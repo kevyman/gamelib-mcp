@@ -6,26 +6,28 @@ from ..utils import _parse_json
 
 # Vibe → tag mappings (multi-tag = AND logic by default; tuple of lists = OR groups)
 VIBE_TAGS: dict[str, list[str]] = {
-    "roguelike": ["roguelike", "rogue-lite", "roguelite"],
+    "roguelike": ["roguelike", "rogue-lite", "roguelite", "roguelike deckbuilder", "deckbuilder", "deck building"],
     "cozy": ["cozy", "relaxing", "casual", "wholesome"],
-    "horror": ["horror", "survival horror", "psychological horror"],
+    "horror": ["horror", "survival horror", "psychological horror", "cosmic horror"],
     "metroidvania": ["metroidvania"],
     "souls": ["souls-like", "soulslike", "souls like"],
     "open world": ["open world", "open-world"],
-    "crafting": ["crafting", "base building", "building"],
+    "crafting": ["crafting", "base building", "building", "survival crafting"],
     "puzzle": ["puzzle", "logic"],
-    "platformer": ["platformer", "2d platformer", "3d platformer"],
-    "rpg": ["rpg", "role-playing", "jrpg", "action rpg"],
-    "strategy": ["strategy", "turn-based strategy", "real-time strategy", "rts", "grand strategy"],
-    "simulation": ["simulation", "life sim", "farming sim", "city builder"],
+    "platformer": ["platformer", "2d platformer", "3d platformer", "precision platformer", "puzzle platformer"],
+    "rpg": ["rpg", "role-playing", "jrpg", "action rpg", "turn-based rpg", "dungeon crawler"],
+    "strategy": ["strategy", "turn-based strategy", "real-time strategy", "rts", "grand strategy", "4x", "tower defense", "turn-based tactics"],
+    "simulation": ["simulation", "life sim", "farming sim", "city builder", "management", "colony sim"],
     "stealth": ["stealth"],
-    "narrative": ["story rich", "narrative", "visual novel", "interactive fiction"],
+    "narrative": ["story rich", "narrative", "visual novel", "interactive fiction", "choices matter", "multiple endings"],
     "co-op": ["co-op", "cooperative", "multiplayer"],
-    "shooter": ["shooter", "fps", "third-person shooter", "tactical shooter"],
+    "shooter": ["shooter", "fps", "third-person shooter", "tactical shooter", "bullet hell", "shoot 'em up"],
     "survival": ["survival"],
     "indie": ["indie"],
     "cyberpunk": ["cyberpunk", "sci-fi", "futuristic"],
     "fantasy": ["fantasy", "dark fantasy", "high fantasy"],
+    "card game": ["card game", "card battler", "deckbuilder", "roguelike deckbuilder"],
+    "fighting": ["fighting", "beat 'em up", "brawler"],
 }
 
 

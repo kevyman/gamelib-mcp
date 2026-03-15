@@ -63,6 +63,8 @@ async def init_db() -> None:
                 -- ProtonDB cache
                 protondb_tier TEXT,
                 protondb_cached_at TEXT,
+                -- SteamSpy user-curated tags cache
+                steamspy_cached_at TEXT,
                 -- Card-farm detection
                 rtime_last_played INTEGER,
                 is_farmed INTEGER DEFAULT 0,
@@ -101,6 +103,12 @@ async def init_db() -> None:
         if "rtime_last_played" not in cols:
             await db.execute("ALTER TABLE games ADD COLUMN rtime_last_played INTEGER")
             await db.execute("ALTER TABLE games ADD COLUMN is_farmed INTEGER DEFAULT 0")
+            await db.commit()
+
+        # Migration: add steamspy_cached_at column
+        cols = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(games)")}
+        if "steamspy_cached_at" not in cols:
+            await db.execute("ALTER TABLE games ADD COLUMN steamspy_cached_at TEXT")
             await db.commit()
 
         # Migration: rename opencritic_* → metacritic_* if old columns exist
