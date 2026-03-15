@@ -68,16 +68,6 @@ mcp = FastMCP(
 )
 
 
-# ── Auth middleware ────────────────────────────────────────────────────────────
-
-def _check_auth(request) -> bool:
-    """Return True if request carries a valid bearer token."""
-    if not MCP_AUTH_TOKEN:
-        return True  # No auth configured — open
-    auth = request.headers.get("authorization", "")
-    return auth == f"Bearer {MCP_AUTH_TOKEN}"
-
-
 # ── Tools ──────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -231,8 +221,24 @@ async def detect_farmed_games(
 
 # ── Health endpoint ────────────────────────────────────────────────────────────
 
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
+
+
+class BearerAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if not MCP_AUTH_TOKEN or request.url.path == "/health":
+            return await call_next(request)
+        auth = request.headers.get("authorization", "")
+        if auth == f"Bearer {MCP_AUTH_TOKEN}":
+            return await call_next(request)
+        if request.query_params.get("token") == MCP_AUTH_TOKEN:
+            return await call_next(request)
+        return Response("Unauthorized", status_code=401)
+
+
+mcp.http_app().add_middleware(BearerAuthMiddleware)
 
 
 @mcp.custom_route("/health", methods=["GET"])
