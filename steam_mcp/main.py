@@ -221,6 +221,7 @@ async def detect_farmed_games(
 
 # ── Health endpoint ────────────────────────────────────────────────────────────
 
+from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -238,9 +239,6 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         return Response("Unauthorized", status_code=401)
 
 
-mcp.http_app().add_middleware(BearerAuthMiddleware)
-
-
 @mcp.custom_route("/health", methods=["GET"])
 async def health(request: Request) -> JSONResponse:
     from .data.db import get_meta
@@ -252,4 +250,4 @@ async def health(request: Request) -> JSONResponse:
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
-    mcp.run(transport="sse", host="0.0.0.0", port=port)
+    mcp.run(transport="sse", host="0.0.0.0", port=port, middleware=[Middleware(BearerAuthMiddleware)])
