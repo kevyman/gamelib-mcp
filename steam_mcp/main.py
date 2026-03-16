@@ -221,22 +221,45 @@ async def detect_farmed_games(
 
 # ── Health endpoint ────────────────────────────────────────────────────────────
 
+from urllib.parse import parse_qs
+
 from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse
+
+# Bypass paths that must work without auth (health check + root discovery probe)
+_OPEN_PATHS = {"/health", "/"}
 
 
-class BearerAuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        if not MCP_AUTH_TOKEN or request.url.path == "/health":
-            return await call_next(request)
-        auth = request.headers.get("authorization", "")
+class BearerAuthMiddleware:
+    """Pure ASGI middleware — safe for SSE streaming (no response buffering)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket") or not MCP_AUTH_TOKEN:
+            await self.app(scope, receive, send)
+            return
+
+        if scope.get("path") in _OPEN_PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        headers = {k.lower(): v for k, v in scope.get("headers", [])}
+        auth = headers.get(b"authorization", b"").decode()
         if auth == f"Bearer {MCP_AUTH_TOKEN}":
-            return await call_next(request)
-        if request.query_params.get("token") == MCP_AUTH_TOKEN:
-            return await call_next(request)
-        return Response("Unauthorized", status_code=401)
+            await self.app(scope, receive, send)
+            return
+
+        params = parse_qs(scope.get("query_string", b"").decode())
+        if params.get("token", [None])[0] == MCP_AUTH_TOKEN:
+            await self.app(scope, receive, send)
+            return
+
+        await send({"type": "http.response.start", "status": 401,
+                    "headers": [(b"content-type", b"text/plain"), (b"content-length", b"12")]})
+        await send({"type": "http.response.body", "body": b"Unauthorized"})
 
 
 @mcp.custom_route("/health", methods=["GET"])
