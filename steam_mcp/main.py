@@ -78,6 +78,17 @@ async def search_games(query: str, limit: int = 20) -> list[dict]:
 
 
 @mcp.tool()
+async def search_games_batch(queries: list[str], limit_per_query: int = 5) -> dict[str, list[dict]]:
+    """
+    Look up multiple games by name in a single call.
+    Returns a dict keyed by each query with matching games as values.
+    Use this instead of calling search_games repeatedly.
+    """
+    from .tools.library import search_games_batch as _batch
+    return await _batch(queries, limit_per_query)
+
+
+@mcp.tool()
 async def get_library_stats(
     filter: str = "all",
     max_hltb_hours: float | None = None,

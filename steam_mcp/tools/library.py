@@ -30,6 +30,25 @@ async def search_games(query: str, limit: int = 20) -> list[dict]:
     return [_format_game(r) for r in rows]
 
 
+async def search_games_batch(queries: list[str], limit_per_query: int = 5) -> dict[str, list[dict]]:
+    """Look up multiple game names in one call. Returns dict keyed by query."""
+    async with get_db() as db:
+        results = {}
+        for query in queries:
+            rows = await db.execute_fetchall(
+                """SELECT appid, name, playtime_forever, playtime_2weeks,
+                          hltb_main, metacritic_score, protondb_tier,
+                          steam_review_desc, is_farmed
+                   FROM games
+                   WHERE lower(name) LIKE lower(?)
+                   ORDER BY playtime_forever DESC
+                   LIMIT ?""",
+                (f"%{query}%", limit_per_query),
+            )
+            results[query] = [_format_game(r) for r in rows]
+    return results
+
+
 async def get_library_stats(
     filter: str = "all",
     max_hltb_hours: float | None = None,
