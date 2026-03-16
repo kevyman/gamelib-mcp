@@ -227,8 +227,9 @@ from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-# Bypass paths that must work without auth (health check + root discovery probe)
+# Paths/prefixes that must work without auth
 _OPEN_PATHS = {"/health", "/"}
+_OPEN_PREFIXES = ("/messages/", "/.well-known/")
 
 
 class BearerAuthMiddleware:
@@ -242,7 +243,8 @@ class BearerAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        if scope.get("path") in _OPEN_PATHS:
+        path = scope.get("path", "")
+        if path in _OPEN_PATHS or path.startswith(_OPEN_PREFIXES):
             await self.app(scope, receive, send)
             return
 
