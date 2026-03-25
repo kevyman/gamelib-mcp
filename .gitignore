@@ -8,5 +8,4 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 *.db-journal
-.claude/
 retry_deploy.sh
