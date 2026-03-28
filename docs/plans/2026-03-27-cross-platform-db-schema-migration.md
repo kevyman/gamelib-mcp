@@ -364,6 +364,13 @@ async def migrate() -> None:
             cols_sql = ", ".join(present)
             placeholders = ", ".join("?" for _ in present)
             values = [row[c] for c in present]
+
+            # Map renamed column: hltb_completionist -> hltb_complete
+            if "hltb_completionist" in old_cols and row["hltb_completionist"] is not None:
+                cols_sql += ", hltb_complete"
+                placeholders += ", ?"
+                values.append(row["hltb_completionist"])
+
             await db.execute(
                 f"INSERT OR IGNORE INTO games ({cols_sql}) VALUES ({placeholders})",
                 values,
