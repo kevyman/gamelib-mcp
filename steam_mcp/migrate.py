@@ -97,11 +97,12 @@ async def migrate() -> None:
             if game is None:
                 continue
             playtime = row["playtime_forever"] if "playtime_forever" in old_cols else None
+            playtime_2weeks = row["playtime_2weeks"] if "playtime_2weeks" in old_cols else None
             await db.execute(
                 """INSERT OR IGNORE INTO game_platforms
-                   (game_id, platform, owned, playtime_minutes, last_synced)
-                   VALUES (?, 'steam', 1, ?, datetime('now'))""",
-                (game["id"], playtime),
+                   (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes, last_synced)
+                   VALUES (?, 'steam', 1, ?, ?, datetime('now'))""",
+                (game["id"], playtime, playtime_2weeks),
             )
         await db.commit()
 

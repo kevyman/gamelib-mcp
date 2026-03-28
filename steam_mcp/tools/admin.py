@@ -33,13 +33,14 @@ async def detect_farmed_games(
 
     async with get_db() as db:
         rows = await db.execute_fetchall(
-            """SELECT appid, name, playtime_forever,
-                      rtime_last_played,
-                      date(rtime_last_played, 'unixepoch') as last_played_date
-               FROM games
-               WHERE rtime_last_played IS NOT NULL
-                 AND playtime_forever > 0
-                 AND playtime_forever <= ?""",
+            """SELECT g.appid, g.name, COALESCE(gp.playtime_minutes, 0) as playtime_forever,
+                      g.rtime_last_played,
+                      date(g.rtime_last_played, 'unixepoch') as last_played_date
+               FROM games g
+               LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+               WHERE g.rtime_last_played IS NOT NULL
+                 AND COALESCE(gp.playtime_minutes, 0) > 0
+                 AND COALESCE(gp.playtime_minutes, 0) <= ?""",
             (threshold_minutes,),
         )
 
