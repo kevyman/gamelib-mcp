@@ -738,7 +738,165 @@ git commit -m "feat: register get_platform_breakdown, sync_platform; update tool
 
 ---
 
-### Task 7: Push branch
+### Task 7: Create `steam_mcp/setup_platform.py`
+
+**Files:**
+- Create: `steam_mcp/setup_platform.py`
+
+The spec requires a setup script that handles OAuth browser flows for GOG and Epic, writing the resulting tokens to `.env`.
+
+**Step 1: Write the script**
+
+```python
+"""Platform credential setup helper.
+
+Usage: python -m steam_mcp.setup_platform <platform>
+
+Supported platforms:
+  gog    — opens GOG OAuth2 flow, writes GOG_REFRESH_TOKEN to .env
+  epic   — prints legendary auth instructions (browser flow managed by legendary CLI)
+  psn    — prints manual NPSSO cookie extraction instructions
+  switch — prints nxapi session token extraction instructions
+"""
+
+import sys
+
+
+def _setup_gog() -> None:
+    """Run GOG OAuth2 flow and write refresh token to .env."""
+    import asyncio
+    import os
+    import webbrowser
+
+    import aiohttp
+    from dotenv import set_key
+
+    CLIENT_ID = "46899977096215655"
+    CLIENT_SECRET = "9d85c43b1718a031d5b64228ecd1a9eb"
+    AUTH_URL = (
+        f"https://auth.gog.com/auth?client_id={CLIENT_ID}"
+        "&redirect_uri=https://embed.gog.com/on_login_success?origin=client"
+        "&response_type=code&layout=client2"
+    )
+
+    print("Opening GOG login page in your browser...")
+    webbrowser.open(AUTH_URL)
+    code = input(
+        "\nAfter logging in, copy the 'code' query parameter from the redirect URL and paste it here:\n> "
+    ).strip()
+
+    async def _exchange():
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://auth.gog.com/token",
+                params={
+                    "client_id": CLIENT_ID,
+                    "client_secret": CLIENT_SECRET,
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": "https://embed.gog.com/on_login_success?origin=client",
+                },
+            ) as resp:
+                resp.raise_for_status()
+                return (await resp.json())["refresh_token"]
+
+    refresh_token = asyncio.run(_exchange())
+    env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
+    set_key(env_path, "GOG_REFRESH_TOKEN", refresh_token)
+    print(f"GOG_REFRESH_TOKEN written to .env")
+
+
+def _setup_epic() -> None:
+    print(
+        "Epic Games auth is handled by the legendary CLI.\n"
+        "Run:  legendary auth\n"
+        "Follow the browser prompts, then set EPIC_LEGENDARY_PATH in .env if legendary\n"
+        "uses a non-default config directory."
+    )
+
+
+def _setup_psn() -> None:
+    print(
+        "PSN auth requires a one-time manual step:\n"
+        "1. Log in to your PSN account in a browser.\n"
+        "2. Visit: https://ca.account.sony.com/api/v1/ssocookie\n"
+        "3. Copy the value of the 'npsso' field.\n"
+        "4. Add to .env:  PSN_NPSSO=<value>"
+    )
+
+
+def _setup_switch() -> None:
+    print(
+        "Nintendo Switch auth requires nxapi and a one-time session token:\n"
+        "1. Install nxapi: https://github.com/samuelthomas2774/nxapi\n"
+        "2. Run: nxapi nso auth\n"
+        "3. Follow the prompts to authenticate with your Nintendo account.\n"
+        "4. Copy the session token and add to .env:  NINTENDO_SESSION_TOKEN=<value>"
+    )
+
+
+_HANDLERS = {
+    "gog": _setup_gog,
+    "epic": _setup_epic,
+    "psn": _setup_psn,
+    "switch": _setup_switch,
+}
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2 or sys.argv[1] not in _HANDLERS:
+        print(f"Usage: python -m steam_mcp.setup_platform <platform>")
+        print(f"Platforms: {', '.join(_HANDLERS)}")
+        sys.exit(1)
+    _HANDLERS[sys.argv[1]]()
+```
+
+**Step 2: Verify the script loads**
+
+```bash
+python -m steam_mcp.setup_platform
+```
+
+Expected: prints usage and platform list, exits with code 1.
+
+**Step 3: Commit**
+
+```bash
+git add steam_mcp/setup_platform.py
+git commit -m "feat: add setup_platform script for GOG OAuth and platform credential guidance"
+```
+
+---
+
+### Task 8: Update `.env.example`
+
+**Files:**
+- Modify: `.env.example`
+
+**Step 1: Append new platform env vars**
+
+Read the current `.env.example`, then append the following block after the existing entries:
+
+```
+# Cross-platform library credentials (all optional — missing vars silently skip that platform)
+PSN_NPSSO=                  # PSN NPSSO cookie — see: python -m steam_mcp.setup_platform psn
+EPIC_LEGENDARY_PATH=        # Path to legendary config dir (optional, default is ~/.config/legendary)
+GOG_REFRESH_TOKEN=          # GOG OAuth2 refresh token — run: python -m steam_mcp.setup_platform gog
+NINTENDO_SESSION_TOKEN=     # Nintendo session token — see: python -m steam_mcp.setup_platform switch
+
+# Hardware preference for get_recommendations suggested_platform (comma-separated, highest priority first)
+HARDWARE_PREFERENCE=switch2,steam_deck,ps5
+```
+
+**Step 2: Commit**
+
+```bash
+git add .env.example
+git commit -m "chore: add cross-platform credential vars to .env.example"
+```
+
+---
+
+### Task 9: Push branch
 
 ```bash
 git push -u origin claude/integrate-superpowers-plugin-0S1aq
@@ -750,11 +908,13 @@ Expected: branch pushed, no errors.
 
 ## Done
 
-All 7 spec tool changes are implemented:
+All spec tool changes are implemented:
 - `get_game_detail` → playtime by platform + owned_on
 - `search_games` + `get_library_stats` → platform filter
 - `get_recommendations` → suggested_platform via hardware preference
 - `refresh_library` → fans out to all configured platforms
 - `get_platform_breakdown` + `sync_platform` → new tools registered
+- `setup_platform` script → OAuth flows for GOG + instructions for Epic/PSN/Switch
+- `.env.example` → all new credential vars documented
 
 The MCP server is now fully cross-platform aware.
