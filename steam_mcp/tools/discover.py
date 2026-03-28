@@ -54,7 +54,7 @@ async def find_games_by_vibe(
     params: list = list(tags)
 
     if unplayed_only:
-        conditions.append("(g.playtime_forever = 0 OR g.is_farmed = 1)")
+        conditions.append("(COALESCE(gp.playtime_minutes, 0) = 0 OR g.is_farmed = 1)")
 
     if max_hltb_hours is not None:
         conditions.append("g.hltb_main <= ?")
@@ -73,10 +73,11 @@ async def find_games_by_vibe(
 
     async with get_db() as db:
         rows = await db.execute_fetchall(
-            f"""SELECT g.appid, g.name, g.playtime_forever,
+            f"""SELECT g.appid, g.name, COALESCE(gp.playtime_minutes, 0) as playtime_forever,
                        g.hltb_main, g.metacritic_score,
                        g.protondb_tier, g.steam_review_desc, g.tags
                 FROM games g
+                LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
                 WHERE {where}
                 ORDER BY g.metacritic_score DESC NULLS LAST
                 LIMIT ?""",
@@ -111,7 +112,7 @@ async def get_recommendations(
     params: list = []
 
     if unplayed_only:
-        conditions.append("(g.playtime_forever = 0 OR g.is_farmed = 1)")
+        conditions.append("(COALESCE(gp.playtime_minutes, 0) = 0 OR g.is_farmed = 1)")
 
     conditions.append("g.tags IS NOT NULL")
 
@@ -123,11 +124,12 @@ async def get_recommendations(
 
     async with get_db() as db:
         rows = await db.execute_fetchall(
-            f"""SELECT g.appid, g.name, g.playtime_forever,
+            f"""SELECT g.appid, g.name, COALESCE(gp.playtime_minutes, 0) as playtime_forever,
                        AVG(ta.affinity_score) as match_score,
                        g.hltb_main, g.metacritic_score,
                        g.steam_review_desc, g.protondb_tier, g.tags
                 FROM games g
+                LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
                 JOIN json_each(g.tags) je ON 1=1
                 JOIN tag_affinity ta ON ta.tag = lower(je.value)
                 {where}

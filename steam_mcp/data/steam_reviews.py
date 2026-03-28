@@ -30,32 +30,39 @@ async def sync_steam_reviews() -> dict:
     synced = 0
     now = datetime.now(timezone.utc).isoformat()
 
-    # Pre-fetch community review scores for all reviewed games
-    community_scores: dict[int, int | None] = {}
+    # Pre-fetch game ids and community review scores for all reviewed games
+    game_info: dict[int, dict] = {}  # appid -> {id, steam_review_score}
     async with get_db() as db:
         for review in reviews:
             row = await db.execute_fetchone(
-                "SELECT steam_review_score FROM games WHERE appid = ?",
+                "SELECT id, steam_review_score FROM games WHERE appid = ?",
                 (review["appid"],),
             )
-            community_scores[review["appid"]] = row["steam_review_score"] if row else None
+            if row:
+                game_info[review["appid"]] = {
+                    "id": row["id"],
+                    "steam_review_score": row["steam_review_score"],
+                }
 
     async with get_db() as db:
         for review in reviews:
             appid = review["appid"]
+            info = game_info.get(appid)
+            if info is None:
+                continue
             vote = review["vote"]  # 1 (up) or -1 (down)
-            community = community_scores.get(appid)
+            community = info["steam_review_score"]
             normalized = _compute_score(vote, community)
 
             await db.execute(
-                """INSERT INTO ratings (appid, source, raw_score, normalized_score, review_text, synced_at)
+                """INSERT INTO ratings (game_id, source, raw_score, normalized_score, review_text, synced_at)
                    VALUES (?, 'steam_review', ?, ?, ?, ?)
-                   ON CONFLICT(appid, source) DO UPDATE SET
+                   ON CONFLICT(game_id, source) DO UPDATE SET
                        raw_score = excluded.raw_score,
                        normalized_score = excluded.normalized_score,
                        review_text = excluded.review_text,
                        synced_at = excluded.synced_at""",
-                (appid, float(vote), normalized, review.get("text", ""), now),
+                (info["id"], float(vote), normalized, review.get("text", ""), now),
             )
             synced += 1
 

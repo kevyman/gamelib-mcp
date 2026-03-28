@@ -11,42 +11,55 @@ async def get_backlog_stats() -> dict:
     async with get_db() as db:
         total = await db.execute_fetchone("SELECT COUNT(*) as c FROM games")
         played = await db.execute_fetchone(
-            "SELECT COUNT(*) as c FROM games WHERE playtime_forever > 0 AND is_farmed = 0"
+            """SELECT COUNT(*) as c FROM games g
+               LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+               WHERE COALESCE(gp.playtime_minutes, 0) > 0 AND g.is_farmed = 0"""
         )
         unplayed = await db.execute_fetchone(
-            "SELECT COUNT(*) as c FROM games WHERE playtime_forever = 0 OR is_farmed = 1"
+            """SELECT COUNT(*) as c FROM games g
+               LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+               WHERE COALESCE(gp.playtime_minutes, 0) = 0 OR g.is_farmed = 1"""
         )
         farmed = await db.execute_fetchone(
             "SELECT COUNT(*) as c FROM games WHERE is_farmed = 1"
         )
         unplayed_hltb = await db.execute_fetchone(
-            """SELECT COUNT(*) as c, SUM(hltb_main) as total_hours
-               FROM games WHERE (playtime_forever = 0 OR is_farmed = 1) AND hltb_main IS NOT NULL"""
+            """SELECT COUNT(*) as c, SUM(g.hltb_main) as total_hours
+               FROM games g
+               LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+               WHERE (COALESCE(gp.playtime_minutes, 0) = 0 OR g.is_farmed = 1)
+                 AND g.hltb_main IS NOT NULL"""
         )
         recent_minutes = await db.execute_fetchone(
-            "SELECT SUM(playtime_2weeks) as s FROM games WHERE playtime_2weeks > 0"
+            """SELECT SUM(gp.playtime_2weeks_minutes) as s FROM game_platforms gp
+               WHERE gp.platform = 'steam' AND gp.playtime_2weeks_minutes > 0"""
         )
         # Most-played genre in unplayed backlog
         top_genre = await db.execute_fetchone(
             """SELECT je.value as genre, COUNT(*) as c
-               FROM games g, json_each(g.genres) je
-               WHERE (g.playtime_forever = 0 OR g.is_farmed = 1)
+               FROM games g
+               LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+               , json_each(g.genres) je
+               WHERE (COALESCE(gp.playtime_minutes, 0) = 0 OR g.is_farmed = 1)
                GROUP BY genre
                ORDER BY c DESC
                LIMIT 1"""
         )
         # Highest-rated unplayed game by Metacritic
         best_unplayed_oc = await db.execute_fetchone(
-            """SELECT name, metacritic_score FROM games
-               WHERE (playtime_forever = 0 OR is_farmed = 1) AND metacritic_score IS NOT NULL
-               ORDER BY metacritic_score DESC
+            """SELECT g.name, g.metacritic_score FROM games g
+               LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+               WHERE (COALESCE(gp.playtime_minutes, 0) = 0 OR g.is_farmed = 1)
+                 AND g.metacritic_score IS NOT NULL
+               ORDER BY g.metacritic_score DESC
                LIMIT 1"""
         )
         # Highest-rated unplayed by my ratings
         best_unplayed_rated = await db.execute_fetchone(
             """SELECT g.name, r.normalized_score FROM games g
-               JOIN ratings r ON r.appid = g.appid
-               WHERE (g.playtime_forever = 0 OR g.is_farmed = 1)
+               LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+               JOIN ratings r ON r.game_id = g.id
+               WHERE (COALESCE(gp.playtime_minutes, 0) = 0 OR g.is_farmed = 1)
                ORDER BY r.normalized_score DESC
                LIMIT 1"""
         )

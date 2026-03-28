@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from .db import get_db, set_meta
+from .db import get_db, set_meta, upsert_game, upsert_game_platform
 
 STEAM_API_KEY = os.getenv("STEAM_API_KEY", "")
 STEAM_ID = os.getenv("STEAM_ID", "")
@@ -53,15 +53,26 @@ async def fetch_library() -> dict:
             rtime = game.get("rtime_last_played") or None         # 0 means never → store as NULL
 
             await db.execute(
-                """INSERT INTO games (appid, name, playtime_forever, playtime_2weeks, rtime_last_played, library_updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?)
+                """INSERT INTO games (appid, name, rtime_last_played, library_updated_at)
+                   VALUES (?, ?, ?, ?)
                    ON CONFLICT(appid) DO UPDATE SET
                        name = excluded.name,
-                       playtime_forever = excluded.playtime_forever,
-                       playtime_2weeks = excluded.playtime_2weeks,
                        rtime_last_played = excluded.rtime_last_played,
                        library_updated_at = excluded.library_updated_at""",
-                (appid, name, playtime_forever, playtime_2weeks, rtime, now),
+                (appid, name, rtime, now),
+            )
+            row = await db.execute_fetchone("SELECT id FROM games WHERE appid = ?", (appid,))
+            game_id = row["id"]
+
+            await db.execute(
+                """INSERT INTO game_platforms (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes, last_synced)
+                   VALUES (?, 'steam', 1, ?, ?, ?)
+                   ON CONFLICT(game_id, platform) DO UPDATE SET
+                       owned = excluded.owned,
+                       playtime_minutes = excluded.playtime_minutes,
+                       playtime_2weeks_minutes = excluded.playtime_2weeks_minutes,
+                       last_synced = excluded.last_synced""",
+                (game_id, playtime_forever, playtime_2weeks, now),
             )
             upserted += 1
 
