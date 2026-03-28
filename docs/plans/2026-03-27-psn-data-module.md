@@ -4,7 +4,7 @@
 
 **Goal:** Add `steam_mcp/data/psn.py` — an async module that fetches the user's PS5 game library and playtime via PSNAWP, deduplicates against existing `games` rows using fuzzy matching, and upserts into `game_platforms`.
 
-**Architecture:** Single async `sync_psn()` function. Auth uses an NPSSO cookie (one-time manual extraction from browser, stored as `PSN_NPSSO` in `.env`). PSNAWP is used to fetch the trophy title list as a proxy for the game library (it's the only public source of PS5 game ownership). Playtime comes from PS5 trophy timestamps (last trophy date used as a proxy — actual playtime minutes are not available from PSN's public API for PS5; we store `NULL`). Fuzzy dedup via `find_game_by_name_fuzzy()` (cutoff=85, already added in epic/gog plan).
+**Architecture:** Single async `sync_psn()` function. Auth uses an NPSSO cookie (one-time manual extraction from browser, stored as `PSN_NPSSO` in `.env`). PSNAWP's `client.title_stats()` is used to fetch the game library — it returns each played title's `name`, `play_count`, and `play_duration` (a `datetime.timedelta`). `play_duration` is converted to minutes for `playtime_minutes`. Fuzzy dedup via `find_game_by_name_fuzzy()` (cutoff=85, already added in epic/gog plan).
 
 **Tech Stack:** Python 3.12, `PSNAWP` library, `rapidfuzz`, existing `upsert_game` / `upsert_game_platform` / `find_game_by_name_fuzzy` helpers from `db.py`.
 
@@ -64,11 +64,9 @@ Auth: set PSN_NPSSO in .env.
 Obtain the NPSSO cookie by visiting https://ca.account.sony.com/api/v1/ssocookie
 while logged in to your PSN account in a browser. Copy the `npsso` value.
 
-Playtime: PSN's public API does not expose playtime minutes for PS5 titles.
-playtime_minutes is stored as NULL. Trophy data is NOT synced — library only.
-
-Library source: trophy title list (all games where at least one trophy has been
-earned). Games with no trophies will not appear. This is a PSN platform limitation.
+Library source: client.title_stats() — returns all titles the user has played,
+with name, play_count, and play_duration (datetime.timedelta). Only played titles
+appear; unplayed purchases will not show up (PSN platform limitation).
 """
 
 import logging
@@ -88,26 +86,28 @@ def _get_psnawp():
     return PSNAWP(npsso)
 
 
-async def fetch_psn_library() -> list[str]:
+async def fetch_psn_library() -> list[dict]:
     """
-    Return a list of PS5 game title strings from the user's trophy library.
+    Return a list of dicts with 'name' and 'playtime_minutes' for each played PS5 title.
 
-    Runs PSNAWP synchronously in an executor to avoid blocking the event loop.
+    Uses client.title_stats() which returns name, play_count, and play_duration
+    (a datetime.timedelta). Runs PSNAWP synchronously in an executor.
     """
     import asyncio
 
     def _fetch():
         psnawp = _get_psnawp()
         client = psnawp.me()
-        titles = []
-        for title in client.trophy_titles():
-            # Filter to PS5 titles only; skip PS4 back-compat
-            if hasattr(title, "np_service_name") and "ps5" in (title.np_service_name or "").lower():
-                titles.append(title.title_name)
-            elif not hasattr(title, "np_service_name"):
-                # Older PSNAWP versions — include all, can't filter
-                titles.append(title.title_name)
-        return titles
+        results = []
+        for entry in client.title_stats():
+            name = entry.name
+            if not name:
+                continue
+            minutes = None
+            if entry.play_duration is not None:
+                minutes = int(entry.play_duration.total_seconds() // 60)
+            results.append({"name": name, "playtime_minutes": minutes})
+        return results
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _fetch)
@@ -126,28 +126,29 @@ async def sync_psn() -> dict:
     added = matched = skipped = 0
 
     try:
-        titles = await fetch_psn_library()
+        entries = await fetch_psn_library()
     except Exception as exc:
         logger.warning("PSN sync failed: %s", exc)
         return {"added": 0, "matched": 0, "skipped": 0}
 
-    for title in titles:
-        if not title:
+    for entry in entries:
+        name = entry["name"]
+        if not name:
             skipped += 1
             continue
 
-        existing = await find_game_by_name_fuzzy(title)
+        existing = await find_game_by_name_fuzzy(name)
         if existing:
             game_id = existing["id"]
             matched += 1
         else:
-            game_id = await upsert_game(appid=None, name=title)
+            game_id = await upsert_game(appid=None, name=name)
             added += 1
 
         await upsert_game_platform(
             game_id=game_id,
             platform="ps5",
-            playtime_minutes=None,  # not available via public PSN API
+            playtime_minutes=entry["playtime_minutes"],
             owned=1,
         )
 
@@ -167,7 +168,7 @@ Expected: no output, no errors.
 
 ```bash
 git add steam_mcp/data/psn.py
-git commit -m "feat: add psn.py — PSN library sync via PSNAWP trophy title list"
+git commit -m "feat: add psn.py — PSN library sync via PSNAWP title_stats (name + playtime)"
 ```
 
 ---
@@ -222,6 +223,6 @@ Expected: branch pushed, no errors.
 
 PSN data module complete. Requires one-time manual NPSSO cookie extraction. Silently skips if `PSN_NPSSO` is absent.
 
-**Known limitation:** Only games with at least one trophy earned appear in the library (PSN platform limitation — no workaround via public API).
+**Known limitation:** Only played titles appear in the library (`title_stats()` tracks play history, not purchases). Unplayed digital purchases will not show up — this is a PSN platform limitation.
 
-Next plan: Nintendo Switch data module (`nintendo.py` via nxapi) or Xbox (`xbox.py`).
+Next plan: Nintendo Switch data module (`nintendo.py` via nxapi).
