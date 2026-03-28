@@ -54,10 +54,12 @@ async def _enrich_store() -> int:
     while True:
         async with get_db() as db:
             rows = await db.execute_fetchall(
-                """SELECT appid, name FROM games
-                   WHERE store_cached_at IS NULL
-                     AND is_farmed = 0
-                   ORDER BY playtime_forever DESC
+                """SELECT g.appid, g.name FROM games g
+                   LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+                   WHERE g.store_cached_at IS NULL
+                     AND g.is_farmed = 0
+                     AND g.appid IS NOT NULL
+                   ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
                    LIMIT 50"""
             )
 
@@ -81,11 +83,13 @@ async def _enrich_hltb() -> int:
     while True:
         async with get_db() as db:
             rows = await db.execute_fetchall(
-                """SELECT appid, name FROM games
-                   WHERE store_cached_at IS NOT NULL
-                     AND hltb_cached_at IS NULL
-                     AND is_farmed = 0
-                   ORDER BY playtime_forever DESC
+                """SELECT g.appid, g.name FROM games g
+                   LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+                   WHERE g.store_cached_at IS NOT NULL
+                     AND g.hltb_cached_at IS NULL
+                     AND g.is_farmed = 0
+                     AND g.appid IS NOT NULL
+                   ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
                    LIMIT 50"""
             )
 
@@ -110,11 +114,13 @@ async def _enrich_protondb() -> int:
     while True:
         async with get_db() as db:
             rows = await db.execute_fetchall(
-                """SELECT appid FROM games
-                   WHERE store_cached_at IS NOT NULL
-                     AND protondb_cached_at IS NULL
-                     AND is_farmed = 0
-                   ORDER BY playtime_forever DESC
+                """SELECT g.appid FROM games g
+                   LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+                   WHERE g.store_cached_at IS NOT NULL
+                     AND g.protondb_cached_at IS NULL
+                     AND g.is_farmed = 0
+                     AND g.appid IS NOT NULL
+                   ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
                    LIMIT 50"""
             )
 
@@ -138,11 +144,13 @@ async def _enrich_steamspy() -> int:
     while True:
         async with get_db() as db:
             rows = await db.execute_fetchall(
-                """SELECT appid, name FROM games
-                   WHERE store_cached_at IS NOT NULL
-                     AND steamspy_cached_at IS NULL
-                     AND is_farmed = 0
-                   ORDER BY playtime_forever DESC
+                """SELECT g.appid, g.name FROM games g
+                   LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+                   WHERE g.store_cached_at IS NOT NULL
+                     AND g.steamspy_cached_at IS NULL
+                     AND g.is_farmed = 0
+                     AND g.appid IS NOT NULL
+                   ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
                    LIMIT 50"""
             )
         if not rows:

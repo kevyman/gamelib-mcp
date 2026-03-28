@@ -8,9 +8,9 @@ from ..data.db import get_db
 
 SORT_COLUMNS = {
     "playtime": "playtime_forever",
-    "name": "name",
-    "metacritic": "metacritic_score",
-    "hltb": "hltb_main",
+    "name": "g.name",
+    "metacritic": "g.metacritic_score",
+    "hltb": "g.hltb_main",
 }
 
 
@@ -18,11 +18,14 @@ async def search_games(query: str, limit: int = 20) -> list[dict]:
     """Find games in library by name substring match."""
     async with get_db() as db:
         rows = await db.execute_fetchall(
-            """SELECT appid, name, playtime_forever, playtime_2weeks,
-                      hltb_main, metacritic_score,
-                      protondb_tier, steam_review_desc, is_farmed
-               FROM games
-               WHERE lower(name) LIKE lower(?)
+            """SELECT g.appid, g.name,
+                      COALESCE(gp.playtime_minutes, 0) as playtime_forever,
+                      COALESCE(gp.playtime_2weeks_minutes, 0) as playtime_2weeks,
+                      g.hltb_main, g.metacritic_score,
+                      g.protondb_tier, g.steam_review_desc, g.is_farmed
+               FROM games g
+               LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+               WHERE lower(g.name) LIKE lower(?)
                ORDER BY playtime_forever DESC
                LIMIT ?""",
             (f"%{query}%", limit),
@@ -36,11 +39,14 @@ async def search_games_batch(queries: list[str], limit_per_query: int = 5) -> di
         results = {}
         for query in queries:
             rows = await db.execute_fetchall(
-                """SELECT appid, name, playtime_forever, playtime_2weeks,
-                          hltb_main, metacritic_score, protondb_tier,
-                          steam_review_desc, is_farmed
-                   FROM games
-                   WHERE lower(name) LIKE lower(?)
+                """SELECT g.appid, g.name,
+                          COALESCE(gp.playtime_minutes, 0) as playtime_forever,
+                          COALESCE(gp.playtime_2weeks_minutes, 0) as playtime_2weeks,
+                          g.hltb_main, g.metacritic_score, g.protondb_tier,
+                          g.steam_review_desc, g.is_farmed
+                   FROM games g
+                   LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+                   WHERE lower(g.name) LIKE lower(?)
                    ORDER BY playtime_forever DESC
                    LIMIT ?""",
                 (f"%{query}%", limit_per_query),
@@ -67,20 +73,20 @@ async def get_library_stats(
     params: list = []
 
     if filter == "unplayed":
-        conditions.append("(playtime_forever = 0 OR is_farmed = 1)")
+        conditions.append("(COALESCE(gp.playtime_minutes, 0) = 0 OR g.is_farmed = 1)")
     elif filter == "played":
-        conditions.append("(playtime_forever > 0 AND is_farmed = 0)")
+        conditions.append("(COALESCE(gp.playtime_minutes, 0) > 0 AND g.is_farmed = 0)")
     elif filter == "recent":
-        conditions.append("playtime_2weeks > 0")
+        conditions.append("COALESCE(gp.playtime_2weeks_minutes, 0) > 0")
     elif filter == "farmed":
-        conditions.append("is_farmed = 1")
+        conditions.append("g.is_farmed = 1")
 
     if max_hltb_hours is not None:
-        conditions.append("hltb_main <= ?")
+        conditions.append("g.hltb_main <= ?")
         params.append(max_hltb_hours)
 
     if min_metacritic is not None:
-        conditions.append("metacritic_score >= ?")
+        conditions.append("g.metacritic_score >= ?")
         params.append(min_metacritic)
 
     if protondb_tier is not None:
@@ -89,7 +95,7 @@ async def get_library_stats(
         min_rank = TIER_ORDER.index(protondb_tier.lower()) if protondb_tier.lower() in TIER_ORDER else 999
         allowed = [t for i, t in enumerate(TIER_ORDER) if i <= min_rank]
         placeholders = ",".join("?" * len(allowed))
-        conditions.append(f"lower(protondb_tier) IN ({placeholders})")
+        conditions.append(f"lower(g.protondb_tier) IN ({placeholders})")
         params.extend(allowed)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -98,10 +104,13 @@ async def get_library_stats(
 
     async with get_db() as db:
         rows = await db.execute_fetchall(
-            f"""SELECT appid, name, playtime_forever, playtime_2weeks,
-                       hltb_main, metacritic_score,
-                       protondb_tier, steam_review_desc, is_farmed
-                FROM games
+            f"""SELECT g.appid, g.name,
+                       COALESCE(gp.playtime_minutes, 0) as playtime_forever,
+                       COALESCE(gp.playtime_2weeks_minutes, 0) as playtime_2weeks,
+                       g.hltb_main, g.metacritic_score,
+                       g.protondb_tier, g.steam_review_desc, g.is_farmed
+                FROM games g
+                LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
                 {where}
                 ORDER BY {sort_col} {sort_dir} NULLS LAST
                 LIMIT ?""",
@@ -110,16 +119,20 @@ async def get_library_stats(
 
         total = await db.execute_fetchone("SELECT COUNT(*) as c FROM games")
         played = await db.execute_fetchone(
-            "SELECT COUNT(*) as c FROM games WHERE playtime_forever > 0 AND is_farmed = 0"
+            """SELECT COUNT(*) as c FROM games g
+               LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+               WHERE COALESCE(gp.playtime_minutes, 0) > 0 AND g.is_farmed = 0"""
         )
         unplayed = await db.execute_fetchone(
-            "SELECT COUNT(*) as c FROM games WHERE playtime_forever = 0 OR is_farmed = 1"
+            """SELECT COUNT(*) as c FROM games g
+               LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+               WHERE COALESCE(gp.playtime_minutes, 0) = 0 OR g.is_farmed = 1"""
         )
         farmed = await db.execute_fetchone(
             "SELECT COUNT(*) as c FROM games WHERE is_farmed = 1"
         )
         total_minutes = await db.execute_fetchone(
-            "SELECT SUM(playtime_forever) as s FROM games"
+            "SELECT SUM(playtime_minutes) as s FROM game_platforms WHERE platform = 'steam'"
         )
 
     stats = {
