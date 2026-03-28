@@ -49,10 +49,8 @@ async def get_game_detail(name: str | None = None, appid: int | None = None) -> 
             (game_appid,),
         )
         rating = await db.execute_fetchone(
-            """SELECT source, raw_score, normalized_score, review_text
-               FROM ratings WHERE game_id = (SELECT id FROM games WHERE appid = ?)
-               ORDER BY source""",
-            (game_appid,),
+            "SELECT source, raw_score, normalized_score, review_text FROM ratings WHERE game_id = ? ORDER BY source",
+            (row["id"],),
         )
 
     rtime = row["rtime_last_played"]
