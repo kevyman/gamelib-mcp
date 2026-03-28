@@ -27,9 +27,11 @@ async def migrate() -> None:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-        if "game_platforms" in tables:
-            print("game_platforms table already exists — migration already applied.")
-            return
+        if "games" in tables:
+            game_cols = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(games)")}
+            if "id" in game_cols:
+                print("New schema already in place — migration already applied.")
+                return
 
         if "games" not in tables:
             print("No games table found — running init_db() on empty database.")
