@@ -49,10 +49,10 @@ async def get_ratings(
 
     async with get_db() as db:
         rows = await db.execute_fetchall(
-            f"""SELECT r.appid, g.name, r.source, r.raw_score, r.normalized_score,
+            f"""SELECT g.appid, g.name, r.source, r.raw_score, r.normalized_score,
                        r.review_text, r.synced_at
                 FROM ratings r
-                JOIN games g ON g.appid = r.appid
+                JOIN games g ON g.id = r.game_id
                 {where}
                 ORDER BY {order}
                 LIMIT ?""",

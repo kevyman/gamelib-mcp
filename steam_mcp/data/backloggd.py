@@ -22,10 +22,10 @@ async def sync_backloggd() -> dict:
     upsert into ratings. Returns stats dict.
     """
     async with get_db() as db:
-        game_rows = await db.execute_fetchall("SELECT appid, name FROM games")
+        game_rows = await db.execute_fetchall("SELECT id, name FROM games")
 
-    name_to_appid = {r["name"].lower(): r["appid"] for r in game_rows}
-    all_names = list(name_to_appid.keys())
+    name_to_id = {r["name"].lower(): r["id"] for r in game_rows}
+    all_names = list(name_to_id.keys())
 
     reviews = await _scrape_all_pages()
     synced = 0
@@ -34,8 +34,8 @@ async def sync_backloggd() -> dict:
 
     async with get_db() as db:
         for review in reviews:
-            appid = _match_appid(review["title"], all_names, name_to_appid)
-            if appid is None:
+            game_id = _match_game_id(review["title"], all_names, name_to_id)
+            if game_id is None:
                 logger.debug("No match for Backloggd game: %s", review["title"])
                 skipped += 1
                 continue
@@ -44,14 +44,14 @@ async def sync_backloggd() -> dict:
             normalized = raw * 2   # → 1–10
 
             await db.execute(
-                """INSERT INTO ratings (appid, source, raw_score, normalized_score, review_text, synced_at)
+                """INSERT INTO ratings (game_id, source, raw_score, normalized_score, review_text, synced_at)
                    VALUES (?, 'backloggd', ?, ?, ?, ?)
-                   ON CONFLICT(appid, source) DO UPDATE SET
+                   ON CONFLICT(game_id, source) DO UPDATE SET
                        raw_score = excluded.raw_score,
                        normalized_score = excluded.normalized_score,
                        review_text = excluded.review_text,
                        synced_at = excluded.synced_at""",
-                (appid, raw, normalized, review.get("text", ""), now),
+                (game_id, raw, normalized, review.get("text", ""), now),
             )
             synced += 1
 
@@ -168,13 +168,13 @@ def _extract_score(card: Tag) -> float | None:
     return None
 
 
-def _match_appid(title: str, all_names: list[str], name_to_appid: dict) -> int | None:
-    """Fuzzy-match a Backloggd title to a game in the DB."""
+def _match_game_id(title: str, all_names: list[str], name_to_id: dict) -> int | None:
+    """Fuzzy-match a Backloggd title to a game in the DB, returns games.id."""
     title_lower = title.lower()
 
     # Exact match first
-    if title_lower in name_to_appid:
-        return name_to_appid[title_lower]
+    if title_lower in name_to_id:
+        return name_to_id[title_lower]
 
     # Fuzzy match
     result = process.extractOne(
@@ -184,6 +184,6 @@ def _match_appid(title: str, all_names: list[str], name_to_appid: dict) -> int |
         score_cutoff=85,
     )
     if result:
-        return name_to_appid[result[0]]
+        return name_to_id[result[0]]
 
     return None

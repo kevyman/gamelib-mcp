@@ -16,11 +16,11 @@ logger = logging.getLogger(__name__)
 async def get_hltb(appid: int, name: str) -> dict | None:
     """
     Lazy-fetch HLTB data for a game. Caches in DB.
-    Returns dict with hltb_main, hltb_extra, hltb_completionist or None.
+    Returns dict with hltb_main, hltb_extra, hltb_complete or None.
     """
     async with get_db() as db:
         row = await db.execute_fetchone(
-            "SELECT hltb_main, hltb_extra, hltb_completionist, hltb_cached_at FROM games WHERE appid = ?",
+            "SELECT hltb_main, hltb_extra, hltb_complete, hltb_cached_at FROM games WHERE appid = ?",
             (appid,),
         )
 
@@ -32,7 +32,7 @@ async def get_hltb(appid: int, name: str) -> dict | None:
             return {
                 "hltb_main": row["hltb_main"],
                 "hltb_extra": row["hltb_extra"],
-                "hltb_completionist": row["hltb_completionist"],
+                "hltb_complete": row["hltb_complete"],
             }
 
     return await _fetch_and_cache(appid, name)
@@ -55,7 +55,7 @@ async def _fetch_and_cache(appid: int, name: str) -> dict | None:
             comp = best.completionist
 
             await _cache_result(appid, main, extra, comp, now)
-            return {"hltb_main": main, "hltb_extra": extra, "hltb_completionist": comp}
+            return {"hltb_main": main, "hltb_extra": extra, "hltb_complete": comp}
         except Exception as e:
             logger.warning("HLTB fetch failed for %s (%d): %s", name, appid, e)
             await _cache_result(appid, None, None, None, "FAILED")
@@ -71,7 +71,7 @@ async def _cache_result(
 ) -> None:
     async with get_db() as db:
         await db.execute(
-            """UPDATE games SET hltb_main = ?, hltb_extra = ?, hltb_completionist = ?, hltb_cached_at = ?
+            """UPDATE games SET hltb_main = ?, hltb_extra = ?, hltb_complete = ?, hltb_cached_at = ?
                WHERE appid = ?""",
             (main, extra, comp, cached_at, appid),
         )
@@ -86,11 +86,12 @@ async def prewarm_hltb() -> None:
     logger.info("HLTB pre-warm started")
     async with get_db() as db:
         rows = await db.execute_fetchall(
-            """SELECT appid, name FROM games
-               WHERE playtime_forever = 0
-                 AND tags IS NOT NULL
-                 AND (hltb_cached_at IS NULL)
-               ORDER BY steam_review_score DESC NULLS LAST
+            """SELECT g.appid, g.name FROM games g
+               LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+               WHERE COALESCE(gp.playtime_minutes, 0) = 0
+                 AND g.tags IS NOT NULL
+                 AND (g.hltb_cached_at IS NULL)
+               ORDER BY g.steam_review_score DESC NULLS LAST
                LIMIT 500"""
         )
 

@@ -76,6 +76,7 @@ async def init_db() -> None:
                 platform         TEXT NOT NULL,
                 owned            INTEGER NOT NULL DEFAULT 1,
                 playtime_minutes INTEGER,
+                playtime_2weeks_minutes INTEGER,
                 last_synced      TEXT,
                 UNIQUE(game_id, platform)
             );
@@ -226,18 +227,20 @@ async def upsert_game_platform(
     game_id: int,
     platform: str,
     playtime_minutes: int | None = None,
+    playtime_2weeks_minutes: int | None = None,
     owned: int = 1,
 ) -> None:
     """Insert or update a game_platforms row."""
     now = datetime.now(timezone.utc).isoformat()
     async with get_db() as db:
         await db.execute(
-            """INSERT INTO game_platforms (game_id, platform, owned, playtime_minutes, last_synced)
-               VALUES (?, ?, ?, ?, ?)
+            """INSERT INTO game_platforms (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes, last_synced)
+               VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(game_id, platform) DO UPDATE SET
                    owned=excluded.owned,
                    playtime_minutes=excluded.playtime_minutes,
+                   playtime_2weeks_minutes=excluded.playtime_2weeks_minutes,
                    last_synced=excluded.last_synced""",
-            (game_id, platform, owned, playtime_minutes, now),
+            (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes, now),
         )
         await db.commit()
