@@ -58,6 +58,7 @@ async def _enrich_store() -> int:
                    LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
                    WHERE g.store_cached_at IS NULL
                      AND g.is_farmed = 0
+                     AND g.appid IS NOT NULL
                    ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
                    LIMIT 50"""
             )
@@ -87,6 +88,7 @@ async def _enrich_hltb() -> int:
                    WHERE g.store_cached_at IS NOT NULL
                      AND g.hltb_cached_at IS NULL
                      AND g.is_farmed = 0
+                     AND g.appid IS NOT NULL
                    ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
                    LIMIT 50"""
             )
@@ -117,6 +119,7 @@ async def _enrich_protondb() -> int:
                    WHERE g.store_cached_at IS NOT NULL
                      AND g.protondb_cached_at IS NULL
                      AND g.is_farmed = 0
+                     AND g.appid IS NOT NULL
                    ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
                    LIMIT 50"""
             )
@@ -146,6 +149,7 @@ async def _enrich_steamspy() -> int:
                    WHERE g.store_cached_at IS NOT NULL
                      AND g.steamspy_cached_at IS NULL
                      AND g.is_farmed = 0
+                     AND g.appid IS NOT NULL
                    ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
                    LIMIT 50"""
             )
