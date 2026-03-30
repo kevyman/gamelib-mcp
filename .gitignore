@@ -10,3 +10,4 @@ __pycache__/
 *.db-journal
 .claude/
 retry_deploy.sh
+.worktrees/
