@@ -338,6 +338,31 @@ async def upsert_game(
         return game_id
 
 
+async def find_game_by_name_fuzzy(name: str, cutoff: int = 85) -> aiosqlite.Row | None:
+    """Return the best-matching games row for a given title, or None if below cutoff."""
+    from rapidfuzz import process, fuzz
+
+    async with get_db() as db:
+        rows = await db.execute_fetchall("SELECT id, name FROM games")
+
+    if not rows:
+        return None
+
+    choices = {row["id"]: row["name"] for row in rows}
+    result = process.extractOne(
+        name,
+        choices,
+        scorer=fuzz.token_sort_ratio,
+        score_cutoff=cutoff,
+    )
+    if result is None:
+        return None
+
+    best_id = result[2]
+    async with get_db() as db:
+        return await db.execute_fetchone("SELECT * FROM games WHERE id = ?", (best_id,))
+
+
 async def upsert_game_platform(
     game_id: int,
     platform: str,
