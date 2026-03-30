@@ -359,3 +359,25 @@ async def upsert_game_platform(
             (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes, now),
         )
         await db.commit()
+
+
+async def find_game_by_name_fuzzy(name: str, cutoff: int = 85) -> aiosqlite.Row | None:
+    """Return the best-matching games row for *name* using rapidfuzz, or None."""
+    from rapidfuzz import process, fuzz
+
+    async with get_db() as db:
+        rows = await (await db.execute("SELECT id, name FROM games")).fetchall()
+
+    if not rows:
+        return None
+
+    names = [r["name"] for r in rows]
+    match = process.extractOne(name, names, scorer=fuzz.token_sort_ratio, score_cutoff=cutoff)
+    if match is None:
+        return None
+
+    matched_name = match[0]
+    for row in rows:
+        if row["name"] == matched_name:
+            return row
+    return None
