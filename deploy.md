@@ -55,6 +55,7 @@ STEAM_API_KEY=your-key-from-steamcommunity.com/dev/apikey
 STEAM_ID=your-64bit-steamid
 MCP_AUTH_TOKEN=<generate with: openssl rand -hex 32>
 PORT=8000
+EPIC_LEGENDARY_HOST_PATH=/root/.config/legendary          # host path to legendary config dir (mounted read-only)
 STEAM_PROFILE_ID=your-steam-community-profile-id   # your steamcommunity.com/id/<this part>
 BACKLOGGD_USER=your-backloggd-username             # your backloggd.com/u/<this part>
 ```
@@ -91,6 +92,19 @@ git push
 ssh root@178.104.53.83
 cd ~/mcps && git pull && docker compose up -d --build steam-mcp
 ```
+
+### Epic in Docker
+
+Epic sync now reads Legendary's cached files directly from the mounted config directory instead of invoking the `legendary` CLI inside the container. The container expects a read-only mount at `/legendary`, which `docker-compose.yml` wires from `EPIC_LEGENDARY_HOST_PATH`.
+
+On the host:
+
+```bash
+legendary auth
+legendary list --force-refresh >/dev/null
+```
+
+That populates `/root/.config/legendary` with `user.json`, `assets.json`, and `metadata/*.json`, which the container then uses for both owned-game import and the reverse-engineered Epic playtime endpoint.
 
 ---
 
