@@ -77,6 +77,7 @@ async def sync_epic() -> dict:
             matched += 1
         else:
             game_id = await upsert_game(appid=None, name=title)
+            candidates[game_id] = title
             added += 1
 
         await upsert_game_platform(
