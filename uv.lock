@@ -2108,6 +2108,7 @@ name = "steam-mcp"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "aiosqlite" },
     { name = "beautifulsoup4" },
     { name = "fastmcp" },
@@ -2121,6 +2122,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.9" },
     { name = "aiosqlite", specifier = ">=0.20" },
     { name = "beautifulsoup4", specifier = ">=4.12" },
     { name = "fastmcp", specifier = ">=2.0,<3.0" },
