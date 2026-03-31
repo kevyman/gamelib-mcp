@@ -9,9 +9,15 @@ import json
 import logging
 import os
 import asyncio
-from datetime import datetime, timezone
 
-from steam_mcp.data.db import find_game_by_name_fuzzy, load_fuzzy_candidates, upsert_game, upsert_game_platform
+from steam_mcp.data.db import (
+    EPIC_ARTIFACT_ID,
+    find_game_by_name_fuzzy,
+    load_fuzzy_candidates,
+    upsert_game,
+    upsert_game_platform,
+    upsert_game_platform_identifier,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +68,6 @@ async def sync_epic() -> dict:
         return {"added": 0, "matched": 0, "skipped": 0}
 
     added = matched = skipped = 0
-    now = datetime.now(timezone.utc).isoformat()
     candidates = await load_fuzzy_candidates()
 
     for game in games:
@@ -80,12 +85,15 @@ async def sync_epic() -> dict:
             candidates[game_id] = title
             added += 1
 
-        await upsert_game_platform(
+        platform_id = await upsert_game_platform(
             game_id=game_id,
             platform="epic",
             playtime_minutes=None,  # Epic doesn't expose playtime
             owned=1,
         )
+        app_name = game.get("app_name")
+        if app_name:
+            await upsert_game_platform_identifier(platform_id, EPIC_ARTIFACT_ID, app_name)
 
     logger.info("Epic sync: added=%d matched=%d skipped=%d", added, matched, skipped)
     return {"added": added, "matched": matched, "skipped": skipped}

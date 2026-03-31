@@ -1,9 +1,9 @@
-"""Background enrichment — slowly populate Steam Store, HLTB, and ProtonDB for all games."""
+"""Background enrichment for Steam-derived metadata."""
 
 import asyncio
 import logging
 
-from .db import get_db, set_meta, get_meta
+from .db import STEAM_APP_ID, get_db
 from .steam_store import enrich_game
 from .hltb import get_hltb
 from .protondb import get_protondb
@@ -54,13 +54,18 @@ async def _enrich_store() -> int:
     while True:
         async with get_db() as db:
             rows = await db.execute_fetchall(
-                """SELECT g.appid, g.name FROM games g
-                   LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
-                   WHERE g.store_cached_at IS NULL
+                """SELECT CAST(gpi.identifier_value AS INTEGER) AS appid, g.name
+                   FROM games g
+                   JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+                   JOIN game_platform_identifiers gpi
+                     ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
+                   LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
+                   WHERE spd.store_cached_at IS NULL
                      AND g.is_farmed = 0
-                     AND g.appid IS NOT NULL
                    ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
                    LIMIT 50"""
+                ,
+                (STEAM_APP_ID,),
             )
 
         if not rows:
@@ -83,12 +88,12 @@ async def _enrich_hltb() -> int:
     while True:
         async with get_db() as db:
             rows = await db.execute_fetchall(
-                """SELECT g.appid, g.name FROM games g
-                   LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
-                   WHERE g.store_cached_at IS NOT NULL
+                """SELECT g.id AS game_id, g.name FROM games g
+                   JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+                   LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
+                   WHERE spd.store_cached_at IS NOT NULL
                      AND g.hltb_cached_at IS NULL
                      AND g.is_farmed = 0
-                     AND g.appid IS NOT NULL
                    ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
                    LIMIT 50"""
             )
@@ -99,7 +104,7 @@ async def _enrich_hltb() -> int:
         for i in range(0, len(rows), _BATCH_SIZE):
             batch = rows[i : i + _BATCH_SIZE]
             await asyncio.gather(
-                *[get_hltb(r["appid"], r["name"]) for r in batch],
+                *[get_hltb(r["game_id"], r["name"]) for r in batch],
                 return_exceptions=True,
             )
             count += len(batch)
@@ -114,14 +119,19 @@ async def _enrich_protondb() -> int:
     while True:
         async with get_db() as db:
             rows = await db.execute_fetchall(
-                """SELECT g.appid FROM games g
-                   LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
-                   WHERE g.store_cached_at IS NOT NULL
-                     AND g.protondb_cached_at IS NULL
+                """SELECT CAST(gpi.identifier_value AS INTEGER) AS appid
+                   FROM games g
+                   JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+                   JOIN game_platform_identifiers gpi
+                     ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
+                   LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
+                   WHERE spd.store_cached_at IS NOT NULL
+                     AND spd.protondb_cached_at IS NULL
                      AND g.is_farmed = 0
-                     AND g.appid IS NOT NULL
                    ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
                    LIMIT 50"""
+                ,
+                (STEAM_APP_ID,),
             )
 
         if not rows:
@@ -144,14 +154,19 @@ async def _enrich_steamspy() -> int:
     while True:
         async with get_db() as db:
             rows = await db.execute_fetchall(
-                """SELECT g.appid, g.name FROM games g
-                   LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
-                   WHERE g.store_cached_at IS NOT NULL
-                     AND g.steamspy_cached_at IS NULL
+                """SELECT CAST(gpi.identifier_value AS INTEGER) AS appid, g.name
+                   FROM games g
+                   JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+                   JOIN game_platform_identifiers gpi
+                     ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
+                   LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
+                   WHERE spd.store_cached_at IS NOT NULL
+                     AND spd.steamspy_cached_at IS NULL
                      AND g.is_farmed = 0
-                     AND g.appid IS NOT NULL
                    ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
                    LIMIT 50"""
+                ,
+                (STEAM_APP_ID,),
             )
         if not rows:
             break
