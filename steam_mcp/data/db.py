@@ -338,21 +338,36 @@ async def upsert_game(
         return game_id
 
 
-async def find_game_by_name_fuzzy(name: str, cutoff: int = 85) -> aiosqlite.Row | None:
-    """Return the best-matching games row for a given title, or None if below cutoff."""
-    from rapidfuzz import process, fuzz
-
+async def load_fuzzy_candidates() -> dict[int, str]:
+    """Load all game id→name pairs for use with find_game_by_name_fuzzy."""
     async with get_db() as db:
         rows = await db.execute_fetchall("SELECT id, name FROM games")
+    return {row["id"]: row["name"] for row in rows}
 
-    if not rows:
+
+async def find_game_by_name_fuzzy(
+    name: str,
+    cutoff: int = 85,
+    candidates: dict[int, str] | None = None,
+) -> aiosqlite.Row | None:
+    """Return the best-matching games row for a given title, or None if below cutoff.
+
+    Pass *candidates* (from load_fuzzy_candidates()) when calling in a loop to
+    avoid a full table read on every invocation.
+    """
+    from rapidfuzz import process, fuzz, utils
+
+    if candidates is None:
+        candidates = await load_fuzzy_candidates()
+
+    if not candidates:
         return None
 
-    choices = {row["id"]: row["name"] for row in rows}
     result = process.extractOne(
         name,
-        choices,
+        candidates,
         scorer=fuzz.token_sort_ratio,
+        processor=utils.default_process,
         score_cutoff=cutoff,
     )
     if result is None:
