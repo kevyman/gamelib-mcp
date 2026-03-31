@@ -1,10 +1,14 @@
 """SQLite connection, schema migrations, and tag_affinity recompute."""
 
+import asyncio
 import json
 import math
 import os
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
+from typing import TypeVar
 
 import aiosqlite
 
@@ -19,10 +23,96 @@ if not hasattr(aiosqlite.Connection, "execute_fetchone"):
 
 
 _DB_PATH = os.getenv("DATABASE_URL", "file:steam.db").removeprefix("file:")
+_DB_READY_PATH: str | None = None
+_DB_INIT_LOCK: asyncio.Lock | None = None
+_FuzzyKey = TypeVar("_FuzzyKey")
 
 
 def _db_path() -> str:
     return _DB_PATH
+
+
+def _default_process(value: str) -> str:
+    return " ".join(sorted(re.findall(r"[a-z0-9]+", value.casefold())))
+
+
+def extract_best_fuzzy_key(
+    query: str,
+    choices: dict[_FuzzyKey, str],
+    cutoff: int = 85,
+) -> _FuzzyKey | None:
+    """Return the best fuzzy-match key, with a stdlib fallback if rapidfuzz is absent."""
+    if not choices:
+        return None
+
+    try:
+        from rapidfuzz import process, fuzz, utils
+
+        result = process.extractOne(
+            query,
+            choices,
+            scorer=fuzz.token_sort_ratio,
+            processor=utils.default_process,
+            score_cutoff=cutoff,
+        )
+        if result is None:
+            return None
+        return result[2]
+    except ModuleNotFoundError:
+        processed_query = _default_process(query)
+        if not processed_query:
+            return None
+
+        best_key = None
+        best_score = float("-inf")
+        for key, value in choices.items():
+            processed_value = _default_process(value)
+            if not processed_value:
+                continue
+            score = SequenceMatcher(None, processed_query, processed_value).ratio() * 100
+            if score > best_score:
+                best_key = key
+                best_score = score
+
+        if best_key is None or best_score < cutoff:
+            return None
+        return best_key
+
+
+async def _ensure_schema(db: aiosqlite.Connection) -> None:
+    """Create or migrate the schema on an already-open connection."""
+    tables = {
+        row[0]
+        for row in await db.execute_fetchall(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "games" in tables:
+        game_cols = {
+            row[1] for row in await db.execute_fetchall("PRAGMA table_info(games)")
+        }
+        if "id" not in game_cols:
+            await _migrate_legacy_schema(db)
+
+    await db.executescript(_NEW_SCHEMA_DDL)
+    await db.commit()
+
+
+async def _ensure_db_initialized(db: aiosqlite.Connection) -> None:
+    global _DB_READY_PATH, _DB_INIT_LOCK
+
+    db_path = _db_path()
+    if _DB_READY_PATH == db_path:
+        return
+
+    if _DB_INIT_LOCK is None:
+        _DB_INIT_LOCK = asyncio.Lock()
+
+    async with _DB_INIT_LOCK:
+        if _DB_READY_PATH == db_path:
+            return
+        await _ensure_schema(db)
+        _DB_READY_PATH = db_path
 
 
 @asynccontextmanager
@@ -32,6 +122,7 @@ async def get_db():
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA journal_mode=WAL")
         await conn.execute("PRAGMA foreign_keys=ON")
+        await _ensure_db_initialized(conn)
         yield conn
 
 
@@ -202,25 +293,14 @@ async def _migrate_legacy_schema(db: aiosqlite.Connection) -> None:
 
 async def init_db() -> None:
     """Create tables if they don't exist, auto-migrating legacy schemas."""
+    global _DB_READY_PATH
+
     async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
-
-        # Detect legacy schema (games table exists but has no 'id' column)
-        tables = {
-            row[0]
-            for row in await db.execute_fetchall(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
-        }
-        if "games" in tables:
-            game_cols = {
-                row[1] for row in await db.execute_fetchall("PRAGMA table_info(games)")
-            }
-            if "id" not in game_cols:
-                await _migrate_legacy_schema(db)
-
-        await db.executescript(_NEW_SCHEMA_DDL)
-        await db.commit()
+        await db.execute("PRAGMA foreign_keys=ON")
+        await _ensure_schema(db)
+        _DB_READY_PATH = _db_path()
 
 
 async def recompute_tag_affinity() -> int:
@@ -355,25 +435,13 @@ async def find_game_by_name_fuzzy(
     Pass *candidates* (from load_fuzzy_candidates()) when calling in a loop to
     avoid a full table read on every invocation.
     """
-    from rapidfuzz import process, fuzz, utils
-
     if candidates is None:
         candidates = await load_fuzzy_candidates()
 
-    if not candidates:
+    best_id = extract_best_fuzzy_key(name, candidates, cutoff=cutoff)
+    if best_id is None:
         return None
 
-    result = process.extractOne(
-        name,
-        candidates,
-        scorer=fuzz.token_sort_ratio,
-        processor=utils.default_process,
-        score_cutoff=cutoff,
-    )
-    if result is None:
-        return None
-
-    best_id = result[2]
     async with get_db() as db:
         return await db.execute_fetchone("SELECT * FROM games WHERE id = ?", (best_id,))
 
