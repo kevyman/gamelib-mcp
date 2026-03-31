@@ -1,11 +1,18 @@
-"""Fetch Steam library via IPlayerService/GetOwnedGames API, upsert into games table."""
+"""Fetch Steam library via IPlayerService/GetOwnedGames API."""
 
 import os
 from datetime import datetime, timezone
 
 import httpx
 
-from .db import get_db, set_meta, upsert_game, upsert_game_platform
+from .db import (
+    STEAM_APP_ID,
+    set_meta,
+    upsert_game,
+    upsert_game_platform,
+    upsert_game_platform_identifier,
+    upsert_steam_platform_data,
+)
 
 STEAM_API_KEY = os.getenv("STEAM_API_KEY", "")
 STEAM_ID = os.getenv("STEAM_ID", "")
@@ -44,39 +51,28 @@ async def fetch_library() -> dict:
     now = datetime.now(timezone.utc).isoformat()
     upserted = 0
 
-    async with get_db() as db:
-        for game in games:
-            appid = game["appid"]
-            name = game.get("name", f"App {appid}")
-            playtime_forever = game.get("playtime_forever", 0)   # already in minutes
-            playtime_2weeks = game.get("playtime_2weeks", 0)      # already in minutes
-            rtime = game.get("rtime_last_played") or None         # 0 means never → store as NULL
+    for game in games:
+        appid = game["appid"]
+        name = game.get("name", f"App {appid}")
+        playtime_forever = game.get("playtime_forever", 0)
+        playtime_2weeks = game.get("playtime_2weeks", 0)
+        rtime = game.get("rtime_last_played") or None
 
-            await db.execute(
-                """INSERT INTO games (appid, name, rtime_last_played, library_updated_at)
-                   VALUES (?, ?, ?, ?)
-                   ON CONFLICT(appid) DO UPDATE SET
-                       name = excluded.name,
-                       rtime_last_played = excluded.rtime_last_played,
-                       library_updated_at = excluded.library_updated_at""",
-                (appid, name, rtime, now),
-            )
-            row = await db.execute_fetchone("SELECT id FROM games WHERE appid = ?", (appid,))
-            game_id = row["id"]
-
-            await db.execute(
-                """INSERT INTO game_platforms (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes, last_synced)
-                   VALUES (?, 'steam', 1, ?, ?, ?)
-                   ON CONFLICT(game_id, platform) DO UPDATE SET
-                       owned = excluded.owned,
-                       playtime_minutes = excluded.playtime_minutes,
-                       playtime_2weeks_minutes = excluded.playtime_2weeks_minutes,
-                       last_synced = excluded.last_synced""",
-                (game_id, playtime_forever, playtime_2weeks, now),
-            )
-            upserted += 1
-
-        await db.commit()
+        game_id = await upsert_game(appid=appid, name=name)
+        platform_id = await upsert_game_platform(
+            game_id=game_id,
+            platform="steam",
+            playtime_minutes=playtime_forever,
+            playtime_2weeks_minutes=playtime_2weeks,
+            owned=1,
+        )
+        await upsert_game_platform_identifier(platform_id, STEAM_APP_ID, appid)
+        await upsert_steam_platform_data(
+            platform_id,
+            rtime_last_played=rtime,
+            library_updated_at=now,
+        )
+        upserted += 1
 
     await set_meta("library_synced_at", now)
     return {"games_upserted": upserted, "synced_at": now}

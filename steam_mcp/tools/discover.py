@@ -1,10 +1,10 @@
 """find_games_by_vibe and get_recommendations tools."""
 
-from ..data.db import get_db
+from ..data.db import STEAM_APP_ID, get_db, load_platforms_for_games
 from ..data.protondb import TIER_ORDER
 from ..utils import _parse_json
 
-# Vibe → tag mappings (multi-tag = AND logic by default; tuple of lists = OR groups)
+# Vibe -> tag mappings (multi-tag = AND logic by default; tuple of lists = OR groups)
 VIBE_TAGS: dict[str, list[str]] = {
     "roguelike": ["roguelike", "rogue-lite", "roguelite", "roguelike deckbuilder", "deckbuilder", "deck building"],
     "cozy": ["cozy", "relaxing", "casual", "wholesome"],
@@ -30,6 +30,36 @@ VIBE_TAGS: dict[str, list[str]] = {
     "fighting": ["fighting", "beat 'em up", "brawler"],
 }
 
+_STEAM_APPID_SQL = f"""
+(
+    SELECT CAST(gpi.identifier_value AS INTEGER)
+    FROM game_platform_identifiers gpi
+    JOIN game_platforms sgp ON sgp.id = gpi.game_platform_id
+    WHERE sgp.game_id = g.id AND gpi.identifier_type = '{STEAM_APP_ID}'
+    ORDER BY gpi.is_primary DESC, gpi.id ASC
+    LIMIT 1
+)
+"""
+
+_GAME_ROLLUP_CTE = f"""
+WITH game_rollup AS (
+    SELECT g.id AS game_id,
+           g.name,
+           {_STEAM_APPID_SQL} AS steam_appid,
+           g.tags,
+           g.hltb_main,
+           g.metacritic_score,
+           g.is_farmed,
+           COALESCE(SUM(COALESCE(gp.playtime_minutes, 0)), 0) AS total_playtime_minutes,
+           MAX(CASE WHEN gp.platform = 'steam' THEN spd.protondb_tier END) AS protondb_tier,
+           MAX(CASE WHEN gp.platform = 'steam' THEN spd.steam_review_desc END) AS steam_review_desc
+    FROM games g
+    LEFT JOIN game_platforms gp ON gp.game_id = g.id
+    LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
+    GROUP BY g.id
+)
+"""
+
 
 async def find_games_by_vibe(
     vibe: str,
@@ -47,56 +77,44 @@ async def find_games_by_vibe(
 
     conditions = [
         f"""EXISTS (
-            SELECT 1 FROM json_each(g.tags)
+            SELECT 1 FROM json_each(tags)
             WHERE lower(value) IN ({placeholders})
         )"""
     ]
     params: list = list(tags)
 
     if unplayed_only:
-        conditions.append("(COALESCE(gp.playtime_minutes, 0) = 0 OR g.is_farmed = 1)")
+        conditions.append("(total_playtime_minutes = 0 OR is_farmed = 1)")
 
     if max_hltb_hours is not None:
-        conditions.append("g.hltb_main <= ?")
+        conditions.append("hltb_main <= ?")
         params.append(max_hltb_hours)
 
     if protondb_min_tier is not None:
         tier_lower = protondb_min_tier.lower()
         if tier_lower in TIER_ORDER:
             min_rank = TIER_ORDER.index(tier_lower)
-            allowed = [t for i, t in enumerate(TIER_ORDER) if i <= min_rank]
+            allowed = [tier for index, tier in enumerate(TIER_ORDER) if index <= min_rank]
             tier_ph = ",".join("?" * len(allowed))
-            conditions.append(f"lower(g.protondb_tier) IN ({tier_ph})")
+            conditions.append(f"lower(COALESCE(protondb_tier, '')) IN ({tier_ph})")
             params.extend(allowed)
 
     where = " AND ".join(conditions)
 
     async with get_db() as db:
         rows = await db.execute_fetchall(
-            f"""SELECT g.appid, g.name, COALESCE(gp.playtime_minutes, 0) as playtime_forever,
-                       g.hltb_main, g.metacritic_score,
-                       g.protondb_tier, g.steam_review_desc, g.tags
-                FROM games g
-                LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
-                WHERE {where}
-                ORDER BY g.metacritic_score DESC NULLS LAST
-                LIMIT ?""",
+            _GAME_ROLLUP_CTE
+            + f"""
+            SELECT *
+            FROM game_rollup
+            WHERE {where}
+            ORDER BY metacritic_score DESC NULLS LAST, name ASC
+            LIMIT ?
+            """,
             (*params, limit),
         )
 
-    return [
-        {
-            "appid": r["appid"],
-            "name": r["name"],
-            "playtime_hours": round(r["playtime_forever"] / 60, 1) if r["playtime_forever"] else 0,
-            "hltb_main": r["hltb_main"],
-            "metacritic_score": r["metacritic_score"],
-            "protondb_tier": r["protondb_tier"],
-            "steam_review_desc": r["steam_review_desc"],
-            "tags": _parse_json(r["tags"]),
-        }
-        for r in rows
-    ]
+    return await _format_rows(rows, include_match_score=False)
 
 
 async def get_recommendations(
@@ -108,49 +126,55 @@ async def get_recommendations(
     Rank unplayed games by tag affinity score (from sync_ratings).
     Returns games sorted by how well they match your taste profile.
     """
-    conditions = []
+    conditions = ["tags IS NOT NULL"]
     params: list = []
 
     if unplayed_only:
-        conditions.append("(COALESCE(gp.playtime_minutes, 0) = 0 OR g.is_farmed = 1)")
-
-    conditions.append("g.tags IS NOT NULL")
+        conditions.append("(total_playtime_minutes = 0 OR is_farmed = 1)")
 
     if max_hltb_hours is not None:
-        conditions.append("g.hltb_main <= ?")
+        conditions.append("hltb_main <= ?")
         params.append(max_hltb_hours)
 
-    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    where = " AND ".join(conditions)
 
     async with get_db() as db:
         rows = await db.execute_fetchall(
-            f"""SELECT g.appid, g.name, COALESCE(gp.playtime_minutes, 0) as playtime_forever,
-                       AVG(ta.affinity_score) as match_score,
-                       g.hltb_main, g.metacritic_score,
-                       g.steam_review_desc, g.protondb_tier, g.tags
-                FROM games g
-                LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
-                JOIN json_each(g.tags) je ON 1=1
-                JOIN tag_affinity ta ON ta.tag = lower(je.value)
-                {where}
-                GROUP BY g.appid
-                ORDER BY match_score DESC
-                LIMIT ?""",
+            _GAME_ROLLUP_CTE
+            + f"""
+            SELECT game_rollup.*,
+                   AVG(ta.affinity_score) AS match_score
+            FROM game_rollup
+            JOIN json_each(game_rollup.tags) je ON 1 = 1
+            JOIN tag_affinity ta ON ta.tag = lower(je.value)
+            WHERE {where}
+            GROUP BY game_rollup.game_id
+            ORDER BY match_score DESC, name ASC
+            LIMIT ?
+            """,
             (*params, limit),
         )
 
-    return [
-        {
-            "appid": r["appid"],
-            "name": r["name"],
-            "match_score": round(r["match_score"], 3) if r["match_score"] else 0,
-            "hltb_main": r["hltb_main"],
-            "metacritic_score": r["metacritic_score"],
-            "steam_review_desc": r["steam_review_desc"],
-            "protondb_tier": r["protondb_tier"],
-            "tags": _parse_json(r["tags"]),
+    return await _format_rows(rows, include_match_score=True)
+
+
+async def _format_rows(rows, include_match_score: bool) -> list[dict]:
+    platforms_by_game = await load_platforms_for_games(row["game_id"] for row in rows)
+    formatted = []
+    for row in rows:
+        game = {
+            "game_id": row["game_id"],
+            "appid": row["steam_appid"],
+            "name": row["name"],
+            "platforms": platforms_by_game.get(row["game_id"], []),
+            "playtime_hours": round((row["total_playtime_minutes"] or 0) / 60, 1),
+            "hltb_main": row["hltb_main"],
+            "metacritic_score": row["metacritic_score"],
+            "steam_review_desc": row["steam_review_desc"],
+            "protondb_tier": row["protondb_tier"],
+            "tags": _parse_json(row["tags"]),
         }
-        for r in rows
-    ]
-
-
+        if include_match_score:
+            game["match_score"] = round(row["match_score"], 3) if row["match_score"] else 0
+        formatted.append(game)
+    return formatted

@@ -1,13 +1,24 @@
 """get_ratings, sync_ratings, get_taste_profile tools."""
 
 from ..data.backloggd import sync_backloggd
+from ..data.db import STEAM_APP_ID, get_db, load_platforms_for_games, recompute_tag_affinity
 from ..data.steam_reviews import sync_steam_reviews
-from ..data.db import get_db, recompute_tag_affinity
+
+_STEAM_APPID_SQL = f"""
+(
+    SELECT CAST(gpi.identifier_value AS INTEGER)
+    FROM game_platform_identifiers gpi
+    JOIN game_platforms sgp ON sgp.id = gpi.game_platform_id
+    WHERE sgp.game_id = g.id AND gpi.identifier_type = '{STEAM_APP_ID}'
+    ORDER BY gpi.is_primary DESC, gpi.id ASC
+    LIMIT 1
+)
+"""
 
 
 async def sync_ratings() -> dict:
     """
-    Scrape Backloggd + Steam reviews, upsert into ratings,
+    Scrape Backloggd plus Steam reviews, upsert into ratings,
     then recompute tag_affinity.
     """
     bl_result = await sync_backloggd()
@@ -49,8 +60,14 @@ async def get_ratings(
 
     async with get_db() as db:
         rows = await db.execute_fetchall(
-            f"""SELECT g.appid, g.name, r.source, r.raw_score, r.normalized_score,
-                       r.review_text, r.synced_at
+            f"""SELECT g.id AS game_id,
+                       {_STEAM_APPID_SQL} AS steam_appid,
+                       g.name,
+                       r.source,
+                       r.raw_score,
+                       r.normalized_score,
+                       r.review_text,
+                       r.synced_at
                 FROM ratings r
                 JOIN games g ON g.id = r.game_id
                 {where}
@@ -59,22 +76,25 @@ async def get_ratings(
             (*params, limit),
         )
 
+    platforms_by_game = await load_platforms_for_games(row["game_id"] for row in rows)
     return [
         {
-            "appid": r["appid"],
-            "name": r["name"],
-            "source": r["source"],
-            "raw_score": r["raw_score"],
-            "normalized_score": r["normalized_score"],
-            "review_text": r["review_text"],
-            "synced_at": r["synced_at"],
+            "game_id": row["game_id"],
+            "appid": row["steam_appid"],
+            "name": row["name"],
+            "platforms": platforms_by_game.get(row["game_id"], []),
+            "source": row["source"],
+            "raw_score": row["raw_score"],
+            "normalized_score": row["normalized_score"],
+            "review_text": row["review_text"],
+            "synced_at": row["synced_at"],
         }
-        for r in rows
+        for row in rows
     ]
 
 
 async def get_taste_profile() -> dict:
-    """Show tag affinities + rating stats summary."""
+    """Show tag affinities plus rating stats summary."""
     async with get_db() as db:
         top_tags = await db.execute_fetchall(
             """SELECT tag, affinity_score, avg_score, game_count
@@ -110,20 +130,20 @@ async def get_taste_profile() -> dict:
         },
         "top_tags": [
             {
-                "tag": r["tag"],
-                "affinity_score": round(r["affinity_score"], 3),
-                "avg_score": round(r["avg_score"], 2),
-                "game_count": r["game_count"],
+                "tag": row["tag"],
+                "affinity_score": round(row["affinity_score"], 3),
+                "avg_score": round(row["avg_score"], 2),
+                "game_count": row["game_count"],
             }
-            for r in top_tags
+            for row in top_tags
         ],
         "bottom_tags": [
             {
-                "tag": r["tag"],
-                "affinity_score": round(r["affinity_score"], 3),
-                "avg_score": round(r["avg_score"], 2),
-                "game_count": r["game_count"],
+                "tag": row["tag"],
+                "affinity_score": round(row["affinity_score"], 3),
+                "avg_score": round(row["avg_score"], 2),
+                "game_count": row["game_count"],
             }
-            for r in bottom_tags
+            for row in bottom_tags
         ],
     }
