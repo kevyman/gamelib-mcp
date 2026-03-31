@@ -11,7 +11,7 @@ import os
 import asyncio
 from datetime import datetime, timezone
 
-from steam_mcp.data.db import find_game_by_name_fuzzy, upsert_game, upsert_game_platform
+from steam_mcp.data.db import find_game_by_name_fuzzy, load_fuzzy_candidates, upsert_game, upsert_game_platform
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,7 @@ async def sync_epic() -> dict:
 
     added = matched = skipped = 0
     now = datetime.now(timezone.utc).isoformat()
+    candidates = await load_fuzzy_candidates()
 
     for game in games:
         title = game.get("title") or game.get("app_title") or game.get("app_name")
@@ -70,7 +71,7 @@ async def sync_epic() -> dict:
             skipped += 1
             continue
 
-        existing = await find_game_by_name_fuzzy(title)
+        existing = await find_game_by_name_fuzzy(title, candidates=candidates)
         if existing:
             game_id = existing["id"]
             matched += 1

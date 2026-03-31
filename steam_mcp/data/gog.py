@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 import aiohttp
 
-from steam_mcp.data.db import find_game_by_name_fuzzy, upsert_game, upsert_game_platform
+from steam_mcp.data.db import find_game_by_name_fuzzy, load_fuzzy_candidates, upsert_game, upsert_game_platform
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +18,9 @@ _GOG_TOKEN_URL = "https://auth.gog.com/token"
 _GOG_LIBRARY_URL = "https://embed.gog.com/user/data/games"
 _GOG_GAME_DETAIL_URL = "https://api.gog.com/products/{game_id}?expand=downloads"
 
-_CLIENT_ID = "46899977096215655"      # GOG public client ID (no secret needed for refresh)
-_CLIENT_SECRET = "9d85c43b1718a031d5b64228ecd1a9eb"  # GOG public client secret
+# GOG Galaxy public OAuth credentials — set env vars to override if GOG rotates them
+_CLIENT_ID = os.getenv("GOG_CLIENT_ID", "46899977096215655")
+_CLIENT_SECRET = os.getenv("GOG_CLIENT_SECRET", "9d85c43b1718a031d5b64228ecd1a9eb")
 
 
 async def _get_access_token(session: aiohttp.ClientSession) -> str:
@@ -89,13 +90,14 @@ async def sync_gog() -> dict:
             access_token = await _get_access_token(session)
             gog_ids = await _fetch_owned_game_ids(session, access_token)
 
+            candidates = await load_fuzzy_candidates()
             for gog_id in gog_ids:
                 title = await _fetch_game_title(session, access_token, gog_id)
                 if not title:
                     skipped += 1
                     continue
 
-                existing = await find_game_by_name_fuzzy(title)
+                existing = await find_game_by_name_fuzzy(title, candidates=candidates)
                 if existing:
                     game_id = existing["id"]
                     matched += 1
