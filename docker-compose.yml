@@ -4,8 +4,11 @@ services:
     restart: always
     expose:
       - "8000"
+    environment:
+      EPIC_LEGENDARY_PATH: /legendary
     volumes:
       - ./data/steam:/data
+      - ${EPIC_LEGENDARY_HOST_PATH:-./data/legendary}:/legendary:ro
     env_file: .env
 
   # Add future MCPs here as new services, e.g.:
