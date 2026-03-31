@@ -59,8 +59,8 @@ _display_name = os.getenv("STEAM_PROFILE_ID") or "the configured user"
 mcp = FastMCP(
     name="steam-library",
     instructions=(
-        f"You have access to {_display_name}'s Steam library. "
-        "Use the tools to search, filter, and get details about games. "
+        f"You have access to {_display_name}'s game library across Steam and any synced stores. "
+        "Use the tools to search, filter, and get details about games and platforms. "
         "Ratings are synced from Backloggd and Steam reviews (read-only). "
         "Call sync_ratings to refresh ratings and taste profile data."
     ),
@@ -72,7 +72,7 @@ mcp = FastMCP(
 
 @mcp.tool()
 async def search_games(query: str, limit: int = 20) -> list[dict]:
-    """Find games in the Steam library by name substring."""
+    """Find games in the library by name substring."""
     from .tools.library import search_games as _search
     return await _search(query, limit)
 
@@ -98,7 +98,7 @@ async def get_library_stats(
     limit: int = 50,
 ) -> dict:
     """
-    Get filtered/sorted library list + aggregate stats.
+    Get filtered/sorted library list plus aggregate stats.
 
     filter: all | unplayed | played | recent | farmed
     sort_by: playtime | name | metacritic | hltb
@@ -109,14 +109,18 @@ async def get_library_stats(
 
 
 @mcp.tool()
-async def get_game_detail(name: str | None = None, appid: int | None = None) -> dict:
+async def get_game_detail(
+    name: str | None = None,
+    appid: int | None = None,
+    game_id: int | None = None,
+) -> dict:
     """
-    Get full details for a single game, including HLTB, OpenCritic, ProtonDB,
-    and any personal ratings. Triggers lazy data fetches.
-    Provide either name (partial match) or appid.
+    Get full details for a single game, including platform ownership, HLTB,
+    Metacritic, ProtonDB, and any personal ratings. Triggers lazy data fetches.
+    Provide game_id, name (partial match), or Steam appid.
     """
     from .tools.detail import get_game_detail as _detail
-    return await _detail(name, appid)
+    return await _detail(name, appid, game_id)
 
 
 @mcp.tool()

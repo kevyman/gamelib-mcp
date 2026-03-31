@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from .db import get_db
+from .db import get_steam_platform_row_by_appid, upsert_steam_platform_data
 
 CACHE_DAYS = 30
 PROTONDB_API = "https://www.protondb.com/api/v1/reports/summaries/{appid}.json"
@@ -15,18 +15,18 @@ logger = logging.getLogger(__name__)
 
 async def get_protondb(appid: int) -> str | None:
     """Lazy-fetch ProtonDB tier. Returns tier string or None."""
-    async with get_db() as db:
-        row = await db.execute_fetchone(
-            "SELECT protondb_tier, protondb_cached_at FROM games WHERE appid = ?", (appid,)
-        )
+    row = await get_steam_platform_row_by_appid(appid)
 
     if row and _is_fresh(row["protondb_cached_at"], CACHE_DAYS):
         return row["protondb_tier"]
 
-    return await _fetch_and_cache(appid)
+    if row is None:
+        return None
+
+    return await _fetch_and_cache(appid, row["game_platform_id"])
 
 
-async def _fetch_and_cache(appid: int) -> str | None:
+async def _fetch_and_cache(appid: int, game_platform_id: int) -> str | None:
     now = datetime.now(timezone.utc).isoformat()
     tier = None
     try:
@@ -38,12 +38,11 @@ async def _fetch_and_cache(appid: int) -> str | None:
     except Exception as e:
         logger.warning("ProtonDB fetch failed for appid %d: %s", appid, e)
 
-    async with get_db() as db:
-        await db.execute(
-            "UPDATE games SET protondb_tier = ?, protondb_cached_at = ? WHERE appid = ?",
-            (tier, now, appid),
-        )
-        await db.commit()
+    await upsert_steam_platform_data(
+        game_platform_id,
+        protondb_tier=tier,
+        protondb_cached_at=now,
+    )
 
     return tier
 

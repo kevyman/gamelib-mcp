@@ -1,14 +1,16 @@
-"""SQLite connection, schema migrations, and tag_affinity recompute."""
+"""SQLite connection, schema migrations, and shared game/platform helpers."""
 
 import asyncio
 import json
 import math
 import os
 import re
+from collections import defaultdict
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
-from typing import TypeVar
+from typing import Callable, Iterable, TypeVar
 
 import aiosqlite
 
@@ -18,6 +20,7 @@ async def _execute_fetchone(self, sql, parameters=()):
     async with self.execute(sql, parameters) as cursor:
         return await cursor.fetchone()
 
+
 if not hasattr(aiosqlite.Connection, "execute_fetchone"):
     aiosqlite.Connection.execute_fetchone = _execute_fetchone  # type: ignore[method-assign]
 
@@ -26,6 +29,25 @@ _DB_PATH = os.getenv("DATABASE_URL", "file:steam.db").removeprefix("file:")
 _DB_READY_PATH: str | None = None
 _DB_INIT_LOCK: asyncio.Lock | None = None
 _FuzzyKey = TypeVar("_FuzzyKey")
+_Progress = Callable[[str], None]
+
+STEAM_PLATFORM = "steam"
+STEAM_APP_ID = "steam_appid"
+EPIC_ARTIFACT_ID = "epic_artifact_id"
+GOG_PRODUCT_ID = "gog_product_id"
+SCHEMA_VERSION = 2
+
+
+@dataclass
+class MigrationResult:
+    initial_version: int
+    final_version: int
+    detected_state: str
+    applied_steps: list[str]
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.applied_steps)
 
 
 def _db_path() -> str:
@@ -46,7 +68,7 @@ def extract_best_fuzzy_key(
         return None
 
     try:
-        from rapidfuzz import process, fuzz, utils
+        from rapidfuzz import fuzz, process, utils
 
         result = process.extractOne(
             query,
@@ -79,54 +101,7 @@ def extract_best_fuzzy_key(
         return best_key
 
 
-async def _ensure_schema(db: aiosqlite.Connection) -> None:
-    """Create or migrate the schema on an already-open connection."""
-    tables = {
-        row[0]
-        for row in await db.execute_fetchall(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        )
-    }
-    if "games" in tables:
-        game_cols = {
-            row[1] for row in await db.execute_fetchall("PRAGMA table_info(games)")
-        }
-        if "id" not in game_cols:
-            await _migrate_legacy_schema(db)
-
-    await db.executescript(_NEW_SCHEMA_DDL)
-    await db.commit()
-
-
-async def _ensure_db_initialized(db: aiosqlite.Connection) -> None:
-    global _DB_READY_PATH, _DB_INIT_LOCK
-
-    db_path = _db_path()
-    if _DB_READY_PATH == db_path:
-        return
-
-    if _DB_INIT_LOCK is None:
-        _DB_INIT_LOCK = asyncio.Lock()
-
-    async with _DB_INIT_LOCK:
-        if _DB_READY_PATH == db_path:
-            return
-        await _ensure_schema(db)
-        _DB_READY_PATH = db_path
-
-
-@asynccontextmanager
-async def get_db():
-    """Async context manager for a WAL-enabled, Row-factory SQLite connection."""
-    async with aiosqlite.connect(_db_path()) as conn:
-        conn.row_factory = aiosqlite.Row
-        await conn.execute("PRAGMA journal_mode=WAL")
-        await conn.execute("PRAGMA foreign_keys=ON")
-        await _ensure_db_initialized(conn)
-        yield conn
-
-
-_NEW_SCHEMA_DDL = """
+_V1_SCHEMA_DDL = """
     CREATE TABLE IF NOT EXISTS games (
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
         appid            INTEGER UNIQUE,
@@ -194,66 +169,219 @@ _NEW_SCHEMA_DDL = """
 """
 
 
-async def _migrate_legacy_schema(db: aiosqlite.Connection) -> None:
-    """Migrate old appid-as-PK schema to cross-platform schema in place.
+_V2_SCHEMA_DDL = """
+    CREATE TABLE IF NOT EXISTS games (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        igdb_id          INTEGER UNIQUE,
+        name             TEXT NOT NULL,
+        sort_name        TEXT,
+        release_date     TEXT,
+        genres           TEXT,
+        tags             TEXT,
+        short_description TEXT,
+        metacritic_score INTEGER,
+        hltb_main        REAL,
+        hltb_extra       REAL,
+        hltb_complete    REAL,
+        opencritic_score INTEGER,
+        hltb_cached_at   TEXT,
+        is_farmed        INTEGER NOT NULL DEFAULT 0
+    );
 
-    Renames existing tables to *_old, re-creates the new schema, migrates
-    all data, then drops the *_old tables.  Called from init_db() when the
-    games table exists but lacks an 'id' column.
-    """
+    CREATE TABLE IF NOT EXISTS game_platforms (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id          INTEGER NOT NULL REFERENCES games(id),
+        platform         TEXT NOT NULL,
+        owned            INTEGER NOT NULL DEFAULT 1,
+        playtime_minutes INTEGER,
+        playtime_2weeks_minutes INTEGER,
+        last_synced      TEXT,
+        UNIQUE(game_id, platform)
+    );
+
+    CREATE TABLE IF NOT EXISTS game_platform_identifiers (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_platform_id INTEGER NOT NULL REFERENCES game_platforms(id) ON DELETE CASCADE,
+        identifier_type  TEXT NOT NULL,
+        identifier_value TEXT NOT NULL,
+        is_primary       INTEGER NOT NULL DEFAULT 1,
+        last_seen_at     TEXT,
+        UNIQUE(identifier_type, identifier_value)
+    );
+
+    CREATE TABLE IF NOT EXISTS steam_platform_data (
+        game_platform_id    INTEGER PRIMARY KEY REFERENCES game_platforms(id) ON DELETE CASCADE,
+        steam_review_score  INTEGER,
+        steam_review_desc   TEXT,
+        protondb_tier       TEXT,
+        store_cached_at     TEXT,
+        protondb_cached_at  TEXT,
+        steamspy_cached_at  TEXT,
+        rtime_last_played   INTEGER,
+        library_updated_at  TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS ratings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id INTEGER REFERENCES games(id),
+        source TEXT NOT NULL,
+        raw_score REAL,
+        normalized_score REAL,
+        review_text TEXT,
+        synced_at TEXT NOT NULL,
+        UNIQUE(game_id, source)
+    );
+
+    CREATE TABLE IF NOT EXISTS tag_affinity (
+        tag TEXT PRIMARY KEY,
+        affinity_score REAL,
+        avg_score REAL,
+        game_count INTEGER,
+        updated_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_game_platforms_game_id ON game_platforms(game_id);
+    CREATE INDEX IF NOT EXISTS idx_game_platforms_platform ON game_platforms(platform);
+    CREATE INDEX IF NOT EXISTS idx_game_platform_identifiers_platform_id
+        ON game_platform_identifiers(game_platform_id);
+    CREATE INDEX IF NOT EXISTS idx_game_platform_identifiers_lookup
+        ON game_platform_identifiers(identifier_type, identifier_value);
+"""
+
+
+async def _table_names(db: aiosqlite.Connection) -> set[str]:
+    rows = await db.execute_fetchall("SELECT name FROM sqlite_master WHERE type='table'")
+    return {row[0] for row in rows}
+
+
+async def _table_columns(db: aiosqlite.Connection, table: str) -> set[str]:
+    rows = await db.execute_fetchall(f"PRAGMA table_info({table})")
+    return {row[1] for row in rows}
+
+
+async def _get_user_version(db: aiosqlite.Connection) -> int:
+    row = await db.execute_fetchone("PRAGMA user_version")
+    return int(row[0]) if row else 0
+
+
+async def _set_user_version(db: aiosqlite.Connection, version: int) -> None:
+    await db.execute(f"PRAGMA user_version = {version}")
+
+
+async def _detect_schema_state(db: aiosqlite.Connection) -> str:
+    tables = await _table_names(db)
+    if "games" not in tables:
+        return "fresh"
+
+    game_cols = await _table_columns(db, "games")
+    if "id" not in game_cols:
+        return "legacy"
+
+    if {
+        "game_platform_identifiers",
+        "steam_platform_data",
+    }.issubset(tables) and "appid" not in game_cols:
+        return "v2"
+
+    return "v1"
+
+
+def _emit(progress: _Progress | None, message: str, applied_steps: list[str], changed: bool = True) -> None:
+    if changed:
+        applied_steps.append(message)
+    if progress is not None:
+        progress(message)
+
+
+async def _migrate_legacy_to_v1(db: aiosqlite.Connection, progress: _Progress | None) -> None:
     await db.execute("PRAGMA foreign_keys=OFF")
-
-    old_cols = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(games)")}
     db.row_factory = aiosqlite.Row
-    old_games = await db.execute_fetchall("SELECT * FROM games")
 
-    tables = {
-        row[0]
-        for row in await db.execute_fetchall(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        )
-    }
-    old_ratings: list = []
-    if "ratings" in tables:
-        old_ratings = await db.execute_fetchall("SELECT * FROM ratings")
-        await db.execute("ALTER TABLE ratings RENAME TO ratings_old")
+    tables = await _table_names(db)
+    if "games" not in tables:
+        await db.executescript(_V1_SCHEMA_DDL)
+        await _set_user_version(db, 1)
+        await db.commit()
+        await db.execute("PRAGMA foreign_keys=ON")
+        return
+
+    game_cols = await _table_columns(db, "games")
+    if "id" in game_cols:
+        await _set_user_version(db, 1)
+        await db.commit()
+        await db.execute("PRAGMA foreign_keys=ON")
+        return
+
+    if progress is not None:
+        progress("Migrating legacy Steam schema to v1.")
 
     await db.execute("ALTER TABLE games RENAME TO games_old")
+    if "ratings" in tables:
+        await db.execute("ALTER TABLE ratings RENAME TO ratings_old")
+    if "tag_affinity" in tables:
+        await db.execute("ALTER TABLE tag_affinity RENAME TO tag_affinity_old")
     await db.commit()
 
-    # Create new schema (executescript issues an implicit COMMIT first)
-    await db.executescript(_NEW_SCHEMA_DDL)
+    await db.executescript(_V1_SCHEMA_DDL)
 
-    # Migrate games rows
+    old_cols = await _table_columns(db, "games_old")
+    old_games = await db.execute_fetchall("SELECT * FROM games_old")
+
     keep_cols = [
-        "appid", "name", "genres", "tags", "short_description",
-        "metacritic_score", "hltb_main", "hltb_extra",
-        "protondb_tier", "steam_review_score", "steam_review_desc",
-        "store_cached_at", "hltb_cached_at", "metacritic_cached_at",
-        "protondb_cached_at", "steamspy_cached_at",
-        "rtime_last_played", "is_farmed", "library_updated_at",
+        "appid",
+        "name",
+        "genres",
+        "tags",
+        "short_description",
+        "metacritic_score",
+        "hltb_main",
+        "hltb_extra",
+        "protondb_tier",
+        "steam_review_score",
+        "steam_review_desc",
+        "store_cached_at",
+        "hltb_cached_at",
+        "metacritic_cached_at",
+        "protondb_cached_at",
+        "steamspy_cached_at",
+        "rtime_last_played",
+        "is_farmed",
+        "library_updated_at",
     ]
+
     for row in old_games:
-        present = [c for c in keep_cols if c in old_cols]
+        present = [col for col in keep_cols if col in old_cols and row[col] is not None]
+        if "hltb_completionist" in old_cols and row["hltb_completionist"] is not None:
+            present = [*present, "hltb_complete"]
+
+        if not present:
+            continue
+
+        values = []
+        for col in present:
+            if col == "hltb_complete":
+                values.append(row["hltb_completionist"])
+            else:
+                values.append(row[col])
+
         cols_sql = ", ".join(present)
         placeholders = ", ".join("?" for _ in present)
-        values = [row[c] for c in present]
-        if "hltb_completionist" in old_cols and row["hltb_completionist"] is not None:
-            cols_sql += ", hltb_complete"
-            placeholders += ", ?"
-            values.append(row["hltb_completionist"])
-        if not values:
-            continue
         await db.execute(
             f"INSERT OR IGNORE INTO games ({cols_sql}) VALUES ({placeholders})",
             values,
         )
+
     await db.commit()
 
-    # Create game_platforms rows from old playtime columns
     for row in old_games:
         game = await db.execute_fetchone(
-            "SELECT id FROM games WHERE appid = ?", (row["appid"],)
+            "SELECT id FROM games WHERE appid = ?",
+            (row["appid"],),
         )
         if game is None:
             continue
@@ -262,52 +390,325 @@ async def _migrate_legacy_schema(db: aiosqlite.Connection) -> None:
         await db.execute(
             """INSERT OR IGNORE INTO game_platforms
                (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes, last_synced)
-               VALUES (?, 'steam', 1, ?, ?, datetime('now'))""",
-            (game["id"], playtime, playtime_2weeks),
+               VALUES (?, ?, 1, ?, ?, datetime('now'))""",
+            (game["id"], STEAM_PLATFORM, playtime, playtime_2weeks),
         )
+
     await db.commit()
 
-    # Migrate ratings rows
-    for row in old_ratings:
-        game = await db.execute_fetchone(
-            "SELECT id FROM games WHERE appid = ?", (row["appid"],)
-        )
-        if game is None:
-            continue
-        await db.execute(
-            """INSERT OR IGNORE INTO ratings
-               (game_id, source, raw_score, normalized_score, review_text, synced_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (game["id"], row["source"], row["raw_score"],
-             row["normalized_score"], row["review_text"], row["synced_at"]),
-        )
-    await db.commit()
+    if "ratings_old" in await _table_names(db):
+        old_ratings = await db.execute_fetchall("SELECT * FROM ratings_old")
+        for row in old_ratings:
+            game = await db.execute_fetchone(
+                "SELECT id FROM games WHERE appid = ?",
+                (row["appid"],),
+            )
+            if game is None:
+                continue
+            await db.execute(
+                """INSERT OR IGNORE INTO ratings
+                   (game_id, source, raw_score, normalized_score, review_text, synced_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    game["id"],
+                    row["source"],
+                    row["raw_score"],
+                    row["normalized_score"],
+                    row["review_text"],
+                    row["synced_at"],
+                ),
+            )
+        await db.commit()
 
-    # Drop legacy tables
-    await db.execute("DROP TABLE IF EXISTS games_old")
-    await db.execute("DROP TABLE IF EXISTS ratings_old")
-    await db.commit()
+    if "tag_affinity_old" in await _table_names(db):
+        await db.execute("DELETE FROM tag_affinity")
+        await db.execute("INSERT INTO tag_affinity SELECT * FROM tag_affinity_old")
+        await db.commit()
 
+    for table in ("games_old", "ratings_old", "tag_affinity_old"):
+        await db.execute(f"DROP TABLE IF EXISTS {table}")
+
+    await _set_user_version(db, 1)
+    await db.commit()
     await db.execute("PRAGMA foreign_keys=ON")
 
 
-async def init_db() -> None:
-    """Create tables if they don't exist, auto-migrating legacy schemas."""
+async def _migrate_v1_to_v2(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    if progress is not None:
+        progress("Migrating cross-platform schema to v2 normalization.")
+
+    await db.execute("PRAGMA foreign_keys=OFF")
+    db.row_factory = aiosqlite.Row
+    now = datetime.now(timezone.utc).isoformat()
+    game_platform_rows = await db.execute_fetchall(
+        """SELECT id, game_id, platform, owned, playtime_minutes,
+                  playtime_2weeks_minutes, last_synced
+           FROM game_platforms"""
+    )
+    ratings_rows = await db.execute_fetchall(
+        """SELECT id, game_id, source, raw_score, normalized_score,
+                  review_text, synced_at
+           FROM ratings"""
+    )
+
+    await db.execute("ALTER TABLE games RENAME TO games_v1_old")
+    await db.execute("ALTER TABLE game_platforms RENAME TO game_platforms_v1_old")
+    await db.execute("ALTER TABLE ratings RENAME TO ratings_v1_old")
+    await db.commit()
+
+    await db.executescript(_V2_SCHEMA_DDL)
+
+    old_cols = await _table_columns(db, "games_v1_old")
+    keep_cols = [
+        "id",
+        "igdb_id",
+        "name",
+        "sort_name",
+        "release_date",
+        "genres",
+        "tags",
+        "short_description",
+        "metacritic_score",
+        "hltb_main",
+        "hltb_extra",
+        "hltb_complete",
+        "opencritic_score",
+        "hltb_cached_at",
+        "is_farmed",
+    ]
+    present = [col for col in keep_cols if col in old_cols]
+    cols_sql = ", ".join(present)
+    await db.execute(
+        f"INSERT INTO games ({cols_sql}) SELECT {cols_sql} FROM games_v1_old"
+    )
+
+    for row in game_platform_rows:
+        await db.execute(
+            """INSERT INTO game_platforms
+               (id, game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes, last_synced)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                row["id"],
+                row["game_id"],
+                row["platform"],
+                row["owned"],
+                row["playtime_minutes"],
+                row["playtime_2weeks_minutes"],
+                row["last_synced"],
+            ),
+        )
+
+    missing_steam_rows = await db.execute_fetchall(
+        """SELECT g.id AS game_id
+           FROM games_v1_old g
+           LEFT JOIN game_platforms gp
+             ON gp.game_id = g.id AND gp.platform = ?
+           WHERE g.appid IS NOT NULL AND gp.id IS NULL""",
+        (STEAM_PLATFORM,),
+    )
+    for row in missing_steam_rows:
+        await db.execute(
+            """INSERT INTO game_platforms
+               (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes, last_synced)
+               VALUES (?, ?, 1, NULL, NULL, ?)""",
+            (row["game_id"], STEAM_PLATFORM, now),
+        )
+
+    rows = await db.execute_fetchall(
+        """SELECT gp.id AS game_platform_id, g.appid
+           FROM games_v1_old g
+           JOIN game_platforms gp
+             ON gp.game_id = g.id AND gp.platform = ?
+           WHERE g.appid IS NOT NULL""",
+        (STEAM_PLATFORM,),
+    )
+    for row in rows:
+        await db.execute(
+            """INSERT INTO game_platform_identifiers
+               (game_platform_id, identifier_type, identifier_value, is_primary, last_seen_at)
+               VALUES (?, ?, ?, 1, ?)
+               ON CONFLICT(identifier_type, identifier_value) DO UPDATE SET
+                   game_platform_id = excluded.game_platform_id,
+                   is_primary = excluded.is_primary,
+                   last_seen_at = excluded.last_seen_at""",
+            (row["game_platform_id"], STEAM_APP_ID, str(row["appid"]), now),
+        )
+
+    steam_rows = await db.execute_fetchall(
+        """SELECT gp.id AS game_platform_id,
+                  g.steam_review_score,
+                  g.steam_review_desc,
+                  g.protondb_tier,
+                  g.store_cached_at,
+                  g.protondb_cached_at,
+                  g.steamspy_cached_at,
+                  g.rtime_last_played,
+                  g.library_updated_at
+           FROM games_v1_old g
+           JOIN game_platforms gp
+             ON gp.game_id = g.id AND gp.platform = ?""",
+        (STEAM_PLATFORM,),
+    )
+    for row in steam_rows:
+        await db.execute(
+            """INSERT INTO steam_platform_data
+               (game_platform_id, steam_review_score, steam_review_desc, protondb_tier,
+                store_cached_at, protondb_cached_at, steamspy_cached_at,
+                rtime_last_played, library_updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(game_platform_id) DO UPDATE SET
+                   steam_review_score = excluded.steam_review_score,
+                   steam_review_desc = excluded.steam_review_desc,
+                   protondb_tier = excluded.protondb_tier,
+                   store_cached_at = excluded.store_cached_at,
+                   protondb_cached_at = excluded.protondb_cached_at,
+                   steamspy_cached_at = excluded.steamspy_cached_at,
+                   rtime_last_played = excluded.rtime_last_played,
+                   library_updated_at = excluded.library_updated_at""",
+            (
+                row["game_platform_id"],
+                row["steam_review_score"],
+                row["steam_review_desc"],
+                row["protondb_tier"],
+                row["store_cached_at"],
+                row["protondb_cached_at"],
+                row["steamspy_cached_at"],
+                row["rtime_last_played"],
+                row["library_updated_at"],
+            ),
+        )
+
+    for row in ratings_rows:
+        await db.execute(
+            """INSERT INTO ratings
+               (id, game_id, source, raw_score, normalized_score, review_text, synced_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                row["id"],
+                row["game_id"],
+                row["source"],
+                row["raw_score"],
+                row["normalized_score"],
+                row["review_text"],
+                row["synced_at"],
+            ),
+        )
+
+    await db.execute("DROP TABLE IF EXISTS games_v1_old")
+    await db.execute("DROP TABLE IF EXISTS game_platforms_v1_old")
+    await db.execute("DROP TABLE IF EXISTS ratings_v1_old")
+    await _set_user_version(db, 2)
+    await db.commit()
+    await db.execute("PRAGMA foreign_keys=ON")
+
+
+async def _run_migrations(
+    db: aiosqlite.Connection,
+    progress: _Progress | None = None,
+) -> MigrationResult:
+    detected_state = await _detect_schema_state(db)
+    initial_version = await _get_user_version(db)
+    version = initial_version
+    applied_steps: list[str] = []
+
+    if detected_state == "fresh":
+        await db.executescript(_V2_SCHEMA_DDL)
+        await _set_user_version(db, SCHEMA_VERSION)
+        await db.commit()
+        _emit(progress, "Initialized fresh database at schema v2.", applied_steps)
+        return MigrationResult(
+            initial_version=initial_version,
+            final_version=SCHEMA_VERSION,
+            detected_state=detected_state,
+            applied_steps=applied_steps,
+        )
+
+    if version == 0:
+        if detected_state == "legacy":
+            _emit(progress, "Applying migration step v0 -> v1.", applied_steps)
+            await _migrate_legacy_to_v1(db, progress=None)
+            version = 1
+        elif detected_state == "v1":
+            await _set_user_version(db, 1)
+            await db.commit()
+            version = 1
+            _emit(progress, "Recorded existing schema as v1.", applied_steps)
+        elif detected_state == "v2":
+            await _set_user_version(db, 2)
+            await db.commit()
+            version = 2
+            _emit(progress, "Recorded existing schema as v2.", applied_steps)
+
+    if version == 1:
+        _emit(progress, "Applying migration step v1 -> v2.", applied_steps)
+        await _migrate_v1_to_v2(db, progress=None)
+        version = 2
+
+    await db.executescript(_V2_SCHEMA_DDL)
+    if version != SCHEMA_VERSION:
+        await _set_user_version(db, SCHEMA_VERSION)
+        version = SCHEMA_VERSION
+    await db.commit()
+
+    return MigrationResult(
+        initial_version=initial_version,
+        final_version=version,
+        detected_state=detected_state,
+        applied_steps=applied_steps,
+    )
+
+
+async def _ensure_db_initialized(db: aiosqlite.Connection) -> None:
+    global _DB_READY_PATH, _DB_INIT_LOCK
+
+    db_path = _db_path()
+    if _DB_READY_PATH == db_path:
+        return
+
+    if _DB_INIT_LOCK is None:
+        _DB_INIT_LOCK = asyncio.Lock()
+
+    async with _DB_INIT_LOCK:
+        if _DB_READY_PATH == db_path:
+            return
+        await _run_migrations(db)
+        _DB_READY_PATH = db_path
+
+
+@asynccontextmanager
+async def get_db():
+    """Async context manager for a WAL-enabled, Row-factory SQLite connection."""
+    async with aiosqlite.connect(_db_path()) as conn:
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA journal_mode=WAL")
+        await conn.execute("PRAGMA foreign_keys=ON")
+        await _ensure_db_initialized(conn)
+        yield conn
+
+
+async def migrate_db(progress: _Progress | None = None) -> MigrationResult:
+    """Run all schema migrations against the configured DB path."""
     global _DB_READY_PATH
 
     async with aiosqlite.connect(_db_path()) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA foreign_keys=ON")
-        await _ensure_schema(db)
+        result = await _run_migrations(db, progress=progress)
         _DB_READY_PATH = _db_path()
+        return result
+
+
+async def init_db() -> None:
+    """Create tables if they don't exist and migrate to the latest schema."""
+    await migrate_db()
 
 
 async def recompute_tag_affinity() -> int:
     """
     Recompute tag_affinity from all rated games.
 
-    affinity_score = weighted_avg_score × log(game_count + 1)
+    affinity_score = weighted_avg_score x log(game_count + 1)
 
     Backloggd weight = 1.0, Steam review weight = 0.5.
     Returns number of tags updated.
@@ -315,22 +716,23 @@ async def recompute_tag_affinity() -> int:
     source_weights = {"backloggd": 1.0, "steam_review": 0.5}
 
     async with get_db() as db:
-        # Fetch all ratings joined with game tags
-        rows = await db.execute_fetchall("""
+        rows = await db.execute_fetchall(
+            """
             SELECT r.game_id, r.source, r.normalized_score, g.tags
             FROM ratings r
             JOIN games g ON g.id = r.game_id
             WHERE g.tags IS NOT NULL AND r.normalized_score IS NOT NULL
-        """)
+            """
+        )
 
-    # Accumulate per-tag weighted scores
-    tag_data: dict[str, dict] = {}  # tag -> {weighted_sum, weight_sum, game_ids}
+    tag_data: dict[str, dict] = {}
 
     for row in rows:
         try:
             tags = json.loads(row["tags"])
         except (ValueError, TypeError):
             continue
+
         weight = source_weights.get(row["source"], 0.5)
         score = row["normalized_score"]
         game_id = row["game_id"]
@@ -338,10 +740,14 @@ async def recompute_tag_affinity() -> int:
         for tag in tags:
             tag_lower = tag.lower()
             if tag_lower not in tag_data:
-                tag_data[tag_lower] = {"weighted_sum": 0.0, "weight_sum": 0.0, "appids": set()}
+                tag_data[tag_lower] = {
+                    "weighted_sum": 0.0,
+                    "weight_sum": 0.0,
+                    "game_ids": set(),
+                }
             tag_data[tag_lower]["weighted_sum"] += score * weight
             tag_data[tag_lower]["weight_sum"] += weight
-            tag_data[tag_lower]["appids"].add(game_id)
+            tag_data[tag_lower]["game_ids"].add(game_id)
 
     now = datetime.now(timezone.utc).isoformat()
 
@@ -351,7 +757,7 @@ async def recompute_tag_affinity() -> int:
             if data["weight_sum"] == 0:
                 continue
             avg_score = data["weighted_sum"] / data["weight_sum"]
-            game_count = len(data["appids"])
+            game_count = len(data["game_ids"])
             affinity_score = avg_score * math.log(game_count + 1)
             await db.execute(
                 """INSERT INTO tag_affinity (tag, affinity_score, avg_score, game_count, updated_at)
@@ -366,21 +772,97 @@ async def recompute_tag_affinity() -> int:
 async def get_meta(key: str) -> str | None:
     async with get_db() as db:
         row = await db.execute_fetchone("SELECT value FROM meta WHERE key = ?", (key,))
-        return row["value"] if row else None
+    return row["value"] if row else None
 
 
 async def set_meta(key: str, value: str) -> None:
     async with get_db() as db:
         await db.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value)
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            (key, value),
         )
         await db.commit()
 
 
-async def get_game_by_appid(appid: int) -> aiosqlite.Row | None:
+async def get_game_by_identifier(identifier_type: str, identifier_value: str) -> aiosqlite.Row | None:
     async with get_db() as db:
         return await db.execute_fetchone(
-            "SELECT * FROM games WHERE appid = ?", (appid,)
+            """SELECT g.*
+               FROM games g
+               JOIN game_platforms gp ON gp.game_id = g.id
+               JOIN game_platform_identifiers gpi ON gpi.game_platform_id = gp.id
+               WHERE gpi.identifier_type = ? AND gpi.identifier_value = ?
+               LIMIT 1""",
+            (identifier_type, identifier_value),
+        )
+
+
+async def get_game_by_appid(appid: int) -> aiosqlite.Row | None:
+    return await get_game_by_identifier(STEAM_APP_ID, str(appid))
+
+
+async def get_game_by_name_exact(name: str) -> aiosqlite.Row | None:
+    async with get_db() as db:
+        return await db.execute_fetchone(
+            "SELECT * FROM games WHERE lower(name) = lower(?) ORDER BY id LIMIT 1",
+            (name,),
+        )
+
+
+async def get_steam_appid_for_game(game_id: int) -> int | None:
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            """SELECT gpi.identifier_value
+               FROM game_platform_identifiers gpi
+               JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+               WHERE gp.game_id = ? AND gpi.identifier_type = ?
+               ORDER BY gpi.is_primary DESC, gpi.id ASC
+               LIMIT 1""",
+            (game_id, STEAM_APP_ID),
+        )
+    if row is None:
+        return None
+    try:
+        return int(row["identifier_value"])
+    except (TypeError, ValueError):
+        return None
+
+
+async def get_steam_platform_row_by_appid(appid: int) -> aiosqlite.Row | None:
+    async with get_db() as db:
+        return await db.execute_fetchone(
+            """SELECT gp.id AS game_platform_id,
+                      gp.game_id,
+                      gp.platform,
+                      gp.owned,
+                      gp.playtime_minutes,
+                      gp.playtime_2weeks_minutes,
+                      gp.last_synced,
+                      g.name,
+                      g.genres,
+                      g.tags,
+                      g.short_description,
+                      g.metacritic_score,
+                      g.hltb_main,
+                      g.hltb_extra,
+                      g.hltb_complete,
+                      g.hltb_cached_at,
+                      g.is_farmed,
+                      spd.steam_review_score,
+                      spd.steam_review_desc,
+                      spd.protondb_tier,
+                      spd.store_cached_at,
+                      spd.protondb_cached_at,
+                      spd.steamspy_cached_at,
+                      spd.rtime_last_played,
+                      spd.library_updated_at
+               FROM game_platform_identifiers gpi
+               JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+               JOIN games g ON g.id = gp.game_id
+               LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
+               WHERE gpi.identifier_type = ? AND gpi.identifier_value = ?
+               LIMIT 1""",
+            (STEAM_APP_ID, str(appid)),
         )
 
 
@@ -389,37 +871,115 @@ async def upsert_game(
     name: str,
     **fields,
 ) -> int:
-    """Insert or update a game row. Returns games.id."""
+    """Insert or update a canonical game row. Returns games.id."""
     async with get_db() as db:
+        row = None
         if appid is not None:
-            await db.execute(
-                """INSERT INTO games (appid, name) VALUES (?, ?)
-                   ON CONFLICT(appid) DO UPDATE SET name=excluded.name""",
-                (appid, name),
-            )
             row = await db.execute_fetchone(
-                "SELECT id FROM games WHERE appid = ?", (appid,)
+                """SELECT g.id
+                   FROM games g
+                   JOIN game_platforms gp ON gp.game_id = g.id
+                   JOIN game_platform_identifiers gpi ON gpi.game_platform_id = gp.id
+                   WHERE gpi.identifier_type = ? AND gpi.identifier_value = ?
+                   LIMIT 1""",
+                (STEAM_APP_ID, str(appid)),
             )
+
+        if row is None:
+            row = await db.execute_fetchone(
+                "SELECT id FROM games WHERE lower(name) = lower(?) ORDER BY id LIMIT 1",
+                (name,),
+            )
+
+        if row is None:
+            cursor = await db.execute("INSERT INTO games (name) VALUES (?)", (name,))
+            game_id = cursor.lastrowid
         else:
-            await db.execute(
-                "INSERT OR IGNORE INTO games (name) VALUES (?)", (name,)
-            )
-            row = await db.execute_fetchone(
-                "SELECT id FROM games WHERE name = ? AND appid IS NULL", (name,)
-            )
-        game_id = row["id"]
-        if fields:
-            cols = ", ".join(f"{k}=?" for k in fields)
-            await db.execute(
-                f"UPDATE games SET {cols} WHERE id = ?",
-                (*fields.values(), game_id),
-            )
+            game_id = row["id"]
+
+        updates = {"name": name, **fields}
+        cols_sql = ", ".join(f"{column} = ?" for column in updates)
+        await db.execute(
+            f"UPDATE games SET {cols_sql} WHERE id = ?",
+            (*updates.values(), game_id),
+        )
         await db.commit()
         return game_id
 
 
+async def upsert_game_platform(
+    game_id: int,
+    platform: str,
+    playtime_minutes: int | None = None,
+    playtime_2weeks_minutes: int | None = None,
+    owned: int = 1,
+) -> int:
+    """Insert or update a game_platforms row and return its id."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with get_db() as db:
+        await db.execute(
+            """INSERT INTO game_platforms
+               (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes, last_synced)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(game_id, platform) DO UPDATE SET
+                   owned = excluded.owned,
+                   playtime_minutes = COALESCE(excluded.playtime_minutes, game_platforms.playtime_minutes),
+                   playtime_2weeks_minutes = COALESCE(
+                       excluded.playtime_2weeks_minutes,
+                       game_platforms.playtime_2weeks_minutes
+                   ),
+                   last_synced = excluded.last_synced""",
+            (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes, now),
+        )
+        row = await db.execute_fetchone(
+            "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",
+            (game_id, platform),
+        )
+        await db.commit()
+        return row["id"]
+
+
+async def upsert_game_platform_identifier(
+    game_platform_id: int,
+    identifier_type: str,
+    identifier_value: str | int,
+    *,
+    is_primary: bool = True,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    async with get_db() as db:
+        await db.execute(
+            """INSERT INTO game_platform_identifiers
+               (game_platform_id, identifier_type, identifier_value, is_primary, last_seen_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(identifier_type, identifier_value) DO UPDATE SET
+                   game_platform_id = excluded.game_platform_id,
+                   is_primary = excluded.is_primary,
+                   last_seen_at = excluded.last_seen_at""",
+            (game_platform_id, identifier_type, str(identifier_value), int(is_primary), now),
+        )
+        await db.commit()
+
+
+async def upsert_steam_platform_data(game_platform_id: int, **fields) -> None:
+    if not fields:
+        return
+
+    columns = ", ".join(["game_platform_id", *fields.keys()])
+    placeholders = ", ".join("?" for _ in range(len(fields) + 1))
+    updates = ", ".join(f"{column} = excluded.{column}" for column in fields)
+    async with get_db() as db:
+        await db.execute(
+            f"""INSERT INTO steam_platform_data ({columns})
+                VALUES ({placeholders})
+                ON CONFLICT(game_platform_id) DO UPDATE SET {updates}""",
+            (game_platform_id, *fields.values()),
+        )
+        await db.commit()
+
+
 async def load_fuzzy_candidates() -> dict[int, str]:
-    """Load all game id→name pairs for use with find_game_by_name_fuzzy."""
+    """Load all game id->name pairs for use with find_game_by_name_fuzzy."""
     async with get_db() as db:
         rows = await db.execute_fetchall("SELECT id, name FROM games")
     return {row["id"]: row["name"] for row in rows}
@@ -430,11 +990,7 @@ async def find_game_by_name_fuzzy(
     cutoff: int = 85,
     candidates: dict[int, str] | None = None,
 ) -> aiosqlite.Row | None:
-    """Return the best-matching games row for a given title, or None if below cutoff.
-
-    Pass *candidates* (from load_fuzzy_candidates()) when calling in a loop to
-    avoid a full table read on every invocation.
-    """
+    """Return the best-matching games row for a given title, or None if below cutoff."""
     if candidates is None:
         candidates = await load_fuzzy_candidates()
 
@@ -446,24 +1002,99 @@ async def find_game_by_name_fuzzy(
         return await db.execute_fetchone("SELECT * FROM games WHERE id = ?", (best_id,))
 
 
-async def upsert_game_platform(
-    game_id: int,
-    platform: str,
-    playtime_minutes: int | None = None,
-    playtime_2weeks_minutes: int | None = None,
-    owned: int = 1,
-) -> None:
-    """Insert or update a game_platforms row."""
-    now = datetime.now(timezone.utc).isoformat()
+def _coerce_identifier_value(identifier_type: str, identifier_value: str) -> str | int:
+    if identifier_type in {STEAM_APP_ID, GOG_PRODUCT_ID}:
+        try:
+            return int(identifier_value)
+        except ValueError:
+            return identifier_value
+    return identifier_value
+
+
+def _platform_dict(row: aiosqlite.Row) -> dict:
+    playtime_minutes = row["playtime_minutes"]
+    playtime_2weeks_minutes = row["playtime_2weeks_minutes"]
+    platform = {
+        "platform": row["platform"],
+        "owned": bool(row["owned"]),
+        "playtime_minutes": playtime_minutes,
+        "playtime_hours": round((playtime_minutes or 0) / 60, 1),
+        "playtime_2weeks_minutes": playtime_2weeks_minutes,
+        "playtime_2weeks_hours": round((playtime_2weeks_minutes or 0) / 60, 1),
+        "last_synced": row["last_synced"],
+        "identifiers": {},
+        "provider_data": {},
+    }
+
+    if row["platform"] == STEAM_PLATFORM:
+        last_played = row["rtime_last_played"]
+        platform["provider_data"] = {
+            "steam_review_score": row["steam_review_score"],
+            "steam_review_desc": row["steam_review_desc"],
+            "protondb_tier": row["protondb_tier"],
+            "last_played_date": (
+                datetime.fromtimestamp(last_played, tz=timezone.utc).date().isoformat()
+                if last_played
+                else None
+            ),
+            "library_updated_at": row["library_updated_at"],
+        }
+
+    return platform
+
+
+async def load_platforms_for_games(game_ids: Iterable[int]) -> dict[int, list[dict]]:
+    """Load platform rows, identifiers, and provider-specific data for many games."""
+    ids = list(dict.fromkeys(game_ids))
+    if not ids:
+        return {}
+
+    placeholders = ",".join("?" for _ in ids)
     async with get_db() as db:
-        await db.execute(
-            """INSERT INTO game_platforms (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes, last_synced)
-               VALUES (?, ?, ?, ?, ?, ?)
-               ON CONFLICT(game_id, platform) DO UPDATE SET
-                   owned=excluded.owned,
-                   playtime_minutes=excluded.playtime_minutes,
-                   playtime_2weeks_minutes=excluded.playtime_2weeks_minutes,
-                   last_synced=excluded.last_synced""",
-            (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes, now),
+        rows = await db.execute_fetchall(
+            f"""SELECT gp.id AS game_platform_id,
+                       gp.game_id,
+                       gp.platform,
+                       gp.owned,
+                       gp.playtime_minutes,
+                       gp.playtime_2weeks_minutes,
+                       gp.last_synced,
+                       gpi.identifier_type,
+                       gpi.identifier_value,
+                       gpi.is_primary,
+                       spd.steam_review_score,
+                       spd.steam_review_desc,
+                       spd.protondb_tier,
+                       spd.rtime_last_played,
+                       spd.library_updated_at
+                FROM game_platforms gp
+                LEFT JOIN game_platform_identifiers gpi ON gpi.game_platform_id = gp.id
+                LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
+                WHERE gp.game_id IN ({placeholders})
+                ORDER BY gp.game_id, gp.platform, gp.id, gpi.is_primary DESC, gpi.identifier_type""",
+            ids,
         )
-        await db.commit()
+
+    by_game: dict[int, list[dict]] = defaultdict(list)
+    by_platform_id: dict[int, dict] = {}
+    for row in rows:
+        game_id = row["game_id"]
+        platform_id = row["game_platform_id"]
+        platform = by_platform_id.get(platform_id)
+        if platform is None:
+            platform = _platform_dict(row)
+            by_platform_id[platform_id] = platform
+            by_game[game_id].append(platform)
+
+        identifier_type = row["identifier_type"]
+        identifier_value = row["identifier_value"]
+        if identifier_type and identifier_value:
+            platform["identifiers"][identifier_type] = _coerce_identifier_value(
+                identifier_type,
+                identifier_value,
+            )
+
+    for platforms in by_game.values():
+        platforms.sort(key=lambda item: item["platform"])
+
+    return dict(by_game)

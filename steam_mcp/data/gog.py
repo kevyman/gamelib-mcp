@@ -6,11 +6,17 @@ Playtime is not available from GOG's public API.
 
 import logging
 import os
-from datetime import datetime, timezone
 
 import aiohttp
 
-from steam_mcp.data.db import find_game_by_name_fuzzy, load_fuzzy_candidates, upsert_game, upsert_game_platform
+from steam_mcp.data.db import (
+    GOG_PRODUCT_ID,
+    find_game_by_name_fuzzy,
+    load_fuzzy_candidates,
+    upsert_game,
+    upsert_game_platform,
+    upsert_game_platform_identifier,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -106,12 +112,13 @@ async def sync_gog() -> dict:
                     candidates[game_id] = title
                     added += 1
 
-                await upsert_game_platform(
+                platform_id = await upsert_game_platform(
                     game_id=game_id,
                     platform="gog",
                     playtime_minutes=None,  # GOG public API doesn't expose playtime
                     owned=1,
                 )
+                await upsert_game_platform_identifier(platform_id, GOG_PRODUCT_ID, gog_id)
 
     except Exception as exc:
         logger.warning("GOG sync failed: %s", exc)

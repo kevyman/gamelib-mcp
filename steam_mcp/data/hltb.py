@@ -13,15 +13,15 @@ _semaphore = asyncio.Semaphore(3)
 logger = logging.getLogger(__name__)
 
 
-async def get_hltb(appid: int, name: str) -> dict | None:
+async def get_hltb(game_id: int, name: str) -> dict | None:
     """
     Lazy-fetch HLTB data for a game. Caches in DB.
     Returns dict with hltb_main, hltb_extra, hltb_complete or None.
     """
     async with get_db() as db:
         row = await db.execute_fetchone(
-            "SELECT hltb_main, hltb_extra, hltb_complete, hltb_cached_at FROM games WHERE appid = ?",
-            (appid,),
+            "SELECT hltb_main, hltb_extra, hltb_complete, hltb_cached_at FROM games WHERE id = ?",
+            (game_id,),
         )
 
     if row:
@@ -35,17 +35,17 @@ async def get_hltb(appid: int, name: str) -> dict | None:
                 "hltb_complete": row["hltb_complete"],
             }
 
-    return await _fetch_and_cache(appid, name)
+    return await _fetch_and_cache(game_id, name)
 
 
-async def _fetch_and_cache(appid: int, name: str) -> dict | None:
+async def _fetch_and_cache(game_id: int, name: str) -> dict | None:
     async with _semaphore:
         try:
             results = await HowLongToBeat().async_search(name)
             now = datetime.now(timezone.utc).isoformat()
 
             if not results:
-                await _cache_result(appid, None, None, None, "FAILED")
+                await _cache_result(game_id, None, None, None, "FAILED")
                 return None
 
             # Pick closest match by similarity score
@@ -54,16 +54,16 @@ async def _fetch_and_cache(appid: int, name: str) -> dict | None:
             extra = best.main_extra
             comp = best.completionist
 
-            await _cache_result(appid, main, extra, comp, now)
+            await _cache_result(game_id, main, extra, comp, now)
             return {"hltb_main": main, "hltb_extra": extra, "hltb_complete": comp}
         except Exception as e:
-            logger.warning("HLTB fetch failed for %s (%d): %s", name, appid, e)
-            await _cache_result(appid, None, None, None, "FAILED")
+            logger.warning("HLTB fetch failed for %s (%d): %s", name, game_id, e)
+            await _cache_result(game_id, None, None, None, "FAILED")
             return None
 
 
 async def _cache_result(
-    appid: int,
+    game_id: int,
     main: float | None,
     extra: float | None,
     comp: float | None,
@@ -72,8 +72,8 @@ async def _cache_result(
     async with get_db() as db:
         await db.execute(
             """UPDATE games SET hltb_main = ?, hltb_extra = ?, hltb_complete = ?, hltb_cached_at = ?
-               WHERE appid = ?""",
-            (main, extra, comp, cached_at, appid),
+               WHERE id = ?""",
+            (main, extra, comp, cached_at, game_id),
         )
         await db.commit()
 
@@ -86,19 +86,20 @@ async def prewarm_hltb() -> None:
     logger.info("HLTB pre-warm started")
     async with get_db() as db:
         rows = await db.execute_fetchall(
-            """SELECT g.appid, g.name FROM games g
+            """SELECT g.id AS game_id, g.name FROM games g
                LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+               LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
                WHERE COALESCE(gp.playtime_minutes, 0) = 0
                  AND g.tags IS NOT NULL
                  AND (g.hltb_cached_at IS NULL)
-               ORDER BY g.steam_review_score DESC NULLS LAST
+               ORDER BY spd.steam_review_score DESC NULLS LAST
                LIMIT 500"""
         )
 
     batch_size = 3
     for i in range(0, len(rows), batch_size):
         batch = rows[i : i + batch_size]
-        tasks = [get_hltb(r["appid"], r["name"]) for r in batch]
+        tasks = [get_hltb(r["game_id"], r["name"]) for r in batch]
         await asyncio.gather(*tasks, return_exceptions=True)
         await asyncio.sleep(1)
 
