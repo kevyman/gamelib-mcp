@@ -4,12 +4,21 @@ import statistics
 from collections import defaultdict
 
 from ..data.db import STEAM_APP_ID, get_db
+from ..data.epic import sync_epic
+from ..data.gog import sync_gog
 from ..data.steam_xml import fetch_library
 
 
 async def refresh_library() -> dict:
-    """Force re-sync the Steam library feed."""
-    return await fetch_library()
+    """Force re-sync Steam, Epic, and GOG library feeds."""
+    steam = await fetch_library()
+    epic = await sync_epic()
+    gog = await sync_gog()
+    return {
+        "steam": steam,
+        "epic": epic,
+        "gog": gog,
+    }
 
 
 async def detect_farmed_games(

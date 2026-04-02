@@ -38,7 +38,7 @@ def _config_dir() -> Path:
     """Return the lgogdownloader config directory (where auth session is stored)."""
     override = os.getenv("LGOGDOWNLOADER_CONFIG_PATH")
     if override:
-        return Path(override)
+        return Path(override).expanduser()
     return Path.home() / ".config" / "lgogdownloader"
 
 
