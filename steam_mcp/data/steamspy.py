@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from .db import get_db
+from .db import get_db, get_steam_platform_row_by_appid, upsert_steam_platform_data
 
 STEAMSPY_API = "https://steamspy.com/api.php"
 CACHE_DAYS = 30
@@ -15,10 +15,10 @@ logger = logging.getLogger(__name__)
 
 async def enrich_steamspy(appid: int) -> list[str] | None:
     """Fetch SteamSpy tags and merge into games.tags. Returns merged tag list or None."""
-    async with get_db() as db:
-        row = await db.execute_fetchone(
-            "SELECT steamspy_cached_at, tags FROM games WHERE appid = ?", (appid,)
-        )
+    row = await get_steam_platform_row_by_appid(appid)
+    if row is None:
+        return None
+
     if row and _is_fresh(row["steamspy_cached_at"], CACHE_DAYS):
         return json.loads(row["tags"]) if row["tags"] else None
 
@@ -35,10 +35,15 @@ async def enrich_steamspy(appid: int) -> list[str] | None:
 
     async with get_db() as db:
         await db.execute(
-            "UPDATE games SET tags = ?, steamspy_cached_at = ? WHERE appid = ?",
-            (json.dumps(merged) if merged else row["tags"], now, appid),
+            "UPDATE games SET tags = ? WHERE id = ?",
+            (json.dumps(merged) if merged else row["tags"], row["game_id"]),
         )
         await db.commit()
+
+    await upsert_steam_platform_data(
+        row["game_platform_id"],
+        steamspy_cached_at=now,
+    )
 
     return merged or None
 

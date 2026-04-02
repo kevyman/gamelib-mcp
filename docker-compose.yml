@@ -4,8 +4,13 @@ services:
     restart: always
     expose:
       - "8000"
+    environment:
+      EPIC_LEGENDARY_PATH: /legendary
+      LGOGDOWNLOADER_CONFIG_PATH: /config/lgogdownloader
     volumes:
       - ./data/steam:/data
+      - ${EPIC_LEGENDARY_HOST_PATH:-./data/legendary}:/legendary:ro
+      - ${LGOGDOWNLOADER_HOST_PATH:-./data/lgogdownloader}:/config/lgogdownloader:ro
     env_file: .env
 
   # Add future MCPs here as new services, e.g.:

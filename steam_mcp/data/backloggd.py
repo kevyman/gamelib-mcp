@@ -7,9 +7,8 @@ from datetime import datetime, timezone
 
 import httpx
 from bs4 import BeautifulSoup, Tag
-from rapidfuzz import process, fuzz
 
-from .db import get_db
+from .db import extract_best_fuzzy_key, get_db
 
 _BACKLOGGD_USER = os.getenv("BACKLOGGD_USER", "")
 BASE_URL = f"https://backloggd.com/u/{_BACKLOGGD_USER}/reviews"
@@ -26,6 +25,7 @@ async def sync_backloggd() -> dict:
 
     name_to_id = {r["name"].lower(): r["id"] for r in game_rows}
     all_names = list(name_to_id.keys())
+    candidate_names = {name: name for name in all_names}
 
     reviews = await _scrape_all_pages()
     synced = 0
@@ -34,7 +34,7 @@ async def sync_backloggd() -> dict:
 
     async with get_db() as db:
         for review in reviews:
-            game_id = _match_game_id(review["title"], all_names, name_to_id)
+            game_id = _match_game_id(review["title"], candidate_names, name_to_id)
             if game_id is None:
                 logger.debug("No match for Backloggd game: %s", review["title"])
                 skipped += 1
@@ -168,7 +168,7 @@ def _extract_score(card: Tag) -> float | None:
     return None
 
 
-def _match_game_id(title: str, all_names: list[str], name_to_id: dict) -> int | None:
+def _match_game_id(title: str, candidate_names: dict[str, str], name_to_id: dict) -> int | None:
     """Fuzzy-match a Backloggd title to a game in the DB, returns games.id."""
     title_lower = title.lower()
 
@@ -177,13 +177,8 @@ def _match_game_id(title: str, all_names: list[str], name_to_id: dict) -> int | 
         return name_to_id[title_lower]
 
     # Fuzzy match
-    result = process.extractOne(
-        title_lower,
-        all_names,
-        scorer=fuzz.token_sort_ratio,
-        score_cutoff=85,
-    )
-    if result:
-        return name_to_id[result[0]]
+    match = extract_best_fuzzy_key(title_lower, candidate_names, cutoff=85)
+    if match:
+        return name_to_id[match]
 
     return None

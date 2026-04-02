@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from .db import get_db
+from .db import get_db, get_steam_platform_row_by_appid, upsert_steam_platform_data
 
 STORE_CACHE_DAYS = 7
 STORE_API = "https://store.steampowered.com/api/appdetails"
@@ -18,56 +18,43 @@ async def enrich_game(appid: int) -> dict | None:
     Fetch Steam Store data for appid and cache in DB.
     Returns the full games row dict, or None on failure.
     """
-    async with get_db() as db:
-        row = await db.execute_fetchone(
-            "SELECT store_cached_at FROM games WHERE appid = ?", (appid,)
-        )
-        if row and _is_fresh(row["store_cached_at"], STORE_CACHE_DAYS):
-            full = await db.execute_fetchone("SELECT * FROM games WHERE appid = ?", (appid,))
-            return dict(full) if full else None
+    row = await get_steam_platform_row_by_appid(appid)
+    if row is None:
+        return None
+    if _is_fresh(row["store_cached_at"], STORE_CACHE_DAYS):
+        return dict(row)
 
     store_data, review_summary = await _fetch_all(appid)
     now = datetime.now(timezone.utc).isoformat()
 
     async with get_db() as db:
-        if store_data is None:
-            await db.execute(
-                "UPDATE games SET store_cached_at = ? WHERE appid = ?", (now, appid)
-            )
-        else:
+        if store_data is not None:
             steam_tags = _extract_tags(store_data)
             genres = json.dumps([g["description"] for g in store_data.get("genres", [])])
             short_desc = store_data.get("short_description", "")
-
-            # Metacritic score from appdetails
             metacritic = store_data.get("metacritic") or {}
             metacritic_score = metacritic.get("score")
-
-            # Steam community review score from appreviews endpoint
-            review_score = review_summary.get("review_score")       # 0–9 enum
-            review_desc = review_summary.get("review_score_desc")   # e.g. "Overwhelmingly Positive"
 
             await db.execute(
                 """UPDATE games SET
                     genres = ?,
                     tags = ?,
                     short_description = ?,
-                    steam_review_score = ?,
-                    steam_review_desc = ?,
-                    metacritic_score = ?,
-                    metacritic_cached_at = ?,
-                    store_cached_at = ?
-                WHERE appid = ?""",
-                (genres, steam_tags, short_desc,
-                 review_score, review_desc,
-                 metacritic_score, now,
-                 now, appid),
+                    metacritic_score = ?
+                WHERE id = ?""",
+                (genres, steam_tags, short_desc, metacritic_score, row["game_id"]),
             )
         await db.commit()
 
-    async with get_db() as db:
-        full = await db.execute_fetchone("SELECT * FROM games WHERE appid = ?", (appid,))
-        return dict(full) if full else None
+    steam_fields = {"store_cached_at": now}
+    if "review_score" in review_summary:
+        steam_fields["steam_review_score"] = review_summary["review_score"]
+    if "review_score_desc" in review_summary:
+        steam_fields["steam_review_desc"] = review_summary["review_score_desc"]
+    await upsert_steam_platform_data(row["game_platform_id"], **steam_fields)
+
+    refreshed = await get_steam_platform_row_by_appid(appid)
+    return dict(refreshed) if refreshed else None
 
 
 async def _fetch_all(appid: int) -> tuple[dict | None, dict]:
