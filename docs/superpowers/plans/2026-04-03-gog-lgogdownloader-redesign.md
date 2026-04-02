@@ -4,9 +4,11 @@
 
 **Goal:** Replace the broken GOG OAuth implementation in `gog.py` with a lgogdownloader-based approach that works reliably in local and Docker/cloud environments.
 
-**Architecture:** `sync_gog()` shells out to `lgogdownloader --list-games` non-interactively, using the session stored in lgogdownloader's cache dir. The cache dir is mounted read-only into Docker — auth happens once locally, never in the cloud. `aiohttp` (previously only used by GOG) is removed. The `upsert_game_platform_identifier` call is dropped since `--list-games` doesn't expose GOG product IDs.
+**Architecture:** `sync_gog()` shells out to `lgogdownloader --list j` (JSON mode) non-interactively, using the session stored in lgogdownloader's **config** dir (`~/.config/lgogdownloader/`, XDG_CONFIG_HOME). The config dir is mounted read-only into Docker — auth happens once locally, never in the cloud. `aiohttp` (previously only used by GOG) is removed. JSON output exposes both human-readable `title` and `product_id`, so `upsert_game_platform_identifier` IS called.
 
-**Tech Stack:** Python 3.12, `asyncio.create_subprocess_exec`, lgogdownloader CLI (system package), existing `find_game_by_name_fuzzy` / `upsert_game` / `upsert_game_platform` helpers from `db.py`.
+**Task 1 findings (lgogdownloader 3.12):** `--list j` outputs a JSON array with `gamename` (slug), `title` (human-readable), and `product_id` per game. Auth session lives in `~/.config/lgogdownloader/` (XDG_CONFIG_HOME), not the XDG cache dir. The env var is `LGOGDOWNLOADER_CONFIG_PATH`; subprocess env injects `XDG_CONFIG_HOME=<parent of config path>`.
+
+**Tech Stack:** Python 3.12, `asyncio.create_subprocess_exec`, lgogdownloader CLI (system package), `json`, existing `find_game_by_name_fuzzy` / `upsert_game` / `upsert_game_platform` / `upsert_game_platform_identifier` / `GOG_PRODUCT_ID` helpers from `db.py`.
 
 ---
 
