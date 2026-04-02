@@ -78,10 +78,9 @@ class SyncGogSkipTests(unittest.TestCase):
 
     def test_skips_when_config_dir_missing(self) -> None:
         with (
-            patch("steam_mcp.data.gog.shutil") as mock_shutil,
-            patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": "/nonexistent/lgogdownloader"}, clear=False),
+            patch("steam_mcp.data.gog.shutil.which", return_value="/usr/bin/lgogdownloader"),
+            patch("steam_mcp.data.gog._config_dir", return_value=Path("/nonexistent/path/that/cannot/exist")),
         ):
-            mock_shutil.which = MagicMock(return_value="/usr/bin/lgogdownloader")
             result = asyncio.run(gog.sync_gog())
         self.assertEqual(result, {"added": 0, "matched": 0, "skipped": 0})
 
@@ -109,9 +108,6 @@ class SyncGogSyncTests(unittest.TestCase):
         return mock_proc
 
     def _run_sync(self, stdout: str, find_result, upsert_game_return=42, platform_id=99):
-        import json
-
-        game_list = json.loads(stdout)
         proc = self._make_proc(stdout)
 
         mock_find = AsyncMock(return_value=find_result)
@@ -121,7 +117,7 @@ class SyncGogSyncTests(unittest.TestCase):
         mock_load_candidates = AsyncMock(return_value={})
 
         with (
-            patch("shutil.which", return_value="/usr/bin/lgogdownloader"),
+            patch("steam_mcp.data.gog.shutil.which", return_value="/usr/bin/lgogdownloader"),
             patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": "/config/lgogdownloader"}, clear=False),
             patch("pathlib.Path.exists", return_value=True),
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
