@@ -6,27 +6,32 @@ One-time local setup:
   3. Mount ~/.config/lgogdownloader/ into Docker (see deploy.md)
 
 Playtime is not available from lgogdownloader output.
+
+Note: lgogdownloader --list j (JSON mode) crashes on lgogdownloader 3.12, so we use
+plain --list which outputs one slug per line with ANSI color codes and optional [N]
+update indicators. Slugs are converted to title-cased strings for fuzzy matching
+against existing game names.
 """
 
 import asyncio
-import json
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 
 from steam_mcp.data.db import (
-    GOG_PRODUCT_ID,
     find_game_by_name_fuzzy,
     load_fuzzy_candidates,
     upsert_game,
     upsert_game_platform,
-    upsert_game_platform_identifier,
 )
 
 logger = logging.getLogger(__name__)
 
 _LGOGDOWNLOADER_BIN = "lgogdownloader"
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+_UPDATE_INDICATOR = re.compile(r"\s+\[\d+\]$")
 
 
 def _config_dir() -> Path:
@@ -50,41 +55,36 @@ def _subprocess_env() -> dict:
     return env
 
 
-def _parse_lgogdownloader_json(stdout: str) -> list[dict]:
+def _slug_to_title(slug: str) -> str:
+    """Convert a lgogdownloader slug to a human-readable title."""
+    return slug.replace("_", " ").title()
+
+
+def _parse_lgogdownloader_output(stdout: str) -> list[str]:
     """
-    Parse lgogdownloader --list j JSON output.
+    Parse lgogdownloader --list plain text output into a list of game titles.
 
-    Returns a list of dicts with keys:
-      - title (str): human-readable game title
-      - product_id (int | None): GOG product ID, or None if absent
+    Each line is a slug with optional ANSI color codes and trailing [N] update
+    indicator. Strips both, then title-cases for fuzzy matching.
 
-    Top-level array only — DLCs are nested inside each game object and are skipped.
+    Example input line: "\x1b[01;34mcyberpunk_2077 [1]\x1b[0m"
+    Example output: "Cyberpunk 2077"
     """
-    try:
-        items = json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        logger.warning("Failed to parse lgogdownloader JSON output: %s", exc)
-        return []
-
-    if not isinstance(items, list):
-        logger.warning("Unexpected lgogdownloader JSON structure (expected list, got %s)", type(items).__name__)
-        return []
-
-    results = []
-    for item in items:
-        if not isinstance(item, dict):
+    titles = []
+    for line in stdout.splitlines():
+        line = _ANSI_ESCAPE.sub("", line).strip()
+        if not line:
             continue
-        title = item.get("title")
-        if not title:
+        line = _UPDATE_INDICATOR.sub("", line).strip()
+        if not line:
             continue
-        product_id = item.get("product_id")
-        results.append({"title": str(title), "product_id": int(product_id) if product_id is not None else None})
-    return results
+        titles.append(_slug_to_title(line))
+    return titles
 
 
 async def sync_gog() -> dict:
     """
-    Sync GOG library into game_platforms via lgogdownloader --list j.
+    Sync GOG library into game_platforms via lgogdownloader --list.
 
     Silent skip conditions:
     - lgogdownloader binary not in PATH
@@ -106,7 +106,7 @@ async def sync_gog() -> dict:
     try:
         proc = await asyncio.create_subprocess_exec(
             _LGOGDOWNLOADER_BIN,
-            "--list", "j",
+            "--list",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=_subprocess_env(),
@@ -118,22 +118,21 @@ async def sync_gog() -> dict:
 
     if proc.returncode != 0:
         logger.warning(
-            "lgogdownloader --list j failed (rc=%d): %s",
+            "lgogdownloader --list failed (rc=%d): %s",
             proc.returncode,
             stderr_bytes.decode()[:300],
         )
         return {"added": 0, "matched": 0, "skipped": 0}
 
-    games = _parse_lgogdownloader_json(stdout_bytes.decode())
-    if not games:
+    titles = _parse_lgogdownloader_output(stdout_bytes.decode())
+    if not titles:
         logger.info("GOG sync: no games found in lgogdownloader output")
         return {"added": 0, "matched": 0, "skipped": 0}
 
     added = matched = skipped = 0
     candidates = await load_fuzzy_candidates()
 
-    for game in games:
-        title = game["title"]
+    for title in titles:
         existing = await find_game_by_name_fuzzy(title, candidates=candidates)
         if existing:
             game_id = existing["id"]
@@ -143,15 +142,12 @@ async def sync_gog() -> dict:
             candidates[game_id] = title
             added += 1
 
-        platform_id = await upsert_game_platform(
+        await upsert_game_platform(
             game_id=game_id,
             platform="gog",
             playtime_minutes=None,
             owned=1,
         )
-
-        if game["product_id"] is not None:
-            await upsert_game_platform_identifier(platform_id, GOG_PRODUCT_ID, game["product_id"])
 
     logger.info("GOG sync: added=%d matched=%d skipped=%d", added, matched, skipped)
     return {"added": added, "matched": matched, "skipped": skipped}
