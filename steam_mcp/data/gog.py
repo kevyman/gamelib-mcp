@@ -66,6 +66,10 @@ def _parse_lgogdownloader_json(stdout: str) -> list[dict]:
         logger.warning("Failed to parse lgogdownloader JSON output: %s", exc)
         return []
 
+    if not isinstance(items, list):
+        logger.warning("Unexpected lgogdownloader JSON structure (expected list, got %s)", type(items).__name__)
+        return []
+
     results = []
     for item in items:
         if not isinstance(item, dict):
@@ -74,7 +78,7 @@ def _parse_lgogdownloader_json(stdout: str) -> list[dict]:
         if not title:
             continue
         product_id = item.get("product_id")
-        results.append({"title": str(title), "product_id": int(product_id) if product_id else None})
+        results.append({"title": str(title), "product_id": int(product_id) if product_id is not None else None})
     return results
 
 
