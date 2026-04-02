@@ -108,6 +108,33 @@ That populates `/root/.config/legendary` with `user.json`, `assets.json`, and `m
 
 ---
 
+### GOG in Docker
+
+GOG sync uses lgogdownloader. Auth is done once on your local machine; the session is mounted read-only into the container.
+
+**One-time local setup:**
+
+```bash
+# On your local machine (not the server)
+sudo apt install lgogdownloader
+lgogdownloader --login   # follow prompts, stores session to ~/.config/lgogdownloader/
+```
+
+**Copy the session to the server:**
+
+```bash
+rsync -av ~/.config/lgogdownloader/ root@178.104.53.83:~/mcps/data/lgogdownloader/
+```
+
+**Server `.env`** (add):
+```
+LGOGDOWNLOADER_HOST_PATH=/root/mcps/data/lgogdownloader
+```
+
+lgogdownloader refreshes its session automatically on each `--list j` call — no manual token rotation needed. If the session expires, re-run `lgogdownloader --login` locally and rsync again.
+
+---
+
 ### Verify
 
 ```bash
