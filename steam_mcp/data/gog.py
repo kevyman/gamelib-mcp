@@ -1,13 +1,19 @@
-"""GOG owned games sync via GOG OAuth2 API.
+"""GOG owned games sync via lgogdownloader CLI.
 
-Set GOG_REFRESH_TOKEN in .env (obtained via python -m steam_mcp.setup_platform gog).
-Playtime is not available from GOG's public API.
+One-time local setup:
+  1. Install lgogdownloader (apt install lgogdownloader)
+  2. Run: lgogdownloader --login
+  3. Mount ~/.config/lgogdownloader/ into Docker (see deploy.md)
+
+Playtime is not available from lgogdownloader output.
 """
 
+import asyncio
+import json
 import logging
 import os
-
-import aiohttp
+import shutil
+from pathlib import Path
 
 from steam_mcp.data.db import (
     GOG_PRODUCT_ID,
@@ -20,109 +26,128 @@ from steam_mcp.data.db import (
 
 logger = logging.getLogger(__name__)
 
-_GOG_TOKEN_URL = "https://auth.gog.com/token"
-_GOG_LIBRARY_URL = "https://embed.gog.com/user/data/games"
-_GOG_GAME_DETAIL_URL = "https://api.gog.com/products/{game_id}?expand=downloads"
-
-# GOG Galaxy public OAuth credentials — set env vars to override if GOG rotates them
-_CLIENT_ID = os.getenv("GOG_CLIENT_ID", "46899977096215655")
-_CLIENT_SECRET = os.getenv("GOG_CLIENT_SECRET", "9d85c43b1718a031d5b64228ecd1a9eb")
+_LGOGDOWNLOADER_BIN = "lgogdownloader"
 
 
-async def _get_access_token(session: aiohttp.ClientSession) -> str:
-    """Exchange GOG_REFRESH_TOKEN for a short-lived access token."""
-    refresh_token = os.environ["GOG_REFRESH_TOKEN"]
-    async with session.post(
-        _GOG_TOKEN_URL,
-        params={
-            "client_id": _CLIENT_ID,
-            "client_secret": _CLIENT_SECRET,
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        },
-    ) as resp:
-        resp.raise_for_status()
-        data = await resp.json()
-        return data["access_token"]
+def _config_dir() -> Path:
+    """Return the lgogdownloader config directory (where auth session is stored)."""
+    override = os.getenv("LGOGDOWNLOADER_CONFIG_PATH")
+    if override:
+        return Path(override)
+    return Path.home() / ".config" / "lgogdownloader"
 
 
-async def _fetch_owned_game_ids(session: aiohttp.ClientSession, access_token: str) -> list[int]:
-    """Return list of owned GOG product IDs."""
-    async with session.get(
-        _GOG_LIBRARY_URL,
-        headers={"Authorization": f"Bearer {access_token}"},
-    ) as resp:
-        resp.raise_for_status()
-        data = await resp.json()
-        return data.get("owned", [])
+def _subprocess_env() -> dict:
+    """
+    Build env dict for lgogdownloader subprocess.
+
+    lgogdownloader stores its session in XDG_CONFIG_HOME/lgogdownloader/.
+    We set XDG_CONFIG_HOME to the parent of _config_dir() so lgogdownloader
+    finds its session at the expected path.
+    """
+    env = dict(os.environ)
+    env["XDG_CONFIG_HOME"] = str(_config_dir().parent)
+    return env
 
 
-async def _fetch_game_title(
-    session: aiohttp.ClientSession,
-    access_token: str,
-    gog_id: int,
-) -> str | None:
-    """Fetch the title for a single GOG product ID."""
-    url = _GOG_GAME_DETAIL_URL.format(game_id=gog_id)
+def _parse_lgogdownloader_json(stdout: str) -> list[dict]:
+    """
+    Parse lgogdownloader --list j JSON output.
+
+    Returns a list of dicts with keys:
+      - title (str): human-readable game title
+      - product_id (int | None): GOG product ID, or None if absent
+
+    Top-level array only — DLCs are nested inside each game object and are skipped.
+    """
     try:
-        async with session.get(
-            url,
-            headers={"Authorization": f"Bearer {access_token}"},
-        ) as resp:
-            if resp.status == 404:
-                return None
-            resp.raise_for_status()
-            data = await resp.json()
-            return data.get("title")
-    except Exception as exc:
-        logger.debug("Could not fetch GOG title for id=%d: %s", gog_id, exc)
-        return None
+        items = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        logger.warning("Failed to parse lgogdownloader JSON output: %s", exc)
+        return []
+
+    results = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title")
+        if not title:
+            continue
+        product_id = item.get("product_id")
+        results.append({"title": str(title), "product_id": int(product_id) if product_id else None})
+    return results
 
 
 async def sync_gog() -> dict:
     """
-    Sync GOG library into game_platforms.
+    Sync GOG library into game_platforms via lgogdownloader --list j.
+
+    Silent skip conditions:
+    - lgogdownloader binary not in PATH
+    - lgogdownloader config dir does not exist (no session stored)
 
     Returns: {"added": int, "matched": int, "skipped": int}
     """
-    if not os.getenv("GOG_REFRESH_TOKEN"):
-        logger.info("GOG_REFRESH_TOKEN not set — skipping GOG sync")
+    if not shutil.which(_LGOGDOWNLOADER_BIN):
+        logger.info("lgogdownloader not in PATH — skipping GOG sync")
+        return {"added": 0, "matched": 0, "skipped": 0}
+
+    config_path = _config_dir()
+    if not config_path.exists():
+        logger.info(
+            "lgogdownloader config dir not found (%s) — skipping GOG sync", config_path
+        )
+        return {"added": 0, "matched": 0, "skipped": 0}
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _LGOGDOWNLOADER_BIN,
+            "--list", "j",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=_subprocess_env(),
+        )
+        stdout_bytes, stderr_bytes = await proc.communicate()
+    except Exception as exc:
+        logger.warning("GOG sync failed (subprocess error): %s", exc)
+        return {"added": 0, "matched": 0, "skipped": 0}
+
+    if proc.returncode != 0:
+        logger.warning(
+            "lgogdownloader --list j failed (rc=%d): %s",
+            proc.returncode,
+            stderr_bytes.decode()[:300],
+        )
+        return {"added": 0, "matched": 0, "skipped": 0}
+
+    games = _parse_lgogdownloader_json(stdout_bytes.decode())
+    if not games:
+        logger.info("GOG sync: no games found in lgogdownloader output")
         return {"added": 0, "matched": 0, "skipped": 0}
 
     added = matched = skipped = 0
+    candidates = await load_fuzzy_candidates()
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            access_token = await _get_access_token(session)
-            gog_ids = await _fetch_owned_game_ids(session, access_token)
+    for game in games:
+        title = game["title"]
+        existing = await find_game_by_name_fuzzy(title, candidates=candidates)
+        if existing:
+            game_id = existing["id"]
+            matched += 1
+        else:
+            game_id = await upsert_game(appid=None, name=title)
+            candidates[game_id] = title
+            added += 1
 
-            candidates = await load_fuzzy_candidates()
-            for gog_id in gog_ids:
-                title = await _fetch_game_title(session, access_token, gog_id)
-                if not title:
-                    skipped += 1
-                    continue
+        platform_id = await upsert_game_platform(
+            game_id=game_id,
+            platform="gog",
+            playtime_minutes=None,
+            owned=1,
+        )
 
-                existing = await find_game_by_name_fuzzy(title, candidates=candidates)
-                if existing:
-                    game_id = existing["id"]
-                    matched += 1
-                else:
-                    game_id = await upsert_game(appid=None, name=title)
-                    candidates[game_id] = title
-                    added += 1
-
-                platform_id = await upsert_game_platform(
-                    game_id=game_id,
-                    platform="gog",
-                    playtime_minutes=None,  # GOG public API doesn't expose playtime
-                    owned=1,
-                )
-                await upsert_game_platform_identifier(platform_id, GOG_PRODUCT_ID, gog_id)
-
-    except Exception as exc:
-        logger.warning("GOG sync failed: %s", exc)
-        return {"added": added, "matched": matched, "skipped": skipped}
+        if game["product_id"] is not None:
+            await upsert_game_platform_identifier(platform_id, GOG_PRODUCT_ID, game["product_id"])
 
     logger.info("GOG sync: added=%d matched=%d skipped=%d", added, matched, skipped)
     return {"added": added, "matched": matched, "skipped": skipped}
