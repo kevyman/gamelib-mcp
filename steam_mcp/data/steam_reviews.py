@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import httpx
 from bs4 import BeautifulSoup
 
-from .db import get_db
+from .db import STEAM_APP_ID, get_db
 
 _STEAM_PROFILE_ID = os.getenv("STEAM_PROFILE_ID", "")
 BASE_URL = f"https://steamcommunity.com/id/{_STEAM_PROFILE_ID}/recommended/"
@@ -35,8 +35,13 @@ async def sync_steam_reviews() -> dict:
     async with get_db() as db:
         for review in reviews:
             row = await db.execute_fetchone(
-                "SELECT id, steam_review_score FROM games WHERE appid = ?",
-                (review["appid"],),
+                """SELECT gp.game_id AS id, spd.steam_review_score
+                   FROM game_platform_identifiers gpi
+                   JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+                   LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
+                   WHERE gpi.identifier_type = ? AND gpi.identifier_value = ?
+                   LIMIT 1""",
+                (STEAM_APP_ID, str(review["appid"])),
             )
             if row:
                 game_info[review["appid"]] = {

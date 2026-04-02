@@ -1,82 +1,97 @@
-"""get_game_detail — full info for one game, triggers lazy fetches."""
+"""get_game_detail: full info for one game, with platform-aware output."""
 
-from datetime import datetime, timezone
-
-from ..data.db import get_db
-from ..data.steam_store import enrich_game
+from ..data.db import (
+    get_db,
+    get_game_by_appid,
+    get_steam_appid_for_game,
+    load_platforms_for_games,
+)
 from ..data.hltb import get_hltb
 from ..data.opencritic import get_metacritic
 from ..data.protondb import get_protondb
+from ..data.steam_store import enrich_game
 from ..utils import _parse_json
 
 
-async def get_game_detail(name: str | None = None, appid: int | None = None) -> dict:
+async def get_game_detail(
+    name: str | None = None,
+    appid: int | None = None,
+    game_id: int | None = None,
+) -> dict:
     """
     Return full detail for a game, triggering lazy enrichment.
-    Accepts either name (substring) or appid.
+    Accepts game_id, Steam appid, or a partial name.
     """
     async with get_db() as db:
-        if appid is not None:
-            row = await db.execute_fetchone("SELECT * FROM games WHERE appid = ?", (appid,))
+        if game_id is not None:
+            row = await db.execute_fetchone("SELECT * FROM games WHERE id = ?", (game_id,))
+        elif appid is not None:
+            row = await get_game_by_appid(appid)
         elif name is not None:
             row = await db.execute_fetchone(
                 "SELECT * FROM games WHERE lower(name) LIKE lower(?) LIMIT 1",
                 (f"%{name}%",),
             )
         else:
-            return {"error": "Provide name or appid"}
+            return {"error": "Provide game_id, name, or appid"}
 
     if row is None:
         return {"error": "Game not found in library"}
 
-    game_appid = row["appid"]
+    game_id = row["id"]
     game_name = row["name"]
+    steam_appid = await get_steam_appid_for_game(game_id)
 
-    # Trigger lazy fetches (each checks its own cache)
-    await enrich_game(game_appid)
-    hltb = await get_hltb(game_appid, game_name)
-    await get_metacritic(game_appid)
-    proton = await get_protondb(game_appid)
+    if steam_appid is not None:
+        await enrich_game(steam_appid)
+        await get_protondb(steam_appid)
+    await get_hltb(game_id, game_name)
+    await get_metacritic(game_id)
 
-    # Re-fetch from DB after enrichment
     async with get_db() as db:
-        row = await db.execute_fetchone(
-            """SELECT g.*, COALESCE(gp.playtime_minutes, 0) as playtime_forever,
-                      COALESCE(gp.playtime_2weeks_minutes, 0) as playtime_2weeks
-               FROM games g
-               LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
-               WHERE g.appid = ?""",
-            (game_appid,),
-        )
+        row = await db.execute_fetchone("SELECT * FROM games WHERE id = ?", (game_id,))
         rating = await db.execute_fetchone(
-            "SELECT source, raw_score, normalized_score, review_text FROM ratings WHERE game_id = ? ORDER BY source",
-            (row["id"],),
+            """SELECT source, raw_score, normalized_score, review_text
+               FROM ratings
+               WHERE game_id = ?
+               ORDER BY source
+               LIMIT 1""",
+            (game_id,),
         )
 
-    rtime = row["rtime_last_played"]
-    last_played_date = (
-        datetime.fromtimestamp(rtime, tz=timezone.utc).date().isoformat()
-        if rtime
-        else None
+    platforms = (await load_platforms_for_games([game_id])).get(game_id, [])
+    steam_platform = next((platform for platform in platforms if platform["platform"] == "steam"), None)
+    steam_data = steam_platform["provider_data"] if steam_platform else {}
+
+    total_playtime_minutes = sum(platform["playtime_minutes"] or 0 for platform in platforms)
+    total_playtime_2weeks_minutes = sum(
+        platform["playtime_2weeks_minutes"] or 0
+        for platform in platforms
     )
 
     result = {
-        "appid": row["appid"],
+        "game_id": row["id"],
+        "appid": steam_appid,
         "name": row["name"],
-        "playtime_hours": round(row["playtime_forever"] / 60, 1) if row["playtime_forever"] else 0,
-        "playtime_2weeks_hours": round(row["playtime_2weeks"] / 60, 1) if row["playtime_2weeks"] else 0,
-        "last_played_date": last_played_date,
+        "platforms": platforms,
+        "playtime_hours": round(total_playtime_minutes / 60, 1) if total_playtime_minutes else 0,
+        "playtime_2weeks_hours": (
+            round(total_playtime_2weeks_minutes / 60, 1)
+            if total_playtime_2weeks_minutes
+            else 0
+        ),
+        "last_played_date": steam_data.get("last_played_date"),
         "is_farmed": bool(row["is_farmed"]),
         "genres": _parse_json(row["genres"]),
         "tags": _parse_json(row["tags"]),
         "short_description": row["short_description"],
-        "steam_review_score": row["steam_review_score"],
-        "steam_review_desc": row["steam_review_desc"],
+        "steam_review_score": steam_data.get("steam_review_score"),
+        "steam_review_desc": steam_data.get("steam_review_desc"),
         "hltb_main": row["hltb_main"],
         "hltb_extra": row["hltb_extra"],
         "hltb_complete": row["hltb_complete"],
         "metacritic_score": row["metacritic_score"],
-        "protondb_tier": row["protondb_tier"],
+        "protondb_tier": steam_data.get("protondb_tier"),
     }
 
     if rating:
@@ -88,5 +103,3 @@ async def get_game_detail(name: str | None = None, appid: int | None = None) -> 
         }
 
     return result
-
-
