@@ -2,15 +2,20 @@
 
 Auth: set PSN_NPSSO in .env.
 Obtain the NPSSO cookie by visiting https://ca.account.sony.com/api/v1/ssocookie
-while logged in to your PSN account in a browser. Copy the `npsso` value.
+while logged in to your PSN account in a browser. The page renders an error message,
+but the `npsso` cookie is set — open DevTools (F12) → Application → Cookies →
+find `npsso` under the Sony domain and copy the 64-character value.
 
 Library source: client.title_stats() — returns all titles the user has played,
 with name, play_count, and play_duration (datetime.timedelta). Only played titles
 appear; unplayed purchases will not show up (PSN platform limitation).
 """
 
+import asyncio
 import logging
 import os
+
+from psnawp_api.models.title_stats import PlatformCategory
 
 from gamelib_mcp.data.db import (
     find_game_by_name_fuzzy,
@@ -20,6 +25,15 @@ from gamelib_mcp.data.db import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Media/streaming apps to exclude from library sync.
+# The primary filter catches PPSA-prefixed titles with UNKNOWN category (PS5-era apps).
+# This blocklist catches PS4-era apps (CUSA IDs) that share the same UNKNOWN category
+# but wouldn't be caught by the prefix check alone.
+_MEDIA_APP_NAMES = {
+    "Disney+", "Spotify", "Netflix", "YouTube", "Prime Video",
+    "Plex", "Crunchyroll", "Apple TV", "Twitch", "SONY PICTURES CORE",
+}
 
 
 def _get_psnawp():
@@ -38,31 +52,19 @@ async def fetch_psn_library() -> list[dict]:
     Uses client.title_stats() which returns name, play_count, and play_duration
     (a datetime.timedelta). Runs PSNAWP synchronously in an executor.
     """
-    import asyncio
-
     def _fetch():
         psnawp = _get_psnawp()
         client = psnawp.me()
-        # Skip media/streaming apps: PPSA IDs that PSN doesn't categorise as games.
-        # A secondary name blocklist catches the handful of apps with legacy CUSA IDs
-        # (e.g. PS4-era Spotify, Disney+) that share the same UNKNOWN category but
-        # wouldn't be caught by the prefix check alone.
-        _MEDIA_APP_NAMES = {
-            "Disney+", "Spotify", "Netflix", "YouTube", "Prime Video",
-            "Plex", "Crunchyroll", "Apple TV", "Twitch", "SONY PICTURES CORE",
-        }
         results = []
         for entry in client.title_stats():
             name = entry.name
             if not name:
                 continue
-            if str(entry.category) == "PlatformCategory.UNKNOWN" and (entry.title_id or "").startswith("PPSA"):
+            if entry.category is PlatformCategory.UNKNOWN and (entry.title_id or "").startswith("PPSA"):
                 continue
             if name in _MEDIA_APP_NAMES:
                 continue
-            minutes = None
-            if entry.play_duration is not None:
-                minutes = int(entry.play_duration.total_seconds() // 60)
+            minutes = int(entry.play_duration.total_seconds() // 60)
             results.append({"name": name, "playtime_minutes": minutes})
         return results
 

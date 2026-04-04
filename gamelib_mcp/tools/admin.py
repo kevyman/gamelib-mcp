@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 async def refresh_library() -> dict:
-    """Force re-sync Steam, Epic, GOG, and Nintendo library feeds."""
+    """Force re-sync Steam, Epic, GOG, Nintendo, and PSN library feeds."""
     steam = await fetch_library()
     epic = await sync_epic()
     gog = await sync_gog()

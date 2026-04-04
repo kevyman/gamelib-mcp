@@ -13,7 +13,7 @@ dependencies = [
     "lxml>=5.0",
     "beautifulsoup4>=4.12",
     "rapidfuzz>=3.0",
-    "psnawp>=2.1",
+    "psnawp>=2.1,<4.0",
 ]
 
 [build-system]

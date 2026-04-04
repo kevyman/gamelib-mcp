@@ -142,8 +142,8 @@ PSN sync uses the [PSNAWP](https://github.com/isFakeAccount/psnawp) library with
 **One-time setup:**
 
 1. Log in to your PSN account in a browser
-2. Navigate to `https://ca.account.sony.com/` (Access Denied is fine — the cookie is set)
-3. Open browser DevTools (F12) → Application → Cookies → find `npsso` under the Sony account domain
+2. Navigate to `https://ca.account.sony.com/api/v1/ssocookie` — the page renders an error message, but the `npsso` cookie is set
+3. Open browser DevTools (F12) → Application → Cookies → find `npsso` under the Sony domain
 4. Copy the 64-character token value
 
 **Server `.env`** (add):
