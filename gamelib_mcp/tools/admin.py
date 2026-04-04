@@ -10,22 +10,25 @@ from ..data.db import STEAM_APP_ID, get_db
 from ..data.epic import sync_epic
 from ..data.gog import sync_gog
 from ..data.nintendo import sync_nintendo
+from ..data.psn import sync_psn
 from ..data.steam_xml import fetch_library
 
 logger = logging.getLogger(__name__)
 
 
 async def refresh_library() -> dict:
-    """Force re-sync Steam, Epic, GOG, and Nintendo library feeds."""
+    """Force re-sync Steam, Epic, GOG, Nintendo, and PSN library feeds."""
     steam = await fetch_library()
     epic = await sync_epic()
     gog = await sync_gog()
     nintendo = await sync_nintendo()
+    psn = await sync_psn()
     return {
         "steam": steam,
         "epic": epic,
         "gog": gog,
         "nintendo": nintendo,
+        "psn": psn,
     }
 
 

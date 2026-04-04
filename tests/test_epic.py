@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from steam_mcp.data import epic
+from gamelib_mcp.data import epic
 
 
 class EpicHelpersTests(unittest.TestCase):
@@ -72,7 +72,7 @@ class EpicHelpersTests(unittest.TestCase):
 
         with (
             patch(
-                "steam_mcp.data.epic._get_epic_session",
+                "gamelib_mcp.data.epic._get_epic_session",
                 AsyncMock(
                     return_value={
                         "account_id": "acct-1",
@@ -81,7 +81,7 @@ class EpicHelpersTests(unittest.TestCase):
                     }
                 ),
             ),
-            patch("steam_mcp.data.epic.httpx.AsyncClient", return_value=_FakeClient()),
+            patch("gamelib_mcp.data.epic.httpx.AsyncClient", return_value=_FakeClient()),
         ):
             playtime = asyncio.run(epic.fetch_epic_playtime())
 
