@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from steam_mcp.data import db as db_module
-from steam_mcp.data import steam_store
+from gamelib_mcp.data import db as db_module
+from gamelib_mcp.data import steam_store
 
 
 class MigrationRegressionTests(unittest.TestCase):

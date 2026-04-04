@@ -7,7 +7,7 @@
 
 ## Goal
 
-Expand steam-mcp from a Steam-only library into a unified cross-platform game collection manager. Primary use case: avoid duplicate purchases, rediscover forgotten games, and get recommendations that factor in which platform and hardware to use.
+Expand gamelib-mcp from a Steam-only library into a unified cross-platform game collection manager. Primary use case: avoid duplicate purchases, rediscover forgotten games, and get recommendations that factor in which platform and hardware to use.
 
 ---
 
@@ -99,7 +99,7 @@ No changes needed. New key added at runtime: `hardware_preference`.
 
 ## Migration
 
-A one-shot script `steam_mcp/migrate.py`:
+A one-shot script `gamelib_mcp/migrate.py`:
 
 1. Creates the new schema in a fresh DB (or renames existing tables to `_old`)
 2. Re-inserts all rows from `games_old` with new autoincrement `id`, preserving `appid` and all enrichment fields
@@ -107,13 +107,13 @@ A one-shot script `steam_mcp/migrate.py`:
 4. Re-inserts `ratings` and `tag_affinity` with updated foreign keys
 5. Drops old tables
 
-Run once with: `python -m steam_mcp.migrate`
+Run once with: `python -m gamelib_mcp.migrate`
 
 ---
 
 ## New Data Layer Modules
 
-One file per platform in `steam_mcp/data/`, all async, following existing patterns:
+One file per platform in `gamelib_mcp/data/`, all async, following existing patterns:
 
 - `psn.py` — wraps PSNAWP; fetches trophy list as game library + PS5 playtime
 - `epic.py` — invokes legendary subprocess; parses owned games JSON
@@ -148,7 +148,7 @@ ITCHIO_API_KEY=...
 HARDWARE_PREFERENCE=switch2,steam_deck,ps5
 ```
 
-A setup script `python -m steam_mcp.setup_platform <platform>` handles the OAuth browser flows for GOG, Epic, and Xbox, writes the resulting tokens to `.env`, and handles token refresh at runtime. PSN (browser cookie extraction) and Nintendo (nxapi session token) are documented as manual one-time steps.
+A setup script `python -m gamelib_mcp.setup_platform <platform>` handles the OAuth browser flows for GOG, Epic, and Xbox, writes the resulting tokens to `.env`, and handles token refresh at runtime. PSN (browser cookie extraction) and Nintendo (nxapi session token) are documented as manual one-time steps.
 
 Any platform without credentials configured is silently skipped during sync.
 

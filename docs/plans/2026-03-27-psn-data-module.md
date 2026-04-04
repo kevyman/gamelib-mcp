@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add `steam_mcp/data/psn.py` — an async module that fetches the user's PS5 game library and playtime via PSNAWP, deduplicates against existing `games` rows using fuzzy matching, and upserts into `game_platforms`.
+**Goal:** Add `gamelib_mcp/data/psn.py` — an async module that fetches the user's PS5 game library and playtime via PSNAWP, deduplicates against existing `games` rows using fuzzy matching, and upserts into `game_platforms`.
 
 **Architecture:** Single async `sync_psn()` function. Auth uses an NPSSO cookie (one-time manual extraction from browser, stored as `PSN_NPSSO` in `.env`). PSNAWP's `client.title_stats()` is used to fetch the game library — it returns each played title's `name`, `play_count`, and `play_duration` (a `datetime.timedelta`). `play_duration` is converted to minutes for `playtime_minutes`. Fuzzy dedup via `find_game_by_name_fuzzy()` (cutoff=85). Candidates are pre-loaded via `load_fuzzy_candidates()` for efficiency, matching the Epic/GOG pattern.
 
@@ -52,10 +52,10 @@ git commit -m "chore: add psnawp dependency for PSN library sync"
 
 ---
 
-### Task 2: Create `steam_mcp/data/psn.py`
+### Task 2: Create `gamelib_mcp/data/psn.py`
 
 **Files:**
-- Create: `steam_mcp/data/psn.py`
+- Create: `gamelib_mcp/data/psn.py`
 
 - [ ] **Step 1: Write the module**
 
@@ -74,7 +74,7 @@ appear; unplayed purchases will not show up (PSN platform limitation).
 import logging
 import os
 
-from steam_mcp.data.db import (
+from gamelib_mcp.data.db import (
     find_game_by_name_fuzzy,
     load_fuzzy_candidates,
     upsert_game,
@@ -169,7 +169,7 @@ async def sync_psn() -> dict:
 - [ ] **Step 2: Verify the module imports cleanly**
 
 ```bash
-python -c "import steam_mcp.data.psn"
+python -c "import gamelib_mcp.data.psn"
 ```
 
 Expected: no output, no errors.
@@ -177,7 +177,7 @@ Expected: no output, no errors.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add steam_mcp/data/psn.py
+git add gamelib_mcp/data/psn.py
 git commit -m "feat: add psn.py — PSN library sync via PSNAWP title_stats (name + playtime)"
 ```
 
@@ -186,16 +186,16 @@ git commit -m "feat: add psn.py — PSN library sync via PSNAWP title_stats (nam
 ### Task 3: Wire into `refresh_library`
 
 **Files:**
-- Modify: `steam_mcp/tools/admin.py`
+- Modify: `gamelib_mcp/tools/admin.py`
 
 - [ ] **Step 1: Add `sync_psn` to the fan-out in `refresh_library`**
 
-In `steam_mcp/tools/admin.py`, import `sync_psn` from `steam_mcp.data.psn` and add it to the platform sync fan-out alongside `sync_epic` and `sync_gog`.
+In `gamelib_mcp/tools/admin.py`, import `sync_psn` from `gamelib_mcp.data.psn` and add it to the platform sync fan-out alongside `sync_epic` and `sync_gog`.
 
 - [ ] **Step 2: Commit**
 
 ```bash
-git add steam_mcp/tools/admin.py
+git add gamelib_mcp/tools/admin.py
 git commit -m "feat: wire PSN sync into refresh_library"
 ```
 
@@ -219,7 +219,7 @@ If not present: skip to Task 5.
 python -c "
 import asyncio, dotenv
 dotenv.load_dotenv()
-from steam_mcp.data.psn import sync_psn
+from gamelib_mcp.data.psn import sync_psn
 result = asyncio.run(sync_psn())
 print(result)
 "

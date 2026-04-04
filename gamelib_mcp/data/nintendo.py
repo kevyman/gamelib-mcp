@@ -25,7 +25,7 @@ import shutil
 import httpx
 from bs4 import BeautifulSoup
 
-from steam_mcp.data.db import (
+from gamelib_mcp.data.db import (
     find_game_by_name_fuzzy,
     load_fuzzy_candidates,
     upsert_game,

@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from steam_mcp.data import gog
+from gamelib_mcp.data import gog
 
 
 class ParseOutputTests(unittest.TestCase):
@@ -72,7 +72,7 @@ class SubprocessEnvTests(unittest.TestCase):
 class SyncGogSkipTests(unittest.TestCase):
     def test_skips_when_lgogdownloader_not_in_path(self) -> None:
         with (
-            patch("steam_mcp.data.gog.shutil") as mock_shutil,
+            patch("gamelib_mcp.data.gog.shutil") as mock_shutil,
             patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": "/config/lgogdownloader"}, clear=False),
         ):
             mock_shutil.which = MagicMock(return_value=None)
@@ -81,8 +81,8 @@ class SyncGogSkipTests(unittest.TestCase):
 
     def test_skips_when_config_dir_missing(self) -> None:
         with (
-            patch("steam_mcp.data.gog.shutil.which", return_value="/usr/bin/lgogdownloader"),
-            patch("steam_mcp.data.gog._config_dir", return_value=Path("/nonexistent/path/that/cannot/exist")),
+            patch("gamelib_mcp.data.gog.shutil.which", return_value="/usr/bin/lgogdownloader"),
+            patch("gamelib_mcp.data.gog._config_dir", return_value=Path("/nonexistent/path/that/cannot/exist")),
         ):
             result = asyncio.run(gog.sync_gog())
         self.assertEqual(result, {"added": 0, "matched": 0, "skipped": 0})
@@ -93,7 +93,7 @@ class SyncGogSkipTests(unittest.TestCase):
         mock_proc.communicate = AsyncMock(return_value=(b"", b"error"))
 
         with (
-            patch("steam_mcp.data.gog.shutil") as mock_shutil,
+            patch("gamelib_mcp.data.gog.shutil") as mock_shutil,
             patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": "/config/lgogdownloader"}, clear=False),
             patch("pathlib.Path.exists", return_value=True),
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)),
@@ -119,14 +119,14 @@ class SyncGogSyncTests(unittest.TestCase):
         mock_load_candidates = AsyncMock(return_value={})
 
         with (
-            patch("steam_mcp.data.gog.shutil.which", return_value="/usr/bin/lgogdownloader"),
+            patch("gamelib_mcp.data.gog.shutil.which", return_value="/usr/bin/lgogdownloader"),
             patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": "/config/lgogdownloader"}, clear=False),
             patch("pathlib.Path.exists", return_value=True),
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
-            patch("steam_mcp.data.gog.find_game_by_name_fuzzy", mock_find),
-            patch("steam_mcp.data.gog.upsert_game", mock_upsert_game),
-            patch("steam_mcp.data.gog.upsert_game_platform", mock_upsert_platform),
-            patch("steam_mcp.data.gog.load_fuzzy_candidates", mock_load_candidates),
+            patch("gamelib_mcp.data.gog.find_game_by_name_fuzzy", mock_find),
+            patch("gamelib_mcp.data.gog.upsert_game", mock_upsert_game),
+            patch("gamelib_mcp.data.gog.upsert_game_platform", mock_upsert_platform),
+            patch("gamelib_mcp.data.gog.load_fuzzy_candidates", mock_load_candidates),
         ):
             result = asyncio.run(gog.sync_gog())
 
@@ -158,13 +158,13 @@ class SyncGogSyncTests(unittest.TestCase):
         proc = self._make_proc(b"\x1b[01;34mcyberpunk_2077 [1]\x1b[0m\n")
 
         with (
-            patch("steam_mcp.data.gog.shutil.which", return_value="/usr/bin/lgogdownloader"),
+            patch("gamelib_mcp.data.gog.shutil.which", return_value="/usr/bin/lgogdownloader"),
             patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": "/config/lgogdownloader"}, clear=False),
             patch("pathlib.Path.exists", return_value=True),
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
-            patch("steam_mcp.data.gog.find_game_by_name_fuzzy", mock_find),
-            patch("steam_mcp.data.gog.upsert_game_platform", AsyncMock(return_value=1)),
-            patch("steam_mcp.data.gog.load_fuzzy_candidates", AsyncMock(return_value={})),
+            patch("gamelib_mcp.data.gog.find_game_by_name_fuzzy", mock_find),
+            patch("gamelib_mcp.data.gog.upsert_game_platform", AsyncMock(return_value=1)),
+            patch("gamelib_mcp.data.gog.load_fuzzy_candidates", AsyncMock(return_value={})),
         ):
             asyncio.run(gog.sync_gog())
 

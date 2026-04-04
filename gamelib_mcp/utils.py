@@ -1,4 +1,4 @@
-"""Shared utilities for steam_mcp tools."""
+"""Shared utilities for gamelib_mcp tools."""
 
 import json
 

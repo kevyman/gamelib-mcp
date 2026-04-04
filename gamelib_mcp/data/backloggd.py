@@ -64,7 +64,7 @@ async def _scrape_all_pages() -> list[dict]:
     """Paginate through Backloggd reviews and return list of {title, score, text}."""
     reviews = []
     page = 1
-    async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "steam-mcp/1.0"}) as client:
+    async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "gamelib-mcp/1.0"}) as client:
         while True:
             url = BASE_URL if page == 1 else f"{BASE_URL}/page/{page}"
             try:
