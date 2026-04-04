@@ -4,7 +4,7 @@
 
 **Goal:** Update 5 existing MCP tools and add 2 new ones to support cross-platform library data: playtime by platform, owned_on list, platform filters, hardware-preference-aware suggested_platform, and platform breakdown/sync tools.
 
-**Architecture:** All changes are in `steam_mcp/tools/` and `steam_mcp/main.py`. DB queries are updated to JOIN `game_platforms` where needed. Hardware preference is read from `meta` table key `hardware_preference` (JSON list, e.g. `["switch2","steam_deck","ps5"]`). No new dependencies required.
+**Architecture:** All changes are in `gamelib_mcp/tools/` and `gamelib_mcp/main.py`. DB queries are updated to JOIN `game_platforms` where needed. Hardware preference is read from `meta` table key `hardware_preference` (JSON list, e.g. `["switch2","steam_deck","ps5"]`). No new dependencies required.
 
 **Tech Stack:** Python 3.12, aiosqlite, existing `get_db()` context manager, FastMCP tool registration in `main.py`.
 
@@ -13,7 +13,7 @@
 ### Task 1: Update `get_game_detail` — playtime by platform + owned_on
 
 **Files:**
-- Modify: `steam_mcp/tools/detail.py`
+- Modify: `gamelib_mcp/tools/detail.py`
 
 **Step 1: Update the DB lookup to use `games.id` instead of `appid`**
 
@@ -93,7 +93,7 @@ With:
 **Step 4: Verify**
 
 ```bash
-python -c "import steam_mcp.tools.detail"
+python -c "import gamelib_mcp.tools.detail"
 ```
 
 Expected: no output, no errors.
@@ -101,7 +101,7 @@ Expected: no output, no errors.
 **Step 5: Commit**
 
 ```bash
-git add steam_mcp/tools/detail.py
+git add gamelib_mcp/tools/detail.py
 git commit -m "feat: get_game_detail — playtime by platform + owned_on field"
 ```
 
@@ -110,7 +110,7 @@ git commit -m "feat: get_game_detail — playtime by platform + owned_on field"
 ### Task 2: Update `search_games` and `get_library_stats` — add platform filter
 
 **Files:**
-- Modify: `steam_mcp/tools/library.py`
+- Modify: `gamelib_mcp/tools/library.py`
 
 **Step 1: Update `search_games` signature and query**
 
@@ -302,7 +302,7 @@ def _format_game(row: aiosqlite.Row) -> dict:
 **Step 5: Verify**
 
 ```bash
-python -c "import steam_mcp.tools.library"
+python -c "import gamelib_mcp.tools.library"
 ```
 
 Expected: no output, no errors.
@@ -310,7 +310,7 @@ Expected: no output, no errors.
 **Step 6: Commit**
 
 ```bash
-git add steam_mcp/tools/library.py
+git add gamelib_mcp/tools/library.py
 git commit -m "feat: add platform filter to search_games + get_library_stats, drop playtime columns"
 ```
 
@@ -319,7 +319,7 @@ git commit -m "feat: add platform filter to search_games + get_library_stats, dr
 ### Task 3: Update `get_recommendations` — add `suggested_platform`
 
 **Files:**
-- Modify: `steam_mcp/tools/discover.py`
+- Modify: `gamelib_mcp/tools/discover.py`
 
 **Step 1: Add hardware preference lookup at the top of `get_recommendations`**
 
@@ -438,7 +438,7 @@ To:
 **Step 5: Verify**
 
 ```bash
-python -c "import steam_mcp.tools.discover"
+python -c "import gamelib_mcp.tools.discover"
 ```
 
 Expected: no output, no errors.
@@ -446,7 +446,7 @@ Expected: no output, no errors.
 **Step 6: Commit**
 
 ```bash
-git add steam_mcp/tools/discover.py
+git add gamelib_mcp/tools/discover.py
 git commit -m "feat: get_recommendations — add suggested_platform via hardware preference"
 ```
 
@@ -455,7 +455,7 @@ git commit -m "feat: get_recommendations — add suggested_platform via hardware
 ### Task 4: Update `refresh_library` — add `platforms` param and fan out
 
 **Files:**
-- Modify: `steam_mcp/tools/admin.py`
+- Modify: `gamelib_mcp/tools/admin.py`
 
 **Step 1: Update `refresh_library` to accept platforms and call platform sync modules**
 
@@ -485,10 +485,10 @@ async def refresh_library(platforms: list[str] | None = None) -> dict:
         results["steam"] = await fetch_library()
 
     platform_syncs = {
-        "epic":   ("steam_mcp.data.epic",    "sync_epic",    "EPIC_LEGENDARY_PATH"),
-        "gog":    ("steam_mcp.data.gog",     "sync_gog",     "GOG_REFRESH_TOKEN"),
-        "ps5":    ("steam_mcp.data.psn",     "sync_psn",     "PSN_NPSSO"),
-        "switch": ("steam_mcp.data.nintendo","sync_nintendo", "NINTENDO_SESSION_TOKEN"),
+        "epic":   ("gamelib_mcp.data.epic",    "sync_epic",    "EPIC_LEGENDARY_PATH"),
+        "gog":    ("gamelib_mcp.data.gog",     "sync_gog",     "GOG_REFRESH_TOKEN"),
+        "ps5":    ("gamelib_mcp.data.psn",     "sync_psn",     "PSN_NPSSO"),
+        "switch": ("gamelib_mcp.data.nintendo","sync_nintendo", "NINTENDO_SESSION_TOKEN"),
     }
 
     for platform, (module_path, fn_name, env_key) in platform_syncs.items():
@@ -511,7 +511,7 @@ async def refresh_library(platforms: list[str] | None = None) -> dict:
 **Step 2: Verify**
 
 ```bash
-python -c "import steam_mcp.tools.admin"
+python -c "import gamelib_mcp.tools.admin"
 ```
 
 Expected: no output, no errors.
@@ -519,16 +519,16 @@ Expected: no output, no errors.
 **Step 3: Commit**
 
 ```bash
-git add steam_mcp/tools/admin.py
+git add gamelib_mcp/tools/admin.py
 git commit -m "feat: refresh_library — fan out to all configured platform sync modules"
 ```
 
 ---
 
-### Task 5: Create `steam_mcp/tools/platforms.py` — new tools
+### Task 5: Create `gamelib_mcp/tools/platforms.py` — new tools
 
 **Files:**
-- Create: `steam_mcp/tools/platforms.py`
+- Create: `gamelib_mcp/tools/platforms.py`
 
 **Step 1: Write the module**
 
@@ -596,11 +596,11 @@ async def sync_platform(platform: str) -> dict:
     import importlib
 
     _PLATFORM_MAP = {
-        "steam":  ("steam_mcp.data.steam_xml", "fetch_library",    None),
-        "epic":   ("steam_mcp.data.epic",       "sync_epic",        "EPIC_LEGENDARY_PATH"),
-        "gog":    ("steam_mcp.data.gog",        "sync_gog",         "GOG_REFRESH_TOKEN"),
-        "ps5":    ("steam_mcp.data.psn",        "sync_psn",         "PSN_NPSSO"),
-        "switch": ("steam_mcp.data.nintendo",   "sync_nintendo",    "NINTENDO_SESSION_TOKEN"),
+        "steam":  ("gamelib_mcp.data.steam_xml", "fetch_library",    None),
+        "epic":   ("gamelib_mcp.data.epic",       "sync_epic",        "EPIC_LEGENDARY_PATH"),
+        "gog":    ("gamelib_mcp.data.gog",        "sync_gog",         "GOG_REFRESH_TOKEN"),
+        "ps5":    ("gamelib_mcp.data.psn",        "sync_psn",         "PSN_NPSSO"),
+        "switch": ("gamelib_mcp.data.nintendo",   "sync_nintendo",    "NINTENDO_SESSION_TOKEN"),
     }
 
     if platform not in _PLATFORM_MAP:
@@ -622,7 +622,7 @@ async def sync_platform(platform: str) -> dict:
 **Step 2: Verify**
 
 ```bash
-python -c "import steam_mcp.tools.platforms"
+python -c "import gamelib_mcp.tools.platforms"
 ```
 
 Expected: no output, no errors.
@@ -630,7 +630,7 @@ Expected: no output, no errors.
 **Step 3: Commit**
 
 ```bash
-git add steam_mcp/tools/platforms.py
+git add gamelib_mcp/tools/platforms.py
 git commit -m "feat: add get_platform_breakdown and sync_platform tools"
 ```
 
@@ -639,7 +639,7 @@ git commit -m "feat: add get_platform_breakdown and sync_platform tools"
 ### Task 6: Register new tools and update signatures in `main.py`
 
 **Files:**
-- Modify: `steam_mcp/main.py`
+- Modify: `gamelib_mcp/main.py`
 
 **Step 1: Update `search_games` registration to include `platform` param**
 
@@ -724,7 +724,7 @@ async def sync_platform(platform: str) -> dict:
 **Step 5: Verify the whole app loads**
 
 ```bash
-python -c "import steam_mcp.main"
+python -c "import gamelib_mcp.main"
 ```
 
 Expected: no output, no errors.
@@ -732,16 +732,16 @@ Expected: no output, no errors.
 **Step 6: Commit**
 
 ```bash
-git add steam_mcp/main.py
+git add gamelib_mcp/main.py
 git commit -m "feat: register get_platform_breakdown, sync_platform; update tool signatures for platform support"
 ```
 
 ---
 
-### Task 7: Create `steam_mcp/setup_platform.py`
+### Task 7: Create `gamelib_mcp/setup_platform.py`
 
 **Files:**
-- Create: `steam_mcp/setup_platform.py`
+- Create: `gamelib_mcp/setup_platform.py`
 
 The spec requires a setup script that handles OAuth browser flows for GOG and Epic, writing the resulting tokens to `.env`.
 
@@ -750,7 +750,7 @@ The spec requires a setup script that handles OAuth browser flows for GOG and Ep
 ```python
 """Platform credential setup helper.
 
-Usage: python -m steam_mcp.setup_platform <platform>
+Usage: python -m gamelib_mcp.setup_platform <platform>
 
 Supported platforms:
   gog    — opens GOG OAuth2 flow, writes GOG_REFRESH_TOKEN to .env
@@ -844,7 +844,7 @@ _HANDLERS = {
 
 if __name__ == "__main__":
     if len(sys.argv) != 2 or sys.argv[1] not in _HANDLERS:
-        print(f"Usage: python -m steam_mcp.setup_platform <platform>")
+        print(f"Usage: python -m gamelib_mcp.setup_platform <platform>")
         print(f"Platforms: {', '.join(_HANDLERS)}")
         sys.exit(1)
     _HANDLERS[sys.argv[1]]()
@@ -853,7 +853,7 @@ if __name__ == "__main__":
 **Step 2: Verify the script loads**
 
 ```bash
-python -m steam_mcp.setup_platform
+python -m gamelib_mcp.setup_platform
 ```
 
 Expected: prints usage and platform list, exits with code 1.
@@ -861,7 +861,7 @@ Expected: prints usage and platform list, exits with code 1.
 **Step 3: Commit**
 
 ```bash
-git add steam_mcp/setup_platform.py
+git add gamelib_mcp/setup_platform.py
 git commit -m "feat: add setup_platform script for GOG OAuth and platform credential guidance"
 ```
 
@@ -878,10 +878,10 @@ Read the current `.env.example`, then append the following block after the exist
 
 ```
 # Cross-platform library credentials (all optional — missing vars silently skip that platform)
-PSN_NPSSO=                  # PSN NPSSO cookie — see: python -m steam_mcp.setup_platform psn
+PSN_NPSSO=                  # PSN NPSSO cookie — see: python -m gamelib_mcp.setup_platform psn
 EPIC_LEGENDARY_PATH=        # Path to legendary config dir (optional, default is ~/.config/legendary)
-GOG_REFRESH_TOKEN=          # GOG OAuth2 refresh token — run: python -m steam_mcp.setup_platform gog
-NINTENDO_SESSION_TOKEN=     # Nintendo session token — see: python -m steam_mcp.setup_platform switch
+GOG_REFRESH_TOKEN=          # GOG OAuth2 refresh token — run: python -m gamelib_mcp.setup_platform gog
+NINTENDO_SESSION_TOKEN=     # Nintendo session token — see: python -m gamelib_mcp.setup_platform switch
 
 # Hardware preference for get_recommendations suggested_platform (comma-separated, highest priority first)
 HARDWARE_PREFERENCE=switch2,steam_deck,ps5

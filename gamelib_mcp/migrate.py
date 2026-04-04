@@ -1,11 +1,11 @@
 """Manual database migration entrypoint.
 
-Run with: python -m steam_mcp.migrate
+Run with: python -m gamelib_mcp.migrate
 """
 
 import asyncio
 
-from steam_mcp.data.db import _db_path, migrate_db
+from gamelib_mcp.data.db import _db_path, migrate_db
 
 
 async def migrate() -> None:

@@ -19,7 +19,7 @@ from typing import Any
 
 import httpx
 
-from steam_mcp.data.db import (
+from gamelib_mcp.data.db import (
     EPIC_ARTIFACT_ID,
     find_game_by_name_fuzzy,
     load_fuzzy_candidates,

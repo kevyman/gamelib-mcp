@@ -2,7 +2,7 @@
 
 > **For Claude:** Use `${SUPERPOWERS_SKILLS_ROOT}/skills/collaboration/executing-plans/SKILL.md` to implement this plan task-by-task.
 
-**Goal:** Add `steam_mcp/data/epic.py` and `steam_mcp/data/gog.py` — async modules that fetch owned games from Epic Games Store (via legendary CLI) and GOG (via OAuth2 API), deduplicate against existing `games` rows using fuzzy matching, and upsert into `game_platforms`.
+**Goal:** Add `gamelib_mcp/data/epic.py` and `gamelib_mcp/data/gog.py` — async modules that fetch owned games from Epic Games Store (via legendary CLI) and GOG (via OAuth2 API), deduplicate against existing `games` rows using fuzzy matching, and upsert into `game_platforms`.
 
 **Architecture:** Each module exposes a single async `sync_<platform>(db_conn)` function. Fuzzy matching uses rapidfuzz `token_sort_ratio` (cutoff=85), same as the existing Backloggd integration. Credentials are read from env vars; missing credentials cause the module to return immediately with zero results (silent skip). No playtime data for either platform.
 
@@ -49,7 +49,7 @@ git commit -m "chore: add aiohttp dependency for GOG OAuth2 API"
 ### Task 2: Add fuzzy-match helper to `db.py`
 
 **Files:**
-- Modify: `steam_mcp/data/db.py` (append after existing helpers)
+- Modify: `gamelib_mcp/data/db.py` (append after existing helpers)
 
 This helper is shared by all non-Steam platform modules.
 
@@ -84,7 +84,7 @@ async def find_game_by_name_fuzzy(name: str, cutoff: int = 85) -> aiosqlite.Row 
 **Step 2: Verify**
 
 ```bash
-python -c "import steam_mcp.data.db"
+python -c "import gamelib_mcp.data.db"
 ```
 
 Expected: no output, no errors.
@@ -92,16 +92,16 @@ Expected: no output, no errors.
 **Step 3: Commit**
 
 ```bash
-git add steam_mcp/data/db.py
+git add gamelib_mcp/data/db.py
 git commit -m "feat: add find_game_by_name_fuzzy helper for cross-platform dedup"
 ```
 
 ---
 
-### Task 3: Create `steam_mcp/data/epic.py`
+### Task 3: Create `gamelib_mcp/data/epic.py`
 
 **Files:**
-- Create: `steam_mcp/data/epic.py`
+- Create: `gamelib_mcp/data/epic.py`
 
 **Step 1: Write the module**
 
@@ -119,7 +119,7 @@ import os
 import asyncio
 from datetime import datetime, timezone
 
-from steam_mcp.data.db import find_game_by_name_fuzzy, upsert_game, upsert_game_platform
+from gamelib_mcp.data.db import find_game_by_name_fuzzy, upsert_game, upsert_game_platform
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +206,7 @@ def _legendary_available() -> bool:
 **Step 2: Verify the module imports cleanly**
 
 ```bash
-python -c "import steam_mcp.data.epic"
+python -c "import gamelib_mcp.data.epic"
 ```
 
 Expected: no output, no errors.
@@ -214,16 +214,16 @@ Expected: no output, no errors.
 **Step 3: Commit**
 
 ```bash
-git add steam_mcp/data/epic.py
+git add gamelib_mcp/data/epic.py
 git commit -m "feat: add epic.py — Epic Games library sync via legendary CLI"
 ```
 
 ---
 
-### Task 4: Create `steam_mcp/data/gog.py`
+### Task 4: Create `gamelib_mcp/data/gog.py`
 
 **Files:**
-- Create: `steam_mcp/data/gog.py`
+- Create: `gamelib_mcp/data/gog.py`
 
 GOG exposes an OAuth2 API. The refresh token is stored in `.env` as `GOG_REFRESH_TOKEN`. At runtime we exchange it for an access token, then hit the owned-games endpoint.
 
@@ -232,7 +232,7 @@ GOG exposes an OAuth2 API. The refresh token is stored in `.env` as `GOG_REFRESH
 ```python
 """GOG owned games sync via GOG OAuth2 API.
 
-Set GOG_REFRESH_TOKEN in .env (obtained via python -m steam_mcp.setup_platform gog).
+Set GOG_REFRESH_TOKEN in .env (obtained via python -m gamelib_mcp.setup_platform gog).
 Playtime is not available from GOG's public API.
 """
 
@@ -242,7 +242,7 @@ from datetime import datetime, timezone
 
 import aiohttp
 
-from steam_mcp.data.db import find_game_by_name_fuzzy, upsert_game, upsert_game_platform
+from gamelib_mcp.data.db import find_game_by_name_fuzzy, upsert_game, upsert_game_platform
 
 logger = logging.getLogger(__name__)
 
@@ -353,7 +353,7 @@ async def sync_gog() -> dict:
 **Step 2: Verify the module imports cleanly**
 
 ```bash
-python -c "import steam_mcp.data.gog"
+python -c "import gamelib_mcp.data.gog"
 ```
 
 Expected: no output, no errors.
@@ -361,7 +361,7 @@ Expected: no output, no errors.
 **Step 3: Commit**
 
 ```bash
-git add steam_mcp/data/gog.py
+git add gamelib_mcp/data/gog.py
 git commit -m "feat: add gog.py — GOG owned games sync via OAuth2 API"
 ```
 
@@ -392,7 +392,7 @@ Expected: shows account info if authenticated. If not authenticated, run `legend
 ```bash
 python -c "
 import asyncio
-from steam_mcp.data.epic import sync_epic
+from gamelib_mcp.data.epic import sync_epic
 result = asyncio.run(sync_epic())
 print(result)
 "
@@ -428,7 +428,7 @@ If not present: skip to Task 7.
 python -c "
 import asyncio, dotenv, os
 dotenv.load_dotenv()
-from steam_mcp.data.gog import sync_gog
+from gamelib_mcp.data.gog import sync_gog
 result = asyncio.run(sync_gog())
 print(result)
 "
