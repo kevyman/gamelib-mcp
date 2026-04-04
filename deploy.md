@@ -135,6 +135,34 @@ lgogdownloader refreshes its session automatically on each `--list j` call — n
 
 ---
 
+### Nintendo in Docker
+
+Nintendo sync uses the `nxapi` CLI to fetch Switch play history. Auth is done once on the host machine and the session token is passed via `.env`.
+
+**One-time setup:**
+
+```bash
+# Install nxapi on the host machine (requires Node.js)
+npm install -g nxapi
+
+# Authenticate with your Nintendo account
+nxapi nso auth
+# Follow the prompts; copy the session token printed at the end
+```
+
+**Server `.env`** (add):
+```
+NINTENDO_SESSION_TOKEN=<token from nxapi nso auth>
+```
+
+`nxapi` does not need to be installed inside the Docker container — it runs as a subprocess on the host (the container inherits the host environment for subprocess calls). If you prefer to isolate it inside the container, add `npm install -g nxapi` to the Dockerfile instead and mount nothing extra.
+
+If the session token expires, re-run `nxapi nso auth` and update `.env`, then restart the container.
+
+**Note:** Only titles that have been launched appear in Nintendo's play history. Unplayed digital purchases and physical cartridges that were never inserted will not sync. This is a Nintendo platform limitation.
+
+---
+
 ### Verify
 
 ```bash
