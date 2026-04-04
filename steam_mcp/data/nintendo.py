@@ -100,10 +100,16 @@ def _nxapi_available() -> bool:
 
 async def _run_nxapi(*args: str) -> str:
     """Run an nxapi CLI command and return stdout."""
+    # Pass token via env var rather than CLI flag to avoid exposure in ps output.
+    token = os.environ.get("NINTENDO_SESSION_TOKEN")
+    env = {**os.environ}
+    if token:
+        env["NXAPI_SESSION_TOKEN"] = token
     proc = await asyncio.create_subprocess_exec(
         NXAPI_BIN, *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
     stdout, stderr = await proc.communicate()
     if proc.returncode != 0:
@@ -120,11 +126,11 @@ async def fetch_nintendo_play_history() -> list[dict]:
     Returns a list of dicts with keys:
       name (str), playtime_minutes (int | None), title_id (str | None)
 
-    Playtime is reported in minutes by nxapi — no unit conversion applied.
+    Playtime: nxapi reports totalPlayTime in minutes (confirmed via nxapi source and
+    NSO-RPC which divides by 60 to get hours — see github.com/samuelthomas2774/nxapi
+    issue #8). No unit conversion applied.
     """
-    token = os.environ.get("NINTENDO_SESSION_TOKEN")
-    nso_args = ["nso", "--token", token, "play-activity", "--json"] if token else ["nso", "play-activity", "--json"]
-    raw = await _run_nxapi(*nso_args)
+    raw = await _run_nxapi("nso", "play-activity", "--json")
     data = json.loads(raw)
 
     items = data if isinstance(data, list) else data.get("items", data.get("titles", []))
@@ -191,14 +197,20 @@ def _parse_vgcs_page(html: str) -> tuple[str, str, str, int]:
     data_div = soup.find(id="data")
     if not data_div:
         raise RuntimeError("VGCS page missing #data div — session cookies may have expired")
-    page_data = json.loads(data_div["data-json"])
+    raw_data = data_div.get("data-json")
+    if not raw_data:
+        raise RuntimeError("VGCS #data div missing data-json attribute — page structure may have changed")
+    page_data = json.loads(raw_data)
     id_token = page_data["idToken"]
     savanna_client_id = page_data["savannaClientId"]
 
     state_div = soup.find(id="state")
     if not state_div:
         raise RuntimeError("VGCS page missing #state div")
-    state = json.loads(state_div["data-json"])
+    raw_state = state_div.get("data-json")
+    if not raw_state:
+        raise RuntimeError("VGCS #state div missing data-json attribute — page structure may have changed")
+    state = json.loads(raw_state)
 
     # Extract two-letter country code from "COUNTRY_NAME_BE" → "BE"
     country_label = state.get("user", {}).get("countryLabel", "")
@@ -319,10 +331,9 @@ async def sync_nintendo() -> dict:
        - Provides full digital library ownership; playtime stored as None.
     3. If neither is available, skip silently.
 
-    Returns: {"added": int, "matched": int, "skipped": int, "source": str}
+    Returns: {"added": int, "matched": int, "skipped": int}
     """
     entries: list[dict] | None = None
-    source = "none"
 
     has_nxapi_token = bool(os.getenv("NINTENDO_SESSION_TOKEN"))
     has_vgcs_cookies = bool(_load_vgcs_cookies())
@@ -331,7 +342,6 @@ async def sync_nintendo() -> dict:
     if has_nxapi_token and _nxapi_available():
         try:
             entries = await fetch_nintendo_play_history()
-            source = "nxapi"
             logger.info("Nintendo: fetched %d titles via nxapi", len(entries))
         except Exception as exc:
             logger.warning("nxapi play-activity failed, trying VGCS fallback: %s", exc)
@@ -340,7 +350,6 @@ async def sync_nintendo() -> dict:
     if entries is None and has_vgcs_cookies:
         try:
             entries = await fetch_nintendo_library_vgcs()
-            source = "vgcs"
             logger.info("Nintendo: fetched %d titles via VGCS fallback", len(entries))
         except Exception as exc:
             logger.warning("VGCS fallback failed: %s", exc)
@@ -350,7 +359,7 @@ async def sync_nintendo() -> dict:
             logger.info(
                 "Nintendo sync skipped — set NINTENDO_SESSION_TOKEN or NINTENDO_COOKIES_FILE"
             )
-        return {"added": 0, "matched": 0, "skipped": 0, "source": source}
+        return {"added": 0, "matched": 0, "skipped": 0}
 
     added = matched = skipped = 0
     candidates = await load_fuzzy_candidates()
@@ -383,7 +392,7 @@ async def sync_nintendo() -> dict:
             )
 
     logger.info(
-        "Nintendo sync (%s): added=%d matched=%d skipped=%d",
-        source, added, matched, skipped,
+        "Nintendo sync: added=%d matched=%d skipped=%d",
+        added, matched, skipped,
     )
-    return {"added": added, "matched": matched, "skipped": skipped, "source": source}
+    return {"added": added, "matched": matched, "skipped": skipped}
