@@ -1,24 +1,74 @@
-"""refresh_library and detect_farmed_games admin tools."""
+"""refresh_library, detect_farmed_games, and set_nintendo_session admin tools."""
 
+import json
+import logging
+import os
 import statistics
 from collections import defaultdict
 
 from ..data.db import STEAM_APP_ID, get_db
 from ..data.epic import sync_epic
 from ..data.gog import sync_gog
+from ..data.nintendo import sync_nintendo
 from ..data.steam_xml import fetch_library
+
+logger = logging.getLogger(__name__)
 
 
 async def refresh_library() -> dict:
-    """Force re-sync Steam, Epic, and GOG library feeds."""
+    """Force re-sync Steam, Epic, GOG, and Nintendo library feeds."""
     steam = await fetch_library()
     epic = await sync_epic()
     gog = await sync_gog()
+    nintendo = await sync_nintendo()
     return {
         "steam": steam,
         "epic": epic,
         "gog": gog,
+        "nintendo": nintendo,
     }
+
+
+async def set_nintendo_session(cookies: str) -> dict:
+    """
+    Store Nintendo Account session cookies for VGCS fallback sync.
+
+    Accepts either:
+    - A JSON object: {"cookie_name": "value", ...}
+    - A JSON array (Cookie Editor / EditThisCookie format):
+      [{"name": "...", "value": "..."}, ...]
+
+    How to get your cookies:
+    1. Open https://accounts.nintendo.com/portal/vgcs/ in your browser
+    2. Install the "Cookie Editor" browser extension
+    3. Click the extension icon → Export → copy the JSON
+    4. Pass that JSON string to this tool
+
+    Cookies are saved to the path in NINTENDO_COOKIES_FILE
+    (default: data/nintendo_cookies.json).
+    """
+    try:
+        raw = json.loads(cookies)
+    except json.JSONDecodeError as exc:
+        return {"success": False, "error": f"Invalid JSON: {exc}"}
+
+    if isinstance(raw, list):
+        normalized = {c["name"]: c["value"] for c in raw if "name" in c and "value" in c}
+    elif isinstance(raw, dict):
+        normalized = raw
+    else:
+        return {"success": False, "error": "Expected a JSON object or array"}
+
+    if not normalized:
+        return {"success": False, "error": "No valid cookies found in input"}
+
+    path = os.getenv("NINTENDO_COOKIES_FILE", "data/nintendo_cookies.json")
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(normalized, f, indent=2)
+
+    logger.info("Nintendo session cookies saved to %s (%d cookies)", path, len(normalized))
+    return {"success": True, "cookie_count": len(normalized), "path": path}
 
 
 async def detect_farmed_games(

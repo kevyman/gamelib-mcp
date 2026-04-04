@@ -234,6 +234,26 @@ async def detect_farmed_games(
     return await _detect(dry_run, threshold_hours, min_games_per_day)
 
 
+@mcp.tool()
+async def set_nintendo_session(cookies: str) -> dict:
+    """
+    Store Nintendo Account session cookies for VGCS library fallback sync.
+
+    Used when nxapi is unavailable. Fetches your full digital library
+    (including unplayed titles) from accounts.nintendo.com — no playtime data.
+
+    How to get cookies:
+    1. Open https://accounts.nintendo.com/portal/vgcs/ (stay logged in)
+    2. Install the "Cookie Editor" browser extension
+    3. Click the extension → Export → copy the JSON
+    4. Pass that JSON string here
+
+    Cookies are saved to NINTENDO_COOKIES_FILE (default: data/nintendo_cookies.json).
+    """
+    from .tools.admin import set_nintendo_session as _set_session
+    return await _set_session(cookies)
+
+
 # ── Health endpoint ────────────────────────────────────────────────────────────
 
 from urllib.parse import parse_qs
