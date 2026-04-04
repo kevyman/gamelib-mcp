@@ -20,7 +20,7 @@ This mirrors the Epic pattern: auth happens once on the developer's machine, cre
 
 ## Changes
 
-### `steam_mcp/data/gog.py` — full rewrite
+### `gamelib_mcp/data/gog.py` — full rewrite
 
 **Remove:**
 - All OAuth logic: `_GOG_TOKEN_URL`, `_CLIENT_ID`, `_CLIENT_SECRET`, `_get_access_token`, `_fetch_owned_game_ids`, `_fetch_game_title`
@@ -78,11 +78,11 @@ Add:
 LGOGDOWNLOADER_CACHE_PATH=   # optional; defaults to ~/.cache/lgogdownloader
 ```
 
-### `steam_mcp/tools/admin.py` — update skip condition
+### `gamelib_mcp/tools/admin.py` — update skip condition
 
 The `refresh_library` fan-out currently checks `os.getenv("GOG_REFRESH_TOKEN")` to decide whether to skip GOG. Change to mirror `sync_gog()`'s own skip logic: check `shutil.which("lgogdownloader")` and whether the cache dir exists.
 
-### `steam_mcp/setup_platform.py` — replace GOG handler
+### `gamelib_mcp/setup_platform.py` — replace GOG handler
 
 Replace the `_setup_gog()` function (which implements a full OAuth code-exchange flow) with a simple instructions printer:
 

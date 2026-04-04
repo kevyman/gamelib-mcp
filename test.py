@@ -3,7 +3,7 @@ import os
 import sqlite3
 import httpx
 from dotenv import load_dotenv
-from steam_mcp.data.db import _V1_SCHEMA_DDL
+from gamelib_mcp.data.db import _V1_SCHEMA_DDL
 
 load_dotenv()
 

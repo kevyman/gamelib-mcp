@@ -1,5 +1,5 @@
 services:
-  steam-mcp:
+  gamelib-mcp:
     build: .
     restart: always
     expose:

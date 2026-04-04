@@ -1,6 +1,6 @@
 ## Deployment: Hetzner Cloud — Multi-MCP Host
 
-This VM hosts multiple MCP servers behind a shared Caddy reverse proxy. The steam-mcp repo root serves as the host-level config (`docker-compose.yml`, `Caddyfile`). Each additional MCP lives in its own subdirectory.
+This VM hosts multiple MCP servers behind a shared Caddy reverse proxy. The gamelib-mcp repo root serves as the host-level config (`docker-compose.yml`, `Caddyfile`). Each additional MCP lives in its own subdirectory.
 
 ### Server details
 
@@ -18,7 +18,7 @@ This VM hosts multiple MCP servers behind a shared Caddy reverse proxy. The stea
   Caddyfile
   .env                   ← created manually on server (not in git)
   Dockerfile
-  steam_mcp/
+  gamelib_mcp/
   data/
     steam/               ← steam.db lives here (persists across redeploys)
     other-mcp/           ← future MCP data volumes
@@ -38,7 +38,7 @@ curl -fsSL https://get.docker.com | sh
 #### 2. Clone the repo
 
 ```bash
-git clone https://github.com/kevyman/steam-mcp ~/mcps
+git clone https://github.com/kevyman/gamelib-mcp ~/mcps
 ```
 
 #### 3. Configure the server
@@ -68,7 +68,7 @@ Point your subdomain to the server IP. Caddy handles TLS automatically.
 
 ```
 steammcp.johnwilkos.com {
-    reverse_proxy steam-mcp:8000
+    reverse_proxy gamelib-mcp:8000
 }
 ```
 
@@ -90,7 +90,7 @@ git push
 
 # On server
 ssh root@178.104.53.83
-cd ~/mcps && git pull && docker compose up -d --build steam-mcp
+cd ~/mcps && git pull && docker compose up -d --build gamelib-mcp
 ```
 
 ### Epic in Docker
@@ -135,6 +135,30 @@ lgogdownloader refreshes its session automatically on each `--list j` call — n
 
 ---
 
+### PSN Setup
+
+PSN sync uses the [PSNAWP](https://github.com/isFakeAccount/psnawp) library with an NPSSO cookie for authentication. No CLI tools needed — just a single cookie value in `.env`.
+
+**One-time setup:**
+
+1. Log in to your PSN account in a browser
+2. Navigate to `https://ca.account.sony.com/api/v1/ssocookie` — the page renders an error message, but the `npsso` cookie is set
+3. Open browser DevTools (F12) → Application → Cookies → find `npsso` under the Sony domain
+4. Copy the 64-character token value
+
+**Server `.env`** (add):
+```
+PSN_NPSSO=<your 64-char npsso token>
+```
+
+PSNAWP is a pure Python library — no extra system packages required in Docker.
+
+**Known limitation:** Only played titles appear in the library (`title_stats()` tracks play history, not purchases). Unplayed digital purchases will not sync. This is a PSN platform limitation.
+
+If the NPSSO token expires, repeat the browser extraction and update `.env`, then restart the container.
+
+---
+
 ### Nintendo in Docker
 
 Nintendo sync uses the `nxapi` CLI to fetch Switch play history. Auth is done once on the host machine and the session token is passed via `.env`.
@@ -174,7 +198,7 @@ curl https://steammcp.johnwilkos.com/health
 
 ---
 
-### Configure Claude to use steam-mcp
+### Configure Claude to use gamelib-mcp
 
 In your Claude MCP config:
 ```json

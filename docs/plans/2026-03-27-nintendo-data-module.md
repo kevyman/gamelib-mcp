@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add `steam_mcp/data/nintendo.py` — an async module that fetches Nintendo Switch play history via the `nxapi` CLI, deduplicates against existing `games` rows using fuzzy matching, and upserts into `game_platforms` with playtime in minutes.
+**Goal:** Add `gamelib_mcp/data/nintendo.py` — an async module that fetches Nintendo Switch play history via the `nxapi` CLI, deduplicates against existing `games` rows using fuzzy matching, and upserts into `game_platforms` with playtime in minutes.
 
 **Architecture:** Single async `sync_nintendo()` function. Auth uses a Nintendo Session Token stored as `NINTENDO_SESSION_TOKEN` in `.env` (one-time manual extraction via `nxapi nso auth`). `nxapi` is invoked as a subprocess; its JSON output is parsed for title name and total play time. Missing credentials cause a silent skip. Fuzzy dedup via `find_game_by_name_fuzzy()` (cutoff=85). Candidates are pre-loaded via `load_fuzzy_candidates()` for efficiency, matching the Epic/GOG pattern.
 
@@ -53,10 +53,10 @@ Some nxapi versions use `nxapi nso titles --json` instead of `nxapi nso play-his
 
 ---
 
-### Task 2: Create `steam_mcp/data/nintendo.py`
+### Task 2: Create `gamelib_mcp/data/nintendo.py`
 
 **Files:**
-- Create: `steam_mcp/data/nintendo.py`
+- Create: `gamelib_mcp/data/nintendo.py`
 
 - [ ] **Step 1: Write the module**
 
@@ -82,7 +82,7 @@ import logging
 import os
 import shutil
 
-from steam_mcp.data.db import (
+from gamelib_mcp.data.db import (
     find_game_by_name_fuzzy,
     load_fuzzy_candidates,
     upsert_game,
@@ -224,7 +224,7 @@ async def sync_nintendo() -> dict:
 - [ ] **Step 2: Verify the module imports cleanly**
 
 ```bash
-python -c "import steam_mcp.data.nintendo"
+python -c "import gamelib_mcp.data.nintendo"
 ```
 
 Expected: no output, no errors.
@@ -232,7 +232,7 @@ Expected: no output, no errors.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add steam_mcp/data/nintendo.py
+git add gamelib_mcp/data/nintendo.py
 git commit -m "feat: add nintendo.py — Switch play history sync via nxapi CLI"
 ```
 
@@ -241,16 +241,16 @@ git commit -m "feat: add nintendo.py — Switch play history sync via nxapi CLI"
 ### Task 3: Wire into `refresh_library`
 
 **Files:**
-- Modify: `steam_mcp/tools/admin.py`
+- Modify: `gamelib_mcp/tools/admin.py`
 
 - [ ] **Step 1: Add `sync_nintendo` to the fan-out in `refresh_library`**
 
-In `steam_mcp/tools/admin.py`, import `sync_nintendo` from `steam_mcp.data.nintendo` and add it to the platform sync fan-out alongside `sync_epic` and `sync_gog`.
+In `gamelib_mcp/tools/admin.py`, import `sync_nintendo` from `gamelib_mcp.data.nintendo` and add it to the platform sync fan-out alongside `sync_epic` and `sync_gog`.
 
 - [ ] **Step 2: Commit**
 
 ```bash
-git add steam_mcp/tools/admin.py
+git add gamelib_mcp/tools/admin.py
 git commit -m "feat: wire Nintendo sync into refresh_library"
 ```
 
@@ -283,7 +283,7 @@ Expected: prints your Nintendo account info. If it errors, re-run `nxapi nso aut
 python -c "
 import asyncio, dotenv
 dotenv.load_dotenv()
-from steam_mcp.data.nintendo import sync_nintendo
+from gamelib_mcp.data.nintendo import sync_nintendo
 result = asyncio.run(sync_nintendo())
 print(result)
 "

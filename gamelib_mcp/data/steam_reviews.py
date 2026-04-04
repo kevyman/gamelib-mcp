@@ -97,7 +97,7 @@ async def _scrape_all_pages() -> list[dict]:
     page = 1
     async with httpx.AsyncClient(
         timeout=15,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; steam-mcp/1.0)"},
+        headers={"User-Agent": "Mozilla/5.0 (compatible; gamelib-mcp/1.0)"},
         follow_redirects=True,
     ) as client:
         while True:
