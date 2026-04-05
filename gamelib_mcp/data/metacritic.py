@@ -14,15 +14,6 @@ logger = logging.getLogger(__name__)
 
 METACRITIC_CACHE_DAYS = 30
 
-# Our platform value → Metacritic URL path segment
-_PLATFORM_SLUG: dict[str, str] = {
-    "steam": "pc",
-    "epic": "pc",
-    "gog": "pc",
-    "ps5": "playstation-5",
-    "switch2": "switch",
-}
-
 _GAME_URL = "https://www.metacritic.com/game/{slug}/"
 
 _HEADERS = {
@@ -112,8 +103,8 @@ async def enrich_metacritic(
     platform: str,
 ) -> dict | None:
     """
-    Scrape Metacritic score for game_name on platform and cache in game_platform_enrichment.
-    Tries PS5 then PS4 for ps5 platform titles. Returns enrichment dict or None.
+    Scrape Metacritic score for game_name and cache in game_platform_enrichment.
+    Returns enrichment dict or None.
     """
     from .db import get_db
 
@@ -129,21 +120,8 @@ async def enrich_metacritic(
     now = datetime.now(timezone.utc).isoformat()
     slug = _to_slug(game_name)
 
-    platforms_to_try = [_PLATFORM_SLUG.get(platform, "pc")]
-    # For ps5 platform, also try playstation-4 as fallback
-    if platform == "ps5" and "playstation-4" not in platforms_to_try:
-        platforms_to_try.append("playstation-4")
-
-    score: int | None = None
-    final_url = ""
-
-    for _plat_slug in platforms_to_try:
-        url = _GAME_URL.format(slug=slug)
-        candidate_score, candidate_url = await _fetch_score_from_url(url)
-        if candidate_score is not None:
-            score = candidate_score
-            final_url = candidate_url
-            break
+    url = _GAME_URL.format(slug=slug)
+    score, final_url = await _fetch_score_from_url(url)
 
     if score is None:
         await upsert_game_platform_enrichment(
