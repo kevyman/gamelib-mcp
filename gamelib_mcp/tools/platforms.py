@@ -94,8 +94,9 @@ async def set_hardware_preference(platforms: list[str]) -> dict:
 
     Valid values: any platform name used in your library (steam, epic, gog, nintendo, ps5, etc.)
     """
-    await set_meta("hardware_preference", json.dumps(platforms))
-    return {"success": True, "hardware_preference": platforms}
+    normalized = [_resolve_platform(p) or p for p in platforms]
+    await set_meta("hardware_preference", json.dumps(normalized))
+    return {"success": True, "hardware_preference": normalized}
 
 
 async def add_game_to_platform(

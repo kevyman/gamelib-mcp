@@ -13,51 +13,13 @@ import sys
 
 
 def _setup_gog() -> None:
-    """Run GOG OAuth2 flow and write refresh token to .env."""
-    import asyncio
-    import os
-    import webbrowser
-
-    import aiohttp
-    from dotenv import set_key
-
-    # These are the publicly-known GOG Galaxy OAuth2 client credentials.
-    # They are not private secrets — they appear in lgogdownloader, heroic,
-    # and other open-source GOG clients. They grant no special access without
-    # a user's own authorization code.
-    GOG_GALAXY_CLIENT_ID = "46899977096215655"
-    GOG_GALAXY_CLIENT_SECRET = "9d85c43b1718a031d5b64228ecd1a9eb"  # noqa: S105
-    AUTH_URL = (
-        f"https://auth.gog.com/auth?client_id={GOG_GALAXY_CLIENT_ID}"
-        "&redirect_uri=https://embed.gog.com/on_login_success?origin=client"
-        "&response_type=code&layout=client2"
+    print(
+        "GOG auth is handled by the lgogdownloader CLI.\n"
+        "Run:  lgogdownloader --login\n"
+        "Follow the browser prompts to authenticate.\n"
+        "Then mount ~/.config/lgogdownloader/ into Docker (see deploy.md) so the\n"
+        "sync container can access the stored session."
     )
-
-    print("Opening GOG login page in your browser...")
-    webbrowser.open(AUTH_URL)
-    code = input(
-        "\nAfter logging in, copy the 'code' query parameter from the redirect URL and paste it here:\n> "
-    ).strip()
-
-    async def _exchange():
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                "https://auth.gog.com/token",
-                params={
-                    "client_id": GOG_GALAXY_CLIENT_ID,
-                    "client_secret": GOG_GALAXY_CLIENT_SECRET,
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": "https://embed.gog.com/on_login_success?origin=client",
-                },
-            ) as resp:
-                resp.raise_for_status()
-                return (await resp.json())["refresh_token"]
-
-    refresh_token = asyncio.run(_exchange())
-    env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
-    set_key(env_path, "GOG_REFRESH_TOKEN", refresh_token)
-    print("GOG_REFRESH_TOKEN written to .env")
 
 
 def _setup_epic() -> None:
