@@ -2,11 +2,12 @@
 
 import asyncio
 import json
+import re
 from datetime import datetime, timezone
 
 import httpx
 
-from .db import get_db, get_steam_platform_row_by_appid, upsert_steam_platform_data
+from .db import get_db, get_steam_platform_row_by_appid, upsert_game_platform_enrichment, upsert_steam_platform_data
 
 STORE_CACHE_DAYS = 7
 STORE_API = "https://store.steampowered.com/api/appdetails"
@@ -59,7 +60,6 @@ async def enrich_game(appid: int) -> dict | None:
         metacritic_score = metacritic.get("score")
         metacritic_url = metacritic.get("url")
         if metacritic_score is not None:
-            from .db import upsert_game_platform_enrichment
             enrichment_fields: dict = {
                 "metacritic_score": metacritic_score,
                 "metacritic_cached_at": now,
@@ -126,7 +126,6 @@ def _parse_steam_date(raw: str) -> str | None:
     """Parse Steam's release date string (e.g. '8 Nov, 2022') to ISO format, best-effort."""
     if not raw:
         return None
-    import re
     # Try "D Mon, YYYY" or "D Mon YYYY"
     m = re.match(r"(\d{1,2})\s+([A-Za-z]+)[,\s]+(\d{4})", raw)
     if m:

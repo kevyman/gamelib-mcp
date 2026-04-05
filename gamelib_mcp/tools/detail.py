@@ -7,7 +7,6 @@ from ..data.db import (
     load_platforms_for_games,
 )
 from ..data.hltb import get_hltb
-from ..data.opencritic import get_metacritic
 from ..data.protondb import get_protondb
 from ..data.steam_store import enrich_game
 from ..utils import _parse_json
@@ -46,7 +45,6 @@ async def get_game_detail(
         await enrich_game(steam_appid)
         await get_protondb(steam_appid)
     await get_hltb(game_id, game_name)
-    await get_metacritic(game_id)
 
     async with get_db() as db:
         row = await db.execute_fetchone("SELECT * FROM games WHERE id = ?", (game_id,))
