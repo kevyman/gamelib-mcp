@@ -49,14 +49,15 @@ WITH game_rollup AS (
            {_STEAM_APPID_SQL} AS steam_appid,
            g.tags,
            g.hltb_main,
-           g.metacritic_score,
            g.is_farmed,
            COALESCE(SUM(COALESCE(gp.playtime_minutes, 0)), 0) AS total_playtime_minutes,
            MAX(CASE WHEN gp.platform = 'steam' THEN spd.protondb_tier END) AS protondb_tier,
-           MAX(CASE WHEN gp.platform = 'steam' THEN spd.steam_review_desc END) AS steam_review_desc
+           MAX(CASE WHEN gp.platform = 'steam' THEN spd.steam_review_desc END) AS steam_review_desc,
+           MAX(gpe.metacritic_score) AS metacritic_score
     FROM games g
     LEFT JOIN game_platforms gp ON gp.game_id = g.id
     LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
+    LEFT JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
     GROUP BY g.id
 )
 """
