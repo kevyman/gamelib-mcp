@@ -58,19 +58,17 @@ async def get_game_detail(
         )
 
     platforms = (await load_platforms_for_games([game_id])).get(game_id, [])
-    steam_platform = next((platform for platform in platforms if platform["platform"] == "steam"), None)
+    steam_platform = next((p for p in platforms if p["platform"] == "steam"), None)
     steam_data = steam_platform["provider_data"] if steam_platform else {}
 
-    total_playtime_minutes = sum(platform["playtime_minutes"] or 0 for platform in platforms)
-    total_playtime_2weeks_minutes = sum(
-        platform["playtime_2weeks_minutes"] or 0
-        for platform in platforms
-    )
+    total_playtime_minutes = sum(p["playtime_minutes"] or 0 for p in platforms)
+    total_playtime_2weeks_minutes = sum(p["playtime_2weeks_minutes"] or 0 for p in platforms)
 
     result = {
         "game_id": row["id"],
         "appid": steam_appid,
         "name": row["name"],
+        "release_date": row["release_date"],
         "platforms": platforms,
         "playtime_hours": round(total_playtime_minutes / 60, 1) if total_playtime_minutes else 0,
         "playtime_2weeks_hours": (
@@ -88,7 +86,6 @@ async def get_game_detail(
         "hltb_main": row["hltb_main"],
         "hltb_extra": row["hltb_extra"],
         "hltb_complete": row["hltb_complete"],
-        "metacritic_score": row["metacritic_score"],
         "protondb_tier": steam_data.get("protondb_tier"),
     }
 
