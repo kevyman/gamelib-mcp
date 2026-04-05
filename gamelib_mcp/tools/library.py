@@ -2,6 +2,19 @@
 
 from ..data.db import STEAM_APP_ID, get_db, load_platforms_for_games
 
+# Public alias → internal DB platform name
+_PLATFORM_ALIASES = {
+    "nintendo": "switch2",
+    "switch": "switch2",
+}
+
+
+def _resolve_platform(platform: str | None) -> str | None:
+    if platform is None:
+        return None
+    return _PLATFORM_ALIASES.get(platform.lower(), platform.lower())
+
+
 SORT_COLUMNS = {
     "playtime": "total_playtime_minutes",
     "name": "name",
@@ -41,19 +54,28 @@ WITH game_rollup AS (
 """
 
 
-async def search_games(query: str, limit: int = 20) -> list[dict]:
-    """Find games in the library by name substring match."""
+async def search_games(query: str, limit: int = 20, platform: str | None = None) -> list[dict]:
+    """Find games in the library by name substring match, optionally filtered by platform."""
+    platform = _resolve_platform(platform)
+    conditions = ["lower(name) LIKE lower(?)"]
+    params: list = [f"%{query}%"]
+    if platform:
+        conditions.append(
+            "game_id IN (SELECT game_id FROM game_platforms WHERE platform = ? AND owned = 1)"
+        )
+        params.append(platform)
+    where = " AND ".join(conditions)
     async with get_db() as db:
         rows = await db.execute_fetchall(
             _GAME_ROLLUP_CTE
-            + """
+            + f"""
             SELECT *
             FROM game_rollup
-            WHERE lower(name) LIKE lower(?)
+            WHERE {where}
             ORDER BY total_playtime_minutes DESC, name ASC
             LIMIT ?
             """,
-            (f"%{query}%", limit),
+            (*params, limit),
         )
     return await _format_rows(rows)
 
@@ -88,12 +110,14 @@ async def get_library_stats(
     protondb_tier: str | None = None,
     sort_by: str = "playtime",
     limit: int = 50,
+    platform: str | None = None,
 ) -> dict:
     """
     Return filtered/sorted game list plus aggregate stats.
 
     filter: all | unplayed | played | recent | farmed
     sort_by: playtime | name | metacritic | hltb
+    platform: steam | epic | gog | ps5 | switch (optional — filter to games owned on that platform)
     """
     conditions = []
     params: list = []
@@ -125,6 +149,13 @@ async def get_library_stats(
         conditions.append(f"lower(COALESCE(protondb_tier, '')) IN ({placeholders})")
         params.extend(allowed)
 
+    platform = _resolve_platform(platform)
+    if platform:
+        conditions.append(
+            "game_id IN (SELECT game_id FROM game_platforms WHERE platform = ? AND owned = 1)"
+        )
+        params.append(platform)
+
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     sort_col = SORT_COLUMNS.get(sort_by, "total_playtime_minutes")
     sort_dir = "ASC" if sort_by == "name" else "DESC"
@@ -143,14 +174,16 @@ async def get_library_stats(
         )
         summary = await db.execute_fetchone(
             _GAME_ROLLUP_CTE
-            + """
+            + f"""
             SELECT COUNT(*) AS total_games,
                    SUM(CASE WHEN total_playtime_minutes > 0 AND is_farmed = 0 THEN 1 ELSE 0 END) AS played,
                    SUM(CASE WHEN total_playtime_minutes = 0 OR is_farmed = 1 THEN 1 ELSE 0 END) AS unplayed,
                    SUM(CASE WHEN is_farmed = 1 THEN 1 ELSE 0 END) AS farmed_games,
                    SUM(total_playtime_minutes) AS total_minutes
             FROM game_rollup
-            """
+            {where}
+            """,
+            tuple(params),
         )
 
     return {

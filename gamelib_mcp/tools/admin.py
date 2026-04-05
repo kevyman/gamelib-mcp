@@ -2,7 +2,6 @@
 
 import json
 import logging
-import os
 import statistics
 from collections import defaultdict
 
@@ -16,20 +15,35 @@ from ..data.steam_xml import fetch_library
 logger = logging.getLogger(__name__)
 
 
-async def refresh_library() -> dict:
-    """Force re-sync Steam, Epic, GOG, Nintendo, and PSN library feeds."""
-    steam = await fetch_library()
-    epic = await sync_epic()
-    gog = await sync_gog()
-    nintendo = await sync_nintendo()
-    psn = await sync_psn()
-    return {
-        "steam": steam,
-        "epic": epic,
-        "gog": gog,
-        "nintendo": nintendo,
-        "psn": psn,
+async def refresh_library(platforms: list[str] | None = None) -> dict:
+    """
+    Re-sync game library. Defaults to all configured platforms.
+    platforms: optional subset, e.g. ["steam", "epic"]. If omitted, syncs all.
+    """
+    _ALL = {"steam", "epic", "gog", "nintendo", "ps5"}
+    targets = set(platforms) if platforms else _ALL
+
+    results: dict = {}
+
+    if "steam" in targets:
+        results["steam"] = await fetch_library()
+
+    platform_syncs = {
+        "epic":     sync_epic,
+        "gog":      sync_gog,
+        "nintendo": sync_nintendo,
+        "ps5":      sync_psn,
     }
+
+    for name, fn in platform_syncs.items():
+        if name not in targets:
+            continue
+        try:
+            results[name] = await fn()
+        except Exception as exc:
+            results[name] = {"error": str(exc)}
+
+    return results
 
 
 async def set_nintendo_session(cookies: str) -> dict:
