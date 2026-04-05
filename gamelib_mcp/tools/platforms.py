@@ -1,7 +1,21 @@
 """get_platform_breakdown, sync_platform, add_game_to_platform, and set_hardware_preference tools."""
 
+import importlib
 import json
 from ..data.db import get_db, set_meta, upsert_game, upsert_game_platform, upsert_game_platform_identifier
+from .library import _resolve_platform
+
+_PLATFORM_MAP = {
+    "steam":    ("gamelib_mcp.data.steam_xml", "fetch_library"),
+    "epic":     ("gamelib_mcp.data.epic",       "sync_epic"),
+    "gog":      ("gamelib_mcp.data.gog",        "sync_gog"),
+    "nintendo": ("gamelib_mcp.data.nintendo",   "sync_nintendo"),
+    "switch":   ("gamelib_mcp.data.nintendo",   "sync_nintendo"),
+    "switch2":  ("gamelib_mcp.data.nintendo",   "sync_nintendo"),
+    "ps5":      ("gamelib_mcp.data.psn",        "sync_psn"),
+}
+
+_VALID_PLATFORMS = {"steam", "epic", "gog", "nintendo", "switch", "switch2", "ps5", "itchio", "xbox", "other"}
 
 
 async def get_platform_breakdown() -> dict:
@@ -18,7 +32,9 @@ async def get_platform_breakdown() -> dict:
                ORDER BY count DESC"""
         )
 
-        total = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
+        total = await db.execute_fetchone(
+            "SELECT COUNT(DISTINCT game_id) AS c FROM game_platforms WHERE owned = 1"
+        )
 
         overlap_rows = await db.execute_fetchall(
             """SELECT g.name, g.id AS game_id,
@@ -52,23 +68,13 @@ async def get_platform_breakdown() -> dict:
 async def sync_platform(platform: str) -> dict:
     """
     Sync a single platform on demand.
-    platform: steam | epic | gog | nintendo | ps5
+    platform: steam | epic | gog | nintendo | switch | switch2 | ps5
 
     Credential handling is left to each sync module (default config paths,
     cookie fallback, etc.) — this tool does not gate on env vars.
     """
-    import importlib
-
-    _PLATFORM_MAP = {
-        "steam":    ("gamelib_mcp.data.steam_xml", "fetch_library"),
-        "epic":     ("gamelib_mcp.data.epic",       "sync_epic"),
-        "gog":      ("gamelib_mcp.data.gog",        "sync_gog"),
-        "nintendo": ("gamelib_mcp.data.nintendo",   "sync_nintendo"),
-        "ps5":      ("gamelib_mcp.data.psn",        "sync_psn"),
-    }
-
     if platform not in _PLATFORM_MAP:
-        return {"error": f"Unknown platform '{platform}'. Valid: {list(_PLATFORM_MAP)}"}
+        return {"error": f"Unknown platform '{platform}'. Valid: {sorted(set(_PLATFORM_MAP))}"}
 
     module_path, fn_name = _PLATFORM_MAP[platform]
     try:
@@ -109,6 +115,20 @@ async def add_game_to_platform(
     identifier_value: Optional store identifier value
     playtime_minutes: Optional known playtime in minutes
     """
+    if platform not in _VALID_PLATFORMS:
+        return {"error": f"Unknown platform '{platform}'. Valid: {sorted(_VALID_PLATFORMS)}"}
+
+    # Normalize aliases (e.g. "nintendo" → "switch2") to match auto-synced data
+    platform = _resolve_platform(platform) or platform
+
+    # Check whether the game already exists before upserting
+    async with get_db() as db:
+        existing = await db.execute_fetchone(
+            "SELECT id FROM games WHERE lower(name) = lower(?) ORDER BY id LIMIT 1",
+            (name,),
+        )
+    created = existing is None
+
     game_id = await upsert_game(None, name)
     game_platform_id = await upsert_game_platform(
         game_id,
@@ -129,6 +149,7 @@ async def add_game_to_platform(
 
     return {
         "success": True,
+        "created": created,
         "game_id": game_id,
         "game_platform_id": game_platform_id,
         "name": name,

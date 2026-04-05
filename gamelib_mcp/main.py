@@ -20,12 +20,19 @@ MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "")
 @asynccontextmanager
 async def lifespan(app):
     """Startup: init DB, sync library if stale, kick off HLTB pre-warm."""
-    from .data.db import init_db, get_meta
+    from .data.db import init_db, get_meta, set_meta
     from .data.steam_xml import fetch_library, STALE_HOURS
     from .data.enrich_bg import background_enrich
 
     await init_db()
     logger.info("Database initialized")
+
+    # Seed hardware preference from env if not yet set
+    hw_pref_env = os.getenv("HARDWARE_PREFERENCE")
+    if hw_pref_env and not await get_meta("hardware_preference"):
+        import json
+        await set_meta("hardware_preference", json.dumps(hw_pref_env.split(",")))
+        logger.info("Seeded hardware_preference from HARDWARE_PREFERENCE env var")
 
     # Refresh library if stale or missing
     last_sync = await get_meta("library_synced_at")

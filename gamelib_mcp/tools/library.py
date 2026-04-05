@@ -174,14 +174,16 @@ async def get_library_stats(
         )
         summary = await db.execute_fetchone(
             _GAME_ROLLUP_CTE
-            + """
+            + f"""
             SELECT COUNT(*) AS total_games,
                    SUM(CASE WHEN total_playtime_minutes > 0 AND is_farmed = 0 THEN 1 ELSE 0 END) AS played,
                    SUM(CASE WHEN total_playtime_minutes = 0 OR is_farmed = 1 THEN 1 ELSE 0 END) AS unplayed,
                    SUM(CASE WHEN is_farmed = 1 THEN 1 ELSE 0 END) AS farmed_games,
                    SUM(total_playtime_minutes) AS total_minutes
             FROM game_rollup
-            """
+            {where}
+            """,
+            tuple(params),
         )
 
     return {

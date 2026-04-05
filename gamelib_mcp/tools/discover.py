@@ -1,6 +1,7 @@
 """find_games_by_vibe and get_recommendations tools."""
 
-from ..data.db import STEAM_APP_ID, get_db, load_platforms_for_games
+import json
+from ..data.db import STEAM_APP_ID, get_db, get_meta, load_platforms_for_games
 from ..data.protondb import TIER_ORDER
 from ..utils import _parse_json
 
@@ -114,7 +115,9 @@ async def find_games_by_vibe(
             (*params, limit),
         )
 
-    return await _format_rows(rows, include_match_score=False)
+    hw_pref_raw = await get_meta("hardware_preference")
+    hw_pref: list[str] = json.loads(hw_pref_raw) if hw_pref_raw else []
+    return await _format_rows(rows, include_match_score=False, hw_pref=hw_pref)
 
 
 async def get_recommendations(
@@ -127,11 +130,8 @@ async def get_recommendations(
     Returns games sorted by how well they match your taste profile.
     Each result includes suggested_platform based on your hardware_preference setting.
     """
-    import json as _json
-    from ..data.db import get_meta
-
     hw_pref_raw = await get_meta("hardware_preference")
-    hw_pref: list[str] = _json.loads(hw_pref_raw) if hw_pref_raw else []
+    hw_pref: list[str] = json.loads(hw_pref_raw) if hw_pref_raw else []
 
     conditions = ["tags IS NOT NULL"]
     params: list = []
@@ -184,12 +184,12 @@ async def _format_rows(
             "protondb_tier": row["protondb_tier"],
             "tags": _parse_json(row["tags"]),
         }
+        pref = hw_pref or []
+        game["suggested_platform"] = next(
+            (hw for hw in pref if hw in owned_platforms),
+            owned_platforms[0] if owned_platforms else None,
+        )
         if include_match_score:
             game["match_score"] = round(row["match_score"], 3) if row["match_score"] else 0
-            pref = hw_pref or []
-            game["suggested_platform"] = next(
-                (hw for hw in pref if hw in owned_platforms),
-                owned_platforms[0] if owned_platforms else None,
-            )
         formatted.append(game)
     return formatted
