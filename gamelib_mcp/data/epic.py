@@ -21,12 +21,12 @@ import httpx
 
 from gamelib_mcp.data.db import (
     EPIC_ARTIFACT_ID,
-    find_game_by_name_fuzzy,
     load_fuzzy_candidates,
-    upsert_game,
     upsert_game_platform,
+    upsert_game_platform_enrichment,
     upsert_game_platform_identifier,
 )
+from gamelib_mcp.data.igdb import resolve_and_link_game, PLATFORM_TO_IGDB
 
 logger = logging.getLogger(__name__)
 
@@ -263,12 +263,11 @@ async def sync_epic() -> dict:
             skipped += 1
             continue
 
-        existing = await find_game_by_name_fuzzy(title, candidates=candidates)
-        if existing:
-            game_id = existing["id"]
+        igdb_platform_id = PLATFORM_TO_IGDB.get("epic")
+        game_id, igdb_game = await resolve_and_link_game(title, igdb_platform_id, candidates)
+        if game_id in candidates:
             matched += 1
         else:
-            game_id = await upsert_game(appid=None, name=title)
             candidates[game_id] = title
             added += 1
 
@@ -280,6 +279,13 @@ async def sync_epic() -> dict:
             playtime_minutes=playtime_by_artifact.get(artifact_id) if artifact_id else None,
             owned=1,
         )
+
+        if igdb_game is not None and igdb_platform_id in igdb_game.platform_release_dates:
+            await upsert_game_platform_enrichment(
+                platform_id,
+                platform_release_date=igdb_game.platform_release_dates[igdb_platform_id],
+            )
+
         if artifact_id:
             await upsert_game_platform_identifier(platform_id, EPIC_ARTIFACT_ID, artifact_id)
 

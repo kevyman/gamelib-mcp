@@ -21,11 +21,11 @@ import shutil
 from pathlib import Path
 
 from gamelib_mcp.data.db import (
-    find_game_by_name_fuzzy,
     load_fuzzy_candidates,
-    upsert_game,
     upsert_game_platform,
+    upsert_game_platform_enrichment,
 )
+from gamelib_mcp.data.igdb import resolve_and_link_game, PLATFORM_TO_IGDB
 
 logger = logging.getLogger(__name__)
 
@@ -133,21 +133,26 @@ async def sync_gog() -> dict:
     candidates = await load_fuzzy_candidates()
 
     for title in titles:
-        existing = await find_game_by_name_fuzzy(title, candidates=candidates)
-        if existing:
-            game_id = existing["id"]
+        igdb_platform_id = PLATFORM_TO_IGDB.get("gog")
+        game_id, igdb_game = await resolve_and_link_game(title, igdb_platform_id, candidates)
+        if game_id in candidates:
             matched += 1
         else:
-            game_id = await upsert_game(appid=None, name=title)
             candidates[game_id] = title
             added += 1
 
-        await upsert_game_platform(
+        platform_id = await upsert_game_platform(
             game_id=game_id,
             platform="gog",
             playtime_minutes=None,
             owned=1,
         )
+
+        if igdb_game is not None and igdb_platform_id in igdb_game.platform_release_dates:
+            await upsert_game_platform_enrichment(
+                platform_id,
+                platform_release_date=igdb_game.platform_release_dates[igdb_platform_id],
+            )
 
     logger.info("GOG sync: added=%d matched=%d skipped=%d", added, matched, skipped)
     return {"added": added, "matched": matched, "skipped": skipped}

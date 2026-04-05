@@ -35,7 +35,7 @@ STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass
@@ -254,6 +254,103 @@ _V2_SCHEMA_DDL = """
 """
 
 
+_V3_SCHEMA_DDL = """
+    CREATE TABLE IF NOT EXISTS games (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        igdb_id          INTEGER UNIQUE,
+        name             TEXT NOT NULL,
+        sort_name        TEXT,
+        release_date     TEXT,
+        genres           TEXT,
+        tags             TEXT,
+        short_description TEXT,
+        hltb_main        REAL,
+        hltb_extra       REAL,
+        hltb_complete    REAL,
+        hltb_cached_at   TEXT,
+        igdb_cached_at   TEXT,
+        is_farmed        INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS game_platforms (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id          INTEGER NOT NULL REFERENCES games(id),
+        platform         TEXT NOT NULL,
+        owned            INTEGER NOT NULL DEFAULT 1,
+        playtime_minutes INTEGER,
+        playtime_2weeks_minutes INTEGER,
+        last_synced      TEXT,
+        UNIQUE(game_id, platform)
+    );
+
+    CREATE TABLE IF NOT EXISTS game_platform_identifiers (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_platform_id INTEGER NOT NULL REFERENCES game_platforms(id) ON DELETE CASCADE,
+        identifier_type  TEXT NOT NULL,
+        identifier_value TEXT NOT NULL,
+        is_primary       INTEGER NOT NULL DEFAULT 1,
+        last_seen_at     TEXT,
+        UNIQUE(identifier_type, identifier_value)
+    );
+
+    CREATE TABLE IF NOT EXISTS steam_platform_data (
+        game_platform_id    INTEGER PRIMARY KEY REFERENCES game_platforms(id) ON DELETE CASCADE,
+        steam_review_score  INTEGER,
+        steam_review_desc   TEXT,
+        protondb_tier       TEXT,
+        store_cached_at     TEXT,
+        protondb_cached_at  TEXT,
+        steamspy_cached_at  TEXT,
+        rtime_last_played   INTEGER,
+        library_updated_at  TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS game_platform_enrichment (
+        game_platform_id      INTEGER PRIMARY KEY REFERENCES game_platforms(id) ON DELETE CASCADE,
+        platform_release_date TEXT,
+        metacritic_score      INTEGER,
+        metacritic_url        TEXT,
+        opencritic_id         INTEGER,
+        opencritic_score      INTEGER,
+        opencritic_tier       TEXT,
+        opencritic_percent_rec REAL,
+        metacritic_cached_at  TEXT,
+        opencritic_cached_at  TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS ratings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id INTEGER REFERENCES games(id),
+        source TEXT NOT NULL,
+        raw_score REAL,
+        normalized_score REAL,
+        review_text TEXT,
+        synced_at TEXT NOT NULL,
+        UNIQUE(game_id, source)
+    );
+
+    CREATE TABLE IF NOT EXISTS tag_affinity (
+        tag TEXT PRIMARY KEY,
+        affinity_score REAL,
+        avg_score REAL,
+        game_count INTEGER,
+        updated_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_game_platforms_game_id ON game_platforms(game_id);
+    CREATE INDEX IF NOT EXISTS idx_game_platforms_platform ON game_platforms(platform);
+    CREATE INDEX IF NOT EXISTS idx_game_platform_identifiers_platform_id
+        ON game_platform_identifiers(game_platform_id);
+    CREATE INDEX IF NOT EXISTS idx_game_platform_identifiers_lookup
+        ON game_platform_identifiers(identifier_type, identifier_value);
+"""
+
+
 async def _table_names(db: aiosqlite.Connection) -> set[str]:
     rows = await db.execute_fetchall("SELECT name FROM sqlite_master WHERE type='table'")
     return {row[0] for row in rows}
@@ -281,6 +378,9 @@ async def _detect_schema_state(db: aiosqlite.Connection) -> str:
     game_cols = await _table_columns(db, "games")
     if "id" not in game_cols:
         return "legacy"
+
+    if "game_platform_enrichment" in tables and "metacritic_score" not in game_cols:
+        return "v3"
 
     if {
         "game_platform_identifiers",
@@ -602,6 +702,77 @@ async def _migrate_v1_to_v2(db: aiosqlite.Connection, progress: _Progress | None
     await db.execute("PRAGMA foreign_keys=ON")
 
 
+async def _migrate_v2_to_v3(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    if progress is not None:
+        progress("Migrating to v3: platform-specific enrichment schema.")
+
+    await db.execute("PRAGMA foreign_keys=OFF")
+    db.row_factory = aiosqlite.Row
+
+    # 1. Create game_platform_enrichment table
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS game_platform_enrichment (
+            game_platform_id      INTEGER PRIMARY KEY REFERENCES game_platforms(id) ON DELETE CASCADE,
+            platform_release_date TEXT,
+            metacritic_score      INTEGER,
+            metacritic_url        TEXT,
+            opencritic_id         INTEGER,
+            opencritic_score      INTEGER,
+            opencritic_tier       TEXT,
+            opencritic_percent_rec REAL,
+            metacritic_cached_at  TEXT,
+            opencritic_cached_at  TEXT
+        )
+    """)
+
+    # 2. Migrate metacritic_score from games → game_platform_enrichment (Steam rows only)
+    game_cols = await _table_columns(db, "games")
+    if "metacritic_score" in game_cols:
+        await db.execute(
+            """INSERT OR IGNORE INTO game_platform_enrichment (game_platform_id, metacritic_score)
+               SELECT gp.id, g.metacritic_score
+               FROM games g
+               JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = ?
+               WHERE g.metacritic_score IS NOT NULL""",
+            (STEAM_PLATFORM,),
+        )
+
+    # 3. Rebuild games table: drop metacritic_score, opencritic_score; add igdb_cached_at
+    await db.execute("ALTER TABLE games RENAME TO games_v2_old")
+    await db.execute("""
+        CREATE TABLE games (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            igdb_id          INTEGER UNIQUE,
+            name             TEXT NOT NULL,
+            sort_name        TEXT,
+            release_date     TEXT,
+            genres           TEXT,
+            tags             TEXT,
+            short_description TEXT,
+            hltb_main        REAL,
+            hltb_extra       REAL,
+            hltb_complete    REAL,
+            hltb_cached_at   TEXT,
+            igdb_cached_at   TEXT,
+            is_farmed        INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+
+    old_cols = await _table_columns(db, "games_v2_old")
+    keep = [c for c in [
+        "id", "igdb_id", "name", "sort_name", "release_date",
+        "genres", "tags", "short_description",
+        "hltb_main", "hltb_extra", "hltb_complete", "hltb_cached_at", "is_farmed",
+    ] if c in old_cols]
+    cols_sql = ", ".join(keep)
+    await db.execute(f"INSERT INTO games ({cols_sql}) SELECT {cols_sql} FROM games_v2_old")
+    await db.execute("DROP TABLE IF EXISTS games_v2_old")
+
+    await _set_user_version(db, 3)
+    await db.commit()
+    await db.execute("PRAGMA foreign_keys=ON")
+
+
 async def _run_migrations(
     db: aiosqlite.Connection,
     progress: _Progress | None = None,
@@ -612,10 +783,10 @@ async def _run_migrations(
     applied_steps: list[str] = []
 
     if detected_state == "fresh":
-        await db.executescript(_V2_SCHEMA_DDL)
+        await db.executescript(_V3_SCHEMA_DDL)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
-        _emit(progress, "Initialized fresh database at schema v2.", applied_steps)
+        _emit(progress, "Initialized fresh database at schema v3.", applied_steps)
         return MigrationResult(
             initial_version=initial_version,
             final_version=SCHEMA_VERSION,
@@ -638,13 +809,23 @@ async def _run_migrations(
             await db.commit()
             version = 2
             _emit(progress, "Recorded existing schema as v2.", applied_steps)
+        elif detected_state == "v3":
+            await _set_user_version(db, 3)
+            await db.commit()
+            version = 3
+            _emit(progress, "Recorded existing schema as v3.", applied_steps)
 
     if version == 1:
         _emit(progress, "Applying migration step v1 -> v2.", applied_steps)
         await _migrate_v1_to_v2(db, progress=None)
         version = 2
 
-    await db.executescript(_V2_SCHEMA_DDL)
+    if version == 2:
+        _emit(progress, "Applying migration step v2 -> v3.", applied_steps)
+        await _migrate_v2_to_v3(db, progress=None)
+        version = 3
+
+    await db.executescript(_V3_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
@@ -801,6 +982,13 @@ async def get_game_by_appid(appid: int) -> aiosqlite.Row | None:
     return await get_game_by_identifier(STEAM_APP_ID, str(appid))
 
 
+async def get_game_by_igdb_id(igdb_id: int) -> aiosqlite.Row | None:
+    async with get_db() as db:
+        return await db.execute_fetchone(
+            "SELECT * FROM games WHERE igdb_id = ?", (igdb_id,)
+        )
+
+
 async def get_game_by_name_exact(name: str) -> aiosqlite.Row | None:
     async with get_db() as db:
         return await db.execute_fetchone(
@@ -842,7 +1030,7 @@ async def get_steam_platform_row_by_appid(appid: int) -> aiosqlite.Row | None:
                       g.genres,
                       g.tags,
                       g.short_description,
-                      g.metacritic_score,
+                      g.release_date,
                       g.hltb_main,
                       g.hltb_extra,
                       g.hltb_complete,
@@ -855,11 +1043,18 @@ async def get_steam_platform_row_by_appid(appid: int) -> aiosqlite.Row | None:
                       spd.protondb_cached_at,
                       spd.steamspy_cached_at,
                       spd.rtime_last_played,
-                      spd.library_updated_at
+                      spd.library_updated_at,
+                      gpe.metacritic_score,
+                      gpe.metacritic_url,
+                      gpe.opencritic_score,
+                      gpe.opencritic_tier,
+                      gpe.opencritic_percent_rec,
+                      gpe.platform_release_date
                FROM game_platform_identifiers gpi
                JOIN game_platforms gp ON gp.id = gpi.game_platform_id
                JOIN games g ON g.id = gp.game_id
                LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
+               LEFT JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
                WHERE gpi.identifier_type = ? AND gpi.identifier_value = ?
                LIMIT 1""",
             (STEAM_APP_ID, str(appid)),
@@ -978,6 +1173,22 @@ async def upsert_steam_platform_data(game_platform_id: int, **fields) -> None:
         await db.commit()
 
 
+async def upsert_game_platform_enrichment(game_platform_id: int, **fields) -> None:
+    if not fields:
+        return
+    columns = ", ".join(["game_platform_id", *fields.keys()])
+    placeholders = ", ".join("?" for _ in range(len(fields) + 1))
+    updates = ", ".join(f"{column} = excluded.{column}" for column in fields)
+    async with get_db() as db:
+        await db.execute(
+            f"""INSERT INTO game_platform_enrichment ({columns})
+                VALUES ({placeholders})
+                ON CONFLICT(game_platform_id) DO UPDATE SET {updates}""",
+            (game_platform_id, *fields.values()),
+        )
+        await db.commit()
+
+
 async def load_fuzzy_candidates() -> dict[int, str]:
     """Load all game id->name pairs for use with find_game_by_name_fuzzy."""
     async with get_db() as db:
@@ -1024,6 +1235,12 @@ def _platform_dict(row: aiosqlite.Row) -> dict:
         "last_synced": row["last_synced"],
         "identifiers": {},
         "provider_data": {},
+        "platform_release_date": row["platform_release_date"],
+        "metacritic_score": row["metacritic_score"],
+        "metacritic_url": row["metacritic_url"],
+        "opencritic_score": row["opencritic_score"],
+        "opencritic_tier": row["opencritic_tier"],
+        "opencritic_percent_rec": row["opencritic_percent_rec"],
     }
 
     if row["platform"] == STEAM_PLATFORM:
@@ -1066,10 +1283,17 @@ async def load_platforms_for_games(game_ids: Iterable[int]) -> dict[int, list[di
                        spd.steam_review_desc,
                        spd.protondb_tier,
                        spd.rtime_last_played,
-                       spd.library_updated_at
+                       spd.library_updated_at,
+                       gpe.platform_release_date,
+                       gpe.metacritic_score,
+                       gpe.metacritic_url,
+                       gpe.opencritic_score,
+                       gpe.opencritic_tier,
+                       gpe.opencritic_percent_rec
                 FROM game_platforms gp
                 LEFT JOIN game_platform_identifiers gpi ON gpi.game_platform_id = gp.id
                 LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
+                LEFT JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
                 WHERE gp.game_id IN ({placeholders})
                 ORDER BY gp.game_id, gp.platform, gp.id, gpi.is_primary DESC, gpi.identifier_type""",
             ids,
