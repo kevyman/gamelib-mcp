@@ -110,50 +110,60 @@ class SyncGogSyncTests(unittest.TestCase):
         mock_proc.communicate = AsyncMock(return_value=(stdout, b""))
         return mock_proc
 
-    def _run_sync(self, stdout: bytes, find_result, upsert_game_return=42, platform_id=99):
+    def _run_sync(self, stdout: bytes, resolve_result, candidates=None, platform_id=99):
         proc = self._make_proc(stdout)
+        if candidates is None:
+            candidates = {}
 
-        mock_find = AsyncMock(return_value=find_result)
-        mock_upsert_game = AsyncMock(return_value=upsert_game_return)
+        mock_resolve = AsyncMock(return_value=resolve_result)
         mock_upsert_platform = AsyncMock(return_value=platform_id)
-        mock_load_candidates = AsyncMock(return_value={})
+        mock_load_candidates = AsyncMock(return_value=dict(candidates))
 
         with (
             patch("gamelib_mcp.data.gog.shutil.which", return_value="/usr/bin/lgogdownloader"),
             patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": "/config/lgogdownloader"}, clear=False),
             patch("pathlib.Path.exists", return_value=True),
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
-            patch("gamelib_mcp.data.gog.find_game_by_name_fuzzy", mock_find),
-            patch("gamelib_mcp.data.gog.upsert_game", mock_upsert_game),
+            patch("gamelib_mcp.data.gog.resolve_and_link_game", mock_resolve),
             patch("gamelib_mcp.data.gog.upsert_game_platform", mock_upsert_platform),
             patch("gamelib_mcp.data.gog.load_fuzzy_candidates", mock_load_candidates),
         ):
             result = asyncio.run(gog.sync_gog())
 
-        return result, mock_upsert_game, mock_upsert_platform
+        return result, mock_resolve, mock_upsert_platform
 
     def test_matched_game_increments_matched(self) -> None:
-        existing_game = {"id": 7, "name": "Cyberpunk 2077"}
-        result, mock_upsert_game, _ = self._run_sync(b"cyberpunk_2077\n", find_result=existing_game)
+        result, mock_resolve, _ = self._run_sync(
+            b"cyberpunk_2077\n",
+            resolve_result=(7, None),
+            candidates={7: "Cyberpunk 2077"},
+        )
         self.assertEqual(result["matched"], 1)
         self.assertEqual(result["added"], 0)
-        mock_upsert_game.assert_not_called()
+        mock_resolve.assert_awaited_once()
 
     def test_unmatched_game_increments_added(self) -> None:
-        result, mock_upsert_game, _ = self._run_sync(b"some_indie_game\n", find_result=None)
+        result, mock_resolve, _ = self._run_sync(
+            b"some_indie_game\n",
+            resolve_result=(42, None),
+            candidates={},
+        )
         self.assertEqual(result["added"], 1)
         self.assertEqual(result["matched"], 0)
-        mock_upsert_game.assert_called_once()
+        mock_resolve.assert_awaited_once()
 
     def test_upsert_game_platform_called_with_none_playtime(self) -> None:
-        _, _, mock_upsert_platform = self._run_sync(b"some_indie_game\n", find_result=None)
+        _, _, mock_upsert_platform = self._run_sync(
+            b"some_indie_game\n",
+            resolve_result=(42, None),
+            candidates={},
+        )
         call_kwargs = mock_upsert_platform.call_args
         self.assertIsNone(call_kwargs.kwargs.get("playtime_minutes"))
 
-    def test_ansi_stripped_before_fuzzy_match(self) -> None:
-        """Verify ANSI codes don't pollute the title passed to find_game_by_name_fuzzy."""
-        existing_game = {"id": 5}
-        mock_find = AsyncMock(return_value=existing_game)
+    def test_ansi_stripped_before_resolve(self) -> None:
+        """Verify ANSI codes don't pollute the title passed to resolve_and_link_game."""
+        mock_resolve = AsyncMock(return_value=(5, None))
 
         proc = self._make_proc(b"\x1b[01;34mcyberpunk_2077 [1]\x1b[0m\n")
 
@@ -162,13 +172,17 @@ class SyncGogSyncTests(unittest.TestCase):
             patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": "/config/lgogdownloader"}, clear=False),
             patch("pathlib.Path.exists", return_value=True),
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
-            patch("gamelib_mcp.data.gog.find_game_by_name_fuzzy", mock_find),
+            patch("gamelib_mcp.data.gog.resolve_and_link_game", mock_resolve),
             patch("gamelib_mcp.data.gog.upsert_game_platform", AsyncMock(return_value=1)),
-            patch("gamelib_mcp.data.gog.load_fuzzy_candidates", AsyncMock(return_value={})),
+            patch("gamelib_mcp.data.gog.load_fuzzy_candidates", AsyncMock(return_value={5: "Cyberpunk 2077"})),
         ):
             asyncio.run(gog.sync_gog())
 
-        mock_find.assert_called_once_with("Cyberpunk 2077", candidates={})
+        mock_resolve.assert_awaited_once_with(
+            "Cyberpunk 2077",
+            gog.PLATFORM_TO_IGDB.get("gog"),
+            {5: "Cyberpunk 2077"},
+        )
 
 
 if __name__ == "__main__":
