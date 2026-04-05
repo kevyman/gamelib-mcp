@@ -3,11 +3,13 @@
 import asyncio
 import logging
 
-from .db import STEAM_APP_ID, get_db
+from .db import STEAM_APP_ID, get_db, upsert_game_platform_enrichment
 from .steam_store import enrich_game
 from .hltb import get_hltb
 from .protondb import get_protondb
 from .steamspy import enrich_steamspy
+from .opencritic import enrich_opencritic
+from .metacritic import enrich_metacritic
 
 logger = logging.getLogger(__name__)
 
@@ -16,16 +18,13 @@ _STORE_DELAY = 1.5      # seconds between Steam Store API calls (rate-limited)
 _HLTB_DELAY = 1.0       # seconds between HLTB batches
 _PROTON_DELAY = 0.5     # ProtonDB is generous
 _STEAMSPY_DELAY = 1.0   # SteamSpy rate limit
+_OPENCRITIC_DELAY = 1.0  # seconds; public API, no key required
+_METACRITIC_DELAY = 2.0  # scraping — be polite
 _BATCH_SIZE = 3
 
 
 async def background_enrich() -> None:
-    """Enrich all games that are missing store data, then HLTB + ProtonDB.
-
-    Runs quietly in the background after startup. Prioritises played games
-    (more likely to appear in recommendations / searches) then unplayed.
-    Stores a checkpoint so restarts resume where they left off.
-    """
+    """Run all enrichment phases: store, HLTB, ProtonDB, SteamSpy, OpenCritic, Metacritic."""
     logger.info("Background enrichment started")
 
     # Phase 1: Steam Store (tags, genres, metacritic, review score)
@@ -44,8 +43,16 @@ async def background_enrich() -> None:
     steamspy_count = await _enrich_steamspy()
     logger.info("Background enrichment — SteamSpy phase done: %d games enriched", steamspy_count)
 
-    logger.info("Background enrichment complete — store=%d hltb=%d protondb=%d steamspy=%d",
-                store_count, hltb_count, proton_count, steamspy_count)
+    opencritic_count = await _enrich_opencritic()
+    logger.info("Background enrichment — OpenCritic phase done: %d rows enriched", opencritic_count)
+
+    metacritic_count = await _enrich_metacritic()
+    logger.info("Background enrichment — Metacritic phase done: %d rows enriched", metacritic_count)
+
+    logger.info(
+        "Background enrichment complete — store=%d hltb=%d protondb=%d steamspy=%d opencritic=%d metacritic=%d",
+        store_count, hltb_count, proton_count, steamspy_count, opencritic_count, metacritic_count,
+    )
 
 
 async def _enrich_store() -> int:
@@ -177,4 +184,80 @@ async def _enrich_steamspy() -> int:
             except Exception as e:
                 logger.debug("SteamSpy enrich failed for %s: %s", row["name"], e)
             await asyncio.sleep(_STEAMSPY_DELAY)
+    return count
+
+
+async def _enrich_opencritic() -> int:
+    """Fetch OpenCritic scores for all platform rows missing opencritic data."""
+    count = 0
+    while True:
+        async with get_db() as db:
+            rows = await db.execute_fetchall(
+                """SELECT gp.id AS game_platform_id, g.name
+                   FROM game_platforms gp
+                   JOIN games g ON g.id = gp.game_id
+                   LEFT JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
+                   WHERE (gpe.opencritic_cached_at IS NULL)
+                     AND g.is_farmed = 0
+                   ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
+                   LIMIT 50"""
+            )
+
+        if not rows:
+            break
+
+        for row in rows:
+            try:
+                await enrich_opencritic(row["game_platform_id"], row["name"])
+                count += 1
+            except Exception as e:
+                logger.debug("OpenCritic enrich failed for %s: %s", row["name"], e)
+                try:
+                    await upsert_game_platform_enrichment(
+                        row["game_platform_id"], opencritic_cached_at="FAILED"
+                    )
+                except Exception:
+                    pass
+            await asyncio.sleep(_OPENCRITIC_DELAY)
+
+    return count
+
+
+async def _enrich_metacritic() -> int:
+    """Scrape Metacritic scores for all platform rows missing metacritic data."""
+    count = 0
+    while True:
+        async with get_db() as db:
+            rows = await db.execute_fetchall(
+                """SELECT gp.id AS game_platform_id, gp.platform, g.name
+                   FROM game_platforms gp
+                   JOIN games g ON g.id = gp.game_id
+                   LEFT JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
+                   WHERE (gpe.metacritic_cached_at IS NULL)
+                     AND g.is_farmed = 0
+                   ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
+                   LIMIT 50"""
+            )
+
+        if not rows:
+            break
+
+        for row in rows:
+            try:
+                await enrich_metacritic(
+                    row["game_platform_id"],
+                    row["name"],
+                    row["platform"],
+                )
+                count += 1
+            except Exception as e:
+                logger.debug("Metacritic enrich failed for %s: %s", row["name"], e)
+                try:
+                    await upsert_game_platform_enrichment(
+                        row["game_platform_id"], metacritic_cached_at="FAILED"
+                    )
+                except Exception:
+                    pass
+            await asyncio.sleep(_METACRITIC_DELAY)
+
     return count
