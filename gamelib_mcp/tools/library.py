@@ -41,19 +41,27 @@ WITH game_rollup AS (
 """
 
 
-async def search_games(query: str, limit: int = 20) -> list[dict]:
-    """Find games in the library by name substring match."""
+async def search_games(query: str, limit: int = 20, platform: str | None = None) -> list[dict]:
+    """Find games in the library by name substring match, optionally filtered by platform."""
+    conditions = ["lower(name) LIKE lower(?)"]
+    params: list = [f"%{query}%"]
+    if platform:
+        conditions.append(
+            "game_id IN (SELECT game_id FROM game_platforms WHERE platform = ? AND owned = 1)"
+        )
+        params.append(platform)
+    where = " AND ".join(conditions)
     async with get_db() as db:
         rows = await db.execute_fetchall(
             _GAME_ROLLUP_CTE
-            + """
+            + f"""
             SELECT *
             FROM game_rollup
-            WHERE lower(name) LIKE lower(?)
+            WHERE {where}
             ORDER BY total_playtime_minutes DESC, name ASC
             LIMIT ?
             """,
-            (f"%{query}%", limit),
+            (*params, limit),
         )
     return await _format_rows(rows)
 
@@ -88,12 +96,14 @@ async def get_library_stats(
     protondb_tier: str | None = None,
     sort_by: str = "playtime",
     limit: int = 50,
+    platform: str | None = None,
 ) -> dict:
     """
     Return filtered/sorted game list plus aggregate stats.
 
     filter: all | unplayed | played | recent | farmed
     sort_by: playtime | name | metacritic | hltb
+    platform: steam | epic | gog | ps5 | switch (optional — filter to games owned on that platform)
     """
     conditions = []
     params: list = []
@@ -124,6 +134,12 @@ async def get_library_stats(
         placeholders = ",".join("?" * len(allowed))
         conditions.append(f"lower(COALESCE(protondb_tier, '')) IN ({placeholders})")
         params.extend(allowed)
+
+    if platform:
+        conditions.append(
+            "game_id IN (SELECT game_id FROM game_platforms WHERE platform = ? AND owned = 1)"
+        )
+        params.append(platform)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     sort_col = SORT_COLUMNS.get(sort_by, "total_playtime_minutes")

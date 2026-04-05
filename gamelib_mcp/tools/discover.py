@@ -125,7 +125,14 @@ async def get_recommendations(
     """
     Rank unplayed games by tag affinity score (from sync_ratings).
     Returns games sorted by how well they match your taste profile.
+    Each result includes suggested_platform based on your hardware_preference setting.
     """
+    import json as _json
+    from ..data.db import get_meta
+
+    hw_pref_raw = await get_meta("hardware_preference")
+    hw_pref: list[str] = _json.loads(hw_pref_raw) if hw_pref_raw else []
+
     conditions = ["tags IS NOT NULL"]
     params: list = []
 
@@ -155,13 +162,16 @@ async def get_recommendations(
             (*params, limit),
         )
 
-    return await _format_rows(rows, include_match_score=True)
+    return await _format_rows(rows, include_match_score=True, hw_pref=hw_pref)
 
 
-async def _format_rows(rows, include_match_score: bool) -> list[dict]:
+async def _format_rows(
+    rows, include_match_score: bool, hw_pref: list[str] | None = None
+) -> list[dict]:
     platforms_by_game = await load_platforms_for_games(row["game_id"] for row in rows)
     formatted = []
     for row in rows:
+        owned_platforms = [p["platform"] for p in platforms_by_game.get(row["game_id"], []) if p["owned"]]
         game = {
             "game_id": row["game_id"],
             "appid": row["steam_appid"],
@@ -176,5 +186,10 @@ async def _format_rows(rows, include_match_score: bool) -> list[dict]:
         }
         if include_match_score:
             game["match_score"] = round(row["match_score"], 3) if row["match_score"] else 0
+            pref = hw_pref or []
+            game["suggested_platform"] = next(
+                (hw for hw in pref if hw in owned_platforms),
+                owned_platforms[0] if owned_platforms else None,
+            )
         formatted.append(game)
     return formatted

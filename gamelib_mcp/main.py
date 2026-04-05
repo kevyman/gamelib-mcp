@@ -71,10 +71,10 @@ mcp = FastMCP(
 # ── Tools ──────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-async def search_games(query: str, limit: int = 20) -> list[dict]:
-    """Find games in the library by name substring."""
+async def search_games(query: str, limit: int = 20, platform: str | None = None) -> list[dict]:
+    """Find games in the library by name substring. platform: steam|epic|gog|nintendo|ps5"""
     from .tools.library import search_games as _search
-    return await _search(query, limit)
+    return await _search(query, limit, platform)
 
 
 @mcp.tool()
@@ -96,6 +96,7 @@ async def get_library_stats(
     protondb_tier: str | None = None,
     sort_by: str = "playtime",
     limit: int = 50,
+    platform: str | None = None,
 ) -> dict:
     """
     Get filtered/sorted library list plus aggregate stats.
@@ -103,9 +104,10 @@ async def get_library_stats(
     filter: all | unplayed | played | recent | farmed
     sort_by: playtime | name | metacritic | hltb
     protondb_tier: native | platinum | gold | silver | bronze | borked
+    platform: steam | epic | gog | nintendo | ps5 (optional — filter to games on that platform)
     """
     from .tools.library import get_library_stats as _stats
-    return await _stats(filter, max_hltb_hours, min_metacritic, protondb_tier, sort_by, limit)
+    return await _stats(filter, max_hltb_hours, min_metacritic, protondb_tier, sort_by, limit, platform)
 
 
 @mcp.tool()
@@ -205,10 +207,13 @@ async def get_backlog_stats() -> dict:
 
 
 @mcp.tool()
-async def refresh_library() -> dict:
-    """Force re-sync the Steam library from the public XML feed."""
+async def refresh_library(platforms: list[str] | None = None) -> dict:
+    """
+    Re-sync game library. platforms: list like ['steam','epic'] or omit for all configured.
+    Valid platforms: steam, epic, gog, nintendo, ps5
+    """
     from .tools.admin import refresh_library as _refresh
-    return await _refresh()
+    return await _refresh(platforms)
 
 
 @mcp.tool()
@@ -232,6 +237,58 @@ async def detect_farmed_games(
     """
     from .tools.admin import detect_farmed_games as _detect
     return await _detect(dry_run, threshold_hours, min_games_per_day)
+
+
+@mcp.tool()
+async def get_platform_breakdown() -> dict:
+    """
+    Show game counts per platform, total unique games, and the overlap list
+    (games you own on multiple platforms).
+    """
+    from .tools.platforms import get_platform_breakdown as _breakdown
+    return await _breakdown()
+
+
+@mcp.tool()
+async def sync_platform(platform: str) -> dict:
+    """
+    Sync a single platform on demand.
+    platform: steam | epic | gog | nintendo | ps5
+    """
+    from .tools.platforms import sync_platform as _sync
+    return await _sync(platform)
+
+
+@mcp.tool()
+async def set_hardware_preference(platforms: list[str]) -> dict:
+    """
+    Set your hardware preference order used by get_recommendations to pick suggested_platform.
+    Ordered list, highest priority first. e.g. ["switch2", "steam_deck", "ps5"]
+    """
+    from .tools.platforms import set_hardware_preference as _set_hw
+    return await _set_hw(platforms)
+
+
+@mcp.tool()
+async def add_game_to_platform(
+    name: str,
+    platform: str,
+    identifier_type: str | None = None,
+    identifier_value: str | None = None,
+    playtime_minutes: int | None = None,
+) -> dict:
+    """
+    Manually add a game to a platform — for games that aren't synced automatically
+    (e.g. physical copies, unreported digital titles, itch.io purchases).
+
+    name: Game name (matches existing game by exact name or creates new entry)
+    platform: steam | epic | gog | nintendo | ps5 | itchio | xbox | other
+    identifier_type: Optional store ID type (e.g. 'steam_appid', 'gog_product_id')
+    identifier_value: Optional store ID value
+    playtime_minutes: Optional known playtime
+    """
+    from .tools.platforms import add_game_to_platform as _add
+    return await _add(name, platform, identifier_type, identifier_value, playtime_minutes)
 
 
 @mcp.tool()
