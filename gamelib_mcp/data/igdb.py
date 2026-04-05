@@ -107,8 +107,6 @@ async def search_game(name: str, igdb_platform_id: int | None = None) -> list[IG
     if not client_id:
         return []
 
-    token = await _get_token()
-
     platform_clause = f" & platforms = ({igdb_platform_id})" if igdb_platform_id else ""
     query = (
         f'fields id, name, category, first_release_date, '
@@ -121,6 +119,7 @@ async def search_game(name: str, igdb_platform_id: int | None = None) -> list[IG
     )
 
     try:
+        token = await _get_token()
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
                 _IGDB_GAMES_URL,
@@ -218,11 +217,18 @@ async def resolve_and_link_game(
         if existing is not None:
             game_id = existing["id"]
         else:
-            # New igdb_id — create a fresh row, bypassing fuzzy matching
-            async with get_db() as db:
-                cursor = await db.execute("INSERT INTO games (name) VALUES (?)", (name,))
-                game_id = cursor.lastrowid
-                await db.commit()
+            # On upgraded databases we may already have the title row without igdb_id.
+            existing = await find_game_by_name_fuzzy(name, candidates=candidates)
+            if existing is None and igdb_game.name.casefold() != name.casefold():
+                existing = await find_game_by_name_fuzzy(igdb_game.name, candidates=candidates)
+
+            if existing is not None:
+                game_id = existing["id"]
+            else:
+                async with get_db() as db:
+                    cursor = await db.execute("INSERT INTO games (name) VALUES (?)", (name,))
+                    game_id = cursor.lastrowid
+                    await db.commit()
 
         await _apply_igdb_metadata(game_id, igdb_game)
         return game_id, igdb_game

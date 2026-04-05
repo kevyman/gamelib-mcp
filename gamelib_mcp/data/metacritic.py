@@ -15,6 +15,19 @@ logger = logging.getLogger(__name__)
 METACRITIC_CACHE_DAYS = 30
 
 _GAME_URL = "https://www.metacritic.com/game/{slug}/"
+_PLATFORM_GAME_URL = "https://www.metacritic.com/game/{platform_slug}/{slug}/"
+
+_PLATFORM_QUERY_VALUES = {
+    "steam": "pc",
+    "epic": "pc",
+    "gog": "pc",
+    "ps5": "playstation-5",
+    "ps4": "playstation-4",
+    "switch": "nintendo-switch",
+    "switch2": "nintendo-switch-2",
+    "xbox-series-x": "xbox-series-x",
+    "xbox-one": "xbox-one",
+}
 
 _HEADERS = {
     "User-Agent": (
@@ -44,6 +57,19 @@ def _to_slug(name: str) -> str:
     slug = re.sub(r"\s+", "-", slug.strip())
     slug = re.sub(r"-+", "-", slug)
     return slug
+
+
+def _candidate_urls(slug: str, platform: str) -> list[str]:
+    query_value = _PLATFORM_QUERY_VALUES.get(platform)
+    base_url = _GAME_URL.format(slug=slug)
+    urls: list[str] = []
+
+    if query_value:
+        urls.append(f"{base_url}?platform={query_value}")
+        urls.append(_PLATFORM_GAME_URL.format(platform_slug=query_value, slug=slug))
+
+    urls.append(base_url)
+    return urls
 
 
 async def _fetch_score_from_url(url: str) -> tuple[int | None, str]:
@@ -119,9 +145,12 @@ async def enrich_metacritic(
 
     now = datetime.now(timezone.utc).isoformat()
     slug = _to_slug(game_name)
-
-    url = _GAME_URL.format(slug=slug)
-    score, final_url = await _fetch_score_from_url(url)
+    score = None
+    final_url = _GAME_URL.format(slug=slug)
+    for url in _candidate_urls(slug, platform):
+        score, final_url = await _fetch_score_from_url(url)
+        if score is not None:
+            break
 
     if score is None:
         await upsert_game_platform_enrichment(
