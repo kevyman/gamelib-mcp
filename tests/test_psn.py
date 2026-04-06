@@ -84,54 +84,42 @@ class SyncPsnSkipTests(unittest.TestCase):
 
 
 class SyncPsnSyncTests(unittest.TestCase):
-    def _run_sync(self, entries, resolve_result, candidates=None):
-        if candidates is None:
-            candidates = {}
-
-        mock_resolve = AsyncMock(return_value=resolve_result)
+    def _run_sync(self, entries, find_result, upsert_game_return=42):
+        mock_find = AsyncMock(return_value=find_result)
+        mock_upsert_game = AsyncMock(return_value=upsert_game_return)
         mock_upsert_platform = AsyncMock(return_value=99)
-        mock_load_candidates = AsyncMock(return_value=dict(candidates))
+        mock_load_candidates = AsyncMock(return_value={})
 
         with (
             patch.dict("os.environ", {"PSN_NPSSO": "fake"}, clear=False),
             patch("gamelib_mcp.data.psn.fetch_psn_library", AsyncMock(return_value=entries)),
-            patch("gamelib_mcp.data.psn.resolve_and_link_game", mock_resolve),
+            patch("gamelib_mcp.data.psn.find_game_by_name_fuzzy", mock_find),
+            patch("gamelib_mcp.data.psn.upsert_game", mock_upsert_game),
             patch("gamelib_mcp.data.psn.upsert_game_platform", mock_upsert_platform),
             patch("gamelib_mcp.data.psn.load_fuzzy_candidates", mock_load_candidates),
         ):
             result = asyncio.run(psn.sync_psn())
 
-        return result, mock_resolve, mock_upsert_platform
+        return result, mock_upsert_game, mock_upsert_platform
 
     def test_matched_game_increments_matched(self) -> None:
         entries = [{"name": "Elden Ring", "playtime_minutes": 120}]
-        result, mock_resolve, _ = self._run_sync(
-            entries,
-            resolve_result=(7, None),
-            candidates={7: "Elden Ring"},
-        )
+        existing = {"id": 7, "name": "Elden Ring"}
+        result, mock_upsert_game, _ = self._run_sync(entries, find_result=existing)
         self.assertEqual(result["matched"], 1)
         self.assertEqual(result["added"], 0)
-        mock_resolve.assert_awaited_once()
+        mock_upsert_game.assert_not_called()
 
     def test_unmatched_game_increments_added(self) -> None:
         entries = [{"name": "Unknown Indie", "playtime_minutes": 60}]
-        result, mock_resolve, _ = self._run_sync(
-            entries,
-            resolve_result=(42, None),
-            candidates={},
-        )
+        result, mock_upsert_game, _ = self._run_sync(entries, find_result=None)
         self.assertEqual(result["added"], 1)
         self.assertEqual(result["matched"], 0)
-        mock_resolve.assert_awaited_once()
+        mock_upsert_game.assert_called_once()
 
     def test_upsert_platform_called_with_playtime(self) -> None:
         entries = [{"name": "Elden Ring", "playtime_minutes": 150}]
-        _, _, mock_upsert_platform = self._run_sync(
-            entries,
-            resolve_result=(1, None),
-            candidates={1: "Elden Ring"},
-        )
+        _, _, mock_upsert_platform = self._run_sync(entries, find_result={"id": 1})
         call_kwargs = mock_upsert_platform.call_args.kwargs
         self.assertEqual(call_kwargs["playtime_minutes"], 150)
         self.assertEqual(call_kwargs["platform"], "ps5")
