@@ -1,5 +1,5 @@
 steam.yourname.duckdns.org {
-    reverse_proxy gamelib-mcp:8000
+    reverse_proxy app:8000
 }
 
 # Add future MCPs here, e.g.:
