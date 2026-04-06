@@ -58,6 +58,14 @@ def _default_process(value: str) -> str:
     return " ".join(sorted(re.findall(r"[a-z0-9]+", value.casefold())))
 
 
+def _iter_chunks(rows: list[dict], chunk_size: int) -> Iterable[list[dict]]:
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be greater than 0")
+
+    for start in range(0, len(rows), chunk_size):
+        yield rows[start : start + chunk_size]
+
+
 def extract_best_fuzzy_key(
     query: str,
     choices: dict[_FuzzyKey, str],
@@ -1184,6 +1192,230 @@ async def upsert_steam_platform_data(game_platform_id: int, **fields) -> None:
             (game_platform_id, *fields.values()),
         )
         await db.commit()
+
+
+async def bulk_upsert_steam_library(
+    rows: list[dict],
+    synced_at: str,
+    chunk_size: int = 250,
+) -> int:
+    if not rows:
+        return 0
+
+    async with get_db() as db:
+        await db.execute(
+            """CREATE TEMP TABLE IF NOT EXISTS temp_steam_library_sync (
+                   appid INTEGER PRIMARY KEY,
+                   name TEXT NOT NULL,
+                   playtime_minutes INTEGER,
+                   playtime_2weeks_minutes INTEGER,
+                   rtime_last_played INTEGER
+               )"""
+        )
+
+        for chunk in _iter_chunks(rows, chunk_size):
+            await db.execute("DELETE FROM temp_steam_library_sync")
+            await db.executemany(
+                """INSERT INTO temp_steam_library_sync
+                   (appid, name, playtime_minutes, playtime_2weeks_minutes, rtime_last_played)
+                   VALUES (?, ?, ?, ?, ?)""",
+                [
+                    (
+                        row["appid"],
+                        row["name"],
+                        row.get("playtime_minutes"),
+                        row.get("playtime_2weeks_minutes"),
+                        row.get("rtime_last_played"),
+                    )
+                    for row in chunk
+                ],
+            )
+
+            await db.execute(
+                """INSERT INTO games (name)
+                   SELECT MIN(t.name)
+                   FROM temp_steam_library_sync t
+                   WHERE NOT EXISTS (
+                       SELECT 1
+                       FROM game_platform_identifiers gpi
+                       JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+                       WHERE gpi.identifier_type = ?
+                         AND gpi.identifier_value = CAST(t.appid AS TEXT)
+                   )
+                     AND NOT EXISTS (
+                       SELECT 1
+                       FROM games g
+                       WHERE lower(g.name) = lower(t.name)
+                   )
+                   GROUP BY lower(t.name)""",
+                (STEAM_APP_ID,),
+            )
+
+            await db.execute(
+                """WITH resolved AS (
+                       SELECT t.appid,
+                              t.name,
+                              COALESCE(
+                                  (
+                                      SELECT gp.game_id
+                                      FROM game_platform_identifiers gpi
+                                      JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+                                      WHERE gpi.identifier_type = ?
+                                        AND gpi.identifier_value = CAST(t.appid AS TEXT)
+                                      LIMIT 1
+                                  ),
+                                  (
+                                      SELECT g.id
+                                      FROM games g
+                                      WHERE lower(g.name) = lower(t.name)
+                                      ORDER BY g.id
+                                      LIMIT 1
+                                  )
+                              ) AS game_id
+                       FROM temp_steam_library_sync t
+                   )
+                   UPDATE games
+                   SET name = (
+                       SELECT resolved.name
+                       FROM resolved
+                       WHERE resolved.game_id = games.id
+                       LIMIT 1
+                   )
+                   WHERE id IN (
+                       SELECT game_id
+                       FROM resolved
+                       WHERE game_id IS NOT NULL
+                   )""",
+                (STEAM_APP_ID,),
+            )
+
+            await db.execute(
+                """WITH resolved AS (
+                       SELECT t.appid,
+                              t.name,
+                              t.playtime_minutes,
+                              t.playtime_2weeks_minutes,
+                              COALESCE(
+                                  (
+                                      SELECT gp.game_id
+                                      FROM game_platform_identifiers gpi
+                                      JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+                                      WHERE gpi.identifier_type = ?
+                                        AND gpi.identifier_value = CAST(t.appid AS TEXT)
+                                      LIMIT 1
+                                  ),
+                                  (
+                                      SELECT g.id
+                                      FROM games g
+                                      WHERE lower(g.name) = lower(t.name)
+                                      ORDER BY g.id
+                                      LIMIT 1
+                                  )
+                              ) AS game_id
+                       FROM temp_steam_library_sync t
+                   )
+                   INSERT INTO game_platforms
+                   (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes, last_synced)
+                   SELECT resolved.game_id, ?, 1,
+                          resolved.playtime_minutes,
+                          resolved.playtime_2weeks_minutes,
+                          ?
+                   FROM resolved
+                   WHERE resolved.game_id IS NOT NULL
+                   ON CONFLICT(game_id, platform) DO UPDATE SET
+                       owned = excluded.owned,
+                       playtime_minutes = COALESCE(
+                           excluded.playtime_minutes,
+                           game_platforms.playtime_minutes
+                       ),
+                       playtime_2weeks_minutes = COALESCE(
+                           excluded.playtime_2weeks_minutes,
+                           game_platforms.playtime_2weeks_minutes
+                       ),
+                       last_synced = excluded.last_synced""",
+                (STEAM_APP_ID, STEAM_PLATFORM, synced_at),
+            )
+
+            await db.execute(
+                """WITH resolved AS (
+                       SELECT t.appid,
+                              t.name,
+                              COALESCE(
+                                  (
+                                      SELECT gp.game_id
+                                      FROM game_platform_identifiers gpi
+                                      JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+                                      WHERE gpi.identifier_type = ?
+                                        AND gpi.identifier_value = CAST(t.appid AS TEXT)
+                                      LIMIT 1
+                                  ),
+                                  (
+                                      SELECT g.id
+                                      FROM games g
+                                      WHERE lower(g.name) = lower(t.name)
+                                      ORDER BY g.id
+                                      LIMIT 1
+                                  )
+                              ) AS game_id
+                       FROM temp_steam_library_sync t
+                   )
+                   INSERT INTO game_platform_identifiers
+                   (game_platform_id, identifier_type, identifier_value, is_primary, last_seen_at)
+                   SELECT gp.id, ?, CAST(resolved.appid AS TEXT), 1, ?
+                   FROM resolved
+                   JOIN game_platforms gp
+                     ON gp.game_id = resolved.game_id AND gp.platform = ?
+                   WHERE resolved.game_id IS NOT NULL
+                   ON CONFLICT(identifier_type, identifier_value) DO UPDATE SET
+                       game_platform_id = excluded.game_platform_id,
+                       is_primary = excluded.is_primary,
+                       last_seen_at = excluded.last_seen_at""",
+                (STEAM_APP_ID, STEAM_APP_ID, synced_at, STEAM_PLATFORM),
+            )
+
+            await db.execute(
+                """WITH resolved AS (
+                       SELECT t.appid,
+                              t.name,
+                              t.rtime_last_played,
+                              COALESCE(
+                                  (
+                                      SELECT gp.game_id
+                                      FROM game_platform_identifiers gpi
+                                      JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+                                      WHERE gpi.identifier_type = ?
+                                        AND gpi.identifier_value = CAST(t.appid AS TEXT)
+                                      LIMIT 1
+                                  ),
+                                  (
+                                      SELECT g.id
+                                      FROM games g
+                                      WHERE lower(g.name) = lower(t.name)
+                                      ORDER BY g.id
+                                      LIMIT 1
+                                  )
+                              ) AS game_id
+                       FROM temp_steam_library_sync t
+                   )
+                   INSERT INTO steam_platform_data
+                   (game_platform_id, rtime_last_played, library_updated_at)
+                   SELECT gp.id, resolved.rtime_last_played, ?
+                   FROM resolved
+                   JOIN game_platforms gp
+                     ON gp.game_id = resolved.game_id AND gp.platform = ?
+                   WHERE resolved.game_id IS NOT NULL
+                   ON CONFLICT(game_platform_id) DO UPDATE SET
+                       rtime_last_played = excluded.rtime_last_played,
+                       library_updated_at = excluded.library_updated_at""",
+                (STEAM_APP_ID, synced_at, STEAM_PLATFORM),
+            )
+
+            await db.commit()
+
+        await db.execute("DROP TABLE IF EXISTS temp_steam_library_sync")
+        await db.commit()
+
+    return len(rows)
 
 
 async def upsert_game_platform_enrichment(game_platform_id: int, **fields) -> None:

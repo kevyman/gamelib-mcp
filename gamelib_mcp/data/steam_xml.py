@@ -6,12 +6,8 @@ from datetime import datetime, timezone
 import httpx
 
 from .db import (
-    STEAM_APP_ID,
+    bulk_upsert_steam_library,
     set_meta,
-    upsert_game,
-    upsert_game_platform,
-    upsert_game_platform_identifier,
-    upsert_steam_platform_data,
 )
 
 STEAM_API_KEY = os.getenv("STEAM_API_KEY", "")
@@ -49,30 +45,17 @@ async def fetch_library() -> dict:
         )
 
     now = datetime.now(timezone.utc).isoformat()
-    upserted = 0
-
-    for game in games:
-        appid = game["appid"]
-        name = game.get("name", f"App {appid}")
-        playtime_forever = game.get("playtime_forever", 0)
-        playtime_2weeks = game.get("playtime_2weeks", 0)
-        rtime = game.get("rtime_last_played") or None
-
-        game_id = await upsert_game(appid=appid, name=name)
-        platform_id = await upsert_game_platform(
-            game_id=game_id,
-            platform="steam",
-            playtime_minutes=playtime_forever,
-            playtime_2weeks_minutes=playtime_2weeks,
-            owned=1,
-        )
-        await upsert_game_platform_identifier(platform_id, STEAM_APP_ID, appid)
-        await upsert_steam_platform_data(
-            platform_id,
-            rtime_last_played=rtime,
-            library_updated_at=now,
-        )
-        upserted += 1
+    normalized_rows = [
+        {
+            "appid": game["appid"],
+            "name": game.get("name", f"App {game['appid']}"),
+            "playtime_minutes": game.get("playtime_forever", 0),
+            "playtime_2weeks_minutes": game.get("playtime_2weeks", 0),
+            "rtime_last_played": game.get("rtime_last_played") or None,
+        }
+        for game in games
+    ]
+    upserted = await bulk_upsert_steam_library(normalized_rows, synced_at=now)
 
     await set_meta("library_synced_at", now)
     return {"games_upserted": upserted, "synced_at": now}
