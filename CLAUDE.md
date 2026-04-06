@@ -16,9 +16,9 @@ uv sync
 python -m gamelib_mcp.main
 
 # Docker (production setup with Caddy reverse proxy)
-docker-compose build
-docker-compose up -d
-docker-compose logs -f gamelib-mcp
+docker compose --profile prod build
+docker compose --profile prod up -d
+docker compose --profile prod logs -f app
 ```
 
 There is no test or lint framework configured.
