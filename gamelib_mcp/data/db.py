@@ -965,6 +965,19 @@ async def set_meta(key: str, value: str) -> None:
         await db.commit()
 
 
+async def set_meta_many(values: dict[str, str | None]) -> None:
+    if not values:
+        return
+
+    async with get_db() as db:
+        for key, value in values.items():
+            await db.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                (key, value),
+            )
+        await db.commit()
+
+
 async def get_game_by_identifier(identifier_type: str, identifier_value: str) -> aiosqlite.Row | None:
     async with get_db() as db:
         return await db.execute_fetchone(

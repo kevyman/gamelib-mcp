@@ -9,19 +9,77 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 
+from .tools.admin import refresh_library as _admin_refresh_library
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "")
+_LIBRARY_REFRESH_TASK: asyncio.Task | None = None
+_LIBRARY_REFRESH_LOCK = asyncio.Lock()
+
+
+def _clear_library_refresh_task(task: asyncio.Task) -> None:
+    global _LIBRARY_REFRESH_TASK
+    if _LIBRARY_REFRESH_TASK is task:
+        _LIBRARY_REFRESH_TASK = None
+
+
+async def _run_startup_refresh() -> None:
+    from .data.db import set_meta_many
+
+    started_at = datetime.now(timezone.utc).isoformat()
+    await set_meta_many(
+        {
+            "library_sync_status": "in_progress",
+            "library_sync_started_at": started_at,
+            "library_sync_finished_at": None,
+            "library_sync_error": None,
+        }
+    )
+
+    try:
+        await _admin_refresh_library()
+    except Exception as exc:
+        finished_at = datetime.now(timezone.utc).isoformat()
+        await set_meta_many(
+            {
+                "library_sync_status": "idle",
+                "library_sync_finished_at": finished_at,
+                "library_sync_error": str(exc),
+            }
+        )
+        logger.exception("Startup library refresh failed")
+    else:
+        finished_at = datetime.now(timezone.utc).isoformat()
+        await set_meta_many(
+            {
+                "library_sync_status": "idle",
+                "library_sync_finished_at": finished_at,
+                "library_sync_error": None,
+            }
+        )
+
+
+async def _ensure_startup_refresh() -> asyncio.Task:
+    global _LIBRARY_REFRESH_TASK
+
+    async with _LIBRARY_REFRESH_LOCK:
+        if _LIBRARY_REFRESH_TASK is not None and not _LIBRARY_REFRESH_TASK.done():
+            return _LIBRARY_REFRESH_TASK
+
+        _LIBRARY_REFRESH_TASK = asyncio.create_task(_run_startup_refresh())
+        _LIBRARY_REFRESH_TASK.add_done_callback(_clear_library_refresh_task)
+        return _LIBRARY_REFRESH_TASK
 
 
 @asynccontextmanager
 async def lifespan(app):
     """Startup: init DB, sync library if stale, kick off HLTB pre-warm."""
     from .data.db import init_db, get_meta, set_meta
-    from .data.steam_xml import fetch_library, STALE_HOURS
+    from .data.steam_xml import STALE_HOURS
     from .data.enrich_bg import background_enrich
 
     await init_db()
@@ -46,12 +104,8 @@ async def lifespan(app):
             pass
 
     if needs_refresh:
-        logger.info("Library stale or missing — fetching Steam XML feed...")
-        try:
-            result = await fetch_library()
-            logger.info("Library sync: %s", result)
-        except Exception as e:
-            logger.error("Library sync failed: %s", e)
+        logger.info("Library stale or missing — scheduling background refresh...")
+        await _ensure_startup_refresh()
 
     # Background enrichment: Steam Store, HLTB, ProtonDB (non-blocking)
     asyncio.create_task(background_enrich())
