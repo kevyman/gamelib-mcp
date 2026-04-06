@@ -68,7 +68,7 @@ Point your subdomain to the server IP. Caddy handles TLS automatically.
 
 ```
 steammcp.johnwilkos.com {
-    reverse_proxy gamelib-mcp:8000
+    reverse_proxy app:8000
 }
 ```
 
@@ -76,8 +76,8 @@ steammcp.johnwilkos.com {
 
 ```bash
 cd ~/mcps
-docker compose up -d --build
-docker compose logs -f
+docker compose --profile prod up -d --build
+docker compose --profile prod logs -f
 ```
 
 ---
@@ -90,7 +90,7 @@ git push
 
 # On server
 ssh root@178.104.53.83
-cd ~/mcps && git pull && docker compose up -d --build gamelib-mcp
+cd ~/mcps && git pull && docker compose --profile prod up -d --build
 ```
 
 ### Epic in Docker
@@ -241,5 +241,5 @@ In your Claude MCP config:
 
 4. Commit, push, then on the server:
    ```bash
-   cd ~/mcps && git pull && docker compose up -d --build
+   cd ~/mcps && git pull && docker compose --profile prod up -d --build
    ```

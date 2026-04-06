@@ -1,5 +1,5 @@
 services:
-  gamelib-mcp:
+  app:
     build: .
     restart: always
     expose:
@@ -25,6 +25,8 @@ services:
 
   caddy:
     image: caddy:alpine
+    profiles:
+      - prod
     restart: always
     ports:
       - "80:80"
