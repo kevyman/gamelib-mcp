@@ -1209,16 +1209,24 @@ async def bulk_upsert_steam_library(
                    name TEXT NOT NULL,
                    playtime_minutes INTEGER,
                    playtime_2weeks_minutes INTEGER,
-                   rtime_last_played INTEGER
+                   rtime_last_played INTEGER,
+                   row_order INTEGER NOT NULL
                )"""
         )
 
+        row_offset = 0
         for chunk in _iter_chunks(rows, chunk_size):
             await db.execute("DELETE FROM temp_steam_library_sync")
             await db.executemany(
                 """INSERT INTO temp_steam_library_sync
-                   (appid, name, playtime_minutes, playtime_2weeks_minutes, rtime_last_played)
-                   VALUES (?, ?, ?, ?, ?)""",
+                   (appid, name, playtime_minutes, playtime_2weeks_minutes, rtime_last_played, row_order)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(appid) DO UPDATE SET
+                       name = excluded.name,
+                       playtime_minutes = excluded.playtime_minutes,
+                       playtime_2weeks_minutes = excluded.playtime_2weeks_minutes,
+                       rtime_last_played = excluded.rtime_last_played,
+                       row_order = excluded.row_order""",
                 [
                     (
                         row["appid"],
@@ -1226,10 +1234,12 @@ async def bulk_upsert_steam_library(
                         row.get("playtime_minutes"),
                         row.get("playtime_2weeks_minutes"),
                         row.get("rtime_last_played"),
+                        row_offset + index,
                     )
-                    for row in chunk
+                    for index, row in enumerate(chunk)
                 ],
             )
+            row_offset += len(chunk)
 
             await db.execute(
                 """INSERT INTO games (name)
@@ -1255,6 +1265,7 @@ async def bulk_upsert_steam_library(
                 """WITH resolved AS (
                        SELECT t.appid,
                               t.name,
+                              t.row_order,
                               COALESCE(
                                   (
                                       SELECT gp.game_id
@@ -1279,6 +1290,7 @@ async def bulk_upsert_steam_library(
                        SELECT resolved.name
                        FROM resolved
                        WHERE resolved.game_id = games.id
+                       ORDER BY resolved.row_order DESC
                        LIMIT 1
                    )
                    WHERE id IN (

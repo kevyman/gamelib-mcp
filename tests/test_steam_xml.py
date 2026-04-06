@@ -1,19 +1,10 @@
-import sys
-import types
+import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-class _DummyConnection:
-    pass
-
-
-sys.modules.setdefault("httpx", types.SimpleNamespace(AsyncClient=None))
-sys.modules.setdefault(
-    "aiosqlite",
-    types.SimpleNamespace(Connection=_DummyConnection, Row=dict),
-)
-
+from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steam_xml
 
 
@@ -46,7 +37,7 @@ class _FixedDatetime:
         return datetime(2026, 4, 7, 12, 0, tzinfo=timezone.utc)
 
 
-class SteamXmlTests(unittest.IsolatedAsyncioTestCase):
+class SteamXmlFetchLibraryTests(unittest.IsolatedAsyncioTestCase):
     async def test_fetch_library_uses_bulk_upsert_for_normalized_rows(self) -> None:
         response = _DummyResponse(
             {
@@ -79,28 +70,8 @@ class SteamXmlTests(unittest.IsolatedAsyncioTestCase):
                 steam_xml,
                 "bulk_upsert_steam_library",
                 AsyncMock(return_value=2),
-                create=True,
             ) as bulk_upsert,
             patch.object(steam_xml, "set_meta", AsyncMock()) as set_meta,
-            patch.object(steam_xml, "upsert_game", AsyncMock(), create=True) as upsert_game,
-            patch.object(
-                steam_xml,
-                "upsert_game_platform",
-                AsyncMock(),
-                create=True,
-            ) as upsert_game_platform,
-            patch.object(
-                steam_xml,
-                "upsert_game_platform_identifier",
-                AsyncMock(),
-                create=True,
-            ) as upsert_game_platform_identifier,
-            patch.object(
-                steam_xml,
-                "upsert_steam_platform_data",
-                AsyncMock(),
-                create=True,
-            ) as upsert_steam_platform_data,
             patch.object(steam_xml, "datetime", _FixedDatetime),
         ):
             result = await steam_xml.fetch_library()
@@ -125,10 +96,6 @@ class SteamXmlTests(unittest.IsolatedAsyncioTestCase):
             synced_at=synced_at,
         )
         set_meta.assert_awaited_once_with("library_synced_at", synced_at)
-        upsert_game.assert_not_awaited()
-        upsert_game_platform.assert_not_awaited()
-        upsert_game_platform_identifier.assert_not_awaited()
-        upsert_steam_platform_data.assert_not_awaited()
         self.assertEqual(result, {"games_upserted": 2, "synced_at": synced_at})
 
     async def test_fetch_library_preserves_bulk_count_and_synced_at(self) -> None:
@@ -157,28 +124,8 @@ class SteamXmlTests(unittest.IsolatedAsyncioTestCase):
                 steam_xml,
                 "bulk_upsert_steam_library",
                 AsyncMock(return_value=7),
-                create=True,
             ),
             patch.object(steam_xml, "set_meta", AsyncMock()) as set_meta,
-            patch.object(steam_xml, "upsert_game", AsyncMock(return_value=1), create=True),
-            patch.object(
-                steam_xml,
-                "upsert_game_platform",
-                AsyncMock(return_value=2),
-                create=True,
-            ),
-            patch.object(
-                steam_xml,
-                "upsert_game_platform_identifier",
-                AsyncMock(),
-                create=True,
-            ),
-            patch.object(
-                steam_xml,
-                "upsert_steam_platform_data",
-                AsyncMock(),
-                create=True,
-            ),
             patch.object(steam_xml, "datetime", _FixedDatetime),
         ):
             result = await steam_xml.fetch_library()
@@ -186,6 +133,73 @@ class SteamXmlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["games_upserted"], 7)
         self.assertEqual(result["synced_at"], synced_at)
         set_meta.assert_awaited_once_with("library_synced_at", synced_at)
+
+
+class SteamBulkUpsertTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tmpdir.name) / "steam-bulk.sqlite"
+        self.original_db_path = db_module._DB_PATH
+        self.original_ready_path = db_module._DB_READY_PATH
+        self.original_init_lock = db_module._DB_INIT_LOCK
+        db_module._DB_PATH = str(self.db_path)
+        db_module._DB_READY_PATH = None
+        db_module._DB_INIT_LOCK = None
+
+    async def asyncSetUp(self) -> None:
+        await db_module.init_db()
+
+    async def asyncTearDown(self) -> None:
+        db_module._DB_PATH = self.original_db_path
+        db_module._DB_READY_PATH = self.original_ready_path
+        db_module._DB_INIT_LOCK = self.original_init_lock
+        self.tmpdir.cleanup()
+
+    async def test_bulk_upsert_is_idempotent_for_duplicate_appids_and_uses_stable_name_resolution(
+        self,
+    ) -> None:
+        synced_at = "2026-04-07T12:00:00+00:00"
+
+        upserted = await db_module.bulk_upsert_steam_library(
+            [
+                {
+                    "appid": 10,
+                    "name": "Portal",
+                    "playtime_minutes": 120,
+                    "playtime_2weeks_minutes": 15,
+                    "rtime_last_played": 1000,
+                },
+                {
+                    "appid": 10,
+                    "name": "Portal Reloaded",
+                    "playtime_minutes": 180,
+                    "playtime_2weeks_minutes": 25,
+                    "rtime_last_played": 2000,
+                },
+            ],
+            synced_at=synced_at,
+        )
+
+        game = await db_module.get_game_by_appid(10)
+        platform_row = await db_module.get_steam_platform_row_by_appid(10)
+        async with db_module.get_db() as db:
+            identifier_count_row = await db.execute_fetchone(
+                """SELECT COUNT(*) AS count
+                   FROM game_platform_identifiers
+                   WHERE identifier_type = ? AND identifier_value = ?""",
+                (db_module.STEAM_APP_ID, "10"),
+            )
+
+        self.assertEqual(upserted, 2)
+        self.assertIsNotNone(game)
+        self.assertEqual(game["name"], "Portal Reloaded")
+        self.assertIsNotNone(platform_row)
+        self.assertEqual(platform_row["playtime_minutes"], 180)
+        self.assertEqual(platform_row["playtime_2weeks_minutes"], 25)
+        self.assertEqual(platform_row["rtime_last_played"], 2000)
+        self.assertEqual(platform_row["last_synced"], synced_at)
+        self.assertEqual(platform_row["library_updated_at"], synced_at)
+        self.assertEqual(identifier_count_row["count"], 1)
 
 
 if __name__ == "__main__":
