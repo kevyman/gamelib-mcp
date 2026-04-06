@@ -27,6 +27,21 @@ def _clear_library_refresh_task(task: asyncio.Task) -> None:
         _LIBRARY_REFRESH_TASK = None
 
 
+def _summarize_refresh_result(result: object) -> str | None:
+    if not isinstance(result, dict):
+        return None
+
+    errors: list[str] = []
+    for platform, payload in result.items():
+        if not isinstance(payload, dict):
+            continue
+        error = payload.get("error")
+        if error:
+            errors.append(f"{platform}: {error}")
+
+    return "; ".join(errors) if errors else None
+
+
 async def _run_startup_refresh() -> None:
     from .data.db import set_meta_many
 
@@ -40,27 +55,33 @@ async def _run_startup_refresh() -> None:
         }
     )
 
+    final_error: str | None = None
+    cancelled = False
     try:
-        await _admin_refresh_library()
+        result = await _admin_refresh_library()
+        final_error = _summarize_refresh_result(result)
+        if final_error:
+            logger.warning("Startup library refresh completed with partial errors: %s", final_error)
+    except asyncio.CancelledError:
+        cancelled = True
+        final_error = "cancelled"
+        raise
     except Exception as exc:
-        finished_at = datetime.now(timezone.utc).isoformat()
-        await set_meta_many(
-            {
-                "library_sync_status": "idle",
-                "library_sync_finished_at": finished_at,
-                "library_sync_error": str(exc),
-            }
-        )
         logger.exception("Startup library refresh failed")
-    else:
+        final_error = str(exc)
+    finally:
         finished_at = datetime.now(timezone.utc).isoformat()
-        await set_meta_many(
-            {
-                "library_sync_status": "idle",
-                "library_sync_finished_at": finished_at,
-                "library_sync_error": None,
-            }
+        await asyncio.shield(
+            set_meta_many(
+                {
+                    "library_sync_status": "idle",
+                    "library_sync_finished_at": finished_at,
+                    "library_sync_error": final_error,
+                }
+            )
         )
+        if cancelled:
+            logger.info("Startup library refresh cancelled")
 
 
 async def _ensure_startup_refresh() -> asyncio.Task:
