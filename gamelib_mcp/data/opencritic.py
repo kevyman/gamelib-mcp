@@ -1,12 +1,15 @@
 """OpenCritic API client — cross-platform review scores cached in game_platform_enrichment."""
 
 import logging
+import json
 import os
 import re
 from datetime import datetime, timezone
 import unicodedata
+from urllib.parse import urljoin
 
 import httpx
+from bs4 import BeautifulSoup
 
 from .db import get_db, upsert_game_platform_enrichment
 
@@ -15,6 +18,15 @@ logger = logging.getLogger(__name__)
 OPENCRITIC_CACHE_DAYS = 30
 _SEARCH_URL = "https://api.opencritic.com/api/game/search"
 _GAME_URL = "https://api.opencritic.com/api/game/{id}"
+_OPENCRITIC_BASE_URL = "https://opencritic.com"
+_SEARCH_PAGE_URL = f"{_OPENCRITIC_BASE_URL}/search"
+_SEARCH_FALLBACK_URL = "https://html.duckduckgo.com/html/"
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
+    )
+}
 
 _EDITION_PATTERNS = {
     "remake": re.compile(r"\bremake\b", re.IGNORECASE),
@@ -90,6 +102,112 @@ def _choose_match(source_title: str, candidates: list[dict]) -> dict | None:
     if len(scored) > 1 and scored[0][0] == scored[1][0]:
         return None
     return scored[0][1]
+
+
+async def discover_candidates(title: str) -> list[dict]:
+    primary = await _discover_from_opencritic(title)
+    if primary:
+        return primary
+    return await _discover_from_search_fallback(title)
+
+
+def _candidate_to_export_url(candidate: dict) -> str:
+    return _normalize_opencritic_url(candidate["url"]).rstrip("/") + "/export"
+
+
+def _parse_opencritic_record(html: str, source_url: str) -> dict | None:
+    state_match = re.search(r"window\.__STATE__\s*=\s*(\{.*?\})\s*;", html, re.S)
+    if state_match is None:
+        return None
+
+    try:
+        state = json.loads(state_match.group(1))
+    except json.JSONDecodeError:
+        return None
+
+    required = (
+        state.get("id"),
+        state.get("topCriticScore"),
+        state.get("tier"),
+        state.get("percentRecommended"),
+        state.get("numReviews"),
+    )
+    if any(value is None for value in required):
+        return None
+
+    canonical = state.get("url")
+    return {
+        "opencritic_id": int(state["id"]),
+        "opencritic_url": canonical if canonical else source_url.removesuffix("/export"),
+        "opencritic_score": int(round(float(state["topCriticScore"]))),
+        "opencritic_tier": state["tier"],
+        "opencritic_percent_rec": float(state["percentRecommended"]),
+        "opencritic_num_reviews": int(state["numReviews"]),
+    }
+
+
+async def _discover_from_opencritic(title: str) -> list[dict]:
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers=_HEADERS) as client:
+            response = await client.get(_SEARCH_PAGE_URL, params={"q": title})
+            response.raise_for_status()
+    except Exception as exc:
+        logger.debug("OpenCritic primary discovery failed for %r: %s", title, exc)
+        return []
+
+    return _parse_discovery_candidates(response.text)
+
+
+async def _discover_from_search_fallback(title: str) -> list[dict]:
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers=_HEADERS) as client:
+            response = await client.get(
+                _SEARCH_FALLBACK_URL,
+                params={"q": f"site:opencritic.com/game {title}"},
+            )
+            response.raise_for_status()
+    except Exception as exc:
+        logger.debug("OpenCritic search fallback failed for %r: %s", title, exc)
+        return []
+
+    return _parse_discovery_candidates(response.text)
+
+
+def _normalize_opencritic_url(value: str) -> str:
+    return urljoin(f"{_OPENCRITIC_BASE_URL}/", value)
+
+
+def _parse_discovery_candidates(html: str) -> list[dict]:
+    soup = BeautifulSoup(html, "html.parser")
+    candidates: list[dict] = []
+    seen_urls: set[str] = set()
+
+    for anchor in soup.find_all("a", href=True):
+        href = anchor["href"]
+        if "/game/" not in href:
+            continue
+
+        url = _normalize_opencritic_url(href)
+        if not url.startswith(f"{_OPENCRITIC_BASE_URL}/game/"):
+            continue
+        match = re.search(r"/game/(\d+)/", url)
+        if match is None or url in seen_urls:
+            continue
+
+        title = anchor.get_text(" ", strip=True)
+        if not title:
+            continue
+
+        candidates.append(
+            {
+                "title": title,
+                "url": url,
+                "opencritic_id": int(match.group(1)),
+            }
+        )
+        seen_urls.add(url)
+
+    return candidates
 
 
 async def enrich_opencritic(game_platform_id: int, game_name: str) -> dict | None:
