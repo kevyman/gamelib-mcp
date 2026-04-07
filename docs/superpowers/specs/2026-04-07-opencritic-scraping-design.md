@@ -54,7 +54,8 @@ These are intentionally out of scope for v1, but the parser may be designed so t
 
 ### Cache and cooldown semantics
 
-- Successful fetch TTL: `30 days`
+- Upcoming through 180 days after release: successful fetch TTL `7 days`
+- Older than 180 days after release: no automatic refresh after the first successful scrape
 - Ambiguous or no-match cooldown: `7 days`
 - Transient failure cooldown: `1 day`
 
@@ -151,7 +152,7 @@ OpenCritic scraping runs only in the background enrichment pipeline.
 
 For each unenriched or stale platform row:
 
-1. Check success TTL and cooldown state
+1. Check release-aware refresh policy and cooldown state
 2. Discover candidate OpenCritic URLs
 3. Choose one canonical match or skip
 4. Fetch the export page
@@ -189,6 +190,19 @@ Scraping must be intentionally paced.
 ### Request identity
 
 Use a dedicated user agent for this project that clearly identifies the client.
+
+### Refresh eligibility
+
+Successful OpenCritic records should not all be refreshed on a fixed global TTL.
+
+Rules:
+
+- If the game is upcoming, keep refreshing on the short success TTL
+- If the game was released within the last 180 days, keep refreshing on the short success TTL
+- If the game is older than 180 days and already has a successful OpenCritic scrape, do not auto-refresh it again
+- Old games without a successful scrape are still eligible until they succeed or hit a cooldown condition
+
+This policy is intentionally biased toward one-time enrichment for old catalog titles, since their OpenCritic scores are unlikely to change in meaningful ways.
 
 ### Base pacing
 
