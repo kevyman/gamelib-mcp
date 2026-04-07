@@ -215,6 +215,26 @@ class SyncPsnSyncTests(unittest.TestCase):
             ("Elden Ring", igdb.PLATFORM_TO_IGDB["ps5"]),
         )
 
+    def test_sync_normalizes_titles_and_skips_non_game_rows(self) -> None:
+        entries = [
+            {"name": "Grand Theft Auto V (PlayStation®5)", "playtime_minutes": 30},
+            {"name": "Q.U.B.E. 2 Soundtrack", "playtime_minutes": 0},
+        ]
+        result, mock_resolve, mock_upsert_platform = self._run_sync(entries, resolve_result=(42, None))
+
+        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 1})
+        mock_resolve.assert_awaited_once()
+        self.assertEqual(
+            mock_resolve.await_args.args[:2],
+            ("Grand Theft Auto V", igdb.PLATFORM_TO_IGDB["ps5"]),
+        )
+        mock_upsert_platform.assert_awaited_once_with(
+            game_id=42,
+            platform="ps5",
+            playtime_minutes=30,
+            owned=1,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

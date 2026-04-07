@@ -78,6 +78,37 @@ class EnrichmentClaimTests(unittest.IsolatedAsyncioTestCase):
         lock_conn.close()
         self.assertIsNone(row["hltb_claimed_at"])
 
+    async def test_hltb_claim_helper_reclaims_legacy_failed_rows(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"DATABASE_URL": f"file:{self.db_path}"},
+            clear=False,
+        ):
+            game_id = await db_module.upsert_game(appid=None, name="Portal")
+            platform_id = await db_module.upsert_game_platform(
+                game_id=game_id,
+                platform="steam",
+                playtime_minutes=120,
+                owned=1,
+            )
+            await db_module.upsert_steam_platform_data(
+                platform_id,
+                store_cached_at="2026-04-07T12:00:00+00:00",
+            )
+            async with db_module.get_db() as db:
+                await db.execute(
+                    "UPDATE games SET hltb_cached_at = 'FAILED' WHERE id = ?",
+                    (game_id,),
+                )
+                await db.commit()
+
+            claimed = await db_module.claim_game_ids_for_hltb(
+                limit=1,
+                stale_before="1970-01-01T00:00:00+00:00",
+            )
+
+        self.assertEqual(claimed, [game_id])
+
 
 class BackgroundEnrichmentSupervisorTests(unittest.IsolatedAsyncioTestCase):
     async def test_background_enrich_skips_opencritic_workers_when_api_key_is_missing(self) -> None:

@@ -152,6 +152,28 @@ class SyncNintendoTests(unittest.TestCase):
 
         self.assertEqual(cookies, {"session": "cookie"})
 
+    def test_sync_normalizes_titles_and_skips_non_game_rows(self) -> None:
+        entries = [
+            {"name": "Hollow Knight – Nintendo Switch 2 Edition", "playtime_minutes": None, "title_id": "0101"},
+            {"name": "METAL GEAR SOLID: MASTER COLLECTION Vol.1 BONUS CONTENT", "playtime_minutes": None, "title_id": "0102"},
+        ]
+
+        result, mock_resolve, mock_upsert_platform, mock_upsert_identifier, _ = self._run_sync(entries)
+
+        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 1})
+        mock_resolve.assert_awaited_once()
+        self.assertEqual(
+            mock_resolve.await_args.args[:2],
+            ("Hollow Knight", igdb.PLATFORM_TO_IGDB["switch2"]),
+        )
+        mock_upsert_platform.assert_awaited_once_with(
+            game_id=42,
+            platform="switch2",
+            playtime_minutes=None,
+            owned=1,
+        )
+        mock_upsert_identifier.assert_awaited_once_with(99, nintendo.NINTENDO_TITLE_ID, "0101")
+
 
 if __name__ == "__main__":
     unittest.main()

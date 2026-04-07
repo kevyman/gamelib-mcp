@@ -24,6 +24,7 @@ from .db import (
     release_game_claim,
     upsert_game_platform_enrichment,
 )
+from .title_normalization import normalize_catalog_title
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +176,10 @@ _IGDB_LINK_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[int, asyncio
 _FALLBACK_TITLE_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = WeakKeyDictionary()
 
 
+class IGDBRequestFailure(RuntimeError):
+    """Raised when IGDB request retries are exhausted or credentials fail operationally."""
+
+
 def _get_igdb_link_lock(igdb_id: int) -> asyncio.Lock:
     loop = asyncio.get_running_loop()
     loop_locks = _IGDB_LINK_LOCKS.get(loop)
@@ -312,6 +317,13 @@ async def _post_igdb_games(query: str, headers: dict[str, str]) -> list[dict]:
         except Exception as exc:
             last_error = exc
             if attempt >= _IGDB_MAX_RETRIES or not _should_retry(exc):
+                status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+                logger.warning(
+                    "IGDB search exhausted retries after %s attempts%s: %s",
+                    attempt + 1,
+                    f" status={status_code}" if status_code is not None else "",
+                    exc,
+                )
                 raise
 
             response = exc.response if isinstance(exc, httpx.HTTPStatusError) else None
@@ -340,7 +352,12 @@ def _build_search_game_query(name: str, igdb_platform_id: int | None = None) -> 
     return " ".join(clauses)
 
 
-async def search_game(name: str, igdb_platform_id: int | None = None) -> list[IGDBGame]:
+async def search_game(
+    name: str,
+    igdb_platform_id: int | None = None,
+    *,
+    suppress_errors: bool = True,
+) -> list[IGDBGame]:
     """
     Search IGDB for a game by name, optionally filtered to a platform.
     Returns up to 5 matches ranked by relevance.
@@ -362,6 +379,8 @@ async def search_game(name: str, igdb_platform_id: int | None = None) -> list[IG
             },
         )
     except Exception as exc:
+        if not suppress_errors:
+            raise IGDBRequestFailure(f"IGDB search failed for {name!r}") from exc
         logger.warning("IGDB search failed for %r: %s", name, exc)
         return []
 
@@ -398,7 +417,12 @@ async def search_game(name: str, igdb_platform_id: int | None = None) -> list[IG
     return games
 
 
-async def resolve_game(name: str, igdb_platform_id: int | None) -> IGDBGame | None:
+async def resolve_game(
+    name: str,
+    igdb_platform_id: int | None,
+    *,
+    suppress_errors: bool = True,
+) -> IGDBGame | None:
     """
     Find the best IGDB match for a game name + platform. Returns None if not found
     or IGDB credentials are not configured.
@@ -406,11 +430,11 @@ async def resolve_game(name: str, igdb_platform_id: int | None) -> IGDBGame | No
     if not os.environ.get("TWITCH_CLIENT_ID"):
         return None
 
-    results = await search_game(name, igdb_platform_id)
+    results = await search_game(name, igdb_platform_id, suppress_errors=suppress_errors)
     if not results:
         # Try without platform filter as fallback
         if igdb_platform_id is not None:
-            results = await search_game(name, igdb_platform_id=None)
+            results = await search_game(name, igdb_platform_id=None, suppress_errors=suppress_errors)
 
     if not results:
         return None
@@ -567,7 +591,11 @@ async def backfill_missing_games(limit: int = 10) -> int:
                 continue
 
             platform_hint = await choose_igdb_platform_hint(game_id)
-            igdb_game = await resolve_game(row["name"], platform_hint)
+            igdb_game = await resolve_game(
+                normalize_catalog_title(row["name"]),
+                platform_hint,
+                suppress_errors=False,
+            )
             if igdb_game is not None:
                 try:
                     await _apply_igdb_metadata(game_id, igdb_game)
@@ -583,6 +611,13 @@ async def backfill_missing_games(limit: int = 10) -> int:
             else:
                 await mark_igdb_checked(game_id)
             processed += 1
+        except IGDBRequestFailure as exc:
+            logger.warning(
+                "IGDB backfill leaving game retryable after operational failure: game_id=%s name=%r error=%s",
+                game_id,
+                row["name"] if row is not None else None,
+                exc,
+            )
         finally:
             await release_game_claim(game_id, "igdb_claimed_at")
 

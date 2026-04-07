@@ -10,6 +10,7 @@ from .db import (
     bulk_upsert_steam_library,
     set_meta,
 )
+from .title_normalization import prepare_catalog_title
 
 logger = logging.getLogger(__name__)
 
@@ -50,16 +51,26 @@ async def fetch_library() -> dict:
         )
 
     now = datetime.now(timezone.utc).isoformat()
-    normalized_rows = [
-        {
-            "appid": game["appid"],
-            "name": game.get("name", f"App {game['appid']}"),
-            "playtime_minutes": game.get("playtime_forever", 0),
-            "playtime_2weeks_minutes": game.get("playtime_2weeks", 0),
-            "rtime_last_played": game.get("rtime_last_played") or None,
-        }
-        for game in games
-    ]
+    normalized_rows = []
+    skipped_rows = 0
+    for game in games:
+        prepared_title = prepare_catalog_title(game.get("name", f"App {game['appid']}"))
+        if prepared_title is None:
+            skipped_rows += 1
+            continue
+
+        normalized_rows.append(
+            {
+                "appid": game["appid"],
+                "name": prepared_title,
+                "playtime_minutes": game.get("playtime_forever", 0),
+                "playtime_2weeks_minutes": game.get("playtime_2weeks", 0),
+                "rtime_last_played": game.get("rtime_last_played") or None,
+            }
+        )
+
+    if skipped_rows:
+        logger.info("Steam sync skipped %d non-game rows before DB upsert", skipped_rows)
     upserted = await bulk_upsert_steam_library(normalized_rows, synced_at=now)
 
     await set_meta("library_synced_at", now)

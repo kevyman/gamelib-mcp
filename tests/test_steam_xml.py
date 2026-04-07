@@ -154,6 +154,53 @@ class SteamXmlFetchLibraryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["key"], "runtime-key")
         self.assertEqual(params["steamid"], "runtime-id")
 
+    async def test_fetch_library_filters_non_game_rows_and_normalizes_titles(self) -> None:
+        response = _DummyResponse(
+            {
+                "response": {
+                    "game_count": 3,
+                    "games": [
+                        {"appid": 10, "name": "Batman: Arkham Asylum GOTY Edition"},
+                        {"appid": 20, "name": "H1Z1: Test Server"},
+                        {"appid": 30, "name": "LEGO® Star Wars™: The Skywalker Saga"},
+                    ],
+                }
+            }
+        )
+        client = _DummyClient(response)
+        synced_at = "2026-04-07T12:00:00+00:00"
+
+        with (
+            patch.object(steam_xml, "STEAM_API_KEY", "key"),
+            patch.object(steam_xml, "STEAM_ID", "steam-id"),
+            patch.object(steam_xml.httpx, "AsyncClient", return_value=client),
+            patch.object(steam_xml, "bulk_upsert_steam_library", AsyncMock(return_value=2)) as bulk_upsert,
+            patch.object(steam_xml, "set_meta", AsyncMock()),
+            patch.object(steam_xml, "datetime", _FixedDatetime),
+        ):
+            result = await steam_xml.fetch_library()
+
+        bulk_upsert.assert_awaited_once_with(
+            [
+                {
+                    "appid": 10,
+                    "name": "Batman: Arkham Asylum",
+                    "playtime_minutes": 0,
+                    "playtime_2weeks_minutes": 0,
+                    "rtime_last_played": None,
+                },
+                {
+                    "appid": 30,
+                    "name": "LEGO Star Wars: The Skywalker Saga",
+                    "playtime_minutes": 0,
+                    "playtime_2weeks_minutes": 0,
+                    "rtime_last_played": None,
+                },
+            ],
+            synced_at=synced_at,
+        )
+        self.assertEqual(result["games_upserted"], 2)
+
 
 class SteamBulkUpsertTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:

@@ -224,3 +224,28 @@ class SyncEpicTests(unittest.TestCase):
             owned=1,
         )
         mock_enrichment.assert_awaited_once_with(99, platform_release_date="2020-09-17")
+
+    def test_sync_skips_non_game_rows_and_normalizes_titles_before_resolving(self) -> None:
+        games = [
+            {"title": "Q.U.B.E. 2 Soundtrack", "asset_infos": {"Windows": {"asset_id": "artifact-1"}}},
+            {"title": "Grand Theft Auto V (PlayStation®5)", "asset_infos": {"Windows": {"asset_id": "artifact-2"}}},
+        ]
+
+        result, mock_resolve, mock_upsert_platform, _ = self._run_sync(
+            games,
+            playtime_by_artifact={"artifact-2": 5},
+            resolve_result=(42, None),
+        )
+
+        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 1})
+        mock_resolve.assert_awaited_once()
+        self.assertEqual(
+            mock_resolve.await_args.args[:2],
+            ("Grand Theft Auto V", igdb.PLATFORM_TO_IGDB["epic"]),
+        )
+        mock_upsert_platform.assert_awaited_once_with(
+            game_id=42,
+            platform="epic",
+            playtime_minutes=5,
+            owned=1,
+        )

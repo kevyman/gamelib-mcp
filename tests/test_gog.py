@@ -216,6 +216,28 @@ class SyncGogSyncTests(unittest.TestCase):
             ("Cyberpunk 2077", igdb.PLATFORM_TO_IGDB["gog"]),
         )
 
+    def test_non_game_rows_are_skipped_before_resolving(self) -> None:
+        proc = self._make_proc(b"quake_ii_quad_damage_game\nq_u_b_e_2_soundtrack\n")
+        mock_resolve = AsyncMock(return_value=(5, None))
+
+        with (
+            patch("gamelib_mcp.data.gog.shutil.which", return_value="/usr/bin/lgogdownloader"),
+            patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": "/config/lgogdownloader"}, clear=False),
+            patch("pathlib.Path.exists", return_value=True),
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            patch("gamelib_mcp.data.gog.resolve_and_link_game", mock_resolve),
+            patch("gamelib_mcp.data.gog.upsert_game_platform", AsyncMock(return_value=1)),
+            patch("gamelib_mcp.data.gog.load_fuzzy_candidates", AsyncMock(return_value={})),
+        ):
+            result = asyncio.run(gog.sync_gog())
+
+        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 1})
+        mock_resolve.assert_awaited_once()
+        self.assertEqual(
+            mock_resolve.await_args.args[:2],
+            ("Quake Ii Quad Damage", igdb.PLATFORM_TO_IGDB["gog"]),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

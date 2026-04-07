@@ -1123,7 +1123,7 @@ async def claim_game_ids_for_hltb(limit: int, stale_before: str) -> list[int]:
            LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
            WHERE spd.store_cached_at IS NOT NULL
              AND spd.store_cached_at != 'FAILED'
-             AND g.hltb_cached_at IS NULL
+             AND (g.hltb_cached_at IS NULL OR g.hltb_cached_at = 'FAILED')
              AND (g.hltb_claimed_at IS NULL OR g.hltb_claimed_at < ?)
              AND g.is_farmed = 0
            ORDER BY COALESCE(gp.playtime_minutes, 0) DESC, g.id
@@ -1132,7 +1132,7 @@ async def claim_game_ids_for_hltb(limit: int, stale_before: str) -> list[int]:
         """UPDATE games
            SET hltb_claimed_at = ?
            WHERE id = ?
-             AND hltb_cached_at IS NULL
+             AND (hltb_cached_at IS NULL OR hltb_cached_at = 'FAILED')
              AND (hltb_claimed_at IS NULL OR hltb_claimed_at < ?)""",
         lambda now, game_id: (now, game_id, stale_before),
     )

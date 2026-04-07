@@ -242,6 +242,27 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.calls, 4)
         self.assertEqual(sleep_mock.await_count, 3)
 
+    async def test_search_game_logs_retry_exhaustion(self) -> None:
+        client = _DummyAsyncClient(
+            [
+                _DummyResponse(429, [], headers={"Retry-After": "0"}),
+                _DummyResponse(503, {"message": "unavailable"}),
+                httpx.ReadTimeout("timeout"),
+                httpx.ConnectError("boom"),
+            ]
+        )
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb.httpx.AsyncClient", return_value=client),
+            self.assertLogs("gamelib_mcp.data.igdb", level="WARNING") as logs,
+        ):
+            with self.assertRaises(igdb.IGDBRequestFailure):
+                await igdb.search_game("Portal 2", suppress_errors=False)
+
+        self.assertTrue(any("IGDB search exhausted retries" in line for line in logs.output))
+
 
 class IGDBLinkingConcurrencyTests(unittest.IsolatedAsyncioTestCase):
     async def test_resolve_and_link_game_reuses_existing_row_under_concurrent_calls(self) -> None:
@@ -414,3 +435,25 @@ class IGDBBackfillTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(count, 2)
         mark_checked.assert_awaited_once_with(7)
         self.assertEqual(release_claim.await_count, 2)
+
+    async def test_backfill_missing_games_does_not_mark_checked_on_operational_failure(self) -> None:
+        game_row = {"id": 7, "name": "Portal 2", "igdb_id": None}
+
+        with (
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[game_row])),
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=igdb.IGDB_PLATFORM_PC)),
+            patch(
+                "gamelib_mcp.data.igdb.resolve_game",
+                AsyncMock(side_effect=igdb.IGDBRequestFailure("retry exhausted")),
+            ),
+            patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()) as release_claim,
+            self.assertLogs("gamelib_mcp.data.igdb", level="WARNING") as logs,
+        ):
+            count = await igdb.backfill_missing_games(limit=1)
+
+        self.assertEqual(count, 0)
+        mark_checked.assert_not_awaited()
+        release_claim.assert_awaited_once_with(7, "igdb_claimed_at")
+        self.assertTrue(any("IGDB backfill leaving game retryable" in line for line in logs.output))

@@ -27,6 +27,7 @@ from gamelib_mcp.data.db import (
     upsert_game_platform_identifier,
 )
 from gamelib_mcp.data.igdb import resolve_and_link_game, PLATFORM_TO_IGDB
+from gamelib_mcp.data.title_normalization import prepare_catalog_title
 
 logger = logging.getLogger(__name__)
 
@@ -262,13 +263,17 @@ async def sync_epic() -> dict:
         if not title:
             skipped += 1
             continue
+        prepared_title = prepare_catalog_title(title)
+        if prepared_title is None:
+            skipped += 1
+            continue
 
         igdb_platform_id = PLATFORM_TO_IGDB.get("epic")
-        game_id, igdb_game = await resolve_and_link_game(title, igdb_platform_id, candidates)
+        game_id, igdb_game = await resolve_and_link_game(prepared_title, igdb_platform_id, candidates)
         if game_id in candidates:
             matched += 1
         else:
-            candidates[game_id] = title
+            candidates[game_id] = prepared_title
             added += 1
 
         artifact_id = _extract_epic_artifact_id(game)

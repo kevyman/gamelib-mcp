@@ -32,6 +32,7 @@ from gamelib_mcp.data.db import (
     upsert_game_platform_identifier,
 )
 from gamelib_mcp.data.igdb import resolve_and_link_game, PLATFORM_TO_IGDB
+from gamelib_mcp.data.title_normalization import prepare_catalog_title
 
 logger = logging.getLogger(__name__)
 
@@ -376,7 +377,7 @@ async def sync_nintendo() -> dict:
     candidates = await load_fuzzy_candidates()
 
     for entry in entries:
-        name = entry["name"]
+        name = prepare_catalog_title(entry["name"])
         if not name:
             skipped += 1
             continue
