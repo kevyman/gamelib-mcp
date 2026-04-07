@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from gamelib_mcp.data import epic
+from gamelib_mcp.data import epic, igdb
 
 
 class EpicHelpersTests(unittest.TestCase):
@@ -86,3 +86,87 @@ class EpicHelpersTests(unittest.TestCase):
             playtime = asyncio.run(epic.fetch_epic_playtime())
 
         self.assertEqual(playtime, {"artifact-1": 2, "artifact-2": 7, "artifact-3": 60})
+
+
+class SyncEpicTests(unittest.TestCase):
+    def _run_sync(self, games, playtime_by_artifact=None, resolve_result=(42, None), candidates=None):
+        mock_resolve = AsyncMock(return_value=resolve_result)
+        mock_upsert_platform = AsyncMock(return_value=99)
+        mock_enrichment = AsyncMock()
+
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch("gamelib_mcp.data.epic.fetch_epic_library", AsyncMock(return_value=games)),
+            patch("gamelib_mcp.data.epic.fetch_epic_playtime", AsyncMock(return_value=playtime_by_artifact or {})),
+            patch("gamelib_mcp.data.epic.load_fuzzy_candidates", AsyncMock(return_value=candidates or {})),
+            patch("gamelib_mcp.data.epic.resolve_and_link_game", mock_resolve),
+            patch("gamelib_mcp.data.epic.upsert_game_platform", mock_upsert_platform),
+            patch("gamelib_mcp.data.epic.upsert_game_platform_enrichment", mock_enrichment),
+        ):
+            result = asyncio.run(epic.sync_epic())
+
+        return result, mock_resolve, mock_upsert_platform, mock_enrichment
+
+    def test_unmatched_game_still_syncs_when_igdb_returns_no_result(self) -> None:
+        games = [
+            {
+                "app_title": "Celeste",
+                "asset_infos": {"Windows": {"asset_id": "artifact-1"}},
+            }
+        ]
+
+        result, mock_resolve, mock_upsert_platform, mock_enrichment = self._run_sync(
+            games,
+            playtime_by_artifact={"artifact-1": 45},
+            resolve_result=(42, None),
+        )
+
+        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 0})
+        mock_resolve.assert_awaited_once()
+        self.assertEqual(
+            mock_resolve.await_args.args[:2],
+            ("Celeste", igdb.PLATFORM_TO_IGDB["epic"]),
+        )
+        mock_upsert_platform.assert_awaited_once_with(
+            game_id=42,
+            platform="epic",
+            playtime_minutes=45,
+            owned=1,
+        )
+        mock_enrichment.assert_not_called()
+
+    def test_matched_game_triggers_platform_release_date_enrichment(self) -> None:
+        games = [
+            {
+                "title": "Hades",
+                "asset_infos": {"Windows": {"asset_id": "artifact-2"}},
+            }
+        ]
+        mock_game = igdb.IGDBGame(
+            igdb_id=99,
+            name="Hades",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2020-09-17",
+            platform_release_dates={igdb.PLATFORM_TO_IGDB["epic"]: "2020-09-17"},
+        )
+
+        result, mock_resolve, mock_upsert_platform, mock_enrichment = self._run_sync(
+            games,
+            playtime_by_artifact={"artifact-2": 60},
+            resolve_result=(7, mock_game),
+            candidates={7: "Hades"},
+        )
+
+        self.assertEqual(result["matched"], 1)
+        mock_resolve.assert_awaited_once()
+        self.assertEqual(
+            mock_resolve.await_args.args[:2],
+            ("Hades", igdb.PLATFORM_TO_IGDB["epic"]),
+        )
+        mock_upsert_platform.assert_awaited_once_with(
+            game_id=7,
+            platform="epic",
+            playtime_minutes=60,
+            owned=1,
+        )
+        mock_enrichment.assert_awaited_once_with(99, platform_release_date="2020-09-17")
