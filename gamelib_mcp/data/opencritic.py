@@ -1,10 +1,12 @@
 """OpenCritic API client — cross-platform review scores cached in game_platform_enrichment."""
 
+import asyncio
 import logging
 import json
 import os
 import re
 from datetime import datetime, timezone
+import random
 import unicodedata
 from urllib.parse import urljoin
 
@@ -16,6 +18,13 @@ from .db import get_db, upsert_game_platform_enrichment
 logger = logging.getLogger(__name__)
 
 OPENCRITIC_CACHE_DAYS = 30
+_RECENT_RELEASE_WINDOW_DAYS = 180
+_RECENT_SUCCESS_TTL_DAYS = 7
+_NO_MATCH_COOLDOWN_DAYS = 7
+_TRANSIENT_FAILURE_COOLDOWN_DAYS = 1
+_BASE_DELAY_SECONDS = 2.0
+_BASE_JITTER_SECONDS = 1.0
+_RETRY_DELAYS = (4.0, 8.0, 16.0)
 _SEARCH_URL = "https://api.opencritic.com/api/game/search"
 _GAME_URL = "https://api.opencritic.com/api/game/{id}"
 _OPENCRITIC_BASE_URL = "https://opencritic.com"
@@ -55,6 +64,23 @@ def _is_fresh(cached_at: str | None) -> bool:
         return (datetime.now(timezone.utc) - dt).total_seconds() < OPENCRITIC_CACHE_DAYS * 86400
     except ValueError:
         return False
+
+
+def _is_opencritic_fresh(cached_at: str | None, release_date: str | None, now: datetime) -> bool:
+    if not cached_at:
+        return False
+    if not release_date:
+        return False
+    try:
+        fetched_at = datetime.fromisoformat(cached_at)
+        released = datetime.fromisoformat(release_date).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    if fetched_at.tzinfo is None:
+        fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+    if (now - released).days > _RECENT_RELEASE_WINDOW_DAYS:
+        return True
+    return (now - fetched_at).total_seconds() < _RECENT_SUCCESS_TTL_DAYS * 86400
 
 
 def _normalize_match_title(value: str) -> str:
@@ -144,6 +170,35 @@ def _parse_opencritic_record(html: str, source_url: str) -> dict | None:
         "opencritic_percent_rec": float(state["percentRecommended"]),
         "opencritic_num_reviews": int(state["numReviews"]),
     }
+
+
+async def _sleep_with_jitter(base_seconds: float) -> None:
+    await asyncio.sleep(base_seconds + random.uniform(0, _BASE_JITTER_SECONDS))
+
+
+async def _fetch_opencritic_record(client: httpx.AsyncClient, url: str) -> dict:
+    await _sleep_with_jitter(_BASE_DELAY_SECONDS)
+    for retry_delay in (*_RETRY_DELAYS, None):
+        try:
+            response = await client.get(url)
+            if response.status_code in (429, 500, 502, 503, 504):
+                raise httpx.HTTPStatusError("retryable", request=response.request, response=response)
+            response.raise_for_status()
+            parsed = _parse_opencritic_record(response.text, url)
+            if parsed is None:
+                return {"status": "parse_failed"}
+            return {"status": "matched", "fields": parsed}
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code in (429, 500, 502, 503, 504) and retry_delay is not None:
+                await _sleep_with_jitter(retry_delay)
+                continue
+            return {"status": "http_error"}
+        except httpx.RequestError:
+            if retry_delay is not None:
+                await _sleep_with_jitter(retry_delay)
+                continue
+            return {"status": "http_error"}
+    return {"status": "http_error"}
 
 
 async def _discover_from_opencritic(title: str) -> list[dict]:

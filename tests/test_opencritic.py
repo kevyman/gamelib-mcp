@@ -1,5 +1,8 @@
 import unittest
-from unittest.mock import AsyncMock, patch
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, Mock, patch
+
+import httpx
 
 from gamelib_mcp.data import opencritic
 
@@ -98,3 +101,108 @@ class OpenCriticDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             candidates = await opencritic.discover_candidates("Portal 2")
 
         self.assertEqual(candidates[0]["opencritic_id"], 120)
+
+
+class OpenCriticRefreshPolicyTests(unittest.TestCase):
+    def test_recent_release_is_stale_after_seven_days(self) -> None:
+        fetched_at = "2026-04-01T00:00:00+00:00"
+        release_date = "2026-03-20"
+        now = datetime(2026, 4, 10, tzinfo=timezone.utc)
+        self.assertFalse(opencritic._is_opencritic_fresh(fetched_at, release_date, now))
+
+    def test_old_release_never_refreshes_after_success(self) -> None:
+        fetched_at = "2025-01-01T00:00:00+00:00"
+        release_date = "2023-05-01"
+        now = datetime(2026, 4, 10, tzinfo=timezone.utc)
+        self.assertTrue(opencritic._is_opencritic_fresh(fetched_at, release_date, now))
+
+    def test_invalid_cached_timestamp_is_not_fresh(self) -> None:
+        now = datetime(2026, 4, 10, tzinfo=timezone.utc)
+        self.assertFalse(opencritic._is_opencritic_fresh("FAILED", "2026-03-20", now))
+
+    def test_naive_cached_timestamp_is_treated_as_utc(self) -> None:
+        now = datetime(2026, 4, 5, tzinfo=timezone.utc)
+        self.assertTrue(opencritic._is_opencritic_fresh("2026-04-01T00:00:00", "2026-03-20", now))
+
+
+class OpenCriticFetchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fetch_opencritic_record_returns_parse_failed_on_empty_html(self) -> None:
+        response = Mock(status_code=200, text="<html></html>")
+        response.raise_for_status = Mock(return_value=None)
+        client = AsyncMock()
+        client.get.return_value = response
+        with patch("gamelib_mcp.data.opencritic._sleep_with_jitter", AsyncMock()):
+            result = await opencritic._fetch_opencritic_record(client, "https://opencritic.com/game/120/portal-2/export")
+        self.assertEqual(result["status"], "parse_failed")
+
+    async def test_fetch_opencritic_record_returns_matched_fields(self) -> None:
+        response = Mock(
+            status_code=200,
+            text=(
+                '<script>window.__STATE__ = {"id":120,"topCriticScore":95,'
+                '"tier":"Mighty","percentRecommended":98,"numReviews":69,'
+                '"url":"https://opencritic.com/game/120/portal-2"};</script>'
+            ),
+        )
+        response.raise_for_status = Mock(return_value=None)
+        client = AsyncMock()
+        client.get.return_value = response
+        with patch("gamelib_mcp.data.opencritic._sleep_with_jitter", AsyncMock()):
+            result = await opencritic._fetch_opencritic_record(client, "https://opencritic.com/game/120/portal-2/export")
+        self.assertEqual(result["status"], "matched")
+        self.assertEqual(result["fields"]["opencritic_id"], 120)
+
+    async def test_fetch_opencritic_record_retries_retryable_http_status(self) -> None:
+        retryable = Mock(status_code=503, text="")
+        retryable.request = Mock()
+        retryable.raise_for_status = Mock(return_value=None)
+        success = Mock(
+            status_code=200,
+            text=(
+                '<script>window.__STATE__ = {"id":120,"topCriticScore":95,'
+                '"tier":"Mighty","percentRecommended":98,"numReviews":69,'
+                '"url":"https://opencritic.com/game/120/portal-2"};</script>'
+            ),
+        )
+        success.raise_for_status = Mock(return_value=None)
+        client = AsyncMock()
+        client.get.side_effect = [retryable, success]
+        with patch("gamelib_mcp.data.opencritic._sleep_with_jitter", AsyncMock()) as sleep:
+            result = await opencritic._fetch_opencritic_record(client, "https://opencritic.com/game/120/portal-2/export")
+        self.assertEqual(result["status"], "matched")
+        self.assertEqual(client.get.await_count, 2)
+        self.assertEqual(sleep.await_count, 2)
+
+    async def test_fetch_opencritic_record_returns_http_error_for_non_retryable_status(self) -> None:
+        response = Mock(status_code=404, text="")
+        response.raise_for_status = Mock(
+            side_effect=httpx.HTTPStatusError("not found", request=Mock(), response=response)
+        )
+        client = AsyncMock()
+        client.get.return_value = response
+        with patch("gamelib_mcp.data.opencritic._sleep_with_jitter", AsyncMock()) as sleep:
+            result = await opencritic._fetch_opencritic_record(client, "https://opencritic.com/game/120/portal-2/export")
+        self.assertEqual(result["status"], "http_error")
+        self.assertEqual(client.get.await_count, 1)
+        sleep.assert_awaited_once()
+
+    async def test_fetch_opencritic_record_retries_request_errors(self) -> None:
+        success = Mock(
+            status_code=200,
+            text=(
+                '<script>window.__STATE__ = {"id":120,"topCriticScore":95,'
+                '"tier":"Mighty","percentRecommended":98,"numReviews":69,'
+                '"url":"https://opencritic.com/game/120/portal-2"};</script>'
+            ),
+        )
+        success.raise_for_status = Mock(return_value=None)
+        client = AsyncMock()
+        client.get.side_effect = [
+            httpx.RequestError("timeout", request=Mock()),
+            success,
+        ]
+        with patch("gamelib_mcp.data.opencritic._sleep_with_jitter", AsyncMock()) as sleep:
+            result = await opencritic._fetch_opencritic_record(client, "https://opencritic.com/game/120/portal-2/export")
+        self.assertEqual(result["status"], "matched")
+        self.assertEqual(client.get.await_count, 2)
+        self.assertEqual(sleep.await_count, 2)
