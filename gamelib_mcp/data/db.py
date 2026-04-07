@@ -1618,6 +1618,8 @@ async def get_steam_platform_row_by_appid(appid: int) -> aiosqlite.Row | None:
                       gpe.opencritic_score,
                       gpe.opencritic_tier,
                       gpe.opencritic_percent_rec,
+                      gpe.opencritic_url,
+                      gpe.opencritic_num_reviews,
                       gpe.platform_release_date
                FROM game_platform_identifiers gpi
                JOIN game_platforms gp ON gp.id = gpi.game_platform_id
@@ -2047,6 +2049,8 @@ def _platform_dict(row: aiosqlite.Row) -> dict:
         "opencritic_score": row["opencritic_score"],
         "opencritic_tier": row["opencritic_tier"],
         "opencritic_percent_rec": row["opencritic_percent_rec"],
+        "opencritic_url": row["opencritic_url"],
+        "opencritic_num_reviews": row["opencritic_num_reviews"],
     }
 
     if row["platform"] == STEAM_PLATFORM:
@@ -2095,7 +2099,9 @@ async def load_platforms_for_games(game_ids: Iterable[int]) -> dict[int, list[di
                        gpe.metacritic_url,
                        gpe.opencritic_score,
                        gpe.opencritic_tier,
-                       gpe.opencritic_percent_rec
+                       gpe.opencritic_percent_rec,
+                       gpe.opencritic_url,
+                       gpe.opencritic_num_reviews
                 FROM game_platforms gp
                 LEFT JOIN game_platform_identifiers gpi ON gpi.game_platform_id = gp.id
                 LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id

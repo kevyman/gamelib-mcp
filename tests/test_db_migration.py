@@ -236,6 +236,81 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("opencritic_url", names)
         self.assertIn("opencritic_num_reviews", names)
 
+    async def test_platform_dict_exposes_opencritic_scrape_fields(self) -> None:
+        platform = db_module._platform_dict(
+            {
+                "game_platform_id": 1,
+                "platform": "steam",
+                "owned": 1,
+                "playtime_minutes": 120,
+                "playtime_2weeks_minutes": 0,
+                "last_synced": "2026-04-07T00:00:00+00:00",
+                "platform_release_date": "2024-02-01",
+                "metacritic_score": 88,
+                "metacritic_url": "https://www.metacritic.com/game/pc/portal-2/",
+                "opencritic_score": 90,
+                "opencritic_tier": "Mighty",
+                "opencritic_percent_rec": 96.0,
+                "opencritic_url": "https://opencritic.com/game/120/portal-2",
+                "opencritic_num_reviews": 135,
+                "steam_review_score": None,
+                "steam_review_desc": None,
+                "protondb_tier": None,
+                "rtime_last_played": None,
+                "library_updated_at": None,
+            }
+        )
+
+        self.assertEqual(platform["opencritic_url"], "https://opencritic.com/game/120/portal-2")
+        self.assertEqual(platform["opencritic_num_reviews"], 135)
+
+    async def test_load_platforms_for_games_includes_opencritic_scrape_fields(self) -> None:
+        db_module._DB_READY_PATH = None
+        with patch.dict(
+            "os.environ",
+            {"DATABASE_URL": f"file:{self.db_path}"},
+            clear=False,
+        ):
+            await db_module.init_db()
+            async with db_module.get_db() as conn:
+                await conn.execute(
+                    "INSERT INTO games (id, name, is_farmed) VALUES (1, 'Portal 2', 0)"
+                )
+                await conn.execute(
+                    """INSERT INTO game_platforms
+                       (id, game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes, last_synced)
+                       VALUES (1, 1, 'steam', 1, 120, 0, '2026-04-07T00:00:00+00:00')"""
+                )
+                await conn.execute(
+                    """INSERT INTO game_platform_enrichment
+                       (game_platform_id, platform_release_date, metacritic_score, metacritic_url,
+                        opencritic_id, opencritic_url, opencritic_score, opencritic_tier,
+                        opencritic_percent_rec, opencritic_num_reviews, opencritic_cached_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        1,
+                        "2024-02-01",
+                        88,
+                        "https://www.metacritic.com/game/pc/portal-2/",
+                        120,
+                        "https://opencritic.com/game/120/portal-2",
+                        90,
+                        "Mighty",
+                        96.0,
+                        135,
+                        "2026-04-07T00:00:00+00:00",
+                    ),
+                )
+                await conn.commit()
+
+            platforms = await db_module.load_platforms_for_games([1])
+
+        self.assertEqual(
+            platforms[1][0]["opencritic_url"],
+            "https://opencritic.com/game/120/portal-2",
+        )
+        self.assertEqual(platforms[1][0]["opencritic_num_reviews"], 135)
+
     async def test_v4_database_migrates_opencritic_scrape_columns(self) -> None:
         conn = sqlite3.connect(self.db_path)
         old_v4_schema = """
