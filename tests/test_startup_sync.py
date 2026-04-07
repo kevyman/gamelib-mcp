@@ -87,7 +87,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_startup_refresh_records_cancellation_cleanup(self) -> None:
         started = asyncio.Event()
 
-        async def blocked_refresh() -> dict:
+        async def blocked_refresh(*_args, **_kwargs) -> dict:
             started.set()
             await asyncio.Future()
             return {"steam": {"games_upserted": 0}}
@@ -145,41 +145,83 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             await cm.__aexit__(None, None, None)
 
-    async def test_stale_startup_waits_for_refresh_before_enrichment(self) -> None:
+    async def test_stale_startup_waits_for_steam_before_enrichment(self) -> None:
         stale_at = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
-        started = asyncio.Event()
-        release = asyncio.Event()
-
-        async def slow_refresh() -> dict:
-            started.set()
-            await release.wait()
-            return {"steam": {"games_upserted": 1}}
-
+        refresh_started = asyncio.Event()
+        refresh_release = asyncio.Event()
         enrich_started = asyncio.Event()
 
-        async def enrich() -> None:
-            enrich_started.set()
+        async def slow_refresh(*_args, on_steam_complete=None, **_kwargs) -> dict:
+            refresh_started.set()
+            await refresh_release.wait()
+            if on_steam_complete is not None:
+                await on_steam_complete()
+            return {"steam": {"games_upserted": 1}}
 
-        enrich = AsyncMock(side_effect=enrich)
+        async def fake_enrich() -> None:
+            enrich_started.set()
 
         with (
             patch("gamelib_mcp.data.db.init_db", AsyncMock()),
             patch("gamelib_mcp.data.db.get_meta", AsyncMock(return_value=stale_at)),
-            patch("gamelib_mcp.main._run_startup_refresh", side_effect=slow_refresh),
-            patch("gamelib_mcp.data.enrich_bg.background_enrich", enrich),
+            patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()),
+            patch("gamelib_mcp.main._admin_refresh_library", AsyncMock(side_effect=slow_refresh)),
+            patch("gamelib_mcp.data.enrich_bg.background_enrich", AsyncMock(side_effect=fake_enrich)),
         ):
             cm = lifespan(object())
             await asyncio.wait_for(cm.__aenter__(), timeout=0.1)
-            await asyncio.wait_for(started.wait(), timeout=0.1)
+            await asyncio.wait_for(refresh_started.wait(), timeout=0.1)
             await asyncio.sleep(0)
-
-            enrich.assert_not_awaited()
-
-            release.set()
+            self.assertFalse(enrich_started.is_set())
+            self.assertFalse(refresh_release.is_set())
+            refresh_release.set()
             await asyncio.wait_for(enrich_started.wait(), timeout=0.1)
             await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=0.1)
 
-        enrich.assert_awaited_once()
+    async def test_refresh_library_signals_steam_completion_before_other_platforms_finish(self) -> None:
+        steam_started = asyncio.Event()
+        steam_release = asyncio.Event()
+        epic_started = asyncio.Event()
+        epic_release = asyncio.Event()
+        steam_done = asyncio.Event()
+
+        async def steam_sync() -> dict:
+            steam_started.set()
+            await steam_release.wait()
+            return {"platform": "steam", "synced": True}
+
+        async def epic_sync() -> dict:
+            epic_started.set()
+            await epic_release.wait()
+            return {"platform": "epic", "synced": True}
+
+        async def mark_steam_done() -> None:
+            steam_done.set()
+
+        with (
+            patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(side_effect=steam_sync)),
+            patch("gamelib_mcp.tools.admin.sync_epic", AsyncMock(side_effect=epic_sync)),
+        ):
+            refresh_task = asyncio.create_task(
+                admin_tools.refresh_library(["steam", "epic"], on_steam_complete=mark_steam_done)
+            )
+            await asyncio.wait_for(steam_started.wait(), timeout=0.1)
+            await asyncio.wait_for(epic_started.wait(), timeout=0.1)
+
+            steam_release.set()
+            await asyncio.wait_for(steam_done.wait(), timeout=0.1)
+            self.assertFalse(refresh_task.done())
+
+            epic_release.set()
+            result = await asyncio.wait_for(refresh_task, timeout=0.1)
+
+        self.assertEqual(
+            result,
+            {
+                "steam": {"platform": "steam", "synced": True},
+                "epic": {"platform": "epic", "synced": True},
+            },
+        )
 
     async def test_refresh_library_parallelizes_platform_syncs_and_isolates_failures(self) -> None:
         started = {

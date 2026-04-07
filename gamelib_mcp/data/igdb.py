@@ -15,6 +15,15 @@ from weakref import WeakKeyDictionary
 
 import httpx
 
+from .db import (
+    _claim_cutoff_iso,
+    claim_game_ids_for_igdb,
+    load_games_for_igdb_backfill,
+    load_platforms_for_games,
+    release_game_claim,
+    upsert_game_platform_enrichment,
+)
+
 logger = logging.getLogger(__name__)
 
 _TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
@@ -316,6 +325,20 @@ def _escape_igdb_search_term(term: str) -> str:
     return term.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _build_search_game_query(name: str, igdb_platform_id: int | None = None) -> str:
+    escaped_name = _escape_igdb_search_term(name)
+    clauses = [
+        "fields id, name, category, first_release_date, "
+        "genres.name, themes.name, keywords.name, "
+        "release_dates.platform, release_dates.date;",
+        f'search "{escaped_name}";',
+    ]
+    if igdb_platform_id is not None:
+        clauses.append(f"where platforms = {igdb_platform_id};")
+    clauses.append("limit 5;")
+    return " ".join(clauses)
+
+
 async def search_game(name: str, igdb_platform_id: int | None = None) -> list[IGDBGame]:
     """
     Search IGDB for a game by name, optionally filtered to a platform.
@@ -325,16 +348,7 @@ async def search_game(name: str, igdb_platform_id: int | None = None) -> list[IG
     if not client_id:
         return []
 
-    platform_clause = f" & platforms = ({igdb_platform_id})" if igdb_platform_id else ""
-    escaped_name = _escape_igdb_search_term(name)
-    query = (
-        f'fields id, name, category, first_release_date, '
-        f'genres.name, themes.name, keywords.name, '
-        f'release_dates.platform, release_dates.date; '
-        f'search "{escaped_name}"; '
-        f'where 1 = 1{platform_clause}; '
-        f'limit 5;'
-    )
+    query = _build_search_game_query(name, igdb_platform_id)
 
     try:
         token = await _get_token()
@@ -487,3 +501,79 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
             (*updates.values(), game_id),
         )
         await db.commit()
+
+
+async def choose_igdb_platform_hint(game_id: int) -> int | None:
+    platforms_by_game = await load_platforms_for_games([game_id])
+    platforms = platforms_by_game.get(game_id, [])
+    if not platforms:
+        return None
+
+    for platform in platforms:
+        if platform["platform"] == "steam":
+            return IGDB_PLATFORM_PC
+
+    for platform in platforms:
+        if platform.get("owned") and platform["platform"] in PLATFORM_TO_IGDB:
+            return PLATFORM_TO_IGDB[platform["platform"]]
+
+    return None
+
+
+async def upsert_backfill_platform_release_dates(game_id: int, igdb_game: IGDBGame) -> None:
+    if not igdb_game.platform_release_dates:
+        return
+
+    platforms_by_game = await load_platforms_for_games([game_id])
+    for platform in platforms_by_game.get(game_id, []):
+        igdb_platform_id = PLATFORM_TO_IGDB.get(platform["platform"])
+        release_date = igdb_game.platform_release_dates.get(igdb_platform_id)
+        game_platform_id = platform["game_platform_id"]
+        if release_date is None or game_platform_id is None:
+            continue
+        await upsert_game_platform_enrichment(
+            game_platform_id,
+            platform_release_date=release_date,
+        )
+
+
+async def mark_igdb_checked(game_id: int) -> None:
+    from .db import get_db
+
+    checked_at = datetime.now(timezone.utc).isoformat()
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE games SET igdb_cached_at = ? WHERE id = ?",
+            (checked_at, game_id),
+        )
+        await db.commit()
+
+
+async def backfill_missing_games(limit: int = 10) -> int:
+    stale_before = _claim_cutoff_iso()
+    game_ids = await claim_game_ids_for_igdb(limit=limit, stale_before=stale_before)
+    if not game_ids:
+        return 0
+
+    rows = await load_games_for_igdb_backfill(game_ids)
+    rows_by_id = {row["id"]: row for row in rows}
+    processed = 0
+
+    for game_id in game_ids:
+        row = rows_by_id.get(game_id)
+        try:
+            if row is None:
+                continue
+
+            platform_hint = await choose_igdb_platform_hint(game_id)
+            igdb_game = await resolve_game(row["name"], platform_hint)
+            if igdb_game is not None:
+                await _apply_igdb_metadata(game_id, igdb_game)
+                await upsert_backfill_platform_release_dates(game_id, igdb_game)
+            else:
+                await mark_igdb_checked(game_id)
+            processed += 1
+        finally:
+            await release_game_claim(game_id, "igdb_claimed_at")
+
+    return processed

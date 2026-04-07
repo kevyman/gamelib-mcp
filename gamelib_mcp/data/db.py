@@ -8,7 +8,7 @@ import re
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Callable, Iterable, TypeVar
 
@@ -34,7 +34,7 @@ STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 @dataclass
@@ -358,6 +358,110 @@ _V3_SCHEMA_DDL = """
 """
 
 
+_V4_SCHEMA_DDL = """
+    CREATE TABLE IF NOT EXISTS games (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        igdb_id          INTEGER UNIQUE,
+        name             TEXT NOT NULL,
+        sort_name        TEXT,
+        release_date     TEXT,
+        genres           TEXT,
+        tags             TEXT,
+        short_description TEXT,
+        hltb_main        REAL,
+        hltb_extra       REAL,
+        hltb_complete    REAL,
+        hltb_cached_at   TEXT,
+        hltb_claimed_at  TEXT,
+        igdb_cached_at   TEXT,
+        igdb_claimed_at  TEXT,
+        is_farmed        INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS game_platforms (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id          INTEGER NOT NULL REFERENCES games(id),
+        platform         TEXT NOT NULL,
+        owned            INTEGER NOT NULL DEFAULT 1,
+        playtime_minutes INTEGER,
+        playtime_2weeks_minutes INTEGER,
+        last_synced      TEXT,
+        UNIQUE(game_id, platform)
+    );
+
+    CREATE TABLE IF NOT EXISTS game_platform_identifiers (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_platform_id INTEGER NOT NULL REFERENCES game_platforms(id) ON DELETE CASCADE,
+        identifier_type  TEXT NOT NULL,
+        identifier_value TEXT NOT NULL,
+        is_primary       INTEGER NOT NULL DEFAULT 1,
+        last_seen_at     TEXT,
+        UNIQUE(identifier_type, identifier_value)
+    );
+
+    CREATE TABLE IF NOT EXISTS steam_platform_data (
+        game_platform_id    INTEGER PRIMARY KEY REFERENCES game_platforms(id) ON DELETE CASCADE,
+        steam_review_score  INTEGER,
+        steam_review_desc   TEXT,
+        protondb_tier       TEXT,
+        store_cached_at     TEXT,
+        store_claimed_at    TEXT,
+        protondb_cached_at  TEXT,
+        protondb_claimed_at TEXT,
+        steamspy_cached_at  TEXT,
+        steamspy_claimed_at TEXT,
+        rtime_last_played   INTEGER,
+        library_updated_at  TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS game_platform_enrichment (
+        game_platform_id       INTEGER PRIMARY KEY REFERENCES game_platforms(id) ON DELETE CASCADE,
+        platform_release_date  TEXT,
+        metacritic_score       INTEGER,
+        metacritic_url         TEXT,
+        metacritic_claimed_at  TEXT,
+        opencritic_id          INTEGER,
+        opencritic_score       INTEGER,
+        opencritic_tier        TEXT,
+        opencritic_percent_rec REAL,
+        opencritic_cached_at   TEXT,
+        opencritic_claimed_at  TEXT,
+        metacritic_cached_at   TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS ratings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id INTEGER REFERENCES games(id),
+        source TEXT NOT NULL,
+        raw_score REAL,
+        normalized_score REAL,
+        review_text TEXT,
+        synced_at TEXT NOT NULL,
+        UNIQUE(game_id, source)
+    );
+
+    CREATE TABLE IF NOT EXISTS tag_affinity (
+        tag TEXT PRIMARY KEY,
+        affinity_score REAL,
+        avg_score REAL,
+        game_count INTEGER,
+        updated_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_game_platforms_game_id ON game_platforms(game_id);
+    CREATE INDEX IF NOT EXISTS idx_game_platforms_platform ON game_platforms(platform);
+    CREATE INDEX IF NOT EXISTS idx_game_platform_identifiers_platform_id
+        ON game_platform_identifiers(game_platform_id);
+    CREATE INDEX IF NOT EXISTS idx_game_platform_identifiers_lookup
+        ON game_platform_identifiers(identifier_type, identifier_value);
+"""
+
+
 async def _table_names(db: aiosqlite.Connection) -> set[str]:
     rows = await db.execute_fetchall("SELECT name FROM sqlite_master WHERE type='table'")
     return {row[0] for row in rows}
@@ -385,6 +489,21 @@ async def _detect_schema_state(db: aiosqlite.Connection) -> str:
     game_cols = await _table_columns(db, "games")
     if "id" not in game_cols:
         return "legacy"
+
+    spd_cols = await _table_columns(db, "steam_platform_data") if "steam_platform_data" in tables else set()
+    gpe_cols = await _table_columns(db, "game_platform_enrichment") if "game_platform_enrichment" in tables else set()
+    if {
+        "igdb_claimed_at",
+        "hltb_claimed_at",
+    }.issubset(game_cols) and {
+        "store_claimed_at",
+        "protondb_claimed_at",
+        "steamspy_claimed_at",
+    }.issubset(spd_cols) and {
+        "opencritic_claimed_at",
+        "metacritic_claimed_at",
+    }.issubset(gpe_cols):
+        return "v4"
 
     if "game_platform_enrichment" in tables and "metacritic_score" not in game_cols:
         return "v3"
@@ -780,6 +899,27 @@ async def _migrate_v2_to_v3(db: aiosqlite.Connection, progress: _Progress | None
     await db.execute("PRAGMA foreign_keys=ON")
 
 
+async def _migrate_v3_to_v4(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    if progress is not None:
+        progress("Migrating to v4: claim-aware enrichment schema.")
+
+    async def add_column_if_missing(table: str, column_name: str, ddl: str) -> None:
+        columns = await _table_columns(db, table)
+        if column_name not in columns:
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+    await add_column_if_missing("games", "igdb_claimed_at", "igdb_claimed_at TEXT")
+    await add_column_if_missing("games", "hltb_claimed_at", "hltb_claimed_at TEXT")
+    await add_column_if_missing("steam_platform_data", "store_claimed_at", "store_claimed_at TEXT")
+    await add_column_if_missing("steam_platform_data", "protondb_claimed_at", "protondb_claimed_at TEXT")
+    await add_column_if_missing("steam_platform_data", "steamspy_claimed_at", "steamspy_claimed_at TEXT")
+    await add_column_if_missing("game_platform_enrichment", "opencritic_claimed_at", "opencritic_claimed_at TEXT")
+    await add_column_if_missing("game_platform_enrichment", "metacritic_claimed_at", "metacritic_claimed_at TEXT")
+
+    await _set_user_version(db, 4)
+    await db.commit()
+
+
 async def _run_migrations(
     db: aiosqlite.Connection,
     progress: _Progress | None = None,
@@ -790,10 +930,10 @@ async def _run_migrations(
     applied_steps: list[str] = []
 
     if detected_state == "fresh":
-        await db.executescript(_V3_SCHEMA_DDL)
+        await db.executescript(_V4_SCHEMA_DDL)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
-        _emit(progress, "Initialized fresh database at schema v3.", applied_steps)
+        _emit(progress, "Initialized fresh database at schema v4.", applied_steps)
         return MigrationResult(
             initial_version=initial_version,
             final_version=SCHEMA_VERSION,
@@ -821,6 +961,11 @@ async def _run_migrations(
             await db.commit()
             version = 3
             _emit(progress, "Recorded existing schema as v3.", applied_steps)
+        elif detected_state == "v4":
+            await _set_user_version(db, 4)
+            await db.commit()
+            version = 4
+            _emit(progress, "Recorded existing schema as v4.", applied_steps)
 
     if version == 1:
         _emit(progress, "Applying migration step v1 -> v2.", applied_steps)
@@ -832,7 +977,12 @@ async def _run_migrations(
         await _migrate_v2_to_v3(db, progress=None)
         version = 3
 
-    await db.executescript(_V3_SCHEMA_DDL)
+    if version == 3:
+        _emit(progress, "Applying migration step v3 -> v4.", applied_steps)
+        await _migrate_v3_to_v4(db, progress=None)
+        version = 4
+
+    await db.executescript(_V4_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
@@ -890,6 +1040,330 @@ async def migrate_db(progress: _Progress | None = None) -> MigrationResult:
 async def init_db() -> None:
     """Create tables if they don't exist and migrate to the latest schema."""
     await migrate_db()
+
+
+def _claim_cutoff_iso(minutes: int = 15) -> str:
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+
+
+async def clear_claim(table: str, claim_column: str, row_id: int, id_column: str = "id") -> None:
+    async with get_db() as db:
+        await db.execute(
+            f"UPDATE {table} SET {claim_column} = NULL WHERE {id_column} = ?",
+            (row_id,),
+        )
+        await db.commit()
+
+
+async def release_game_claim(game_id: int, column: str) -> None:
+    await clear_claim("games", column, game_id)
+
+
+async def _claim_ids(
+    select_sql: str,
+    select_params: tuple,
+    update_sql: str,
+    update_params_for_id: Callable[[str, int], tuple],
+) -> list[int]:
+    async with get_db() as db:
+        rows = await db.execute_fetchall(select_sql, select_params)
+        ids = [row["id"] for row in rows]
+        if not ids:
+            return []
+
+        now = datetime.now(timezone.utc).isoformat()
+        claimed: list[int] = []
+        for row_id in ids:
+            cursor = await db.execute(update_sql, update_params_for_id(now, row_id))
+            if cursor.rowcount:
+                claimed.append(row_id)
+        await db.commit()
+        return claimed
+
+
+async def claim_game_ids_for_igdb(limit: int, stale_before: str) -> list[int]:
+    return await _claim_ids(
+        """SELECT id
+           FROM games
+           WHERE igdb_cached_at IS NULL
+             AND (igdb_claimed_at IS NULL OR igdb_claimed_at < ?)
+           ORDER BY id
+           LIMIT ?""",
+        (stale_before, limit),
+        """UPDATE games
+           SET igdb_claimed_at = ?
+           WHERE id = ?
+             AND igdb_cached_at IS NULL
+             AND (igdb_claimed_at IS NULL OR igdb_claimed_at < ?)""",
+        lambda now, game_id: (now, game_id, stale_before),
+    )
+
+
+async def claim_game_ids_for_hltb(limit: int, stale_before: str) -> list[int]:
+    return await _claim_ids(
+        """SELECT DISTINCT g.id
+           FROM games g
+           JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = ?
+           LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
+           WHERE spd.store_cached_at IS NOT NULL
+             AND spd.store_cached_at != 'FAILED'
+             AND g.hltb_cached_at IS NULL
+             AND (g.hltb_claimed_at IS NULL OR g.hltb_claimed_at < ?)
+             AND g.is_farmed = 0
+           ORDER BY COALESCE(gp.playtime_minutes, 0) DESC, g.id
+           LIMIT ?""",
+        (STEAM_PLATFORM, stale_before, limit),
+        """UPDATE games
+           SET hltb_claimed_at = ?
+           WHERE id = ?
+             AND hltb_cached_at IS NULL
+             AND (hltb_claimed_at IS NULL OR hltb_claimed_at < ?)""",
+        lambda now, game_id: (now, game_id, stale_before),
+    )
+
+
+async def claim_steam_platform_ids_for_store(limit: int, stale_before: str) -> list[int]:
+    return await _claim_ids(
+        """SELECT spd.game_platform_id AS id
+           FROM steam_platform_data spd
+           JOIN game_platforms gp ON gp.id = spd.game_platform_id
+           JOIN games g ON g.id = gp.game_id
+           JOIN game_platform_identifiers gpi
+             ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
+           WHERE spd.store_cached_at IS NULL
+             AND (spd.store_claimed_at IS NULL OR spd.store_claimed_at < ?)
+             AND g.is_farmed = 0
+           ORDER BY COALESCE(gp.playtime_minutes, 0) DESC, spd.game_platform_id
+           LIMIT ?""",
+        (STEAM_APP_ID, stale_before, limit),
+        """UPDATE steam_platform_data
+           SET store_claimed_at = ?
+           WHERE game_platform_id = ?
+             AND store_cached_at IS NULL
+             AND (store_claimed_at IS NULL OR store_claimed_at < ?)""",
+        lambda now, platform_id: (now, platform_id, stale_before),
+    )
+
+
+async def claim_steam_platform_ids_for_protondb(limit: int, stale_before: str) -> list[int]:
+    return await _claim_ids(
+        """SELECT spd.game_platform_id AS id
+           FROM steam_platform_data spd
+           JOIN game_platforms gp ON gp.id = spd.game_platform_id
+           JOIN games g ON g.id = gp.game_id
+           JOIN game_platform_identifiers gpi
+             ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
+           WHERE spd.store_cached_at IS NOT NULL
+             AND spd.store_cached_at != 'FAILED'
+             AND spd.protondb_cached_at IS NULL
+             AND (spd.protondb_claimed_at IS NULL OR spd.protondb_claimed_at < ?)
+             AND g.is_farmed = 0
+           ORDER BY COALESCE(gp.playtime_minutes, 0) DESC, spd.game_platform_id
+           LIMIT ?""",
+        (STEAM_APP_ID, stale_before, limit),
+        """UPDATE steam_platform_data
+           SET protondb_claimed_at = ?
+           WHERE game_platform_id = ?
+             AND protondb_cached_at IS NULL
+             AND (protondb_claimed_at IS NULL OR protondb_claimed_at < ?)""",
+        lambda now, platform_id: (now, platform_id, stale_before),
+    )
+
+
+async def claim_steam_platform_ids_for_steamspy(limit: int, stale_before: str) -> list[int]:
+    return await _claim_ids(
+        """SELECT spd.game_platform_id AS id
+           FROM steam_platform_data spd
+           JOIN game_platforms gp ON gp.id = spd.game_platform_id
+           JOIN games g ON g.id = gp.game_id
+           JOIN game_platform_identifiers gpi
+             ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
+           WHERE spd.store_cached_at IS NOT NULL
+             AND spd.store_cached_at != 'FAILED'
+             AND spd.steamspy_cached_at IS NULL
+             AND (spd.steamspy_claimed_at IS NULL OR spd.steamspy_claimed_at < ?)
+             AND g.is_farmed = 0
+           ORDER BY COALESCE(gp.playtime_minutes, 0) DESC, spd.game_platform_id
+           LIMIT ?""",
+        (STEAM_APP_ID, stale_before, limit),
+        """UPDATE steam_platform_data
+           SET steamspy_claimed_at = ?
+           WHERE game_platform_id = ?
+             AND steamspy_cached_at IS NULL
+             AND (steamspy_claimed_at IS NULL OR steamspy_claimed_at < ?)""",
+        lambda now, platform_id: (now, platform_id, stale_before),
+    )
+
+
+async def claim_game_platform_ids_for_opencritic(limit: int, stale_before: str) -> list[int]:
+    async with get_db() as db:
+        await db.execute(
+            """INSERT OR IGNORE INTO game_platform_enrichment (game_platform_id)
+               SELECT gp.id
+               FROM game_platforms gp
+               JOIN games g ON g.id = gp.game_id
+               WHERE g.is_farmed = 0"""
+        )
+        await db.commit()
+
+    return await _claim_ids(
+        """SELECT gp.id AS id
+           FROM game_platforms gp
+           JOIN games g ON g.id = gp.game_id
+           JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
+           WHERE gpe.opencritic_cached_at IS NULL
+             AND (gpe.opencritic_claimed_at IS NULL OR gpe.opencritic_claimed_at < ?)
+             AND g.is_farmed = 0
+           ORDER BY COALESCE(gp.playtime_minutes, 0) DESC, gp.id
+           LIMIT ?""",
+        (stale_before, limit),
+        """UPDATE game_platform_enrichment
+           SET opencritic_claimed_at = ?
+           WHERE game_platform_id = ?
+             AND opencritic_cached_at IS NULL
+             AND (opencritic_claimed_at IS NULL OR opencritic_claimed_at < ?)""",
+        lambda now, platform_id: (now, platform_id, stale_before),
+    )
+
+
+async def claim_game_platform_ids_for_metacritic(limit: int, stale_before: str) -> list[int]:
+    async with get_db() as db:
+        await db.execute(
+            """INSERT OR IGNORE INTO game_platform_enrichment (game_platform_id)
+               SELECT gp.id
+               FROM game_platforms gp
+               JOIN games g ON g.id = gp.game_id
+               WHERE g.is_farmed = 0"""
+        )
+        await db.commit()
+
+    return await _claim_ids(
+        """SELECT gp.id AS id
+           FROM game_platforms gp
+           JOIN games g ON g.id = gp.game_id
+           JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
+           WHERE gpe.metacritic_cached_at IS NULL
+             AND (gpe.metacritic_claimed_at IS NULL OR gpe.metacritic_claimed_at < ?)
+             AND g.is_farmed = 0
+           ORDER BY COALESCE(gp.playtime_minutes, 0) DESC, gp.id
+           LIMIT ?""",
+        (stale_before, limit),
+        """UPDATE game_platform_enrichment
+           SET metacritic_claimed_at = ?
+           WHERE game_platform_id = ?
+             AND metacritic_cached_at IS NULL
+             AND (metacritic_claimed_at IS NULL OR metacritic_claimed_at < ?)""",
+        lambda now, platform_id: (now, platform_id, stale_before),
+    )
+
+
+async def load_games_for_igdb_backfill(game_ids: Iterable[int]) -> list[aiosqlite.Row]:
+    ids = list(dict.fromkeys(game_ids))
+    if not ids:
+        return []
+
+    placeholders = ",".join("?" for _ in ids)
+    async with get_db() as db:
+        return await db.execute_fetchall(
+            f"""SELECT id, name, igdb_id
+                FROM games
+                WHERE id IN ({placeholders})
+                ORDER BY id""",
+            ids,
+        )
+
+
+async def load_store_batch_rows(platform_ids: Iterable[int]) -> list[aiosqlite.Row]:
+    ids = list(dict.fromkeys(platform_ids))
+    if not ids:
+        return []
+
+    placeholders = ",".join("?" for _ in ids)
+    async with get_db() as db:
+        return await db.execute_fetchall(
+            f"""SELECT gp.id AS game_platform_id,
+                       CAST(gpi.identifier_value AS INTEGER) AS appid,
+                       g.name
+                FROM game_platforms gp
+                JOIN games g ON g.id = gp.game_id
+                JOIN game_platform_identifiers gpi
+                  ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
+                WHERE gp.id IN ({placeholders})
+                ORDER BY COALESCE(gp.playtime_minutes, 0) DESC, gp.id""",
+            [STEAM_APP_ID, *ids],
+        )
+
+
+async def load_hltb_batch_rows(game_ids: Iterable[int]) -> list[aiosqlite.Row]:
+    ids = list(dict.fromkeys(game_ids))
+    if not ids:
+        return []
+
+    placeholders = ",".join("?" for _ in ids)
+    async with get_db() as db:
+        return await db.execute_fetchall(
+            f"""SELECT id AS game_id, name
+                FROM games
+                WHERE id IN ({placeholders})
+                ORDER BY id""",
+            ids,
+        )
+
+
+async def load_steam_platform_batch_rows(platform_ids: Iterable[int]) -> list[aiosqlite.Row]:
+    ids = list(dict.fromkeys(platform_ids))
+    if not ids:
+        return []
+
+    placeholders = ",".join("?" for _ in ids)
+    async with get_db() as db:
+        return await db.execute_fetchall(
+            f"""SELECT gp.id AS game_platform_id,
+                       CAST(gpi.identifier_value AS INTEGER) AS appid,
+                       g.name,
+                       gp.platform
+                FROM game_platforms gp
+                JOIN games g ON g.id = gp.game_id
+                JOIN game_platform_identifiers gpi
+                  ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
+                WHERE gp.id IN ({placeholders})
+                ORDER BY COALESCE(gp.playtime_minutes, 0) DESC, gp.id""",
+            [STEAM_APP_ID, *ids],
+        )
+
+
+async def load_opencritic_batch_rows(platform_ids: Iterable[int]) -> list[aiosqlite.Row]:
+    ids = list(dict.fromkeys(platform_ids))
+    if not ids:
+        return []
+
+    placeholders = ",".join("?" for _ in ids)
+    async with get_db() as db:
+        return await db.execute_fetchall(
+            f"""SELECT gp.id AS game_platform_id, g.name
+                FROM game_platforms gp
+                JOIN games g ON g.id = gp.game_id
+                WHERE gp.id IN ({placeholders})
+                ORDER BY COALESCE(gp.playtime_minutes, 0) DESC, gp.id""",
+            ids,
+        )
+
+
+async def load_metacritic_batch_rows(platform_ids: Iterable[int]) -> list[aiosqlite.Row]:
+    ids = list(dict.fromkeys(platform_ids))
+    if not ids:
+        return []
+
+    placeholders = ",".join("?" for _ in ids)
+    async with get_db() as db:
+        return await db.execute_fetchall(
+            f"""SELECT gp.id AS game_platform_id, gp.platform, g.name
+                FROM game_platforms gp
+                JOIN games g ON g.id = gp.game_id
+                WHERE gp.id IN ({placeholders})
+                ORDER BY COALESCE(gp.playtime_minutes, 0) DESC, gp.id""",
+            ids,
+        )
 
 
 async def recompute_tag_affinity() -> int:
@@ -1482,6 +1956,7 @@ def _platform_dict(row: aiosqlite.Row) -> dict:
     playtime_minutes = row["playtime_minutes"]
     playtime_2weeks_minutes = row["playtime_2weeks_minutes"]
     platform = {
+        "game_platform_id": row["game_platform_id"],
         "platform": row["platform"],
         "owned": bool(row["owned"]),
         "playtime_minutes": playtime_minutes,

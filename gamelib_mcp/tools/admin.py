@@ -1,10 +1,12 @@
 """refresh_library, detect_farmed_games, and set_nintendo_session admin tools."""
 
 import asyncio
+import inspect
 import json
 import logging
 import statistics
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 
 from ..data.db import STEAM_APP_ID, get_db
 from ..data.epic import sync_epic
@@ -16,7 +18,10 @@ from ..data.steam_xml import fetch_library
 logger = logging.getLogger(__name__)
 
 
-async def refresh_library(platforms: list[str] | None = None) -> dict:
+async def refresh_library(
+    platforms: list[str] | None = None,
+    on_steam_complete: Callable[[], Awaitable[None] | None] | None = None,
+) -> dict:
     """
     Re-sync game library. Defaults to all configured platforms.
     platforms: optional subset, e.g. ["steam", "epic"]. If omitted, syncs all.
@@ -41,8 +46,24 @@ async def refresh_library(platforms: list[str] | None = None) -> dict:
         "nintendo": sync_nintendo,
         "ps5":      sync_psn,
     }
+
+    async def run_platform(name: str, fn) -> dict:
+        try:
+            return await fn()
+        finally:
+            if name == "steam" and on_steam_complete is not None:
+                try:
+                    result = on_steam_complete()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception:
+                    logger.exception("Steam completion callback failed")
+
     selected = [(name, fn) for name, fn in platform_syncs.items() if name in targets]
-    outcomes = await asyncio.gather(*(fn() for _, fn in selected), return_exceptions=True)
+    outcomes = await asyncio.gather(
+        *(run_platform(name, fn) for name, fn in selected),
+        return_exceptions=True,
+    )
 
     results: dict = {}
     for (name, _), outcome in zip(selected, outcomes, strict=True):

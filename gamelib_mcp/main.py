@@ -18,13 +18,15 @@ logger = logging.getLogger(__name__)
 
 MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "")
 _LIBRARY_REFRESH_TASK: asyncio.Task | None = None
+_LIBRARY_REFRESH_STEAM_READY: asyncio.Event | None = None
 _LIBRARY_REFRESH_LOCK = asyncio.Lock()
 
 
 def _clear_library_refresh_task(task: asyncio.Task) -> None:
-    global _LIBRARY_REFRESH_TASK
+    global _LIBRARY_REFRESH_TASK, _LIBRARY_REFRESH_STEAM_READY
     if _LIBRARY_REFRESH_TASK is task:
         _LIBRARY_REFRESH_TASK = None
+        _LIBRARY_REFRESH_STEAM_READY = None
 
 
 def _summarize_refresh_result(result: object) -> str | None:
@@ -45,6 +47,12 @@ def _summarize_refresh_result(result: object) -> str | None:
 async def _run_startup_refresh() -> dict:
     from .data.db import set_meta_many
 
+    steam_ready = _LIBRARY_REFRESH_STEAM_READY
+
+    async def _mark_steam_ready() -> None:
+        if steam_ready is not None and not steam_ready.is_set():
+            steam_ready.set()
+
     started_at = datetime.now(timezone.utc).isoformat()
     await set_meta_many(
         {
@@ -59,7 +67,7 @@ async def _run_startup_refresh() -> dict:
     cancelled = False
     refresh_result: dict | None = None
     try:
-        refresh_result = await _admin_refresh_library()
+        refresh_result = await _admin_refresh_library(on_steam_complete=_mark_steam_ready)
         final_error = _summarize_refresh_result(refresh_result)
         if final_error:
             logger.warning("Startup library refresh completed with partial errors: %s", final_error)
@@ -71,6 +79,8 @@ async def _run_startup_refresh() -> dict:
         logger.exception("Startup library refresh failed")
         final_error = str(exc)
     finally:
+        if steam_ready is not None and not steam_ready.is_set():
+            steam_ready.set()
         finished_at = datetime.now(timezone.utc).isoformat()
         await asyncio.shield(
             set_meta_many(
@@ -87,29 +97,26 @@ async def _run_startup_refresh() -> dict:
     return refresh_result or {}
 
 
-async def _run_background_enrich_after(refresh_task: asyncio.Task) -> None:
-    from .data.enrich_bg import background_enrich
-
-    try:
-        await asyncio.shield(refresh_task)
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        logger.exception("Startup refresh failed before background enrichment")
-
-    await background_enrich()
-
-
 async def _ensure_startup_refresh() -> asyncio.Task:
-    global _LIBRARY_REFRESH_TASK
+    global _LIBRARY_REFRESH_TASK, _LIBRARY_REFRESH_STEAM_READY
 
     async with _LIBRARY_REFRESH_LOCK:
         if _LIBRARY_REFRESH_TASK is not None and not _LIBRARY_REFRESH_TASK.done():
             return _LIBRARY_REFRESH_TASK
 
+        _LIBRARY_REFRESH_STEAM_READY = asyncio.Event()
         _LIBRARY_REFRESH_TASK = asyncio.create_task(_run_startup_refresh())
         _LIBRARY_REFRESH_TASK.add_done_callback(_clear_library_refresh_task)
         return _LIBRARY_REFRESH_TASK
+
+
+async def _run_background_enrich_after_steam_ready(steam_ready: asyncio.Event | None) -> None:
+    from .data.enrich_bg import background_enrich
+
+    if steam_ready is not None:
+        await steam_ready.wait()
+
+    await background_enrich()
 
 
 @asynccontextmanager
@@ -141,8 +148,8 @@ async def lifespan(app):
 
     if needs_refresh:
         logger.info("Library stale or missing — scheduling background refresh...")
-        refresh_task = await _ensure_startup_refresh()
-        asyncio.create_task(_run_background_enrich_after(refresh_task))
+        await _ensure_startup_refresh()
+        asyncio.create_task(_run_background_enrich_after_steam_ready(_LIBRARY_REFRESH_STEAM_READY))
     else:
         from .data.enrich_bg import background_enrich
 

@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 import tempfile
 import unittest
@@ -199,6 +200,30 @@ class MigrationRegressionTests(unittest.TestCase):
         self.assertEqual(steam_data["steam_review_desc"], "Overwhelmingly Positive")
         self.assertEqual(steam_data["protondb_tier"], "gold")
 
+    def test_schema_contains_claim_columns(self) -> None:
+        async def run() -> None:
+            db_module._DB_READY_PATH = None
+            with patch.dict(
+                "os.environ",
+                {"DATABASE_URL": f"file:{self.db_path}"},
+                clear=False,
+            ):
+                await db_module.init_db()
+                async with db_module.get_db() as conn:
+                    games_cols = await conn.execute_fetchall("PRAGMA table_info(games)")
+                    spd_cols = await conn.execute_fetchall("PRAGMA table_info(steam_platform_data)")
+                    gpe_cols = await conn.execute_fetchall("PRAGMA table_info(game_platform_enrichment)")
+
+            self.assertIn("igdb_claimed_at", {row["name"] for row in games_cols})
+            self.assertIn("hltb_claimed_at", {row["name"] for row in games_cols})
+            self.assertIn("store_claimed_at", {row["name"] for row in spd_cols})
+            self.assertIn("protondb_claimed_at", {row["name"] for row in spd_cols})
+            self.assertIn("steamspy_claimed_at", {row["name"] for row in spd_cols})
+            self.assertIn("opencritic_claimed_at", {row["name"] for row in gpe_cols})
+            self.assertIn("metacritic_claimed_at", {row["name"] for row in gpe_cols})
+
+        asyncio.run(run())
+
 
 class SteamStoreRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_enrich_game_preserves_review_fields_when_review_fetch_fails(self) -> None:
@@ -238,6 +263,41 @@ class SteamStoreRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshed, row)
         _, kwargs = upsert.await_args
         self.assertEqual(kwargs.keys(), {"store_cached_at"})
+
+
+class BackgroundEnrichmentRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_store_batch_processes_multiple_games_concurrently(self) -> None:
+        from gamelib_mcp.data import enrich_bg
+
+        rows = [
+            {"game_platform_id": 11, "appid": 10, "name": "Portal 2"},
+            {"game_platform_id": 12, "appid": 20, "name": "Half-Life 2"},
+        ]
+        in_flight = 0
+        peak_in_flight = 0
+        both_started = asyncio.Event()
+
+        async def fake_enrich_game(appid: int, *args, **kwargs) -> None:
+            nonlocal in_flight, peak_in_flight
+            in_flight += 1
+            peak_in_flight = max(peak_in_flight, in_flight)
+            if in_flight >= 2:
+                both_started.set()
+            await asyncio.wait_for(both_started.wait(), timeout=0.1)
+            await asyncio.sleep(0)
+            in_flight -= 1
+
+        with (
+            patch.object(enrich_bg, "claim_steam_platform_ids_for_store", AsyncMock(return_value=[11, 12])),
+            patch.object(enrich_bg, "load_store_batch_rows", AsyncMock(return_value=rows)),
+            patch.object(enrich_bg, "enrich_game", AsyncMock(side_effect=fake_enrich_game)),
+            patch.object(enrich_bg, "_finalize_store_claim", AsyncMock()),
+            patch.object(enrich_bg.asyncio, "sleep", AsyncMock()),
+        ):
+            count = await asyncio.wait_for(enrich_bg._run_store_batch(), timeout=0.1)
+
+        self.assertEqual(count, 2)
+        self.assertGreaterEqual(peak_in_flight, 2)
 
 
 if __name__ == "__main__":

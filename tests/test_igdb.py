@@ -106,6 +106,21 @@ class IGDBRequestGateTests(unittest.IsolatedAsyncioTestCase):
 
 
 class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_search_game_builds_platform_filter_without_placeholder_clause(self) -> None:
+        post_mock = AsyncMock(return_value=[])
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", new=post_mock),
+        ):
+            await igdb.search_game("Age of Wonders", igdb.IGDB_PLATFORM_PC)
+
+        query = post_mock.await_args.args[0]
+        self.assertIn("search \"Age of Wonders\";", query)
+        self.assertIn("where platforms = 6;", query)
+        self.assertNotIn("where 1 = 1", query)
+
     async def test_search_game_escapes_quotes_in_search_string(self) -> None:
         post_mock = AsyncMock(return_value=[])
 
@@ -334,3 +349,28 @@ class IGDBLinkingConcurrencyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(results, [(200, None), (200, None)])
         self.assertEqual(state["insert_calls"], 1)
+
+
+class IGDBBackfillTests(unittest.IsolatedAsyncioTestCase):
+    async def test_backfill_missing_games_uses_existing_request_gate(self) -> None:
+        igdb_game = igdb.IGDBGame(
+            igdb_id=620,
+            name="Portal 2",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2011-04-19",
+        )
+        game_row = {"id": 7, "name": "Portal 2", "igdb_id": None}
+
+        with (
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[game_row])),
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=igdb.IGDB_PLATFORM_PC)),
+            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock(return_value=igdb_game)),
+            patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
+            patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
+        ):
+            count = await igdb.backfill_missing_games(limit=1)
+
+        self.assertEqual(count, 1)
+        apply_metadata.assert_awaited_once_with(7, igdb_game)

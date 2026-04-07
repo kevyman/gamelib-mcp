@@ -13,7 +13,16 @@ Steam MCP is a [Model Context Protocol](https://modelcontextprotocol.io/) server
 uv sync
 
 # Run locally (SSE transport on port 8000)
-python -m gamelib_mcp.main
+uv run python -m gamelib_mcp.main
+
+# Run tests
+.venv/bin/python -m pytest
+
+# Run a focused test file
+.venv/bin/python -m pytest tests/test_igdb.py -q
+
+# Fallback if pytest/plugin discovery is awkward in the environment
+.venv/bin/python -m unittest tests.test_igdb tests.test_enrich_bg
 
 # Docker (production setup with Caddy reverse proxy)
 docker compose --profile prod build
@@ -21,7 +30,7 @@ docker compose --profile prod up -d
 docker compose --profile prod logs -f app
 ```
 
-There is no test or lint framework configured.
+`pytest` is configured in the `dev` dependency group in `pyproject.toml`. In this workspace, the reliable test runner is the local virtualenv at `.venv/bin/python`. There is no lint framework configured.
 
 ## Required Environment Variables
 

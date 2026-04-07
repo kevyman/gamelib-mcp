@@ -15,6 +15,10 @@ _SEARCH_URL = "https://api.opencritic.com/api/game/search"
 _GAME_URL = "https://api.opencritic.com/api/game/{id}"
 
 
+def is_configured() -> bool:
+    return bool(os.getenv("OPENCRITIC_API_KEY"))
+
+
 def _is_fresh(cached_at: str | None) -> bool:
     if not cached_at:
         return False
@@ -30,8 +34,12 @@ def _is_fresh(cached_at: str | None) -> bool:
 async def enrich_opencritic(game_platform_id: int, game_name: str) -> dict | None:
     """
     Fetch OpenCritic score for game_name and cache in game_platform_enrichment.
-    Returns enrichment dict or None on failure. No API key required.
+    Returns enrichment dict or None on failure.
     """
+    if not is_configured():
+        logger.info("OpenCritic enrich skipped for %r: OPENCRITIC_API_KEY is not configured", game_name)
+        return None
+
     async with get_db() as db:
         row = await db.execute_fetchone(
             "SELECT opencritic_cached_at FROM game_platform_enrichment WHERE game_platform_id = ?",
