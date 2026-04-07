@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,6 +37,46 @@ class EnrichmentClaimTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(first, [game_id])
         self.assertEqual(second, [])
+
+    async def test_clear_claim_waits_for_transient_sqlite_lock(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO games (id, name, is_farmed, hltb_claimed_at) VALUES (?, ?, 0, ?)",
+            (1, "Portal", "2026-04-07T00:00:00+00:00"),
+        )
+        conn.commit()
+        conn.close()
+
+        original_connect = db_module.aiosqlite.connect
+
+        def fast_connect(*args, **kwargs):
+            kwargs.setdefault("timeout", 0.1)
+            return original_connect(*args, **kwargs)
+
+        lock_conn = sqlite3.connect(self.db_path, timeout=5)
+        lock_conn.execute("BEGIN IMMEDIATE")
+        lock_conn.execute("UPDATE games SET name = ? WHERE id = ?", ("Portal Locked", 1))
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"DATABASE_URL": f"file:{self.db_path}"},
+                clear=False,
+            ),
+            patch.object(db_module.aiosqlite, "connect", side_effect=fast_connect),
+            patch.object(db_module, "_SQLITE_CONNECT_TIMEOUT_SECONDS", 0.3, create=True),
+            patch.object(db_module, "_SQLITE_BUSY_TIMEOUT_MS", 300, create=True),
+        ):
+            clear_task = asyncio.create_task(db_module.clear_claim("games", "hltb_claimed_at", 1))
+            await asyncio.sleep(0.15)
+            lock_conn.rollback()
+            await asyncio.wait_for(clear_task, timeout=1.0)
+
+            async with db_module.get_db() as db:
+                row = await db.execute_fetchone("SELECT hltb_claimed_at FROM games WHERE id = ?", (1,))
+
+        lock_conn.close()
+        self.assertIsNone(row["hltb_claimed_at"])
 
 
 class BackgroundEnrichmentSupervisorTests(unittest.IsolatedAsyncioTestCase):
@@ -82,6 +123,51 @@ class BackgroundEnrichmentSupervisorTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(started["igdb"].wait(), timeout=0.1)
             release.set()
             await asyncio.wait_for(task, timeout=0.1)
+
+    async def test_background_enrich_logs_family_exceptions(self) -> None:
+        with (
+            patch("gamelib_mcp.data.enrich_bg._run_store_workers", AsyncMock(side_effect=RuntimeError("store boom"))),
+            patch("gamelib_mcp.data.enrich_bg._run_igdb_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_hltb_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_protondb_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_steamspy_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_opencritic_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_metacritic_workers", AsyncMock(return_value=0)),
+            self.assertLogs("gamelib_mcp.data.enrich_bg", level="ERROR") as logs,
+        ):
+            await enrich_bg.background_enrich()
+
+        self.assertTrue(any("Background enrichment family failed: store" in line for line in logs.output))
+
+    async def test_background_enrich_keeps_igdb_polling_while_other_families_progress(self) -> None:
+        real_sleep = asyncio.sleep
+        store_results = iter([1, 1, 1, 1, 0, 0, 0])
+        igdb_results = iter([0, 0, 0, 1, 0, 0, 0])
+
+        async def fake_sleep(_seconds: float) -> None:
+            await real_sleep(0)
+
+        async def fake_store_batch() -> int:
+            await real_sleep(0)
+            return next(store_results, 0)
+
+        async def fake_igdb_batch() -> int:
+            await real_sleep(0)
+            return next(igdb_results, 0)
+
+        with (
+            patch("gamelib_mcp.data.enrich_bg.asyncio.sleep", new=fake_sleep),
+            patch("gamelib_mcp.data.enrich_bg._run_store_batch", AsyncMock(side_effect=fake_store_batch)),
+            patch("gamelib_mcp.data.enrich_bg._run_igdb_batch", AsyncMock(side_effect=fake_igdb_batch)) as igdb_batch,
+            patch("gamelib_mcp.data.enrich_bg._run_hltb_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_protondb_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_steamspy_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_opencritic_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_metacritic_workers", AsyncMock(return_value=0)),
+        ):
+            await enrich_bg.background_enrich()
+
+        self.assertGreaterEqual(igdb_batch.await_count, 4)
 
     async def test_store_batch_skips_rows_already_claimed(self) -> None:
         with (

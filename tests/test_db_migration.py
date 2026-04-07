@@ -276,6 +276,7 @@ class BackgroundEnrichmentRegressionTests(unittest.IsolatedAsyncioTestCase):
         in_flight = 0
         peak_in_flight = 0
         both_started = asyncio.Event()
+        release = asyncio.Event()
 
         async def fake_enrich_game(appid: int, *args, **kwargs) -> None:
             nonlocal in_flight, peak_in_flight
@@ -283,9 +284,10 @@ class BackgroundEnrichmentRegressionTests(unittest.IsolatedAsyncioTestCase):
             peak_in_flight = max(peak_in_flight, in_flight)
             if in_flight >= 2:
                 both_started.set()
-            await asyncio.wait_for(both_started.wait(), timeout=0.1)
-            await asyncio.sleep(0)
-            in_flight -= 1
+            try:
+                await release.wait()
+            finally:
+                in_flight -= 1
 
         with (
             patch.object(enrich_bg, "claim_steam_platform_ids_for_store", AsyncMock(return_value=[11, 12])),
@@ -293,8 +295,12 @@ class BackgroundEnrichmentRegressionTests(unittest.IsolatedAsyncioTestCase):
             patch.object(enrich_bg, "enrich_game", AsyncMock(side_effect=fake_enrich_game)),
             patch.object(enrich_bg, "_finalize_store_claim", AsyncMock()),
             patch.object(enrich_bg.asyncio, "sleep", AsyncMock()),
+            patch.object(enrich_bg, "_STORE_START_INTERVAL", 0.0),
         ):
-            count = await asyncio.wait_for(enrich_bg._run_store_batch(), timeout=0.1)
+            task = asyncio.create_task(enrich_bg._run_store_batch())
+            await asyncio.wait_for(both_started.wait(), timeout=1.0)
+            release.set()
+            count = await asyncio.wait_for(task, timeout=1.0)
 
         self.assertEqual(count, 2)
         self.assertGreaterEqual(peak_in_flight, 2)

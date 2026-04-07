@@ -18,15 +18,13 @@ logger = logging.getLogger(__name__)
 
 MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "")
 _LIBRARY_REFRESH_TASK: asyncio.Task | None = None
-_LIBRARY_REFRESH_STEAM_READY: asyncio.Event | None = None
 _LIBRARY_REFRESH_LOCK = asyncio.Lock()
 
 
 def _clear_library_refresh_task(task: asyncio.Task) -> None:
-    global _LIBRARY_REFRESH_TASK, _LIBRARY_REFRESH_STEAM_READY
+    global _LIBRARY_REFRESH_TASK
     if _LIBRARY_REFRESH_TASK is task:
         _LIBRARY_REFRESH_TASK = None
-        _LIBRARY_REFRESH_STEAM_READY = None
 
 
 def _summarize_refresh_result(result: object) -> str | None:
@@ -47,12 +45,6 @@ def _summarize_refresh_result(result: object) -> str | None:
 async def _run_startup_refresh() -> dict:
     from .data.db import set_meta_many
 
-    steam_ready = _LIBRARY_REFRESH_STEAM_READY
-
-    async def _mark_steam_ready() -> None:
-        if steam_ready is not None and not steam_ready.is_set():
-            steam_ready.set()
-
     started_at = datetime.now(timezone.utc).isoformat()
     await set_meta_many(
         {
@@ -67,7 +59,7 @@ async def _run_startup_refresh() -> dict:
     cancelled = False
     refresh_result: dict | None = None
     try:
-        refresh_result = await _admin_refresh_library(on_steam_complete=_mark_steam_ready)
+        refresh_result = await _admin_refresh_library()
         final_error = _summarize_refresh_result(refresh_result)
         if final_error:
             logger.warning("Startup library refresh completed with partial errors: %s", final_error)
@@ -79,8 +71,6 @@ async def _run_startup_refresh() -> dict:
         logger.exception("Startup library refresh failed")
         final_error = str(exc)
     finally:
-        if steam_ready is not None and not steam_ready.is_set():
-            steam_ready.set()
         finished_at = datetime.now(timezone.utc).isoformat()
         await asyncio.shield(
             set_meta_many(
@@ -98,25 +88,15 @@ async def _run_startup_refresh() -> dict:
 
 
 async def _ensure_startup_refresh() -> asyncio.Task:
-    global _LIBRARY_REFRESH_TASK, _LIBRARY_REFRESH_STEAM_READY
+    global _LIBRARY_REFRESH_TASK
 
     async with _LIBRARY_REFRESH_LOCK:
         if _LIBRARY_REFRESH_TASK is not None and not _LIBRARY_REFRESH_TASK.done():
             return _LIBRARY_REFRESH_TASK
 
-        _LIBRARY_REFRESH_STEAM_READY = asyncio.Event()
         _LIBRARY_REFRESH_TASK = asyncio.create_task(_run_startup_refresh())
         _LIBRARY_REFRESH_TASK.add_done_callback(_clear_library_refresh_task)
         return _LIBRARY_REFRESH_TASK
-
-
-async def _run_background_enrich_after_steam_ready(steam_ready: asyncio.Event | None) -> None:
-    from .data.enrich_bg import background_enrich
-
-    if steam_ready is not None:
-        await steam_ready.wait()
-
-    await background_enrich()
 
 
 @asynccontextmanager
@@ -149,11 +129,13 @@ async def lifespan(app):
     if needs_refresh:
         logger.info("Library stale or missing — scheduling background refresh...")
         await _ensure_startup_refresh()
-        asyncio.create_task(_run_background_enrich_after_steam_ready(_LIBRARY_REFRESH_STEAM_READY))
+        from .data.enrich_bg import background_enrich
+
+        asyncio.create_task(background_enrich())
     else:
         from .data.enrich_bg import background_enrich
 
-        # Background enrichment: Steam Store, HLTB, ProtonDB (non-blocking)
+        # Background enrichment: store/provider metadata, ratings, and discovery signals
         asyncio.create_task(background_enrich())
 
     yield
@@ -161,14 +143,14 @@ async def lifespan(app):
     logger.info("Shutdown")
 
 
-_display_name = os.getenv("STEAM_PROFILE_ID") or "the configured user"
+_display_name = os.getenv("STEAM_PROFILE_ID") or os.getenv("BACKLOGGD_USER") or "the configured user"
 
 mcp = FastMCP(
-    name="steam-library",
+    name="game-library",
     instructions=(
-        f"You have access to {_display_name}'s game library across Steam and any synced stores. "
+        f"You have access to {_display_name}'s game library across synced platforms and stores. "
         "Use the tools to search, filter, and get details about games and platforms. "
-        "Ratings are synced from Backloggd and Steam reviews (read-only). "
+        "Ratings are synced from connected sources such as Backloggd and Steam reviews (read-only). "
         "Call sync_ratings to refresh ratings and taste profile data."
     ),
     lifespan=lifespan,
@@ -179,7 +161,7 @@ mcp = FastMCP(
 
 @mcp.tool()
 async def search_games(query: str, limit: int = 20, platform: str | None = None) -> list[dict]:
-    """Find games in the library by name substring. platform: steam|epic|gog|nintendo|ps5"""
+    """Find games in the library by name substring. platform: steam|epic|gog|nintendo|switch2|ps5"""
     from .tools.library import search_games as _search
     return await _search(query, limit, platform)
 
@@ -211,7 +193,7 @@ async def get_library_stats(
     filter: all | unplayed | played | recent | farmed
     sort_by: playtime | name | metacritic | hltb
     protondb_tier: native | platinum | gold | silver | bronze | borked
-    platform: steam | epic | gog | nintendo | ps5 (optional — filter to games on that platform)
+    platform: steam | epic | gog | nintendo | switch2 | ps5 (optional — filter to games on that platform)
     """
     from .tools.library import get_library_stats as _stats
     return await _stats(filter, max_hltb_hours, min_metacritic, protondb_tier, sort_by, limit, platform)
@@ -226,7 +208,7 @@ async def get_game_detail(
     """
     Get full details for a single game, including platform ownership, HLTB,
     Metacritic, ProtonDB, and any personal ratings. Triggers lazy data fetches.
-    Provide game_id, name (partial match), or Steam appid.
+    Provide game_id, name (partial match), or Steam appid when available.
     """
     from .tools.detail import get_game_detail as _detail
     return await _detail(name, appid, game_id)
@@ -317,7 +299,7 @@ async def get_backlog_stats() -> dict:
 async def refresh_library(platforms: list[str] | None = None) -> dict:
     """
     Re-sync game library. platforms: list like ['steam','epic'] or omit for all configured.
-    Valid platforms: steam, epic, gog, nintendo, ps5
+    Valid platforms: steam, epic, gog, nintendo, switch2, ps5
     """
     from .tools.admin import refresh_library as _refresh
     return await _refresh(platforms)
@@ -360,7 +342,7 @@ async def get_platform_breakdown() -> dict:
 async def sync_platform(platform: str) -> dict:
     """
     Sync a single platform on demand.
-    platform: steam | epic | gog | nintendo | ps5
+    platform: steam | epic | gog | nintendo | switch | switch2 | ps5
     """
     from .tools.platforms import sync_platform as _sync
     return await _sync(platform)
@@ -389,7 +371,7 @@ async def add_game_to_platform(
     (e.g. physical copies, unreported digital titles, itch.io purchases).
 
     name: Game name (matches existing game by exact name or creates new entry)
-    platform: steam | epic | gog | nintendo | ps5 | itchio | xbox | other
+    platform: steam | epic | gog | nintendo | switch2 | ps5 | itchio | xbox | other
     identifier_type: Optional store ID type (e.g. 'steam_appid', 'gog_product_id')
     identifier_value: Optional store ID value
     playtime_minutes: Optional known playtime

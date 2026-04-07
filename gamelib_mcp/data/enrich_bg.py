@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 
 import httpx
 
@@ -45,6 +46,10 @@ _IGDB_WORKER_CONCURRENCY = 2
 _BATCH_SIZE = 3
 _IDLE_POLLS = 3
 _IDLE_SLEEP_SECONDS = 1.0
+_SUPERVISOR_PROGRESS: ContextVar["_ProgressTracker | None"] = ContextVar(
+    "enrich_supervisor_progress",
+    default=None,
+)
 
 
 class _RequestStartGate:
@@ -65,36 +70,64 @@ class _RequestStartGate:
             self._next_allowed = now + self._interval_seconds
 
 
+class _ProgressTracker:
+    def __init__(self) -> None:
+        self._epoch = 0
+
+    @property
+    def epoch(self) -> int:
+        return self._epoch
+
+    def record_progress(self) -> int:
+        self._epoch += 1
+        return self._epoch
+
+
 async def background_enrich() -> None:
     """Run enrichment families concurrently until all queues go quiescent."""
     logger.info("Background enrichment started")
-    jobs = [
-        _run_store_workers(),
-        _run_hltb_workers(),
-        _run_protondb_workers(),
-        _run_steamspy_workers(),
-        _run_metacritic_workers(),
-        _run_igdb_workers(),
-    ]
-    if opencritic_is_configured():
-        jobs.append(_run_opencritic_workers())
-    else:
-        logger.info("Background enrichment skipping OpenCritic workers: OPENCRITIC_API_KEY is not configured")
+    token = _SUPERVISOR_PROGRESS.set(_ProgressTracker())
+    try:
+        jobs = [
+            ("store", _run_store_workers()),
+            ("hltb", _run_hltb_workers()),
+            ("protondb", _run_protondb_workers()),
+            ("steamspy", _run_steamspy_workers()),
+            ("metacritic", _run_metacritic_workers()),
+            ("igdb", _run_igdb_workers()),
+        ]
+        if opencritic_is_configured():
+            jobs.append(("opencritic", _run_opencritic_workers()))
+        else:
+            logger.info("Background enrichment skipping OpenCritic workers: OPENCRITIC_API_KEY is not configured")
 
-    results = await asyncio.gather(*jobs, return_exceptions=True)
-    logger.info("Background enrichment complete: %r", results)
+        results = await asyncio.gather(*(job for _, job in jobs), return_exceptions=True)
+        for (family, _), result in zip(jobs, results, strict=True):
+            if isinstance(result, Exception):
+                logger.error("Background enrichment family failed: %s: %s", family, result)
+        logger.info("Background enrichment complete: %r", results)
+    finally:
+        _SUPERVISOR_PROGRESS.reset(token)
 
 
 async def _run_until_quiescent(run_batch: Callable[[], Awaitable[int]]) -> int:
     idle_polls = 0
     total = 0
+    tracker = _SUPERVISOR_PROGRESS.get()
+    observed_epoch = tracker.epoch if tracker is not None else 0
     while idle_polls < _IDLE_POLLS:
         processed = await run_batch()
         total += processed
         if processed:
             idle_polls = 0
+            if tracker is not None:
+                observed_epoch = tracker.record_progress()
             continue
         idle_polls += 1
+        if idle_polls >= _IDLE_POLLS and tracker is not None and tracker.epoch != observed_epoch:
+            observed_epoch = tracker.epoch
+            idle_polls = 0
+            continue
         await asyncio.sleep(_IDLE_SLEEP_SECONDS)
     return total
 

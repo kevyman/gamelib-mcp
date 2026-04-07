@@ -81,6 +81,7 @@ async def get_ratings(
         {
             "game_id": row["game_id"],
             "appid": row["steam_appid"],
+            "steam_appid": row["steam_appid"],
             "name": row["name"],
             "platforms": platforms_by_game.get(row["game_id"], []),
             "source": row["source"],

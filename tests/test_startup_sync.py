@@ -145,17 +145,15 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             await cm.__aexit__(None, None, None)
 
-    async def test_stale_startup_waits_for_steam_before_enrichment(self) -> None:
+    async def test_stale_startup_starts_enrichment_without_waiting_for_refresh(self) -> None:
         stale_at = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
         refresh_started = asyncio.Event()
         refresh_release = asyncio.Event()
         enrich_started = asyncio.Event()
 
-        async def slow_refresh(*_args, on_steam_complete=None, **_kwargs) -> dict:
+        async def slow_refresh(*_args, **_kwargs) -> dict:
             refresh_started.set()
             await refresh_release.wait()
-            if on_steam_complete is not None:
-                await on_steam_complete()
             return {"steam": {"games_upserted": 1}}
 
         async def fake_enrich() -> None:
@@ -171,57 +169,10 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             cm = lifespan(object())
             await asyncio.wait_for(cm.__aenter__(), timeout=0.1)
             await asyncio.wait_for(refresh_started.wait(), timeout=0.1)
-            await asyncio.sleep(0)
-            self.assertFalse(enrich_started.is_set())
+            await asyncio.wait_for(enrich_started.wait(), timeout=0.1)
             self.assertFalse(refresh_release.is_set())
             refresh_release.set()
-            await asyncio.wait_for(enrich_started.wait(), timeout=0.1)
             await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=0.1)
-
-    async def test_refresh_library_signals_steam_completion_before_other_platforms_finish(self) -> None:
-        steam_started = asyncio.Event()
-        steam_release = asyncio.Event()
-        epic_started = asyncio.Event()
-        epic_release = asyncio.Event()
-        steam_done = asyncio.Event()
-
-        async def steam_sync() -> dict:
-            steam_started.set()
-            await steam_release.wait()
-            return {"platform": "steam", "synced": True}
-
-        async def epic_sync() -> dict:
-            epic_started.set()
-            await epic_release.wait()
-            return {"platform": "epic", "synced": True}
-
-        async def mark_steam_done() -> None:
-            steam_done.set()
-
-        with (
-            patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(side_effect=steam_sync)),
-            patch("gamelib_mcp.tools.admin.sync_epic", AsyncMock(side_effect=epic_sync)),
-        ):
-            refresh_task = asyncio.create_task(
-                admin_tools.refresh_library(["steam", "epic"], on_steam_complete=mark_steam_done)
-            )
-            await asyncio.wait_for(steam_started.wait(), timeout=0.1)
-            await asyncio.wait_for(epic_started.wait(), timeout=0.1)
-
-            steam_release.set()
-            await asyncio.wait_for(steam_done.wait(), timeout=0.1)
-            self.assertFalse(refresh_task.done())
-
-            epic_release.set()
-            result = await asyncio.wait_for(refresh_task, timeout=0.1)
-
-        self.assertEqual(
-            result,
-            {
-                "steam": {"platform": "steam", "synced": True},
-                "epic": {"platform": "epic", "synced": True},
-            },
-        )
 
     async def test_refresh_library_parallelizes_platform_syncs_and_isolates_failures(self) -> None:
         started = {
@@ -312,6 +263,19 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict(os.environ, {"DATABASE_URL": "file:./second.db"}, clear=False):
             self.assertEqual(db_module._db_path(), "./second.db")
+
+    async def test_db_path_defaults_to_gamelib_name_with_legacy_fallback(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("gamelib_mcp.data.db.os.path.exists", side_effect=lambda path: path == "steam.db"),
+        ):
+            self.assertEqual(db_module._db_path(), "steam.db")
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("gamelib_mcp.data.db.os.path.exists", return_value=False),
+        ):
+            self.assertEqual(db_module._db_path(), "gamelib.db")
 
     async def test_refresh_library_reuses_running_startup_refresh_task(self) -> None:
         import gamelib_mcp.main as main_module

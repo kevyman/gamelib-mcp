@@ -29,6 +29,8 @@ _DB_READY_PATH: str | None = None
 _DB_INIT_LOCK: asyncio.Lock | None = None
 _FuzzyKey = TypeVar("_FuzzyKey")
 _Progress = Callable[[str], None]
+_SQLITE_CONNECT_TIMEOUT_SECONDS = 30.0
+_SQLITE_BUSY_TIMEOUT_MS = 30_000
 
 STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
@@ -50,7 +52,15 @@ class MigrationResult:
 
 
 def _db_path() -> str:
-    return os.getenv("DATABASE_URL", "file:steam.db").removeprefix("file:")
+    configured = os.getenv("DATABASE_URL")
+    if configured:
+        return configured.removeprefix("file:")
+
+    if os.path.exists("gamelib.db"):
+        return "gamelib.db"
+    if os.path.exists("steam.db"):
+        return "steam.db"
+    return "gamelib.db"
 
 
 def _default_process(value: str) -> str:
@@ -1013,13 +1023,20 @@ async def _ensure_db_initialized(db: aiosqlite.Connection) -> None:
         _DB_READY_PATH = db_path
 
 
+async def _configure_connection(conn: aiosqlite.Connection, *, enable_wal: bool) -> None:
+    conn.row_factory = aiosqlite.Row
+    await conn.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
+    await conn.execute("PRAGMA foreign_keys=ON")
+    if enable_wal:
+        await conn.execute("PRAGMA journal_mode=WAL")
+
+
 @asynccontextmanager
 async def get_db():
     """Async context manager for a WAL-enabled, Row-factory SQLite connection."""
-    async with aiosqlite.connect(_db_path()) as conn:
-        conn.row_factory = aiosqlite.Row
-        await conn.execute("PRAGMA journal_mode=WAL")
-        await conn.execute("PRAGMA foreign_keys=ON")
+    db_path = _db_path()
+    async with aiosqlite.connect(db_path, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS) as conn:
+        await _configure_connection(conn, enable_wal=_DB_READY_PATH != db_path)
         await _ensure_db_initialized(conn)
         yield conn
 
@@ -1028,12 +1045,11 @@ async def migrate_db(progress: _Progress | None = None) -> MigrationResult:
     """Run all schema migrations against the configured DB path."""
     global _DB_READY_PATH
 
-    async with aiosqlite.connect(_db_path()) as db:
-        db.row_factory = aiosqlite.Row
-        await db.execute("PRAGMA journal_mode=WAL")
-        await db.execute("PRAGMA foreign_keys=ON")
+    db_path = _db_path()
+    async with aiosqlite.connect(db_path, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS) as db:
+        await _configure_connection(db, enable_wal=True)
         result = await _run_migrations(db, progress=progress)
-        _DB_READY_PATH = _db_path()
+        _DB_READY_PATH = db_path
         return result
 
 

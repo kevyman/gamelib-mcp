@@ -6,7 +6,7 @@ This repo's checked-in [docker-compose.yml](/home/john/code/gamelib-mcp/docker-c
 
 ```bash
 cp .env.local.example .env
-mkdir -p data/steam data/legendary data/lgogdownloader
+mkdir -p data/library data/legendary data/lgogdownloader
 ```
 
 Then edit `.env` and set at least:

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Steam MCP is a [Model Context Protocol](https://modelcontextprotocol.io/) server that gives AI assistants tools to manage a Steam game library. It enriches Steam data with external sources (HowLongToBeat, ProtonDB, Backloggd, Steam reviews) and provides personalized game discovery via tag-based affinity scoring.
+gamelib-mcp is a [Model Context Protocol](https://modelcontextprotocol.io/) server that gives AI assistants tools to manage a cross-platform game library. It enriches platform data with external sources such as HowLongToBeat, ProtonDB, IGDB, Backloggd, and Steam reviews, and provides personalized game discovery via tag-based affinity scoring.
 
 ## Commands
 
@@ -38,7 +38,7 @@ Copy `.env.example` to `.env`:
 
 - `STEAM_API_KEY` — from steamcommunity.com/dev/apikey
 - `STEAM_ID` — 64-bit Steam ID
-- `DATABASE_URL` — SQLite path (default: `file:steam.db`)
+- `DATABASE_URL` — SQLite path (default: `file:gamelib.db`, with legacy `steam.db` fallback)
 - `MCP_AUTH_TOKEN` — bearer token for MCP auth (empty = open)
 - `PORT` — server port (default: 8000)
 
@@ -46,7 +46,7 @@ Copy `.env.example` to `.env`:
 
 ### Entry Point & Transport
 
-`gamelib_mcp/main.py` creates the FastMCP app, registers all 10 tools, and starts an SSE server. On startup: DB is initialized, library is refreshed if >6h stale, and a background task pre-warms HLTB data for top unplayed games. A custom `/health` Starlette route returns sync status.
+`gamelib_mcp/main.py` creates the FastMCP app, registers all 10 tools, and starts an SSE server. On startup: DB is initialized, library refresh is scheduled if >6h stale, and background enrichment starts without waiting for a single provider to finish first.
 
 ### Layer Separation
 
@@ -69,8 +69,12 @@ Copy `.env.example` to `.env`:
 
 ### Database (SQLite via aiosqlite)
 
-Four tables, auto-migrated on startup in `db.init_db()`:
-- `games`: appid, name, playtimes, JSON genres/tags, cached enrichment fields
+Core tables, auto-migrated on startup in `db.init_db()`:
+- `games`: canonical game rows and shared enrichment fields
+- `game_platforms`: ownership/playtime per platform
+- `game_platform_identifiers`: provider-specific IDs such as `steam_appid` and `gog_product_id`
+- `steam_platform_data`: Steam-only provider metadata
+- `game_platform_enrichment`: cross-platform review/release enrichment
 - `ratings`: normalized 1–10 scores from Backloggd (weight 1.0) and Steam (weight 0.5)
 - `tag_affinity`: precomputed per-tag preference scores (drives recommendations)
 - `meta`: key-value store (last sync timestamp, etc.)
@@ -79,7 +83,7 @@ WAL mode enabled, foreign keys on.
 
 ### Key Design Patterns
 
-- **Lazy enrichment**: `get_game_detail` fetches from Steam Store, HLTB, ProtonDB on demand and caches results. Bulk library calls skip unenriched fields.
+- **Lazy enrichment**: `get_game_detail` fetches available provider-specific enrichment on demand and caches results. Bulk library calls skip unenriched fields.
 - **Tag affinity**: After `sync_ratings`, weighted tag scores are recomputed across all rated games. `get_recommendations` ranks unplayed games by these scores.
 - **Rate limiting**: HLTB pre-warm uses an asyncio semaphore to avoid hammering the API.
-- **Fuzzy matching**: Backloggd game titles are reconciled to Steam appids via rapidfuzz (handles naming mismatches between sources).
+- **Fuzzy matching**: Title matching uses rapidfuzz/stdlib helpers where provider identifiers are unavailable.

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import random
+import sqlite3
 import time
 from collections import deque
 from contextvars import ContextVar
@@ -568,8 +569,17 @@ async def backfill_missing_games(limit: int = 10) -> int:
             platform_hint = await choose_igdb_platform_hint(game_id)
             igdb_game = await resolve_game(row["name"], platform_hint)
             if igdb_game is not None:
-                await _apply_igdb_metadata(game_id, igdb_game)
-                await upsert_backfill_platform_release_dates(game_id, igdb_game)
+                try:
+                    await _apply_igdb_metadata(game_id, igdb_game)
+                    await upsert_backfill_platform_release_dates(game_id, igdb_game)
+                except sqlite3.IntegrityError:
+                    logger.warning(
+                        "IGDB backfill skipped duplicate igdb_id for game_id=%s name=%r igdb_id=%s",
+                        game_id,
+                        row["name"],
+                        igdb_game.igdb_id,
+                    )
+                    await mark_igdb_checked(game_id)
             else:
                 await mark_igdb_checked(game_id)
             processed += 1

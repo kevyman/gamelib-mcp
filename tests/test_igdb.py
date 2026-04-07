@@ -374,3 +374,43 @@ class IGDBBackfillTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(count, 1)
         apply_metadata.assert_awaited_once_with(7, igdb_game)
+
+    async def test_backfill_missing_games_skips_duplicate_igdb_id_and_continues(self) -> None:
+        first = {"id": 7, "name": "Portal", "igdb_id": None}
+        second = {"id": 8, "name": "Portal 2", "igdb_id": None}
+        duplicate_game = igdb.IGDBGame(
+            igdb_id=620,
+            name="Portal",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2007-10-10",
+        )
+        unique_game = igdb.IGDBGame(
+            igdb_id=621,
+            name="Portal 2",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2011-04-19",
+        )
+
+        async def apply_metadata(game_id: int, igdb_game: igdb.IGDBGame) -> None:
+            if game_id == 7:
+                raise sqlite3.IntegrityError("UNIQUE constraint failed: games.igdb_id")
+            self.assertEqual((game_id, igdb_game.igdb_id), (8, 621))
+
+        with (
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7, 8])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[first, second])),
+            patch(
+                "gamelib_mcp.data.igdb.choose_igdb_platform_hint",
+                AsyncMock(side_effect=[igdb.IGDB_PLATFORM_PC, igdb.IGDB_PLATFORM_PC]),
+            ),
+            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock(side_effect=[duplicate_game, unique_game])),
+            patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock(side_effect=apply_metadata)),
+            patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()) as release_claim,
+        ):
+            count = await igdb.backfill_missing_games(limit=2)
+
+        self.assertEqual(count, 2)
+        mark_checked.assert_awaited_once_with(7)
+        self.assertEqual(release_claim.await_count, 2)
