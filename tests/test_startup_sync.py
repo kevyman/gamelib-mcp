@@ -9,7 +9,13 @@ from unittest.mock import AsyncMock, patch
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import admin as admin_tools
-from gamelib_mcp.main import _ensure_startup_refresh, _run_startup_refresh, lifespan
+from gamelib_mcp.main import (
+    _ensure_periodic_refresh_loop,
+    _ensure_startup_refresh,
+    _run_periodic_refresh_loop,
+    _run_startup_refresh,
+    lifespan,
+)
 
 
 class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
@@ -22,6 +28,13 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         main_module._LIBRARY_REFRESH_TASK = None
+
+        periodic_task = getattr(main_module, "_PERIODIC_REFRESH_TASK", None)
+        if periodic_task is not None and not periodic_task.done():
+            periodic_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await periodic_task
+        main_module._PERIODIC_REFRESH_TASK = None
 
     async def test_stale_startup_schedules_background_refresh(self) -> None:
         stale_at = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
@@ -123,6 +136,40 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         with contextlib.suppress(asyncio.CancelledError):
             await running_task
 
+    async def test_run_periodic_refresh_loop_waits_then_requests_refresh(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_refresh() -> asyncio.Task:
+            started.set()
+            await release.wait()
+            return asyncio.current_task()
+
+        with patch("gamelib_mcp.main._ensure_startup_refresh", AsyncMock(side_effect=fake_refresh)) as mock_refresh:
+            task = asyncio.create_task(_run_periodic_refresh_loop(0.01))
+            await asyncio.wait_for(started.wait(), timeout=0.1)
+            self.assertEqual(mock_refresh.await_count, 1)
+
+            release.set()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+    async def test_ensure_periodic_refresh_loop_skips_duplicate_running_task(self) -> None:
+        import gamelib_mcp.main as main_module
+
+        running_task = asyncio.create_task(asyncio.sleep(0.2))
+        main_module._PERIODIC_REFRESH_TASK = running_task
+
+        with patch("gamelib_mcp.main.asyncio.create_task", AsyncMock()) as mock_create_task:
+            task = await _ensure_periodic_refresh_loop(3600)
+
+        self.assertIs(task, running_task)
+        mock_create_task.assert_not_called()
+        running_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await running_task
+
     async def test_startup_is_non_blocking_while_refresh_runs(self) -> None:
         stale_at = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
         started = asyncio.Event()
@@ -175,6 +222,49 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(refresh_release.is_set())
             refresh_release.set()
             await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=0.1)
+
+    async def test_lifespan_starts_periodic_refresh_loop(self) -> None:
+        fresh_at = datetime.now(timezone.utc).isoformat()
+
+        with (
+            patch("gamelib_mcp.data.db.init_db", AsyncMock()),
+            patch("gamelib_mcp.data.db.get_meta", AsyncMock(return_value=fresh_at)),
+            patch("gamelib_mcp.main._ensure_periodic_refresh_loop", AsyncMock()) as mock_periodic,
+            patch("gamelib_mcp.data.enrich_bg.background_enrich", AsyncMock()),
+        ):
+            async with lifespan(object()):
+                pass
+
+        mock_periodic.assert_awaited_once()
+
+    async def test_lifespan_cancels_periodic_refresh_loop_on_shutdown(self) -> None:
+        fresh_at = datetime.now(timezone.utc).isoformat()
+        started = asyncio.Event()
+
+        async def idle_forever() -> None:
+            started.set()
+            await asyncio.Future()
+
+        with (
+            patch("gamelib_mcp.data.db.init_db", AsyncMock()),
+            patch("gamelib_mcp.data.db.get_meta", AsyncMock(return_value=fresh_at)),
+            patch("gamelib_mcp.data.enrich_bg.background_enrich", AsyncMock()),
+            patch.dict(os.environ, {"LIBRARY_REFRESH_INTERVAL_HOURS": "24"}, clear=False),
+        ):
+            cm = lifespan(object())
+            await asyncio.wait_for(cm.__aenter__(), timeout=0.1)
+
+            import gamelib_mcp.main as main_module
+
+            if main_module._PERIODIC_REFRESH_TASK is not None:
+                main_module._PERIODIC_REFRESH_TASK.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await main_module._PERIODIC_REFRESH_TASK
+            main_module._PERIODIC_REFRESH_TASK = asyncio.create_task(idle_forever())
+            await asyncio.wait_for(started.wait(), timeout=0.1)
+
+            await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=0.1)
+            self.assertTrue(main_module._PERIODIC_REFRESH_TASK.done())
 
     async def test_startup_clears_abandoned_hltb_claims_before_background_enrich(self) -> None:
         tmpdir = tempfile.TemporaryDirectory()
