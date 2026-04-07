@@ -1,10 +1,15 @@
 """IGDB (Twitch) API client — game identity resolution with tags, genres, release dates."""
 
+import asyncio
 import json
 import logging
 import os
+import random
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 import httpx
 
@@ -45,6 +50,94 @@ CATEGORY_PORT = 11
 # Cached token
 _token: str | None = None
 _token_expires_at: datetime = datetime.min.replace(tzinfo=timezone.utc)
+
+_IGDB_TARGET_REQUEST_INTERVAL = 1 / 3
+_IGDB_MAX_REQUESTS_PER_SECOND = 4
+_IGDB_MAX_IN_FLIGHT_REQUESTS = 4
+_IGDB_MAX_RETRIES = 3
+_IGDB_RETRY_BASE_DELAY_SECONDS = 0.5
+_IGDB_RETRY_JITTER_SECONDS = 0.25
+_IGDB_REQUEST_TIMEOUT_SECONDS = 15
+
+
+class _IGDBRequestGate:
+    """Shared gate that paces request starts and caps concurrent IGDB requests."""
+
+    def __init__(
+        self,
+        *,
+        target_interval: float,
+        max_requests_per_second: int,
+        max_in_flight: int,
+    ) -> None:
+        self._target_interval = target_interval
+        self._max_requests_per_second = max_requests_per_second
+        self._max_in_flight = max_in_flight
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._lock: asyncio.Lock | None = None
+        self._semaphore: asyncio.Semaphore | None = None
+        self._request_started_at: deque[float] = deque()
+        self._next_slot_at = 0.0
+
+    def _ensure_loop_state(self) -> tuple[asyncio.Lock, asyncio.Semaphore]:
+        loop = asyncio.get_running_loop()
+        if self._loop is not loop:
+            self._loop = loop
+            self._lock = asyncio.Lock()
+            self._semaphore = asyncio.Semaphore(self._max_in_flight)
+            self._request_started_at = deque()
+            self._next_slot_at = 0.0
+
+        assert self._lock is not None
+        assert self._semaphore is not None
+        return self._lock, self._semaphore
+
+    async def __aenter__(self) -> "_IGDBRequestGate":
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        self.release()
+        return False
+
+    async def acquire(self) -> None:
+        lock, semaphore = self._ensure_loop_state()
+        await semaphore.acquire()
+
+        try:
+            while True:
+                wait_seconds = 0.0
+                async with lock:
+                    now = time.monotonic()
+                    cutoff = now - 1.0
+                    while self._request_started_at and self._request_started_at[0] <= cutoff:
+                        self._request_started_at.popleft()
+
+                    wait_seconds = max(0.0, self._next_slot_at - now)
+                    if len(self._request_started_at) >= self._max_requests_per_second:
+                        oldest = self._request_started_at[0]
+                        wait_seconds = max(wait_seconds, (oldest + 1.0) - now)
+
+                    if wait_seconds <= 0:
+                        self._request_started_at.append(now)
+                        self._next_slot_at = max(self._next_slot_at, now) + self._target_interval
+                        return
+
+                await asyncio.sleep(wait_seconds)
+        except Exception:
+            semaphore.release()
+            raise
+
+    def release(self) -> None:
+        _, semaphore = self._ensure_loop_state()
+        semaphore.release()
+
+
+_IGDB_REQUEST_GATE = _IGDBRequestGate(
+    target_interval=_IGDB_TARGET_REQUEST_INTERVAL,
+    max_requests_per_second=_IGDB_MAX_REQUESTS_PER_SECOND,
+    max_in_flight=_IGDB_MAX_IN_FLIGHT_REQUESTS,
+)
 
 
 @dataclass
@@ -98,6 +191,73 @@ def _unix_to_iso(ts: int | None) -> str | None:
         return None
 
 
+def _parse_retry_after(retry_after: str | None) -> float | None:
+    if not retry_after:
+        return None
+
+    try:
+        return max(0.0, float(retry_after))
+    except ValueError:
+        pass
+
+    try:
+        retry_at = parsedate_to_datetime(retry_after)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+
+    return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+
+
+def _retry_delay_seconds(attempt: int, response: httpx.Response | None = None) -> float:
+    retry_after = _parse_retry_after(response.headers.get("Retry-After") if response else None)
+    if retry_after is not None:
+        return retry_after
+
+    backoff = _IGDB_RETRY_BASE_DELAY_SECONDS * (2 ** attempt)
+    return backoff + random.uniform(0.0, _IGDB_RETRY_JITTER_SECONDS)
+
+
+async def _sleep_before_retry(delay_seconds: float) -> None:
+    await asyncio.sleep(delay_seconds)
+
+
+def _should_retry(exc: Exception) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 429 or 500 <= exc.response.status_code < 600
+
+    return isinstance(exc, (httpx.TimeoutException, httpx.TransportError))
+
+
+async def _post_igdb_games(query: str, headers: dict[str, str]) -> list[dict]:
+    last_error: Exception | None = None
+
+    for attempt in range(_IGDB_MAX_RETRIES + 1):
+        try:
+            async with _IGDB_REQUEST_GATE:
+                async with httpx.AsyncClient(timeout=_IGDB_REQUEST_TIMEOUT_SECONDS) as client:
+                    resp = await client.post(
+                        _IGDB_GAMES_URL,
+                        content=query,
+                        headers=headers,
+                    )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as exc:
+            last_error = exc
+            if attempt >= _IGDB_MAX_RETRIES or not _should_retry(exc):
+                raise
+
+            response = exc.response if isinstance(exc, httpx.HTTPStatusError) else None
+            await _sleep_before_retry(_retry_delay_seconds(attempt, response))
+
+    if last_error is not None:
+        raise last_error
+    return []
+
+
 async def search_game(name: str, igdb_platform_id: int | None = None) -> list[IGDBGame]:
     """
     Search IGDB for a game by name, optionally filtered to a platform.
@@ -120,18 +280,14 @@ async def search_game(name: str, igdb_platform_id: int | None = None) -> list[IG
 
     try:
         token = await _get_token()
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                _IGDB_GAMES_URL,
-                content=query,
-                headers={
-                    "Client-ID": client_id,
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "text/plain",
-                },
-            )
-            resp.raise_for_status()
-            results = resp.json()
+        results = await _post_igdb_games(
+            query,
+            headers={
+                "Client-ID": client_id,
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "text/plain",
+            },
+        )
     except Exception as exc:
         logger.warning("IGDB search failed for %r: %s", name, exc)
         return []
