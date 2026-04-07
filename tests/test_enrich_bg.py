@@ -111,7 +111,7 @@ class EnrichmentClaimTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BackgroundEnrichmentSupervisorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_background_enrich_skips_opencritic_workers_when_api_key_is_missing(self) -> None:
+    async def test_background_enrich_runs_opencritic_workers_without_api_key(self) -> None:
         with (
             patch.dict("os.environ", {}, clear=True),
             patch("gamelib_mcp.data.enrich_bg._run_store_workers", AsyncMock(return_value=0)),
@@ -124,7 +124,7 @@ class BackgroundEnrichmentSupervisorTests(unittest.IsolatedAsyncioTestCase):
         ):
             await enrich_bg.background_enrich()
 
-        opencritic_workers.assert_not_awaited()
+        opencritic_workers.assert_awaited_once()
 
     async def test_background_enrich_runs_worker_families_concurrently(self) -> None:
         started = {"store": asyncio.Event(), "igdb": asyncio.Event()}
@@ -267,6 +267,36 @@ class BackgroundEnrichmentSupervisorTests(unittest.IsolatedAsyncioTestCase):
         sql = db_mock.execute.await_args.args[0]
         self.assertIn("SET store_claimed_at = NULL", sql)
         self.assertNotIn("store_cached_at = 'FAILED'", sql)
+
+    async def test_opencritic_batch_releases_claim_without_forcing_failed_cache_marker(self) -> None:
+        with (
+            patch("gamelib_mcp.data.enrich_bg.claim_game_platform_ids_for_opencritic", AsyncMock(return_value=[11])),
+            patch(
+                "gamelib_mcp.data.enrich_bg.load_opencritic_batch_rows",
+                AsyncMock(return_value=[{"game_platform_id": 11, "name": "Portal 2"}]),
+            ),
+            patch("gamelib_mcp.data.enrich_bg.enrich_opencritic", AsyncMock(return_value={"status": "ambiguous"})),
+            patch("gamelib_mcp.data.enrich_bg._finalize_platform_enrichment_claim", AsyncMock()) as finalize,
+            patch("gamelib_mcp.data.enrich_bg.asyncio.sleep", AsyncMock()),
+        ):
+            await enrich_bg._run_opencritic_batch()
+
+        finalize.assert_awaited_once_with(11, "opencritic_claimed_at", "opencritic_cached_at", True)
+
+    async def test_opencritic_batch_treats_http_error_as_successful_finalization(self) -> None:
+        with (
+            patch("gamelib_mcp.data.enrich_bg.claim_game_platform_ids_for_opencritic", AsyncMock(return_value=[11])),
+            patch(
+                "gamelib_mcp.data.enrich_bg.load_opencritic_batch_rows",
+                AsyncMock(return_value=[{"game_platform_id": 11, "name": "Portal 2"}]),
+            ),
+            patch("gamelib_mcp.data.enrich_bg.enrich_opencritic", AsyncMock(return_value={"status": "http_error"})),
+            patch("gamelib_mcp.data.enrich_bg._finalize_platform_enrichment_claim", AsyncMock()) as finalize,
+            patch("gamelib_mcp.data.enrich_bg.asyncio.sleep", AsyncMock()),
+        ):
+            await enrich_bg._run_opencritic_batch()
+
+        finalize.assert_awaited_once_with(11, "opencritic_claimed_at", "opencritic_cached_at", True)
 
     async def test_protondb_batch_releases_claim_without_marking_failed_on_exception(self) -> None:
         db_mock = AsyncMock()

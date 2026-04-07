@@ -28,7 +28,7 @@ from .db import (
 )
 from .hltb import get_hltb
 from .metacritic import enrich_metacritic
-from .opencritic import enrich_opencritic, is_configured as opencritic_is_configured
+from .opencritic import enrich_opencritic
 from .protondb import get_protondb
 from .steam_store import enrich_game
 from .steamspy import enrich_steamspy
@@ -50,6 +50,14 @@ _SUPERVISOR_PROGRESS: ContextVar["_ProgressTracker | None"] = ContextVar(
     "enrich_supervisor_progress",
     default=None,
 )
+_OPENCRITIC_SUCCESS_STATUSES = {
+    "matched",
+    "cached",
+    "no_match",
+    "ambiguous",
+    "parse_failed",
+    "http_error",
+}
 
 
 class _RequestStartGate:
@@ -93,13 +101,10 @@ async def background_enrich() -> None:
             ("hltb", _run_hltb_workers()),
             ("protondb", _run_protondb_workers()),
             ("steamspy", _run_steamspy_workers()),
+            ("opencritic", _run_opencritic_workers()),
             ("metacritic", _run_metacritic_workers()),
             ("igdb", _run_igdb_workers()),
         ]
-        if opencritic_is_configured():
-            jobs.append(("opencritic", _run_opencritic_workers()))
-        else:
-            logger.info("Background enrichment skipping OpenCritic workers: OPENCRITIC_API_KEY is not configured")
 
         results = await asyncio.gather(*(job for _, job in jobs), return_exceptions=True)
         for (family, _), result in zip(jobs, results, strict=True):
@@ -151,8 +156,6 @@ async def _run_steamspy_workers() -> int:
 
 
 async def _run_opencritic_workers() -> int:
-    if not opencritic_is_configured():
-        return 0
     return await _run_until_quiescent(_run_opencritic_batch)
 
 
@@ -262,7 +265,8 @@ async def _run_opencritic_batch() -> int:
     for row in rows:
         success = True
         try:
-            await enrich_opencritic(row["game_platform_id"], row["name"])
+            result = await enrich_opencritic(row["game_platform_id"], row["name"])
+            success = result.get("status") in _OPENCRITIC_SUCCESS_STATUSES
         except Exception as exc:
             success = False
             logger.debug("OpenCritic enrich failed for %s: %s", row["name"], exc)
