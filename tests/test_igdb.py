@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -49,6 +50,60 @@ class _DummyAsyncClient:
         return outcome
 
 
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, delay: float) -> None:
+        self.sleeps.append(delay)
+        self.now += delay
+
+
+class IGDBRequestGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_gate_releases_permit_when_acquire_is_cancelled(self) -> None:
+        gate = igdb._IGDBRequestGate(
+            target_interval=1.0,
+            max_requests_per_second=4,
+            max_in_flight=1,
+        )
+
+        await gate.acquire()
+        gate.release()
+
+        async def cancel_sleep(_delay: float) -> None:
+            raise asyncio.CancelledError()
+
+        with patch("gamelib_mcp.data.igdb.asyncio.sleep", new=cancel_sleep):
+            with self.assertRaises(asyncio.CancelledError):
+                await gate.acquire()
+
+        state = gate._get_loop_state()
+        self.assertEqual(state.semaphore._value, 1)
+
+    async def test_gate_enforces_target_interval_without_wall_clock_sleep(self) -> None:
+        gate = igdb._IGDBRequestGate(
+            target_interval=0.5,
+            max_requests_per_second=4,
+            max_in_flight=1,
+        )
+        clock = _FakeClock()
+
+        with (
+            patch("gamelib_mcp.data.igdb.time.monotonic", side_effect=clock.monotonic),
+            patch("gamelib_mcp.data.igdb.asyncio.sleep", new=clock.sleep),
+        ):
+            await gate.acquire()
+            gate.release()
+            await gate.acquire()
+            gate.release()
+
+        self.assertEqual(clock.sleeps, [0.5])
+
+
 class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
     async def test_search_game_retries_rate_limit_response(self) -> None:
         client = _DummyAsyncClient(
@@ -80,6 +135,27 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([game.name for game in results], ["Portal 2"])
         self.assertEqual(client.calls, 2)
         sleep_mock.assert_awaited()
+
+    async def test_search_game_uses_retry_after_before_backoff_jitter(self) -> None:
+        client = _DummyAsyncClient(
+            [
+                _DummyResponse(429, [], headers={"Retry-After": "7"}),
+                _DummyResponse(200, []),
+            ]
+        )
+        sleep_mock = AsyncMock()
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb.httpx.AsyncClient", return_value=client),
+            patch("gamelib_mcp.data.igdb._sleep_before_retry", new=sleep_mock),
+            patch("gamelib_mcp.data.igdb.random.uniform", side_effect=AssertionError("unexpected jitter")),
+        ):
+            results = await igdb.search_game("Portal 2")
+
+        self.assertEqual(results, [])
+        sleep_mock.assert_awaited_once_with(7.0)
 
     async def test_search_game_does_not_retry_bad_request(self) -> None:
         client = _DummyAsyncClient([_DummyResponse(400, {"message": "bad request"})])

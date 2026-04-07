@@ -7,9 +7,11 @@ import os
 import random
 import time
 from collections import deque
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from weakref import WeakKeyDictionary
 
 import httpx
 
@@ -73,24 +75,22 @@ class _IGDBRequestGate:
         self._target_interval = target_interval
         self._max_requests_per_second = max_requests_per_second
         self._max_in_flight = max_in_flight
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._lock: asyncio.Lock | None = None
-        self._semaphore: asyncio.Semaphore | None = None
-        self._request_started_at: deque[float] = deque()
-        self._next_slot_at = 0.0
+        self._loop_states: WeakKeyDictionary[asyncio.AbstractEventLoop, _IGDBRequestGateState] = WeakKeyDictionary()
+        self._lease_stack: ContextVar[tuple["_IGDBRequestGateState", ...]] = ContextVar(
+            "igdb_request_gate_lease_stack",
+            default=(),
+        )
 
-    def _ensure_loop_state(self) -> tuple[asyncio.Lock, asyncio.Semaphore]:
+    def _get_loop_state(self) -> "_IGDBRequestGateState":
         loop = asyncio.get_running_loop()
-        if self._loop is not loop:
-            self._loop = loop
-            self._lock = asyncio.Lock()
-            self._semaphore = asyncio.Semaphore(self._max_in_flight)
-            self._request_started_at = deque()
-            self._next_slot_at = 0.0
-
-        assert self._lock is not None
-        assert self._semaphore is not None
-        return self._lock, self._semaphore
+        state = self._loop_states.get(loop)
+        if state is None:
+            state = _IGDBRequestGateState(
+                lock=asyncio.Lock(),
+                semaphore=asyncio.Semaphore(self._max_in_flight),
+            )
+            self._loop_states[loop] = state
+        return state
 
     async def __aenter__(self) -> "_IGDBRequestGate":
         await self.acquire()
@@ -101,36 +101,51 @@ class _IGDBRequestGate:
         return False
 
     async def acquire(self) -> None:
-        lock, semaphore = self._ensure_loop_state()
-        await semaphore.acquire()
+        state = self._get_loop_state()
+        await state.semaphore.acquire()
 
         try:
             while True:
                 wait_seconds = 0.0
-                async with lock:
+                async with state.lock:
                     now = time.monotonic()
                     cutoff = now - 1.0
-                    while self._request_started_at and self._request_started_at[0] <= cutoff:
-                        self._request_started_at.popleft()
+                    while state.request_started_at and state.request_started_at[0] <= cutoff:
+                        state.request_started_at.popleft()
 
-                    wait_seconds = max(0.0, self._next_slot_at - now)
-                    if len(self._request_started_at) >= self._max_requests_per_second:
-                        oldest = self._request_started_at[0]
+                    wait_seconds = max(0.0, state.next_slot_at - now)
+                    if len(state.request_started_at) >= self._max_requests_per_second:
+                        oldest = state.request_started_at[0]
                         wait_seconds = max(wait_seconds, (oldest + 1.0) - now)
 
                     if wait_seconds <= 0:
-                        self._request_started_at.append(now)
-                        self._next_slot_at = max(self._next_slot_at, now) + self._target_interval
+                        state.request_started_at.append(now)
+                        state.next_slot_at = max(state.next_slot_at, now) + self._target_interval
+                        lease_stack = self._lease_stack.get()
+                        self._lease_stack.set((*lease_stack, state))
                         return
 
                 await asyncio.sleep(wait_seconds)
-        except Exception:
-            semaphore.release()
+        except BaseException:
+            state.semaphore.release()
             raise
 
     def release(self) -> None:
-        _, semaphore = self._ensure_loop_state()
-        semaphore.release()
+        lease_stack = self._lease_stack.get()
+        if not lease_stack:
+            raise RuntimeError("IGDB request gate released without matching acquire")
+
+        state = lease_stack[-1]
+        self._lease_stack.set(lease_stack[:-1])
+        state.semaphore.release()
+
+
+@dataclass
+class _IGDBRequestGateState:
+    lock: asyncio.Lock
+    semaphore: asyncio.Semaphore
+    request_started_at: deque[float] = field(default_factory=deque)
+    next_slot_at: float = 0.0
 
 
 _IGDB_REQUEST_GATE = _IGDBRequestGate(
