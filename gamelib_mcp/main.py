@@ -42,7 +42,7 @@ def _summarize_refresh_result(result: object) -> str | None:
     return "; ".join(errors) if errors else None
 
 
-async def _run_startup_refresh() -> None:
+async def _run_startup_refresh() -> dict:
     from .data.db import set_meta_many
 
     started_at = datetime.now(timezone.utc).isoformat()
@@ -57,9 +57,10 @@ async def _run_startup_refresh() -> None:
 
     final_error: str | None = None
     cancelled = False
+    refresh_result: dict | None = None
     try:
-        result = await _admin_refresh_library()
-        final_error = _summarize_refresh_result(result)
+        refresh_result = await _admin_refresh_library()
+        final_error = _summarize_refresh_result(refresh_result)
         if final_error:
             logger.warning("Startup library refresh completed with partial errors: %s", final_error)
     except asyncio.CancelledError:
@@ -83,6 +84,21 @@ async def _run_startup_refresh() -> None:
         if cancelled:
             logger.info("Startup library refresh cancelled")
 
+    return refresh_result or {}
+
+
+async def _run_background_enrich_after(refresh_task: asyncio.Task) -> None:
+    from .data.enrich_bg import background_enrich
+
+    try:
+        await asyncio.shield(refresh_task)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Startup refresh failed before background enrichment")
+
+    await background_enrich()
+
 
 async def _ensure_startup_refresh() -> asyncio.Task:
     global _LIBRARY_REFRESH_TASK
@@ -101,7 +117,6 @@ async def lifespan(app):
     """Startup: init DB, sync library if stale, kick off HLTB pre-warm."""
     from .data.db import init_db, get_meta, set_meta
     from .data.steam_xml import STALE_HOURS
-    from .data.enrich_bg import background_enrich
 
     await init_db()
     logger.info("Database initialized")
@@ -126,10 +141,13 @@ async def lifespan(app):
 
     if needs_refresh:
         logger.info("Library stale or missing — scheduling background refresh...")
-        await _ensure_startup_refresh()
+        refresh_task = await _ensure_startup_refresh()
+        asyncio.create_task(_run_background_enrich_after(refresh_task))
+    else:
+        from .data.enrich_bg import background_enrich
 
-    # Background enrichment: Steam Store, HLTB, ProtonDB (non-blocking)
-    asyncio.create_task(background_enrich())
+        # Background enrichment: Steam Store, HLTB, ProtonDB (non-blocking)
+        asyncio.create_task(background_enrich())
 
     yield
 

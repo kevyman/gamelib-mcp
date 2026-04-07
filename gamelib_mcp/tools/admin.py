@@ -24,6 +24,16 @@ async def refresh_library(platforms: list[str] | None = None) -> dict:
     _ALL = {"steam", "epic", "gog", "nintendo", "ps5"}
     targets = set(platforms) if platforms else _ALL
 
+    if targets == _ALL:
+        from .. import main as main_module
+
+        startup_task = main_module._LIBRARY_REFRESH_TASK
+        current_task = asyncio.current_task()
+        if startup_task is not None and not startup_task.done() and startup_task is not current_task:
+            result = await asyncio.shield(startup_task)
+            if isinstance(result, dict):
+                return result
+
     platform_syncs = {
         "steam":    fetch_library,
         "epic":     sync_epic,

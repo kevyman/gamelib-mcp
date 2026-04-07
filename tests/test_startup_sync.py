@@ -143,6 +143,42 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             await cm.__aexit__(None, None, None)
 
+    async def test_stale_startup_waits_for_refresh_before_enrichment(self) -> None:
+        stale_at = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_refresh() -> dict:
+            started.set()
+            await release.wait()
+            return {"steam": {"games_upserted": 1}}
+
+        enrich_started = asyncio.Event()
+
+        async def enrich() -> None:
+            enrich_started.set()
+
+        enrich = AsyncMock(side_effect=enrich)
+
+        with (
+            patch("gamelib_mcp.data.db.init_db", AsyncMock()),
+            patch("gamelib_mcp.data.db.get_meta", AsyncMock(return_value=stale_at)),
+            patch("gamelib_mcp.main._run_startup_refresh", side_effect=slow_refresh),
+            patch("gamelib_mcp.data.enrich_bg.background_enrich", enrich),
+        ):
+            cm = lifespan(object())
+            await asyncio.wait_for(cm.__aenter__(), timeout=0.1)
+            await asyncio.wait_for(started.wait(), timeout=0.1)
+            await asyncio.sleep(0)
+
+            enrich.assert_not_awaited()
+
+            release.set()
+            await asyncio.wait_for(enrich_started.wait(), timeout=0.1)
+            await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=0.1)
+
+        enrich.assert_awaited_once()
+
     async def test_refresh_library_parallelizes_platform_syncs_and_isolates_failures(self) -> None:
         started = {
             "steam": asyncio.Event(),
@@ -225,6 +261,30 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
                 "epic": {"error": "epic cancelled"},
             },
         )
+
+    async def test_refresh_library_reuses_running_startup_refresh_task(self) -> None:
+        import gamelib_mcp.main as main_module
+
+        release = asyncio.Event()
+        refresh_result = {"steam": {"games_upserted": 3}}
+
+        async def running_refresh() -> dict:
+            await release.wait()
+            return refresh_result
+
+        startup_task = asyncio.create_task(running_refresh())
+        main_module._LIBRARY_REFRESH_TASK = startup_task
+
+        with patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock()) as mock_fetch_library:
+            refresh_call = asyncio.create_task(admin_tools.refresh_library())
+            await asyncio.sleep(0)
+            self.assertFalse(refresh_call.done())
+
+            release.set()
+            result = await asyncio.wait_for(refresh_call, timeout=0.1)
+
+        self.assertEqual(result, refresh_result)
+        mock_fetch_library.assert_not_called()
 
 
 if __name__ == "__main__":
