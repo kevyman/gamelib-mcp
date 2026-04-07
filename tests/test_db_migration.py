@@ -9,7 +9,7 @@ from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steam_store
 
 
-class MigrationRegressionTests(unittest.TestCase):
+class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tmpdir.name) / "migration.sqlite"
@@ -200,29 +200,164 @@ class MigrationRegressionTests(unittest.TestCase):
         self.assertEqual(steam_data["steam_review_desc"], "Overwhelmingly Positive")
         self.assertEqual(steam_data["protondb_tier"], "gold")
 
-    def test_schema_contains_claim_columns(self) -> None:
-        async def run() -> None:
-            db_module._DB_READY_PATH = None
-            with patch.dict(
-                "os.environ",
-                {"DATABASE_URL": f"file:{self.db_path}"},
-                clear=False,
-            ):
-                await db_module.init_db()
-                async with db_module.get_db() as conn:
-                    games_cols = await conn.execute_fetchall("PRAGMA table_info(games)")
-                    spd_cols = await conn.execute_fetchall("PRAGMA table_info(steam_platform_data)")
-                    gpe_cols = await conn.execute_fetchall("PRAGMA table_info(game_platform_enrichment)")
+    async def test_schema_contains_claim_columns(self) -> None:
+        db_module._DB_READY_PATH = None
+        with patch.dict(
+            "os.environ",
+            {"DATABASE_URL": f"file:{self.db_path}"},
+            clear=False,
+        ):
+            await db_module.init_db()
+            async with db_module.get_db() as conn:
+                games_cols = await conn.execute_fetchall("PRAGMA table_info(games)")
+                spd_cols = await conn.execute_fetchall("PRAGMA table_info(steam_platform_data)")
+                gpe_cols = await conn.execute_fetchall("PRAGMA table_info(game_platform_enrichment)")
 
-            self.assertIn("igdb_claimed_at", {row["name"] for row in games_cols})
-            self.assertIn("hltb_claimed_at", {row["name"] for row in games_cols})
-            self.assertIn("store_claimed_at", {row["name"] for row in spd_cols})
-            self.assertIn("protondb_claimed_at", {row["name"] for row in spd_cols})
-            self.assertIn("steamspy_claimed_at", {row["name"] for row in spd_cols})
-            self.assertIn("opencritic_claimed_at", {row["name"] for row in gpe_cols})
-            self.assertIn("metacritic_claimed_at", {row["name"] for row in gpe_cols})
+        self.assertIn("igdb_claimed_at", {row["name"] for row in games_cols})
+        self.assertIn("hltb_claimed_at", {row["name"] for row in games_cols})
+        self.assertIn("store_claimed_at", {row["name"] for row in spd_cols})
+        self.assertIn("protondb_claimed_at", {row["name"] for row in spd_cols})
+        self.assertIn("steamspy_claimed_at", {row["name"] for row in spd_cols})
+        self.assertIn("opencritic_claimed_at", {row["name"] for row in gpe_cols})
+        self.assertIn("metacritic_claimed_at", {row["name"] for row in gpe_cols})
 
-        asyncio.run(run())
+    async def test_schema_contains_opencritic_scrape_columns(self) -> None:
+        db_module._DB_READY_PATH = None
+        with patch.dict(
+            "os.environ",
+            {"DATABASE_URL": f"file:{self.db_path}"},
+            clear=False,
+        ):
+            await db_module.init_db()
+            async with db_module.get_db() as conn:
+                gpe_cols = await conn.execute_fetchall("PRAGMA table_info(game_platform_enrichment)")
+
+        names = {row["name"] for row in gpe_cols}
+        self.assertIn("opencritic_url", names)
+        self.assertIn("opencritic_num_reviews", names)
+
+    async def test_v4_database_migrates_opencritic_scrape_columns(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        old_v4_schema = """
+    CREATE TABLE IF NOT EXISTS games (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        igdb_id          INTEGER UNIQUE,
+        name             TEXT NOT NULL,
+        sort_name        TEXT,
+        release_date     TEXT,
+        genres           TEXT,
+        tags             TEXT,
+        short_description TEXT,
+        hltb_main        REAL,
+        hltb_extra       REAL,
+        hltb_complete    REAL,
+        hltb_cached_at   TEXT,
+        hltb_claimed_at  TEXT,
+        igdb_cached_at   TEXT,
+        igdb_claimed_at  TEXT,
+        is_farmed        INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS game_platforms (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id          INTEGER NOT NULL REFERENCES games(id),
+        platform         TEXT NOT NULL,
+        owned            INTEGER NOT NULL DEFAULT 1,
+        playtime_minutes INTEGER,
+        playtime_2weeks_minutes INTEGER,
+        last_synced      TEXT,
+        UNIQUE(game_id, platform)
+    );
+
+    CREATE TABLE IF NOT EXISTS game_platform_identifiers (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_platform_id INTEGER NOT NULL REFERENCES game_platforms(id) ON DELETE CASCADE,
+        identifier_type  TEXT NOT NULL,
+        identifier_value TEXT NOT NULL,
+        is_primary       INTEGER NOT NULL DEFAULT 1,
+        last_seen_at     TEXT,
+        UNIQUE(identifier_type, identifier_value)
+    );
+
+    CREATE TABLE IF NOT EXISTS steam_platform_data (
+        game_platform_id    INTEGER PRIMARY KEY REFERENCES game_platforms(id) ON DELETE CASCADE,
+        steam_review_score  INTEGER,
+        steam_review_desc   TEXT,
+        protondb_tier       TEXT,
+        store_cached_at     TEXT,
+        store_claimed_at    TEXT,
+        protondb_cached_at  TEXT,
+        protondb_claimed_at TEXT,
+        steamspy_cached_at  TEXT,
+        steamspy_claimed_at TEXT,
+        rtime_last_played   INTEGER,
+        library_updated_at  TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS game_platform_enrichment (
+        game_platform_id       INTEGER PRIMARY KEY REFERENCES game_platforms(id) ON DELETE CASCADE,
+        platform_release_date  TEXT,
+        metacritic_score       INTEGER,
+        metacritic_url         TEXT,
+        metacritic_claimed_at  TEXT,
+        opencritic_id          INTEGER,
+        opencritic_score       INTEGER,
+        opencritic_tier        TEXT,
+        opencritic_percent_rec REAL,
+        opencritic_cached_at   TEXT,
+        opencritic_claimed_at  TEXT,
+        metacritic_cached_at   TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS ratings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id INTEGER REFERENCES games(id),
+        source TEXT NOT NULL,
+        raw_score REAL,
+        normalized_score REAL,
+        review_text TEXT,
+        synced_at TEXT NOT NULL,
+        UNIQUE(game_id, source)
+    );
+
+    CREATE TABLE IF NOT EXISTS tag_affinity (
+        tag TEXT PRIMARY KEY,
+        affinity_score REAL,
+        avg_score REAL,
+        game_count INTEGER,
+        updated_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_game_platforms_game_id ON game_platforms(game_id);
+    CREATE INDEX IF NOT EXISTS idx_game_platforms_platform ON game_platforms(platform);
+    CREATE INDEX IF NOT EXISTS idx_game_platform_identifiers_platform_id
+        ON game_platform_identifiers(game_platform_id);
+    CREATE INDEX IF NOT EXISTS idx_game_platform_identifiers_lookup
+        ON game_platform_identifiers(identifier_type, identifier_value);
+"""
+        conn.executescript(old_v4_schema)
+        conn.execute("PRAGMA user_version = 4")
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict(
+            "os.environ",
+            {"DATABASE_URL": f"file:{self.db_path}"},
+            clear=False,
+        ):
+            await db_module.init_db()
+            async with db_module.get_db() as migrated:
+                cols = await migrated.execute_fetchall("PRAGMA table_info(game_platform_enrichment)")
+
+        names = {row["name"] for row in cols}
+        self.assertIn("opencritic_url", names)
+        self.assertIn("opencritic_num_reviews", names)
 
 
 class SteamStoreRegressionTests(unittest.IsolatedAsyncioTestCase):

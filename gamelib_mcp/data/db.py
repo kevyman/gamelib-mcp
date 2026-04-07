@@ -36,7 +36,7 @@ STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 @dataclass
@@ -431,9 +431,11 @@ _V4_SCHEMA_DDL = """
         metacritic_url         TEXT,
         metacritic_claimed_at  TEXT,
         opencritic_id          INTEGER,
+        opencritic_url         TEXT,
         opencritic_score       INTEGER,
         opencritic_tier        TEXT,
         opencritic_percent_rec REAL,
+        opencritic_num_reviews INTEGER,
         opencritic_cached_at   TEXT,
         opencritic_claimed_at  TEXT,
         metacritic_cached_at   TEXT
@@ -502,6 +504,21 @@ async def _detect_schema_state(db: aiosqlite.Connection) -> str:
 
     spd_cols = await _table_columns(db, "steam_platform_data") if "steam_platform_data" in tables else set()
     gpe_cols = await _table_columns(db, "game_platform_enrichment") if "game_platform_enrichment" in tables else set()
+    if {
+        "igdb_claimed_at",
+        "hltb_claimed_at",
+    }.issubset(game_cols) and {
+        "store_claimed_at",
+        "protondb_claimed_at",
+        "steamspy_claimed_at",
+    }.issubset(spd_cols) and {
+        "opencritic_claimed_at",
+        "metacritic_claimed_at",
+        "opencritic_url",
+        "opencritic_num_reviews",
+    }.issubset(gpe_cols):
+        return "v5"
+
     if {
         "igdb_claimed_at",
         "hltb_claimed_at",
@@ -930,6 +947,26 @@ async def _migrate_v3_to_v4(db: aiosqlite.Connection, progress: _Progress | None
     await db.commit()
 
 
+async def _migrate_v4_to_v5(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    if progress is not None:
+        progress("Migrating to v5: add OpenCritic scrape result columns.")
+
+    async def add_column_if_missing(table: str, column_name: str, ddl: str) -> None:
+        columns = await _table_columns(db, table)
+        if column_name not in columns:
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+    await add_column_if_missing("game_platform_enrichment", "opencritic_url", "opencritic_url TEXT")
+    await add_column_if_missing(
+        "game_platform_enrichment",
+        "opencritic_num_reviews",
+        "opencritic_num_reviews INTEGER",
+    )
+
+    await _set_user_version(db, 5)
+    await db.commit()
+
+
 async def _run_migrations(
     db: aiosqlite.Connection,
     progress: _Progress | None = None,
@@ -943,7 +980,7 @@ async def _run_migrations(
         await db.executescript(_V4_SCHEMA_DDL)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
-        _emit(progress, "Initialized fresh database at schema v4.", applied_steps)
+        _emit(progress, "Initialized fresh database at schema v5.", applied_steps)
         return MigrationResult(
             initial_version=initial_version,
             final_version=SCHEMA_VERSION,
@@ -976,6 +1013,11 @@ async def _run_migrations(
             await db.commit()
             version = 4
             _emit(progress, "Recorded existing schema as v4.", applied_steps)
+        elif detected_state == "v5":
+            await _set_user_version(db, 5)
+            await db.commit()
+            version = 5
+            _emit(progress, "Recorded existing schema as v5.", applied_steps)
 
     if version == 1:
         _emit(progress, "Applying migration step v1 -> v2.", applied_steps)
@@ -991,6 +1033,11 @@ async def _run_migrations(
         _emit(progress, "Applying migration step v3 -> v4.", applied_steps)
         await _migrate_v3_to_v4(db, progress=None)
         version = 4
+
+    if version == 4:
+        _emit(progress, "Applying migration step v4 -> v5.", applied_steps)
+        await _migrate_v4_to_v5(db, progress=None)
+        version = 5
 
     await db.executescript(_V4_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
