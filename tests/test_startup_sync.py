@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from gamelib_mcp.tools import admin as admin_tools
 from gamelib_mcp.main import _ensure_startup_refresh, _run_startup_refresh, lifespan
 
 
@@ -141,6 +142,65 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
 
             release.set()
             await cm.__aexit__(None, None, None)
+
+    async def test_refresh_library_parallelizes_platform_syncs_and_isolates_failures(self) -> None:
+        started = {
+            "steam": asyncio.Event(),
+            "epic": asyncio.Event(),
+            "gog": asyncio.Event(),
+            "nintendo": asyncio.Event(),
+            "ps5": asyncio.Event(),
+        }
+        release = asyncio.Event()
+
+        async def make_sync(name: str, result: dict | None = None, error: Exception | None = None) -> dict:
+            started[name].set()
+            await release.wait()
+            if error is not None:
+                raise error
+            return result or {"platform": name, "synced": True}
+
+        async def steam_sync() -> dict:
+            return await make_sync("steam", {"platform": "steam", "synced": True})
+
+        async def epic_sync() -> dict:
+            return await make_sync("epic", error=RuntimeError("epic boom"))
+
+        async def gog_sync() -> dict:
+            return await make_sync("gog", {"platform": "gog", "synced": True})
+
+        async def nintendo_sync() -> dict:
+            return await make_sync("nintendo", {"platform": "nintendo", "synced": True})
+
+        async def psn_sync() -> dict:
+            return await make_sync("ps5", {"platform": "ps5", "synced": True})
+
+        with (
+            patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(side_effect=steam_sync)),
+            patch("gamelib_mcp.tools.admin.sync_epic", AsyncMock(side_effect=epic_sync)),
+            patch("gamelib_mcp.tools.admin.sync_gog", AsyncMock(side_effect=gog_sync)),
+            patch("gamelib_mcp.tools.admin.sync_nintendo", AsyncMock(side_effect=nintendo_sync)),
+            patch("gamelib_mcp.tools.admin.sync_psn", AsyncMock(side_effect=psn_sync)),
+        ):
+            refresh_task = asyncio.create_task(admin_tools.refresh_library())
+            await asyncio.wait_for(
+                asyncio.gather(*(event.wait() for event in started.values())),
+                timeout=0.1,
+            )
+
+            release.set()
+            result = await asyncio.wait_for(refresh_task, timeout=0.1)
+
+        self.assertEqual(
+            result,
+            {
+                "steam": {"platform": "steam", "synced": True},
+                "epic": {"error": "epic boom"},
+                "gog": {"platform": "gog", "synced": True},
+                "nintendo": {"platform": "nintendo", "synced": True},
+                "ps5": {"platform": "ps5", "synced": True},
+            },
+        )
 
 
 if __name__ == "__main__":

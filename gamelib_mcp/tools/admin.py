@@ -1,5 +1,6 @@
 """refresh_library, detect_farmed_games, and set_nintendo_session admin tools."""
 
+import asyncio
 import json
 import logging
 import statistics
@@ -23,26 +24,22 @@ async def refresh_library(platforms: list[str] | None = None) -> dict:
     _ALL = {"steam", "epic", "gog", "nintendo", "ps5"}
     targets = set(platforms) if platforms else _ALL
 
-    results: dict = {}
-
-    if "steam" in targets:
-        results["steam"] = await fetch_library()
-
     platform_syncs = {
+        "steam":    fetch_library,
         "epic":     sync_epic,
         "gog":      sync_gog,
         "nintendo": sync_nintendo,
         "ps5":      sync_psn,
     }
+    selected = [(name, fn) for name, fn in platform_syncs.items() if name in targets]
+    outcomes = await asyncio.gather(*(fn() for _, fn in selected), return_exceptions=True)
 
-    for name, fn in platform_syncs.items():
-        if name not in targets:
-            continue
-        try:
-            results[name] = await fn()
-        except Exception as exc:
-            results[name] = {"error": str(exc)}
-
+    results: dict = {}
+    for (name, _), outcome in zip(selected, outcomes, strict=True):
+        if isinstance(outcome, Exception):
+            results[name] = {"error": str(outcome)}
+        else:
+            results[name] = outcome
     return results
 
 
