@@ -1,9 +1,8 @@
-"""OpenCritic API client — cross-platform review scores cached in game_platform_enrichment."""
+"""OpenCritic scraping helpers cached in game_platform_enrichment."""
 
 import asyncio
 import logging
 import json
-import os
 import re
 from datetime import datetime, timezone
 import random
@@ -17,7 +16,6 @@ from .db import get_db, upsert_game_platform_enrichment
 
 logger = logging.getLogger(__name__)
 
-OPENCRITIC_CACHE_DAYS = 30
 _RECENT_RELEASE_WINDOW_DAYS = 180
 _RECENT_SUCCESS_TTL_DAYS = 7
 _NO_MATCH_COOLDOWN_DAYS = 7
@@ -25,8 +23,6 @@ _TRANSIENT_FAILURE_COOLDOWN_DAYS = 1
 _BASE_DELAY_SECONDS = 2.0
 _BASE_JITTER_SECONDS = 1.0
 _RETRY_DELAYS = (4.0, 8.0, 16.0)
-_SEARCH_URL = "https://api.opencritic.com/api/game/search"
-_GAME_URL = "https://api.opencritic.com/api/game/{id}"
 _OPENCRITIC_BASE_URL = "https://opencritic.com"
 _SEARCH_PAGE_URL = f"{_OPENCRITIC_BASE_URL}/search"
 _SEARCH_FALLBACK_URL = "https://html.duckduckgo.com/html/"
@@ -51,19 +47,7 @@ _EDITION_PATTERNS = {
 
 
 def is_configured() -> bool:
-    return bool(os.getenv("OPENCRITIC_API_KEY"))
-
-
-def _is_fresh(cached_at: str | None) -> bool:
-    if not cached_at:
-        return False
-    if cached_at == "FAILED":
-        return True  # don't retry; background job will skip FAILED entries
-    try:
-        dt = datetime.fromisoformat(cached_at)
-        return (datetime.now(timezone.utc) - dt).total_seconds() < OPENCRITIC_CACHE_DAYS * 86400
-    except ValueError:
-        return False
+    return True
 
 
 def _is_opencritic_fresh(cached_at: str | None, release_date: str | None, now: datetime) -> bool:
@@ -265,97 +249,46 @@ def _parse_discovery_candidates(html: str) -> list[dict]:
     return candidates
 
 
-async def enrich_opencritic(game_platform_id: int, game_name: str) -> dict | None:
-    """
-    Fetch OpenCritic score for game_name and cache in game_platform_enrichment.
-    Returns enrichment dict or None on failure.
-    """
-    if not is_configured():
-        logger.info("OpenCritic enrich skipped for %r: OPENCRITIC_API_KEY is not configured", game_name)
-        return None
-
+async def _load_opencritic_context(game_platform_id: int) -> dict:
     async with get_db() as db:
         row = await db.execute_fetchone(
-            "SELECT opencritic_cached_at FROM game_platform_enrichment WHERE game_platform_id = ?",
+            """SELECT g.release_date, gpe.opencritic_cached_at
+               FROM game_platforms gp
+               JOIN games g ON g.id = gp.game_id
+               LEFT JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
+               WHERE gp.id = ?""",
             (game_platform_id,),
         )
-    cached_at = row["opencritic_cached_at"] if row else None
-    if _is_fresh(cached_at):
-        return None
+    return dict(row) if row else {"release_date": None, "opencritic_cached_at": None}
 
-    now = datetime.now(timezone.utc).isoformat()
 
-    oc_id = await _search_game(game_name)
-    if oc_id is None:
-        await upsert_game_platform_enrichment(game_platform_id, opencritic_cached_at="FAILED")
-        return None
+async def _fetch_via_client(client: httpx.AsyncClient, match: dict) -> dict:
+    return await _fetch_opencritic_record(client, _candidate_to_export_url(match))
 
-    data = await _fetch_game(oc_id)
-    if data is None:
-        await upsert_game_platform_enrichment(game_platform_id, opencritic_cached_at="FAILED")
-        return None
 
-    score = data.get("topCriticScore")
-    tier = data.get("tier")
-    percent_rec = data.get("percentRecommended")
+async def enrich_opencritic(game_platform_id: int, game_name: str) -> dict:
+    context = await _load_opencritic_context(game_platform_id)
+    now = datetime.now(timezone.utc)
+    if _is_opencritic_fresh(context["opencritic_cached_at"], context["release_date"], now):
+        return {"status": "cached"}
 
-    # topCriticScore can be -1 when no reviews yet
-    if score is not None and score < 0:
-        score = None
+    candidates = await discover_candidates(game_name)
+    if not candidates:
+        return {"status": "no_match"}
+
+    match = _choose_match(game_name, candidates)
+    if match is None:
+        return {"status": "ambiguous"}
+
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers=_HEADERS) as client:
+        fetched = await _fetch_via_client(client, match)
+
+    if fetched["status"] != "matched":
+        return fetched
 
     fields = {
-        "opencritic_id": oc_id,
-        "opencritic_score": score,
-        "opencritic_tier": tier,
-        "opencritic_percent_rec": percent_rec,
-        "opencritic_cached_at": now,
+        **fetched["fields"],
+        "opencritic_cached_at": now.isoformat(),
     }
     await upsert_game_platform_enrichment(game_platform_id, **fields)
-    return fields
-
-
-async def _search_game(name: str) -> int | None:
-    api_key = os.getenv("OPENCRITIC_API_KEY")
-    if not api_key:
-        logger.info("OpenCritic search skipped for %r: OPENCRITIC_API_KEY is not configured", name)
-        return None
-
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                _SEARCH_URL,
-                params={"criteria": name},
-                headers={"x-access-token": api_key},
-            )
-            resp.raise_for_status()
-            results = resp.json()
-    except Exception as exc:
-        logger.debug("OpenCritic search failed for %r: %s", name, exc)
-        return None
-
-    if not results:
-        return None
-
-    # Pick best name match
-    from .db import extract_best_fuzzy_key
-    choices = {item["id"]: item["name"] for item in results if "id" in item and "name" in item}
-    best_id = extract_best_fuzzy_key(name, choices, cutoff=70)
-    return best_id if best_id is not None else results[0].get("id")
-
-
-async def _fetch_game(oc_id: int) -> dict | None:
-    api_key = os.getenv("OPENCRITIC_API_KEY")
-    if not api_key:
-        return None
-
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                _GAME_URL.format(id=oc_id),
-                headers={"x-access-token": api_key},
-            )
-            resp.raise_for_status()
-            return resp.json()
-    except Exception as exc:
-        logger.debug("OpenCritic game fetch failed for id %d: %s", oc_id, exc)
-        return None
+    return {"status": "matched", "fields": fields}

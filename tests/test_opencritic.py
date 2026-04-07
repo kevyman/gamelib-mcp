@@ -103,6 +103,44 @@ class OpenCriticDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(candidates[0]["opencritic_id"], 120)
 
 
+class OpenCriticEnrichTests(unittest.IsolatedAsyncioTestCase):
+    async def test_enrich_opencritic_writes_scraped_fields_on_success(self) -> None:
+        with (
+            patch("gamelib_mcp.data.opencritic._load_opencritic_context", AsyncMock(return_value={"release_date": "2026-03-01", "opencritic_cached_at": None})),
+            patch("gamelib_mcp.data.opencritic.discover_candidates", AsyncMock(return_value=[{"title": "Portal 2", "url": "https://opencritic.com/game/120/portal-2", "opencritic_id": 120}])),
+            patch("gamelib_mcp.data.opencritic._choose_match", return_value={"title": "Portal 2", "url": "https://opencritic.com/game/120/portal-2", "opencritic_id": 120}),
+            patch("gamelib_mcp.data.opencritic._fetch_via_client", AsyncMock(return_value={"status": "matched", "fields": {"opencritic_id": 120, "opencritic_url": "https://opencritic.com/game/120/portal-2", "opencritic_score": 95, "opencritic_tier": "Mighty", "opencritic_percent_rec": 98.0, "opencritic_num_reviews": 69}})),
+            patch("gamelib_mcp.data.opencritic.upsert_game_platform_enrichment", AsyncMock()) as upsert,
+        ):
+            result = await opencritic.enrich_opencritic(7, "Portal 2")
+
+        self.assertEqual(result["status"], "matched")
+        upsert.assert_awaited_once()
+        upsert.assert_awaited_once_with(
+            7,
+            opencritic_id=120,
+            opencritic_url="https://opencritic.com/game/120/portal-2",
+            opencritic_score=95,
+            opencritic_tier="Mighty",
+            opencritic_percent_rec=98.0,
+            opencritic_num_reviews=69,
+            opencritic_cached_at=result["fields"]["opencritic_cached_at"],
+        )
+        self.assertIsInstance(result["fields"]["opencritic_cached_at"], str)
+
+    async def test_enrich_opencritic_returns_ambiguous_without_writing_success_fields(self) -> None:
+        with (
+            patch("gamelib_mcp.data.opencritic._load_opencritic_context", AsyncMock(return_value={"release_date": "2026-03-01", "opencritic_cached_at": None})),
+            patch("gamelib_mcp.data.opencritic.discover_candidates", AsyncMock(return_value=[{"title": "Persona 3", "url": "https://opencritic.com/game/1/persona-3", "opencritic_id": 1}])),
+            patch("gamelib_mcp.data.opencritic._choose_match", return_value=None),
+            patch("gamelib_mcp.data.opencritic.upsert_game_platform_enrichment", AsyncMock()) as upsert,
+        ):
+            result = await opencritic.enrich_opencritic(7, "Persona 3")
+
+        self.assertEqual(result["status"], "ambiguous")
+        upsert.assert_not_awaited()
+
+
 class OpenCriticRefreshPolicyTests(unittest.TestCase):
     def test_recent_release_is_stale_after_seven_days(self) -> None:
         fetched_at = "2026-04-01T00:00:00+00:00"
