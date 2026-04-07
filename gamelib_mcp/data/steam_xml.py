@@ -1,5 +1,6 @@
 """Fetch Steam library via IPlayerService/GetOwnedGames API."""
 
+import logging
 import os
 from datetime import datetime, timezone
 
@@ -10,6 +11,8 @@ from .db import (
     set_meta,
 )
 
+logger = logging.getLogger(__name__)
+
 STEAM_API_KEY = os.getenv("STEAM_API_KEY", "")
 STEAM_ID = os.getenv("STEAM_ID", "")
 OWNED_GAMES_URL = "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/"
@@ -18,15 +21,17 @@ STALE_HOURS = 6
 
 async def fetch_library() -> dict:
     """Fetch owned games from Steam Web API and upsert into games table."""
-    if not STEAM_API_KEY or not STEAM_ID:
+    steam_api_key = os.getenv("STEAM_API_KEY", STEAM_API_KEY)
+    steam_id = os.getenv("STEAM_ID", STEAM_ID)
+    if not steam_api_key or not steam_id:
         raise ValueError("STEAM_API_KEY and STEAM_ID environment variables must be set")
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
             OWNED_GAMES_URL,
             params={
-                "key": STEAM_API_KEY,
-                "steamid": STEAM_ID,
+                "key": steam_api_key,
+                "steamid": steam_id,
                 "include_appinfo": 1,
                 "include_played_free_games": 1,
                 "skip_unvetted_apps": 0,

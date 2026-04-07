@@ -1,6 +1,7 @@
 """OpenCritic API client — cross-platform review scores cached in game_platform_enrichment."""
 
 import logging
+import os
 from datetime import datetime, timezone
 
 import httpx
@@ -72,9 +73,18 @@ async def enrich_opencritic(game_platform_id: int, game_name: str) -> dict | Non
 
 
 async def _search_game(name: str) -> int | None:
+    api_key = os.getenv("OPENCRITIC_API_KEY")
+    if not api_key:
+        logger.info("OpenCritic search skipped for %r: OPENCRITIC_API_KEY is not configured", name)
+        return None
+
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(_SEARCH_URL, params={"criteria": name})
+            resp = await client.get(
+                _SEARCH_URL,
+                params={"criteria": name},
+                headers={"x-access-token": api_key},
+            )
             resp.raise_for_status()
             results = resp.json()
     except Exception as exc:
@@ -92,9 +102,16 @@ async def _search_game(name: str) -> int | None:
 
 
 async def _fetch_game(oc_id: int) -> dict | None:
+    api_key = os.getenv("OPENCRITIC_API_KEY")
+    if not api_key:
+        return None
+
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(_GAME_URL.format(id=oc_id))
+            resp = await client.get(
+                _GAME_URL.format(id=oc_id),
+                headers={"x-access-token": api_key},
+            )
             resp.raise_for_status()
             return resp.json()
     except Exception as exc:

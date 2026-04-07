@@ -3,6 +3,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+import os
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steam_xml
@@ -134,25 +135,44 @@ class SteamXmlFetchLibraryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["synced_at"], synced_at)
         set_meta.assert_awaited_once_with("library_synced_at", synced_at)
 
+    async def test_fetch_library_reads_credentials_from_environment_at_call_time(self) -> None:
+        response = _DummyResponse({"response": {"game_count": 0, "games": []}})
+        client = _DummyClient(response)
+
+        with (
+            patch.object(steam_xml, "STEAM_API_KEY", ""),
+            patch.object(steam_xml, "STEAM_ID", ""),
+            patch.dict(os.environ, {"STEAM_API_KEY": "runtime-key", "STEAM_ID": "runtime-id"}, clear=False),
+            patch.object(steam_xml.httpx, "AsyncClient", return_value=client),
+            patch.object(steam_xml, "bulk_upsert_steam_library", AsyncMock(return_value=0)),
+            patch.object(steam_xml, "set_meta", AsyncMock()),
+            patch.object(steam_xml, "datetime", _FixedDatetime),
+        ):
+            await steam_xml.fetch_library()
+
+        params = client.get.await_args.kwargs["params"]
+        self.assertEqual(params["key"], "runtime-key")
+        self.assertEqual(params["steamid"], "runtime-id")
+
 
 class SteamBulkUpsertTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tmpdir.name) / "steam-bulk.sqlite"
-        self.original_db_path = db_module._DB_PATH
         self.original_ready_path = db_module._DB_READY_PATH
         self.original_init_lock = db_module._DB_INIT_LOCK
-        db_module._DB_PATH = str(self.db_path)
         db_module._DB_READY_PATH = None
         db_module._DB_INIT_LOCK = None
+        self.env = patch.dict(os.environ, {"DATABASE_URL": f"file:{self.db_path}"}, clear=False)
+        self.env.start()
 
     async def asyncSetUp(self) -> None:
         await db_module.init_db()
 
     async def asyncTearDown(self) -> None:
-        db_module._DB_PATH = self.original_db_path
         db_module._DB_READY_PATH = self.original_ready_path
         db_module._DB_INIT_LOCK = self.original_init_lock
+        self.env.stop()
         self.tmpdir.cleanup()
 
     async def test_bulk_upsert_is_idempotent_for_duplicate_appids_and_uses_stable_name_resolution(

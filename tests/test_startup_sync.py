@@ -1,9 +1,11 @@
 import asyncio
 import contextlib
 from datetime import datetime, timedelta, timezone
+import os
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import admin as admin_tools
 from gamelib_mcp.main import _ensure_startup_refresh, _run_startup_refresh, lifespan
 
@@ -261,6 +263,13 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
                 "epic": {"error": "epic cancelled"},
             },
         )
+
+    async def test_db_path_reads_database_url_at_call_time(self) -> None:
+        with patch.dict(os.environ, {"DATABASE_URL": "file:./first.db"}, clear=False):
+            self.assertEqual(db_module._db_path(), "./first.db")
+
+        with patch.dict(os.environ, {"DATABASE_URL": "file:./second.db"}, clear=False):
+            self.assertEqual(db_module._db_path(), "./second.db")
 
     async def test_refresh_library_reuses_running_startup_refresh_task(self) -> None:
         import gamelib_mcp.main as main_module

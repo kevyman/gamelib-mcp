@@ -25,7 +25,6 @@ if not hasattr(aiosqlite.Connection, "execute_fetchone"):
     aiosqlite.Connection.execute_fetchone = _execute_fetchone  # type: ignore[method-assign]
 
 
-_DB_PATH = os.getenv("DATABASE_URL", "file:steam.db").removeprefix("file:")
 _DB_READY_PATH: str | None = None
 _DB_INIT_LOCK: asyncio.Lock | None = None
 _FuzzyKey = TypeVar("_FuzzyKey")
@@ -51,7 +50,7 @@ class MigrationResult:
 
 
 def _db_path() -> str:
-    return _DB_PATH
+    return os.getenv("DATABASE_URL", "file:steam.db").removeprefix("file:")
 
 
 def _default_process(value: str) -> str:

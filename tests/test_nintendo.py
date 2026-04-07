@@ -1,7 +1,11 @@
 import sys
 import types
 import asyncio
+import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 try:
@@ -125,6 +129,28 @@ class SyncNintendoTests(unittest.TestCase):
             result = asyncio.run(nintendo.sync_nintendo())
 
         self.assertEqual(result, {"added": 0, "matched": 0, "skipped": 0})
+
+    def test_load_vgcs_cookies_falls_back_to_local_default_file_when_env_path_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            local_data_dir = tmp_path / "data"
+            local_data_dir.mkdir()
+            fallback_file = local_data_dir / "nintendo_cookies.json"
+            fallback_file.write_text(json.dumps({"session": "cookie"}), encoding="utf-8")
+
+            with patch.dict(
+                os.environ,
+                {"NINTENDO_COOKIES_FILE": "/data/nintendo_cookies.json"},
+                clear=False,
+            ):
+                original_cwd = os.getcwd()
+                try:
+                    os.chdir(tmp_path)
+                    cookies = nintendo._load_vgcs_cookies()
+                finally:
+                    os.chdir(original_cwd)
+
+        self.assertEqual(cookies, {"session": "cookie"})
 
 
 if __name__ == "__main__":

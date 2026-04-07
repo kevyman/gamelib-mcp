@@ -106,6 +106,36 @@ class IGDBRequestGateTests(unittest.IsolatedAsyncioTestCase):
 
 
 class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_search_game_escapes_quotes_in_search_string(self) -> None:
+        post_mock = AsyncMock(return_value=[])
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", new=post_mock),
+        ):
+            await igdb.search_game('3 out of 10, EP 5: "The Rig Is Up!"')
+
+        query = post_mock.await_args.args[0]
+        self.assertIn('search "3 out of 10, EP 5: \\"The Rig Is Up!\\"";', query)
+
+    async def test_search_game_does_not_filter_out_results_with_missing_category(self) -> None:
+        async def fake_post(query: str, headers: dict[str, str]) -> list[dict]:
+            if "category !=" in query:
+                return []
+            return [{"id": 141533, "name": "Loop Hero", "release_dates": [{"platform": 6, "date": 1615334400}]}]
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", new=fake_post),
+        ):
+            results = await igdb.search_game("Loop Hero", igdb.PLATFORM_TO_IGDB["epic"])
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].igdb_id, 141533)
+        self.assertEqual(results[0].name, "Loop Hero")
+
     async def test_search_game_retries_rate_limit_response(self) -> None:
         client = _DummyAsyncClient(
             [

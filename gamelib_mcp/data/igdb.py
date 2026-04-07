@@ -48,6 +48,13 @@ CATEGORY_REMAKE = 8
 CATEGORY_REMASTER = 9
 CATEGORY_EXPANDED_GAME = 10
 CATEGORY_PORT = 11
+_EXCLUDED_SEARCH_CATEGORIES = {
+    CATEGORY_DLC,
+    CATEGORY_BUNDLE,
+    CATEGORY_MOD,
+    CATEGORY_EPISODE,
+    CATEGORY_SEASON,
+}
 
 # Cached token
 _token: str | None = None
@@ -305,6 +312,10 @@ async def _post_igdb_games(query: str, headers: dict[str, str]) -> list[dict]:
     return []
 
 
+def _escape_igdb_search_term(term: str) -> str:
+    return term.replace("\\", "\\\\").replace('"', '\\"')
+
+
 async def search_game(name: str, igdb_platform_id: int | None = None) -> list[IGDBGame]:
     """
     Search IGDB for a game by name, optionally filtered to a platform.
@@ -315,13 +326,13 @@ async def search_game(name: str, igdb_platform_id: int | None = None) -> list[IG
         return []
 
     platform_clause = f" & platforms = ({igdb_platform_id})" if igdb_platform_id else ""
+    escaped_name = _escape_igdb_search_term(name)
     query = (
         f'fields id, name, category, first_release_date, '
         f'genres.name, themes.name, keywords.name, '
         f'release_dates.platform, release_dates.date; '
-        f'search "{name}"; '
-        f'where category != ({CATEGORY_DLC},{CATEGORY_BUNDLE},{CATEGORY_MOD},'
-        f'{CATEGORY_EPISODE},{CATEGORY_SEASON}){platform_clause}; '
+        f'search "{escaped_name}"; '
+        f'where 1 = 1{platform_clause}; '
         f'limit 5;'
     )
 
@@ -341,6 +352,10 @@ async def search_game(name: str, igdb_platform_id: int | None = None) -> list[IG
 
     games = []
     for item in results:
+        category = item.get("category")
+        if category in _EXCLUDED_SEARCH_CATEGORIES:
+            continue
+
         genres = [g["name"] for g in item.get("genres") or []]
         themes = [t["name"] for t in item.get("themes") or []]
         keywords = [k["name"] for k in item.get("keywords") or []]
@@ -358,7 +373,7 @@ async def search_game(name: str, igdb_platform_id: int | None = None) -> list[IG
         games.append(IGDBGame(
             igdb_id=item["id"],
             name=item["name"],
-            category=item.get("category", CATEGORY_MAIN_GAME),
+            category=category if category is not None else CATEGORY_MAIN_GAME,
             first_release_date=_unix_to_iso(item.get("first_release_date")),
             genres=genres,
             tags=tags,
@@ -414,7 +429,6 @@ async def resolve_and_link_game(
     from .db import find_game_by_name_fuzzy, get_game_by_igdb_id, get_db
 
     igdb_game = await resolve_game(name, igdb_platform_id)
-
     if igdb_game is not None:
         async with _get_igdb_link_lock(igdb_game.igdb_id):
             existing = await get_game_by_igdb_id(igdb_game.igdb_id)

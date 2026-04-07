@@ -9,9 +9,9 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 
-from .tools.admin import refresh_library as _admin_refresh_library
-
 load_dotenv()
+
+from .tools.admin import refresh_library as _admin_refresh_library
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
