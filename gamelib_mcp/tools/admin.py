@@ -36,7 +36,7 @@ async def refresh_library(platforms: list[str] | None = None) -> dict:
 
     results: dict = {}
     for (name, _), outcome in zip(selected, outcomes, strict=True):
-        if isinstance(outcome, Exception):
+        if isinstance(outcome, BaseException):
             results[name] = {"error": str(outcome)}
         else:
             results[name] = outcome

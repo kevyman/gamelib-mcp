@@ -202,6 +202,30 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_refresh_library_normalizes_baseexception_results(self) -> None:
+        class PlatformAborted(BaseException):
+            pass
+
+        async def steam_sync() -> dict:
+            return {"platform": "steam", "synced": True}
+
+        async def epic_sync() -> dict:
+            raise PlatformAborted("epic cancelled")
+
+        with (
+            patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(side_effect=steam_sync)),
+            patch("gamelib_mcp.tools.admin.sync_epic", AsyncMock(side_effect=epic_sync)),
+        ):
+            result = await admin_tools.refresh_library(["steam", "epic"])
+
+        self.assertEqual(
+            result,
+            {
+                "steam": {"platform": "steam", "synced": True},
+                "epic": {"error": "epic cancelled"},
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

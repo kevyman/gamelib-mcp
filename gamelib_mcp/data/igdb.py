@@ -154,6 +154,22 @@ _IGDB_REQUEST_GATE = _IGDBRequestGate(
     max_in_flight=_IGDB_MAX_IN_FLIGHT_REQUESTS,
 )
 
+_IGDB_LINK_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[int, asyncio.Lock]] = WeakKeyDictionary()
+
+
+def _get_igdb_link_lock(igdb_id: int) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    loop_locks = _IGDB_LINK_LOCKS.get(loop)
+    if loop_locks is None:
+        loop_locks = {}
+        _IGDB_LINK_LOCKS[loop] = loop_locks
+
+    lock = loop_locks.get(igdb_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        loop_locks[igdb_id] = lock
+    return lock
+
 
 @dataclass
 class IGDBGame:
@@ -384,24 +400,25 @@ async def resolve_and_link_game(
     igdb_game = await resolve_game(name, igdb_platform_id)
 
     if igdb_game is not None:
-        existing = await get_game_by_igdb_id(igdb_game.igdb_id)
-        if existing is not None:
-            game_id = existing["id"]
-        else:
-            # On upgraded databases we may already have the title row without igdb_id.
-            existing = await find_game_by_name_fuzzy(name, candidates=candidates)
-            if existing is None and igdb_game.name.casefold() != name.casefold():
-                existing = await find_game_by_name_fuzzy(igdb_game.name, candidates=candidates)
-
+        async with _get_igdb_link_lock(igdb_game.igdb_id):
+            existing = await get_game_by_igdb_id(igdb_game.igdb_id)
             if existing is not None:
                 game_id = existing["id"]
             else:
-                async with get_db() as db:
-                    cursor = await db.execute("INSERT INTO games (name) VALUES (?)", (name,))
-                    game_id = cursor.lastrowid
-                    await db.commit()
+                # On upgraded databases we may already have the title row without igdb_id.
+                existing = await find_game_by_name_fuzzy(name, candidates=candidates)
+                if existing is None and igdb_game.name.casefold() != name.casefold():
+                    existing = await find_game_by_name_fuzzy(igdb_game.name, candidates=candidates)
 
-        await _apply_igdb_metadata(game_id, igdb_game)
+                if existing is not None:
+                    game_id = existing["id"]
+                else:
+                    async with get_db() as db:
+                        cursor = await db.execute("INSERT INTO games (name) VALUES (?)", (name,))
+                        game_id = cursor.lastrowid
+                        await db.commit()
+
+            await _apply_igdb_metadata(game_id, igdb_game)
         return game_id, igdb_game
 
     # No IGDB result — fall back to fuzzy matching

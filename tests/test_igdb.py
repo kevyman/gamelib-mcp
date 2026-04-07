@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -195,3 +196,74 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, [])
         self.assertEqual(client.calls, 4)
         self.assertEqual(sleep_mock.await_count, 3)
+
+
+class IGDBLinkingConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_resolve_and_link_game_reuses_existing_row_under_concurrent_calls(self) -> None:
+        igdb_game = igdb.IGDBGame(
+            igdb_id=99,
+            name="Portal",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2007-10-10",
+        )
+        state = {
+            "linked_game_id": None,
+            "next_game_id": 100,
+            "inserted_ids": [],
+        }
+
+        async def get_game_by_igdb_id(_igdb_id: int):
+            await asyncio.sleep(0.01)
+            if state["linked_game_id"] is None:
+                return None
+            return {"id": state["linked_game_id"]}
+
+        async def find_game_by_name_fuzzy(*_args, **_kwargs):
+            return None
+
+        async def apply_metadata(game_id: int, _igdb_game: igdb.IGDBGame) -> None:
+            if state["linked_game_id"] is None:
+                state["linked_game_id"] = game_id
+                return
+            if state["linked_game_id"] != game_id:
+                raise sqlite3.IntegrityError("UNIQUE constraint failed: games.igdb_id")
+
+        class _InsertResult:
+            def __init__(self, lastrowid: int) -> None:
+                self.lastrowid = lastrowid
+
+        class _FakeDb:
+            async def execute(self, sql: str, _params):
+                self_sql = " ".join(sql.split())
+                if self_sql != "INSERT INTO games (name) VALUES (?)":
+                    raise AssertionError(f"unexpected SQL: {sql}")
+                state["next_game_id"] += 1
+                game_id = state["next_game_id"]
+                state["inserted_ids"].append(game_id)
+                await asyncio.sleep(0)
+                return _InsertResult(game_id)
+
+            async def commit(self) -> None:
+                return None
+
+        class _FakeDbContext:
+            async def __aenter__(self):
+                return _FakeDb()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        with (
+            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock(return_value=igdb_game)),
+            patch("gamelib_mcp.data.db.get_game_by_igdb_id", AsyncMock(side_effect=get_game_by_igdb_id)),
+            patch("gamelib_mcp.data.db.find_game_by_name_fuzzy", AsyncMock(side_effect=find_game_by_name_fuzzy)),
+            patch("gamelib_mcp.data.db.get_db", return_value=_FakeDbContext()),
+            patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock(side_effect=apply_metadata)),
+        ):
+            results = await asyncio.gather(
+                igdb.resolve_and_link_game("Portal", igdb.IGDB_PLATFORM_PC, {}),
+                igdb.resolve_and_link_game("Portal", igdb.IGDB_PLATFORM_PC, {}),
+            )
+
+        self.assertEqual(results, [(101, igdb_game), (101, igdb_game)])
+        self.assertEqual(state["inserted_ids"], [101])
