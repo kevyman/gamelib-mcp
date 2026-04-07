@@ -1,7 +1,28 @@
+import sys
+import types
 import asyncio
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+
+try:
+    import aiosqlite  # type: ignore
+except ModuleNotFoundError:
+    aiosqlite = types.ModuleType("aiosqlite")
+
+    class Connection:  # minimal stub for db.py import-time polyfill
+        pass
+
+    class Row(dict):
+        pass
+
+    async def connect(*_args, **_kwargs):
+        raise ModuleNotFoundError("aiosqlite is not installed")
+
+    aiosqlite.Connection = Connection
+    aiosqlite.Row = Row
+    aiosqlite.connect = connect
+    sys.modules["aiosqlite"] = aiosqlite
 
 from gamelib_mcp.data import gog, igdb
 

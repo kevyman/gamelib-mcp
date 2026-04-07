@@ -1,9 +1,61 @@
+import sys
+import types
 import asyncio
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+
+try:
+    import aiosqlite  # type: ignore
+except ModuleNotFoundError:
+    aiosqlite = types.ModuleType("aiosqlite")
+
+    class Connection:  # minimal stub for db.py import-time polyfill
+        pass
+
+    class Row(dict):
+        pass
+
+    async def connect(*_args, **_kwargs):
+        raise ModuleNotFoundError("aiosqlite is not installed")
+
+    aiosqlite.Connection = Connection
+    aiosqlite.Row = Row
+    aiosqlite.connect = connect
+    sys.modules["aiosqlite"] = aiosqlite
+
+try:
+    import httpx  # type: ignore
+except ModuleNotFoundError:
+    httpx = types.ModuleType("httpx")
+
+    class Response:
+        pass
+
+    class Request:
+        pass
+
+    class HTTPStatusError(Exception):
+        pass
+
+    class TimeoutException(Exception):
+        pass
+
+    class TransportError(Exception):
+        pass
+
+    class AsyncClient:
+        pass
+
+    httpx.Response = Response
+    httpx.Request = Request
+    httpx.HTTPStatusError = HTTPStatusError
+    httpx.TimeoutException = TimeoutException
+    httpx.TransportError = TransportError
+    httpx.AsyncClient = AsyncClient
+    sys.modules["httpx"] = httpx
 
 from gamelib_mcp.data import epic, igdb
 

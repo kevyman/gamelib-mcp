@@ -1,10 +1,55 @@
+import sys
+import types
 import asyncio
 import unittest
 from datetime import timedelta
+from enum import Enum
 from unittest.mock import AsyncMock, MagicMock, patch
 
+try:
+    import aiosqlite  # type: ignore
+except ModuleNotFoundError:
+    aiosqlite = types.ModuleType("aiosqlite")
+
+    class Connection:  # minimal stub for db.py import-time polyfill
+        pass
+
+    class Row(dict):
+        pass
+
+    async def connect(*_args, **_kwargs):
+        raise ModuleNotFoundError("aiosqlite is not installed")
+
+    aiosqlite.Connection = Connection
+    aiosqlite.Row = Row
+    aiosqlite.connect = connect
+    sys.modules["aiosqlite"] = aiosqlite
+
+try:
+    from psnawp_api.models.title_stats import PlatformCategory  # type: ignore
+except ModuleNotFoundError:
+    psnawp_api = types.ModuleType("psnawp_api")
+    models = types.ModuleType("psnawp_api.models")
+    title_stats = types.ModuleType("psnawp_api.models.title_stats")
+
+    class PlatformCategory(Enum):
+        UNKNOWN = 0
+        PS5 = 1
+        PS4 = 2
+
+    class PSNAWP:  # pragma: no cover - import stub only
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    title_stats.PlatformCategory = PlatformCategory
+    models.title_stats = title_stats
+    psnawp_api.models = models
+    psnawp_api.PSNAWP = PSNAWP
+    sys.modules["psnawp_api"] = psnawp_api
+    sys.modules["psnawp_api.models"] = models
+    sys.modules["psnawp_api.models.title_stats"] = title_stats
+
 from gamelib_mcp.data import igdb, psn
-from psnawp_api.models.title_stats import PlatformCategory
 
 
 def _make_entry(name, title_id="PPSA12345_00", category=PlatformCategory.PS5, play_duration=timedelta(minutes=90)):

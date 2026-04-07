@@ -1,6 +1,69 @@
+import sys
+import types
 import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
+
+try:
+    import aiosqlite  # type: ignore
+except ModuleNotFoundError:
+    aiosqlite = types.ModuleType("aiosqlite")
+
+    class Connection:  # minimal stub for db.py import-time polyfill
+        pass
+
+    class Row(dict):
+        pass
+
+    async def connect(*_args, **_kwargs):
+        raise ModuleNotFoundError("aiosqlite is not installed")
+
+    aiosqlite.Connection = Connection
+    aiosqlite.Row = Row
+    aiosqlite.connect = connect
+    sys.modules["aiosqlite"] = aiosqlite
+
+try:
+    import httpx  # type: ignore
+except ModuleNotFoundError:
+    httpx = types.ModuleType("httpx")
+
+    class Response:
+        pass
+
+    class HTTPStatusError(Exception):
+        pass
+
+    class TimeoutException(Exception):
+        pass
+
+    class TransportError(Exception):
+        pass
+
+    class AsyncClient:
+        pass
+
+    httpx.Response = Response
+    httpx.HTTPStatusError = HTTPStatusError
+    httpx.TimeoutException = TimeoutException
+    httpx.TransportError = TransportError
+    httpx.AsyncClient = AsyncClient
+    sys.modules["httpx"] = httpx
+
+try:
+    from bs4 import BeautifulSoup  # type: ignore
+except ModuleNotFoundError:
+    bs4 = types.ModuleType("bs4")
+
+    class BeautifulSoup:  # pragma: no cover - import stub only
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def find(self, *_args, **_kwargs):
+            return None
+
+    bs4.BeautifulSoup = BeautifulSoup
+    sys.modules["bs4"] = bs4
 
 from gamelib_mcp.data import igdb, nintendo
 
