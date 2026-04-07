@@ -200,6 +200,38 @@ class BackgroundEnrichmentSupervisorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertGreaterEqual(igdb_batch.await_count, 4)
 
+    async def test_hltb_batch_logs_claimed_row_count(self) -> None:
+        with (
+            patch("gamelib_mcp.data.enrich_bg.claim_game_ids_for_hltb", AsyncMock(return_value=[1, 2])),
+            patch(
+                "gamelib_mcp.data.enrich_bg.load_hltb_batch_rows",
+                AsyncMock(
+                    return_value=[
+                        {"game_id": 1, "name": "Portal"},
+                        {"game_id": 2, "name": "Half-Life 2"},
+                    ]
+                ),
+            ),
+            patch("gamelib_mcp.data.enrich_bg.get_hltb", AsyncMock(return_value=None)),
+            patch("gamelib_mcp.data.enrich_bg.clear_claim", AsyncMock()),
+            patch("gamelib_mcp.data.enrich_bg.asyncio.sleep", AsyncMock()),
+            self.assertLogs("gamelib_mcp.data.enrich_bg", level="INFO") as logs,
+        ):
+            processed = await enrich_bg._run_hltb_batch()
+
+        self.assertEqual(processed, 2)
+        self.assertTrue(any("HLTB worker claimed 2 rows" in line for line in logs.output))
+
+    async def test_hltb_workers_log_total_processed(self) -> None:
+        with (
+            patch("gamelib_mcp.data.enrich_bg._run_until_quiescent", AsyncMock(return_value=7)),
+            self.assertLogs("gamelib_mcp.data.enrich_bg", level="INFO") as logs,
+        ):
+            processed = await enrich_bg._run_hltb_workers()
+
+        self.assertEqual(processed, 7)
+        self.assertTrue(any("HLTB worker complete: processed 7 rows" in line for line in logs.output))
+
     async def test_store_batch_skips_rows_already_claimed(self) -> None:
         with (
             patch("gamelib_mcp.data.enrich_bg.claim_steam_platform_ids_for_store", AsyncMock(return_value=[11])),

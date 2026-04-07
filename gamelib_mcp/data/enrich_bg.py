@@ -137,7 +137,9 @@ async def _run_store_workers() -> int:
 
 
 async def _run_hltb_workers() -> int:
-    return await _run_until_quiescent(_run_hltb_batch)
+    total = await _run_until_quiescent(_run_hltb_batch)
+    logger.info("HLTB worker complete: processed %d rows", total)
+    return total
 
 
 async def _run_protondb_workers() -> int:
@@ -191,6 +193,8 @@ async def _run_hltb_batch() -> int:
     rows = await load_hltb_batch_rows(claimed_ids)
     if not rows:
         return 0
+
+    logger.info("HLTB worker claimed %d rows", len(rows))
 
     total = 0
     for index in range(0, len(rows), _BATCH_SIZE):

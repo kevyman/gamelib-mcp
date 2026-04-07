@@ -2,7 +2,9 @@ import asyncio
 import contextlib
 from datetime import datetime, timedelta, timezone
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from gamelib_mcp.data import db as db_module
@@ -173,6 +175,55 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(refresh_release.is_set())
             refresh_release.set()
             await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=0.1)
+
+    async def test_startup_clears_abandoned_hltb_claims_before_background_enrich(self) -> None:
+        tmpdir = tempfile.TemporaryDirectory()
+        db_path = Path(tmpdir.name) / "startup.sqlite"
+        db_module._DB_READY_PATH = None
+
+        try:
+            with patch.dict(
+                os.environ,
+                {"DATABASE_URL": f"file:{db_path}"},
+                clear=False,
+            ):
+                await db_module.init_db()
+                game_id = await db_module.upsert_game(appid=None, name="Portal")
+                platform_id = await db_module.upsert_game_platform(
+                    game_id=game_id,
+                    platform="steam",
+                    playtime_minutes=120,
+                    owned=1,
+                )
+                await db_module.upsert_steam_platform_data(
+                    platform_id,
+                    store_cached_at="2026-04-07T12:00:00+00:00",
+                )
+                async with db_module.get_db() as db:
+                    await db.execute(
+                        "UPDATE games SET hltb_cached_at = 'FAILED', hltb_claimed_at = ? WHERE id = ?",
+                        (datetime.now(timezone.utc).isoformat(), game_id),
+                    )
+                    await db.commit()
+
+                fresh_at = datetime.now(timezone.utc).isoformat()
+                with (
+                    patch("gamelib_mcp.data.db.get_meta", AsyncMock(return_value=fresh_at)),
+                    patch("gamelib_mcp.data.enrich_bg.background_enrich", AsyncMock()),
+                ):
+                    async with lifespan(object()):
+                        pass
+
+                async with db_module.get_db() as db:
+                    row = await db.execute_fetchone(
+                        "SELECT hltb_claimed_at FROM games WHERE id = ?",
+                        (game_id,),
+                    )
+        finally:
+            db_module._DB_READY_PATH = None
+            tmpdir.cleanup()
+
+        self.assertIsNone(row["hltb_claimed_at"])
 
     async def test_refresh_library_parallelizes_platform_syncs_and_isolates_failures(self) -> None:
         started = {

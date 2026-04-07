@@ -1071,6 +1071,18 @@ async def clear_claim(table: str, claim_column: str, row_id: int, id_column: str
         await db.commit()
 
 
+async def clear_all_enrichment_claims() -> None:
+    async with get_db() as db:
+        await db.execute("UPDATE games SET igdb_claimed_at = NULL, hltb_claimed_at = NULL")
+        await db.execute(
+            "UPDATE steam_platform_data SET store_claimed_at = NULL, protondb_claimed_at = NULL, steamspy_claimed_at = NULL"
+        )
+        await db.execute(
+            "UPDATE game_platform_enrichment SET opencritic_claimed_at = NULL, metacritic_claimed_at = NULL"
+        )
+        await db.commit()
+
+
 async def release_game_claim(game_id: int, column: str) -> None:
     await clear_claim("games", column, game_id)
 

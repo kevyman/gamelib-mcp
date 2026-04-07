@@ -102,10 +102,11 @@ async def _ensure_startup_refresh() -> asyncio.Task:
 @asynccontextmanager
 async def lifespan(app):
     """Startup: init DB, sync library if stale, kick off HLTB pre-warm."""
-    from .data.db import init_db, get_meta, set_meta
+    from .data.db import clear_all_enrichment_claims, init_db, get_meta, set_meta
     from .data.steam_xml import STALE_HOURS
 
     await init_db()
+    await clear_all_enrichment_claims()
     logger.info("Database initialized")
 
     # Seed hardware preference from env if not yet set
