@@ -155,6 +155,7 @@ _IGDB_REQUEST_GATE = _IGDBRequestGate(
 )
 
 _IGDB_LINK_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[int, asyncio.Lock]] = WeakKeyDictionary()
+_FALLBACK_TITLE_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = WeakKeyDictionary()
 
 
 def _get_igdb_link_lock(igdb_id: int) -> asyncio.Lock:
@@ -168,6 +169,21 @@ def _get_igdb_link_lock(igdb_id: int) -> asyncio.Lock:
     if lock is None:
         lock = asyncio.Lock()
         loop_locks[igdb_id] = lock
+    return lock
+
+
+def _get_fallback_title_lock(name: str) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    loop_locks = _FALLBACK_TITLE_LOCKS.get(loop)
+    if loop_locks is None:
+        loop_locks = {}
+        _FALLBACK_TITLE_LOCKS[loop] = loop_locks
+
+    normalized_name = name.casefold()
+    lock = loop_locks.get(normalized_name)
+    if lock is None:
+        lock = asyncio.Lock()
+        loop_locks[normalized_name] = lock
     return lock
 
 
@@ -422,12 +438,13 @@ async def resolve_and_link_game(
         return game_id, igdb_game
 
     # No IGDB result — fall back to fuzzy matching
-    existing = await find_game_by_name_fuzzy(name, candidates=candidates)
-    if existing:
-        return existing["id"], None
+    async with _get_fallback_title_lock(name):
+        existing = await find_game_by_name_fuzzy(name, candidates=candidates)
+        if existing:
+            return existing["id"], None
 
-    from .db import upsert_game
-    return await upsert_game(appid=None, name=name), None
+        from .db import upsert_game
+        return await upsert_game(appid=None, name=name), None
 
 
 async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:

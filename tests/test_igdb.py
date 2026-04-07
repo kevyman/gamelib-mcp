@@ -267,3 +267,40 @@ class IGDBLinkingConcurrencyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(results, [(101, igdb_game), (101, igdb_game)])
         self.assertEqual(state["inserted_ids"], [101])
+
+    async def test_resolve_and_link_game_serializes_no_igdb_fallback_inserts(self) -> None:
+        state = {
+            "game_id": None,
+            "insert_calls": 0,
+        }
+
+        async def find_game_by_name_fuzzy(*_args, **_kwargs):
+            await asyncio.sleep(0.01)
+            if state["game_id"] is None:
+                return None
+            return {"id": state["game_id"]}
+
+        async def upsert_game(*, appid: int | None, name: str):
+            self.assertIsNone(appid)
+            self.assertEqual(name, "Portal")
+            state["insert_calls"] += 1
+            await asyncio.sleep(0.01)
+
+            if state["game_id"] is None:
+                state["game_id"] = 200
+                return 200
+
+            return 201
+
+        with (
+            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock(return_value=None)),
+            patch("gamelib_mcp.data.db.find_game_by_name_fuzzy", AsyncMock(side_effect=find_game_by_name_fuzzy)),
+            patch("gamelib_mcp.data.db.upsert_game", AsyncMock(side_effect=upsert_game)),
+        ):
+            results = await asyncio.gather(
+                igdb.resolve_and_link_game("Portal", igdb.IGDB_PLATFORM_PC, {}),
+                igdb.resolve_and_link_game("Portal", igdb.IGDB_PLATFORM_PC, {}),
+            )
+
+        self.assertEqual(results, [(200, None), (200, None)])
+        self.assertEqual(state["insert_calls"], 1)
