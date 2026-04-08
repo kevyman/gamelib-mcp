@@ -51,6 +51,49 @@ class OpenCriticMatcherTests(unittest.TestCase):
 
 
 class OpenCriticParserTests(unittest.TestCase):
+    def test_parse_discovery_candidates_extracts_opencritic_api_results(self) -> None:
+        payload = """
+        [
+          {"id": 7966, "name": "Remnant: From the Ashes", "dist": 0, "relation": "game"},
+          {"id": 10038, "name": "Remnant From The Ashes - Subject 2923", "dist": 0.36, "relation": "game"},
+          {"id": 1, "name": "OpenCritic", "dist": 0.0, "relation": "company"}
+        ]
+        """
+        self.assertEqual(
+            opencritic._parse_discovery_candidates(payload),
+            [
+                {
+                    "title": "Remnant: From the Ashes",
+                    "url": "https://opencritic.com/game/7966/remnant-from-the-ashes",
+                    "opencritic_id": 7966,
+                },
+                {
+                    "title": "Remnant From The Ashes - Subject 2923",
+                    "url": "https://opencritic.com/game/10038/remnant-from-the-ashes-subject-2923",
+                    "opencritic_id": 10038,
+                },
+            ],
+        )
+
+    def test_parse_discovery_candidates_extracts_duckduckgo_redirect_targets(self) -> None:
+        html = """
+        <html><body>
+          <a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fopencritic.com%2Fgame%2F9755%2Fborderlands-2&amp;rut=abc">
+            Borderlands 2 Reviews - OpenCritic
+          </a>
+        </body></html>
+        """
+        self.assertEqual(
+            opencritic._parse_discovery_candidates(html),
+            [
+                {
+                    "title": "Borderlands 2 Reviews - OpenCritic",
+                    "url": "https://opencritic.com/game/9755/borderlands-2",
+                    "opencritic_id": 9755,
+                }
+            ],
+        )
+
     def test_candidate_to_export_url_normalizes_relative_urls(self) -> None:
         self.assertEqual(
             opencritic._candidate_to_export_url({"url": "/game/120/portal-2"}),
@@ -74,11 +117,58 @@ class OpenCriticParserTests(unittest.TestCase):
         self.assertEqual(record["opencritic_percent_rec"], 98.0)
         self.assertEqual(record["opencritic_num_reviews"], 69)
 
+    def test_parse_export_page_extracts_server_app_state_payload(self) -> None:
+        html = """
+        <script id="serverApp-state" type="application/json">
+        {&q;game/9755&q;:{&q;percentRecommended&q;:85.71428571428571,
+        &q;numReviews&q;:23,&q;topCriticScore&q;:85.9,&q;tier&q;:&q;Mighty&q;,
+        &q;name&q;:&q;Borderlands 2&q;}}
+        </script>
+        """
+        record = opencritic._parse_opencritic_record(html, "https://opencritic.com/game/9755/borderlands-2/export")
+        self.assertEqual(record["opencritic_id"], 9755)
+        self.assertEqual(record["opencritic_url"], "https://opencritic.com/game/9755/borderlands-2")
+        self.assertEqual(record["opencritic_score"], 86)
+        self.assertEqual(record["opencritic_tier"], "Mighty")
+        self.assertEqual(record["opencritic_percent_rec"], 85.71428571428571)
+        self.assertEqual(record["opencritic_num_reviews"], 23)
+
     def test_parse_opencritic_record_returns_none_when_required_fields_missing(self) -> None:
         self.assertIsNone(opencritic._parse_opencritic_record("<html></html>", "https://opencritic.com/game/1/test/export"))
 
 
 class OpenCriticDiscoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_discover_from_opencritic_uses_api_meta_search(self) -> None:
+        response = Mock(
+            status_code=200,
+            text='[{"id":120,"name":"Portal 2","dist":0,"relation":"game"}]',
+        )
+        response.raise_for_status = Mock(return_value=None)
+
+        client = AsyncMock()
+        client.get.return_value = response
+        client.__aenter__.return_value = client
+        client.__aexit__.return_value = False
+
+        with patch("gamelib_mcp.data.opencritic.httpx.AsyncClient", return_value=client):
+            candidates = await opencritic._discover_from_opencritic("Portal 2")
+
+        self.assertEqual(
+            candidates,
+            [{"title": "Portal 2", "url": "https://opencritic.com/game/120/portal-2", "opencritic_id": 120}],
+        )
+        client.get.assert_awaited_once_with(
+            "https://api.opencritic.com/api/meta/search",
+            params={"criteria": "Portal 2"},
+            headers={
+                **opencritic._HEADERS,
+                "Accept": "application/json, text/plain, */*",
+                "Authorization": "Bearer R2tBRkdvUU9WSHpoUXpaSXVYa2g5cGU5NEFsWUgyeXQ=",
+                "Origin": "https://opencritic.com",
+                "Referer": "https://opencritic.com/search?q=Portal+2",
+            },
+        )
+
     async def test_discover_candidates_returns_primary_results_without_fallback(self) -> None:
         primary = [{"title": "Portal 2", "url": "https://opencritic.com/game/120/portal-2", "opencritic_id": 120}]
         with (

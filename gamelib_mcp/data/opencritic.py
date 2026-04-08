@@ -1,13 +1,14 @@
 """OpenCritic scraping helpers cached in game_platform_enrichment."""
 
 import asyncio
+import html
 import logging
 import json
 import re
 from datetime import datetime, timezone
 import random
 import unicodedata
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -25,7 +26,11 @@ _BASE_JITTER_SECONDS = 1.0
 _RETRY_DELAYS = (4.0, 8.0, 16.0)
 _OPENCRITIC_BASE_URL = "https://opencritic.com"
 _SEARCH_PAGE_URL = f"{_OPENCRITIC_BASE_URL}/search"
+_SEARCH_API_URL = "https://api.opencritic.com/api/meta/search"
 _SEARCH_FALLBACK_URL = "https://html.duckduckgo.com/html/"
+_OPENCRITIC_API_BEARER = "Bearer R2tBRkdvUU9WSHpoUXpaSXVYa2g5cGU5NEFsWUgyeXQ="
+_DDG_DELAY_SECONDS = 10.0
+_DDG_403_COOLDOWN_SECONDS = 60.0
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -127,14 +132,54 @@ def _candidate_to_export_url(candidate: dict) -> str:
 
 def _parse_opencritic_record(html: str, source_url: str) -> dict | None:
     state_match = re.search(r"window\.__STATE__\s*=\s*(\{.*?\})\s*;", html, re.S)
-    if state_match is None:
+    if state_match is not None:
+        try:
+            state = json.loads(state_match.group(1))
+        except json.JSONDecodeError:
+            state = None
+        else:
+            record = _state_to_opencritic_record(state, source_url)
+            if record is not None:
+                return record
+
+    script_match = re.search(
+        r'<script id="serverApp-state" type="application/json">\s*(.*?)\s*</script>',
+        html,
+        re.S,
+    )
+    if script_match is None:
         return None
 
+    payload_text = html_unescape_quotes(script_match.group(1))
     try:
-        state = json.loads(state_match.group(1))
+        payload = json.loads(payload_text)
     except json.JSONDecodeError:
         return None
 
+    source_id_match = re.search(r"/game/(\d+)/", source_url)
+    source_id = int(source_id_match.group(1)) if source_id_match is not None else None
+
+    state: dict | None = None
+    if source_id is not None:
+        state = payload.get(f"game/{source_id}")
+    if state is None:
+        for key, value in payload.items():
+            if key.startswith("game/") and isinstance(value, dict):
+                state = value
+                break
+    if state is None:
+        return None
+
+    if source_id is not None and "id" not in state:
+        state = {"id": source_id, **state}
+    return _state_to_opencritic_record(state, source_url)
+
+
+def html_unescape_quotes(value: str) -> str:
+    return html.unescape(value).replace("&q;", '"')
+
+
+def _state_to_opencritic_record(state: dict, source_url: str) -> dict | None:
     required = (
         state.get("id"),
         state.get("topCriticScore"),
@@ -188,7 +233,17 @@ async def _fetch_opencritic_record(client: httpx.AsyncClient, url: str) -> dict:
 async def _discover_from_opencritic(title: str) -> list[dict]:
     try:
         async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers=_HEADERS) as client:
-            response = await client.get(_SEARCH_PAGE_URL, params={"q": title})
+            response = await client.get(
+                _SEARCH_API_URL,
+                params={"criteria": title},
+                headers={
+                    **_HEADERS,
+                    "Accept": "application/json, text/plain, */*",
+                    "Authorization": _OPENCRITIC_API_BEARER,
+                    "Origin": _OPENCRITIC_BASE_URL,
+                    "Referer": f"{_SEARCH_PAGE_URL}?q={quote_plus(title)}",
+                },
+            )
             response.raise_for_status()
     except Exception as exc:
         logger.debug("OpenCritic primary discovery failed for %r: %s", title, exc)
@@ -200,10 +255,13 @@ async def _discover_from_opencritic(title: str) -> list[dict]:
 async def _discover_from_search_fallback(title: str) -> list[dict]:
     try:
         async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers=_HEADERS) as client:
+            await _sleep_with_jitter(_DDG_DELAY_SECONDS)
             response = await client.get(
                 _SEARCH_FALLBACK_URL,
                 params={"q": f"site:opencritic.com/game {title}"},
             )
+            if response.status_code == 403:
+                await _sleep_with_jitter(_DDG_403_COOLDOWN_SECONDS)
             response.raise_for_status()
     except Exception as exc:
         logger.debug("OpenCritic search fallback failed for %r: %s", title, exc)
@@ -216,17 +274,48 @@ def _normalize_opencritic_url(value: str) -> str:
     return urljoin(f"{_OPENCRITIC_BASE_URL}/", value)
 
 
+def _slugify_opencritic_title(value: str) -> str:
+    cleaned = unicodedata.normalize("NFKD", value)
+    cleaned = "".join(ch for ch in cleaned if not unicodedata.combining(ch))
+    cleaned = cleaned.casefold().replace("&", " and ")
+    cleaned = re.sub(r"[^a-z0-9]+", "-", cleaned)
+    return cleaned.strip("-")
+
+
+def _extract_duckduckgo_target(href: str) -> str:
+    parsed = urlparse(urljoin("https://duckduckgo.com", href))
+    query = parse_qs(parsed.query)
+    target = query.get("uddg", [href])[0]
+    return _normalize_opencritic_url(target)
+
+
 def _parse_discovery_candidates(html: str) -> list[dict]:
+    try:
+        payload = json.loads(html)
+    except json.JSONDecodeError:
+        payload = None
+
+    if isinstance(payload, list):
+        return [
+            {
+                "title": item["name"],
+                "url": f"{_OPENCRITIC_BASE_URL}/game/{int(item['id'])}/{_slugify_opencritic_title(item['name'])}",
+                "opencritic_id": int(item["id"]),
+            }
+            for item in payload
+            if item.get("relation") == "game" and item.get("id") is not None and item.get("name")
+        ]
+
     soup = BeautifulSoup(html, "html.parser")
     candidates: list[dict] = []
     seen_urls: set[str] = set()
 
     for anchor in soup.find_all("a", href=True):
         href = anchor["href"]
-        if "/game/" not in href:
+        url = _extract_duckduckgo_target(href)
+        if "/game/" not in url:
             continue
 
-        url = _normalize_opencritic_url(href)
         if not url.startswith(f"{_OPENCRITIC_BASE_URL}/game/"):
             continue
         match = re.search(r"/game/(\d+)/", url)
