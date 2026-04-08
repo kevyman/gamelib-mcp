@@ -10,9 +10,11 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
+from pathlib import Path
 from typing import Callable, Iterable, TypeVar
 
 import aiosqlite
+from dotenv import load_dotenv
 
 
 # Polyfill: aiosqlite <0.20 doesn't have execute_fetchone as a Connection method
@@ -27,6 +29,7 @@ if not hasattr(aiosqlite.Connection, "execute_fetchone"):
 
 _DB_READY_PATH: str | None = None
 _DB_INIT_LOCK: asyncio.Lock | None = None
+_ENV_LOADED = False
 _FuzzyKey = TypeVar("_FuzzyKey")
 _Progress = Callable[[str], None]
 _SQLITE_CONNECT_TIMEOUT_SECONDS = 30.0
@@ -52,6 +55,11 @@ class MigrationResult:
 
 
 def _db_path() -> str:
+    global _ENV_LOADED
+    if not _ENV_LOADED:
+        load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+        _ENV_LOADED = True
+
     configured = os.getenv("DATABASE_URL")
     if configured:
         return configured.removeprefix("file:")
@@ -472,6 +480,12 @@ _V4_SCHEMA_DDL = """
     CREATE INDEX IF NOT EXISTS idx_game_platform_identifiers_lookup
         ON game_platform_identifiers(identifier_type, identifier_value);
 """
+
+# Alias used for fresh database initialization and final reconciliation.
+# The DDL above already contains all v5 columns (opencritic_url,
+# opencritic_num_reviews, metacritic_cached_at), so both names refer to the
+# same full schema.
+_V5_SCHEMA_DDL = _V4_SCHEMA_DDL
 
 
 async def _table_names(db: aiosqlite.Connection) -> set[str]:
@@ -977,7 +991,7 @@ async def _run_migrations(
     applied_steps: list[str] = []
 
     if detected_state == "fresh":
-        await db.executescript(_V4_SCHEMA_DDL)
+        await db.executescript(_V5_SCHEMA_DDL)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
         _emit(progress, "Initialized fresh database at schema v5.", applied_steps)
@@ -1039,7 +1053,7 @@ async def _run_migrations(
         await _migrate_v4_to_v5(db, progress=None)
         version = 5
 
-    await db.executescript(_V4_SCHEMA_DDL)
+    await db.executescript(_V5_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
