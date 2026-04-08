@@ -567,6 +567,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                 indexes = {row[1] for row in await db.execute_fetchall("PRAGMA index_list(game_platform_identifiers)")}
 
         self.assertNotIn("idx_game_platform_identifiers_lookup", indexes)
+        self.assertIn("sqlite_autoindex_game_platform_identifiers_1", indexes)
 
     async def test_identifier_primary_repair_demotes_extra_rows(self):
         db_module._DB_READY_PATH = None
