@@ -469,22 +469,14 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             load_dotenv.side_effect = fake_load_dotenv
             self.assertEqual(db_module._db_path(), "./from-dotenv.db")
 
-    async def test_db_path_defaults_to_gamelib_name_with_legacy_fallback(self) -> None:
+    def test_db_path_ignores_legacy_root_db_files(self) -> None:
         db_module._ENV_LOADED = False
         with (
             patch.dict(os.environ, {}, clear=True),
             patch("gamelib_mcp.data.db.load_dotenv", return_value=False),
             patch("gamelib_mcp.data.db.os.path.exists", side_effect=lambda path: path == "steam.db"),
         ):
-            self.assertEqual(db_module._db_path(), "steam.db")
-
-        db_module._ENV_LOADED = False
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch("gamelib_mcp.data.db.load_dotenv", return_value=False),
-            patch("gamelib_mcp.data.db.os.path.exists", return_value=False),
-        ):
-            self.assertEqual(db_module._db_path(), "gamelib.db")
+            self.assertEqual(db_module._db_path(), "data/gamelib.db")
 
     async def test_refresh_library_reuses_running_startup_refresh_task(self) -> None:
         import gamelib_mcp.main as main_module

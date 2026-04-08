@@ -38,9 +38,16 @@ Copy `.env.example` to `.env`:
 
 - `STEAM_API_KEY` — from steamcommunity.com/dev/apikey
 - `STEAM_ID` — 64-bit Steam ID
-- `DATABASE_URL` — SQLite path (default: `file:gamelib.db`, with legacy `steam.db` fallback)
+- `DATABASE_URL` — SQLite path (optional). Defaults to `data/gamelib.db` when unset. Set explicitly (e.g. `file:./data/gamelib.db`) only when overriding the location.
 - `MCP_AUTH_TOKEN` — bearer token for MCP auth (empty = open)
 - `PORT` — server port (default: 8000)
+
+## Database Path
+
+The project database lives at `./data/gamelib.db`. `_db_path()` defaults to `data/gamelib.db` when `DATABASE_URL` is unset — no legacy root-level fallback exists.
+
+- Do not set `DATABASE_URL` for normal dev; the default is correct.
+- If `./gamelib.db` exists in the repo root, it is stale/spurious — delete it.
 
 ## Architecture
 

@@ -64,11 +64,7 @@ def _db_path() -> str:
     if configured:
         return configured.removeprefix("file:")
 
-    if os.path.exists("gamelib.db"):
-        return "gamelib.db"
-    if os.path.exists("steam.db"):
-        return "steam.db"
-    return "gamelib.db"
+    return "data/gamelib.db"
 
 
 def _default_process(value: str) -> str:
