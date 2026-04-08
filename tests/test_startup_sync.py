@@ -353,6 +353,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.tools.admin.sync_gog", AsyncMock(side_effect=gog_sync)),
             patch("gamelib_mcp.tools.admin.sync_nintendo", AsyncMock(side_effect=nintendo_sync)),
             patch("gamelib_mcp.tools.admin.sync_psn", AsyncMock(side_effect=psn_sync)),
+            patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(return_value={"candidates": 0})) as mock_detect,
         ):
             refresh_task = asyncio.create_task(admin_tools.refresh_library())
             await asyncio.wait_for(
@@ -373,6 +374,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
                 "ps5": {"platform": "ps5", "synced": True},
             },
         )
+        mock_detect.assert_awaited_once_with(dry_run=False)
 
     async def test_refresh_library_normalizes_baseexception_results(self) -> None:
         class PlatformAborted(BaseException):
@@ -387,6 +389,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(side_effect=steam_sync)),
             patch("gamelib_mcp.tools.admin.sync_epic", AsyncMock(side_effect=epic_sync)),
+            patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(return_value={"candidates": 0})) as mock_detect,
         ):
             result = await admin_tools.refresh_library(["steam", "epic"])
 
@@ -397,6 +400,41 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
                 "epic": {"error": "epic cancelled"},
             },
         )
+        mock_detect.assert_awaited_once_with(dry_run=False)
+
+    async def test_refresh_library_runs_farm_detection_after_successful_steam_sync(self) -> None:
+        refresh_result = {"platform": "steam", "synced": True}
+
+        with (
+            patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(return_value=refresh_result)),
+            patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(return_value={"candidates": 3})) as mock_detect,
+        ):
+            result = await admin_tools.refresh_library(["steam"])
+
+        self.assertEqual(result, {"steam": refresh_result})
+        mock_detect.assert_awaited_once_with(dry_run=False)
+
+    async def test_refresh_library_skips_farm_detection_without_steam(self) -> None:
+        with (
+            patch("gamelib_mcp.tools.admin.sync_epic", AsyncMock(return_value={"platform": "epic", "synced": True})),
+            patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock()) as mock_detect,
+        ):
+            result = await admin_tools.refresh_library(["epic"])
+
+        self.assertEqual(result, {"epic": {"platform": "epic", "synced": True}})
+        mock_detect.assert_not_awaited()
+
+    async def test_refresh_library_ignores_farm_detection_failures(self) -> None:
+        refresh_result = {"platform": "steam", "synced": True}
+
+        with (
+            patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(return_value=refresh_result)),
+            patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(side_effect=RuntimeError("detector boom"))) as mock_detect,
+        ):
+            result = await admin_tools.refresh_library(["steam"])
+
+        self.assertEqual(result, {"steam": refresh_result})
+        mock_detect.assert_awaited_once_with(dry_run=False)
 
     async def test_db_path_reads_database_url_at_call_time(self) -> None:
         with patch.dict(os.environ, {"DATABASE_URL": "file:./first.db"}, clear=False):

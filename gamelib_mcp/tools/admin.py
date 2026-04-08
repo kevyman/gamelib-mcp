@@ -59,6 +59,19 @@ async def refresh_library(
             results[name] = {"error": str(outcome)}
         else:
             results[name] = outcome
+
+    steam_result = results.get("steam")
+    steam_synced = (
+        "steam" in targets
+        and isinstance(steam_result, dict)
+        and not steam_result.get("error")
+    )
+    if steam_synced:
+        try:
+            await detect_farmed_games(dry_run=False)
+        except Exception:
+            logger.exception("Farmed-game detection failed after Steam refresh")
+
     return results
 
 
