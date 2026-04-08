@@ -418,7 +418,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertEqual(db_module._db_path(), "data/gamelib.db")
 
-    async def test_db_path_loads_database_url_from_dotenv(self) -> None:
+    def test_db_path_loads_database_url_from_dotenv(self) -> None:
         db_module._ENV_LOADED = False
         with (
             patch.dict(os.environ, {}, clear=True),
