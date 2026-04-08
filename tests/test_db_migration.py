@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import aiosqlite
+
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steam_store
 
@@ -310,6 +312,19 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             "https://opencritic.com/game/120/portal-2",
         )
         self.assertEqual(platforms[1][0]["opencritic_num_reviews"], 135)
+
+    async def test_fresh_db_initializes_with_v5_columns(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db_module._configure_connection(db, enable_wal=True)
+            result = await db_module._run_migrations(db)
+
+            version = await db_module._get_user_version(db)
+            cols = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(game_platform_enrichment)")}
+
+        self.assertEqual(version, 5)
+        self.assertEqual(result.final_version, 5)
+        self.assertIn("opencritic_url", cols)
+        self.assertIn("opencritic_num_reviews", cols)
 
     async def test_v4_database_migrates_opencritic_scrape_columns(self) -> None:
         conn = sqlite3.connect(self.db_path)

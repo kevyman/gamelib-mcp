@@ -405,15 +405,45 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {"DATABASE_URL": "file:./second.db"}, clear=False):
             self.assertEqual(db_module._db_path(), "./second.db")
 
-    async def test_db_path_defaults_to_gamelib_name_with_legacy_fallback(self) -> None:
+    def test_db_path_prefers_database_url(self):
+        with patch.dict(os.environ, {"DATABASE_URL": "file:./data/gamelib.db"}, clear=False):
+            self.assertEqual(db_module._db_path(), "./data/gamelib.db")
+
+    def test_db_path_defaults_to_project_data_db(self):
+        db_module._ENV_LOADED = False
         with (
             patch.dict(os.environ, {}, clear=True),
+            patch("gamelib_mcp.data.db.load_dotenv", return_value=False),
+            patch("gamelib_mcp.data.db.os.path.exists", return_value=False),
+        ):
+            self.assertEqual(db_module._db_path(), "data/gamelib.db")
+
+    async def test_db_path_loads_database_url_from_dotenv(self) -> None:
+        db_module._ENV_LOADED = False
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("gamelib_mcp.data.db.load_dotenv") as load_dotenv,
+        ):
+            def fake_load_dotenv(path: str | None = None, *args, **kwargs) -> bool:
+                os.environ["DATABASE_URL"] = "file:./from-dotenv.db"
+                return True
+
+            load_dotenv.side_effect = fake_load_dotenv
+            self.assertEqual(db_module._db_path(), "./from-dotenv.db")
+
+    async def test_db_path_defaults_to_gamelib_name_with_legacy_fallback(self) -> None:
+        db_module._ENV_LOADED = False
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("gamelib_mcp.data.db.load_dotenv", return_value=False),
             patch("gamelib_mcp.data.db.os.path.exists", side_effect=lambda path: path == "steam.db"),
         ):
             self.assertEqual(db_module._db_path(), "steam.db")
 
+        db_module._ENV_LOADED = False
         with (
             patch.dict(os.environ, {}, clear=True),
+            patch("gamelib_mcp.data.db.load_dotenv", return_value=False),
             patch("gamelib_mcp.data.db.os.path.exists", return_value=False),
         ):
             self.assertEqual(db_module._db_path(), "gamelib.db")
