@@ -977,6 +977,22 @@ async def _migrate_v4_to_v5(db: aiosqlite.Connection, progress: _Progress | None
     await db.commit()
 
 
+async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
+    await db.execute(
+        """
+        UPDATE game_platform_identifiers
+        SET is_primary = CASE
+            WHEN id IN (
+                SELECT MIN(id)
+                FROM game_platform_identifiers
+                GROUP BY game_platform_id, identifier_type
+            ) THEN 1
+            ELSE 0
+        END
+        """
+    )
+
+
 async def _run_migrations(
     db: aiosqlite.Connection,
     progress: _Progress | None = None,
@@ -1049,6 +1065,7 @@ async def _run_migrations(
         await _migrate_v4_to_v5(db, progress=None)
         version = 5
 
+    await _repair_identifier_primary_flags(db)
     await db.executescript(_V5_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
@@ -1724,7 +1741,7 @@ async def upsert_game_platform_identifier(
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
     async with get_db() as db:
-        await db.execute(
+        cursor = await db.execute(
             """INSERT INTO game_platform_identifiers
                (game_platform_id, identifier_type, identifier_value, is_primary, last_seen_at)
                VALUES (?, ?, ?, ?, ?)
@@ -1734,6 +1751,16 @@ async def upsert_game_platform_identifier(
                    last_seen_at = excluded.last_seen_at""",
             (game_platform_id, identifier_type, str(identifier_value), int(is_primary), now),
         )
+        if is_primary:
+            row_id = cursor.lastrowid
+            await db.execute(
+                """
+                UPDATE game_platform_identifiers
+                SET is_primary = 0
+                WHERE game_platform_id = ? AND identifier_type = ? AND id != ?
+                """,
+                (game_platform_id, identifier_type, row_id),
+            )
         await db.commit()
 
 

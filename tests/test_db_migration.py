@@ -450,6 +450,43 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("opencritic_num_reviews", names)
 
 
+    async def test_identifier_primary_repair_demotes_extra_rows(self):
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+            game_id = await db_module.upsert_game(appid=None, name="TestGame")
+            platform_id = await db_module.upsert_game_platform(
+                game_id=game_id,
+                platform="steam",
+                playtime_minutes=0,
+                owned=1,
+            )
+
+            now = "2026-04-08T00:00:00+00:00"
+            async with db_module.get_db() as db:
+                # Insert two rows for the same (game_platform_id, identifier_type) with is_primary=1
+                # We need to bypass the UNIQUE constraint on (identifier_type, identifier_value)
+                # by using different identifier_value values
+                await db.execute(
+                    "INSERT INTO game_platform_identifiers (game_platform_id, identifier_type, identifier_value, is_primary, last_seen_at) VALUES (?, ?, ?, 1, ?)",
+                    (platform_id, "steam_appid", "100", now),
+                )
+                await db.execute(
+                    "INSERT INTO game_platform_identifiers (game_platform_id, identifier_type, identifier_value, is_primary, last_seen_at) VALUES (?, ?, ?, 1, ?)",
+                    (platform_id, "steam_appid", "101", now),
+                )
+                await db.commit()
+
+                await db_module._repair_identifier_primary_flags(db)
+
+                rows = await db.execute_fetchall(
+                    "SELECT identifier_value, is_primary FROM game_platform_identifiers WHERE game_platform_id = ? AND identifier_type = ? ORDER BY id",
+                    (platform_id, "steam_appid"),
+                )
+
+        self.assertEqual([row[1] for row in rows], [1, 0])
+
+
 class SteamStoreRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_enrich_game_preserves_review_fields_when_review_fetch_fails(self) -> None:
         row = {
