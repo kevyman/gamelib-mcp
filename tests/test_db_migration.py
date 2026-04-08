@@ -486,6 +486,45 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([row[1] for row in rows], [1, 0])
 
+    async def test_upsert_identifier_demotes_existing_primary(self):
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+            game_id = await db_module.upsert_game(appid=None, name="TestGame2")
+            platform_id = await db_module.upsert_game_platform(
+                game_id=game_id,
+                platform="steam",
+                playtime_minutes=0,
+                owned=1,
+            )
+
+            # Write first identifier as primary
+            await db_module.upsert_game_platform_identifier(
+                game_platform_id=platform_id,
+                identifier_type="steam_appid",
+                identifier_value="200",
+                is_primary=True,
+            )
+
+            # Write second identifier as primary for same (platform_id, identifier_type)
+            await db_module.upsert_game_platform_identifier(
+                game_platform_id=platform_id,
+                identifier_type="steam_appid",
+                identifier_value="201",
+                is_primary=True,
+            )
+
+            async with db_module.get_db() as db:
+                rows = await db.execute_fetchall(
+                    "SELECT identifier_value, is_primary FROM game_platform_identifiers WHERE game_platform_id = ? AND identifier_type = ? ORDER BY id",
+                    (platform_id, "steam_appid"),
+                )
+
+        # First identifier should be demoted, second should be primary
+        primaries = [row["is_primary"] for row in rows]
+        self.assertEqual(sum(primaries), 1, "Exactly one row should be primary")
+        self.assertEqual(rows[-1]["is_primary"], 1, "Most recently written row should be primary")
+
 
 class SteamStoreRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_enrich_game_preserves_review_fields_when_review_fetch_fails(self) -> None:

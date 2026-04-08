@@ -978,17 +978,26 @@ async def _migrate_v4_to_v5(db: aiosqlite.Connection, progress: _Progress | None
 
 
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
+    # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
+    # single-primary groups untouched.
     await db.execute(
         """
         UPDATE game_platform_identifiers
         SET is_primary = CASE
-            WHEN id IN (
+            WHEN id = (
                 SELECT MIN(id)
-                FROM game_platform_identifiers
-                GROUP BY game_platform_id, identifier_type
+                FROM game_platform_identifiers g2
+                WHERE g2.game_platform_id = game_platform_identifiers.game_platform_id
+                  AND g2.identifier_type = game_platform_identifiers.identifier_type
             ) THEN 1
             ELSE 0
         END
+        WHERE game_platform_id IN (
+            SELECT game_platform_id
+            FROM game_platform_identifiers
+            GROUP BY game_platform_id, identifier_type
+            HAVING SUM(is_primary) > 1
+        )
         """
     )
 
@@ -1741,7 +1750,7 @@ async def upsert_game_platform_identifier(
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
     async with get_db() as db:
-        cursor = await db.execute(
+        await db.execute(
             """INSERT INTO game_platform_identifiers
                (game_platform_id, identifier_type, identifier_value, is_primary, last_seen_at)
                VALUES (?, ?, ?, ?, ?)
@@ -1752,7 +1761,11 @@ async def upsert_game_platform_identifier(
             (game_platform_id, identifier_type, str(identifier_value), int(is_primary), now),
         )
         if is_primary:
-            row_id = cursor.lastrowid
+            row = await db.execute_fetchone(
+                "SELECT id FROM game_platform_identifiers WHERE identifier_type = ? AND identifier_value = ?",
+                (identifier_type, str(identifier_value)),
+            )
+            row_id = row["id"]
             await db.execute(
                 """
                 UPDATE game_platform_identifiers
