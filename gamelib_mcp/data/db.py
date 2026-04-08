@@ -473,8 +473,6 @@ _V5_SCHEMA_DDL = """
     CREATE INDEX IF NOT EXISTS idx_game_platforms_platform ON game_platforms(platform);
     CREATE INDEX IF NOT EXISTS idx_game_platform_identifiers_platform_id
         ON game_platform_identifiers(game_platform_id);
-    CREATE INDEX IF NOT EXISTS idx_game_platform_identifiers_lookup
-        ON game_platform_identifiers(identifier_type, identifier_value);
 """
 
 # Alias used for fresh database initialization and final reconciliation.
@@ -1074,6 +1072,7 @@ async def _run_migrations(
         await _migrate_v4_to_v5(db, progress=None)
         version = 5
 
+    await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
     await db.executescript(_V5_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
