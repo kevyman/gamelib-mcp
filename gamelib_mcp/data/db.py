@@ -376,7 +376,7 @@ _V3_SCHEMA_DDL = """
 """
 
 
-_V4_SCHEMA_DDL = """
+_V5_SCHEMA_DDL = """
     CREATE TABLE IF NOT EXISTS games (
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
         igdb_id          INTEGER UNIQUE,
@@ -485,7 +485,7 @@ _V4_SCHEMA_DDL = """
 # The DDL above already contains all v5 columns (opencritic_url,
 # opencritic_num_reviews, metacritic_cached_at), so both names refer to the
 # same full schema.
-_V5_SCHEMA_DDL = _V4_SCHEMA_DDL
+_V4_SCHEMA_DDL = _V5_SCHEMA_DDL  # backward-compat alias; kept for external references
 
 
 async def _table_names(db: aiosqlite.Connection) -> set[str]:
