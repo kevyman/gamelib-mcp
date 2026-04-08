@@ -452,7 +452,6 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict(os.environ, {}, clear=True),
             patch("gamelib_mcp.data.db.load_dotenv", return_value=False),
-            patch("gamelib_mcp.data.db.os.path.exists", return_value=False),
         ):
             self.assertEqual(db_module._db_path(), "data/gamelib.db")
 
@@ -474,7 +473,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict(os.environ, {}, clear=True),
             patch("gamelib_mcp.data.db.load_dotenv", return_value=False),
-            patch("gamelib_mcp.data.db.os.path.exists", side_effect=lambda path: path == "steam.db"),
+            # os.path.exists is NOT called — the function ignores legacy root-level files unconditionally
         ):
             self.assertEqual(db_module._db_path(), "data/gamelib.db")
 
