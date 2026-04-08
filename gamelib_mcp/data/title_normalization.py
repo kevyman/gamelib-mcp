@@ -6,10 +6,18 @@ import unicodedata
 
 _NON_GAME_PATTERNS = (
     re.compile(r"\b(soundtrack|wallpaper|art book|artbook)\b$", re.IGNORECASE),
-    re.compile(r"\b(test server|public test|playtest|staging branch|experimental branch)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(test server|public test(?:ing)?|public beta(?: client)?|playtest|staging branch|experimental branch|test branch)\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\b(friend'?s pass|pre-?game editor|resource archiver)\b", re.IGNORECASE),
-    re.compile(r"\b(bonus content|digital content|content pack|dlc|expansion pack)\b$", re.IGNORECASE),
+    re.compile(
+        r"\b(bonus content|digital content|content pack|goodies collection|scenario pack|unit pack|editor|vfx)\b$",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(dlc|expansion pack)(?:\s+no\.?\s*\d+)?\b$", re.IGNORECASE),
     re.compile(r"\bcontent\b$", re.IGNORECASE),
+    re.compile(r"\bbeta(?:\s+demo)?\b\W*$", re.IGNORECASE),
 )
 _TRAILING_VARIANT_PATTERNS = (
     re.compile(r"\s*\((?:PlayStation ?5|PS5)\)\s*$", re.IGNORECASE),
@@ -40,7 +48,14 @@ def _ascii_fold(value: str) -> str:
 
 def is_non_game_title(name: str) -> bool:
     folded = _ascii_fold(name)
-    return any(pattern.search(folded) for pattern in _NON_GAME_PATTERNS)
+    if any(pattern.search(folded) for pattern in _NON_GAME_PATTERNS):
+        return True
+
+    words = re.findall(r"[a-z0-9]+", folded.casefold())
+    if words and words[-1] == "demo" and len(words) <= 3:
+        return True
+
+    return False
 
 
 def normalize_catalog_title(name: str) -> str:

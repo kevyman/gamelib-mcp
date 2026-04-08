@@ -138,7 +138,7 @@ class OpenCriticParserTests(unittest.TestCase):
 
 
 class OpenCriticDiscoveryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_discover_from_opencritic_uses_api_meta_search(self) -> None:
+    async def test_discover_from_opencritic_uses_api_meta_search_with_resolved_bearer(self) -> None:
         response = Mock(
             status_code=200,
             text='[{"id":120,"name":"Portal 2","dist":0,"relation":"game"}]',
@@ -150,7 +150,10 @@ class OpenCriticDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         client.__aenter__.return_value = client
         client.__aexit__.return_value = False
 
-        with patch("gamelib_mcp.data.opencritic.httpx.AsyncClient", return_value=client):
+        with (
+            patch("gamelib_mcp.data.opencritic.httpx.AsyncClient", return_value=client),
+            patch("gamelib_mcp.data.opencritic._get_opencritic_api_bearer", AsyncMock(return_value="Bearer test-token")),
+        ):
             candidates = await opencritic._discover_from_opencritic("Portal 2")
 
         self.assertEqual(
@@ -163,11 +166,32 @@ class OpenCriticDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             headers={
                 **opencritic._HEADERS,
                 "Accept": "application/json, text/plain, */*",
-                "Authorization": "Bearer R2tBRkdvUU9WSHpoUXpaSXVYa2g5cGU5NEFsWUgyeXQ=",
+                "Authorization": "Bearer test-token",
                 "Origin": "https://opencritic.com",
                 "Referer": "https://opencritic.com/search?q=Portal+2",
             },
         )
+
+    async def test_discover_from_opencritic_logs_auth_retry_details(self) -> None:
+        auth_error = Mock(status_code=400, text='{"message":"API key is required."}')
+        auth_error.raise_for_status = Mock(return_value=None)
+        success = Mock(status_code=200, text='[{"id":120,"name":"Portal 2","dist":0,"relation":"game"}]')
+        success.raise_for_status = Mock(return_value=None)
+
+        client = AsyncMock()
+        client.get.side_effect = [auth_error, success]
+        client.__aenter__.return_value = client
+        client.__aexit__.return_value = False
+
+        with (
+            patch("gamelib_mcp.data.opencritic.httpx.AsyncClient", return_value=client),
+            patch("gamelib_mcp.data.opencritic._get_opencritic_api_bearer", AsyncMock(side_effect=["Bearer stale", "Bearer fresh"])),
+            self.assertLogs("gamelib_mcp.data.opencritic", level="INFO") as logs,
+        ):
+            await opencritic._discover_from_opencritic("Portal 2")
+
+        self.assertTrue(any("API key is required" in line for line in logs.output))
+        self.assertTrue(any("refreshing bearer" in line.lower() for line in logs.output))
 
     async def test_discover_candidates_returns_primary_results_without_fallback(self) -> None:
         primary = [{"title": "Portal 2", "url": "https://opencritic.com/game/120/portal-2", "opencritic_id": 120}]
@@ -228,7 +252,43 @@ class OpenCriticEnrichTests(unittest.IsolatedAsyncioTestCase):
             result = await opencritic.enrich_opencritic(7, "Persona 3")
 
         self.assertEqual(result["status"], "ambiguous")
-        upsert.assert_not_awaited()
+        upsert.assert_awaited_once_with(
+            7,
+            opencritic_cached_at=result["cached_at"],
+        )
+        self.assertTrue(result["cached_at"].startswith("AMBIGUOUS:"))
+
+    async def test_enrich_opencritic_persists_no_match_marker(self) -> None:
+        with (
+            patch("gamelib_mcp.data.opencritic._load_opencritic_context", AsyncMock(return_value={"release_date": "2026-03-01", "opencritic_cached_at": None})),
+            patch("gamelib_mcp.data.opencritic.discover_candidates", AsyncMock(return_value=[])),
+            patch("gamelib_mcp.data.opencritic.upsert_game_platform_enrichment", AsyncMock()) as upsert,
+        ):
+            result = await opencritic.enrich_opencritic(7, "Missing Game")
+
+        self.assertEqual(result["status"], "no_match")
+        upsert.assert_awaited_once_with(
+            7,
+            opencritic_cached_at=result["cached_at"],
+        )
+        self.assertTrue(result["cached_at"].startswith("NO_MATCH:"))
+
+    async def test_enrich_opencritic_persists_fetch_error_marker(self) -> None:
+        with (
+            patch("gamelib_mcp.data.opencritic._load_opencritic_context", AsyncMock(return_value={"release_date": "2026-03-01", "opencritic_cached_at": None})),
+            patch("gamelib_mcp.data.opencritic.discover_candidates", AsyncMock(return_value=[{"title": "Portal 2", "url": "https://opencritic.com/game/120/portal-2", "opencritic_id": 120}])),
+            patch("gamelib_mcp.data.opencritic._choose_match", return_value={"title": "Portal 2", "url": "https://opencritic.com/game/120/portal-2", "opencritic_id": 120}),
+            patch("gamelib_mcp.data.opencritic._fetch_via_client", AsyncMock(return_value={"status": "http_error"})),
+            patch("gamelib_mcp.data.opencritic.upsert_game_platform_enrichment", AsyncMock()) as upsert,
+        ):
+            result = await opencritic.enrich_opencritic(7, "Portal 2")
+
+        self.assertEqual(result["status"], "http_error")
+        upsert.assert_awaited_once_with(
+            7,
+            opencritic_cached_at=result["cached_at"],
+        )
+        self.assertTrue(result["cached_at"].startswith("HTTP_ERROR:"))
 
 
 class OpenCriticRefreshPolicyTests(unittest.TestCase):
@@ -259,9 +319,13 @@ class OpenCriticFetchTests(unittest.IsolatedAsyncioTestCase):
         response.raise_for_status = Mock(return_value=None)
         client = AsyncMock()
         client.get.return_value = response
-        with patch("gamelib_mcp.data.opencritic._sleep_with_jitter", AsyncMock()):
+        with (
+            patch("gamelib_mcp.data.opencritic._sleep_with_jitter", AsyncMock()),
+            self.assertLogs("gamelib_mcp.data.opencritic", level="INFO") as logs,
+        ):
             result = await opencritic._fetch_opencritic_record(client, "https://opencritic.com/game/120/portal-2/export")
         self.assertEqual(result["status"], "parse_failed")
+        self.assertTrue(any("parse failed" in line.lower() for line in logs.output))
 
     async def test_fetch_opencritic_record_returns_matched_fields(self) -> None:
         response = Mock(

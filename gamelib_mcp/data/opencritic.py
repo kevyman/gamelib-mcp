@@ -1,6 +1,7 @@
 """OpenCritic scraping helpers cached in game_platform_enrichment."""
 
 import asyncio
+import base64
 import html
 import logging
 import json
@@ -28,9 +29,9 @@ _OPENCRITIC_BASE_URL = "https://opencritic.com"
 _SEARCH_PAGE_URL = f"{_OPENCRITIC_BASE_URL}/search"
 _SEARCH_API_URL = "https://api.opencritic.com/api/meta/search"
 _SEARCH_FALLBACK_URL = "https://html.duckduckgo.com/html/"
-_OPENCRITIC_API_BEARER = "Bearer R2tBRkdvUU9WSHpoUXpaSXVYa2g5cGU5NEFsWUgyeXQ="
 _DDG_DELAY_SECONDS = 10.0
 _DDG_403_COOLDOWN_SECONDS = 60.0
+_OPENCRITIC_BEARER_CACHE: str | None = None
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -179,6 +180,13 @@ def html_unescape_quotes(value: str) -> str:
     return html.unescape(value).replace("&q;", '"')
 
 
+def _log_excerpt(value: str, limit: int = 200) -> str:
+    compact = re.sub(r"\s+", " ", value).strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
 def _state_to_opencritic_record(state: dict, source_url: str) -> dict | None:
     required = (
         state.get("id"),
@@ -210,46 +218,137 @@ async def _fetch_opencritic_record(client: httpx.AsyncClient, url: str) -> dict:
     for retry_delay in (*_RETRY_DELAYS, None):
         try:
             response = await client.get(url)
+            logger.info("OpenCritic export response: url=%s status=%s", url, response.status_code)
             if response.status_code in (429, 500, 502, 503, 504):
                 raise httpx.HTTPStatusError("retryable", request=response.request, response=response)
             response.raise_for_status()
             parsed = _parse_opencritic_record(response.text, url)
             if parsed is None:
+                logger.info(
+                    "OpenCritic export parse failed: url=%s body=%s",
+                    url,
+                    _log_excerpt(response.text),
+                )
                 return {"status": "parse_failed"}
+            logger.info(
+                "OpenCritic export parsed: url=%s opencritic_id=%s score=%s reviews=%s",
+                url,
+                parsed["opencritic_id"],
+                parsed["opencritic_score"],
+                parsed["opencritic_num_reviews"],
+            )
             return {"status": "matched", "fields": parsed}
         except httpx.HTTPStatusError as exc:
             if exc.response is not None and exc.response.status_code in (429, 500, 502, 503, 504) and retry_delay is not None:
+                logger.info(
+                    "OpenCritic export retryable error: url=%s status=%s retry_delay=%s",
+                    url,
+                    exc.response.status_code,
+                    retry_delay,
+                )
                 await _sleep_with_jitter(retry_delay)
                 continue
+            logger.info(
+                "OpenCritic export http error: url=%s status=%s body=%s",
+                url,
+                exc.response.status_code if exc.response is not None else "unknown",
+                _log_excerpt(exc.response.text) if exc.response is not None else "",
+            )
             return {"status": "http_error"}
         except httpx.RequestError:
             if retry_delay is not None:
+                logger.info("OpenCritic export request error: url=%s retry_delay=%s", url, retry_delay)
                 await _sleep_with_jitter(retry_delay)
                 continue
+            logger.info("OpenCritic export request error: url=%s exhausted retries", url)
             return {"status": "http_error"}
     return {"status": "http_error"}
+
+
+async def _get_opencritic_api_bearer(client: httpx.AsyncClient, force_refresh: bool = False) -> str | None:
+    global _OPENCRITIC_BEARER_CACHE
+
+    if _OPENCRITIC_BEARER_CACHE is not None and not force_refresh:
+        logger.info("OpenCritic bearer cache hit")
+        return _OPENCRITIC_BEARER_CACHE
+
+    try:
+        search_page = await client.get(_SEARCH_PAGE_URL)
+        search_page.raise_for_status()
+        script_matches = re.findall(r'<script[^>]+src="([^"]+)"', search_page.text)
+        main_script = next((src for src in script_matches if re.search(r"(?:^|/)main\.[^/]+\.js$", src)), None)
+        if main_script is None:
+            return None
+
+        bundle = await client.get(_normalize_opencritic_url(main_script))
+        bundle.raise_for_status()
+    except Exception as exc:
+        logger.debug("OpenCritic bearer discovery failed: %s", exc)
+        return None
+
+    match = re.search(r'client:\{baseUrl:"[^"]+",apiKey:"([^"]+)"\}', bundle.text)
+    if match is None:
+        logger.debug("OpenCritic bearer discovery failed: apiKey missing from bundle")
+        return None
+
+    _OPENCRITIC_BEARER_CACHE = "Bearer " + base64.b64encode(match.group(1).encode("utf-8")).decode("ascii")
+    logger.info("OpenCritic bearer resolved from frontend bundle%s", " (refresh)" if force_refresh else "")
+    return _OPENCRITIC_BEARER_CACHE
 
 
 async def _discover_from_opencritic(title: str) -> list[dict]:
     try:
         async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers=_HEADERS) as client:
+            bearer = await _get_opencritic_api_bearer(client)
+            if bearer is None:
+                return []
             response = await client.get(
                 _SEARCH_API_URL,
                 params={"criteria": title},
                 headers={
                     **_HEADERS,
                     "Accept": "application/json, text/plain, */*",
-                    "Authorization": _OPENCRITIC_API_BEARER,
+                    "Authorization": bearer,
                     "Origin": _OPENCRITIC_BASE_URL,
                     "Referer": f"{_SEARCH_PAGE_URL}?q={quote_plus(title)}",
                 },
             )
+            logger.info(
+                "OpenCritic search response: title=%r status=%s body=%s",
+                title,
+                response.status_code,
+                _log_excerpt(response.text),
+            )
+            if response.status_code == 400 and "API key is required" in response.text:
+                logger.info("OpenCritic search reported API key is required for %r; refreshing bearer", title)
+                bearer = await _get_opencritic_api_bearer(client, force_refresh=True)
+                if bearer is None:
+                    return []
+                response = await client.get(
+                    _SEARCH_API_URL,
+                    params={"criteria": title},
+                    headers={
+                        **_HEADERS,
+                        "Accept": "application/json, text/plain, */*",
+                        "Authorization": bearer,
+                        "Origin": _OPENCRITIC_BASE_URL,
+                        "Referer": f"{_SEARCH_PAGE_URL}?q={quote_plus(title)}",
+                    },
+                )
+                logger.info(
+                    "OpenCritic search retry response: title=%r status=%s body=%s",
+                    title,
+                    response.status_code,
+                    _log_excerpt(response.text),
+                )
             response.raise_for_status()
     except Exception as exc:
         logger.debug("OpenCritic primary discovery failed for %r: %s", title, exc)
         return []
 
-    return _parse_discovery_candidates(response.text)
+    candidates = _parse_discovery_candidates(response.text)
+    logger.info("OpenCritic search candidates: title=%r count=%d", title, len(candidates))
+    return candidates
 
 
 async def _discover_from_search_fallback(title: str) -> list[dict]:
@@ -260,6 +359,12 @@ async def _discover_from_search_fallback(title: str) -> list[dict]:
                 _SEARCH_FALLBACK_URL,
                 params={"q": f"site:opencritic.com/game {title}"},
             )
+            logger.info(
+                "DuckDuckGo fallback response: title=%r status=%s body=%s",
+                title,
+                response.status_code,
+                _log_excerpt(response.text),
+            )
             if response.status_code == 403:
                 await _sleep_with_jitter(_DDG_403_COOLDOWN_SECONDS)
             response.raise_for_status()
@@ -267,7 +372,9 @@ async def _discover_from_search_fallback(title: str) -> list[dict]:
         logger.debug("OpenCritic search fallback failed for %r: %s", title, exc)
         return []
 
-    return _parse_discovery_candidates(response.text)
+    candidates = _parse_discovery_candidates(response.text)
+    logger.info("DuckDuckGo fallback candidates: title=%r count=%d", title, len(candidates))
+    return candidates
 
 
 def _normalize_opencritic_url(value: str) -> str:
@@ -355,29 +462,67 @@ async def _fetch_via_client(client: httpx.AsyncClient, match: dict) -> dict:
     return await _fetch_opencritic_record(client, _candidate_to_export_url(match))
 
 
+async def _write_opencritic_status_marker(game_platform_id: int, status: str, now: datetime) -> str:
+    marker = f"{status.upper()}:{now.isoformat()}"
+    await upsert_game_platform_enrichment(game_platform_id, opencritic_cached_at=marker)
+    return marker
+
+
 async def enrich_opencritic(game_platform_id: int, game_name: str) -> dict:
     context = await _load_opencritic_context(game_platform_id)
     now = datetime.now(timezone.utc)
     if _is_opencritic_fresh(context["opencritic_cached_at"], context["release_date"], now):
+        logger.info("OpenCritic enrich cached: game_platform_id=%s name=%r", game_platform_id, game_name)
         return {"status": "cached"}
 
     candidates = await discover_candidates(game_name)
     if not candidates:
-        return {"status": "no_match"}
+        cached_at = await _write_opencritic_status_marker(game_platform_id, "NO_MATCH", now)
+        logger.info(
+            "OpenCritic enrich no match: game_platform_id=%s name=%r marker=%s",
+            game_platform_id,
+            game_name,
+            cached_at,
+        )
+        return {"status": "no_match", "cached_at": cached_at}
 
     match = _choose_match(game_name, candidates)
     if match is None:
-        return {"status": "ambiguous"}
+        cached_at = await _write_opencritic_status_marker(game_platform_id, "AMBIGUOUS", now)
+        logger.info(
+            "OpenCritic enrich ambiguous: game_platform_id=%s name=%r candidates=%d marker=%s",
+            game_platform_id,
+            game_name,
+            len(candidates),
+            cached_at,
+        )
+        return {"status": "ambiguous", "cached_at": cached_at}
 
     async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers=_HEADERS) as client:
         fetched = await _fetch_via_client(client, match)
 
     if fetched["status"] != "matched":
-        return fetched
+        cached_at = await _write_opencritic_status_marker(game_platform_id, fetched["status"], now)
+        logger.info(
+            "OpenCritic enrich non-match status: game_platform_id=%s name=%r status=%s marker=%s",
+            game_platform_id,
+            game_name,
+            fetched["status"],
+            cached_at,
+        )
+        return {**fetched, "cached_at": cached_at}
 
     fields = {
         **fetched["fields"],
         "opencritic_cached_at": now.isoformat(),
     }
     await upsert_game_platform_enrichment(game_platform_id, **fields)
+    logger.info(
+        "OpenCritic enrich matched: game_platform_id=%s name=%r opencritic_id=%s score=%s reviews=%s",
+        game_platform_id,
+        game_name,
+        fields["opencritic_id"],
+        fields["opencritic_score"],
+        fields["opencritic_num_reviews"],
+    )
     return {"status": "matched", "fields": fields}
