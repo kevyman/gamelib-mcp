@@ -70,13 +70,17 @@ async def _drain_background_enrich_reruns() -> None:
 
     while True:
         task = await _schedule_background_enrich()
+        should_exit = False
         try:
             await task
         finally:
             async with _ENRICHMENT_LOCK:
                 if not _ENRICHMENT_RERUN_REQUESTED:
-                    return
-                _ENRICHMENT_RERUN_REQUESTED = False
+                    should_exit = True
+                else:
+                    _ENRICHMENT_RERUN_REQUESTED = False
+        if should_exit:
+            return
 
 
 def _library_refresh_interval_seconds() -> float | None:

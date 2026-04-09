@@ -67,6 +67,17 @@ def _db_path() -> str:
     return "data/gamelib.db"
 
 
+def _ensure_db_parent_dir(db_path: str) -> None:
+    if not db_path or db_path == ":memory:":
+        return
+
+    parent = Path(db_path).expanduser().parent
+    if str(parent) in ("", "."):
+        return
+
+    parent.mkdir(parents=True, exist_ok=True)
+
+
 def _default_process(value: str) -> str:
     return " ".join(sorted(re.findall(r"[a-z0-9]+", value.casefold())))
 
@@ -1117,6 +1128,7 @@ async def _configure_connection(conn: aiosqlite.Connection, *, enable_wal: bool)
 async def get_db():
     """Async context manager for a WAL-enabled, Row-factory SQLite connection."""
     db_path = _db_path()
+    _ensure_db_parent_dir(db_path)
     async with aiosqlite.connect(db_path, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS) as conn:
         await _configure_connection(conn, enable_wal=_DB_READY_PATH != db_path)
         await _ensure_db_initialized(conn)
@@ -1128,6 +1140,7 @@ async def migrate_db(progress: _Progress | None = None) -> MigrationResult:
     global _DB_READY_PATH
 
     db_path = _db_path()
+    _ensure_db_parent_dir(db_path)
     async with aiosqlite.connect(db_path, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS) as db:
         await _configure_connection(db, enable_wal=True)
         result = await _run_migrations(db, progress=progress)

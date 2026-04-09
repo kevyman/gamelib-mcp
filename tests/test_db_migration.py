@@ -19,6 +19,14 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self) -> None:
         self.tmpdir.cleanup()
 
+    async def test_init_db_creates_missing_parent_directory(self) -> None:
+        nested_db_path = Path(self.tmpdir.name) / "missing" / "nested" / "gamelib.db"
+
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{nested_db_path}"}, clear=False):
+            await db_module.init_db()
+
+        self.assertTrue(nested_db_path.exists())
+
     def test_v1_to_v2_rebuilds_foreign_keys_against_new_games_table(self) -> None:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
