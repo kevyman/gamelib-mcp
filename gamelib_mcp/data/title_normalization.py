@@ -34,9 +34,7 @@ _TRAILING_VARIANT_PATTERNS = (
     re.compile(r"\s+Remastered\s*$", re.IGNORECASE),
     re.compile(r"\s+Enhanced\s*$", re.IGNORECASE),
     re.compile(r"\s+\(Classic\)\s*$", re.IGNORECASE),
-    re.compile(r"\s+Legacy\s*$", re.IGNORECASE),
     re.compile(r"\s+Steam Edition\s*$", re.IGNORECASE),
-    re.compile(r"\s+Game\s*$", re.IGNORECASE),
 )
 
 

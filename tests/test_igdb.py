@@ -118,7 +118,9 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
 
         query = post_mock.await_args.args[0]
         self.assertIn("search \"Age of Wonders\";", query)
-        self.assertIn("where platforms = 6;", query)
+        self.assertIn("category = null", query)
+        self.assertIn("category != (1, 3, 5, 6, 7)", query)
+        self.assertIn("platforms = 6", query)
         self.assertNotIn("where 1 = 1", query)
 
     async def test_search_game_escapes_quotes_in_search_string(self) -> None:
@@ -136,7 +138,7 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_search_game_does_not_filter_out_results_with_missing_category(self) -> None:
         async def fake_post(query: str, headers: dict[str, str]) -> list[dict]:
-            if "category !=" in query:
+            if "category !=" in query and "category = null" not in query:
                 return []
             return [{"id": 141533, "name": "Loop Hero", "release_dates": [{"platform": 6, "date": 1615334400}]}]
 
@@ -150,6 +152,20 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].igdb_id, 141533)
         self.assertEqual(results[0].name, "Loop Hero")
+
+    async def test_search_game_filters_excluded_categories_before_limit(self) -> None:
+        post_mock = AsyncMock(return_value=[])
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", new=post_mock),
+        ):
+            await igdb.search_game("Portal 2")
+
+        query = post_mock.await_args.args[0]
+        self.assertIn("where (category = null | category != (1, 3, 5, 6, 7));", query)
+        self.assertIn("limit 5;", query)
 
     async def test_search_game_retries_rate_limit_response(self) -> None:
         client = _DummyAsyncClient(

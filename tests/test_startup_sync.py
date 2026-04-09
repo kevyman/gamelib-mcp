@@ -10,7 +10,9 @@ from unittest.mock import AsyncMock, patch
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import admin as admin_tools
 from gamelib_mcp.main import (
+    _drain_background_enrich_reruns,
     _ensure_periodic_refresh_loop,
+    _schedule_background_enrich,
     _ensure_startup_refresh,
     _run_periodic_refresh_loop,
     _run_startup_refresh,
@@ -35,15 +37,23 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             with contextlib.suppress(asyncio.CancelledError):
                 await periodic_task
         main_module._PERIODIC_REFRESH_TASK = None
+        enrich_task = getattr(main_module, "_ENRICHMENT_TASK", None)
+        if enrich_task is not None and not enrich_task.done():
+            enrich_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await enrich_task
+        main_module._ENRICHMENT_TASK = None
+        main_module._ENRICHMENT_RERUN_REQUESTED = False
 
     async def test_stale_startup_schedules_background_refresh(self) -> None:
         stale_at = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
 
         with (
             patch("gamelib_mcp.data.db.init_db", AsyncMock()),
+            patch("gamelib_mcp.data.db.clear_all_enrichment_claims", AsyncMock()),
             patch("gamelib_mcp.data.db.get_meta", AsyncMock(return_value=stale_at)),
             patch("gamelib_mcp.main._ensure_startup_refresh", AsyncMock()) as mock_ensure_refresh,
-            patch("gamelib_mcp.data.enrich_bg.background_enrich", AsyncMock()),
+            patch("gamelib_mcp.main._run_background_enrich", AsyncMock()),
         ):
             async with lifespan(object()):
                 pass
@@ -56,6 +66,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()) as mock_set_meta_many,
             patch("gamelib_mcp.main._admin_refresh_library", AsyncMock(return_value=refresh_result)),
+            patch("gamelib_mcp.main._drain_background_enrich_reruns", AsyncMock()) as mock_drain,
         ):
             await _run_startup_refresh()
 
@@ -67,6 +78,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finished["library_sync_status"], "idle")
         self.assertIsNone(finished["library_sync_error"])
         self.assertIn("library_sync_finished_at", finished)
+        mock_drain.assert_awaited_once()
 
     async def test_run_startup_refresh_records_partial_failure_summary(self) -> None:
         refresh_result = {
@@ -78,6 +90,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()) as mock_set_meta_many,
             patch("gamelib_mcp.main._admin_refresh_library", AsyncMock(return_value=refresh_result)),
+            patch("gamelib_mcp.main._drain_background_enrich_reruns", AsyncMock()),
         ):
             await _run_startup_refresh()
 
@@ -92,12 +105,14 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()) as mock_set_meta_many,
             patch("gamelib_mcp.main._admin_refresh_library", AsyncMock(side_effect=RuntimeError("boom"))),
+            patch("gamelib_mcp.main._drain_background_enrich_reruns", AsyncMock()) as mock_drain,
         ):
             await _run_startup_refresh()
 
         finished = mock_set_meta_many.await_args_list[1].args[0]
         self.assertEqual(finished["library_sync_status"], "idle")
         self.assertEqual(finished["library_sync_error"], "boom")
+        mock_drain.assert_not_awaited()
 
     async def test_run_startup_refresh_records_cancellation_cleanup(self) -> None:
         started = asyncio.Event()
@@ -110,6 +125,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()) as mock_set_meta_many,
             patch("gamelib_mcp.main._admin_refresh_library", AsyncMock(side_effect=blocked_refresh)),
+            patch("gamelib_mcp.main._drain_background_enrich_reruns", AsyncMock()) as mock_drain,
         ):
             task = asyncio.create_task(_run_startup_refresh())
             await asyncio.wait_for(started.wait(), timeout=0.1)
@@ -120,6 +136,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         finished = mock_set_meta_many.await_args_list[1].args[0]
         self.assertEqual(finished["library_sync_status"], "idle")
         self.assertEqual(finished["library_sync_error"], "cancelled")
+        mock_drain.assert_not_awaited()
 
     async def test_ensure_startup_refresh_skips_duplicate_running_task(self) -> None:
         import gamelib_mcp.main as main_module
@@ -181,9 +198,10 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("gamelib_mcp.data.db.init_db", AsyncMock()),
+            patch("gamelib_mcp.data.db.clear_all_enrichment_claims", AsyncMock()),
             patch("gamelib_mcp.data.db.get_meta", AsyncMock(return_value=stale_at)),
             patch("gamelib_mcp.main._run_startup_refresh", side_effect=slow_refresh),
-            patch("gamelib_mcp.data.enrich_bg.background_enrich", AsyncMock()),
+            patch("gamelib_mcp.main._run_background_enrich", AsyncMock()),
         ):
             cm = lifespan(object())
             await asyncio.wait_for(cm.__aenter__(), timeout=0.1)
@@ -210,10 +228,11 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("gamelib_mcp.data.db.init_db", AsyncMock()),
+            patch("gamelib_mcp.data.db.clear_all_enrichment_claims", AsyncMock()),
             patch("gamelib_mcp.data.db.get_meta", AsyncMock(return_value=stale_at)),
             patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()),
             patch("gamelib_mcp.main._admin_refresh_library", AsyncMock(side_effect=slow_refresh)),
-            patch("gamelib_mcp.data.enrich_bg.background_enrich", AsyncMock(side_effect=fake_enrich)),
+            patch("gamelib_mcp.main._run_background_enrich", AsyncMock(side_effect=fake_enrich)),
         ):
             cm = lifespan(object())
             await asyncio.wait_for(cm.__aenter__(), timeout=0.1)
@@ -223,14 +242,80 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             refresh_release.set()
             await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=0.1)
 
+    async def test_stale_startup_requeues_enrichment_after_refresh_finishes(self) -> None:
+        stale_at = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+        refresh_started = asyncio.Event()
+        refresh_release = asyncio.Event()
+        first_enrich_started = asyncio.Event()
+        second_enrich_started = asyncio.Event()
+        enrich_calls = 0
+
+        async def slow_refresh(*_args, **_kwargs) -> dict:
+            refresh_started.set()
+            await refresh_release.wait()
+            return {"steam": {"games_upserted": 1}}
+
+        async def fake_enrich() -> None:
+            nonlocal enrich_calls
+            enrich_calls += 1
+            if enrich_calls == 1:
+                first_enrich_started.set()
+                return
+            second_enrich_started.set()
+
+        with (
+            patch("gamelib_mcp.data.db.init_db", AsyncMock()),
+            patch("gamelib_mcp.data.db.clear_all_enrichment_claims", AsyncMock()),
+            patch("gamelib_mcp.data.db.get_meta", AsyncMock(return_value=stale_at)),
+            patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()),
+            patch("gamelib_mcp.main._admin_refresh_library", AsyncMock(side_effect=slow_refresh)),
+            patch("gamelib_mcp.main._run_background_enrich", AsyncMock(side_effect=fake_enrich)),
+        ):
+            cm = lifespan(object())
+            await asyncio.wait_for(cm.__aenter__(), timeout=0.1)
+            await asyncio.wait_for(refresh_started.wait(), timeout=0.1)
+            await asyncio.wait_for(first_enrich_started.wait(), timeout=0.1)
+
+            refresh_release.set()
+            await asyncio.wait_for(second_enrich_started.wait(), timeout=0.1)
+            await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=0.1)
+
+        self.assertEqual(enrich_calls, 2)
+
+    async def test_drain_background_enrich_reruns_requeues_after_active_run(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        enrich_calls = 0
+
+        async def fake_enrich() -> None:
+            nonlocal enrich_calls
+            enrich_calls += 1
+            if enrich_calls == 1:
+                started.set()
+                await release.wait()
+
+        with patch("gamelib_mcp.main._run_background_enrich", AsyncMock(side_effect=fake_enrich)):
+            first_task = await _schedule_background_enrich()
+            await asyncio.wait_for(started.wait(), timeout=0.1)
+            second_task = await _schedule_background_enrich()
+
+            self.assertIs(first_task, second_task)
+
+            drain_task = asyncio.create_task(_drain_background_enrich_reruns())
+            release.set()
+            await asyncio.wait_for(drain_task, timeout=0.1)
+
+        self.assertEqual(enrich_calls, 2)
+
     async def test_lifespan_starts_periodic_refresh_loop(self) -> None:
         fresh_at = datetime.now(timezone.utc).isoformat()
 
         with (
             patch("gamelib_mcp.data.db.init_db", AsyncMock()),
+            patch("gamelib_mcp.data.db.clear_all_enrichment_claims", AsyncMock()),
             patch("gamelib_mcp.data.db.get_meta", AsyncMock(return_value=fresh_at)),
             patch("gamelib_mcp.main._ensure_periodic_refresh_loop", AsyncMock()) as mock_periodic,
-            patch("gamelib_mcp.data.enrich_bg.background_enrich", AsyncMock()),
+            patch("gamelib_mcp.main._run_background_enrich", AsyncMock()),
         ):
             async with lifespan(object()):
                 pass
@@ -247,8 +332,9 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("gamelib_mcp.data.db.init_db", AsyncMock()),
+            patch("gamelib_mcp.data.db.clear_all_enrichment_claims", AsyncMock()),
             patch("gamelib_mcp.data.db.get_meta", AsyncMock(return_value=fresh_at)),
-            patch("gamelib_mcp.data.enrich_bg.background_enrich", AsyncMock()),
+            patch("gamelib_mcp.main._run_background_enrich", AsyncMock()),
             patch.dict(os.environ, {"LIBRARY_REFRESH_INTERVAL_HOURS": "24"}, clear=False),
         ):
             cm = lifespan(object())
@@ -299,7 +385,8 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
                 fresh_at = datetime.now(timezone.utc).isoformat()
                 with (
                     patch("gamelib_mcp.data.db.get_meta", AsyncMock(return_value=fresh_at)),
-                    patch("gamelib_mcp.data.enrich_bg.background_enrich", AsyncMock()),
+                    patch("gamelib_mcp.main._ensure_periodic_refresh_loop", AsyncMock(return_value=None)),
+                    patch("gamelib_mcp.main._run_background_enrich", AsyncMock()),
                 ):
                     async with lifespan(object()):
                         pass

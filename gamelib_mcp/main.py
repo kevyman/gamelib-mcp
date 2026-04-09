@@ -21,6 +21,9 @@ _LIBRARY_REFRESH_TASK: asyncio.Task | None = None
 _LIBRARY_REFRESH_LOCK = asyncio.Lock()
 _PERIODIC_REFRESH_TASK: asyncio.Task | None = None
 _PERIODIC_REFRESH_LOCK = asyncio.Lock()
+_ENRICHMENT_TASK: asyncio.Task | None = None
+_ENRICHMENT_LOCK = asyncio.Lock()
+_ENRICHMENT_RERUN_REQUESTED = False
 
 
 def _clear_library_refresh_task(task: asyncio.Task) -> None:
@@ -33,6 +36,47 @@ def _clear_periodic_refresh_task(task: asyncio.Task) -> None:
     global _PERIODIC_REFRESH_TASK
     if _PERIODIC_REFRESH_TASK is task:
         _PERIODIC_REFRESH_TASK = None
+
+
+def _clear_enrichment_task(task: asyncio.Task) -> None:
+    global _ENRICHMENT_TASK
+    if _ENRICHMENT_TASK is task:
+        _ENRICHMENT_TASK = None
+
+
+async def _run_background_enrich() -> None:
+    from .data.enrich_bg import background_enrich
+
+    await background_enrich()
+
+
+async def _schedule_background_enrich() -> asyncio.Task:
+    global _ENRICHMENT_TASK
+    global _ENRICHMENT_RERUN_REQUESTED
+
+    async with _ENRICHMENT_LOCK:
+        if _ENRICHMENT_TASK is not None and not _ENRICHMENT_TASK.done():
+            _ENRICHMENT_RERUN_REQUESTED = True
+            return _ENRICHMENT_TASK
+
+        _ENRICHMENT_RERUN_REQUESTED = False
+        _ENRICHMENT_TASK = asyncio.create_task(_run_background_enrich())
+        _ENRICHMENT_TASK.add_done_callback(_clear_enrichment_task)
+        return _ENRICHMENT_TASK
+
+
+async def _drain_background_enrich_reruns() -> None:
+    global _ENRICHMENT_RERUN_REQUESTED
+
+    while True:
+        task = await _schedule_background_enrich()
+        try:
+            await task
+        finally:
+            async with _ENRICHMENT_LOCK:
+                if not _ENRICHMENT_RERUN_REQUESTED:
+                    return
+                _ENRICHMENT_RERUN_REQUESTED = False
 
 
 def _library_refresh_interval_seconds() -> float | None:
@@ -112,6 +156,9 @@ async def _run_startup_refresh() -> dict:
         )
         if cancelled:
             logger.info("Startup library refresh cancelled")
+
+    if refresh_result is not None:
+        await _drain_background_enrich_reruns()
 
     return refresh_result or {}
 
@@ -197,14 +244,10 @@ async def lifespan(app):
     if needs_refresh:
         logger.info("Library stale or missing — scheduling background refresh...")
         await _ensure_startup_refresh()
-        from .data.enrich_bg import background_enrich
-
-        asyncio.create_task(background_enrich())
+        await _schedule_background_enrich()
     else:
-        from .data.enrich_bg import background_enrich
-
         # Background enrichment: store/provider metadata, ratings, and discovery signals
-        asyncio.create_task(background_enrich())
+        await _schedule_background_enrich()
 
     await _ensure_periodic_refresh_loop()
 
@@ -212,6 +255,7 @@ async def lifespan(app):
 
     await _cancel_task(_PERIODIC_REFRESH_TASK)
     await _cancel_task(_LIBRARY_REFRESH_TASK)
+    await _cancel_task(_ENRICHMENT_TASK)
     logger.info("Shutdown")
 
 

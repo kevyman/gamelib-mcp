@@ -24,6 +24,8 @@ class TitleNormalizationTests(unittest.TestCase):
         self.assertEqual(prepare_catalog_title("DLC Quest"), "DLC Quest")
         self.assertEqual(prepare_catalog_title("The Stanley Parable Demo"), "The Stanley Parable Demo")
         self.assertEqual(prepare_catalog_title("Beta Max"), "Beta Max")
+        self.assertEqual(prepare_catalog_title("Hogwarts Legacy"), "Hogwarts Legacy")
+        self.assertEqual(prepare_catalog_title("Squid Game"), "Squid Game")
 
     def test_prepare_catalog_title_normalizes_storefront_variants(self) -> None:
         self.assertEqual(

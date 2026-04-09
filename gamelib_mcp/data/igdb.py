@@ -340,14 +340,19 @@ def _escape_igdb_search_term(term: str) -> str:
 
 def _build_search_game_query(name: str, igdb_platform_id: int | None = None) -> str:
     escaped_name = _escape_igdb_search_term(name)
+    filters = [
+        "category = null",
+        f"category != ({', '.join(str(category) for category in sorted(_EXCLUDED_SEARCH_CATEGORIES))})",
+    ]
+    if igdb_platform_id is not None:
+        filters.append(f"platforms = {igdb_platform_id}")
     clauses = [
         "fields id, name, category, first_release_date, "
         "genres.name, themes.name, keywords.name, "
         "release_dates.platform, release_dates.date;",
         f'search "{escaped_name}";',
     ]
-    if igdb_platform_id is not None:
-        clauses.append(f"where platforms = {igdb_platform_id};")
+    clauses.append(f"where ({' | '.join(filters[:2])}){' & ' + filters[2] if len(filters) > 2 else ''};")
     clauses.append("limit 5;")
     return " ".join(clauses)
 
