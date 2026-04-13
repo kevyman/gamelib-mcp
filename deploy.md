@@ -20,7 +20,7 @@ This VM hosts multiple MCP servers behind a shared Caddy reverse proxy. The game
   Dockerfile
   gamelib_mcp/
   data/
-    steam/               ← steam.db lives here (persists across redeploys)
+    library/             ← gamelib.db lives here (persists across redeploys)
     other-mcp/           ← future MCP data volumes
   other-mcp/             ← future MCP source (git submodule or separate clone)
 ```
@@ -45,12 +45,12 @@ git clone https://github.com/kevyman/gamelib-mcp ~/mcps
 
 ```bash
 cd ~/mcps
-mkdir -p data/steam
+mkdir -p data/library
 nano .env
 ```
 
 ```
-DATABASE_URL=file:/data/steam.db
+DATABASE_URL=file:/data/gamelib.db
 STEAM_API_KEY=your-key-from-steamcommunity.com/dev/apikey
 STEAM_ID=your-64bit-steamid
 MCP_AUTH_TOKEN=<generate with: openssl rand -hex 32>
@@ -67,7 +67,7 @@ Point your subdomain to the server IP. Caddy handles TLS automatically.
 #### 5. Update the Caddyfile
 
 ```
-steammcp.johnwilkos.com {
+gamelibmcp.johnwilkos.com {
     reverse_proxy app:8000
 }
 ```
@@ -192,7 +192,7 @@ If the session token expires, re-run `nxapi nso auth` and update `.env`, then re
 ### Verify
 
 ```bash
-curl https://steammcp.johnwilkos.com/health
+curl https://gamelibmcp.johnwilkos.com/health
 # {"status": "ok", "library_synced_at": "..."}
 ```
 
@@ -205,7 +205,7 @@ In your Claude MCP config:
 {
   "mcpServers": {
     "steam": {
-      "url": "https://steammcp.johnwilkos.com/sse",
+      "url": "https://gamelibmcp.johnwilkos.com/sse",
       "headers": {
         "Authorization": "Bearer <YOUR_MCP_AUTH_TOKEN>"
       }

@@ -6,7 +6,7 @@ This repo's checked-in [docker-compose.yml](/home/john/code/gamelib-mcp/docker-c
 
 ```bash
 cp .env.local.example .env
-mkdir -p data/steam data/legendary data/lgogdownloader
+mkdir -p data/library data/legendary data/lgogdownloader
 ```
 
 Then edit `.env` and set at least:
@@ -46,6 +46,23 @@ If `MCP_AUTH_TOKEN` is set:
 
 ```bash
 curl -i -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8000/sse
+```
+
+## Connect with Inspector CLI
+
+The local MCP endpoint is [http://127.0.0.1:8000/sse](/home/john/code/gamelib-mcp/LOCAL_DOCKER.md).
+
+Use the repo wrapper:
+
+```bash
+./scripts/mcp-local-inspector --method tools/list
+./scripts/mcp-local-inspector --method tools/call --tool-name search_games --tool-arg query=halo
+```
+
+If auth is enabled:
+
+```bash
+MCP_AUTH_TOKEN=YOUR_TOKEN ./scripts/mcp-local-inspector --method tools/list
 ```
 
 ## Logs and teardown

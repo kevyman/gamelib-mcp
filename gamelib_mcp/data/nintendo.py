@@ -32,6 +32,7 @@ from gamelib_mcp.data.db import (
     upsert_game_platform_identifier,
 )
 from gamelib_mcp.data.igdb import resolve_and_link_game, PLATFORM_TO_IGDB
+from gamelib_mcp.data.title_normalization import prepare_catalog_title
 
 logger = logging.getLogger(__name__)
 
@@ -169,14 +170,25 @@ async def fetch_nintendo_play_history() -> list[dict]:
 
 def _load_vgcs_cookies() -> dict[str, str] | None:
     """Load Nintendo session cookies from NINTENDO_COOKIES_FILE."""
-    path = os.getenv("NINTENDO_COOKIES_FILE", "data/nintendo_cookies.json")
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except FileNotFoundError:
-        return None
-    except Exception as exc:
-        logger.warning("Failed to load Nintendo cookies from %s: %s", path, exc)
+    configured_path = os.getenv("NINTENDO_COOKIES_FILE", "data/nintendo_cookies.json")
+    candidate_paths = [configured_path]
+    fallback_path = "data/nintendo_cookies.json"
+    if configured_path != fallback_path:
+        candidate_paths.append(fallback_path)
+
+    raw = None
+    for path in candidate_paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            break
+        except FileNotFoundError:
+            continue
+        except Exception as exc:
+            logger.warning("Failed to load Nintendo cookies from %s: %s", path, exc)
+            return None
+
+    if raw is None:
         return None
 
     # Accept both {name: value} dict and Cookie Editor array [{name, value, ...}]
@@ -365,7 +377,7 @@ async def sync_nintendo() -> dict:
     candidates = await load_fuzzy_candidates()
 
     for entry in entries:
-        name = entry["name"]
+        name = prepare_catalog_title(entry["name"])
         if not name:
             skipped += 1
             continue

@@ -5,26 +5,257 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from weakref import WeakKeyDictionary
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 
 load_dotenv()
 
+from .tools.admin import refresh_library as _admin_refresh_library
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "")
+_LIBRARY_REFRESH_TASK: asyncio.Task | None = None
+_LIBRARY_REFRESH_LOCK: asyncio.Lock | None = None
+_PERIODIC_REFRESH_TASK: asyncio.Task | None = None
+_PERIODIC_REFRESH_LOCK: asyncio.Lock | None = None
+_ENRICHMENT_TASK: asyncio.Task | None = None
+_ENRICHMENT_LOCK: asyncio.Lock | None = None
+_ENRICHMENT_RERUN_REQUESTED = False
+_LIBRARY_REFRESH_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
+_PERIODIC_REFRESH_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
+_ENRICHMENT_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
+
+
+def _get_library_refresh_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _LIBRARY_REFRESH_LOCKS.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _LIBRARY_REFRESH_LOCKS[loop] = lock
+    return lock
+
+
+def _get_periodic_refresh_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _PERIODIC_REFRESH_LOCKS.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _PERIODIC_REFRESH_LOCKS[loop] = lock
+    return lock
+
+
+def _get_enrichment_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _ENRICHMENT_LOCKS.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _ENRICHMENT_LOCKS[loop] = lock
+    return lock
+
+
+def _clear_library_refresh_task(task: asyncio.Task) -> None:
+    global _LIBRARY_REFRESH_TASK
+    if _LIBRARY_REFRESH_TASK is task:
+        _LIBRARY_REFRESH_TASK = None
+
+
+def _clear_periodic_refresh_task(task: asyncio.Task) -> None:
+    global _PERIODIC_REFRESH_TASK
+    if _PERIODIC_REFRESH_TASK is task:
+        _PERIODIC_REFRESH_TASK = None
+
+
+def _clear_enrichment_task(task: asyncio.Task) -> None:
+    global _ENRICHMENT_TASK
+    if _ENRICHMENT_TASK is task:
+        _ENRICHMENT_TASK = None
+
+
+async def _run_background_enrich() -> None:
+    from .data.enrich_bg import background_enrich
+
+    await background_enrich()
+
+
+async def _schedule_background_enrich() -> asyncio.Task:
+    global _ENRICHMENT_TASK
+    global _ENRICHMENT_RERUN_REQUESTED
+
+    async with _get_enrichment_lock():
+        if _ENRICHMENT_TASK is not None and not _ENRICHMENT_TASK.done():
+            _ENRICHMENT_RERUN_REQUESTED = True
+            return _ENRICHMENT_TASK
+
+        _ENRICHMENT_RERUN_REQUESTED = False
+        _ENRICHMENT_TASK = asyncio.create_task(_run_background_enrich())
+        _ENRICHMENT_TASK.add_done_callback(_clear_enrichment_task)
+        return _ENRICHMENT_TASK
+
+
+async def _drain_background_enrich_reruns() -> None:
+    global _ENRICHMENT_RERUN_REQUESTED
+
+    while True:
+        task = await _schedule_background_enrich()
+        should_exit = False
+        try:
+            await task
+        finally:
+            async with _get_enrichment_lock():
+                if not _ENRICHMENT_RERUN_REQUESTED:
+                    should_exit = True
+                else:
+                    _ENRICHMENT_RERUN_REQUESTED = False
+        if should_exit:
+            return
+
+
+def _library_refresh_interval_seconds() -> float | None:
+    raw_value = os.getenv("LIBRARY_REFRESH_INTERVAL_HOURS", "24").strip()
+    if not raw_value:
+        return 24 * 3600
+
+    try:
+        hours = float(raw_value)
+    except ValueError:
+        logger.warning(
+            "Invalid LIBRARY_REFRESH_INTERVAL_HOURS=%r; defaulting to 24 hours",
+            raw_value,
+        )
+        return 24 * 3600
+
+    if hours <= 0:
+        logger.info("Periodic library refresh disabled via LIBRARY_REFRESH_INTERVAL_HOURS=%s", raw_value)
+        return None
+
+    return hours * 3600
+
+
+def _summarize_refresh_result(result: object) -> str | None:
+    if not isinstance(result, dict):
+        return None
+
+    errors: list[str] = []
+    for platform, payload in result.items():
+        if not isinstance(payload, dict):
+            continue
+        error = payload.get("error")
+        if error:
+            errors.append(f"{platform}: {error}")
+
+    return "; ".join(errors) if errors else None
+
+
+async def _run_startup_refresh() -> dict:
+    from .data.db import set_meta_many
+
+    started_at = datetime.now(timezone.utc).isoformat()
+    await set_meta_many(
+        {
+            "library_sync_status": "in_progress",
+            "library_sync_started_at": started_at,
+            "library_sync_finished_at": None,
+            "library_sync_error": None,
+        }
+    )
+
+    final_error: str | None = None
+    cancelled = False
+    refresh_result: dict | None = None
+    try:
+        refresh_result = await _admin_refresh_library()
+        final_error = _summarize_refresh_result(refresh_result)
+        if final_error:
+            logger.warning("Startup library refresh completed with partial errors: %s", final_error)
+    except asyncio.CancelledError:
+        cancelled = True
+        final_error = "cancelled"
+        raise
+    except Exception as exc:
+        logger.exception("Startup library refresh failed")
+        final_error = str(exc)
+    finally:
+        finished_at = datetime.now(timezone.utc).isoformat()
+        await asyncio.shield(
+            set_meta_many(
+                {
+                    "library_sync_status": "idle",
+                    "library_sync_finished_at": finished_at,
+                    "library_sync_error": final_error,
+                }
+            )
+        )
+        if cancelled:
+            logger.info("Startup library refresh cancelled")
+
+    if refresh_result is not None:
+        await _drain_background_enrich_reruns()
+
+    return refresh_result or {}
+
+
+async def _ensure_startup_refresh() -> asyncio.Task:
+    global _LIBRARY_REFRESH_TASK
+
+    async with _get_library_refresh_lock():
+        if _LIBRARY_REFRESH_TASK is not None and not _LIBRARY_REFRESH_TASK.done():
+            return _LIBRARY_REFRESH_TASK
+
+        _LIBRARY_REFRESH_TASK = asyncio.create_task(_run_startup_refresh())
+        _LIBRARY_REFRESH_TASK.add_done_callback(_clear_library_refresh_task)
+        return _LIBRARY_REFRESH_TASK
+
+
+async def _run_periodic_refresh_loop(interval_seconds: float) -> None:
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await _ensure_startup_refresh()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Periodic library refresh scheduling failed")
+
+
+async def _ensure_periodic_refresh_loop(interval_seconds: float | None = None) -> asyncio.Task | None:
+    global _PERIODIC_REFRESH_TASK
+
+    resolved_interval = interval_seconds if interval_seconds is not None else _library_refresh_interval_seconds()
+    if resolved_interval is None:
+        return None
+
+    async with _get_periodic_refresh_lock():
+        if _PERIODIC_REFRESH_TASK is not None and not _PERIODIC_REFRESH_TASK.done():
+            return _PERIODIC_REFRESH_TASK
+
+        _PERIODIC_REFRESH_TASK = asyncio.create_task(_run_periodic_refresh_loop(resolved_interval))
+        _PERIODIC_REFRESH_TASK.add_done_callback(_clear_periodic_refresh_task)
+        return _PERIODIC_REFRESH_TASK
+
+
+async def _cancel_task(task: asyncio.Task | None) -> None:
+    if task is None or task.done():
+        return
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 @asynccontextmanager
 async def lifespan(app):
     """Startup: init DB, sync library if stale, kick off HLTB pre-warm."""
-    from .data.db import init_db, get_meta, set_meta
-    from .data.steam_xml import fetch_library, STALE_HOURS
-    from .data.enrich_bg import background_enrich
+    from .data.db import clear_all_enrichment_claims, init_db, get_meta, set_meta
+    from .data.steam_xml import STALE_HOURS
 
     await init_db()
+    await clear_all_enrichment_claims()
     logger.info("Database initialized")
 
     # Seed hardware preference from env if not yet set
@@ -46,29 +277,31 @@ async def lifespan(app):
             pass
 
     if needs_refresh:
-        logger.info("Library stale or missing — fetching Steam XML feed...")
-        try:
-            result = await fetch_library()
-            logger.info("Library sync: %s", result)
-        except Exception as e:
-            logger.error("Library sync failed: %s", e)
+        logger.info("Library stale or missing — scheduling background refresh...")
+        await _ensure_startup_refresh()
+        await _schedule_background_enrich()
+    else:
+        # Background enrichment: store/provider metadata, ratings, and discovery signals
+        await _schedule_background_enrich()
 
-    # Background enrichment: Steam Store, HLTB, ProtonDB (non-blocking)
-    asyncio.create_task(background_enrich())
+    await _ensure_periodic_refresh_loop()
 
     yield
 
+    await _cancel_task(_PERIODIC_REFRESH_TASK)
+    await _cancel_task(_LIBRARY_REFRESH_TASK)
+    await _cancel_task(_ENRICHMENT_TASK)
     logger.info("Shutdown")
 
 
-_display_name = os.getenv("STEAM_PROFILE_ID") or "the configured user"
+_display_name = os.getenv("STEAM_PROFILE_ID") or os.getenv("BACKLOGGD_USER") or "the configured user"
 
 mcp = FastMCP(
-    name="steam-library",
+    name="game-library",
     instructions=(
-        f"You have access to {_display_name}'s game library across Steam and any synced stores. "
+        f"You have access to {_display_name}'s game library across synced platforms and stores. "
         "Use the tools to search, filter, and get details about games and platforms. "
-        "Ratings are synced from Backloggd and Steam reviews (read-only). "
+        "Ratings are synced from connected sources such as Backloggd and Steam reviews (read-only). "
         "Call sync_ratings to refresh ratings and taste profile data."
     ),
     lifespan=lifespan,
@@ -79,7 +312,7 @@ mcp = FastMCP(
 
 @mcp.tool()
 async def search_games(query: str, limit: int = 20, platform: str | None = None) -> list[dict]:
-    """Find games in the library by name substring. platform: steam|epic|gog|nintendo|ps5"""
+    """Find games in the library by name substring. platform: steam|epic|gog|nintendo|switch2|ps5"""
     from .tools.library import search_games as _search
     return await _search(query, limit, platform)
 
@@ -111,7 +344,7 @@ async def get_library_stats(
     filter: all | unplayed | played | recent | farmed
     sort_by: playtime | name | metacritic | hltb
     protondb_tier: native | platinum | gold | silver | bronze | borked
-    platform: steam | epic | gog | nintendo | ps5 (optional — filter to games on that platform)
+    platform: steam | epic | gog | nintendo | switch2 | ps5 (optional — filter to games on that platform)
     """
     from .tools.library import get_library_stats as _stats
     return await _stats(filter, max_hltb_hours, min_metacritic, protondb_tier, sort_by, limit, platform)
@@ -126,7 +359,7 @@ async def get_game_detail(
     """
     Get full details for a single game, including platform ownership, HLTB,
     Metacritic, ProtonDB, and any personal ratings. Triggers lazy data fetches.
-    Provide game_id, name (partial match), or Steam appid.
+    Provide game_id, name (partial match), or Steam appid when available.
     """
     from .tools.detail import get_game_detail as _detail
     return await _detail(name, appid, game_id)
@@ -217,7 +450,7 @@ async def get_backlog_stats() -> dict:
 async def refresh_library(platforms: list[str] | None = None) -> dict:
     """
     Re-sync game library. platforms: list like ['steam','epic'] or omit for all configured.
-    Valid platforms: steam, epic, gog, nintendo, ps5
+    Valid platforms: steam, epic, gog, nintendo, switch2, ps5
     """
     from .tools.admin import refresh_library as _refresh
     return await _refresh(platforms)
@@ -260,7 +493,7 @@ async def get_platform_breakdown() -> dict:
 async def sync_platform(platform: str) -> dict:
     """
     Sync a single platform on demand.
-    platform: steam | epic | gog | nintendo | ps5
+    platform: steam | epic | gog | nintendo | switch | switch2 | ps5
     """
     from .tools.platforms import sync_platform as _sync
     return await _sync(platform)
@@ -289,7 +522,7 @@ async def add_game_to_platform(
     (e.g. physical copies, unreported digital titles, itch.io purchases).
 
     name: Game name (matches existing game by exact name or creates new entry)
-    platform: steam | epic | gog | nintendo | ps5 | itchio | xbox | other
+    platform: steam | epic | gog | nintendo | switch2 | ps5 | itchio | xbox | other
     identifier_type: Optional store ID type (e.g. 'steam_appid', 'gog_product_id')
     identifier_value: Optional store ID value
     playtime_minutes: Optional known playtime
