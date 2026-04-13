@@ -360,54 +360,28 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(main_module._PERIODIC_REFRESH_TASK.done())
 
     async def test_startup_clears_abandoned_hltb_claims_before_background_enrich(self) -> None:
-        tmpdir = tempfile.TemporaryDirectory()
-        db_path = Path(tmpdir.name) / "startup.sqlite"
-        db_module._DB_READY_PATH = None
+        fresh_at = datetime.now(timezone.utc).isoformat()
+        enrich_started = asyncio.Event()
+        call_order: list[str] = []
 
-        try:
-            with patch.dict(
-                os.environ,
-                {"DATABASE_URL": f"file:{db_path}"},
-                clear=False,
-            ):
-                await db_module.init_db()
-                game_id = await db_module.upsert_game(appid=None, name="Portal")
-                platform_id = await db_module.upsert_game_platform(
-                    game_id=game_id,
-                    platform="steam",
-                    playtime_minutes=120,
-                    owned=1,
-                )
-                await db_module.upsert_steam_platform_data(
-                    platform_id,
-                    store_cached_at="2026-04-07T12:00:00+00:00",
-                )
-                async with db_module.get_db() as db:
-                    await db.execute(
-                        "UPDATE games SET hltb_cached_at = 'FAILED', hltb_claimed_at = ? WHERE id = ?",
-                        (datetime.now(timezone.utc).isoformat(), game_id),
-                    )
-                    await db.commit()
+        async def fake_clear_claims() -> None:
+            call_order.append("clear_claims")
 
-                fresh_at = datetime.now(timezone.utc).isoformat()
-                with (
-                    patch("gamelib_mcp.data.db.get_meta", AsyncMock(return_value=fresh_at)),
-                    patch("gamelib_mcp.main._ensure_periodic_refresh_loop", AsyncMock(return_value=None)),
-                    patch("gamelib_mcp.main._run_background_enrich", AsyncMock()),
-                ):
-                    async with lifespan(object()):
-                        pass
+        async def fake_enrich() -> None:
+            call_order.append("background_enrich")
+            enrich_started.set()
 
-                async with db_module.get_db() as db:
-                    row = await db.execute_fetchone(
-                        "SELECT hltb_claimed_at FROM games WHERE id = ?",
-                        (game_id,),
-                    )
-        finally:
-            db_module._DB_READY_PATH = None
-            tmpdir.cleanup()
+        with (
+            patch("gamelib_mcp.data.db.init_db", AsyncMock()),
+            patch("gamelib_mcp.data.db.clear_all_enrichment_claims", AsyncMock(side_effect=fake_clear_claims)),
+            patch("gamelib_mcp.data.db.get_meta", AsyncMock(return_value=fresh_at)),
+            patch("gamelib_mcp.main._ensure_periodic_refresh_loop", AsyncMock(return_value=None)),
+            patch("gamelib_mcp.main._run_background_enrich", AsyncMock(side_effect=fake_enrich)),
+        ):
+            async with lifespan(object()):
+                await asyncio.wait_for(enrich_started.wait(), timeout=0.1)
 
-        self.assertIsNone(row["hltb_claimed_at"])
+        self.assertEqual(call_order[:2], ["clear_claims", "background_enrich"])
 
     async def test_refresh_library_parallelizes_platform_syncs_and_isolates_failures(self) -> None:
         started = {
