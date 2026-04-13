@@ -1,5 +1,6 @@
 """refresh_library, detect_farmed_games, and set_nintendo_session admin tools."""
 
+import asyncio
 import json
 import logging
 import statistics
@@ -15,33 +16,68 @@ from ..data.steam_xml import fetch_library
 logger = logging.getLogger(__name__)
 
 
-async def refresh_library(platforms: list[str] | None = None) -> dict:
+async def refresh_library(
+    platforms: list[str] | None = None,
+) -> dict:
     """
     Re-sync game library. Defaults to all configured platforms.
     platforms: optional subset, e.g. ["steam", "epic"]. If omitted, syncs all.
     """
+    platform_aliases = {"switch2": "nintendo"}
     _ALL = {"steam", "epic", "gog", "nintendo", "ps5"}
-    targets = set(platforms) if platforms else _ALL
+    requested_targets = list(platforms) if platforms else sorted(_ALL)
+    targets = {platform_aliases.get(platform, platform) for platform in requested_targets}
 
-    results: dict = {}
+    if targets == _ALL:
+        from .. import main as main_module
 
-    if "steam" in targets:
-        results["steam"] = await fetch_library()
+        startup_task = main_module._LIBRARY_REFRESH_TASK
+        current_task = asyncio.current_task()
+        if startup_task is not None and not startup_task.done() and startup_task is not current_task:
+            result = await asyncio.shield(startup_task)
+            if isinstance(result, dict):
+                return result
 
     platform_syncs = {
+        "steam":    fetch_library,
         "epic":     sync_epic,
         "gog":      sync_gog,
         "nintendo": sync_nintendo,
         "ps5":      sync_psn,
     }
 
-    for name, fn in platform_syncs.items():
-        if name not in targets:
-            continue
+    result_names = {name: name for name in targets}
+    for requested in requested_targets:
+        result_names[platform_aliases.get(requested, requested)] = requested
+
+    async def run_platform(_name: str, fn) -> dict:
+        return await fn()
+
+    selected = [(name, fn) for name, fn in platform_syncs.items() if name in targets]
+    outcomes = await asyncio.gather(
+        *(run_platform(name, fn) for name, fn in selected),
+        return_exceptions=True,
+    )
+
+    results: dict = {}
+    for (name, _), outcome in zip(selected, outcomes, strict=True):
+        result_name = result_names.get(name, name)
+        if isinstance(outcome, BaseException):
+            results[result_name] = {"error": str(outcome)}
+        else:
+            results[result_name] = outcome
+
+    steam_result = results.get("steam")
+    steam_synced = (
+        "steam" in targets
+        and isinstance(steam_result, dict)
+        and not steam_result.get("error")
+    )
+    if steam_synced:
         try:
-            results[name] = await fn()
-        except Exception as exc:
-            results[name] = {"error": str(exc)}
+            await detect_farmed_games(dry_run=False)
+        except Exception:
+            logger.exception("Farmed-game detection failed after Steam refresh")
 
     return results
 

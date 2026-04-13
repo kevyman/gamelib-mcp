@@ -118,7 +118,7 @@ async def get_library_stats(
 
     filter: all | unplayed | played | recent | farmed
     sort_by: playtime | name | metacritic | hltb
-    platform: steam | epic | gog | ps5 | switch (optional — filter to games owned on that platform)
+    platform: steam | epic | gog | ps5 | nintendo | switch2 (optional — filter to games owned on that platform)
     """
     conditions = []
     params: list = []
@@ -211,6 +211,7 @@ def _format_game(row, platforms: list[dict]) -> dict:
     return {
         "game_id": row["game_id"],
         "appid": row["steam_appid"],
+        "steam_appid": row["steam_appid"],
         "name": row["name"],
         "platforms": platforms,
         "playtime_hours": round((row["total_playtime_minutes"] or 0) / 60, 1),

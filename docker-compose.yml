@@ -8,7 +8,7 @@ services:
       EPIC_LEGENDARY_PATH: /legendary
       LGOGDOWNLOADER_CONFIG_PATH: /config/lgogdownloader
     volumes:
-      - ./data/steam:/data
+      - ./data/library:/data
       - ${EPIC_LEGENDARY_HOST_PATH:-./data/legendary}:/legendary:ro
       - ${LGOGDOWNLOADER_HOST_PATH:-./data/lgogdownloader}:/config/lgogdownloader:ro
     env_file: .env
