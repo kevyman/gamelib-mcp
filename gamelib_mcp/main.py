@@ -5,6 +5,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from weakref import WeakKeyDictionary
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
@@ -18,12 +19,42 @@ logger = logging.getLogger(__name__)
 
 MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "")
 _LIBRARY_REFRESH_TASK: asyncio.Task | None = None
-_LIBRARY_REFRESH_LOCK = asyncio.Lock()
+_LIBRARY_REFRESH_LOCK: asyncio.Lock | None = None
 _PERIODIC_REFRESH_TASK: asyncio.Task | None = None
-_PERIODIC_REFRESH_LOCK = asyncio.Lock()
+_PERIODIC_REFRESH_LOCK: asyncio.Lock | None = None
 _ENRICHMENT_TASK: asyncio.Task | None = None
-_ENRICHMENT_LOCK = asyncio.Lock()
+_ENRICHMENT_LOCK: asyncio.Lock | None = None
 _ENRICHMENT_RERUN_REQUESTED = False
+_LIBRARY_REFRESH_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
+_PERIODIC_REFRESH_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
+_ENRICHMENT_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
+
+
+def _get_library_refresh_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _LIBRARY_REFRESH_LOCKS.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _LIBRARY_REFRESH_LOCKS[loop] = lock
+    return lock
+
+
+def _get_periodic_refresh_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _PERIODIC_REFRESH_LOCKS.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _PERIODIC_REFRESH_LOCKS[loop] = lock
+    return lock
+
+
+def _get_enrichment_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _ENRICHMENT_LOCKS.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _ENRICHMENT_LOCKS[loop] = lock
+    return lock
 
 
 def _clear_library_refresh_task(task: asyncio.Task) -> None:
@@ -54,7 +85,7 @@ async def _schedule_background_enrich() -> asyncio.Task:
     global _ENRICHMENT_TASK
     global _ENRICHMENT_RERUN_REQUESTED
 
-    async with _ENRICHMENT_LOCK:
+    async with _get_enrichment_lock():
         if _ENRICHMENT_TASK is not None and not _ENRICHMENT_TASK.done():
             _ENRICHMENT_RERUN_REQUESTED = True
             return _ENRICHMENT_TASK
@@ -74,7 +105,7 @@ async def _drain_background_enrich_reruns() -> None:
         try:
             await task
         finally:
-            async with _ENRICHMENT_LOCK:
+            async with _get_enrichment_lock():
                 if not _ENRICHMENT_RERUN_REQUESTED:
                     should_exit = True
                 else:
@@ -170,7 +201,7 @@ async def _run_startup_refresh() -> dict:
 async def _ensure_startup_refresh() -> asyncio.Task:
     global _LIBRARY_REFRESH_TASK
 
-    async with _LIBRARY_REFRESH_LOCK:
+    async with _get_library_refresh_lock():
         if _LIBRARY_REFRESH_TASK is not None and not _LIBRARY_REFRESH_TASK.done():
             return _LIBRARY_REFRESH_TASK
 
@@ -197,7 +228,7 @@ async def _ensure_periodic_refresh_loop(interval_seconds: float | None = None) -
     if resolved_interval is None:
         return None
 
-    async with _PERIODIC_REFRESH_LOCK:
+    async with _get_periodic_refresh_lock():
         if _PERIODIC_REFRESH_TASK is not None and not _PERIODIC_REFRESH_TASK.done():
             return _PERIODIC_REFRESH_TASK
 

@@ -198,6 +198,53 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.calls, 2)
         sleep_mock.assert_awaited()
 
+    async def test_retry_after_blocks_other_requests_at_shared_gate(self) -> None:
+        gate = igdb._IGDBRequestGate(
+            target_interval=0.0,
+            max_requests_per_second=100,
+            max_in_flight=1,
+        )
+        post_started = asyncio.Event()
+        allow_retry = asyncio.Event()
+        post_calls = 0
+
+        class _SharedClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, *_args, **_kwargs):
+                nonlocal post_calls
+                post_calls += 1
+                if post_calls == 1:
+                    return _DummyResponse(429, [], headers={"Retry-After": "1"})
+                post_started.set()
+                return _DummyResponse(200, [{"id": post_calls}])
+
+        async def block_retry(delay_seconds: float) -> None:
+            self.assertEqual(delay_seconds, 1.0)
+            await allow_retry.wait()
+
+        with (
+            patch("gamelib_mcp.data.igdb._IGDB_REQUEST_GATE", gate),
+            patch("gamelib_mcp.data.igdb.httpx.AsyncClient", return_value=_SharedClient()),
+            patch("gamelib_mcp.data.igdb._sleep_before_retry", new=block_retry),
+        ):
+            first = asyncio.create_task(igdb._post_igdb_games("fields id;", headers={}))
+            await asyncio.sleep(0)
+            second = asyncio.create_task(igdb._post_igdb_games("fields id;", headers={}))
+            await asyncio.sleep(0)
+
+            self.assertFalse(post_started.is_set())
+            self.assertEqual(post_calls, 1)
+
+            allow_retry.set()
+            first_result, second_result = await asyncio.gather(first, second)
+
+        self.assertEqual(sorted(result[0]["id"] for result in (first_result, second_result)), [2, 3])
+
     async def test_search_game_uses_retry_after_before_backoff_jitter(self) -> None:
         client = _DummyAsyncClient(
             [

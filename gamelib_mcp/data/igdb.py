@@ -148,6 +148,14 @@ class _IGDBRequestGate:
             state.semaphore.release()
             raise
 
+    async def backoff(self, delay_seconds: float) -> None:
+        if delay_seconds <= 0:
+            return
+
+        state = self._get_loop_state()
+        async with state.lock:
+            state.next_slot_at = max(state.next_slot_at, time.monotonic() + delay_seconds)
+
     def release(self) -> None:
         lease_stack = self._lease_stack.get()
         if not lease_stack:
@@ -327,7 +335,9 @@ async def _post_igdb_games(query: str, headers: dict[str, str]) -> list[dict]:
                 raise
 
             response = exc.response if isinstance(exc, httpx.HTTPStatusError) else None
-            await _sleep_before_retry(_retry_delay_seconds(attempt, response))
+            delay_seconds = _retry_delay_seconds(attempt, response)
+            await _IGDB_REQUEST_GATE.backoff(delay_seconds)
+            await _sleep_before_retry(delay_seconds)
 
     if last_error is not None:
         raise last_error

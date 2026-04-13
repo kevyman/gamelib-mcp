@@ -60,6 +60,13 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
 
         mock_ensure_refresh.assert_awaited_once()
 
+    def test_main_defers_lock_creation_until_runtime(self) -> None:
+        import gamelib_mcp.main as main_module
+
+        self.assertIsNone(main_module._LIBRARY_REFRESH_LOCK)
+        self.assertIsNone(main_module._PERIODIC_REFRESH_LOCK)
+        self.assertIsNone(main_module._ENRICHMENT_LOCK)
+
     async def test_run_startup_refresh_records_success_state(self) -> None:
         refresh_result = {"steam": {"games_upserted": 3, "synced_at": "2026-04-07T00:00:00+00:00"}}
 
@@ -509,6 +516,19 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             result = await admin_tools.refresh_library(["epic"])
 
         self.assertEqual(result, {"epic": {"platform": "epic", "synced": True}})
+        mock_detect.assert_not_awaited()
+
+    async def test_refresh_library_supports_switch2_alias(self) -> None:
+        switch_result = {"platform": "switch2", "synced": True}
+
+        with (
+            patch("gamelib_mcp.tools.admin.sync_nintendo", AsyncMock(return_value=switch_result)) as mock_sync,
+            patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock()) as mock_detect,
+        ):
+            result = await admin_tools.refresh_library(["switch2"])
+
+        self.assertEqual(result, {"switch2": switch_result})
+        mock_sync.assert_awaited_once()
         mock_detect.assert_not_awaited()
 
     async def test_refresh_library_ignores_farm_detection_failures(self) -> None:

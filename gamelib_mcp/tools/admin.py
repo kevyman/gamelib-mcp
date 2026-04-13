@@ -23,8 +23,10 @@ async def refresh_library(
     Re-sync game library. Defaults to all configured platforms.
     platforms: optional subset, e.g. ["steam", "epic"]. If omitted, syncs all.
     """
+    platform_aliases = {"switch2": "nintendo"}
     _ALL = {"steam", "epic", "gog", "nintendo", "ps5"}
-    targets = set(platforms) if platforms else _ALL
+    requested_targets = list(platforms) if platforms else sorted(_ALL)
+    targets = {platform_aliases.get(platform, platform) for platform in requested_targets}
 
     if targets == _ALL:
         from .. import main as main_module
@@ -44,6 +46,10 @@ async def refresh_library(
         "ps5":      sync_psn,
     }
 
+    result_names = {name: name for name in targets}
+    for requested in requested_targets:
+        result_names[platform_aliases.get(requested, requested)] = requested
+
     async def run_platform(_name: str, fn) -> dict:
         return await fn()
 
@@ -55,10 +61,11 @@ async def refresh_library(
 
     results: dict = {}
     for (name, _), outcome in zip(selected, outcomes, strict=True):
+        result_name = result_names.get(name, name)
         if isinstance(outcome, BaseException):
-            results[name] = {"error": str(outcome)}
+            results[result_name] = {"error": str(outcome)}
         else:
-            results[name] = outcome
+            results[result_name] = outcome
 
     steam_result = results.get("steam")
     steam_synced = (
