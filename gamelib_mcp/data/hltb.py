@@ -9,6 +9,7 @@ from howlongtobeatpy import HowLongToBeat
 from .db import get_db
 
 HLTB_CACHE_DAYS = 30
+HLTB_NOT_FOUND = "NOT_FOUND"
 _semaphore = asyncio.Semaphore(3)
 logger = logging.getLogger(__name__)
 
@@ -26,8 +27,8 @@ async def get_hltb(game_id: int, name: str) -> dict | None:
 
     if row:
         cached_at = row["hltb_cached_at"]
-        if cached_at == "FAILED" or _is_fresh(cached_at, HLTB_CACHE_DAYS):
-            if cached_at == "FAILED":
+        if cached_at == HLTB_NOT_FOUND or _is_fresh(cached_at, HLTB_CACHE_DAYS):
+            if cached_at == HLTB_NOT_FOUND:
                 return None
             return {
                 "hltb_main": row["hltb_main"],
@@ -44,8 +45,12 @@ async def _fetch_and_cache(game_id: int, name: str) -> dict | None:
             results = await HowLongToBeat().async_search(name)
             now = datetime.now(timezone.utc).isoformat()
 
+            if results is None:
+                await _cache_result(game_id, None, None, None, None)
+                return None
+
             if not results:
-                await _cache_result(game_id, None, None, None, "FAILED")
+                await _cache_result(game_id, None, None, None, HLTB_NOT_FOUND)
                 return None
 
             # Pick closest match by similarity score
@@ -58,7 +63,7 @@ async def _fetch_and_cache(game_id: int, name: str) -> dict | None:
             return {"hltb_main": main, "hltb_extra": extra, "hltb_complete": comp}
         except Exception as e:
             logger.warning("HLTB fetch failed for %s (%d): %s", name, game_id, e)
-            await _cache_result(game_id, None, None, None, "FAILED")
+            await _cache_result(game_id, None, None, None, None)
             return None
 
 
@@ -67,7 +72,7 @@ async def _cache_result(
     main: float | None,
     extra: float | None,
     comp: float | None,
-    cached_at: str,
+    cached_at: str | None,
 ) -> None:
     async with get_db() as db:
         await db.execute(

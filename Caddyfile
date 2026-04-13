@@ -1,4 +1,4 @@
-steam.yourname.duckdns.org {
+gamelib.yourname.duckdns.org {
     reverse_proxy app:8000
 }
 

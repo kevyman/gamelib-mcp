@@ -1,263 +1,352 @@
-"""Background enrichment for Steam-derived metadata."""
+"""Concurrent background enrichment with claim-aware worker families."""
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 
-from .db import STEAM_APP_ID, get_db, upsert_game_platform_enrichment
-from .steam_store import enrich_game
+import httpx
+
+from . import igdb
+from .db import (
+    STEAM_APP_ID,
+    _claim_cutoff_iso,
+    claim_game_ids_for_hltb,
+    claim_game_platform_ids_for_metacritic,
+    claim_game_platform_ids_for_opencritic,
+    claim_steam_platform_ids_for_protondb,
+    claim_steam_platform_ids_for_steamspy,
+    claim_steam_platform_ids_for_store,
+    clear_claim,
+    get_db,
+    load_hltb_batch_rows,
+    load_metacritic_batch_rows,
+    load_opencritic_batch_rows,
+    load_steam_platform_batch_rows,
+    load_store_batch_rows,
+    upsert_game_platform_enrichment,
+)
 from .hltb import get_hltb
-from .protondb import get_protondb
-from .steamspy import enrich_steamspy
-from .opencritic import enrich_opencritic
 from .metacritic import enrich_metacritic
+from .opencritic import enrich_opencritic
+from .protondb import get_protondb
+from .steam_store import enrich_game
+from .steamspy import enrich_steamspy
 
 logger = logging.getLogger(__name__)
 
-# Concurrency / rate limits
-_STORE_DELAY = 1.5      # seconds between Steam Store API calls (rate-limited)
-_HLTB_DELAY = 1.0       # seconds between HLTB batches
-_PROTON_DELAY = 0.5     # ProtonDB is generous
-_STEAMSPY_DELAY = 1.0   # SteamSpy rate limit
-_OPENCRITIC_DELAY = 1.0  # seconds; public API, no key required
-_METACRITIC_DELAY = 2.0  # scraping — be polite
+_STORE_CONCURRENCY = 4
+_STORE_START_INTERVAL = 0.35
+_HLTB_DELAY = 1.0
+_PROTON_DELAY = 0.5
+_STEAMSPY_DELAY = 1.0
+_OPENCRITIC_DELAY = 1.0
+_METACRITIC_DELAY = 2.0
+_IGDB_WORKER_CONCURRENCY = 2
 _BATCH_SIZE = 3
+_IDLE_POLLS = 3
+_IDLE_SLEEP_SECONDS = 1.0
+_SUPERVISOR_PROGRESS: ContextVar["_ProgressTracker | None"] = ContextVar(
+    "enrich_supervisor_progress",
+    default=None,
+)
+_OPENCRITIC_SUCCESS_STATUSES = {
+    "matched",
+    "cached",
+    "no_match",
+    "ambiguous",
+    "parse_failed",
+    "http_error",
+}
+
+
+class _RequestStartGate:
+    """Serialize request starts to avoid bursty launches while allowing overlap."""
+
+    def __init__(self, interval_seconds: float) -> None:
+        self._interval_seconds = interval_seconds
+        self._lock = asyncio.Lock()
+        self._next_allowed = 0.0
+
+    async def wait_turn(self) -> None:
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            if now < self._next_allowed:
+                await asyncio.sleep(self._next_allowed - now)
+                now = loop.time()
+            self._next_allowed = now + self._interval_seconds
+
+
+class _ProgressTracker:
+    def __init__(self) -> None:
+        self._epoch = 0
+
+    @property
+    def epoch(self) -> int:
+        return self._epoch
+
+    def record_progress(self) -> int:
+        self._epoch += 1
+        return self._epoch
 
 
 async def background_enrich() -> None:
-    """Run all enrichment phases: store, HLTB, ProtonDB, SteamSpy, OpenCritic, Metacritic."""
+    """Run enrichment families concurrently until all queues go quiescent."""
     logger.info("Background enrichment started")
+    token = _SUPERVISOR_PROGRESS.set(_ProgressTracker())
+    try:
+        jobs = [
+            ("store", _run_store_workers()),
+            ("hltb", _run_hltb_workers()),
+            ("protondb", _run_protondb_workers()),
+            ("steamspy", _run_steamspy_workers()),
+            ("opencritic", _run_opencritic_workers()),
+            ("metacritic", _run_metacritic_workers()),
+            ("igdb", _run_igdb_workers()),
+        ]
 
-    # Phase 1: Steam Store (tags, genres, metacritic, review score)
-    store_count = await _enrich_store()
-    logger.info("Background enrichment — store phase done: %d games enriched", store_count)
+        results = await asyncio.gather(*(job for _, job in jobs), return_exceptions=True)
+        for (family, _), result in zip(jobs, results, strict=True):
+            if isinstance(result, Exception):
+                logger.error("Background enrichment family failed: %s: %s", family, result)
+        logger.info("Background enrichment complete: %r", results)
+    finally:
+        _SUPERVISOR_PROGRESS.reset(token)
 
-    # Phase 2: HLTB for games that now have store data but no HLTB
-    hltb_count = await _enrich_hltb()
-    logger.info("Background enrichment — HLTB phase done: %d games enriched", hltb_count)
 
-    # Phase 3: ProtonDB for games that still have no tier
-    proton_count = await _enrich_protondb()
-    logger.info("Background enrichment — ProtonDB phase done: %d games enriched", proton_count)
+async def _run_until_quiescent(run_batch: Callable[[], Awaitable[int]]) -> int:
+    idle_polls = 0
+    total = 0
+    tracker = _SUPERVISOR_PROGRESS.get()
+    observed_epoch = tracker.epoch if tracker is not None else 0
+    while idle_polls < _IDLE_POLLS:
+        processed = await run_batch()
+        total += processed
+        if processed:
+            idle_polls = 0
+            if tracker is not None:
+                observed_epoch = tracker.record_progress()
+            continue
+        idle_polls += 1
+        if idle_polls >= _IDLE_POLLS and tracker is not None and tracker.epoch != observed_epoch:
+            observed_epoch = tracker.epoch
+            idle_polls = 0
+            continue
+        await asyncio.sleep(_IDLE_SLEEP_SECONDS)
+    return total
 
-    # Phase 4: SteamSpy user-curated tags
-    steamspy_count = await _enrich_steamspy()
-    logger.info("Background enrichment — SteamSpy phase done: %d games enriched", steamspy_count)
 
-    opencritic_count = await _enrich_opencritic()
-    logger.info("Background enrichment — OpenCritic phase done: %d rows enriched", opencritic_count)
+async def _run_store_workers() -> int:
+    return await _run_until_quiescent(_run_store_batch)
 
-    metacritic_count = await _enrich_metacritic()
-    logger.info("Background enrichment — Metacritic phase done: %d rows enriched", metacritic_count)
 
-    logger.info(
-        "Background enrichment complete — store=%d hltb=%d protondb=%d steamspy=%d opencritic=%d metacritic=%d",
-        store_count, hltb_count, proton_count, steamspy_count, opencritic_count, metacritic_count,
+async def _run_hltb_workers() -> int:
+    total = await _run_until_quiescent(_run_hltb_batch)
+    logger.info("HLTB worker complete: processed %d rows", total)
+    return total
+
+
+async def _run_protondb_workers() -> int:
+    return await _run_until_quiescent(_run_protondb_batch)
+
+
+async def _run_steamspy_workers() -> int:
+    return await _run_until_quiescent(_run_steamspy_batch)
+
+
+async def _run_opencritic_workers() -> int:
+    return await _run_until_quiescent(_run_opencritic_batch)
+
+
+async def _run_metacritic_workers() -> int:
+    return await _run_until_quiescent(_run_metacritic_batch)
+
+
+async def _run_igdb_workers() -> int:
+    return await _run_until_quiescent(_run_igdb_batch)
+
+
+async def _run_store_batch() -> int:
+    claimed_ids = await claim_steam_platform_ids_for_store(limit=50, stale_before=_claim_cutoff_iso())
+    rows = await load_store_batch_rows(claimed_ids)
+    if not rows:
+        return 0
+
+    semaphore = asyncio.Semaphore(_STORE_CONCURRENCY)
+    start_gate = _RequestStartGate(_STORE_START_INTERVAL)
+
+    async with httpx.AsyncClient() as client:
+        async def enrich_one(row) -> int:
+            async with semaphore:
+                try:
+                    await start_gate.wait_turn()
+                    await enrich_game(row["appid"], client=client)
+                except Exception as exc:
+                    logger.debug("Store enrich failed for %s: %s", row["name"], exc)
+                finally:
+                    await _finalize_store_claim(row["game_platform_id"])
+                return 1
+
+        return sum(await asyncio.gather(*(enrich_one(row) for row in rows)))
+
+
+async def _run_hltb_batch() -> int:
+    claimed_ids = await claim_game_ids_for_hltb(limit=25, stale_before=_claim_cutoff_iso())
+    rows = await load_hltb_batch_rows(claimed_ids)
+    if not rows:
+        return 0
+
+    logger.info("HLTB worker claimed %d rows", len(rows))
+
+    total = 0
+    for index in range(0, len(rows), _BATCH_SIZE):
+        batch = rows[index : index + _BATCH_SIZE]
+
+        async def run_one(row) -> int:
+            try:
+                await get_hltb(row["game_id"], row["name"])
+            except Exception as exc:
+                logger.debug("HLTB enrich failed for %s: %s", row["name"], exc)
+            finally:
+                await clear_claim("games", "hltb_claimed_at", row["game_id"])
+            return 1
+
+        total += sum(await asyncio.gather(*(run_one(row) for row in batch)))
+        await asyncio.sleep(_HLTB_DELAY)
+    return total
+
+
+async def _run_protondb_batch() -> int:
+    claimed_ids = await claim_steam_platform_ids_for_protondb(limit=25, stale_before=_claim_cutoff_iso())
+    rows = await load_steam_platform_batch_rows(claimed_ids)
+    if not rows:
+        return 0
+
+    processed = 0
+    for row in rows:
+        try:
+            await get_protondb(row["appid"])
+        except Exception as exc:
+            logger.debug("ProtonDB enrich failed for %s: %s", row["name"], exc)
+        finally:
+            await _finalize_steam_claim(row["game_platform_id"], "protondb_claimed_at")
+        processed += 1
+        await asyncio.sleep(_PROTON_DELAY)
+    return processed
+
+
+async def _run_steamspy_batch() -> int:
+    claimed_ids = await claim_steam_platform_ids_for_steamspy(limit=25, stale_before=_claim_cutoff_iso())
+    rows = await load_steam_platform_batch_rows(claimed_ids)
+    if not rows:
+        return 0
+
+    processed = 0
+    for row in rows:
+        try:
+            await enrich_steamspy(row["appid"])
+        except Exception as exc:
+            logger.debug("SteamSpy enrich failed for %s: %s", row["name"], exc)
+        finally:
+            await _finalize_steam_claim(row["game_platform_id"], "steamspy_claimed_at")
+        processed += 1
+        await asyncio.sleep(_STEAMSPY_DELAY)
+    return processed
+
+
+async def _run_opencritic_batch() -> int:
+    claimed_ids = await claim_game_platform_ids_for_opencritic(limit=25, stale_before=_claim_cutoff_iso())
+    rows = await load_opencritic_batch_rows(claimed_ids)
+    if not rows:
+        return 0
+
+    processed = 0
+    for row in rows:
+        success = True
+        try:
+            result = await enrich_opencritic(row["game_platform_id"], row["name"])
+            success = result.get("status") in _OPENCRITIC_SUCCESS_STATUSES
+        except Exception as exc:
+            success = False
+            logger.debug("OpenCritic enrich failed for %s: %s", row["name"], exc)
+        finally:
+            await _finalize_platform_enrichment_claim(
+                row["game_platform_id"],
+                "opencritic_claimed_at",
+                "opencritic_cached_at",
+                success,
+            )
+        processed += 1
+        await asyncio.sleep(_OPENCRITIC_DELAY)
+    return processed
+
+
+async def _run_metacritic_batch() -> int:
+    claimed_ids = await claim_game_platform_ids_for_metacritic(limit=25, stale_before=_claim_cutoff_iso())
+    rows = await load_metacritic_batch_rows(claimed_ids)
+    if not rows:
+        return 0
+
+    processed = 0
+    for row in rows:
+        success = True
+        try:
+            await enrich_metacritic(row["game_platform_id"], row["name"], row["platform"])
+        except Exception as exc:
+            success = False
+            logger.debug("Metacritic enrich failed for %s: %s", row["name"], exc)
+        finally:
+            await _finalize_platform_enrichment_claim(
+                row["game_platform_id"],
+                "metacritic_claimed_at",
+                "metacritic_cached_at",
+                success,
+            )
+        processed += 1
+        await asyncio.sleep(_METACRITIC_DELAY)
+    return processed
+
+
+async def _run_igdb_batch() -> int:
+    total = 0
+    for _ in range(_IGDB_WORKER_CONCURRENCY):
+        total += await igdb.backfill_missing_games(limit=10)
+    return total
+
+
+async def _finalize_store_claim(platform_id: int) -> None:
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE steam_platform_data SET store_claimed_at = NULL WHERE game_platform_id = ?",
+            (platform_id,),
+        )
+        await db.commit()
+
+
+async def _finalize_steam_claim(
+    platform_id: int,
+    claim_column: str,
+) -> None:
+    async with get_db() as db:
+        await db.execute(
+            f"UPDATE steam_platform_data SET {claim_column} = NULL WHERE game_platform_id = ?",
+            (platform_id,),
+        )
+        await db.commit()
+
+
+async def _finalize_platform_enrichment_claim(
+    platform_id: int,
+    claim_column: str,
+    cached_column: str,
+    success: bool,
+) -> None:
+    if success:
+        await clear_claim("game_platform_enrichment", claim_column, platform_id, id_column="game_platform_id")
+        return
+
+    await upsert_game_platform_enrichment(
+        platform_id,
+        **{claim_column: None, cached_column: "FAILED"},
     )
-
-
-async def _enrich_store() -> int:
-    """Enrich all games missing store data, respecting Steam's rate limits."""
-    count = 0
-    while True:
-        async with get_db() as db:
-            rows = await db.execute_fetchall(
-                """SELECT CAST(gpi.identifier_value AS INTEGER) AS appid, g.name
-                   FROM games g
-                   JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
-                   JOIN game_platform_identifiers gpi
-                     ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
-                   LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
-                   WHERE spd.store_cached_at IS NULL
-                     AND g.is_farmed = 0
-                   ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
-                   LIMIT 50"""
-                ,
-                (STEAM_APP_ID,),
-            )
-
-        if not rows:
-            break
-
-        for row in rows:
-            try:
-                await enrich_game(row["appid"])
-                count += 1
-            except Exception as e:
-                logger.debug("Store enrich failed for %s: %s", row["name"], e)
-            await asyncio.sleep(_STORE_DELAY)
-
-    return count
-
-
-async def _enrich_hltb() -> int:
-    """Backfill HLTB for games that have store data but no HLTB yet."""
-    count = 0
-    while True:
-        async with get_db() as db:
-            rows = await db.execute_fetchall(
-                """SELECT g.id AS game_id, g.name FROM games g
-                   JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
-                   LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
-                   WHERE spd.store_cached_at IS NOT NULL
-                     AND g.hltb_cached_at IS NULL
-                     AND g.is_farmed = 0
-                   ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
-                   LIMIT 50"""
-            )
-
-        if not rows:
-            break
-
-        for i in range(0, len(rows), _BATCH_SIZE):
-            batch = rows[i : i + _BATCH_SIZE]
-            await asyncio.gather(
-                *[get_hltb(r["game_id"], r["name"]) for r in batch],
-                return_exceptions=True,
-            )
-            count += len(batch)
-            await asyncio.sleep(_HLTB_DELAY)
-
-    return count
-
-
-async def _enrich_protondb() -> int:
-    """Backfill ProtonDB tiers."""
-    count = 0
-    while True:
-        async with get_db() as db:
-            rows = await db.execute_fetchall(
-                """SELECT CAST(gpi.identifier_value AS INTEGER) AS appid
-                   FROM games g
-                   JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
-                   JOIN game_platform_identifiers gpi
-                     ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
-                   LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
-                   WHERE spd.store_cached_at IS NOT NULL
-                     AND spd.protondb_cached_at IS NULL
-                     AND g.is_farmed = 0
-                   ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
-                   LIMIT 50"""
-                ,
-                (STEAM_APP_ID,),
-            )
-
-        if not rows:
-            break
-
-        for row in rows:
-            try:
-                await get_protondb(row["appid"])
-                count += 1
-            except Exception as e:
-                logger.debug("ProtonDB enrich failed for appid %d: %s", row["appid"], e)
-            await asyncio.sleep(_PROTON_DELAY)
-
-    return count
-
-
-async def _enrich_steamspy() -> int:
-    """Backfill SteamSpy user-curated tags."""
-    count = 0
-    while True:
-        async with get_db() as db:
-            rows = await db.execute_fetchall(
-                """SELECT CAST(gpi.identifier_value AS INTEGER) AS appid, g.name
-                   FROM games g
-                   JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
-                   JOIN game_platform_identifiers gpi
-                     ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
-                   LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
-                   WHERE spd.store_cached_at IS NOT NULL
-                     AND spd.steamspy_cached_at IS NULL
-                     AND g.is_farmed = 0
-                   ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
-                   LIMIT 50"""
-                ,
-                (STEAM_APP_ID,),
-            )
-        if not rows:
-            break
-        for row in rows:
-            try:
-                await enrich_steamspy(row["appid"])
-                count += 1
-            except Exception as e:
-                logger.debug("SteamSpy enrich failed for %s: %s", row["name"], e)
-            await asyncio.sleep(_STEAMSPY_DELAY)
-    return count
-
-
-async def _enrich_opencritic() -> int:
-    """Fetch OpenCritic scores for all platform rows missing opencritic data."""
-    count = 0
-    while True:
-        async with get_db() as db:
-            rows = await db.execute_fetchall(
-                """SELECT gp.id AS game_platform_id, g.name
-                   FROM game_platforms gp
-                   JOIN games g ON g.id = gp.game_id
-                   LEFT JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
-                   WHERE (gpe.opencritic_cached_at IS NULL)
-                     AND g.is_farmed = 0
-                   ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
-                   LIMIT 50"""
-            )
-
-        if not rows:
-            break
-
-        for row in rows:
-            try:
-                await enrich_opencritic(row["game_platform_id"], row["name"])
-                count += 1
-            except Exception as e:
-                logger.debug("OpenCritic enrich failed for %s: %s", row["name"], e)
-                try:
-                    await upsert_game_platform_enrichment(
-                        row["game_platform_id"], opencritic_cached_at="FAILED"
-                    )
-                except Exception:
-                    pass
-            await asyncio.sleep(_OPENCRITIC_DELAY)
-
-    return count
-
-
-async def _enrich_metacritic() -> int:
-    """Scrape Metacritic scores for all platform rows missing metacritic data."""
-    count = 0
-    while True:
-        async with get_db() as db:
-            rows = await db.execute_fetchall(
-                """SELECT gp.id AS game_platform_id, gp.platform, g.name
-                   FROM game_platforms gp
-                   JOIN games g ON g.id = gp.game_id
-                   LEFT JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
-                   WHERE (gpe.metacritic_cached_at IS NULL)
-                     AND g.is_farmed = 0
-                   ORDER BY COALESCE(gp.playtime_minutes, 0) DESC
-                   LIMIT 50"""
-            )
-
-        if not rows:
-            break
-
-        for row in rows:
-            try:
-                await enrich_metacritic(
-                    row["game_platform_id"],
-                    row["name"],
-                    row["platform"],
-                )
-                count += 1
-            except Exception as e:
-                logger.debug("Metacritic enrich failed for %s: %s", row["name"], e)
-                try:
-                    await upsert_game_platform_enrichment(
-                        row["game_platform_id"], metacritic_cached_at="FAILED"
-                    )
-                except Exception:
-                    pass
-            await asyncio.sleep(_METACRITIC_DELAY)
-
-    return count

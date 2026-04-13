@@ -19,7 +19,7 @@ async def get_game_detail(
 ) -> dict:
     """
     Return full detail for a game, triggering lazy enrichment.
-    Accepts game_id, Steam appid, or a partial name.
+    Accepts game_id, a Steam appid when available, or a partial name.
     """
     async with get_db() as db:
         if game_id is not None:
@@ -67,6 +67,7 @@ async def get_game_detail(
     result = {
         "game_id": row["id"],
         "appid": steam_appid,
+        "steam_appid": steam_appid,
         "name": row["name"],
         "release_date": row["release_date"],
         "platforms": platforms,
