@@ -457,6 +457,16 @@ async def refresh_library(platforms: list[str] | None = None) -> dict:
 
 
 @mcp.tool()
+async def get_integration_status(platforms: list[str] | None = None, verbose: bool = True) -> dict:
+    """
+    Inspect integration readiness for configured platforms.
+    platforms: optional subset like ['steam', 'epic']; verbose=False returns a compact summary.
+    """
+    from .tools.integrations import get_integration_status as _get_integration_status
+    return await _get_integration_status(platforms, verbose)
+
+
+@mcp.tool()
 async def detect_farmed_games(
     dry_run: bool = True,
     threshold_hours: float = 8.0,
