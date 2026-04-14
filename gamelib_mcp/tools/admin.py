@@ -39,7 +39,9 @@ def build_platform_sync_metadata(refresh_result: dict, finished_at: str) -> dict
 
         prefix = f"integration_sync_{platform}"
         error = payload.get("error")
+        metadata[f"{prefix}_last_attempt_at"] = finished_at
         metadata[f"{prefix}_last_finished_at"] = finished_at
+        metadata[f"{prefix}_last_error_summary"] = error if isinstance(error, str) and error else None
         metadata[f"{prefix}_last_error_classification"] = (
             classify_platform_sync_error(error) if isinstance(error, str) and error else None
         )

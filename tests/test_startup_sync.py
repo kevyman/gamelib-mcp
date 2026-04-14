@@ -131,6 +131,25 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             "missing_runtime_dependency",
         )
 
+    async def test_run_startup_refresh_records_platform_error_summary_and_attempt_time(self) -> None:
+        refresh_result = {
+            "epic": {"error": "Legendary refresh token rejected; rerun legendary auth"},
+        }
+
+        with (
+            patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()) as mock_set_meta_many,
+            patch("gamelib_mcp.main._admin_refresh_library", AsyncMock(return_value=refresh_result)),
+            patch("gamelib_mcp.main._drain_background_enrich_reruns", AsyncMock()),
+        ):
+            await _run_startup_refresh()
+
+        finished = mock_set_meta_many.await_args_list[1].args[0]
+        self.assertEqual(
+            finished["integration_sync_epic_last_error_summary"],
+            "Legendary refresh token rejected; rerun legendary auth",
+        )
+        self.assertIn("integration_sync_epic_last_attempt_at", finished)
+
     async def test_run_startup_refresh_records_exception_failure(self) -> None:
         with (
             patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()) as mock_set_meta_many,

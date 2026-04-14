@@ -634,8 +634,10 @@ async def _integration_status_payload() -> dict[str, dict]:
             last_sync = {
                 key: value
                 for key, value in {
+                    "last_attempt_at": await get_meta(f"{prefix}_last_attempt_at"),
                     "last_finished_at": await get_meta(f"{prefix}_last_finished_at"),
                     "last_success_at": await get_meta(f"{prefix}_last_success_at"),
+                    "last_error_summary": await get_meta(f"{prefix}_last_error_summary"),
                     "last_error_classification": await get_meta(f"{prefix}_last_error_classification"),
                 }.items()
                 if value is not None
@@ -661,11 +663,61 @@ async def admin_integrations_ui(request: Request) -> HTMLResponse:
         summary = html.escape(status.get("summary") or "No summary available.")
         overall_status = html.escape(status.get("overall_status") or "unknown")
         backend = html.escape(status.get("active_backend") or "none")
-        items.append(
+        capabilities = status.get("capabilities") or []
+        checks = status.get("checks") or []
+        last_sync = status.get("last_sync") or {}
+        remediation_steps = status.get("remediation_steps") or []
+
+        capability_list = "".join(
             "<li>"
-            f"<strong>{html.escape(platform)}</strong>: {overall_status}"
-            f" ({backend})<br>{summary}"
+            f"{html.escape(item.get('name') or 'unknown')}: "
+            f"{html.escape(item.get('status') or 'unknown')} "
+            f"- {html.escape(item.get('summary') or '')}"
             "</li>"
+            for item in capabilities
+        ) or "<li>None</li>"
+
+        failing_checks = [item for item in checks if item.get("status") != "pass"]
+        failing_check_list = "".join(
+            "<li>"
+            f"{html.escape(item.get('name') or 'unknown')}: "
+            f"{html.escape(item.get('status') or 'unknown')} "
+            f"- {html.escape(item.get('summary') or '')}"
+            "</li>"
+            for item in failing_checks
+        ) or "<li>None</li>"
+
+        last_sync_list = "".join(
+            "<li>"
+            f"{html.escape(str(key))}: {html.escape(str(value))}"
+            "</li>"
+            for key, value in last_sync.items()
+        ) or "<li>None</li>"
+
+        remediation_list = "".join(
+            "<li><code>"
+            f"{html.escape(step)}"
+            "</code></li>"
+            for step in remediation_steps
+        ) or "<li>None</li>"
+        items.append(
+            "<li><section>"
+            f"<h2>{html.escape(platform)}</h2>"
+            f"<p><strong>Status:</strong> {overall_status} ({backend})</p>"
+            f"<p>{summary}</p>"
+            "<h3>Capabilities</h3><ul>"
+            f"{capability_list}"
+            "</ul>"
+            "<h3>Failing Checks</h3><ul>"
+            f"{failing_check_list}"
+            "</ul>"
+            "<h3>Last Sync</h3><ul>"
+            f"{last_sync_list}"
+            "</ul>"
+            "<h3>Remediation</h3><ul>"
+            f"{remediation_list}"
+            "</ul>"
+            "</section></li>"
         )
 
     body = "".join(items) or "<li>No integrations detected.</li>"

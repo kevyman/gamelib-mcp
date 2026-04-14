@@ -95,6 +95,24 @@ def test_inspect_gog_reports_degraded_when_binary_missing_but_mount_exists(tmp_p
     assert "binary" in statuses["gog"].summary.lower()
 
 
+def test_inspect_gog_reports_stale_when_recent_auth_failure_detected(tmp_path: Path):
+    config_dir = tmp_path / "lgogdownloader"
+    config_dir.mkdir()
+
+    with (
+        patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": str(config_dir)}, clear=False),
+        patch("gamelib_mcp.integrations.inspectors.shutil.which", return_value="/usr/bin/lgogdownloader"),
+    ):
+        statuses = inspect_all_integrations(
+            last_sync_by_platform={"gog": {"last_error_classification": "auth_stale"}}
+        )
+
+    gog = statuses["gog"]
+
+    assert gog.overall_status == "stale"
+    assert gog.active_backend == "lgogdownloader"
+
+
 def test_inspect_nintendo_reports_degraded_when_token_present_but_nxapi_missing(tmp_path: Path):
     missing_cookies_path = tmp_path / "missing_nintendo_cookies.json"
 
@@ -114,6 +132,30 @@ def test_inspect_nintendo_reports_degraded_when_token_present_but_nxapi_missing(
     nintendo = statuses["nintendo"]
 
     assert nintendo.overall_status == "degraded"
+    assert nintendo.active_backend == "nxapi"
+
+
+def test_inspect_nintendo_reports_stale_when_recent_auth_failure_detected(tmp_path: Path):
+    missing_cookies_path = tmp_path / "missing_nintendo_cookies.json"
+
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "NINTENDO_SESSION_TOKEN": "token",
+                "NINTENDO_COOKIES_FILE": str(missing_cookies_path),
+            },
+            clear=True,
+        ),
+        patch("gamelib_mcp.integrations.inspectors.shutil.which", return_value="/usr/bin/nxapi"),
+    ):
+        statuses = inspect_all_integrations(
+            last_sync_by_platform={"nintendo": {"last_error_classification": "auth_stale"}}
+        )
+
+    nintendo = statuses["nintendo"]
+
+    assert nintendo.overall_status == "stale"
     assert nintendo.active_backend == "nxapi"
 
 
@@ -185,6 +227,16 @@ def test_inspect_all_integrations_dict_serializes_statuses():
     assert payload["steam"]["platform"] == "steam"
     assert payload["steam"]["overall_status"] == "ready"
     assert isinstance(payload["steam"]["capabilities"], list)
+
+
+def test_inspect_all_integrations_maps_inspector_failures_to_error_status():
+    with patch("gamelib_mcp.integrations.inspectors.inspect_steam", side_effect=RuntimeError("boom")):
+        payload = inspect_all_integrations_dict()
+
+    steam = payload["steam"]
+
+    assert steam["overall_status"] == "error"
+    assert steam["summary"] == "boom"
 
 
 def test_inspect_epic_reports_partially_configured_when_only_user_json_exists(tmp_path: Path):

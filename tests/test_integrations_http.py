@@ -192,6 +192,22 @@ def test_get_admin_integrations_ui_renders_summary_text_and_escapes_unsafe_field
             "overall_status": "degraded",
             "summary": "<b>Ownership</b> is ready but <script>auth</script> is stale.",
             "active_backend": "<b>legendary-cache</b>",
+            "capabilities": [
+                {"name": "ownership", "status": "ready", "summary": "<i>cached</i>"},
+                {"name": "playtime", "status": "stale", "summary": "<script>expired</script>"},
+            ],
+            "checks": [
+                {"name": "legendary_user_json", "status": "pass", "summary": "user.json found"},
+                {"name": "epic_playtime_token", "status": "warn", "summary": "<script>refresh</script> required"},
+            ],
+            "remediation_steps": [
+                "Run `<legendary auth>`.",
+                "Run `<legendary list --force-refresh>`.",
+            ],
+            "last_sync": {
+                "last_success_at": "2026-04-13T12:00:00+00:00",
+                "last_error_classification": "auth_stale",
+            },
         }
     }
 
@@ -211,5 +227,9 @@ def test_get_admin_integrations_ui_renders_summary_text_and_escapes_unsafe_field
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in text
     assert "&lt;b&gt;Ownership&lt;/b&gt; is ready but &lt;script&gt;auth&lt;/script&gt; is stale." in text
     assert "(&lt;b&gt;legendary-cache&lt;/b&gt;)" in text
+    assert "playtime" in text
+    assert "epic_playtime_token" in text
+    assert "last_error_classification" in text
+    assert "Run `&lt;legendary auth&gt;`." in text
     assert "<script>alert(1)</script>" not in text
     assert "<b>Ownership</b>" not in text

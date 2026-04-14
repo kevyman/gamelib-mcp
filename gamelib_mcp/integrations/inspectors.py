@@ -9,7 +9,9 @@ from .status import CapabilityStatus, CheckStatus, IntegrationStatus
 
 
 class LastSyncMeta(TypedDict, total=False):
+    last_attempt_at: str
     last_error_classification: str
+    last_error_summary: str
     last_success_at: str
     last_finished_at: str
 
@@ -19,11 +21,11 @@ def inspect_all_integrations(
 ) -> dict[str, IntegrationStatus]:
     last_sync_by_platform = last_sync_by_platform or {}
     return {
-        "steam": inspect_steam(last_sync_by_platform.get("steam")),
-        "epic": inspect_epic(last_sync_by_platform.get("epic")),
-        "gog": inspect_gog(last_sync_by_platform.get("gog")),
-        "nintendo": inspect_nintendo(last_sync_by_platform.get("nintendo")),
-        "ps5": inspect_psn(last_sync_by_platform.get("ps5")),
+        "steam": _safe_inspect("steam", inspect_steam, last_sync_by_platform.get("steam")),
+        "epic": _safe_inspect("epic", inspect_epic, last_sync_by_platform.get("epic")),
+        "gog": _safe_inspect("gog", inspect_gog, last_sync_by_platform.get("gog")),
+        "nintendo": _safe_inspect("nintendo", inspect_nintendo, last_sync_by_platform.get("nintendo")),
+        "ps5": _safe_inspect("ps5", inspect_psn, last_sync_by_platform.get("ps5")),
     }
 
 
@@ -200,6 +202,7 @@ def inspect_gog(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
     root = _gog_root()
     binary = shutil.which("lgogdownloader")
     has_mount = root.exists()
+    auth_stale = (last_sync or {}).get("last_error_classification") == "auth_stale"
 
     if has_mount and binary is None:
         return IntegrationStatus(
@@ -213,6 +216,27 @@ def inspect_gog(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
             detected_inputs=[str(root)],
             remediation_steps=[
                 "Install `lgogdownloader` in the container image.",
+                "Keep the GOG config directory mounted read-only into the container.",
+            ],
+            last_sync=last_sync or {},
+        )
+
+    if has_mount and binary is not None and auth_stale:
+        return IntegrationStatus(
+            platform="gog",
+            overall_status="stale",
+            active_backend="lgogdownloader",
+            summary="GOG session auth appears stale and needs to be refreshed.",
+            capabilities=[CapabilityStatus("ownership", "stale", "GOG auth must be refreshed before ownership can be listed reliably")],
+            checks=[
+                CheckStatus("lgogdownloader_binary", "pass", "lgogdownloader found in PATH"),
+                CheckStatus("lgogdownloader_config", "pass", "Config directory found"),
+                CheckStatus("gog_session_auth", "warn", "Recent GOG auth failed and the session should be refreshed"),
+            ],
+            required_inputs=["lgogdownloader binary", "LGOGDOWNLOADER_CONFIG_PATH mount"],
+            detected_inputs=[binary, str(root)],
+            remediation_steps=[
+                "Run `lgogdownloader --login` on the host to refresh the session.",
                 "Keep the GOG config directory mounted read-only into the container.",
             ],
             last_sync=last_sync or {},
@@ -288,6 +312,32 @@ def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus
     has_session_token = bool(os.getenv("NINTENDO_SESSION_TOKEN"))
     cookies_path = Path(os.getenv("NINTENDO_COOKIES_FILE", "data/nintendo_cookies.json")).expanduser()
     has_cookies = cookies_path.is_file()
+    auth_stale = (last_sync or {}).get("last_error_classification") == "auth_stale"
+
+    if has_session_token and nxapi_bin is not None and auth_stale:
+        detected_inputs = _detected_env_inputs(("NINTENDO_SESSION_TOKEN", has_session_token))
+        detected_inputs.append(nxapi_bin)
+        return IntegrationStatus(
+            platform="nintendo",
+            overall_status="stale",
+            active_backend="nxapi",
+            summary="Nintendo auth is stale and the nxapi session token must be refreshed.",
+            capabilities=[
+                CapabilityStatus("ownership", "stale", "Nintendo auth must be refreshed before play activity can be read."),
+                CapabilityStatus("playtime", "stale", "Nintendo auth must be refreshed before playtime can be read."),
+            ],
+            checks=[
+                CheckStatus("nxapi_binary", "pass", "nxapi found in PATH"),
+                CheckStatus("nintendo_session_token", "warn", "Recent Nintendo auth failed and the session token should be refreshed"),
+            ],
+            required_inputs=["nxapi binary", "NINTENDO_SESSION_TOKEN or NINTENDO_COOKIES_FILE"],
+            detected_inputs=detected_inputs,
+            remediation_steps=[
+                "Re-run `nxapi nso auth` and update `NINTENDO_SESSION_TOKEN`.",
+                "Restart the container after updating the token.",
+            ],
+            last_sync=last_sync or {},
+        )
 
     if has_session_token and nxapi_bin is not None:
         detected_inputs = _detected_env_inputs(("NINTENDO_SESSION_TOKEN", has_session_token))
@@ -446,6 +496,28 @@ def inspect_psn(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
         ],
         last_sync=last_sync or {},
     )
+
+
+def _safe_inspect(
+    platform: str,
+    inspector,
+    last_sync: LastSyncMeta | None = None,
+) -> IntegrationStatus:
+    try:
+        return inspector(last_sync)
+    except Exception as exc:
+        return IntegrationStatus(
+            platform=platform,
+            overall_status="error",
+            active_backend=None,
+            summary=str(exc),
+            capabilities=[],
+            checks=[CheckStatus("inspector_error", "fail", str(exc))],
+            required_inputs=[],
+            detected_inputs=[],
+            remediation_steps=["Check server logs for the inspector traceback and fix the underlying runtime issue."],
+            last_sync=last_sync or {},
+        )
 
 
 def _epic_root() -> Path:
