@@ -1,6 +1,7 @@
 """FastMCP server — lifespan, auth, SSE transport, all 10 tools."""
 
 import asyncio
+import html
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -567,7 +568,7 @@ from urllib.parse import parse_qs
 
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 
 # Paths/prefixes that must work without auth
 _OPEN_PATHS = {"/health", "/"}
@@ -611,6 +612,51 @@ async def health(request: Request) -> JSONResponse:
     from .data.db import get_meta
     last_sync = await get_meta("library_synced_at")
     return JSONResponse({"status": "ok", "library_synced_at": last_sync})
+
+
+def _integration_status_payload() -> dict[str, dict]:
+    from .integrations.inspectors import inspect_all_integrations_dict
+
+    return inspect_all_integrations_dict()
+
+
+@mcp.custom_route("/admin/integrations", methods=["GET"])
+async def admin_integrations(request: Request) -> JSONResponse:
+    return JSONResponse(_integration_status_payload())
+
+
+@mcp.custom_route("/admin/integrations/ui", methods=["GET"])
+async def admin_integrations_ui(request: Request) -> HTMLResponse:
+    payload = _integration_status_payload()
+    items = []
+    for platform, status in payload.items():
+        summary = html.escape(status.get("summary") or "No summary available.")
+        overall_status = html.escape(status.get("overall_status") or "unknown")
+        backend = html.escape(status.get("active_backend") or "none")
+        items.append(
+            "<li>"
+            f"<strong>{html.escape(platform)}</strong>: {overall_status}"
+            f" ({backend})<br>{summary}"
+            "</li>"
+        )
+
+    body = "".join(items) or "<li>No integrations detected.</li>"
+    return HTMLResponse(
+        "<!doctype html>"
+        "<html><head><title>Integration Status</title></head>"
+        "<body><h1>Integration Status</h1><ul>"
+        f"{body}"
+        "</ul></body></html>"
+    )
+
+
+@mcp.custom_route("/admin/integrations/{platform}", methods=["GET"])
+async def admin_integration_detail(request: Request) -> JSONResponse:
+    platform = request.path_params["platform"]
+    payload = _integration_status_payload()
+    if platform not in payload:
+        return JSONResponse({"error": f"Unknown integration: {platform}"}, status_code=404)
+    return JSONResponse(payload[platform])
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
