@@ -12,7 +12,6 @@ class LastSyncMeta(TypedDict, total=False):
     last_error_classification: str
     last_success_at: str
     last_finished_at: str
-    last_error: str
 
 
 def inspect_all_integrations(

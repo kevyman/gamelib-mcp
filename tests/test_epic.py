@@ -139,6 +139,23 @@ class EpicHelpersTests(unittest.TestCase):
 
         self.assertEqual(playtime, {"artifact-1": 2, "artifact-2": 7, "artifact-3": 60})
 
+    def test_fetch_epic_playtime_logs_info_for_stale_credentials(self) -> None:
+        with (
+            patch(
+                "gamelib_mcp.data.epic._get_epic_session",
+                AsyncMock(
+                    side_effect=epic.EpicConfigurationError(
+                        "Legendary refresh token rejected; rerun legendary auth"
+                    )
+                ),
+            ),
+            self.assertLogs("gamelib_mcp.data.epic", level="INFO") as logs,
+        ):
+            playtime = asyncio.run(epic.fetch_epic_playtime())
+
+        self.assertEqual(playtime, {})
+        self.assertIn("INFO:gamelib_mcp.data.epic:Epic playtime unavailable", logs.output[0])
+
 
 class SyncEpicTests(unittest.TestCase):
     def _run_sync(self, games, playtime_by_artifact=None, resolve_result=(42, None), candidates=None):

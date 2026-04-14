@@ -108,6 +108,29 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             "epic: legendary unavailable; ps5: network timeout",
         )
 
+    async def test_run_startup_refresh_records_platform_error_classifications(self) -> None:
+        refresh_result = {
+            "epic": {"error": "Legendary refresh token rejected; rerun legendary auth"},
+            "gog": {"error": "lgogdownloader not in PATH"},
+        }
+
+        with (
+            patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()) as mock_set_meta_many,
+            patch("gamelib_mcp.main._admin_refresh_library", AsyncMock(return_value=refresh_result)),
+            patch("gamelib_mcp.main._drain_background_enrich_reruns", AsyncMock()),
+        ):
+            await _run_startup_refresh()
+
+        finished = mock_set_meta_many.await_args_list[1].args[0]
+        self.assertEqual(
+            finished["integration_sync_epic_last_error_classification"],
+            "auth_stale",
+        )
+        self.assertEqual(
+            finished["integration_sync_gog_last_error_classification"],
+            "missing_runtime_dependency",
+        )
+
     async def test_run_startup_refresh_records_exception_failure(self) -> None:
         with (
             patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()) as mock_set_meta_many,
@@ -416,6 +439,11 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             return await make_sync("ps5", {"platform": "ps5", "synced": True})
 
         with (
+            patch("gamelib_mcp.tools.admin.is_steam_configured", return_value=True, create=True),
+            patch("gamelib_mcp.tools.admin.is_epic_configured", return_value=True, create=True),
+            patch("gamelib_mcp.tools.admin.is_gog_configured", return_value=True, create=True),
+            patch("gamelib_mcp.tools.admin.is_nintendo_configured", return_value=True, create=True),
+            patch("gamelib_mcp.tools.admin.is_psn_configured", return_value=True, create=True),
             patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(side_effect=steam_sync)),
             patch("gamelib_mcp.tools.admin.sync_epic", AsyncMock(side_effect=epic_sync)),
             patch("gamelib_mcp.tools.admin.sync_gog", AsyncMock(side_effect=gog_sync)),

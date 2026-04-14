@@ -1,43 +1,27 @@
 import unittest
-from unittest.mock import patch
 
 from gamelib_mcp.tools.integrations import get_integration_status
 
 
-class IntegrationToolsTests(unittest.IsolatedAsyncioTestCase):
-    async def test_get_integration_status_returns_filtered_platforms(self) -> None:
-        fake_payload = {
+class IntegrationToolsTests(unittest.TestCase):
+    def test_get_integration_status_returns_filtered_platforms(self) -> None:
+        payload = {
             "epic": {"platform": "epic", "overall_status": "ready"},
             "gog": {"platform": "gog", "overall_status": "unconfigured"},
         }
+        result = get_integration_status(payload, ["epic"])
+        self.assertEqual(result, {"epic": {"platform": "epic", "overall_status": "ready"}})
 
-        with patch(
-            "gamelib_mcp.tools.integrations.inspect_all_integrations_dict",
-            return_value=fake_payload,
-        ):
-            result = await get_integration_status(["epic"])
-
-        self.assertEqual(
-            result,
-            {"epic": {"platform": "epic", "overall_status": "ready"}},
-        )
-
-    async def test_get_integration_status_treats_empty_platform_filter_as_empty_result(self) -> None:
-        fake_payload = {
+    def test_get_integration_status_treats_empty_platform_filter_as_empty_result(self) -> None:
+        payload = {
             "epic": {"platform": "epic", "overall_status": "ready"},
             "gog": {"platform": "gog", "overall_status": "unconfigured"},
         }
-
-        with patch(
-            "gamelib_mcp.tools.integrations.inspect_all_integrations_dict",
-            return_value=fake_payload,
-        ):
-            result = await get_integration_status([])
-
+        result = get_integration_status(payload, [])
         self.assertEqual(result, {})
 
-    async def test_get_integration_status_returns_compact_payload_when_not_verbose(self) -> None:
-        fake_payload = {
+    def test_get_integration_status_returns_compact_payload_when_not_verbose(self) -> None:
+        payload = {
             "epic": {
                 "platform": "epic",
                 "overall_status": "ready",
@@ -46,13 +30,7 @@ class IntegrationToolsTests(unittest.IsolatedAsyncioTestCase):
                 "checks": [{"name": "legendary_user_json", "status": "pass"}],
             }
         }
-
-        with patch(
-            "gamelib_mcp.tools.integrations.inspect_all_integrations_dict",
-            return_value=fake_payload,
-        ):
-            result = await get_integration_status(verbose=False)
-
+        result = get_integration_status(payload, verbose=False)
         self.assertEqual(
             result,
             {

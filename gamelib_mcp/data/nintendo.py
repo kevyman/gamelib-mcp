@@ -199,6 +199,10 @@ def _load_vgcs_cookies() -> dict[str, str] | None:
     return None
 
 
+def is_nintendo_configured() -> bool:
+    return bool(os.getenv("NINTENDO_SESSION_TOKEN")) or _load_vgcs_cookies() is not None
+
+
 def _parse_vgcs_page(html: str) -> tuple[str, str, str, int]:
     """
     Parse the VGCS page HTML.

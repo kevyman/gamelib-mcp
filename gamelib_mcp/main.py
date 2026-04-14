@@ -13,7 +13,12 @@ from fastmcp import FastMCP
 
 load_dotenv()
 
-from .tools.admin import refresh_library as _admin_refresh_library
+from .tools.admin import (
+    SYNC_METADATA_PLATFORMS,
+    build_platform_sync_metadata,
+    refresh_library as _admin_refresh_library,
+)
+from .tools.integrations import get_integration_status as _filter_integration_status
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -181,13 +186,16 @@ async def _run_startup_refresh() -> dict:
         final_error = str(exc)
     finally:
         finished_at = datetime.now(timezone.utc).isoformat()
+        finished_meta = {
+            "library_sync_status": "idle",
+            "library_sync_finished_at": finished_at,
+            "library_sync_error": final_error,
+        }
+        if refresh_result is not None:
+            finished_meta.update(build_platform_sync_metadata(refresh_result, finished_at))
         await asyncio.shield(
             set_meta_many(
-                {
-                    "library_sync_status": "idle",
-                    "library_sync_finished_at": finished_at,
-                    "library_sync_error": final_error,
-                }
+                finished_meta
             )
         )
         if cancelled:
@@ -463,8 +471,9 @@ async def get_integration_status(platforms: list[str] | None = None, verbose: bo
     Inspect integration readiness for configured platforms.
     platforms: optional subset like ['steam', 'epic']; verbose=False returns a compact summary.
     """
-    from .tools.integrations import get_integration_status as _get_integration_status
-    return await _get_integration_status(platforms, verbose)
+    return _filter_integration_status(
+        await _integration_status_payload(), platforms, verbose
+    )
 
 
 @mcp.tool()
@@ -614,20 +623,39 @@ async def health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "library_synced_at": last_sync})
 
 
-def _integration_status_payload() -> dict[str, dict]:
+async def _integration_status_payload() -> dict[str, dict]:
+    from .data.db import get_meta
     from .integrations.inspectors import inspect_all_integrations_dict
 
-    return inspect_all_integrations_dict()
+    last_sync_by_platform: dict[str, dict[str, str]] = {}
+    try:
+        for platform in SYNC_METADATA_PLATFORMS:
+            prefix = f"integration_sync_{platform}"
+            last_sync = {
+                key: value
+                for key, value in {
+                    "last_finished_at": await get_meta(f"{prefix}_last_finished_at"),
+                    "last_success_at": await get_meta(f"{prefix}_last_success_at"),
+                    "last_error_classification": await get_meta(f"{prefix}_last_error_classification"),
+                }.items()
+                if value is not None
+            }
+            if last_sync:
+                last_sync_by_platform[platform] = last_sync
+    except Exception:
+        logger.exception("Failed to load integration sync metadata")
+
+    return inspect_all_integrations_dict(last_sync_by_platform=last_sync_by_platform)
 
 
 @mcp.custom_route("/admin/integrations", methods=["GET"])
 async def admin_integrations(request: Request) -> JSONResponse:
-    return JSONResponse(_integration_status_payload())
+    return JSONResponse(await _integration_status_payload())
 
 
 @mcp.custom_route("/admin/integrations/ui", methods=["GET"])
 async def admin_integrations_ui(request: Request) -> HTMLResponse:
-    payload = _integration_status_payload()
+    payload = await _integration_status_payload()
     items = []
     for platform, status in payload.items():
         summary = html.escape(status.get("summary") or "No summary available.")
@@ -653,7 +681,7 @@ async def admin_integrations_ui(request: Request) -> HTMLResponse:
 @mcp.custom_route("/admin/integrations/{platform}", methods=["GET"])
 async def admin_integration_detail(request: Request) -> JSONResponse:
     platform = request.path_params["platform"]
-    payload = _integration_status_payload()
+    payload = await _integration_status_payload()
     if platform not in payload:
         return JSONResponse({"error": f"Unknown integration: {platform}"}, status_code=404)
     return JSONResponse(payload[platform])

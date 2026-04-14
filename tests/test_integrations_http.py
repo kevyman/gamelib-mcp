@@ -1,6 +1,6 @@
 import asyncio
 import json
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from starlette.requests import Request
 
@@ -119,8 +119,8 @@ def test_get_admin_integrations_returns_json_payload():
     route = _get_route("/admin/integrations")
 
     with patch(
-        "gamelib_mcp.integrations.inspectors.inspect_all_integrations_dict",
-        return_value=payload,
+        "gamelib_mcp.main._integration_status_payload",
+        new=AsyncMock(return_value=payload),
     ):
         response = asyncio.run(route.endpoint(_request("/admin/integrations")))
 
@@ -148,8 +148,8 @@ def test_get_admin_integration_detail_returns_requested_platform():
     route = _get_route("/admin/integrations/{platform}")
 
     with patch(
-        "gamelib_mcp.integrations.inspectors.inspect_all_integrations_dict",
-        return_value=payload,
+        "gamelib_mcp.main._integration_status_payload",
+        new=AsyncMock(return_value=payload),
     ):
         response = asyncio.run(
             route.endpoint(
@@ -169,8 +169,8 @@ def test_get_admin_integration_detail_returns_404_for_unknown_platform():
     route = _get_route("/admin/integrations/{platform}")
 
     with patch(
-        "gamelib_mcp.integrations.inspectors.inspect_all_integrations_dict",
-        return_value={"steam": {"platform": "steam", "overall_status": "ready"}},
+        "gamelib_mcp.main._integration_status_payload",
+        new=AsyncMock(return_value={"steam": {"platform": "steam", "overall_status": "ready"}}),
     ):
         response = asyncio.run(
             route.endpoint(
@@ -198,8 +198,8 @@ def test_get_admin_integrations_ui_renders_summary_text_and_escapes_unsafe_field
     route = _get_route("/admin/integrations/ui")
 
     with patch(
-        "gamelib_mcp.integrations.inspectors.inspect_all_integrations_dict",
-        return_value=payload,
+        "gamelib_mcp.main._integration_status_payload",
+        new=AsyncMock(return_value=payload),
     ):
         response = asyncio.run(route.endpoint(_request("/admin/integrations/ui")))
 

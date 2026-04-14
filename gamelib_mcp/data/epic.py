@@ -43,6 +43,10 @@ _EPIC_TIMEOUT = 20.0
 _TOKEN_REFRESH_SKEW = timedelta(minutes=10)
 
 
+class EpicConfigurationError(RuntimeError):
+    """Raised when local Legendary auth state is missing or stale."""
+
+
 def _legendary_config_path() -> Path:
     configured = os.getenv("EPIC_LEGENDARY_PATH") or os.getenv("LEGENDARY_CONFIG_PATH")
     if configured:
@@ -75,11 +79,11 @@ async def _read_json_file(path: Path) -> Any:
 async def _load_epic_user_data() -> dict[str, Any]:
     user_path = _legendary_config_path() / "user.json"
     if not user_path.is_file():
-        raise FileNotFoundError(f"missing Epic credentials file: {user_path}")
+        raise EpicConfigurationError(f"missing Epic credentials file: {user_path}")
 
     data = await _read_json_file(user_path)
     if not isinstance(data, dict):
-        raise RuntimeError(f"unexpected Epic credentials payload in {user_path}")
+        raise EpicConfigurationError(f"unexpected Epic credentials payload in {user_path}")
     return data
 
 
@@ -97,7 +101,15 @@ async def _refresh_epic_session(refresh_token: str) -> dict[str, Any]:
                 "token_type": "eg1",
             },
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 400:
+                raise EpicConfigurationError(
+                    "Legendary refresh token rejected; rerun `legendary auth` and "
+                    "`legendary list --force-refresh`"
+                ) from exc
+            raise
         payload = response.json()
 
     if not isinstance(payload, dict) or "access_token" not in payload:
@@ -177,6 +189,9 @@ async def fetch_epic_playtime() -> dict[str, int]:
     """Return a mapping of Epic artifact id to total playtime minutes."""
     try:
         session = await _get_epic_session()
+    except EpicConfigurationError as exc:
+        logger.info("Epic playtime unavailable: %s", exc)
+        return {}
     except Exception as exc:
         logger.warning("Epic playtime unavailable: %s", exc)
         return {}
@@ -185,7 +200,7 @@ async def fetch_epic_playtime() -> dict[str, int]:
     access_token = session.get("access_token")
     refresh_token = session.get("refresh_token")
     if not account_id or not access_token:
-        logger.warning("Epic playtime unavailable: missing account_id or access_token")
+        logger.info("Epic playtime unavailable: missing account_id or access_token")
         return {}
 
     async with httpx.AsyncClient(
@@ -200,6 +215,9 @@ async def fetch_epic_playtime() -> dict[str, int]:
         if response.status_code == 401 and refresh_token:
             try:
                 session = await _refresh_epic_session(str(refresh_token))
+            except EpicConfigurationError as exc:
+                logger.info("Epic playtime unavailable: %s", exc)
+                return {}
             except Exception as exc:
                 logger.warning("Epic playtime refresh failed after 401: %s", exc)
                 return {}
@@ -232,6 +250,11 @@ async def fetch_epic_playtime() -> dict[str, int]:
             logger.debug("Skipping Epic playtime row with invalid totalTime: %r", entry)
 
     return playtime
+
+
+def is_epic_configured() -> bool:
+    config_path = _legendary_config_path()
+    return config_path.exists() and (config_path / "user.json").is_file() and (config_path / "metadata").is_dir()
 
 
 async def sync_epic() -> dict:

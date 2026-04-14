@@ -58,6 +58,8 @@ def _subprocess_env() -> dict:
 
 def _slug_to_title(slug: str) -> str:
     """Convert a lgogdownloader slug to a human-readable title."""
+    if slug.endswith("_game") and "_" in slug[:-5]:
+        slug = slug[:-5]
     return slug.replace("_", " ").title()
 
 
@@ -81,6 +83,10 @@ def _parse_lgogdownloader_output(stdout: str) -> list[str]:
             continue
         titles.append(_slug_to_title(line))
     return titles
+
+
+def is_gog_configured() -> bool:
+    return shutil.which(_LGOGDOWNLOADER_BIN) is not None and _config_dir().exists()
 
 
 async def sync_gog() -> dict:
