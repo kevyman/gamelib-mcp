@@ -1,6 +1,7 @@
 """FastMCP server — lifespan, auth, SSE transport, all 10 tools."""
 
 import asyncio
+import html
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -12,7 +13,12 @@ from fastmcp import FastMCP
 
 load_dotenv()
 
-from .tools.admin import refresh_library as _admin_refresh_library
+from .tools.admin import (
+    SYNC_METADATA_PLATFORMS,
+    build_platform_sync_metadata,
+    refresh_library as _admin_refresh_library,
+)
+from .tools.integrations import get_integration_status as _filter_integration_status
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -180,13 +186,16 @@ async def _run_startup_refresh() -> dict:
         final_error = str(exc)
     finally:
         finished_at = datetime.now(timezone.utc).isoformat()
+        finished_meta = {
+            "library_sync_status": "idle",
+            "library_sync_finished_at": finished_at,
+            "library_sync_error": final_error,
+        }
+        if refresh_result is not None:
+            finished_meta.update(build_platform_sync_metadata(refresh_result, finished_at))
         await asyncio.shield(
             set_meta_many(
-                {
-                    "library_sync_status": "idle",
-                    "library_sync_finished_at": finished_at,
-                    "library_sync_error": final_error,
-                }
+                finished_meta
             )
         )
         if cancelled:
@@ -457,6 +466,17 @@ async def refresh_library(platforms: list[str] | None = None) -> dict:
 
 
 @mcp.tool()
+async def get_integration_status(platforms: list[str] | None = None, verbose: bool = True) -> dict:
+    """
+    Inspect integration readiness for configured platforms.
+    platforms: optional subset like ['steam', 'epic']; verbose=False returns a compact summary.
+    """
+    return _filter_integration_status(
+        await _integration_status_payload(), platforms, verbose
+    )
+
+
+@mcp.tool()
 async def detect_farmed_games(
     dry_run: bool = True,
     threshold_hours: float = 8.0,
@@ -557,7 +577,7 @@ from urllib.parse import parse_qs
 
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 
 # Paths/prefixes that must work without auth
 _OPEN_PATHS = {"/health", "/"}
@@ -601,6 +621,122 @@ async def health(request: Request) -> JSONResponse:
     from .data.db import get_meta
     last_sync = await get_meta("library_synced_at")
     return JSONResponse({"status": "ok", "library_synced_at": last_sync})
+
+
+async def _integration_status_payload() -> dict[str, dict]:
+    from .data.db import get_meta
+    from .integrations.inspectors import inspect_all_integrations_dict
+
+    last_sync_by_platform: dict[str, dict[str, str]] = {}
+    try:
+        for platform in SYNC_METADATA_PLATFORMS:
+            prefix = f"integration_sync_{platform}"
+            last_sync = {
+                key: value
+                for key, value in {
+                    "last_attempt_at": await get_meta(f"{prefix}_last_attempt_at"),
+                    "last_finished_at": await get_meta(f"{prefix}_last_finished_at"),
+                    "last_success_at": await get_meta(f"{prefix}_last_success_at"),
+                    "last_error_summary": await get_meta(f"{prefix}_last_error_summary"),
+                    "last_error_classification": await get_meta(f"{prefix}_last_error_classification"),
+                }.items()
+                if value is not None
+            }
+            if last_sync:
+                last_sync_by_platform[platform] = last_sync
+    except Exception:
+        logger.exception("Failed to load integration sync metadata")
+
+    return inspect_all_integrations_dict(last_sync_by_platform=last_sync_by_platform)
+
+
+@mcp.custom_route("/admin/integrations", methods=["GET"])
+async def admin_integrations(request: Request) -> JSONResponse:
+    return JSONResponse(await _integration_status_payload())
+
+
+@mcp.custom_route("/admin/integrations/ui", methods=["GET"])
+async def admin_integrations_ui(request: Request) -> HTMLResponse:
+    payload = await _integration_status_payload()
+    items = []
+    for platform, status in payload.items():
+        summary = html.escape(status.get("summary") or "No summary available.")
+        overall_status = html.escape(status.get("overall_status") or "unknown")
+        backend = html.escape(status.get("active_backend") or "none")
+        capabilities = status.get("capabilities") or []
+        checks = status.get("checks") or []
+        last_sync = status.get("last_sync") or {}
+        remediation_steps = status.get("remediation_steps") or []
+
+        capability_list = "".join(
+            "<li>"
+            f"{html.escape(item.get('name') or 'unknown')}: "
+            f"{html.escape(item.get('status') or 'unknown')} "
+            f"- {html.escape(item.get('summary') or '')}"
+            "</li>"
+            for item in capabilities
+        ) or "<li>None</li>"
+
+        failing_checks = [item for item in checks if item.get("status") != "pass"]
+        failing_check_list = "".join(
+            "<li>"
+            f"{html.escape(item.get('name') or 'unknown')}: "
+            f"{html.escape(item.get('status') or 'unknown')} "
+            f"- {html.escape(item.get('summary') or '')}"
+            "</li>"
+            for item in failing_checks
+        ) or "<li>None</li>"
+
+        last_sync_list = "".join(
+            "<li>"
+            f"{html.escape(str(key))}: {html.escape(str(value))}"
+            "</li>"
+            for key, value in last_sync.items()
+        ) or "<li>None</li>"
+
+        remediation_list = "".join(
+            "<li><code>"
+            f"{html.escape(step)}"
+            "</code></li>"
+            for step in remediation_steps
+        ) or "<li>None</li>"
+        items.append(
+            "<li><section>"
+            f"<h2>{html.escape(platform)}</h2>"
+            f"<p><strong>Status:</strong> {overall_status} ({backend})</p>"
+            f"<p>{summary}</p>"
+            "<h3>Capabilities</h3><ul>"
+            f"{capability_list}"
+            "</ul>"
+            "<h3>Failing Checks</h3><ul>"
+            f"{failing_check_list}"
+            "</ul>"
+            "<h3>Last Sync</h3><ul>"
+            f"{last_sync_list}"
+            "</ul>"
+            "<h3>Remediation</h3><ul>"
+            f"{remediation_list}"
+            "</ul>"
+            "</section></li>"
+        )
+
+    body = "".join(items) or "<li>No integrations detected.</li>"
+    return HTMLResponse(
+        "<!doctype html>"
+        "<html><head><title>Integration Status</title></head>"
+        "<body><h1>Integration Status</h1><ul>"
+        f"{body}"
+        "</ul></body></html>"
+    )
+
+
+@mcp.custom_route("/admin/integrations/{platform}", methods=["GET"])
+async def admin_integration_detail(request: Request) -> JSONResponse:
+    platform = request.path_params["platform"]
+    payload = await _integration_status_payload()
+    if platform not in payload:
+        return JSONResponse({"error": f"Unknown integration: {platform}"}, status_code=404)
+    return JSONResponse(payload[platform])
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

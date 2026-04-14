@@ -37,6 +37,10 @@ _MEDIA_APP_NAMES = {
 }
 
 
+def is_psn_configured() -> bool:
+    return bool(os.getenv("PSN_NPSSO"))
+
+
 def _get_psnawp():
     """Return an authenticated PSNAWP instance, or raise if not configured."""
     from psnawp_api import PSNAWP  # lazy import — optional dependency

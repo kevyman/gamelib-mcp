@@ -2,6 +2,22 @@
 
 This VM hosts multiple MCP servers behind a shared Caddy reverse proxy. The gamelib-mcp repo root serves as the host-level config (`docker-compose.yml`, `Caddyfile`). Each additional MCP lives in its own subdirectory.
 
+### Control plane first
+
+After each deploy or auth change, use the integration control plane before debugging any individual platform sync.
+
+- MCP: `get_integration_status()`
+- HTTP JSON: `GET /admin/integrations`
+- HTTP UI: `GET /admin/integrations/ui`
+
+These are the primary operator entrypoints for Hetzner/Docker. They show:
+
+- whether each platform is `ready`, `degraded`, `stale`, `partially_configured`, or `unconfigured`
+- which backend the container detected
+- whether required env values, host mounts, or binaries are missing inside the container
+- the last startup-sync error classification per platform
+- remediation steps to run on the host before retrying sync
+
 ### Server details
 
 - **Provider**: Hetzner Cloud
@@ -80,6 +96,20 @@ docker compose --profile prod up -d --build
 docker compose --profile prod logs -f
 ```
 
+#### 7. Check integration status before anything else
+
+```bash
+curl -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
+  https://gamelibmcp.johnwilkos.com/admin/integrations | jq
+```
+
+Use that output or `/admin/integrations/ui` as the first readiness check:
+
+- `ready`: the container can see the inputs it needs
+- `degraded` or `stale`: the backend exists, but auth/runtime needs intervention
+- `partially_configured`: some required inputs are present, but not all
+- `unconfigured`: the container cannot see the required env values, files, or mounts
+
 ---
 
 ### Redeploying after code changes
@@ -105,6 +135,8 @@ legendary list --force-refresh >/dev/null
 ```
 
 That populates `/root/.config/legendary` with `user.json`, `assets.json`, and `metadata/*.json`, which the container then uses for both owned-game import and the reverse-engineered Epic playtime endpoint.
+
+If the control plane reports Epic auth as stale, rerun the two host commands above and restart the container.
 
 ---
 
@@ -133,6 +165,8 @@ LGOGDOWNLOADER_HOST_PATH=/root/mcps/data/lgogdownloader
 
 lgogdownloader refreshes its session automatically on each `--list j` call — no manual token rotation needed. If the session expires, re-run `lgogdownloader --login` locally and rsync again.
 
+If the control plane reports a missing runtime dependency, the mount is present but `lgogdownloader` is not available inside the container image.
+
 ---
 
 ### PSN Setup
@@ -156,6 +190,8 @@ PSNAWP is a pure Python library — no extra system packages required in Docker.
 **Known limitation:** Only played titles appear in the library (`title_stats()` tracks play history, not purchases). Unplayed digital purchases will not sync. This is a PSN platform limitation.
 
 If the NPSSO token expires, repeat the browser extraction and update `.env`, then restart the container.
+
+If the control plane reports PSN auth as stale, re-extract `PSN_NPSSO`, update `.env`, and restart the container.
 
 ---
 
@@ -185,6 +221,8 @@ Alternatively, skip nxapi entirely and use the VGCS cookie fallback (see below) 
 
 If the session token expires, re-run `nxapi nso auth` and update `.env`, then restart the container.
 
+If the control plane reports Nintendo as degraded or stale, verify that the container can see `NINTENDO_SESSION_TOKEN`, `NXAPI_BIN`, or the cookie fallback file before retrying sync.
+
 **Note:** Only titles that have been launched appear in Nintendo's play history. Unplayed digital purchases and physical cartridges that were never inserted will not sync. This is a Nintendo platform limitation.
 
 ---
@@ -194,6 +232,13 @@ If the session token expires, re-run `nxapi nso auth` and update `.env`, then re
 ```bash
 curl https://gamelibmcp.johnwilkos.com/health
 # {"status": "ok", "library_synced_at": "..."}
+```
+
+Then check:
+
+```bash
+curl -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
+  https://gamelibmcp.johnwilkos.com/admin/integrations/ui
 ```
 
 ---

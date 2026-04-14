@@ -52,6 +52,18 @@ except ModuleNotFoundError:
 from gamelib_mcp.data import igdb, psn
 
 
+def _run_async(coro):
+    # Python 3.14 in this environment hangs in asyncio.run() when shutting down
+    # the default executor after fetch_psn_library() offloads sync PSNAWP work.
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro)
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
 def _make_entry(name, title_id="PPSA12345_00", category=PlatformCategory.PS5, play_duration=timedelta(minutes=90)):
     entry = MagicMock()
     entry.name = name
@@ -69,7 +81,7 @@ class FetchPsnLibraryFilterTests(unittest.TestCase):
         mock_psnawp.me.return_value = mock_client
 
         with patch("gamelib_mcp.data.psn._get_psnawp", return_value=mock_psnawp):
-            return asyncio.run(psn.fetch_psn_library())
+            return _run_async(psn.fetch_psn_library())
 
     def test_normal_ps5_game_passes_through(self) -> None:
         entries = [_make_entry("Elden Ring")]
@@ -116,7 +128,7 @@ class SyncPsnSkipTests(unittest.TestCase):
         with patch.dict("os.environ", {}, clear=False):
             import os
             os.environ.pop("PSN_NPSSO", None)
-            result = asyncio.run(psn.sync_psn())
+            result = _run_async(psn.sync_psn())
         self.assertEqual(result, {"added": 0, "matched": 0, "skipped": 0})
 
     def test_returns_zeros_on_fetch_exception(self) -> None:
@@ -124,7 +136,7 @@ class SyncPsnSkipTests(unittest.TestCase):
             patch.dict("os.environ", {"PSN_NPSSO": "fake"}, clear=False),
             patch("gamelib_mcp.data.psn.fetch_psn_library", AsyncMock(side_effect=Exception("auth failed"))),
         ):
-            result = asyncio.run(psn.sync_psn())
+            result = _run_async(psn.sync_psn())
         self.assertEqual(result, {"added": 0, "matched": 0, "skipped": 0})
 
 
@@ -141,7 +153,7 @@ class SyncPsnSyncTests(unittest.TestCase):
             patch("gamelib_mcp.data.psn.upsert_game_platform", mock_upsert_platform),
             patch("gamelib_mcp.data.psn.load_fuzzy_candidates", mock_load_candidates),
         ):
-            result = asyncio.run(psn.sync_psn())
+            result = _run_async(psn.sync_psn())
 
         return result, mock_resolve, mock_upsert_platform
 
@@ -207,7 +219,7 @@ class SyncPsnSyncTests(unittest.TestCase):
             patch("gamelib_mcp.data.psn.upsert_game_platform", AsyncMock(return_value=99)),
             patch("gamelib_mcp.data.psn.load_fuzzy_candidates", AsyncMock(return_value={})),
         ):
-            asyncio.run(psn.sync_psn())
+            _run_async(psn.sync_psn())
 
         mock_resolve.assert_awaited_once()
         self.assertEqual(
