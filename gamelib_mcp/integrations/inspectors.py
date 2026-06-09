@@ -454,7 +454,7 @@ def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus
 def inspect_psn(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
     has_npsso = bool(os.getenv("PSN_NPSSO"))
     auth_stale = (last_sync or {}).get("last_error_classification") == "auth_stale"
-    if auth_stale:
+    if auth_stale and has_npsso:
         return IntegrationStatus(
             platform="ps5",
             overall_status="stale",

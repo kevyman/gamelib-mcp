@@ -91,6 +91,15 @@ _SHOP_ID_BY_REGION = {
 }
 
 
+def _classify_nintendo_sync_error(message: str) -> str:
+    lowered = message.lower()
+    if any(token in lowered for token in ("auth", "expired", "session", "token", "login")):
+        return "auth_stale"
+    if any(token in lowered for token in ("not found", "not in path", "command not found", "executable", "binary")):
+        return "missing_runtime_dependency"
+    return "unexpected"
+
+
 # ---------------------------------------------------------------------------
 # nxapi helpers
 # ---------------------------------------------------------------------------
@@ -353,6 +362,8 @@ async def sync_nintendo() -> dict:
 
     has_nxapi_token = bool(os.getenv("NINTENDO_SESSION_TOKEN"))
     has_vgcs_cookies = bool(_load_vgcs_cookies())
+    nxapi_error: Exception | None = None
+    vgcs_error: Exception | None = None
 
     # --- attempt nxapi ---
     if has_nxapi_token and _nxapi_available():
@@ -360,6 +371,7 @@ async def sync_nintendo() -> dict:
             entries = await fetch_nintendo_play_history()
             logger.info("Nintendo: fetched %d titles via nxapi", len(entries))
         except Exception as exc:
+            nxapi_error = exc
             logger.warning("nxapi play-activity failed, trying VGCS fallback: %s", exc)
 
     # --- attempt VGCS fallback ---
@@ -368,9 +380,39 @@ async def sync_nintendo() -> dict:
             entries = await fetch_nintendo_library_vgcs()
             logger.info("Nintendo: fetched %d titles via VGCS fallback", len(entries))
         except Exception as exc:
+            vgcs_error = exc
             logger.warning("VGCS fallback failed: %s", exc)
 
     if entries is None:
+        if nxapi_error is not None:
+            classification = _classify_nintendo_sync_error(str(nxapi_error))
+            return {
+                "added": 0,
+                "matched": 0,
+                "skipped": 0,
+                "sync_status": "stale" if classification == "auth_stale" else "failed",
+                "error_summary": f"nxapi play-activity failed: {nxapi_error}",
+                "error_classification": classification,
+            }
+        if has_nxapi_token and not _nxapi_available():
+            return {
+                "added": 0,
+                "matched": 0,
+                "skipped": 0,
+                "sync_status": "degraded",
+                "error_summary": f"{NXAPI_BIN} not in PATH",
+                "error_classification": "missing_runtime_dependency",
+            }
+        if vgcs_error is not None:
+            classification = _classify_nintendo_sync_error(str(vgcs_error))
+            return {
+                "added": 0,
+                "matched": 0,
+                "skipped": 0,
+                "sync_status": "stale" if classification == "auth_stale" else "failed",
+                "error_summary": f"VGCS fallback failed: {vgcs_error}",
+                "error_classification": classification,
+            }
         if not has_nxapi_token and not has_vgcs_cookies:
             logger.info(
                 "Nintendo sync skipped — set NINTENDO_SESSION_TOKEN or NINTENDO_COOKIES_FILE"

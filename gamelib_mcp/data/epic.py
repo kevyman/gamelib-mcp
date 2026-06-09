@@ -9,7 +9,6 @@ that directory read-only into the container and point ``EPIC_LEGENDARY_PATH``
 at the mount path.
 """
 
-import asyncio
 import json
 import logging
 import os
@@ -185,11 +184,13 @@ def _extract_epic_artifact_id(game: dict[str, Any]) -> str | None:
     return str(app_name) if app_name else None
 
 
-async def fetch_epic_playtime() -> dict[str, int]:
+async def fetch_epic_playtime(suppress_configuration_errors: bool = True) -> dict[str, int]:
     """Return a mapping of Epic artifact id to total playtime minutes."""
     try:
         session = await _get_epic_session()
     except EpicConfigurationError as exc:
+        if not suppress_configuration_errors:
+            raise
         logger.info("Epic playtime unavailable: %s", exc)
         return {}
     except Exception as exc:
@@ -216,6 +217,8 @@ async def fetch_epic_playtime() -> dict[str, int]:
             try:
                 session = await _refresh_epic_session(str(refresh_token))
             except EpicConfigurationError as exc:
+                if not suppress_configuration_errors:
+                    raise
                 logger.info("Epic playtime unavailable: %s", exc)
                 return {}
             except Exception as exc:
@@ -276,7 +279,7 @@ async def sync_epic() -> dict:
         }
 
     try:
-        games, playtime_by_artifact = await asyncio.gather(fetch_epic_library(), fetch_epic_playtime())
+        games = await fetch_epic_library()
     except Exception as exc:
         logger.warning("Epic sync failed: %s", exc)
         return {
@@ -286,6 +289,14 @@ async def sync_epic() -> dict:
             "sync_status": "failed",
             "error_summary": f"Epic sync failed: {exc}",
         }
+
+    playtime_error: EpicConfigurationError | None = None
+    try:
+        playtime_by_artifact = await fetch_epic_playtime(suppress_configuration_errors=False)
+    except EpicConfigurationError as exc:
+        logger.info("Epic playtime stale; syncing ownership only: %s", exc)
+        playtime_error = exc
+        playtime_by_artifact = {}
 
     if not games:
         logger.info("Epic metadata cache is empty at %s — skipping Epic sync", config_path / "metadata")
@@ -344,4 +355,13 @@ async def sync_epic() -> dict:
         skipped,
         len(playtime_by_artifact),
     )
-    return {"added": added, "matched": matched, "skipped": skipped}
+    result = {"added": added, "matched": matched, "skipped": skipped}
+    if playtime_error is not None:
+        result.update(
+            {
+                "sync_status": "stale",
+                "error_summary": str(playtime_error),
+                "error_classification": "auth_stale",
+            }
+        )
+    return result

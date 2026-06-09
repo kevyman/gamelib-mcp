@@ -130,6 +130,25 @@ class SyncNintendoTests(unittest.TestCase):
 
         self.assertEqual(result, {"added": 0, "matched": 0, "skipped": 0})
 
+    def test_returns_stale_metadata_when_nxapi_auth_fails_without_fallback(self) -> None:
+        with (
+            patch.dict("os.environ", {"NINTENDO_SESSION_TOKEN": "token"}, clear=True),
+            patch("gamelib_mcp.data.nintendo._load_vgcs_cookies", return_value=None),
+            patch("gamelib_mcp.data.nintendo._nxapi_available", return_value=True),
+            patch(
+                "gamelib_mcp.data.nintendo.fetch_nintendo_play_history",
+                AsyncMock(side_effect=RuntimeError("Nintendo auth expired")),
+            ),
+        ):
+            result = asyncio.run(nintendo.sync_nintendo())
+
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["matched"], 0)
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(result["sync_status"], "stale")
+        self.assertEqual(result["error_classification"], "auth_stale")
+        self.assertIn("Nintendo auth expired", result["error_summary"])
+
     def test_load_vgcs_cookies_falls_back_to_local_default_file_when_env_path_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)

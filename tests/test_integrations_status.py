@@ -215,8 +215,8 @@ def test_inspect_nintendo_cookie_fallback_reports_vgcs_cookie_ownership_only(tmp
     assert all(capability.name != "playtime" for capability in nintendo.capabilities)
 
 
-def test_inspect_psn_reports_stale_when_auth_requires_reextract():
-    with patch.dict("os.environ", {}, clear=True):
+def test_inspect_psn_reports_stale_when_configured_auth_requires_reextract():
+    with patch.dict("os.environ", {"PSN_NPSSO": "token"}, clear=True):
         statuses = inspect_all_integrations(
             last_sync_by_platform={"ps5": {"last_error_classification": "auth_stale"}}
         )
@@ -225,6 +225,18 @@ def test_inspect_psn_reports_stale_when_auth_requires_reextract():
 
     assert psn.overall_status == "stale"
     assert psn.active_backend == "psnawp"
+
+
+def test_inspect_psn_reports_unconfigured_when_token_removed_after_stale_sync():
+    with patch.dict("os.environ", {}, clear=True):
+        statuses = inspect_all_integrations(
+            last_sync_by_platform={"ps5": {"last_error_classification": "auth_stale"}}
+        )
+
+    psn = statuses["ps5"]
+
+    assert psn.overall_status == "unconfigured"
+    assert psn.active_backend is None
 
 
 def test_inspect_steam_reports_ready_when_credentials_present():
