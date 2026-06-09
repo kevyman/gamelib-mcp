@@ -139,6 +139,23 @@ class EpicHelpersTests(unittest.TestCase):
 
         self.assertEqual(playtime, {"artifact-1": 2, "artifact-2": 7, "artifact-3": 60})
 
+    def test_fetch_epic_playtime_logs_info_for_stale_credentials(self) -> None:
+        with (
+            patch(
+                "gamelib_mcp.data.epic._get_epic_session",
+                AsyncMock(
+                    side_effect=epic.EpicConfigurationError(
+                        "Legendary refresh token rejected; rerun legendary auth"
+                    )
+                ),
+            ),
+            self.assertLogs("gamelib_mcp.data.epic", level="INFO") as logs,
+        ):
+            playtime = asyncio.run(epic.fetch_epic_playtime())
+
+        self.assertEqual(playtime, {})
+        self.assertIn("INFO:gamelib_mcp.data.epic:Epic playtime unavailable", logs.output[0])
+
 
 class SyncEpicTests(unittest.TestCase):
     def _run_sync(self, games, playtime_by_artifact=None, resolve_result=(42, None), candidates=None):
@@ -160,6 +177,89 @@ class SyncEpicTests(unittest.TestCase):
             result = asyncio.run(epic.sync_epic())
 
         return result, mock_resolve, mock_upsert_platform, mock_enrichment
+
+    def test_returns_failure_metadata_when_config_missing(self) -> None:
+        missing_path = Path("/nonexistent/legendary")
+
+        with patch("gamelib_mcp.data.epic._legendary_config_path", return_value=missing_path):
+            result = asyncio.run(epic.sync_epic())
+
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["matched"], 0)
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(result["sync_status"], "unconfigured")
+        self.assertEqual(result["error_classification"], "missing_configuration")
+
+    def test_returns_failure_metadata_when_metadata_cache_empty(self) -> None:
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch("gamelib_mcp.data.epic.fetch_epic_library", AsyncMock(return_value=[])),
+            patch("gamelib_mcp.data.epic.fetch_epic_playtime", AsyncMock(return_value={})),
+        ):
+            result = asyncio.run(epic.sync_epic())
+
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["sync_status"], "unconfigured")
+        self.assertEqual(result["error_classification"], "missing_configuration")
+
+    def test_returns_failure_metadata_on_sync_exception(self) -> None:
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch("gamelib_mcp.data.epic.fetch_epic_library", AsyncMock(side_effect=RuntimeError("boom"))),
+            patch("gamelib_mcp.data.epic.fetch_epic_playtime", AsyncMock(return_value={})),
+        ):
+            result = asyncio.run(epic.sync_epic())
+
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["sync_status"], "failed")
+        self.assertEqual(result["error_summary"], "Epic sync failed: boom")
+
+    def test_returns_stale_metadata_but_still_syncs_ownership_when_playtime_auth_is_stale(self) -> None:
+        mock_resolve = AsyncMock(return_value=(42, None))
+        mock_upsert_platform = AsyncMock(return_value=99)
+        mock_identifier = AsyncMock()
+
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch(
+                "gamelib_mcp.data.epic.fetch_epic_library",
+                AsyncMock(
+                    return_value=[
+                        {
+                            "app_title": "Celeste",
+                            "asset_infos": {"Windows": {"asset_id": "artifact-1"}},
+                        }
+                    ]
+                ),
+            ),
+            patch(
+                "gamelib_mcp.data.epic._get_epic_session",
+                AsyncMock(
+                    side_effect=epic.EpicConfigurationError(
+                        "Legendary refresh token rejected; rerun legendary auth"
+                    )
+                ),
+            ),
+            patch("gamelib_mcp.data.epic.load_fuzzy_candidates", AsyncMock(return_value={})),
+            patch("gamelib_mcp.data.epic.resolve_and_link_game", mock_resolve),
+            patch("gamelib_mcp.data.epic.upsert_game_platform", mock_upsert_platform),
+            patch("gamelib_mcp.data.epic.upsert_game_platform_enrichment", AsyncMock()),
+            patch("gamelib_mcp.data.epic.upsert_game_platform_identifier", mock_identifier),
+        ):
+            result = asyncio.run(epic.sync_epic())
+
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(result["matched"], 0)
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(result["sync_status"], "stale")
+        self.assertEqual(result["error_classification"], "auth_stale")
+        self.assertIn("Legendary refresh token rejected", result["error_summary"])
+        mock_upsert_platform.assert_awaited_once_with(
+            game_id=42,
+            platform="epic",
+            playtime_minutes=None,
+            owned=1,
+        )
 
     def test_unmatched_game_still_syncs_when_igdb_returns_no_result(self) -> None:
         games = [

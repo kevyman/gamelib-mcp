@@ -108,6 +108,89 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             "epic: legendary unavailable; ps5: network timeout",
         )
 
+    async def test_run_startup_refresh_records_platform_error_classifications(self) -> None:
+        refresh_result = {
+            "epic": {"error": "Legendary refresh token rejected; rerun legendary auth"},
+            "gog": {"error": "lgogdownloader not in PATH"},
+        }
+
+        with (
+            patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()) as mock_set_meta_many,
+            patch("gamelib_mcp.main._admin_refresh_library", AsyncMock(return_value=refresh_result)),
+            patch("gamelib_mcp.main._drain_background_enrich_reruns", AsyncMock()),
+        ):
+            await _run_startup_refresh()
+
+        finished = mock_set_meta_many.await_args_list[1].args[0]
+        self.assertEqual(
+            finished["integration_sync_epic_last_error_classification"],
+            "auth_stale",
+        )
+        self.assertEqual(
+            finished["integration_sync_gog_last_error_classification"],
+            "missing_runtime_dependency",
+        )
+
+    async def test_run_startup_refresh_records_platform_error_summary_and_attempt_time(self) -> None:
+        refresh_result = {
+            "epic": {"error": "Legendary refresh token rejected; rerun legendary auth"},
+        }
+
+        with (
+            patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()) as mock_set_meta_many,
+            patch("gamelib_mcp.main._admin_refresh_library", AsyncMock(return_value=refresh_result)),
+            patch("gamelib_mcp.main._drain_background_enrich_reruns", AsyncMock()),
+        ):
+            await _run_startup_refresh()
+
+        finished = mock_set_meta_many.await_args_list[1].args[0]
+        self.assertEqual(
+            finished["integration_sync_epic_last_error_summary"],
+            "Legendary refresh token rejected; rerun legendary auth",
+        )
+        self.assertIn("integration_sync_epic_last_attempt_at", finished)
+        self.assertNotIn("integration_sync_epic_last_success_at", finished)
+
+    def test_platform_metadata_treats_sync_status_payloads_as_failures(self) -> None:
+        finished_at = "2026-04-13T12:00:00+00:00"
+        refresh_result = {
+            "gog": {
+                "added": 0,
+                "matched": 0,
+                "skipped": 0,
+                "sync_status": "stale",
+                "error_summary": "lgogdownloader auth expired; run lgogdownloader --login",
+            },
+            "ps5": {
+                "added": 0,
+                "matched": 0,
+                "skipped": 0,
+                "sync_status": "unconfigured",
+                "summary": "PSN_NPSSO is not set",
+            },
+        }
+
+        metadata = admin_tools.build_platform_sync_metadata(refresh_result, finished_at)
+
+        self.assertEqual(
+            metadata["integration_sync_gog_last_error_summary"],
+            "lgogdownloader auth expired; run lgogdownloader --login",
+        )
+        self.assertEqual(
+            metadata["integration_sync_gog_last_error_classification"],
+            "auth_stale",
+        )
+        self.assertNotIn("integration_sync_gog_last_success_at", metadata)
+        self.assertEqual(
+            metadata["integration_sync_ps5_last_error_summary"],
+            "PSN_NPSSO is not set",
+        )
+        self.assertEqual(
+            metadata["integration_sync_ps5_last_error_classification"],
+            "missing_configuration",
+        )
+        self.assertNotIn("integration_sync_ps5_last_success_at", metadata)
+
     async def test_run_startup_refresh_records_exception_failure(self) -> None:
         with (
             patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()) as mock_set_meta_many,
@@ -416,6 +499,11 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             return await make_sync("ps5", {"platform": "ps5", "synced": True})
 
         with (
+            patch("gamelib_mcp.tools.admin.is_steam_configured", return_value=True, create=True),
+            patch("gamelib_mcp.tools.admin.is_epic_configured", return_value=True, create=True),
+            patch("gamelib_mcp.tools.admin.is_gog_configured", return_value=True, create=True),
+            patch("gamelib_mcp.tools.admin.is_nintendo_configured", return_value=True, create=True),
+            patch("gamelib_mcp.tools.admin.is_psn_configured", return_value=True, create=True),
             patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(side_effect=steam_sync)),
             patch("gamelib_mcp.tools.admin.sync_epic", AsyncMock(side_effect=epic_sync)),
             patch("gamelib_mcp.tools.admin.sync_gog", AsyncMock(side_effect=gog_sync)),
@@ -532,7 +620,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         db_module._ENV_LOADED = False
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("gamelib_mcp.data.db.load_dotenv", return_value=False),
+            patch("gamelib_mcp.data.db.load_project_dotenv", return_value=False),
         ):
             self.assertEqual(db_module._db_path(), "data/gamelib.db")
 
@@ -540,20 +628,20 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         db_module._ENV_LOADED = False
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("gamelib_mcp.data.db.load_dotenv") as load_dotenv,
+            patch("gamelib_mcp.data.db.load_project_dotenv") as load_project_dotenv,
         ):
-            def fake_load_dotenv(path: str | None = None, *args, **kwargs) -> bool:
+            def fake_load_project_dotenv(path: str | None = None, *args, **kwargs) -> bool:
                 os.environ["DATABASE_URL"] = "file:./from-dotenv.db"
                 return True
 
-            load_dotenv.side_effect = fake_load_dotenv
+            load_project_dotenv.side_effect = fake_load_project_dotenv
             self.assertEqual(db_module._db_path(), "./from-dotenv.db")
 
     def test_db_path_ignores_legacy_root_db_files(self) -> None:
         db_module._ENV_LOADED = False
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("gamelib_mcp.data.db.load_dotenv", return_value=False),
+            patch("gamelib_mcp.data.db.load_project_dotenv", return_value=False),
             # os.path.exists is NOT called — the function ignores legacy root-level files unconditionally
         ):
             self.assertEqual(db_module._db_path(), "data/gamelib.db")
