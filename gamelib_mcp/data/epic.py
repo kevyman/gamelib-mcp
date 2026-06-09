@@ -9,7 +9,6 @@ that directory read-only into the container and point ``EPIC_LEGENDARY_PATH``
 at the mount path.
 """
 
-import asyncio
 import json
 import logging
 import os
@@ -41,6 +40,10 @@ _EPIC_CLIENT_SECRET = os.getenv("EPIC_CLIENT_SECRET", "daafbccc737745039dffe53d9
 _EPIC_USER_AGENT = "UELauncher/11.0.1-14907503+++Portal+Release-Live Windows/10.0.19041.1.256.64bit"
 _EPIC_TIMEOUT = 20.0
 _TOKEN_REFRESH_SKEW = timedelta(minutes=10)
+
+
+class EpicConfigurationError(RuntimeError):
+    """Raised when local Legendary auth state is missing or stale."""
 
 
 def _legendary_config_path() -> Path:
@@ -75,11 +78,11 @@ async def _read_json_file(path: Path) -> Any:
 async def _load_epic_user_data() -> dict[str, Any]:
     user_path = _legendary_config_path() / "user.json"
     if not user_path.is_file():
-        raise FileNotFoundError(f"missing Epic credentials file: {user_path}")
+        raise EpicConfigurationError(f"missing Epic credentials file: {user_path}")
 
     data = await _read_json_file(user_path)
     if not isinstance(data, dict):
-        raise RuntimeError(f"unexpected Epic credentials payload in {user_path}")
+        raise EpicConfigurationError(f"unexpected Epic credentials payload in {user_path}")
     return data
 
 
@@ -97,7 +100,15 @@ async def _refresh_epic_session(refresh_token: str) -> dict[str, Any]:
                 "token_type": "eg1",
             },
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 400:
+                raise EpicConfigurationError(
+                    "Legendary refresh token rejected; rerun `legendary auth` and "
+                    "`legendary list --force-refresh`"
+                ) from exc
+            raise
         payload = response.json()
 
     if not isinstance(payload, dict) or "access_token" not in payload:
@@ -173,10 +184,15 @@ def _extract_epic_artifact_id(game: dict[str, Any]) -> str | None:
     return str(app_name) if app_name else None
 
 
-async def fetch_epic_playtime() -> dict[str, int]:
+async def fetch_epic_playtime(suppress_configuration_errors: bool = True) -> dict[str, int]:
     """Return a mapping of Epic artifact id to total playtime minutes."""
     try:
         session = await _get_epic_session()
+    except EpicConfigurationError as exc:
+        if not suppress_configuration_errors:
+            raise
+        logger.info("Epic playtime unavailable: %s", exc)
+        return {}
     except Exception as exc:
         logger.warning("Epic playtime unavailable: %s", exc)
         return {}
@@ -185,7 +201,7 @@ async def fetch_epic_playtime() -> dict[str, int]:
     access_token = session.get("access_token")
     refresh_token = session.get("refresh_token")
     if not account_id or not access_token:
-        logger.warning("Epic playtime unavailable: missing account_id or access_token")
+        logger.info("Epic playtime unavailable: missing account_id or access_token")
         return {}
 
     async with httpx.AsyncClient(
@@ -200,6 +216,11 @@ async def fetch_epic_playtime() -> dict[str, int]:
         if response.status_code == 401 and refresh_token:
             try:
                 session = await _refresh_epic_session(str(refresh_token))
+            except EpicConfigurationError as exc:
+                if not suppress_configuration_errors:
+                    raise
+                logger.info("Epic playtime unavailable: %s", exc)
+                return {}
             except Exception as exc:
                 logger.warning("Epic playtime refresh failed after 401: %s", exc)
                 return {}
@@ -234,6 +255,11 @@ async def fetch_epic_playtime() -> dict[str, int]:
     return playtime
 
 
+def is_epic_configured() -> bool:
+    config_path = _legendary_config_path()
+    return config_path.exists() and (config_path / "user.json").is_file() and (config_path / "metadata").is_dir()
+
+
 async def sync_epic() -> dict:
     """
     Sync Epic Games library into game_platforms.
@@ -243,17 +269,48 @@ async def sync_epic() -> dict:
     config_path = _legendary_config_path()
     if not config_path.exists():
         logger.info("Epic config path does not exist (%s) — skipping Epic sync", config_path)
-        return {"added": 0, "matched": 0, "skipped": 0}
+        return {
+            "added": 0,
+            "matched": 0,
+            "skipped": 0,
+            "sync_status": "unconfigured",
+            "error_summary": f"Epic config path does not exist: {config_path}",
+            "error_classification": "missing_configuration",
+        }
 
     try:
-        games, playtime_by_artifact = await asyncio.gather(fetch_epic_library(), fetch_epic_playtime())
+        games = await fetch_epic_library()
     except Exception as exc:
         logger.warning("Epic sync failed: %s", exc)
-        return {"added": 0, "matched": 0, "skipped": 0}
+        return {
+            "added": 0,
+            "matched": 0,
+            "skipped": 0,
+            "sync_status": "failed",
+            "error_summary": f"Epic sync failed: {exc}",
+        }
+
+    playtime_error: EpicConfigurationError | None = None
+    try:
+        playtime_by_artifact = await fetch_epic_playtime(suppress_configuration_errors=False)
+    except EpicConfigurationError as exc:
+        logger.info("Epic playtime stale; syncing ownership only: %s", exc)
+        playtime_error = exc
+        playtime_by_artifact = {}
+    except Exception as exc:
+        logger.warning("Epic playtime unavailable (non-fatal): %s", exc)
+        playtime_by_artifact = {}
 
     if not games:
         logger.info("Epic metadata cache is empty at %s — skipping Epic sync", config_path / "metadata")
-        return {"added": 0, "matched": 0, "skipped": 0}
+        return {
+            "added": 0,
+            "matched": 0,
+            "skipped": 0,
+            "sync_status": "unconfigured",
+            "error_summary": f"Epic metadata cache is empty at {config_path / 'metadata'}",
+            "error_classification": "missing_configuration",
+        }
 
     added = matched = skipped = 0
     candidates = await load_fuzzy_candidates()
@@ -301,4 +358,13 @@ async def sync_epic() -> dict:
         skipped,
         len(playtime_by_artifact),
     )
-    return {"added": added, "matched": matched, "skipped": skipped}
+    result = {"added": added, "matched": matched, "skipped": skipped}
+    if playtime_error is not None:
+        result.update(
+            {
+                "sync_status": "stale",
+                "error_summary": str(playtime_error),
+                "error_classification": "auth_stale",
+            }
+        )
+    return result

@@ -14,6 +14,70 @@ from ..data.psn import sync_psn
 from ..data.steam_xml import fetch_library
 
 logger = logging.getLogger(__name__)
+SYNC_METADATA_PLATFORMS = ("steam", "epic", "gog", "nintendo", "ps5")
+
+
+def classify_platform_sync_error(message: str) -> str:
+    lowered = message.lower()
+    if any(token in lowered for token in ("refresh token rejected", "expired", "npsso", "reauth", "auth", "login")):
+        return "auth_stale"
+    if any(token in lowered for token in ("not in path", "binary", "command not found", "executable", "no such file")):
+        return "missing_runtime_dependency"
+    if any(token in lowered for token in ("not set", "missing", "not configured", "no credentials")):
+        return "missing_configuration"
+    if any(token in lowered for token in ("timeout", "timed out", "network", "connection", "dns")):
+        return "network"
+    return "unexpected"
+
+
+def _platform_sync_error_summary(payload: dict) -> str | None:
+    error = payload.get("error")
+    if isinstance(error, str) and error:
+        return error
+
+    summary = payload.get("error_summary")
+    if not isinstance(summary, str) or not summary:
+        summary = payload.get("summary")
+    if not isinstance(summary, str) or not summary:
+        return None
+
+    status = payload.get("sync_status")
+    if isinstance(status, str) and status not in {"ready", "success", "synced", "ok"}:
+        return summary
+    return None
+
+
+def _platform_sync_error_classification(payload: dict, summary: str) -> str:
+    classification = payload.get("error_classification")
+    if isinstance(classification, str) and classification:
+        return classification
+    status = payload.get("sync_status")
+    if status == "unconfigured":
+        return "missing_configuration"
+    if status == "degraded":
+        return "missing_runtime_dependency"
+    return classify_platform_sync_error(summary)
+
+
+def build_platform_sync_metadata(refresh_result: dict, finished_at: str) -> dict[str, str | None]:
+    metadata: dict[str, str | None] = {}
+    for platform in SYNC_METADATA_PLATFORMS:
+        payload = refresh_result.get(platform)
+        if not isinstance(payload, dict):
+            continue
+
+        prefix = f"integration_sync_{platform}"
+        error = _platform_sync_error_summary(payload)
+        metadata[f"{prefix}_last_attempt_at"] = finished_at
+        metadata[f"{prefix}_last_finished_at"] = finished_at
+        metadata[f"{prefix}_last_error_summary"] = error
+        metadata[f"{prefix}_last_error_classification"] = (
+            _platform_sync_error_classification(payload, error) if error else None
+        )
+        if not error:
+            metadata[f"{prefix}_last_success_at"] = finished_at
+
+    return metadata
 
 
 async def refresh_library(

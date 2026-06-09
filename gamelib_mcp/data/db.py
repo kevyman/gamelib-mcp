@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Callable, Iterable, TypeVar
 
 import aiosqlite
-from dotenv import load_dotenv
+
+from gamelib_mcp.env import load_project_dotenv
 
 
 # Polyfill: aiosqlite <0.20 doesn't have execute_fetchone as a Connection method
@@ -57,7 +58,7 @@ class MigrationResult:
 def _db_path() -> str:
     global _ENV_LOADED
     if not _ENV_LOADED:
-        load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+        load_project_dotenv(Path(__file__).resolve().parents[2] / ".env")
         _ENV_LOADED = True
 
     configured = os.getenv("DATABASE_URL")
@@ -1558,6 +1559,16 @@ async def get_meta(key: str) -> str | None:
     async with get_db() as db:
         row = await db.execute_fetchone("SELECT value FROM meta WHERE key = ?", (key,))
     return row["value"] if row else None
+
+
+async def get_meta_prefix(prefix: str) -> dict[str, str]:
+    """Return all meta rows whose key starts with prefix as {key: value}."""
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT key, value FROM meta WHERE key LIKE ?", (f"{prefix}%",)
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return {row["key"]: row["value"] for row in rows if row["value"] is not None}
 
 
 async def set_meta(key: str, value: str) -> None:

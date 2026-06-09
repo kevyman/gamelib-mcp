@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 _LGOGDOWNLOADER_BIN = "lgogdownloader"
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 _UPDATE_INDICATOR = re.compile(r"\s+\[\d+\]$")
+_AUTH_FILE_TOKENS = ("cookie", "token", "auth", "session", "galaxy")
 
 
 def _config_dir() -> Path:
@@ -58,6 +59,8 @@ def _subprocess_env() -> dict:
 
 def _slug_to_title(slug: str) -> str:
     """Convert a lgogdownloader slug to a human-readable title."""
+    if slug.endswith("_game") and "_" in slug[:-5]:
+        slug = slug[:-5]
     return slug.replace("_", " ").title()
 
 
@@ -83,6 +86,19 @@ def _parse_lgogdownloader_output(stdout: str) -> list[str]:
     return titles
 
 
+def _has_auth_files(config_path: Path) -> bool:
+    if not config_path.is_dir():
+        return False
+    return any(
+        path.is_file() and any(token in path.name.lower() for token in _AUTH_FILE_TOKENS)
+        for path in config_path.iterdir()
+    )
+
+
+def is_gog_configured() -> bool:
+    return shutil.which(_LGOGDOWNLOADER_BIN) is not None and _has_auth_files(_config_dir())
+
+
 async def sync_gog() -> dict:
     """
     Sync GOG library into game_platforms via lgogdownloader --list.
@@ -91,18 +107,44 @@ async def sync_gog() -> dict:
     - lgogdownloader binary not in PATH
     - lgogdownloader config dir does not exist (no session stored)
 
-    Returns: {"added": int, "matched": int, "skipped": int}
+    Returns: {"added": int, "matched": int, "skipped": int} plus sync failure
+    metadata when the CLI cannot run.
     """
     if not shutil.which(_LGOGDOWNLOADER_BIN):
         logger.info("lgogdownloader not in PATH — skipping GOG sync")
-        return {"added": 0, "matched": 0, "skipped": 0}
+        return {
+            "added": 0,
+            "matched": 0,
+            "skipped": 0,
+            "sync_status": "degraded",
+            "error_summary": "lgogdownloader not in PATH",
+            "error_classification": "missing_runtime_dependency",
+        }
 
     config_path = _config_dir()
     if not config_path.exists():
         logger.info(
             "lgogdownloader config dir not found (%s) — skipping GOG sync", config_path
         )
-        return {"added": 0, "matched": 0, "skipped": 0}
+        return {
+            "added": 0,
+            "matched": 0,
+            "skipped": 0,
+            "sync_status": "unconfigured",
+            "error_summary": f"lgogdownloader config dir not found: {config_path}",
+            "error_classification": "missing_configuration",
+        }
+
+    if not _has_auth_files(config_path):
+        logger.info("lgogdownloader session files missing in %s — skipping GOG sync", config_path)
+        return {
+            "added": 0,
+            "matched": 0,
+            "skipped": 0,
+            "sync_status": "unconfigured",
+            "error_summary": f"lgogdownloader session files missing in {config_path}; run lgogdownloader --login",
+            "error_classification": "missing_configuration",
+        }
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -115,15 +157,31 @@ async def sync_gog() -> dict:
         stdout_bytes, stderr_bytes = await proc.communicate()
     except Exception as exc:
         logger.warning("GOG sync failed (subprocess error): %s", exc)
-        return {"added": 0, "matched": 0, "skipped": 0}
+        return {
+            "added": 0,
+            "matched": 0,
+            "skipped": 0,
+            "sync_status": "failed",
+            "error_summary": f"GOG sync failed: {exc}",
+        }
 
     if proc.returncode != 0:
+        stderr = stderr_bytes.decode(errors="replace")[:300]
         logger.warning(
             "lgogdownloader --list failed (rc=%d): %s",
             proc.returncode,
-            stderr_bytes.decode()[:300],
+            stderr,
         )
-        return {"added": 0, "matched": 0, "skipped": 0}
+        summary = f"lgogdownloader --list failed (rc={proc.returncode})"
+        if stderr:
+            summary = f"{summary}: {stderr}"
+        return {
+            "added": 0,
+            "matched": 0,
+            "skipped": 0,
+            "sync_status": "failed",
+            "error_summary": summary,
+        }
 
     titles = _parse_lgogdownloader_output(stdout_bytes.decode())
     if not titles:
