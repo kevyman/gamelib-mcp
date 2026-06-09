@@ -37,6 +37,10 @@ _MEDIA_APP_NAMES = {
 }
 
 
+def is_psn_configured() -> bool:
+    return bool(os.getenv("PSN_NPSSO"))
+
+
 def _get_psnawp():
     """Return an authenticated PSNAWP instance, or raise if not configured."""
     from psnawp_api import PSNAWP  # lazy import — optional dependency
@@ -81,7 +85,14 @@ async def sync_psn() -> dict:
     """
     if not os.getenv("PSN_NPSSO"):
         logger.info("PSN_NPSSO not set — skipping PSN sync")
-        return {"added": 0, "matched": 0, "skipped": 0}
+        return {
+            "added": 0,
+            "matched": 0,
+            "skipped": 0,
+            "sync_status": "unconfigured",
+            "error_summary": "PSN_NPSSO is not set",
+            "error_classification": "missing_configuration",
+        }
 
     added = matched = skipped = 0
 
@@ -89,7 +100,13 @@ async def sync_psn() -> dict:
         entries = await fetch_psn_library()
     except Exception as exc:
         logger.warning("PSN sync failed: %s", exc)
-        return {"added": 0, "matched": 0, "skipped": 0}
+        return {
+            "added": 0,
+            "matched": 0,
+            "skipped": 0,
+            "sync_status": "failed",
+            "error_summary": f"PSN sync failed: {exc}",
+        }
 
     candidates = await load_fuzzy_candidates()
 

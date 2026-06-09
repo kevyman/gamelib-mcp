@@ -20,6 +20,12 @@ OWNED_GAMES_URL = "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/
 STALE_HOURS = 6
 
 
+def is_steam_configured() -> bool:
+    steam_api_key = os.getenv("STEAM_API_KEY", STEAM_API_KEY)
+    steam_id = os.getenv("STEAM_ID", STEAM_ID)
+    return bool(steam_api_key and steam_id)
+
+
 async def fetch_library() -> dict:
     """Fetch owned games from Steam Web API and upsert into games table."""
     steam_api_key = os.getenv("STEAM_API_KEY", STEAM_API_KEY)
