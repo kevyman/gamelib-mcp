@@ -30,6 +30,35 @@ def classify_platform_sync_error(message: str) -> str:
     return "unexpected"
 
 
+def _platform_sync_error_summary(payload: dict) -> str | None:
+    error = payload.get("error")
+    if isinstance(error, str) and error:
+        return error
+
+    summary = payload.get("error_summary")
+    if not isinstance(summary, str) or not summary:
+        summary = payload.get("summary")
+    if not isinstance(summary, str) or not summary:
+        return None
+
+    status = payload.get("sync_status")
+    if isinstance(status, str) and status not in {"ready", "success", "synced", "ok"}:
+        return summary
+    return None
+
+
+def _platform_sync_error_classification(payload: dict, summary: str) -> str:
+    classification = payload.get("error_classification")
+    if isinstance(classification, str) and classification:
+        return classification
+    status = payload.get("sync_status")
+    if status == "unconfigured":
+        return "missing_configuration"
+    if status == "degraded":
+        return "missing_runtime_dependency"
+    return classify_platform_sync_error(summary)
+
+
 def build_platform_sync_metadata(refresh_result: dict, finished_at: str) -> dict[str, str | None]:
     metadata: dict[str, str | None] = {}
     for platform in SYNC_METADATA_PLATFORMS:
@@ -38,12 +67,12 @@ def build_platform_sync_metadata(refresh_result: dict, finished_at: str) -> dict
             continue
 
         prefix = f"integration_sync_{platform}"
-        error = payload.get("error")
+        error = _platform_sync_error_summary(payload)
         metadata[f"{prefix}_last_attempt_at"] = finished_at
         metadata[f"{prefix}_last_finished_at"] = finished_at
-        metadata[f"{prefix}_last_error_summary"] = error if isinstance(error, str) and error else None
+        metadata[f"{prefix}_last_error_summary"] = error
         metadata[f"{prefix}_last_error_classification"] = (
-            classify_platform_sync_error(error) if isinstance(error, str) and error else None
+            _platform_sync_error_classification(payload, error) if error else None
         )
         if not error:
             metadata[f"{prefix}_last_success_at"] = finished_at

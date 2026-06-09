@@ -149,6 +149,47 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             "Legendary refresh token rejected; rerun legendary auth",
         )
         self.assertIn("integration_sync_epic_last_attempt_at", finished)
+        self.assertNotIn("integration_sync_epic_last_success_at", finished)
+
+    def test_platform_metadata_treats_sync_status_payloads_as_failures(self) -> None:
+        finished_at = "2026-04-13T12:00:00+00:00"
+        refresh_result = {
+            "gog": {
+                "added": 0,
+                "matched": 0,
+                "skipped": 0,
+                "sync_status": "stale",
+                "error_summary": "lgogdownloader auth expired; run lgogdownloader --login",
+            },
+            "ps5": {
+                "added": 0,
+                "matched": 0,
+                "skipped": 0,
+                "sync_status": "unconfigured",
+                "summary": "PSN_NPSSO is not set",
+            },
+        }
+
+        metadata = admin_tools.build_platform_sync_metadata(refresh_result, finished_at)
+
+        self.assertEqual(
+            metadata["integration_sync_gog_last_error_summary"],
+            "lgogdownloader auth expired; run lgogdownloader --login",
+        )
+        self.assertEqual(
+            metadata["integration_sync_gog_last_error_classification"],
+            "auth_stale",
+        )
+        self.assertNotIn("integration_sync_gog_last_success_at", metadata)
+        self.assertEqual(
+            metadata["integration_sync_ps5_last_error_summary"],
+            "PSN_NPSSO is not set",
+        )
+        self.assertEqual(
+            metadata["integration_sync_ps5_last_error_classification"],
+            "missing_configuration",
+        )
+        self.assertNotIn("integration_sync_ps5_last_success_at", metadata)
 
     async def test_run_startup_refresh_records_exception_failure(self) -> None:
         with (

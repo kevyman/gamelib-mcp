@@ -266,17 +266,37 @@ async def sync_epic() -> dict:
     config_path = _legendary_config_path()
     if not config_path.exists():
         logger.info("Epic config path does not exist (%s) — skipping Epic sync", config_path)
-        return {"added": 0, "matched": 0, "skipped": 0}
+        return {
+            "added": 0,
+            "matched": 0,
+            "skipped": 0,
+            "sync_status": "unconfigured",
+            "error_summary": f"Epic config path does not exist: {config_path}",
+            "error_classification": "missing_configuration",
+        }
 
     try:
         games, playtime_by_artifact = await asyncio.gather(fetch_epic_library(), fetch_epic_playtime())
     except Exception as exc:
         logger.warning("Epic sync failed: %s", exc)
-        return {"added": 0, "matched": 0, "skipped": 0}
+        return {
+            "added": 0,
+            "matched": 0,
+            "skipped": 0,
+            "sync_status": "failed",
+            "error_summary": f"Epic sync failed: {exc}",
+        }
 
     if not games:
         logger.info("Epic metadata cache is empty at %s — skipping Epic sync", config_path / "metadata")
-        return {"added": 0, "matched": 0, "skipped": 0}
+        return {
+            "added": 0,
+            "matched": 0,
+            "skipped": 0,
+            "sync_status": "unconfigured",
+            "error_summary": f"Epic metadata cache is empty at {config_path / 'metadata'}",
+            "error_classification": "missing_configuration",
+        }
 
     added = matched = skipped = 0
     candidates = await load_fuzzy_candidates()

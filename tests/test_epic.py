@@ -178,6 +178,42 @@ class SyncEpicTests(unittest.TestCase):
 
         return result, mock_resolve, mock_upsert_platform, mock_enrichment
 
+    def test_returns_failure_metadata_when_config_missing(self) -> None:
+        missing_path = Path("/nonexistent/legendary")
+
+        with patch("gamelib_mcp.data.epic._legendary_config_path", return_value=missing_path):
+            result = asyncio.run(epic.sync_epic())
+
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["matched"], 0)
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(result["sync_status"], "unconfigured")
+        self.assertEqual(result["error_classification"], "missing_configuration")
+
+    def test_returns_failure_metadata_when_metadata_cache_empty(self) -> None:
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch("gamelib_mcp.data.epic.fetch_epic_library", AsyncMock(return_value=[])),
+            patch("gamelib_mcp.data.epic.fetch_epic_playtime", AsyncMock(return_value={})),
+        ):
+            result = asyncio.run(epic.sync_epic())
+
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["sync_status"], "unconfigured")
+        self.assertEqual(result["error_classification"], "missing_configuration")
+
+    def test_returns_failure_metadata_on_sync_exception(self) -> None:
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch("gamelib_mcp.data.epic.fetch_epic_library", AsyncMock(side_effect=RuntimeError("boom"))),
+            patch("gamelib_mcp.data.epic.fetch_epic_playtime", AsyncMock(return_value={})),
+        ):
+            result = asyncio.run(epic.sync_epic())
+
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["sync_status"], "failed")
+        self.assertEqual(result["error_summary"], "Epic sync failed: boom")
+
     def test_unmatched_game_still_syncs_when_igdb_returns_no_result(self) -> None:
         games = [
             {

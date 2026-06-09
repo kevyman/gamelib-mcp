@@ -129,7 +129,9 @@ class SyncPsnSkipTests(unittest.TestCase):
             import os
             os.environ.pop("PSN_NPSSO", None)
             result = _run_async(psn.sync_psn())
-        self.assertEqual(result, {"added": 0, "matched": 0, "skipped": 0})
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["sync_status"], "unconfigured")
+        self.assertEqual(result["error_classification"], "missing_configuration")
 
     def test_returns_zeros_on_fetch_exception(self) -> None:
         with (
@@ -137,7 +139,9 @@ class SyncPsnSkipTests(unittest.TestCase):
             patch("gamelib_mcp.data.psn.fetch_psn_library", AsyncMock(side_effect=Exception("auth failed"))),
         ):
             result = _run_async(psn.sync_psn())
-        self.assertEqual(result, {"added": 0, "matched": 0, "skipped": 0})
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["sync_status"], "failed")
+        self.assertEqual(result["error_summary"], "PSN sync failed: auth failed")
 
 
 class SyncPsnSyncTests(unittest.TestCase):

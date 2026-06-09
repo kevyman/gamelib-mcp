@@ -1,6 +1,7 @@
 import sys
 import types
 import asyncio
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -73,6 +74,17 @@ class ConfigDirTests(unittest.TestCase):
             result = gog._config_dir()
         self.assertEqual(result, Path("/custom/lgogdownloader"))
 
+    def test_auth_files_detects_session_like_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_dir = Path(tmp)
+            (config_dir / "cookies.txt").write_text("session", encoding="utf-8")
+
+            self.assertTrue(gog._has_auth_files(config_dir))
+
+    def test_auth_files_ignores_empty_config_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(gog._has_auth_files(Path(tmp)))
+
 
 class SubprocessEnvTests(unittest.TestCase):
     def test_xdg_config_home_set_to_parent(self) -> None:
@@ -98,7 +110,9 @@ class SyncGogSkipTests(unittest.TestCase):
         ):
             mock_shutil.which = MagicMock(return_value=None)
             result = asyncio.run(gog.sync_gog())
-        self.assertEqual(result, {"added": 0, "matched": 0, "skipped": 0})
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["sync_status"], "degraded")
+        self.assertEqual(result["error_classification"], "missing_runtime_dependency")
 
     def test_skips_when_config_dir_missing(self) -> None:
         with (
@@ -106,7 +120,22 @@ class SyncGogSkipTests(unittest.TestCase):
             patch("gamelib_mcp.data.gog._config_dir", return_value=Path("/nonexistent/path/that/cannot/exist")),
         ):
             result = asyncio.run(gog.sync_gog())
-        self.assertEqual(result, {"added": 0, "matched": 0, "skipped": 0})
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["sync_status"], "unconfigured")
+        self.assertEqual(result["error_classification"], "missing_configuration")
+
+    def test_skips_when_session_files_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_dir = Path(tmp)
+            with (
+                patch("gamelib_mcp.data.gog.shutil.which", return_value="/usr/bin/lgogdownloader"),
+                patch("gamelib_mcp.data.gog._config_dir", return_value=config_dir),
+            ):
+                result = asyncio.run(gog.sync_gog())
+
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["sync_status"], "unconfigured")
+        self.assertEqual(result["error_classification"], "missing_configuration")
 
     def test_skips_on_nonzero_returncode(self) -> None:
         mock_proc = MagicMock()
@@ -117,11 +146,14 @@ class SyncGogSkipTests(unittest.TestCase):
             patch("gamelib_mcp.data.gog.shutil") as mock_shutil,
             patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": "/config/lgogdownloader"}, clear=False),
             patch("pathlib.Path.exists", return_value=True),
+            patch("gamelib_mcp.data.gog._has_auth_files", return_value=True),
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)),
         ):
             mock_shutil.which = MagicMock(return_value="/usr/bin/lgogdownloader")
             result = asyncio.run(gog.sync_gog())
-        self.assertEqual(result, {"added": 0, "matched": 0, "skipped": 0})
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["sync_status"], "failed")
+        self.assertIn("lgogdownloader --list failed", result["error_summary"])
 
 
 class SyncGogSyncTests(unittest.TestCase):
@@ -141,6 +173,7 @@ class SyncGogSyncTests(unittest.TestCase):
             patch("gamelib_mcp.data.gog.shutil.which", return_value="/usr/bin/lgogdownloader"),
             patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": "/config/lgogdownloader"}, clear=False),
             patch("pathlib.Path.exists", return_value=True),
+            patch("gamelib_mcp.data.gog._has_auth_files", return_value=True),
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
             patch("gamelib_mcp.data.gog.resolve_and_link_game", mock_resolve),
             patch("gamelib_mcp.data.gog.upsert_game_platform", mock_upsert_platform),
@@ -203,6 +236,7 @@ class SyncGogSyncTests(unittest.TestCase):
             patch("gamelib_mcp.data.gog.shutil.which", return_value="/usr/bin/lgogdownloader"),
             patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": "/config/lgogdownloader"}, clear=False),
             patch("pathlib.Path.exists", return_value=True),
+            patch("gamelib_mcp.data.gog._has_auth_files", return_value=True),
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
             patch("gamelib_mcp.data.gog.resolve_and_link_game", mock_resolve),
             patch("gamelib_mcp.data.gog.upsert_game_platform", AsyncMock(return_value=1)),
@@ -224,6 +258,7 @@ class SyncGogSyncTests(unittest.TestCase):
             patch("gamelib_mcp.data.gog.shutil.which", return_value="/usr/bin/lgogdownloader"),
             patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": "/config/lgogdownloader"}, clear=False),
             patch("pathlib.Path.exists", return_value=True),
+            patch("gamelib_mcp.data.gog._has_auth_files", return_value=True),
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
             patch("gamelib_mcp.data.gog.resolve_and_link_game", mock_resolve),
             patch("gamelib_mcp.data.gog.upsert_game_platform", AsyncMock(return_value=1)),

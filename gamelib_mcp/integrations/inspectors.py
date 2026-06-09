@@ -202,6 +202,7 @@ def inspect_gog(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
     root = _gog_root()
     binary = shutil.which("lgogdownloader")
     has_mount = root.exists()
+    has_auth = _has_gog_auth_files(root)
     auth_stale = (last_sync or {}).get("last_error_classification") == "auth_stale"
 
     if has_mount and binary is None:
@@ -221,7 +222,7 @@ def inspect_gog(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
             last_sync=last_sync or {},
         )
 
-    if has_mount and binary is not None and auth_stale:
+    if has_mount and binary is not None and has_auth and auth_stale:
         return IntegrationStatus(
             platform="gog",
             overall_status="stale",
@@ -242,16 +243,17 @@ def inspect_gog(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
             last_sync=last_sync or {},
         )
 
-    if has_mount and binary is not None:
+    if has_mount and binary is not None and has_auth:
         return IntegrationStatus(
             platform="gog",
             overall_status="ready",
             active_backend="lgogdownloader",
-            summary="lgogdownloader and its config directory are available.",
+            summary="lgogdownloader and its session files are available.",
             capabilities=[CapabilityStatus("ownership", "ready", "GOG ownership can be listed locally")],
             checks=[
                 CheckStatus("lgogdownloader_binary", "pass", "lgogdownloader found in PATH"),
                 CheckStatus("lgogdownloader_config", "pass", "Config directory found"),
+                CheckStatus("gog_session_auth", "pass", "GOG session files found"),
             ],
             required_inputs=["lgogdownloader binary", "LGOGDOWNLOADER_CONFIG_PATH mount"],
             detected_inputs=[binary, str(root)],
@@ -260,11 +262,18 @@ def inspect_gog(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
         )
 
     if binary is not None or has_mount:
+        missing_steps = []
+        if binary is None:
+            missing_steps.append("Install `lgogdownloader` in the container image.")
+        if not has_mount:
+            missing_steps.append("Mount the lgogdownloader config directory read-only into the container.")
+        if has_mount and binary is not None and not has_auth:
+            missing_steps.append("Run `lgogdownloader --login` on the host and mount the resulting session files.")
         return IntegrationStatus(
             platform="gog",
             overall_status="partially_configured",
             active_backend="lgogdownloader",
-            summary="GOG requires both the lgogdownloader binary and a mounted config directory.",
+            summary="GOG requires the lgogdownloader binary, a mounted config directory, and session auth files.",
             capabilities=[CapabilityStatus("ownership", "partially_configured", "GOG setup is incomplete")],
             checks=[
                 CheckStatus(
@@ -277,13 +286,15 @@ def inspect_gog(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
                     "pass" if has_mount else "fail",
                     "Config directory found" if has_mount else "Config directory missing",
                 ),
+                CheckStatus(
+                    "gog_session_auth",
+                    "pass" if has_auth else "fail",
+                    "GOG session files found" if has_auth else "GOG session files missing",
+                ),
             ],
             required_inputs=["lgogdownloader binary", "LGOGDOWNLOADER_CONFIG_PATH mount"],
             detected_inputs=[item for item in [binary, str(root) if has_mount else None] if item is not None],
-            remediation_steps=[
-                "Install `lgogdownloader` in the container image.",
-                "Mount the lgogdownloader config directory read-only into the container.",
-            ],
+            remediation_steps=missing_steps,
             last_sync=last_sync or {},
         )
 
@@ -537,6 +548,16 @@ def _gog_root() -> Path:
     if configured:
         return Path(configured).expanduser()
     return Path.home() / ".config" / "lgogdownloader"
+
+
+def _has_gog_auth_files(root: Path) -> bool:
+    if not root.is_dir():
+        return False
+    auth_tokens = ("cookie", "token", "auth", "session", "galaxy")
+    return any(
+        path.is_file() and any(token in path.name.lower() for token in auth_tokens)
+        for path in root.iterdir()
+    )
 
 
 def _detected_env_inputs(*pairs: tuple[str, bool]) -> list[str]:

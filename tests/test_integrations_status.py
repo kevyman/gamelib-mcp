@@ -98,6 +98,7 @@ def test_inspect_gog_reports_degraded_when_binary_missing_but_mount_exists(tmp_p
 def test_inspect_gog_reports_stale_when_recent_auth_failure_detected(tmp_path: Path):
     config_dir = tmp_path / "lgogdownloader"
     config_dir.mkdir()
+    (config_dir / "cookies.txt").write_text("session", encoding="utf-8")
 
     with (
         patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": str(config_dir)}, clear=False),
@@ -110,6 +111,40 @@ def test_inspect_gog_reports_stale_when_recent_auth_failure_detected(tmp_path: P
     gog = statuses["gog"]
 
     assert gog.overall_status == "stale"
+    assert gog.active_backend == "lgogdownloader"
+
+
+def test_inspect_gog_reports_partially_configured_when_auth_files_missing(tmp_path: Path):
+    config_dir = tmp_path / "lgogdownloader"
+    config_dir.mkdir()
+
+    with (
+        patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": str(config_dir)}, clear=False),
+        patch("gamelib_mcp.integrations.inspectors.shutil.which", return_value="/usr/bin/lgogdownloader"),
+    ):
+        statuses = inspect_all_integrations()
+
+    gog = statuses["gog"]
+
+    assert gog.overall_status == "partially_configured"
+    assert gog.active_backend == "lgogdownloader"
+    assert any(check.name == "gog_session_auth" and check.status == "fail" for check in gog.checks)
+
+
+def test_inspect_gog_reports_ready_when_auth_files_present(tmp_path: Path):
+    config_dir = tmp_path / "lgogdownloader"
+    config_dir.mkdir()
+    (config_dir / "cookies.txt").write_text("session", encoding="utf-8")
+
+    with (
+        patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": str(config_dir)}, clear=False),
+        patch("gamelib_mcp.integrations.inspectors.shutil.which", return_value="/usr/bin/lgogdownloader"),
+    ):
+        statuses = inspect_all_integrations()
+
+    gog = statuses["gog"]
+
+    assert gog.overall_status == "ready"
     assert gog.active_backend == "lgogdownloader"
 
 
