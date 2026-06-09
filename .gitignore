@@ -11,3 +11,4 @@ __pycache__/
 .claude/
 retry_deploy.sh
 .worktrees/
+gamelib.db
