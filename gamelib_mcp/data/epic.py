@@ -297,6 +297,9 @@ async def sync_epic() -> dict:
         logger.info("Epic playtime stale; syncing ownership only: %s", exc)
         playtime_error = exc
         playtime_by_artifact = {}
+    except Exception as exc:
+        logger.warning("Epic playtime unavailable (non-fatal): %s", exc)
+        playtime_by_artifact = {}
 
     if not games:
         logger.info("Epic metadata cache is empty at %s — skipping Epic sync", config_path / "metadata")

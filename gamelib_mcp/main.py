@@ -8,10 +8,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from weakref import WeakKeyDictionary
 
-from dotenv import load_dotenv
 from fastmcp import FastMCP
 
-load_dotenv()
+from .env import load_project_dotenv
+
+load_project_dotenv()
 
 from .tools.admin import (
     SYNC_METADATA_PLATFORMS,
@@ -149,7 +150,7 @@ def _summarize_refresh_result(result: object) -> str | None:
     for platform, payload in result.items():
         if not isinstance(payload, dict):
             continue
-        error = payload.get("error")
+        error = payload.get("error") or payload.get("error_summary")
         if error:
             errors.append(f"{platform}: {error}")
 
@@ -624,26 +625,21 @@ async def health(request: Request) -> JSONResponse:
 
 
 async def _integration_status_payload() -> dict[str, dict]:
-    from .data.db import get_meta
+    from .data.db import get_meta_prefix
     from .integrations.inspectors import inspect_all_integrations_dict
 
     last_sync_by_platform: dict[str, dict[str, str]] = {}
     try:
+        all_meta = await get_meta_prefix("integration_sync_")
         for platform in SYNC_METADATA_PLATFORMS:
-            prefix = f"integration_sync_{platform}"
-            last_sync = {
-                key: value
-                for key, value in {
-                    "last_attempt_at": await get_meta(f"{prefix}_last_attempt_at"),
-                    "last_finished_at": await get_meta(f"{prefix}_last_finished_at"),
-                    "last_success_at": await get_meta(f"{prefix}_last_success_at"),
-                    "last_error_summary": await get_meta(f"{prefix}_last_error_summary"),
-                    "last_error_classification": await get_meta(f"{prefix}_last_error_classification"),
-                }.items()
-                if value is not None
+            prefix = f"integration_sync_{platform}_"
+            platform_meta = {
+                key[len(prefix):]: value
+                for key, value in all_meta.items()
+                if key.startswith(prefix)
             }
-            if last_sync:
-                last_sync_by_platform[platform] = last_sync
+            if platform_meta:
+                last_sync_by_platform[platform] = platform_meta
     except Exception:
         logger.exception("Failed to load integration sync metadata")
 

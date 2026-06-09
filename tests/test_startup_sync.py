@@ -620,7 +620,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         db_module._ENV_LOADED = False
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("gamelib_mcp.data.db.load_dotenv", return_value=False),
+            patch("gamelib_mcp.data.db.load_project_dotenv", return_value=False),
         ):
             self.assertEqual(db_module._db_path(), "data/gamelib.db")
 
@@ -628,20 +628,20 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         db_module._ENV_LOADED = False
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("gamelib_mcp.data.db.load_dotenv") as load_dotenv,
+            patch("gamelib_mcp.data.db.load_project_dotenv") as load_project_dotenv,
         ):
-            def fake_load_dotenv(path: str | None = None, *args, **kwargs) -> bool:
+            def fake_load_project_dotenv(path: str | None = None, *args, **kwargs) -> bool:
                 os.environ["DATABASE_URL"] = "file:./from-dotenv.db"
                 return True
 
-            load_dotenv.side_effect = fake_load_dotenv
+            load_project_dotenv.side_effect = fake_load_project_dotenv
             self.assertEqual(db_module._db_path(), "./from-dotenv.db")
 
     def test_db_path_ignores_legacy_root_db_files(self) -> None:
         db_module._ENV_LOADED = False
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("gamelib_mcp.data.db.load_dotenv", return_value=False),
+            patch("gamelib_mcp.data.db.load_project_dotenv", return_value=False),
             # os.path.exists is NOT called — the function ignores legacy root-level files unconditionally
         ):
             self.assertEqual(db_module._db_path(), "data/gamelib.db")

@@ -167,7 +167,7 @@ def test_inspect_nintendo_reports_degraded_when_token_present_but_nxapi_missing(
     nintendo = statuses["nintendo"]
 
     assert nintendo.overall_status == "degraded"
-    assert nintendo.active_backend == "nxapi"
+    assert nintendo.active_backend is None
 
 
 def test_inspect_nintendo_reports_stale_when_recent_auth_failure_detected(tmp_path: Path):

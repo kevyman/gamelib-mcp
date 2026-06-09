@@ -5,6 +5,9 @@ import shutil
 from pathlib import Path
 from typing import TypedDict
 
+from ..data.epic import _legendary_config_path as _epic_root
+from ..data.gog import _AUTH_FILE_TOKENS as _GOG_AUTH_FILE_TOKENS
+from ..data.gog import _config_dir as _gog_root
 from .status import CapabilityStatus, CheckStatus, IntegrationStatus
 
 
@@ -209,7 +212,7 @@ def inspect_gog(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
         return IntegrationStatus(
             platform="gog",
             overall_status="degraded",
-            active_backend="lgogdownloader",
+            active_backend=None,
             summary="GOG session files are present but the lgogdownloader binary is missing in the container.",
             capabilities=[CapabilityStatus("ownership", "degraded", "Runtime dependency missing")],
             checks=[CheckStatus("lgogdownloader_binary", "fail", "lgogdownloader not found in PATH")],
@@ -409,7 +412,7 @@ def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus
         return IntegrationStatus(
             platform="nintendo",
             overall_status=overall_status,
-            active_backend="nxapi" if nxapi_bin is not None or has_session_token else None,
+            active_backend="nxapi" if nxapi_bin is not None else None,
             summary=summary,
             capabilities=[
                 CapabilityStatus("ownership", overall_status, "Nintendo setup is incomplete."),
@@ -531,31 +534,11 @@ def _safe_inspect(
         )
 
 
-def _epic_root() -> Path:
-    configured = os.getenv("EPIC_LEGENDARY_PATH") or os.getenv("LEGENDARY_CONFIG_PATH")
-    if configured:
-        return Path(configured).expanduser()
-
-    xdg_config_home = os.getenv("XDG_CONFIG_HOME")
-    if xdg_config_home:
-        return Path(xdg_config_home).expanduser() / "legendary"
-
-    return Path.home() / ".config" / "legendary"
-
-
-def _gog_root() -> Path:
-    configured = os.getenv("LGOGDOWNLOADER_CONFIG_PATH")
-    if configured:
-        return Path(configured).expanduser()
-    return Path.home() / ".config" / "lgogdownloader"
-
-
 def _has_gog_auth_files(root: Path) -> bool:
     if not root.is_dir():
         return False
-    auth_tokens = ("cookie", "token", "auth", "session", "galaxy")
     return any(
-        path.is_file() and any(token in path.name.lower() for token in auth_tokens)
+        path.is_file() and any(token in path.name.lower() for token in _GOG_AUTH_FILE_TOKENS)
         for path in root.iterdir()
     )
 

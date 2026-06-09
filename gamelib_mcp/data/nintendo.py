@@ -95,7 +95,7 @@ def _classify_nintendo_sync_error(message: str) -> str:
     lowered = message.lower()
     if any(token in lowered for token in ("auth", "expired", "session", "token", "login")):
         return "auth_stale"
-    if any(token in lowered for token in ("not found", "not in path", "command not found", "executable", "binary")):
+    if any(token in lowered for token in ("not in path", "command not found", "executable", "binary")):
         return "missing_runtime_dependency"
     return "unexpected"
 
@@ -417,6 +417,14 @@ async def sync_nintendo() -> dict:
             logger.info(
                 "Nintendo sync skipped — set NINTENDO_SESSION_TOKEN or NINTENDO_COOKIES_FILE"
             )
+            return {
+                "added": 0,
+                "matched": 0,
+                "skipped": 0,
+                "sync_status": "unconfigured",
+                "error_summary": "Nintendo sync skipped: set NINTENDO_SESSION_TOKEN or NINTENDO_COOKIES_FILE",
+                "error_classification": "missing_configuration",
+            }
         return {"added": 0, "matched": 0, "skipped": 0}
 
     added = matched = skipped = 0

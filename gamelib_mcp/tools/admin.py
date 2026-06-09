@@ -19,11 +19,11 @@ SYNC_METADATA_PLATFORMS = ("steam", "epic", "gog", "nintendo", "ps5")
 
 def classify_platform_sync_error(message: str) -> str:
     lowered = message.lower()
-    if any(token in lowered for token in ("refresh token rejected", "expired", "npsso", "reauth", "auth")):
+    if any(token in lowered for token in ("refresh token rejected", "expired", "npsso", "reauth", "auth", "login")):
         return "auth_stale"
     if any(token in lowered for token in ("not in path", "binary", "command not found", "executable", "no such file")):
         return "missing_runtime_dependency"
-    if any(token in lowered for token in ("not set", "missing", "not configured", "no credentials", "not found")):
+    if any(token in lowered for token in ("not set", "missing", "not configured", "no credentials")):
         return "missing_configuration"
     if any(token in lowered for token in ("timeout", "timed out", "network", "connection", "dns")):
         return "network"

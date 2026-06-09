@@ -128,7 +128,9 @@ class SyncNintendoTests(unittest.TestCase):
         ):
             result = asyncio.run(nintendo.sync_nintendo())
 
-        self.assertEqual(result, {"added": 0, "matched": 0, "skipped": 0})
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["sync_status"], "unconfigured")
+        self.assertEqual(result["error_classification"], "missing_configuration")
 
     def test_returns_stale_metadata_when_nxapi_auth_fails_without_fallback(self) -> None:
         with (
