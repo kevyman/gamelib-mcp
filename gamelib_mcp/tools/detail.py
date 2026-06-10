@@ -12,6 +12,7 @@ from ..data.hltb import get_hltb
 from ..data.protondb import get_protondb
 from ..data.steam_store import enrich_game
 from ..utils import _parse_json
+from .common import like_escape as _like_escape
 
 
 async def get_game_detail(
@@ -30,8 +31,8 @@ async def get_game_detail(
             row = await get_game_by_appid(appid)
         elif name is not None:
             row = await db.execute_fetchone(
-                "SELECT * FROM games WHERE lower(name) LIKE lower(?) LIMIT 1",
-                (f"%{name}%",),
+                r"SELECT * FROM games WHERE lower(name) LIKE lower(?) ESCAPE '\' LIMIT 1",
+                (f"%{_like_escape(name)}%",),
             )
         else:
             raise ToolError("Provide game_id, name, or appid")

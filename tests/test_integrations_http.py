@@ -31,7 +31,12 @@ def _request_with_path_params(path: str, path_params: dict[str, str]) -> Request
     )
 
 
-async def _invoke_asgi_app(app, path: str, headers: list[tuple[bytes, bytes]] | None = None) -> tuple[int, dict[str, str], bytes]:
+async def _invoke_asgi_app(
+    app,
+    path: str,
+    headers: list[tuple[bytes, bytes]] | None = None,
+    method: str = "GET",
+) -> tuple[int, dict[str, str], bytes]:
     events: list[dict] = []
 
     async def receive():
@@ -43,7 +48,7 @@ async def _invoke_asgi_app(app, path: str, headers: list[tuple[bytes, bytes]] | 
     await app(
         {
             "type": "http",
-            "method": "GET",
+            "method": method,
             "path": path,
             "query_string": b"",
             "headers": headers or [],
@@ -184,7 +189,56 @@ def test_bearer_auth_middleware_allows_browser_origin_in_allowlist():
 
     assert called is True
     assert status == 204
-    assert headers == {}
+    assert headers["access-control-allow-origin"] == "https://claude.ai"
+    assert headers["access-control-allow-methods"] == "GET, POST, DELETE, OPTIONS"
+    assert headers["access-control-allow-headers"] == (
+        "authorization, content-type, accept, mcp-session-id, last-event-id, mcp-protocol-version"
+    )
+    assert "mcp-protocol-version" in headers["access-control-allow-headers"]
+    assert headers["access-control-expose-headers"] == "mcp-session-id"
+    assert headers["vary"] == "Origin"
+    assert body == b""
+
+
+def test_bearer_auth_middleware_answers_allowed_browser_preflight_before_app():
+    called = False
+
+    async def sentinel_app(scope, receive, send):
+        nonlocal called
+        called = True
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    app = BearerAuthMiddleware(sentinel_app)
+
+    with (
+        patch("gamelib_mcp.http_admin.MCP_AUTH_TOKEN", "secret-token"),
+        patch("gamelib_mcp.http_admin._ALLOWED_ORIGINS", frozenset({"https://chatgpt.com"})),
+    ):
+        status, headers, body = asyncio.run(
+            _invoke_asgi_app(
+                app,
+                "/mcp",
+                headers=[
+                    (b"origin", b"https://chatgpt.com"),
+                    (b"access-control-request-method", b"POST"),
+                    (b"access-control-request-headers", b"content-type, accept"),
+                ],
+                method="OPTIONS",
+            )
+        )
+
+    assert called is False
+    assert status == 204
+    assert headers["access-control-allow-origin"] == "https://chatgpt.com"
+    assert headers["access-control-allow-methods"] == "GET, POST, DELETE, OPTIONS"
+    assert headers["access-control-allow-headers"] == (
+        "authorization, content-type, accept, mcp-session-id, last-event-id, mcp-protocol-version"
+    )
+    assert "mcp-protocol-version" in headers["access-control-allow-headers"]
+    assert headers["access-control-expose-headers"] == "mcp-session-id"
+    assert headers["access-control-max-age"] == "86400"
+    assert headers["content-length"] == "0"
     assert body == b""
 
 

@@ -7,6 +7,8 @@ adds tag handling, stats selects genres and omits the steam appid), and merging
 them would change query output.
 """
 
+from fastmcp.exceptions import ToolError
+
 from ..data.db import STEAM_APP_ID
 
 # Public alias → internal DB platform name
@@ -15,11 +17,55 @@ PLATFORM_ALIASES = {
     "switch": "switch2",
 }
 
+# Platforms with an automated sync backend (canonical, post-alias names).
+SYNCABLE_PLATFORMS = frozenset({"steam", "epic", "gog", "switch2", "ps5"})
+
+# Every platform a game can be recorded against in the library (post-alias).
+# Superset of SYNCABLE_PLATFORMS plus manual-only stores.
+LIBRARY_PLATFORMS = SYNCABLE_PLATFORMS | {"itchio", "xbox", "other"}
+
+# Result-count ceiling shared by all list-returning tools. Keeps a single tool
+# call from blowing the client's context with a multi-megabyte response.
+MAX_RESULT_LIMIT = 200
+
 
 def resolve_platform(platform: str | None) -> str | None:
     if platform is None:
         return None
     return PLATFORM_ALIASES.get(platform.lower(), platform.lower())
+
+
+def validate_platform(platform: str, allowed: frozenset[str]) -> str:
+    """Resolve aliases and confirm the platform is in ``allowed``.
+
+    Returns the canonical platform name; raises ToolError with a consistent
+    message (and the valid set) otherwise.
+    """
+    resolved = resolve_platform(platform)
+    if resolved not in allowed:
+        raise ToolError(
+            f"Unknown platform '{platform}'. Valid: {sorted(allowed | set(PLATFORM_ALIASES))}"
+        )
+    return resolved
+
+
+def clamp_limit(limit: int, maximum: int = MAX_RESULT_LIMIT) -> int:
+    """Clamp a user-supplied LIMIT into [0, maximum].
+
+    Guards against context-blowing huge limits and SQLite's "negative LIMIT =
+    unbounded" behaviour, which would otherwise return the whole table.
+    """
+    if limit < 0:
+        return maximum
+    return min(limit, maximum)
+
+
+def like_escape(value: str) -> str:
+    r"""Escape LIKE wildcards so user input matches literally.
+
+    Use with ``LIKE ? ESCAPE '\'``. Escapes backslash first, then % and _.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 # Correlated subquery selecting a game's primary Steam appid, for use inside a

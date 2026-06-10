@@ -3,10 +3,12 @@
 import json
 from typing import Literal
 
+from fastmcp.exceptions import ToolError
+
 from ..data.db import get_db, get_meta, load_platforms_for_games
 from ..data.protondb import TIER_ORDER
 from ..utils import _parse_json
-from .common import STEAM_APPID_SQL as _STEAM_APPID_SQL
+from .common import STEAM_APPID_SQL as _STEAM_APPID_SQL, clamp_limit as _clamp_limit
 
 ResponseFormat = Literal["concise", "detailed"]
 
@@ -72,6 +74,7 @@ async def find_games_by_vibe(
     Find games matching a vibe (tag-based). Uses json_each() for proper JSON tag matching.
     vibe: one of the keys in VIBE_TAGS, or a raw tag string.
     """
+    limit = _clamp_limit(limit)
     tags = VIBE_TAGS.get(vibe.lower(), [vibe.lower()])
     placeholders = ",".join("?" * len(tags))
 
@@ -92,12 +95,15 @@ async def find_games_by_vibe(
 
     if protondb_min_tier is not None:
         tier_lower = protondb_min_tier.lower()
-        if tier_lower in TIER_ORDER:
-            min_rank = TIER_ORDER.index(tier_lower)
-            allowed = [tier for index, tier in enumerate(TIER_ORDER) if index <= min_rank]
-            tier_ph = ",".join("?" * len(allowed))
-            conditions.append(f"lower(COALESCE(protondb_tier, '')) IN ({tier_ph})")
-            params.extend(allowed)
+        if tier_lower not in TIER_ORDER:
+            raise ToolError(
+                f"Unknown protondb_min_tier '{protondb_min_tier}'. Valid: {list(TIER_ORDER)}"
+            )
+        min_rank = TIER_ORDER.index(tier_lower)
+        allowed = [tier for index, tier in enumerate(TIER_ORDER) if index <= min_rank]
+        tier_ph = ",".join("?" * len(allowed))
+        conditions.append(f"lower(COALESCE(protondb_tier, '')) IN ({tier_ph})")
+        params.extend(allowed)
 
     where = " AND ".join(conditions)
 
@@ -126,7 +132,7 @@ async def find_games_by_vibe(
 
     hw_pref_raw = await get_meta("hardware_preference")
     hw_pref: list[str] = json.loads(hw_pref_raw) if hw_pref_raw else []
-    return _envelope(
+    envelope = _envelope(
         await _format_rows(
             rows,
             include_match_score=False,
@@ -137,6 +143,12 @@ async def find_games_by_vibe(
         limit,
         offset,
     )
+    if total["c"] == 0 and vibe.lower() not in VIBE_TAGS:
+        envelope["note"] = (
+            f"'{vibe}' is not a known vibe and matched no tags directly. "
+            f"Known vibes: {sorted(VIBE_TAGS)}"
+        )
+    return envelope
 
 
 async def get_recommendations(
@@ -151,6 +163,7 @@ async def get_recommendations(
     Returns games sorted by how well they match your taste profile.
     Each result includes suggested_platform based on your hardware_preference setting.
     """
+    limit = _clamp_limit(limit)
     hw_pref_raw = await get_meta("hardware_preference")
     hw_pref: list[str] = json.loads(hw_pref_raw) if hw_pref_raw else []
 
@@ -198,8 +211,9 @@ async def get_recommendations(
             """,
             (*params, limit, offset),
         )
+        affinity_row = await db.execute_fetchone("SELECT COUNT(*) AS c FROM tag_affinity")
 
-    return _envelope(
+    envelope = _envelope(
         await _format_rows(
             rows,
             include_match_score=True,
@@ -210,6 +224,12 @@ async def get_recommendations(
         limit,
         offset,
     )
+    if affinity_row["c"] == 0:
+        envelope["note"] = (
+            "No taste profile yet — run sync_ratings to compute tag affinity "
+            "before recommendations can be ranked."
+        )
+    return envelope
 
 
 async def _format_rows(
