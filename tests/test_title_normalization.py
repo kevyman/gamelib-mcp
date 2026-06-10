@@ -26,6 +26,11 @@ class TitleNormalizationTests(unittest.TestCase):
         self.assertEqual(prepare_catalog_title("Beta Max"), "Beta Max")
         self.assertEqual(prepare_catalog_title("Hogwarts Legacy"), "Hogwarts Legacy")
         self.assertEqual(prepare_catalog_title("Squid Game"), "Squid Game")
+        self.assertEqual(prepare_catalog_title("STREET FIGHTER 6"), "STREET FIGHTER 6")
+        self.assertEqual(
+            prepare_catalog_title("METAL GEAR SOLID - Master Collection Version"),
+            "METAL GEAR SOLID - Master Collection Version",
+        )
 
     def test_prepare_catalog_title_normalizes_storefront_variants(self) -> None:
         self.assertEqual(
