@@ -1,9 +1,10 @@
 """find_games_by_vibe and get_recommendations tools."""
 
 import json
-from ..data.db import STEAM_APP_ID, get_db, get_meta, load_platforms_for_games
+from ..data.db import get_db, get_meta, load_platforms_for_games
 from ..data.protondb import TIER_ORDER
 from ..utils import _parse_json
+from .common import STEAM_APPID_SQL as _STEAM_APPID_SQL
 
 # Vibe -> tag mappings (multi-tag = AND logic by default; tuple of lists = OR groups)
 VIBE_TAGS: dict[str, list[str]] = {
@@ -31,17 +32,8 @@ VIBE_TAGS: dict[str, list[str]] = {
     "fighting": ["fighting", "beat 'em up", "brawler"],
 }
 
-_STEAM_APPID_SQL = f"""
-(
-    SELECT CAST(gpi.identifier_value AS INTEGER)
-    FROM game_platform_identifiers gpi
-    JOIN game_platforms sgp ON sgp.id = gpi.game_platform_id
-    WHERE sgp.game_id = g.id AND gpi.identifier_type = '{STEAM_APP_ID}'
-    ORDER BY gpi.is_primary DESC, gpi.id ASC
-    LIMIT 1
-)
-"""
-
+# NOTE: discover-specific CTE — no 2-week playtime column; tags drive vibe/affinity
+# matching. Distinct from the library and stats variants on purpose.
 _GAME_ROLLUP_CTE = f"""
 WITH game_rollup AS (
     SELECT g.id AS game_id,

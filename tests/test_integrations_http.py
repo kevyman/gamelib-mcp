@@ -4,7 +4,8 @@ from unittest.mock import AsyncMock, patch
 
 from starlette.requests import Request
 
-from gamelib_mcp.main import BearerAuthMiddleware, mcp
+from gamelib_mcp.http_admin import BearerAuthMiddleware
+from gamelib_mcp.main import mcp
 
 
 def _get_route(path: str):
@@ -71,7 +72,7 @@ def test_bearer_auth_middleware_blocks_admin_integrations_without_auth():
 
     app = BearerAuthMiddleware(sentinel_app)
 
-    with patch("gamelib_mcp.main.MCP_AUTH_TOKEN", "secret-token"):
+    with patch("gamelib_mcp.http_admin.MCP_AUTH_TOKEN", "secret-token"):
         status, headers, body = asyncio.run(_invoke_asgi_app(app, "/admin/integrations"))
 
     assert called is False
@@ -91,7 +92,7 @@ def test_bearer_auth_middleware_allows_admin_integrations_with_valid_bearer_toke
 
     app = BearerAuthMiddleware(sentinel_app)
 
-    with patch("gamelib_mcp.main.MCP_AUTH_TOKEN", "secret-token"):
+    with patch("gamelib_mcp.http_admin.MCP_AUTH_TOKEN", "secret-token"):
         status, headers, body = asyncio.run(
             _invoke_asgi_app(
                 app,
@@ -119,7 +120,7 @@ def test_get_admin_integrations_returns_json_payload():
     route = _get_route("/admin/integrations")
 
     with patch(
-        "gamelib_mcp.main._integration_status_payload",
+        "gamelib_mcp.http_admin._integration_status_payload",
         new=AsyncMock(return_value=payload),
     ):
         response = asyncio.run(route.endpoint(_request("/admin/integrations")))
@@ -148,7 +149,7 @@ def test_get_admin_integration_detail_returns_requested_platform():
     route = _get_route("/admin/integrations/{platform}")
 
     with patch(
-        "gamelib_mcp.main._integration_status_payload",
+        "gamelib_mcp.http_admin._integration_status_payload",
         new=AsyncMock(return_value=payload),
     ):
         response = asyncio.run(
@@ -169,7 +170,7 @@ def test_get_admin_integration_detail_returns_404_for_unknown_platform():
     route = _get_route("/admin/integrations/{platform}")
 
     with patch(
-        "gamelib_mcp.main._integration_status_payload",
+        "gamelib_mcp.http_admin._integration_status_payload",
         new=AsyncMock(return_value={"steam": {"platform": "steam", "overall_status": "ready"}}),
     ):
         response = asyncio.run(
@@ -214,7 +215,7 @@ def test_get_admin_integrations_ui_renders_summary_text_and_escapes_unsafe_field
     route = _get_route("/admin/integrations/ui")
 
     with patch(
-        "gamelib_mcp.main._integration_status_payload",
+        "gamelib_mcp.http_admin._integration_status_payload",
         new=AsyncMock(return_value=payload),
     ):
         response = asyncio.run(route.endpoint(_request("/admin/integrations/ui")))
