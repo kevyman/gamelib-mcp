@@ -2,6 +2,8 @@
 
 from ..data.db import get_db
 
+# NOTE: stats-specific CTE — selects genres and omits the steam appid that the
+# library/discover variants compute. Kept separate on purpose; do not merge.
 _GAME_ROLLUP_CTE = """
 WITH game_rollup AS (
     SELECT g.id AS game_id,
