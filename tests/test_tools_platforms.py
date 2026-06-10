@@ -2,6 +2,8 @@
 
 import json
 
+from fastmcp.exceptions import ToolError
+
 from conftest import ToolDBTestCase, seed_game, add_platform
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import platforms
@@ -30,16 +32,15 @@ class PlatformBreakdownTests(ToolDBTestCase):
 
 class SyncPlatformTests(ToolDBTestCase):
     async def test_unknown_platform_returns_error(self):
-        result = await platforms.sync_platform("playstation")
-        self.assertIn("error", result)
-        self.assertIn("Unknown platform", result["error"])
+        with self.assertRaisesRegex(ToolError, "Unknown platform 'playstation'"):
+            await platforms.sync_platform("playstation")
 
 
 class SetHardwarePreferenceTests(ToolDBTestCase):
     async def test_normalizes_aliases_and_persists(self):
         result = await platforms.set_hardware_preference(["nintendo", "steam"])
         self.assertEqual(
-            result, {"success": True, "hardware_preference": ["switch2", "steam"]}
+            result, {"hardware_preference": ["switch2", "steam"]}
         )
         stored = await db_module.get_meta("hardware_preference")
         self.assertEqual(json.loads(stored), ["switch2", "steam"])
@@ -47,8 +48,8 @@ class SetHardwarePreferenceTests(ToolDBTestCase):
 
 class AddGameToPlatformTests(ToolDBTestCase):
     async def test_unknown_platform_error(self):
-        result = await platforms.add_game_to_platform("Foo", "playstation")
-        self.assertIn("error", result)
+        with self.assertRaisesRegex(ToolError, "Unknown platform 'playstation'"):
+            await platforms.add_game_to_platform("Foo", "playstation")
 
     async def test_creates_new_game(self):
         result = await platforms.add_game_to_platform(
@@ -61,7 +62,6 @@ class AddGameToPlatformTests(ToolDBTestCase):
         self.assertEqual(
             set(result),
             {
-                "success",
                 "created",
                 "game_id",
                 "game_platform_id",
@@ -71,7 +71,6 @@ class AddGameToPlatformTests(ToolDBTestCase):
                 "identifier",
             },
         )
-        self.assertTrue(result["success"])
         self.assertTrue(result["created"])
         self.assertEqual(result["platform"], "switch2")
         self.assertEqual(result["playtime_minutes"], 45)

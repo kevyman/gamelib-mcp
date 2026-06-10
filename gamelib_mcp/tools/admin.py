@@ -7,6 +7,8 @@ import os
 import statistics
 from collections import defaultdict
 
+from fastmcp.exceptions import ToolError
+
 from ..data.db import STEAM_APP_ID, get_db
 from ..data.epic import sync_epic
 from ..data.gog import sync_gog
@@ -28,6 +30,13 @@ async def refresh_library(
     platform_aliases = {"switch2": "nintendo"}
     _ALL = {"steam", "epic", "gog", "nintendo", "ps5"}
     requested_targets = list(platforms) if platforms else sorted(_ALL)
+    valid_platforms = _ALL | set(platform_aliases)
+    unknown_platforms = [platform for platform in requested_targets if platform not in valid_platforms]
+    if unknown_platforms:
+        valid = sorted(valid_platforms)
+        unknown = "', '".join(unknown_platforms)
+        raise ToolError(f"Unknown platform '{unknown}'. Valid: {valid}")
+
     targets = {platform_aliases.get(platform, platform) for platform in requested_targets}
 
     if targets == _ALL:
@@ -108,17 +117,17 @@ async def set_nintendo_session(cookies: str) -> dict:
     try:
         raw = json.loads(cookies)
     except json.JSONDecodeError as exc:
-        return {"success": False, "error": f"Invalid JSON: {exc}"}
+        raise ToolError(f"Invalid JSON: {exc}") from exc
 
     if isinstance(raw, list):
         normalized = {c["name"]: c["value"] for c in raw if "name" in c and "value" in c}
     elif isinstance(raw, dict):
         normalized = raw
     else:
-        return {"success": False, "error": "Expected a JSON object or array"}
+        raise ToolError("Expected a JSON object or array")
 
     if not normalized:
-        return {"success": False, "error": "No valid cookies found in input"}
+        raise ToolError("No valid cookies found in input")
 
     path = os.getenv("NINTENDO_COOKIES_FILE", "data/nintendo_cookies.json")
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -126,7 +135,7 @@ async def set_nintendo_session(cookies: str) -> dict:
         json.dump(normalized, f, indent=2)
 
     logger.info("Nintendo session cookies saved to %s (%d cookies)", path, len(normalized))
-    return {"success": True, "cookie_count": len(normalized), "path": path}
+    return {"cookie_count": len(normalized), "path": path}
 
 
 async def detect_farmed_games(
