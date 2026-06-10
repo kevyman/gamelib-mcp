@@ -48,6 +48,7 @@ Copy `.env.example` to `.env`:
 - `STEAM_ID` — 64-bit Steam ID
 - `DATABASE_URL` — SQLite path (optional). Defaults to `data/gamelib.db` when unset. Set explicitly (e.g. `file:./data/gamelib.db`) only when overriding the location.
 - `MCP_AUTH_TOKEN` — bearer token for MCP auth (empty = open)
+- `MCP_ALLOWED_ORIGINS` — comma-separated browser origins allowed to call the MCP endpoint, e.g. `https://claude.ai,https://chatgpt.com`. Requests without an `Origin` header are still allowed for native/CLI MCP clients.
 - `PORT` — server port (default: 8000)
 
 ## Database Path

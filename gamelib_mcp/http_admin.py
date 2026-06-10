@@ -42,15 +42,14 @@ class BearerAuthMiddleware:
         headers = {k.lower(): v for k, v in scope.get("headers", [])}
 
         # Origin header validation (MCP spec MUST for Streamable HTTP, DNS-rebinding defense).
-        # Only enforced when MCP_ALLOWED_ORIGINS is configured; requests without an Origin
-        # header always pass (CLI tools and MCP desktop clients don't send one).
-        if _ALLOWED_ORIGINS:
-            origin = headers.get(b"origin", b"").decode()
-            if origin and origin not in _ALLOWED_ORIGINS:
-                await send({"type": "http.response.start", "status": 403,
-                            "headers": [(b"content-type", b"text/plain"), (b"content-length", b"9")]})
-                await send({"type": "http.response.body", "body": b"Forbidden"})
-                return
+        # Requests without an Origin header pass (CLI tools and native MCP clients don't send one).
+        # Browser-origin requests must be explicitly allowlisted via MCP_ALLOWED_ORIGINS.
+        origin = headers.get(b"origin", b"").decode()
+        if origin and origin not in _ALLOWED_ORIGINS:
+            await send({"type": "http.response.start", "status": 403,
+                        "headers": [(b"content-type", b"text/plain"), (b"content-length", b"9")]})
+            await send({"type": "http.response.body", "body": b"Forbidden"})
+            return
 
         if not MCP_AUTH_TOKEN:
             await self.app(scope, receive, send)
