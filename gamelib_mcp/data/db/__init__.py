@@ -1,4 +1,14 @@
-"""SQLite connection, schema migrations, and shared game/platform helpers."""
+"""SQLite data layer — package facade.
+
+This module holds the bottom layer (connection management, schema detection,
+the migration chain, init, and the mutable readiness globals) and re-exports the
+domain submodules so ``gamelib_mcp.data.db.<name>`` remains the single stable
+import surface for all consumers. Submodules: schema (DDL), claims (row-claiming
++ batch loaders), queries (meta KV, lookups, platform assembly), upserts,
+affinity (tag-affinity recompute), fuzzy (name matching). The submodule
+re-exports sit at the end of this file so the bottom layer is fully defined
+before each leaf does ``from . import get_db, ...``.
+"""
 
 import asyncio
 import json
