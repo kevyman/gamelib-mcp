@@ -1,0 +1,266 @@
+"""Meta KV store, game lookups, and platform assembly for read paths."""
+
+from collections import defaultdict
+from datetime import datetime, timezone
+from typing import Iterable
+
+import aiosqlite
+
+from . import (
+    GOG_PRODUCT_ID,
+    STEAM_APP_ID,
+    STEAM_PLATFORM,
+    get_db,
+)
+
+
+async def get_meta(key: str) -> str | None:
+    async with get_db() as db:
+        row = await db.execute_fetchone("SELECT value FROM meta WHERE key = ?", (key,))
+    return row["value"] if row else None
+
+
+async def get_meta_prefix(prefix: str) -> dict[str, str]:
+    """Return all meta rows whose key starts with prefix as {key: value}."""
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT key, value FROM meta WHERE key LIKE ?", (f"{prefix}%",)
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return {row["key"]: row["value"] for row in rows if row["value"] is not None}
+
+
+async def set_meta(key: str, value: str) -> None:
+    async with get_db() as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        await db.commit()
+
+
+async def set_meta_many(values: dict[str, str | None]) -> None:
+    if not values:
+        return
+
+    async with get_db() as db:
+        for key, value in values.items():
+            await db.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                (key, value),
+            )
+        await db.commit()
+
+
+async def get_game_by_identifier(identifier_type: str, identifier_value: str) -> aiosqlite.Row | None:
+    async with get_db() as db:
+        return await db.execute_fetchone(
+            """SELECT g.*
+               FROM games g
+               JOIN game_platforms gp ON gp.game_id = g.id
+               JOIN game_platform_identifiers gpi ON gpi.game_platform_id = gp.id
+               WHERE gpi.identifier_type = ? AND gpi.identifier_value = ?
+               LIMIT 1""",
+            (identifier_type, identifier_value),
+        )
+
+
+async def get_game_by_appid(appid: int) -> aiosqlite.Row | None:
+    return await get_game_by_identifier(STEAM_APP_ID, str(appid))
+
+
+async def get_game_by_igdb_id(igdb_id: int) -> aiosqlite.Row | None:
+    async with get_db() as db:
+        return await db.execute_fetchone(
+            "SELECT * FROM games WHERE igdb_id = ?", (igdb_id,)
+        )
+
+
+async def get_game_by_name_exact(name: str) -> aiosqlite.Row | None:
+    async with get_db() as db:
+        return await db.execute_fetchone(
+            "SELECT * FROM games WHERE lower(name) = lower(?) ORDER BY id LIMIT 1",
+            (name,),
+        )
+
+
+async def get_steam_appid_for_game(game_id: int) -> int | None:
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            """SELECT gpi.identifier_value
+               FROM game_platform_identifiers gpi
+               JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+               WHERE gp.game_id = ? AND gpi.identifier_type = ?
+               ORDER BY gpi.is_primary DESC, gpi.id ASC
+               LIMIT 1""",
+            (game_id, STEAM_APP_ID),
+        )
+    if row is None:
+        return None
+    try:
+        return int(row["identifier_value"])
+    except (TypeError, ValueError):
+        return None
+
+
+async def get_steam_platform_row_by_appid(appid: int) -> aiosqlite.Row | None:
+    async with get_db() as db:
+        return await db.execute_fetchone(
+            """SELECT gp.id AS game_platform_id,
+                      gp.game_id,
+                      gp.platform,
+                      gp.owned,
+                      gp.playtime_minutes,
+                      gp.playtime_2weeks_minutes,
+                      gp.last_synced,
+                      g.name,
+                      g.genres,
+                      g.tags,
+                      g.short_description,
+                      g.release_date,
+                      g.hltb_main,
+                      g.hltb_extra,
+                      g.hltb_complete,
+                      g.hltb_cached_at,
+                      g.is_farmed,
+                      spd.steam_review_score,
+                      spd.steam_review_desc,
+                      spd.protondb_tier,
+                      spd.store_cached_at,
+                      spd.protondb_cached_at,
+                      spd.steamspy_cached_at,
+                      spd.rtime_last_played,
+                      spd.library_updated_at,
+                      gpe.metacritic_score,
+                      gpe.metacritic_url,
+                      gpe.opencritic_score,
+                      gpe.opencritic_tier,
+                      gpe.opencritic_percent_rec,
+                      gpe.opencritic_url,
+                      gpe.opencritic_num_reviews,
+                      gpe.platform_release_date
+               FROM game_platform_identifiers gpi
+               JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+               JOIN games g ON g.id = gp.game_id
+               LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
+               LEFT JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
+               WHERE gpi.identifier_type = ? AND gpi.identifier_value = ?
+               LIMIT 1""",
+            (STEAM_APP_ID, str(appid)),
+        )
+
+
+def _coerce_identifier_value(identifier_type: str, identifier_value: str) -> str | int:
+    if identifier_type in {STEAM_APP_ID, GOG_PRODUCT_ID}:
+        try:
+            return int(identifier_value)
+        except ValueError:
+            return identifier_value
+    return identifier_value
+
+
+def _platform_dict(row: aiosqlite.Row) -> dict:
+    playtime_minutes = row["playtime_minutes"]
+    playtime_2weeks_minutes = row["playtime_2weeks_minutes"]
+    platform = {
+        "game_platform_id": row["game_platform_id"],
+        "platform": row["platform"],
+        "owned": bool(row["owned"]),
+        "playtime_minutes": playtime_minutes,
+        "playtime_hours": round((playtime_minutes or 0) / 60, 1),
+        "playtime_2weeks_minutes": playtime_2weeks_minutes,
+        "playtime_2weeks_hours": round((playtime_2weeks_minutes or 0) / 60, 1),
+        "last_synced": row["last_synced"],
+        "identifiers": {},
+        "provider_data": {},
+        "platform_release_date": row["platform_release_date"],
+        "metacritic_score": row["metacritic_score"],
+        "metacritic_url": row["metacritic_url"],
+        "opencritic_score": row["opencritic_score"],
+        "opencritic_tier": row["opencritic_tier"],
+        "opencritic_percent_rec": row["opencritic_percent_rec"],
+        "opencritic_url": row["opencritic_url"],
+        "opencritic_num_reviews": row["opencritic_num_reviews"],
+    }
+
+    if row["platform"] == STEAM_PLATFORM:
+        last_played = row["rtime_last_played"]
+        platform["provider_data"] = {
+            "steam_review_score": row["steam_review_score"],
+            "steam_review_desc": row["steam_review_desc"],
+            "protondb_tier": row["protondb_tier"],
+            "last_played_date": (
+                datetime.fromtimestamp(last_played, tz=timezone.utc).date().isoformat()
+                if last_played
+                else None
+            ),
+            "library_updated_at": row["library_updated_at"],
+        }
+
+    return platform
+
+
+async def load_platforms_for_games(game_ids: Iterable[int]) -> dict[int, list[dict]]:
+    """Load platform rows, identifiers, and provider-specific data for many games."""
+    ids = list(dict.fromkeys(game_ids))
+    if not ids:
+        return {}
+
+    placeholders = ",".join("?" for _ in ids)
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            f"""SELECT gp.id AS game_platform_id,
+                       gp.game_id,
+                       gp.platform,
+                       gp.owned,
+                       gp.playtime_minutes,
+                       gp.playtime_2weeks_minutes,
+                       gp.last_synced,
+                       gpi.identifier_type,
+                       gpi.identifier_value,
+                       gpi.is_primary,
+                       spd.steam_review_score,
+                       spd.steam_review_desc,
+                       spd.protondb_tier,
+                       spd.rtime_last_played,
+                       spd.library_updated_at,
+                       gpe.platform_release_date,
+                       gpe.metacritic_score,
+                       gpe.metacritic_url,
+                       gpe.opencritic_score,
+                       gpe.opencritic_tier,
+                       gpe.opencritic_percent_rec,
+                       gpe.opencritic_url,
+                       gpe.opencritic_num_reviews
+                FROM game_platforms gp
+                LEFT JOIN game_platform_identifiers gpi ON gpi.game_platform_id = gp.id
+                LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
+                LEFT JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
+                WHERE gp.game_id IN ({placeholders})
+                ORDER BY gp.game_id, gp.platform, gp.id, gpi.is_primary DESC, gpi.identifier_type""",
+            ids,
+        )
+
+    by_game: dict[int, list[dict]] = defaultdict(list)
+    by_platform_id: dict[int, dict] = {}
+    for row in rows:
+        game_id = row["game_id"]
+        platform_id = row["game_platform_id"]
+        platform = by_platform_id.get(platform_id)
+        if platform is None:
+            platform = _platform_dict(row)
+            by_platform_id[platform_id] = platform
+            by_game[game_id].append(platform)
+
+        identifier_type = row["identifier_type"]
+        identifier_value = row["identifier_value"]
+        if identifier_type and identifier_value:
+            platform["identifiers"][identifier_type] = _coerce_identifier_value(
+                identifier_type,
+                identifier_value,
+            )
+
+    for platforms in by_game.values():
+        platforms.sort(key=lambda item: item["platform"])
+
+    return dict(by_game)

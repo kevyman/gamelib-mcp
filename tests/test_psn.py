@@ -11,7 +11,7 @@ try:
 except ModuleNotFoundError:
     aiosqlite = types.ModuleType("aiosqlite")
 
-    class Connection:  # minimal stub for db.py import-time polyfill
+    class Connection:  # minimal stub for db package import-time polyfill
         pass
 
     class Row(dict):

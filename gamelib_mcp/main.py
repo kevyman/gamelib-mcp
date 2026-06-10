@@ -1,12 +1,14 @@
-"""FastMCP server — lifespan, auth, SSE transport, all 10 tools."""
+"""FastMCP server — app definition, MCP tool registration, auth, SSE transport.
 
-import asyncio
-import html
+Startup/shutdown and background-task orchestration live in ``lifecycle.py``; the
+bearer-auth middleware and HTTP admin routes live in ``http_admin.py``. This
+module stays deliberately thin: the FastMCP instance, the tool passthrough
+decorators (whose signatures and docstrings are the MCP wire schema), and the
+ASGI entry point.
+"""
+
 import logging
 import os
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from weakref import WeakKeyDictionary
 
 from fastmcp import FastMCP
 
@@ -14,295 +16,12 @@ from .env import load_project_dotenv
 
 load_project_dotenv()
 
-from .tools.admin import (
-    SYNC_METADATA_PLATFORMS,
-    build_platform_sync_metadata,
-    refresh_library as _admin_refresh_library,
-)
+from .http_admin import BearerAuthMiddleware, register_http_routes
+from .lifecycle import lifespan
 from .tools.integrations import get_integration_status as _filter_integration_status
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
-
-MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "")
-_LIBRARY_REFRESH_TASK: asyncio.Task | None = None
-_LIBRARY_REFRESH_LOCK: asyncio.Lock | None = None
-_PERIODIC_REFRESH_TASK: asyncio.Task | None = None
-_PERIODIC_REFRESH_LOCK: asyncio.Lock | None = None
-_ENRICHMENT_TASK: asyncio.Task | None = None
-_ENRICHMENT_LOCK: asyncio.Lock | None = None
-_ENRICHMENT_RERUN_REQUESTED = False
-_LIBRARY_REFRESH_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
-_PERIODIC_REFRESH_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
-_ENRICHMENT_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
-
-
-def _get_library_refresh_lock() -> asyncio.Lock:
-    loop = asyncio.get_running_loop()
-    lock = _LIBRARY_REFRESH_LOCKS.get(loop)
-    if lock is None:
-        lock = asyncio.Lock()
-        _LIBRARY_REFRESH_LOCKS[loop] = lock
-    return lock
-
-
-def _get_periodic_refresh_lock() -> asyncio.Lock:
-    loop = asyncio.get_running_loop()
-    lock = _PERIODIC_REFRESH_LOCKS.get(loop)
-    if lock is None:
-        lock = asyncio.Lock()
-        _PERIODIC_REFRESH_LOCKS[loop] = lock
-    return lock
-
-
-def _get_enrichment_lock() -> asyncio.Lock:
-    loop = asyncio.get_running_loop()
-    lock = _ENRICHMENT_LOCKS.get(loop)
-    if lock is None:
-        lock = asyncio.Lock()
-        _ENRICHMENT_LOCKS[loop] = lock
-    return lock
-
-
-def _clear_library_refresh_task(task: asyncio.Task) -> None:
-    global _LIBRARY_REFRESH_TASK
-    if _LIBRARY_REFRESH_TASK is task:
-        _LIBRARY_REFRESH_TASK = None
-
-
-def _clear_periodic_refresh_task(task: asyncio.Task) -> None:
-    global _PERIODIC_REFRESH_TASK
-    if _PERIODIC_REFRESH_TASK is task:
-        _PERIODIC_REFRESH_TASK = None
-
-
-def _clear_enrichment_task(task: asyncio.Task) -> None:
-    global _ENRICHMENT_TASK
-    if _ENRICHMENT_TASK is task:
-        _ENRICHMENT_TASK = None
-
-
-async def _run_background_enrich() -> None:
-    from .data.enrich_bg import background_enrich
-
-    await background_enrich()
-
-
-async def _schedule_background_enrich() -> asyncio.Task:
-    global _ENRICHMENT_TASK
-    global _ENRICHMENT_RERUN_REQUESTED
-
-    async with _get_enrichment_lock():
-        if _ENRICHMENT_TASK is not None and not _ENRICHMENT_TASK.done():
-            _ENRICHMENT_RERUN_REQUESTED = True
-            return _ENRICHMENT_TASK
-
-        _ENRICHMENT_RERUN_REQUESTED = False
-        _ENRICHMENT_TASK = asyncio.create_task(_run_background_enrich())
-        _ENRICHMENT_TASK.add_done_callback(_clear_enrichment_task)
-        return _ENRICHMENT_TASK
-
-
-async def _drain_background_enrich_reruns() -> None:
-    global _ENRICHMENT_RERUN_REQUESTED
-
-    while True:
-        task = await _schedule_background_enrich()
-        should_exit = False
-        try:
-            await task
-        finally:
-            async with _get_enrichment_lock():
-                if not _ENRICHMENT_RERUN_REQUESTED:
-                    should_exit = True
-                else:
-                    _ENRICHMENT_RERUN_REQUESTED = False
-        if should_exit:
-            return
-
-
-def _library_refresh_interval_seconds() -> float | None:
-    raw_value = os.getenv("LIBRARY_REFRESH_INTERVAL_HOURS", "24").strip()
-    if not raw_value:
-        return 24 * 3600
-
-    try:
-        hours = float(raw_value)
-    except ValueError:
-        logger.warning(
-            "Invalid LIBRARY_REFRESH_INTERVAL_HOURS=%r; defaulting to 24 hours",
-            raw_value,
-        )
-        return 24 * 3600
-
-    if hours <= 0:
-        logger.info("Periodic library refresh disabled via LIBRARY_REFRESH_INTERVAL_HOURS=%s", raw_value)
-        return None
-
-    return hours * 3600
-
-
-def _summarize_refresh_result(result: object) -> str | None:
-    if not isinstance(result, dict):
-        return None
-
-    errors: list[str] = []
-    for platform, payload in result.items():
-        if not isinstance(payload, dict):
-            continue
-        error = payload.get("error") or payload.get("error_summary")
-        if error:
-            errors.append(f"{platform}: {error}")
-
-    return "; ".join(errors) if errors else None
-
-
-async def _run_startup_refresh() -> dict:
-    from .data.db import set_meta_many
-
-    started_at = datetime.now(timezone.utc).isoformat()
-    await set_meta_many(
-        {
-            "library_sync_status": "in_progress",
-            "library_sync_started_at": started_at,
-            "library_sync_finished_at": None,
-            "library_sync_error": None,
-        }
-    )
-
-    final_error: str | None = None
-    cancelled = False
-    refresh_result: dict | None = None
-    try:
-        refresh_result = await _admin_refresh_library()
-        final_error = _summarize_refresh_result(refresh_result)
-        if final_error:
-            logger.warning("Startup library refresh completed with partial errors: %s", final_error)
-    except asyncio.CancelledError:
-        cancelled = True
-        final_error = "cancelled"
-        raise
-    except Exception as exc:
-        logger.exception("Startup library refresh failed")
-        final_error = str(exc)
-    finally:
-        finished_at = datetime.now(timezone.utc).isoformat()
-        finished_meta = {
-            "library_sync_status": "idle",
-            "library_sync_finished_at": finished_at,
-            "library_sync_error": final_error,
-        }
-        if refresh_result is not None:
-            finished_meta.update(build_platform_sync_metadata(refresh_result, finished_at))
-        await asyncio.shield(
-            set_meta_many(
-                finished_meta
-            )
-        )
-        if cancelled:
-            logger.info("Startup library refresh cancelled")
-
-    if refresh_result is not None:
-        await _drain_background_enrich_reruns()
-
-    return refresh_result or {}
-
-
-async def _ensure_startup_refresh() -> asyncio.Task:
-    global _LIBRARY_REFRESH_TASK
-
-    async with _get_library_refresh_lock():
-        if _LIBRARY_REFRESH_TASK is not None and not _LIBRARY_REFRESH_TASK.done():
-            return _LIBRARY_REFRESH_TASK
-
-        _LIBRARY_REFRESH_TASK = asyncio.create_task(_run_startup_refresh())
-        _LIBRARY_REFRESH_TASK.add_done_callback(_clear_library_refresh_task)
-        return _LIBRARY_REFRESH_TASK
-
-
-async def _run_periodic_refresh_loop(interval_seconds: float) -> None:
-    while True:
-        await asyncio.sleep(interval_seconds)
-        try:
-            await _ensure_startup_refresh()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Periodic library refresh scheduling failed")
-
-
-async def _ensure_periodic_refresh_loop(interval_seconds: float | None = None) -> asyncio.Task | None:
-    global _PERIODIC_REFRESH_TASK
-
-    resolved_interval = interval_seconds if interval_seconds is not None else _library_refresh_interval_seconds()
-    if resolved_interval is None:
-        return None
-
-    async with _get_periodic_refresh_lock():
-        if _PERIODIC_REFRESH_TASK is not None and not _PERIODIC_REFRESH_TASK.done():
-            return _PERIODIC_REFRESH_TASK
-
-        _PERIODIC_REFRESH_TASK = asyncio.create_task(_run_periodic_refresh_loop(resolved_interval))
-        _PERIODIC_REFRESH_TASK.add_done_callback(_clear_periodic_refresh_task)
-        return _PERIODIC_REFRESH_TASK
-
-
-async def _cancel_task(task: asyncio.Task | None) -> None:
-    if task is None or task.done():
-        return
-
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-
-
-@asynccontextmanager
-async def lifespan(app):
-    """Startup: init DB, sync library if stale, kick off HLTB pre-warm."""
-    from .data.db import clear_all_enrichment_claims, init_db, get_meta, set_meta
-    from .data.steam_xml import STALE_HOURS
-
-    await init_db()
-    await clear_all_enrichment_claims()
-    logger.info("Database initialized")
-
-    # Seed hardware preference from env if not yet set
-    hw_pref_env = os.getenv("HARDWARE_PREFERENCE")
-    if hw_pref_env and not await get_meta("hardware_preference"):
-        import json
-        await set_meta("hardware_preference", json.dumps(hw_pref_env.split(",")))
-        logger.info("Seeded hardware_preference from HARDWARE_PREFERENCE env var")
-
-    # Refresh library if stale or missing
-    last_sync = await get_meta("library_synced_at")
-    needs_refresh = True
-    if last_sync:
-        try:
-            dt = datetime.fromisoformat(last_sync)
-            age_hours = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
-            needs_refresh = age_hours > STALE_HOURS
-        except ValueError:
-            pass
-
-    if needs_refresh:
-        logger.info("Library stale or missing — scheduling background refresh...")
-        await _ensure_startup_refresh()
-        await _schedule_background_enrich()
-    else:
-        # Background enrichment: store/provider metadata, ratings, and discovery signals
-        await _schedule_background_enrich()
-
-    await _ensure_periodic_refresh_loop()
-
-    yield
-
-    await _cancel_task(_PERIODIC_REFRESH_TASK)
-    await _cancel_task(_LIBRARY_REFRESH_TASK)
-    await _cancel_task(_ENRICHMENT_TASK)
-    logger.info("Shutdown")
-
 
 _display_name = os.getenv("STEAM_PROFILE_ID") or os.getenv("BACKLOGGD_USER") or "the configured user"
 
@@ -472,6 +191,7 @@ async def get_integration_status(platforms: list[str] | None = None, verbose: bo
     Inspect integration readiness for configured platforms.
     platforms: optional subset like ['steam', 'epic']; verbose=False returns a compact summary.
     """
+    from .http_admin import _integration_status_payload
     return _filter_integration_status(
         await _integration_status_payload(), platforms, verbose
     )
@@ -572,171 +292,15 @@ async def set_nintendo_session(cookies: str) -> dict:
     return await _set_session(cookies)
 
 
-# ── Health endpoint ────────────────────────────────────────────────────────────
+# ── Health + admin endpoints ─────────────────────────────────────────────────
 
-from urllib.parse import parse_qs
-
-from starlette.middleware import Middleware
-from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
-
-# Paths/prefixes that must work without auth
-_OPEN_PATHS = {"/health", "/"}
-_OPEN_PREFIXES = ("/messages/", "/.well-known/")
-
-
-class BearerAuthMiddleware:
-    """Pure ASGI middleware — safe for SSE streaming (no response buffering)."""
-
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] not in ("http", "websocket") or not MCP_AUTH_TOKEN:
-            await self.app(scope, receive, send)
-            return
-
-        path = scope.get("path", "")
-        if path in _OPEN_PATHS or path.startswith(_OPEN_PREFIXES):
-            await self.app(scope, receive, send)
-            return
-
-        headers = {k.lower(): v for k, v in scope.get("headers", [])}
-        auth = headers.get(b"authorization", b"").decode()
-        if auth == f"Bearer {MCP_AUTH_TOKEN}":
-            await self.app(scope, receive, send)
-            return
-
-        params = parse_qs(scope.get("query_string", b"").decode())
-        if params.get("token", [None])[0] == MCP_AUTH_TOKEN:
-            await self.app(scope, receive, send)
-            return
-
-        await send({"type": "http.response.start", "status": 401,
-                    "headers": [(b"content-type", b"text/plain"), (b"content-length", b"12")]})
-        await send({"type": "http.response.body", "body": b"Unauthorized"})
-
-
-@mcp.custom_route("/health", methods=["GET"])
-async def health(request: Request) -> JSONResponse:
-    from .data.db import get_meta
-    last_sync = await get_meta("library_synced_at")
-    return JSONResponse({"status": "ok", "library_synced_at": last_sync})
-
-
-async def _integration_status_payload() -> dict[str, dict]:
-    from .data.db import get_meta_prefix
-    from .integrations.inspectors import inspect_all_integrations_dict
-
-    last_sync_by_platform: dict[str, dict[str, str]] = {}
-    try:
-        all_meta = await get_meta_prefix("integration_sync_")
-        for platform in SYNC_METADATA_PLATFORMS:
-            prefix = f"integration_sync_{platform}_"
-            platform_meta = {
-                key[len(prefix):]: value
-                for key, value in all_meta.items()
-                if key.startswith(prefix)
-            }
-            if platform_meta:
-                last_sync_by_platform[platform] = platform_meta
-    except Exception:
-        logger.exception("Failed to load integration sync metadata")
-
-    return inspect_all_integrations_dict(last_sync_by_platform=last_sync_by_platform)
-
-
-@mcp.custom_route("/admin/integrations", methods=["GET"])
-async def admin_integrations(request: Request) -> JSONResponse:
-    return JSONResponse(await _integration_status_payload())
-
-
-@mcp.custom_route("/admin/integrations/ui", methods=["GET"])
-async def admin_integrations_ui(request: Request) -> HTMLResponse:
-    payload = await _integration_status_payload()
-    items = []
-    for platform, status in payload.items():
-        summary = html.escape(status.get("summary") or "No summary available.")
-        overall_status = html.escape(status.get("overall_status") or "unknown")
-        backend = html.escape(status.get("active_backend") or "none")
-        capabilities = status.get("capabilities") or []
-        checks = status.get("checks") or []
-        last_sync = status.get("last_sync") or {}
-        remediation_steps = status.get("remediation_steps") or []
-
-        capability_list = "".join(
-            "<li>"
-            f"{html.escape(item.get('name') or 'unknown')}: "
-            f"{html.escape(item.get('status') or 'unknown')} "
-            f"- {html.escape(item.get('summary') or '')}"
-            "</li>"
-            for item in capabilities
-        ) or "<li>None</li>"
-
-        failing_checks = [item for item in checks if item.get("status") != "pass"]
-        failing_check_list = "".join(
-            "<li>"
-            f"{html.escape(item.get('name') or 'unknown')}: "
-            f"{html.escape(item.get('status') or 'unknown')} "
-            f"- {html.escape(item.get('summary') or '')}"
-            "</li>"
-            for item in failing_checks
-        ) or "<li>None</li>"
-
-        last_sync_list = "".join(
-            "<li>"
-            f"{html.escape(str(key))}: {html.escape(str(value))}"
-            "</li>"
-            for key, value in last_sync.items()
-        ) or "<li>None</li>"
-
-        remediation_list = "".join(
-            "<li><code>"
-            f"{html.escape(step)}"
-            "</code></li>"
-            for step in remediation_steps
-        ) or "<li>None</li>"
-        items.append(
-            "<li><section>"
-            f"<h2>{html.escape(platform)}</h2>"
-            f"<p><strong>Status:</strong> {overall_status} ({backend})</p>"
-            f"<p>{summary}</p>"
-            "<h3>Capabilities</h3><ul>"
-            f"{capability_list}"
-            "</ul>"
-            "<h3>Failing Checks</h3><ul>"
-            f"{failing_check_list}"
-            "</ul>"
-            "<h3>Last Sync</h3><ul>"
-            f"{last_sync_list}"
-            "</ul>"
-            "<h3>Remediation</h3><ul>"
-            f"{remediation_list}"
-            "</ul>"
-            "</section></li>"
-        )
-
-    body = "".join(items) or "<li>No integrations detected.</li>"
-    return HTMLResponse(
-        "<!doctype html>"
-        "<html><head><title>Integration Status</title></head>"
-        "<body><h1>Integration Status</h1><ul>"
-        f"{body}"
-        "</ul></body></html>"
-    )
-
-
-@mcp.custom_route("/admin/integrations/{platform}", methods=["GET"])
-async def admin_integration_detail(request: Request) -> JSONResponse:
-    platform = request.path_params["platform"]
-    payload = await _integration_status_payload()
-    if platform not in payload:
-        return JSONResponse({"error": f"Unknown integration: {platform}"}, status_code=404)
-    return JSONResponse(payload[platform])
+register_http_routes(mcp)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    from starlette.middleware import Middleware
+
     port = int(os.getenv("PORT", "8000"))
     mcp.run(transport="sse", host="0.0.0.0", port=port, middleware=[Middleware(BearerAuthMiddleware)])

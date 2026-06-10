@@ -3,7 +3,7 @@
 import importlib
 import json
 from ..data.db import get_db, set_meta, upsert_game, upsert_game_platform, upsert_game_platform_identifier
-from .library import _resolve_platform
+from .common import resolve_platform as _resolve_platform
 
 _PLATFORM_MAP = {
     "steam":    ("gamelib_mcp.data.steam_xml", "fetch_library"),

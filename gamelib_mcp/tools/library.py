@@ -1,19 +1,7 @@
 """search_games and get_library_stats tools."""
 
-from ..data.db import STEAM_APP_ID, get_db, load_platforms_for_games
-
-# Public alias → internal DB platform name
-_PLATFORM_ALIASES = {
-    "nintendo": "switch2",
-    "switch": "switch2",
-}
-
-
-def _resolve_platform(platform: str | None) -> str | None:
-    if platform is None:
-        return None
-    return _PLATFORM_ALIASES.get(platform.lower(), platform.lower())
-
+from ..data.db import get_db, load_platforms_for_games
+from .common import STEAM_APPID_SQL as _STEAM_APPID_SQL, resolve_platform as _resolve_platform
 
 SORT_COLUMNS = {
     "playtime": "total_playtime_minutes",
@@ -22,17 +10,8 @@ SORT_COLUMNS = {
     "hltb": "hltb_main",
 }
 
-_STEAM_APPID_SQL = f"""
-(
-    SELECT CAST(gpi.identifier_value AS INTEGER)
-    FROM game_platform_identifiers gpi
-    JOIN game_platforms sgp ON sgp.id = gpi.game_platform_id
-    WHERE sgp.game_id = g.id AND gpi.identifier_type = '{STEAM_APP_ID}'
-    ORDER BY gpi.is_primary DESC, gpi.id ASC
-    LIMIT 1
-)
-"""
-
+# NOTE: this CTE is library-specific — it aggregates total_playtime_2weeks_minutes,
+# which the discover/stats variants do not. Do not merge them without checking output.
 _GAME_ROLLUP_CTE = f"""
 WITH game_rollup AS (
     SELECT g.id AS game_id,
