@@ -1225,18 +1225,14 @@ async def claim_game_ids_for_igdb(limit: int, stale_before: str) -> list[int]:
 
 async def claim_game_ids_for_hltb(limit: int, stale_before: str) -> list[int]:
     return await _claim_ids(
-        """SELECT DISTINCT g.id
-           FROM games g
-           JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = ?
-           LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
-           WHERE spd.store_cached_at IS NOT NULL
-             AND spd.store_cached_at != 'FAILED'
-             AND (g.hltb_cached_at IS NULL OR g.hltb_cached_at = 'FAILED')
-             AND (g.hltb_claimed_at IS NULL OR g.hltb_claimed_at < ?)
-             AND g.is_farmed = 0
-           ORDER BY COALESCE(gp.playtime_minutes, 0) DESC, g.id
+        """SELECT id
+           FROM games
+           WHERE (hltb_cached_at IS NULL OR hltb_cached_at = 'FAILED')
+             AND (hltb_claimed_at IS NULL OR hltb_claimed_at < ?)
+             AND is_farmed = 0
+           ORDER BY id
            LIMIT ?""",
-        (STEAM_PLATFORM, stale_before, limit),
+        (stale_before, limit),
         """UPDATE games
            SET hltb_claimed_at = ?
            WHERE id = ?
@@ -1277,9 +1273,7 @@ async def claim_steam_platform_ids_for_protondb(limit: int, stale_before: str) -
            JOIN games g ON g.id = gp.game_id
            JOIN game_platform_identifiers gpi
              ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
-           WHERE spd.store_cached_at IS NOT NULL
-             AND spd.store_cached_at != 'FAILED'
-             AND spd.protondb_cached_at IS NULL
+           WHERE spd.protondb_cached_at IS NULL
              AND (spd.protondb_claimed_at IS NULL OR spd.protondb_claimed_at < ?)
              AND g.is_farmed = 0
            ORDER BY COALESCE(gp.playtime_minutes, 0) DESC, spd.game_platform_id
@@ -1302,9 +1296,7 @@ async def claim_steam_platform_ids_for_steamspy(limit: int, stale_before: str) -
            JOIN games g ON g.id = gp.game_id
            JOIN game_platform_identifiers gpi
              ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
-           WHERE spd.store_cached_at IS NOT NULL
-             AND spd.store_cached_at != 'FAILED'
-             AND spd.steamspy_cached_at IS NULL
+           WHERE spd.steamspy_cached_at IS NULL
              AND (spd.steamspy_claimed_at IS NULL OR spd.steamspy_claimed_at < ?)
              AND g.is_farmed = 0
            ORDER BY COALESCE(gp.playtime_minutes, 0) DESC, spd.game_platform_id
