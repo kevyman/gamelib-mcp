@@ -210,6 +210,104 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(steam_data["steam_review_desc"], "Overwhelmingly Positive")
         self.assertEqual(steam_data["protondb_tier"], "gold")
 
+    async def test_v2_to_v3_rebuilds_foreign_keys_against_new_games_table(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V2_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 2")
+        conn.execute("INSERT INTO games (id, name, is_farmed) VALUES (1, 'Portal', 0)")
+        conn.execute(
+            """INSERT INTO game_platforms
+               (id, game_id, platform, owned, last_synced)
+               VALUES (1, 1, 'steam', 1, '2024-01-01T00:00:00+00:00')"""
+        )
+        conn.commit()
+        conn.close()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db_module._configure_connection(db, enable_wal=True)
+            await db_module._run_migrations(db)
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        game_platform_fks = conn.execute("PRAGMA foreign_key_list(game_platforms)").fetchall()
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("INSERT INTO games (id, name, is_farmed) VALUES (2, 'Half-Life', 0)")
+        conn.execute(
+            """INSERT INTO game_platforms
+               (game_id, platform, owned, last_synced)
+               VALUES (2, 'steam', 1, '2024-01-02T00:00:00+00:00')"""
+        )
+        conn.close()
+
+        self.assertEqual(game_platform_fks[0]["table"], "games")
+
+    async def test_current_schema_repairs_game_foreign_keys_left_by_old_migration(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V6_SCHEMA_DDL)
+        conn.execute("INSERT INTO games (id, name, is_farmed) VALUES (1, 'Portal', 0)")
+        conn.execute(
+            """INSERT INTO game_platforms
+               (id, game_id, platform, owned, last_synced)
+               VALUES (1, 1, 'steam', 1, '2024-01-01T00:00:00+00:00')"""
+        )
+        conn.execute(
+            """INSERT INTO ratings
+               (id, game_id, source, raw_score, normalized_score, synced_at)
+               VALUES (1, 1, 'manual', 9.0, 90.0, '2024-01-01T00:00:00+00:00')"""
+        )
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("ALTER TABLE games RENAME TO games_v2_old")
+        conn.execute(
+            """CREATE TABLE games (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                igdb_id          INTEGER UNIQUE,
+                name             TEXT NOT NULL,
+                sort_name        TEXT,
+                release_date     TEXT,
+                genres           TEXT,
+                tags             TEXT,
+                short_description TEXT,
+                hltb_main        REAL,
+                hltb_extra       REAL,
+                hltb_complete    REAL,
+                hltb_cached_at   TEXT,
+                hltb_claimed_at  TEXT,
+                igdb_cached_at   TEXT,
+                igdb_claimed_at  TEXT,
+                is_farmed        INTEGER NOT NULL DEFAULT 0
+            )"""
+        )
+        conn.execute("INSERT INTO games SELECT * FROM games_v2_old")
+        conn.execute("DROP TABLE games_v2_old")
+        conn.execute("PRAGMA user_version = 6")
+        conn.commit()
+        conn.close()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db_module._configure_connection(db, enable_wal=True)
+            await db_module._run_migrations(db)
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        game_platform_fks = conn.execute("PRAGMA foreign_key_list(game_platforms)").fetchall()
+        ratings_fks = conn.execute("PRAGMA foreign_key_list(ratings)").fetchall()
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("INSERT INTO games (id, name, is_farmed) VALUES (2, 'Half-Life', 0)")
+        conn.execute(
+            """INSERT INTO game_platforms
+               (game_id, platform, owned, last_synced)
+               VALUES (2, 'steam', 1, '2024-01-02T00:00:00+00:00')"""
+        )
+        conn.execute(
+            """INSERT INTO ratings
+               (game_id, source, raw_score, normalized_score, synced_at)
+               VALUES (2, 'manual', 8.0, 80.0, '2024-01-02T00:00:00+00:00')"""
+        )
+        conn.close()
+
+        self.assertEqual(game_platform_fks[0]["table"], "games")
+        self.assertEqual(ratings_fks[0]["table"], "games")
+
     async def test_schema_contains_claim_columns(self) -> None:
         db_module._DB_READY_PATH = None
         with patch.dict(
