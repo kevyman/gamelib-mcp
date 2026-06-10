@@ -61,7 +61,6 @@ def normalize_catalog_title(name: str) -> str:
     cleaned = cleaned.replace("™", "").replace("®", "")
     cleaned = re.sub(r"\(TM\)|\(R\)|\bTM\b|\bR\b", "", cleaned)
     cleaned = re.sub(r"(?<=[A-Za-z])TM(?=[:\s]|$)", "", cleaned)
-    cleaned = re.sub(r"(?<=[A-Za-z])R(?=[:\s]|$)", "", cleaned)
     cleaned = cleaned.replace("–", "-").replace("—", "-")
     cleaned = re.sub(r"\(\s*(\d{4})\s*\)$", "", cleaned)
 
