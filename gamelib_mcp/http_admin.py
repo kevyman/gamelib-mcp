@@ -22,6 +22,14 @@ MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "")
 _ALLOWED_ORIGINS: frozenset[str] = frozenset(
     o.strip().rstrip("/") for o in os.getenv("MCP_ALLOWED_ORIGINS", "").split(",") if o.strip()
 )
+_CORS_ALLOW_METHODS = b"GET, POST, DELETE, OPTIONS"
+# mcp-protocol-version is required: the Streamable HTTP spec has clients send it
+# on every post-initialize request, so the preflight must allow it.
+_CORS_ALLOW_HEADERS = (
+    b"authorization, content-type, accept, mcp-session-id, last-event-id, mcp-protocol-version"
+)
+_CORS_EXPOSE_HEADERS = b"mcp-session-id"
+_CORS_MAX_AGE = b"86400"  # cache preflight for a day to cut repeat OPTIONS
 
 # Paths/prefixes that must work without auth
 _OPEN_PATHS = {"/health", "/"}
@@ -51,27 +59,58 @@ class BearerAuthMiddleware:
             await send({"type": "http.response.body", "body": b"Forbidden"})
             return
 
+        cors_headers = []
+        if origin:
+            cors_headers = [
+                (b"access-control-allow-origin", origin.encode()),
+                (b"access-control-allow-methods", _CORS_ALLOW_METHODS),
+                (b"access-control-allow-headers", _CORS_ALLOW_HEADERS),
+                (b"access-control-expose-headers", _CORS_EXPOSE_HEADERS),
+                (b"vary", b"Origin"),
+            ]
+
+            if scope.get("method") == "OPTIONS":
+                await send({
+                    "type": "http.response.start",
+                    "status": 204,
+                    "headers": [
+                        *cors_headers,
+                        (b"access-control-max-age", _CORS_MAX_AGE),
+                        (b"content-length", b"0"),
+                    ],
+                })
+                await send({"type": "http.response.body", "body": b""})
+                return
+
+        async def send_with_cors(message):
+            if cors_headers and message["type"] == "http.response.start":
+                message = {**message, "headers": [*message.get("headers", []), *cors_headers]}
+            await send(message)
+
+        downstream_send = send_with_cors if cors_headers else send
+
         if not MCP_AUTH_TOKEN:
-            await self.app(scope, receive, send)
+            await self.app(scope, receive, downstream_send)
             return
 
         path = scope.get("path", "")
         if path in _OPEN_PATHS or path.startswith(_OPEN_PREFIXES):
-            await self.app(scope, receive, send)
+            await self.app(scope, receive, downstream_send)
             return
 
         auth = headers.get(b"authorization", b"").decode()
         if auth == f"Bearer {MCP_AUTH_TOKEN}":
-            await self.app(scope, receive, send)
+            await self.app(scope, receive, downstream_send)
             return
 
         params = parse_qs(scope.get("query_string", b"").decode())
         if params.get("token", [None])[0] == MCP_AUTH_TOKEN:
-            await self.app(scope, receive, send)
+            await self.app(scope, receive, downstream_send)
             return
 
+        auth_headers = [(b"content-type", b"text/plain"), (b"content-length", b"12"), *cors_headers]
         await send({"type": "http.response.start", "status": 401,
-                    "headers": [(b"content-type", b"text/plain"), (b"content-length", b"12")]})
+                    "headers": auth_headers})
         await send({"type": "http.response.body", "body": b"Unauthorized"})
 
 

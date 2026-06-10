@@ -50,7 +50,7 @@ STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 @dataclass
@@ -150,6 +150,7 @@ from .schema import (
     _V3_SCHEMA_DDL,
     _V4_SCHEMA_DDL,
     _V5_SCHEMA_DDL,
+    _V6_SCHEMA_DDL,
 )
 
 
@@ -646,6 +647,38 @@ async def _migrate_v4_to_v5(db: aiosqlite.Connection, progress: _Progress | None
     await db.commit()
 
 
+async def _migrate_v5_to_v6(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Data-only migration: clean enrichment values written by older buggy scrapers.
+
+    1. Metacritic: a prior scraper stored the 0-10 user score as if it were the
+       0-100 Metascore. The contaminated rows are exactly the int-truncated user
+       scores (<= 10); legitimate critic Metascores effectively never fall that
+       low. Null the score *and* its cache/claim timestamps so the fixed scraper
+       re-fetches the real Metascore.
+    2. HLTB: a prior fetch stored 0 for durations HowLongToBeat has no data for.
+       0 means "unknown", so normalize to NULL in place (no re-scrape needed —
+       re-fetching would just return 0 again).
+    """
+    if progress is not None:
+        progress("Migrating to v6: clean Metacritic user-score and HLTB zero contamination.")
+
+    await db.execute(
+        """UPDATE game_platform_enrichment
+              SET metacritic_score = NULL,
+                  metacritic_url = NULL,
+                  metacritic_cached_at = NULL,
+                  metacritic_claimed_at = NULL
+            WHERE metacritic_score IS NOT NULL
+              AND metacritic_score <= 10"""
+    )
+    await db.execute("UPDATE games SET hltb_main = NULL WHERE hltb_main = 0")
+    await db.execute("UPDATE games SET hltb_extra = NULL WHERE hltb_extra = 0")
+    await db.execute("UPDATE games SET hltb_complete = NULL WHERE hltb_complete = 0")
+
+    await _set_user_version(db, 6)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -681,10 +714,10 @@ async def _run_migrations(
     applied_steps: list[str] = []
 
     if detected_state == "fresh":
-        await db.executescript(_V5_SCHEMA_DDL)
+        await db.executescript(_V6_SCHEMA_DDL)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
-        _emit(progress, "Initialized fresh database at schema v5.", applied_steps)
+        _emit(progress, "Initialized fresh database at schema v6.", applied_steps)
         return MigrationResult(
             initial_version=initial_version,
             final_version=SCHEMA_VERSION,
@@ -743,9 +776,14 @@ async def _run_migrations(
         await _migrate_v4_to_v5(db, progress=None)
         version = 5
 
+    if version == 5:
+        _emit(progress, "Applying migration step v5 -> v6.", applied_steps)
+        await _migrate_v5_to_v6(db, progress=None)
+        version = 6
+
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V5_SCHEMA_DDL)
+    await db.executescript(_V6_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION

@@ -329,8 +329,8 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             version = await db_module._get_user_version(db)
             cols = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(game_platform_enrichment)")}
 
-        self.assertEqual(version, 5)
-        self.assertEqual(result.final_version, 5)
+        self.assertEqual(version, 6)
+        self.assertEqual(result.final_version, 6)
         self.assertIn("opencritic_url", cols)
         self.assertIn("opencritic_num_reviews", cols)
 
@@ -457,6 +457,58 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("opencritic_url", names)
         self.assertIn("opencritic_num_reviews", names)
 
+    async def test_v5_to_v6_cleans_metacritic_and_hltb_contamination(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V5_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 5")
+        # game 1: HLTB main is a real "no data" zero; complete is real.
+        # game 2: clean data that must be left untouched.
+        conn.execute(
+            "INSERT INTO games (id, name, hltb_main, hltb_extra, hltb_complete) "
+            "VALUES (1, 'ZeroHLTB', 0, 0, 12.5), (2, 'GoodHLTB', 10.0, 15.0, 20.0)"
+        )
+        conn.execute("INSERT INTO game_platforms (id, game_id, platform) VALUES (1, 1, 'steam'), (2, 2, 'steam')")
+        # gpe 1: contaminated user score (8); gpe 2: legit low Metascore (36) kept.
+        conn.execute(
+            "INSERT INTO game_platform_enrichment "
+            "(game_platform_id, metacritic_score, metacritic_url, metacritic_cached_at, metacritic_claimed_at) "
+            "VALUES (1, 8, 'http://mc/x', '2026-01-01', '2026-01-01'), (2, 36, 'http://mc/y', '2026-01-01', NULL)"
+        )
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+            async with db_module.get_db() as db:
+                version = await db_module._get_user_version(db)
+                games = {
+                    row["name"]: row
+                    for row in await db.execute_fetchall(
+                        "SELECT name, hltb_main, hltb_extra, hltb_complete FROM games"
+                    )
+                }
+                gpe = {
+                    row["game_platform_id"]: row
+                    for row in await db.execute_fetchall(
+                        "SELECT game_platform_id, metacritic_score, metacritic_cached_at, "
+                        "metacritic_claimed_at FROM game_platform_enrichment"
+                    )
+                }
+
+        self.assertEqual(version, 6)
+        # Contaminated user score nulled, with cache/claim cleared for re-scrape.
+        self.assertIsNone(gpe[1]["metacritic_score"])
+        self.assertIsNone(gpe[1]["metacritic_cached_at"])
+        self.assertIsNone(gpe[1]["metacritic_claimed_at"])
+        # Legit low Metascore preserved.
+        self.assertEqual(gpe[2]["metacritic_score"], 36)
+        self.assertEqual(gpe[2]["metacritic_cached_at"], "2026-01-01")
+        # HLTB zeros nulled in place; non-zero values untouched.
+        self.assertIsNone(games["ZeroHLTB"]["hltb_main"])
+        self.assertIsNone(games["ZeroHLTB"]["hltb_extra"])
+        self.assertEqual(games["ZeroHLTB"]["hltb_complete"], 12.5)
+        self.assertEqual(games["GoodHLTB"]["hltb_main"], 10.0)
 
     async def test_redundant_lookup_index_is_removed(self):
         db_module._DB_READY_PATH = None

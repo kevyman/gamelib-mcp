@@ -101,3 +101,27 @@ class GetRecommendationsTests(ToolDBTestCase):
         await make_steam_game("NoAffinity", 1, playtime_minutes=0, tags=["obscure"])
         results = await discover.get_recommendations()
         self.assertEqual(results["results"], [])
+
+    async def test_empty_affinity_includes_sync_hint(self):
+        await make_steam_game("Anything", 1, playtime_minutes=0, tags=["roguelike"])
+        results = await discover.get_recommendations()
+        self.assertEqual(results["results"], [])
+        self.assertIn("sync_ratings", results["note"])
+
+    async def test_populated_affinity_has_no_note(self):
+        await make_steam_game("LikedGame", 1, playtime_minutes=0, tags=["roguelike"])
+        await set_tag_affinity("roguelike", affinity_score=2.5, avg_score=9.0, game_count=4)
+        results = await discover.get_recommendations()
+        self.assertNotIn("note", results)
+
+
+class VibeHintTests(ToolDBTestCase):
+    async def test_unknown_vibe_with_no_matches_gets_hint(self):
+        results = await discover.find_games_by_vibe("totally-not-a-vibe")
+        self.assertEqual(results["total_matches"], 0)
+        self.assertIn("Known vibes", results["note"])
+
+    async def test_known_vibe_no_note(self):
+        await make_steam_game("Hades", 1, playtime_minutes=0, tags=["roguelike"])
+        results = await discover.find_games_by_vibe("roguelike")
+        self.assertNotIn("note", results)

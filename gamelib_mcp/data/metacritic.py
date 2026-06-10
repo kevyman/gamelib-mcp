@@ -95,20 +95,34 @@ async def _fetch_score_from_url(url: str) -> tuple[int | None, str]:
 
     soup = BeautifulSoup(html, "html.parser")
 
-    # Try JSON-LD structured data first (more reliable than HTML scraping)
+    # Try JSON-LD structured data first (more reliable than HTML scraping).
+    # Metacritic exposes both the critic Metascore (0-100) and the user score
+    # (0-10) as aggregateRating blocks; only the critic block has bestRating=100.
+    # Without this guard we'd silently store user scores like 8 as a "Metascore".
     for script in soup.find_all("script", type="application/ld+json"):
         try:
             data = json.loads(script.string or "")
-            rating = (data.get("aggregateRating") or {}).get("ratingValue")
-            if rating is not None:
-                return int(float(rating)), final_url
         except Exception:
             continue
+        for entry in data if isinstance(data, list) else [data]:
+            if not isinstance(entry, dict):
+                continue
+            rating = entry.get("aggregateRating") or {}
+            value = rating.get("ratingValue")
+            best = rating.get("bestRating")
+            if value is None or best is None:
+                continue
+            try:
+                if int(float(best)) != 100:
+                    continue  # user score (bestRating=10), not the Metascore
+                return int(float(value)), final_url
+            except (TypeError, ValueError):
+                continue
 
-    # Fallback: look for score in common Metacritic CSS selectors
+    # Fallback: critic-score-only CSS selectors. (.c-siteReviewScore is shared by
+    # the user-score widget, so it is intentionally excluded here.)
     for selector in [
         '[data-testid="score-meta-critic"]',
-        ".c-siteReviewScore",
         ".metascore_w",
     ]:
         el = soup.select_one(selector)
