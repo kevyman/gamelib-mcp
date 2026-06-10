@@ -303,4 +303,4 @@ if __name__ == "__main__":
     from starlette.middleware import Middleware
 
     port = int(os.getenv("PORT", "8000"))
-    mcp.run(transport="sse", host="0.0.0.0", port=port, middleware=[Middleware(BearerAuthMiddleware)])
+    mcp.run(transport="http", host="0.0.0.0", port=port, middleware=[Middleware(BearerAuthMiddleware)])

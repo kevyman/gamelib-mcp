@@ -250,7 +250,7 @@ In your Claude MCP config:
 {
   "mcpServers": {
     "steam": {
-      "url": "https://gamelibmcp.johnwilkos.com/sse",
+      "url": "https://gamelibmcp.johnwilkos.com/mcp",
       "headers": {
         "Authorization": "Bearer <YOUR_MCP_AUTH_TOKEN>"
       }

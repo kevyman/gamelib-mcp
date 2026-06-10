@@ -12,7 +12,7 @@ gamelib-mcp is a [Model Context Protocol](https://modelcontextprotocol.io/) serv
 # Install dependencies (uses uv package manager)
 uv sync
 
-# Run locally (SSE transport on port 8000)
+# Run locally (Streamable HTTP on port 8000)
 uv run python -m gamelib_mcp.main
 
 # Run tests
@@ -54,7 +54,7 @@ The project database lives at `./data/gamelib.db`. `_db_path()` defaults to `dat
 ### Entry Point & Transport
 
 App composition is split across three thin top-level modules:
-- `gamelib_mcp/main.py`: creates the FastMCP app, registers all MCP tools (declarative `@mcp.tool()` passthroughs whose signatures/docstrings are the wire schema), wires the lifespan + HTTP routes, and is the SSE entry point (`python -m gamelib_mcp.main`).
+- `gamelib_mcp/main.py`: creates the FastMCP app, registers all MCP tools (declarative `@mcp.tool()` passthroughs whose signatures/docstrings are the wire schema), wires the lifespan + HTTP routes, and is the Streamable HTTP entry point (`python -m gamelib_mcp.main`).
 - `gamelib_mcp/lifecycle.py`: the `lifespan` context manager and all background-task orchestration — startup library refresh, background enrichment scheduling, periodic refresh loop, per-event-loop locks, and the per-platform sync-metadata helpers. On startup: DB is initialized, library refresh is scheduled if stale, and background enrichment starts without waiting for a single provider to finish first.
 - `gamelib_mcp/http_admin.py`: bearer-auth ASGI middleware plus the `/health` and `/admin/integrations*` routes, registered via `register_http_routes(mcp)`.
 
