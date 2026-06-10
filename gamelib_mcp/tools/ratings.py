@@ -5,7 +5,12 @@ from typing import Literal
 from ..data.backloggd import sync_backloggd
 from ..data.db import get_db, load_platforms_for_games, recompute_tag_affinity
 from ..data.steam_reviews import sync_steam_reviews
-from .common import STEAM_APPID_SQL as _STEAM_APPID_SQL, info as _info, report_progress
+from .common import (
+    STEAM_APPID_SQL as _STEAM_APPID_SQL,
+    clamp_limit as _clamp_limit,
+    info as _info,
+    report_progress,
+)
 
 ResponseFormat = Literal["concise", "detailed"]
 
@@ -48,6 +53,7 @@ async def get_ratings(
     source: 'backloggd' | 'steam_review' | None (all)
     sort_by: 'score' | 'name'
     """
+    limit = _clamp_limit(limit)
     conditions = []
     params: list = []
 

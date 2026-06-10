@@ -1,7 +1,10 @@
 """Characterization tests for gamelib_mcp.tools.library."""
 
+from fastmcp.exceptions import ToolError
+
 from conftest import ToolDBTestCase, make_steam_game, seed_game, add_platform
 from gamelib_mcp.tools import library
+from gamelib_mcp.tools.common import MAX_RESULT_LIMIT
 
 
 def _platform_names(game: dict) -> list[str]:
@@ -89,6 +92,31 @@ class SearchGamesTests(ToolDBTestCase):
         self.assertNotIn("platforms", results["results"][0])
         self.assertNotIn("tags", results["results"][0])
 
+    async def test_like_wildcards_are_treated_literally(self):
+        await make_steam_game("Portal 2", 620, playtime_minutes=600)
+        # "%" must not match every game; only literal "%" would.
+        results = await library.search_games("%")
+        self.assertEqual(results["total_matches"], 0)
+
+    async def test_underscore_is_literal(self):
+        await make_steam_game("Hades", 1, playtime_minutes=10)
+        # "h_des" would match "Hades" if "_" were a wildcard.
+        results = await library.search_games("h_des")
+        self.assertEqual(results["total_matches"], 0)
+
+    async def test_negative_limit_is_clamped_not_unbounded(self):
+        for i in range(3):
+            await make_steam_game(f"Game {i}", 100 + i, playtime_minutes=i)
+        results = await library.search_games("game", limit=-1)
+        # SQLite treats LIMIT -1 as unbounded; clamp must cap the row count.
+        self.assertLessEqual(len(results["results"]), MAX_RESULT_LIMIT)
+        self.assertEqual(results["total_matches"], 3)
+
+    async def test_huge_limit_is_clamped(self):
+        await make_steam_game("Solo", 1, playtime_minutes=10)
+        results = await library.search_games("solo", limit=10**9)
+        self.assertEqual(len(results["results"]), 1)
+
 
 class SearchGamesBatchTests(ToolDBTestCase):
     async def test_keyed_by_query(self):
@@ -153,6 +181,18 @@ class LibraryStatsTests(ToolDBTestCase):
         stats = await library.get_library_stats(min_metacritic=90)
         names = [g["name"] for g in stats["results"]]
         self.assertEqual(names, ["Great"])
+
+    async def test_invalid_filter_raises(self):
+        with self.assertRaisesRegex(ToolError, "Unknown filter 'bogus'"):
+            await library.get_library_stats(filter="bogus")
+
+    async def test_invalid_sort_by_raises(self):
+        with self.assertRaisesRegex(ToolError, "Unknown sort_by 'bogus'"):
+            await library.get_library_stats(sort_by="bogus")
+
+    async def test_invalid_protondb_tier_raises(self):
+        with self.assertRaisesRegex(ToolError, "Unknown protondb_tier 'diamond'"):
+            await library.get_library_stats(protondb_tier="diamond")
 
     async def test_offset_and_has_more_for_result_list(self):
         for i in range(3):

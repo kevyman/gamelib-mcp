@@ -1,7 +1,38 @@
+import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from gamelib_mcp.data import igdb, metacritic
+
+
+class _FakeResponse:
+    def __init__(self, html: str, url: str, status_code: int = 200):
+        self.text = html
+        self.url = url
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        return None
+
+
+class _FakeAsyncClient:
+    def __init__(self, response: _FakeResponse):
+        self._response = response
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, url):
+        return self._response
+
+
+def _ld_json(rating_value, best_rating) -> str:
+    block = {"@type": "Product", "aggregateRating": {
+        "@type": "AggregateRating", "ratingValue": rating_value, "bestRating": best_rating}}
+    return f'<html><head><script type="application/ld+json">{json.dumps(block)}</script></head></html>'
 
 
 class _DummyDb:
@@ -78,6 +109,38 @@ class MetacriticRegressionTests(unittest.IsolatedAsyncioTestCase):
         upsert.assert_awaited_once()
         self.assertEqual(fields["metacritic_score"], 72)
         self.assertEqual(fields["metacritic_url"], expected_url)
+
+    async def test_fetch_score_accepts_critic_metascore(self) -> None:
+        url = "https://www.metacritic.com/game/portal/"
+        response = _FakeResponse(_ld_json("90", "100"), url)
+        with patch("gamelib_mcp.data.metacritic.httpx.AsyncClient", return_value=_FakeAsyncClient(response)):
+            score, _ = await metacritic._fetch_score_from_url(url)
+        self.assertEqual(score, 90)
+
+    async def test_fetch_score_rejects_user_score_aggregate(self) -> None:
+        # bestRating=10 means this aggregateRating is the user score, not the Metascore.
+        url = "https://www.metacritic.com/game/garrys-mod/"
+        response = _FakeResponse(_ld_json("8.4", "10"), url)
+        with patch("gamelib_mcp.data.metacritic.httpx.AsyncClient", return_value=_FakeAsyncClient(response)):
+            score, _ = await metacritic._fetch_score_from_url(url)
+        self.assertIsNone(score)
+
+    async def test_fetch_score_picks_critic_block_when_both_present(self) -> None:
+        url = "https://www.metacritic.com/game/hades/"
+        critic = {"@type": "Product", "aggregateRating": {
+            "@type": "AggregateRating", "ratingValue": "93", "bestRating": "100"}}
+        user = {"@type": "Product", "aggregateRating": {
+            "@type": "AggregateRating", "ratingValue": "9", "bestRating": "10"}}
+        html = (
+            f'<html><head>'
+            f'<script type="application/ld+json">{json.dumps(user)}</script>'
+            f'<script type="application/ld+json">{json.dumps(critic)}</script>'
+            f'</head></html>'
+        )
+        response = _FakeResponse(html, url)
+        with patch("gamelib_mcp.data.metacritic.httpx.AsyncClient", return_value=_FakeAsyncClient(response)):
+            score, _ = await metacritic._fetch_score_from_url(url)
+        self.assertEqual(score, 93)
 
     def test_candidate_urls_fall_back_to_generic_slug(self) -> None:
         slug = "metal-slug-tactics"

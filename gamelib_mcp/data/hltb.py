@@ -55,9 +55,12 @@ async def _fetch_and_cache(game_id: int, name: str) -> dict | None:
 
             # Pick closest match by similarity score
             best = max(results, key=lambda e: e.similarity)
-            main = best.main_story
-            extra = best.main_extra
-            comp = best.completionist
+            # HLTB returns 0 for durations it has no data for; store NULL so
+            # callers can distinguish "unknown length" from "instant" and so
+            # max_hltb_hours filters / shortest-game sorts don't pick them up.
+            main = _nonzero(best.main_story)
+            extra = _nonzero(best.main_extra)
+            comp = _nonzero(best.completionist)
 
             await _cache_result(game_id, main, extra, comp, now)
             return {"hltb_main": main, "hltb_extra": extra, "hltb_complete": comp}
@@ -65,6 +68,13 @@ async def _fetch_and_cache(game_id: int, name: str) -> dict | None:
             logger.warning("HLTB fetch failed for %s (%d): %s", name, game_id, e)
             await _cache_result(game_id, None, None, None, None)
             return None
+
+
+def _nonzero(value: float | None) -> float | None:
+    """Treat HLTB's 0 (no data) as NULL."""
+    if value is None or value == 0:
+        return None
+    return value
 
 
 async def _cache_result(

@@ -2,8 +2,17 @@
 
 from typing import Literal
 
+from fastmcp.exceptions import ToolError
+
 from ..data.db import get_db, load_platforms_for_games
-from .common import STEAM_APPID_SQL as _STEAM_APPID_SQL, resolve_platform as _resolve_platform
+from .common import (
+    STEAM_APPID_SQL as _STEAM_APPID_SQL,
+    clamp_limit as _clamp_limit,
+    like_escape as _like_escape,
+    resolve_platform as _resolve_platform,
+)
+
+VALID_FILTERS = {"all", "unplayed", "played", "recent", "farmed"}
 
 ResponseFormat = Literal["concise", "detailed"]
 
@@ -46,9 +55,10 @@ async def search_games(
     response_format: ResponseFormat = "concise",
 ) -> dict:
     """Find games in the library by name substring match, optionally filtered by platform."""
+    limit = _clamp_limit(limit)
     platform = _resolve_platform(platform)
-    conditions = ["lower(name) LIKE lower(?)"]
-    params: list = [f"%{query}%"]
+    conditions = [r"lower(name) LIKE lower(?) ESCAPE '\'"]
+    params: list = [f"%{_like_escape(query)}%"]
     if platform:
         conditions.append(
             "game_id IN (SELECT game_id FROM game_platforms WHERE platform = ? AND owned = 1)"
@@ -90,19 +100,20 @@ async def search_games_batch(
     limit_per_query: int = 5,
 ) -> dict[str, list[dict]]:
     """Look up multiple game names in one call. Returns dict keyed by query."""
+    limit_per_query = _clamp_limit(limit_per_query)
     async with get_db() as db:
         results = {}
         for query in queries:
             rows = await db.execute_fetchall(
                 _GAME_ROLLUP_CTE
-                + """
+                + r"""
                 SELECT *
                 FROM game_rollup
-                WHERE lower(name) LIKE lower(?)
+                WHERE lower(name) LIKE lower(?) ESCAPE '\'
                 ORDER BY total_playtime_minutes DESC, name ASC
                 LIMIT ?
                 """,
-                (f"%{query}%", limit_per_query),
+                (f"%{_like_escape(query)}%", limit_per_query),
             )
             results[query] = await _format_rows(rows)
     return results
@@ -125,7 +136,23 @@ async def get_library_stats(
     filter: all | unplayed | played | recent | farmed
     sort_by: playtime | name | metacritic | hltb
     platform: steam | epic | gog | ps5 | nintendo | switch2 (optional — filter to games owned on that platform)
+
+    Note: min_metacritic and max_hltb_hours exclude games with no Metacritic
+    score / no HLTB data (NULL), so even min_metacritic=0 drops unscored games.
     """
+    limit = _clamp_limit(limit)
+    if filter not in VALID_FILTERS:
+        raise ToolError(f"Unknown filter '{filter}'. Valid: {sorted(VALID_FILTERS)}")
+    if sort_by not in SORT_COLUMNS:
+        raise ToolError(f"Unknown sort_by '{sort_by}'. Valid: {sorted(SORT_COLUMNS)}")
+    if protondb_tier is not None:
+        from ..data.protondb import TIER_ORDER
+
+        if protondb_tier.lower() not in TIER_ORDER:
+            raise ToolError(
+                f"Unknown protondb_tier '{protondb_tier}'. Valid: {list(TIER_ORDER)}"
+            )
+
     conditions = []
     params: list = []
 

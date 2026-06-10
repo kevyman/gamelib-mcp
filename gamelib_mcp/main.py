@@ -358,7 +358,7 @@ async def set_hardware_preference(platforms: list[str]) -> HardwarePreferenceRes
 
     Use this when suggested_platform should prioritize specific hardware.
     platforms is an ordered list from highest priority to lowest, for example
-    ["switch2", "steam_deck", "ps5"]. Returns the saved preference order.
+    ["switch2", "ps5", "steam"]. Returns the saved preference order.
     """
     from .tools.platforms import set_hardware_preference as _set_hw
     return await _set_hw(platforms)

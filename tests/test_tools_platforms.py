@@ -68,6 +68,10 @@ class SetHardwarePreferenceTests(ToolDBTestCase):
         stored = await db_module.get_meta("hardware_preference")
         self.assertEqual(json.loads(stored), ["switch2", "steam"])
 
+    async def test_rejects_unknown_platform(self):
+        with self.assertRaisesRegex(ToolError, "Unknown platform 'dreamcast'"):
+            await platforms.set_hardware_preference(["steam", "dreamcast"])
+
 
 class AddGameToPlatformTests(ToolDBTestCase):
     async def test_unknown_platform_error(self):
@@ -105,3 +109,11 @@ class AddGameToPlatformTests(ToolDBTestCase):
         self.assertFalse(result["created"])
         self.assertEqual(result["platform"], "switch2")  # alias resolved
         self.assertIsNone(result["identifier"])
+
+    async def test_rejects_empty_name(self):
+        with self.assertRaisesRegex(ToolError, "name must not be empty"):
+            await platforms.add_game_to_platform("   ", "steam")
+
+    async def test_rejects_negative_playtime(self):
+        with self.assertRaisesRegex(ToolError, "playtime_minutes must not be negative"):
+            await platforms.add_game_to_platform("Some Game", "gog", playtime_minutes=-5)

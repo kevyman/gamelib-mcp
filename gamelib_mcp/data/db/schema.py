@@ -363,3 +363,8 @@ _V5_SCHEMA_DDL = """
 # opencritic_num_reviews, metacritic_cached_at), so both names refer to the
 # same full schema.
 _V4_SCHEMA_DDL = _V5_SCHEMA_DDL  # backward-compat alias; kept for external references
+
+# v6 introduces no structural change — it is a data-only migration that clears
+# Metacritic user-score contamination and normalizes HLTB "no data" zeros to
+# NULL — so its schema is identical to v5.
+_V6_SCHEMA_DDL = _V5_SCHEMA_DDL

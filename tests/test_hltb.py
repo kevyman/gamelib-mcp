@@ -86,6 +86,35 @@ class HLTBRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(row["hltb_complete"])
         self.assertIsNone(row["hltb_cached_at"])
 
+    async def test_get_hltb_coerces_zero_durations_to_null(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"DATABASE_URL": f"file:{self.db_path}"},
+            clear=False,
+        ):
+            game_id = await db_module.upsert_game(appid=None, name="ASTRO BOT")
+            # HLTB has the title but no main-story duration -> returns 0.0.
+            fake_result = SimpleNamespace(main_story=0.0, main_extra=0.0, completionist=12.5, similarity=1.0)
+            with patch(
+                "gamelib_mcp.data.hltb.HowLongToBeat.async_search",
+                return_value=[fake_result],
+            ):
+                result = await hltb.get_hltb(game_id, "ASTRO BOT")
+
+            self.assertEqual(
+                result,
+                {"hltb_main": None, "hltb_extra": None, "hltb_complete": 12.5},
+            )
+            async with db_module.get_db() as db:
+                row = await db.execute_fetchone(
+                    "SELECT hltb_main, hltb_extra, hltb_complete FROM games WHERE id = ?",
+                    (game_id,),
+                )
+
+        self.assertIsNone(row["hltb_main"])
+        self.assertIsNone(row["hltb_extra"])
+        self.assertEqual(row["hltb_complete"], 12.5)
+
     async def test_get_hltb_marks_true_no_match_as_not_found(self) -> None:
         with patch.dict(
             "os.environ",
