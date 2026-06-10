@@ -1,19 +1,9 @@
 """get_ratings, sync_ratings, get_taste_profile tools."""
 
 from ..data.backloggd import sync_backloggd
-from ..data.db import STEAM_APP_ID, get_db, load_platforms_for_games, recompute_tag_affinity
+from ..data.db import get_db, load_platforms_for_games, recompute_tag_affinity
 from ..data.steam_reviews import sync_steam_reviews
-
-_STEAM_APPID_SQL = f"""
-(
-    SELECT CAST(gpi.identifier_value AS INTEGER)
-    FROM game_platform_identifiers gpi
-    JOIN game_platforms sgp ON sgp.id = gpi.game_platform_id
-    WHERE sgp.game_id = g.id AND gpi.identifier_type = '{STEAM_APP_ID}'
-    ORDER BY gpi.is_primary DESC, gpi.id ASC
-    LIMIT 1
-)
-"""
+from .common import STEAM_APPID_SQL as _STEAM_APPID_SQL
 
 
 async def sync_ratings() -> dict:
