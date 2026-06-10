@@ -1,13 +1,10 @@
 """Characterization tests for gamelib_mcp.tools.admin.
 
-Covers detect_farmed_games (pure DB) and the input-validation branches of
-set_nintendo_session. The successful file-write path of set_nintendo_session
-currently raises NameError (missing `import os`); that is pinned as an expected
-failure here and flipped to a passing assertion in the import-os fix step.
+Covers detect_farmed_games (pure DB) and set_nintendo_session, including its
+successful file-write path (writes to a temp NINTENDO_COOKIES_FILE).
 """
 
 import json
-import unittest
 
 from conftest import ToolDBTestCase, make_steam_game
 from gamelib_mcp.data import db as db_module
@@ -89,9 +86,19 @@ class SetNintendoSessionValidationTests(ToolDBTestCase):
             result, {"success": False, "error": "No valid cookies found in input"}
         )
 
-    @unittest.expectedFailure
     async def test_valid_cookies_write_succeeds(self):
-        # Currently raises NameError (missing `import os`); see module docstring.
-        result = await admin.set_nintendo_session(json.dumps({"id_token": "abc"}))
-        self.assertTrue(result["success"])
-        self.assertEqual(result["cookie_count"], 1)
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cookie_path = os.path.join(tmp, "nested", "cookies.json")
+            with patch.dict(os.environ, {"NINTENDO_COOKIES_FILE": cookie_path}):
+                result = await admin.set_nintendo_session(
+                    json.dumps([{"name": "id_token", "value": "abc"}])
+                )
+            self.assertTrue(result["success"])
+            self.assertEqual(result["cookie_count"], 1)
+            self.assertEqual(result["path"], cookie_path)
+            with open(cookie_path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f), {"id_token": "abc"})
