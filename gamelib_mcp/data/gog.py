@@ -20,6 +20,9 @@ import re
 import shutil
 from pathlib import Path
 
+_ROMAN_RE = re.compile(r"\b([IiVvXx]{2,})\b")
+_ORDINAL_RE = re.compile(r"(\d+)(St|Nd|Rd|Th)\b")
+
 from gamelib_mcp.data.db import (
     load_fuzzy_candidates,
     upsert_game_platform,
@@ -61,7 +64,15 @@ def _slug_to_title(slug: str) -> str:
     """Convert a lgogdownloader slug to a human-readable title."""
     if slug.endswith("_game") and "_" in slug[:-5]:
         slug = slug[:-5]
-    return slug.replace("_", " ").title()
+    # GOG convention: trailing _the → "The " prefix (e.g. elder_scrolls_the → The Elder Scrolls)
+    if slug.endswith("_the") and "_" in slug[:-4]:
+        slug = "the_" + slug[:-4]
+    title = slug.replace("_", " ").title()
+    # Fix Roman numerals mangled by .title() (Ii→II, Iii→III, Iv→IV, Vi→VI …)
+    title = _ROMAN_RE.sub(lambda m: m.group(0).upper(), title)
+    # Fix ordinal suffixes (20Th→20th, 1St→1st, 2Nd→2nd, 3Rd→3rd)
+    title = _ORDINAL_RE.sub(lambda m: m.group(1) + m.group(2).lower(), title)
+    return title
 
 
 def _parse_lgogdownloader_output(stdout: str) -> list[str]:

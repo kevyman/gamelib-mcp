@@ -143,6 +143,12 @@ async def refresh_library(
         except Exception:
             logger.exception("Farmed-game detection failed after Steam refresh")
 
+    from .. import main as _main
+    try:
+        await _main._schedule_background_enrich()
+    except Exception:
+        logger.exception("Failed to schedule background enrichment after library refresh")
+
     return results
 
 

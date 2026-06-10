@@ -270,7 +270,7 @@ class SyncGogSyncTests(unittest.TestCase):
         mock_resolve.assert_awaited_once()
         self.assertEqual(
             mock_resolve.await_args.args[:2],
-            ("Quake Ii Quad Damage", igdb.PLATFORM_TO_IGDB["gog"]),
+            ("Quake II Quad Damage", igdb.PLATFORM_TO_IGDB["gog"]),
         )
 
 
