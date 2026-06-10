@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "")
 _ALLOWED_ORIGINS: frozenset[str] = frozenset(
-    o.strip() for o in os.getenv("MCP_ALLOWED_ORIGINS", "").split(",") if o.strip()
+    o.strip().rstrip("/") for o in os.getenv("MCP_ALLOWED_ORIGINS", "").split(",") if o.strip()
 )
 
 # Paths/prefixes that must work without auth
