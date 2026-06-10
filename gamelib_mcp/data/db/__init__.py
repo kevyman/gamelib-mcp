@@ -571,7 +571,9 @@ async def _migrate_v2_to_v3(db: aiosqlite.Connection, progress: _Progress | None
         )
 
     # 3. Rebuild games table: drop metacritic_score, opencritic_score; add igdb_cached_at
+    await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute("ALTER TABLE games RENAME TO games_v2_old")
+    await db.execute("PRAGMA legacy_alter_table=OFF")
     await db.execute("""
         CREATE TABLE games (
             id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -704,6 +706,48 @@ async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     )
 
 
+async def _foreign_key_targets(db: aiosqlite.Connection, table: str) -> set[str]:
+    rows = await db.execute_fetchall(f"PRAGMA foreign_key_list({table})")
+    return {row[2] for row in rows}
+
+
+async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: str) -> None:
+    old_table = f"{table}_fk_repair_old"
+    await db.execute(f"DROP TABLE IF EXISTS {old_table}")
+    await db.execute("PRAGMA legacy_alter_table=ON")
+    await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
+    await db.execute("PRAGMA legacy_alter_table=OFF")
+    await db.executescript(_V6_SCHEMA_DDL)
+
+    old_cols = await _table_columns(db, old_table)
+    new_cols = await _table_columns(db, table)
+    keep = [col for col in new_cols if col in old_cols]
+    cols_sql = ", ".join(keep)
+    await db.execute(f"INSERT INTO {table} ({cols_sql}) SELECT {cols_sql} FROM {old_table}")
+    await db.execute(f"DROP TABLE IF EXISTS {old_table}")
+
+
+async def _repair_game_foreign_keys(db: aiosqlite.Connection) -> None:
+    tables = await _table_names(db)
+    stale_tables = [
+        table
+        for table in ("game_platforms", "ratings")
+        if table in tables and "games_v2_old" in await _foreign_key_targets(db, table)
+    ]
+    if not stale_tables:
+        return
+
+    await db.commit()
+    await db.execute("PRAGMA foreign_keys=OFF")
+    try:
+        for table in stale_tables:
+            await _rebuild_table_from_current_schema(db, table)
+        await db.commit()
+    finally:
+        await db.execute("PRAGMA legacy_alter_table=OFF")
+        await db.execute("PRAGMA foreign_keys=ON")
+
+
 async def _run_migrations(
     db: aiosqlite.Connection,
     progress: _Progress | None = None,
@@ -781,6 +825,7 @@ async def _run_migrations(
         await _migrate_v5_to_v6(db, progress=None)
         version = 6
 
+    await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
     await db.executescript(_V6_SCHEMA_DDL)
