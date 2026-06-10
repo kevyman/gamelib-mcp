@@ -2,7 +2,7 @@
 
 This is the compatibility tripwire for the restructuring work — any later step
 that changes a tool name, drops a parameter, or alters required-ness will fail
-here. Descriptions are intentionally NOT asserted (they may be improved).
+here. Description assertions stay limited to known regressions.
 """
 
 import unittest
@@ -54,6 +54,27 @@ EXPECTED_TOOLS = {
     "set_nintendo_session": {"params": {"cookies"}, "required": {"cookies"}},
 }
 
+EXPECTED_ANNOTATIONS = {
+    "search_games": {"readOnlyHint": True, "idempotentHint": True},
+    "search_games_batch": {"readOnlyHint": True, "idempotentHint": True},
+    "get_library_stats": {"readOnlyHint": True, "idempotentHint": True},
+    "get_game_detail": {"readOnlyHint": True, "idempotentHint": True},
+    "find_games_by_vibe": {"readOnlyHint": True, "idempotentHint": True},
+    "get_recommendations": {"readOnlyHint": True, "idempotentHint": True},
+    "get_taste_profile": {"readOnlyHint": True, "idempotentHint": True},
+    "get_ratings": {"readOnlyHint": True, "idempotentHint": True},
+    "get_backlog_stats": {"readOnlyHint": True, "idempotentHint": True},
+    "get_integration_status": {"readOnlyHint": True, "idempotentHint": True},
+    "get_platform_breakdown": {"readOnlyHint": True, "idempotentHint": True},
+    "detect_farmed_games": {"destructiveHint": False, "idempotentHint": True},
+    "sync_ratings": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
+    "refresh_library": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
+    "sync_platform": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
+    "set_hardware_preference": {"readOnlyHint": False, "idempotentHint": True},
+    "add_game_to_platform": {"readOnlyHint": False, "idempotentHint": True},
+    "set_nintendo_session": {"readOnlyHint": False, "idempotentHint": True},
+}
+
 
 class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
     async def _tools(self):
@@ -77,6 +98,31 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
                 required = set(schema.get("required", []))
                 self.assertEqual(props, expected["params"])
                 self.assertEqual(required, expected["required"])
+
+    async def test_all_tools_have_expected_annotations(self):
+        tools = await self._tools()
+        for name, expected in EXPECTED_ANNOTATIONS.items():
+            with self.subTest(tool=name):
+                annotations = tools[name].annotations
+                self.assertIsNotNone(annotations)
+                for field, value in expected.items():
+                    self.assertEqual(getattr(annotations, field), value)
+
+    async def test_detect_farmed_games_description_matches_defaults(self):
+        tools = await self._tools()
+        description = tools["detect_farmed_games"].description
+        self.assertIn("default 8.0h", description)
+        self.assertIn("default 8", description)
+        self.assertNotIn("default 4h", description)
+        self.assertNotIn("default 20", description)
+
+    def test_server_instructions_include_discovery_workflow(self):
+        instructions = main.mcp.instructions
+        self.assertIn("sync_ratings", instructions)
+        self.assertIn("get_recommendations", instructions)
+        self.assertIn("find_games_by_vibe", instructions)
+        self.assertIn("concise", instructions)
+        self.assertIn("offset", instructions)
 
 
 if __name__ == "__main__":
