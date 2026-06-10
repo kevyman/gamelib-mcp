@@ -86,6 +86,7 @@ async def get_backlog_stats() -> dict:
     unplayed_count = summary["unplayed"] or 0
     farmed_count = summary["farmed_games"] or 0
     played_pct = round(played_count / total_count * 100) if total_count else 0
+    unplayed_pct = (100 - played_pct) if total_count else 0
 
     backlog_hours_hltb = round(summary["backlog_hours_hltb"] or 0)
     weekly_hours = round((summary["recent_minutes"] or 0) / 2 / 60, 1)
@@ -100,7 +101,7 @@ async def get_backlog_stats() -> dict:
         "played": played_count,
         "played_pct": played_pct,
         "unplayed": unplayed_count,
-        "unplayed_pct": 100 - played_pct,
+        "unplayed_pct": unplayed_pct,
         "farmed_games": farmed_count,
         "unplayed_with_hltb": summary["unplayed_with_hltb"] or 0,
         "backlog_hours_hltb": backlog_hours_hltb,

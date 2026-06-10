@@ -5,7 +5,12 @@ import json
 from fastmcp.exceptions import ToolError
 
 from ..data.db import get_db, set_meta, upsert_game, upsert_game_platform, upsert_game_platform_identifier
-from .common import info as _info, report_progress, resolve_platform as _resolve_platform
+from .common import (
+    LIBRARY_PLATFORMS,
+    info as _info,
+    report_progress,
+    validate_platform as _validate_platform,
+)
 
 _PLATFORM_MAP = {
     "steam":    ("gamelib_mcp.data.steam_xml", "fetch_library"),
@@ -16,8 +21,6 @@ _PLATFORM_MAP = {
     "switch2":  ("gamelib_mcp.data.nintendo",   "sync_nintendo"),
     "ps5":      ("gamelib_mcp.data.psn",        "sync_psn"),
 }
-
-_VALID_PLATFORMS = {"steam", "epic", "gog", "nintendo", "switch", "switch2", "ps5", "itchio", "xbox", "other"}
 
 
 async def get_platform_breakdown() -> dict:
@@ -97,11 +100,11 @@ async def set_hardware_preference(platforms: list[str]) -> dict:
     Set your hardware preference order for get_recommendations suggested_platform.
 
     platforms: ordered list, highest priority first.
-    e.g. ["switch2", "steam_deck", "ps5"]
+    e.g. ["switch2", "ps5", "steam"]
 
-    Valid values: any platform name used in your library (steam, epic, gog, switch2, ps5, etc.)
+    Valid values: steam, epic, gog, switch2 (aka nintendo/switch), ps5, itchio, xbox, other.
     """
-    normalized = [_resolve_platform(p) or p for p in platforms]
+    normalized = [_validate_platform(p, LIBRARY_PLATFORMS) for p in platforms]
     await set_meta("hardware_preference", json.dumps(normalized))
     return {"hardware_preference": normalized}
 
@@ -123,11 +126,14 @@ async def add_game_to_platform(
     identifier_value: Optional store identifier value
     playtime_minutes: Optional known playtime in minutes
     """
-    if platform not in _VALID_PLATFORMS:
-        raise ToolError(f"Unknown platform '{platform}'. Valid: {sorted(_VALID_PLATFORMS)}")
+    # Resolve aliases (e.g. "nintendo" → "switch2") and validate in one step.
+    platform = _validate_platform(platform, LIBRARY_PLATFORMS)
 
-    # Normalize aliases (e.g. "nintendo" → "switch2") to match auto-synced data
-    platform = _resolve_platform(platform) or platform
+    name = name.strip()
+    if not name:
+        raise ToolError("name must not be empty")
+    if playtime_minutes is not None and playtime_minutes < 0:
+        raise ToolError("playtime_minutes must not be negative")
 
     # Check whether the game already exists before upserting
     async with get_db() as db:
