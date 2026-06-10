@@ -53,26 +53,38 @@ The project database lives at `./data/gamelib.db`. `_db_path()` defaults to `dat
 
 ### Entry Point & Transport
 
-`gamelib_mcp/main.py` creates the FastMCP app, registers all 10 tools, and starts an SSE server. On startup: DB is initialized, library refresh is scheduled if >6h stale, and background enrichment starts without waiting for a single provider to finish first.
+App composition is split across three thin top-level modules:
+- `gamelib_mcp/main.py`: creates the FastMCP app, registers all MCP tools (declarative `@mcp.tool()` passthroughs whose signatures/docstrings are the wire schema), wires the lifespan + HTTP routes, and is the SSE entry point (`python -m gamelib_mcp.main`).
+- `gamelib_mcp/lifecycle.py`: the `lifespan` context manager and all background-task orchestration — startup library refresh, background enrichment scheduling, periodic refresh loop, per-event-loop locks, and the per-platform sync-metadata helpers. On startup: DB is initialized, library refresh is scheduled if stale, and background enrichment starts without waiting for a single provider to finish first.
+- `gamelib_mcp/http_admin.py`: bearer-auth ASGI middleware plus the `/health` and `/admin/integrations*` routes, registered via `register_http_routes(mcp)`.
+
+Dependency direction is a clean DAG: `main → lifecycle`, `main → http_admin`, `tools.admin → lifecycle`. `lifecycle` reaches `tools.admin.refresh_library` lazily (no top-level import) to avoid a cycle.
 
 ### Layer Separation
 
 **`gamelib_mcp/tools/`** — MCP tool handlers (business logic, formatting responses for AI consumption):
-- `library.py`: `search_games`, `get_library_stats`
+- `library.py`: `search_games`, `search_games_batch`, `get_library_stats`
 - `detail.py`: `get_game_detail` (triggers lazy enrichment)
 - `discover.py`: `find_games_by_vibe`, `get_recommendations`
 - `ratings.py`: `sync_ratings`, `get_ratings`, `get_taste_profile`
 - `stats.py`: `get_backlog_stats`
-- `admin.py`: `refresh_library`, `detect_farmed_games`
+- `admin.py`: `refresh_library`, `detect_farmed_games`, `set_nintendo_session`
+- `platforms.py`: `get_platform_breakdown`, `sync_platform`, `set_hardware_preference`, `add_game_to_platform`
+- `integrations.py`: `get_integration_status` (read-only filter over the inspector payload)
+- `common.py`: shared helpers — the steam-appid correlated subquery and the platform-alias resolver (imported by the modules above). The three `_GAME_ROLLUP_CTE` variants deliberately stay in their own modules; they differ.
 
 **`gamelib_mcp/data/`** — Data fetching and caching layer (all async):
-- `db.py`: SQLite schema, connection pool, tag affinity computation
+- `db/`: SQLite package. `__init__.py` holds the connection/migration/init bottom layer and re-exports everything (so `gamelib_mcp.data.db.<name>` is the stable public API). Submodules: `schema.py` (versioned DDL), `claims.py` (enrichment row-claiming + batch loaders), `queries.py` (meta KV, lookups, platform assembly), `upserts.py` (game/platform/enrichment upserts + bulk Steam sync), `affinity.py` (tag-affinity recompute), `fuzzy.py` (fuzzy name matching).
+- `enrich_bg.py`: background enrichment orchestration (the worker families driven by the claim functions).
 - `steam_xml.py`: Steam Web API (owned games, playtimes)
 - `steam_store.py`: Steam Store API (genres, tags, Metacritic) — 7-day cache
 - `steam_reviews.py`: Scrapes Steam Community review pages
 - `hltb.py`: HowLongToBeat async fetching — 30-day cache
 - `protondb.py`: ProtonDB Linux compatibility tiers — 30-day cache
 - `backloggd.py`: Scrapes Backloggd user reviews (fuzzy name matching via rapidfuzz)
+- Other providers/syncs: `igdb.py`, `opencritic.py`, `metacritic.py`, `steamspy.py`, and the platform syncs `epic.py`, `gog.py`, `nintendo.py`, `psn.py` (plus `title_normalization.py`).
+
+**`gamelib_mcp/integrations/`** — read-only integration status inspectors (`status.py` dataclasses, `inspectors.py` per-platform probes) surfaced by the `get_integration_status` tool and the `/admin/integrations*` routes.
 
 ### Database (SQLite via aiosqlite)
 
