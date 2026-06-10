@@ -13,72 +13,9 @@ from ..data.gog import sync_gog
 from ..data.nintendo import sync_nintendo
 from ..data.psn import sync_psn
 from ..data.steam_xml import fetch_library
+from ..lifecycle import _schedule_background_enrich, get_startup_refresh_task
 
 logger = logging.getLogger(__name__)
-SYNC_METADATA_PLATFORMS = ("steam", "epic", "gog", "nintendo", "ps5")
-
-
-def classify_platform_sync_error(message: str) -> str:
-    lowered = message.lower()
-    if any(token in lowered for token in ("refresh token rejected", "expired", "npsso", "reauth", "auth", "login")):
-        return "auth_stale"
-    if any(token in lowered for token in ("not in path", "binary", "command not found", "executable", "no such file")):
-        return "missing_runtime_dependency"
-    if any(token in lowered for token in ("not set", "missing", "not configured", "no credentials")):
-        return "missing_configuration"
-    if any(token in lowered for token in ("timeout", "timed out", "network", "connection", "dns")):
-        return "network"
-    return "unexpected"
-
-
-def _platform_sync_error_summary(payload: dict) -> str | None:
-    error = payload.get("error")
-    if isinstance(error, str) and error:
-        return error
-
-    summary = payload.get("error_summary")
-    if not isinstance(summary, str) or not summary:
-        summary = payload.get("summary")
-    if not isinstance(summary, str) or not summary:
-        return None
-
-    status = payload.get("sync_status")
-    if isinstance(status, str) and status not in {"ready", "success", "synced", "ok"}:
-        return summary
-    return None
-
-
-def _platform_sync_error_classification(payload: dict, summary: str) -> str:
-    classification = payload.get("error_classification")
-    if isinstance(classification, str) and classification:
-        return classification
-    status = payload.get("sync_status")
-    if status == "unconfigured":
-        return "missing_configuration"
-    if status == "degraded":
-        return "missing_runtime_dependency"
-    return classify_platform_sync_error(summary)
-
-
-def build_platform_sync_metadata(refresh_result: dict, finished_at: str) -> dict[str, str | None]:
-    metadata: dict[str, str | None] = {}
-    for platform in SYNC_METADATA_PLATFORMS:
-        payload = refresh_result.get(platform)
-        if not isinstance(payload, dict):
-            continue
-
-        prefix = f"integration_sync_{platform}"
-        error = _platform_sync_error_summary(payload)
-        metadata[f"{prefix}_last_attempt_at"] = finished_at
-        metadata[f"{prefix}_last_finished_at"] = finished_at
-        metadata[f"{prefix}_last_error_summary"] = error
-        metadata[f"{prefix}_last_error_classification"] = (
-            _platform_sync_error_classification(payload, error) if error else None
-        )
-        if not error:
-            metadata[f"{prefix}_last_success_at"] = finished_at
-
-    return metadata
 
 
 async def refresh_library(
@@ -94,9 +31,7 @@ async def refresh_library(
     targets = {platform_aliases.get(platform, platform) for platform in requested_targets}
 
     if targets == _ALL:
-        from .. import main as main_module
-
-        startup_task = main_module._LIBRARY_REFRESH_TASK
+        startup_task = get_startup_refresh_task()
         current_task = asyncio.current_task()
         if startup_task is not None and not startup_task.done() and startup_task is not current_task:
             result = await asyncio.shield(startup_task)
@@ -144,9 +79,8 @@ async def refresh_library(
         except Exception:
             logger.exception("Farmed-game detection failed after Steam refresh")
 
-    from .. import main as _main
     try:
-        await _main._schedule_background_enrich()
+        await _schedule_background_enrich()
     except Exception:
         logger.exception("Failed to schedule background enrichment after library refresh")
 
