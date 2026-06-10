@@ -5,19 +5,27 @@ from typing import Literal
 from ..data.backloggd import sync_backloggd
 from ..data.db import get_db, load_platforms_for_games, recompute_tag_affinity
 from ..data.steam_reviews import sync_steam_reviews
-from .common import STEAM_APPID_SQL as _STEAM_APPID_SQL
+from .common import STEAM_APPID_SQL as _STEAM_APPID_SQL, info as _info, report_progress
 
 ResponseFormat = Literal["concise", "detailed"]
 
 
-async def sync_ratings() -> dict:
+async def sync_ratings(ctx=None) -> dict:
     """
     Scrape Backloggd plus Steam reviews, upsert into ratings,
     then recompute tag_affinity.
     """
+    await report_progress(ctx, 0, 3)
+    await _info(ctx, "Syncing Backloggd ratings")
     bl_result = await sync_backloggd()
+    await report_progress(ctx, 1, 3)
+    await _info(ctx, "Syncing Steam review ratings")
     sr_result = await sync_steam_reviews()
+    await report_progress(ctx, 2, 3)
+    await _info(ctx, "Recomputing tag affinity")
     tag_count = await recompute_tag_affinity()
+    await report_progress(ctx, 3, 3)
+    await _info(ctx, "Finished rating sync")
 
     return {
         "backloggd": bl_result,

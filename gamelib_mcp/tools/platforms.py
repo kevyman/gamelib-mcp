@@ -5,7 +5,7 @@ import json
 from fastmcp.exceptions import ToolError
 
 from ..data.db import get_db, set_meta, upsert_game, upsert_game_platform, upsert_game_platform_identifier
-from .common import resolve_platform as _resolve_platform
+from .common import info as _info, report_progress, resolve_platform as _resolve_platform
 
 _PLATFORM_MAP = {
     "steam":    ("gamelib_mcp.data.steam_xml", "fetch_library"),
@@ -67,7 +67,7 @@ async def get_platform_breakdown() -> dict:
     }
 
 
-async def sync_platform(platform: str) -> dict:
+async def sync_platform(platform: str, ctx=None) -> dict:
     """
     Sync a single platform on demand.
     platform: steam | epic | gog | nintendo | switch | switch2 | ps5
@@ -80,9 +80,14 @@ async def sync_platform(platform: str) -> dict:
 
     module_path, fn_name = _PLATFORM_MAP[platform]
     try:
+        await report_progress(ctx, 0, 1)
+        await _info(ctx, f"Syncing {platform}")
         module = importlib.import_module(module_path)
         fn = getattr(module, fn_name)
-        return await fn()
+        result = await fn()
+        await report_progress(ctx, 1, 1)
+        await _info(ctx, f"Finished {platform}")
+        return result
     except Exception as exc:
         raise ToolError(f"{platform} sync failed: {exc}") from exc
 

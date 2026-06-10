@@ -7,6 +7,7 @@ successful file-write path (writes to a temp NINTENDO_COOKIES_FILE).
 import json
 
 from fastmcp.exceptions import ToolError
+from unittest.mock import AsyncMock, patch
 
 from conftest import ToolDBTestCase, make_steam_game
 from gamelib_mcp.data import db as db_module
@@ -101,6 +102,33 @@ class SetNintendoSessionValidationTests(ToolDBTestCase):
 
 
 class RefreshLibraryValidationTests(ToolDBTestCase):
+    class FakeContext:
+        def __init__(self):
+            self.progress = []
+            self.infos = []
+
+        async def report_progress(self, progress, total):
+            self.progress.append((progress, total))
+
+        async def info(self, message):
+            self.infos.append(message)
+
     async def test_unknown_platform_raises_tool_error(self):
         with self.assertRaisesRegex(ToolError, "Unknown platform 'playstation'"):
             await admin.refresh_library(["playstation"])
+
+    async def test_reports_progress(self):
+        ctx = self.FakeContext()
+        with (
+            patch.object(admin, "fetch_library", AsyncMock(return_value={"platform": "steam"})),
+            patch.object(admin, "sync_epic", AsyncMock(return_value={"platform": "epic"})),
+            patch.object(admin, "detect_farmed_games", AsyncMock(return_value={"candidates": 0})),
+        ):
+            result = await admin.refresh_library(["steam", "epic"], ctx=ctx)
+
+        self.assertEqual(result["steam"], {"platform": "steam"})
+        self.assertEqual(result["epic"], {"platform": "epic"})
+        self.assertEqual(ctx.progress, [(0, 2), (1, 2), (2, 2)])
+        self.assertIn("Refreshing 2 platform(s)", ctx.infos)
+        self.assertIn("Finished steam refresh", ctx.infos)
+        self.assertIn("Finished epic refresh", ctx.infos)

@@ -16,12 +16,14 @@ from ..data.nintendo import sync_nintendo
 from ..data.psn import sync_psn
 from ..data.steam_xml import fetch_library
 from ..lifecycle import _schedule_background_enrich, get_startup_refresh_task
+from .common import info as _info, report_progress
 
 logger = logging.getLogger(__name__)
 
 
 async def refresh_library(
     platforms: list[str] | None = None,
+    ctx=None,
 ) -> dict:
     """
     Re-sync game library. Defaults to all configured platforms.
@@ -43,6 +45,7 @@ async def refresh_library(
         startup_task = get_startup_refresh_task()
         current_task = asyncio.current_task()
         if startup_task is not None and not startup_task.done() and startup_task is not current_task:
+            await _info(ctx, "Waiting for running startup library refresh")
             result = await asyncio.shield(startup_task)
             if isinstance(result, dict):
                 return result
@@ -63,18 +66,23 @@ async def refresh_library(
         return await fn()
 
     selected = [(name, fn) for name, fn in platform_syncs.items() if name in targets]
+    await report_progress(ctx, 0, len(selected))
+    await _info(ctx, f"Refreshing {len(selected)} platform(s)")
     outcomes = await asyncio.gather(
         *(run_platform(name, fn) for name, fn in selected),
         return_exceptions=True,
     )
 
     results: dict = {}
-    for (name, _), outcome in zip(selected, outcomes, strict=True):
+    for index, ((name, _), outcome) in enumerate(zip(selected, outcomes, strict=True), start=1):
         result_name = result_names.get(name, name)
         if isinstance(outcome, BaseException):
             results[result_name] = {"error": str(outcome)}
+            await _info(ctx, f"Failed {result_name} refresh: {outcome}")
         else:
             results[result_name] = outcome
+            await _info(ctx, f"Finished {result_name} refresh")
+        await report_progress(ctx, index, len(selected))
 
     steam_result = results.get("steam")
     steam_synced = (

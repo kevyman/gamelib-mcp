@@ -11,7 +11,7 @@ import logging
 import os
 from typing import Literal
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 
 from .env import load_project_dotenv
@@ -242,7 +242,7 @@ async def get_ratings(
 
 
 @mcp.tool(annotations=NETWORK_SYNC_TOOL)
-async def sync_ratings() -> SyncRatingsResponse:
+async def sync_ratings(ctx: Context) -> SyncRatingsResponse:
     """
     Refresh ratings and recompute the taste profile.
 
@@ -252,7 +252,7 @@ async def sync_ratings() -> SyncRatingsResponse:
     affinity. This may take 1-2 minutes. Returns a sync summary dictionary.
     """
     from .tools.ratings import sync_ratings as _sync
-    return await _sync()
+    return await _sync(ctx=ctx)
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)
@@ -269,7 +269,10 @@ async def get_backlog_stats() -> BacklogStatsResponse:
 
 
 @mcp.tool(annotations=NETWORK_SYNC_TOOL)
-async def refresh_library(platforms: list[str] | None = None) -> RefreshLibraryResponse:
+async def refresh_library(
+    ctx: Context,
+    platforms: list[str] | None = None,
+) -> RefreshLibraryResponse:
     """
     Re-sync the owned game library from configured platforms.
 
@@ -279,7 +282,7 @@ async def refresh_library(platforms: list[str] | None = None) -> RefreshLibraryR
     sync summary dictionary.
     """
     from .tools.admin import refresh_library as _refresh
-    return await _refresh(platforms)
+    return await _refresh(platforms, ctx=ctx)
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)
@@ -336,7 +339,7 @@ async def get_platform_breakdown() -> PlatformBreakdownResponse:
 
 
 @mcp.tool(annotations=NETWORK_SYNC_TOOL)
-async def sync_platform(platform: str) -> SyncPlatformResponse:
+async def sync_platform(platform: str, ctx: Context) -> SyncPlatformResponse:
     """
     Sync one platform on demand.
 
@@ -345,7 +348,7 @@ async def sync_platform(platform: str) -> SyncPlatformResponse:
     nintendo, switch, switch2, or ps5. Returns that platform's sync result.
     """
     from .tools.platforms import sync_platform as _sync
-    return await _sync(platform)
+    return await _sync(platform, ctx=ctx)
 
 
 @mcp.tool(annotations=MUTATION_TOOL)

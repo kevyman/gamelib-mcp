@@ -1,6 +1,8 @@
 """Characterization tests for gamelib_mcp.tools.platforms."""
 
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from fastmcp.exceptions import ToolError
 
@@ -31,9 +33,30 @@ class PlatformBreakdownTests(ToolDBTestCase):
 
 
 class SyncPlatformTests(ToolDBTestCase):
+    class FakeContext:
+        def __init__(self):
+            self.progress = []
+            self.infos = []
+
+        async def report_progress(self, progress, total):
+            self.progress.append((progress, total))
+
+        async def info(self, message):
+            self.infos.append(message)
+
     async def test_unknown_platform_returns_error(self):
         with self.assertRaisesRegex(ToolError, "Unknown platform 'playstation'"):
             await platforms.sync_platform("playstation")
+
+    async def test_reports_progress(self):
+        ctx = self.FakeContext()
+        module = SimpleNamespace(fetch_library=AsyncMock(return_value={"synced": True}))
+        with patch.object(platforms.importlib, "import_module", return_value=module):
+            result = await platforms.sync_platform("steam", ctx=ctx)
+
+        self.assertEqual(result, {"synced": True})
+        self.assertEqual(ctx.progress, [(0, 1), (1, 1)])
+        self.assertEqual(ctx.infos, ["Syncing steam", "Finished steam"])
 
 
 class SetHardwarePreferenceTests(ToolDBTestCase):

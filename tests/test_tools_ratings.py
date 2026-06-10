@@ -108,6 +108,17 @@ class GetTasteProfileTests(ToolDBTestCase):
 
 
 class SyncRatingsTests(ToolDBTestCase):
+    class FakeContext:
+        def __init__(self):
+            self.progress = []
+            self.infos = []
+
+        async def report_progress(self, progress, total):
+            self.progress.append((progress, total))
+
+        async def info(self, message):
+            self.infos.append(message)
+
     async def test_aggregates_provider_results(self):
         with (
             patch.object(ratings, "sync_backloggd", AsyncMock(return_value={"synced": 3})),
@@ -124,3 +135,16 @@ class SyncRatingsTests(ToolDBTestCase):
                 "status": "done",
             },
         )
+
+    async def test_reports_progress(self):
+        ctx = self.FakeContext()
+        with (
+            patch.object(ratings, "sync_backloggd", AsyncMock(return_value={"synced": 3})),
+            patch.object(ratings, "sync_steam_reviews", AsyncMock(return_value={"synced": 2})),
+            patch.object(ratings, "recompute_tag_affinity", AsyncMock(return_value=7)),
+        ):
+            await ratings.sync_ratings(ctx=ctx)
+
+        self.assertEqual(ctx.progress, [(0, 3), (1, 3), (2, 3), (3, 3)])
+        self.assertIn("Syncing Backloggd ratings", ctx.infos)
+        self.assertIn("Recomputing tag affinity", ctx.infos)
