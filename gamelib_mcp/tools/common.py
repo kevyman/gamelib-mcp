@@ -34,3 +34,13 @@ STEAM_APPID_SQL = f"""
     LIMIT 1
 )
 """
+
+
+async def report_progress(ctx, progress: int, total: int) -> None:
+    if ctx is not None:
+        await ctx.report_progress(progress, total)
+
+
+async def info(ctx, message: str) -> None:
+    if ctx is not None:
+        await ctx.info(message)

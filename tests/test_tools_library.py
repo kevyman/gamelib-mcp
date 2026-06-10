@@ -19,9 +19,11 @@ class SearchGamesTests(ToolDBTestCase):
             protondb_tier="platinum",
             steam_review_desc="Overwhelmingly Positive",
         )
-        results = await library.search_games("portal")
-        self.assertEqual(len(results), 1)
-        game = results[0]
+        results = await library.search_games("portal", response_format="detailed")
+        self.assertEqual(set(results), {"results", "total_matches", "has_more"})
+        self.assertEqual(results["total_matches"], 1)
+        self.assertFalse(results["has_more"])
+        game = results["results"][0]
         self.assertEqual(
             set(game),
             {
@@ -54,14 +56,23 @@ class SearchGamesTests(ToolDBTestCase):
         await make_steam_game("Alpha", 1, playtime_minutes=60)
         await make_steam_game("Beta", 2, playtime_minutes=600)
         results = await library.search_games("a")
-        names = [g["name"] for g in results]
+        names = [g["name"] for g in results["results"]]
         self.assertEqual(names[0], "Beta")  # higher playtime first
 
-    async def test_limit_applies(self):
+    async def test_limit_applies_and_reports_more(self):
         for i in range(5):
             await make_steam_game(f"Game {i}", 100 + i, playtime_minutes=i)
         results = await library.search_games("game", limit=2)
-        self.assertEqual(len(results), 2)
+        self.assertEqual(len(results["results"]), 2)
+        self.assertEqual(results["total_matches"], 5)
+        self.assertTrue(results["has_more"])
+
+    async def test_offset_pages_results(self):
+        for i in range(3):
+            await make_steam_game(f"Game {i}", 100 + i, playtime_minutes=300 - i)
+        first = await library.search_games("game", limit=1)
+        second = await library.search_games("game", limit=1, offset=1)
+        self.assertNotEqual(first["results"][0]["name"], second["results"][0]["name"])
 
     async def test_platform_filter_and_alias(self):
         gid = await seed_game("Zelda")
@@ -69,8 +80,14 @@ class SearchGamesTests(ToolDBTestCase):
         await make_steam_game("Half-Life", 70, playtime_minutes=300)
         # alias: "nintendo" resolves to "switch2"
         results = await library.search_games("", platform="nintendo")
-        names = [g["name"] for g in results]
+        names = [g["name"] for g in results["results"]]
         self.assertEqual(names, ["Zelda"])
+
+    async def test_concise_drops_platform_arrays(self):
+        await make_steam_game("Portal 2", 620, playtime_minutes=600, tags=["puzzle"])
+        results = await library.search_games("portal")
+        self.assertNotIn("platforms", results["results"][0])
+        self.assertNotIn("tags", results["results"][0])
 
 
 class SearchGamesBatchTests(ToolDBTestCase):
@@ -102,6 +119,8 @@ class LibraryStatsTests(ToolDBTestCase):
                 "filter",
                 "sort_by",
                 "results",
+                "total_matches",
+                "has_more",
             },
         )
         self.assertEqual(stats["total_games"], 3)
@@ -111,6 +130,8 @@ class LibraryStatsTests(ToolDBTestCase):
         self.assertEqual(stats["total_playtime_hours"], round(630 / 60, 1))
         self.assertEqual(stats["filter"], "all")
         self.assertEqual(stats["sort_by"], "playtime")
+        self.assertEqual(stats["total_matches"], 3)
+        self.assertFalse(stats["has_more"])
 
     async def test_filter_unplayed(self):
         await make_steam_game("Played", 1, playtime_minutes=600)
@@ -132,3 +153,11 @@ class LibraryStatsTests(ToolDBTestCase):
         stats = await library.get_library_stats(min_metacritic=90)
         names = [g["name"] for g in stats["results"]]
         self.assertEqual(names, ["Great"])
+
+    async def test_offset_and_has_more_for_result_list(self):
+        for i in range(3):
+            await make_steam_game(f"Game {i}", 100 + i, playtime_minutes=300 - i)
+        stats = await library.get_library_stats(limit=1, offset=1)
+        self.assertEqual(len(stats["results"]), 1)
+        self.assertEqual(stats["total_matches"], 3)
+        self.assertTrue(stats["has_more"])

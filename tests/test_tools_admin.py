@@ -6,6 +6,9 @@ successful file-write path (writes to a temp NINTENDO_COOKIES_FILE).
 
 import json
 
+from fastmcp.exceptions import ToolError
+from unittest.mock import AsyncMock, patch
+
 from conftest import ToolDBTestCase, make_steam_game
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import admin
@@ -70,21 +73,16 @@ class DetectFarmedGamesTests(ToolDBTestCase):
 
 class SetNintendoSessionValidationTests(ToolDBTestCase):
     async def test_invalid_json_returns_error(self):
-        result = await admin.set_nintendo_session("not json{")
-        self.assertFalse(result["success"])
-        self.assertIn("Invalid JSON", result["error"])
+        with self.assertRaisesRegex(ToolError, "Invalid JSON"):
+            await admin.set_nintendo_session("not json{")
 
     async def test_non_object_or_array_rejected(self):
-        result = await admin.set_nintendo_session(json.dumps(42))
-        self.assertEqual(
-            result, {"success": False, "error": "Expected a JSON object or array"}
-        )
+        with self.assertRaisesRegex(ToolError, "Expected a JSON object or array"):
+            await admin.set_nintendo_session(json.dumps(42))
 
     async def test_empty_cookies_rejected(self):
-        result = await admin.set_nintendo_session(json.dumps({}))
-        self.assertEqual(
-            result, {"success": False, "error": "No valid cookies found in input"}
-        )
+        with self.assertRaisesRegex(ToolError, "No valid cookies found in input"):
+            await admin.set_nintendo_session(json.dumps({}))
 
     async def test_valid_cookies_write_succeeds(self):
         import os
@@ -97,8 +95,40 @@ class SetNintendoSessionValidationTests(ToolDBTestCase):
                 result = await admin.set_nintendo_session(
                     json.dumps([{"name": "id_token", "value": "abc"}])
                 )
-            self.assertTrue(result["success"])
             self.assertEqual(result["cookie_count"], 1)
             self.assertEqual(result["path"], cookie_path)
             with open(cookie_path, encoding="utf-8") as f:
                 self.assertEqual(json.load(f), {"id_token": "abc"})
+
+
+class RefreshLibraryValidationTests(ToolDBTestCase):
+    class FakeContext:
+        def __init__(self):
+            self.progress = []
+            self.infos = []
+
+        async def report_progress(self, progress, total):
+            self.progress.append((progress, total))
+
+        async def info(self, message):
+            self.infos.append(message)
+
+    async def test_unknown_platform_raises_tool_error(self):
+        with self.assertRaisesRegex(ToolError, "Unknown platform 'playstation'"):
+            await admin.refresh_library(["playstation"])
+
+    async def test_reports_progress(self):
+        ctx = self.FakeContext()
+        with (
+            patch.object(admin, "fetch_library", AsyncMock(return_value={"platform": "steam"})),
+            patch.object(admin, "sync_epic", AsyncMock(return_value={"platform": "epic"})),
+            patch.object(admin, "detect_farmed_games", AsyncMock(return_value={"candidates": 0})),
+        ):
+            result = await admin.refresh_library(["steam", "epic"], ctx=ctx)
+
+        self.assertEqual(result["steam"], {"platform": "steam"})
+        self.assertEqual(result["epic"], {"platform": "epic"})
+        self.assertEqual(ctx.progress, [(0, 2), (1, 2), (2, 2)])
+        self.assertIn("Refreshing 2 platform(s)", ctx.infos)
+        self.assertIn("Finished steam refresh", ctx.infos)
+        self.assertIn("Finished epic refresh", ctx.infos)

@@ -107,6 +107,87 @@ def test_bearer_auth_middleware_allows_admin_integrations_with_valid_bearer_toke
     assert body == b""
 
 
+def test_bearer_auth_middleware_allows_no_origin_when_origin_allowlist_empty():
+    called = False
+
+    async def sentinel_app(scope, receive, send):
+        nonlocal called
+        called = True
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    app = BearerAuthMiddleware(sentinel_app)
+
+    with (
+        patch("gamelib_mcp.http_admin.MCP_AUTH_TOKEN", ""),
+        patch("gamelib_mcp.http_admin._ALLOWED_ORIGINS", frozenset()),
+    ):
+        status, headers, body = asyncio.run(_invoke_asgi_app(app, "/mcp"))
+
+    assert called is True
+    assert status == 204
+    assert headers == {}
+    assert body == b""
+
+
+def test_bearer_auth_middleware_rejects_browser_origin_when_origin_allowlist_empty():
+    called = False
+
+    async def sentinel_app(scope, receive, send):
+        nonlocal called
+        called = True
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    app = BearerAuthMiddleware(sentinel_app)
+
+    with (
+        patch("gamelib_mcp.http_admin.MCP_AUTH_TOKEN", ""),
+        patch("gamelib_mcp.http_admin._ALLOWED_ORIGINS", frozenset()),
+    ):
+        status, headers, body = asyncio.run(
+            _invoke_asgi_app(
+                app,
+                "/mcp",
+                headers=[(b"origin", b"https://evil.example")],
+            )
+        )
+
+    assert called is False
+    assert status == 403
+    assert headers["content-type"] == "text/plain"
+    assert body == b"Forbidden"
+
+
+def test_bearer_auth_middleware_allows_browser_origin_in_allowlist():
+    called = False
+
+    async def sentinel_app(scope, receive, send):
+        nonlocal called
+        called = True
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    app = BearerAuthMiddleware(sentinel_app)
+
+    with (
+        patch("gamelib_mcp.http_admin.MCP_AUTH_TOKEN", ""),
+        patch("gamelib_mcp.http_admin._ALLOWED_ORIGINS", frozenset({"https://claude.ai"})),
+    ):
+        status, headers, body = asyncio.run(
+            _invoke_asgi_app(
+                app,
+                "/mcp",
+                headers=[(b"origin", b"https://claude.ai")],
+            )
+        )
+
+    assert called is True
+    assert status == 204
+    assert headers == {}
+    assert body == b""
+
+
 def test_get_admin_integrations_returns_json_payload():
     payload = {
         "steam": {

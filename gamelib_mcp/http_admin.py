@@ -19,20 +19,39 @@ from .lifecycle import SYNC_METADATA_PLATFORMS
 logger = logging.getLogger(__name__)
 
 MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "")
+_ALLOWED_ORIGINS: frozenset[str] = frozenset(
+    o.strip().rstrip("/") for o in os.getenv("MCP_ALLOWED_ORIGINS", "").split(",") if o.strip()
+)
 
 # Paths/prefixes that must work without auth
 _OPEN_PATHS = {"/health", "/"}
-_OPEN_PREFIXES = ("/messages/", "/.well-known/")
+_OPEN_PREFIXES = ("/.well-known/",)
 
 
 class BearerAuthMiddleware:
-    """Pure ASGI middleware — safe for SSE streaming (no response buffering)."""
+    """Pure ASGI middleware — safe for Streamable HTTP (no response buffering)."""
 
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] not in ("http", "websocket") or not MCP_AUTH_TOKEN:
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+
+        headers = {k.lower(): v for k, v in scope.get("headers", [])}
+
+        # Origin header validation (MCP spec MUST for Streamable HTTP, DNS-rebinding defense).
+        # Requests without an Origin header pass (CLI tools and native MCP clients don't send one).
+        # Browser-origin requests must be explicitly allowlisted via MCP_ALLOWED_ORIGINS.
+        origin = headers.get(b"origin", b"").decode()
+        if origin and origin not in _ALLOWED_ORIGINS:
+            await send({"type": "http.response.start", "status": 403,
+                        "headers": [(b"content-type", b"text/plain"), (b"content-length", b"9")]})
+            await send({"type": "http.response.body", "body": b"Forbidden"})
+            return
+
+        if not MCP_AUTH_TOKEN:
             await self.app(scope, receive, send)
             return
 
@@ -41,7 +60,6 @@ class BearerAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        headers = {k.lower(): v for k, v in scope.get("headers", [])}
         auth = headers.get(b"authorization", b"").decode()
         if auth == f"Bearer {MCP_AUTH_TOKEN}":
             await self.app(scope, receive, send)

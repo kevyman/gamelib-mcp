@@ -2,8 +2,10 @@
 
 import importlib
 import json
+from fastmcp.exceptions import ToolError
+
 from ..data.db import get_db, set_meta, upsert_game, upsert_game_platform, upsert_game_platform_identifier
-from .common import resolve_platform as _resolve_platform
+from .common import info as _info, report_progress, resolve_platform as _resolve_platform
 
 _PLATFORM_MAP = {
     "steam":    ("gamelib_mcp.data.steam_xml", "fetch_library"),
@@ -65,7 +67,7 @@ async def get_platform_breakdown() -> dict:
     }
 
 
-async def sync_platform(platform: str) -> dict:
+async def sync_platform(platform: str, ctx=None) -> dict:
     """
     Sync a single platform on demand.
     platform: steam | epic | gog | nintendo | switch | switch2 | ps5
@@ -74,15 +76,20 @@ async def sync_platform(platform: str) -> dict:
     cookie fallback, etc.) — this tool does not gate on env vars.
     """
     if platform not in _PLATFORM_MAP:
-        return {"error": f"Unknown platform '{platform}'. Valid: {sorted(set(_PLATFORM_MAP))}"}
+        raise ToolError(f"Unknown platform '{platform}'. Valid: {sorted(set(_PLATFORM_MAP))}")
 
     module_path, fn_name = _PLATFORM_MAP[platform]
     try:
+        await report_progress(ctx, 0, 1)
+        await _info(ctx, f"Syncing {platform}")
         module = importlib.import_module(module_path)
         fn = getattr(module, fn_name)
-        return await fn()
+        result = await fn()
+        await report_progress(ctx, 1, 1)
+        await _info(ctx, f"Finished {platform}")
+        return result
     except Exception as exc:
-        return {"error": str(exc)}
+        raise ToolError(f"{platform} sync failed: {exc}") from exc
 
 
 async def set_hardware_preference(platforms: list[str]) -> dict:
@@ -96,7 +103,7 @@ async def set_hardware_preference(platforms: list[str]) -> dict:
     """
     normalized = [_resolve_platform(p) or p for p in platforms]
     await set_meta("hardware_preference", json.dumps(normalized))
-    return {"success": True, "hardware_preference": normalized}
+    return {"hardware_preference": normalized}
 
 
 async def add_game_to_platform(
@@ -117,7 +124,7 @@ async def add_game_to_platform(
     playtime_minutes: Optional known playtime in minutes
     """
     if platform not in _VALID_PLATFORMS:
-        return {"error": f"Unknown platform '{platform}'. Valid: {sorted(_VALID_PLATFORMS)}"}
+        raise ToolError(f"Unknown platform '{platform}'. Valid: {sorted(_VALID_PLATFORMS)}")
 
     # Normalize aliases (e.g. "nintendo" → "switch2") to match auto-synced data
     platform = _resolve_platform(platform) or platform
@@ -149,7 +156,6 @@ async def add_game_to_platform(
         added_identifier = {"type": identifier_type, "value": identifier_value}
 
     return {
-        "success": True,
         "created": created,
         "game_id": game_id,
         "game_platform_id": game_platform_id,
