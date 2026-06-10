@@ -16,7 +16,7 @@ from ..data.nintendo import sync_nintendo
 from ..data.psn import sync_psn
 from ..data.steam_xml import fetch_library
 from ..lifecycle import _schedule_background_enrich, get_startup_refresh_task
-from .common import info as _info, report_progress
+from .common import PLATFORM_ALIASES, SYNCABLE_PLATFORMS, info as _info, report_progress
 
 logger = logging.getLogger(__name__)
 
@@ -29,19 +29,19 @@ async def refresh_library(
     Re-sync game library. Defaults to all configured platforms.
     platforms: optional subset, e.g. ["steam", "epic"]. If omitted, syncs all.
     """
-    platform_aliases = {"switch2": "nintendo"}
-    _ALL = {"steam", "epic", "gog", "nintendo", "ps5"}
-    requested_targets = list(platforms) if platforms else sorted(_ALL)
-    valid_platforms = _ALL | set(platform_aliases)
-    unknown_platforms = [platform for platform in requested_targets if platform not in valid_platforms]
+    def _resolve(p: str) -> str:
+        return PLATFORM_ALIASES.get(p.lower(), p.lower())
+
+    requested_targets = list(platforms) if platforms else sorted(SYNCABLE_PLATFORMS)
+    unknown_platforms = [p for p in requested_targets if _resolve(p) not in SYNCABLE_PLATFORMS]
     if unknown_platforms:
-        valid = sorted(valid_platforms)
+        valid = sorted(SYNCABLE_PLATFORMS | set(PLATFORM_ALIASES))
         unknown = "', '".join(unknown_platforms)
         raise ToolError(f"Unknown platform '{unknown}'. Valid: {valid}")
 
-    targets = {platform_aliases.get(platform, platform) for platform in requested_targets}
+    targets = {_resolve(p) for p in requested_targets}
 
-    if targets == _ALL:
+    if targets == SYNCABLE_PLATFORMS:
         startup_task = get_startup_refresh_task()
         current_task = asyncio.current_task()
         if startup_task is not None and not startup_task.done() and startup_task is not current_task:
@@ -51,16 +51,16 @@ async def refresh_library(
                 return result
 
     platform_syncs = {
-        "steam":    fetch_library,
-        "epic":     sync_epic,
-        "gog":      sync_gog,
-        "nintendo": sync_nintendo,
-        "ps5":      sync_psn,
+        "steam":   fetch_library,
+        "epic":    sync_epic,
+        "gog":     sync_gog,
+        "switch2": sync_nintendo,
+        "ps5":     sync_psn,
     }
 
     result_names = {name: name for name in targets}
     for requested in requested_targets:
-        result_names[platform_aliases.get(requested, requested)] = requested
+        result_names[_resolve(requested)] = requested
 
     async def run_platform(_name: str, fn) -> dict:
         return await fn()
