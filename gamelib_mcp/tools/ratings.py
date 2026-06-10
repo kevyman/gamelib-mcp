@@ -1,19 +1,31 @@
 """get_ratings, sync_ratings, get_taste_profile tools."""
 
+from typing import Literal
+
 from ..data.backloggd import sync_backloggd
 from ..data.db import get_db, load_platforms_for_games, recompute_tag_affinity
 from ..data.steam_reviews import sync_steam_reviews
-from .common import STEAM_APPID_SQL as _STEAM_APPID_SQL
+from .common import STEAM_APPID_SQL as _STEAM_APPID_SQL, info as _info, report_progress
+
+ResponseFormat = Literal["concise", "detailed"]
 
 
-async def sync_ratings() -> dict:
+async def sync_ratings(ctx=None) -> dict:
     """
     Scrape Backloggd plus Steam reviews, upsert into ratings,
     then recompute tag_affinity.
     """
+    await report_progress(ctx, 0, 3)
+    await _info(ctx, "Syncing Backloggd ratings")
     bl_result = await sync_backloggd()
+    await report_progress(ctx, 1, 3)
+    await _info(ctx, "Syncing Steam review ratings")
     sr_result = await sync_steam_reviews()
+    await report_progress(ctx, 2, 3)
+    await _info(ctx, "Recomputing tag affinity")
     tag_count = await recompute_tag_affinity()
+    await report_progress(ctx, 3, 3)
+    await _info(ctx, "Finished rating sync")
 
     return {
         "backloggd": bl_result,
@@ -28,7 +40,9 @@ async def get_ratings(
     min_score: float | None = None,
     sort_by: str = "score",
     limit: int = 50,
-) -> list[dict]:
+    offset: int = 0,
+    response_format: ResponseFormat = "concise",
+) -> dict:
     """
     View synced ratings.
     source: 'backloggd' | 'steam_review' | None (all)
@@ -49,6 +63,13 @@ async def get_ratings(
     order = "r.normalized_score DESC" if sort_by == "score" else "g.name ASC"
 
     async with get_db() as db:
+        total = await db.execute_fetchone(
+            f"""SELECT COUNT(*) AS c
+                FROM ratings r
+                JOIN games g ON g.id = r.game_id
+                {where}""",
+            tuple(params),
+        )
         rows = await db.execute_fetchall(
             f"""SELECT g.id AS game_id,
                        {_STEAM_APPID_SQL} AS steam_appid,
@@ -62,26 +83,38 @@ async def get_ratings(
                 JOIN games g ON g.id = r.game_id
                 {where}
                 ORDER BY {order}
-                LIMIT ?""",
-            (*params, limit),
+                LIMIT ?
+                OFFSET ?""",
+            (*params, limit, offset),
         )
 
-    platforms_by_game = await load_platforms_for_games(row["game_id"] for row in rows)
-    return [
-        {
+    platforms_by_game = (
+        await load_platforms_for_games(row["game_id"] for row in rows)
+        if response_format == "detailed"
+        else {}
+    )
+    results = []
+    for row in rows:
+        rating = {
             "game_id": row["game_id"],
             "appid": row["steam_appid"],
             "steam_appid": row["steam_appid"],
             "name": row["name"],
-            "platforms": platforms_by_game.get(row["game_id"], []),
             "source": row["source"],
             "raw_score": row["raw_score"],
             "normalized_score": row["normalized_score"],
-            "review_text": row["review_text"],
             "synced_at": row["synced_at"],
         }
-        for row in rows
-    ]
+        if response_format == "detailed":
+            rating["platforms"] = platforms_by_game.get(row["game_id"], [])
+            rating["review_text"] = row["review_text"]
+        results.append(rating)
+
+    return {
+        "results": results,
+        "total_matches": total["c"],
+        "has_more": offset + len(results) < total["c"],
+    }
 
 
 async def get_taste_profile() -> dict:

@@ -6,6 +6,8 @@ test characterizes lookup + formatting only, without network.
 
 from unittest.mock import AsyncMock, patch
 
+from fastmcp.exceptions import ToolError
+
 from conftest import ToolDBTestCase, make_steam_game, seed_game, add_rating
 from gamelib_mcp.tools import detail
 
@@ -27,16 +29,12 @@ class GetGameDetailTests(ToolDBTestCase):
         super().tearDown()
 
     async def test_requires_an_identifier(self):
-        self.assertEqual(
-            await detail.get_game_detail(),
-            {"error": "Provide game_id, name, or appid"},
-        )
+        with self.assertRaisesRegex(ToolError, "Provide game_id, name, or appid"):
+            await detail.get_game_detail()
 
     async def test_not_found_returns_error(self):
-        self.assertEqual(
-            await detail.get_game_detail(name="does-not-exist"),
-            {"error": "Game not found in library"},
-        )
+        with self.assertRaisesRegex(ToolError, "Game not found in library"):
+            await detail.get_game_detail(name="does-not-exist")
 
     async def test_lookup_by_game_id_shape(self):
         gid = await make_steam_game(
