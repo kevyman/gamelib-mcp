@@ -472,7 +472,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             "steam": asyncio.Event(),
             "epic": asyncio.Event(),
             "gog": asyncio.Event(),
-            "nintendo": asyncio.Event(),
+            "switch2": asyncio.Event(),
             "ps5": asyncio.Event(),
         }
         release = asyncio.Event()
@@ -494,7 +494,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             return await make_sync("gog", {"platform": "gog", "synced": True})
 
         async def nintendo_sync() -> dict:
-            return await make_sync("nintendo", {"platform": "nintendo", "synced": True})
+            return await make_sync("switch2", {"platform": "switch2", "synced": True})
 
         async def psn_sync() -> dict:
             return await make_sync("ps5", {"platform": "ps5", "synced": True})
@@ -527,7 +527,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
                 "steam": {"platform": "steam", "synced": True},
                 "epic": {"error": "epic boom"},
                 "gog": {"platform": "gog", "synced": True},
-                "nintendo": {"platform": "nintendo", "synced": True},
+                "switch2": {"platform": "switch2", "synced": True},
                 "ps5": {"platform": "ps5", "synced": True},
             },
         )

@@ -1,7 +1,13 @@
 FROM python:3.12-slim
 WORKDIR /app
-RUN apt-get update && apt-get install -y lgogdownloader && rm -rf /var/lib/apt/lists/*
-COPY pyproject.toml .
+ENV DEBIAN_FRONTEND=noninteractive \
+    PATH="/app/.venv/bin:$PATH" \
+    UV_LINK_MODE=copy
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends lgogdownloader \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir uv==0.11.20
+COPY pyproject.toml uv.lock ./
 COPY gamelib_mcp/ gamelib_mcp/
-RUN pip install -e .
+RUN uv sync --frozen --no-dev --no-cache
 CMD ["python", "-m", "gamelib_mcp.main"]
