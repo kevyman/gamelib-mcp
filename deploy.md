@@ -70,11 +70,14 @@ DATABASE_URL=file:/data/gamelib.db
 STEAM_API_KEY=your-key-from-steamcommunity.com/dev/apikey
 STEAM_ID=your-64bit-steamid
 MCP_AUTH_TOKEN=<generate with: openssl rand -hex 32>
+MCP_ALLOWED_ORIGINS=https://claude.ai,https://chatgpt.com
 PORT=8000
 EPIC_LEGENDARY_HOST_PATH=/root/.config/legendary          # host path to legendary config dir (mounted read-only)
 STEAM_PROFILE_ID=your-steam-community-profile-id   # your steamcommunity.com/id/<this part>
 BACKLOGGD_USER=your-backloggd-username             # your backloggd.com/u/<this part>
 ```
+
+`MCP_ALLOWED_ORIGINS` is required for browser-based MCP clients. Leave it limited to trusted web app origins; native/CLI clients that send no `Origin` header are not affected.
 
 #### 4. Add DNS record
 
@@ -250,7 +253,7 @@ In your Claude MCP config:
 {
   "mcpServers": {
     "steam": {
-      "url": "https://gamelibmcp.johnwilkos.com/sse",
+      "url": "https://gamelibmcp.johnwilkos.com/mcp",
       "headers": {
         "Authorization": "Bearer <YOUR_MCP_AUTH_TOKEN>"
       }

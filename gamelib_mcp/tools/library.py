@@ -1,7 +1,11 @@
 """search_games and get_library_stats tools."""
 
+from typing import Literal
+
 from ..data.db import get_db, load_platforms_for_games
 from .common import STEAM_APPID_SQL as _STEAM_APPID_SQL, resolve_platform as _resolve_platform
+
+ResponseFormat = Literal["concise", "detailed"]
 
 SORT_COLUMNS = {
     "playtime": "total_playtime_minutes",
@@ -34,7 +38,13 @@ WITH game_rollup AS (
 """
 
 
-async def search_games(query: str, limit: int = 20, platform: str | None = None) -> list[dict]:
+async def search_games(
+    query: str,
+    limit: int = 20,
+    offset: int = 0,
+    platform: str | None = None,
+    response_format: ResponseFormat = "concise",
+) -> dict:
     """Find games in the library by name substring match, optionally filtered by platform."""
     platform = _resolve_platform(platform)
     conditions = ["lower(name) LIKE lower(?)"]
@@ -46,6 +56,15 @@ async def search_games(query: str, limit: int = 20, platform: str | None = None)
         params.append(platform)
     where = " AND ".join(conditions)
     async with get_db() as db:
+        total = await db.execute_fetchone(
+            _GAME_ROLLUP_CTE
+            + f"""
+            SELECT COUNT(*) AS c
+            FROM game_rollup
+            WHERE {where}
+            """,
+            tuple(params),
+        )
         rows = await db.execute_fetchall(
             _GAME_ROLLUP_CTE
             + f"""
@@ -54,10 +73,16 @@ async def search_games(query: str, limit: int = 20, platform: str | None = None)
             WHERE {where}
             ORDER BY total_playtime_minutes DESC, name ASC
             LIMIT ?
+            OFFSET ?
             """,
-            (*params, limit),
+            (*params, limit, offset),
         )
-    return await _format_rows(rows)
+    return _envelope(
+        await _format_rows(rows, response_format=response_format),
+        total["c"],
+        limit,
+        offset,
+    )
 
 
 async def search_games_batch(
@@ -90,7 +115,9 @@ async def get_library_stats(
     protondb_tier: str | None = None,
     sort_by: str = "playtime",
     limit: int = 50,
+    offset: int = 0,
     platform: str | None = None,
+    response_format: ResponseFormat = "concise",
 ) -> dict:
     """
     Return filtered/sorted game list plus aggregate stats.
@@ -149,8 +176,9 @@ async def get_library_stats(
             {where}
             ORDER BY {sort_col} {sort_dir} NULLS LAST, name ASC
             LIMIT ?
+            OFFSET ?
             """,
-            (*params, limit),
+            (*params, limit, offset),
         )
         summary = await db.execute_fetchone(
             _GAME_ROLLUP_CTE
@@ -174,25 +202,30 @@ async def get_library_stats(
         "total_playtime_hours": round((summary["total_minutes"] or 0) / 60, 1),
         "filter": filter,
         "sort_by": sort_by,
-        "results": await _format_rows(rows),
+        "results": await _format_rows(rows, response_format=response_format),
+        "total_matches": summary["total_games"],
+        "has_more": offset + len(rows) < summary["total_games"],
     }
 
 
-async def _format_rows(rows) -> list[dict]:
-    platforms_by_game = await load_platforms_for_games(row["game_id"] for row in rows)
+async def _format_rows(rows, response_format: ResponseFormat = "detailed") -> list[dict]:
+    platforms_by_game = (
+        await load_platforms_for_games(row["game_id"] for row in rows)
+        if response_format == "detailed"
+        else {}
+    )
     return [
-        _format_game(row, platforms_by_game.get(row["game_id"], []))
+        _format_game(row, platforms_by_game.get(row["game_id"], []), response_format)
         for row in rows
     ]
 
 
-def _format_game(row, platforms: list[dict]) -> dict:
-    return {
+def _format_game(row, platforms: list[dict], response_format: ResponseFormat) -> dict:
+    game = {
         "game_id": row["game_id"],
         "appid": row["steam_appid"],
         "steam_appid": row["steam_appid"],
         "name": row["name"],
-        "platforms": platforms,
         "playtime_hours": round((row["total_playtime_minutes"] or 0) / 60, 1),
         "playtime_2weeks_hours": round((row["total_playtime_2weeks_minutes"] or 0) / 60, 1),
         "hltb_main": row["hltb_main"],
@@ -200,4 +233,15 @@ def _format_game(row, platforms: list[dict]) -> dict:
         "protondb_tier": row["protondb_tier"],
         "steam_review_desc": row["steam_review_desc"],
         "is_farmed": bool(row["is_farmed"]),
+    }
+    if response_format == "detailed":
+        game["platforms"] = platforms
+    return game
+
+
+def _envelope(results: list[dict], total_matches: int, limit: int, offset: int) -> dict:
+    return {
+        "results": results,
+        "total_matches": total_matches,
+        "has_more": offset + len(results) < total_matches,
     }

@@ -1,5 +1,7 @@
 """get_game_detail: full info for one game, with platform-aware output."""
 
+from fastmcp.exceptions import ToolError
+
 from ..data.db import (
     get_db,
     get_game_by_appid,
@@ -32,10 +34,10 @@ async def get_game_detail(
                 (f"%{name}%",),
             )
         else:
-            return {"error": "Provide game_id, name, or appid"}
+            raise ToolError("Provide game_id, name, or appid")
 
     if row is None:
-        return {"error": "Game not found in library"}
+        raise ToolError("Game not found in library")
 
     game_id = row["id"]
     game_name = row["name"]

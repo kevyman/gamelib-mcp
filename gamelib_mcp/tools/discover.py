@@ -1,10 +1,14 @@
 """find_games_by_vibe and get_recommendations tools."""
 
 import json
+from typing import Literal
+
 from ..data.db import get_db, get_meta, load_platforms_for_games
 from ..data.protondb import TIER_ORDER
 from ..utils import _parse_json
 from .common import STEAM_APPID_SQL as _STEAM_APPID_SQL
+
+ResponseFormat = Literal["concise", "detailed"]
 
 # Vibe -> tag mappings (multi-tag = AND logic by default; tuple of lists = OR groups)
 VIBE_TAGS: dict[str, list[str]] = {
@@ -61,7 +65,9 @@ async def find_games_by_vibe(
     unplayed_only: bool = True,
     protondb_min_tier: str | None = None,
     limit: int = 20,
-) -> list[dict]:
+    offset: int = 0,
+    response_format: ResponseFormat = "concise",
+) -> dict:
     """
     Find games matching a vibe (tag-based). Uses json_each() for proper JSON tag matching.
     vibe: one of the keys in VIBE_TAGS, or a raw tag string.
@@ -96,6 +102,15 @@ async def find_games_by_vibe(
     where = " AND ".join(conditions)
 
     async with get_db() as db:
+        total = await db.execute_fetchone(
+            _GAME_ROLLUP_CTE
+            + f"""
+            SELECT COUNT(*) AS c
+            FROM game_rollup
+            WHERE {where}
+            """,
+            tuple(params),
+        )
         rows = await db.execute_fetchall(
             _GAME_ROLLUP_CTE
             + f"""
@@ -104,20 +119,33 @@ async def find_games_by_vibe(
             WHERE {where}
             ORDER BY metacritic_score DESC NULLS LAST, name ASC
             LIMIT ?
+            OFFSET ?
             """,
-            (*params, limit),
+            (*params, limit, offset),
         )
 
     hw_pref_raw = await get_meta("hardware_preference")
     hw_pref: list[str] = json.loads(hw_pref_raw) if hw_pref_raw else []
-    return await _format_rows(rows, include_match_score=False, hw_pref=hw_pref)
+    return _envelope(
+        await _format_rows(
+            rows,
+            include_match_score=False,
+            hw_pref=hw_pref,
+            response_format=response_format,
+        ),
+        total["c"],
+        limit,
+        offset,
+    )
 
 
 async def get_recommendations(
     max_hltb_hours: float | None = None,
     unplayed_only: bool = True,
     limit: int = 20,
-) -> list[dict]:
+    offset: int = 0,
+    response_format: ResponseFormat = "concise",
+) -> dict:
     """
     Rank unplayed games by tag affinity score (from sync_ratings).
     Returns games sorted by how well they match your taste profile.
@@ -139,6 +167,21 @@ async def get_recommendations(
     where = " AND ".join(conditions)
 
     async with get_db() as db:
+        total = await db.execute_fetchone(
+            _GAME_ROLLUP_CTE
+            + f"""
+            SELECT COUNT(*) AS c
+            FROM (
+                SELECT game_rollup.game_id
+                FROM game_rollup
+                JOIN json_each(game_rollup.tags) je ON 1 = 1
+                JOIN tag_affinity ta ON ta.tag = lower(je.value)
+                WHERE {where}
+                GROUP BY game_rollup.game_id
+            )
+            """,
+            tuple(params),
+        )
         rows = await db.execute_fetchall(
             _GAME_ROLLUP_CTE
             + f"""
@@ -151,15 +194,29 @@ async def get_recommendations(
             GROUP BY game_rollup.game_id
             ORDER BY match_score DESC, name ASC
             LIMIT ?
+            OFFSET ?
             """,
-            (*params, limit),
+            (*params, limit, offset),
         )
 
-    return await _format_rows(rows, include_match_score=True, hw_pref=hw_pref)
+    return _envelope(
+        await _format_rows(
+            rows,
+            include_match_score=True,
+            hw_pref=hw_pref,
+            response_format=response_format,
+        ),
+        total["c"],
+        limit,
+        offset,
+    )
 
 
 async def _format_rows(
-    rows, include_match_score: bool, hw_pref: list[str] | None = None
+    rows,
+    include_match_score: bool,
+    hw_pref: list[str] | None = None,
+    response_format: ResponseFormat = "detailed",
 ) -> list[dict]:
     platforms_by_game = await load_platforms_for_games(row["game_id"] for row in rows)
     formatted = []
@@ -169,14 +226,15 @@ async def _format_rows(
             "game_id": row["game_id"],
             "appid": row["steam_appid"],
             "name": row["name"],
-            "platforms": platforms_by_game.get(row["game_id"], []),
             "playtime_hours": round((row["total_playtime_minutes"] or 0) / 60, 1),
             "hltb_main": row["hltb_main"],
             "metacritic_score": row["metacritic_score"],
             "steam_review_desc": row["steam_review_desc"],
             "protondb_tier": row["protondb_tier"],
-            "tags": _parse_json(row["tags"]),
         }
+        if response_format == "detailed":
+            game["platforms"] = platforms_by_game.get(row["game_id"], [])
+            game["tags"] = _parse_json(row["tags"])
         pref = hw_pref or []
         game["suggested_platform"] = next(
             (hw for hw in pref if hw in owned_platforms),
@@ -186,3 +244,11 @@ async def _format_rows(
             game["match_score"] = round(row["match_score"], 3) if row["match_score"] else 0
         formatted.append(game)
     return formatted
+
+
+def _envelope(results: list[dict], total_matches: int, limit: int, offset: int) -> dict:
+    return {
+        "results": results,
+        "total_matches": total_matches,
+        "has_more": offset + len(results) < total_matches,
+    }
