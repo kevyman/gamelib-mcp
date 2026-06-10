@@ -32,6 +32,14 @@ docker compose --profile prod logs -f app
 
 `pytest` is configured in the `dev` dependency group in `pyproject.toml`. In this workspace, the reliable test runner is the local virtualenv at `.venv/bin/python`. There is no lint framework configured.
 
+### Test Environment Note
+
+DB-backed tests use temporary SQLite files; they do not require a checked-in `data/gamelib.db`.
+In Codex sandboxing, `aiosqlite` tests can hang because the worker thread completes the SQLite
+operation but the thread-safe event-loop callback does not resume the awaiting coroutine. If a
+test hangs at `aiosqlite.connect()` or early DB migration setup, run the same pytest command
+outside the sandbox before changing test fixtures or database paths.
+
 ## Required Environment Variables
 
 Copy `.env.example` to `.env`:
