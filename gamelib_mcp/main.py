@@ -9,6 +9,7 @@ ASGI entry point.
 
 import logging
 import os
+from typing import Literal
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -20,6 +21,24 @@ load_project_dotenv()
 from .http_admin import BearerAuthMiddleware, register_http_routes
 from .lifecycle import lifespan
 from .tools.integrations import get_integration_status as _filter_integration_status
+from .tools.models import (
+    AddGameToPlatformResponse,
+    BacklogStatsResponse,
+    DetectFarmedGamesResponse,
+    GameDetailResponse,
+    HardwarePreferenceResponse,
+    IntegrationStatusResponse,
+    LibraryStatsResponse,
+    NintendoSessionResponse,
+    PaginatedGamesResponse,
+    PlatformBreakdownResponse,
+    RatingsResponse,
+    RefreshLibraryResponse,
+    SearchGamesBatchResponse,
+    SyncPlatformResponse,
+    SyncRatingsResponse,
+    TasteProfileResponse,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -47,20 +66,27 @@ mcp = FastMCP(
 # ── Tools ──────────────────────────────────────────────────────────────────────
 
 @mcp.tool(annotations=READ_ONLY_TOOL)
-async def search_games(query: str, limit: int = 20, platform: str | None = None) -> list[dict]:
+async def search_games(
+    query: str,
+    limit: int = 20,
+    offset: int = 0,
+    platform: str | None = None,
+    response_format: Literal["concise", "detailed"] = "concise",
+) -> PaginatedGamesResponse:
     """
     Find games in the library by name substring.
 
     Use this for quick lookup when you know part of a title; prefer get_game_detail
     after selecting one result. platform can filter to steam, epic, gog, nintendo,
-    switch2, or ps5. Returns a list of matching game summary dictionaries.
+    switch2, or ps5. response_format=concise omits platform arrays; detailed
+    includes them. Returns results, total_matches, and has_more.
     """
     from .tools.library import search_games as _search
-    return await _search(query, limit, platform)
+    return await _search(query, limit, offset, platform, response_format)
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)
-async def search_games_batch(queries: list[str], limit_per_query: int = 5) -> dict[str, list[dict]]:
+async def search_games_batch(queries: list[str], limit_per_query: int = 5) -> SearchGamesBatchResponse:
     """
     Look up multiple game names in one read-only call.
 
@@ -80,8 +106,10 @@ async def get_library_stats(
     protondb_tier: str | None = None,
     sort_by: str = "playtime",
     limit: int = 50,
+    offset: int = 0,
     platform: str | None = None,
-) -> dict:
+    response_format: Literal["concise", "detailed"] = "concise",
+) -> LibraryStatsResponse:
     """
     Get aggregate library stats plus a filtered and sorted game list.
 
@@ -90,10 +118,21 @@ async def get_library_stats(
     unplayed, played, recent, or farmed. sort_by accepts playtime, name,
     metacritic, or hltb. protondb_tier accepts native, platinum, gold, silver,
     bronze, or borked. platform can filter to steam, epic, gog, nintendo,
-    switch2, or ps5. Returns aggregate counts and a game summary list.
+    switch2, or ps5. response_format=concise omits platform arrays. Returns
+    aggregate counts, paged results, total_matches, and has_more.
     """
     from .tools.library import get_library_stats as _stats
-    return await _stats(filter, max_hltb_hours, min_metacritic, protondb_tier, sort_by, limit, platform)
+    return await _stats(
+        filter,
+        max_hltb_hours,
+        min_metacritic,
+        protondb_tier,
+        sort_by,
+        limit,
+        offset,
+        platform,
+        response_format,
+    )
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)
@@ -101,7 +140,7 @@ async def get_game_detail(
     name: str | None = None,
     appid: int | None = None,
     game_id: int | None = None,
-) -> dict:
+) -> GameDetailResponse:
     """
     Get full details for one game.
 
@@ -121,7 +160,9 @@ async def find_games_by_vibe(
     unplayed_only: bool = True,
     protondb_min_tier: str | None = None,
     limit: int = 20,
-) -> list[dict]:
+    offset: int = 0,
+    response_format: Literal["concise", "detailed"] = "concise",
+) -> PaginatedGamesResponse:
     """
     Find games matching a genre, mood, or tag vibe.
 
@@ -130,10 +171,19 @@ async def find_games_by_vibe(
     be roguelike, cozy, horror, metroidvania, souls, open world, crafting,
     puzzle, platformer, rpg, strategy, simulation, stealth, narrative, co-op,
     shooter, survival, indie, cyberpunk, fantasy, or a raw tag string.
-    protondb_min_tier filters PC compatibility. Returns matching game summaries.
+    protondb_min_tier filters PC compatibility. response_format=concise omits
+    platform arrays and tags. Returns results, total_matches, and has_more.
     """
     from .tools.discover import find_games_by_vibe as _vibe
-    return await _vibe(vibe, max_hltb_hours, unplayed_only, protondb_min_tier, limit)
+    return await _vibe(
+        vibe,
+        max_hltb_hours,
+        unplayed_only,
+        protondb_min_tier,
+        limit,
+        offset,
+        response_format,
+    )
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)
@@ -141,21 +191,24 @@ async def get_recommendations(
     max_hltb_hours: float | None = None,
     unplayed_only: bool = True,
     limit: int = 20,
-) -> list[dict]:
+    offset: int = 0,
+    response_format: Literal["concise", "detailed"] = "concise",
+) -> PaginatedGamesResponse:
     """
     Get personalized game recommendations from synced rating taste data.
 
     Use this after sync_ratings when you want ranked games to play next; prefer
     find_games_by_vibe when the request is about a specific mood or genre.
     max_hltb_hours limits completion length, unplayed_only defaults to true, and
-    limit caps returned rows. Returns ranked game summaries with affinity data.
+    limit caps returned rows. response_format=concise omits platform arrays and
+    tags. Returns results, total_matches, and has_more.
     """
     from .tools.discover import get_recommendations as _rec
-    return await _rec(max_hltb_hours, unplayed_only, limit)
+    return await _rec(max_hltb_hours, unplayed_only, limit, offset, response_format)
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)
-async def get_taste_profile() -> dict:
+async def get_taste_profile() -> TasteProfileResponse:
     """
     Show the current tag affinity profile.
 
@@ -173,21 +226,23 @@ async def get_ratings(
     min_score: float | None = None,
     sort_by: str = "score",
     limit: int = 50,
-) -> list[dict]:
+    offset: int = 0,
+    response_format: Literal["concise", "detailed"] = "concise",
+) -> RatingsResponse:
     """
     View synced personal ratings.
 
     Use this to inspect the raw rating inputs behind taste profile and
     recommendations. source can be backloggd, steam_review, or omitted for all
-    sources. sort_by accepts score or name. Returns rating dictionaries, which
-    may include review text until concise responses are added.
+    sources. sort_by accepts score or name. response_format=concise omits
+    platform arrays and review_text. Returns results, total_matches, and has_more.
     """
     from .tools.ratings import get_ratings as _ratings
-    return await _ratings(source, min_score, sort_by, limit)
+    return await _ratings(source, min_score, sort_by, limit, offset, response_format)
 
 
 @mcp.tool(annotations=NETWORK_SYNC_TOOL)
-async def sync_ratings() -> dict:
+async def sync_ratings() -> SyncRatingsResponse:
     """
     Refresh ratings and recompute the taste profile.
 
@@ -201,7 +256,7 @@ async def sync_ratings() -> dict:
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)
-async def get_backlog_stats() -> dict:
+async def get_backlog_stats() -> BacklogStatsResponse:
     """
     Get backlog completion and time-to-clear stats.
 
@@ -214,7 +269,7 @@ async def get_backlog_stats() -> dict:
 
 
 @mcp.tool(annotations=NETWORK_SYNC_TOOL)
-async def refresh_library(platforms: list[str] | None = None) -> dict:
+async def refresh_library(platforms: list[str] | None = None) -> RefreshLibraryResponse:
     """
     Re-sync the owned game library from configured platforms.
 
@@ -228,7 +283,10 @@ async def refresh_library(platforms: list[str] | None = None) -> dict:
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)
-async def get_integration_status(platforms: list[str] | None = None, verbose: bool = True) -> dict:
+async def get_integration_status(
+    platforms: list[str] | None = None,
+    verbose: bool = True,
+) -> IntegrationStatusResponse:
     """
     Inspect platform integration readiness.
 
@@ -247,7 +305,7 @@ async def detect_farmed_games(
     dry_run: bool = True,
     threshold_hours: float = 8.0,
     min_games_per_day: int = 8,
-) -> dict:
+) -> DetectFarmedGamesResponse:
     """
     Detect ArchiSteamFarm card-farming sessions and optionally mark games as farmed.
 
@@ -265,7 +323,7 @@ async def detect_farmed_games(
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)
-async def get_platform_breakdown() -> dict:
+async def get_platform_breakdown() -> PlatformBreakdownResponse:
     """
     Show ownership counts and overlap by platform.
 
@@ -278,7 +336,7 @@ async def get_platform_breakdown() -> dict:
 
 
 @mcp.tool(annotations=NETWORK_SYNC_TOOL)
-async def sync_platform(platform: str) -> dict:
+async def sync_platform(platform: str) -> SyncPlatformResponse:
     """
     Sync one platform on demand.
 
@@ -291,7 +349,7 @@ async def sync_platform(platform: str) -> dict:
 
 
 @mcp.tool(annotations=MUTATION_TOOL)
-async def set_hardware_preference(platforms: list[str]) -> dict:
+async def set_hardware_preference(platforms: list[str]) -> HardwarePreferenceResponse:
     """
     Set the hardware preference order used for recommendations.
 
@@ -310,7 +368,7 @@ async def add_game_to_platform(
     identifier_type: str | None = None,
     identifier_value: str | None = None,
     playtime_minutes: int | None = None,
-) -> dict:
+) -> AddGameToPlatformResponse:
     """
     Manually add a game to a platform.
 
@@ -326,7 +384,7 @@ async def add_game_to_platform(
 
 
 @mcp.tool(annotations=MUTATION_TOOL)
-async def set_nintendo_session(cookies: str) -> dict:
+async def set_nintendo_session(cookies: str) -> NintendoSessionResponse:
     """
     Store Nintendo Account session cookies for VGCS fallback sync.
 

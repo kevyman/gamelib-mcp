@@ -12,10 +12,14 @@ class GetRatingsTests(ToolDBTestCase):
         b = await make_steam_game("Okay Game", 2, playtime_minutes=10)
         await add_rating(a, "backloggd", raw_score=4.5, normalized_score=9.0, review_text="love")
         await add_rating(b, "steam_review", raw_score=1.0, normalized_score=5.0)
-        rows = await ratings.get_ratings()
-        self.assertEqual([r["name"] for r in rows], ["Great Game", "Okay Game"])
+        rows = await ratings.get_ratings(response_format="detailed")
+        self.assertEqual(set(rows), {"results", "total_matches", "has_more"})
+        self.assertEqual(rows["total_matches"], 2)
+        self.assertFalse(rows["has_more"])
+        ratings_rows = rows["results"]
+        self.assertEqual([r["name"] for r in ratings_rows], ["Great Game", "Okay Game"])
         self.assertEqual(
-            set(rows[0]),
+            set(ratings_rows[0]),
             {
                 "game_id",
                 "appid",
@@ -29,9 +33,9 @@ class GetRatingsTests(ToolDBTestCase):
                 "synced_at",
             },
         )
-        self.assertEqual(rows[0]["normalized_score"], 9.0)
-        self.assertEqual(rows[0]["source"], "backloggd")
-        self.assertEqual(rows[0]["appid"], 1)
+        self.assertEqual(ratings_rows[0]["normalized_score"], 9.0)
+        self.assertEqual(ratings_rows[0]["source"], "backloggd")
+        self.assertEqual(ratings_rows[0]["appid"], 1)
 
     async def test_filter_by_source(self):
         a = await seed_game("A")
@@ -39,7 +43,7 @@ class GetRatingsTests(ToolDBTestCase):
         await add_rating(a, "backloggd", 4.0, 8.0)
         await add_rating(b, "steam_review", 1.0, 5.0)
         rows = await ratings.get_ratings(source="steam_review")
-        self.assertEqual([r["name"] for r in rows], ["B"])
+        self.assertEqual([r["name"] for r in rows["results"]], ["B"])
 
     async def test_min_score_filter(self):
         a = await seed_game("High")
@@ -47,7 +51,7 @@ class GetRatingsTests(ToolDBTestCase):
         await add_rating(a, "backloggd", 4.5, 9.0)
         await add_rating(b, "backloggd", 1.0, 2.0)
         rows = await ratings.get_ratings(min_score=5.0)
-        self.assertEqual([r["name"] for r in rows], ["High"])
+        self.assertEqual([r["name"] for r in rows["results"]], ["High"])
 
     async def test_sort_by_name(self):
         a = await seed_game("Zeta")
@@ -55,7 +59,24 @@ class GetRatingsTests(ToolDBTestCase):
         await add_rating(a, "backloggd", 5.0, 10.0)
         await add_rating(b, "backloggd", 1.0, 2.0)
         rows = await ratings.get_ratings(sort_by="name")
-        self.assertEqual([r["name"] for r in rows], ["Alpha", "Zeta"])
+        self.assertEqual([r["name"] for r in rows["results"]], ["Alpha", "Zeta"])
+
+    async def test_concise_drops_platforms_and_review_text(self):
+        a = await make_steam_game("Great Game", 1, playtime_minutes=10)
+        await add_rating(a, "backloggd", raw_score=4.5, normalized_score=9.0, review_text="love")
+        rows = await ratings.get_ratings()
+        rating = rows["results"][0]
+        self.assertNotIn("platforms", rating)
+        self.assertNotIn("review_text", rating)
+
+    async def test_offset_and_has_more(self):
+        for i in range(3):
+            game_id = await seed_game(f"Game {i}")
+            await add_rating(game_id, "backloggd", raw_score=5 - i, normalized_score=10 - i)
+        rows = await ratings.get_ratings(limit=1, offset=1)
+        self.assertEqual(len(rows["results"]), 1)
+        self.assertEqual(rows["total_matches"], 3)
+        self.assertTrue(rows["has_more"])
 
 
 class GetTasteProfileTests(ToolDBTestCase):

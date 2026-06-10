@@ -11,7 +11,10 @@ from gamelib_mcp import main
 
 
 EXPECTED_TOOLS = {
-    "search_games": {"params": {"query", "limit", "platform"}, "required": {"query"}},
+    "search_games": {
+        "params": {"query", "limit", "offset", "platform", "response_format"},
+        "required": {"query"},
+    },
     "search_games_batch": {"params": {"queries", "limit_per_query"}, "required": {"queries"}},
     "get_library_stats": {
         "params": {
@@ -21,21 +24,34 @@ EXPECTED_TOOLS = {
             "protondb_tier",
             "sort_by",
             "limit",
+            "offset",
             "platform",
+            "response_format",
         },
         "required": set(),
     },
     "get_game_detail": {"params": {"name", "appid", "game_id"}, "required": set()},
     "find_games_by_vibe": {
-        "params": {"vibe", "max_hltb_hours", "unplayed_only", "protondb_min_tier", "limit"},
+        "params": {
+            "vibe",
+            "max_hltb_hours",
+            "unplayed_only",
+            "protondb_min_tier",
+            "limit",
+            "offset",
+            "response_format",
+        },
         "required": {"vibe"},
     },
     "get_recommendations": {
-        "params": {"max_hltb_hours", "unplayed_only", "limit"},
+        "params": {"max_hltb_hours", "unplayed_only", "limit", "offset", "response_format"},
         "required": set(),
     },
     "get_taste_profile": {"params": set(), "required": set()},
-    "get_ratings": {"params": {"source", "min_score", "sort_by", "limit"}, "required": set()},
+    "get_ratings": {
+        "params": {"source", "min_score", "sort_by", "limit", "offset", "response_format"},
+        "required": set(),
+    },
     "sync_ratings": {"params": set(), "required": set()},
     "get_backlog_stats": {"params": set(), "required": set()},
     "refresh_library": {"params": {"platforms"}, "required": set()},
@@ -75,6 +91,14 @@ EXPECTED_ANNOTATIONS = {
     "set_nintendo_session": {"readOnlyHint": False, "idempotentHint": True},
 }
 
+PAGINATED_OUTPUTS = {
+    "search_games",
+    "get_library_stats",
+    "find_games_by_vibe",
+    "get_recommendations",
+    "get_ratings",
+}
+
 
 class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
     async def _tools(self):
@@ -107,6 +131,22 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(annotations)
                 for field, value in expected.items():
                     self.assertEqual(getattr(annotations, field), value)
+
+    async def test_all_tools_have_output_schema(self):
+        tools = await self._tools()
+        for name, tool in tools.items():
+            with self.subTest(tool=name):
+                self.assertIsNotNone(tool.output_schema)
+                self.assertNotEqual(tool.output_schema, {})
+
+    async def test_paginated_tools_have_named_output_properties(self):
+        tools = await self._tools()
+        for name in PAGINATED_OUTPUTS:
+            with self.subTest(tool=name):
+                props = set(tools[name].output_schema.get("properties", {}))
+                self.assertIn("results", props)
+                self.assertIn("total_matches", props)
+                self.assertIn("has_more", props)
 
     async def test_detect_farmed_games_description_matches_defaults(self):
         tools = await self._tools()
