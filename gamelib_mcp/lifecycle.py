@@ -172,15 +172,19 @@ def _clear_ratings_sync_task(task: asyncio.Task) -> None:
 
 
 async def _run_startup_ratings_sync() -> None:
+    import time
+    from .data.db import get_meta
     from .tools.ratings import sync_ratings
 
-    # Wait for any in-flight library refresh to finish before touching the DB
-    refresh_task = get_startup_refresh_task()
-    if refresh_task is not None and not refresh_task.done():
-        try:
-            await asyncio.wait_for(asyncio.shield(refresh_task), timeout=300)
-        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-            pass
+    # _run_startup_refresh drains background enrichment before completing, so
+    # library_sync_status stays "in_progress" until all writes settle. Polling
+    # is safer than awaiting the task handle directly.
+    deadline = time.monotonic() + 900  # 15 min absolute ceiling
+    while time.monotonic() < deadline:
+        status = await get_meta("library_sync_status")
+        if status != "in_progress":
+            break
+        await asyncio.sleep(15)
 
     try:
         logger.info("Running startup ratings sync")
