@@ -441,6 +441,9 @@ async def lifespan(app):
 
     if needs_refresh:
         logger.info("Library stale or missing — scheduling background refresh...")
+        # Mark in_progress now so the startup ratings sync task sees it immediately
+        # before the refresh task has had a chance to write it itself.
+        await set_meta("library_sync_status", "in_progress")
         await _ensure_startup_refresh()
         await _schedule_background_enrich()
     else:
