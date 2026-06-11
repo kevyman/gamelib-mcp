@@ -174,6 +174,14 @@ def _clear_ratings_sync_task(task: asyncio.Task) -> None:
 async def _run_startup_ratings_sync() -> None:
     from .tools.ratings import sync_ratings
 
+    # Wait for any in-flight library refresh to finish before touching the DB
+    refresh_task = get_startup_refresh_task()
+    if refresh_task is not None and not refresh_task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(refresh_task), timeout=300)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            pass
+
     try:
         logger.info("Running startup ratings sync")
         await sync_ratings()
