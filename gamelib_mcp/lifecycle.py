@@ -35,9 +35,13 @@ _PERIODIC_REFRESH_LOCK: asyncio.Lock | None = None
 _ENRICHMENT_TASK: asyncio.Task | None = None
 _ENRICHMENT_LOCK: asyncio.Lock | None = None
 _ENRICHMENT_RERUN_REQUESTED = False
+_RATINGS_SYNC_TASK: asyncio.Task | None = None
 _LIBRARY_REFRESH_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
 _PERIODIC_REFRESH_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
 _ENRICHMENT_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
+_RATINGS_SYNC_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
+
+RATINGS_SYNC_INTERVAL_SECONDS = 7 * 24 * 3600  # weekly
 
 
 # ── Per-platform sync metadata ───────────────────────────────────────────────
@@ -150,6 +154,59 @@ def _clear_enrichment_task(task: asyncio.Task) -> None:
     global _ENRICHMENT_TASK
     if _ENRICHMENT_TASK is task:
         _ENRICHMENT_TASK = None
+
+
+def _get_ratings_sync_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _RATINGS_SYNC_LOCKS.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _RATINGS_SYNC_LOCKS[loop] = lock
+    return lock
+
+
+def _clear_ratings_sync_task(task: asyncio.Task) -> None:
+    global _RATINGS_SYNC_TASK
+    if _RATINGS_SYNC_TASK is task:
+        _RATINGS_SYNC_TASK = None
+
+
+async def _run_startup_ratings_sync() -> None:
+    from .tools.ratings import sync_ratings
+
+    try:
+        logger.info("Running startup ratings sync")
+        await sync_ratings()
+        logger.info("Startup ratings sync complete")
+    except Exception:
+        logger.exception("Startup ratings sync failed")
+
+
+async def _run_periodic_ratings_loop() -> None:
+    from .tools.ratings import sync_ratings
+
+    while True:
+        await asyncio.sleep(RATINGS_SYNC_INTERVAL_SECONDS)
+        try:
+            logger.info("Running scheduled weekly ratings sync")
+            await sync_ratings()
+            logger.info("Weekly ratings sync complete")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Periodic ratings sync failed")
+
+
+async def _ensure_periodic_ratings_loop() -> asyncio.Task:
+    global _RATINGS_SYNC_TASK
+
+    async with _get_ratings_sync_lock():
+        if _RATINGS_SYNC_TASK is not None and not _RATINGS_SYNC_TASK.done():
+            return _RATINGS_SYNC_TASK
+
+        _RATINGS_SYNC_TASK = asyncio.create_task(_run_periodic_ratings_loop())
+        _RATINGS_SYNC_TASK.add_done_callback(_clear_ratings_sync_task)
+        return _RATINGS_SYNC_TASK
 
 
 # ── Background enrichment ────────────────────────────────────────────────────
@@ -380,9 +437,25 @@ async def lifespan(app):
 
     await _ensure_periodic_refresh_loop()
 
+    # Sync ratings on startup if never run or stale (>7 days), then schedule weekly
+    last_ratings_sync = await get_meta("ratings_synced_at")
+    ratings_stale = True
+    if last_ratings_sync:
+        try:
+            dt = datetime.fromisoformat(last_ratings_sync)
+            age_seconds = (datetime.now(timezone.utc) - dt).total_seconds()
+            ratings_stale = age_seconds > RATINGS_SYNC_INTERVAL_SECONDS
+        except ValueError:
+            pass
+    if ratings_stale:
+        logger.info("Ratings stale or missing — scheduling background ratings sync...")
+        asyncio.create_task(_run_startup_ratings_sync())
+    await _ensure_periodic_ratings_loop()
+
     yield
 
     await _cancel_task(_PERIODIC_REFRESH_TASK)
     await _cancel_task(_LIBRARY_REFRESH_TASK)
     await _cancel_task(_ENRICHMENT_TASK)
+    await _cancel_task(_RATINGS_SYNC_TASK)
     logger.info("Shutdown")

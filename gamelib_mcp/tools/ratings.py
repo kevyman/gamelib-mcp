@@ -3,7 +3,7 @@
 from typing import Literal
 
 from ..data.backloggd import sync_backloggd
-from ..data.db import get_db, load_platforms_for_games, recompute_tag_affinity
+from ..data.db import get_db, load_platforms_for_games, recompute_tag_affinity, set_meta
 from ..data.steam_reviews import sync_steam_reviews
 from .common import (
     STEAM_APPID_SQL as _STEAM_APPID_SQL,
@@ -31,6 +31,9 @@ async def sync_ratings(ctx=None) -> dict:
     tag_count = await recompute_tag_affinity()
     await report_progress(ctx, 3, 3)
     await _info(ctx, "Finished rating sync")
+
+    from datetime import datetime, timezone
+    await set_meta("ratings_synced_at", datetime.now(timezone.utc).isoformat())
 
     return {
         "backloggd": bl_result,
