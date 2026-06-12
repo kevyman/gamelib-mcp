@@ -80,6 +80,7 @@ class RatingsResponse(FlexibleModel):
 class GameDetailResponse(GameSummary):
     release_date: str | None = None
     genres: list[str] | None = None
+    features: list[str] | None = None
     short_description: str | None = None
     steam_review_score: int | None = None
     metacritic_url: str | None = None

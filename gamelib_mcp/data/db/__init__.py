@@ -50,7 +50,7 @@ STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 @dataclass
@@ -152,6 +152,7 @@ from .schema import (
     _V5_SCHEMA_DDL,
     _V6_SCHEMA_DDL,
     _V7_SCHEMA_DDL,
+    _V8_SCHEMA_DDL,
 )
 
 
@@ -185,6 +186,12 @@ async def _detect_schema_state(db: aiosqlite.Connection) -> str:
 
     spd_cols = await _table_columns(db, "steam_platform_data") if "steam_platform_data" in tables else set()
     gpe_cols = await _table_columns(db, "game_platform_enrichment") if "game_platform_enrichment" in tables else set()
+    if {"name_normalized", "features"}.issubset(game_cols) and {
+        "opencritic_url",
+        "opencritic_num_reviews",
+    }.issubset(gpe_cols):
+        return "v8"
+
     if "name_normalized" in game_cols and {
         "opencritic_url",
         "opencritic_num_reviews",
@@ -718,6 +725,66 @@ async def _migrate_v6_to_v7(db: aiosqlite.Connection, progress: _Progress | None
     await db.commit()
 
 
+async def _migrate_v7_to_v8(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Split storefront feature flags out of games.tags into games.features.
+
+    Pre-split rows mixed Steam categories like "Steam Trading Cards" into tags,
+    polluting tag_affinity and vibe matching. For games left with NO real tags
+    (only feature flags), clear the steam store/steamspy cache stamps so
+    background enrichment re-fetches genuine tags.
+    """
+    from ..tags import STEAM_FEATURE_FLAGS, split_features
+
+    if progress is not None:
+        progress("Migrating to v8: quarantine feature flags from games.tags.")
+
+    db.row_factory = aiosqlite.Row
+    game_cols = await _table_columns(db, "games")
+    if "features" not in game_cols:
+        await db.execute("ALTER TABLE games ADD COLUMN features TEXT")
+
+    rows = await db.execute_fetchall(
+        "SELECT id, tags FROM games WHERE tags IS NOT NULL"
+    )
+    emptied_game_ids: list[int] = []
+    for row in rows:
+        try:
+            tags = json.loads(row["tags"])
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(tags, list):
+            continue
+        real_tags, features = split_features(tags)
+        if not features:
+            continue
+        await db.execute(
+            "UPDATE games SET tags = ?, features = ? WHERE id = ?",
+            (json.dumps(real_tags), json.dumps(features), row["id"]),
+        )
+        if not real_tags:
+            emptied_game_ids.append(row["id"])
+
+    for game_id in emptied_game_ids:
+        await db.execute(
+            """UPDATE steam_platform_data
+                  SET store_cached_at = NULL, steamspy_cached_at = NULL
+                WHERE game_platform_id IN (
+                    SELECT id FROM game_platforms
+                    WHERE game_id = ? AND platform = ?
+                )""",
+            (game_id, STEAM_PLATFORM),
+        )
+
+    flag_placeholders = ",".join("?" * len(STEAM_FEATURE_FLAGS))
+    await db.execute(
+        f"DELETE FROM tag_affinity WHERE lower(tag) IN ({flag_placeholders})",
+        tuple(STEAM_FEATURE_FLAGS),
+    )
+
+    await _set_user_version(db, 8)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -754,7 +821,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V7_SCHEMA_DDL)
+    await db.executescript(_V8_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -795,10 +862,10 @@ async def _run_migrations(
     applied_steps: list[str] = []
 
     if detected_state == "fresh":
-        await db.executescript(_V7_SCHEMA_DDL)
+        await db.executescript(_V8_SCHEMA_DDL)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
-        _emit(progress, "Initialized fresh database at schema v7.", applied_steps)
+        _emit(progress, "Initialized fresh database at schema v8.", applied_steps)
         return MigrationResult(
             initial_version=initial_version,
             final_version=SCHEMA_VERSION,
@@ -841,6 +908,11 @@ async def _run_migrations(
             await db.commit()
             version = 7
             _emit(progress, "Recorded existing schema as v7.", applied_steps)
+        elif detected_state == "v8":
+            await _set_user_version(db, 8)
+            await db.commit()
+            version = 8
+            _emit(progress, "Recorded existing schema as v8.", applied_steps)
 
     if version == 1:
         _emit(progress, "Applying migration step v1 -> v2.", applied_steps)
@@ -872,10 +944,15 @@ async def _run_migrations(
         await _migrate_v6_to_v7(db, progress=None)
         version = 7
 
+    if version == 7:
+        _emit(progress, "Applying migration step v7 -> v8.", applied_steps)
+        await _migrate_v7_to_v8(db, progress=None)
+        version = 8
+
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V7_SCHEMA_DDL)
+    await db.executescript(_V8_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION

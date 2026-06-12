@@ -114,6 +114,7 @@ async def get_game_detail(
         "is_farmed": bool(row["is_farmed"]),
         "genres": _parse_json(row["genres"]),
         "tags": _parse_json(row["tags"]),
+        "features": _parse_json(row["features"]),
         "short_description": row["short_description"],
         "steam_review_score": steam_data.get("steam_review_score"),
         "steam_review_desc": steam_data.get("steam_review_desc"),

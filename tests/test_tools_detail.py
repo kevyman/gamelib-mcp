@@ -61,6 +61,7 @@ class GetGameDetailTests(ToolDBTestCase):
                 "is_farmed",
                 "genres",
                 "tags",
+                "features",
                 "short_description",
                 "steam_review_score",
                 "steam_review_desc",

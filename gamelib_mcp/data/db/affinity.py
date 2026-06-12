@@ -5,6 +5,7 @@ import math
 from datetime import datetime, timezone
 
 from . import get_db
+from ..tags import STEAM_FEATURE_FLAGS
 
 
 async def recompute_tag_affinity() -> int:
@@ -42,6 +43,10 @@ async def recompute_tag_affinity() -> int:
 
         for tag in tags:
             tag_lower = tag.lower()
+            # Storefront feature flags carry no taste signal; rows written
+            # before the tags/features split may still contain them.
+            if tag_lower in STEAM_FEATURE_FLAGS:
+                continue
             if tag_lower not in tag_data:
                 tag_data[tag_lower] = {
                     "weighted_sum": 0.0,

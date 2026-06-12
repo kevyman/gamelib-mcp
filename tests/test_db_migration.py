@@ -634,10 +634,82 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                     for row in await db.execute_fetchall("PRAGMA index_list(games)")
                 }
 
-        self.assertEqual(version, 7)
+        self.assertEqual(version, db_module.SCHEMA_VERSION)
         self.assertEqual(rows[0]["name_normalized"], "sekiro shadows die twice")
         self.assertEqual(rows[1]["name_normalized"], "don t starve")
         self.assertIn("idx_games_name_normalized", indexes)
+
+    async def test_v7_to_v8_quarantines_feature_flags_from_tags(self) -> None:
+        import json
+
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V7_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 7")
+        # Game 1 has real tags mixed with feature flags; game 2 has ONLY flags
+        # (its tags must empty out and its steam caches must clear for re-fetch);
+        # game 3 is clean and must be untouched.
+        conn.execute(
+            "INSERT INTO games (id, name, tags) VALUES "
+            "(1, 'Hades', ?), (2, 'Sekiro', ?), (3, 'Celeste', ?)",
+            (
+                json.dumps(["Roguelike", "Steam Trading Cards", "Action"]),
+                json.dumps(["Steam Achievements", "Family Sharing", "Steam Cloud"]),
+                json.dumps(["Platformer"]),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO game_platforms (id, game_id, platform) VALUES "
+            "(1, 1, 'steam'), (2, 2, 'steam'), (3, 3, 'steam')"
+        )
+        conn.execute(
+            "INSERT INTO steam_platform_data (game_platform_id, store_cached_at, steamspy_cached_at) "
+            "VALUES (1, '2026-01-01', '2026-01-01'), (2, '2026-01-01', '2026-01-01'), "
+            "(3, '2026-01-01', '2026-01-01')"
+        )
+        conn.execute(
+            "INSERT INTO tag_affinity (tag, affinity_score, avg_score, game_count, updated_at) "
+            "VALUES ('steam achievements', 6.5, 9.5, 1, '2026-01-01'), "
+            "('roguelike', 8.0, 9.0, 2, '2026-01-01')"
+        )
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+            async with db_module.get_db() as db:
+                version = await db_module._get_user_version(db)
+                games = {
+                    row["id"]: row
+                    for row in await db.execute_fetchall(
+                        "SELECT id, tags, features FROM games"
+                    )
+                }
+                spd = {
+                    row["game_platform_id"]: row
+                    for row in await db.execute_fetchall(
+                        "SELECT game_platform_id, store_cached_at, steamspy_cached_at "
+                        "FROM steam_platform_data"
+                    )
+                }
+                affinity_tags = {
+                    row["tag"]
+                    for row in await db.execute_fetchall("SELECT tag FROM tag_affinity")
+                }
+
+        self.assertEqual(version, db_module.SCHEMA_VERSION)
+        self.assertEqual(json.loads(games[1]["tags"]), ["Roguelike", "Action"])
+        self.assertEqual(json.loads(games[1]["features"]), ["Steam Trading Cards"])
+        # Game 2 emptied out -> caches cleared so enrichment re-fetches tags.
+        self.assertEqual(json.loads(games[2]["tags"]), [])
+        self.assertIsNone(spd[2]["store_cached_at"])
+        self.assertIsNone(spd[2]["steamspy_cached_at"])
+        # Games with surviving tags keep their caches.
+        self.assertEqual(spd[1]["store_cached_at"], "2026-01-01")
+        self.assertEqual(json.loads(games[3]["tags"]), ["Platformer"])
+        self.assertIsNone(games[3]["features"])
+        # Feature flags purged from tag_affinity; real tags survive.
+        self.assertEqual(affinity_tags, {"roguelike"})
 
     async def test_upsert_game_maintains_name_normalized(self) -> None:
         db_module._DB_READY_PATH = None
