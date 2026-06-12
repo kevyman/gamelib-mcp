@@ -34,6 +34,7 @@ WITH game_rollup AS (
            COALESCE(g.name_normalized, lower(g.name)) AS name_normalized,
            {_STEAM_APPID_SQL} AS steam_appid,
            g.tags,
+           g.genres,
            g.hltb_main,
            g.is_farmed,
            COALESCE(SUM(COALESCE(gp.playtime_minutes, 0)), 0) AS total_playtime_minutes,
@@ -194,6 +195,8 @@ async def get_library_stats(
     platform: str | None = None,
     response_format: ResponseFormat = "concise",
     min_opencritic: int | None = None,
+    tags: list[str] | None = None,
+    genres: list[str] | None = None,
 ) -> dict:
     """
     Return filtered/sorted game list plus aggregate stats.
@@ -201,6 +204,7 @@ async def get_library_stats(
     filter: all | unplayed | played | recent | farmed
     sort_by: playtime | name | metacritic | opencritic | hltb
     platform: steam | epic | gog | ps5 | nintendo | switch2 (optional — filter to games owned on that platform)
+    tags / genres: case-insensitive; a game must carry EVERY listed entry.
 
     Note: min_metacritic, min_opencritic, and max_hltb_hours exclude games with
     no score / no HLTB data (NULL), so even min_metacritic=0 drops unscored games.
@@ -241,6 +245,16 @@ async def get_library_stats(
     if min_opencritic is not None:
         conditions.append("opencritic_score >= ?")
         params.append(min_opencritic)
+
+    for column, wanted in (("tags", tags), ("genres", genres)):
+        for entry in wanted or []:
+            conditions.append(
+                f"""EXISTS (
+                    SELECT 1 FROM json_each(COALESCE({column}, '[]'))
+                    WHERE lower(value) = ?
+                )"""
+            )
+            params.append(entry.lower())
 
     if protondb_tier is not None:
         from ..data.protondb import TIER_ORDER

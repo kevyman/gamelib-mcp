@@ -32,10 +32,10 @@ from .tools.models import (
     NintendoSessionResponse,
     PaginatedGamesResponse,
     PlatformBreakdownResponse,
+    RateGameResponse,
     RatingsResponse,
     RefreshLibraryResponse,
     SearchGamesBatchResponse,
-    SyncPlatformResponse,
     SyncRatingsResponse,
     TasteProfileResponse,
 )
@@ -54,10 +54,10 @@ mcp = FastMCP(
     name="game-library",
     instructions=(
         f"You have access to {_display_name}'s game library across synced platforms and stores. "
-        "Use sync_ratings first when recommendations or vibe discovery should reflect current "
-        "Backloggd and Steam review data, then use get_recommendations or find_games_by_vibe "
-        "to discover what to play next. Use search and detail tools for known games, and prefer "
-        "concise list responses with offset pagination when available for larger result sets."
+        "Use sync_ratings (or rate_game for one-off ratings) when discovery should reflect "
+        "current taste data, then use discover_games to find what to play next — by vibe, "
+        "taste match, critic score, or value. Use search and detail tools for known games, and "
+        "prefer concise list responses with offset pagination when available for larger result sets."
     ),
     lifespan=lifespan,
 )
@@ -113,6 +113,8 @@ async def get_library_stats(
     platform: str | None = None,
     response_format: Literal["concise", "detailed"] = "concise",
     min_opencritic: int | None = None,
+    tags: list[str] | None = None,
+    genres: list[str] | None = None,
 ) -> LibraryStatsResponse:
     """
     Get aggregate library stats plus a filtered and sorted game list.
@@ -121,11 +123,13 @@ async def get_library_stats(
     audits; prefer get_game_detail for one selected game. filter accepts all,
     unplayed, played, recent, or farmed. sort_by accepts playtime, name,
     metacritic, opencritic, or hltb. min_metacritic/min_opencritic filter on
-    critic scores (unscored games are excluded). protondb_tier accepts native,
-    platinum, gold, silver, bronze, or borked. platform can filter to steam,
-    epic, gog, nintendo, switch2, or ps5. response_format=concise omits
-    platform arrays. Returns aggregate counts, paged results, total_matches,
-    and has_more.
+    critic scores (unscored games are excluded). tags/genres filter
+    case-insensitively; a game must carry every listed entry (e.g.
+    genres=["RPG"] with max_hltb_hours=10 for short RPGs). protondb_tier
+    accepts native, platinum, gold, silver, bronze, or borked. platform can
+    filter to steam, epic, gog, nintendo, switch2, or ps5.
+    response_format=concise omits platform arrays. Returns aggregate counts,
+    paged results, total_matches, and has_more.
     """
     from .tools.library import get_library_stats as _stats
     return await _stats(
@@ -139,6 +143,8 @@ async def get_library_stats(
         platform,
         response_format,
         min_opencritic,
+        tags,
+        genres,
     )
 
 
@@ -162,9 +168,11 @@ async def get_game_detail(
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)
-async def find_games_by_vibe(
-    vibe: str,
+async def discover_games(
+    vibes: list[str] | None = None,
+    sort_by: Literal["match", "critic", "value"] = "match",
     max_hltb_hours: float | None = None,
+    min_score: int | None = None,
     unplayed_only: bool = True,
     protondb_min_tier: str | None = None,
     limit: int = 20,
@@ -172,47 +180,33 @@ async def find_games_by_vibe(
     response_format: Literal["concise", "detailed"] = "concise",
 ) -> PaginatedGamesResponse:
     """
-    Find games matching a genre, mood, or tag vibe.
+    Discover games to play next: by vibe, taste profile, critic score, or value.
 
-    Use this for discovery when the desired feel is known; prefer
-    get_recommendations for personalized ranking from synced ratings. vibe can
-    be roguelike, cozy, horror, metroidvania, souls, open world, crafting,
+    Omit vibes for pure taste-profile recommendations (run sync_ratings or
+    rate_game first); pass one or more vibes to filter by mood — known vibes
+    include roguelike, cozy, horror, metroidvania, souls, open world, crafting,
     puzzle, platformer, rpg, strategy, simulation, stealth, narrative, co-op,
-    shooter, survival, indie, cyberpunk, fantasy, or a raw tag string.
-    protondb_min_tier filters PC compatibility. response_format=concise omits
-    platform arrays and tags. Returns results, total_matches, and has_more.
+    shooter, survival, indie, cyberpunk, fantasy, card game, fighting, or any
+    raw tag string; multiple vibes must ALL match. sort_by accepts match
+    (taste affinity), critic (best OpenCritic/Metacritic), or value (highly
+    rated AND short — backlog hidden gems, includes a value_note). min_score
+    filters on critic score. Results include matched_tags explaining WHY each
+    game ranks (top affinity tags) and suggested_platform from the hardware
+    preference. response_format=concise omits platform arrays and tags.
+    Returns results, total_matches, and has_more.
     """
-    from .tools.discover import find_games_by_vibe as _vibe
-    return await _vibe(
-        vibe,
+    from .tools.discover import discover_games as _discover
+    return await _discover(
+        vibes,
+        sort_by,
         max_hltb_hours,
+        min_score,
         unplayed_only,
         protondb_min_tier,
         limit,
         offset,
         response_format,
     )
-
-
-@mcp.tool(annotations=READ_ONLY_TOOL)
-async def get_recommendations(
-    max_hltb_hours: float | None = None,
-    unplayed_only: bool = True,
-    limit: int = 20,
-    offset: int = 0,
-    response_format: Literal["concise", "detailed"] = "concise",
-) -> PaginatedGamesResponse:
-    """
-    Get personalized game recommendations from synced rating taste data.
-
-    Use this after sync_ratings when you want ranked games to play next; prefer
-    find_games_by_vibe when the request is about a specific mood or genre.
-    max_hltb_hours limits completion length, unplayed_only defaults to true, and
-    limit caps returned rows. response_format=concise omits platform arrays and
-    tags. Returns results, total_matches, and has_more.
-    """
-    from .tools.discover import get_recommendations as _rec
-    return await _rec(max_hltb_hours, unplayed_only, limit, offset, response_format)
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)
@@ -254,13 +248,33 @@ async def sync_ratings(ctx: Context) -> SyncRatingsResponse:
     """
     Refresh ratings and recompute the taste profile.
 
-    Use this before get_recommendations, find_games_by_vibe comparisons, or
-    get_taste_profile when external ratings may have changed. It scrapes
-    Backloggd and Steam community reviews, upserts ratings, and recalculates tag
-    affinity. This may take 1-2 minutes. Returns a sync summary dictionary.
+    Use this before discover_games or get_taste_profile when external ratings
+    may have changed. It scrapes Backloggd and Steam community reviews, upserts
+    ratings, and recalculates tag affinity. This may take 1-2 minutes. Returns
+    a sync summary dictionary.
     """
     from .tools.ratings import sync_ratings as _sync
     return await _sync(ctx=ctx)
+
+
+@mcp.tool(annotations=MUTATION_TOOL)
+async def rate_game(
+    name: str | None = None,
+    game_id: int | None = None,
+    score: float = 0.0,
+    review_text: str | None = None,
+) -> RateGameResponse:
+    """
+    Rate a game 0-10 directly in chat (no external rating site needed).
+
+    Use this to record or update a personal rating; it is stored as
+    source='manual', feeds the taste profile at full weight, and immediately
+    recomputes tag affinity so recommendations reflect it. Provide game_id or
+    name (partial/fuzzy match). Re-rating the same game overwrites the previous
+    manual rating. Returns the stored rating and affected tags.
+    """
+    from .tools.ratings import rate_game as _rate
+    return await _rate(name, game_id, score, review_text)
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)
@@ -284,10 +298,10 @@ async def refresh_library(
     """
     Re-sync the owned game library from configured platforms.
 
-    Use this when platform libraries may have changed; prefer sync_platform for
-    one specific service. platforms can be omitted for all configured platforms
-    or set to steam, epic, gog, nintendo, switch2, or ps5. Returns a per-platform
-    sync summary dictionary.
+    Use this when platform libraries may have changed. platforms can be omitted
+    for all configured platforms, or set to a subset — including a single one
+    like ["gog"] — of steam, epic, gog, nintendo, switch2, or ps5. Returns a
+    per-platform sync summary dictionary.
     """
     from .tools.admin import refresh_library as _refresh
     return await _refresh(platforms, ctx=ctx)
@@ -297,17 +311,19 @@ async def refresh_library(
 async def get_integration_status(
     platforms: list[str] | None = None,
     verbose: bool = True,
+    force_refresh: bool = False,
 ) -> IntegrationStatusResponse:
     """
     Inspect platform integration readiness.
 
     Use this before syncing to see which credentials or integrations are
     configured. platforms can be an optional subset such as steam or epic.
-    verbose=False returns a compact summary. Returns platform status details.
+    verbose=False returns a compact summary. Results are cached for ~60s;
+    force_refresh=True re-probes immediately. Returns platform status details.
     """
     from .http_admin import _integration_status_payload
     return _filter_integration_status(
-        await _integration_status_payload(), platforms, verbose
+        await _integration_status_payload(force_refresh=force_refresh), platforms, verbose
     )
 
 
@@ -344,19 +360,6 @@ async def get_platform_breakdown() -> PlatformBreakdownResponse:
     """
     from .tools.platforms import get_platform_breakdown as _breakdown
     return await _breakdown()
-
-
-@mcp.tool(annotations=NETWORK_SYNC_TOOL)
-async def sync_platform(platform: str, ctx: Context) -> SyncPlatformResponse:
-    """
-    Sync one platform on demand.
-
-    Use this when only one service needs refresh; prefer refresh_library when
-    syncing all configured services. platform accepts steam, epic, gog,
-    nintendo, switch, switch2, or ps5. Returns that platform's sync result.
-    """
-    from .tools.platforms import sync_platform as _sync
-    return await _sync(platform, ctx=ctx)
 
 
 @mcp.tool(annotations=MUTATION_TOOL)

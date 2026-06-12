@@ -134,8 +134,14 @@ class PlatformBreakdownResponse(FlexibleModel):
     overlap_games: list[dict[str, Any]]
 
 
-class SyncPlatformResponse(FlexibleModel):
-    pass
+class RateGameResponse(FlexibleModel):
+    game_id: int
+    name: str
+    source: str
+    score: float
+    review_text: str | None = None
+    tags_affected: list[str]
+    tag_affinity_tags_updated: int
 
 
 class HardwarePreferenceResponse(FlexibleModel):

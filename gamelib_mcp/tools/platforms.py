@@ -1,26 +1,13 @@
-"""get_platform_breakdown, sync_platform, add_game_to_platform, and set_hardware_preference tools."""
+"""get_platform_breakdown, add_game_to_platform, and set_hardware_preference tools."""
 
-import importlib
 import json
 from fastmcp.exceptions import ToolError
 
 from ..data.db import get_db, set_meta, upsert_game, upsert_game_platform, upsert_game_platform_identifier
 from .common import (
     LIBRARY_PLATFORMS,
-    info as _info,
-    report_progress,
     validate_platform as _validate_platform,
 )
-
-_PLATFORM_MAP = {
-    "steam":    ("gamelib_mcp.data.steam_xml", "fetch_library"),
-    "epic":     ("gamelib_mcp.data.epic",       "sync_epic"),
-    "gog":      ("gamelib_mcp.data.gog",        "sync_gog"),
-    "nintendo": ("gamelib_mcp.data.nintendo",   "sync_nintendo"),
-    "switch":   ("gamelib_mcp.data.nintendo",   "sync_nintendo"),
-    "switch2":  ("gamelib_mcp.data.nintendo",   "sync_nintendo"),
-    "ps5":      ("gamelib_mcp.data.psn",        "sync_psn"),
-}
 
 
 async def get_platform_breakdown() -> dict:
@@ -68,31 +55,6 @@ async def get_platform_breakdown() -> dict:
             for r in overlap_rows
         ],
     }
-
-
-async def sync_platform(platform: str, ctx=None) -> dict:
-    """
-    Sync a single platform on demand.
-    platform: steam | epic | gog | nintendo | switch | switch2 | ps5
-
-    Credential handling is left to each sync module (default config paths,
-    cookie fallback, etc.) — this tool does not gate on env vars.
-    """
-    if platform not in _PLATFORM_MAP:
-        raise ToolError(f"Unknown platform '{platform}'. Valid: {sorted(set(_PLATFORM_MAP))}")
-
-    module_path, fn_name = _PLATFORM_MAP[platform]
-    try:
-        await report_progress(ctx, 0, 1)
-        await _info(ctx, f"Syncing {platform}")
-        module = importlib.import_module(module_path)
-        fn = getattr(module, fn_name)
-        result = await fn()
-        await report_progress(ctx, 1, 1)
-        await _info(ctx, f"Finished {platform}")
-        return result
-    except Exception as exc:
-        raise ToolError(f"{platform} sync failed: {exc}") from exc
 
 
 async def set_hardware_preference(platforms: list[str]) -> dict:

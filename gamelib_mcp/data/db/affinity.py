@@ -14,10 +14,10 @@ async def recompute_tag_affinity() -> int:
 
     affinity_score = weighted_avg_score x log(game_count + 1)
 
-    Backloggd weight = 1.0, Steam review weight = 0.5.
+    Backloggd and manual weight = 1.0, Steam review weight = 0.5.
     Returns number of tags updated.
     """
-    source_weights = {"backloggd": 1.0, "steam_review": 0.5}
+    source_weights = {"backloggd": 1.0, "manual": 1.0, "steam_review": 0.5}
 
     async with get_db() as db:
         rows = await db.execute_fetchall(

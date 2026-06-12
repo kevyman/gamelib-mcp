@@ -177,6 +177,26 @@ class LibraryStatsOpenCriticTests(ToolDBTestCase):
         self.assertEqual(names[:2], ["Mighty", "Weak"])
 
 
+class LibraryStatsTagGenreFilterTests(ToolDBTestCase):
+    async def test_genre_filter_is_case_insensitive(self):
+        await make_steam_game("Witcher 3", 1, genres=["RPG"], hltb_main=50)
+        await make_steam_game("Doom", 2, genres=["Shooter"], hltb_main=12)
+        results = await library.get_library_stats(genres=["rpg"])
+        self.assertEqual([g["name"] for g in results["results"]], ["Witcher 3"])
+
+    async def test_tag_filter_requires_every_entry(self):
+        await make_steam_game("Hades", 1, tags=["Roguelike", "Action"])
+        await make_steam_game("Dead Cells", 2, tags=["Roguelike"])
+        results = await library.get_library_stats(tags=["roguelike", "action"])
+        self.assertEqual([g["name"] for g in results["results"]], ["Hades"])
+
+    async def test_combines_with_hltb_filter(self):
+        await make_steam_game("Short RPG", 1, genres=["RPG"], hltb_main=8)
+        await make_steam_game("Long RPG", 2, genres=["RPG"], hltb_main=80)
+        results = await library.get_library_stats(genres=["RPG"], max_hltb_hours=10)
+        self.assertEqual([g["name"] for g in results["results"]], ["Short RPG"])
+
+
 class SearchGamesBatchTests(ToolDBTestCase):
     async def test_keyed_by_query(self):
         await make_steam_game("Portal", 400, playtime_minutes=120)

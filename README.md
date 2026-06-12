@@ -8,7 +8,7 @@ Ask your assistant things like *"what should I play next?"*, *"find me a cozy ga
 
 - **Cross-platform library** — Steam, Epic (via [Legendary](https://github.com/derrod/legendary)), GOG (via [lgogdownloader](https://github.com/Sude-/lgogdownloader)), Nintendo (via [nxapi](https://github.com/samuelthomas2774/nxapi)), and PSN, unified into one canonical game list with per-platform ownership and playtime.
 - **Rich enrichment** — completion times (HowLongToBeat), Linux/Steam Deck compatibility (ProtonDB), critic scores (OpenCritic, Metacritic), metadata and identity resolution (IGDB), community sentiment (Steam reviews, SteamSpy).
-- **Personalized discovery** — syncs your ratings from Backloggd and Steam, computes weighted per-tag affinity scores, and ranks unplayed games by predicted fit. Vibe-based search (`find_games_by_vibe`) for fuzzy "I want something like X" queries.
+- **Personalized discovery** — syncs your ratings from Backloggd and Steam (or rate games directly in chat with `rate_game`), computes weighted per-tag affinity scores, and ranks unplayed games by predicted fit. One `discover_games` tool covers vibe-based moods ("cozy", "souls"), taste-profile matches (with "why this rec" tag explanations), critic-score ranking, and backlog value picks.
 - **Backlog intelligence** — backlog stats, platform breakdowns, hardware-preference-aware recommendations (e.g. prefer Switch 2 over Steam Deck over PS5), and farmed-achievement detection.
 - **Operator control plane** — `get_integration_status` plus `/admin/integrations` (JSON) and `/admin/integrations/ui` (HTML) show per-platform readiness, missing credentials/mounts, and remediation steps.
 
@@ -16,17 +16,16 @@ Ask your assistant things like *"what should I play next?"*, *"find me a cozy ga
 
 | Tool | Description |
 |---|---|
-| `search_games` / `search_games_batch` | Fuzzy search the library by title |
+| `search_games` / `search_games_batch` | Punctuation-insensitive, relevance-ranked title search with fuzzy fallback |
 | `get_game_detail` | Full detail for one game; triggers lazy enrichment on demand |
-| `get_library_stats` | Library-wide aggregates and filters |
-| `find_games_by_vibe` | Tag/vibe-driven discovery across owned games |
-| `get_recommendations` | Ranks unplayed games by your tag-affinity profile |
+| `get_library_stats` | Library-wide aggregates with tag/genre/score/playtime filters |
+| `discover_games` | Unified discovery: vibe filters, taste-match ranking (with matched-tag explanations), critic-score ranking, and backlog value picks |
 | `get_taste_profile` | Your computed tag preferences |
 | `sync_ratings` / `get_ratings` | Pull ratings from Backloggd and Steam reviews |
+| `rate_game` | Rate a game 0–10 directly; feeds the taste profile immediately |
 | `get_backlog_stats` | Backlog size, completion estimates |
 | `get_platform_breakdown` | Ownership counts per platform |
-| `sync_platform` | Re-sync one platform's library |
-| `refresh_library` | Full library refresh |
+| `refresh_library` | Re-sync all platforms, or a subset (e.g. just `["gog"]`) |
 | `set_hardware_preference` | Priority order for suggested platforms |
 | `add_game_to_platform` | Manually record ownership |
 | `detect_farmed_games` | Flag games with suspicious achievement patterns |
@@ -118,7 +117,7 @@ Key design points:
 
 - **Layer separation** — `tools/` handles MCP-facing logic and formatting; `data/` handles fetching and caching; `data/db/` owns all SQLite access.
 - **Lazy enrichment** — bulk library calls stay fast by skipping unenriched fields; `get_game_detail` fetches and caches provider data on demand, while background workers enrich the rest over time.
-- **Tag affinity** — after `sync_ratings`, weighted tag scores are recomputed across all rated games (Backloggd weight 1.0, Steam 0.5) and drive `get_recommendations`.
+- **Tag affinity** — after `sync_ratings` or `rate_game`, weighted tag scores are recomputed across all rated games (Backloggd/manual weight 1.0, Steam 0.5) and drive `discover_games`; Steam storefront feature flags are quarantined into a separate `features` column so they never skew taste.
 - **Caching & rate limiting** — provider responses are cached (Steam Store 7 days, HLTB/ProtonDB 30 days) and HLTB pre-warming is throttled with an asyncio semaphore.
 - **Fuzzy matching** — rapidfuzz-based title matching where providers lack stable identifiers.
 
