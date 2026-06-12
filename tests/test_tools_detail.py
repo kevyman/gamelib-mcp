@@ -87,6 +87,22 @@ class GetGameDetailTests(ToolDBTestCase):
         result = await detail.get_game_detail(name="hollow")
         self.assertEqual(result["name"], "Hollow Knight")
 
+    async def test_lookup_by_name_across_punctuation(self):
+        await make_steam_game("Sekiro: Shadows Die Twice", 814380, playtime_minutes=344)
+        result = await detail.get_game_detail(name="sekiro shadow")
+        self.assertEqual(result["name"], "Sekiro: Shadows Die Twice")
+
+    async def test_lookup_by_name_prefers_exact_match_over_longer_titles(self):
+        await make_steam_game("Hades II", 1145350, playtime_minutes=600)
+        await make_steam_game("Hades", 1145360, playtime_minutes=10)
+        result = await detail.get_game_detail(name="hades")
+        self.assertEqual(result["name"], "Hades")
+
+    async def test_lookup_by_name_falls_back_to_fuzzy(self):
+        await make_steam_game("Sekiro: Shadows Die Twice", 814380, playtime_minutes=344)
+        result = await detail.get_game_detail(name="sekrio shadows die twice")
+        self.assertEqual(result["name"], "Sekiro: Shadows Die Twice")
+
     async def test_includes_rating_when_present(self):
         gid = await seed_game("Disco Elysium")
         await add_rating(gid, "backloggd", raw_score=5.0, normalized_score=10.0, review_text="GOAT")

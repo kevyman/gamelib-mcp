@@ -5,12 +5,13 @@ from typing import Literal
 from fastmcp.exceptions import ToolError
 
 from ..data.db import get_db, load_platforms_for_games
+from ..data.title_normalization import normalize_search_text
 from .common import (
     STEAM_APPID_SQL as _STEAM_APPID_SQL,
     clamp_limit as _clamp_limit,
-    like_escape as _like_escape,
     resolve_platform as _resolve_platform,
 )
+from .search import build_name_match, fuzzy_fallback_game_ids
 
 VALID_FILTERS = {"all", "unplayed", "played", "recent", "farmed"}
 
@@ -29,6 +30,7 @@ _GAME_ROLLUP_CTE = f"""
 WITH game_rollup AS (
     SELECT g.id AS game_id,
            g.name,
+           COALESCE(g.name_normalized, lower(g.name)) AS name_normalized,
            {_STEAM_APPID_SQL} AS steam_appid,
            g.tags,
            g.hltb_main,
@@ -54,11 +56,17 @@ async def search_games(
     platform: str | None = None,
     response_format: ResponseFormat = "concise",
 ) -> dict:
-    """Find games in the library by name substring match, optionally filtered by platform."""
+    """Find games in the library by name, optionally filtered by platform.
+
+    Matching is punctuation-insensitive and token-based ("sekiro shadow" finds
+    "Sekiro: Shadows Die Twice"); when nothing matches, a fuzzy fallback
+    catches misspellings and tags those results with match_type="fuzzy".
+    """
     limit = _clamp_limit(limit)
     platform = _resolve_platform(platform)
-    conditions = [r"lower(name) LIKE lower(?) ESCAPE '\'"]
-    params: list = [f"%{_like_escape(query)}%"]
+    match = build_name_match(query)
+    conditions = [match.where_sql]
+    params: list = list(match.where_params)
     if platform:
         conditions.append(
             "game_id IN (SELECT game_id FROM game_platforms WHERE platform = ? AND owned = 1)"
@@ -78,15 +86,21 @@ async def search_games(
         rows = await db.execute_fetchall(
             _GAME_ROLLUP_CTE
             + f"""
-            SELECT *
+            SELECT *, {match.rank_sql} AS match_rank
             FROM game_rollup
             WHERE {where}
-            ORDER BY total_playtime_minutes DESC, name ASC
+            ORDER BY match_rank ASC, total_playtime_minutes DESC, name ASC
             LIMIT ?
             OFFSET ?
             """,
-            (*params, limit, offset),
+            (*match.rank_params, *params, limit, offset),
         )
+
+    if total["c"] == 0 and match.fuzzy_eligible:
+        fuzzy_results = await _fuzzy_search(query, platform, limit, response_format)
+        if fuzzy_results is not None:
+            return fuzzy_results
+
     return _envelope(
         await _format_rows(rows, response_format=response_format),
         total["c"],
@@ -95,27 +109,75 @@ async def search_games(
     )
 
 
+async def _fuzzy_search(
+    query: str,
+    platform: str | None,
+    limit: int,
+    response_format: ResponseFormat,
+) -> dict | None:
+    """LIKE tiers found nothing — retry with the fuzzy matcher. None = no match."""
+    game_ids = await fuzzy_fallback_game_ids(query)
+    if not game_ids:
+        return None
+
+    placeholders = ",".join("?" * len(game_ids))
+    conditions = [f"game_id IN ({placeholders})"]
+    params: list = list(game_ids)
+    if platform:
+        conditions.append(
+            "game_id IN (SELECT game_id FROM game_platforms WHERE platform = ? AND owned = 1)"
+        )
+        params.append(platform)
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            _GAME_ROLLUP_CTE
+            + f"""
+            SELECT *
+            FROM game_rollup
+            WHERE {' AND '.join(conditions)}
+            ORDER BY total_playtime_minutes DESC, name ASC
+            LIMIT ?
+            """,
+            (*params, limit),
+        )
+    if not rows:
+        return None
+
+    results = await _format_rows(rows, response_format=response_format)
+    for game in results:
+        game["match_type"] = "fuzzy"
+    return _envelope(results, len(rows), limit, 0)
+
+
 async def search_games_batch(
     queries: list[str],
     limit_per_query: int = 5,
 ) -> dict[str, list[dict]]:
     """Look up multiple game names in one call. Returns dict keyed by query."""
     limit_per_query = _clamp_limit(limit_per_query)
+    results = {}
     async with get_db() as db:
-        results = {}
         for query in queries:
+            match = build_name_match(query)
             rows = await db.execute_fetchall(
                 _GAME_ROLLUP_CTE
-                + r"""
-                SELECT *
+                + f"""
+                SELECT *, {match.rank_sql} AS match_rank
                 FROM game_rollup
-                WHERE lower(name) LIKE lower(?) ESCAPE '\'
-                ORDER BY total_playtime_minutes DESC, name ASC
+                WHERE {match.where_sql}
+                ORDER BY match_rank ASC, total_playtime_minutes DESC, name ASC
                 LIMIT ?
                 """,
-                (f"%{_like_escape(query)}%", limit_per_query),
+                (*match.rank_params, *match.where_params, limit_per_query),
             )
             results[query] = await _format_rows(rows)
+
+    for query, games in results.items():
+        if games or not normalize_search_text(query):
+            continue
+        fuzzy = await _fuzzy_search(query, None, limit_per_query, "detailed")
+        if fuzzy is not None:
+            results[query] = fuzzy["results"]
     return results
 
 

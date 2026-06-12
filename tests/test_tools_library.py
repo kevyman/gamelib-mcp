@@ -55,12 +55,20 @@ class SearchGamesTests(ToolDBTestCase):
         self.assertIs(game["is_farmed"], False)
         self.assertEqual(_platform_names(game), ["steam"])
 
-    async def test_orders_by_playtime_desc(self):
-        await make_steam_game("Alpha", 1, playtime_minutes=60)
-        await make_steam_game("Beta", 2, playtime_minutes=600)
-        results = await library.search_games("a")
+    async def test_orders_by_playtime_desc_within_same_match_rank(self):
+        await make_steam_game("Game Alpha", 1, playtime_minutes=60)
+        await make_steam_game("Game Beta", 2, playtime_minutes=600)
+        results = await library.search_games("game")
         names = [g["name"] for g in results["results"]]
-        self.assertEqual(names[0], "Beta")  # higher playtime first
+        self.assertEqual(names[0], "Game Beta")  # higher playtime first
+
+    async def test_orders_by_match_relevance_before_playtime(self):
+        await make_steam_game("Hades II", 2, playtime_minutes=6000)
+        await make_steam_game("Hades", 1, playtime_minutes=10)
+        results = await library.search_games("hades")
+        names = [g["name"] for g in results["results"]]
+        # Exact normalized match outranks the higher-playtime prefix match.
+        self.assertEqual(names, ["Hades", "Hades II"])
 
     async def test_limit_applies_and_reports_more(self):
         for i in range(5):
@@ -98,10 +106,39 @@ class SearchGamesTests(ToolDBTestCase):
         results = await library.search_games("%")
         self.assertEqual(results["total_matches"], 0)
 
-    async def test_underscore_is_literal(self):
+    async def test_underscore_normalizes_to_token_boundary(self):
         await make_steam_game("Hades", 1, playtime_minutes=10)
-        # "h_des" would match "Hades" if "_" were a wildcard.
+        await make_steam_game("Bastion", 2, playtime_minutes=10)
+        # "_" is never a SQL wildcard: it becomes a token boundary, so "h_des"
+        # token-matches "Hades" (h + des) but cannot match unrelated titles.
         results = await library.search_games("h_des")
+        names = {g["name"] for g in results["results"]}
+        self.assertEqual(names, {"Hades"})
+
+    async def test_punctuation_in_title_does_not_block_match(self):
+        await make_steam_game("Sekiro: Shadows Die Twice", 814380, playtime_minutes=344)
+        results = await library.search_games("sekiro shadow")
+        self.assertEqual(results["total_matches"], 1)
+        self.assertEqual(results["results"][0]["name"], "Sekiro: Shadows Die Twice")
+        self.assertNotIn("match_type", results["results"][0])
+
+    async def test_punctuation_in_query_does_not_block_match(self):
+        await make_steam_game("Don't Starve", 219740, playtime_minutes=100)
+        results = await library.search_games("dont starve")
+        self.assertEqual(results["total_matches"], 1)
+        self.assertEqual(results["results"][0]["name"], "Don't Starve")
+
+    async def test_misspelling_falls_back_to_fuzzy(self):
+        await make_steam_game("Sekiro: Shadows Die Twice", 814380, playtime_minutes=344)
+        results = await library.search_games("sekrio shadows die twice")
+        self.assertEqual(results["total_matches"], 1)
+        game = results["results"][0]
+        self.assertEqual(game["name"], "Sekiro: Shadows Die Twice")
+        self.assertEqual(game["match_type"], "fuzzy")
+
+    async def test_fuzzy_fallback_respects_platform_filter(self):
+        await make_steam_game("Sekiro: Shadows Die Twice", 814380, playtime_minutes=344)
+        results = await library.search_games("sekrio shadows die twice", platform="gog")
         self.assertEqual(results["total_matches"], 0)
 
     async def test_negative_limit_is_clamped_not_unbounded(self):

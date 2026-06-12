@@ -50,7 +50,7 @@ STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 @dataclass
@@ -151,6 +151,7 @@ from .schema import (
     _V4_SCHEMA_DDL,
     _V5_SCHEMA_DDL,
     _V6_SCHEMA_DDL,
+    _V7_SCHEMA_DDL,
 )
 
 
@@ -184,6 +185,12 @@ async def _detect_schema_state(db: aiosqlite.Connection) -> str:
 
     spd_cols = await _table_columns(db, "steam_platform_data") if "steam_platform_data" in tables else set()
     gpe_cols = await _table_columns(db, "game_platform_enrichment") if "game_platform_enrichment" in tables else set()
+    if "name_normalized" in game_cols and {
+        "opencritic_url",
+        "opencritic_num_reviews",
+    }.issubset(gpe_cols):
+        return "v7"
+
     if {
         "igdb_claimed_at",
         "hltb_claimed_at",
@@ -681,6 +688,36 @@ async def _migrate_v5_to_v6(db: aiosqlite.Connection, progress: _Progress | None
     await db.commit()
 
 
+async def _backfill_name_normalized(db: aiosqlite.Connection) -> int:
+    """Populate games.name_normalized wherever it is NULL. Returns rows updated."""
+    from ..title_normalization import normalize_search_text
+
+    rows = await db.execute_fetchall(
+        "SELECT id, name FROM games WHERE name_normalized IS NULL"
+    )
+    for row in rows:
+        await db.execute(
+            "UPDATE games SET name_normalized = ? WHERE id = ?",
+            (normalize_search_text(row["name"]), row["id"]),
+        )
+    return len(rows)
+
+
+async def _migrate_v6_to_v7(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add games.name_normalized (search matching column) and backfill it."""
+    if progress is not None:
+        progress("Migrating to v7: add and backfill games.name_normalized.")
+
+    db.row_factory = aiosqlite.Row
+    game_cols = await _table_columns(db, "games")
+    if "name_normalized" not in game_cols:
+        await db.execute("ALTER TABLE games ADD COLUMN name_normalized TEXT")
+    await _backfill_name_normalized(db)
+
+    await _set_user_version(db, 7)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -717,7 +754,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V6_SCHEMA_DDL)
+    await db.executescript(_V7_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -758,10 +795,10 @@ async def _run_migrations(
     applied_steps: list[str] = []
 
     if detected_state == "fresh":
-        await db.executescript(_V6_SCHEMA_DDL)
+        await db.executescript(_V7_SCHEMA_DDL)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
-        _emit(progress, "Initialized fresh database at schema v6.", applied_steps)
+        _emit(progress, "Initialized fresh database at schema v7.", applied_steps)
         return MigrationResult(
             initial_version=initial_version,
             final_version=SCHEMA_VERSION,
@@ -799,6 +836,11 @@ async def _run_migrations(
             await db.commit()
             version = 5
             _emit(progress, "Recorded existing schema as v5.", applied_steps)
+        elif detected_state == "v7":
+            await _set_user_version(db, 7)
+            await db.commit()
+            version = 7
+            _emit(progress, "Recorded existing schema as v7.", applied_steps)
 
     if version == 1:
         _emit(progress, "Applying migration step v1 -> v2.", applied_steps)
@@ -825,10 +867,15 @@ async def _run_migrations(
         await _migrate_v5_to_v6(db, progress=None)
         version = 6
 
+    if version == 6:
+        _emit(progress, "Applying migration step v6 -> v7.", applied_steps)
+        await _migrate_v6_to_v7(db, progress=None)
+        version = 7
+
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V6_SCHEMA_DDL)
+    await db.executescript(_V7_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION

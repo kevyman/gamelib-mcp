@@ -419,18 +419,20 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(platforms[1][0]["opencritic_num_reviews"], 135)
 
-    async def test_fresh_db_initializes_with_v5_columns(self):
+    async def test_fresh_db_initializes_with_latest_columns(self):
         async with aiosqlite.connect(self.db_path) as db:
             await db_module._configure_connection(db, enable_wal=True)
             result = await db_module._run_migrations(db)
 
             version = await db_module._get_user_version(db)
             cols = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(game_platform_enrichment)")}
+            game_cols = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(games)")}
 
-        self.assertEqual(version, 6)
-        self.assertEqual(result.final_version, 6)
+        self.assertEqual(version, db_module.SCHEMA_VERSION)
+        self.assertEqual(result.final_version, db_module.SCHEMA_VERSION)
         self.assertIn("opencritic_url", cols)
         self.assertIn("opencritic_num_reviews", cols)
+        self.assertIn("name_normalized", game_cols)
 
     async def test_v4_database_migrates_opencritic_scrape_columns(self) -> None:
         conn = sqlite3.connect(self.db_path)
@@ -594,7 +596,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                     )
                 }
 
-        self.assertEqual(version, 6)
+        self.assertEqual(version, db_module.SCHEMA_VERSION)
         # Contaminated user score nulled, with cache/claim cleared for re-scrape.
         self.assertIsNone(gpe[1]["metacritic_score"])
         self.assertIsNone(gpe[1]["metacritic_cached_at"])
@@ -607,6 +609,63 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(games["ZeroHLTB"]["hltb_extra"])
         self.assertEqual(games["ZeroHLTB"]["hltb_complete"], 12.5)
         self.assertEqual(games["GoodHLTB"]["hltb_main"], 10.0)
+
+    async def test_v6_to_v7_backfills_name_normalized(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V6_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 6")
+        conn.execute(
+            "INSERT INTO games (id, name) VALUES "
+            "(1, 'Sekiro™: Shadows Die Twice'), (2, \"Don't Starve\")"
+        )
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+            async with db_module.get_db() as db:
+                version = await db_module._get_user_version(db)
+                rows = await db.execute_fetchall(
+                    "SELECT id, name_normalized FROM games ORDER BY id"
+                )
+                indexes = {
+                    row[1]
+                    for row in await db.execute_fetchall("PRAGMA index_list(games)")
+                }
+
+        self.assertEqual(version, 7)
+        self.assertEqual(rows[0]["name_normalized"], "sekiro shadows die twice")
+        self.assertEqual(rows[1]["name_normalized"], "don t starve")
+        self.assertIn("idx_games_name_normalized", indexes)
+
+    async def test_upsert_game_maintains_name_normalized(self) -> None:
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+            game_id = await db_module.upsert_game(appid=None, name="Hades II")
+            async with db_module.get_db() as db:
+                row = await db.execute_fetchone(
+                    "SELECT name_normalized FROM games WHERE id = ?", (game_id,)
+                )
+
+        self.assertEqual(row["name_normalized"], "hades ii")
+
+    async def test_bulk_steam_sync_backfills_name_normalized(self) -> None:
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+            await db_module.bulk_upsert_steam_library(
+                [{"appid": 814380, "name": "Sekiro: Shadows Die Twice", "playtime_minutes": 344}],
+                synced_at="2026-06-11T00:00:00+00:00",
+            )
+            async with db_module.get_db() as db:
+                row = await db.execute_fetchone(
+                    "SELECT name_normalized FROM games WHERE name = ?",
+                    ("Sekiro: Shadows Die Twice",),
+                )
+
+        self.assertEqual(row["name_normalized"], "sekiro shadows die twice")
 
     async def test_redundant_lookup_index_is_removed(self):
         db_module._DB_READY_PATH = None

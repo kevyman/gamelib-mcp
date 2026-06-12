@@ -34,6 +34,7 @@ class GameSummary(FlexibleModel):
     tags: list[str] | None = None
     suggested_platform: str | None = None
     match_score: float | None = None
+    match_type: str | None = None
 
 
 class PaginatedGamesResponse(FlexibleModel):

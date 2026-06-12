@@ -12,7 +12,11 @@ from ..data.hltb import get_hltb
 from ..data.protondb import get_protondb
 from ..data.steam_store import enrich_game
 from ..utils import _parse_json
-from .common import like_escape as _like_escape
+from .search import (
+    NORMALIZED_NAME_SQL,
+    build_name_match,
+    fuzzy_fallback_game_ids,
+)
 
 
 async def get_game_detail(
@@ -30,12 +34,25 @@ async def get_game_detail(
         elif appid is not None:
             row = await get_game_by_appid(appid)
         elif name is not None:
+            match = build_name_match(name, column=NORMALIZED_NAME_SQL)
             row = await db.execute_fetchone(
-                r"SELECT * FROM games WHERE lower(name) LIKE lower(?) ESCAPE '\' LIMIT 1",
-                (f"%{_like_escape(name)}%",),
+                f"""SELECT g.*, {match.rank_sql} AS match_rank
+                    FROM games g
+                    WHERE {match.where_sql}
+                    ORDER BY match_rank ASC, length(g.name) ASC, g.id ASC
+                    LIMIT 1""",
+                (*match.rank_params, *match.where_params),
             )
         else:
             raise ToolError("Provide game_id, name, or appid")
+
+    if row is None and name is not None:
+        fuzzy_ids = await fuzzy_fallback_game_ids(name)
+        if fuzzy_ids:
+            async with get_db() as db:
+                row = await db.execute_fetchone(
+                    "SELECT * FROM games WHERE id = ?", (fuzzy_ids[0],)
+                )
 
     if row is None:
         raise ToolError("Game not found in library")
