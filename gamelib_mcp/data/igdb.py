@@ -24,7 +24,7 @@ from .db import (
     release_game_claim,
     upsert_game_platform_enrichment,
 )
-from .title_normalization import normalize_catalog_title
+from .title_normalization import normalize_catalog_title, normalize_search_text
 
 logger = logging.getLogger(__name__)
 
@@ -498,7 +498,10 @@ async def resolve_and_link_game(
                     game_id = existing["id"]
                 else:
                     async with get_db() as db:
-                        cursor = await db.execute("INSERT INTO games (name) VALUES (?)", (name,))
+                        cursor = await db.execute(
+                            "INSERT INTO games (name, name_normalized) VALUES (?, ?)",
+                            (name, normalize_search_text(name)),
+                        )
                         game_id = cursor.lastrowid
                         await db.commit()
 

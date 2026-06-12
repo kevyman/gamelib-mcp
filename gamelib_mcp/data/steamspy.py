@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import httpx
 
 from .db import get_db, get_steam_platform_row_by_appid, upsert_steam_platform_data
+from .tags import is_feature_flag
 
 STEAMSPY_API = "https://steamspy.com/api.php"
 CACHE_DAYS = 30
@@ -66,7 +67,8 @@ def _merge_tags(spy_tags: list[str], existing: list[str]) -> list[str]:
     result = []
     for t in spy_tags + existing:
         k = t.lower()
-        if k not in seen:
+        # Feature flags may linger in pre-split rows merged via `existing`.
+        if k not in seen and not is_feature_flag(t):
             seen.add(k)
             result.append(t)
     return result

@@ -1,6 +1,30 @@
 import unittest
 
-from gamelib_mcp.data.title_normalization import prepare_catalog_title
+from gamelib_mcp.data.title_normalization import (
+    normalize_search_text,
+    prepare_catalog_title,
+)
+
+
+class NormalizeSearchTextTests(unittest.TestCase):
+    def test_strips_punctuation_to_token_boundaries(self) -> None:
+        self.assertEqual(
+            normalize_search_text("Sekiro: Shadows Die Twice"),
+            "sekiro shadows die twice",
+        )
+        self.assertEqual(normalize_search_text("Don't Starve"), "don t starve")
+        self.assertEqual(normalize_search_text("Half-Life 2"), "half life 2")
+
+    def test_folds_trademark_glyphs_and_accents(self) -> None:
+        self.assertEqual(normalize_search_text("NieR™ Replicant"), "nier replicant")
+        self.assertEqual(normalize_search_text("Pokémon"), "pokemon")
+
+    def test_collapses_whitespace_and_casefolds(self) -> None:
+        self.assertEqual(normalize_search_text("  HADES   II  "), "hades ii")
+
+    def test_punctuation_only_input_normalizes_to_empty(self) -> None:
+        self.assertEqual(normalize_search_text("%"), "")
+        self.assertEqual(normalize_search_text("™:!_"), "")
 
 
 class TitleNormalizationTests(unittest.TestCase):

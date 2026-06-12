@@ -1,15 +1,24 @@
-"""get_ratings, sync_ratings, get_taste_profile tools."""
+"""get_ratings, sync_ratings, rate_game, get_taste_profile tools."""
 
+from datetime import datetime, timezone
 from typing import Literal
+
+from fastmcp.exceptions import ToolError
 
 from ..data.backloggd import sync_backloggd
 from ..data.db import get_db, load_platforms_for_games, recompute_tag_affinity, set_meta
 from ..data.steam_reviews import sync_steam_reviews
+from ..utils import _parse_json
 from .common import (
     STEAM_APPID_SQL as _STEAM_APPID_SQL,
     clamp_limit as _clamp_limit,
     info as _info,
     report_progress,
+)
+from .search import (
+    NORMALIZED_NAME_SQL,
+    build_name_match,
+    fuzzy_fallback_game_ids,
 )
 
 ResponseFormat = Literal["concise", "detailed"]
@@ -40,6 +49,78 @@ async def sync_ratings(ctx=None) -> dict:
         "steam_reviews": sr_result,
         "tag_affinity_tags_updated": tag_count,
         "status": "done",
+    }
+
+
+async def rate_game(
+    name: str | None = None,
+    game_id: int | None = None,
+    score: float = 0.0,
+    review_text: str | None = None,
+) -> dict:
+    """
+    Rate a game (0-10) directly, without an external rating source.
+
+    Stored as source='manual' (re-rating overwrites); feeds tag affinity with
+    full weight and immediately recomputes the taste profile.
+    """
+    if not 0 <= score <= 10:
+        raise ToolError("score must be between 0 and 10")
+
+    async with get_db() as db:
+        if game_id is not None:
+            row = await db.execute_fetchone(
+                "SELECT id, name, tags FROM games WHERE id = ?", (game_id,)
+            )
+        elif name is not None:
+            match = build_name_match(name, column=NORMALIZED_NAME_SQL)
+            row = await db.execute_fetchone(
+                f"""SELECT g.id, g.name, g.tags, {match.rank_sql} AS match_rank
+                    FROM games g
+                    WHERE {match.where_sql}
+                    ORDER BY match_rank ASC, length(g.name) ASC, g.id ASC
+                    LIMIT 1""",
+                (*match.rank_params, *match.where_params),
+            )
+        else:
+            raise ToolError("Provide game_id or name")
+
+    if row is None and name is not None:
+        fuzzy_ids = await fuzzy_fallback_game_ids(name)
+        if fuzzy_ids:
+            async with get_db() as db:
+                row = await db.execute_fetchone(
+                    "SELECT id, name, tags FROM games WHERE id = ?", (fuzzy_ids[0],)
+                )
+
+    if row is None:
+        raise ToolError("Game not found in library")
+
+    now = datetime.now(timezone.utc).isoformat()
+    async with get_db() as db:
+        await db.execute(
+            """INSERT INTO ratings
+               (game_id, source, raw_score, normalized_score, review_text, synced_at)
+               VALUES (?, 'manual', ?, ?, ?, ?)
+               ON CONFLICT(game_id, source) DO UPDATE SET
+                   raw_score = excluded.raw_score,
+                   normalized_score = excluded.normalized_score,
+                   review_text = excluded.review_text,
+                   synced_at = excluded.synced_at""",
+            (row["id"], score, score, review_text, now),
+        )
+        await db.commit()
+
+    tag_count = await recompute_tag_affinity()
+
+    return {
+        "game_id": row["id"],
+        "name": row["name"],
+        "source": "manual",
+        "score": score,
+        "review_text": review_text,
+        "tags_affected": _parse_json(row["tags"]) or [],
+        "tag_affinity_tags_updated": tag_count,
     }
 
 
@@ -148,7 +229,8 @@ async def get_taste_profile() -> dict:
                 MIN(normalized_score) as min_score,
                 MAX(normalized_score) as max_score,
                 SUM(CASE WHEN source = 'backloggd' THEN 1 ELSE 0 END) as backloggd_count,
-                SUM(CASE WHEN source = 'steam_review' THEN 1 ELSE 0 END) as steam_count
+                SUM(CASE WHEN source = 'steam_review' THEN 1 ELSE 0 END) as steam_count,
+                SUM(CASE WHEN source = 'manual' THEN 1 ELSE 0 END) as manual_count
                FROM ratings"""
         )
 
@@ -160,6 +242,7 @@ async def get_taste_profile() -> dict:
             "max_score": rating_stats["max_score"],
             "backloggd_ratings": rating_stats["backloggd_count"],
             "steam_review_ratings": rating_stats["steam_count"],
+            "manual_ratings": rating_stats["manual_count"],
         },
         "top_tags": [
             {

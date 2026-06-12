@@ -56,6 +56,21 @@ def is_non_game_title(name: str) -> bool:
     return False
 
 
+def normalize_search_text(value: str) -> str:
+    """Normalize a title or query for search matching.
+
+    Strips trademark glyphs, ascii-folds, casefolds, and collapses every
+    non-alphanumeric run into a single space, so "Sekiro™: Shadows Die Twice"
+    and "sekiro shadows die twice" normalize identically. Word order is
+    preserved (unlike the token-sorting fuzzy preprocessor) so
+    prefix/substring ranking stays meaningful.
+    """
+    # NFKD would otherwise expand ™ to a literal "TM" glued onto the word.
+    cleaned = value.replace("™", " ").replace("®", " ")
+    folded = _ascii_fold(cleaned).casefold()
+    return " ".join(re.findall(r"[a-z0-9]+", folded))
+
+
 def normalize_catalog_title(name: str) -> str:
     cleaned = _ascii_fold(name)
     cleaned = cleaned.replace("™", "").replace("®", "")

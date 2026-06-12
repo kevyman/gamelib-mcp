@@ -16,6 +16,7 @@ from weakref import WeakKeyDictionary
 import httpx
 
 from .db import get_db, get_steam_platform_row_by_appid, upsert_game_platform_enrichment, upsert_steam_platform_data
+from .tags import split_features
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +211,7 @@ async def enrich_game(appid: int, client: httpx.AsyncClient | None = None) -> di
 
     async with get_db() as db:
         if store_data is not None:
-            steam_tags = _extract_tags(store_data)
+            steam_tags, steam_features = _extract_tags(store_data)
             genres = json.dumps([g["description"] for g in store_data.get("genres", [])])
             short_desc = store_data.get("short_description", "")
             raw_date = (store_data.get("release_date") or {}).get("date", "")
@@ -220,10 +221,11 @@ async def enrich_game(appid: int, client: httpx.AsyncClient | None = None) -> di
                 """UPDATE games SET
                     genres = ?,
                     tags = ?,
+                    features = ?,
                     short_description = ?,
                     release_date = COALESCE(release_date, ?)
                 WHERE id = ?""",
-                (genres, steam_tags, short_desc, release_date, row["game_id"]),
+                (genres, steam_tags, steam_features, short_desc, release_date, row["game_id"]),
             )
         await db.commit()
 
@@ -295,20 +297,26 @@ async def _fetch_all(appid: int, client: httpx.AsyncClient | None = None) -> tup
         return store_data, review_summary
 
 
-def _extract_tags(data: dict) -> str:
-    """Build tag list from genres + categories, deduplicated, max 20."""
-    tags = []
+def _extract_tags(data: dict) -> tuple[str, str]:
+    """Build (tags, features) JSON from genres + categories, deduplicated.
+
+    Storefront/platform feature categories (Steam Trading Cards, controller
+    support, ...) land in features so they never pollute tag affinity;
+    gameplay-mode categories and genres stay tags. Tags capped at 20.
+    """
+    raw = []
     for g in data.get("genres", []):
-        tags.append(g["description"])
+        raw.append(g["description"])
     for c in data.get("categories", []):
-        tags.append(c["description"])
+        raw.append(c["description"])
     seen = set()
     unique = []
-    for t in tags:
+    for t in raw:
         if t.lower() not in seen:
             seen.add(t.lower())
             unique.append(t)
-    return json.dumps(unique[:20])
+    tags, features = split_features(unique)
+    return json.dumps(tags[:20]), json.dumps(features)
 
 
 def _parse_steam_date(raw: str) -> str | None:

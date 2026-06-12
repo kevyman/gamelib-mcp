@@ -22,6 +22,7 @@ class BacklogStatsTests(ToolDBTestCase):
                 "years_to_clear_backlog",
                 "most_played_genre_in_backlog",
                 "highest_rated_unplayed_metacritic",
+                "highest_rated_unplayed_opencritic",
                 "highest_rated_unplayed_personal",
             },
         )
