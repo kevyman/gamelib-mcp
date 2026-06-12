@@ -100,7 +100,7 @@ async def search_games(
         )
 
     if total["c"] == 0 and match.fuzzy_eligible:
-        fuzzy_results = await _fuzzy_search(query, platform, limit, response_format)
+        fuzzy_results = await _fuzzy_search(query, platform, limit, offset, response_format)
         if fuzzy_results is not None:
             return fuzzy_results
 
@@ -116,6 +116,7 @@ async def _fuzzy_search(
     query: str,
     platform: str | None,
     limit: int,
+    offset: int,
     response_format: ResponseFormat,
 ) -> dict | None:
     """LIKE tiers found nothing — retry with the fuzzy matcher. None = no match."""
@@ -132,6 +133,18 @@ async def _fuzzy_search(
         )
         params.append(platform)
     async with get_db() as db:
+        total = await db.execute_fetchone(
+            _GAME_ROLLUP_CTE
+            + f"""
+            SELECT COUNT(*) AS c
+            FROM game_rollup
+            WHERE {' AND '.join(conditions)}
+            """,
+            tuple(params),
+        )
+        if total["c"] == 0:
+            return None
+
         rows = await db.execute_fetchall(
             _GAME_ROLLUP_CTE
             + f"""
@@ -140,16 +153,15 @@ async def _fuzzy_search(
             WHERE {' AND '.join(conditions)}
             ORDER BY total_playtime_minutes DESC, name ASC
             LIMIT ?
+            OFFSET ?
             """,
-            (*params, limit),
+            (*params, limit, offset),
         )
-    if not rows:
-        return None
 
     results = await _format_rows(rows, response_format=response_format)
     for game in results:
         game["match_type"] = "fuzzy"
-    return _envelope(results, len(rows), limit, 0)
+    return _envelope(results, total["c"], limit, offset)
 
 
 async def search_games_batch(
@@ -178,7 +190,7 @@ async def search_games_batch(
     for query, games in results.items():
         if games or not normalize_search_text(query):
             continue
-        fuzzy = await _fuzzy_search(query, None, limit_per_query, "detailed")
+        fuzzy = await _fuzzy_search(query, None, limit_per_query, 0, "detailed")
         if fuzzy is not None:
             results[query] = fuzzy["results"]
     return results

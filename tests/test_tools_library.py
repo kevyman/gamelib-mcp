@@ -137,6 +137,13 @@ class SearchGamesTests(ToolDBTestCase):
         self.assertEqual(game["name"], "Sekiro: Shadows Die Twice")
         self.assertEqual(game["match_type"], "fuzzy")
 
+    async def test_fuzzy_fallback_respects_offset(self):
+        await make_steam_game("Sekiro: Shadows Die Twice", 814380, playtime_minutes=344)
+        results = await library.search_games("sekrio shadows die twice", limit=1, offset=1)
+        self.assertEqual(results["results"], [])
+        self.assertEqual(results["total_matches"], 1)
+        self.assertFalse(results["has_more"])
+
     async def test_fuzzy_fallback_respects_platform_filter(self):
         await make_steam_game("Sekiro: Shadows Die Twice", 814380, playtime_minutes=344)
         results = await library.search_games("sekrio shadows die twice", platform="gog")

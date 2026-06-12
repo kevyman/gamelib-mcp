@@ -53,6 +53,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.data.db.init_db", AsyncMock()),
             patch("gamelib_mcp.data.db.clear_all_enrichment_claims", AsyncMock()),
             patch("gamelib_mcp.data.db.get_meta", AsyncMock(return_value=stale_at)),
+            patch("gamelib_mcp.data.db.set_meta", AsyncMock()),
             patch("gamelib_mcp.lifecycle._ensure_startup_refresh", AsyncMock()) as mock_ensure_refresh,
             patch("gamelib_mcp.lifecycle._run_background_enrich", AsyncMock()),
         ):
@@ -291,6 +292,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.data.db.init_db", AsyncMock()),
             patch("gamelib_mcp.data.db.clear_all_enrichment_claims", AsyncMock()),
             patch("gamelib_mcp.data.db.get_meta", AsyncMock(return_value=stale_at)),
+            patch("gamelib_mcp.data.db.set_meta", AsyncMock()),
             patch("gamelib_mcp.lifecycle._run_startup_refresh", side_effect=slow_refresh),
             patch("gamelib_mcp.lifecycle._run_background_enrich", AsyncMock()),
         ):
@@ -321,6 +323,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.data.db.init_db", AsyncMock()),
             patch("gamelib_mcp.data.db.clear_all_enrichment_claims", AsyncMock()),
             patch("gamelib_mcp.data.db.get_meta", AsyncMock(return_value=stale_at)),
+            patch("gamelib_mcp.data.db.set_meta", AsyncMock()),
             patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()),
             patch("gamelib_mcp.lifecycle._admin_refresh_library", AsyncMock(side_effect=slow_refresh)),
             patch("gamelib_mcp.lifecycle._run_background_enrich", AsyncMock(side_effect=fake_enrich)),
@@ -358,6 +361,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.data.db.init_db", AsyncMock()),
             patch("gamelib_mcp.data.db.clear_all_enrichment_claims", AsyncMock()),
             patch("gamelib_mcp.data.db.get_meta", AsyncMock(return_value=stale_at)),
+            patch("gamelib_mcp.data.db.set_meta", AsyncMock()),
             patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()),
             patch("gamelib_mcp.lifecycle._admin_refresh_library", AsyncMock(side_effect=slow_refresh)),
             patch("gamelib_mcp.lifecycle._run_background_enrich", AsyncMock(side_effect=fake_enrich)),
