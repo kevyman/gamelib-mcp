@@ -39,6 +39,7 @@ class SearchGamesTests(ToolDBTestCase):
                 "playtime_2weeks_hours",
                 "hltb_main",
                 "metacritic_score",
+                "opencritic_score",
                 "protondb_tier",
                 "steam_review_desc",
                 "is_farmed",
@@ -153,6 +154,27 @@ class SearchGamesTests(ToolDBTestCase):
         await make_steam_game("Solo", 1, playtime_minutes=10)
         results = await library.search_games("solo", limit=10**9)
         self.assertEqual(len(results["results"]), 1)
+
+    async def test_exposes_opencritic_score(self):
+        await make_steam_game("Sekiro: Shadows Die Twice", 814380, opencritic_score=90)
+        results = await library.search_games("sekiro")
+        self.assertEqual(results["results"][0]["opencritic_score"], 90)
+
+
+class LibraryStatsOpenCriticTests(ToolDBTestCase):
+    async def test_min_opencritic_filters_and_excludes_unscored(self):
+        await make_steam_game("Mighty", 1, opencritic_score=90)
+        await make_steam_game("Weak", 2, opencritic_score=55)
+        await make_steam_game("Unscored", 3)
+        results = await library.get_library_stats(min_opencritic=80)
+        self.assertEqual([g["name"] for g in results["results"]], ["Mighty"])
+
+    async def test_sort_by_opencritic(self):
+        await make_steam_game("Weak", 2, opencritic_score=55)
+        await make_steam_game("Mighty", 1, opencritic_score=90)
+        results = await library.get_library_stats(sort_by="opencritic")
+        names = [g["name"] for g in results["results"]]
+        self.assertEqual(names[:2], ["Mighty", "Weak"])
 
 
 class SearchGamesBatchTests(ToolDBTestCase):

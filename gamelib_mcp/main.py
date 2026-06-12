@@ -74,12 +74,15 @@ async def search_games(
     response_format: Literal["concise", "detailed"] = "concise",
 ) -> PaginatedGamesResponse:
     """
-    Find games in the library by name substring.
+    Find games in the library by name.
 
-    Use this for quick lookup when you know part of a title; prefer get_game_detail
-    after selecting one result. platform can filter to steam, epic, gog, nintendo,
-    switch2, or ps5. response_format=concise omits platform arrays; detailed
-    includes them. Returns results, total_matches, and has_more.
+    Matching is punctuation-insensitive and token-based ("sekiro shadow" finds
+    "Sekiro: Shadows Die Twice"), ranked by relevance, with a fuzzy fallback
+    for misspellings (those results carry match_type="fuzzy"). Prefer
+    get_game_detail after selecting one result. platform can filter to steam,
+    epic, gog, nintendo, switch2, or ps5. response_format=concise omits
+    platform arrays; detailed includes them. Returns results, total_matches,
+    and has_more.
     """
     from .tools.library import search_games as _search
     return await _search(query, limit, offset, platform, response_format)
@@ -109,6 +112,7 @@ async def get_library_stats(
     offset: int = 0,
     platform: str | None = None,
     response_format: Literal["concise", "detailed"] = "concise",
+    min_opencritic: int | None = None,
 ) -> LibraryStatsResponse:
     """
     Get aggregate library stats plus a filtered and sorted game list.
@@ -116,10 +120,12 @@ async def get_library_stats(
     Use this for backlog slices, unplayed lists, recent activity, or farmed-game
     audits; prefer get_game_detail for one selected game. filter accepts all,
     unplayed, played, recent, or farmed. sort_by accepts playtime, name,
-    metacritic, or hltb. protondb_tier accepts native, platinum, gold, silver,
-    bronze, or borked. platform can filter to steam, epic, gog, nintendo,
-    switch2, or ps5. response_format=concise omits platform arrays. Returns
-    aggregate counts, paged results, total_matches, and has_more.
+    metacritic, opencritic, or hltb. min_metacritic/min_opencritic filter on
+    critic scores (unscored games are excluded). protondb_tier accepts native,
+    platinum, gold, silver, bronze, or borked. platform can filter to steam,
+    epic, gog, nintendo, switch2, or ps5. response_format=concise omits
+    platform arrays. Returns aggregate counts, paged results, total_matches,
+    and has_more.
     """
     from .tools.library import get_library_stats as _stats
     return await _stats(
@@ -132,6 +138,7 @@ async def get_library_stats(
         offset,
         platform,
         response_format,
+        min_opencritic,
     )
 
 
@@ -145,9 +152,10 @@ async def get_game_detail(
     Get full details for one game.
 
     Use this after search_games or recommendations when you need platform
-    ownership, HLTB, Metacritic, ProtonDB, tags, and personal ratings. Provide
-    game_id, name as a partial match, or Steam appid when available. This may
-    trigger lazy metadata fetches. Returns one detailed game dictionary.
+    ownership, HLTB, Metacritic, OpenCritic, ProtonDB, tags, and personal
+    ratings. Provide game_id, name (partial or fuzzy match), or Steam appid
+    when available. This may trigger lazy metadata fetches. Returns one
+    detailed game dictionary.
     """
     from .tools.detail import get_game_detail as _detail
     return await _detail(name, appid, game_id)

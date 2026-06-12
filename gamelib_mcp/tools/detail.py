@@ -81,6 +81,19 @@ async def get_game_detail(
     steam_platform = next((p for p in platforms if p["platform"] == "steam"), None)
     steam_data = steam_platform["provider_data"] if steam_platform else {}
 
+    # Best-of-platforms critic scores, hoisted so clients don't have to dig
+    # through the platforms array (mirrors the MAX() rollup in list tools).
+    best_metacritic = max(
+        (p for p in platforms if p.get("metacritic_score") is not None),
+        key=lambda p: p["metacritic_score"],
+        default=None,
+    )
+    best_opencritic = max(
+        (p for p in platforms if p.get("opencritic_score") is not None),
+        key=lambda p: p["opencritic_score"],
+        default=None,
+    )
+
     total_playtime_minutes = sum(p["playtime_minutes"] or 0 for p in platforms)
     total_playtime_2weeks_minutes = sum(p["playtime_2weeks_minutes"] or 0 for p in platforms)
 
@@ -104,6 +117,14 @@ async def get_game_detail(
         "short_description": row["short_description"],
         "steam_review_score": steam_data.get("steam_review_score"),
         "steam_review_desc": steam_data.get("steam_review_desc"),
+        "metacritic_score": best_metacritic["metacritic_score"] if best_metacritic else None,
+        "metacritic_url": best_metacritic["metacritic_url"] if best_metacritic else None,
+        "opencritic_score": best_opencritic["opencritic_score"] if best_opencritic else None,
+        "opencritic_tier": best_opencritic["opencritic_tier"] if best_opencritic else None,
+        "opencritic_percent_rec": (
+            best_opencritic["opencritic_percent_rec"] if best_opencritic else None
+        ),
+        "opencritic_url": best_opencritic["opencritic_url"] if best_opencritic else None,
         "hltb_main": row["hltb_main"],
         "hltb_extra": row["hltb_extra"],
         "hltb_complete": row["hltb_complete"],

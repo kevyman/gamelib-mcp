@@ -28,6 +28,7 @@ class GameSummary(FlexibleModel):
     playtime_2weeks_hours: float | None = None
     hltb_main: float | None = None
     metacritic_score: int | None = None
+    opencritic_score: int | None = None
     protondb_tier: str | None = None
     steam_review_desc: str | None = None
     is_farmed: bool | None = None
@@ -81,6 +82,10 @@ class GameDetailResponse(GameSummary):
     genres: list[str] | None = None
     short_description: str | None = None
     steam_review_score: int | None = None
+    metacritic_url: str | None = None
+    opencritic_tier: str | None = None
+    opencritic_percent_rec: float | None = None
+    opencritic_url: str | None = None
     hltb_extra: float | None = None
     hltb_complete: float | None = None
     protondb_tier: str | None = None

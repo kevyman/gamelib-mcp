@@ -21,6 +21,7 @@ EXPECTED_TOOLS = {
             "filter",
             "max_hltb_hours",
             "min_metacritic",
+            "min_opencritic",
             "protondb_tier",
             "sort_by",
             "limit",

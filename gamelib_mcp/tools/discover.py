@@ -51,7 +51,8 @@ WITH game_rollup AS (
            COALESCE(SUM(COALESCE(gp.playtime_minutes, 0)), 0) AS total_playtime_minutes,
            MAX(CASE WHEN gp.platform = 'steam' THEN spd.protondb_tier END) AS protondb_tier,
            MAX(CASE WHEN gp.platform = 'steam' THEN spd.steam_review_desc END) AS steam_review_desc,
-           MAX(gpe.metacritic_score) AS metacritic_score
+           MAX(gpe.metacritic_score) AS metacritic_score,
+           MAX(gpe.opencritic_score) AS opencritic_score
     FROM games g
     LEFT JOIN game_platforms gp ON gp.game_id = g.id
     LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
@@ -249,6 +250,7 @@ async def _format_rows(
             "playtime_hours": round((row["total_playtime_minutes"] or 0) / 60, 1),
             "hltb_main": row["hltb_main"],
             "metacritic_score": row["metacritic_score"],
+            "opencritic_score": row["opencritic_score"],
             "steam_review_desc": row["steam_review_desc"],
             "protondb_tier": row["protondb_tier"],
         }

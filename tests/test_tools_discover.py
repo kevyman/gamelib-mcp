@@ -37,6 +37,7 @@ class FindGamesByVibeTests(ToolDBTestCase):
                 "playtime_hours",
                 "hltb_main",
                 "metacritic_score",
+                "opencritic_score",
                 "steam_review_desc",
                 "protondb_tier",
                 "tags",
