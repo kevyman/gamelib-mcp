@@ -148,3 +148,57 @@ class SyncRatingsTests(ToolDBTestCase):
         self.assertEqual(ctx.progress, [(0, 3), (1, 3), (2, 3), (3, 3)])
         self.assertIn("Syncing Backloggd ratings", ctx.infos)
         self.assertIn("Recomputing tag affinity", ctx.infos)
+
+
+class RateGameTests(ToolDBTestCase):
+    async def test_rates_by_name_and_recomputes_affinity(self):
+        await make_steam_game("Hades", 1, tags=["Roguelike", "Action"])
+        result = await ratings.rate_game(name="hades", score=9.5, review_text="superb")
+
+        self.assertEqual(result["name"], "Hades")
+        self.assertEqual(result["source"], "manual")
+        self.assertEqual(result["score"], 9.5)
+        self.assertEqual(result["tags_affected"], ["Roguelike", "Action"])
+        self.assertEqual(result["tag_affinity_tags_updated"], 2)
+
+        rows = await ratings.get_ratings(source="manual", response_format="detailed")
+        self.assertEqual(rows["total_matches"], 1)
+        self.assertEqual(rows["results"][0]["normalized_score"], 9.5)
+        self.assertEqual(rows["results"][0]["review_text"], "superb")
+
+        profile = await ratings.get_taste_profile()
+        self.assertEqual(profile["summary"]["manual_ratings"], 1)
+        self.assertEqual({t["tag"] for t in profile["top_tags"]}, {"roguelike", "action"})
+
+    async def test_rerating_overwrites_previous_manual_rating(self):
+        gid = await make_steam_game("Hades", 1, tags=["Roguelike"])
+        await ratings.rate_game(game_id=gid, score=6.0)
+        await ratings.rate_game(game_id=gid, score=9.0)
+
+        rows = await ratings.get_ratings(source="manual")
+        self.assertEqual(rows["total_matches"], 1)
+        self.assertEqual(rows["results"][0]["normalized_score"], 9.0)
+
+    async def test_fuzzy_name_resolution(self):
+        await make_steam_game("Sekiro: Shadows Die Twice", 814380, tags=["Souls-like"])
+        result = await ratings.rate_game(name="sekrio shadows die twice", score=8.0)
+        self.assertEqual(result["name"], "Sekiro: Shadows Die Twice")
+
+    async def test_score_out_of_range_raises(self):
+        from fastmcp.exceptions import ToolError
+
+        await make_steam_game("Hades", 1)
+        with self.assertRaisesRegex(ToolError, "between 0 and 10"):
+            await ratings.rate_game(name="hades", score=11)
+
+    async def test_unknown_game_raises(self):
+        from fastmcp.exceptions import ToolError
+
+        with self.assertRaisesRegex(ToolError, "not found"):
+            await ratings.rate_game(name="does-not-exist", score=5)
+
+    async def test_requires_identifier(self):
+        from fastmcp.exceptions import ToolError
+
+        with self.assertRaisesRegex(ToolError, "Provide game_id or name"):
+            await ratings.rate_game(score=5)

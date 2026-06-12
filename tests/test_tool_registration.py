@@ -21,30 +21,31 @@ EXPECTED_TOOLS = {
             "filter",
             "max_hltb_hours",
             "min_metacritic",
+            "min_opencritic",
             "protondb_tier",
             "sort_by",
             "limit",
             "offset",
             "platform",
             "response_format",
+            "tags",
+            "genres",
         },
         "required": set(),
     },
     "get_game_detail": {"params": {"name", "appid", "game_id"}, "required": set()},
-    "find_games_by_vibe": {
+    "discover_games": {
         "params": {
-            "vibe",
+            "vibes",
+            "sort_by",
             "max_hltb_hours",
+            "min_score",
             "unplayed_only",
             "protondb_min_tier",
             "limit",
             "offset",
             "response_format",
         },
-        "required": {"vibe"},
-    },
-    "get_recommendations": {
-        "params": {"max_hltb_hours", "unplayed_only", "limit", "offset", "response_format"},
         "required": set(),
     },
     "get_taste_profile": {"params": set(), "required": set()},
@@ -53,15 +54,21 @@ EXPECTED_TOOLS = {
         "required": set(),
     },
     "sync_ratings": {"params": set(), "required": set()},
+    "rate_game": {
+        "params": {"name", "game_id", "score", "review_text"},
+        "required": set(),
+    },
     "get_backlog_stats": {"params": set(), "required": set()},
     "refresh_library": {"params": {"platforms"}, "required": set()},
-    "get_integration_status": {"params": {"platforms", "verbose"}, "required": set()},
+    "get_integration_status": {
+        "params": {"platforms", "verbose", "force_refresh"},
+        "required": set(),
+    },
     "detect_farmed_games": {
         "params": {"dry_run", "threshold_hours", "min_games_per_day"},
         "required": set(),
     },
     "get_platform_breakdown": {"params": set(), "required": set()},
-    "sync_platform": {"params": {"platform"}, "required": {"platform"}},
     "set_hardware_preference": {"params": {"platforms"}, "required": {"platforms"}},
     "add_game_to_platform": {
         "params": {"name", "platform", "identifier_type", "identifier_value", "playtime_minutes"},
@@ -75,8 +82,7 @@ EXPECTED_ANNOTATIONS = {
     "search_games_batch": {"readOnlyHint": True, "idempotentHint": True},
     "get_library_stats": {"readOnlyHint": True, "idempotentHint": True},
     "get_game_detail": {"readOnlyHint": True, "idempotentHint": True},
-    "find_games_by_vibe": {"readOnlyHint": True, "idempotentHint": True},
-    "get_recommendations": {"readOnlyHint": True, "idempotentHint": True},
+    "discover_games": {"readOnlyHint": True, "idempotentHint": True},
     "get_taste_profile": {"readOnlyHint": True, "idempotentHint": True},
     "get_ratings": {"readOnlyHint": True, "idempotentHint": True},
     "get_backlog_stats": {"readOnlyHint": True, "idempotentHint": True},
@@ -84,8 +90,8 @@ EXPECTED_ANNOTATIONS = {
     "get_platform_breakdown": {"readOnlyHint": True, "idempotentHint": True},
     "detect_farmed_games": {"destructiveHint": False, "idempotentHint": True},
     "sync_ratings": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
+    "rate_game": {"readOnlyHint": False, "idempotentHint": True},
     "refresh_library": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
-    "sync_platform": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
     "set_hardware_preference": {"readOnlyHint": False, "idempotentHint": True},
     "add_game_to_platform": {"readOnlyHint": False, "idempotentHint": True},
     "set_nintendo_session": {"readOnlyHint": False, "idempotentHint": True},
@@ -94,8 +100,7 @@ EXPECTED_ANNOTATIONS = {
 PAGINATED_OUTPUTS = {
     "search_games",
     "get_library_stats",
-    "find_games_by_vibe",
-    "get_recommendations",
+    "discover_games",
     "get_ratings",
 }
 
@@ -109,9 +114,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_18(self):
+    async def test_tool_count_is_17(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 18)
+        self.assertEqual(len(tools), 17)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()
@@ -159,8 +164,8 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
     def test_server_instructions_include_discovery_workflow(self):
         instructions = main.mcp.instructions
         self.assertIn("sync_ratings", instructions)
-        self.assertIn("get_recommendations", instructions)
-        self.assertIn("find_games_by_vibe", instructions)
+        self.assertIn("rate_game", instructions)
+        self.assertIn("discover_games", instructions)
         self.assertIn("concise", instructions)
         self.assertIn("offset", instructions)
 

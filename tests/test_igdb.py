@@ -364,7 +364,7 @@ class IGDBLinkingConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         class _FakeDb:
             async def execute(self, sql: str, _params):
                 self_sql = " ".join(sql.split())
-                if self_sql != "INSERT INTO games (name) VALUES (?)":
+                if self_sql != "INSERT INTO games (name, name_normalized) VALUES (?, ?)":
                     raise AssertionError(f"unexpected SQL: {sql}")
                 state["next_game_id"] += 1
                 game_id = state["next_game_id"]

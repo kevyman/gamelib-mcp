@@ -74,13 +74,14 @@ Dependency direction is a clean DAG: `main → lifecycle`, `main → http_admin`
 **`gamelib_mcp/tools/`** — MCP tool handlers (business logic, formatting responses for AI consumption):
 - `library.py`: `search_games`, `search_games_batch`, `get_library_stats`
 - `detail.py`: `get_game_detail` (triggers lazy enrichment)
-- `discover.py`: `find_games_by_vibe`, `get_recommendations`
-- `ratings.py`: `sync_ratings`, `get_ratings`, `get_taste_profile`
+- `discover.py`: `discover_games` (vibe filters + taste/critic/value ranking with matched-tag explanations)
+- `ratings.py`: `sync_ratings`, `rate_game`, `get_ratings`, `get_taste_profile`
 - `stats.py`: `get_backlog_stats`
-- `admin.py`: `refresh_library`, `detect_farmed_games`, `set_nintendo_session`
-- `platforms.py`: `get_platform_breakdown`, `sync_platform`, `set_hardware_preference`, `add_game_to_platform`
+- `admin.py`: `refresh_library` (full or per-platform sync), `detect_farmed_games`, `set_nintendo_session`
+- `platforms.py`: `get_platform_breakdown`, `set_hardware_preference`, `add_game_to_platform`
 - `integrations.py`: `get_integration_status` (read-only filter over the inspector payload)
 - `common.py`: shared helpers — the steam-appid correlated subquery and the platform-alias resolver (imported by the modules above). The three `_GAME_ROLLUP_CTE` variants deliberately stay in their own modules; they differ.
+- `search.py`: tiered name-match SQL builder (exact > prefix > substring > token-AND over `games.name_normalized`) plus the fuzzy fallback, used by search, detail, and rate_game name resolution.
 
 **`gamelib_mcp/data/`** — Data fetching and caching layer (all async):
 - `db/`: SQLite package. `__init__.py` holds the connection/migration/init bottom layer and re-exports everything (so `gamelib_mcp.data.db.<name>` is the stable public API). Submodules: `schema.py` (versioned DDL), `claims.py` (enrichment row-claiming + batch loaders), `queries.py` (meta KV, lookups, platform assembly), `upserts.py` (game/platform/enrichment upserts + bulk Steam sync), `affinity.py` (tag-affinity recompute), `fuzzy.py` (fuzzy name matching).
@@ -103,7 +104,7 @@ Core tables, auto-migrated on startup in `db.init_db()`:
 - `game_platform_identifiers`: provider-specific IDs such as `steam_appid` and `gog_product_id`
 - `steam_platform_data`: Steam-only provider metadata
 - `game_platform_enrichment`: cross-platform review/release enrichment
-- `ratings`: normalized 1–10 scores from Backloggd (weight 1.0) and Steam (weight 0.5)
+- `ratings`: normalized 1–10 scores from Backloggd (weight 1.0), manual `rate_game` ratings (weight 1.0), and Steam (weight 0.5)
 - `tag_affinity`: precomputed per-tag preference scores (drives recommendations)
 - `meta`: key-value store (last sync timestamp, etc.)
 
@@ -112,6 +113,6 @@ WAL mode enabled, foreign keys on.
 ### Key Design Patterns
 
 - **Lazy enrichment**: `get_game_detail` fetches available provider-specific enrichment on demand and caches results. Bulk library calls skip unenriched fields.
-- **Tag affinity**: After `sync_ratings`, weighted tag scores are recomputed across all rated games. `get_recommendations` ranks unplayed games by these scores.
+- **Tag affinity**: After `sync_ratings` or `rate_game`, weighted tag scores are recomputed across all rated games (Steam feature flags from `data/tags.py` are excluded — they live in `games.features`, not `games.tags`). `discover_games` ranks unplayed games by these scores and explains each result via `matched_tags`.
 - **Rate limiting**: HLTB pre-warm uses an asyncio semaphore to avoid hammering the API.
 - **Fuzzy matching**: Title matching uses rapidfuzz/stdlib helpers where provider identifiers are unavailable.

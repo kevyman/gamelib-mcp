@@ -5,12 +5,13 @@ from typing import Literal
 from fastmcp.exceptions import ToolError
 
 from ..data.db import get_db, load_platforms_for_games
+from ..data.title_normalization import normalize_search_text
 from .common import (
     STEAM_APPID_SQL as _STEAM_APPID_SQL,
     clamp_limit as _clamp_limit,
-    like_escape as _like_escape,
     resolve_platform as _resolve_platform,
 )
+from .search import build_name_match, fuzzy_fallback_game_ids
 
 VALID_FILTERS = {"all", "unplayed", "played", "recent", "farmed"}
 
@@ -20,6 +21,7 @@ SORT_COLUMNS = {
     "playtime": "total_playtime_minutes",
     "name": "name",
     "metacritic": "metacritic_score",
+    "opencritic": "opencritic_score",
     "hltb": "hltb_main",
 }
 
@@ -29,15 +31,18 @@ _GAME_ROLLUP_CTE = f"""
 WITH game_rollup AS (
     SELECT g.id AS game_id,
            g.name,
+           COALESCE(g.name_normalized, lower(g.name)) AS name_normalized,
            {_STEAM_APPID_SQL} AS steam_appid,
            g.tags,
+           g.genres,
            g.hltb_main,
            g.is_farmed,
            COALESCE(SUM(COALESCE(gp.playtime_minutes, 0)), 0) AS total_playtime_minutes,
            COALESCE(SUM(COALESCE(gp.playtime_2weeks_minutes, 0)), 0) AS total_playtime_2weeks_minutes,
            MAX(CASE WHEN gp.platform = 'steam' THEN spd.protondb_tier END) AS protondb_tier,
            MAX(CASE WHEN gp.platform = 'steam' THEN spd.steam_review_desc END) AS steam_review_desc,
-           MAX(gpe.metacritic_score) AS metacritic_score
+           MAX(gpe.metacritic_score) AS metacritic_score,
+           MAX(gpe.opencritic_score) AS opencritic_score
     FROM games g
     LEFT JOIN game_platforms gp ON gp.game_id = g.id
     LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
@@ -54,11 +59,17 @@ async def search_games(
     platform: str | None = None,
     response_format: ResponseFormat = "concise",
 ) -> dict:
-    """Find games in the library by name substring match, optionally filtered by platform."""
+    """Find games in the library by name, optionally filtered by platform.
+
+    Matching is punctuation-insensitive and token-based ("sekiro shadow" finds
+    "Sekiro: Shadows Die Twice"); when nothing matches, a fuzzy fallback
+    catches misspellings and tags those results with match_type="fuzzy".
+    """
     limit = _clamp_limit(limit)
     platform = _resolve_platform(platform)
-    conditions = [r"lower(name) LIKE lower(?) ESCAPE '\'"]
-    params: list = [f"%{_like_escape(query)}%"]
+    match = build_name_match(query)
+    conditions = [match.where_sql]
+    params: list = list(match.where_params)
     if platform:
         conditions.append(
             "game_id IN (SELECT game_id FROM game_platforms WHERE platform = ? AND owned = 1)"
@@ -78,15 +89,21 @@ async def search_games(
         rows = await db.execute_fetchall(
             _GAME_ROLLUP_CTE
             + f"""
-            SELECT *
+            SELECT *, {match.rank_sql} AS match_rank
             FROM game_rollup
             WHERE {where}
-            ORDER BY total_playtime_minutes DESC, name ASC
+            ORDER BY match_rank ASC, total_playtime_minutes DESC, name ASC
             LIMIT ?
             OFFSET ?
             """,
-            (*params, limit, offset),
+            (*match.rank_params, *params, limit, offset),
         )
+
+    if total["c"] == 0 and match.fuzzy_eligible:
+        fuzzy_results = await _fuzzy_search(query, platform, limit, offset, response_format)
+        if fuzzy_results is not None:
+            return fuzzy_results
+
     return _envelope(
         await _format_rows(rows, response_format=response_format),
         total["c"],
@@ -95,27 +112,87 @@ async def search_games(
     )
 
 
+async def _fuzzy_search(
+    query: str,
+    platform: str | None,
+    limit: int,
+    offset: int,
+    response_format: ResponseFormat,
+) -> dict | None:
+    """LIKE tiers found nothing — retry with the fuzzy matcher. None = no match."""
+    game_ids = await fuzzy_fallback_game_ids(query)
+    if not game_ids:
+        return None
+
+    placeholders = ",".join("?" * len(game_ids))
+    conditions = [f"game_id IN ({placeholders})"]
+    params: list = list(game_ids)
+    if platform:
+        conditions.append(
+            "game_id IN (SELECT game_id FROM game_platforms WHERE platform = ? AND owned = 1)"
+        )
+        params.append(platform)
+    async with get_db() as db:
+        total = await db.execute_fetchone(
+            _GAME_ROLLUP_CTE
+            + f"""
+            SELECT COUNT(*) AS c
+            FROM game_rollup
+            WHERE {' AND '.join(conditions)}
+            """,
+            tuple(params),
+        )
+        if total["c"] == 0:
+            return None
+
+        rows = await db.execute_fetchall(
+            _GAME_ROLLUP_CTE
+            + f"""
+            SELECT *
+            FROM game_rollup
+            WHERE {' AND '.join(conditions)}
+            ORDER BY total_playtime_minutes DESC, name ASC
+            LIMIT ?
+            OFFSET ?
+            """,
+            (*params, limit, offset),
+        )
+
+    results = await _format_rows(rows, response_format=response_format)
+    for game in results:
+        game["match_type"] = "fuzzy"
+    return _envelope(results, total["c"], limit, offset)
+
+
 async def search_games_batch(
     queries: list[str],
     limit_per_query: int = 5,
 ) -> dict[str, list[dict]]:
     """Look up multiple game names in one call. Returns dict keyed by query."""
     limit_per_query = _clamp_limit(limit_per_query)
+    results = {}
     async with get_db() as db:
-        results = {}
         for query in queries:
+            match = build_name_match(query)
             rows = await db.execute_fetchall(
                 _GAME_ROLLUP_CTE
-                + r"""
-                SELECT *
+                + f"""
+                SELECT *, {match.rank_sql} AS match_rank
                 FROM game_rollup
-                WHERE lower(name) LIKE lower(?) ESCAPE '\'
-                ORDER BY total_playtime_minutes DESC, name ASC
+                WHERE {match.where_sql}
+                ORDER BY match_rank ASC, total_playtime_minutes DESC, name ASC
                 LIMIT ?
                 """,
-                (f"%{_like_escape(query)}%", limit_per_query),
+                (*match.rank_params, *match.where_params, limit_per_query),
             )
             results[query] = await _format_rows(rows)
+
+    for query, games in results.items():
+        if games or not normalize_search_text(query):
+            continue
+        fuzzy = await _fuzzy_search(query, None, limit_per_query, 0, "detailed")
+        if fuzzy is not None:
+            results[query] = fuzzy["results"]
     return results
 
 
@@ -129,16 +206,20 @@ async def get_library_stats(
     offset: int = 0,
     platform: str | None = None,
     response_format: ResponseFormat = "concise",
+    min_opencritic: int | None = None,
+    tags: list[str] | None = None,
+    genres: list[str] | None = None,
 ) -> dict:
     """
     Return filtered/sorted game list plus aggregate stats.
 
     filter: all | unplayed | played | recent | farmed
-    sort_by: playtime | name | metacritic | hltb
+    sort_by: playtime | name | metacritic | opencritic | hltb
     platform: steam | epic | gog | ps5 | nintendo | switch2 (optional — filter to games owned on that platform)
+    tags / genres: case-insensitive; a game must carry EVERY listed entry.
 
-    Note: min_metacritic and max_hltb_hours exclude games with no Metacritic
-    score / no HLTB data (NULL), so even min_metacritic=0 drops unscored games.
+    Note: min_metacritic, min_opencritic, and max_hltb_hours exclude games with
+    no score / no HLTB data (NULL), so even min_metacritic=0 drops unscored games.
     """
     limit = _clamp_limit(limit)
     if filter not in VALID_FILTERS:
@@ -172,6 +253,20 @@ async def get_library_stats(
     if min_metacritic is not None:
         conditions.append("metacritic_score >= ?")
         params.append(min_metacritic)
+
+    if min_opencritic is not None:
+        conditions.append("opencritic_score >= ?")
+        params.append(min_opencritic)
+
+    for column, wanted in (("tags", tags), ("genres", genres)):
+        for entry in wanted or []:
+            conditions.append(
+                f"""EXISTS (
+                    SELECT 1 FROM json_each(COALESCE({column}, '[]'))
+                    WHERE lower(value) = ?
+                )"""
+            )
+            params.append(entry.lower())
 
     if protondb_tier is not None:
         from ..data.protondb import TIER_ORDER
@@ -257,6 +352,7 @@ def _format_game(row, platforms: list[dict], response_format: ResponseFormat) ->
         "playtime_2weeks_hours": round((row["total_playtime_2weeks_minutes"] or 0) / 60, 1),
         "hltb_main": row["hltb_main"],
         "metacritic_score": row["metacritic_score"],
+        "opencritic_score": row["opencritic_score"],
         "protondb_tier": row["protondb_tier"],
         "steam_review_desc": row["steam_review_desc"],
         "is_farmed": bool(row["is_farmed"]),

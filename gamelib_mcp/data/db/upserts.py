@@ -5,9 +5,11 @@ from datetime import datetime, timezone
 from . import (
     STEAM_APP_ID,
     STEAM_PLATFORM,
+    _backfill_name_normalized,
     _iter_chunks,
     get_db,
 )
+from ..title_normalization import normalize_search_text
 
 
 async def upsert_game(
@@ -41,7 +43,7 @@ async def upsert_game(
         else:
             game_id = row["id"]
 
-        updates = {"name": name, **fields}
+        updates = {"name": name, "name_normalized": normalize_search_text(name), **fields}
         cols_sql = ", ".join(f"{column} = ?" for column in updates)
         await db.execute(
             f"UPDATE games SET {cols_sql} WHERE id = ?",
@@ -234,7 +236,8 @@ async def bulk_upsert_steam_library(
                        WHERE resolved.game_id = games.id
                        ORDER BY resolved.row_order DESC
                        LIMIT 1
-                   )
+                   ),
+                   name_normalized = NULL
                    WHERE id IN (
                        SELECT game_id
                        FROM resolved
@@ -366,6 +369,9 @@ async def bulk_upsert_steam_library(
 
             await db.commit()
 
+        # Pure-SQL inserts/renames above leave name_normalized NULL; fill it in
+        # one pass so search matching never sees a stale value.
+        await _backfill_name_normalized(db)
         await db.execute("DROP TABLE IF EXISTS temp_steam_library_sync")
         await db.commit()
 
