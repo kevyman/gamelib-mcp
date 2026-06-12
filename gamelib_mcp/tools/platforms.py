@@ -59,7 +59,7 @@ async def get_platform_breakdown() -> dict:
 
 async def set_hardware_preference(platforms: list[str]) -> dict:
     """
-    Set your hardware preference order for get_recommendations suggested_platform.
+    Set your hardware preference order for discover_games suggested_platform.
 
     platforms: ordered list, highest priority first.
     e.g. ["switch2", "ps5", "steam"]
