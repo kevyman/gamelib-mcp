@@ -28,12 +28,14 @@ class GameSummary(FlexibleModel):
     playtime_2weeks_hours: float | None = None
     hltb_main: float | None = None
     metacritic_score: int | None = None
+    opencritic_score: int | None = None
     protondb_tier: str | None = None
     steam_review_desc: str | None = None
     is_farmed: bool | None = None
     tags: list[str] | None = None
     suggested_platform: str | None = None
     match_score: float | None = None
+    match_type: str | None = None
 
 
 class PaginatedGamesResponse(FlexibleModel):
@@ -78,8 +80,13 @@ class RatingsResponse(FlexibleModel):
 class GameDetailResponse(GameSummary):
     release_date: str | None = None
     genres: list[str] | None = None
+    features: list[str] | None = None
     short_description: str | None = None
     steam_review_score: int | None = None
+    metacritic_url: str | None = None
+    opencritic_tier: str | None = None
+    opencritic_percent_rec: float | None = None
+    opencritic_url: str | None = None
     hltb_extra: float | None = None
     hltb_complete: float | None = None
     protondb_tier: str | None = None
@@ -127,8 +134,14 @@ class PlatformBreakdownResponse(FlexibleModel):
     overlap_games: list[dict[str, Any]]
 
 
-class SyncPlatformResponse(FlexibleModel):
-    pass
+class RateGameResponse(FlexibleModel):
+    game_id: int
+    name: str
+    source: str
+    score: float
+    review_text: str | None = None
+    tags_affected: list[str]
+    tag_affinity_tags_updated: int
 
 
 class HardwarePreferenceResponse(FlexibleModel):

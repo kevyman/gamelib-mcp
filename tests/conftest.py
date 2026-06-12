@@ -160,6 +160,7 @@ async def make_steam_game(
     hltb_main: float | None = None,
     is_farmed: int = 0,
     metacritic_score: int | None = None,
+    opencritic_score: int | None = None,
     protondb_tier: str | None = None,
     steam_review_desc: str | None = None,
     steam_review_score: int | None = None,
@@ -191,6 +192,11 @@ async def make_steam_game(
         steam_fields["rtime_last_played"] = rtime_last_played
     if steam_fields:
         await add_steam_data(gpid, **steam_fields)
+    enrichment_fields: dict = {}
     if metacritic_score is not None:
-        await add_enrichment(gpid, metacritic_score=metacritic_score)
+        enrichment_fields["metacritic_score"] = metacritic_score
+    if opencritic_score is not None:
+        enrichment_fields["opencritic_score"] = opencritic_score
+    if enrichment_fields:
+        await add_enrichment(gpid, **enrichment_fields)
     return game_id

@@ -61,9 +61,16 @@ class GetGameDetailTests(ToolDBTestCase):
                 "is_farmed",
                 "genres",
                 "tags",
+                "features",
                 "short_description",
                 "steam_review_score",
                 "steam_review_desc",
+                "metacritic_score",
+                "metacritic_url",
+                "opencritic_score",
+                "opencritic_tier",
+                "opencritic_percent_rec",
+                "opencritic_url",
                 "hltb_main",
                 "hltb_extra",
                 "hltb_complete",
@@ -86,6 +93,45 @@ class GetGameDetailTests(ToolDBTestCase):
         await make_steam_game("Hollow Knight", 367520, playtime_minutes=120)
         result = await detail.get_game_detail(name="hollow")
         self.assertEqual(result["name"], "Hollow Knight")
+
+    async def test_lookup_by_name_across_punctuation(self):
+        await make_steam_game("Sekiro: Shadows Die Twice", 814380, playtime_minutes=344)
+        result = await detail.get_game_detail(name="sekiro shadow")
+        self.assertEqual(result["name"], "Sekiro: Shadows Die Twice")
+
+    async def test_lookup_by_name_prefers_exact_match_over_longer_titles(self):
+        await make_steam_game("Hades II", 1145350, playtime_minutes=600)
+        await make_steam_game("Hades", 1145360, playtime_minutes=10)
+        result = await detail.get_game_detail(name="hades")
+        self.assertEqual(result["name"], "Hades")
+
+    async def test_lookup_by_name_falls_back_to_fuzzy(self):
+        await make_steam_game("Sekiro: Shadows Die Twice", 814380, playtime_minutes=344)
+        result = await detail.get_game_detail(name="sekrio shadows die twice")
+        self.assertEqual(result["name"], "Sekiro: Shadows Die Twice")
+
+    async def test_hoists_best_opencritic_fields_from_platforms(self):
+        from conftest import add_enrichment, add_platform
+
+        gid = await make_steam_game("Sekiro: Shadows Die Twice", 814380)
+        # Second platform with a higher OpenCritic score must win the hoist.
+        ps5_gpid = await add_platform(gid, "ps5")
+        await add_enrichment(
+            ps5_gpid,
+            opencritic_score=91,
+            opencritic_tier="Mighty",
+            opencritic_percent_rec=95.4,
+            opencritic_url="https://opencritic.com/game/6630/sekiro-shadows-die-twice",
+            metacritic_score=88,
+        )
+        result = await detail.get_game_detail(game_id=gid)
+        self.assertEqual(result["opencritic_score"], 91)
+        self.assertEqual(result["opencritic_tier"], "Mighty")
+        self.assertEqual(result["metacritic_score"], 88)
+        self.assertEqual(
+            result["opencritic_url"],
+            "https://opencritic.com/game/6630/sekiro-shadows-die-twice",
+        )
 
     async def test_includes_rating_when_present(self):
         gid = await seed_game("Disco Elysium")

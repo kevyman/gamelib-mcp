@@ -13,7 +13,8 @@ WITH game_rollup AS (
            g.is_farmed,
            COALESCE(SUM(COALESCE(gp.playtime_minutes, 0)), 0) AS total_playtime_minutes,
            COALESCE(SUM(COALESCE(gp.playtime_2weeks_minutes, 0)), 0) AS total_playtime_2weeks_minutes,
-           MAX(gpe.metacritic_score) AS metacritic_score
+           MAX(gpe.metacritic_score) AS metacritic_score,
+           MAX(gpe.opencritic_score) AS opencritic_score
     FROM games g
     LEFT JOIN game_platforms gp ON gp.game_id = g.id
     LEFT JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
@@ -69,6 +70,17 @@ async def get_backlog_stats() -> dict:
             LIMIT 1
             """
         )
+        best_unplayed_opencritic = await db.execute_fetchone(
+            _GAME_ROLLUP_CTE
+            + """
+            SELECT name, opencritic_score
+            FROM game_rollup
+            WHERE (total_playtime_minutes = 0 OR is_farmed = 1)
+              AND opencritic_score IS NOT NULL
+            ORDER BY opencritic_score DESC
+            LIMIT 1
+            """
+        )
         best_unplayed_rated = await db.execute_fetchone(
             _GAME_ROLLUP_CTE
             + """
@@ -116,6 +128,14 @@ async def get_backlog_stats() -> dict:
                 "score": best_unplayed_metacritic["metacritic_score"],
             }
             if best_unplayed_metacritic
+            else None
+        ),
+        "highest_rated_unplayed_opencritic": (
+            {
+                "name": best_unplayed_opencritic["name"],
+                "score": best_unplayed_opencritic["opencritic_score"],
+            }
+            if best_unplayed_opencritic
             else None
         ),
         "highest_rated_unplayed_personal": (

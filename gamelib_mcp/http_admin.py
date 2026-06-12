@@ -9,6 +9,7 @@ importing the FastMCP instance, which keeps the dependency one-way
 import html
 import logging
 import os
+import time
 from urllib.parse import parse_qs
 
 from starlette.requests import Request
@@ -114,9 +115,22 @@ class BearerAuthMiddleware:
         await send({"type": "http.response.body", "body": b"Unauthorized"})
 
 
-async def _integration_status_payload() -> dict[str, dict]:
+# The inspectors probe binaries/config mounts on every call, which is too
+# expensive to repeat per request; status changes on the order of syncs.
+_INTEGRATION_STATUS_TTL_SECONDS = 60.0
+_integration_status_cache: tuple[float, dict] | None = None
+
+
+async def _integration_status_payload(force_refresh: bool = False) -> dict[str, dict]:
+    global _integration_status_cache
+
     from .data.db import get_meta_prefix
     from .integrations.inspectors import inspect_all_integrations_dict
+
+    if not force_refresh and _integration_status_cache is not None:
+        cached_at, payload = _integration_status_cache
+        if time.monotonic() - cached_at < _INTEGRATION_STATUS_TTL_SECONDS:
+            return payload
 
     last_sync_by_platform: dict[str, dict[str, str]] = {}
     try:
@@ -133,7 +147,9 @@ async def _integration_status_payload() -> dict[str, dict]:
     except Exception:
         logger.exception("Failed to load integration sync metadata")
 
-    return inspect_all_integrations_dict(last_sync_by_platform=last_sync_by_platform)
+    payload = inspect_all_integrations_dict(last_sync_by_platform=last_sync_by_platform)
+    _integration_status_cache = (time.monotonic(), payload)
+    return payload
 
 
 def _render_integrations_ui(payload: dict[str, dict]) -> str:
