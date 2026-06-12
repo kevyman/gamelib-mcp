@@ -12,3 +12,4 @@ __pycache__/
 retry_deploy.sh
 .worktrees/
 gamelib.db
+.codex
