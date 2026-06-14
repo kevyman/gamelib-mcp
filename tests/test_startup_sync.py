@@ -682,29 +682,28 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(seen["platforms"], ["gog"])
 
-    async def test_refresh_library_reuses_running_startup_refresh_task(self) -> None:
+    async def test_refresh_library_reports_already_running_when_startup_in_flight(self) -> None:
         import gamelib_mcp.lifecycle as main_module
 
         release = asyncio.Event()
-        refresh_result = {"steam": {"games_upserted": 3}}
 
         async def running_refresh() -> dict:
             await release.wait()
-            return refresh_result
+            return {"steam": {"games_upserted": 3}}
 
         startup_task = asyncio.create_task(running_refresh())
         main_module._LIBRARY_REFRESH_TASK = startup_task
 
-        with patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock()) as mock_fetch_library:
-            refresh_call = asyncio.create_task(admin_tools.refresh_library())
-            await asyncio.sleep(0)
-            self.assertFalse(refresh_call.done())
-
+        try:
+            with patch("gamelib_mcp.tools.admin._mark_sync_started", AsyncMock()):
+                ack = await admin_tools.refresh_library()
+            self.assertEqual(ack["status"], "already_running")
+            self.assertTrue(ack["already_running"])
+            self.assertFalse(startup_task.done())
+        finally:
             release.set()
-            result = await asyncio.wait_for(refresh_call, timeout=0.1)
-
-        self.assertEqual(result, refresh_result)
-        mock_fetch_library.assert_not_called()
+            await startup_task
+            main_module._LIBRARY_REFRESH_TASK = None
 
 
 if __name__ == "__main__":

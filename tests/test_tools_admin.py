@@ -4,6 +4,7 @@ Covers detect_farmed_games (pure DB) and set_nintendo_session, including its
 successful file-write path (writes to a temp NINTENDO_COOKIES_FILE).
 """
 
+import asyncio
 import json
 
 from fastmcp.exceptions import ToolError
@@ -13,6 +14,7 @@ from conftest import ToolDBTestCase, make_steam_game
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.db import get_meta
 from gamelib_mcp.tools import admin
+from gamelib_mcp import lifecycle
 
 
 class DetectFarmedGamesTests(ToolDBTestCase):
@@ -125,7 +127,7 @@ class RefreshLibraryValidationTests(ToolDBTestCase):
             patch.object(admin, "sync_epic", AsyncMock(return_value={"platform": "epic"})),
             patch.object(admin, "detect_farmed_games", AsyncMock(return_value={"candidates": 0})),
         ):
-            result = await admin.refresh_library(["steam", "epic"], ctx=ctx)
+            result = await admin.run_library_sync(["steam", "epic"], ctx=ctx)
 
         self.assertEqual(result["steam"], {"platform": "steam"})
         self.assertEqual(result["epic"], {"platform": "epic"})
@@ -159,3 +161,50 @@ class RunLibrarySyncStateTests(ToolDBTestCase):
         self.assertIn("error", result["steam"])
         self.assertEqual(await get_meta("sync_platform_state_steam"), "error")
         self.assertEqual(await get_meta("library_sync_status"), "idle")
+
+
+class RefreshLibraryAckTests(ToolDBTestCase):
+    async def asyncTearDown(self) -> None:
+        task = lifecycle._LIBRARY_REFRESH_TASK
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        lifecycle._LIBRARY_REFRESH_TASK = None
+        await super().asyncTearDown()
+
+    async def test_returns_started_without_blocking(self):
+        release = asyncio.Event()
+
+        async def slow_worker(platforms=None):
+            await release.wait()
+            return {}
+
+        with patch("gamelib_mcp.lifecycle._admin_refresh_library", AsyncMock(side_effect=slow_worker)):
+            ack = await admin.refresh_library(["steam"])
+            self.assertEqual(ack["status"], "started")
+            self.assertFalse(ack["already_running"])
+            self.assertEqual(ack["platforms"], ["steam"])
+            self.assertEqual(await get_meta("library_sync_status"), "in_progress")
+            release.set()
+
+    async def test_returns_already_running_when_in_flight(self):
+        release = asyncio.Event()
+
+        async def slow_worker(platforms=None):
+            await release.wait()
+            return {}
+
+        with patch("gamelib_mcp.lifecycle._admin_refresh_library", AsyncMock(side_effect=slow_worker)):
+            first = await admin.refresh_library(["steam"])
+            second = await admin.refresh_library(["gog"])
+            self.assertEqual(first["status"], "started")
+            self.assertEqual(second["status"], "already_running")
+            self.assertTrue(second["already_running"])
+            release.set()
+
+    async def test_rejects_unknown_platform(self):
+        with self.assertRaises(ToolError):
+            await admin.refresh_library(["nope"])

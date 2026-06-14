@@ -136,8 +136,41 @@ async def refresh_library(
     platforms: list[str] | None = None,
     ctx=None,
 ) -> dict:
-    """Deprecated alias for run_library_sync. Do not call directly."""
-    return await run_library_sync(platforms=platforms, ctx=ctx)
+    """
+    Schedule a library re-sync and return immediately (non-blocking).
+
+    Starts a background sync of the owned game library from configured
+    platforms and returns an acknowledgement. Poll get_sync_status to follow
+    progress. platforms can be omitted (all configured platforms) or a subset.
+    """
+    from ..lifecycle import _ensure_startup_refresh, get_startup_refresh_task
+
+    def _resolve(p: str) -> str:
+        return PLATFORM_ALIASES.get(p.lower(), p.lower())
+
+    requested_targets = list(platforms) if platforms else sorted(SYNCABLE_PLATFORMS)
+    unknown = [p for p in requested_targets if _resolve(p) not in SYNCABLE_PLATFORMS]
+    if unknown:
+        valid = sorted(SYNCABLE_PLATFORMS | set(PLATFORM_ALIASES))
+        raise ToolError(f"Unknown platform '{', '.join(unknown)}'. Valid: {valid}")
+
+    targets = {_resolve(p) for p in requested_targets}
+
+    existing = get_startup_refresh_task()
+    if existing is not None and not existing.done():
+        return {
+            "status": "already_running",
+            "platforms": sorted(targets),
+            "already_running": True,
+        }
+
+    await _mark_sync_started(targets)
+    await _ensure_startup_refresh(sorted(targets))
+    return {
+        "status": "started",
+        "platforms": sorted(targets),
+        "already_running": False,
+    }
 
 
 async def set_nintendo_session(cookies: str) -> dict:
