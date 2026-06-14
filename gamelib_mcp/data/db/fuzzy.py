@@ -34,6 +34,20 @@ def _has_conflicting_sequel_identity(query: str, candidate: str) -> bool:
     return _sequel_identity_tokens(query) != _sequel_identity_tokens(candidate)
 
 
+def find_conflicting_fuzzy_key(
+    name: str,
+    candidates: dict[int, str],
+    cutoff: int = 85,
+) -> int | None:
+    """Return a rejected fuzzy candidate when title identity tokens conflict."""
+    best_id = extract_best_fuzzy_key(name, candidates, cutoff=cutoff)
+    if best_id is None:
+        return None
+    if not _has_conflicting_sequel_identity(name, candidates[best_id]):
+        return None
+    return best_id
+
+
 async def load_fuzzy_candidates() -> dict[int, str]:
     """Load all game id->name pairs for use with find_game_by_name_fuzzy."""
     async with get_db() as db:
