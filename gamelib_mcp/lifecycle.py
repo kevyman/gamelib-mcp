@@ -305,8 +305,8 @@ async def _run_startup_refresh() -> dict:
     from .data.db import set_meta_many
 
     if _admin_refresh_library is None:
-        from .tools.admin import refresh_library
-        _admin_refresh_library = refresh_library
+        from .tools.admin import run_library_sync
+        _admin_refresh_library = run_library_sync
 
     started_at = datetime.now(timezone.utc).isoformat()
     await set_meta_many(

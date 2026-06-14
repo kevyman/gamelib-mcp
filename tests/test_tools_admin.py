@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 from conftest import ToolDBTestCase, make_steam_game
 from gamelib_mcp.data import db as db_module
+from gamelib_mcp.data.db import get_meta
 from gamelib_mcp.tools import admin
 
 
@@ -132,3 +133,29 @@ class RefreshLibraryValidationTests(ToolDBTestCase):
         self.assertIn("Refreshing 2 platform(s)", ctx.infos)
         self.assertIn("Finished steam refresh", ctx.infos)
         self.assertIn("Finished epic refresh", ctx.infos)
+
+
+class RunLibrarySyncStateTests(ToolDBTestCase):
+    async def test_writes_done_state_for_successful_platform(self):
+        async def fake_steam():
+            # while running, state must read "running"
+            assert await get_meta("sync_platform_state_steam") == "running"
+            return {"games_upserted": 3}
+
+        with patch("gamelib_mcp.tools.admin.fetch_library", side_effect=fake_steam), \
+             patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.admin._schedule_background_enrich", AsyncMock()):
+            result = await admin.run_library_sync(["steam"])
+
+        self.assertEqual(result["steam"], {"games_upserted": 3})
+        self.assertEqual(await get_meta("sync_platform_state_steam"), "done")
+        self.assertEqual(await get_meta("library_sync_status"), "idle")
+
+    async def test_marks_platform_error_on_failure(self):
+        with patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(side_effect=RuntimeError("boom"))), \
+             patch("gamelib_mcp.tools.admin._schedule_background_enrich", AsyncMock()):
+            result = await admin.run_library_sync(["steam"])
+
+        self.assertIn("error", result["steam"])
+        self.assertEqual(await get_meta("sync_platform_state_steam"), "error")
+        self.assertEqual(await get_meta("library_sync_status"), "idle")

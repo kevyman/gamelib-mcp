@@ -6,6 +6,7 @@ import logging
 import os
 import statistics
 from collections import defaultdict
+from datetime import datetime, timezone
 
 from fastmcp.exceptions import ToolError
 
@@ -21,7 +22,26 @@ from .common import PLATFORM_ALIASES, SYNCABLE_PLATFORMS, info as _info, report_
 logger = logging.getLogger(__name__)
 
 
-async def refresh_library(
+async def _mark_sync_started(targets: set[str]) -> None:
+    """Mark the overall sync in-progress and each selected platform running."""
+    from ..data.db import set_meta_many
+
+    updates: dict[str, str | None] = {
+        "library_sync_status": "in_progress",
+        "library_sync_started_at": datetime.now(timezone.utc).isoformat(),
+        "library_sync_finished_at": None,
+    }
+    for name in targets:
+        updates[f"sync_platform_state_{name}"] = "running"
+    await set_meta_many(updates)
+
+
+async def _mark_platform_state(name: str, state: str) -> None:
+    from ..data.db import set_meta
+    await set_meta(f"sync_platform_state_{name}", state)
+
+
+async def run_library_sync(
     platforms: list[str] | None = None,
     ctx=None,
 ) -> dict:
@@ -66,6 +86,7 @@ async def refresh_library(
         return await fn()
 
     selected = [(name, fn) for name, fn in platform_syncs.items() if name in targets]
+    await _mark_sync_started(targets)
     await report_progress(ctx, 0, len(selected))
     await _info(ctx, f"Refreshing {len(selected)} platform(s)")
     outcomes = await asyncio.gather(
@@ -78,9 +99,11 @@ async def refresh_library(
         result_name = result_names.get(name, name)
         if isinstance(outcome, BaseException):
             results[result_name] = {"error": str(outcome)}
+            await _mark_platform_state(name, "error")
             await _info(ctx, f"Failed {result_name} refresh: {outcome}")
         else:
             results[result_name] = outcome
+            await _mark_platform_state(name, "done")
             await _info(ctx, f"Finished {result_name} refresh")
         await report_progress(ctx, index, len(selected))
 
@@ -101,7 +124,20 @@ async def refresh_library(
     except Exception:
         logger.exception("Failed to schedule background enrichment after library refresh")
 
+    from ..data.db import set_meta_many
+    await set_meta_many({
+        "library_sync_status": "idle",
+        "library_sync_finished_at": datetime.now(timezone.utc).isoformat(),
+    })
     return results
+
+
+async def refresh_library(
+    platforms: list[str] | None = None,
+    ctx=None,
+) -> dict:
+    """Deprecated alias for run_library_sync. Do not call directly."""
+    return await run_library_sync(platforms=platforms, ctx=ctx)
 
 
 async def set_nintendo_session(cookies: str) -> dict:
