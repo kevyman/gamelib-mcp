@@ -26,13 +26,15 @@ import httpx
 from bs4 import BeautifulSoup
 
 from gamelib_mcp.data.db import (
+    find_conflicting_fuzzy_key,
     load_fuzzy_candidates,
+    repair_misclassified_platform_row,
     upsert_game_platform,
     upsert_game_platform_enrichment,
     upsert_game_platform_identifier,
 )
 from gamelib_mcp.data.igdb import resolve_and_link_game, PLATFORM_TO_IGDB
-from gamelib_mcp.data.title_normalization import prepare_catalog_title
+from gamelib_mcp.data.title_normalization import normalize_search_text, prepare_catalog_title
 
 logger = logging.getLogger(__name__)
 
@@ -428,14 +430,19 @@ async def sync_nintendo() -> dict:
         return {"added": 0, "matched": 0, "skipped": 0}
 
     added = matched = skipped = 0
-    candidates = await load_fuzzy_candidates()
-
+    prepared_entries = []
     for entry in entries:
         name = prepare_catalog_title(entry["name"])
         if not name:
             skipped += 1
             continue
+        prepared_entries.append((entry, name))
 
+    current_titles = {normalize_search_text(name) for _entry, name in prepared_entries}
+    candidates = await load_fuzzy_candidates()
+
+    for entry, name in prepared_entries:
+        conflicting_game_id = find_conflicting_fuzzy_key(name, candidates)
         igdb_platform_id = PLATFORM_TO_IGDB.get(PLATFORM)
         game_id, igdb_game = await resolve_and_link_game(name, igdb_platform_id, candidates)
         if game_id in candidates:
@@ -443,6 +450,15 @@ async def sync_nintendo() -> dict:
         else:
             candidates[game_id] = name
             added += 1
+
+        if conflicting_game_id is not None and conflicting_game_id != game_id:
+            conflicting_title = candidates.get(conflicting_game_id)
+            if conflicting_title and normalize_search_text(conflicting_title) not in current_titles:
+                await repair_misclassified_platform_row(
+                    source_game_id=conflicting_game_id,
+                    target_game_id=game_id,
+                    platform=PLATFORM,
+                )
 
         platform_id = await upsert_game_platform(
             game_id=game_id,

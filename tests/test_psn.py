@@ -251,6 +251,50 @@ class SyncPsnSyncTests(unittest.TestCase):
             owned=1,
         )
 
+    def test_repairs_stale_conflicting_platform_row(self) -> None:
+        entries = [{"name": "Borderlands 4", "playtime_minutes": 45}]
+        mock_repair = AsyncMock()
+
+        with (
+            patch.dict("os.environ", {"PSN_NPSSO": "fake"}, clear=False),
+            patch("gamelib_mcp.data.psn.fetch_psn_library", AsyncMock(return_value=entries)),
+            patch("gamelib_mcp.data.psn.load_fuzzy_candidates", AsyncMock(return_value={7: "Borderlands 2"})),
+            patch("gamelib_mcp.data.psn.find_conflicting_fuzzy_key", return_value=7),
+            patch("gamelib_mcp.data.psn.resolve_and_link_game", AsyncMock(return_value=(42, None))),
+            patch("gamelib_mcp.data.psn.repair_misclassified_platform_row", mock_repair),
+            patch("gamelib_mcp.data.psn.upsert_game_platform", AsyncMock(return_value=99)),
+        ):
+            _run_async(psn.sync_psn())
+
+        mock_repair.assert_awaited_once_with(
+            source_game_id=7,
+            target_game_id=42,
+            platform="ps5",
+        )
+
+    def test_does_not_repair_when_conflicting_source_title_is_in_current_payload(self) -> None:
+        entries = [
+            {"name": "Borderlands 2", "playtime_minutes": 120},
+            {"name": "Borderlands 4", "playtime_minutes": 45},
+        ]
+        mock_repair = AsyncMock()
+
+        with (
+            patch.dict("os.environ", {"PSN_NPSSO": "fake"}, clear=False),
+            patch("gamelib_mcp.data.psn.fetch_psn_library", AsyncMock(return_value=entries)),
+            patch("gamelib_mcp.data.psn.load_fuzzy_candidates", AsyncMock(return_value={7: "Borderlands 2"})),
+            patch("gamelib_mcp.data.psn.find_conflicting_fuzzy_key", side_effect=[None, 7]),
+            patch(
+                "gamelib_mcp.data.psn.resolve_and_link_game",
+                AsyncMock(side_effect=[(7, None), (42, None)]),
+            ),
+            patch("gamelib_mcp.data.psn.repair_misclassified_platform_row", mock_repair),
+            patch("gamelib_mcp.data.psn.upsert_game_platform", AsyncMock(return_value=99)),
+        ):
+            _run_async(psn.sync_psn())
+
+        mock_repair.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

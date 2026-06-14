@@ -195,6 +195,70 @@ class SyncNintendoTests(unittest.TestCase):
         )
         mock_upsert_identifier.assert_awaited_once_with(99, nintendo.NINTENDO_TITLE_ID, "0101")
 
+    def test_repairs_stale_conflicting_platform_row(self) -> None:
+        entries = [
+            {
+                "name": "PowerWash Simulator 2",
+                "playtime_minutes": None,
+                "title_id": "0101",
+            }
+        ]
+        mock_repair = AsyncMock()
+
+        with (
+            patch.dict("os.environ", {"NINTENDO_SESSION_TOKEN": ""}, clear=False),
+            patch("gamelib_mcp.data.nintendo._nxapi_available", return_value=False),
+            patch("gamelib_mcp.data.nintendo._load_vgcs_cookies", return_value={"session": "cookie"}),
+            patch("gamelib_mcp.data.nintendo.fetch_nintendo_library_vgcs", AsyncMock(return_value=entries)),
+            patch("gamelib_mcp.data.nintendo.load_fuzzy_candidates", AsyncMock(return_value={7: "PowerWash Simulator"})),
+            patch("gamelib_mcp.data.nintendo.find_conflicting_fuzzy_key", return_value=7),
+            patch("gamelib_mcp.data.nintendo.resolve_and_link_game", AsyncMock(return_value=(42, None))),
+            patch("gamelib_mcp.data.nintendo.repair_misclassified_platform_row", mock_repair),
+            patch("gamelib_mcp.data.nintendo.upsert_game_platform", AsyncMock(return_value=99)),
+            patch("gamelib_mcp.data.nintendo.upsert_game_platform_identifier", AsyncMock()),
+        ):
+            asyncio.run(nintendo.sync_nintendo())
+
+        mock_repair.assert_awaited_once_with(
+            source_game_id=7,
+            target_game_id=42,
+            platform="switch2",
+        )
+
+    def test_does_not_repair_when_conflicting_source_title_is_in_current_payload(self) -> None:
+        entries = [
+            {
+                "name": "PowerWash Simulator",
+                "playtime_minutes": None,
+                "title_id": "0101",
+            },
+            {
+                "name": "PowerWash Simulator 2",
+                "playtime_minutes": None,
+                "title_id": "0102",
+            },
+        ]
+        mock_repair = AsyncMock()
+
+        with (
+            patch.dict("os.environ", {"NINTENDO_SESSION_TOKEN": ""}, clear=False),
+            patch("gamelib_mcp.data.nintendo._nxapi_available", return_value=False),
+            patch("gamelib_mcp.data.nintendo._load_vgcs_cookies", return_value={"session": "cookie"}),
+            patch("gamelib_mcp.data.nintendo.fetch_nintendo_library_vgcs", AsyncMock(return_value=entries)),
+            patch("gamelib_mcp.data.nintendo.load_fuzzy_candidates", AsyncMock(return_value={7: "PowerWash Simulator"})),
+            patch("gamelib_mcp.data.nintendo.find_conflicting_fuzzy_key", side_effect=[None, 7]),
+            patch(
+                "gamelib_mcp.data.nintendo.resolve_and_link_game",
+                AsyncMock(side_effect=[(7, None), (42, None)]),
+            ),
+            patch("gamelib_mcp.data.nintendo.repair_misclassified_platform_row", mock_repair),
+            patch("gamelib_mcp.data.nintendo.upsert_game_platform", AsyncMock(return_value=99)),
+            patch("gamelib_mcp.data.nintendo.upsert_game_platform_identifier", AsyncMock()),
+        ):
+            asyncio.run(nintendo.sync_nintendo())
+
+        mock_repair.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

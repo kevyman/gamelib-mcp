@@ -1061,6 +1061,7 @@ from .queries import (  # noqa: E402
 from .upserts import (  # noqa: E402
     upsert_game,
     upsert_game_platform,
+    repair_misclassified_platform_row,
     upsert_game_platform_identifier,
     upsert_steam_platform_data,
     bulk_upsert_steam_library,
@@ -1069,4 +1070,5 @@ from .upserts import (  # noqa: E402
 from .fuzzy import (  # noqa: E402
     load_fuzzy_candidates,
     find_game_by_name_fuzzy,
+    find_conflicting_fuzzy_key,
 )
