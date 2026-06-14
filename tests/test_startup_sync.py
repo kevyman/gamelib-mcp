@@ -682,6 +682,35 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(seen["platforms"], ["gog"])
 
+    async def test_reconcile_resets_stale_in_progress(self) -> None:
+        from gamelib_mcp.lifecycle import reconcile_stale_sync_status
+        from gamelib_mcp.data.db import set_meta_many, get_meta, init_db
+
+        await init_db()
+        await set_meta_many(
+            {
+                "library_sync_status": "in_progress",
+                "sync_platform_state_steam": "running",
+                "sync_platform_state_gog": "done",
+            }
+        )
+
+        await reconcile_stale_sync_status()
+
+        self.assertEqual(await get_meta("library_sync_status"), "idle")
+        self.assertEqual(await get_meta("sync_platform_state_steam"), "error")
+        self.assertEqual(await get_meta("sync_platform_state_gog"), "done")
+        self.assertIsNotNone(await get_meta("library_sync_error"))
+
+    async def test_reconcile_noop_when_idle(self) -> None:
+        from gamelib_mcp.lifecycle import reconcile_stale_sync_status
+        from gamelib_mcp.data.db import set_meta, get_meta, init_db
+
+        await init_db()
+        await set_meta("library_sync_status", "idle")
+        await reconcile_stale_sync_status()
+        self.assertEqual(await get_meta("library_sync_status"), "idle")
+
     async def test_refresh_library_reports_already_running_when_startup_in_flight(self) -> None:
         import gamelib_mcp.lifecycle as main_module
 

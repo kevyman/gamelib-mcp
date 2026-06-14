@@ -300,6 +300,30 @@ def _summarize_refresh_result(result: object) -> str | None:
     return "; ".join(errors) if errors else None
 
 
+async def reconcile_stale_sync_status() -> None:
+    """Reset a sync left `in_progress` by a crash.
+
+    At process start there is never a live refresh task, so an `in_progress`
+    status can only be stale. Flip it to idle, note the interruption, and mark
+    any platform still `running` as `error`.
+    """
+    from .data.db import get_meta, get_meta_prefix, set_meta_many
+
+    if await get_meta("library_sync_status") != "in_progress":
+        return
+
+    updates: dict[str, str | None] = {
+        "library_sync_status": "idle",
+        "library_sync_finished_at": datetime.now(timezone.utc).isoformat(),
+        "library_sync_error": "Previous sync interrupted before completion",
+    }
+    for key, value in (await get_meta_prefix("sync_platform_state_")).items():
+        if value == "running":
+            updates[key] = "error"
+    await set_meta_many(updates)
+    logger.info("Reconciled stale in-progress library sync status on startup")
+
+
 async def _run_startup_refresh(platforms: list[str] | None = None) -> dict:
     global _admin_refresh_library
     from .data.db import set_meta_many
@@ -419,6 +443,7 @@ async def lifespan(app):
 
     await init_db()
     await clear_all_enrichment_claims()
+    await reconcile_stale_sync_status()
     logger.info("Database initialized")
 
     # Seed hardware preference from env if not yet set
