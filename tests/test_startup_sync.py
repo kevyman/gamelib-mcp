@@ -671,6 +671,30 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertEqual(db_module._db_path(), "data/gamelib.db")
 
+    def test_db_path_defaults_to_mounted_data_when_absolute_path_required(self):
+        db_module._ENV_LOADED = False
+        with (
+            patch.dict(os.environ, {"GAMELIB_REQUIRE_ABSOLUTE_DB_PATH": "1"}, clear=True),
+            patch("gamelib_mcp.data.db.load_project_dotenv", return_value=False),
+        ):
+            self.assertEqual(db_module._db_path(), "/data/gamelib.db")
+
+    def test_db_path_rejects_relative_database_url_when_absolute_path_required(self):
+        db_module._ENV_LOADED = False
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "DATABASE_URL": "file:./data/gamelib.db",
+                    "GAMELIB_REQUIRE_ABSOLUTE_DB_PATH": "1",
+                },
+                clear=True,
+            ),
+            patch("gamelib_mcp.data.db.load_project_dotenv", return_value=False),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "absolute"):
+                db_module._db_path()
+
     def test_db_path_loads_database_url_from_dotenv(self) -> None:
         db_module._ENV_LOADED = False
         with (
