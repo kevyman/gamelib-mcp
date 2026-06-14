@@ -1,0 +1,56 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Never run two deploys at once; cancel an in-flight test run if a newer
+# push to main arrives, but let an in-flight deploy finish.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Run tests
+        run: uv run python -m pytest -q
+
+  deploy:
+    name: Deploy to Hetzner
+    needs: test
+    runs-on: ubuntu-latest
+    # Only deploy real pushes/manual runs on main, never forks or PRs.
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          # Fail the job if any command fails so a broken deploy is visible.
+          script_stop: true
+          script: |
+            set -euo pipefail
+            cd "${DEPLOY_PATH:-$HOME/mcps}"
+            git fetch --prune origin main
+            # The repo is the source of truth: mirror origin/main exactly.
+            # Server-local secrets live in .env (gitignored) and survive this.
+            git reset --hard origin/main
+            docker compose --profile prod up -d --build
+            docker image prune -f
