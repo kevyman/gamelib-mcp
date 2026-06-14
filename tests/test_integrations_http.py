@@ -1,9 +1,12 @@
 import asyncio
 import json
+import os
 from unittest.mock import AsyncMock, patch
 
 from starlette.requests import Request
 
+from conftest import add_platform, seed_game
+from gamelib_mcp.data import db as db_module
 from gamelib_mcp.http_admin import BearerAuthMiddleware
 from gamelib_mcp.main import mcp
 
@@ -263,6 +266,79 @@ def test_get_admin_integrations_returns_json_payload():
     assert route.methods == {"GET", "HEAD"}
     assert response.status_code == 200
     assert json.loads(response.body) == payload
+
+
+def test_health_reports_platform_coverage_degraded_when_platforms_are_missing(tmp_path):
+    async def run_test():
+        db_path = tmp_path / "health.sqlite"
+        db_module._DB_READY_PATH = None
+        db_module._ENV_LOADED = True
+        with patch.dict(os.environ, {"DATABASE_URL": f"file:{db_path}"}, clear=False):
+            await db_module.init_db()
+            steam_game_id = await seed_game("Portal")
+            epic_game_id = await seed_game("Alan Wake")
+            await add_platform(steam_game_id, "steam")
+            await add_platform(epic_game_id, "epic")
+            await db_module.set_meta("library_synced_at", "2026-06-14T20:13:18+00:00")
+            await db_module.set_meta("library_sync_status", "idle")
+            await db_module.set_meta("library_sync_error", "previous transient failure")
+
+            route = _get_route("/health")
+            response = await route.endpoint(_request("/health"))
+
+        db_module._DB_READY_PATH = None
+        return response
+
+    response = asyncio.run(run_test())
+    payload = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert payload == {"status": "degraded"}
+
+
+def test_admin_health_reports_platform_coverage_details_when_platforms_are_missing(tmp_path):
+    async def run_test():
+        db_path = tmp_path / "admin-health.sqlite"
+        db_module._DB_READY_PATH = None
+        db_module._ENV_LOADED = True
+        with patch.dict(os.environ, {"DATABASE_URL": f"file:{db_path}"}, clear=False):
+            await db_module.init_db()
+            steam_game_id = await seed_game("Portal")
+            epic_game_id = await seed_game("Alan Wake")
+            await add_platform(steam_game_id, "steam")
+            await add_platform(epic_game_id, "epic")
+            await db_module.set_meta("library_synced_at", "2026-06-14T20:13:18+00:00")
+            await db_module.set_meta("library_sync_status", "idle")
+            await db_module.set_meta("library_sync_error", "previous transient failure")
+
+            route = _get_route("/admin/health")
+            response = await route.endpoint(_request("/admin/health"))
+
+        db_module._DB_READY_PATH = None
+        return response
+
+    response = asyncio.run(run_test())
+    payload = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert payload["status"] == "degraded"
+    assert payload["checks"]["database"]["status"] == "ok"
+    assert payload["checks"]["library_sync"]["status"] == "ok"
+    assert payload["checks"]["library_sync"]["error"] == "previous transient failure"
+    assert payload["checks"]["platform_coverage"]["status"] == "degraded"
+    assert payload["checks"]["platform_coverage"]["platform_counts"] == {"epic": 1, "steam": 1}
+    assert payload["checks"]["platform_coverage"]["missing_platforms"] == ["gog", "ps5", "switch2"]
+
+
+def test_health_returns_503_when_database_is_unavailable():
+    route = _get_route("/health")
+
+    with patch("gamelib_mcp.http_admin._health_payload", new=AsyncMock(side_effect=RuntimeError("db boom"))):
+        response = asyncio.run(route.endpoint(_request("/health")))
+
+    assert response.status_code == 503
+    payload = json.loads(response.body)
+    assert payload == {"status": "error"}
 
 
 def test_get_admin_integration_detail_returns_requested_platform():
