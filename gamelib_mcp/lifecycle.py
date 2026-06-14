@@ -7,7 +7,7 @@ helpers consumed by the startup refresh.
 
 It deliberately does NOT import ``gamelib_mcp.tools.admin`` at module load time.
 The tool layer (``admin.py``) imports orchestration primitives from here at the
-top level; this module reaches back into ``admin.refresh_library`` lazily (via
+top level; this module reaches back into ``admin.run_library_sync`` lazily (via
 the patchable ``_admin_refresh_library`` global), so the dependency is a clean
 one-way edge ``tools.admin -> lifecycle`` with no import cycle.
 """
@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 # Platforms whose per-run sync outcome is recorded in the meta table.
 SYNC_METADATA_PLATFORMS = ("steam", "epic", "gog", "nintendo", "ps5")
 
-# Lazily bound to tools.admin.refresh_library on first startup refresh. Kept as a
-# module-level name so tests can patch it directly.
+# Lazily bound to tools.admin.run_library_sync (the worker) on first startup
+# refresh. Kept as a module-level name so tests can patch it directly.
 _admin_refresh_library = None
 
 _LIBRARY_REFRESH_TASK: asyncio.Task | None = None

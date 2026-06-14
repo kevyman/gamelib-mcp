@@ -86,6 +86,10 @@ async def run_library_sync(
         return await fn()
 
     selected = [(name, fn) for name, fn in platform_syncs.items() if name in targets]
+    # Mark started here too (not only in the refresh_library tool): the startup and
+    # periodic paths reach this worker via _run_startup_refresh without going through
+    # the tool, so this is what records per-platform "running" state on those paths.
+    # On the tool path it's an idempotent re-write of state the tool already set.
     await _mark_sync_started(targets)
     await report_progress(ctx, 0, len(selected))
     await _info(ctx, f"Refreshing {len(selected)} platform(s)")
