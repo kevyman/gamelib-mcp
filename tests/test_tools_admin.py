@@ -4,6 +4,7 @@ Covers detect_farmed_games (pure DB) and set_nintendo_session, including its
 successful file-write path (writes to a temp NINTENDO_COOKIES_FILE).
 """
 
+import asyncio
 import json
 
 from fastmcp.exceptions import ToolError
@@ -11,7 +12,9 @@ from unittest.mock import AsyncMock, patch
 
 from conftest import ToolDBTestCase, make_steam_game
 from gamelib_mcp.data import db as db_module
+from gamelib_mcp.data.db import get_meta, set_meta_many
 from gamelib_mcp.tools import admin
+from gamelib_mcp import lifecycle
 
 
 class DetectFarmedGamesTests(ToolDBTestCase):
@@ -124,7 +127,7 @@ class RefreshLibraryValidationTests(ToolDBTestCase):
             patch.object(admin, "sync_epic", AsyncMock(return_value={"platform": "epic"})),
             patch.object(admin, "detect_farmed_games", AsyncMock(return_value={"candidates": 0})),
         ):
-            result = await admin.refresh_library(["steam", "epic"], ctx=ctx)
+            result = await admin.run_library_sync(["steam", "epic"], ctx=ctx)
 
         self.assertEqual(result["steam"], {"platform": "steam"})
         self.assertEqual(result["epic"], {"platform": "epic"})
@@ -132,3 +135,107 @@ class RefreshLibraryValidationTests(ToolDBTestCase):
         self.assertIn("Refreshing 2 platform(s)", ctx.infos)
         self.assertIn("Finished steam refresh", ctx.infos)
         self.assertIn("Finished epic refresh", ctx.infos)
+
+
+class RunLibrarySyncStateTests(ToolDBTestCase):
+    async def test_writes_done_state_for_successful_platform(self):
+        async def fake_steam():
+            # while running, state must read "running"
+            assert await get_meta("sync_platform_state_steam") == "running"
+            return {"games_upserted": 3}
+
+        with patch("gamelib_mcp.tools.admin.fetch_library", side_effect=fake_steam), \
+             patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.admin._schedule_background_enrich", AsyncMock()):
+            result = await admin.run_library_sync(["steam"])
+
+        self.assertEqual(result["steam"], {"games_upserted": 3})
+        self.assertEqual(await get_meta("sync_platform_state_steam"), "done")
+        self.assertEqual(await get_meta("library_sync_status"), "idle")
+
+    async def test_marks_platform_error_on_failure(self):
+        with patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(side_effect=RuntimeError("boom"))), \
+             patch("gamelib_mcp.tools.admin._schedule_background_enrich", AsyncMock()):
+            result = await admin.run_library_sync(["steam"])
+
+        self.assertIn("error", result["steam"])
+        self.assertEqual(await get_meta("sync_platform_state_steam"), "error")
+        self.assertEqual(await get_meta("library_sync_status"), "idle")
+
+
+class RefreshLibraryAckTests(ToolDBTestCase):
+    async def asyncTearDown(self) -> None:
+        task = lifecycle._LIBRARY_REFRESH_TASK
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        lifecycle._LIBRARY_REFRESH_TASK = None
+        await super().asyncTearDown()
+
+    async def test_returns_started_without_blocking(self):
+        release = asyncio.Event()
+
+        async def slow_worker(platforms=None):
+            await release.wait()
+            return {}
+
+        with patch("gamelib_mcp.lifecycle._admin_refresh_library", AsyncMock(side_effect=slow_worker)):
+            ack = await admin.refresh_library(["steam"])
+            self.assertEqual(ack["status"], "started")
+            self.assertFalse(ack["already_running"])
+            self.assertEqual(ack["platforms"], ["steam"])
+            self.assertEqual(await get_meta("library_sync_status"), "in_progress")
+            release.set()
+
+    async def test_returns_already_running_when_in_flight(self):
+        release = asyncio.Event()
+
+        async def slow_worker(platforms=None):
+            await release.wait()
+            return {}
+
+        with patch("gamelib_mcp.lifecycle._admin_refresh_library", AsyncMock(side_effect=slow_worker)):
+            first = await admin.refresh_library(["steam"])
+            second = await admin.refresh_library(["gog"])
+            self.assertEqual(first["status"], "started")
+            self.assertEqual(second["status"], "already_running")
+            self.assertTrue(second["already_running"])
+            release.set()
+
+    async def test_rejects_unknown_platform(self):
+        with self.assertRaises(ToolError):
+            await admin.refresh_library(["nope"])
+
+
+class GetSyncStatusTests(ToolDBTestCase):
+    async def test_reports_idle_with_pending_platforms_when_never_synced(self):
+        status = await admin.get_sync_status()
+        self.assertEqual(status["status"], "idle")
+        self.assertEqual(
+            set(status["platforms"]), {"steam", "epic", "gog", "switch2", "ps5"}
+        )
+        self.assertEqual(status["platforms"]["steam"]["state"], "pending")
+
+    async def test_reflects_in_progress_and_per_platform_state(self):
+        await set_meta_many(
+            {
+                "library_sync_status": "in_progress",
+                "library_sync_started_at": "2026-06-14T12:00:00+00:00",
+                "library_sync_finished_at": None,
+                "sync_platform_state_steam": "done",
+                "sync_platform_state_gog": "running",
+                "sync_platform_state_ps5": "error",
+                "integration_sync_ps5_last_error_summary": "refresh token rejected",
+            }
+        )
+        status = await admin.get_sync_status()
+        self.assertEqual(status["status"], "in_progress")
+        self.assertEqual(status["started_at"], "2026-06-14T12:00:00+00:00")
+        self.assertIsNone(status["finished_at"])
+        self.assertEqual(status["platforms"]["steam"]["state"], "done")
+        self.assertEqual(status["platforms"]["gog"]["state"], "running")
+        self.assertEqual(status["platforms"]["ps5"]["state"], "error")
+        self.assertEqual(status["platforms"]["ps5"]["error"], "refresh token rejected")
