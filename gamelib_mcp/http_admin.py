@@ -15,7 +15,7 @@ from urllib.parse import parse_qs
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 
-from .lifecycle import SYNC_METADATA_PLATFORMS
+from .lifecycle import INSPECTOR_PLATFORM_ALIASES, SYNC_METADATA_PLATFORMS
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +143,8 @@ async def _integration_status_payload(force_refresh: bool = False) -> dict[str, 
                 if key.startswith(prefix)
             }
             if platform_meta:
-                last_sync_by_platform[platform] = platform_meta
+                inspector_name = INSPECTOR_PLATFORM_ALIASES.get(platform, platform)
+                last_sync_by_platform[inspector_name] = platform_meta
     except Exception:
         logger.exception("Failed to load integration sync metadata")
 

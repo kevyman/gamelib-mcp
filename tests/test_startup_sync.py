@@ -205,6 +205,30 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("integration_sync_ps5_last_success_at", metadata)
 
+    def test_platform_metadata_records_switch2_sync_result(self) -> None:
+        # The library sync keys this platform as "switch2" (see SYNCABLE_PLATFORMS
+        # and run_library_sync.platform_syncs), and get_sync_status reads
+        # integration_sync_switch2_*. Metadata must be recorded under that key, not
+        # "nintendo", or get_sync_status silently drops the per-platform error.
+        finished_at = "2026-06-14T12:00:00+00:00"
+
+        failed = lifecycle.build_platform_sync_metadata(
+            {"switch2": {"error": "database is locked"}}, finished_at
+        )
+        self.assertEqual(
+            failed["integration_sync_switch2_last_error_summary"],
+            "database is locked",
+        )
+        self.assertNotIn("integration_sync_switch2_last_success_at", failed)
+
+        succeeded = lifecycle.build_platform_sync_metadata(
+            {"switch2": {"added": 2, "synced": True}}, finished_at
+        )
+        self.assertIsNone(succeeded["integration_sync_switch2_last_error_summary"])
+        self.assertEqual(
+            succeeded["integration_sync_switch2_last_success_at"], finished_at
+        )
+
     async def test_run_startup_refresh_records_exception_failure(self) -> None:
         with (
             patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()) as mock_set_meta_many,
