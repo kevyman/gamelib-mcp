@@ -304,7 +304,10 @@ async def refresh_library(
     progress and see per-platform results. platforms can be omitted (all
     configured platforms) or a subset such as ["gog"] of steam, epic, gog,
     nintendo, switch2, or ps5. If a sync is already running, returns
-    status="already_running".
+    status="already_running" — note this can briefly persist after
+    get_sync_status reports "idle", while post-sync background enrichment
+    finishes; treat get_sync_status="idle" as the signal that the sync itself
+    is done.
     """
     from .tools.admin import refresh_library as _refresh
     return await _refresh(platforms, ctx=ctx)
@@ -317,7 +320,9 @@ async def get_sync_status() -> SyncStatusResponse:
 
     Returns status ("in_progress" or "idle"), started_at/finished_at, and a
     per-platform map with state (pending/running/done/error), last_success_at,
-    and any error. Poll this after calling refresh_library.
+    and any error. Poll this after calling refresh_library; status="idle" means
+    the sync itself has finished (a follow-up refresh_library may still briefly
+    report "already_running" while background enrichment drains).
     """
     from .tools.admin import get_sync_status as _status
     return await _status()
