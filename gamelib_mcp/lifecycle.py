@@ -300,7 +300,7 @@ def _summarize_refresh_result(result: object) -> str | None:
     return "; ".join(errors) if errors else None
 
 
-async def _run_startup_refresh() -> dict:
+async def _run_startup_refresh(platforms: list[str] | None = None) -> dict:
     global _admin_refresh_library
     from .data.db import set_meta_many
 
@@ -322,7 +322,7 @@ async def _run_startup_refresh() -> dict:
     cancelled = False
     refresh_result: dict | None = None
     try:
-        refresh_result = await _admin_refresh_library()
+        refresh_result = await _admin_refresh_library(platforms)
         final_error = _summarize_refresh_result(refresh_result)
         if final_error:
             logger.warning("Startup library refresh completed with partial errors: %s", final_error)
@@ -356,14 +356,14 @@ async def _run_startup_refresh() -> dict:
     return refresh_result or {}
 
 
-async def _ensure_startup_refresh() -> asyncio.Task:
+async def _ensure_startup_refresh(platforms: list[str] | None = None) -> asyncio.Task:
     global _LIBRARY_REFRESH_TASK
 
     async with _get_library_refresh_lock():
         if _LIBRARY_REFRESH_TASK is not None and not _LIBRARY_REFRESH_TASK.done():
             return _LIBRARY_REFRESH_TASK
 
-        _LIBRARY_REFRESH_TASK = asyncio.create_task(_run_startup_refresh())
+        _LIBRARY_REFRESH_TASK = asyncio.create_task(_run_startup_refresh(platforms))
         _LIBRARY_REFRESH_TASK.add_done_callback(_clear_library_refresh_task)
         return _LIBRARY_REFRESH_TASK
 

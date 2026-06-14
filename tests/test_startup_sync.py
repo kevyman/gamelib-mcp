@@ -296,7 +296,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         started = asyncio.Event()
         release = asyncio.Event()
 
-        async def slow_refresh() -> None:
+        async def slow_refresh(platforms=None) -> None:
             started.set()
             await release.wait()
 
@@ -668,6 +668,19 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             # os.path.exists is NOT called — the function ignores legacy root-level files unconditionally
         ):
             self.assertEqual(db_module._db_path(), "data/gamelib.db")
+
+    async def test_ensure_startup_refresh_passes_platforms_to_worker(self) -> None:
+        seen = {}
+
+        async def fake_worker(platforms=None):
+            seen["platforms"] = platforms
+            return {}
+
+        with patch("gamelib_mcp.lifecycle._admin_refresh_library", AsyncMock(side_effect=fake_worker)):
+            task = await _ensure_startup_refresh(["gog"])
+            await task
+
+        self.assertEqual(seen["platforms"], ["gog"])
 
     async def test_refresh_library_reuses_running_startup_refresh_task(self) -> None:
         import gamelib_mcp.lifecycle as main_module
