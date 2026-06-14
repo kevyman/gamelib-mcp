@@ -85,6 +85,47 @@ async def upsert_game_platform(
         return row["id"]
 
 
+async def repair_misclassified_platform_row(
+    *,
+    source_game_id: int,
+    target_game_id: int,
+    platform: str,
+) -> bool:
+    """Move a same-platform row from a bad fuzzy match to the corrected game."""
+    if source_game_id == target_game_id:
+        return False
+
+    async with get_db() as db:
+        source = await db.execute_fetchone(
+            "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",
+            (source_game_id, platform),
+        )
+        if source is None:
+            return False
+
+        target = await db.execute_fetchone(
+            "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",
+            (target_game_id, platform),
+        )
+
+        source_platform_id = source["id"]
+        if target is None:
+            await db.execute(
+                "UPDATE game_platforms SET game_id = ? WHERE id = ?",
+                (target_game_id, source_platform_id),
+            )
+        else:
+            target_platform_id = target["id"]
+            await db.execute(
+                "UPDATE game_platform_identifiers SET game_platform_id = ? WHERE game_platform_id = ?",
+                (target_platform_id, source_platform_id),
+            )
+            await db.execute("DELETE FROM game_platforms WHERE id = ?", (source_platform_id,))
+
+        await db.commit()
+        return True
+
+
 async def upsert_game_platform_identifier(
     game_platform_id: int,
     identifier_type: str,
