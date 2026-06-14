@@ -117,6 +117,10 @@ Use that output or `/admin/integrations/ui` as the first readiness check:
 
 ### Redeploying after code changes
 
+Pushes to `main` deploy automatically — see **Continuous deployment** below.
+
+To deploy manually (or if the Action is unavailable):
+
 ```bash
 # From local machine — push changes
 git push
@@ -125,6 +129,65 @@ git push
 ssh root@178.104.53.83
 cd ~/mcps && git pull && docker compose --profile prod up -d --build
 ```
+
+---
+
+### Continuous deployment (GitHub Actions)
+
+`.github/workflows/deploy.yml` runs on every push to `main` (and can be
+triggered manually from the Actions tab via *Run workflow*):
+
+1. **Test** — `uv sync --frozen` then the full `pytest` suite. This gates the
+   deploy: if tests fail, nothing ships.
+2. **Deploy** — SSHes into the Hetzner box and runs the equivalent of the
+   manual redeploy: `git fetch` → `git reset --hard origin/main` →
+   `docker compose --profile prod up -d --build` → `docker image prune -f`
+   (the prune keeps the small VM's disk from filling with stale layers).
+
+#### Required GitHub secrets
+
+Add these under **Settings → Secrets and variables → Actions → New repository
+secret**:
+
+| Secret | Value |
+| --- | --- |
+| `DEPLOY_HOST` | `178.104.53.83` |
+| `DEPLOY_USER` | `root` |
+| `DEPLOY_SSH_KEY` | A **private** SSH key whose public half is in the server's `~/.ssh/authorized_keys` |
+| `DEPLOY_PORT` | *(optional)* SSH port, defaults to `22` |
+
+Generate a dedicated deploy key (don't reuse a personal key):
+
+```bash
+# On your local machine
+ssh-keygen -t ed25519 -C "github-actions-deploy" -f deploy_key -N ""
+
+# Authorize the public half on the server
+ssh-copy-id -i deploy_key.pub root@178.104.53.83
+# (or append deploy_key.pub to ~/.ssh/authorized_keys on the server)
+
+# Paste the PRIVATE key file contents into the DEPLOY_SSH_KEY secret
+cat deploy_key
+```
+
+Then delete the local `deploy_key`/`deploy_key.pub` files.
+
+#### Source-of-truth caveat
+
+The deploy does `git reset --hard origin/main`, so the server tracks `main`
+exactly. **Anything committed to the repo (including `Caddyfile`) must be
+correct for production** — local edits to *tracked* files on the server will be
+overwritten on the next deploy. In particular, commit the real domain into
+`Caddyfile` rather than editing it on the box. Untracked, gitignored files
+(`.env`, `data/`, the Legendary/lgogdownloader mounts) are never touched.
+
+#### First-run checklist
+
+1. Add the secrets above.
+2. Ensure the server clone at `~/mcps` is on `main` with a clean working tree
+   (`cd ~/mcps && git status`). Commit/move any server-only edits first.
+3. Push to `main` (or use *Run workflow*) and watch the run in the Actions tab.
+4. Verify: `curl https://gamelibmcp.johnwilkos.com/health`.
 
 ### Epic in Docker
 
