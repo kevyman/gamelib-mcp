@@ -119,6 +119,7 @@ class BearerAuthMiddleware:
 # expensive to repeat per request; status changes on the order of syncs.
 _INTEGRATION_STATUS_TTL_SECONDS = 60.0
 _integration_status_cache: tuple[float, dict] | None = None
+_EXPECTED_LIBRARY_PLATFORMS = ("epic", "gog", "ps5", "steam", "switch2")
 
 
 async def _integration_status_payload(force_refresh: bool = False) -> dict[str, dict]:
@@ -151,6 +152,61 @@ async def _integration_status_payload(force_refresh: bool = False) -> dict[str, 
     payload = inspect_all_integrations_dict(last_sync_by_platform=last_sync_by_platform)
     _integration_status_cache = (time.monotonic(), payload)
     return payload
+
+
+async def _health_payload() -> dict:
+    from .data.db import SCHEMA_VERSION, _db_path, get_db, get_meta
+
+    db_path = _db_path()
+    async with get_db() as db:
+        user_version_row = await db.execute_fetchone("PRAGMA user_version")
+        user_version = int(user_version_row[0]) if user_version_row else None
+        platform_rows = await db.execute_fetchall(
+            """SELECT platform, COUNT(*) AS count
+               FROM game_platforms
+               WHERE owned = 1
+               GROUP BY platform
+               ORDER BY platform"""
+        )
+        platform_counts = {row["platform"]: row["count"] for row in platform_rows}
+
+    last_sync = await get_meta("library_synced_at")
+    library_sync_status = await get_meta("library_sync_status") or "idle"
+    library_sync_error = await get_meta("library_sync_error")
+
+    missing_platforms = [
+        platform
+        for platform in _EXPECTED_LIBRARY_PLATFORMS
+        if platform_counts.get(platform, 0) == 0
+    ]
+    db_status = "ok" if user_version == SCHEMA_VERSION else "degraded"
+    platform_status = "ok" if not missing_platforms else "degraded"
+    sync_status = "running" if library_sync_status == "in_progress" else "ok"
+    overall_status = "ok" if {db_status, platform_status, sync_status} == {"ok"} else "degraded"
+
+    return {
+        "status": overall_status,
+        "library_synced_at": last_sync,
+        "checks": {
+            "database": {
+                "status": db_status,
+                "path": db_path,
+                "schema_version": user_version,
+                "expected_schema_version": SCHEMA_VERSION,
+            },
+            "library_sync": {
+                "status": sync_status,
+                "state": library_sync_status,
+                "error": library_sync_error,
+            },
+            "platform_coverage": {
+                "status": platform_status,
+                "expected_platforms": list(_EXPECTED_LIBRARY_PLATFORMS),
+                "platform_counts": platform_counts,
+                "missing_platforms": missing_platforms,
+            },
+        },
+    }
 
 
 def _render_integrations_ui(payload: dict[str, dict]) -> str:
@@ -231,9 +287,22 @@ def register_http_routes(mcp) -> None:
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health(request: Request) -> JSONResponse:
-        from .data.db import get_meta
-        last_sync = await get_meta("library_synced_at")
-        return JSONResponse({"status": "ok", "library_synced_at": last_sync})
+        try:
+            return JSONResponse(await _health_payload())
+        except Exception as exc:
+            logger.exception("Health check failed")
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "checks": {
+                        "database": {
+                            "status": "error",
+                            "error": str(exc),
+                        }
+                    },
+                },
+                status_code=503,
+            )
 
     @mcp.custom_route("/admin/integrations", methods=["GET"])
     async def admin_integrations(request: Request) -> JSONResponse:
