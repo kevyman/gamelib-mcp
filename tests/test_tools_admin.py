@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 from conftest import ToolDBTestCase, make_steam_game
 from gamelib_mcp.data import db as db_module
-from gamelib_mcp.data.db import get_meta
+from gamelib_mcp.data.db import get_meta, set_meta_many
 from gamelib_mcp.tools import admin
 from gamelib_mcp import lifecycle
 
@@ -208,3 +208,34 @@ class RefreshLibraryAckTests(ToolDBTestCase):
     async def test_rejects_unknown_platform(self):
         with self.assertRaises(ToolError):
             await admin.refresh_library(["nope"])
+
+
+class GetSyncStatusTests(ToolDBTestCase):
+    async def test_reports_idle_with_pending_platforms_when_never_synced(self):
+        status = await admin.get_sync_status()
+        self.assertEqual(status["status"], "idle")
+        self.assertEqual(
+            set(status["platforms"]), {"steam", "epic", "gog", "switch2", "ps5"}
+        )
+        self.assertEqual(status["platforms"]["steam"]["state"], "pending")
+
+    async def test_reflects_in_progress_and_per_platform_state(self):
+        await set_meta_many(
+            {
+                "library_sync_status": "in_progress",
+                "library_sync_started_at": "2026-06-14T12:00:00+00:00",
+                "library_sync_finished_at": None,
+                "sync_platform_state_steam": "done",
+                "sync_platform_state_gog": "running",
+                "sync_platform_state_ps5": "error",
+                "integration_sync_ps5_last_error_summary": "refresh token rejected",
+            }
+        )
+        status = await admin.get_sync_status()
+        self.assertEqual(status["status"], "in_progress")
+        self.assertEqual(status["started_at"], "2026-06-14T12:00:00+00:00")
+        self.assertIsNone(status["finished_at"])
+        self.assertEqual(status["platforms"]["steam"]["state"], "done")
+        self.assertEqual(status["platforms"]["gog"]["state"], "running")
+        self.assertEqual(status["platforms"]["ps5"]["state"], "error")
+        self.assertEqual(status["platforms"]["ps5"]["error"], "refresh token rejected")

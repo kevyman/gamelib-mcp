@@ -173,6 +173,39 @@ async def refresh_library(
     }
 
 
+async def get_sync_status() -> dict:
+    """
+    Report the current/last library sync: overall state plus per-platform state.
+
+    status is "in_progress" while a sync runs, else "idle". Each syncable
+    platform reports state (pending/running/done/error), its last success time,
+    and the last error summary if any. Poll this after calling refresh_library.
+    """
+    from ..data.db import get_meta, get_meta_prefix
+
+    overall = await get_meta("library_sync_status") or "idle"
+    started_at = await get_meta("library_sync_started_at")
+    finished_at = await get_meta("library_sync_finished_at")
+
+    state_keys = await get_meta_prefix("sync_platform_state_")
+    integ = await get_meta_prefix("integration_sync_")
+
+    platforms: dict[str, dict] = {}
+    for name in sorted(SYNCABLE_PLATFORMS):
+        platforms[name] = {
+            "state": state_keys.get(f"sync_platform_state_{name}", "pending"),
+            "last_success_at": integ.get(f"integration_sync_{name}_last_success_at"),
+            "error": integ.get(f"integration_sync_{name}_last_error_summary"),
+        }
+
+    return {
+        "status": overall,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "platforms": platforms,
+    }
+
+
 async def set_nintendo_session(cookies: str) -> dict:
     """
     Store Nintendo Account session cookies for VGCS fallback sync.
