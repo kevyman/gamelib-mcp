@@ -21,6 +21,18 @@ from gamelib_mcp.lifecycle import (
 )
 
 
+@contextlib.contextmanager
+def _stub_sync_meta_writes():
+    """Neutralize run_library_sync's meta writes so worker-behavior tests stay
+    DB-free and fast (these tests run without a configured temp DB)."""
+    with (
+        patch("gamelib_mcp.tools.admin._mark_sync_started", AsyncMock()),
+        patch("gamelib_mcp.tools.admin._mark_platform_state", AsyncMock()),
+        patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()),
+    ):
+        yield
+
+
 class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         import gamelib_mcp.lifecycle as main_module
@@ -284,7 +296,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         started = asyncio.Event()
         release = asyncio.Event()
 
-        async def slow_refresh() -> None:
+        async def slow_refresh(platforms=None) -> None:
             started.set()
             await release.wait()
 
@@ -504,6 +516,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             return await make_sync("ps5", {"platform": "ps5", "synced": True})
 
         with (
+            _stub_sync_meta_writes(),
             patch("gamelib_mcp.tools.admin.is_steam_configured", return_value=True, create=True),
             patch("gamelib_mcp.tools.admin.is_epic_configured", return_value=True, create=True),
             patch("gamelib_mcp.tools.admin.is_gog_configured", return_value=True, create=True),
@@ -516,7 +529,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.tools.admin.sync_psn", AsyncMock(side_effect=psn_sync)),
             patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(return_value={"candidates": 0})) as mock_detect,
         ):
-            refresh_task = asyncio.create_task(admin_tools.refresh_library())
+            refresh_task = asyncio.create_task(admin_tools.run_library_sync())
             await asyncio.wait_for(
                 asyncio.gather(*(event.wait() for event in started.values())),
                 timeout=0.1,
@@ -548,11 +561,12 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             raise PlatformAborted("epic cancelled")
 
         with (
+            _stub_sync_meta_writes(),
             patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(side_effect=steam_sync)),
             patch("gamelib_mcp.tools.admin.sync_epic", AsyncMock(side_effect=epic_sync)),
             patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(return_value={"candidates": 0})) as mock_detect,
         ):
-            result = await admin_tools.refresh_library(["steam", "epic"])
+            result = await admin_tools.run_library_sync(["steam", "epic"])
 
         self.assertEqual(
             result,
@@ -567,20 +581,22 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         refresh_result = {"platform": "steam", "synced": True}
 
         with (
+            _stub_sync_meta_writes(),
             patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(return_value=refresh_result)),
             patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(return_value={"candidates": 3})) as mock_detect,
         ):
-            result = await admin_tools.refresh_library(["steam"])
+            result = await admin_tools.run_library_sync(["steam"])
 
         self.assertEqual(result, {"steam": refresh_result})
         mock_detect.assert_awaited_once_with(dry_run=False)
 
     async def test_refresh_library_skips_farm_detection_without_steam(self) -> None:
         with (
+            _stub_sync_meta_writes(),
             patch("gamelib_mcp.tools.admin.sync_epic", AsyncMock(return_value={"platform": "epic", "synced": True})),
             patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock()) as mock_detect,
         ):
-            result = await admin_tools.refresh_library(["epic"])
+            result = await admin_tools.run_library_sync(["epic"])
 
         self.assertEqual(result, {"epic": {"platform": "epic", "synced": True}})
         mock_detect.assert_not_awaited()
@@ -589,10 +605,11 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         switch_result = {"platform": "switch2", "synced": True}
 
         with (
+            _stub_sync_meta_writes(),
             patch("gamelib_mcp.tools.admin.sync_nintendo", AsyncMock(return_value=switch_result)) as mock_sync,
             patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock()) as mock_detect,
         ):
-            result = await admin_tools.refresh_library(["switch2"])
+            result = await admin_tools.run_library_sync(["switch2"])
 
         self.assertEqual(result, {"switch2": switch_result})
         mock_sync.assert_awaited_once()
@@ -602,10 +619,11 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         refresh_result = {"platform": "steam", "synced": True}
 
         with (
+            _stub_sync_meta_writes(),
             patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(return_value=refresh_result)),
             patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(side_effect=RuntimeError("detector boom"))) as mock_detect,
         ):
-            result = await admin_tools.refresh_library(["steam"])
+            result = await admin_tools.run_library_sync(["steam"])
 
         self.assertEqual(result, {"steam": refresh_result})
         mock_detect.assert_awaited_once_with(dry_run=False)
@@ -651,29 +669,70 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertEqual(db_module._db_path(), "data/gamelib.db")
 
-    async def test_refresh_library_reuses_running_startup_refresh_task(self) -> None:
+    async def test_ensure_startup_refresh_passes_platforms_to_worker(self) -> None:
+        seen = {}
+
+        async def fake_worker(platforms=None):
+            seen["platforms"] = platforms
+            return {}
+
+        with patch("gamelib_mcp.lifecycle._admin_refresh_library", AsyncMock(side_effect=fake_worker)):
+            task = await _ensure_startup_refresh(["gog"])
+            await task
+
+        self.assertEqual(seen["platforms"], ["gog"])
+
+    async def test_reconcile_resets_stale_in_progress(self) -> None:
+        from gamelib_mcp.lifecycle import reconcile_stale_sync_status
+        from gamelib_mcp.data.db import set_meta_many, get_meta, init_db
+
+        await init_db()
+        await set_meta_many(
+            {
+                "library_sync_status": "in_progress",
+                "sync_platform_state_steam": "running",
+                "sync_platform_state_gog": "done",
+            }
+        )
+
+        await reconcile_stale_sync_status()
+
+        self.assertEqual(await get_meta("library_sync_status"), "idle")
+        self.assertEqual(await get_meta("sync_platform_state_steam"), "error")
+        self.assertEqual(await get_meta("sync_platform_state_gog"), "done")
+        self.assertIsNotNone(await get_meta("library_sync_error"))
+
+    async def test_reconcile_noop_when_idle(self) -> None:
+        from gamelib_mcp.lifecycle import reconcile_stale_sync_status
+        from gamelib_mcp.data.db import set_meta, get_meta, init_db
+
+        await init_db()
+        await set_meta("library_sync_status", "idle")
+        await reconcile_stale_sync_status()
+        self.assertEqual(await get_meta("library_sync_status"), "idle")
+
+    async def test_refresh_library_reports_already_running_when_startup_in_flight(self) -> None:
         import gamelib_mcp.lifecycle as main_module
 
         release = asyncio.Event()
-        refresh_result = {"steam": {"games_upserted": 3}}
 
         async def running_refresh() -> dict:
             await release.wait()
-            return refresh_result
+            return {"steam": {"games_upserted": 3}}
 
         startup_task = asyncio.create_task(running_refresh())
         main_module._LIBRARY_REFRESH_TASK = startup_task
 
-        with patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock()) as mock_fetch_library:
-            refresh_call = asyncio.create_task(admin_tools.refresh_library())
-            await asyncio.sleep(0)
-            self.assertFalse(refresh_call.done())
-
+        try:
+            with patch("gamelib_mcp.tools.admin._mark_sync_started", AsyncMock()):
+                ack = await admin_tools.refresh_library()
+            self.assertEqual(ack["status"], "already_running")
+            self.assertTrue(ack["already_running"])
+            self.assertFalse(startup_task.done())
+        finally:
             release.set()
-            result = await asyncio.wait_for(refresh_call, timeout=0.1)
-
-        self.assertEqual(result, refresh_result)
-        mock_fetch_library.assert_not_called()
+            await startup_task
+            main_module._LIBRARY_REFRESH_TASK = None
 
 
 if __name__ == "__main__":

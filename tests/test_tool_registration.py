@@ -60,6 +60,7 @@ EXPECTED_TOOLS = {
     },
     "get_backlog_stats": {"params": set(), "required": set()},
     "refresh_library": {"params": {"platforms"}, "required": set()},
+    "get_sync_status": {"params": set(), "required": set()},
     "get_integration_status": {
         "params": {"platforms", "verbose", "force_refresh"},
         "required": set(),
@@ -92,6 +93,7 @@ EXPECTED_ANNOTATIONS = {
     "sync_ratings": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
     "rate_game": {"readOnlyHint": False, "idempotentHint": True},
     "refresh_library": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
+    "get_sync_status": {"readOnlyHint": True, "idempotentHint": True},
     "set_hardware_preference": {"readOnlyHint": False, "idempotentHint": True},
     "add_game_to_platform": {"readOnlyHint": False, "idempotentHint": True},
     "set_nintendo_session": {"readOnlyHint": False, "idempotentHint": True},
@@ -114,9 +116,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_17(self):
+    async def test_tool_count_is_18(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 17)
+        self.assertEqual(len(tools), 18)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()
