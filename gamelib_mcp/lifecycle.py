@@ -21,8 +21,18 @@ from weakref import WeakKeyDictionary
 
 logger = logging.getLogger(__name__)
 
-# Platforms whose per-run sync outcome is recorded in the meta table.
-SYNC_METADATA_PLATFORMS = ("steam", "epic", "gog", "nintendo", "ps5")
+# Platforms whose per-run sync outcome is recorded in the meta table. These are
+# the keys the library sync emits in its result dict (see SYNCABLE_PLATFORMS and
+# run_library_sync.platform_syncs) and the keys get_sync_status reads back, so
+# they must match exactly — e.g. the Nintendo sync is keyed "switch2", not
+# "nintendo". The integration inspector uses its own vocabulary ("nintendo");
+# http_admin translates between the two via INSPECTOR_PLATFORM_ALIASES.
+SYNC_METADATA_PLATFORMS = ("steam", "epic", "gog", "switch2", "ps5")
+
+# Maps a sync-metadata platform key to the name the integration inspector uses,
+# where they differ. Only the Nintendo platform is split: synced as "switch2",
+# inspected as "nintendo".
+INSPECTOR_PLATFORM_ALIASES = {"switch2": "nintendo"}
 
 # Lazily bound to tools.admin.run_library_sync (the worker) on first startup
 # refresh. Kept as a module-level name so tests can patch it directly.
