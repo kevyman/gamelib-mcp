@@ -110,6 +110,42 @@ class FuzzyIdentityRegressionTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertIsNone(row)
 
+    async def test_fuzzy_identity_allows_same_sequel_number_variants(self) -> None:
+        with (
+            patch("gamelib_mcp.data.db.fuzzy.extract_best_fuzzy_key", return_value=7),
+            patch("gamelib_mcp.data.db.fuzzy.get_db", return_value=_DummyContext({"id": 7})),
+        ):
+            row = await db_fuzzy.find_game_by_name_fuzzy(
+                "Borderlands 4 Ultimate Edition",
+                candidates={7: "Borderlands 4"},
+            )
+
+        self.assertEqual(row, {"id": 7})
+        self.assertIsNone(
+            db_fuzzy.find_conflicting_fuzzy_key(
+                "Borderlands 4 Ultimate Edition",
+                candidates={7: "Borderlands 4"},
+            )
+        )
+
+    async def test_fuzzy_identity_allows_non_numbered_title_variants(self) -> None:
+        with (
+            patch("gamelib_mcp.data.db.fuzzy.extract_best_fuzzy_key", return_value=7),
+            patch("gamelib_mcp.data.db.fuzzy.get_db", return_value=_DummyContext({"id": 7})),
+        ):
+            row = await db_fuzzy.find_game_by_name_fuzzy(
+                "Sekiro Shadows Die Twice",
+                candidates={7: "Sekiro: Shadows Die Twice"},
+            )
+
+        self.assertEqual(row, {"id": 7})
+        self.assertIsNone(
+            db_fuzzy.find_conflicting_fuzzy_key(
+                "Sekiro Shadows Die Twice",
+                candidates={7: "Sekiro: Shadows Die Twice"},
+            )
+        )
+
 
 class MetacriticRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_enrich_metacritic_prefers_platform_specific_url(self) -> None:
