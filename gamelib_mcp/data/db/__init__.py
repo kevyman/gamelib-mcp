@@ -45,6 +45,7 @@ _FuzzyKey = TypeVar("_FuzzyKey")
 _Progress = Callable[[str], None]
 _SQLITE_CONNECT_TIMEOUT_SECONDS = 30.0
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
+_REQUIRE_ABSOLUTE_DB_PATH_ENV = "GAMELIB_REQUIRE_ABSOLUTE_DB_PATH"
 
 STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
@@ -73,9 +74,23 @@ def _db_path() -> str:
 
     configured = os.getenv("DATABASE_URL")
     if configured:
-        return configured.removeprefix("file:")
+        db_path = configured.removeprefix("file:")
+    elif os.getenv(_REQUIRE_ABSOLUTE_DB_PATH_ENV):
+        db_path = "/data/gamelib.db"
+    else:
+        db_path = "data/gamelib.db"
 
-    return "data/gamelib.db"
+    if (
+        os.getenv(_REQUIRE_ABSOLUTE_DB_PATH_ENV)
+        and db_path != ":memory:"
+        and not Path(db_path).expanduser().is_absolute()
+    ):
+        raise RuntimeError(
+            f"DATABASE_URL must resolve to an absolute SQLite path when "
+            f"{_REQUIRE_ABSOLUTE_DB_PATH_ENV} is set; got {db_path!r}"
+        )
+
+    return db_path
 
 
 def _ensure_db_parent_dir(db_path: str) -> None:
