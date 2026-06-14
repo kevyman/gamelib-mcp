@@ -2,10 +2,36 @@
 
 import aiosqlite
 
+from ..title_normalization import normalize_search_text
 from . import (
     extract_best_fuzzy_key,
     get_db,
 )
+
+_ROMAN_NUMERAL_SEQUEL_TOKENS = {
+    "ii",
+    "iii",
+    "iv",
+    "v",
+    "vi",
+    "vii",
+    "viii",
+    "ix",
+    "x",
+}
+
+
+def _sequel_identity_tokens(value: str) -> set[str]:
+    tokens = normalize_search_text(value).split()
+    return {
+        token
+        for token in tokens
+        if any(char.isdigit() for char in token) or token in _ROMAN_NUMERAL_SEQUEL_TOKENS
+    }
+
+
+def _has_conflicting_sequel_identity(query: str, candidate: str) -> bool:
+    return _sequel_identity_tokens(query) != _sequel_identity_tokens(candidate)
 
 
 async def load_fuzzy_candidates() -> dict[int, str]:
@@ -26,6 +52,9 @@ async def find_game_by_name_fuzzy(
 
     best_id = extract_best_fuzzy_key(name, candidates, cutoff=cutoff)
     if best_id is None:
+        return None
+
+    if _has_conflicting_sequel_identity(name, candidates[best_id]):
         return None
 
     async with get_db() as db:

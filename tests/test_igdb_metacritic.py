@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from gamelib_mcp.data import igdb, metacritic
+from gamelib_mcp.data.db import fuzzy as db_fuzzy
 
 
 class _FakeResponse:
@@ -89,6 +90,25 @@ class IGDBRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(linked_game, igdb_game)
         apply_metadata.assert_awaited_once_with(7, igdb_game)
         get_db.assert_not_called()
+
+
+class FuzzyIdentityRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fuzzy_identity_rejects_conflicting_sequel_numbers(self) -> None:
+        cases = [
+            ("Borderlands 4", "Borderlands 2"),
+            ("PowerWash Simulator 2", "PowerWash Simulator"),
+            ("Red Dead Redemption", "Red Dead Redemption 2"),
+        ]
+
+        for query, candidate in cases:
+            with self.subTest(query=query, candidate=candidate):
+                with (
+                    patch("gamelib_mcp.data.db.fuzzy.extract_best_fuzzy_key", return_value=7),
+                    patch("gamelib_mcp.data.db.fuzzy.get_db", return_value=_DummyContext({"id": 7})),
+                ):
+                    row = await db_fuzzy.find_game_by_name_fuzzy(query, candidates={7: candidate})
+
+                self.assertIsNone(row)
 
 
 class MetacriticRegressionTests(unittest.IsolatedAsyncioTestCase):
