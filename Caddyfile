@@ -1,8 +1,8 @@
-gamelib.yourname.duckdns.org {
+gamelibmcp.johnwilkos.com {
     reverse_proxy app:8000
 }
 
 # Add future MCPs here, e.g.:
-# notes.yourname.duckdns.org {
+# notes.johnwilkos.com {
 #     reverse_proxy notes-mcp:8001
 # }
