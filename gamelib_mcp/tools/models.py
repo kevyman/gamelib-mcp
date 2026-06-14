@@ -110,8 +110,17 @@ class BacklogStatsResponse(FlexibleModel):
     pass
 
 
-class RefreshLibraryResponse(RootModel[dict[str, dict[str, Any]]]):
-    pass
+class RefreshLibraryResponse(FlexibleModel):
+    status: str  # "started" or "already_running"
+    platforms: list[str]
+    already_running: bool
+
+
+class SyncStatusResponse(FlexibleModel):
+    status: str  # "in_progress" or "idle"
+    started_at: str | None = None
+    finished_at: str | None = None
+    platforms: dict[str, dict[str, Any]]
 
 
 class IntegrationStatusResponse(FlexibleModel):

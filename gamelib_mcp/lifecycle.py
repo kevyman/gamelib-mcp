@@ -7,7 +7,7 @@ helpers consumed by the startup refresh.
 
 It deliberately does NOT import ``gamelib_mcp.tools.admin`` at module load time.
 The tool layer (``admin.py``) imports orchestration primitives from here at the
-top level; this module reaches back into ``admin.refresh_library`` lazily (via
+top level; this module reaches back into ``admin.run_library_sync`` lazily (via
 the patchable ``_admin_refresh_library`` global), so the dependency is a clean
 one-way edge ``tools.admin -> lifecycle`` with no import cycle.
 """
@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 # Platforms whose per-run sync outcome is recorded in the meta table.
 SYNC_METADATA_PLATFORMS = ("steam", "epic", "gog", "nintendo", "ps5")
 
-# Lazily bound to tools.admin.refresh_library on first startup refresh. Kept as a
-# module-level name so tests can patch it directly.
+# Lazily bound to tools.admin.run_library_sync (the worker) on first startup
+# refresh. Kept as a module-level name so tests can patch it directly.
 _admin_refresh_library = None
 
 _LIBRARY_REFRESH_TASK: asyncio.Task | None = None
@@ -300,13 +300,37 @@ def _summarize_refresh_result(result: object) -> str | None:
     return "; ".join(errors) if errors else None
 
 
-async def _run_startup_refresh() -> dict:
+async def reconcile_stale_sync_status() -> None:
+    """Reset a sync left `in_progress` by a crash.
+
+    At process start there is never a live refresh task, so an `in_progress`
+    status can only be stale. Flip it to idle, note the interruption, and mark
+    any platform still `running` as `error`.
+    """
+    from .data.db import get_meta, get_meta_prefix, set_meta_many
+
+    if await get_meta("library_sync_status") != "in_progress":
+        return
+
+    updates: dict[str, str | None] = {
+        "library_sync_status": "idle",
+        "library_sync_finished_at": datetime.now(timezone.utc).isoformat(),
+        "library_sync_error": "Previous sync interrupted before completion",
+    }
+    for key, value in (await get_meta_prefix("sync_platform_state_")).items():
+        if value == "running":
+            updates[key] = "error"
+    await set_meta_many(updates)
+    logger.info("Reconciled stale in-progress library sync status on startup")
+
+
+async def _run_startup_refresh(platforms: list[str] | None = None) -> dict:
     global _admin_refresh_library
     from .data.db import set_meta_many
 
     if _admin_refresh_library is None:
-        from .tools.admin import refresh_library
-        _admin_refresh_library = refresh_library
+        from .tools.admin import run_library_sync
+        _admin_refresh_library = run_library_sync
 
     started_at = datetime.now(timezone.utc).isoformat()
     await set_meta_many(
@@ -322,7 +346,7 @@ async def _run_startup_refresh() -> dict:
     cancelled = False
     refresh_result: dict | None = None
     try:
-        refresh_result = await _admin_refresh_library()
+        refresh_result = await _admin_refresh_library(platforms)
         final_error = _summarize_refresh_result(refresh_result)
         if final_error:
             logger.warning("Startup library refresh completed with partial errors: %s", final_error)
@@ -356,14 +380,14 @@ async def _run_startup_refresh() -> dict:
     return refresh_result or {}
 
 
-async def _ensure_startup_refresh() -> asyncio.Task:
+async def _ensure_startup_refresh(platforms: list[str] | None = None) -> asyncio.Task:
     global _LIBRARY_REFRESH_TASK
 
     async with _get_library_refresh_lock():
         if _LIBRARY_REFRESH_TASK is not None and not _LIBRARY_REFRESH_TASK.done():
             return _LIBRARY_REFRESH_TASK
 
-        _LIBRARY_REFRESH_TASK = asyncio.create_task(_run_startup_refresh())
+        _LIBRARY_REFRESH_TASK = asyncio.create_task(_run_startup_refresh(platforms))
         _LIBRARY_REFRESH_TASK.add_done_callback(_clear_library_refresh_task)
         return _LIBRARY_REFRESH_TASK
 
@@ -419,6 +443,7 @@ async def lifespan(app):
 
     await init_db()
     await clear_all_enrichment_claims()
+    await reconcile_stale_sync_status()
     logger.info("Database initialized")
 
     # Seed hardware preference from env if not yet set
