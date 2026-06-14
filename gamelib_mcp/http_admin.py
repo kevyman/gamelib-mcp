@@ -288,21 +288,15 @@ def register_http_routes(mcp) -> None:
     @mcp.custom_route("/health", methods=["GET"])
     async def health(request: Request) -> JSONResponse:
         try:
-            return JSONResponse(await _health_payload())
-        except Exception as exc:
+            payload = await _health_payload()
+            return JSONResponse({"status": payload["status"]})
+        except Exception:
             logger.exception("Health check failed")
-            return JSONResponse(
-                {
-                    "status": "error",
-                    "checks": {
-                        "database": {
-                            "status": "error",
-                            "error": str(exc),
-                        }
-                    },
-                },
-                status_code=503,
-            )
+            return JSONResponse({"status": "error"}, status_code=503)
+
+    @mcp.custom_route("/admin/health", methods=["GET"])
+    async def admin_health(request: Request) -> JSONResponse:
+        return JSONResponse(await _health_payload())
 
     @mcp.custom_route("/admin/integrations", methods=["GET"])
     async def admin_integrations(request: Request) -> JSONResponse:
