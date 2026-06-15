@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import sqlite3
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 
@@ -50,6 +51,7 @@ _SUPERVISOR_PROGRESS: ContextVar["_ProgressTracker | None"] = ContextVar(
     "enrich_supervisor_progress",
     default=None,
 )
+_BACKGROUND_ENRICHMENT_PAUSE_COUNT = 0
 _OPENCRITIC_SUCCESS_STATUSES = {
     "matched",
     "cached",
@@ -91,6 +93,23 @@ class _ProgressTracker:
         return self._epoch
 
 
+def pause_background_enrichment() -> None:
+    """Prevent enrichment workers from claiming new batches."""
+    global _BACKGROUND_ENRICHMENT_PAUSE_COUNT
+    _BACKGROUND_ENRICHMENT_PAUSE_COUNT += 1
+
+
+def resume_background_enrichment() -> None:
+    """Release one pause request for enrichment workers."""
+    global _BACKGROUND_ENRICHMENT_PAUSE_COUNT
+    if _BACKGROUND_ENRICHMENT_PAUSE_COUNT > 0:
+        _BACKGROUND_ENRICHMENT_PAUSE_COUNT -= 1
+
+
+def is_background_enrichment_paused() -> bool:
+    return _BACKGROUND_ENRICHMENT_PAUSE_COUNT > 0
+
+
 async def background_enrich() -> None:
     """Run enrichment families concurrently until all queues go quiescent."""
     logger.info("Background enrichment started")
@@ -121,6 +140,8 @@ async def _run_until_quiescent(run_batch: Callable[[], Awaitable[int]]) -> int:
     tracker = _SUPERVISOR_PROGRESS.get()
     observed_epoch = tracker.epoch if tracker is not None else 0
     while idle_polls < _IDLE_POLLS:
+        if is_background_enrichment_paused():
+            return total
         processed = await run_batch()
         total += processed
         if processed:
@@ -209,7 +230,7 @@ async def _run_hltb_batch() -> int:
             except Exception as exc:
                 logger.debug("HLTB enrich failed for %s: %s", row["name"], exc)
             finally:
-                await clear_claim("games", "hltb_claimed_at", row["game_id"])
+                await _clear_claim_or_defer("games", "hltb_claimed_at", row["game_id"])
             return 1
 
         total += sum(await asyncio.gather(*(run_one(row) for row in batch)))
@@ -316,24 +337,42 @@ async def _run_igdb_batch() -> int:
 
 
 async def _finalize_store_claim(platform_id: int) -> None:
-    async with get_db() as db:
-        await db.execute(
-            "UPDATE steam_platform_data SET store_claimed_at = NULL WHERE game_platform_id = ?",
-            (platform_id,),
-        )
-        await db.commit()
+    if _defer_claim_release_if_paused("steam_platform_data", "store_claimed_at", platform_id):
+        return
+
+    try:
+        async with get_db() as db:
+            await db.execute(
+                "UPDATE steam_platform_data SET store_claimed_at = NULL WHERE game_platform_id = ?",
+                (platform_id,),
+            )
+            await db.commit()
+    except sqlite3.OperationalError as exc:
+        if _is_transient_sqlite_lock(exc):
+            _log_deferred_claim_release("steam_platform_data", "store_claimed_at", platform_id, exc)
+            return
+        raise
 
 
 async def _finalize_steam_claim(
     platform_id: int,
     claim_column: str,
 ) -> None:
-    async with get_db() as db:
-        await db.execute(
-            f"UPDATE steam_platform_data SET {claim_column} = NULL WHERE game_platform_id = ?",
-            (platform_id,),
-        )
-        await db.commit()
+    if _defer_claim_release_if_paused("steam_platform_data", claim_column, platform_id):
+        return
+
+    try:
+        async with get_db() as db:
+            await db.execute(
+                f"UPDATE steam_platform_data SET {claim_column} = NULL WHERE game_platform_id = ?",
+                (platform_id,),
+            )
+            await db.commit()
+    except sqlite3.OperationalError as exc:
+        if _is_transient_sqlite_lock(exc):
+            _log_deferred_claim_release("steam_platform_data", claim_column, platform_id, exc)
+            return
+        raise
 
 
 async def _finalize_platform_enrichment_claim(
@@ -343,10 +382,75 @@ async def _finalize_platform_enrichment_claim(
     success: bool,
 ) -> None:
     if success:
-        await clear_claim("game_platform_enrichment", claim_column, platform_id, id_column="game_platform_id")
+        await _clear_claim_or_defer(
+            "game_platform_enrichment",
+            claim_column,
+            platform_id,
+            id_column="game_platform_id",
+        )
         return
 
-    await upsert_game_platform_enrichment(
-        platform_id,
-        **{claim_column: None, cached_column: "FAILED"},
+    if _defer_claim_release_if_paused("game_platform_enrichment", claim_column, platform_id):
+        return
+
+    try:
+        await upsert_game_platform_enrichment(
+            platform_id,
+            **{claim_column: None, cached_column: "FAILED"},
+        )
+    except sqlite3.OperationalError as exc:
+        if _is_transient_sqlite_lock(exc):
+            _log_deferred_claim_release("game_platform_enrichment", claim_column, platform_id, exc)
+            return
+        raise
+
+
+async def _clear_claim_or_defer(
+    table: str,
+    claim_column: str,
+    row_id: int,
+    *,
+    id_column: str = "id",
+) -> None:
+    if _defer_claim_release_if_paused(table, claim_column, row_id):
+        return
+
+    try:
+        await clear_claim(table, claim_column, row_id, id_column=id_column)
+    except sqlite3.OperationalError as exc:
+        if _is_transient_sqlite_lock(exc):
+            _log_deferred_claim_release(table, claim_column, row_id, exc)
+            return
+        raise
+
+
+def _defer_claim_release_if_paused(table: str, claim_column: str, row_id: int) -> bool:
+    if not is_background_enrichment_paused():
+        return False
+
+    logger.info(
+        "Deferring enrichment claim release for %s.%s row %s while enrichment is paused",
+        table,
+        claim_column,
+        row_id,
+    )
+    return True
+
+
+def _is_transient_sqlite_lock(exc: sqlite3.OperationalError) -> bool:
+    return "database is locked" in str(exc).lower()
+
+
+def _log_deferred_claim_release(
+    table: str,
+    claim_column: str,
+    row_id: int,
+    exc: sqlite3.OperationalError,
+) -> None:
+    logger.info(
+        "Deferring enrichment claim release for %s.%s row %s after transient SQLite lock: %s",
+        table,
+        claim_column,
+        row_id,
+        exc,
     )

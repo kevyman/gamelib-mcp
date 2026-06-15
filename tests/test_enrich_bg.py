@@ -111,6 +111,18 @@ class EnrichmentClaimTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BackgroundEnrichmentSupervisorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_until_quiescent_does_not_claim_new_work_while_paused(self) -> None:
+        run_batch = AsyncMock(return_value=1)
+
+        enrich_bg.pause_background_enrichment()
+        try:
+            processed = await enrich_bg._run_until_quiescent(run_batch)
+        finally:
+            enrich_bg.resume_background_enrichment()
+
+        self.assertEqual(processed, 0)
+        run_batch.assert_not_awaited()
+
     async def test_background_enrich_runs_opencritic_workers_without_api_key(self) -> None:
         with (
             patch.dict("os.environ", {}, clear=True),
@@ -319,6 +331,61 @@ class BackgroundEnrichmentSupervisorTests(unittest.IsolatedAsyncioTestCase):
         sql = db_mock.execute.await_args.args[0]
         self.assertIn("SET protondb_claimed_at = NULL", sql)
         self.assertNotIn("protondb_cached_at = 'FAILED'", sql)
+
+    async def test_finalize_steam_claim_defers_transient_sqlite_lock(self) -> None:
+        db_mock = AsyncMock()
+        db_mock.execute.side_effect = sqlite3.OperationalError("database is locked")
+        db_cm = AsyncMock()
+        db_cm.__aenter__.return_value = db_mock
+        db_cm.__aexit__.return_value = False
+
+        with (
+            patch("gamelib_mcp.data.enrich_bg.get_db", return_value=db_cm),
+            self.assertLogs("gamelib_mcp.data.enrich_bg", level="INFO") as logs,
+        ):
+            await enrich_bg._finalize_steam_claim(11, "protondb_claimed_at")
+
+        self.assertTrue(any("Deferring enrichment claim release" in line for line in logs.output))
+
+    async def test_finalize_steam_claim_defers_without_db_write_while_paused(self) -> None:
+        db_cm = AsyncMock()
+
+        enrich_bg.pause_background_enrichment()
+        try:
+            with (
+                patch("gamelib_mcp.data.enrich_bg.get_db", return_value=db_cm) as get_db,
+                self.assertLogs("gamelib_mcp.data.enrich_bg", level="INFO") as logs,
+            ):
+                await enrich_bg._finalize_steam_claim(11, "protondb_claimed_at")
+        finally:
+            enrich_bg.resume_background_enrichment()
+
+        get_db.assert_not_called()
+        self.assertTrue(any("while enrichment is paused" in line for line in logs.output))
+
+    async def test_hltb_batch_defers_claim_release_when_pause_starts_after_claim(self) -> None:
+        async def pause_during_hltb(_game_id: int, _name: str) -> None:
+            enrich_bg.pause_background_enrichment()
+
+        with (
+            patch("gamelib_mcp.data.enrich_bg.claim_game_ids_for_hltb", AsyncMock(return_value=[1])),
+            patch(
+                "gamelib_mcp.data.enrich_bg.load_hltb_batch_rows",
+                AsyncMock(return_value=[{"game_id": 1, "name": "Portal"}]),
+            ),
+            patch("gamelib_mcp.data.enrich_bg.get_hltb", AsyncMock(side_effect=pause_during_hltb)),
+            patch("gamelib_mcp.data.enrich_bg.clear_claim", AsyncMock()) as clear_claim,
+            patch("gamelib_mcp.data.enrich_bg.asyncio.sleep", AsyncMock()),
+            self.assertLogs("gamelib_mcp.data.enrich_bg", level="INFO") as logs,
+        ):
+            try:
+                processed = await enrich_bg._run_hltb_batch()
+            finally:
+                enrich_bg.resume_background_enrichment()
+
+        self.assertEqual(processed, 1)
+        clear_claim.assert_not_awaited()
+        self.assertTrue(any("while enrichment is paused" in line for line in logs.output))
 
     async def test_steamspy_batch_releases_claim_without_marking_failed_on_exception(self) -> None:
         db_mock = AsyncMock()
