@@ -68,7 +68,7 @@ async def claim_game_ids_for_igdb(limit: int, stale_before: str) -> list[int]:
            FROM games
            WHERE igdb_cached_at IS NULL
              AND (igdb_claimed_at IS NULL OR igdb_claimed_at < ?)
-           ORDER BY id
+           ORDER BY is_farmed ASC, id
            LIMIT ?""",
         (stale_before, limit),
         """UPDATE games
@@ -86,8 +86,7 @@ async def claim_game_ids_for_hltb(limit: int, stale_before: str) -> list[int]:
            FROM games
            WHERE (hltb_cached_at IS NULL OR hltb_cached_at = 'FAILED')
              AND (hltb_claimed_at IS NULL OR hltb_claimed_at < ?)
-             AND is_farmed = 0
-           ORDER BY id
+           ORDER BY is_farmed ASC, id
            LIMIT ?""",
         (stale_before, limit),
         """UPDATE games
@@ -109,8 +108,7 @@ async def claim_steam_platform_ids_for_store(limit: int, stale_before: str) -> l
              ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
            WHERE spd.store_cached_at IS NULL
              AND (spd.store_claimed_at IS NULL OR spd.store_claimed_at < ?)
-             AND g.is_farmed = 0
-           ORDER BY COALESCE(gp.playtime_minutes, 0) DESC, spd.game_platform_id
+           ORDER BY g.is_farmed ASC, COALESCE(gp.playtime_minutes, 0) DESC, spd.game_platform_id
            LIMIT ?""",
         (STEAM_APP_ID, stale_before, limit),
         """UPDATE steam_platform_data
@@ -132,8 +130,7 @@ async def claim_steam_platform_ids_for_protondb(limit: int, stale_before: str) -
              ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
            WHERE spd.protondb_cached_at IS NULL
              AND (spd.protondb_claimed_at IS NULL OR spd.protondb_claimed_at < ?)
-             AND g.is_farmed = 0
-           ORDER BY COALESCE(gp.playtime_minutes, 0) DESC, spd.game_platform_id
+           ORDER BY g.is_farmed ASC, COALESCE(gp.playtime_minutes, 0) DESC, spd.game_platform_id
            LIMIT ?""",
         (STEAM_APP_ID, stale_before, limit),
         """UPDATE steam_platform_data
@@ -155,8 +152,7 @@ async def claim_steam_platform_ids_for_steamspy(limit: int, stale_before: str) -
              ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
            WHERE spd.steamspy_cached_at IS NULL
              AND (spd.steamspy_claimed_at IS NULL OR spd.steamspy_claimed_at < ?)
-             AND g.is_farmed = 0
-           ORDER BY COALESCE(gp.playtime_minutes, 0) DESC, spd.game_platform_id
+           ORDER BY g.is_farmed ASC, COALESCE(gp.playtime_minutes, 0) DESC, spd.game_platform_id
            LIMIT ?""",
         (STEAM_APP_ID, stale_before, limit),
         """UPDATE steam_platform_data
@@ -174,8 +170,7 @@ async def claim_game_platform_ids_for_opencritic(limit: int, stale_before: str) 
             """INSERT OR IGNORE INTO game_platform_enrichment (game_platform_id)
                SELECT gp.id
                FROM game_platforms gp
-               JOIN games g ON g.id = gp.game_id
-               WHERE g.is_farmed = 0"""
+               JOIN games g ON g.id = gp.game_id"""
         )
         await db.commit()
 
@@ -186,8 +181,7 @@ async def claim_game_platform_ids_for_opencritic(limit: int, stale_before: str) 
            JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
            WHERE gpe.opencritic_cached_at IS NULL
              AND (gpe.opencritic_claimed_at IS NULL OR gpe.opencritic_claimed_at < ?)
-             AND g.is_farmed = 0
-           ORDER BY COALESCE(gp.playtime_minutes, 0) DESC, gp.id
+           ORDER BY g.is_farmed ASC, COALESCE(gp.playtime_minutes, 0) DESC, gp.id
            LIMIT ?""",
         (stale_before, limit),
         """UPDATE game_platform_enrichment
@@ -205,8 +199,7 @@ async def claim_game_platform_ids_for_metacritic(limit: int, stale_before: str) 
             """INSERT OR IGNORE INTO game_platform_enrichment (game_platform_id)
                SELECT gp.id
                FROM game_platforms gp
-               JOIN games g ON g.id = gp.game_id
-               WHERE g.is_farmed = 0"""
+               JOIN games g ON g.id = gp.game_id"""
         )
         await db.commit()
 
@@ -217,8 +210,7 @@ async def claim_game_platform_ids_for_metacritic(limit: int, stale_before: str) 
            JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
            WHERE gpe.metacritic_cached_at IS NULL
              AND (gpe.metacritic_claimed_at IS NULL OR gpe.metacritic_claimed_at < ?)
-             AND g.is_farmed = 0
-           ORDER BY COALESCE(gp.playtime_minutes, 0) DESC, gp.id
+           ORDER BY g.is_farmed ASC, COALESCE(gp.playtime_minutes, 0) DESC, gp.id
            LIMIT ?""",
         (stale_before, limit),
         """UPDATE game_platform_enrichment
