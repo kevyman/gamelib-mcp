@@ -125,6 +125,22 @@ class EnrichmentClaimTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(claimed, [regular_id, farmed_id])
 
+    async def test_igdb_claims_farmed_games_after_regular_games(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"DATABASE_URL": f"file:{self.db_path}"},
+            clear=False,
+        ):
+            farmed_id = await db_module.upsert_game(appid=None, name="Farmed", is_farmed=1)
+            regular_id = await db_module.upsert_game(appid=None, name="Regular")
+
+            claimed = await db_module.claim_game_ids_for_igdb(
+                limit=2,
+                stale_before="1970-01-01T00:00:00+00:00",
+            )
+
+        self.assertEqual(claimed, [regular_id, farmed_id])
+
     async def test_steam_claims_include_farmed_games_after_regular_playtime(self) -> None:
         with patch.dict(
             "os.environ",

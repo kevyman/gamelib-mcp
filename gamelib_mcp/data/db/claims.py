@@ -68,7 +68,7 @@ async def claim_game_ids_for_igdb(limit: int, stale_before: str) -> list[int]:
            FROM games
            WHERE igdb_cached_at IS NULL
              AND (igdb_claimed_at IS NULL OR igdb_claimed_at < ?)
-           ORDER BY id
+           ORDER BY is_farmed ASC, id
            LIMIT ?""",
         (stale_before, limit),
         """UPDATE games
