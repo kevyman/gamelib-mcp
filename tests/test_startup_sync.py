@@ -5,7 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import admin as admin_tools
@@ -613,6 +613,30 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, {"steam": refresh_result})
         mock_detect.assert_awaited_once_with(dry_run=False)
+
+    async def test_refresh_library_pauses_enrichment_during_platform_sync(self) -> None:
+        pause_enrichment = Mock()
+        resume_enrichment = Mock()
+
+        async def steam_sync() -> dict:
+            pause_enrichment.assert_called_once_with()
+            resume_enrichment.assert_not_called()
+            return {"platform": "steam", "synced": True}
+
+        with (
+            _stub_sync_meta_writes(),
+            patch("gamelib_mcp.tools.admin.pause_background_enrichment", pause_enrichment),
+            patch("gamelib_mcp.tools.admin.resume_background_enrichment", resume_enrichment),
+            patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(side_effect=steam_sync)),
+            patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(return_value={"candidates": 0})),
+            patch("gamelib_mcp.tools.admin._schedule_background_enrich", AsyncMock()) as schedule_enrich,
+        ):
+            result = await admin_tools.run_library_sync(["steam"])
+
+        self.assertEqual(result, {"steam": {"platform": "steam", "synced": True}})
+        pause_enrichment.assert_called_once_with()
+        resume_enrichment.assert_called_once_with()
+        schedule_enrich.assert_awaited_once()
 
     async def test_refresh_library_skips_farm_detection_without_steam(self) -> None:
         with (

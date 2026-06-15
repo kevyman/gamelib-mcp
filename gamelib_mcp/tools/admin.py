@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from fastmcp.exceptions import ToolError
 
 from ..data.db import STEAM_APP_ID, get_db
+from ..data.enrich_bg import pause_background_enrichment, resume_background_enrichment
 from ..data.epic import sync_epic
 from ..data.gog import sync_gog
 from ..data.nintendo import sync_nintendo
@@ -86,42 +87,46 @@ async def run_library_sync(
         return await fn()
 
     selected = [(name, fn) for name, fn in platform_syncs.items() if name in targets]
-    # Mark started here too (not only in the refresh_library tool): the startup and
-    # periodic paths reach this worker via _run_startup_refresh without going through
-    # the tool, so this is what records per-platform "running" state on those paths.
-    # On the tool path it's an idempotent re-write of state the tool already set.
-    await _mark_sync_started(targets)
-    await report_progress(ctx, 0, len(selected))
-    await _info(ctx, f"Refreshing {len(selected)} platform(s)")
-    outcomes = await asyncio.gather(
-        *(run_platform(name, fn) for name, fn in selected),
-        return_exceptions=True,
-    )
+    pause_background_enrichment()
+    try:
+        # Mark started here too (not only in the refresh_library tool): the startup and
+        # periodic paths reach this worker via _run_startup_refresh without going through
+        # the tool, so this is what records per-platform "running" state on those paths.
+        # On the tool path it's an idempotent re-write of state the tool already set.
+        await _mark_sync_started(targets)
+        await report_progress(ctx, 0, len(selected))
+        await _info(ctx, f"Refreshing {len(selected)} platform(s)")
+        outcomes = await asyncio.gather(
+            *(run_platform(name, fn) for name, fn in selected),
+            return_exceptions=True,
+        )
 
-    results: dict = {}
-    for index, ((name, _), outcome) in enumerate(zip(selected, outcomes, strict=True), start=1):
-        result_name = result_names.get(name, name)
-        if isinstance(outcome, BaseException):
-            results[result_name] = {"error": str(outcome)}
-            await _mark_platform_state(name, "error")
-            await _info(ctx, f"Failed {result_name} refresh: {outcome}")
-        else:
-            results[result_name] = outcome
-            await _mark_platform_state(name, "done")
-            await _info(ctx, f"Finished {result_name} refresh")
-        await report_progress(ctx, index, len(selected))
+        results: dict = {}
+        for index, ((name, _), outcome) in enumerate(zip(selected, outcomes, strict=True), start=1):
+            result_name = result_names.get(name, name)
+            if isinstance(outcome, BaseException):
+                results[result_name] = {"error": str(outcome)}
+                await _mark_platform_state(name, "error")
+                await _info(ctx, f"Failed {result_name} refresh: {outcome}")
+            else:
+                results[result_name] = outcome
+                await _mark_platform_state(name, "done")
+                await _info(ctx, f"Finished {result_name} refresh")
+            await report_progress(ctx, index, len(selected))
 
-    steam_result = results.get("steam")
-    steam_synced = (
-        "steam" in targets
-        and isinstance(steam_result, dict)
-        and not steam_result.get("error")
-    )
-    if steam_synced:
-        try:
-            await detect_farmed_games(dry_run=False)
-        except Exception:
-            logger.exception("Farmed-game detection failed after Steam refresh")
+        steam_result = results.get("steam")
+        steam_synced = (
+            "steam" in targets
+            and isinstance(steam_result, dict)
+            and not steam_result.get("error")
+        )
+        if steam_synced:
+            try:
+                await detect_farmed_games(dry_run=False)
+            except Exception:
+                logger.exception("Farmed-game detection failed after Steam refresh")
+    finally:
+        resume_background_enrichment()
 
     try:
         await _schedule_background_enrich()
