@@ -86,6 +86,15 @@ class AddGameToPlatformTests(ToolDBTestCase):
         self.assertTrue(result["created"])
         self.assertEqual(result["platform"], "ea")
 
+    async def test_accepts_ubisoft_manual_platform(self):
+        result = await platforms.add_game_to_platform("Assassin's Creed", "ubisoft")
+        self.assertTrue(result["created"])
+        self.assertEqual(result["platform"], "ubisoft")
+
+    async def test_uplay_alias_resolves_to_ubisoft(self):
+        result = await platforms.add_game_to_platform("Far Cry", "uplay")
+        self.assertEqual(result["platform"], "ubisoft")  # alias resolved
+
     async def test_rejects_empty_name(self):
         with self.assertRaisesRegex(ToolError, "name must not be empty"):
             await platforms.add_game_to_platform("   ", "steam")
