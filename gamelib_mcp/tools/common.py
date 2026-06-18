@@ -16,6 +16,7 @@ PLATFORM_ALIASES = {
     "nintendo": "switch2",
     "switch": "switch2",
     "uplay": "ubisoft",
+    "origin": "ea",
 }
 
 # Platforms with an automated sync backend (canonical, post-alias names).
