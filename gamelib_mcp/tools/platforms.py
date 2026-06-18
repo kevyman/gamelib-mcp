@@ -64,7 +64,7 @@ async def set_hardware_preference(platforms: list[str]) -> dict:
     platforms: ordered list, highest priority first.
     e.g. ["switch2", "ps5", "steam"]
 
-    Valid values: steam, epic, gog, switch2 (aka nintendo/switch), ps5, itchio, xbox, other.
+    Valid values: steam, epic, gog, switch2 (aka nintendo/switch), ps5, itchio, xbox, ea, other.
     """
     normalized = [_validate_platform(p, LIBRARY_PLATFORMS) for p in platforms]
     await set_meta("hardware_preference", json.dumps(normalized))
@@ -83,7 +83,7 @@ async def add_game_to_platform(
     automatically (e.g. physical copies, unreported digital titles).
 
     name: Game name (will match an existing game by exact name or create a new one)
-    platform: steam | epic | gog | nintendo | switch2 | ps5 | itchio | xbox | other
+    platform: steam | epic | gog | nintendo | switch2 | ps5 | itchio | xbox | ea | other
     identifier_type: Optional store identifier type (e.g. 'steam_appid', 'gog_product_id')
     identifier_value: Optional store identifier value
     playtime_minutes: Optional known playtime in minutes
