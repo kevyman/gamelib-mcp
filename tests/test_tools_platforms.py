@@ -81,6 +81,11 @@ class AddGameToPlatformTests(ToolDBTestCase):
         self.assertEqual(result["platform"], "switch2")  # alias resolved
         self.assertIsNone(result["identifier"])
 
+    async def test_accepts_ea_manual_platform(self):
+        result = await platforms.add_game_to_platform("Dragon Age", "ea")
+        self.assertTrue(result["created"])
+        self.assertEqual(result["platform"], "ea")
+
     async def test_rejects_empty_name(self):
         with self.assertRaisesRegex(ToolError, "name must not be empty"):
             await platforms.add_game_to_platform("   ", "steam")
