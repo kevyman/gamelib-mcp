@@ -95,6 +95,10 @@ class AddGameToPlatformTests(ToolDBTestCase):
         result = await platforms.add_game_to_platform("Far Cry", "uplay")
         self.assertEqual(result["platform"], "ubisoft")  # alias resolved
 
+    async def test_origin_alias_resolves_to_ea(self):
+        result = await platforms.add_game_to_platform("Burnout Paradise", "origin")
+        self.assertEqual(result["platform"], "ea")  # alias resolved
+
     async def test_rejects_empty_name(self):
         with self.assertRaisesRegex(ToolError, "name must not be empty"):
             await platforms.add_game_to_platform("   ", "steam")
