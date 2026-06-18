@@ -15,14 +15,16 @@ from ..data.db import STEAM_APP_ID
 PLATFORM_ALIASES = {
     "nintendo": "switch2",
     "switch": "switch2",
+    "uplay": "ubisoft",
 }
 
 # Platforms with an automated sync backend (canonical, post-alias names).
 SYNCABLE_PLATFORMS = frozenset({"steam", "epic", "gog", "switch2", "ps5"})
 
 # Every platform a game can be recorded against in the library (post-alias).
-# Superset of SYNCABLE_PLATFORMS plus manual-only stores (ea has no sync backend).
-LIBRARY_PLATFORMS = SYNCABLE_PLATFORMS | {"itchio", "xbox", "ea", "other"}
+# Superset of SYNCABLE_PLATFORMS plus manual-only stores (ea/ubisoft have no
+# sync backend; ubisoft == Ubisoft Connect, formerly Uplay).
+LIBRARY_PLATFORMS = SYNCABLE_PLATFORMS | {"itchio", "xbox", "ea", "ubisoft", "other"}
 
 # Result-count ceiling shared by all list-returning tools. Keeps a single tool
 # call from blowing the client's context with a multi-megabyte response.
