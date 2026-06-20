@@ -587,6 +587,9 @@ _V8_SCHEMA_DDL = """
 
 # v9 adds games.manual_overrides: a JSON array of column names set via the
 # update_game tool. Background sync/enrichment must not clobber these columns.
+#
+# v10 (defined below) appends normalized series tables (game_series +
+# game_series_membership) for IGDB collections/franchises.
 _V9_SCHEMA_DDL = """
     CREATE TABLE IF NOT EXISTS games (
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -693,4 +696,26 @@ _V9_SCHEMA_DDL = """
         ON game_platform_identifiers(game_platform_id);
     CREATE INDEX IF NOT EXISTS idx_games_name_normalized ON games(name_normalized);
     CREATE INDEX IF NOT EXISTS idx_ratings_game_id ON ratings(game_id);
+"""
+
+
+# v10 adds normalized series tracking (IGDB collections + franchises) with a
+# many-to-many membership junction.
+_V10_SCHEMA_DDL = _V9_SCHEMA_DDL + """
+    CREATE TABLE IF NOT EXISTS game_series (
+        id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        igdb_id INTEGER,
+        kind    TEXT NOT NULL,
+        name    TEXT NOT NULL,
+        UNIQUE(kind, igdb_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS game_series_membership (
+        game_id   INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        series_id INTEGER NOT NULL REFERENCES game_series(id) ON DELETE CASCADE,
+        PRIMARY KEY (game_id, series_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_gsm_game ON game_series_membership(game_id);
+    CREATE INDEX IF NOT EXISTS idx_gsm_series ON game_series_membership(series_id);
 """

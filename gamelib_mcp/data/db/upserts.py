@@ -520,3 +520,39 @@ async def upsert_game_platform_enrichment(game_platform_id: int, **fields) -> No
             (game_platform_id, *fields.values()),
         )
         await db.commit()
+
+
+async def upsert_game_series_links(game_id: int, series_entries) -> None:
+    """Link a game to its series (IGDB collections/franchises).
+
+    ``series_entries`` is an iterable of (kind, igdb_id, name) tuples, where
+    ``kind`` is "collection" or "franchise". Series rows are deduped on
+    (kind, igdb_id); memberships are add-only and idempotent, so re-running
+    IGDB backfill never creates duplicates.
+    """
+    entries = [
+        (kind, igdb_id, name)
+        for kind, igdb_id, name in series_entries
+        if igdb_id is not None and name
+    ]
+    if not entries:
+        return
+
+    async with get_db() as db:
+        for kind, igdb_id, name in entries:
+            await db.execute(
+                """INSERT INTO game_series (kind, igdb_id, name)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(kind, igdb_id) DO UPDATE SET name = excluded.name""",
+                (kind, igdb_id, name),
+            )
+            row = await db.execute_fetchone(
+                "SELECT id FROM game_series WHERE kind = ? AND igdb_id = ?",
+                (kind, igdb_id),
+            )
+            await db.execute(
+                """INSERT OR IGNORE INTO game_series_membership (game_id, series_id)
+                   VALUES (?, ?)""",
+                (game_id, row["id"]),
+            )
+        await db.commit()

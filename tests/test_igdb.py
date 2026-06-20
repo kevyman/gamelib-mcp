@@ -167,6 +167,47 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("where (category = null | category != (1, 3, 5, 6, 7));", query)
         self.assertIn("limit 5;", query)
 
+    async def test_search_game_requests_series_fields(self) -> None:
+        post_mock = AsyncMock(return_value=[])
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", new=post_mock),
+        ):
+            await igdb.search_game("Bloodborne")
+
+        query = post_mock.await_args.args[0]
+        self.assertIn("collections.id, collections.name", query)
+        self.assertIn("franchises.id, franchises.name", query)
+
+    async def test_search_game_parses_collections_and_franchises(self) -> None:
+        async def fake_post(query: str, headers: dict[str, str]) -> list[dict]:
+            return [
+                {
+                    "id": 7346,
+                    "name": "Breath of the Wild",
+                    "category": igdb.CATEGORY_MAIN_GAME,
+                    "collections": [{"id": 1, "name": "The Legend of Zelda"}],
+                    "franchises": [{"id": 2, "name": "The Legend of Zelda"}],
+                }
+            ]
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", new=fake_post),
+        ):
+            results = await igdb.search_game("Breath of the Wild")
+
+        self.assertEqual(
+            results[0].series,
+            [
+                ("collection", 1, "The Legend of Zelda"),
+                ("franchise", 2, "The Legend of Zelda"),
+            ],
+        )
+
     async def test_search_game_retries_rate_limit_response(self) -> None:
         client = _DummyAsyncClient(
             [

@@ -80,7 +80,7 @@ Dependency direction is a clean DAG: `main → lifecycle`, `main → http_admin`
 - `admin.py`: `refresh_library` (full or per-platform sync), `detect_farmed_games`, `set_nintendo_session`
 - `platforms.py`: `get_platform_breakdown`, `set_hardware_preference`, `add_game_to_platform`, `update_game` (manual per-game property edits incl. `is_farmed`; edited columns are recorded in `games.manual_overrides` so sync/enrichment won't clobber them)
 - `integrations.py`: `get_integration_status` (read-only filter over the inspector payload)
-- `common.py`: shared helpers — the steam-appid correlated subquery and the platform-alias resolver (imported by the modules above). The three `_GAME_ROLLUP_CTE` variants deliberately stay in their own modules; they differ.
+- `common.py`: shared helpers — the steam-appid correlated subquery, the series-names correlated subquery (`SERIES_NAMES_SQL`), and the platform-alias resolver (imported by the modules above). The three `_GAME_ROLLUP_CTE` variants deliberately stay in their own modules; they differ.
 - `search.py`: tiered name-match SQL builder (exact > prefix > substring > token-AND over `games.name_normalized`) plus the fuzzy fallback, used by search, detail, and rate_game name resolution.
 
 **`gamelib_mcp/data/`** — Data fetching and caching layer (all async):
@@ -104,6 +104,7 @@ Core tables, auto-migrated on startup in `db.init_db()`:
 - `game_platform_identifiers`: provider-specific IDs such as `steam_appid` and `gog_product_id`
 - `steam_platform_data`: Steam-only provider metadata
 - `game_platform_enrichment`: cross-platform review/release enrichment
+- `game_series` / `game_series_membership`: normalized series tracking (IGDB collections + franchises) with a many-to-many membership junction; populated during IGDB backfill and surfaced/filterable via the `series` field on search/detail/stats tools
 - `ratings`: normalized 1–10 scores from Backloggd (weight 1.0), manual `rate_game` ratings (weight 1.0), and Steam (weight 0.5)
 - `tag_affinity`: precomputed per-tag preference scores (drives recommendations)
 - `meta`: key-value store (last sync timestamp, etc.)

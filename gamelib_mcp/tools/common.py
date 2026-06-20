@@ -84,6 +84,20 @@ STEAM_APPID_SQL = f"""
 )
 """
 
+# Correlated subquery returning a JSON array of a game's series names (IGDB
+# collections + franchises), for use where the games table is aliased ``g``.
+SERIES_NAMES_SQL = """
+(
+    SELECT json_group_array(s.name)
+    FROM (
+        SELECT DISTINCT s.name
+        FROM game_series_membership m
+        JOIN game_series s ON s.id = m.series_id
+        WHERE m.game_id = g.id
+    ) s
+)
+"""
+
 
 async def report_progress(ctx, progress: int, total: int) -> None:
     if ctx is not None:

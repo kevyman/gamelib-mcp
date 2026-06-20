@@ -12,7 +12,7 @@ from gamelib_mcp import main
 
 EXPECTED_TOOLS = {
     "search_games": {
-        "params": {"query", "limit", "offset", "platform", "response_format"},
+        "params": {"query", "limit", "offset", "platform", "series", "response_format"},
         "required": {"query"},
     },
     "search_games_batch": {"params": {"queries", "limit_per_query"}, "required": {"queries"}},
@@ -30,6 +30,7 @@ EXPECTED_TOOLS = {
             "response_format",
             "tags",
             "genres",
+            "series",
         },
         "required": set(),
     },

@@ -73,6 +73,7 @@ async def search_games(
     limit: int = 20,
     offset: int = 0,
     platform: str | None = None,
+    series: str | None = None,
     response_format: Literal["concise", "detailed"] = "concise",
 ) -> PaginatedGamesResponse:
     """
@@ -82,12 +83,15 @@ async def search_games(
     "Sekiro: Shadows Die Twice"), ranked by relevance, with a fuzzy fallback
     for misspellings (those results carry match_type="fuzzy"). Prefer
     get_game_detail after selecting one result. platform can filter to steam,
-    epic, gog, nintendo, switch2, or ps5. response_format=concise omits
-    platform arrays; detailed includes them. Returns results, total_matches,
-    and has_more.
+    epic, gog, nintendo, switch2, or ps5. series restricts to a single
+    game series (IGDB collection/franchise) by exact, case-insensitive name —
+    pass an empty query to browse a whole series, e.g.
+    search_games("", series="The Legend of Zelda"). Each result carries its
+    series list. response_format=concise omits platform arrays; detailed
+    includes them. Returns results, total_matches, and has_more.
     """
     from .tools.library import search_games as _search
-    return await _search(query, limit, offset, platform, response_format)
+    return await _search(query, limit, offset, platform, series, response_format)
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)
@@ -117,6 +121,7 @@ async def get_library_stats(
     min_opencritic: int | None = None,
     tags: list[str] | None = None,
     genres: list[str] | None = None,
+    series: list[str] | None = None,
 ) -> LibraryStatsResponse:
     """
     Get aggregate library stats plus a filtered and sorted game list.
@@ -125,9 +130,10 @@ async def get_library_stats(
     audits; prefer get_game_detail for one selected game. filter accepts all,
     unplayed, played, recent, or farmed. sort_by accepts playtime, name,
     metacritic, opencritic, or hltb. min_metacritic/min_opencritic filter on
-    critic scores (unscored games are excluded). tags/genres filter
+    critic scores (unscored games are excluded). tags/genres/series filter
     case-insensitively; a game must carry every listed entry (e.g.
-    genres=["RPG"] with max_hltb_hours=10 for short RPGs). protondb_tier
+    genres=["RPG"] with max_hltb_hours=10 for short RPGs; series=["Final
+    Fantasy"] for one IGDB collection/franchise). protondb_tier
     accepts native, platinum, gold, silver, bronze, or borked. platform can
     filter to steam, epic, gog, nintendo, switch2, or ps5.
     response_format=concise omits platform arrays. Returns aggregate counts,
@@ -147,6 +153,7 @@ async def get_library_stats(
         min_opencritic,
         tags,
         genres,
+        series,
     )
 
 

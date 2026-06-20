@@ -54,6 +54,7 @@ class GetGameDetailTests(ToolDBTestCase):
                 "steam_appid",
                 "name",
                 "release_date",
+                "series",
                 "platforms",
                 "playtime_hours",
                 "playtime_2weeks_hours",
