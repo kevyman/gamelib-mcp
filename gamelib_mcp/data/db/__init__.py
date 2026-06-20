@@ -1114,6 +1114,7 @@ from .upserts import (  # noqa: E402
     upsert_game_platform_enrichment,
     get_manual_overrides,
     apply_manual_game_fields,
+    remove_manual_overrides,
 )
 from .fuzzy import (  # noqa: E402
     load_fuzzy_candidates,

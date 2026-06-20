@@ -1,13 +1,14 @@
 """Characterization tests for gamelib_mcp.tools.platforms."""
 
 import json
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 from fastmcp.exceptions import ToolError
 
 from conftest import ToolDBTestCase, make_steam_game, seed_game, add_platform
 from gamelib_mcp.data import db as db_module
-from gamelib_mcp.data import steamspy
+from gamelib_mcp.data import hltb, steamspy
 from gamelib_mcp.tools import platforms
 
 
@@ -177,6 +178,25 @@ class UpdateGameTests(ToolDBTestCase):
         with self.assertRaisesRegex(ToolError, "new_name must not be empty"):
             await platforms.update_game(game_id=gid, new_name="   ")
 
+    async def test_clear_only_removes_protection(self):
+        gid = await seed_game("Clearable", tags=["x"])
+        await platforms.update_game(game_id=gid, tags=["a"], is_farmed=True)
+        result = await platforms.update_game(game_id=gid, clear_overrides=["is_farmed"])
+        self.assertEqual(result["updated"], {})
+        self.assertEqual(result["cleared"], ["is_farmed"])
+        self.assertEqual(set(result["manual_overrides"]), {"tags"})
+        self.assertEqual(await self._overrides(gid), {"tags"})
+
+    async def test_clear_requires_known_column(self):
+        gid = await seed_game("Bad Clear")
+        with self.assertRaisesRegex(ToolError, "unknown column"):
+            await platforms.update_game(game_id=gid, clear_overrides=["bogus"])
+
+    async def test_cannot_set_and_clear_same_column(self):
+        gid = await seed_game("Conflict")
+        with self.assertRaisesRegex(ToolError, "set and clear the same"):
+            await platforms.update_game(game_id=gid, tags=["a"], clear_overrides=["tags"])
+
 
 class UpdateGameProtectionTests(ToolDBTestCase):
     async def test_steamspy_does_not_clobber_manual_tags(self):
@@ -203,3 +223,56 @@ class UpdateGameProtectionTests(ToolDBTestCase):
         async with db_module.get_db() as db:
             row = await db.execute_fetchone("SELECT tags FROM games WHERE id = ?", (gid,))
         self.assertIn("Action", json.loads(row["tags"]))
+
+    async def test_bulk_steam_name_sync_respects_manual_name(self):
+        gid = await make_steam_game("Original", 700)
+        await platforms.update_game(game_id=gid, new_name="My Title")
+        await db_module.bulk_upsert_steam_library(
+            [{"appid": 700, "name": "Steam Renamed", "playtime_minutes": 5}],
+            synced_at=datetime.now(timezone.utc).isoformat(),
+        )
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone("SELECT name FROM games WHERE id = ?", (gid,))
+        self.assertEqual(row["name"], "My Title")
+
+    async def test_bulk_steam_name_sync_renames_unprotected(self):
+        gid = await make_steam_game("Original", 701)
+        await db_module.bulk_upsert_steam_library(
+            [{"appid": 701, "name": "Steam Renamed", "playtime_minutes": 5}],
+            synced_at=datetime.now(timezone.utc).isoformat(),
+        )
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone("SELECT name FROM games WHERE id = ?", (gid,))
+        self.assertEqual(row["name"], "Steam Renamed")
+
+    async def test_hltb_cache_result_respects_manual_durations(self):
+        gid = await seed_game("Timed Game", hltb_main=10.0)
+        await platforms.update_game(game_id=gid, hltb_main=42.0)
+        # Background HLTB refresh tries to overwrite with fresh durations.
+        await hltb._cache_result(gid, 5.0, 6.0, 7.0, "2026-01-01")
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT hltb_main, hltb_extra, hltb_cached_at FROM games WHERE id = ?", (gid,)
+            )
+        self.assertEqual(row["hltb_main"], 42.0)  # manual value preserved
+        self.assertIsNone(row["hltb_extra"])  # whole HLTB group skipped
+        self.assertEqual(row["hltb_cached_at"], "2026-01-01")  # cache still stamped
+
+    async def test_clear_override_lets_sync_update_again(self):
+        gid = await make_steam_game("Reclaimable", 800, tags=["orig"])
+        await platforms.update_game(game_id=gid, tags=["manual"])
+        # Revoke protection; value stays until the next sync.
+        result = await platforms.update_game(game_id=gid, clear_overrides=["tags"])
+        self.assertEqual(result["cleared"], ["tags"])
+        self.assertNotIn("tags", result["manual_overrides"])
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone("SELECT tags FROM games WHERE id = ?", (gid,))
+        self.assertEqual(json.loads(row["tags"]), ["manual"])  # unchanged by clear
+
+        with patch.object(
+            steamspy, "_fetch_steamspy", AsyncMock(return_value={"Action": 99})
+        ):
+            await steamspy.enrich_steamspy(800)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone("SELECT tags FROM games WHERE id = ?", (gid,))
+        self.assertIn("Action", json.loads(row["tags"]))  # sync took over again

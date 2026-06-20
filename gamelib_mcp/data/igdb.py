@@ -520,9 +520,7 @@ async def resolve_and_link_game(
 
 async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
     """Write IGDB fields to games row, skipping columns that are already populated."""
-    from .db import get_db
-
-    from .db import get_manual_overrides
+    from .db import get_db, get_manual_overrides
 
     now = datetime.now(timezone.utc).isoformat()
     async with get_db() as db:

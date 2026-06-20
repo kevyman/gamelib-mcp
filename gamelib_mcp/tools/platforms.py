@@ -4,9 +4,11 @@ import json
 from fastmcp.exceptions import ToolError
 
 from ..data.db import (
+    GAME_EDITABLE_FIELDS,
     apply_manual_game_fields,
     get_db,
     recompute_tag_affinity,
+    remove_manual_overrides,
     set_meta,
     upsert_game,
     upsert_game_platform,
@@ -152,12 +154,12 @@ async def _resolve_game_row(name: str | None, game_id: int | None) -> dict:
     async with get_db() as db:
         if game_id is not None:
             row = await db.execute_fetchone(
-                "SELECT id, name, tags FROM games WHERE id = ?", (game_id,)
+                "SELECT id, name FROM games WHERE id = ?", (game_id,)
             )
         elif name is not None:
             match = build_name_match(name, column=NORMALIZED_NAME_SQL)
             row = await db.execute_fetchone(
-                f"""SELECT g.id, g.name, g.tags, {match.rank_sql} AS match_rank
+                f"""SELECT g.id, g.name, {match.rank_sql} AS match_rank
                     FROM games g
                     WHERE {match.where_sql}
                     ORDER BY match_rank ASC, length(g.name) ASC, g.id ASC
@@ -172,7 +174,7 @@ async def _resolve_game_row(name: str | None, game_id: int | None) -> dict:
         if fuzzy_ids:
             async with get_db() as db:
                 row = await db.execute_fetchone(
-                    "SELECT id, name, tags FROM games WHERE id = ?", (fuzzy_ids[0],)
+                    "SELECT id, name FROM games WHERE id = ?", (fuzzy_ids[0],)
                 )
 
     if row is None:
@@ -194,17 +196,30 @@ async def update_game(
     hltb_extra: float | None = None,
     hltb_complete: float | None = None,
     is_farmed: bool | None = None,
+    clear_overrides: list[str] | None = None,
 ) -> dict:
     """
-    Manually edit one game's properties and protect them from being overwritten.
+    Manually edit one game's properties, with revocable sync protection.
 
     Resolve the game with game_id or name, then set any subset of fields. Each
     edited field is recorded as a manual override so later library syncs and
-    background enrichment will not clobber it. Editing tags recomputes the taste
-    profile. Returns the updated fields and the full manual-override list.
+    background enrichment will not clobber it. To hand a field back to automatic
+    sync, pass its column name(s) in clear_overrides (e.g.
+    clear_overrides=["is_farmed"] to let auto-detection manage it again); this
+    only removes protection and does not change the stored value. Editing tags
+    recomputes the taste profile. Returns the updated fields, any cleared
+    columns, and the full manual-override list.
     """
     row = await _resolve_game_row(name, game_id)
     resolved_id = row["id"]
+
+    clear = list(dict.fromkeys(clear_overrides or []))
+    invalid = [c for c in clear if c not in GAME_EDITABLE_FIELDS]
+    if invalid:
+        raise ToolError(
+            f"clear_overrides has unknown column(s): {invalid}. "
+            f"Valid: {sorted(GAME_EDITABLE_FIELDS)}"
+        )
 
     # Map the public params to games columns, JSON-encoding list fields and
     # coercing the is_farmed flag. Only explicitly-provided fields are written.
@@ -238,22 +253,42 @@ async def update_game(
     if is_farmed is not None:
         fields["is_farmed"] = int(bool(is_farmed))
 
-    if not fields:
-        raise ToolError("Provide at least one field to update")
+    if not fields and not clear:
+        raise ToolError("Provide at least one field to update or clear")
 
-    overrides = await apply_manual_game_fields(resolved_id, fields)
+    conflict = set(fields) & set(clear)
+    if conflict:
+        raise ToolError(
+            f"Cannot set and clear the same column(s) in one call: {sorted(conflict)}"
+        )
+
+    # Apply edits first (records their protection), then revoke any requested
+    # protections. fields and clear are disjoint, so order only matters for the
+    # returned override set, which clearing finalizes.
+    overrides: set[str] = set()
+    if fields:
+        overrides = await apply_manual_game_fields(resolved_id, fields)
+    if clear:
+        overrides = await remove_manual_overrides(resolved_id, clear)
 
     # Tags feed the taste profile; recompute so recommendations reflect the edit.
     if "tags" in fields:
         await recompute_tag_affinity()
 
-    updated = {key: json.loads(value) if key in {"genres", "tags", "features"} else value
-               for key, value in fields.items()}
+    def _display(key: str, value):
+        if key in {"genres", "tags", "features"}:
+            return json.loads(value)
+        if key == "is_farmed":
+            return bool(value)
+        return value
+
+    updated = {key: _display(key, value) for key, value in fields.items()}
     updated_name = fields.get("name", row["name"])
 
     return {
         "game_id": resolved_id,
         "name": updated_name,
         "updated": updated,
+        "cleared": clear,
         "manual_overrides": sorted(overrides),
     }

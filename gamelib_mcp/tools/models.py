@@ -177,4 +177,5 @@ class UpdateGameResponse(FlexibleModel):
     game_id: int
     name: str
     updated: dict[str, Any]
+    cleared: list[str]
     manual_overrides: list[str]

@@ -81,6 +81,22 @@ async def apply_manual_game_fields(game_id: int, fields: dict) -> set[str]:
         return merged
 
 
+async def remove_manual_overrides(game_id: int, columns) -> set[str]:
+    """Stop protecting the given columns so sync/enrichment may update them again.
+
+    Removing protection does not change the current value — it just lets the next
+    sync/enrichment pass overwrite it. Returns the remaining override set.
+    """
+    async with get_db() as db:
+        remaining = await get_manual_overrides(db, game_id) - set(columns)
+        await db.execute(
+            "UPDATE games SET manual_overrides = ? WHERE id = ?",
+            (json.dumps(sorted(remaining)) if remaining else None, game_id),
+        )
+        await db.commit()
+        return remaining
+
+
 async def upsert_game(
     appid: int | None,
     name: str,
@@ -353,7 +369,8 @@ async def bulk_upsert_steam_library(
                        FROM resolved
                        WHERE game_id IS NOT NULL
                    )
-                   AND (manual_overrides IS NULL OR manual_overrides NOT LIKE '%"name"%')""",
+                   AND (manual_overrides IS NULL
+                        OR 'name' NOT IN (SELECT value FROM json_each(manual_overrides)))""",
                 (STEAM_APP_ID,),
             )
 
