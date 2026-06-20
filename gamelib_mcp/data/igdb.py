@@ -24,6 +24,7 @@ from .db import (
     release_game_claim,
     upsert_game_platform_enrichment,
 )
+from .content import classify_igdb_game, classify_title_override
 from .title_normalization import normalize_catalog_title, normalize_search_text
 
 logger = logging.getLogger(__name__)
@@ -229,6 +230,15 @@ class IGDBGame:
     # Series groupings as (kind, igdb_id, name) tuples; kind is
     # "collection" (IGDB's term for a "Series") or "franchise".
     series: list[tuple[str, int, str]] = field(default_factory=list)
+    game_type: int | None = None
+    content_type: str = "base_game"
+    parent_igdb_id: int | None = None
+    parent_name: str | None = None
+    version_parent_igdb_id: int | None = None
+    version_parent_name: str | None = None
+    version_title: str | None = None
+    is_primary_library_item: bool = True
+    alias_for_parent: bool = False
 
 
 async def _get_token() -> str:
@@ -353,20 +363,20 @@ def _escape_igdb_search_term(term: str) -> str:
 
 def _build_search_game_query(name: str, igdb_platform_id: int | None = None) -> str:
     escaped_name = _escape_igdb_search_term(name)
-    filters = [
-        "category = null",
-        f"category != ({', '.join(str(category) for category in sorted(_EXCLUDED_SEARCH_CATEGORIES))})",
-    ]
+    filters = []
     if igdb_platform_id is not None:
         filters.append(f"platforms = {igdb_platform_id}")
     clauses = [
-        "fields id, name, category, first_release_date, "
+        "fields id, name, category, game_type, first_release_date, "
         "genres.name, themes.name, keywords.name, "
         "collections.id, collections.name, franchises.id, franchises.name, "
+        "parent_game.id, parent_game.name, "
+        "version_parent.id, version_parent.name, version_title, "
         "release_dates.platform, release_dates.date;",
         f'search "{escaped_name}";',
     ]
-    clauses.append(f"where ({' | '.join(filters[:2])}){' & ' + filters[2] if len(filters) > 2 else ''};")
+    if filters:
+        clauses.append(f"where {' & '.join(filters)};")
     clauses.append("limit 5;")
     return " ".join(clauses)
 
@@ -406,8 +416,6 @@ async def search_game(
     games = []
     for item in results:
         category = item.get("category")
-        if category in _EXCLUDED_SEARCH_CATEGORIES:
-            continue
 
         genres = [g["name"] for g in item.get("genres") or []]
         themes = [t["name"] for t in item.get("themes") or []]
@@ -431,6 +439,19 @@ async def search_game(
                 if sid and sname:
                     series.append((kind, sid, sname))
 
+        parent_game = item.get("parent_game") if isinstance(item.get("parent_game"), dict) else {}
+        version_parent = (
+            item.get("version_parent") if isinstance(item.get("version_parent"), dict) else {}
+        )
+        classification = classify_igdb_game(
+            title=item["name"],
+            category=category,
+            parent_name=parent_game.get("name"),
+            parent_igdb_id=parent_game.get("id"),
+            version_parent_name=version_parent.get("name"),
+            version_parent_igdb_id=version_parent.get("id"),
+        )
+
         games.append(IGDBGame(
             igdb_id=item["id"],
             name=item["name"],
@@ -440,6 +461,15 @@ async def search_game(
             tags=tags,
             platform_release_dates=platform_dates,
             series=series,
+            game_type=item.get("game_type"),
+            content_type=classification.content_type,
+            parent_igdb_id=classification.parent_igdb_id,
+            parent_name=classification.parent_name,
+            version_parent_igdb_id=version_parent.get("id"),
+            version_parent_name=version_parent.get("name"),
+            version_title=item.get("version_title"),
+            is_primary_library_item=classification.is_primary_library_item,
+            alias_for_parent=classification.alias_for_parent,
         ))
 
     return games
@@ -498,6 +528,34 @@ async def resolve_and_link_game(
     igdb_game = await resolve_game(name, igdb_platform_id)
     if igdb_game is not None:
         async with _get_igdb_link_lock(igdb_game.igdb_id):
+            if igdb_game.alias_for_parent and (igdb_game.parent_igdb_id or igdb_game.parent_name):
+                parent = None
+                if igdb_game.parent_igdb_id is not None:
+                    parent = await get_game_by_igdb_id(igdb_game.parent_igdb_id)
+                if parent is None and igdb_game.parent_name:
+                    parent = await find_game_by_name_fuzzy(igdb_game.parent_name, candidates=candidates)
+                if parent is not None:
+                    game_id = parent["id"]
+                else:
+                    from .db import upsert_game
+
+                    game_id = await upsert_game(
+                        appid=None,
+                        name=igdb_game.parent_name or igdb_game.name,
+                    )
+                    candidates[game_id] = igdb_game.parent_name or igdb_game.name
+
+                from .db import upsert_game_alias
+
+                await upsert_game_alias(
+                    game_id,
+                    name,
+                    alias_type=igdb_game.content_type,
+                    source="igdb",
+                    source_key=str(igdb_game.igdb_id),
+                )
+                return game_id, igdb_game
+
             existing = await get_game_by_igdb_id(igdb_game.igdb_id)
             if existing is not None:
                 game_id = existing["id"]
@@ -523,6 +581,51 @@ async def resolve_and_link_game(
 
     # No IGDB result — fall back to fuzzy matching
     async with _get_fallback_title_lock(name):
+        override = classify_title_override(name)
+        if override is not None and override.alias_for_parent and override.parent_name:
+            parent = await find_game_by_name_fuzzy(override.parent_name, candidates=candidates)
+            if parent is not None:
+                game_id = parent["id"]
+            else:
+                from .db import upsert_game
+
+                game_id = await upsert_game(appid=None, name=override.parent_name)
+                candidates[game_id] = override.parent_name
+
+            from .db import upsert_game_alias
+
+            await upsert_game_alias(
+                game_id,
+                name,
+                alias_type=override.content_type,
+                source="local_override",
+                source_key=None,
+            )
+            return game_id, None
+        if override is not None and not override.is_primary_library_item:
+            parent_game_id = None
+            if override.parent_name:
+                parent = await find_game_by_name_fuzzy(override.parent_name, candidates=candidates)
+                if parent is not None:
+                    parent_game_id = parent["id"]
+                else:
+                    from .db import upsert_game
+
+                    parent_game_id = await upsert_game(appid=None, name=override.parent_name)
+                    candidates[parent_game_id] = override.parent_name
+
+            from .db import upsert_game
+
+            game_id = await upsert_game(
+                appid=None,
+                name=name,
+                content_type=override.content_type,
+                parent_game_id=parent_game_id,
+                is_primary_library_item=int(override.is_primary_library_item),
+            )
+            candidates[game_id] = name
+            return game_id, None
+
         existing = await find_game_by_name_fuzzy(name, candidates=candidates)
         if existing:
             return existing["id"], None
@@ -533,12 +636,36 @@ async def resolve_and_link_game(
 
 async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
     """Write IGDB fields to games row, skipping columns that are already populated."""
-    from .db import get_db, get_manual_overrides
+    from .db import get_db, get_game_by_igdb_id, get_manual_overrides, upsert_game
 
     now = datetime.now(timezone.utc).isoformat()
+    parent_game_id: int | None = None
+    if igdb_game.parent_igdb_id is not None:
+        parent = await get_game_by_igdb_id(igdb_game.parent_igdb_id)
+        if parent is not None:
+            parent_game_id = parent["id"]
+    if parent_game_id is None and igdb_game.parent_name:
+        async with get_db() as db:
+            parent = await db.execute_fetchone(
+                "SELECT id FROM games WHERE lower(name) = lower(?) ORDER BY id LIMIT 1",
+                (igdb_game.parent_name,),
+            )
+        if parent is not None:
+            parent_game_id = parent["id"]
+        else:
+            parent_game_id = await upsert_game(appid=None, name=igdb_game.parent_name)
+
     async with get_db() as db:
         row = await db.execute_fetchone(
-            "SELECT tags, genres, release_date FROM games WHERE id = ?", (game_id,)
+            """SELECT tags,
+                      genres,
+                      release_date,
+                      content_type,
+                      parent_game_id,
+                      is_primary_library_item
+               FROM games
+               WHERE id = ?""",
+            (game_id,),
         )
         if row is None:
             return
@@ -551,6 +678,12 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
             updates["genres"] = json.dumps(igdb_game.genres)
         if row["tags"] is None and igdb_game.tags and "tags" not in overrides:
             updates["tags"] = json.dumps(igdb_game.tags)
+        if "content_type" not in overrides:
+            updates["content_type"] = igdb_game.content_type
+        if parent_game_id is not None and "parent_game_id" not in overrides:
+            updates["parent_game_id"] = parent_game_id
+        if "is_primary_library_item" not in overrides:
+            updates["is_primary_library_item"] = int(igdb_game.is_primary_library_item)
 
         cols_sql = ", ".join(f"{col} = ?" for col in updates)
         await db.execute(

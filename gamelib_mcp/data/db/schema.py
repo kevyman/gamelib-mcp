@@ -719,3 +719,34 @@ _V10_SCHEMA_DDL = _V9_SCHEMA_DDL + """
     CREATE INDEX IF NOT EXISTS idx_gsm_game ON game_series_membership(game_id);
     CREATE INDEX IF NOT EXISTS idx_gsm_series ON game_series_membership(series_id);
 """
+
+
+# v11 adds content relationship metadata for DLC/expansions/editions and a
+# normalized alias table for package/storefront names that should resolve to a
+# canonical parent game.
+_V11_SCHEMA_DDL = _V10_SCHEMA_DDL.replace(
+    "        is_farmed        INTEGER NOT NULL DEFAULT 0,\n"
+    "        manual_overrides TEXT",
+    "        is_farmed        INTEGER NOT NULL DEFAULT 0,\n"
+    "        content_type     TEXT NOT NULL DEFAULT 'base_game',\n"
+    "        parent_game_id   INTEGER REFERENCES games(id) ON DELETE SET NULL,\n"
+    "        is_primary_library_item INTEGER NOT NULL DEFAULT 1,\n"
+    "        manual_overrides TEXT",
+) + """
+    CREATE TABLE IF NOT EXISTS game_aliases (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id          INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        alias            TEXT NOT NULL,
+        alias_normalized TEXT NOT NULL,
+        alias_type       TEXT NOT NULL,
+        source           TEXT,
+        source_key       TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_games_parent_game_id ON games(parent_game_id);
+    CREATE INDEX IF NOT EXISTS idx_games_primary_library_item ON games(is_primary_library_item);
+    CREATE INDEX IF NOT EXISTS idx_game_aliases_game_id ON game_aliases(game_id);
+    CREATE INDEX IF NOT EXISTS idx_game_aliases_normalized ON game_aliases(alias_normalized);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_game_aliases_unique
+        ON game_aliases(game_id, alias_normalized, alias_type, COALESCE(source, ''), COALESCE(source_key, ''));
+"""

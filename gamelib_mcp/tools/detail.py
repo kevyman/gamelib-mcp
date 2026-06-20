@@ -7,6 +7,7 @@ from ..data.db import (
     get_game_by_appid,
     get_steam_appid_for_game,
     load_platforms_for_games,
+    load_related_content_for_games,
     load_series_for_games,
 )
 from ..data.hltb import get_hltb
@@ -80,6 +81,10 @@ async def get_game_detail(
 
     platforms = (await load_platforms_for_games([game_id])).get(game_id, [])
     series = (await load_series_for_games([game_id])).get(game_id, [])
+    related_content = (await load_related_content_for_games([game_id])).get(
+        game_id,
+        {"dlc": [], "expansions": [], "editions": [], "bundles": []},
+    )
     steam_platform = next((p for p in platforms if p["platform"] == "steam"), None)
     steam_data = steam_platform["provider_data"] if steam_platform else {}
 
@@ -115,6 +120,10 @@ async def get_game_detail(
         ),
         "last_played_date": steam_data.get("last_played_date"),
         "is_farmed": bool(row["is_farmed"]),
+        "content_type": row["content_type"],
+        "parent_game_id": row["parent_game_id"],
+        "is_primary_library_item": bool(row["is_primary_library_item"]),
+        "related_content": related_content,
         "genres": _parse_json(row["genres"]),
         "tags": _parse_json(row["tags"]),
         "features": _parse_json(row["features"]),

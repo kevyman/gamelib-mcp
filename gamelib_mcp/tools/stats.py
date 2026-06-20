@@ -11,6 +11,7 @@ WITH game_rollup AS (
            g.genres,
            g.hltb_main,
            g.is_farmed,
+           g.is_primary_library_item,
            COALESCE(SUM(COALESCE(gp.playtime_minutes, 0)), 0) AS total_playtime_minutes,
            COALESCE(SUM(COALESCE(gp.playtime_2weeks_minutes, 0)), 0) AS total_playtime_2weeks_minutes,
            MAX(gpe.metacritic_score) AS metacritic_score,
@@ -18,6 +19,7 @@ WITH game_rollup AS (
     FROM games g
     LEFT JOIN game_platforms gp ON gp.game_id = g.id
     LEFT JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
+    WHERE g.is_primary_library_item = 1
     GROUP BY g.id
 )
 """

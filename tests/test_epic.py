@@ -163,6 +163,7 @@ class SyncEpicTests(unittest.TestCase):
         mock_upsert_platform = AsyncMock(return_value=99)
         mock_enrichment = AsyncMock()
         mock_identifier = AsyncMock()
+        mock_alias = AsyncMock()
 
         with (
             patch("pathlib.Path.exists", return_value=True),
@@ -171,6 +172,7 @@ class SyncEpicTests(unittest.TestCase):
             patch("gamelib_mcp.data.epic.load_fuzzy_candidates", AsyncMock(return_value=candidates or {})),
             patch("gamelib_mcp.data.epic.resolve_and_link_game", mock_resolve),
             patch("gamelib_mcp.data.epic.upsert_game_platform", mock_upsert_platform),
+            patch("gamelib_mcp.data.epic.upsert_game_alias", mock_alias),
             patch("gamelib_mcp.data.epic.upsert_game_platform_enrichment", mock_enrichment),
             patch("gamelib_mcp.data.epic.upsert_game_platform_identifier", mock_identifier),
         ):
