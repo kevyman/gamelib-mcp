@@ -25,6 +25,7 @@ _ORDINAL_RE = re.compile(r"(\d+)(St|Nd|Rd|Th)\b")
 
 from gamelib_mcp.data.db import (
     load_fuzzy_candidates,
+    upsert_game_alias,
     upsert_game_platform,
     upsert_game_platform_enrichment,
 )
@@ -214,6 +215,15 @@ async def sync_gog() -> dict:
         else:
             candidates[game_id] = prepared_title
             added += 1
+
+        if title != prepared_title:
+            await upsert_game_alias(
+                game_id,
+                title,
+                alias_type="edition",
+                source="gog",
+                source_key=None,
+            )
 
         platform_id = await upsert_game_platform(
             game_id=game_id,

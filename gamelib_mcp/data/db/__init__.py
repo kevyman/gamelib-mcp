@@ -51,7 +51,7 @@ STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 @dataclass
@@ -170,6 +170,7 @@ from .schema import (
     _V8_SCHEMA_DDL,
     _V9_SCHEMA_DDL,
     _V10_SCHEMA_DDL,
+    _V11_SCHEMA_DDL,
 )
 
 
@@ -203,6 +204,12 @@ async def _detect_schema_state(db: aiosqlite.Connection) -> str:
 
     spd_cols = await _table_columns(db, "steam_platform_data") if "steam_platform_data" in tables else set()
     gpe_cols = await _table_columns(db, "game_platform_enrichment") if "game_platform_enrichment" in tables else set()
+    if {
+        "content_type",
+        "parent_game_id",
+        "is_primary_library_item",
+    }.issubset(game_cols) and "game_aliases" in tables and "game_series" in tables:
+        return "v11"
     if {"name_normalized", "features", "manual_overrides"}.issubset(game_cols) and {
         "opencritic_url",
         "opencritic_num_reviews",
@@ -843,6 +850,46 @@ async def _migrate_v9_to_v10(db: aiosqlite.Connection, progress: _Progress | Non
     await db.commit()
 
 
+async def _migrate_v10_to_v11(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add DLC/expansion content relationships and alias support."""
+    if progress is not None:
+        progress("Migrating to v11: add content relationship fields + game_aliases.")
+
+    game_cols = await _table_columns(db, "games")
+    if "content_type" not in game_cols:
+        await db.execute("ALTER TABLE games ADD COLUMN content_type TEXT NOT NULL DEFAULT 'base_game'")
+    if "parent_game_id" not in game_cols:
+        await db.execute("ALTER TABLE games ADD COLUMN parent_game_id INTEGER REFERENCES games(id) ON DELETE SET NULL")
+    if "is_primary_library_item" not in game_cols:
+        await db.execute(
+            "ALTER TABLE games ADD COLUMN is_primary_library_item INTEGER NOT NULL DEFAULT 1"
+        )
+
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS game_aliases (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_id          INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+            alias            TEXT NOT NULL,
+            alias_normalized TEXT NOT NULL,
+            alias_type       TEXT NOT NULL,
+            source           TEXT,
+            source_key       TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_games_parent_game_id ON games(parent_game_id);
+        CREATE INDEX IF NOT EXISTS idx_games_primary_library_item ON games(is_primary_library_item);
+        CREATE INDEX IF NOT EXISTS idx_game_aliases_game_id ON game_aliases(game_id);
+        CREATE INDEX IF NOT EXISTS idx_game_aliases_normalized ON game_aliases(alias_normalized);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_game_aliases_unique
+            ON game_aliases(game_id, alias_normalized, alias_type, COALESCE(source, ''), COALESCE(source_key, ''));
+        """
+    )
+
+    await _set_user_version(db, 11)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -879,7 +926,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V10_SCHEMA_DDL)
+    await db.executescript(_V11_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -920,10 +967,10 @@ async def _run_migrations(
     applied_steps: list[str] = []
 
     if detected_state == "fresh":
-        await db.executescript(_V10_SCHEMA_DDL)
+        await db.executescript(_V11_SCHEMA_DDL)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
-        _emit(progress, "Initialized fresh database at schema v10.", applied_steps)
+        _emit(progress, "Initialized fresh database at schema v11.", applied_steps)
         return MigrationResult(
             initial_version=initial_version,
             final_version=SCHEMA_VERSION,
@@ -981,6 +1028,11 @@ async def _run_migrations(
             await db.commit()
             version = 10
             _emit(progress, "Recorded existing schema as v10.", applied_steps)
+        elif detected_state == "v11":
+            await _set_user_version(db, 11)
+            await db.commit()
+            version = 11
+            _emit(progress, "Recorded existing schema as v11.", applied_steps)
 
     if version == 1:
         _emit(progress, "Applying migration step v1 -> v2.", applied_steps)
@@ -1027,10 +1079,15 @@ async def _run_migrations(
         await _migrate_v9_to_v10(db, progress=None)
         version = 10
 
+    if version == 10:
+        _emit(progress, "Applying migration step v10 -> v11.", applied_steps)
+        await _migrate_v10_to_v11(db, progress=None)
+        version = 11
+
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V10_SCHEMA_DDL)
+    await db.executescript(_V11_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
@@ -1136,6 +1193,7 @@ from .queries import (  # noqa: E402
     _platform_dict,
     load_platforms_for_games,
     load_series_for_games,
+    load_related_content_for_games,
 )
 from .upserts import (  # noqa: E402
     GAME_EDITABLE_FIELDS,
@@ -1150,6 +1208,7 @@ from .upserts import (  # noqa: E402
     apply_manual_game_fields,
     remove_manual_overrides,
     upsert_game_series_links,
+    upsert_game_alias,
 )
 from .fuzzy import (  # noqa: E402
     load_fuzzy_candidates,
