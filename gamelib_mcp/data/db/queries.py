@@ -292,3 +292,53 @@ async def load_series_for_games(game_ids: Iterable[int]) -> dict[int, list[dict]
             {"name": row["name"], "kind": row["kind"], "igdb_id": row["igdb_id"]}
         )
     return dict(by_game)
+
+
+def _related_content_group(content_type: str) -> str:
+    if content_type == "dlc":
+        return "dlc"
+    if content_type == "expansion":
+        return "expansions"
+    if content_type == "bundle":
+        return "bundles"
+    if content_type == "edition":
+        return "editions"
+    return "other"
+
+
+async def load_related_content_for_games(game_ids: Iterable[int]) -> dict[int, dict[str, list[dict]]]:
+    """Load child DLC/expansion/edition/bundle rows grouped by parent game id."""
+    ids = list(dict.fromkeys(game_ids))
+    empty = {"dlc": [], "expansions": [], "editions": [], "bundles": [], "other": []}
+    if not ids:
+        return {}
+
+    placeholders = ",".join("?" for _ in ids)
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            f"""SELECT id AS game_id,
+                       parent_game_id,
+                       name,
+                       content_type,
+                       is_primary_library_item
+                FROM games
+                WHERE parent_game_id IN ({placeholders})
+                ORDER BY content_type, name""",
+            ids,
+        )
+
+    related_ids = [row["game_id"] for row in rows]
+    platforms_by_game = await load_platforms_for_games(related_ids)
+    grouped: dict[int, dict[str, list[dict]]] = {
+        game_id: {key: list(value) for key, value in empty.items()} for game_id in ids
+    }
+    for row in rows:
+        entry = {
+            "game_id": row["game_id"],
+            "name": row["name"],
+            "content_type": row["content_type"],
+            "is_primary_library_item": bool(row["is_primary_library_item"]),
+            "platforms": platforms_by_game.get(row["game_id"], []),
+        }
+        grouped[row["parent_game_id"]][_related_content_group(row["content_type"])].append(entry)
+    return grouped

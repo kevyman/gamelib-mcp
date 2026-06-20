@@ -51,6 +51,7 @@ WITH game_rollup AS (
            g.tags,
            g.hltb_main,
            g.is_farmed,
+           g.is_primary_library_item,
            COALESCE(SUM(COALESCE(gp.playtime_minutes, 0)), 0) AS total_playtime_minutes,
            MAX(CASE WHEN gp.platform = 'steam' THEN spd.protondb_tier END) AS protondb_tier,
            MAX(CASE WHEN gp.platform = 'steam' THEN spd.steam_review_desc END) AS steam_review_desc,
@@ -60,6 +61,7 @@ WITH game_rollup AS (
     LEFT JOIN game_platforms gp ON gp.game_id = g.id
     LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
     LEFT JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
+    WHERE g.is_primary_library_item = 1
     GROUP BY g.id
 )
 """
