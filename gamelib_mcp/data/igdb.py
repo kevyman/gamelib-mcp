@@ -226,6 +226,9 @@ class IGDBGame:
     genres: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)   # themes + keywords
     platform_release_dates: dict[int, str] = field(default_factory=dict)  # igdb_platform_id → ISO date
+    # Series groupings as (kind, igdb_id, name) tuples; kind is
+    # "collection" (IGDB's term for a "Series") or "franchise".
+    series: list[tuple[str, int, str]] = field(default_factory=list)
 
 
 async def _get_token() -> str:
@@ -359,6 +362,7 @@ def _build_search_game_query(name: str, igdb_platform_id: int | None = None) -> 
     clauses = [
         "fields id, name, category, first_release_date, "
         "genres.name, themes.name, keywords.name, "
+        "collections.id, collections.name, franchises.id, franchises.name, "
         "release_dates.platform, release_dates.date;",
         f'search "{escaped_name}";',
     ]
@@ -419,6 +423,14 @@ async def search_game(
                 if iso:
                     platform_dates[pid] = iso
 
+        series: list[tuple[str, int, str]] = []
+        for kind, key in (("collection", "collections"), ("franchise", "franchises")):
+            for entry in item.get(key) or []:
+                sid = entry.get("id")
+                sname = entry.get("name")
+                if sid and sname:
+                    series.append((kind, sid, sname))
+
         games.append(IGDBGame(
             igdb_id=item["id"],
             name=item["name"],
@@ -427,6 +439,7 @@ async def search_game(
             genres=genres,
             tags=tags,
             platform_release_dates=platform_dates,
+            series=series,
         ))
 
     return games
@@ -545,6 +558,11 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
             (*updates.values(), game_id),
         )
         await db.commit()
+
+    if igdb_game.series:
+        from .db import upsert_game_series_links
+
+        await upsert_game_series_links(game_id, igdb_game.series)
 
 
 async def choose_igdb_platform_hint(game_id: int) -> int | None:

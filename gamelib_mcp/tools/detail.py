@@ -7,6 +7,7 @@ from ..data.db import (
     get_game_by_appid,
     get_steam_appid_for_game,
     load_platforms_for_games,
+    load_series_for_games,
 )
 from ..data.hltb import get_hltb
 from ..data.protondb import get_protondb
@@ -78,6 +79,7 @@ async def get_game_detail(
         )
 
     platforms = (await load_platforms_for_games([game_id])).get(game_id, [])
+    series = (await load_series_for_games([game_id])).get(game_id, [])
     steam_platform = next((p for p in platforms if p["platform"] == "steam"), None)
     steam_data = steam_platform["provider_data"] if steam_platform else {}
 
@@ -103,6 +105,7 @@ async def get_game_detail(
         "steam_appid": steam_appid,
         "name": row["name"],
         "release_date": row["release_date"],
+        "series": series,
         "platforms": platforms,
         "playtime_hours": round(total_playtime_minutes / 60, 1) if total_playtime_minutes else 0,
         "playtime_2weeks_hours": (

@@ -731,6 +731,34 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("manual_overrides", cols)
         self.assertEqual(overrides, set())
 
+    async def test_v9_to_v10_adds_series_tables(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V9_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 9")
+        conn.execute("INSERT INTO games (id, name) VALUES (1, 'Hollow Knight')")
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+            # Existing v9 game data survives the migration, and series writes work.
+            await db_module.upsert_game_series_links(
+                1, [("collection", 5, "Hollow Knight"), ("franchise", 6, "Team Cherry")]
+            )
+            async with db_module.get_db() as db:
+                version = await db_module._get_user_version(db)
+                tables = await db_module._table_names(db)
+            series = await db_module.load_series_for_games([1])
+
+        self.assertEqual(version, db_module.SCHEMA_VERSION)
+        self.assertIn("game_series", tables)
+        self.assertIn("game_series_membership", tables)
+        self.assertEqual(
+            {(s["kind"], s["name"]) for s in series[1]},
+            {("collection", "Hollow Knight"), ("franchise", "Team Cherry")},
+        )
+
     async def test_upsert_game_maintains_name_normalized(self) -> None:
         db_module._DB_READY_PATH = None
         with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
