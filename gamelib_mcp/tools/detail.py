@@ -83,7 +83,7 @@ async def get_game_detail(
     series = (await load_series_for_games([game_id])).get(game_id, [])
     related_content = (await load_related_content_for_games([game_id])).get(
         game_id,
-        {"dlc": [], "expansions": [], "editions": [], "bundles": []},
+        {"dlc": [], "expansions": [], "editions": [], "bundles": [], "other": []},
     )
     steam_platform = next((p for p in platforms if p["platform"] == "steam"), None)
     steam_data = steam_platform["provider_data"] if steam_platform else {}

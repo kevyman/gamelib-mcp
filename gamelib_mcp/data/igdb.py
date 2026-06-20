@@ -60,13 +60,6 @@ CATEGORY_REMAKE = 8
 CATEGORY_REMASTER = 9
 CATEGORY_EXPANDED_GAME = 10
 CATEGORY_PORT = 11
-_EXCLUDED_SEARCH_CATEGORIES = {
-    CATEGORY_DLC,
-    CATEGORY_BUNDLE,
-    CATEGORY_MOD,
-    CATEGORY_EPISODE,
-    CATEGORY_SEASON,
-}
 
 # Cached token
 _token: str | None = None
@@ -678,12 +671,30 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
             updates["genres"] = json.dumps(igdb_game.genres)
         if row["tags"] is None and igdb_game.tags and "tags" not in overrides:
             updates["tags"] = json.dumps(igdb_game.tags)
-        if "content_type" not in overrides:
-            updates["content_type"] = igdb_game.content_type
-        if parent_game_id is not None and "parent_game_id" not in overrides:
-            updates["parent_game_id"] = parent_game_id
-        if "is_primary_library_item" not in overrides:
-            updates["is_primary_library_item"] = int(igdb_game.is_primary_library_item)
+        # Content classification: never let a default ("base_game"/primary,
+        # no parent) re-fetch clobber a prior non-default classification.
+        # IGDB search can return a bare main-game hit on a later pass, and
+        # silently flipping a nested DLC back to primary would resurface it as
+        # its own library item. Only apply when the fetch carries a real signal
+        # or the stored row is still at the default. Mirrors the enrich
+        # re-fetch guard.
+        new_is_default = (
+            igdb_game.content_type == "base_game"
+            and igdb_game.is_primary_library_item
+            and parent_game_id is None
+        )
+        stored_is_default = (
+            row["content_type"] == "base_game"
+            and bool(row["is_primary_library_item"])
+            and row["parent_game_id"] is None
+        )
+        if not new_is_default or stored_is_default:
+            if "content_type" not in overrides:
+                updates["content_type"] = igdb_game.content_type
+            if parent_game_id is not None and "parent_game_id" not in overrides:
+                updates["parent_game_id"] = parent_game_id
+            if "is_primary_library_item" not in overrides:
+                updates["is_primary_library_item"] = int(igdb_game.is_primary_library_item)
 
         cols_sql = ", ".join(f"{col} = ?" for col in updates)
         await db.execute(

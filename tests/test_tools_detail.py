@@ -91,7 +91,10 @@ class GetGameDetailTests(ToolDBTestCase):
         self.assertEqual(result["content_type"], "base_game")
         self.assertIsNone(result["parent_game_id"])
         self.assertIs(result["is_primary_library_item"], True)
-        self.assertEqual(result["related_content"], {"dlc": [], "expansions": [], "editions": [], "bundles": []})
+        self.assertEqual(
+            result["related_content"],
+            {"dlc": [], "expansions": [], "editions": [], "bundles": [], "other": []},
+        )
         self.assertNotIn("my_rating", result)
 
     async def test_lookup_by_appid(self):
