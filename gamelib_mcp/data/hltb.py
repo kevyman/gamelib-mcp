@@ -46,11 +46,12 @@ async def _fetch_and_cache(game_id: int, name: str) -> dict | None:
             now = datetime.now(timezone.utc).isoformat()
 
             if results is None:
-                await _cache_result(game_id, None, None, None, None)
+                # API failure — preserve existing data, leave row retryable
                 return None
 
             if not results:
-                await _cache_result(game_id, None, None, None, HLTB_NOT_FOUND)
+                # Authoritative not-found — mark it but keep any prior data intact
+                await _set_cached_at(game_id, HLTB_NOT_FOUND)
                 return None
 
             # Pick closest match by similarity score
@@ -66,7 +67,7 @@ async def _fetch_and_cache(game_id: int, name: str) -> dict | None:
             return {"hltb_main": main, "hltb_extra": extra, "hltb_complete": comp}
         except Exception as e:
             logger.warning("HLTB fetch failed for %s (%d): %s", name, game_id, e)
-            await _cache_result(game_id, None, None, None, None)
+            # Preserve existing data, leave row retryable
             return None
 
 
@@ -75,6 +76,15 @@ def _nonzero(value: float | None) -> float | None:
     if value is None or value == 0:
         return None
     return value
+
+
+async def _set_cached_at(game_id: int, marker: str | None) -> None:
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE games SET hltb_cached_at = ? WHERE id = ?",
+            (marker, game_id),
+        )
+        await db.commit()
 
 
 async def _cache_result(

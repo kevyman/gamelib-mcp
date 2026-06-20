@@ -34,17 +34,16 @@ async def enrich_steamspy(appid: int) -> list[str] | None:
     else:
         merged = existing  # preserve on failure
 
+    # Always write cached_at — on failure this acts as a backoff marker so the
+    # background worker doesn't immediately re-claim the row and hot-loop.
+    await upsert_steam_platform_data(row["game_platform_id"], steamspy_cached_at=now)
+
     async with get_db() as db:
         await db.execute(
             "UPDATE games SET tags = ? WHERE id = ?",
             (json.dumps(merged) if merged else row["tags"], row["game_id"]),
         )
         await db.commit()
-
-    await upsert_steam_platform_data(
-        row["game_platform_id"],
-        steamspy_cached_at=now,
-    )
 
     return merged or None
 

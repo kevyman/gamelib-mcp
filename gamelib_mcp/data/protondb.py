@@ -32,11 +32,18 @@ async def _fetch_and_cache(appid: int, game_platform_id: int) -> str | None:
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(PROTONDB_API.format(appid=appid))
-            if resp.status_code == 200:
-                data = resp.json()
-                tier = data.get("tier")
+            if resp.status_code != 200:
+                logger.warning("ProtonDB returned %s for appid %d", resp.status_code, appid)
+                # Write backoff timestamp without touching tier so the background
+                # worker doesn't immediately re-claim the row and hot-loop.
+                await upsert_steam_platform_data(game_platform_id, protondb_cached_at=now)
+                return None
+            data = resp.json()
+            tier = data.get("tier")
     except Exception as e:
         logger.warning("ProtonDB fetch failed for appid %d: %s", appid, e)
+        await upsert_steam_platform_data(game_platform_id, protondb_cached_at=now)
+        return None
 
     await upsert_steam_platform_data(
         game_platform_id,
