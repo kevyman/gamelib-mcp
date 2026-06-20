@@ -31,9 +31,12 @@ async def enrich_steamspy(appid: int) -> list[str] | None:
         # Top N by votes, SteamSpy tags first
         top = [t for t, _ in sorted(spy_tags.items(), key=lambda x: -x[1])[:TOP_N]]
         merged = _merge_tags(top, existing)
-        await upsert_steam_platform_data(row["game_platform_id"], steamspy_cached_at=now)
     else:
-        merged = existing  # preserve on failure; leave steamspy_cached_at NULL for retry
+        merged = existing  # preserve on failure
+
+    # Always write cached_at — on failure this acts as a backoff marker so the
+    # background worker doesn't immediately re-claim the row and hot-loop.
+    await upsert_steam_platform_data(row["game_platform_id"], steamspy_cached_at=now)
 
     async with get_db() as db:
         await db.execute(

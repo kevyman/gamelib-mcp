@@ -31,13 +31,13 @@ class ProtonDBQualityGateTests(unittest.IsolatedAsyncioTestCase):
         await db_module.upsert_steam_platform_data(game_platform_id, protondb_tier=tier)
         return game_id, game_platform_id
 
-    async def _read_tier(self, game_platform_id: int) -> str | None:
+    async def _read_row(self, game_platform_id: int) -> dict | None:
         async with db_module.get_db() as db:
             row = await db.execute_fetchone(
                 "SELECT protondb_tier, protondb_cached_at FROM steam_platform_data WHERE game_platform_id = ?",
                 (game_platform_id,),
             )
-        return row["protondb_tier"] if row else None
+        return dict(row) if row else None
 
     async def test_fetch_exception_does_not_overwrite_tier(self) -> None:
         with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
@@ -51,9 +51,11 @@ class ProtonDBQualityGateTests(unittest.IsolatedAsyncioTestCase):
                 result = await protondb._fetch_and_cache(123, game_platform_id)
 
             self.assertIsNone(result)
-            tier = await self._read_tier(game_platform_id)
+            row = await self._read_row(game_platform_id)
 
-        self.assertEqual(tier, "gold")
+        # Tier must survive the failure; cached_at should be stamped (backoff marker).
+        self.assertEqual(row["protondb_tier"], "gold")
+        self.assertIsNotNone(row["protondb_cached_at"])
 
     async def test_non_200_does_not_overwrite_tier(self) -> None:
         with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
@@ -69,9 +71,11 @@ class ProtonDBQualityGateTests(unittest.IsolatedAsyncioTestCase):
                 result = await protondb._fetch_and_cache(123, game_platform_id)
 
             self.assertIsNone(result)
-            tier = await self._read_tier(game_platform_id)
+            row = await self._read_row(game_platform_id)
 
-        self.assertEqual(tier, "platinum")
+        # Tier must survive the failure; cached_at should be stamped (backoff marker).
+        self.assertEqual(row["protondb_tier"], "platinum")
+        self.assertIsNotNone(row["protondb_cached_at"])
 
     async def test_success_writes_tier(self) -> None:
         with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
@@ -89,9 +93,9 @@ class ProtonDBQualityGateTests(unittest.IsolatedAsyncioTestCase):
                 result = await protondb._fetch_and_cache(456, game_platform_id)
 
             self.assertEqual(result, "silver")
-            tier = await self._read_tier(game_platform_id)
+            row = await self._read_row(game_platform_id)
 
-        self.assertEqual(tier, "silver")
+        self.assertEqual(row["protondb_tier"], "silver")
 
 
 if __name__ == "__main__":
