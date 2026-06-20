@@ -118,9 +118,8 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
 
         query = post_mock.await_args.args[0]
         self.assertIn("search \"Age of Wonders\";", query)
-        self.assertIn("category = null", query)
-        self.assertIn("category != (1, 3, 5, 6, 7)", query)
         self.assertIn("platforms = 6", query)
+        self.assertNotIn("category !=", query)
         self.assertNotIn("where 1 = 1", query)
 
     async def test_search_game_escapes_quotes_in_search_string(self) -> None:
@@ -153,7 +152,7 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results[0].igdb_id, 141533)
         self.assertEqual(results[0].name, "Loop Hero")
 
-    async def test_search_game_filters_excluded_categories_before_limit(self) -> None:
+    async def test_search_game_requests_content_relationship_fields_without_excluding_addons(self) -> None:
         post_mock = AsyncMock(return_value=[])
 
         with (
@@ -164,7 +163,10 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
             await igdb.search_game("Portal 2")
 
         query = post_mock.await_args.args[0]
-        self.assertIn("where (category = null | category != (1, 3, 5, 6, 7));", query)
+        self.assertIn("fields id, name, category, game_type, first_release_date", query)
+        self.assertIn("parent_game.id, parent_game.name", query)
+        self.assertIn("version_parent.id, version_parent.name", query)
+        self.assertNotIn("category !=", query)
         self.assertIn("limit 5;", query)
 
     async def test_search_game_requests_series_fields(self) -> None:
@@ -207,6 +209,30 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
                 ("franchise", 2, "The Legend of Zelda"),
             ],
         )
+
+    async def test_search_game_parses_expansion_parent_relationship(self) -> None:
+        async def fake_post(query: str, headers: dict[str, str]) -> list[dict]:
+            return [
+                {
+                    "id": 222,
+                    "name": "Sid Meier's Civilization IV: Warlords",
+                    "category": igdb.CATEGORY_EXPANSION,
+                    "parent_game": {"id": 111, "name": "Sid Meier's Civilization IV"},
+                }
+            ]
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", new=fake_post),
+        ):
+            results = await igdb.search_game("Sid Meier's Civilization IV: Warlords")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].content_type, "expansion")
+        self.assertEqual(results[0].parent_igdb_id, 111)
+        self.assertEqual(results[0].parent_name, "Sid Meier's Civilization IV")
+        self.assertFalse(results[0].is_primary_library_item)
 
     async def test_search_game_retries_rate_limit_response(self) -> None:
         client = _DummyAsyncClient(

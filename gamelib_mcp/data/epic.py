@@ -22,6 +22,7 @@ from gamelib_mcp.data.db import (
     EPIC_ARTIFACT_ID,
     load_fuzzy_candidates,
     upsert_game_platform,
+    upsert_game_alias,
     upsert_game_platform_enrichment,
     upsert_game_platform_identifier,
 )
@@ -325,6 +326,7 @@ async def sync_epic() -> dict:
             skipped += 1
             continue
 
+        artifact_id = _extract_epic_artifact_id(game)
         igdb_platform_id = PLATFORM_TO_IGDB.get("epic")
         game_id, igdb_game = await resolve_and_link_game(prepared_title, igdb_platform_id, candidates)
         if game_id in candidates:
@@ -333,7 +335,15 @@ async def sync_epic() -> dict:
             candidates[game_id] = prepared_title
             added += 1
 
-        artifact_id = _extract_epic_artifact_id(game)
+        if title != prepared_title:
+            await upsert_game_alias(
+                game_id,
+                title,
+                alias_type="edition",
+                source="epic",
+                source_key=artifact_id,
+            )
+
         platform_id = await upsert_game_platform(
             game_id=game_id,
             platform="epic",

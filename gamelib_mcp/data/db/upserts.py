@@ -28,6 +28,9 @@ GAME_EDITABLE_FIELDS = {
     "hltb_extra",
     "hltb_complete",
     "is_farmed",
+    "content_type",
+    "parent_game_id",
+    "is_primary_library_item",
 }
 
 
@@ -243,6 +246,46 @@ async def upsert_game_platform_identifier(
                 WHERE game_platform_id = ? AND identifier_type = ? AND id != ?
                 """,
                 (game_platform_id, identifier_type, row_id),
+            )
+        await db.commit()
+
+
+async def upsert_game_alias(
+    game_id: int,
+    alias: str,
+    *,
+    alias_type: str = "edition",
+    source: str | None = None,
+    source_key: str | None = None,
+) -> None:
+    alias_normalized = normalize_search_text(alias)
+    if not alias_normalized:
+        return
+
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            """SELECT id FROM game_aliases
+               WHERE game_id = ?
+                 AND alias_normalized = ?
+                 AND alias_type = ?
+                 AND COALESCE(source, '') = COALESCE(?, '')
+                 AND COALESCE(source_key, '') = COALESCE(?, '')
+               LIMIT 1""",
+            (game_id, alias_normalized, alias_type, source, source_key),
+        )
+        if row is None:
+            await db.execute(
+                """INSERT INTO game_aliases
+                   (game_id, alias, alias_normalized, alias_type, source, source_key)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (game_id, alias, alias_normalized, alias_type, source, source_key),
+            )
+        else:
+            await db.execute(
+                """UPDATE game_aliases
+                   SET alias = ?, source = ?, source_key = ?
+                   WHERE id = ?""",
+                (alias, source, source_key, row["id"]),
             )
         await db.commit()
 

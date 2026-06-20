@@ -40,6 +40,9 @@ WITH game_rollup AS (
            g.genres,
            g.hltb_main,
            g.is_farmed,
+           g.content_type,
+           g.parent_game_id,
+           g.is_primary_library_item,
            COALESCE(SUM(COALESCE(gp.playtime_minutes, 0)), 0) AS total_playtime_minutes,
            COALESCE(SUM(COALESCE(gp.playtime_2weeks_minutes, 0)), 0) AS total_playtime_2weeks_minutes,
            MAX(CASE WHEN gp.platform = 'steam' THEN spd.protondb_tier END) AS protondb_tier,
@@ -78,6 +81,7 @@ async def search_games(
     match = build_name_match(query)
     conditions = [match.where_sql]
     params: list = list(match.where_params)
+    conditions.append("is_primary_library_item = 1")
     if platform:
         conditions.append(
             "game_id IN (SELECT game_id FROM game_platforms WHERE platform = ? AND owned = 1)"
@@ -116,6 +120,9 @@ async def search_games(
         )
 
     if total["c"] == 0 and match.fuzzy_eligible and not series:
+        alias_results = await _alias_search(query, platform, limit, offset, response_format)
+        if alias_results is not None:
+            return alias_results
         fuzzy_results = await _fuzzy_search(query, platform, limit, offset, response_format)
         if fuzzy_results is not None:
             return fuzzy_results
@@ -141,7 +148,7 @@ async def _fuzzy_search(
         return None
 
     placeholders = ",".join("?" * len(game_ids))
-    conditions = [f"game_id IN ({placeholders})"]
+    conditions = [f"game_id IN ({placeholders})", "is_primary_library_item = 1"]
     params: list = list(game_ids)
     if platform:
         conditions.append(
@@ -180,6 +187,65 @@ async def _fuzzy_search(
     return _envelope(results, total["c"], limit, offset)
 
 
+async def _alias_search(
+    query: str,
+    platform: str | None,
+    limit: int,
+    offset: int,
+    response_format: ResponseFormat,
+) -> dict | None:
+    """Retry against package/edition aliases. None = no alias match."""
+    match = build_name_match(query, column="ga.alias_normalized")
+    if not match.fuzzy_eligible:
+        return None
+
+    conditions = [match.where_sql, "gr.is_primary_library_item = 1"]
+    params: list = list(match.where_params)
+    if platform:
+        conditions.append(
+            "gr.game_id IN (SELECT game_id FROM game_platforms WHERE platform = ? AND owned = 1)"
+        )
+        params.append(platform)
+    where = " AND ".join(conditions)
+
+    async with get_db() as db:
+        total = await db.execute_fetchone(
+            _GAME_ROLLUP_CTE
+            + f"""
+            SELECT COUNT(DISTINCT gr.game_id) AS c
+            FROM game_rollup gr
+            JOIN game_aliases ga ON ga.game_id = gr.game_id
+            WHERE {where}
+            """,
+            tuple(params),
+        )
+        if total["c"] == 0:
+            return None
+
+        rows = await db.execute_fetchall(
+            _GAME_ROLLUP_CTE
+            + f"""
+            SELECT gr.*, ga.alias AS matched_alias, 'alias' AS match_type,
+                   {match.rank_sql} AS match_rank
+            FROM game_rollup gr
+            JOIN game_aliases ga ON ga.game_id = gr.game_id
+            WHERE {where}
+            GROUP BY gr.game_id
+            ORDER BY match_rank ASC, gr.total_playtime_minutes DESC, gr.name ASC
+            LIMIT ?
+            OFFSET ?
+            """,
+            (*match.rank_params, *params, limit, offset),
+        )
+
+    return _envelope(
+        await _format_rows(rows, response_format=response_format),
+        total["c"],
+        limit,
+        offset,
+    )
+
+
 async def search_games_batch(
     queries: list[str],
     limit_per_query: int = 5,
@@ -195,7 +261,7 @@ async def search_games_batch(
                 + f"""
                 SELECT *, {match.rank_sql} AS match_rank
                 FROM game_rollup
-                WHERE {match.where_sql}
+                WHERE {match.where_sql} AND is_primary_library_item = 1
                 ORDER BY match_rank ASC, total_playtime_minutes DESC, name ASC
                 LIMIT ?
                 """,
@@ -252,7 +318,7 @@ async def get_library_stats(
                 f"Unknown protondb_tier '{protondb_tier}'. Valid: {list(TIER_ORDER)}"
             )
 
-    conditions = []
+    conditions = ["is_primary_library_item = 1"]
     params: list = []
 
     if filter == "unplayed":
@@ -361,6 +427,7 @@ async def _format_rows(rows, response_format: ResponseFormat = "detailed") -> li
 
 
 def _format_game(row, platforms: list[dict], response_format: ResponseFormat) -> dict:
+    row_keys = set(row.keys())
     game = {
         "game_id": row["game_id"],
         "appid": row["steam_appid"],
@@ -375,7 +442,14 @@ def _format_game(row, platforms: list[dict], response_format: ResponseFormat) ->
         "protondb_tier": row["protondb_tier"],
         "steam_review_desc": row["steam_review_desc"],
         "is_farmed": bool(row["is_farmed"]),
+        "content_type": row["content_type"],
+        "parent_game_id": row["parent_game_id"],
+        "is_primary_library_item": bool(row["is_primary_library_item"]),
     }
+    if "match_type" in row_keys and row["match_type"]:
+        game["match_type"] = row["match_type"]
+    if "matched_alias" in row_keys and row["matched_alias"]:
+        game["matched_alias"] = row["matched_alias"]
     if response_format == "detailed":
         game["platforms"] = platforms
     return game

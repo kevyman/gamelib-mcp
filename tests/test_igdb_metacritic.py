@@ -91,6 +91,87 @@ class IGDBRegressionTests(unittest.IsolatedAsyncioTestCase):
         apply_metadata.assert_awaited_once_with(7, igdb_game)
         get_db.assert_not_called()
 
+    async def test_resolve_and_link_game_records_edition_alias_on_parent_game(self) -> None:
+        igdb_game = igdb.IGDBGame(
+            igdb_id=200,
+            name="Fallout New Vegas Ultimate Edition",
+            category=igdb.CATEGORY_BUNDLE,
+            first_release_date=None,
+            content_type="edition",
+            parent_name="Fallout: New Vegas",
+            alias_for_parent=True,
+            is_primary_library_item=False,
+        )
+
+        with (
+            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock(return_value=igdb_game)),
+            patch("gamelib_mcp.data.db.find_game_by_name_fuzzy", AsyncMock(return_value={"id": 7})),
+            patch("gamelib_mcp.data.db.upsert_game_alias", AsyncMock()) as upsert_alias,
+            patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
+        ):
+            game_id, linked_game = await igdb.resolve_and_link_game(
+                name="Fallout New Vegas Ultimate Edition",
+                igdb_platform_id=igdb.IGDB_PLATFORM_PC,
+                candidates={7: "Fallout: New Vegas"},
+            )
+
+        self.assertEqual(game_id, 7)
+        self.assertIs(linked_game, igdb_game)
+        upsert_alias.assert_awaited_once_with(
+            7,
+            "Fallout New Vegas Ultimate Edition",
+            alias_type="edition",
+            source="igdb",
+            source_key="200",
+        )
+        apply_metadata.assert_not_awaited()
+
+    async def test_resolve_and_link_game_uses_local_edition_override_without_igdb(self) -> None:
+        with (
+            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock(return_value=None)),
+            patch("gamelib_mcp.data.db.find_game_by_name_fuzzy", AsyncMock(return_value={"id": 7})),
+            patch("gamelib_mcp.data.db.upsert_game_alias", AsyncMock()) as upsert_alias,
+            patch("gamelib_mcp.data.db.upsert_game", AsyncMock()) as upsert_game,
+        ):
+            game_id, linked_game = await igdb.resolve_and_link_game(
+                name="Fallout New Vegas Ultimate Edition",
+                igdb_platform_id=igdb.IGDB_PLATFORM_PC,
+                candidates={7: "Fallout: New Vegas"},
+            )
+
+        self.assertEqual(game_id, 7)
+        self.assertIsNone(linked_game)
+        upsert_alias.assert_awaited_once_with(
+            7,
+            "Fallout New Vegas Ultimate Edition",
+            alias_type="edition",
+            source="local_override",
+            source_key=None,
+        )
+        upsert_game.assert_not_awaited()
+
+    async def test_resolve_and_link_game_uses_local_dlc_override_without_igdb(self) -> None:
+        with (
+            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock(return_value=None)),
+            patch("gamelib_mcp.data.db.find_game_by_name_fuzzy", AsyncMock(return_value={"id": 7})),
+            patch("gamelib_mcp.data.db.upsert_game", AsyncMock(return_value=8)) as upsert_game,
+        ):
+            game_id, linked_game = await igdb.resolve_and_link_game(
+                name="Fallout New Vegas: Dead Money",
+                igdb_platform_id=igdb.IGDB_PLATFORM_PC,
+                candidates={7: "Fallout: New Vegas"},
+            )
+
+        self.assertEqual(game_id, 8)
+        self.assertIsNone(linked_game)
+        upsert_game.assert_awaited_once_with(
+            appid=None,
+            name="Fallout New Vegas: Dead Money",
+            content_type="dlc",
+            parent_game_id=7,
+            is_primary_library_item=0,
+        )
+
 
 class FuzzyIdentityRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_fuzzy_identity_rejects_conflicting_sequel_numbers(self) -> None:

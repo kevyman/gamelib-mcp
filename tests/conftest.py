@@ -18,6 +18,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from gamelib_mcp.data import db as db_module
+from gamelib_mcp.data.title_normalization import normalize_search_text
 
 
 class ToolDBTestCase(unittest.IsolatedAsyncioTestCase):
@@ -53,6 +54,9 @@ async def seed_game(
     is_farmed: int = 0,
     release_date: str | None = None,
     short_description: str | None = None,
+    content_type: str | None = None,
+    parent_game_id: int | None = None,
+    is_primary_library_item: int | None = None,
 ) -> int:
     """Create a canonical games row and return its id."""
     fields: dict = {"is_farmed": is_farmed}
@@ -70,7 +74,40 @@ async def seed_game(
         fields["release_date"] = release_date
     if short_description is not None:
         fields["short_description"] = short_description
-    return await db_module.upsert_game(None, name, **fields)
+    game_id = await db_module.upsert_game(None, name, **fields)
+    related_updates = {
+        "content_type": content_type,
+        "parent_game_id": parent_game_id,
+        "is_primary_library_item": is_primary_library_item,
+    }
+    related_updates = {key: value for key, value in related_updates.items() if value is not None}
+    if related_updates:
+        cols_sql = ", ".join(f"{column} = ?" for column in related_updates)
+        async with db_module.get_db() as db:
+            await db.execute(
+                f"UPDATE games SET {cols_sql} WHERE id = ?",
+                (*related_updates.values(), game_id),
+            )
+            await db.commit()
+    return game_id
+
+
+async def add_game_alias(
+    game_id: int,
+    alias: str,
+    *,
+    alias_type: str = "edition",
+    source: str | None = None,
+    source_key: str | None = None,
+) -> None:
+    async with db_module.get_db() as db:
+        await db.execute(
+            """INSERT INTO game_aliases
+               (game_id, alias, alias_normalized, alias_type, source, source_key)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (game_id, alias, normalize_search_text(alias), alias_type, source, source_key),
+        )
+        await db.commit()
 
 
 async def add_platform(

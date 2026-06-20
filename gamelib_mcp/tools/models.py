@@ -32,6 +32,10 @@ class GameSummary(FlexibleModel):
     protondb_tier: str | None = None
     steam_review_desc: str | None = None
     is_farmed: bool | None = None
+    content_type: str | None = None
+    parent_game_id: int | None = None
+    is_primary_library_item: bool | None = None
+    matched_alias: str | None = None
     tags: list[str] | None = None
     series: list[Any] | None = None
     suggested_platform: str | None = None
@@ -93,6 +97,7 @@ class GameDetailResponse(GameSummary):
     protondb_tier: str | None = None
     my_rating: dict[str, Any] | None = None
     manual_overrides: list[str] | None = None
+    related_content: dict[str, list[dict[str, Any]]] | None = None
 
 
 class TasteProfileResponse(FlexibleModel):

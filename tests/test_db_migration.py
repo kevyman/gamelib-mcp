@@ -27,6 +27,62 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(nested_db_path.exists())
 
+    async def test_fresh_database_includes_v11_content_relationship_schema(self) -> None:
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            db_module._DB_READY_PATH = None
+            await db_module.init_db()
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        game_cols = {row["name"] for row in conn.execute("PRAGMA table_info(games)").fetchall()}
+        alias_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(game_aliases)").fetchall()
+        }
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        conn.close()
+
+        self.assertEqual(version, db_module.SCHEMA_VERSION)
+        self.assertIn("content_type", game_cols)
+        self.assertIn("parent_game_id", game_cols)
+        self.assertIn("is_primary_library_item", game_cols)
+        self.assertEqual(
+            alias_cols,
+            {
+                "id",
+                "game_id",
+                "alias",
+                "alias_normalized",
+                "alias_type",
+                "source",
+                "source_key",
+            },
+        )
+
+    async def test_v10_to_v11_preserves_existing_games_as_primary_base_games(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V10_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 10")
+        conn.execute("INSERT INTO games (id, name, name_normalized) VALUES (1, 'Portal', 'portal')")
+        conn.commit()
+        conn.close()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db_module._configure_connection(db, enable_wal=True)
+            await db_module._run_migrations(db)
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT content_type, parent_game_id, is_primary_library_item FROM games WHERE id = 1"
+        ).fetchone()
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        conn.close()
+
+        self.assertEqual(version, db_module.SCHEMA_VERSION)
+        self.assertEqual(row["content_type"], "base_game")
+        self.assertIsNone(row["parent_game_id"])
+        self.assertEqual(row["is_primary_library_item"], 1)
+
     def test_v1_to_v2_rebuilds_foreign_keys_against_new_games_table(self) -> None:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row

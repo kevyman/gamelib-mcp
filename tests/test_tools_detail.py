@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastmcp.exceptions import ToolError
 
-from conftest import ToolDBTestCase, make_steam_game, seed_game, add_rating
+from conftest import ToolDBTestCase, make_steam_game, seed_game, add_rating, add_platform
 from gamelib_mcp.tools import detail
 
 
@@ -60,6 +60,10 @@ class GetGameDetailTests(ToolDBTestCase):
                 "playtime_2weeks_hours",
                 "last_played_date",
                 "is_farmed",
+                "content_type",
+                "parent_game_id",
+                "is_primary_library_item",
+                "related_content",
                 "genres",
                 "tags",
                 "features",
@@ -84,6 +88,13 @@ class GetGameDetailTests(ToolDBTestCase):
         self.assertEqual(result["playtime_hours"], 5.0)
         self.assertEqual(result["tags"], ["platformer"])
         self.assertEqual(result["genres"], ["Indie"])
+        self.assertEqual(result["content_type"], "base_game")
+        self.assertIsNone(result["parent_game_id"])
+        self.assertIs(result["is_primary_library_item"], True)
+        self.assertEqual(
+            result["related_content"],
+            {"dlc": [], "expansions": [], "editions": [], "bundles": [], "other": []},
+        )
         self.assertNotIn("my_rating", result)
 
     async def test_lookup_by_appid(self):
@@ -148,3 +159,34 @@ class GetGameDetailTests(ToolDBTestCase):
                 "review_text": "GOAT",
             },
         )
+
+    async def test_includes_related_content_grouped_by_type(self):
+        parent_id = await seed_game("Fallout: New Vegas")
+        await add_platform(parent_id, "steam", playtime_minutes=2694)
+        dlc_id = await seed_game(
+            "Fallout New Vegas: Dead Money",
+            content_type="dlc",
+            parent_game_id=parent_id,
+            is_primary_library_item=0,
+        )
+        expansion_id = await seed_game(
+            "Fallout New Vegas: Old World Blues",
+            content_type="expansion",
+            parent_game_id=parent_id,
+            is_primary_library_item=0,
+        )
+        await add_platform(dlc_id, "epic")
+        await add_platform(expansion_id, "epic")
+
+        result = await detail.get_game_detail(game_id=parent_id)
+
+        self.assertEqual(
+            [entry["name"] for entry in result["related_content"]["dlc"]],
+            ["Fallout New Vegas: Dead Money"],
+        )
+        self.assertEqual(
+            [entry["name"] for entry in result["related_content"]["expansions"]],
+            ["Fallout New Vegas: Old World Blues"],
+        )
+        self.assertEqual(result["related_content"]["editions"], [])
+        self.assertEqual(result["related_content"]["bundles"], [])

@@ -2,7 +2,7 @@
 
 from fastmcp.exceptions import ToolError
 
-from conftest import ToolDBTestCase, make_steam_game, seed_game, add_platform
+from conftest import ToolDBTestCase, make_steam_game, seed_game, add_platform, add_game_alias
 from gamelib_mcp.tools import library
 from gamelib_mcp.tools.common import MAX_RESULT_LIMIT
 
@@ -44,6 +44,9 @@ class SearchGamesTests(ToolDBTestCase):
                 "protondb_tier",
                 "steam_review_desc",
                 "is_farmed",
+                "content_type",
+                "parent_game_id",
+                "is_primary_library_item",
             },
         )
         self.assertEqual(game["name"], "Portal 2")
@@ -95,6 +98,35 @@ class SearchGamesTests(ToolDBTestCase):
         results = await library.search_games("", platform="nintendo")
         names = [g["name"] for g in results["results"]]
         self.assertEqual(names, ["Zelda"])
+
+    async def test_search_matches_edition_alias_and_returns_parent_game(self):
+        gid = await seed_game("Fallout: New Vegas")
+        await add_platform(gid, "gog")
+        await add_game_alias(gid, "Fallout New Vegas Ultimate Edition", alias_type="edition")
+
+        results = await library.search_games("fallout new vegas ultimate", response_format="detailed")
+
+        self.assertEqual(results["total_matches"], 1)
+        game = results["results"][0]
+        self.assertEqual(game["game_id"], gid)
+        self.assertEqual(game["name"], "Fallout: New Vegas")
+        self.assertEqual(game["match_type"], "alias")
+        self.assertEqual(game["matched_alias"], "Fallout New Vegas Ultimate Edition")
+
+    async def test_search_excludes_nested_related_content_by_default(self):
+        parent_id = await seed_game("Fallout: New Vegas")
+        await add_platform(parent_id, "steam")
+        dlc_id = await seed_game(
+            "Fallout New Vegas: Dead Money",
+            content_type="dlc",
+            parent_game_id=parent_id,
+            is_primary_library_item=0,
+        )
+        await add_platform(dlc_id, "epic")
+
+        results = await library.search_games("fallout")
+
+        self.assertEqual([game["name"] for game in results["results"]], ["Fallout: New Vegas"])
 
     async def test_concise_drops_platform_arrays(self):
         await make_steam_game("Portal 2", 620, playtime_minutes=600, tags=["puzzle"])
@@ -288,3 +320,19 @@ class LibraryStatsTests(ToolDBTestCase):
         self.assertEqual(len(stats["results"]), 1)
         self.assertEqual(stats["total_matches"], 3)
         self.assertTrue(stats["has_more"])
+
+    async def test_library_stats_excludes_nested_related_content(self):
+        parent_id = await seed_game("Sid Meier's Civilization IV")
+        await add_platform(parent_id, "gog")
+        expansion_id = await seed_game(
+            "Sid Meier's Civilization IV: Warlords",
+            content_type="expansion",
+            parent_game_id=parent_id,
+            is_primary_library_item=0,
+        )
+        await add_platform(expansion_id, "gog")
+
+        stats = await library.get_library_stats()
+
+        self.assertEqual(stats["total_games"], 1)
+        self.assertEqual([game["name"] for game in stats["results"]], ["Sid Meier's Civilization IV"])
