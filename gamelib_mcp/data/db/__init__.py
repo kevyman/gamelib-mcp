@@ -829,6 +829,16 @@ async def _migrate_v9_to_v10(db: aiosqlite.Connection, progress: _Progress | Non
         progress("Migrating to v10: add game_series + game_series_membership.")
 
     await db.executescript(_V10_SCHEMA_DDL)
+    # Requeue already-matched games for IGDB so the background worker re-fetches
+    # them and backfills series. Without this, games enriched before v10 keep a
+    # non-null igdb_cached_at and claim_game_ids_for_igdb never revisits them, so
+    # game_series_membership would stay empty for the existing library. Safe and
+    # one-time: _apply_igdb_metadata only writes columns that are currently NULL
+    # and not manually overridden, so genres/tags/release_date are preserved.
+    await db.execute(
+        "UPDATE games SET igdb_cached_at = NULL, igdb_claimed_at = NULL "
+        "WHERE igdb_id IS NOT NULL"
+    )
     await _set_user_version(db, 10)
     await db.commit()
 
