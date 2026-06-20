@@ -5,7 +5,12 @@ from datetime import datetime, timezone
 
 import httpx
 
-from .db import get_db, get_steam_platform_row_by_appid, upsert_steam_platform_data
+from .db import (
+    get_db,
+    get_manual_overrides,
+    get_steam_platform_row_by_appid,
+    upsert_steam_platform_data,
+)
 from .tags import is_feature_flag
 
 STEAMSPY_API = "https://steamspy.com/api.php"
@@ -39,11 +44,13 @@ async def enrich_steamspy(appid: int) -> list[str] | None:
     await upsert_steam_platform_data(row["game_platform_id"], steamspy_cached_at=now)
 
     async with get_db() as db:
-        await db.execute(
-            "UPDATE games SET tags = ? WHERE id = ?",
-            (json.dumps(merged) if merged else row["tags"], row["game_id"]),
-        )
-        await db.commit()
+        # Don't overwrite tags the user set via update_game.
+        if "tags" not in await get_manual_overrides(db, row["game_id"]):
+            await db.execute(
+                "UPDATE games SET tags = ? WHERE id = ?",
+                (json.dumps(merged) if merged else row["tags"], row["game_id"]),
+            )
+            await db.commit()
 
     return merged or None
 

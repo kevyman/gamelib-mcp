@@ -67,6 +67,24 @@ class DetectFarmedGamesTests(ToolDBTestCase):
             )
         self.assertEqual(row["c"], 2)
 
+    async def test_manual_is_farmed_override_is_respected(self):
+        await self._seed_farming_day()
+        # User manually un-farms one of the candidates; detection must not re-flag it.
+        async with db_module.get_db() as db:
+            target = await db.execute_fetchone(
+                "SELECT id FROM games WHERE name = ?", ("Card Farm A",)
+            )
+        from gamelib_mcp.tools import platforms
+        await platforms.update_game(game_id=target["id"], is_farmed=False)
+
+        await admin.detect_farmed_games(dry_run=False, min_games_per_day=2)
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT is_farmed FROM games WHERE id = ?", (target["id"],)
+            )
+        self.assertEqual(row["is_farmed"], 0)
+
     async def test_below_threshold_no_farming_day(self):
         await make_steam_game("Lonely", 1, playtime_minutes=30, rtime_last_played=1700000000)
         result = await admin.detect_farmed_games(dry_run=True, min_games_per_day=8)

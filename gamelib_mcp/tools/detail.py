@@ -130,6 +130,7 @@ async def get_game_detail(
         "hltb_extra": row["hltb_extra"],
         "hltb_complete": row["hltb_complete"],
         "protondb_tier": steam_data.get("protondb_tier"),
+        "manual_overrides": _parse_json(row["manual_overrides"]) or [],
     }
 
     if rating:

@@ -1,5 +1,6 @@
 """Game/platform/identifier/enrichment upserts, incl. bulk Steam library sync."""
 
+import json
 from datetime import datetime, timezone
 
 from . import (
@@ -10,6 +11,90 @@ from . import (
     get_db,
 )
 from ..title_normalization import normalize_search_text
+
+# games columns the update_game tool may set manually. A subset of these is
+# recorded per-row in games.manual_overrides so background sync/enrichment knows
+# not to clobber a value the user set by hand. name_normalized is derived from
+# name and never protected on its own.
+GAME_EDITABLE_FIELDS = {
+    "name",
+    "sort_name",
+    "release_date",
+    "genres",
+    "tags",
+    "features",
+    "short_description",
+    "hltb_main",
+    "hltb_extra",
+    "hltb_complete",
+    "is_farmed",
+}
+
+
+def _decode_overrides(raw) -> set[str]:
+    if not raw:
+        return set()
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return set()
+    return set(data) if isinstance(data, list) else set()
+
+
+async def get_manual_overrides(db, game_id: int) -> set[str]:
+    """Return the set of games columns marked as manual overrides for a game.
+
+    ``db`` is an open connection (enrichment writers already hold one). Used by
+    the sync/enrichment paths to skip columns the user set via update_game.
+    """
+    row = await db.execute_fetchone(
+        "SELECT manual_overrides FROM games WHERE id = ?", (game_id,)
+    )
+    return _decode_overrides(row["manual_overrides"]) if row else set()
+
+
+async def apply_manual_game_fields(game_id: int, fields: dict) -> set[str]:
+    """Write user-supplied games columns and record them as manual overrides.
+
+    Recomputes name_normalized when name changes. Merges the written column
+    names into games.manual_overrides so later sync/enrichment won't overwrite
+    them. Returns the full override set after the write.
+    """
+    if not fields:
+        async with get_db() as db:
+            return await get_manual_overrides(db, game_id)
+
+    updates = dict(fields)
+    if "name" in updates:
+        updates["name_normalized"] = normalize_search_text(updates["name"])
+
+    async with get_db() as db:
+        current = await get_manual_overrides(db, game_id)
+        merged = current | (set(fields) & GAME_EDITABLE_FIELDS)
+        updates["manual_overrides"] = json.dumps(sorted(merged))
+        cols_sql = ", ".join(f"{column} = ?" for column in updates)
+        await db.execute(
+            f"UPDATE games SET {cols_sql} WHERE id = ?",
+            (*updates.values(), game_id),
+        )
+        await db.commit()
+        return merged
+
+
+async def remove_manual_overrides(game_id: int, columns) -> set[str]:
+    """Stop protecting the given columns so sync/enrichment may update them again.
+
+    Removing protection does not change the current value — it just lets the next
+    sync/enrichment pass overwrite it. Returns the remaining override set.
+    """
+    async with get_db() as db:
+        remaining = await get_manual_overrides(db, game_id) - set(columns)
+        await db.execute(
+            "UPDATE games SET manual_overrides = ? WHERE id = ?",
+            (json.dumps(sorted(remaining)) if remaining else None, game_id),
+        )
+        await db.commit()
+        return remaining
 
 
 async def upsert_game(
@@ -283,7 +368,9 @@ async def bulk_upsert_steam_library(
                        SELECT game_id
                        FROM resolved
                        WHERE game_id IS NOT NULL
-                   )""",
+                   )
+                   AND (manual_overrides IS NULL
+                        OR 'name' NOT IN (SELECT value FROM json_each(manual_overrides)))""",
                 (STEAM_APP_ID,),
             )
 

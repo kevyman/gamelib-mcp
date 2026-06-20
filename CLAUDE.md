@@ -78,7 +78,7 @@ Dependency direction is a clean DAG: `main → lifecycle`, `main → http_admin`
 - `ratings.py`: `sync_ratings`, `rate_game`, `get_ratings`, `get_taste_profile`
 - `stats.py`: `get_backlog_stats`
 - `admin.py`: `refresh_library` (full or per-platform sync), `detect_farmed_games`, `set_nintendo_session`
-- `platforms.py`: `get_platform_breakdown`, `set_hardware_preference`, `add_game_to_platform`
+- `platforms.py`: `get_platform_breakdown`, `set_hardware_preference`, `add_game_to_platform`, `update_game` (manual per-game property edits incl. `is_farmed`; edited columns are recorded in `games.manual_overrides` so sync/enrichment won't clobber them)
 - `integrations.py`: `get_integration_status` (read-only filter over the inspector payload)
 - `common.py`: shared helpers — the steam-appid correlated subquery and the platform-alias resolver (imported by the modules above). The three `_GAME_ROLLUP_CTE` variants deliberately stay in their own modules; they differ.
 - `search.py`: tiered name-match SQL builder (exact > prefix > substring > token-AND over `games.name_normalized`) plus the fuzzy fallback, used by search, detail, and rate_game name resolution.
@@ -116,3 +116,4 @@ WAL mode enabled, foreign keys on.
 - **Tag affinity**: After `sync_ratings` or `rate_game`, weighted tag scores are recomputed across all rated games (Steam feature flags from `data/tags.py` are excluded — they live in `games.features`, not `games.tags`). `discover_games` ranks unplayed games by these scores and explains each result via `matched_tags`.
 - **Rate limiting**: HLTB pre-warm uses an asyncio semaphore to avoid hammering the API.
 - **Fuzzy matching**: Title matching uses rapidfuzz/stdlib helpers where provider identifiers are unavailable.
+- **Manual overrides**: `update_game` writes user-edited `games` columns and records their names in `games.manual_overrides` (JSON array). Sync/enrichment writers (`steam_store`, `steamspy`, `hltb`, `igdb`, the bulk Steam name update, and `detect_farmed_games`) consult `get_manual_overrides` and skip those columns, so a hand edit survives later syncs. Protection is revocable: `update_game(clear_overrides=[...])` removes columns from `manual_overrides` (via `remove_manual_overrides`) so sync can manage them again.

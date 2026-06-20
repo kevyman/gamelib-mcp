@@ -15,7 +15,13 @@ from weakref import WeakKeyDictionary
 
 import httpx
 
-from .db import get_db, get_steam_platform_row_by_appid, upsert_game_platform_enrichment, upsert_steam_platform_data
+from .db import (
+    get_db,
+    get_manual_overrides,
+    get_steam_platform_row_by_appid,
+    upsert_game_platform_enrichment,
+    upsert_steam_platform_data,
+)
 from .tags import split_features
 
 logger = logging.getLogger(__name__)
@@ -217,16 +223,24 @@ async def enrich_game(appid: int, client: httpx.AsyncClient | None = None) -> di
             raw_date = (store_data.get("release_date") or {}).get("date", "")
             release_date = _parse_steam_date(raw_date)
 
-            await db.execute(
-                """UPDATE games SET
-                    genres = ?,
-                    tags = ?,
-                    features = ?,
-                    short_description = ?,
-                    release_date = COALESCE(release_date, ?)
-                WHERE id = ?""",
-                (genres, steam_tags, steam_features, short_desc, release_date, row["game_id"]),
-            )
+            # Skip any column the user set via update_game so sync never clobbers
+            # a manual edit.
+            overrides = await get_manual_overrides(db, row["game_id"])
+            candidates = [
+                ("genres = ?", "genres", genres),
+                ("tags = ?", "tags", steam_tags),
+                ("features = ?", "features", steam_features),
+                ("short_description = ?", "short_description", short_desc),
+                ("release_date = COALESCE(release_date, ?)", "release_date", release_date),
+            ]
+            assignments = [(sql, value) for sql, col, value in candidates if col not in overrides]
+            if assignments:
+                set_sql = ", ".join(sql for sql, _ in assignments)
+                params = [value for _, value in assignments]
+                await db.execute(
+                    f"UPDATE games SET {set_sql} WHERE id = ?",
+                    (*params, row["game_id"]),
+                )
         await db.commit()
 
     # Always write store_cached_at — on failure this acts as a backoff marker so

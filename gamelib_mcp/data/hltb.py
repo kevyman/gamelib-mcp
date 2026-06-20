@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from howlongtobeatpy import HowLongToBeat
 
-from .db import get_db
+from .db import get_db, get_manual_overrides
 
 HLTB_CACHE_DAYS = 30
 HLTB_NOT_FOUND = "NOT_FOUND"
@@ -95,11 +95,21 @@ async def _cache_result(
     cached_at: str | None,
 ) -> None:
     async with get_db() as db:
-        await db.execute(
-            """UPDATE games SET hltb_main = ?, hltb_extra = ?, hltb_complete = ?, hltb_cached_at = ?
-               WHERE id = ?""",
-            (main, extra, comp, cached_at, game_id),
-        )
+        # Preserve manually-edited HLTB times: still stamp hltb_cached_at (so the
+        # background worker doesn't hot-loop re-claiming the row) but leave the
+        # user's durations alone.
+        overrides = await get_manual_overrides(db, game_id)
+        if overrides & {"hltb_main", "hltb_extra", "hltb_complete"}:
+            await db.execute(
+                "UPDATE games SET hltb_cached_at = ? WHERE id = ?",
+                (cached_at, game_id),
+            )
+        else:
+            await db.execute(
+                """UPDATE games SET hltb_main = ?, hltb_extra = ?, hltb_complete = ?, hltb_cached_at = ?
+                   WHERE id = ?""",
+                (main, extra, comp, cached_at, game_id),
+            )
         await db.commit()
 
 

@@ -520,7 +520,7 @@ async def resolve_and_link_game(
 
 async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
     """Write IGDB fields to games row, skipping columns that are already populated."""
-    from .db import get_db
+    from .db import get_db, get_manual_overrides
 
     now = datetime.now(timezone.utc).isoformat()
     async with get_db() as db:
@@ -530,12 +530,13 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
         if row is None:
             return
 
+        overrides = await get_manual_overrides(db, game_id)
         updates: dict = {"igdb_id": igdb_game.igdb_id, "igdb_cached_at": now}
-        if row["release_date"] is None and igdb_game.first_release_date:
+        if row["release_date"] is None and igdb_game.first_release_date and "release_date" not in overrides:
             updates["release_date"] = igdb_game.first_release_date
-        if row["genres"] is None and igdb_game.genres:
+        if row["genres"] is None and igdb_game.genres and "genres" not in overrides:
             updates["genres"] = json.dumps(igdb_game.genres)
-        if row["tags"] is None and igdb_game.tags:
+        if row["tags"] is None and igdb_game.tags and "tags" not in overrides:
             updates["tags"] = json.dumps(igdb_game.tags)
 
         cols_sql = ", ".join(f"{col} = ?" for col in updates)
