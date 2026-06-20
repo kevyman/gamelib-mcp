@@ -229,12 +229,17 @@ async def enrich_game(appid: int, client: httpx.AsyncClient | None = None) -> di
             )
         await db.commit()
 
-    steam_fields = {"store_cached_at": now}
+    # Only mark store as cached when we actually got store data; leave NULL
+    # on failure so the background worker can re-claim the row for retry.
+    steam_fields: dict = {}
+    if store_data is not None:
+        steam_fields["store_cached_at"] = now
     if "review_score" in review_summary:
         steam_fields["steam_review_score"] = review_summary["review_score"]
     if "review_score_desc" in review_summary:
         steam_fields["steam_review_desc"] = review_summary["review_score_desc"]
-    await upsert_steam_platform_data(row["game_platform_id"], **steam_fields)
+    if steam_fields:
+        await upsert_steam_platform_data(row["game_platform_id"], **steam_fields)
 
     # Write metacritic to game_platform_enrichment (Steam Store provides this for free)
     if store_data is not None:
