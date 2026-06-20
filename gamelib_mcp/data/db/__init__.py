@@ -51,7 +51,7 @@ STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 @dataclass
@@ -168,6 +168,7 @@ from .schema import (
     _V6_SCHEMA_DDL,
     _V7_SCHEMA_DDL,
     _V8_SCHEMA_DDL,
+    _V9_SCHEMA_DDL,
 )
 
 
@@ -201,6 +202,12 @@ async def _detect_schema_state(db: aiosqlite.Connection) -> str:
 
     spd_cols = await _table_columns(db, "steam_platform_data") if "steam_platform_data" in tables else set()
     gpe_cols = await _table_columns(db, "game_platform_enrichment") if "game_platform_enrichment" in tables else set()
+    if {"name_normalized", "features", "manual_overrides"}.issubset(game_cols) and {
+        "opencritic_url",
+        "opencritic_num_reviews",
+    }.issubset(gpe_cols):
+        return "v9"
+
     if {"name_normalized", "features"}.issubset(game_cols) and {
         "opencritic_url",
         "opencritic_num_reviews",
@@ -800,6 +807,19 @@ async def _migrate_v7_to_v8(db: aiosqlite.Connection, progress: _Progress | None
     await db.commit()
 
 
+async def _migrate_v8_to_v9(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add games.manual_overrides (JSON array of tool-protected column names)."""
+    if progress is not None:
+        progress("Migrating to v9: add games.manual_overrides.")
+
+    game_cols = await _table_columns(db, "games")
+    if "manual_overrides" not in game_cols:
+        await db.execute("ALTER TABLE games ADD COLUMN manual_overrides TEXT")
+
+    await _set_user_version(db, 9)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -836,7 +856,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V8_SCHEMA_DDL)
+    await db.executescript(_V9_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -877,10 +897,10 @@ async def _run_migrations(
     applied_steps: list[str] = []
 
     if detected_state == "fresh":
-        await db.executescript(_V8_SCHEMA_DDL)
+        await db.executescript(_V9_SCHEMA_DDL)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
-        _emit(progress, "Initialized fresh database at schema v8.", applied_steps)
+        _emit(progress, "Initialized fresh database at schema v9.", applied_steps)
         return MigrationResult(
             initial_version=initial_version,
             final_version=SCHEMA_VERSION,
@@ -928,6 +948,11 @@ async def _run_migrations(
             await db.commit()
             version = 8
             _emit(progress, "Recorded existing schema as v8.", applied_steps)
+        elif detected_state == "v9":
+            await _set_user_version(db, 9)
+            await db.commit()
+            version = 9
+            _emit(progress, "Recorded existing schema as v9.", applied_steps)
 
     if version == 1:
         _emit(progress, "Applying migration step v1 -> v2.", applied_steps)
@@ -964,10 +989,15 @@ async def _run_migrations(
         await _migrate_v7_to_v8(db, progress=None)
         version = 8
 
+    if version == 8:
+        _emit(progress, "Applying migration step v8 -> v9.", applied_steps)
+        await _migrate_v8_to_v9(db, progress=None)
+        version = 9
+
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V8_SCHEMA_DDL)
+    await db.executescript(_V9_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
@@ -1074,6 +1104,7 @@ from .queries import (  # noqa: E402
     load_platforms_for_games,
 )
 from .upserts import (  # noqa: E402
+    GAME_EDITABLE_FIELDS,
     upsert_game,
     upsert_game_platform,
     repair_misclassified_platform_row,
@@ -1081,6 +1112,9 @@ from .upserts import (  # noqa: E402
     upsert_steam_platform_data,
     bulk_upsert_steam_library,
     upsert_game_platform_enrichment,
+    get_manual_overrides,
+    apply_manual_game_fields,
+    remove_manual_overrides,
 )
 from .fuzzy import (  # noqa: E402
     load_fuzzy_candidates,

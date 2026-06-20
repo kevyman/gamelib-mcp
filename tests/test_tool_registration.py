@@ -76,6 +76,25 @@ EXPECTED_TOOLS = {
         "required": {"name", "platform"},
     },
     "set_nintendo_session": {"params": {"cookies"}, "required": {"cookies"}},
+    "update_game": {
+        "params": {
+            "name",
+            "game_id",
+            "new_name",
+            "sort_name",
+            "release_date",
+            "genres",
+            "tags",
+            "features",
+            "short_description",
+            "hltb_main",
+            "hltb_extra",
+            "hltb_complete",
+            "is_farmed",
+            "clear_overrides",
+        },
+        "required": set(),
+    },
 }
 
 EXPECTED_ANNOTATIONS = {
@@ -97,6 +116,7 @@ EXPECTED_ANNOTATIONS = {
     "set_hardware_preference": {"readOnlyHint": False, "idempotentHint": True},
     "add_game_to_platform": {"readOnlyHint": False, "idempotentHint": True},
     "set_nintendo_session": {"readOnlyHint": False, "idempotentHint": True},
+    "update_game": {"readOnlyHint": False, "idempotentHint": True},
 }
 
 PAGINATED_OUTPUTS = {
@@ -116,9 +136,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_18(self):
+    async def test_tool_count_is_19(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 18)
+        self.assertEqual(len(tools), 19)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()

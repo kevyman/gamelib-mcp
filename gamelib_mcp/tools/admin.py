@@ -329,8 +329,15 @@ async def detect_farmed_games(
     if not dry_run and candidate_game_ids:
         placeholders = ",".join("?" * len(candidate_game_ids))
         async with get_db() as db:
+            # Respect a manual is_farmed value set via update_game (e.g. a user
+            # un-farming a false positive). json_each decouples the guard from
+            # manual_overrides' JSON serialization format (json_each(NULL) yields
+            # no rows, so the IS NULL clause is belt-and-suspenders).
             await db.execute(
-                f"UPDATE games SET is_farmed = 1 WHERE id IN ({placeholders})",
+                f"""UPDATE games SET is_farmed = 1
+                    WHERE id IN ({placeholders})
+                      AND (manual_overrides IS NULL
+                           OR 'is_farmed' NOT IN (SELECT value FROM json_each(manual_overrides)))""",
                 list(candidate_game_ids),
             )
             await db.commit()

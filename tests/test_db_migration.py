@@ -711,6 +711,26 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         # Feature flags purged from tag_affinity; real tags survive.
         self.assertEqual(affinity_tags, {"roguelike"})
 
+    async def test_v8_to_v9_adds_manual_overrides_column(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V8_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 8")
+        conn.execute("INSERT INTO games (id, name) VALUES (1, 'Hollow Knight')")
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+            async with db_module.get_db() as db:
+                version = await db_module._get_user_version(db)
+                cols = await db_module._table_columns(db, "games")
+                overrides = await db_module.get_manual_overrides(db, 1)
+
+        self.assertEqual(version, db_module.SCHEMA_VERSION)
+        self.assertIn("manual_overrides", cols)
+        self.assertEqual(overrides, set())
+
     async def test_upsert_game_maintains_name_normalized(self) -> None:
         db_module._DB_READY_PATH = None
         with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
