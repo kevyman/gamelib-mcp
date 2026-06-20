@@ -229,7 +229,10 @@ async def enrich_game(appid: int, client: httpx.AsyncClient | None = None) -> di
             )
         await db.commit()
 
-    steam_fields = {"store_cached_at": now}
+    # Always write store_cached_at — on failure this acts as a backoff marker so
+    # the background worker doesn't immediately re-claim the row and hot-loop.
+    # Game data fields are only written above when store_data is not None.
+    steam_fields: dict = {"store_cached_at": now}
     if "review_score" in review_summary:
         steam_fields["steam_review_score"] = review_summary["review_score"]
     if "review_score_desc" in review_summary:
