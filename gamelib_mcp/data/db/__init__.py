@@ -51,7 +51,7 @@ STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 @dataclass
@@ -169,6 +169,7 @@ from .schema import (
     _V7_SCHEMA_DDL,
     _V8_SCHEMA_DDL,
     _V9_SCHEMA_DDL,
+    _V10_SCHEMA_DDL,
 )
 
 
@@ -206,6 +207,8 @@ async def _detect_schema_state(db: aiosqlite.Connection) -> str:
         "opencritic_url",
         "opencritic_num_reviews",
     }.issubset(gpe_cols):
+        if "game_series" in tables:
+            return "v10"
         return "v9"
 
     if {"name_normalized", "features"}.issubset(game_cols) and {
@@ -820,6 +823,26 @@ async def _migrate_v8_to_v9(db: aiosqlite.Connection, progress: _Progress | None
     await db.commit()
 
 
+async def _migrate_v9_to_v10(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add normalized series tables (IGDB collections + franchises)."""
+    if progress is not None:
+        progress("Migrating to v10: add game_series + game_series_membership.")
+
+    await db.executescript(_V10_SCHEMA_DDL)
+    # Requeue already-matched games for IGDB so the background worker re-fetches
+    # them and backfills series. Without this, games enriched before v10 keep a
+    # non-null igdb_cached_at and claim_game_ids_for_igdb never revisits them, so
+    # game_series_membership would stay empty for the existing library. Safe and
+    # one-time: _apply_igdb_metadata only writes columns that are currently NULL
+    # and not manually overridden, so genres/tags/release_date are preserved.
+    await db.execute(
+        "UPDATE games SET igdb_cached_at = NULL, igdb_claimed_at = NULL "
+        "WHERE igdb_id IS NOT NULL"
+    )
+    await _set_user_version(db, 10)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -856,7 +879,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V9_SCHEMA_DDL)
+    await db.executescript(_V10_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -897,10 +920,10 @@ async def _run_migrations(
     applied_steps: list[str] = []
 
     if detected_state == "fresh":
-        await db.executescript(_V9_SCHEMA_DDL)
+        await db.executescript(_V10_SCHEMA_DDL)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
-        _emit(progress, "Initialized fresh database at schema v9.", applied_steps)
+        _emit(progress, "Initialized fresh database at schema v10.", applied_steps)
         return MigrationResult(
             initial_version=initial_version,
             final_version=SCHEMA_VERSION,
@@ -953,6 +976,11 @@ async def _run_migrations(
             await db.commit()
             version = 9
             _emit(progress, "Recorded existing schema as v9.", applied_steps)
+        elif detected_state == "v10":
+            await _set_user_version(db, 10)
+            await db.commit()
+            version = 10
+            _emit(progress, "Recorded existing schema as v10.", applied_steps)
 
     if version == 1:
         _emit(progress, "Applying migration step v1 -> v2.", applied_steps)
@@ -994,10 +1022,15 @@ async def _run_migrations(
         await _migrate_v8_to_v9(db, progress=None)
         version = 9
 
+    if version == 9:
+        _emit(progress, "Applying migration step v9 -> v10.", applied_steps)
+        await _migrate_v9_to_v10(db, progress=None)
+        version = 10
+
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V9_SCHEMA_DDL)
+    await db.executescript(_V10_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
@@ -1102,6 +1135,7 @@ from .queries import (  # noqa: E402
     _coerce_identifier_value,
     _platform_dict,
     load_platforms_for_games,
+    load_series_for_games,
 )
 from .upserts import (  # noqa: E402
     GAME_EDITABLE_FIELDS,
@@ -1115,6 +1149,7 @@ from .upserts import (  # noqa: E402
     get_manual_overrides,
     apply_manual_game_fields,
     remove_manual_overrides,
+    upsert_game_series_links,
 )
 from .fuzzy import (  # noqa: E402
     load_fuzzy_candidates,

@@ -33,6 +33,7 @@ class GameSummary(FlexibleModel):
     steam_review_desc: str | None = None
     is_farmed: bool | None = None
     tags: list[str] | None = None
+    series: list[Any] | None = None
     suggested_platform: str | None = None
     match_score: float | None = None
     match_type: str | None = None
