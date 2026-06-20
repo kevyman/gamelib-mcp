@@ -75,6 +75,7 @@ class GetGameDetailTests(ToolDBTestCase):
                 "hltb_extra",
                 "hltb_complete",
                 "protondb_tier",
+                "manual_overrides",
             },
         )
         self.assertEqual(result["name"], "Celeste")

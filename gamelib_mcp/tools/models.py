@@ -91,6 +91,7 @@ class GameDetailResponse(GameSummary):
     hltb_complete: float | None = None
     protondb_tier: str | None = None
     my_rating: dict[str, Any] | None = None
+    manual_overrides: list[str] | None = None
 
 
 class TasteProfileResponse(FlexibleModel):
@@ -170,3 +171,11 @@ class AddGameToPlatformResponse(FlexibleModel):
 class NintendoSessionResponse(FlexibleModel):
     cookie_count: int
     path: str
+
+
+class UpdateGameResponse(FlexibleModel):
+    game_id: int
+    name: str
+    updated: dict[str, Any]
+    cleared: list[str]
+    manual_overrides: list[str]
