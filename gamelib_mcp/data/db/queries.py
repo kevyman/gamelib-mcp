@@ -264,3 +264,31 @@ async def load_platforms_for_games(game_ids: Iterable[int]) -> dict[int, list[di
         platforms.sort(key=lambda item: item["platform"])
 
     return dict(by_game)
+
+
+async def load_series_for_games(game_ids: Iterable[int]) -> dict[int, list[dict]]:
+    """Load series memberships (IGDB collections/franchises) for many games.
+
+    Returns {game_id: [{"name", "kind", "igdb_id"}, ...]}.
+    """
+    ids = list(dict.fromkeys(game_ids))
+    if not ids:
+        return {}
+
+    placeholders = ",".join("?" for _ in ids)
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            f"""SELECT m.game_id, s.name, s.kind, s.igdb_id
+                FROM game_series_membership m
+                JOIN game_series s ON s.id = m.series_id
+                WHERE m.game_id IN ({placeholders})
+                ORDER BY m.game_id, s.kind, s.name""",
+            ids,
+        )
+
+    by_game: dict[int, list[dict]] = defaultdict(list)
+    for row in rows:
+        by_game[row["game_id"]].append(
+            {"name": row["name"], "kind": row["kind"], "igdb_id": row["igdb_id"]}
+        )
+    return dict(by_game)

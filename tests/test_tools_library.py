@@ -34,6 +34,7 @@ class SearchGamesTests(ToolDBTestCase):
                 "appid",
                 "steam_appid",
                 "name",
+                "series",
                 "platforms",
                 "playtime_hours",
                 "playtime_2weeks_hours",

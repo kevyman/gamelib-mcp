@@ -731,6 +731,69 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("manual_overrides", cols)
         self.assertEqual(overrides, set())
 
+    async def test_v9_to_v10_adds_series_tables(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V9_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 9")
+        conn.execute("INSERT INTO games (id, name) VALUES (1, 'Hollow Knight')")
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+            # Existing v9 game data survives the migration, and series writes work.
+            await db_module.upsert_game_series_links(
+                1, [("collection", 5, "Hollow Knight"), ("franchise", 6, "Team Cherry")]
+            )
+            async with db_module.get_db() as db:
+                version = await db_module._get_user_version(db)
+                tables = await db_module._table_names(db)
+            series = await db_module.load_series_for_games([1])
+
+        self.assertEqual(version, db_module.SCHEMA_VERSION)
+        self.assertIn("game_series", tables)
+        self.assertIn("game_series_membership", tables)
+        self.assertEqual(
+            {(s["kind"], s["name"]) for s in series[1]},
+            {("collection", "Hollow Knight"), ("franchise", "Team Cherry")},
+        )
+
+    async def test_v9_to_v10_requeues_cached_igdb_games_for_series_backfill(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V9_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 9")
+        # Game 1: previously matched + cached by IGDB -> must be requeued.
+        conn.execute(
+            "INSERT INTO games (id, name, igdb_id, igdb_cached_at, igdb_claimed_at) "
+            "VALUES (1, 'Hollow Knight', 999, '2026-01-01T00:00:00+00:00', "
+            "'2026-01-01T00:00:00+00:00')"
+        )
+        # Game 2: checked but never matched (no igdb_id) -> left untouched.
+        conn.execute(
+            "INSERT INTO games (id, name, igdb_id, igdb_cached_at) "
+            "VALUES (2, 'Some Indie', NULL, '2026-01-01T00:00:00+00:00')"
+        )
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+            async with db_module.get_db() as db:
+                matched = await db.execute_fetchone(
+                    "SELECT igdb_cached_at, igdb_claimed_at FROM games WHERE id = 1"
+                )
+                unmatched = await db.execute_fetchone(
+                    "SELECT igdb_cached_at FROM games WHERE id = 2"
+                )
+
+        # Matched game is requeued (both timestamps cleared) so the IGDB worker
+        # revisits it and backfills series; unmatched game is untouched.
+        self.assertIsNone(matched["igdb_cached_at"])
+        self.assertIsNone(matched["igdb_claimed_at"])
+        self.assertEqual(unmatched["igdb_cached_at"], "2026-01-01T00:00:00+00:00")
+
     async def test_upsert_game_maintains_name_normalized(self) -> None:
         db_module._DB_READY_PATH = None
         with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):

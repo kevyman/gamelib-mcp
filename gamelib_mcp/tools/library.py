@@ -6,7 +6,9 @@ from fastmcp.exceptions import ToolError
 
 from ..data.db import get_db, load_platforms_for_games
 from ..data.title_normalization import normalize_search_text
+from ..utils import _parse_json
 from .common import (
+    SERIES_NAMES_SQL as _SERIES_NAMES_SQL,
     STEAM_APPID_SQL as _STEAM_APPID_SQL,
     clamp_limit as _clamp_limit,
     resolve_platform as _resolve_platform,
@@ -33,6 +35,7 @@ WITH game_rollup AS (
            g.name,
            COALESCE(g.name_normalized, lower(g.name)) AS name_normalized,
            {_STEAM_APPID_SQL} AS steam_appid,
+           {_SERIES_NAMES_SQL} AS series,
            g.tags,
            g.genres,
            g.hltb_main,
@@ -57,13 +60,18 @@ async def search_games(
     limit: int = 20,
     offset: int = 0,
     platform: str | None = None,
+    series: str | None = None,
     response_format: ResponseFormat = "concise",
 ) -> dict:
-    """Find games in the library by name, optionally filtered by platform.
+    """Find games in the library by name, optionally filtered by platform/series.
 
     Matching is punctuation-insensitive and token-based ("sekiro shadow" finds
     "Sekiro: Shadows Die Twice"); when nothing matches, a fuzzy fallback
     catches misspellings and tags those results with match_type="fuzzy".
+
+    series: restrict to games in a series (IGDB collection/franchise) by exact,
+    case-insensitive name. Pass an empty query to browse a whole series, e.g.
+    search_games("", series="The Legend of Zelda").
     """
     limit = _clamp_limit(limit)
     platform = _resolve_platform(platform)
@@ -75,6 +83,14 @@ async def search_games(
             "game_id IN (SELECT game_id FROM game_platforms WHERE platform = ? AND owned = 1)"
         )
         params.append(platform)
+    if series:
+        conditions.append(
+            """EXISTS (
+                SELECT 1 FROM json_each(COALESCE(series, '[]'))
+                WHERE lower(value) = ?
+            )"""
+        )
+        params.append(series.lower())
     where = " AND ".join(conditions)
     async with get_db() as db:
         total = await db.execute_fetchone(
@@ -99,7 +115,7 @@ async def search_games(
             (*match.rank_params, *params, limit, offset),
         )
 
-    if total["c"] == 0 and match.fuzzy_eligible:
+    if total["c"] == 0 and match.fuzzy_eligible and not series:
         fuzzy_results = await _fuzzy_search(query, platform, limit, offset, response_format)
         if fuzzy_results is not None:
             return fuzzy_results
@@ -209,6 +225,7 @@ async def get_library_stats(
     min_opencritic: int | None = None,
     tags: list[str] | None = None,
     genres: list[str] | None = None,
+    series: list[str] | None = None,
 ) -> dict:
     """
     Return filtered/sorted game list plus aggregate stats.
@@ -216,7 +233,8 @@ async def get_library_stats(
     filter: all | unplayed | played | recent | farmed
     sort_by: playtime | name | metacritic | opencritic | hltb
     platform: steam | epic | gog | ps5 | nintendo | switch2 (optional — filter to games owned on that platform)
-    tags / genres: case-insensitive; a game must carry EVERY listed entry.
+    tags / genres / series: case-insensitive; a game must carry EVERY listed entry.
+    series matches IGDB collections/franchises (e.g. "The Legend of Zelda").
 
     Note: min_metacritic, min_opencritic, and max_hltb_hours exclude games with
     no score / no HLTB data (NULL), so even min_metacritic=0 drops unscored games.
@@ -258,7 +276,7 @@ async def get_library_stats(
         conditions.append("opencritic_score >= ?")
         params.append(min_opencritic)
 
-    for column, wanted in (("tags", tags), ("genres", genres)):
+    for column, wanted in (("tags", tags), ("genres", genres), ("series", series)):
         for entry in wanted or []:
             conditions.append(
                 f"""EXISTS (
@@ -348,6 +366,7 @@ def _format_game(row, platforms: list[dict], response_format: ResponseFormat) ->
         "appid": row["steam_appid"],
         "steam_appid": row["steam_appid"],
         "name": row["name"],
+        "series": _parse_json(row["series"]),
         "playtime_hours": round((row["total_playtime_minutes"] or 0) / 60, 1),
         "playtime_2weeks_hours": round((row["total_playtime_2weeks_minutes"] or 0) / 60, 1),
         "hltb_main": row["hltb_main"],
