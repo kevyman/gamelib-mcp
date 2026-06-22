@@ -346,7 +346,7 @@ async def fetch_nintendo_library_vgcs() -> list[dict]:
 # Main sync entry point
 # ---------------------------------------------------------------------------
 
-async def sync_nintendo() -> dict:
+async def _sync_nintendo_ownership() -> dict:
     """
     Sync Nintendo Switch titles into game_platforms (platform="switch2").
 
@@ -483,3 +483,42 @@ async def sync_nintendo() -> dict:
         added, matched, skipped,
     )
     return {"added": added, "matched": matched, "skipped": skipped}
+
+
+async def sync_nintendo() -> dict:
+    """Sync the switch2 platform: VGCS ownership, then Parental Controls playtime.
+
+    The two layers are independent — VGCS (`_sync_nintendo_ownership`) provides
+    ownership of the digital library; Parental Controls (`sync_nintendo_pctl`)
+    provides per-game playtime and surfaces games played on this console under
+    another account. A failure in one must not abort the other. Ownership keys
+    stay at the top level (so per-platform sync metadata still reports switch2
+    ownership status); the playtime result is nested under "playtime".
+    """
+    ownership = await _sync_nintendo_ownership()
+
+    try:
+        from gamelib_mcp.data.nintendo_pctl import sync_nintendo_pctl
+
+        playtime = await sync_nintendo_pctl()
+    except Exception as exc:  # defensive: never let playtime break ownership sync
+        logger.warning("Parental Controls playtime layer failed: %s", exc)
+        playtime = {
+            "sync_status": "failed",
+            "error_summary": str(exc),
+            "error_classification": _classify_nintendo_sync_error(str(exc)),
+        }
+
+    result = {**ownership, "playtime": playtime}
+
+    # If ownership succeeded but the playtime layer *actually failed* (not merely
+    # unconfigured), surface that error at the top level so per-platform sync
+    # metadata records it — otherwise a stale/expired Parental Controls token is
+    # invisible in the control plane (build_platform_sync_metadata only inspects
+    # the top-level sync_status/error_summary).
+    if not ownership.get("error_summary") and playtime.get("sync_status") in ("failed", "stale"):
+        result["sync_status"] = playtime["sync_status"]
+        result["error_summary"] = f"Parental Controls playtime: {playtime.get('error_summary')}"
+        result["error_classification"] = playtime.get("error_classification")
+
+    return result

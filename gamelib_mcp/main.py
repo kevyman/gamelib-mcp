@@ -538,6 +538,27 @@ async def set_nintendo_session(cookies: str) -> NintendoSessionResponse:
     return await _set_session(cookies)
 
 
+@mcp.tool(annotations=MUTATION_TOOL)
+async def set_nintendo_pctl_session(response: str = "") -> dict:
+    """
+    Set up Nintendo Switch Parental Controls playtime sync (no f-token needed).
+
+    The Parental Controls API reports per-game playtime for any console registered
+    to Parental Controls, regardless of which account owns each game — so titles
+    played on your console under another account appear too. This is the playtime
+    source for switch2 (VGCS provides ownership; together they fill in the library).
+
+    Two-step flow (the server can't open a browser):
+    1. Call with no argument → returns a login_url. Open it, sign in to your
+       Nintendo account, right-click "Select this person" and copy the link.
+    2. Call again with that npf://auth link (or a bare session token) → stored.
+
+    Saved to NINTENDO_PCTL_SESSION_FILE (default: data/nintendo_pctl_session.json).
+    """
+    from .tools.admin import set_nintendo_pctl_session as _set_pctl
+    return await _set_pctl(response)
+
+
 # ── Health + admin endpoints ─────────────────────────────────────────────────
 
 register_http_routes(mcp)

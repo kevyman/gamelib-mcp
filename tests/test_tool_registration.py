@@ -89,6 +89,7 @@ EXPECTED_TOOLS = {
         "required": {"name", "platform"},
     },
     "set_nintendo_session": {"params": {"cookies"}, "required": {"cookies"}},
+    "set_nintendo_pctl_session": {"params": {"response"}, "required": set()},
     "update_game": {
         "params": {
             "name",
@@ -130,6 +131,7 @@ EXPECTED_ANNOTATIONS = {
     "set_hardware_preference": {"readOnlyHint": False, "idempotentHint": True},
     "add_game_to_platform": {"readOnlyHint": False, "idempotentHint": True},
     "set_nintendo_session": {"readOnlyHint": False, "idempotentHint": True},
+    "set_nintendo_pctl_session": {"readOnlyHint": False, "idempotentHint": True},
     "update_game": {"readOnlyHint": False, "idempotentHint": True},
 }
 
@@ -151,9 +153,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_20(self):
+    async def test_tool_count_is_21(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 20)
+        self.assertEqual(len(tools), 21)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()
