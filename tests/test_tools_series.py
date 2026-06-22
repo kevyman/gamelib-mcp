@@ -113,6 +113,22 @@ class SeriesBreakdownTests(ToolDBTestCase):
         nintendo = await series.get_series_breakdown(platform="nintendo")
         self.assertEqual(nintendo["results"], [])
 
+    async def test_platform_filter_excludes_non_owned(self):
+        # A stale/manual game_platforms row with owned=0 must not contribute to
+        # platform-scoped counts, playtime, or include_games results.
+        owned = await seed_game("Forza Horizon 5")
+        await add_platform(owned, "steam", playtime_minutes=120, owned=1)
+        not_owned = await seed_game("Forza Motorsport")
+        await add_platform(not_owned, "steam", playtime_minutes=999, owned=0)
+        for gid in (owned, not_owned):
+            await link_series(gid, "franchise", 50, "Forza")
+
+        result = await series.get_series_breakdown(platform="steam", include_games=True)
+        row = result["results"][0]
+        self.assertEqual(row["count"], 1)
+        self.assertEqual(row["total_playtime_hours"], 2.0)
+        self.assertEqual(row["included_games"], ["Forza Horizon 5"])
+
     async def test_include_games(self):
         await self._seed_fallout()
         result = await series.get_series_breakdown(include_games=True)

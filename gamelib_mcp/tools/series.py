@@ -64,7 +64,7 @@ async def get_series_breakdown(
     if resolved_platform:
         where_clauses.append(
             "EXISTS (SELECT 1 FROM game_platforms gp "
-            "WHERE gp.game_id = g.id AND gp.platform = :platform)"
+            "WHERE gp.game_id = g.id AND gp.platform = :platform AND gp.owned = 1)"
         )
         params["platform"] = resolved_platform
     if kind is not None:
@@ -74,7 +74,7 @@ async def get_series_breakdown(
 
     # Per-game playtime (scoped to the platform when set) summed over the series'
     # member games. A correlated subquery avoids join fan-out inflating the sum.
-    platform_pt_clause = " AND gp.platform = :platform" if resolved_platform else ""
+    platform_pt_clause = " AND gp.platform = :platform AND gp.owned = 1" if resolved_platform else ""
     playtime_subq = (
         "(SELECT COALESCE(SUM(gp.playtime_minutes), 0) FROM game_platforms gp "
         f"WHERE gp.game_id = g.id{platform_pt_clause})"
@@ -153,7 +153,7 @@ async def _load_members(
     if platform:
         platform_clause = (
             " AND EXISTS (SELECT 1 FROM game_platforms gp "
-            "WHERE gp.game_id = g.id AND gp.platform = :platform)"
+            "WHERE gp.game_id = g.id AND gp.platform = :platform AND gp.owned = 1)"
         )
         params["platform"] = platform
     rows = await db.execute_fetchall(
