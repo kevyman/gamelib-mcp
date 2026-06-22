@@ -509,4 +509,16 @@ async def sync_nintendo() -> dict:
             "error_classification": _classify_nintendo_sync_error(str(exc)),
         }
 
-    return {**ownership, "playtime": playtime}
+    result = {**ownership, "playtime": playtime}
+
+    # If ownership succeeded but the playtime layer *actually failed* (not merely
+    # unconfigured), surface that error at the top level so per-platform sync
+    # metadata records it — otherwise a stale/expired Parental Controls token is
+    # invisible in the control plane (build_platform_sync_metadata only inspects
+    # the top-level sync_status/error_summary).
+    if not ownership.get("error_summary") and playtime.get("sync_status") in ("failed", "stale"):
+        result["sync_status"] = playtime["sync_status"]
+        result["error_summary"] = f"Parental Controls playtime: {playtime.get('error_summary')}"
+        result["error_classification"] = playtime.get("error_classification")
+
+    return result

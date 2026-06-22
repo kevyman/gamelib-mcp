@@ -13,6 +13,7 @@ from conftest import ToolDBTestCase, add_identifier, add_platform, seed_game
 
 import gamelib_mcp.data.igdb as igdb_module
 from gamelib_mcp.data import db as db_module
+from gamelib_mcp.data import nintendo as nintendo_module
 from gamelib_mcp.data import nintendo_pctl
 
 
@@ -142,6 +143,52 @@ class TestExtractRows(unittest.TestCase):
             {"playedGames": [{"meta": {}, "playingTime": 4}]},
         ]}]
         self.assertEqual(nintendo_pctl._extract_rows("d", summaries), [])
+
+
+class TestSyncWrapperErrorPropagation(unittest.IsolatedAsyncioTestCase):
+    """sync_nintendo must surface real playtime failures so the control plane records them,
+    without letting an unconfigured/working playtime layer flip switch2 to errored."""
+
+    async def _run(self, ownership: dict, playtime: dict) -> dict:
+        async def fake_own():
+            return ownership
+
+        async def fake_pctl():
+            return playtime
+
+        with mock.patch.object(nintendo_module, "_sync_nintendo_ownership", new=fake_own), \
+             mock.patch("gamelib_mcp.data.nintendo_pctl.sync_nintendo_pctl", new=fake_pctl):
+            return await nintendo_module.sync_nintendo()
+
+    async def test_stale_playtime_surfaces_at_top_level_when_ownership_ok(self):
+        result = await self._run(
+            {"added": 0, "matched": 1, "skipped": 0},
+            {"sync_status": "stale", "error_summary": "token expired",
+             "error_classification": "auth_stale", "added": 0, "matched": 0, "titles": 0},
+        )
+        self.assertEqual(result["sync_status"], "stale")
+        self.assertEqual(result["error_classification"], "auth_stale")
+        self.assertIn("Parental Controls", result["error_summary"])
+        self.assertEqual(result["playtime"]["sync_status"], "stale")  # still nested too
+
+    async def test_unconfigured_playtime_does_not_mark_switch2_errored(self):
+        result = await self._run(
+            {"added": 1, "matched": 0, "skipped": 0},
+            {"sync_status": "unconfigured", "error_summary": "not configured",
+             "error_classification": "missing_configuration", "titles": 0},
+        )
+        self.assertNotIn("error_summary", result)
+        self.assertNotIn("sync_status", result)
+
+    async def test_ownership_failure_is_not_overwritten_by_playtime(self):
+        result = await self._run(
+            {"added": 0, "matched": 0, "skipped": 0, "sync_status": "stale",
+             "error_summary": "vgcs stale", "error_classification": "auth_stale"},
+            {"sync_status": "failed", "error_summary": "pctl boom",
+             "error_classification": "unexpected"},
+        )
+        self.assertEqual(result["error_summary"], "vgcs stale")
+        self.assertEqual(result["sync_status"], "stale")
 
 
 async def _async(value):

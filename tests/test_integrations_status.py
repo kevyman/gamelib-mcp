@@ -252,6 +252,62 @@ def test_inspect_nintendo_with_parental_controls_reports_playtime(tmp_path: Path
     assert "Parental Controls" in nintendo.summary
 
 
+def test_inspect_nintendo_playtime_only_reports_parental_controls(tmp_path: Path):
+    # Only the Parental Controls token is configured (no cookies / nxapi). This is
+    # a supported state (sync_nintendo still runs the playtime layer), so the
+    # control plane must report playtime ready instead of "unconfigured".
+    pctl_path = tmp_path / "nintendo_pctl_session.json"
+    pctl_path.write_text("{}", encoding="utf-8")
+
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "NINTENDO_PCTL_SESSION_FILE": str(pctl_path),
+                "NINTENDO_COOKIES_FILE": str(tmp_path / "absent_cookies.json"),
+            },
+            clear=True,
+        ),
+        patch("gamelib_mcp.integrations.inspectors.shutil.which", side_effect=lambda name: None),
+    ):
+        statuses = inspect_all_integrations()
+
+    nintendo = statuses["nintendo"]
+
+    assert nintendo.active_backend == "parental-controls"
+    assert nintendo.overall_status == "partially_configured"
+    caps = {capability.name: capability.status for capability in nintendo.capabilities}
+    assert caps["playtime"] == "ready"
+    assert caps["ownership"] == "unconfigured"
+
+
+def test_inspect_nintendo_playtime_only_reports_stale_after_auth_failure(tmp_path: Path):
+    pctl_path = tmp_path / "nintendo_pctl_session.json"
+    pctl_path.write_text("{}", encoding="utf-8")
+
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "NINTENDO_PCTL_SESSION_FILE": str(pctl_path),
+                "NINTENDO_COOKIES_FILE": str(tmp_path / "absent_cookies.json"),
+            },
+            clear=True,
+        ),
+        patch("gamelib_mcp.integrations.inspectors.shutil.which", side_effect=lambda name: None),
+    ):
+        statuses = inspect_all_integrations(
+            last_sync_by_platform={"nintendo": {"last_error_classification": "auth_stale"}}
+        )
+
+    nintendo = statuses["nintendo"]
+
+    assert nintendo.active_backend == "parental-controls"
+    assert nintendo.overall_status == "stale"
+    caps = {capability.name: capability.status for capability in nintendo.capabilities}
+    assert caps["playtime"] == "stale"
+
+
 def test_inspect_psn_reports_stale_when_configured_auth_requires_reextract():
     with patch.dict("os.environ", {"PSN_NPSSO": "token"}, clear=True):
         statuses = inspect_all_integrations(

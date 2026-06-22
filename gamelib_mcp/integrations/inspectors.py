@@ -419,6 +419,57 @@ def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus
             last_sync=last_sync or {},
         )
 
+    if has_pctl:
+        # Playtime-only setup: Parental Controls token present but no ownership
+        # backend (cookies/nxapi). sync_nintendo still runs the playtime layer, so
+        # this is a real supported state — report it instead of "unconfigured".
+        stale = auth_stale
+        playtime_status = "stale" if stale else "ready"
+        return IntegrationStatus(
+            platform="nintendo",
+            overall_status="stale" if stale else "partially_configured",
+            active_backend="parental-controls",
+            summary=(
+                "Nintendo Switch playtime auth is stale; refresh the Parental Controls token."
+                if stale
+                else "Nintendo Switch playtime via Parental Controls; ownership sync not configured."
+            ),
+            capabilities=[
+                CapabilityStatus(
+                    "ownership",
+                    "unconfigured",
+                    "Set NINTENDO_COOKIES_FILE via set_nintendo_session for digital ownership.",
+                ),
+                CapabilityStatus(
+                    "playtime",
+                    playtime_status,
+                    "Parental Controls auth is stale; re-run set_nintendo_pctl_session."
+                    if stale
+                    else "Parental Controls playtime is configured.",
+                ),
+            ],
+            checks=[
+                CheckStatus(
+                    "nintendo_pctl_session",
+                    "warn" if stale else "pass",
+                    "Parental Controls token present but recent sync failed auth"
+                    if stale
+                    else "Parental Controls session token found",
+                ),
+                CheckStatus("nintendo_cookies_file", "warn", "Cookie fallback file not present"),
+            ],
+            required_inputs=[
+                "NINTENDO_PCTL_SESSION_FILE (playtime) and/or NINTENDO_COOKIES_FILE (ownership)"
+            ],
+            detected_inputs=[str(pctl_path)],
+            remediation_steps=[
+                "Re-run set_nintendo_pctl_session to refresh the Parental Controls token."
+                if stale
+                else "Run set_nintendo_session to add Switch digital ownership.",
+            ],
+            last_sync=last_sync or {},
+        )
+
     if has_session_token or nxapi_bin is not None:
         detected_inputs = _detected_env_inputs(("NINTENDO_SESSION_TOKEN", has_session_token))
         if nxapi_bin is not None:
