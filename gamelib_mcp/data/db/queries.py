@@ -30,6 +30,32 @@ async def get_meta_prefix(prefix: str) -> dict[str, str]:
     return {row["key"]: row["value"] for row in rows if row["value"] is not None}
 
 
+async def get_nintendo_play_totals(period_type: str = "day") -> dict[str, dict]:
+    """Sum Parental Controls playtime per application_id across all devices.
+
+    Returns {application_id: {"minutes": int, "app_name": str | None}}. The total
+    is the running playtime for a Switch title since Parental Controls tracking
+    began; ``period_type='day'`` is the source of truth (finalized daily summaries).
+    """
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            """SELECT application_id,
+                      SUM(playtime_minutes) AS minutes,
+                      MAX(app_name) AS app_name
+               FROM nintendo_play_summary
+               WHERE period_type = ?
+               GROUP BY application_id""",
+            (period_type,),
+        )
+    return {
+        row["application_id"]: {
+            "minutes": int(row["minutes"] or 0),
+            "app_name": row["app_name"],
+        }
+        for row in rows
+    }
+
+
 async def set_meta(key: str, value: str) -> None:
     async with get_db() as db:
         await db.execute(

@@ -51,7 +51,7 @@ STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 @dataclass
@@ -171,6 +171,7 @@ from .schema import (
     _V9_SCHEMA_DDL,
     _V10_SCHEMA_DDL,
     _V11_SCHEMA_DDL,
+    _V12_SCHEMA_DDL,
 )
 
 
@@ -209,6 +210,8 @@ async def _detect_schema_state(db: aiosqlite.Connection) -> str:
         "parent_game_id",
         "is_primary_library_item",
     }.issubset(game_cols) and "game_aliases" in tables and "game_series" in tables:
+        if "nintendo_play_summary" in tables:
+            return "v12"
         return "v11"
     if {"name_normalized", "features", "manual_overrides"}.issubset(game_cols) and {
         "opencritic_url",
@@ -890,6 +893,32 @@ async def _migrate_v10_to_v11(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v11_to_v12(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add nintendo_play_summary (Parental Controls per-app playtime history)."""
+    if progress is not None:
+        progress("Migrating to v12: add nintendo_play_summary.")
+
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS nintendo_play_summary (
+            device_id        TEXT NOT NULL,
+            application_id   TEXT NOT NULL,
+            period_type      TEXT NOT NULL,
+            period_key       TEXT NOT NULL,
+            playtime_minutes INTEGER NOT NULL,
+            app_name         TEXT,
+            updated_at       TEXT,
+            PRIMARY KEY (device_id, application_id, period_type, period_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_nps_app ON nintendo_play_summary(application_id);
+        """
+    )
+
+    await _set_user_version(db, 12)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -926,7 +955,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V11_SCHEMA_DDL)
+    await db.executescript(_V12_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -967,10 +996,10 @@ async def _run_migrations(
     applied_steps: list[str] = []
 
     if detected_state == "fresh":
-        await db.executescript(_V11_SCHEMA_DDL)
+        await db.executescript(_V12_SCHEMA_DDL)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
-        _emit(progress, "Initialized fresh database at schema v11.", applied_steps)
+        _emit(progress, "Initialized fresh database at schema v12.", applied_steps)
         return MigrationResult(
             initial_version=initial_version,
             final_version=SCHEMA_VERSION,
@@ -1033,6 +1062,11 @@ async def _run_migrations(
             await db.commit()
             version = 11
             _emit(progress, "Recorded existing schema as v11.", applied_steps)
+        elif detected_state == "v12":
+            await _set_user_version(db, 12)
+            await db.commit()
+            version = 12
+            _emit(progress, "Recorded existing schema as v12.", applied_steps)
 
     if version == 1:
         _emit(progress, "Applying migration step v1 -> v2.", applied_steps)
@@ -1084,10 +1118,15 @@ async def _run_migrations(
         await _migrate_v10_to_v11(db, progress=None)
         version = 11
 
+    if version == 11:
+        _emit(progress, "Applying migration step v11 -> v12.", applied_steps)
+        await _migrate_v11_to_v12(db, progress=None)
+        version = 12
+
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V11_SCHEMA_DDL)
+    await db.executescript(_V12_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
@@ -1181,6 +1220,7 @@ from .claims import (  # noqa: E402
 from .queries import (  # noqa: E402
     get_meta,
     get_meta_prefix,
+    get_nintendo_play_totals,
     set_meta,
     set_meta_many,
     get_game_by_identifier,
@@ -1209,6 +1249,7 @@ from .upserts import (  # noqa: E402
     remove_manual_overrides,
     upsert_game_series_links,
     upsert_game_alias,
+    upsert_nintendo_play_summary,
 )
 from .fuzzy import (  # noqa: E402
     load_fuzzy_candidates,

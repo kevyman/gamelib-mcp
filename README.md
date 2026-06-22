@@ -6,7 +6,7 @@ Ask your assistant things like *"what should I play next?"*, *"find me a cozy ga
 
 ## Features
 
-- **Cross-platform library** — Steam, Epic (via [Legendary](https://github.com/derrod/legendary)), GOG (via [lgogdownloader](https://github.com/Sude-/lgogdownloader)), Nintendo (via [nxapi](https://github.com/samuelthomas2774/nxapi)), and PSN, unified into one canonical game list with per-platform ownership and playtime.
+- **Cross-platform library** — Steam, Epic (via [Legendary](https://github.com/derrod/legendary)), GOG (via [lgogdownloader](https://github.com/Sude-/lgogdownloader)), Nintendo Switch (digital ownership via your Nintendo Account, playtime via the Switch Parental Controls API), and PSN, unified into one canonical game list with per-platform ownership and playtime.
 - **Rich enrichment** — completion times (HowLongToBeat), Linux/Steam Deck compatibility (ProtonDB), critic scores (OpenCritic, Metacritic), metadata and identity resolution (IGDB), community sentiment (Steam reviews, SteamSpy).
 - **Personalized discovery** — syncs your ratings from Backloggd and Steam (or rate games directly in chat with `rate_game`), computes weighted per-tag affinity scores, and ranks unplayed games by predicted fit. One `discover_games` tool covers vibe-based moods ("cozy", "souls"), taste-profile matches (with "why this rec" tag explanations), critic-score ranking, and backlog value picks.
 - **Backlog intelligence** — backlog stats, platform breakdowns, hardware-preference-aware recommendations (e.g. prefer Switch 2 over Steam Deck over PS5), and farmed-achievement detection.
@@ -29,7 +29,8 @@ Ask your assistant things like *"what should I play next?"*, *"find me a cozy ga
 | `set_hardware_preference` | Priority order for suggested platforms |
 | `add_game_to_platform` | Manually record ownership |
 | `detect_farmed_games` | Flag games with suspicious achievement patterns |
-| `set_nintendo_session` | Provide Nintendo session cookies at runtime |
+| `set_nintendo_session` | Provide Nintendo session cookies for Switch ownership sync |
+| `set_nintendo_pctl_session` | Set up Switch playtime sync via Parental Controls |
 | `get_integration_status` | Per-platform integration health |
 
 ## Quick Start
@@ -74,7 +75,8 @@ All configuration is via environment variables (see [.env.example](.env.example)
 | `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET` | optional | IGDB enrichment ([dev.twitch.tv/console](https://dev.twitch.tv/console)) |
 | `BACKLOGGD_USER` | optional | Backloggd username for rating sync |
 | `PSN_NPSSO` | optional | PSN NPSSO cookie for PlayStation sync |
-| `NINTENDO_SESSION_TOKEN` | optional | From `nxapi nso auth`, for Nintendo sync |
+| `NINTENDO_COOKIES_FILE` | optional | Switch digital ownership (populate via `set_nintendo_session`) |
+| `NINTENDO_PCTL_SESSION_FILE` | optional | Switch playtime via Parental Controls (populate via `set_nintendo_pctl_session`) |
 | `EPIC_LEGENDARY_HOST_PATH` | optional | Legendary config dir for Epic sync |
 | `LGOGDOWNLOADER_HOST_PATH` | optional | lgogdownloader config dir for GOG sync |
 | `HARDWARE_PREFERENCE` | optional | Platform priority for recommendations, e.g. `switch2,steam_deck,ps5` |
@@ -121,7 +123,7 @@ Key design points:
 - **Caching & rate limiting** — provider responses are cached (Steam Store 7 days, HLTB/ProtonDB 30 days) and HLTB pre-warming is throttled with an asyncio semaphore.
 - **Fuzzy matching** — rapidfuzz-based title matching where providers lack stable identifiers.
 
-The database is SQLite (WAL mode, foreign keys on), auto-migrated on startup. Core tables: `games`, `game_platforms`, `game_platform_identifiers`, `steam_platform_data`, `game_platform_enrichment`, `ratings`, `tag_affinity`, and a `meta` key-value store.
+The database is SQLite (WAL mode, foreign keys on), auto-migrated on startup. Core tables: `games`, `game_platforms`, `game_platform_identifiers`, `steam_platform_data`, `game_platform_enrichment`, `nintendo_play_summary` (Parental Controls per-game playtime history), `ratings`, `tag_affinity`, and a `meta` key-value store.
 
 ## Development
 
