@@ -748,7 +748,10 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             seen["platforms"] = platforms
             return {}
 
-        with patch("gamelib_mcp.lifecycle._admin_refresh_library", AsyncMock(side_effect=fake_worker)):
+        with (
+            patch("gamelib_mcp.lifecycle._admin_refresh_library", AsyncMock(side_effect=fake_worker)),
+            patch("gamelib_mcp.lifecycle._drain_background_enrich_reruns", AsyncMock()),
+        ):
             task = await _ensure_startup_refresh(["gog"])
             await task
 
