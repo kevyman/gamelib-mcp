@@ -36,6 +36,7 @@ from .tools.models import (
     RatingsResponse,
     RefreshLibraryResponse,
     SearchGamesBatchResponse,
+    SeriesBreakdownResponse,
     SyncRatingsResponse,
     SyncStatusResponse,
     TasteProfileResponse,
@@ -297,6 +298,44 @@ async def get_backlog_stats() -> BacklogStatsResponse:
     """
     from .tools.stats import get_backlog_stats as _bstats
     return await _bstats()
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL)
+async def get_series_breakdown(
+    counting_mode: Literal["entries", "distinct_games", "base_games_only"] = "distinct_games",
+    kind: Literal["collection", "franchise"] | None = None,
+    min_games: int = 1,
+    platform: str | None = None,
+    include_games: bool = False,
+    limit: int = 25,
+    offset: int = 0,
+) -> SeriesBreakdownResponse:
+    """
+    Rank the library's game series/franchises by how many you own.
+
+    Use this for "what are my biggest series?" — it groups owned games by their
+    IGDB series in one call instead of guessing franchise names and searching.
+    Each result is one series labeled with its kind: "collection" is the tight,
+    specific series (e.g. Assassin's Creed) and "franchise" is the broad umbrella
+    (e.g. Star Wars, Warhammer). Both kinds share one ranking, so a game can count
+    toward both its collection and its franchise; pass kind to restrict to one,
+    and min_games to drop tiny series.
+
+    counting_mode controls what each count means: "entries" counts every owned
+    item including DLC/editions/bundles; "distinct_games" (default) counts only
+    primary library items (excludes nested DLC/editions); "base_games_only"
+    counts base games only (also excludes remasters/remakes/expansions/ports).
+    Every result still reports all three counts (count_entries,
+    count_distinct_games, count_base_games_only) for comparison. platform scopes
+    counts to games owned on steam, epic, gog, nintendo, switch2, or ps5.
+    include_games adds each series' included_games (primary) and collapsed_entries
+    ({name, reason}) for the returned page. Returns results, counting_mode,
+    total_matches, and has_more.
+    """
+    from .tools.series import get_series_breakdown as _series
+    return await _series(
+        counting_mode, kind, min_games, platform, include_games, limit, offset
+    )
 
 
 @mcp.tool(annotations=NETWORK_SYNC_TOOL)

@@ -60,6 +60,18 @@ EXPECTED_TOOLS = {
         "required": set(),
     },
     "get_backlog_stats": {"params": set(), "required": set()},
+    "get_series_breakdown": {
+        "params": {
+            "counting_mode",
+            "kind",
+            "min_games",
+            "platform",
+            "include_games",
+            "limit",
+            "offset",
+        },
+        "required": set(),
+    },
     "refresh_library": {"params": {"platforms"}, "required": set()},
     "get_sync_status": {"params": set(), "required": set()},
     "get_integration_status": {
@@ -107,6 +119,7 @@ EXPECTED_ANNOTATIONS = {
     "get_taste_profile": {"readOnlyHint": True, "idempotentHint": True},
     "get_ratings": {"readOnlyHint": True, "idempotentHint": True},
     "get_backlog_stats": {"readOnlyHint": True, "idempotentHint": True},
+    "get_series_breakdown": {"readOnlyHint": True, "idempotentHint": True},
     "get_integration_status": {"readOnlyHint": True, "idempotentHint": True},
     "get_platform_breakdown": {"readOnlyHint": True, "idempotentHint": True},
     "detect_farmed_games": {"destructiveHint": False, "idempotentHint": True},
@@ -125,6 +138,7 @@ PAGINATED_OUTPUTS = {
     "get_library_stats",
     "discover_games",
     "get_ratings",
+    "get_series_breakdown",
 }
 
 
@@ -137,9 +151,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_19(self):
+    async def test_tool_count_is_20(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 19)
+        self.assertEqual(len(tools), 20)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()
