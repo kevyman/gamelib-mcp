@@ -90,7 +90,10 @@ class SyncNintendoTests(unittest.TestCase):
             patch("gamelib_mcp.data.nintendo.upsert_game_platform_identifier", mock_upsert_identifier),
             patch("gamelib_mcp.data.nintendo.upsert_game_platform_enrichment", mock_upsert_enrichment),
         ):
-            result = asyncio.run(nintendo.sync_nintendo())
+            # Characterize the VGCS ownership layer directly; the Parental Controls
+            # playtime layer (wired into the public sync_nintendo wrapper) is
+            # covered separately in test_nintendo_pctl.
+            result = asyncio.run(nintendo._sync_nintendo_ownership())
 
         return result, mock_resolve, mock_upsert_platform, mock_upsert_identifier, mock_upsert_enrichment
 

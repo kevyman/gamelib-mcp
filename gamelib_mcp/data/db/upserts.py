@@ -599,3 +599,42 @@ async def upsert_game_series_links(game_id: int, series_entries) -> None:
                 (game_id, row["id"]),
             )
         await db.commit()
+
+
+async def upsert_nintendo_play_summary(rows: list[dict]) -> int:
+    """Idempotently upsert Parental Controls play-summary rows.
+
+    Each row dict carries: device_id, application_id, period_type, period_key,
+    playtime_minutes, and (optional) app_name. The natural primary key
+    (device_id, application_id, period_type, period_key) makes re-syncing a day
+    a no-op overwrite rather than a double-count. Returns the row count written.
+    """
+    if not rows:
+        return 0
+    now = datetime.now(timezone.utc).isoformat()
+    async with get_db() as db:
+        await db.executemany(
+            """INSERT INTO nintendo_play_summary
+               (device_id, application_id, period_type, period_key,
+                playtime_minutes, app_name, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(device_id, application_id, period_type, period_key)
+               DO UPDATE SET
+                   playtime_minutes = excluded.playtime_minutes,
+                   app_name = COALESCE(excluded.app_name, nintendo_play_summary.app_name),
+                   updated_at = excluded.updated_at""",
+            [
+                (
+                    str(r["device_id"]),
+                    str(r["application_id"]),
+                    r["period_type"],
+                    r["period_key"],
+                    int(r["playtime_minutes"]),
+                    r.get("app_name"),
+                    now,
+                )
+                for r in rows
+            ],
+        )
+        await db.commit()
+    return len(rows)

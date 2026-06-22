@@ -326,6 +326,10 @@ def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus
     has_session_token = bool(os.getenv("NINTENDO_SESSION_TOKEN"))
     cookies_path = Path(os.getenv("NINTENDO_COOKIES_FILE", "data/nintendo_cookies.json")).expanduser()
     has_cookies = cookies_path.is_file()
+    pctl_path = Path(
+        os.getenv("NINTENDO_PCTL_SESSION_FILE", "data/nintendo_pctl_session.json")
+    ).expanduser()
+    has_pctl = pctl_path.is_file()
     auth_stale = (last_sync or {}).get("last_error_classification") == "auth_stale"
 
     if has_session_token and nxapi_bin is not None and auth_stale:
@@ -379,22 +383,89 @@ def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus
         )
 
     if has_cookies:
+        capabilities = [CapabilityStatus("ownership", "ready", "VGCS cookies are available.")]
+        checks = [
+            CheckStatus("nintendo_cookies_file", "pass", "Cookie fallback file found"),
+            CheckStatus("nxapi_binary", "warn" if nxapi_bin is None else "pass", "nxapi not found in PATH" if nxapi_bin is None else "nxapi found in PATH"),
+        ]
+        detected_inputs = [str(cookies_path)]
+        summary = "Nintendo cookie fallback is available for ownership-only sync."
+        remediation_steps = [
+            "Set `NINTENDO_SESSION_TOKEN` and install `nxapi` if you need playtime data.",
+        ]
+        # Parental Controls supplies playtime (and play-but-don't-own titles) with
+        # no nxapi/f-token. Surface it when configured; the no-token path is
+        # intentionally left byte-identical to before.
+        if has_pctl:
+            capabilities.append(
+                CapabilityStatus("playtime", "ready", "Parental Controls playtime is configured.")
+            )
+            checks.append(
+                CheckStatus("nintendo_pctl_session", "pass", "Parental Controls session token found")
+            )
+            detected_inputs.append(str(pctl_path))
+            summary = "Nintendo ownership via VGCS cookies; playtime via Parental Controls."
+            remediation_steps = []
         return IntegrationStatus(
             platform="nintendo",
             overall_status="ready",
             active_backend="vgcs-cookie",
-            summary="Nintendo cookie fallback is available for ownership-only sync.",
+            summary=summary,
+            capabilities=capabilities,
+            checks=checks,
+            required_inputs=["NINTENDO_COOKIES_FILE or NINTENDO_SESSION_TOKEN"],
+            detected_inputs=detected_inputs,
+            remediation_steps=remediation_steps,
+            last_sync=last_sync or {},
+        )
+
+    if has_pctl:
+        # Playtime-only setup: Parental Controls token present but no ownership
+        # backend (cookies/nxapi). sync_nintendo still runs the playtime layer, so
+        # this is a real supported state — report it instead of "unconfigured".
+        stale = auth_stale
+        playtime_status = "stale" if stale else "ready"
+        return IntegrationStatus(
+            platform="nintendo",
+            overall_status="stale" if stale else "partially_configured",
+            active_backend="parental-controls",
+            summary=(
+                "Nintendo Switch playtime auth is stale; refresh the Parental Controls token."
+                if stale
+                else "Nintendo Switch playtime via Parental Controls; ownership sync not configured."
+            ),
             capabilities=[
-                CapabilityStatus("ownership", "ready", "VGCS cookies are available."),
+                CapabilityStatus(
+                    "ownership",
+                    "unconfigured",
+                    "Set NINTENDO_COOKIES_FILE via set_nintendo_session for digital ownership.",
+                ),
+                CapabilityStatus(
+                    "playtime",
+                    playtime_status,
+                    "Parental Controls auth is stale; re-run set_nintendo_pctl_session."
+                    if stale
+                    else "Parental Controls playtime is configured.",
+                ),
             ],
             checks=[
-                CheckStatus("nintendo_cookies_file", "pass", "Cookie fallback file found"),
-                CheckStatus("nxapi_binary", "warn" if nxapi_bin is None else "pass", "nxapi not found in PATH" if nxapi_bin is None else "nxapi found in PATH"),
+                CheckStatus(
+                    "nintendo_pctl_session",
+                    "warn" if stale else "pass",
+                    "Parental Controls token present but recent sync failed auth"
+                    if stale
+                    else "Parental Controls session token found",
+                ),
+                CheckStatus("nintendo_cookies_file", "warn", "Cookie fallback file not present"),
             ],
-            required_inputs=["NINTENDO_COOKIES_FILE or NINTENDO_SESSION_TOKEN"],
-            detected_inputs=[str(cookies_path)],
+            required_inputs=[
+                "NINTENDO_PCTL_SESSION_FILE (playtime) and/or NINTENDO_COOKIES_FILE (ownership)"
+            ],
+            detected_inputs=[str(pctl_path)],
             remediation_steps=[
-                "Set `NINTENDO_SESSION_TOKEN` and install `nxapi` if you need playtime data.",
+                "Re-run set_nintendo_pctl_session to refresh the Parental Controls token."
+                if stale
+                else "Run set_nintendo_session to add Switch digital ownership.",
             ],
             last_sync=last_sync or {},
         )

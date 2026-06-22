@@ -750,3 +750,25 @@ _V11_SCHEMA_DDL = _V10_SCHEMA_DDL.replace(
     CREATE UNIQUE INDEX IF NOT EXISTS idx_game_aliases_unique
         ON game_aliases(game_id, alias_normalized, alias_type, COALESCE(source, ''), COALESCE(source_key, ''));
 """
+
+
+# v12 adds nintendo_play_summary: per-(device, application, period) playtime from
+# the Nintendo Switch Parental Controls API. This is the source of the switch2
+# *playtime* total — VGCS ownership sync provides ownership, Parental Controls
+# provides minutes. period_type 'day' (finalized daily summaries) is the v1
+# source of truth; 'month' is reserved for later backfill without a new
+# migration. Additive table only — no existing-data migration needed.
+_V12_SCHEMA_DDL = _V11_SCHEMA_DDL + """
+    CREATE TABLE IF NOT EXISTS nintendo_play_summary (
+        device_id        TEXT NOT NULL,
+        application_id   TEXT NOT NULL,
+        period_type      TEXT NOT NULL,
+        period_key       TEXT NOT NULL,
+        playtime_minutes INTEGER NOT NULL,
+        app_name         TEXT,
+        updated_at       TEXT,
+        PRIMARY KEY (device_id, application_id, period_type, period_key)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_nps_app ON nintendo_play_summary(application_id);
+"""

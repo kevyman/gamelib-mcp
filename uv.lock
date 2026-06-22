@@ -760,6 +760,7 @@ dependencies = [
     { name = "lxml" },
     { name = "psnawp" },
     { name = "pydantic" },
+    { name = "pynintendoparental" },
     { name = "python-dotenv" },
     { name = "rapidfuzz" },
 ]
@@ -779,6 +780,7 @@ requires-dist = [
     { name = "lxml", specifier = ">=5.0" },
     { name = "psnawp", specifier = ">=2.1,<4.0" },
     { name = "pydantic", specifier = ">=2.0" },
+    { name = "pynintendoparental", specifier = ">=2.4" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "rapidfuzz", specifier = ">=3.0" },
 ]
@@ -1656,6 +1658,30 @@ wheels = [
 [package.optional-dependencies]
 crypto = [
     { name = "cryptography" },
+]
+
+[[package]]
+name = "pynintendoauth"
+version = "1.0.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9b/f8/3974826cc6fe703f8f730325f454e7a7cdc855b1d0013757acb8f1516cf9/pynintendoauth-1.0.2.tar.gz", hash = "sha256:c14ad2d74332d243aca1315e3df117d53e75b3f5c3d98e55c7126aefc0f4dc7a", size = 9349, upload-time = "2025-12-15T17:10:14.477Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/16/b3/7f76e8e771eac604ae134b613d8595f4302df36d7f8c675d76a1d44e30a6/pynintendoauth-1.0.2-py3-none-any.whl", hash = "sha256:41dc90bbcb8fc68e0bca6809c14a7e53aa10c60c4634c4de382f242a27bbb770", size = 10098, upload-time = "2025-12-15T17:10:13.161Z" },
+]
+
+[[package]]
+name = "pynintendoparental"
+version = "2.4.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pynintendoauth" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/13/9d/cbadc30ba4c9d11938cc0cc5f2ea269bd228459c5735775aea7da14ed26d/pynintendoparental-2.4.0.1.tar.gz", hash = "sha256:39d71ba1377b6e0e97e86b9c2c3bf0d34a5a1e156475cb95138fc5d8ba6ff0e4", size = 33582, upload-time = "2026-06-14T09:32:13.038Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/99/46/db2b56576a21f2fe0fc59e08ee2c4cf5817ebdbd9b403938d9359e6d3f9c/pynintendoparental-2.4.0.1-py3-none-any.whl", hash = "sha256:0fb24c32ff5e710c1b278b896cc65e352441e099d9ad97b6626c607feba372b4", size = 24739, upload-time = "2026-06-14T09:32:11.953Z" },
 ]
 
 [[package]]
