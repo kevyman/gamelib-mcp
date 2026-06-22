@@ -53,6 +53,26 @@ class SearchGamesBatchResponse(RootModel[dict[str, list[GameSummary]]]):
     pass
 
 
+class SeriesBreakdownEntry(FlexibleModel):
+    series_id: int
+    series_name: str
+    kind: str
+    count: int
+    count_entries: int
+    count_distinct_games: int
+    count_base_games_only: int
+    total_playtime_hours: float | None = None
+    included_games: list[str] | None = None
+    collapsed_entries: list[Any] | None = None
+
+
+class SeriesBreakdownResponse(FlexibleModel):
+    results: list[SeriesBreakdownEntry]
+    counting_mode: str
+    total_matches: int
+    has_more: bool
+
+
 class LibraryStatsResponse(PaginatedGamesResponse):
     total_games: int
     played: int
