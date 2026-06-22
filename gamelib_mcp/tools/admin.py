@@ -257,6 +257,78 @@ async def set_nintendo_session(cookies: str) -> dict:
     return {"cookie_count": len(normalized), "path": path}
 
 
+# Holds the PKCE code_verifier between the two set_nintendo_pctl_session calls.
+# The verifier that generated the login URL must be the one used to exchange the
+# pasted code, so it has to survive across the (interactive) gap.
+_PENDING_PCTL_LOGIN: dict[str, str] = {}
+
+
+async def set_nintendo_pctl_session(response: str = "") -> dict:
+    """
+    Set up Nintendo Switch Parental Controls playtime sync (no `f` token needed).
+
+    The Parental Controls API reports per-game playtime for any console registered
+    to Parental Controls, regardless of which account owns the game — so games
+    played on your console under another account show up too. This is the playtime
+    source for switch2 (VGCS provides ownership).
+
+    Two-step flow (the server can't open a browser):
+    1. Call with no argument → returns a `login_url`. Open it, sign in to your
+       Nintendo account, right-click "Select this person" and copy the link.
+    2. Call again with that `npf…://auth` link (or a bare session token) → the
+       session token is stored for playtime sync.
+
+    Saved to NINTENDO_PCTL_SESSION_FILE (default: data/nintendo_pctl_session.json).
+    """
+    import aiohttp
+    from pynintendoparental.authenticator import Authenticator
+
+    from ..data.nintendo_pctl import _token_file_path
+
+    text = (response or "").strip()
+    async with aiohttp.ClientSession() as session:
+        if not text:
+            auth = Authenticator(client_session=session)
+            _PENDING_PCTL_LOGIN["verifier"] = auth._auth_code_verifier
+            return {
+                "status": "awaiting_login",
+                "login_url": auth.login_url,
+                "instructions": (
+                    "Open login_url, sign in, right-click 'Select this person' and copy "
+                    "the link, then call set_nintendo_pctl_session again with that "
+                    "npf://auth link."
+                ),
+            }
+
+        if "session_token_code" in text or text.startswith("npf"):
+            auth = Authenticator(client_session=session)
+            verifier = _PENDING_PCTL_LOGIN.get("verifier")
+            if verifier:
+                auth._auth_code_verifier = verifier
+            try:
+                await auth.async_complete_login(response_token=text)
+            except Exception as exc:
+                raise ToolError(
+                    f"Parental Controls login failed: {exc}. Re-run with no argument "
+                    "to get a fresh login URL, then paste the link promptly."
+                ) from exc
+            token = auth._session_token
+            _PENDING_PCTL_LOGIN.pop("verifier", None)
+        else:
+            token = text  # treat as a bare session token
+
+    if not token:
+        raise ToolError("No session token obtained")
+
+    path = _token_file_path()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"session_token": token}, f, indent=2)
+
+    logger.info("Nintendo Parental Controls session token saved to %s", path)
+    return {"status": "stored", "path": path}
+
+
 async def detect_farmed_games(
     dry_run: bool = True,
     threshold_hours: float = 8.0,

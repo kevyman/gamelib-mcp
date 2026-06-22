@@ -77,7 +77,7 @@ Dependency direction is a clean DAG: `main → lifecycle`, `main → http_admin`
 - `discover.py`: `discover_games` (vibe filters + taste/critic/value ranking with matched-tag explanations)
 - `ratings.py`: `sync_ratings`, `rate_game`, `get_ratings`, `get_taste_profile`
 - `stats.py`: `get_backlog_stats`
-- `admin.py`: `refresh_library` (full or per-platform sync), `detect_farmed_games`, `set_nintendo_session`
+- `admin.py`: `refresh_library` (full or per-platform sync), `detect_farmed_games`, `set_nintendo_session` (VGCS ownership cookies), `set_nintendo_pctl_session` (Parental Controls playtime token)
 - `platforms.py`: `get_platform_breakdown`, `set_hardware_preference`, `add_game_to_platform`, `update_game` (manual per-game property edits incl. `is_farmed`; edited columns are recorded in `games.manual_overrides` so sync/enrichment won't clobber them)
 - `integrations.py`: `get_integration_status` (read-only filter over the inspector payload)
 - `common.py`: shared helpers — the steam-appid correlated subquery, the series-names correlated subquery (`SERIES_NAMES_SQL`), and the platform-alias resolver (imported by the modules above). The three `_GAME_ROLLUP_CTE` variants deliberately stay in their own modules; they differ.
@@ -93,6 +93,7 @@ Dependency direction is a clean DAG: `main → lifecycle`, `main → http_admin`
 - `protondb.py`: ProtonDB Linux compatibility tiers — 30-day cache
 - `backloggd.py`: Scrapes Backloggd user reviews (fuzzy name matching via rapidfuzz)
 - Other providers/syncs: `igdb.py`, `opencritic.py`, `metacritic.py`, `steamspy.py`, and the platform syncs `epic.py`, `gog.py`, `nintendo.py`, `psn.py` (plus `title_normalization.py`).
+- Nintendo switch2 uses two complementary sources: `nintendo.py` provides **ownership** (VGCS digital library via session cookies; no playtime), and `nintendo_pctl.py` provides **playtime** via the Nintendo Switch Parental Controls API (`pynintendoparental`, plain OAuth — no Coral `f`-token). Parental Controls reports per-game minutes for any console registered to it, *ownership-agnostic*, so titles played on the console under another account are auto-added as owned switch2 games. `sync_nintendo` runs ownership then layers playtime on top (the playtime result is nested under `"playtime"`); per-game daily summaries — including the in-progress current day, whose counters refine through the day — accumulate idempotently in `nintendo_play_summary` (v12, natural PK), and the switch2 playtime total is their `SUM`. Each day's `players[].playedGames[]` entry nests game identity under `meta` (`applicationId`/`title`) with `playingTime` at the entry top level (see `_extract_rows`). Forward-only — Parental Controls has no retroactive history. Auth token comes from `set_nintendo_pctl_session` (`NINTENDO_PCTL_SESSION_FILE`).
 
 **`gamelib_mcp/integrations/`** — read-only integration status inspectors (`status.py` dataclasses, `inspectors.py` per-platform probes) surfaced by the `get_integration_status` tool and the `/admin/integrations*` routes.
 
@@ -104,6 +105,7 @@ Core tables, auto-migrated on startup in `db.init_db()`:
 - `game_platform_identifiers`: provider-specific IDs such as `steam_appid` and `gog_product_id`
 - `steam_platform_data`: Steam-only provider metadata
 - `game_platform_enrichment`: cross-platform review/release enrichment
+- `nintendo_play_summary`: per-(device, application, day) Switch playtime from the Parental Controls API (v12); the switch2 `playtime_minutes` total is the `SUM` of these rows (see `nintendo_pctl.py`)
 - `game_series` / `game_series_membership`: normalized series tracking (IGDB collections + franchises) with a many-to-many membership junction; populated during IGDB backfill and surfaced/filterable via the `series` field on search/detail/stats tools
 - `ratings`: normalized 1–10 scores from Backloggd (weight 1.0), manual `rate_game` ratings (weight 1.0), and Steam (weight 0.5)
 - `tag_affinity`: precomputed per-tag preference scores (drives recommendations)

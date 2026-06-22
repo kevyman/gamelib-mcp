@@ -263,33 +263,20 @@ If the control plane reports PSN auth as stale, re-extract `PSN_NPSSO`, update `
 
 ### Nintendo in Docker
 
-Nintendo sync uses the `nxapi` CLI to fetch Switch play history. Auth is done once on the host machine and the session token is passed via `.env`.
+Switch sync needs **no extra binaries** in the container — both data sources are HTTP/OAuth and run on Python dependencies already in the image. Two complementary sources combine into the `switch2` platform:
 
-**One-time setup:**
+- **Ownership** (your digital library): the Nintendo Account VGCS cookie API. Populate via the `set_nintendo_session` MCP tool (paste a Cookie-Editor JSON export from `accounts.nintendo.com/portal/vgcs/`). Stored at `NINTENDO_COOKIES_FILE` (default `data/nintendo_cookies.json`).
+- **Playtime** (per-game minutes — including games played on the console but owned on another account): the Nintendo Switch **Parental Controls** API via `pynintendoparental` — plain OAuth, no Coral `f`-token. Requires the console to be registered to Parental Controls. Set up via the `set_nintendo_pctl_session` MCP tool:
+  1. Call it with no argument → it returns a `login_url`.
+  2. Open the URL, sign in, right-click "Select this person" → Copy Link.
+  3. Call it again with that `npf://auth` link. The session token is saved to `NINTENDO_PCTL_SESSION_FILE` (default `data/nintendo_pctl_session.json`).
 
-```bash
-# Install nxapi on the host machine (requires Node.js)
-npm install -g nxapi
+Then run `refresh_library(["switch2"])` (or a full refresh) — ownership and playtime sync together.
 
-# Authenticate with your Nintendo account
-nxapi nso auth
-# Follow the prompts; copy the session token printed at the end
-```
-
-**Server `.env`** (add):
-```
-NINTENDO_SESSION_TOKEN=<token from nxapi nso auth>
-```
-
-`nxapi` must be installed **inside the container** if you want to use it in a Dockerized deployment — subprocesses spawned by the app run inside the container, not on the host. Add `npm install -g nxapi` to the Dockerfile for this.
-
-Alternatively, skip nxapi entirely and use the VGCS cookie fallback (see below) — this is the recommended path for Docker since it requires no extra tooling.
-
-If the session token expires, re-run `nxapi nso auth` and update `.env`, then restart the container.
-
-If the control plane reports Nintendo as degraded or stale, verify that the container can see `NINTENDO_SESSION_TOKEN`, `NXAPI_BIN`, or the cookie fallback file before retrying sync.
-
-**Note:** Only titles that have been launched appear in Nintendo's play history. Unplayed digital purchases and physical cartridges that were never inserted will not sync. This is a Nintendo platform limitation.
+**Notes:**
+- Playtime is forward-only: Parental Controls tracks from console registration onward (no retroactive history). Today's in-progress play is captured and refines through the day.
+- The legacy `nxapi`/Coral `play-activity` path is **no longer used** — the public `f`-token providers it depended on are defunct. `NINTENDO_SESSION_TOKEN`/`NXAPI_BIN` remain wired but dormant.
+- If the control plane reports Nintendo as stale, re-run `set_nintendo_session` (ownership) and/or `set_nintendo_pctl_session` (playtime), then retry sync.
 
 ---
 
