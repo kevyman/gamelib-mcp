@@ -754,15 +754,16 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                 }
 
         self.assertEqual(version, db_module.SCHEMA_VERSION)
-        self.assertEqual(json.loads(games[1]["tags"]), ["Roguelike", "Action"])
+        # v12->v13 canonicalizes (lowercases) surviving tags in place.
+        self.assertEqual(json.loads(games[1]["tags"]), ["roguelike", "action"])
         self.assertEqual(json.loads(games[1]["features"]), ["Steam Trading Cards"])
         # Game 2 emptied out -> caches cleared so enrichment re-fetches tags.
         self.assertEqual(json.loads(games[2]["tags"]), [])
         self.assertIsNone(spd[2]["store_cached_at"])
         self.assertIsNone(spd[2]["steamspy_cached_at"])
-        # Games with surviving tags keep their caches.
+        # store_cached_at survives (v13 only resets SteamSpy/IGDB caches, not store).
         self.assertEqual(spd[1]["store_cached_at"], "2026-01-01")
-        self.assertEqual(json.loads(games[3]["tags"]), ["Platformer"])
+        self.assertEqual(json.loads(games[3]["tags"]), ["platformer"])
         self.assertIsNone(games[3]["features"])
         # Feature flags purged from tag_affinity; real tags survive.
         self.assertEqual(affinity_tags, {"roguelike"})
@@ -786,6 +787,76 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(version, db_module.SCHEMA_VERSION)
         self.assertIn("manual_overrides", cols)
         self.assertEqual(overrides, set())
+
+    async def test_v12_to_v13_canonicalizes_tags_and_reclaims_steam(self) -> None:
+        import json
+
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V12_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 12")
+        # 1: steam game, mixed-case + synonym tags -> canonicalized
+        # 2: non-steam game, IGDB cache must be LEFT ALONE
+        # 3: steam game with manual tags override -> tags preserved verbatim
+        conn.execute(
+            "INSERT INTO games (id, name, tags, igdb_cached_at, igdb_claimed_at, manual_overrides) VALUES "
+            "(1, 'Sekiro', ?, '2026-01-01', NULL, NULL), "
+            "(2, 'Metroid Dread', ?, '2026-01-01', NULL, NULL), "
+            "(3, 'Pinned', ?, '2026-01-01', NULL, ?)",
+            (
+                json.dumps(["Souls-like", "Difficult", "souls-like"]),
+                json.dumps(["metroidvania"]),
+                json.dumps(["MyTag"]),
+                json.dumps(["tags"]),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO game_platforms (id, game_id, platform) VALUES "
+            "(1, 1, 'steam'), (2, 2, 'switch2'), (3, 3, 'steam')"
+        )
+        conn.execute(
+            "INSERT INTO game_platform_identifiers (game_platform_id, identifier_type, identifier_value) VALUES "
+            "(1, ?, '814380'), (3, ?, '900000')",
+            (db_module.STEAM_APP_ID, db_module.STEAM_APP_ID),
+        )
+        conn.execute(
+            "INSERT INTO steam_platform_data (game_platform_id, steamspy_cached_at, store_cached_at) VALUES "
+            "(1, '2026-01-01', '2026-01-01'), (3, '2026-01-01', '2026-01-01')"
+        )
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+            async with db_module.get_db() as db:
+                version = await db_module._get_user_version(db)
+                games = {
+                    row["id"]: row
+                    for row in await db.execute_fetchall(
+                        "SELECT id, tags, igdb_cached_at FROM games"
+                    )
+                }
+                spd = {
+                    row["game_platform_id"]: row
+                    for row in await db.execute_fetchall(
+                        "SELECT game_platform_id, steamspy_cached_at, store_cached_at "
+                        "FROM steam_platform_data"
+                    )
+                }
+
+        self.assertEqual(version, db_module.SCHEMA_VERSION)
+        # Tags canonicalized + deduped in place.
+        self.assertEqual(json.loads(games[1]["tags"]), ["souls-like", "difficult"])
+        self.assertEqual(json.loads(games[2]["tags"]), ["metroidvania"])
+        # Manual override on tags is preserved verbatim.
+        self.assertEqual(json.loads(games[3]["tags"]), ["MyTag"])
+        # SteamSpy cache cleared for steam rows; store cache untouched.
+        self.assertIsNone(spd[1]["steamspy_cached_at"])
+        self.assertEqual(spd[1]["store_cached_at"], "2026-01-01")
+        # IGDB cache cleared for Steam-linked games only.
+        self.assertIsNone(games[1]["igdb_cached_at"])
+        self.assertIsNone(games[3]["igdb_cached_at"])
+        self.assertEqual(games[2]["igdb_cached_at"], "2026-01-01")
 
     async def test_v9_to_v10_adds_series_tables(self) -> None:
         conn = sqlite3.connect(self.db_path)

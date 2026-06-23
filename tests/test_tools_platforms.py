@@ -222,7 +222,8 @@ class UpdateGameProtectionTests(ToolDBTestCase):
 
         async with db_module.get_db() as db:
             row = await db.execute_fetchone("SELECT tags FROM games WHERE id = ?", (gid,))
-        self.assertIn("Action", json.loads(row["tags"]))
+        # SteamSpy tags are canonicalized (lowercased) on write.
+        self.assertIn("action", json.loads(row["tags"]))
 
     async def test_bulk_steam_name_sync_respects_manual_name(self):
         gid = await make_steam_game("Original", 700)
@@ -275,4 +276,4 @@ class UpdateGameProtectionTests(ToolDBTestCase):
             await steamspy.enrich_steamspy(800)
         async with db_module.get_db() as db:
             row = await db.execute_fetchone("SELECT tags FROM games WHERE id = ?", (gid,))
-        self.assertIn("Action", json.loads(row["tags"]))  # sync took over again
+        self.assertIn("action", json.loads(row["tags"]))  # sync took over again

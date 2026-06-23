@@ -39,7 +39,9 @@ class ExtractTagsTests(unittest.TestCase):
             ],
         }
         tags_json, features_json = _extract_tags(data)
-        self.assertEqual(json.loads(tags_json), ["Action", "Single-player"])
+        # Real tags are canonicalized (lowercased) so Steam/IGDB/SteamSpy share one
+        # vocabulary; feature flags keep their original surface form.
+        self.assertEqual(json.loads(tags_json), ["action", "single-player"])
         self.assertEqual(
             json.loads(features_json),
             ["Steam Achievements", "Full controller support"],
@@ -52,7 +54,8 @@ class MergeTagsTests(unittest.TestCase):
             ["Souls-like", "Difficult"],
             ["Action", "Steam Trading Cards", "souls-like"],
         )
-        self.assertEqual(merged, ["Souls-like", "Difficult", "Action"])
+        # Canonicalized + deduped: "Souls-like"/"souls-like" collapse to one tag.
+        self.assertEqual(merged, ["souls-like", "difficult", "action"])
 
 
 class AffinityHygieneTests(ToolDBTestCase):

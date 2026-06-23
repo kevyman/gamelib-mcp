@@ -51,7 +51,7 @@ STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 @dataclass
@@ -919,6 +919,70 @@ async def _migrate_v11_to_v12(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v12_to_v13(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Canonicalize existing tags and re-claim Steam tag enrichment.
+
+    Data-only. Rewrites games.tags in place to the shared canonical vocabulary
+    (synonym map + feature-flag filter), then nulls the SteamSpy cache for all Steam
+    rows and the IGDB cache for Steam-linked games so the background worker refills
+    the richer community/keyword tags the old genre-clobbering path suppressed.
+    """
+    if progress is not None:
+        progress("Migrating to v13: canonicalize tags and re-claim Steam enrichment.")
+
+    from ..tag_synonyms import canonical_tag
+    from ..tags import is_feature_flag
+
+    rows = await db.execute_fetchall(
+        "SELECT id, tags, manual_overrides FROM games WHERE tags IS NOT NULL"
+    )
+    for row in rows:
+        try:
+            overrides = json.loads(row["manual_overrides"]) if row["manual_overrides"] else []
+        except (ValueError, TypeError):
+            overrides = []
+        if "tags" in overrides:
+            continue  # respect a hand-edited tag list
+        try:
+            tags = json.loads(row["tags"])
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(tags, list):
+            continue
+        seen: set[str] = set()
+        canon: list[str] = []
+        for t in tags:
+            if not isinstance(t, str) or is_feature_flag(t):
+                continue
+            c = canonical_tag(t)
+            if c and c not in seen:
+                seen.add(c)
+                canon.append(c)
+        new_value = json.dumps(canon)
+        if new_value != row["tags"]:
+            await db.execute("UPDATE games SET tags = ? WHERE id = ?", (new_value, row["id"]))
+
+    # Re-run SteamSpy for all Steam rows (community tags the old store path clobbered).
+    await db.execute(
+        "UPDATE steam_platform_data SET steamspy_cached_at = NULL, steamspy_claimed_at = NULL"
+    )
+    # Re-apply IGDB (union) for Steam-linked games only, to bound re-fetch cost.
+    await db.execute(
+        """
+        UPDATE games SET igdb_cached_at = NULL, igdb_claimed_at = NULL
+        WHERE id IN (
+            SELECT gp.game_id FROM game_platforms gp
+            JOIN game_platform_identifiers gpi
+              ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
+        )
+        """,
+        (STEAM_APP_ID,),
+    )
+
+    await _set_user_version(db, 13)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1122,6 +1186,11 @@ async def _run_migrations(
         _emit(progress, "Applying migration step v11 -> v12.", applied_steps)
         await _migrate_v11_to_v12(db, progress=None)
         version = 12
+
+    if version == 12:
+        _emit(progress, "Applying migration step v12 -> v13.", applied_steps)
+        await _migrate_v12_to_v13(db, progress=None)
+        version = 13
 
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
