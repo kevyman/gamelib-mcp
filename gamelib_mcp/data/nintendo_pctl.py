@@ -208,6 +208,8 @@ async def sync_nintendo_pctl() -> dict:
     added = matched = 0
     for application_id, info in totals.items():
         total_minutes = info["minutes"]
+        minutes_2weeks = info["minutes_2weeks"]
+        last_played = info["last_played"]
 
         existing = await get_game_by_identifier(NINTENDO_TITLE_ID, application_id)
         if existing is not None:
@@ -215,6 +217,8 @@ async def sync_nintendo_pctl() -> dict:
                 game_id=existing["id"],
                 platform=PLATFORM,
                 playtime_minutes=total_minutes,
+                playtime_2weeks_minutes=minutes_2weeks,
+                last_played=last_played,
                 owned=1,
             )
             matched += 1
@@ -231,6 +235,8 @@ async def sync_nintendo_pctl() -> dict:
             game_id=game_id,
             platform=PLATFORM,
             playtime_minutes=total_minutes,
+            playtime_2weeks_minutes=minutes_2weeks,
+            last_played=last_played,
             owned=1,
         )
         await upsert_game_platform_identifier(platform_id, NINTENDO_TITLE_ID, application_id)
