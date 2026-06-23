@@ -5,6 +5,7 @@ import math
 from datetime import datetime, timezone
 
 from . import get_db
+from ..tag_synonyms import canonical_tag
 from ..tags import STEAM_FEATURE_FLAGS
 
 
@@ -42,20 +43,22 @@ async def recompute_tag_affinity() -> int:
         game_id = row["game_id"]
 
         for tag in tags:
-            tag_lower = tag.lower()
             # Storefront feature flags carry no taste signal; rows written
             # before the tags/features split may still contain them.
-            if tag_lower in STEAM_FEATURE_FLAGS:
+            if tag.lower() in STEAM_FEATURE_FLAGS:
                 continue
-            if tag_lower not in tag_data:
-                tag_data[tag_lower] = {
+            # Key on the canonical form so synonym variants accumulate together and
+            # match the discover/library lower(value) joins against canonical tags.
+            tag_key = canonical_tag(tag)
+            if tag_key not in tag_data:
+                tag_data[tag_key] = {
                     "weighted_sum": 0.0,
                     "weight_sum": 0.0,
                     "game_ids": set(),
                 }
-            tag_data[tag_lower]["weighted_sum"] += score * weight
-            tag_data[tag_lower]["weight_sum"] += weight
-            tag_data[tag_lower]["game_ids"].add(game_id)
+            tag_data[tag_key]["weighted_sum"] += score * weight
+            tag_data[tag_key]["weight_sum"] += weight
+            tag_data[tag_key]["game_ids"].add(game_id)
 
     now = datetime.now(timezone.utc).isoformat()
 

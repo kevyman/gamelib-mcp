@@ -25,9 +25,37 @@ from .db import (
     upsert_game_platform_enrichment,
 )
 from .content import classify_igdb_game, classify_title_override
+from .tag_synonyms import canonical_tag
+from .tags import is_feature_flag
 from .title_normalization import normalize_catalog_title, normalize_search_text
 
 logger = logging.getLogger(__name__)
+
+# Cap on the merged SteamSpy(≤20) + IGDB(≤30) tag cloud, to bound bloat in
+# get_game_detail and tag_affinity. Existing (SteamSpy, vote-ranked) tags are kept
+# preferentially; IGDB fills the remaining slots.
+MERGED_TAG_CAP = 30
+
+
+def _merge_igdb_tags(existing: list[str], igdb_tags: list[str]) -> list[str]:
+    """Union existing tags with IGDB tags, canonicalized, existing-first, capped.
+
+    Existing tags (SteamSpy community tags, vote-ranked) keep their order and
+    priority; IGDB themes/keywords append only when not already present. Feature
+    flags are filtered out so they never reach tag_affinity.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for t in list(existing) + list(igdb_tags):
+        if is_feature_flag(t):
+            continue
+        c = canonical_tag(t)
+        if c and c not in seen:
+            seen.add(c)
+            result.append(c)
+        if len(result) >= MERGED_TAG_CAP:
+            break
+    return result
 
 _TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 _IGDB_GAMES_URL = "https://api.igdb.com/v4/games"
@@ -669,8 +697,11 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
             updates["release_date"] = igdb_game.first_release_date
         if row["genres"] is None and igdb_game.genres and "genres" not in overrides:
             updates["genres"] = json.dumps(igdb_game.genres)
-        if row["tags"] is None and igdb_game.tags and "tags" not in overrides:
-            updates["tags"] = json.dumps(igdb_game.tags)
+        if igdb_game.tags and "tags" not in overrides:
+            existing = json.loads(row["tags"]) if row["tags"] else []
+            merged = _merge_igdb_tags(existing, igdb_game.tags)
+            if merged != existing:
+                updates["tags"] = json.dumps(merged)
         # Content classification: never let a default ("base_game"/primary,
         # no parent) re-fetch clobber a prior non-default classification.
         # IGDB search can return a bare main-game hit on a later pass, and

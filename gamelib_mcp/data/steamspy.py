@@ -11,11 +11,12 @@ from .db import (
     get_steam_platform_row_by_appid,
     upsert_steam_platform_data,
 )
+from .tag_synonyms import canonical_tag
 from .tags import is_feature_flag
 
 STEAMSPY_API = "https://steamspy.com/api.php"
 CACHE_DAYS = 30
-TOP_N = 15
+TOP_N = 20
 logger = logging.getLogger(__name__)
 
 
@@ -72,11 +73,15 @@ def _merge_tags(spy_tags: list[str], existing: list[str]) -> list[str]:
     seen = set()
     result = []
     for t in spy_tags + existing:
-        k = t.lower()
-        # Feature flags may linger in pre-split rows merged via `existing`.
-        if k not in seen and not is_feature_flag(t):
-            seen.add(k)
-            result.append(t)
+        # Check feature-flag membership on the original surface form (the flag set
+        # uses specific punctuation), then store the canonical form so SteamSpy,
+        # IGDB, and steam_store share one tag vocabulary.
+        if is_feature_flag(t):
+            continue
+        c = canonical_tag(t)
+        if c not in seen:
+            seen.add(c)
+            result.append(c)
     return result
 
 
