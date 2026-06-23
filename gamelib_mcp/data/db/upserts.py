@@ -146,15 +146,23 @@ async def upsert_game_platform(
     platform: str,
     playtime_minutes: int | None = None,
     playtime_2weeks_minutes: int | None = None,
+    last_played: str | None = None,
     owned: int = 1,
 ) -> int:
-    """Insert or update a game_platforms row and return its id."""
+    """Insert or update a game_platforms row and return its id.
+
+    ``last_played`` is an ISO date string (``YYYY-MM-DD``) for the platform's own
+    last-played signal (Steam stores its own in steam_platform_data; Nintendo and
+    PSN write it here). Like the playtime columns it only advances when a non-NULL
+    value is supplied, so an ownership-only sync never clears it.
+    """
     now = datetime.now(timezone.utc).isoformat()
     async with get_db() as db:
         await db.execute(
             """INSERT INTO game_platforms
-               (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes, last_synced)
-               VALUES (?, ?, ?, ?, ?, ?)
+               (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes,
+                last_played, last_synced)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(game_id, platform) DO UPDATE SET
                    owned = excluded.owned,
                    playtime_minutes = COALESCE(excluded.playtime_minutes, game_platforms.playtime_minutes),
@@ -162,8 +170,10 @@ async def upsert_game_platform(
                        excluded.playtime_2weeks_minutes,
                        game_platforms.playtime_2weeks_minutes
                    ),
+                   last_played = COALESCE(excluded.last_played, game_platforms.last_played),
                    last_synced = excluded.last_synced""",
-            (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes, now),
+            (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes,
+             last_played, now),
         )
         row = await db.execute_fetchone(
             "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",

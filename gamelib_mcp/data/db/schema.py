@@ -620,6 +620,7 @@ _V9_SCHEMA_DDL = """
         owned            INTEGER NOT NULL DEFAULT 1,
         playtime_minutes INTEGER,
         playtime_2weeks_minutes INTEGER,
+        last_played      TEXT,
         last_synced      TEXT,
         UNIQUE(game_id, platform)
     );

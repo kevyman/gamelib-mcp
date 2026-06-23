@@ -54,10 +54,13 @@ def _get_psnawp():
 
 async def fetch_psn_library() -> list[dict]:
     """
-    Return a list of dicts with 'name' and 'playtime_minutes' for each played PS5 title.
+    Return a list of dicts with 'name', 'playtime_minutes', and 'last_played'
+    (ISO ``YYYY-MM-DD`` or None) for each played PS5 title.
 
-    Uses client.title_stats() which returns name, play_count, and play_duration
-    (a datetime.timedelta). Runs PSNAWP synchronously in an executor.
+    Uses client.title_stats() which returns name, play_count, play_duration
+    (a datetime.timedelta), and last_played_date_time. PSN exposes no rolling
+    2-week playtime, so only lifetime playtime and last-played are captured.
+    Runs PSNAWP synchronously in an executor.
     """
     def _fetch():
         psnawp = _get_psnawp()
@@ -72,7 +75,11 @@ async def fetch_psn_library() -> list[dict]:
             if name in _MEDIA_APP_NAMES:
                 continue
             minutes = int(entry.play_duration.total_seconds() // 60)
-            results.append({"name": name, "playtime_minutes": minutes})
+            last_played_dt = getattr(entry, "last_played_date_time", None)
+            last_played = last_played_dt.date().isoformat() if last_played_dt else None
+            results.append(
+                {"name": name, "playtime_minutes": minutes, "last_played": last_played}
+            )
         return results
 
     loop = asyncio.get_running_loop()
@@ -144,6 +151,7 @@ async def sync_psn() -> dict:
             game_id=game_id,
             platform="ps5",
             playtime_minutes=entry["playtime_minutes"],
+            last_played=entry.get("last_played"),
             owned=1,
         )
 
