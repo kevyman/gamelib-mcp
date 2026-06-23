@@ -31,16 +31,23 @@ async def get_meta_prefix(prefix: str) -> dict[str, str]:
 
 
 async def get_nintendo_play_totals(period_type: str = "day") -> dict[str, dict]:
-    """Sum Parental Controls playtime per application_id across all devices.
+    """Aggregate Parental Controls playtime per application_id across all devices.
 
-    Returns {application_id: {"minutes": int, "app_name": str | None}}. The total
-    is the running playtime for a Switch title since Parental Controls tracking
-    began; ``period_type='day'`` is the source of truth (finalized daily summaries).
+    Returns ``{application_id: {"minutes", "minutes_2weeks", "last_played",
+    "app_name"}}``. ``minutes`` is the running total since Parental Controls
+    tracking began; ``minutes_2weeks`` sums the trailing 14-day window; and
+    ``last_played`` is the most recent day (ISO ``YYYY-MM-DD``) with recorded
+    playtime — derived the same way Steam exposes its own 2-week / last-played
+    signals, so the switch2 platform can fill those columns too.
+    ``period_type='day'`` is the source of truth (finalized daily summaries).
     """
     async with get_db() as db:
         rows = await db.execute_fetchall(
             """SELECT application_id,
                       SUM(playtime_minutes) AS minutes,
+                      SUM(CASE WHEN period_key >= date('now', '-13 days')
+                               THEN playtime_minutes ELSE 0 END) AS minutes_2weeks,
+                      MAX(CASE WHEN playtime_minutes > 0 THEN period_key END) AS last_played,
                       MAX(app_name) AS app_name
                FROM nintendo_play_summary
                WHERE period_type = ?
@@ -50,6 +57,8 @@ async def get_nintendo_play_totals(period_type: str = "day") -> dict[str, dict]:
     return {
         row["application_id"]: {
             "minutes": int(row["minutes"] or 0),
+            "minutes_2weeks": int(row["minutes_2weeks"] or 0),
+            "last_played": row["last_played"],
             "app_name": row["app_name"],
         }
         for row in rows
@@ -138,6 +147,7 @@ async def get_steam_platform_row_by_appid(appid: int) -> aiosqlite.Row | None:
                       gp.owned,
                       gp.playtime_minutes,
                       gp.playtime_2weeks_minutes,
+                      gp.last_played,
                       gp.last_synced,
                       g.name,
                       g.genres,
@@ -188,6 +198,7 @@ def _coerce_identifier_value(identifier_type: str, identifier_value: str) -> str
 def _platform_dict(row: aiosqlite.Row) -> dict:
     playtime_minutes = row["playtime_minutes"]
     playtime_2weeks_minutes = row["playtime_2weeks_minutes"]
+    last_played_date = row["last_played"]
     platform = {
         "game_platform_id": row["game_platform_id"],
         "platform": row["platform"],
@@ -196,6 +207,7 @@ def _platform_dict(row: aiosqlite.Row) -> dict:
         "playtime_hours": round((playtime_minutes or 0) / 60, 1),
         "playtime_2weeks_minutes": playtime_2weeks_minutes,
         "playtime_2weeks_hours": round((playtime_2weeks_minutes or 0) / 60, 1),
+        "last_played_date": last_played_date,
         "last_synced": row["last_synced"],
         "identifiers": {},
         "provider_data": {},
@@ -211,15 +223,21 @@ def _platform_dict(row: aiosqlite.Row) -> dict:
 
     if row["platform"] == STEAM_PLATFORM:
         last_played = row["rtime_last_played"]
+        steam_last_played_date = (
+            datetime.fromtimestamp(last_played, tz=timezone.utc).date().isoformat()
+            if last_played
+            else None
+        )
+        # Steam's last-played lives in steam_platform_data (rtime_last_played), not
+        # the generic game_platforms.last_played column. Surface it at the top level
+        # so last_played_date is uniform across platforms.
+        if platform["last_played_date"] is None:
+            platform["last_played_date"] = steam_last_played_date
         platform["provider_data"] = {
             "steam_review_score": row["steam_review_score"],
             "steam_review_desc": row["steam_review_desc"],
             "protondb_tier": row["protondb_tier"],
-            "last_played_date": (
-                datetime.fromtimestamp(last_played, tz=timezone.utc).date().isoformat()
-                if last_played
-                else None
-            ),
+            "last_played_date": steam_last_played_date,
             "library_updated_at": row["library_updated_at"],
         }
 
@@ -241,6 +259,7 @@ async def load_platforms_for_games(game_ids: Iterable[int]) -> dict[int, list[di
                        gp.owned,
                        gp.playtime_minutes,
                        gp.playtime_2weeks_minutes,
+                       gp.last_played,
                        gp.last_synced,
                        gpi.identifier_type,
                        gpi.identifier_value,

@@ -408,6 +408,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                 "owned": 1,
                 "playtime_minutes": 120,
                 "playtime_2weeks_minutes": 0,
+                "last_played": None,
                 "last_synced": "2026-04-07T00:00:00+00:00",
                 "platform_release_date": "2024-02-01",
                 "metacritic_score": 88,

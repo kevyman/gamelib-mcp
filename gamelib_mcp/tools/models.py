@@ -16,6 +16,7 @@ class PlatformEntry(FlexibleModel):
     owned: bool | None = None
     playtime_minutes: int | None = None
     playtime_2weeks_minutes: int | None = None
+    last_played_date: str | None = None
 
 
 class GameSummary(FlexibleModel):
