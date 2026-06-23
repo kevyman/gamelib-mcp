@@ -25,6 +25,7 @@ from .db import (
     load_opencritic_batch_rows,
     load_steam_platform_batch_rows,
     load_store_batch_rows,
+    recompute_tag_affinity,
     upsert_game_platform_enrichment,
 )
 from .hltb import get_hltb
@@ -126,10 +127,20 @@ async def background_enrich() -> None:
         ]
 
         results = await asyncio.gather(*(job for _, job in jobs), return_exceptions=True)
+        processed_any = False
         for (family, _), result in zip(jobs, results, strict=True):
             if isinstance(result, Exception):
                 logger.error("Background enrichment family failed: %s: %s", family, result)
+            elif result:
+                processed_any = True
         logger.info("Background enrichment complete: %r", results)
+        # Tags may have changed (SteamSpy community tags, IGDB union); refresh the
+        # tag_affinity table so the taste profile reflects the new vocabulary.
+        if processed_any:
+            try:
+                await recompute_tag_affinity()
+            except Exception as exc:
+                logger.error("tag_affinity recompute after enrichment failed: %s", exc)
     finally:
         _SUPERVISOR_PROGRESS.reset(token)
 

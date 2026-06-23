@@ -138,6 +138,17 @@ class UpdateGameTests(ToolDBTestCase):
         self.assertEqual(row["release_date"], "2021-01-01")
         self.assertEqual(row["short_description"], "hand fixed")
 
+    async def test_manual_tags_are_canonicalized(self):
+        gid = await seed_game("Manual Tags")
+        result = await platforms.update_game(
+            name="Manual Tags", tags=["Soulslike", "Co-op", "Atmospheric"]
+        )
+        # Manual tags share the canonical vocabulary so tag filters still match.
+        self.assertEqual(result["updated"]["tags"], ["souls-like", "co-op", "atmospheric"])
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone("SELECT tags FROM games WHERE id = ?", (gid,))
+        self.assertEqual(json.loads(row["tags"]), ["souls-like", "co-op", "atmospheric"])
+
     async def test_rename_updates_name_and_search(self):
         gid = await seed_game("Wrong Title")
         result = await platforms.update_game(game_id=gid, new_name="Correct Title")
@@ -222,7 +233,8 @@ class UpdateGameProtectionTests(ToolDBTestCase):
 
         async with db_module.get_db() as db:
             row = await db.execute_fetchone("SELECT tags FROM games WHERE id = ?", (gid,))
-        self.assertIn("Action", json.loads(row["tags"]))
+        # SteamSpy tags are canonicalized (lowercased) on write.
+        self.assertIn("action", json.loads(row["tags"]))
 
     async def test_bulk_steam_name_sync_respects_manual_name(self):
         gid = await make_steam_game("Original", 700)
@@ -275,4 +287,4 @@ class UpdateGameProtectionTests(ToolDBTestCase):
             await steamspy.enrich_steamspy(800)
         async with db_module.get_db() as db:
             row = await db.execute_fetchone("SELECT tags FROM games WHERE id = ?", (gid,))
-        self.assertIn("Action", json.loads(row["tags"]))  # sync took over again
+        self.assertIn("action", json.loads(row["tags"]))  # sync took over again

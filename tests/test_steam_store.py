@@ -1,10 +1,21 @@
 import asyncio
+import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
 import httpx
 
+from conftest import ToolDBTestCase, make_steam_game
+from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steam_store
+
+_STORE_DATA = {
+    "genres": [{"description": "Action"}],
+    "categories": [{"description": "Single-player"}],
+    "short_description": "",
+    "release_date": {"date": ""},
+    "metacritic": {},
+}
 
 
 class _DummyResponse:
@@ -122,6 +133,32 @@ class SteamRetryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(payload, {"ok": True})
         sleep_mock.assert_awaited_once_with(7.0)
+
+
+class EnrichGameTagSeedTests(ToolDBTestCase):
+    async def _tags(self, game_id: int) -> list[str]:
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone("SELECT tags FROM games WHERE id = ?", (game_id,))
+        return json.loads(row["tags"]) if row["tags"] else []
+
+    async def test_does_not_clobber_existing_tags(self) -> None:
+        # SteamSpy already populated rich community tags; the 7-day store re-run
+        # must NOT overwrite them with the genre-derived list (COALESCE seed).
+        game_id = await make_steam_game("Sekiro", appid=814380, tags=["souls-like", "difficult"])
+
+        with patch.object(steam_store, "_fetch_all", AsyncMock(return_value=(_STORE_DATA, {}))):
+            await steam_store.enrich_game(814380)
+
+        self.assertEqual(await self._tags(game_id), ["souls-like", "difficult"])
+
+    async def test_seeds_tags_when_null(self) -> None:
+        game_id = await make_steam_game("Blank", appid=999001)  # tags NULL
+
+        with patch.object(steam_store, "_fetch_all", AsyncMock(return_value=(_STORE_DATA, {}))):
+            await steam_store.enrich_game(999001)
+
+        # Genre/category tags canonicalized (lowercased) on the seed path.
+        self.assertEqual(await self._tags(game_id), ["action", "single-player"])
 
 
 if __name__ == "__main__":

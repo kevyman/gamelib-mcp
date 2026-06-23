@@ -5,6 +5,7 @@ from typing import Literal
 from fastmcp.exceptions import ToolError
 
 from ..data.db import get_db, load_platforms_for_games
+from ..data.tag_synonyms import canonical_tag
 from ..data.title_normalization import normalize_search_text
 from ..utils import _parse_json
 from .common import (
@@ -350,7 +351,8 @@ async def get_library_stats(
                     WHERE lower(value) = ?
                 )"""
             )
-            params.append(entry.lower())
+            # Tags carry a canonical/synonym vocabulary; genres and series do not.
+            params.append(canonical_tag(entry) if column == "tags" else entry.lower())
 
     if protondb_tier is not None:
         from ..data.protondb import TIER_ORDER

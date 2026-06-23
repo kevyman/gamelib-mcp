@@ -278,6 +278,7 @@ class BackgroundEnrichmentSupervisorTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.data.enrich_bg._run_steamspy_workers", AsyncMock(return_value=0)),
             patch("gamelib_mcp.data.enrich_bg._run_opencritic_workers", AsyncMock(return_value=0)),
             patch("gamelib_mcp.data.enrich_bg._run_metacritic_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg.recompute_tag_affinity", AsyncMock()),
         ):
             task = asyncio.create_task(enrich_bg.background_enrich())
             await asyncio.wait_for(started["store"].wait(), timeout=0.1)
@@ -299,6 +300,38 @@ class BackgroundEnrichmentSupervisorTests(unittest.IsolatedAsyncioTestCase):
             await enrich_bg.background_enrich()
 
         self.assertTrue(any("Background enrichment family failed: store" in line for line in logs.output))
+
+    async def test_recomputes_affinity_after_non_empty_pass(self) -> None:
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch("gamelib_mcp.data.enrich_bg._run_store_workers", AsyncMock(return_value=3)),
+            patch("gamelib_mcp.data.enrich_bg._run_igdb_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_hltb_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_protondb_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_steamspy_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_opencritic_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_metacritic_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg.recompute_tag_affinity", AsyncMock()) as recompute,
+        ):
+            await enrich_bg.background_enrich()
+
+        recompute.assert_awaited_once()
+
+    async def test_skips_affinity_recompute_when_nothing_processed(self) -> None:
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch("gamelib_mcp.data.enrich_bg._run_store_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_igdb_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_hltb_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_protondb_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_steamspy_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_opencritic_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_metacritic_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg.recompute_tag_affinity", AsyncMock()) as recompute,
+        ):
+            await enrich_bg.background_enrich()
+
+        recompute.assert_not_awaited()
 
     async def test_background_enrich_keeps_igdb_polling_while_other_families_progress(self) -> None:
         real_sleep = asyncio.sleep
@@ -325,6 +358,7 @@ class BackgroundEnrichmentSupervisorTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.data.enrich_bg._run_steamspy_workers", AsyncMock(return_value=0)),
             patch("gamelib_mcp.data.enrich_bg._run_opencritic_workers", AsyncMock(return_value=0)),
             patch("gamelib_mcp.data.enrich_bg._run_metacritic_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg.recompute_tag_affinity", AsyncMock()),
         ):
             await enrich_bg.background_enrich()
 

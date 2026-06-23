@@ -7,6 +7,7 @@ from fastmcp.exceptions import ToolError
 
 from ..data.db import get_db, get_meta, load_platforms_for_games
 from ..data.protondb import TIER_ORDER
+from ..data.tag_synonyms import canonical_tag
 from ..utils import _parse_json
 from .common import STEAM_APPID_SQL as _STEAM_APPID_SQL, clamp_limit as _clamp_limit
 
@@ -109,6 +110,8 @@ async def discover_games(
         if tags is None:
             tags = [vibe.lower()]
             unknown_vibes.append(vibe)
+        # Match against the canonical vocabulary stored in games.tags.
+        tags = [canonical_tag(t) for t in tags]
         placeholders = ",".join("?" * len(tags))
         inner_conditions.append(
             f"""EXISTS (

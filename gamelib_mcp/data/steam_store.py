@@ -22,6 +22,7 @@ from .db import (
     upsert_game_platform_enrichment,
     upsert_steam_platform_data,
 )
+from .tag_synonyms import canonical_tag
 from .tags import split_features
 
 logger = logging.getLogger(__name__)
@@ -228,7 +229,9 @@ async def enrich_game(appid: int, client: httpx.AsyncClient | None = None) -> di
             overrides = await get_manual_overrides(db, row["game_id"])
             candidates = [
                 ("genres = ?", "genres", genres),
-                ("tags = ?", "tags", steam_tags),
+                # Seed-only: never clobber a richer SteamSpy/IGDB/user tag cloud on
+                # the 7-day store re-run. SteamSpy owns tags once it has run.
+                ("tags = COALESCE(tags, ?)", "tags", steam_tags),
                 ("features = ?", "features", steam_features),
                 ("short_description = ?", "short_description", short_desc),
                 ("release_date = COALESCE(release_date, ?)", "release_date", release_date),
@@ -332,8 +335,18 @@ def _extract_tags(data: dict) -> tuple[str, str]:
         if t.lower() not in seen:
             seen.add(t.lower())
             unique.append(t)
+    # Split features on the original surface form (the feature-flag set uses
+    # specific punctuation, e.g. "cross-platform multiplayer"), then canonicalize
+    # the real tags so they share one vocabulary with SteamSpy/IGDB.
     tags, features = split_features(unique)
-    return json.dumps(tags[:20]), json.dumps(features)
+    canon_seen: set[str] = set()
+    canon_tags: list[str] = []
+    for t in tags:
+        c = canonical_tag(t)
+        if c not in canon_seen:
+            canon_seen.add(c)
+            canon_tags.append(c)
+    return json.dumps(canon_tags[:20]), json.dumps(features)
 
 
 def _parse_steam_date(raw: str) -> str | None:
