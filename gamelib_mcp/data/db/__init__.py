@@ -51,7 +51,7 @@ STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 
 @dataclass
@@ -979,6 +979,25 @@ async def _migrate_v12_to_v13(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v13_to_v14(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add a generic game_platforms.last_played column.
+
+    Previously last-played was Steam-only (steam_platform_data.rtime_last_played).
+    This adds a cross-platform per-platform last-played date (ISO ``YYYY-MM-DD``)
+    so non-Steam syncs (Nintendo Parental Controls, PSN) can record it too.
+    Additive column only — backfilled by the next sync of each platform.
+    """
+    if progress is not None:
+        progress("Migrating to v14: add game_platforms.last_played.")
+
+    cols = await _table_columns(db, "game_platforms")
+    if "last_played" not in cols:
+        await db.execute("ALTER TABLE game_platforms ADD COLUMN last_played TEXT")
+
+    await _set_user_version(db, 14)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1187,6 +1206,11 @@ async def _run_migrations(
         _emit(progress, "Applying migration step v12 -> v13.", applied_steps)
         await _migrate_v12_to_v13(db, progress=None)
         version = 13
+
+    if version == 13:
+        _emit(progress, "Applying migration step v13 -> v14.", applied_steps)
+        await _migrate_v13_to_v14(db, progress=None)
+        version = 14
 
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")

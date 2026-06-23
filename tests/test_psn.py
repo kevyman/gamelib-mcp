@@ -2,7 +2,7 @@ import sys
 import types
 import asyncio
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -64,12 +64,13 @@ def _run_async(coro):
         loop.close()
 
 
-def _make_entry(name, title_id="PPSA12345_00", category=PlatformCategory.PS5, play_duration=timedelta(minutes=90)):
+def _make_entry(name, title_id="PPSA12345_00", category=PlatformCategory.PS5, play_duration=timedelta(minutes=90), last_played=None):
     entry = MagicMock()
     entry.name = name
     entry.title_id = title_id
     entry.category = category
     entry.play_duration = play_duration
+    entry.last_played_date_time = last_played
     return entry
 
 
@@ -121,6 +122,21 @@ class FetchPsnLibraryFilterTests(unittest.TestCase):
         entries = [_make_entry(None)]
         result = self._run_fetch(entries)
         self.assertEqual(result, [])
+
+    def test_last_played_date_time_converted_to_iso_date(self) -> None:
+        entries = [
+            _make_entry(
+                "Elden Ring",
+                last_played=datetime(2026, 6, 20, 14, 30, tzinfo=timezone.utc),
+            )
+        ]
+        result = self._run_fetch(entries)
+        self.assertEqual(result[0]["last_played"], "2026-06-20")
+
+    def test_missing_last_played_is_none(self) -> None:
+        entries = [_make_entry("Elden Ring", last_played=None)]
+        result = self._run_fetch(entries)
+        self.assertIsNone(result[0]["last_played"])
 
 
 class SyncPsnSkipTests(unittest.TestCase):
@@ -179,6 +195,7 @@ class SyncPsnSyncTests(unittest.TestCase):
             game_id=7,
             platform="ps5",
             playtime_minutes=120,
+            last_played=None,
             owned=1,
         )
 
@@ -195,6 +212,7 @@ class SyncPsnSyncTests(unittest.TestCase):
             game_id=42,
             platform="ps5",
             playtime_minutes=60,
+            last_played=None,
             owned=1,
         )
 
@@ -248,6 +266,7 @@ class SyncPsnSyncTests(unittest.TestCase):
             game_id=42,
             platform="ps5",
             playtime_minutes=30,
+            last_played=None,
             owned=1,
         )
 

@@ -118,7 +118,10 @@ async def get_game_detail(
             if total_playtime_2weeks_minutes
             else 0
         ),
-        "last_played_date": steam_data.get("last_played_date"),
+        "last_played_date": max(
+            (p["last_played_date"] for p in platforms if p.get("last_played_date")),
+            default=None,
+        ),
         "is_farmed": bool(row["is_farmed"]),
         "content_type": row["content_type"],
         "parent_game_id": row["parent_game_id"],
