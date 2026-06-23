@@ -138,6 +138,17 @@ class UpdateGameTests(ToolDBTestCase):
         self.assertEqual(row["release_date"], "2021-01-01")
         self.assertEqual(row["short_description"], "hand fixed")
 
+    async def test_manual_tags_are_canonicalized(self):
+        gid = await seed_game("Manual Tags")
+        result = await platforms.update_game(
+            name="Manual Tags", tags=["Soulslike", "Co-op", "Atmospheric"]
+        )
+        # Manual tags share the canonical vocabulary so tag filters still match.
+        self.assertEqual(result["updated"]["tags"], ["souls-like", "co-op", "atmospheric"])
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone("SELECT tags FROM games WHERE id = ?", (gid,))
+        self.assertEqual(json.loads(row["tags"]), ["souls-like", "co-op", "atmospheric"])
+
     async def test_rename_updates_name_and_search(self):
         gid = await seed_game("Wrong Title")
         result = await platforms.update_game(game_id=gid, new_name="Correct Title")

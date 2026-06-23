@@ -14,6 +14,7 @@ from ..data.db import (
     upsert_game_platform,
     upsert_game_platform_identifier,
 )
+from ..data.tag_synonyms import canonical_tag
 from .common import (
     LIBRARY_PLATFORMS,
     validate_platform as _validate_platform,
@@ -236,7 +237,9 @@ async def update_game(
     if genres is not None:
         fields["genres"] = json.dumps(genres)
     if tags is not None:
-        fields["tags"] = json.dumps(tags)
+        # Canonicalize manual tags too, so a hand-set synonym variant matches the
+        # shared vocabulary used by affinity/discover/library filters.
+        fields["tags"] = json.dumps([canonical_tag(t) for t in tags])
     if features is not None:
         fields["features"] = json.dumps(features)
     if short_description is not None:

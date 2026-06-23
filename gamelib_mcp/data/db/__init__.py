@@ -933,16 +933,12 @@ async def _migrate_v12_to_v13(db: aiosqlite.Connection, progress: _Progress | No
     from ..tag_synonyms import canonical_tag
     from ..tags import is_feature_flag
 
-    rows = await db.execute_fetchall(
-        "SELECT id, tags, manual_overrides FROM games WHERE tags IS NOT NULL"
-    )
+    # Canonicalize every row's tags, including manually-overridden ones: this is a
+    # content-preserving normalization (souls-like == soulslike), not a sync
+    # clobber, and update_game also canonicalizes manual tags on write. Keeping
+    # manual rows verbatim would leave them unmatchable by canonicalized filters.
+    rows = await db.execute_fetchall("SELECT id, tags FROM games WHERE tags IS NOT NULL")
     for row in rows:
-        try:
-            overrides = json.loads(row["manual_overrides"]) if row["manual_overrides"] else []
-        except (ValueError, TypeError):
-            overrides = []
-        if "tags" in overrides:
-            continue  # respect a hand-edited tag list
         try:
             tags = json.loads(row["tags"])
         except (ValueError, TypeError):
@@ -1260,7 +1256,13 @@ async def migrate_db(progress: _Progress | None = None) -> MigrationResult:
 
 async def init_db() -> None:
     """Create tables if they don't exist and migrate to the latest schema."""
-    await migrate_db()
+    result = await migrate_db()
+    # The v12->v13 migration canonicalizes games.tags in place, which can orphan
+    # tag_affinity rows still keyed on the old synonym form. Rebuild affinity once
+    # so discover/taste scoring matches the canonicalized tags even for libraries
+    # the background enrichment pass won't re-process (e.g. no Steam games).
+    if any("v12 -> v13" in step for step in result.applied_steps):
+        await recompute_tag_affinity()
 
 
 # ── Domain submodules (re-exported; imported last so the bottom layer above is

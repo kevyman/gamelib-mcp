@@ -727,6 +727,11 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             "VALUES ('steam achievements', 6.5, 9.5, 1, '2026-01-01'), "
             "('roguelike', 8.0, 9.0, 2, '2026-01-01')"
         )
+        # Rate Hades so the v13 post-migration affinity recompute keeps its tags.
+        conn.execute(
+            "INSERT INTO ratings (game_id, source, raw_score, normalized_score, synced_at) "
+            "VALUES (1, 'backloggd', 5.0, 10.0, '2026-01-01')"
+        )
         conn.commit()
         conn.close()
 
@@ -765,8 +770,9 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(spd[1]["store_cached_at"], "2026-01-01")
         self.assertEqual(json.loads(games[3]["tags"]), ["platformer"])
         self.assertIsNone(games[3]["features"])
-        # Feature flags purged from tag_affinity; real tags survive.
-        self.assertEqual(affinity_tags, {"roguelike"})
+        # Affinity is rebuilt from ratings by the v13 post-migration recompute;
+        # feature flags stay out, Hades' real (canonicalized) tags survive.
+        self.assertEqual(affinity_tags, {"roguelike", "action"})
 
     async def test_v8_to_v9_adds_manual_overrides_column(self) -> None:
         conn = sqlite3.connect(self.db_path)
@@ -796,7 +802,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         conn.execute("PRAGMA user_version = 12")
         # 1: steam game, mixed-case + synonym tags -> canonicalized
         # 2: non-steam game, IGDB cache must be LEFT ALONE
-        # 3: steam game with manual tags override -> tags preserved verbatim
+        # 3: steam game with manual tags override -> still canonicalized in place
         conn.execute(
             "INSERT INTO games (id, name, tags, igdb_cached_at, igdb_claimed_at, manual_overrides) VALUES "
             "(1, 'Sekiro', ?, '2026-01-01', NULL, NULL), "
@@ -805,7 +811,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             (
                 json.dumps(["Souls-like", "Difficult", "souls-like"]),
                 json.dumps(["metroidvania"]),
-                json.dumps(["MyTag"]),
+                json.dumps(["Soulslike"]),
                 json.dumps(["tags"]),
             ),
         )
@@ -848,8 +854,8 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         # Tags canonicalized + deduped in place.
         self.assertEqual(json.loads(games[1]["tags"]), ["souls-like", "difficult"])
         self.assertEqual(json.loads(games[2]["tags"]), ["metroidvania"])
-        # Manual override on tags is preserved verbatim.
-        self.assertEqual(json.loads(games[3]["tags"]), ["MyTag"])
+        # Manual-override rows are canonicalized in place too (synonym normalized).
+        self.assertEqual(json.loads(games[3]["tags"]), ["souls-like"])
         # SteamSpy cache cleared for steam rows; store cache untouched.
         self.assertIsNone(spd[1]["steamspy_cached_at"])
         self.assertEqual(spd[1]["store_cached_at"], "2026-01-01")
