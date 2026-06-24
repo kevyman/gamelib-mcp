@@ -90,7 +90,10 @@ def normalize_catalog_title(name: str) -> str:
             cleaned = pattern.sub("", cleaned)
 
     cleaned = re.sub(r"\s+", " ", cleaned)
-    cleaned = re.sub(r"\s*-\s*$", "", cleaned)
+    # Strip any separator left dangling after a trailing variant/subtitle was
+    # removed, so "Deus Ex: Game of the Year Edition" -> "Deus Ex" (not
+    # "Deus Ex:") and "...Templars: Director's Cut" -> "...Templars".
+    cleaned = re.sub(r"[\s:-]+$", "", cleaned)
     return cleaned.strip()
 
 
