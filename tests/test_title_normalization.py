@@ -73,3 +73,23 @@ class TitleNormalizationTests(unittest.TestCase):
             prepare_catalog_title("LEGO® Star Wars™: The Skywalker Saga"),
             "LEGO Star Wars: The Skywalker Saga",
         )
+
+    def test_prepare_catalog_title_strips_dangling_separator_after_suffix(self) -> None:
+        # A stripped subtitle/edition must not leave a trailing ":" or "-".
+        self.assertEqual(
+            prepare_catalog_title("Deus Ex: Game of the Year Edition"), "Deus Ex"
+        )
+        self.assertEqual(
+            prepare_catalog_title("Sleeping Dogs: Definitive Edition"), "Sleeping Dogs"
+        )
+        self.assertEqual(
+            prepare_catalog_title("Mafia III: Definitive Edition"), "Mafia III"
+        )
+        self.assertEqual(
+            prepare_catalog_title("Ori and the Blind Forest: Definitive Edition"),
+            "Ori and the Blind Forest",
+        )
+        # Internal colons in a retained title are untouched.
+        self.assertEqual(
+            prepare_catalog_title("Batman: Arkham Asylum"), "Batman: Arkham Asylum"
+        )
