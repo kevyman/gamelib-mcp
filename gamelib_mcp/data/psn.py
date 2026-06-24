@@ -14,20 +14,58 @@ appear; unplayed purchases will not show up (PSN platform limitation).
 import asyncio
 import logging
 import os
+import re
 
 from psnawp_api.models.title_stats import PlatformCategory
 
 from gamelib_mcp.data.db import (
     find_conflicting_fuzzy_key,
+    get_game_by_identifier,
     load_fuzzy_candidates,
     repair_misclassified_platform_row,
     upsert_game_platform,
     upsert_game_platform_enrichment,
+    upsert_game_platform_identifier,
 )
 from gamelib_mcp.data.igdb import resolve_and_link_game, PLATFORM_TO_IGDB
 from gamelib_mcp.data.title_normalization import normalize_search_text, prepare_catalog_title
 
 logger = logging.getLogger(__name__)
+
+# Identifier type for the stable PSN title id (e.g. "PPSA01234_00"). Matching on
+# it lets a re-sync find an already-ingested title regardless of the (locale-
+# dependent) display name PSN returns.
+PSN_TITLE_ID = "psn_title_id"
+
+# CJK / fullwidth ranges — the PSN gamelist endpoint returns titles in the
+# account's system language, so some come back localized (e.g. Chinese). Those
+# can't fuzzy-match the English library, which spawns duplicate rows.
+_NON_LATIN_RE = re.compile(r"[　-ヿ㐀-鿿가-힯＀-￯]")
+
+
+def _is_probably_non_latin(name: str) -> bool:
+    return bool(_NON_LATIN_RE.search(name))
+
+
+def _resolve_english_title(psnawp, title_id: str, fallback: str) -> str:
+    """Best-effort: look up a title's canonical English name via the PSN catalog.
+
+    The gamelist endpoint honours the account language, not Accept-Language, so a
+    localized name is resolved to English through the title-concept API. Any
+    failure degrades gracefully to ``fallback`` (the original name).
+    """
+    try:
+        from psnawp_api.models.trophies.trophy_constants import PlatformType
+
+        game_title = psnawp.game_title(title_id=title_id, platform=PlatformType.PS5)
+        details = game_title.get_details(country="US", language="en-US")
+        english = (details[0].get("name") if details else None) or ""
+        if english.strip():
+            return english.strip()
+    except Exception as exc:  # defensive: never let a lookup break the sync
+        logger.debug("PSN English title lookup failed for %s: %s", title_id, exc)
+    return fallback
+
 
 # Media/streaming apps to exclude from library sync.
 # The primary filter catches PPSA-prefixed titles with UNKNOWN category (PS5-era apps).
@@ -74,11 +112,21 @@ async def fetch_psn_library() -> list[dict]:
                 continue
             if name in _MEDIA_APP_NAMES:
                 continue
+            title_id = entry.title_id
+            # PSN may return a localized (non-Latin) name; resolve it to English
+            # so it matches the existing library instead of spawning a duplicate.
+            if title_id and _is_probably_non_latin(name):
+                name = _resolve_english_title(psnawp, title_id, name)
             minutes = int(entry.play_duration.total_seconds() // 60)
             last_played_dt = getattr(entry, "last_played_date_time", None)
             last_played = last_played_dt.date().isoformat() if last_played_dt else None
             results.append(
-                {"name": name, "playtime_minutes": minutes, "last_played": last_played}
+                {
+                    "name": name,
+                    "title_id": title_id,
+                    "playtime_minutes": minutes,
+                    "last_played": last_played,
+                }
             )
         return results
 
@@ -129,23 +177,36 @@ async def sync_psn() -> dict:
     candidates = await load_fuzzy_candidates()
 
     for entry, name in prepared_entries:
-        conflicting_game_id = find_conflicting_fuzzy_key(name, candidates)
         igdb_platform_id = PLATFORM_TO_IGDB.get("ps5")
-        game_id, igdb_game = await resolve_and_link_game(name, igdb_platform_id, candidates)
-        if game_id in candidates:
+        title_id = entry.get("title_id")
+
+        # Prefer the stable PSN title id: if we've ingested this title before,
+        # match the existing game directly so a localized name can't fork a
+        # duplicate row. Fall back to fuzzy name resolution for first ingest.
+        existing = (
+            await get_game_by_identifier(PSN_TITLE_ID, title_id) if title_id else None
+        )
+        if existing is not None:
+            game_id = existing["id"]
+            igdb_game = None
             matched += 1
         else:
-            candidates[game_id] = name
-            added += 1
+            conflicting_game_id = find_conflicting_fuzzy_key(name, candidates)
+            game_id, igdb_game = await resolve_and_link_game(name, igdb_platform_id, candidates)
+            if game_id in candidates:
+                matched += 1
+            else:
+                candidates[game_id] = name
+                added += 1
 
-        if conflicting_game_id is not None and conflicting_game_id != game_id:
-            conflicting_title = candidates.get(conflicting_game_id)
-            if conflicting_title and normalize_search_text(conflicting_title) not in current_titles:
-                await repair_misclassified_platform_row(
-                    source_game_id=conflicting_game_id,
-                    target_game_id=game_id,
-                    platform="ps5",
-                )
+            if conflicting_game_id is not None and conflicting_game_id != game_id:
+                conflicting_title = candidates.get(conflicting_game_id)
+                if conflicting_title and normalize_search_text(conflicting_title) not in current_titles:
+                    await repair_misclassified_platform_row(
+                        source_game_id=conflicting_game_id,
+                        target_game_id=game_id,
+                        platform="ps5",
+                    )
 
         platform_id = await upsert_game_platform(
             game_id=game_id,
@@ -154,6 +215,10 @@ async def sync_psn() -> dict:
             last_played=entry.get("last_played"),
             owned=1,
         )
+
+        # Record the stable id so future syncs match by it (idempotent).
+        if title_id:
+            await upsert_game_platform_identifier(platform_id, PSN_TITLE_ID, title_id)
 
         if igdb_game is not None and igdb_platform_id in igdb_game.platform_release_dates:
             await upsert_game_platform_enrichment(
