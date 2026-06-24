@@ -6,7 +6,13 @@ from unittest.mock import AsyncMock, patch
 
 from fastmcp.exceptions import ToolError
 
-from conftest import ToolDBTestCase, make_steam_game, seed_game, add_platform
+from conftest import (
+    ToolDBTestCase,
+    add_enrichment,
+    add_platform,
+    make_steam_game,
+    seed_game,
+)
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import hltb, steamspy
 from gamelib_mcp.tools import platforms
@@ -288,3 +294,101 @@ class UpdateGameProtectionTests(ToolDBTestCase):
         async with db_module.get_db() as db:
             row = await db.execute_fetchone("SELECT tags FROM games WHERE id = ?", (gid,))
         self.assertIn("action", json.loads(row["tags"]))  # sync took over again
+
+
+class UpdateGameRenameReenrichTests(ToolDBTestCase):
+    """A rename invalidates name-matched enrichment so it re-fetches the new title."""
+
+    async def _seed_enriched(self, name: str) -> int:
+        gid = await seed_game(name)
+        gpid = await add_platform(gid, "switch2")
+        await add_enrichment(gpid, metacritic_score=83, opencritic_score=83)
+        # Stamp every name-matched cache/claim as already done.
+        async with db_module.get_db() as db:
+            await db.execute(
+                """UPDATE games
+                      SET igdb_cached_at = '2026-01-01', igdb_claimed_at = '2026-01-01',
+                          hltb_cached_at = '2026-01-01', hltb_claimed_at = '2026-01-01'
+                    WHERE id = ?""",
+                (gid,),
+            )
+            await db.execute(
+                """UPDATE game_platform_enrichment
+                      SET metacritic_cached_at = '2026-01-01', metacritic_claimed_at = '2026-01-01',
+                          opencritic_cached_at = '2026-01-01', opencritic_claimed_at = '2026-01-01'
+                    WHERE game_platform_id = ?""",
+                (gpid,),
+            )
+            await db.commit()
+        return gid
+
+    async def _caches(self, gid: int) -> dict:
+        async with db_module.get_db() as db:
+            game = await db.execute_fetchone(
+                "SELECT igdb_cached_at, hltb_cached_at FROM games WHERE id = ?", (gid,)
+            )
+            enr = await db.execute_fetchone(
+                """SELECT metacritic_cached_at, opencritic_cached_at
+                     FROM game_platform_enrichment e
+                     JOIN game_platforms p ON p.id = e.game_platform_id
+                    WHERE p.game_id = ?""",
+                (gid,),
+            )
+        return {**dict(game), **dict(enr)}
+
+    async def test_rename_clears_name_matched_caches(self):
+        gid = await self._seed_enriched("Xenoblade Chronicles 2")
+        result = await platforms.update_game(
+            game_id=gid, new_name="Xenoblade Chronicles: Definitive Edition"
+        )
+        self.assertEqual(
+            set(result["enrichment_invalidated"]),
+            {"igdb", "hltb", "opencritic", "metacritic"},
+        )
+        caches = await self._caches(gid)
+        self.assertTrue(all(v is None for v in caches.values()), caches)
+
+    async def test_rename_clears_stale_series_memberships(self):
+        gid = await self._seed_enriched("Xenoblade Chronicles 2")
+        await db_module.upsert_game_series_links(
+            gid, [("collection", 5, "Old Series"), ("franchise", 6, "Old Franchise")]
+        )
+        await platforms.update_game(
+            game_id=gid, new_name="Xenoblade Chronicles: Definitive Edition"
+        )
+        # Memberships are dropped so re-enrichment can repopulate cleanly; the
+        # shared game_series rows themselves remain.
+        async with db_module.get_db() as db:
+            members = await db.execute_fetchone(
+                "SELECT COUNT(*) AS c FROM game_series_membership WHERE game_id = ?", (gid,)
+            )
+            series = await db.execute_fetchone("SELECT COUNT(*) AS c FROM game_series")
+        self.assertEqual(members["c"], 0)
+        self.assertEqual(series["c"], 2)
+
+    async def test_rename_skips_hltb_when_all_durations_pinned(self):
+        gid = await self._seed_enriched("Old Title")
+        # Pin every HLTB duration in the same edit as the rename.
+        result = await platforms.update_game(
+            game_id=gid,
+            new_name="New Title",
+            hltb_main=10.0,
+            hltb_extra=20.0,
+            hltb_complete=30.0,
+        )
+        self.assertNotIn("hltb", result["enrichment_invalidated"])
+        self.assertIn("igdb", result["enrichment_invalidated"])
+        caches = await self._caches(gid)
+        self.assertEqual(caches["hltb_cached_at"], "2026-01-01")  # preserved
+        self.assertIsNone(caches["igdb_cached_at"])  # still re-claimed
+
+    async def test_noop_rename_and_non_rename_edits_do_not_invalidate(self):
+        gid = await self._seed_enriched("Same Title")
+        # Renaming to the identical name is a no-op.
+        same = await platforms.update_game(game_id=gid, new_name="Same Title")
+        self.assertEqual(same["enrichment_invalidated"], [])
+        # Editing other fields without renaming leaves enrichment alone.
+        edited = await platforms.update_game(game_id=gid, release_date="2020-05-29")
+        self.assertEqual(edited["enrichment_invalidated"], [])
+        caches = await self._caches(gid)
+        self.assertTrue(all(v == "2026-01-01" for v in caches.values()), caches)

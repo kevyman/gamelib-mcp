@@ -7,6 +7,7 @@ from ..data.db import (
     GAME_EDITABLE_FIELDS,
     apply_manual_game_fields,
     get_db,
+    invalidate_name_derived_enrichment,
     recompute_tag_affinity,
     remove_manual_overrides,
     set_meta,
@@ -208,8 +209,12 @@ async def update_game(
     sync, pass its column name(s) in clear_overrides (e.g.
     clear_overrides=["is_farmed"] to let auto-detection manage it again); this
     only removes protection and does not change the stored value. Editing tags
-    recomputes the taste profile. Returns the updated fields, any cleared
-    columns, and the full manual-override list.
+    recomputes the taste profile. Renaming a game (new_name) additionally clears
+    its name-matched enrichment caches (IGDB series/metadata, HowLongToBeat,
+    OpenCritic/Metacritic) so background workers re-fetch under the correct title;
+    any field you also pinned in the same edit stays protected. Returns the
+    updated fields, any cleared columns, the full manual-override list, and the
+    providers whose enrichment was invalidated.
     """
     row = await _resolve_game_row(name, game_id)
     resolved_id = row["id"]
@@ -274,6 +279,16 @@ async def update_game(
     if clear:
         overrides = await remove_manual_overrides(resolved_id, clear)
 
+    # A rename invalidates name-matched enrichment (IGDB series/metadata, HLTB,
+    # OpenCritic/Metacritic): the cached values describe the old title. Clear those
+    # caches so background workers re-fetch under the new name. Field-level
+    # manual_overrides still protect any user-pinned columns at write time.
+    enrichment_invalidated: list[str] = []
+    if "name" in fields and fields["name"] != row["name"]:
+        enrichment_invalidated = await invalidate_name_derived_enrichment(
+            resolved_id, overrides
+        )
+
     # Tags feed the taste profile; recompute so recommendations reflect the edit.
     if "tags" in fields:
         await recompute_tag_affinity()
@@ -294,4 +309,5 @@ async def update_game(
         "updated": updated,
         "cleared": clear,
         "manual_overrides": sorted(overrides),
+        "enrichment_invalidated": enrichment_invalidated,
     }

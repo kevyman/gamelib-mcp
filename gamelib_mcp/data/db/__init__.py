@@ -1297,6 +1297,7 @@ from .claims import (  # noqa: E402
     _claim_ids,
     clear_claim,
     clear_all_enrichment_claims,
+    invalidate_name_derived_enrichment,
     release_game_claim,
     claim_game_ids_for_igdb,
     claim_game_ids_for_hltb,
@@ -1350,4 +1351,5 @@ from .fuzzy import (  # noqa: E402
     load_fuzzy_candidates,
     find_game_by_name_fuzzy,
     find_conflicting_fuzzy_key,
+    titles_conflict_on_identity,
 )
