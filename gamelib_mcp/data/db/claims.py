@@ -40,6 +40,65 @@ async def release_game_claim(game_id: int, column: str) -> None:
     await clear_claim("games", column, game_id)
 
 
+# Providers whose enrichment is keyed on the game's *name*. When a game is
+# renamed the cached values describe the old title, so they must be re-fetched.
+# (Steam store/SteamSpy/ProtonDB are keyed on steam_appid, not name, so they are
+# deliberately left alone.)
+_HLTB_OVERRIDE_COLUMNS = frozenset({"hltb_main", "hltb_extra", "hltb_complete"})
+
+
+async def invalidate_name_derived_enrichment(
+    game_id: int, overrides: Iterable[str] = (),
+) -> list[str]:
+    """Clear name-matched enrichment caches so background workers re-fetch under
+    a game's new title. Call this after renaming a game.
+
+    IGDB (series + shared genres/tags/release_date) and the OpenCritic/Metacritic
+    critic scores are always re-claimed; field-level ``manual_overrides`` still
+    protect any user-pinned columns at write time. HLTB is skipped when all of its
+    durations are manually overridden, since a re-fetch could not change them.
+
+    Returns the list of providers invalidated.
+    """
+    overrides = set(overrides)
+    invalidated: list[str] = ["igdb"]
+    async with get_db() as db:
+        # IGDB — name-matched; drives series and shared cross-platform metadata.
+        await db.execute(
+            "UPDATE games SET igdb_cached_at = NULL, igdb_claimed_at = NULL WHERE id = ?",
+            (game_id,),
+        )
+        # Drop existing IGDB series memberships too: upsert_game_series_links is
+        # add-only, so without this a title renamed into a different collection/
+        # franchise would keep its old series alongside the new one. The backfill
+        # worker repopulates the correct memberships when it re-fetches.
+        await db.execute(
+            "DELETE FROM game_series_membership WHERE game_id = ?",
+            (game_id,),
+        )
+        # HLTB — name-matched; pointless to re-fetch if the user pinned every duration.
+        if not _HLTB_OVERRIDE_COLUMNS <= overrides:
+            await db.execute(
+                "UPDATE games SET hltb_cached_at = NULL, hltb_claimed_at = NULL WHERE id = ?",
+                (game_id,),
+            )
+            invalidated.append("hltb")
+        # OpenCritic + Metacritic — name-matched critic scores on every platform
+        # enrichment row for this game.
+        await db.execute(
+            """UPDATE game_platform_enrichment
+                  SET opencritic_cached_at = NULL, opencritic_claimed_at = NULL,
+                      metacritic_cached_at = NULL, metacritic_claimed_at = NULL
+                WHERE game_platform_id IN (
+                    SELECT id FROM game_platforms WHERE game_id = ?
+                )""",
+            (game_id,),
+        )
+        invalidated.extend(["opencritic", "metacritic"])
+        await db.commit()
+    return invalidated
+
+
 async def _claim_ids(
     select_sql: str,
     select_params: tuple,

@@ -227,6 +227,32 @@ class FuzzyIdentityRegressionTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    def test_titles_conflict_on_identity_cases(self) -> None:
+        conflict = db_fuzzy.titles_conflict_on_identity
+        # Base title vs numbered sequel — the original Xenoblade bug.
+        self.assertTrue(conflict("Xenoblade Chronicles", "Xenoblade Chronicles 2"))
+        # Roman numeral and its Arabic form are the same entry.
+        self.assertFalse(conflict("Final Fantasy VII", "Final Fantasy 7"))
+        # "Switch 2 Edition" (with and without "Nintendo") is not a sequel number.
+        self.assertFalse(
+            conflict(
+                "Xenoblade Chronicles: Definitive Edition - Nintendo Switch 2 Edition",
+                "Xenoblade Chronicles",
+            )
+        )
+        self.assertFalse(conflict("Zelda: Echoes of Wisdom - Switch 2 Edition", "Zelda: Echoes of Wisdom"))
+        self.assertTrue(
+            conflict(
+                "Xenoblade Chronicles: Definitive Edition - Nintendo Switch 2 Edition",
+                "Xenoblade Chronicles 2",
+            )
+        )
+        # Platform tags carry numbers but are not series identity.
+        self.assertFalse(conflict("God of War Ragnarok PS5", "God of War Ragnarok PS4"))
+        # Annualized titles whose version is fused into a token stay distinct.
+        self.assertTrue(conflict("NBA 2K24", "NBA 2K25"))
+        self.assertFalse(conflict("NBA 2K24", "NBA 2K24"))
+
 
 class MetacriticRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_enrich_metacritic_prefers_platform_specific_url(self) -> None:

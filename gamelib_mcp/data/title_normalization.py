@@ -23,6 +23,10 @@ _TRAILING_VARIANT_PATTERNS = (
     re.compile(r"\s*\((?:PlayStation ?5|PS5)\)\s*$", re.IGNORECASE),
     re.compile(r"\s*-\s*Nintendo Switch 2 Edition\s*$", re.IGNORECASE),
     re.compile(r"\s+Nintendo Switch 2 Edition\s*$", re.IGNORECASE),
+    # Bare "Switch 2 Edition" (no "Nintendo") — strip so its "2" is not mistaken
+    # for a sequel number during identity matching.
+    re.compile(r"\s*-\s*Switch 2 Edition\s*$", re.IGNORECASE),
+    re.compile(r"\s+Switch 2 Edition\s*$", re.IGNORECASE),
     re.compile(r"\s+for Nintendo Switch\s*$", re.IGNORECASE),
     re.compile(r"\s+GOTY Edition\s*$", re.IGNORECASE),
     re.compile(r"\s+Game of the Year Edition\s*$", re.IGNORECASE),
