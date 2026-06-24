@@ -23,6 +23,22 @@ _ROMAN_TO_ARABIC = {
     "x": "10",
 }
 
+# Digit-bearing tokens that denote *hardware*, not a series entry. Ignored so
+# "God of War PS5" and "God of War PS4" are recognized as the same game while
+# genuine version tokens (e.g. "2k24") are still kept.
+_PLATFORM_IDENTITY_TAGS = {
+    "ps1",
+    "ps2",
+    "ps3",
+    "ps4",
+    "ps5",
+    "x360",
+    "xbox360",
+    "n64",
+    "3ds",
+    "switch2",
+}
+
 
 def _sequel_identity_tokens(value: str) -> set[str]:
     """Return the numbers that distinguish entries within a series.
@@ -30,15 +46,18 @@ def _sequel_identity_tokens(value: str) -> set[str]:
     Edition/platform decorations (e.g. "Definitive Edition", "Nintendo Switch 2
     Edition") are stripped first via ``normalize_catalog_title`` so a marketing
     number — like the "2" in "Switch 2 Edition" — never reads as a sequel number.
-    Only pure-digit and Roman-numeral tokens count as identity (Roman normalized
-    to Arabic); platform tags such as "PS5" are deliberately ignored.
+    A token counts as identity when it is a Roman numeral (normalized to Arabic)
+    or contains a digit (so embedded version markers like "2k24" are preserved);
+    known platform tags such as "PS5" are deliberately ignored.
     """
     tokens = normalize_search_text(normalize_catalog_title(value)).split()
     identity: set[str] = set()
     for token in tokens:
+        if token in _PLATFORM_IDENTITY_TAGS:
+            continue
         if token in _ROMAN_TO_ARABIC:
             identity.add(_ROMAN_TO_ARABIC[token])
-        elif token.isdigit():
+        elif any(char.isdigit() for char in token):
             identity.add(token)
     return identity
 

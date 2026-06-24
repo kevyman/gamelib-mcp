@@ -249,6 +249,9 @@ class FuzzyIdentityRegressionTests(unittest.IsolatedAsyncioTestCase):
         )
         # Platform tags carry numbers but are not series identity.
         self.assertFalse(conflict("God of War Ragnarok PS5", "God of War Ragnarok PS4"))
+        # Annualized titles whose version is fused into a token stay distinct.
+        self.assertTrue(conflict("NBA 2K24", "NBA 2K25"))
+        self.assertFalse(conflict("NBA 2K24", "NBA 2K24"))
 
 
 class MetacriticRegressionTests(unittest.IsolatedAsyncioTestCase):

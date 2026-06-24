@@ -68,6 +68,14 @@ async def invalidate_name_derived_enrichment(
             "UPDATE games SET igdb_cached_at = NULL, igdb_claimed_at = NULL WHERE id = ?",
             (game_id,),
         )
+        # Drop existing IGDB series memberships too: upsert_game_series_links is
+        # add-only, so without this a title renamed into a different collection/
+        # franchise would keep its old series alongside the new one. The backfill
+        # worker repopulates the correct memberships when it re-fetches.
+        await db.execute(
+            "DELETE FROM game_series_membership WHERE game_id = ?",
+            (game_id,),
+        )
         # HLTB — name-matched; pointless to re-fetch if the user pinned every duration.
         if not _HLTB_OVERRIDE_COLUMNS <= overrides:
             await db.execute(

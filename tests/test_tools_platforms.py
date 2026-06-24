@@ -348,6 +348,24 @@ class UpdateGameRenameReenrichTests(ToolDBTestCase):
         caches = await self._caches(gid)
         self.assertTrue(all(v is None for v in caches.values()), caches)
 
+    async def test_rename_clears_stale_series_memberships(self):
+        gid = await self._seed_enriched("Xenoblade Chronicles 2")
+        await db_module.upsert_game_series_links(
+            gid, [("collection", 5, "Old Series"), ("franchise", 6, "Old Franchise")]
+        )
+        await platforms.update_game(
+            game_id=gid, new_name="Xenoblade Chronicles: Definitive Edition"
+        )
+        # Memberships are dropped so re-enrichment can repopulate cleanly; the
+        # shared game_series rows themselves remain.
+        async with db_module.get_db() as db:
+            members = await db.execute_fetchone(
+                "SELECT COUNT(*) AS c FROM game_series_membership WHERE game_id = ?", (gid,)
+            )
+            series = await db.execute_fetchone("SELECT COUNT(*) AS c FROM game_series")
+        self.assertEqual(members["c"], 0)
+        self.assertEqual(series["c"], 2)
+
     async def test_rename_skips_hltb_when_all_durations_pinned(self):
         gid = await self._seed_enriched("Old Title")
         # Pin every HLTB duration in the same edit as the rename.
