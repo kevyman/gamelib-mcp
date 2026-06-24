@@ -83,6 +83,7 @@ EXPECTED_NAMES = {
     "extract_best_fuzzy_key",
     "load_fuzzy_candidates",
     "find_game_by_name_fuzzy",
+    "titles_conflict_on_identity",
     # platform assembly
     "load_platforms_for_games",
     "_platform_dict",

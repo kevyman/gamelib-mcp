@@ -1351,4 +1351,5 @@ from .fuzzy import (  # noqa: E402
     load_fuzzy_candidates,
     find_game_by_name_fuzzy,
     find_conflicting_fuzzy_key,
+    titles_conflict_on_identity,
 )

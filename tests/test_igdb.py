@@ -587,3 +587,56 @@ class IGDBBackfillTests(unittest.IsolatedAsyncioTestCase):
         mark_checked.assert_not_awaited()
         release_claim.assert_awaited_once_with(7, "igdb_claimed_at")
         self.assertTrue(any("IGDB backfill leaving game retryable" in line for line in logs.output))
+
+
+class ResolveGameIdentityTests(unittest.IsolatedAsyncioTestCase):
+    """resolve_game must never collapse a title onto a different series entry."""
+
+    def _game(self, igdb_id: int, name: str) -> "igdb.IGDBGame":
+        return igdb.IGDBGame(
+            igdb_id=igdb_id,
+            name=name,
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2020-05-29",
+        )
+
+    async def _resolve(self, query: str, candidate_names: list[str]):
+        candidates = [self._game(i + 1, n) for i, n in enumerate(candidate_names)]
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
+            patch(
+                "gamelib_mcp.data.igdb.search_game",
+                AsyncMock(return_value=candidates),
+            ),
+        ):
+            return await igdb.resolve_game(query, igdb.PLATFORM_TO_IGDB["switch2"])
+
+    async def test_rejects_when_every_candidate_is_a_different_sequel(self) -> None:
+        # The Definitive Edition isn't in IGDB's results; do not fall back to XC2.
+        result = await self._resolve(
+            "Xenoblade Chronicles",
+            ["Xenoblade Chronicles 2", "Xenoblade Chronicles 3"],
+        )
+        self.assertIsNone(result)
+
+    async def test_picks_identity_compatible_candidate_over_conflicting_top_hit(self) -> None:
+        # IGDB ranks XC2 first by relevance; the matcher must skip it.
+        result = await self._resolve(
+            "Xenoblade Chronicles",
+            ["Xenoblade Chronicles 2", "Xenoblade Chronicles: Definitive Edition"],
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result.name, "Xenoblade Chronicles: Definitive Edition")
+
+    async def test_switch2_edition_query_does_not_match_numbered_sequel(self) -> None:
+        # The "2" in "Switch 2 Edition" must not pull in "Xenoblade Chronicles 2".
+        result = await self._resolve(
+            "Xenoblade Chronicles: Definitive Edition - Nintendo Switch 2 Edition",
+            ["Xenoblade Chronicles 2"],
+        )
+        self.assertIsNone(result)
+
+    async def test_same_sequel_number_still_matches(self) -> None:
+        result = await self._resolve("Hitman 2", ["Hitman 2", "Hitman"])
+        self.assertIsNotNone(result)
+        self.assertEqual(result.name, "Hitman 2")
