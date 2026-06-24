@@ -518,12 +518,27 @@ async def resolve_game(
     if not results:
         return None
 
-    # Pick best name match
-    from .db import extract_best_fuzzy_key
-    choices = {i: g.name for i, g in enumerate(results)}
+    # Pick the best name match, but never collapse onto a different entry in the
+    # same series: "Xenoblade Chronicles" must not resolve to "Xenoblade
+    # Chronicles 2". Drop candidates whose sequel/version identity conflicts with
+    # the query before ranking.
+    from .db import extract_best_fuzzy_key, titles_conflict_on_identity
+
+    choices = {
+        i: g.name
+        for i, g in enumerate(results)
+        if not titles_conflict_on_identity(name, g.name)
+    }
+    if not choices:
+        # Every candidate disagrees on the sequel number — a confident wrong match
+        # is worse than none. Let the caller fall back to the normalized name.
+        return None
+
     best_idx = extract_best_fuzzy_key(name, choices, cutoff=70)
     if best_idx is None:
-        best_idx = 0  # take top result if fuzzy fails (IGDB ranked by relevance)
+        # Fuzzy was inconclusive; take IGDB's top *identity-compatible* relevance
+        # hit rather than forcing position 0 (which may be a conflicting entry).
+        best_idx = next(iter(choices))
 
     return results[best_idx]
 
