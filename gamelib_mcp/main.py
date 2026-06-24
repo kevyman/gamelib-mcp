@@ -29,6 +29,7 @@ from .tools.models import (
     HardwarePreferenceResponse,
     IntegrationStatusResponse,
     LibraryStatsResponse,
+    MergeGamesResponse,
     NintendoSessionResponse,
     PaginatedGamesResponse,
     PlatformBreakdownResponse,
@@ -514,6 +515,32 @@ async def update_game(
         is_farmed,
         clear_overrides,
     )
+
+
+@mcp.tool(annotations=MUTATION_TOOL)
+async def merge_games(
+    source_game_id: int,
+    target_game_id: int,
+    dry_run: bool = False,
+) -> MergeGamesResponse:
+    """
+    Merge a duplicate game row into a canonical one and delete the source.
+
+    Use this to consolidate duplicate library entries — for example a PSN
+    localized-name row that was ingested before the English title resolver
+    existed, alongside the correct English row. All platform ownership,
+    identifiers, enrichment, ratings, series memberships, and aliases are
+    transferred from source to target in one atomic transaction, then the
+    source game row is deleted.
+
+    When both games own the same platform the source playtime and last-played
+    are preserved if they are greater than the target's; platform identifiers
+    are re-pointed to the target row. Ratings that exist on both games keep
+    the target's value. Pass dry_run=True to preview what would change without
+    writing anything. Returns a summary dict with counts for each data type.
+    """
+    from .tools.admin import merge_games as _merge
+    return await _merge(source_game_id, target_game_id, dry_run)
 
 
 @mcp.tool(annotations=MUTATION_TOOL)

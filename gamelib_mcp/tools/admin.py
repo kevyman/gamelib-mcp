@@ -329,6 +329,200 @@ async def set_nintendo_pctl_session(response: str = "") -> dict:
     return {"status": "stored", "path": path}
 
 
+async def merge_games(
+    source_game_id: int,
+    target_game_id: int,
+    dry_run: bool = False,
+) -> dict:
+    """
+    Merge one game row into another and delete the source.
+
+    Transfers all platform ownership rows (re-pointing or merging into an
+    existing target platform), platform identifiers, enrichment, ratings, series
+    memberships, and game aliases from source to target in a single atomic
+    transaction. When both games own the same platform, identifiers are
+    re-pointed to the target row, playtime is set to the higher of the two
+    values, and the source platform row is deleted. Ratings for the same source
+    are kept on the target if already present; otherwise they are moved.
+
+    Use this to consolidate PSN/localized duplicate rows that were ingested
+    before the English title resolver existed. After merging, the source
+    game_id is deleted.
+
+    dry_run=True previews what would change without committing anything.
+    Returns a summary dict with moved/merged counts for each data type.
+    """
+    if source_game_id == target_game_id:
+        raise ToolError("source_game_id and target_game_id must differ")
+
+    async with get_db() as db:
+        source_row = await db.execute_fetchone(
+            "SELECT id, name FROM games WHERE id = ?", (source_game_id,)
+        )
+        target_row = await db.execute_fetchone(
+            "SELECT id, name FROM games WHERE id = ?", (target_game_id,)
+        )
+        if source_row is None:
+            raise ToolError(f"Source game {source_game_id} not found")
+        if target_row is None:
+            raise ToolError(f"Target game {target_game_id} not found")
+
+        source_platforms = await db.execute_fetchall(
+            "SELECT id, platform, playtime_minutes, owned, last_played FROM game_platforms WHERE game_id = ?",
+            (source_game_id,),
+        )
+
+        platforms_moved: list[str] = []
+        platforms_merged: list[str] = []
+
+        for sp in source_platforms:
+            sp_id: int = sp["id"]
+            platform: str = sp["platform"]
+            target_platform = await db.execute_fetchone(
+                "SELECT id, playtime_minutes, last_played FROM game_platforms WHERE game_id = ? AND platform = ?",
+                (target_game_id, platform),
+            )
+
+            if not dry_run:
+                if target_platform is None:
+                    await db.execute(
+                        "UPDATE game_platforms SET game_id = ? WHERE id = ?",
+                        (target_game_id, sp_id),
+                    )
+                    platforms_moved.append(platform)
+                else:
+                    tp_id: int = target_platform["id"]
+                    # Keep better playtime on target
+                    src_mins = sp["playtime_minutes"] or 0
+                    tgt_mins = target_platform["playtime_minutes"] or 0
+                    if src_mins > tgt_mins:
+                        await db.execute(
+                            "UPDATE game_platforms SET playtime_minutes = ? WHERE id = ?",
+                            (src_mins, tp_id),
+                        )
+                    # Keep most-recent last_played
+                    src_lp = sp["last_played"]
+                    tgt_lp = target_platform["last_played"]
+                    if src_lp and (not tgt_lp or src_lp > tgt_lp):
+                        await db.execute(
+                            "UPDATE game_platforms SET last_played = ? WHERE id = ?",
+                            (src_lp, tp_id),
+                        )
+                    # Move identifiers: UPDATE OR IGNORE keeps target row on unique conflict
+                    await db.execute(
+                        """UPDATE OR IGNORE game_platform_identifiers
+                              SET game_platform_id = ?
+                            WHERE game_platform_id = ?""",
+                        (tp_id, sp_id),
+                    )
+                    # Move enrichment only if target has none
+                    has_target_enrichment = await db.execute_fetchone(
+                        "SELECT 1 FROM game_platform_enrichment WHERE game_platform_id = ?",
+                        (tp_id,),
+                    )
+                    has_source_enrichment = await db.execute_fetchone(
+                        "SELECT 1 FROM game_platform_enrichment WHERE game_platform_id = ?",
+                        (sp_id,),
+                    )
+                    if has_source_enrichment and not has_target_enrichment:
+                        await db.execute(
+                            "UPDATE game_platform_enrichment SET game_platform_id = ? WHERE game_platform_id = ?",
+                            (tp_id, sp_id),
+                        )
+                    # Delete source platform row (cascade cleans remaining identifiers/enrichment/steam_platform_data)
+                    await db.execute("DELETE FROM game_platforms WHERE id = ?", (sp_id,))
+                    platforms_merged.append(platform)
+            else:
+                if target_platform is None:
+                    platforms_moved.append(platform)
+                else:
+                    platforms_merged.append(platform)
+
+        # Ratings — UNIQUE(game_id, source); keep target's if conflict
+        source_ratings = await db.execute_fetchall(
+            "SELECT source FROM ratings WHERE game_id = ?", (source_game_id,)
+        )
+        ratings_moved: list[str] = []
+        ratings_kept_target: list[str] = []
+
+        for r in source_ratings:
+            src = r["source"]
+            target_has = await db.execute_fetchone(
+                "SELECT id FROM ratings WHERE game_id = ? AND source = ?",
+                (target_game_id, src),
+            )
+            if not dry_run:
+                if target_has is None:
+                    await db.execute(
+                        "UPDATE ratings SET game_id = ? WHERE game_id = ? AND source = ?",
+                        (target_game_id, source_game_id, src),
+                    )
+                    ratings_moved.append(src)
+                else:
+                    await db.execute(
+                        "DELETE FROM ratings WHERE game_id = ? AND source = ?",
+                        (source_game_id, src),
+                    )
+                    ratings_kept_target.append(src)
+            else:
+                if target_has is None:
+                    ratings_moved.append(src)
+                else:
+                    ratings_kept_target.append(src)
+
+        # Series memberships
+        source_series = await db.execute_fetchall(
+            "SELECT series_id FROM game_series_membership WHERE game_id = ?",
+            (source_game_id,),
+        )
+        if not dry_run:
+            for s in source_series:
+                await db.execute(
+                    "INSERT OR IGNORE INTO game_series_membership (game_id, series_id) VALUES (?, ?)",
+                    (target_game_id, s["series_id"]),
+                )
+            await db.execute(
+                "DELETE FROM game_series_membership WHERE game_id = ?", (source_game_id,)
+            )
+
+        # Game aliases
+        source_aliases = await db.execute_fetchall(
+            "SELECT alias, alias_normalized, alias_type, source, source_key FROM game_aliases WHERE game_id = ?",
+            (source_game_id,),
+        )
+        if not dry_run:
+            for a in source_aliases:
+                await db.execute(
+                    """INSERT OR IGNORE INTO game_aliases
+                           (game_id, alias, alias_normalized, alias_type, source, source_key)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        target_game_id,
+                        a["alias"],
+                        a["alias_normalized"],
+                        a["alias_type"],
+                        a["source"],
+                        a["source_key"],
+                    ),
+                )
+            await db.execute("DELETE FROM game_aliases WHERE game_id = ?", (source_game_id,))
+            await db.execute("DELETE FROM games WHERE id = ?", (source_game_id,))
+            await db.commit()
+
+        return {
+            "dry_run": dry_run,
+            "source": {"game_id": source_game_id, "name": source_row["name"]},
+            "target": {"game_id": target_game_id, "name": target_row["name"]},
+            "platforms_moved": platforms_moved,
+            "platforms_merged": platforms_merged,
+            "ratings_moved": ratings_moved,
+            "ratings_kept_target": ratings_kept_target,
+            "series_memberships_transferred": len(source_series),
+            "aliases_transferred": len(source_aliases),
+            "source_deleted": not dry_run,
+        }
+
+
 async def detect_farmed_games(
     dry_run: bool = True,
     threshold_hours: float = 8.0,
