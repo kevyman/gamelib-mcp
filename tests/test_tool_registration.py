@@ -137,7 +137,7 @@ EXPECTED_ANNOTATIONS = {
     "set_nintendo_session": {"readOnlyHint": False, "idempotentHint": True},
     "set_nintendo_pctl_session": {"readOnlyHint": False, "idempotentHint": True},
     "update_game": {"readOnlyHint": False, "idempotentHint": True},
-    "merge_games": {"readOnlyHint": False, "idempotentHint": True},
+    "merge_games": {"readOnlyHint": False, "idempotentHint": False},
 }
 
 PAGINATED_OUTPUTS = {

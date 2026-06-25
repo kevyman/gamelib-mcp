@@ -379,7 +379,7 @@ async def merge_games(
             sp_id: int = sp["id"]
             platform: str = sp["platform"]
             target_platform = await db.execute_fetchone(
-                "SELECT id, playtime_minutes, last_played FROM game_platforms WHERE game_id = ? AND platform = ?",
+                "SELECT id, playtime_minutes, last_played, owned FROM game_platforms WHERE game_id = ? AND platform = ?",
                 (target_game_id, platform),
             )
 
@@ -407,6 +407,15 @@ async def merge_games(
                         await db.execute(
                             "UPDATE game_platforms SET last_played = ? WHERE id = ?",
                             (src_lp, tp_id),
+                        )
+                    # Don't silently drop ownership the source had (e.g. target was
+                    # a manual add_game_to_platform stub with owned=0).
+                    src_owned = sp["owned"]
+                    tgt_owned = target_platform["owned"] or 0
+                    if src_owned and not tgt_owned:
+                        await db.execute(
+                            "UPDATE game_platforms SET owned = 1 WHERE id = ?",
+                            (tp_id,),
                         )
                     # Move identifiers: UPDATE OR IGNORE keeps target row on unique conflict
                     await db.execute(
@@ -470,29 +479,43 @@ async def merge_games(
                 else:
                     ratings_kept_target.append(src)
 
-        # Series memberships
+        # Series memberships — count only rows actually transferred (the target
+        # may already share some), so both the live result and the dry-run
+        # preview reflect what INSERT OR IGNORE would really add.
         source_series = await db.execute_fetchall(
             "SELECT series_id FROM game_series_membership WHERE game_id = ?",
             (source_game_id,),
         )
-        if not dry_run:
-            for s in source_series:
-                await db.execute(
+        series_transferred = 0
+        for s in source_series:
+            if not dry_run:
+                cursor = await db.execute(
                     "INSERT OR IGNORE INTO game_series_membership (game_id, series_id) VALUES (?, ?)",
                     (target_game_id, s["series_id"]),
                 )
+                series_transferred += cursor.rowcount
+            else:
+                existing = await db.execute_fetchone(
+                    "SELECT 1 FROM game_series_membership WHERE game_id = ? AND series_id = ?",
+                    (target_game_id, s["series_id"]),
+                )
+                if existing is None:
+                    series_transferred += 1
+        if not dry_run:
             await db.execute(
                 "DELETE FROM game_series_membership WHERE game_id = ?", (source_game_id,)
             )
 
-        # Game aliases
+        # Game aliases — same accurate-count treatment. The dry-run check mirrors
+        # the idx_game_aliases_unique columns so a preview never over-reports.
         source_aliases = await db.execute_fetchall(
             "SELECT alias, alias_normalized, alias_type, source, source_key FROM game_aliases WHERE game_id = ?",
             (source_game_id,),
         )
-        if not dry_run:
-            for a in source_aliases:
-                await db.execute(
+        aliases_transferred = 0
+        for a in source_aliases:
+            if not dry_run:
+                cursor = await db.execute(
                     """INSERT OR IGNORE INTO game_aliases
                            (game_id, alias, alias_normalized, alias_type, source, source_key)
                            VALUES (?, ?, ?, ?, ?, ?)""",
@@ -505,22 +528,48 @@ async def merge_games(
                         a["source_key"],
                     ),
                 )
+                aliases_transferred += cursor.rowcount
+            else:
+                existing = await db.execute_fetchone(
+                    """SELECT 1 FROM game_aliases
+                        WHERE game_id = ? AND alias_normalized = ? AND alias_type = ?
+                          AND COALESCE(source, '') = COALESCE(?, '')
+                          AND COALESCE(source_key, '') = COALESCE(?, '')""",
+                    (
+                        target_game_id,
+                        a["alias_normalized"],
+                        a["alias_type"],
+                        a["source"],
+                        a["source_key"],
+                    ),
+                )
+                if existing is None:
+                    aliases_transferred += 1
+        if not dry_run:
             await db.execute("DELETE FROM game_aliases WHERE game_id = ?", (source_game_id,))
             await db.execute("DELETE FROM games WHERE id = ?", (source_game_id,))
             await db.commit()
 
-        return {
-            "dry_run": dry_run,
-            "source": {"game_id": source_game_id, "name": source_row["name"]},
-            "target": {"game_id": target_game_id, "name": target_row["name"]},
-            "platforms_moved": platforms_moved,
-            "platforms_merged": platforms_merged,
-            "ratings_moved": ratings_moved,
-            "ratings_kept_target": ratings_kept_target,
-            "series_memberships_transferred": len(source_series),
-            "aliases_transferred": len(source_aliases),
-            "source_deleted": not dry_run,
-        }
+    # Moving ratings shifts which games feed the taste profile, so recompute tag
+    # affinity the same way rate_game/sync_ratings do — otherwise discover_games
+    # ranks on stale scores until the next background pass. Outside the db
+    # context manager since recompute opens its own connection.
+    if not dry_run and (ratings_moved or ratings_kept_target):
+        from ..data.db import recompute_tag_affinity
+        await recompute_tag_affinity()
+
+    return {
+        "dry_run": dry_run,
+        "source": {"game_id": source_game_id, "name": source_row["name"]},
+        "target": {"game_id": target_game_id, "name": target_row["name"]},
+        "platforms_moved": platforms_moved,
+        "platforms_merged": platforms_merged,
+        "ratings_moved": ratings_moved,
+        "ratings_kept_target": ratings_kept_target,
+        "series_memberships_transferred": series_transferred,
+        "aliases_transferred": aliases_transferred,
+        "source_deleted": not dry_run,
+    }
 
 
 async def detect_farmed_games(

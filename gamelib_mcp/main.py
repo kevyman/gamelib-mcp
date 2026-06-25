@@ -53,6 +53,9 @@ READ_ONLY_TOOL = ToolAnnotations(readOnlyHint=True, idempotentHint=True)
 FARM_DETECTION_TOOL = ToolAnnotations(destructiveHint=False, idempotentHint=True)
 NETWORK_SYNC_TOOL = ToolAnnotations(readOnlyHint=False, idempotentHint=True, openWorldHint=True)
 MUTATION_TOOL = ToolAnnotations(readOnlyHint=False, idempotentHint=True)
+# merge_games deletes the source row, so a repeat call with the same source
+# errors ("not found") rather than being a no-op — explicitly non-idempotent.
+NON_IDEMPOTENT_MUTATION_TOOL = ToolAnnotations(readOnlyHint=False, idempotentHint=False)
 
 mcp = FastMCP(
     name="game-library",
@@ -517,7 +520,7 @@ async def update_game(
     )
 
 
-@mcp.tool(annotations=MUTATION_TOOL)
+@mcp.tool(annotations=NON_IDEMPOTENT_MUTATION_TOOL)
 async def merge_games(
     source_game_id: int,
     target_game_id: int,

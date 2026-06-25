@@ -401,6 +401,16 @@ class PsnHelperTests(unittest.TestCase):
         self.assertFalse(psn._is_probably_non_latin("The Rogue Prince of Persia"))
         self.assertFalse(psn._is_probably_non_latin("NieR: Automata"))
 
+    def test_is_probably_non_latin_covers_non_cjk_scripts(self) -> None:
+        # Cyrillic, Arabic, Hebrew, Thai — locales outside CJK that also fork
+        # localized-name duplicates without resolution.
+        self.assertTrue(psn._is_probably_non_latin("Ведьмак 3"))  # Cyrillic
+        self.assertTrue(psn._is_probably_non_latin("بريق الشمس"))  # Arabic
+        self.assertTrue(psn._is_probably_non_latin("שדים"))  # Hebrew
+        self.assertTrue(psn._is_probably_non_latin("เกม"))  # Thai
+        # Latin-with-accents must still read as Latin (no false positives).
+        self.assertFalse(psn._is_probably_non_latin("Pokémon Légends"))
+
 
 if __name__ == "__main__":
     unittest.main()

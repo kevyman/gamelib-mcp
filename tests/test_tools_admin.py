@@ -467,3 +467,114 @@ class MergeGamesTests(ToolDBTestCase):
         self.assertEqual(set(result.keys()), expected_keys)
         self.assertEqual(result["source"]["game_id"], src)
         self.assertEqual(result["target"]["game_id"], tgt)
+
+    async def test_owned_propagated_when_merging_into_unowned_target(self):
+        src = await seed_game("PSN English Synced")
+        tgt = await seed_game("Manual Stub")
+        await add_platform(src, "ps5", playtime_minutes=90, owned=1)
+        await add_platform(tgt, "ps5", playtime_minutes=0, owned=0)
+
+        await admin.merge_games(src, tgt)
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT owned FROM game_platforms WHERE game_id = ? AND platform = ?",
+                (tgt, "ps5"),
+            )
+        self.assertEqual(row["owned"], 1)
+
+    async def test_series_count_excludes_entries_target_already_has(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        async with db_module.get_db() as db:
+            await db.execute(
+                "INSERT INTO game_series (kind, igdb_id, name) VALUES ('collection', 7, 'Shared')"
+            )
+            shared = await db.execute_fetchone("SELECT id FROM game_series WHERE igdb_id = 7")
+            # both source and target already belong to the shared series
+            await db.execute(
+                "INSERT INTO game_series_membership (game_id, series_id) VALUES (?, ?)",
+                (src, shared["id"]),
+            )
+            await db.execute(
+                "INSERT INTO game_series_membership (game_id, series_id) VALUES (?, ?)",
+                (tgt, shared["id"]),
+            )
+            await db.commit()
+
+        result = await admin.merge_games(src, tgt)
+        # target already had the only series — nothing new transferred
+        self.assertEqual(result["series_memberships_transferred"], 0)
+
+    async def test_dry_run_series_count_excludes_shared(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        async with db_module.get_db() as db:
+            await db.execute(
+                "INSERT INTO game_series (kind, igdb_id, name) VALUES ('collection', 8, 'A')"
+            )
+            await db.execute(
+                "INSERT INTO game_series (kind, igdb_id, name) VALUES ('collection', 9, 'B')"
+            )
+            a = await db.execute_fetchone("SELECT id FROM game_series WHERE igdb_id = 8")
+            b = await db.execute_fetchone("SELECT id FROM game_series WHERE igdb_id = 9")
+            # source in both A and B; target already in A
+            await db.execute(
+                "INSERT INTO game_series_membership (game_id, series_id) VALUES (?, ?)",
+                (src, a["id"]),
+            )
+            await db.execute(
+                "INSERT INTO game_series_membership (game_id, series_id) VALUES (?, ?)",
+                (src, b["id"]),
+            )
+            await db.execute(
+                "INSERT INTO game_series_membership (game_id, series_id) VALUES (?, ?)",
+                (tgt, a["id"]),
+            )
+            await db.commit()
+
+        result = await admin.merge_games(src, tgt, dry_run=True)
+        # only B would actually be inserted
+        self.assertEqual(result["series_memberships_transferred"], 1)
+
+    async def test_aliases_count_excludes_entries_target_already_has(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        await add_game_alias(src, "Shared Alias", alias_type="edition")
+        await add_game_alias(tgt, "Shared Alias", alias_type="edition")
+
+        result = await admin.merge_games(src, tgt)
+        self.assertEqual(result["aliases_transferred"], 0)
+
+    async def test_tag_affinity_recomputed_after_rating_move(self):
+        src = await seed_game("Source", tags=["roguelike"])
+        tgt = await seed_game("Target", tags=["roguelike"])
+        await add_rating(src, "backloggd", 9.0, 9.0)
+
+        with patch(
+            "gamelib_mcp.data.db.recompute_tag_affinity", AsyncMock()
+        ) as mock_recompute:
+            await admin.merge_games(src, tgt)
+        mock_recompute.assert_awaited_once()
+
+    async def test_tag_affinity_not_recomputed_without_ratings(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        await add_platform(src, "ps5", playtime_minutes=10)
+
+        with patch(
+            "gamelib_mcp.data.db.recompute_tag_affinity", AsyncMock()
+        ) as mock_recompute:
+            await admin.merge_games(src, tgt)
+        mock_recompute.assert_not_awaited()
+
+    async def test_dry_run_does_not_recompute_affinity(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        await add_rating(src, "backloggd", 7.0, 7.0)
+
+        with patch(
+            "gamelib_mcp.data.db.recompute_tag_affinity", AsyncMock()
+        ) as mock_recompute:
+            await admin.merge_games(src, tgt, dry_run=True)
+        mock_recompute.assert_not_awaited()

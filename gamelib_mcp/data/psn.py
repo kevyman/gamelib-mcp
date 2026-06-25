@@ -37,10 +37,20 @@ logger = logging.getLogger(__name__)
 # dependent) display name PSN returns.
 PSN_TITLE_ID = "psn_title_id"
 
-# CJK / fullwidth ranges — the PSN gamelist endpoint returns titles in the
+# Non-Latin script ranges — the PSN gamelist endpoint returns titles in the
 # account's system language, so some come back localized (e.g. Chinese). Those
-# can't fuzzy-match the English library, which spawns duplicate rows.
-_NON_LATIN_RE = re.compile(r"[　-ヿ㐀-鿿가-힯＀-￯]")
+# can't fuzzy-match the English library, which spawns duplicate rows. Covers CJK,
+# Kana, Hangul, and fullwidth forms plus Cyrillic/Arabic/Hebrew/Thai so non-CJK
+# locales are resolved too (the English lookup degrades gracefully on failure).
+_NON_LATIN_RE = re.compile(
+    "["
+    "　-ヿ㐀-鿿가-힯＀-￯"  # CJK / Kana / Hangul / fullwidth
+    "Ѐ-ӿ"  # Cyrillic
+    "؀-ۿ"  # Arabic
+    "֐-׿"  # Hebrew
+    "฀-๿"  # Thai
+    "]"
+)
 
 
 def _is_probably_non_latin(name: str) -> bool:
