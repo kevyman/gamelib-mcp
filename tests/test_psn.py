@@ -315,5 +315,102 @@ class SyncPsnSyncTests(unittest.TestCase):
         mock_repair.assert_not_awaited()
 
 
+class FetchPsnEnglishResolutionTests(unittest.TestCase):
+    def _run_fetch(self, entries, game_title=None):
+        mock_client = MagicMock()
+        mock_client.title_stats.return_value = iter(entries)
+        mock_psnawp = MagicMock()
+        mock_psnawp.me.return_value = mock_client
+        if game_title is not None:
+            mock_psnawp.game_title.return_value = game_title
+        with patch("gamelib_mcp.data.psn._get_psnawp", return_value=mock_psnawp):
+            return _run_async(psn.fetch_psn_library()), mock_psnawp
+
+    def test_non_latin_name_resolved_to_english(self) -> None:
+        gt = MagicMock()
+        gt.get_details.return_value = [{"name": "Hogwarts Legacy"}]
+        result, mock_psnawp = self._run_fetch(
+            [_make_entry("霍格沃茨之遗", title_id="PPSA01")], game_title=gt
+        )
+        self.assertEqual(result[0]["name"], "Hogwarts Legacy")
+        self.assertEqual(result[0]["title_id"], "PPSA01")
+        mock_psnawp.game_title.assert_called_once()
+
+    def test_latin_name_skips_lookup_and_keeps_title_id(self) -> None:
+        result, mock_psnawp = self._run_fetch([_make_entry("Elden Ring", title_id="PPSA02")])
+        self.assertEqual(result[0]["name"], "Elden Ring")
+        self.assertEqual(result[0]["title_id"], "PPSA02")
+        mock_psnawp.game_title.assert_not_called()
+
+    def test_lookup_failure_keeps_original_name(self) -> None:
+        result, _ = self._run_fetch(
+            [_make_entry("霍格沃茨之遗", title_id="PPSA03")],
+            game_title=MagicMock(get_details=MagicMock(side_effect=Exception("api down"))),
+        )
+        self.assertEqual(result[0]["name"], "霍格沃茨之遗")
+
+    def test_empty_details_keeps_original_name(self) -> None:
+        gt = MagicMock()
+        gt.get_details.return_value = []
+        result, _ = self._run_fetch([_make_entry("波斯王子", title_id="PPSA04")], game_title=gt)
+        self.assertEqual(result[0]["name"], "波斯王子")
+
+
+class PsnTitleIdMatchingTests(unittest.TestCase):
+    def test_existing_title_id_matches_without_fuzzy_resolution(self) -> None:
+        entries = [{"name": "Hogwarts Legacy", "title_id": "PPSA10", "playtime_minutes": 30}]
+        mock_resolve = AsyncMock(return_value=(99, None))
+        mock_get_by_id = AsyncMock(return_value={"id": 5})
+        mock_upsert_id = AsyncMock()
+        with (
+            patch.dict("os.environ", {"PSN_NPSSO": "fake"}, clear=False),
+            patch("gamelib_mcp.data.psn.fetch_psn_library", AsyncMock(return_value=entries)),
+            patch("gamelib_mcp.data.psn.load_fuzzy_candidates", AsyncMock(return_value={})),
+            patch("gamelib_mcp.data.psn.get_game_by_identifier", mock_get_by_id),
+            patch("gamelib_mcp.data.psn.resolve_and_link_game", mock_resolve),
+            patch("gamelib_mcp.data.psn.upsert_game_platform", AsyncMock(return_value=77)),
+            patch("gamelib_mcp.data.psn.upsert_game_platform_identifier", mock_upsert_id),
+        ):
+            result = _run_async(psn.sync_psn())
+        mock_get_by_id.assert_awaited_once_with(psn.PSN_TITLE_ID, "PPSA10")
+        mock_resolve.assert_not_awaited()  # stable id short-circuits fuzzy matching
+        self.assertEqual(result["matched"], 1)
+        mock_upsert_id.assert_awaited_once_with(77, psn.PSN_TITLE_ID, "PPSA10")
+
+    def test_first_ingest_stores_title_id(self) -> None:
+        entries = [{"name": "New PS5 Game", "title_id": "PPSA11", "playtime_minutes": 10}]
+        mock_upsert_id = AsyncMock()
+        with (
+            patch.dict("os.environ", {"PSN_NPSSO": "fake"}, clear=False),
+            patch("gamelib_mcp.data.psn.fetch_psn_library", AsyncMock(return_value=entries)),
+            patch("gamelib_mcp.data.psn.load_fuzzy_candidates", AsyncMock(return_value={})),
+            patch("gamelib_mcp.data.psn.get_game_by_identifier", AsyncMock(return_value=None)),
+            patch("gamelib_mcp.data.psn.resolve_and_link_game", AsyncMock(return_value=(42, None))),
+            patch("gamelib_mcp.data.psn.upsert_game_platform", AsyncMock(return_value=88)),
+            patch("gamelib_mcp.data.psn.upsert_game_platform_identifier", mock_upsert_id),
+        ):
+            result = _run_async(psn.sync_psn())
+        self.assertEqual(result["added"], 1)
+        mock_upsert_id.assert_awaited_once_with(88, psn.PSN_TITLE_ID, "PPSA11")
+
+
+class PsnHelperTests(unittest.TestCase):
+    def test_is_probably_non_latin(self) -> None:
+        self.assertTrue(psn._is_probably_non_latin("霍格沃茨之遗"))
+        self.assertTrue(psn._is_probably_non_latin("波斯王子:Rogue"))
+        self.assertFalse(psn._is_probably_non_latin("The Rogue Prince of Persia"))
+        self.assertFalse(psn._is_probably_non_latin("NieR: Automata"))
+
+    def test_is_probably_non_latin_covers_non_cjk_scripts(self) -> None:
+        # Cyrillic, Arabic, Hebrew, Thai — locales outside CJK that also fork
+        # localized-name duplicates without resolution.
+        self.assertTrue(psn._is_probably_non_latin("Ведьмак 3"))  # Cyrillic
+        self.assertTrue(psn._is_probably_non_latin("بريق الشمس"))  # Arabic
+        self.assertTrue(psn._is_probably_non_latin("שדים"))  # Hebrew
+        self.assertTrue(psn._is_probably_non_latin("เกม"))  # Thai
+        # Latin-with-accents must still read as Latin (no false positives).
+        self.assertFalse(psn._is_probably_non_latin("Pokémon Légends"))
+
+
 if __name__ == "__main__":
     unittest.main()

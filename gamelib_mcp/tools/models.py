@@ -206,3 +206,16 @@ class UpdateGameResponse(FlexibleModel):
     updated: dict[str, Any]
     cleared: list[str]
     manual_overrides: list[str]
+
+
+class MergeGamesResponse(FlexibleModel):
+    dry_run: bool
+    source: dict[str, Any]
+    target: dict[str, Any]
+    platforms_moved: list[str]
+    platforms_merged: list[str]
+    ratings_moved: list[str]
+    ratings_kept_target: list[str]
+    series_memberships_transferred: int
+    aliases_transferred: int
+    source_deleted: bool

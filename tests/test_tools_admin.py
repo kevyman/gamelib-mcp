@@ -10,7 +10,15 @@ import json
 from fastmcp.exceptions import ToolError
 from unittest.mock import AsyncMock, patch
 
-from conftest import ToolDBTestCase, make_steam_game
+from conftest import (
+    ToolDBTestCase,
+    add_game_alias,
+    add_identifier,
+    add_platform,
+    add_rating,
+    make_steam_game,
+    seed_game,
+)
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.db import get_meta, set_meta_many
 from gamelib_mcp.tools import admin
@@ -257,3 +265,316 @@ class GetSyncStatusTests(ToolDBTestCase):
         self.assertEqual(status["platforms"]["gog"]["state"], "running")
         self.assertEqual(status["platforms"]["ps5"]["state"], "error")
         self.assertEqual(status["platforms"]["ps5"]["error"], "refresh token rejected")
+
+
+class MergeGamesTests(ToolDBTestCase):
+    async def test_same_id_raises_tool_error(self):
+        gid = await seed_game("Solo")
+        with self.assertRaisesRegex(ToolError, "must differ"):
+            await admin.merge_games(gid, gid)
+
+    async def test_missing_source_raises_tool_error(self):
+        gid = await seed_game("Target")
+        with self.assertRaisesRegex(ToolError, "not found"):
+            await admin.merge_games(99999, gid)
+
+    async def test_missing_target_raises_tool_error(self):
+        gid = await seed_game("Source")
+        with self.assertRaisesRegex(ToolError, "not found"):
+            await admin.merge_games(gid, 99999)
+
+    async def test_platform_moved_when_target_lacks_it(self):
+        src = await seed_game("PSN Localized")
+        tgt = await seed_game("Real English")
+        sp_id = await add_platform(src, "ps5", playtime_minutes=120)
+        await add_identifier(sp_id, "psn_title_id", "PPSA12345_00")
+
+        result = await admin.merge_games(src, tgt)
+
+        self.assertEqual(result["platforms_moved"], ["ps5"])
+        self.assertEqual(result["platforms_merged"], [])
+        self.assertTrue(result["source_deleted"])
+
+        # source game gone; target now has ps5
+        async with db_module.get_db() as db:
+            src_row = await db.execute_fetchone("SELECT id FROM games WHERE id = ?", (src,))
+            self.assertIsNone(src_row)
+            tgt_plat = await db.execute_fetchone(
+                "SELECT playtime_minutes FROM game_platforms WHERE game_id = ? AND platform = ?",
+                (tgt, "ps5"),
+            )
+        self.assertIsNotNone(tgt_plat)
+        self.assertEqual(tgt_plat["playtime_minutes"], 120)
+
+        # identifier re-pointed to target
+        async with db_module.get_db() as db:
+            ident = await db.execute_fetchone(
+                """SELECT gp.game_id
+                     FROM game_platform_identifiers gpi
+                     JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+                    WHERE gpi.identifier_value = 'PPSA12345_00'""",
+            )
+        self.assertEqual(ident["game_id"], tgt)
+
+    async def test_platform_merged_keeps_higher_playtime(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        await add_platform(src, "ps5", playtime_minutes=200)
+        await add_platform(tgt, "ps5", playtime_minutes=50)
+
+        result = await admin.merge_games(src, tgt)
+
+        self.assertEqual(result["platforms_merged"], ["ps5"])
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT playtime_minutes FROM game_platforms WHERE game_id = ? AND platform = ?",
+                (tgt, "ps5"),
+            )
+        self.assertEqual(row["playtime_minutes"], 200)
+
+    async def test_platform_merged_keeps_target_playtime_when_higher(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        await add_platform(src, "ps5", playtime_minutes=30)
+        await add_platform(tgt, "ps5", playtime_minutes=150)
+
+        await admin.merge_games(src, tgt)
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT playtime_minutes FROM game_platforms WHERE game_id = ? AND platform = ?",
+                (tgt, "ps5"),
+            )
+        self.assertEqual(row["playtime_minutes"], 150)
+
+    async def test_ratings_moved_when_target_lacks_source(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        await add_rating(src, "backloggd", 8.0, 8.0)
+
+        result = await admin.merge_games(src, tgt)
+
+        self.assertEqual(result["ratings_moved"], ["backloggd"])
+        self.assertEqual(result["ratings_kept_target"], [])
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT game_id FROM ratings WHERE source = 'backloggd'",
+            )
+        self.assertEqual(row["game_id"], tgt)
+
+    async def test_ratings_kept_target_on_conflict(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        await add_rating(src, "backloggd", 6.0, 6.0)
+        await add_rating(tgt, "backloggd", 9.0, 9.0)
+
+        result = await admin.merge_games(src, tgt)
+
+        self.assertEqual(result["ratings_kept_target"], ["backloggd"])
+        # target's rating survives
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT raw_score FROM ratings WHERE game_id = ? AND source = 'backloggd'",
+                (tgt,),
+            )
+        self.assertEqual(row["raw_score"], 9.0)
+
+    async def test_series_memberships_transferred(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        async with db_module.get_db() as db:
+            await db.execute(
+                "INSERT INTO game_series (kind, igdb_id, name) VALUES ('collection', 42, 'Test Series')"
+            )
+            series_row = await db.execute_fetchone(
+                "SELECT id FROM game_series WHERE igdb_id = 42"
+            )
+            await db.execute(
+                "INSERT INTO game_series_membership (game_id, series_id) VALUES (?, ?)",
+                (src, series_row["id"]),
+            )
+            await db.commit()
+
+        result = await admin.merge_games(src, tgt)
+
+        self.assertEqual(result["series_memberships_transferred"], 1)
+        async with db_module.get_db() as db:
+            membership = await db.execute_fetchone(
+                "SELECT game_id FROM game_series_membership WHERE series_id = ?",
+                (series_row["id"],),
+            )
+        self.assertEqual(membership["game_id"], tgt)
+
+    async def test_aliases_transferred(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        await add_game_alias(src, "Source Alt", alias_type="edition")
+
+        result = await admin.merge_games(src, tgt)
+
+        self.assertEqual(result["aliases_transferred"], 1)
+        async with db_module.get_db() as db:
+            alias = await db.execute_fetchone(
+                "SELECT game_id FROM game_aliases WHERE alias = 'Source Alt'",
+            )
+        self.assertEqual(alias["game_id"], tgt)
+
+    async def test_source_deleted_after_merge(self):
+        src = await seed_game("Duplicate PSN Row")
+        tgt = await seed_game("English Title")
+        await add_platform(src, "ps5", playtime_minutes=60)
+
+        await admin.merge_games(src, tgt)
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone("SELECT id FROM games WHERE id = ?", (src,))
+        self.assertIsNone(row)
+
+    async def test_dry_run_makes_no_changes(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        await add_platform(src, "ps5", playtime_minutes=100)
+        await add_rating(src, "backloggd", 7.0, 7.0)
+
+        result = await admin.merge_games(src, tgt, dry_run=True)
+
+        self.assertTrue(result["dry_run"])
+        self.assertFalse(result["source_deleted"])
+        self.assertEqual(result["platforms_moved"], ["ps5"])
+        self.assertEqual(result["ratings_moved"], ["backloggd"])
+
+        # nothing actually changed
+        async with db_module.get_db() as db:
+            src_row = await db.execute_fetchone("SELECT id FROM games WHERE id = ?", (src,))
+            src_plat = await db.execute_fetchone(
+                "SELECT id FROM game_platforms WHERE game_id = ?", (src,)
+            )
+        self.assertIsNotNone(src_row)
+        self.assertIsNotNone(src_plat)
+
+    async def test_response_shape(self):
+        src = await seed_game("PSN Dup")
+        tgt = await seed_game("English")
+        result = await admin.merge_games(src, tgt)
+        expected_keys = {
+            "dry_run", "source", "target",
+            "platforms_moved", "platforms_merged",
+            "ratings_moved", "ratings_kept_target",
+            "series_memberships_transferred", "aliases_transferred",
+            "source_deleted",
+        }
+        self.assertEqual(set(result.keys()), expected_keys)
+        self.assertEqual(result["source"]["game_id"], src)
+        self.assertEqual(result["target"]["game_id"], tgt)
+
+    async def test_owned_propagated_when_merging_into_unowned_target(self):
+        src = await seed_game("PSN English Synced")
+        tgt = await seed_game("Manual Stub")
+        await add_platform(src, "ps5", playtime_minutes=90, owned=1)
+        await add_platform(tgt, "ps5", playtime_minutes=0, owned=0)
+
+        await admin.merge_games(src, tgt)
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT owned FROM game_platforms WHERE game_id = ? AND platform = ?",
+                (tgt, "ps5"),
+            )
+        self.assertEqual(row["owned"], 1)
+
+    async def test_series_count_excludes_entries_target_already_has(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        async with db_module.get_db() as db:
+            await db.execute(
+                "INSERT INTO game_series (kind, igdb_id, name) VALUES ('collection', 7, 'Shared')"
+            )
+            shared = await db.execute_fetchone("SELECT id FROM game_series WHERE igdb_id = 7")
+            # both source and target already belong to the shared series
+            await db.execute(
+                "INSERT INTO game_series_membership (game_id, series_id) VALUES (?, ?)",
+                (src, shared["id"]),
+            )
+            await db.execute(
+                "INSERT INTO game_series_membership (game_id, series_id) VALUES (?, ?)",
+                (tgt, shared["id"]),
+            )
+            await db.commit()
+
+        result = await admin.merge_games(src, tgt)
+        # target already had the only series — nothing new transferred
+        self.assertEqual(result["series_memberships_transferred"], 0)
+
+    async def test_dry_run_series_count_excludes_shared(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        async with db_module.get_db() as db:
+            await db.execute(
+                "INSERT INTO game_series (kind, igdb_id, name) VALUES ('collection', 8, 'A')"
+            )
+            await db.execute(
+                "INSERT INTO game_series (kind, igdb_id, name) VALUES ('collection', 9, 'B')"
+            )
+            a = await db.execute_fetchone("SELECT id FROM game_series WHERE igdb_id = 8")
+            b = await db.execute_fetchone("SELECT id FROM game_series WHERE igdb_id = 9")
+            # source in both A and B; target already in A
+            await db.execute(
+                "INSERT INTO game_series_membership (game_id, series_id) VALUES (?, ?)",
+                (src, a["id"]),
+            )
+            await db.execute(
+                "INSERT INTO game_series_membership (game_id, series_id) VALUES (?, ?)",
+                (src, b["id"]),
+            )
+            await db.execute(
+                "INSERT INTO game_series_membership (game_id, series_id) VALUES (?, ?)",
+                (tgt, a["id"]),
+            )
+            await db.commit()
+
+        result = await admin.merge_games(src, tgt, dry_run=True)
+        # only B would actually be inserted
+        self.assertEqual(result["series_memberships_transferred"], 1)
+
+    async def test_aliases_count_excludes_entries_target_already_has(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        await add_game_alias(src, "Shared Alias", alias_type="edition")
+        await add_game_alias(tgt, "Shared Alias", alias_type="edition")
+
+        result = await admin.merge_games(src, tgt)
+        self.assertEqual(result["aliases_transferred"], 0)
+
+    async def test_tag_affinity_recomputed_after_rating_move(self):
+        src = await seed_game("Source", tags=["roguelike"])
+        tgt = await seed_game("Target", tags=["roguelike"])
+        await add_rating(src, "backloggd", 9.0, 9.0)
+
+        with patch(
+            "gamelib_mcp.data.db.recompute_tag_affinity", AsyncMock()
+        ) as mock_recompute:
+            await admin.merge_games(src, tgt)
+        mock_recompute.assert_awaited_once()
+
+    async def test_tag_affinity_not_recomputed_without_ratings(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        await add_platform(src, "ps5", playtime_minutes=10)
+
+        with patch(
+            "gamelib_mcp.data.db.recompute_tag_affinity", AsyncMock()
+        ) as mock_recompute:
+            await admin.merge_games(src, tgt)
+        mock_recompute.assert_not_awaited()
+
+    async def test_dry_run_does_not_recompute_affinity(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        await add_rating(src, "backloggd", 7.0, 7.0)
+
+        with patch(
+            "gamelib_mcp.data.db.recompute_tag_affinity", AsyncMock()
+        ) as mock_recompute:
+            await admin.merge_games(src, tgt, dry_run=True)
+        mock_recompute.assert_not_awaited()
