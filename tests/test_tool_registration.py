@@ -109,6 +109,10 @@ EXPECTED_TOOLS = {
         },
         "required": set(),
     },
+    "merge_games": {
+        "params": {"source_game_id", "target_game_id", "dry_run"},
+        "required": {"source_game_id", "target_game_id"},
+    },
 }
 
 EXPECTED_ANNOTATIONS = {
@@ -133,6 +137,7 @@ EXPECTED_ANNOTATIONS = {
     "set_nintendo_session": {"readOnlyHint": False, "idempotentHint": True},
     "set_nintendo_pctl_session": {"readOnlyHint": False, "idempotentHint": True},
     "update_game": {"readOnlyHint": False, "idempotentHint": True},
+    "merge_games": {"readOnlyHint": False, "idempotentHint": False},
 }
 
 PAGINATED_OUTPUTS = {
@@ -153,9 +158,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_21(self):
+    async def test_tool_count_is_22(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 21)
+        self.assertEqual(len(tools), 22)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()
