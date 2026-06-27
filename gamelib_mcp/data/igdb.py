@@ -59,6 +59,21 @@ def _merge_igdb_tags(existing: list[str], igdb_tags: list[str]) -> list[str]:
 
 _TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 _IGDB_GAMES_URL = "https://api.igdb.com/v4/games"
+_IGDB_EXTERNAL_GAMES_URL = "https://api.igdb.com/v4/external_games"
+
+# IGDB external_games.category for storefront identifier lookups.
+IGDB_EXTERNAL_CATEGORY_STEAM = 1
+
+
+def igdb_credentials_configured() -> bool:
+    """True only when both IGDB/Twitch credentials are present.
+
+    ``_get_token()`` requires client id *and* secret and raises EnvironmentError
+    otherwise, so any caller that gates on "is IGDB configured" must check both —
+    a half-configured env (id set, secret missing) must read as unconfigured
+    rather than crash.
+    """
+    return bool(os.environ.get("TWITCH_CLIENT_ID") and os.environ.get("TWITCH_CLIENT_SECRET"))
 
 # IGDB platform IDs
 IGDB_PLATFORM_PC = 6
@@ -342,7 +357,9 @@ def _should_retry(exc: Exception) -> bool:
     return isinstance(exc, (httpx.TimeoutException, httpx.TransportError))
 
 
-async def _post_igdb_games(query: str, headers: dict[str, str]) -> list[dict]:
+async def _post_igdb_games(
+    query: str, headers: dict[str, str], url: str = _IGDB_GAMES_URL
+) -> list[dict]:
     last_error: Exception | None = None
 
     for attempt in range(_IGDB_MAX_RETRIES + 1):
@@ -350,7 +367,7 @@ async def _post_igdb_games(query: str, headers: dict[str, str]) -> list[dict]:
             async with _IGDB_REQUEST_GATE:
                 async with httpx.AsyncClient(timeout=_IGDB_REQUEST_TIMEOUT_SECONDS) as client:
                     resp = await client.post(
-                        _IGDB_GAMES_URL,
+                        url,
                         content=query,
                         headers=headers,
                     )
@@ -868,3 +885,70 @@ async def backfill_missing_games(limit: int = 10) -> int:
             await release_game_claim(game_id, "igdb_claimed_at")
 
     return processed
+
+
+def _igdb_headers(client_id: str, token: str) -> dict[str, str]:
+    return {
+        "Client-ID": client_id,
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "text/plain",
+    }
+
+
+def _chunked(items: list, size: int):
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
+async def resolve_steam_appids_to_igdb(appids: list[str]) -> dict[str, int]:
+    """Map Steam appids to the IGDB game id IGDB associates with each.
+
+    Uses IGDB's external_games endpoint (the authoritative store→game mapping) so a
+    caller can tell whether a Steam platform row really belongs to the game its
+    library row claims to be. Returns {appid: igdb_game_id} for appids IGDB knows;
+    unknown appids are simply omitted. Returns {} if IGDB is unconfigured.
+    """
+    client_id = os.environ.get("TWITCH_CLIENT_ID")
+    if not igdb_credentials_configured() or not appids:
+        return {}
+
+    unique = [str(a) for a in dict.fromkeys(appids)]
+    token = await _get_token()
+    headers = _igdb_headers(client_id, token)
+
+    result: dict[str, int] = {}
+    for chunk in _chunked(unique, 100):
+        uid_list = ", ".join(f'"{_escape_igdb_search_term(a)}"' for a in chunk)
+        query = (
+            f"fields game, uid; "
+            f"where category = {IGDB_EXTERNAL_CATEGORY_STEAM} & uid = ({uid_list}); "
+            f"limit 500;"
+        )
+        rows = await _post_igdb_games(query, headers, url=_IGDB_EXTERNAL_GAMES_URL)
+        for row in rows:
+            uid = row.get("uid")
+            game = row.get("game")
+            if uid is not None and game is not None:
+                result[str(uid)] = game
+    return result
+
+
+async def fetch_igdb_game_names(igdb_ids: list[int]) -> dict[int, str]:
+    """Return {igdb_game_id: name} for the given IGDB game ids (for display)."""
+    client_id = os.environ.get("TWITCH_CLIENT_ID")
+    ids = [i for i in dict.fromkeys(igdb_ids) if i is not None]
+    if not igdb_credentials_configured() or not ids:
+        return {}
+
+    token = await _get_token()
+    headers = _igdb_headers(client_id, token)
+
+    names: dict[int, str] = {}
+    for chunk in _chunked(ids, 100):
+        id_list = ", ".join(str(i) for i in chunk)
+        query = f"fields id, name; where id = ({id_list}); limit 500;"
+        rows = await _post_igdb_games(query, headers)
+        for row in rows:
+            if row.get("id") is not None and row.get("name"):
+                names[row["id"]] = row["name"]
+    return names

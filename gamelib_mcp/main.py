@@ -25,6 +25,7 @@ from .tools.models import (
     AddGameToPlatformResponse,
     BacklogStatsResponse,
     DetectCollapsedGamesResponse,
+    DetectCrossPlatformCollapsesResponse,
     DetectFarmedGamesResponse,
     GameDetailResponse,
     HardwarePreferenceResponse,
@@ -39,6 +40,7 @@ from .tools.models import (
     RefreshLibraryResponse,
     SearchGamesBatchResponse,
     SeriesBreakdownResponse,
+    SplitGameResponse,
     SyncRatingsResponse,
     SyncStatusResponse,
     TasteProfileResponse,
@@ -435,6 +437,51 @@ async def detect_collapsed_games() -> DetectCollapsedGamesResponse:
     """
     from .tools.admin import detect_collapsed_games as _detect_collapsed
     return await _detect_collapsed()
+
+
+@mcp.tool(annotations=NETWORK_SYNC_TOOL)
+async def detect_cross_platform_collapses(limit: int = 0) -> DetectCrossPlatformCollapsesResponse:
+    """
+    Find games that merged two *different* editions across platforms by name.
+
+    Unlike detect_collapsed_games (which finds one platform row holding multiple
+    store IDs), this catches the cross-platform case — e.g. a single "Dead Space"
+    whose Steam appid is the 2008 original while its PS5 entry is the 2023 remake.
+    For each multi-platform game that has a Steam appid and a stored IGDB id, it
+    asks IGDB which game that appid really is; when that disagrees with the row's
+    IGDB id, the row is flagged. Read-only (queries IGDB; no writes). Resolve a
+    flagged row with split_game. limit caps how many games are checked (0 = all).
+    Returns checked/collapsed counts and the candidate list.
+    """
+    from .tools.admin import detect_cross_platform_collapses as _detect_xplat
+    return await _detect_xplat(limit)
+
+
+@mcp.tool(annotations=NON_IDEMPOTENT_MUTATION_TOOL)
+async def split_game(
+    source_game_id: int,
+    platform: str,
+    identifier_values: list[str],
+    new_name: str | None = None,
+    dry_run: bool = False,
+) -> SplitGameResponse:
+    """
+    Split store identifiers off an over-merged game into a new game (inverse of merge_games).
+
+    Use after detect_collapsed_games / detect_cross_platform_collapses to undo a
+    bad merge. Peels the given identifier_values (on platform) out of
+    source_game_id onto a freshly created game. If the values are all the
+    identifiers on that platform row, the whole row is re-pointed (carrying
+    enrichment and playtime); otherwise a new platform row is created and only
+    those identifiers move, with playtime re-populating on the next sync.
+
+    Pass a distinct new_name (e.g. "Dead Space (2023)") so the new game does not
+    re-resolve onto the source's identity. Ratings and the source's game-level
+    fields stay on the source. dry_run=True previews without writing. Returns the
+    new game id and what moved.
+    """
+    from .tools.admin import split_game as _split
+    return await _split(source_game_id, platform, identifier_values, new_name, dry_run)
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)
