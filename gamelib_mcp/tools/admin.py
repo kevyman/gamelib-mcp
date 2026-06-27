@@ -844,9 +844,13 @@ async def detect_cross_platform_collapses(limit: int = 0) -> dict:
     against the row's ``igdb_id`` means the Steam side does not belong here. Pure
     read (queries IGDB, no writes); resolve a hit with ``split_game``.
     """
-    from ..data.igdb import fetch_igdb_game_names, resolve_steam_appids_to_igdb
+    from ..data.igdb import (
+        fetch_igdb_game_names,
+        igdb_credentials_configured,
+        resolve_steam_appids_to_igdb,
+    )
 
-    igdb_configured = bool(os.environ.get("TWITCH_CLIENT_ID"))
+    igdb_configured = igdb_credentials_configured()
 
     async with get_db() as db:
         rows = await db.execute_fetchall(

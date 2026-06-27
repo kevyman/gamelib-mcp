@@ -64,6 +64,17 @@ _IGDB_EXTERNAL_GAMES_URL = "https://api.igdb.com/v4/external_games"
 # IGDB external_games.category for storefront identifier lookups.
 IGDB_EXTERNAL_CATEGORY_STEAM = 1
 
+
+def igdb_credentials_configured() -> bool:
+    """True only when both IGDB/Twitch credentials are present.
+
+    ``_get_token()`` requires client id *and* secret and raises EnvironmentError
+    otherwise, so any caller that gates on "is IGDB configured" must check both —
+    a half-configured env (id set, secret missing) must read as unconfigured
+    rather than crash.
+    """
+    return bool(os.environ.get("TWITCH_CLIENT_ID") and os.environ.get("TWITCH_CLIENT_SECRET"))
+
 # IGDB platform IDs
 IGDB_PLATFORM_PC = 6
 IGDB_PLATFORM_PS5 = 167
@@ -898,7 +909,7 @@ async def resolve_steam_appids_to_igdb(appids: list[str]) -> dict[str, int]:
     unknown appids are simply omitted. Returns {} if IGDB is unconfigured.
     """
     client_id = os.environ.get("TWITCH_CLIENT_ID")
-    if not client_id or not appids:
+    if not igdb_credentials_configured() or not appids:
         return {}
 
     unique = [str(a) for a in dict.fromkeys(appids)]
@@ -926,7 +937,7 @@ async def fetch_igdb_game_names(igdb_ids: list[int]) -> dict[int, str]:
     """Return {igdb_game_id: name} for the given IGDB game ids (for display)."""
     client_id = os.environ.get("TWITCH_CLIENT_ID")
     ids = [i for i in dict.fromkeys(igdb_ids) if i is not None]
-    if not client_id or not ids:
+    if not igdb_credentials_configured() or not ids:
         return {}
 
     token = await _get_token()

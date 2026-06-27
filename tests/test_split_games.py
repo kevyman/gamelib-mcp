@@ -138,7 +138,7 @@ class DetectCrossPlatformCollapsesTests(ToolDBTestCase):
         game_id = await self._multi_platform_steam_game("Dead Space", 17470, 999)
 
         with (
-            patch.dict(os.environ, {"TWITCH_CLIENT_ID": "x"}),
+            patch.dict(os.environ, {"TWITCH_CLIENT_ID": "x", "TWITCH_CLIENT_SECRET": "y"}),
             patch(
                 "gamelib_mcp.data.igdb.resolve_steam_appids_to_igdb",
                 AsyncMock(return_value={"17470": 222}),
@@ -163,7 +163,7 @@ class DetectCrossPlatformCollapsesTests(ToolDBTestCase):
         await self._multi_platform_steam_game("Resident Evil 2", 883710, 555)
 
         with (
-            patch.dict(os.environ, {"TWITCH_CLIENT_ID": "x"}),
+            patch.dict(os.environ, {"TWITCH_CLIENT_ID": "x", "TWITCH_CLIENT_SECRET": "y"}),
             patch(
                 "gamelib_mcp.data.igdb.resolve_steam_appids_to_igdb",
                 AsyncMock(return_value={"883710": 555}),
@@ -182,6 +182,17 @@ class DetectCrossPlatformCollapsesTests(ToolDBTestCase):
         await self._multi_platform_steam_game("Dead Space", 17470, 999)
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TWITCH_CLIENT_ID", None)
+            os.environ.pop("TWITCH_CLIENT_SECRET", None)
             result = await admin.detect_cross_platform_collapses()
         self.assertFalse(result["igdb_configured"])
         self.assertEqual(result["checked"], 0)
+
+    async def test_partial_credentials_read_as_unconfigured(self):
+        # Client id set but secret missing must not crash (_get_token needs both).
+        await self._multi_platform_steam_game("Dead Space", 17470, 999)
+        with patch.dict(os.environ, {"TWITCH_CLIENT_ID": "x"}, clear=False):
+            os.environ.pop("TWITCH_CLIENT_SECRET", None)
+            result = await admin.detect_cross_platform_collapses()
+        self.assertFalse(result["igdb_configured"])
+        self.assertEqual(result["checked"], 0)
+        self.assertEqual(result["candidates"], [])
