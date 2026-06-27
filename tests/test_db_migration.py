@@ -865,6 +865,44 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(games[3]["igdb_cached_at"])
         self.assertEqual(games[2]["igdb_cached_at"], "2026-01-01")
 
+    async def test_v14_to_v15_repairs_self_referencing_parent(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V12_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 14")
+        # 1: orphaned self-referencing edition -> promoted back to primary.
+        conn.execute(
+            "INSERT INTO games (id, name, content_type, parent_game_id, is_primary_library_item) "
+            "VALUES (1, 'The House in Fata Morgana', 'edition', 1, 0)"
+        )
+        # 2: genuine nested edition with a distinct parent -> left untouched.
+        conn.execute("INSERT INTO games (id, name) VALUES (2, 'Base Game')")
+        conn.execute(
+            "INSERT INTO games (id, name, content_type, parent_game_id, is_primary_library_item) "
+            "VALUES (3, 'Base Game: Deluxe', 'edition', 2, 0)"
+        )
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+            async with db_module.get_db() as db:
+                version = await db_module._get_user_version(db)
+                rows = {
+                    row["id"]: row
+                    for row in await db.execute_fetchall(
+                        "SELECT id, parent_game_id, is_primary_library_item FROM games"
+                    )
+                }
+
+        self.assertEqual(version, db_module.SCHEMA_VERSION)
+        # Self-referencing row is repaired: parent cleared, promoted to primary.
+        self.assertIsNone(rows[1]["parent_game_id"])
+        self.assertEqual(rows[1]["is_primary_library_item"], 1)
+        # Legitimate nested edition with a distinct parent is left alone.
+        self.assertEqual(rows[3]["parent_game_id"], 2)
+        self.assertEqual(rows[3]["is_primary_library_item"], 0)
+
     async def test_v9_to_v10_adds_series_tables(self) -> None:
         conn = sqlite3.connect(self.db_path)
         conn.executescript(db_module._V9_SCHEMA_DDL)
