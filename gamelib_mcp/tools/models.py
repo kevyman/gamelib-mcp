@@ -224,3 +224,22 @@ class MergeGamesResponse(FlexibleModel):
     series_memberships_transferred: int
     aliases_transferred: int
     source_deleted: bool
+
+
+class SplitGameResponse(FlexibleModel):
+    dry_run: bool
+    source_game_id: int
+    source_name: str
+    new_game_id: int | None
+    new_name: str
+    platform: str
+    identifiers_moved: list[str]
+    moved_whole_platform: bool
+    identifiers_remaining_on_source: list[str]
+
+
+class DetectCrossPlatformCollapsesResponse(FlexibleModel):
+    checked: int
+    collapsed_count: int
+    candidates: list[dict[str, Any]]
+    igdb_configured: bool
