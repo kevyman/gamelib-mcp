@@ -202,7 +202,9 @@ async def sync_psn() -> dict:
             matched += 1
         else:
             conflicting_game_id = find_conflicting_fuzzy_key(name, candidates)
-            game_id, igdb_game = await resolve_and_link_game(name, igdb_platform_id, candidates)
+            game_id, igdb_game = await resolve_and_link_game(
+                name, igdb_platform_id, candidates, platform="ps5"
+            )
             if game_id in candidates:
                 matched += 1
             else:

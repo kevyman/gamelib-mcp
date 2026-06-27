@@ -27,6 +27,7 @@ from bs4 import BeautifulSoup
 
 from gamelib_mcp.data.db import (
     find_conflicting_fuzzy_key,
+    get_game_by_identifier,
     load_fuzzy_candidates,
     repair_misclassified_platform_row,
     upsert_game_platform,
@@ -442,23 +443,38 @@ async def _sync_nintendo_ownership() -> dict:
     candidates = await load_fuzzy_candidates()
 
     for entry, name in prepared_entries:
-        conflicting_game_id = find_conflicting_fuzzy_key(name, candidates)
         igdb_platform_id = PLATFORM_TO_IGDB.get(PLATFORM)
-        game_id, igdb_game = await resolve_and_link_game(name, igdb_platform_id, candidates)
-        if game_id in candidates:
+        title_id = entry.get("title_id")
+
+        # Prefer the stable Nintendo application id so a re-sync matches the existing
+        # game directly; name/fuzzy resolution (which now refuses to attach onto an
+        # existing switch2-owning row) is reserved for genuinely new titles.
+        existing = (
+            await get_game_by_identifier(NINTENDO_TITLE_ID, title_id) if title_id else None
+        )
+        if existing is not None:
+            game_id = existing["id"]
+            igdb_game = None
             matched += 1
         else:
-            candidates[game_id] = name
-            added += 1
+            conflicting_game_id = find_conflicting_fuzzy_key(name, candidates)
+            game_id, igdb_game = await resolve_and_link_game(
+                name, igdb_platform_id, candidates, platform=PLATFORM
+            )
+            if game_id in candidates:
+                matched += 1
+            else:
+                candidates[game_id] = name
+                added += 1
 
-        if conflicting_game_id is not None and conflicting_game_id != game_id:
-            conflicting_title = candidates.get(conflicting_game_id)
-            if conflicting_title and normalize_search_text(conflicting_title) not in current_titles:
-                await repair_misclassified_platform_row(
-                    source_game_id=conflicting_game_id,
-                    target_game_id=game_id,
-                    platform=PLATFORM,
-                )
+            if conflicting_game_id is not None and conflicting_game_id != game_id:
+                conflicting_title = candidates.get(conflicting_game_id)
+                if conflicting_title and normalize_search_text(conflicting_title) not in current_titles:
+                    await repair_misclassified_platform_row(
+                        source_game_id=conflicting_game_id,
+                        target_game_id=game_id,
+                        platform=PLATFORM,
+                    )
 
         platform_id = await upsert_game_platform(
             game_id=game_id,
