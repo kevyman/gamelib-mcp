@@ -74,6 +74,53 @@ class ApplyIgdbMetadataGuardTests(ToolDBTestCase):
         self.assertEqual(after["is_primary_library_item"], 0)
 
 
+    async def test_self_referential_parent_is_dropped_and_kept_primary(self) -> None:
+        # IGDB returns an "edition" whose parent name resolves back to this same
+        # row. We must not write parent_game_id = game_id (which would orphan the
+        # row from both search and its parent's editions list); instead drop the
+        # self-parent and keep it a primary library item.
+        game_id = await seed_game("The House in Fata Morgana")
+
+        await igdb._apply_igdb_metadata(
+            game_id,
+            igdb.IGDBGame(
+                igdb_id=3000,
+                name="The House in Fata Morgana",
+                category=0,
+                first_release_date=None,
+                content_type="edition",
+                parent_name="The House in Fata Morgana",
+                is_primary_library_item=False,
+            ),
+        )
+
+        after = await _read_classification(game_id)
+        self.assertIsNone(after["parent_game_id"])
+        self.assertEqual(after["is_primary_library_item"], 1)
+
+
+class UpsertGameSelfParentTests(ToolDBTestCase):
+    async def test_upsert_game_drops_self_referencing_parent(self) -> None:
+        game_id = await seed_game("Some Edition")
+
+        returned_id = await db_module.upsert_game(
+            appid=None,
+            name="Some Edition",
+            content_type="edition",
+            parent_game_id=game_id,
+            is_primary_library_item=0,
+        )
+
+        self.assertEqual(returned_id, game_id)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT parent_game_id, is_primary_library_item FROM games WHERE id = ?",
+                (game_id,),
+            )
+        self.assertIsNone(row["parent_game_id"])
+        self.assertEqual(row["is_primary_library_item"], 1)
+
+
 class ApplyIgdbMetadataTagUnionTests(ToolDBTestCase):
     async def test_igdb_tags_union_into_existing_steam_tags(self) -> None:
         # Existing (SteamSpy) tags must be kept, IGDB tags appended canonicalized,
