@@ -141,6 +141,13 @@ async def upsert_game(
             game_id = row["id"]
 
         updates = {"name": name, "name_normalized": normalize_search_text(name), **fields}
+        # Never persist a self-referencing parent: it would orphan the row from
+        # both search (the is_primary filter) and its parent's editions list. Drop
+        # the self-parent and keep the row a primary library item.
+        if updates.get("parent_game_id") == game_id:
+            updates["parent_game_id"] = None
+            if "is_primary_library_item" in updates:
+                updates["is_primary_library_item"] = 1
         cols_sql = ", ".join(f"{column} = ?" for column in updates)
         await db.execute(
             f"UPDATE games SET {cols_sql} WHERE id = ?",

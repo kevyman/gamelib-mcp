@@ -727,6 +727,15 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
         else:
             parent_game_id = await upsert_game(appid=None, name=igdb_game.parent_name)
 
+    # A parent that resolves back to this same row is not a real parent (IGDB
+    # occasionally lists an edition/version whose parent is the row itself). Writing
+    # parent_game_id = game_id would orphan the row: it is excluded from search/list
+    # (is_primary filter) yet unreachable as any other row's edition. Drop the
+    # self-parent and keep the row a primary library item.
+    self_referential_parent = parent_game_id == game_id
+    if self_referential_parent:
+        parent_game_id = None
+
     async with get_db() as db:
         row = await db.execute_fetchone(
             """SELECT tags,
@@ -775,8 +784,11 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
                 updates["content_type"] = igdb_game.content_type
             if parent_game_id is not None and "parent_game_id" not in overrides:
                 updates["parent_game_id"] = parent_game_id
+            # Without a real (distinct) parent a nested item has nowhere to be
+            # reached from, so a self-referential parent forces it to stay primary.
+            is_primary = igdb_game.is_primary_library_item or self_referential_parent
             if "is_primary_library_item" not in overrides:
-                updates["is_primary_library_item"] = int(igdb_game.is_primary_library_item)
+                updates["is_primary_library_item"] = int(is_primary)
 
         cols_sql = ", ".join(f"{col} = ?" for col in updates)
         await db.execute(

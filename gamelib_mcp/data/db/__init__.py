@@ -51,7 +51,7 @@ STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 
 @dataclass
@@ -998,6 +998,30 @@ async def _migrate_v13_to_v14(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v14_to_v15(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Repair self-referencing parent_game_id rows.
+
+    IGDB edition resolution could resolve a row's parent back to the row itself
+    (e.g. IGDB listed an edition/version whose parent is the same entry), writing
+    ``parent_game_id = id``. Such a row is a non-primary library item whose parent
+    points at itself, so it is excluded from search/list (which filter on
+    ``is_primary_library_item = 1``) yet is unreachable as any other row's edition
+    — an orphan that silently reads as "not owned". Clear the bogus self-parent
+    and promote these rows back to primary library items so they surface again.
+    Data-only; the ingest path now refuses to write a self-referencing parent.
+    """
+    if progress is not None:
+        progress("Migrating to v15: repair self-referencing parent_game_id rows.")
+
+    await db.execute(
+        "UPDATE games SET parent_game_id = NULL, is_primary_library_item = 1 "
+        "WHERE parent_game_id = id"
+    )
+
+    await _set_user_version(db, 15)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1211,6 +1235,11 @@ async def _run_migrations(
         _emit(progress, "Applying migration step v13 -> v14.", applied_steps)
         await _migrate_v13_to_v14(db, progress=None)
         version = 14
+
+    if version == 14:
+        _emit(progress, "Applying migration step v14 -> v15.", applied_steps)
+        await _migrate_v14_to_v15(db, progress=None)
+        version = 15
 
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
