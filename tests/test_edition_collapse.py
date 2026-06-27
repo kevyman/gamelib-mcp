@@ -92,6 +92,29 @@ class SteamBulkCollapseTests(ToolDBTestCase):
         by_game = await _steam_appids_by_game()
         self.assertEqual(by_game, {epic_game_id: ["400"]})
 
+    async def test_two_appids_dont_both_batch_onto_one_cross_platform_row(self):
+        # A Steam-less "Portal" exists (Epic) and a single sync chunk carries two
+        # distinct Portal appids. Only one may claim the cross-platform row; the
+        # other must fork its own game rather than collapse onto the same row.
+        epic_game_id = await seed_game("Portal")
+        await add_platform(epic_game_id, "epic")
+
+        await db_module.bulk_upsert_steam_library(
+            [
+                {"appid": 400, "name": "Portal", "playtime_minutes": 0},
+                {"appid": 401, "name": "Portal", "playtime_minutes": 0},
+            ],
+            _now(),
+        )
+
+        # One pre-existing Epic game + one brand-new game = two rows total.
+        self.assertEqual(await _game_count(), 2)
+        by_game = await _steam_appids_by_game()
+        self.assertEqual(len(by_game), 2)
+        # The lowest row_order appid (400) claims the Epic row; 401 forks a new game.
+        self.assertEqual(by_game[epic_game_id], ["400"])
+        self.assertEqual(sorted(sum(by_game.values(), [])), ["400", "401"])
+
     async def test_resync_is_idempotent(self):
         rows = [{"appid": 17470, "name": "Dead Space", "playtime_minutes": 30}]
         await db_module.bulk_upsert_steam_library(rows, _now())
@@ -130,6 +153,19 @@ class FuzzyGuardTests(ToolDBTestCase):
             "Dead Space", candidates=candidates, reference_release_date="2023-01-27"
         )
         self.assertIsNone(other_year)
+
+    async def test_year_filter_picks_matching_candidate_over_best_name_match(self):
+        # Both editions exist as separate rows. A 2023 cross-platform sync must
+        # resolve to the 2023 row, not return None because the 2008 row ranked first.
+        old = await seed_game("Dead Space", release_date="2008-10-13")
+        new = await seed_game("Dead Space", release_date="2023-01-27")
+        candidates = {old: "Dead Space", new: "Dead Space"}
+
+        matched = await db_module.find_game_by_name_fuzzy(
+            "Dead Space", candidates=candidates, reference_release_date="2023-01-27"
+        )
+        self.assertIsNotNone(matched)
+        self.assertEqual(matched["id"], new)
 
 
 class DetectCollapsedGamesTests(ToolDBTestCase):

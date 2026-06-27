@@ -374,41 +374,53 @@ async def bulk_upsert_steam_library(
             )
             row_offset += len(chunk)
 
-            # Resolve each appid ONCE, up front, into temp.resolved_game_id:
-            #   1. its own steam_appid identifier (a re-sync), else
-            #   2. an existing game of the same name that does NOT already own a Steam
-            #      row (a cross-platform attach onto an Epic/GOG/etc. entry).
-            # The steam-row guard is the anti-collapse fix: a second appid whose name
-            # is already taken by a Steam game is a distinct edition (Dead Space 2008
-            # vs 2023), not the same game, so it stays NULL and gets its own row below.
-            # Computing this once (rather than re-deriving it in each statement) keeps
-            # resolution stable even after the platform insert below adds Steam rows —
-            # otherwise the guard would start excluding rows it had just matched.
+            # Resolve each appid ONCE, up front, into temp.resolved_game_id, in two
+            # passes so resolution is stable across the later platform inserts (which
+            # add Steam rows the steam-row guard would otherwise start excluding):
+            #
+            #   Pass 1 — its own steam_appid identifier (a re-sync).
+            #   Pass 2 — for appids still unresolved, an existing same-name game that
+            #            does NOT already own a Steam row (a cross-platform attach onto
+            #            an Epic/GOG/etc. entry). Crucially only ONE appid per name may
+            #            claim that single Steam-less row (the lowest row_order); other
+            #            same-name appids stay NULL and get their own row below.
+            # The steam-row guard is the anti-collapse fix: a second appid whose name is
+            # already taken by a Steam game is a distinct edition (Dead Space 2008 vs
+            # 2023), not the same game, so it stays NULL.
             await db.execute(
                 """UPDATE temp_steam_library_sync AS t
-                   SET resolved_game_id = COALESCE(
-                       (
-                           SELECT gp.game_id
-                           FROM game_platform_identifiers gpi
-                           JOIN game_platforms gp ON gp.id = gpi.game_platform_id
-                           WHERE gpi.identifier_type = ?
-                             AND gpi.identifier_value = CAST(t.appid AS TEXT)
-                           LIMIT 1
-                       ),
-                       (
-                           SELECT g.id
-                           FROM games g
-                           WHERE lower(g.name) = lower(t.name)
-                             AND NOT EXISTS (
-                                 SELECT 1 FROM game_platforms gp_excl
-                                 WHERE gp_excl.game_id = g.id
-                                   AND gp_excl.platform = 'steam'
-                             )
-                           ORDER BY g.id
-                           LIMIT 1
-                       )
+                   SET resolved_game_id = (
+                       SELECT gp.game_id
+                       FROM game_platform_identifiers gpi
+                       JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+                       WHERE gpi.identifier_type = ?
+                         AND gpi.identifier_value = CAST(t.appid AS TEXT)
+                       LIMIT 1
                    )""",
                 (STEAM_APP_ID,),
+            )
+
+            await db.execute(
+                """UPDATE temp_steam_library_sync AS t
+                   SET resolved_game_id = (
+                       SELECT g.id
+                       FROM games g
+                       WHERE lower(g.name) = lower(t.name)
+                         AND NOT EXISTS (
+                             SELECT 1 FROM game_platforms gp_excl
+                             WHERE gp_excl.game_id = g.id
+                               AND gp_excl.platform = 'steam'
+                         )
+                       ORDER BY g.id
+                       LIMIT 1
+                   )
+                   WHERE t.resolved_game_id IS NULL
+                     AND t.row_order = (
+                         SELECT MIN(t2.row_order)
+                         FROM temp_steam_library_sync t2
+                         WHERE t2.resolved_game_id IS NULL
+                           AND lower(t2.name) = lower(t.name)
+                     )"""
             )
 
             await db.execute(

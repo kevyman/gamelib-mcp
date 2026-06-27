@@ -135,9 +135,11 @@ async def find_game_by_name_fuzzy(
     starts a new game rather than collapsing onto an existing one. Cross-platform
     matches are unaffected.
 
-    ``reference_release_date`` rejects an otherwise-good match when both it and the
-    matched row carry a release year and those years disagree — the signal that
-    separates same-named remakes (Dead Space 2008 vs 2023) that share no sequel number.
+    ``reference_release_date`` drops candidates whose release year disagrees with it
+    *before* ranking — the signal that separates same-named remakes (Dead Space 2008
+    vs 2023) that share no sequel number. Filtering before ranking (rather than
+    rejecting only the single best match) lets an equally-named candidate with the
+    matching year still win instead of forking a duplicate.
     """
     if candidates is None:
         candidates = await load_fuzzy_candidates()
@@ -147,6 +149,19 @@ async def find_game_by_name_fuzzy(
         if excluded:
             candidates = {gid: n for gid, n in candidates.items() if gid not in excluded}
 
+    if reference_release_date is not None and candidates:
+        ref_year = _release_year(reference_release_date)
+        if ref_year is not None:
+            async with get_db() as db:
+                rows = await db.execute_fetchall(
+                    "SELECT id FROM games "
+                    "WHERE release_date IS NOT NULL AND substr(release_date, 1, 4) <> ?",
+                    (f"{ref_year:04d}",),
+                )
+            conflicting = {row["id"] for row in rows}
+            if conflicting:
+                candidates = {gid: n for gid, n in candidates.items() if gid not in conflicting}
+
     best_id = extract_best_fuzzy_key(name, candidates, cutoff=cutoff)
     if best_id is None:
         return None
@@ -155,12 +170,4 @@ async def find_game_by_name_fuzzy(
         return None
 
     async with get_db() as db:
-        row = await db.execute_fetchone("SELECT * FROM games WHERE id = ?", (best_id,))
-
-    if row is not None and reference_release_date is not None:
-        ref_year = _release_year(reference_release_date)
-        row_year = _release_year(row["release_date"])
-        if ref_year is not None and row_year is not None and ref_year != row_year:
-            return None
-
-    return row
+        return await db.execute_fetchone("SELECT * FROM games WHERE id = ?", (best_id,))
