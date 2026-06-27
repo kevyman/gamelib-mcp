@@ -20,6 +20,7 @@ import httpx
 
 from gamelib_mcp.data.db import (
     EPIC_ARTIFACT_ID,
+    get_game_by_identifier,
     load_fuzzy_candidates,
     upsert_game_platform,
     upsert_game_alias,
@@ -328,12 +329,26 @@ async def sync_epic() -> dict:
 
         artifact_id = _extract_epic_artifact_id(game)
         igdb_platform_id = PLATFORM_TO_IGDB.get("epic")
-        game_id, igdb_game = await resolve_and_link_game(prepared_title, igdb_platform_id, candidates)
-        if game_id in candidates:
+
+        # Prefer the stable Epic artifact id: a re-sync matches the existing game
+        # directly so name/fuzzy resolution (which now refuses to attach onto an
+        # existing Epic-owning row) never re-creates it as a duplicate.
+        existing = (
+            await get_game_by_identifier(EPIC_ARTIFACT_ID, artifact_id) if artifact_id else None
+        )
+        if existing is not None:
+            game_id = existing["id"]
+            igdb_game = None
             matched += 1
         else:
-            candidates[game_id] = prepared_title
-            added += 1
+            game_id, igdb_game = await resolve_and_link_game(
+                prepared_title, igdb_platform_id, candidates, platform="epic"
+            )
+            if game_id in candidates:
+                matched += 1
+            else:
+                candidates[game_id] = prepared_title
+                added += 1
 
         if title != prepared_title:
             await upsert_game_alias(

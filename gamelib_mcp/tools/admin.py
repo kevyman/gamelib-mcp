@@ -665,3 +665,45 @@ async def detect_farmed_games(
         "dry_run": dry_run,
         "sample_games": sample,
     }
+
+
+async def detect_collapsed_games() -> dict:
+    """Surface games that were over-merged by name into a single row.
+
+    The fingerprint of an over-merge is one platform row carrying more than one
+    distinct store identifier of the same type — e.g. a single "Dead Space" game
+    holding two ``steam_appid`` values (the 2008 original and the 2023 remake).
+    Read-only: it lists candidates for manual review; cleanup is left to the user
+    (re-sync after the resolution fix, or a hand edit). No automatic split is
+    attempted because commingled playtime cannot be reliably re-attributed.
+    """
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            """SELECT g.id AS game_id,
+                      g.name,
+                      gp.platform,
+                      gpi.identifier_type,
+                      COUNT(DISTINCT gpi.identifier_value) AS identifier_count,
+                      GROUP_CONCAT(DISTINCT gpi.identifier_value) AS identifier_values
+               FROM games g
+               JOIN game_platforms gp ON gp.game_id = g.id
+               JOIN game_platform_identifiers gpi ON gpi.game_platform_id = gp.id
+               WHERE gpi.identifier_type IN
+                     ('steam_appid', 'epic_artifact_id', 'psn_title_id', 'nintendo_title_id')
+               GROUP BY gp.id, gpi.identifier_type
+               HAVING COUNT(DISTINCT gpi.identifier_value) > 1
+               ORDER BY identifier_count DESC, g.name""",
+        )
+
+    candidates = [
+        {
+            "game_id": row["game_id"],
+            "name": row["name"],
+            "platform": row["platform"],
+            "identifier_type": row["identifier_type"],
+            "identifier_count": row["identifier_count"],
+            "identifier_values": (row["identifier_values"] or "").split(","),
+        }
+        for row in rows
+    ]
+    return {"collapsed_count": len(candidates), "candidates": candidates}
