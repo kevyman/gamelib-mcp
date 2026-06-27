@@ -229,7 +229,9 @@ async def sync_nintendo_pctl() -> dict:
         name = prepare_catalog_title(info["app_name"] or application_id)
         if not name:
             continue
-        game_id, _igdb_game = await resolve_and_link_game(name, igdb_platform_id, candidates)
+        game_id, _igdb_game = await resolve_and_link_game(
+            name, igdb_platform_id, candidates, platform=PLATFORM
+        )
         candidates.setdefault(game_id, name)
         platform_id = await upsert_game_platform(
             game_id=game_id,

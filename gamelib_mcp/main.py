@@ -24,6 +24,7 @@ from .tools.integrations import get_integration_status as _filter_integration_st
 from .tools.models import (
     AddGameToPlatformResponse,
     BacklogStatsResponse,
+    DetectCollapsedGamesResponse,
     DetectFarmedGamesResponse,
     GameDetailResponse,
     HardwarePreferenceResponse,
@@ -419,6 +420,21 @@ async def detect_farmed_games(
     """
     from .tools.admin import detect_farmed_games as _detect
     return await _detect(dry_run, threshold_hours, min_games_per_day)
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL)
+async def detect_collapsed_games() -> DetectCollapsedGamesResponse:
+    """
+    Find library entries that were over-merged by name into a single game row.
+
+    The fingerprint is one game holding two or more distinct store identifiers of
+    the same type — e.g. a single "Dead Space" carrying both the 2008 and 2023
+    Steam appids. Use this to review duplicates that predate the edition/remake
+    resolution fix. Read-only: it only reports candidates; resolve them by
+    re-syncing or hand-editing. Returns a count and the candidate list.
+    """
+    from .tools.admin import detect_collapsed_games as _detect_collapsed
+    return await _detect_collapsed()
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)

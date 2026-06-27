@@ -97,14 +97,55 @@ async def load_fuzzy_candidates() -> dict[int, str]:
     return {row["id"]: row["name"] for row in rows}
 
 
+def _release_year(release_date: str | None) -> int | None:
+    """Extract a 4-digit year from a stored release_date (e.g. '2008-10-13')."""
+    if not release_date:
+        return None
+    head = release_date.strip()[:4]
+    return int(head) if head.isdigit() else None
+
+
+async def _game_ids_with_platform(platform: str) -> set[int]:
+    """Return game ids that already own a game_platforms row for ``platform``.
+
+    Queried live so it reflects rows created earlier in the same sync pass — two
+    distinct same-platform store entries with the same name therefore never
+    collapse onto each other.
+    """
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            "SELECT DISTINCT game_id FROM game_platforms WHERE platform = ?",
+            (platform,),
+        )
+    return {row["game_id"] for row in rows}
+
+
 async def find_game_by_name_fuzzy(
     name: str,
     cutoff: int = 85,
     candidates: dict[int, str] | None = None,
+    *,
+    exclude_platform: str | None = None,
+    reference_release_date: str | None = None,
 ) -> aiosqlite.Row | None:
-    """Return the best-matching games row for a given title, or None if below cutoff."""
+    """Return the best-matching games row for a given title, or None if below cutoff.
+
+    ``exclude_platform`` drops candidates that already own a row for that platform,
+    so a distinct same-platform store entry (e.g. a second "Dead Space" on Steam)
+    starts a new game rather than collapsing onto an existing one. Cross-platform
+    matches are unaffected.
+
+    ``reference_release_date`` rejects an otherwise-good match when both it and the
+    matched row carry a release year and those years disagree — the signal that
+    separates same-named remakes (Dead Space 2008 vs 2023) that share no sequel number.
+    """
     if candidates is None:
         candidates = await load_fuzzy_candidates()
+
+    if exclude_platform is not None:
+        excluded = await _game_ids_with_platform(exclude_platform)
+        if excluded:
+            candidates = {gid: n for gid, n in candidates.items() if gid not in excluded}
 
     best_id = extract_best_fuzzy_key(name, candidates, cutoff=cutoff)
     if best_id is None:
@@ -114,4 +155,12 @@ async def find_game_by_name_fuzzy(
         return None
 
     async with get_db() as db:
-        return await db.execute_fetchone("SELECT * FROM games WHERE id = ?", (best_id,))
+        row = await db.execute_fetchone("SELECT * FROM games WHERE id = ?", (best_id,))
+
+    if row is not None and reference_release_date is not None:
+        ref_year = _release_year(reference_release_date)
+        row_year = _release_year(row["release_date"])
+        if ref_year is not None and row_year is not None and ref_year != row_year:
+            return None
+
+    return row
