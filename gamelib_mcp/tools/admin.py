@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from fastmcp.exceptions import ToolError
 
 from ..data.db import STEAM_APP_ID, get_db
+from ..data.title_normalization import normalize_search_text
 from ..data.enrich_bg import pause_background_enrichment, resume_background_enrichment
 from ..data.epic import sync_epic
 from ..data.gog import sync_gog
@@ -707,3 +708,205 @@ async def detect_collapsed_games() -> dict:
         for row in rows
     ]
     return {"collapsed_count": len(candidates), "candidates": candidates}
+
+
+async def split_game(
+    source_game_id: int,
+    platform: str,
+    identifier_values: list[str],
+    new_name: str | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """Split store identifiers off an over-merged game into a new game row.
+
+    The inverse of ``merge_games``: it peels the given ``identifier_values`` (on
+    ``platform``) out of ``source_game_id`` and attaches them to a freshly created
+    game. Two shapes are handled in one operation:
+
+    * Whole-platform split (cross-platform collapse, e.g. Dead Space = Steam 2008 +
+      PS5 2023): when the peeled values are *all* the identifiers on the source's
+      platform row, that ``game_platforms`` row is simply re-pointed to the new
+      game, carrying its identifiers, enrichment, steam_platform_data and playtime.
+    * Subset split (within-platform collapse, e.g. one Steam row holding two
+      appids): a new ``game_platforms`` row is created under the new game and only
+      the named identifiers move to it; per-platform enrichment stays on the source
+      row and playtime re-populates per identifier on the next sync (Steam reports
+      per-appid playtime, so the split is lossless after a re-sync).
+
+    Game-level rows (ratings, name, igdb_id, tags) stay on the source. The new game
+    starts unenriched so background IGDB backfill re-resolves it; set a distinct
+    ``new_name`` (e.g. "Dead Space (2023)") so it does not re-resolve onto the
+    source's contaminated identity. ``dry_run=True`` previews without writing.
+    """
+    if not identifier_values:
+        raise ToolError("identifier_values must be non-empty")
+
+    async with get_db() as db:
+        source_row = await db.execute_fetchone(
+            "SELECT id, name FROM games WHERE id = ?", (source_game_id,)
+        )
+        if source_row is None:
+            raise ToolError(f"Source game {source_game_id} not found")
+
+        platform_row = await db.execute_fetchone(
+            "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",
+            (source_game_id, platform),
+        )
+        if platform_row is None:
+            raise ToolError(f"Game {source_game_id} has no {platform!r} platform row")
+        source_platform_id = platform_row["id"]
+
+        all_identifiers = await db.execute_fetchall(
+            "SELECT id, identifier_type, identifier_value FROM game_platform_identifiers "
+            "WHERE game_platform_id = ?",
+            (source_platform_id,),
+        )
+        owned_values = {row["identifier_value"] for row in all_identifiers}
+        requested = set(map(str, identifier_values))
+        missing = requested - owned_values
+        if missing:
+            raise ToolError(
+                f"{platform!r} row of game {source_game_id} does not own identifier(s): "
+                f"{sorted(missing)}"
+            )
+        if requested == owned_values and len(owned_values) == 1:
+            # The platform row exists only for these identifiers and would be left
+            # empty — moving the whole row is the clean, lossless path.
+            move_whole_platform = True
+        else:
+            move_whole_platform = requested == owned_values
+        remaining = sorted(owned_values - requested)
+        target_name = new_name or source_row["name"]
+
+        if dry_run:
+            return {
+                "source_game_id": source_game_id,
+                "source_name": source_row["name"],
+                "new_game_id": None,
+                "new_name": target_name,
+                "platform": platform,
+                "identifiers_moved": sorted(requested),
+                "moved_whole_platform": move_whole_platform,
+                "identifiers_remaining_on_source": remaining,
+                "dry_run": True,
+            }
+
+        cursor = await db.execute(
+            "INSERT INTO games (name, name_normalized) VALUES (?, ?)",
+            (target_name, normalize_search_text(target_name)),
+        )
+        new_game_id = cursor.lastrowid
+
+        if move_whole_platform:
+            await db.execute(
+                "UPDATE game_platforms SET game_id = ? WHERE id = ?",
+                (new_game_id, source_platform_id),
+            )
+        else:
+            now = datetime.now(timezone.utc).isoformat()
+            cursor = await db.execute(
+                """INSERT INTO game_platforms (game_id, platform, owned, last_synced)
+                   VALUES (?, ?, 1, ?)""",
+                (new_game_id, platform, now),
+            )
+            new_platform_id = cursor.lastrowid
+            await db.executemany(
+                "UPDATE game_platform_identifiers SET game_platform_id = ? WHERE id = ?",
+                [
+                    (new_platform_id, row["id"])
+                    for row in all_identifiers
+                    if row["identifier_value"] in requested
+                ],
+            )
+        await db.commit()
+
+    return {
+        "source_game_id": source_game_id,
+        "source_name": source_row["name"],
+        "new_game_id": new_game_id,
+        "new_name": target_name,
+        "platform": platform,
+        "identifiers_moved": sorted(requested),
+        "moved_whole_platform": move_whole_platform,
+        "identifiers_remaining_on_source": remaining,
+        "dry_run": False,
+    }
+
+
+async def detect_cross_platform_collapses(limit: int = 0) -> dict:
+    """Flag multi-platform games whose Steam appid is a *different* IGDB game.
+
+    detect_collapsed_games finds one platform row holding several store IDs; this
+    finds the cross-platform case where a single row merged two editions across
+    stores (e.g. Steam appid 17470 = Dead Space 2008 sitting on the same row as the
+    PS5 2023 remake). For each multi-platform game that has a Steam appid and a
+    stored ``igdb_id``, it asks IGDB which game that appid actually is; a mismatch
+    against the row's ``igdb_id`` means the Steam side does not belong here. Pure
+    read (queries IGDB, no writes); resolve a hit with ``split_game``.
+    """
+    from ..data.igdb import fetch_igdb_game_names, resolve_steam_appids_to_igdb
+
+    igdb_configured = bool(os.environ.get("TWITCH_CLIENT_ID"))
+
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            """SELECT g.id AS game_id,
+                      g.name,
+                      g.igdb_id AS row_igdb_id,
+                      gpi.identifier_value AS steam_appid
+               FROM games g
+               JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
+               JOIN game_platform_identifiers gpi
+                 ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
+               WHERE g.igdb_id IS NOT NULL
+                 AND (SELECT COUNT(*) FROM game_platforms gp2 WHERE gp2.game_id = g.id) > 1
+               ORDER BY g.id""",
+            (STEAM_APP_ID,),
+        )
+
+    if limit and limit > 0:
+        rows = rows[:limit]
+
+    if not igdb_configured or not rows:
+        return {
+            "checked": 0,
+            "collapsed_count": 0,
+            "candidates": [],
+            "igdb_configured": igdb_configured,
+        }
+
+    appid_to_igdb = await resolve_steam_appids_to_igdb([r["steam_appid"] for r in rows])
+
+    flagged = []
+    for row in rows:
+        true_igdb = appid_to_igdb.get(str(row["steam_appid"]))
+        if true_igdb is not None and true_igdb != row["row_igdb_id"]:
+            flagged.append(row)
+
+    # Resolve names for the (small) flagged set so the report is human-readable.
+    names = await fetch_igdb_game_names(
+        [r["row_igdb_id"] for r in flagged]
+        + [appid_to_igdb[str(r["steam_appid"])] for r in flagged]
+    )
+
+    candidates = []
+    for row in flagged:
+        steam_true_igdb = appid_to_igdb[str(row["steam_appid"])]
+        candidates.append(
+            {
+                "game_id": row["game_id"],
+                "name": row["name"],
+                "steam_appid": row["steam_appid"],
+                "row_igdb_id": row["row_igdb_id"],
+                "row_igdb_name": names.get(row["row_igdb_id"]),
+                "steam_true_igdb_id": steam_true_igdb,
+                "steam_true_igdb_name": names.get(steam_true_igdb),
+            }
+        )
+
+    return {
+        "checked": len(rows),
+        "collapsed_count": len(candidates),
+        "candidates": candidates,
+        "igdb_configured": igdb_configured,
+    }

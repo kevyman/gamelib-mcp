@@ -83,6 +83,11 @@ EXPECTED_TOOLS = {
         "required": set(),
     },
     "detect_collapsed_games": {"params": set(), "required": set()},
+    "detect_cross_platform_collapses": {"params": {"limit"}, "required": set()},
+    "split_game": {
+        "params": {"source_game_id", "platform", "identifier_values", "new_name", "dry_run"},
+        "required": {"source_game_id", "platform", "identifier_values"},
+    },
     "get_platform_breakdown": {"params": set(), "required": set()},
     "set_hardware_preference": {"params": {"platforms"}, "required": {"platforms"}},
     "add_game_to_platform": {
@@ -130,6 +135,12 @@ EXPECTED_ANNOTATIONS = {
     "get_platform_breakdown": {"readOnlyHint": True, "idempotentHint": True},
     "detect_farmed_games": {"destructiveHint": False, "idempotentHint": True},
     "detect_collapsed_games": {"readOnlyHint": True, "idempotentHint": True},
+    "detect_cross_platform_collapses": {
+        "readOnlyHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+    "split_game": {"readOnlyHint": False, "idempotentHint": False},
     "sync_ratings": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
     "rate_game": {"readOnlyHint": False, "idempotentHint": True},
     "refresh_library": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
@@ -160,9 +171,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_23(self):
+    async def test_tool_count_is_25(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 23)
+        self.assertEqual(len(tools), 25)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()
