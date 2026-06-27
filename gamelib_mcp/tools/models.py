@@ -164,6 +164,11 @@ class DetectFarmedGamesResponse(FlexibleModel):
     sample_games: list[dict[str, Any]]
 
 
+class DetectCollapsedGamesResponse(FlexibleModel):
+    collapsed_count: int
+    candidates: list[dict[str, Any]]
+
+
 class PlatformBreakdownResponse(FlexibleModel):
     by_platform: list[dict[str, Any]]
     total_unique_games: int

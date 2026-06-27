@@ -547,6 +547,8 @@ async def resolve_and_link_game(
     name: str,
     igdb_platform_id: int | None,
     candidates: dict[int, str],
+    *,
+    platform: str | None = None,
 ) -> tuple[int, "IGDBGame | None"]:
     """
     Resolve a game to its canonical games row via IGDB, creating a new row if needed.
@@ -558,6 +560,11 @@ async def resolve_and_link_game(
     igdb_game is None when IGDB is unconfigured or returns no result.
 
     Falls back to fuzzy name matching if IGDB is unconfigured or returns no result.
+
+    ``platform`` is the caller's internal platform string (e.g. "steam", "gog"). When
+    given, the title→existing-row fuzzy fallback refuses to attach onto a row that
+    already owns that platform, so two distinct same-platform store entries with the
+    same name stay separate instead of collapsing.
     """
     from .db import find_game_by_name_fuzzy, get_game_by_igdb_id, get_db
 
@@ -597,9 +604,19 @@ async def resolve_and_link_game(
                 game_id = existing["id"]
             else:
                 # On upgraded databases we may already have the title row without igdb_id.
-                existing = await find_game_by_name_fuzzy(name, candidates=candidates)
+                existing = await find_game_by_name_fuzzy(
+                    name,
+                    candidates=candidates,
+                    exclude_platform=platform,
+                    reference_release_date=igdb_game.first_release_date,
+                )
                 if existing is None and igdb_game.name.casefold() != name.casefold():
-                    existing = await find_game_by_name_fuzzy(igdb_game.name, candidates=candidates)
+                    existing = await find_game_by_name_fuzzy(
+                        igdb_game.name,
+                        candidates=candidates,
+                        exclude_platform=platform,
+                        reference_release_date=igdb_game.first_release_date,
+                    )
 
                 if existing is not None:
                     game_id = existing["id"]
@@ -662,12 +679,14 @@ async def resolve_and_link_game(
             candidates[game_id] = name
             return game_id, None
 
-        existing = await find_game_by_name_fuzzy(name, candidates=candidates)
+        existing = await find_game_by_name_fuzzy(
+            name, candidates=candidates, exclude_platform=platform
+        )
         if existing:
             return existing["id"], None
 
         from .db import upsert_game
-        return await upsert_game(appid=None, name=name), None
+        return await upsert_game(appid=None, name=name, match_existing_by_name=False), None
 
 
 async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:

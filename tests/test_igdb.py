@@ -476,9 +476,12 @@ class IGDBLinkingConcurrencyTests(unittest.IsolatedAsyncioTestCase):
                 return None
             return {"id": state["game_id"]}
 
-        async def upsert_game(*, appid: int | None, name: str):
+        async def upsert_game(*, appid: int | None, name: str, match_existing_by_name: bool = True):
             self.assertIsNone(appid)
             self.assertEqual(name, "Portal")
+            # The non-IGDB create-new terminal must opt out of the name fallback so a
+            # deliberately-rejected fuzzy match isn't silently re-collapsed.
+            self.assertFalse(match_existing_by_name)
             state["insert_calls"] += 1
             await asyncio.sleep(0.01)
 
