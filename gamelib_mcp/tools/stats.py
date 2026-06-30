@@ -1,10 +1,14 @@
 """get_backlog_stats tool."""
 
 from ..data.db import get_db
+from .common import (
+    PLAY_STATE_SQL as _PLAY_STATE_SQL,
+    PLAYTIME_SUM_SQL as _PLAYTIME_SUM_SQL,
+)
 
 # NOTE: stats-specific CTE — selects genres and omits the steam appid that the
 # library/discover variants compute. Kept separate on purpose; do not merge.
-_GAME_ROLLUP_CTE = """
+_GAME_ROLLUP_CTE = f"""
 WITH game_rollup AS (
     SELECT g.id AS game_id,
            g.name,
@@ -12,7 +16,8 @@ WITH game_rollup AS (
            g.hltb_main,
            g.is_farmed,
            g.is_primary_library_item,
-           COALESCE(SUM(COALESCE(gp.playtime_minutes, 0)), 0) AS total_playtime_minutes,
+           {_PLAYTIME_SUM_SQL} AS total_playtime_minutes,
+           {_PLAY_STATE_SQL} AS play_state,
            COALESCE(SUM(COALESCE(gp.playtime_2weeks_minutes, 0)), 0) AS total_playtime_2weeks_minutes,
            MAX(gpe.metacritic_score) AS metacritic_score,
            MAX(gpe.opencritic_score) AS opencritic_score
@@ -35,15 +40,16 @@ async def get_backlog_stats() -> dict:
             _GAME_ROLLUP_CTE
             + """
             SELECT COUNT(*) AS total_library,
-                   SUM(CASE WHEN total_playtime_minutes > 0 AND is_farmed = 0 THEN 1 ELSE 0 END) AS played,
-                   SUM(CASE WHEN total_playtime_minutes = 0 OR is_farmed = 1 THEN 1 ELSE 0 END) AS unplayed,
+                   SUM(CASE WHEN play_state = 'played' THEN 1 ELSE 0 END) AS played,
+                   SUM(CASE WHEN play_state = 'unplayed' THEN 1 ELSE 0 END) AS unplayed,
+                   SUM(CASE WHEN play_state = 'unknown' THEN 1 ELSE 0 END) AS unknown_playtime,
                    SUM(CASE WHEN is_farmed = 1 THEN 1 ELSE 0 END) AS farmed_games,
                    SUM(CASE
-                           WHEN (total_playtime_minutes = 0 OR is_farmed = 1) AND hltb_main IS NOT NULL
+                           WHEN play_state = 'unplayed' AND hltb_main IS NOT NULL
                            THEN 1 ELSE 0
                        END) AS unplayed_with_hltb,
                    SUM(CASE
-                           WHEN (total_playtime_minutes = 0 OR is_farmed = 1) AND hltb_main IS NOT NULL
+                           WHEN play_state = 'unplayed' AND hltb_main IS NOT NULL
                            THEN hltb_main ELSE 0
                        END) AS backlog_hours_hltb,
                    SUM(total_playtime_2weeks_minutes) AS recent_minutes
@@ -55,7 +61,7 @@ async def get_backlog_stats() -> dict:
             + """
             SELECT je.value AS genre, COUNT(*) AS c
             FROM game_rollup, json_each(game_rollup.genres) je
-            WHERE (total_playtime_minutes = 0 OR is_farmed = 1)
+            WHERE play_state = 'unplayed'
             GROUP BY genre
             ORDER BY c DESC
             LIMIT 1
@@ -66,7 +72,7 @@ async def get_backlog_stats() -> dict:
             + """
             SELECT name, metacritic_score
             FROM game_rollup
-            WHERE (total_playtime_minutes = 0 OR is_farmed = 1)
+            WHERE play_state = 'unplayed'
               AND metacritic_score IS NOT NULL
             ORDER BY metacritic_score DESC
             LIMIT 1
@@ -77,7 +83,7 @@ async def get_backlog_stats() -> dict:
             + """
             SELECT name, opencritic_score
             FROM game_rollup
-            WHERE (total_playtime_minutes = 0 OR is_farmed = 1)
+            WHERE play_state = 'unplayed'
               AND opencritic_score IS NOT NULL
             ORDER BY opencritic_score DESC
             LIMIT 1
@@ -89,7 +95,7 @@ async def get_backlog_stats() -> dict:
             SELECT gr.name, r.normalized_score
             FROM game_rollup gr
             JOIN ratings r ON r.game_id = gr.game_id
-            WHERE (gr.total_playtime_minutes = 0 OR gr.is_farmed = 1)
+            WHERE gr.play_state = 'unplayed'
             ORDER BY r.normalized_score DESC
             LIMIT 1
             """
@@ -98,9 +104,11 @@ async def get_backlog_stats() -> dict:
     total_count = summary["total_library"] or 0
     played_count = summary["played"] or 0
     unplayed_count = summary["unplayed"] or 0
+    unknown_count = summary["unknown_playtime"] or 0
     farmed_count = summary["farmed_games"] or 0
     played_pct = round(played_count / total_count * 100) if total_count else 0
-    unplayed_pct = (100 - played_pct) if total_count else 0
+    unplayed_pct = round(unplayed_count / total_count * 100) if total_count else 0
+    unknown_pct = round(unknown_count / total_count * 100) if total_count else 0
 
     backlog_hours_hltb = round(summary["backlog_hours_hltb"] or 0)
     weekly_hours = round((summary["recent_minutes"] or 0) / 2 / 60, 1)
@@ -116,6 +124,8 @@ async def get_backlog_stats() -> dict:
         "played_pct": played_pct,
         "unplayed": unplayed_count,
         "unplayed_pct": unplayed_pct,
+        "unknown_playtime": unknown_count,
+        "unknown_pct": unknown_pct,
         "farmed_games": farmed_count,
         "unplayed_with_hltb": summary["unplayed_with_hltb"] or 0,
         "backlog_hours_hltb": backlog_hours_hltb,

@@ -36,6 +36,7 @@ class GameSummary(FlexibleModel):
     content_type: str | None = None
     parent_game_id: int | None = None
     is_primary_library_item: bool | None = None
+    play_state: str | None = None
     matched_alias: str | None = None
     tags: list[str] | None = None
     series: list[Any] | None = None
@@ -78,6 +79,7 @@ class LibraryStatsResponse(PaginatedGamesResponse):
     total_games: int
     played: int
     unplayed: int
+    unknown: int
     farmed_games: int
     total_playtime_hours: float
     filter: str

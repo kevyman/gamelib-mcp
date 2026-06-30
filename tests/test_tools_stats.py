@@ -15,6 +15,8 @@ class BacklogStatsTests(ToolDBTestCase):
                 "played_pct",
                 "unplayed",
                 "unplayed_pct",
+                "unknown_playtime",
+                "unknown_pct",
                 "farmed_games",
                 "unplayed_with_hltb",
                 "backlog_hours_hltb",
@@ -29,6 +31,8 @@ class BacklogStatsTests(ToolDBTestCase):
         self.assertEqual(result["total_library"], 0)
         self.assertEqual(result["played"], 0)
         self.assertEqual(result["played_pct"], 0)
+        self.assertEqual(result["unknown_playtime"], 0)
+        self.assertEqual(result["unknown_pct"], 0)
         self.assertIsNone(result["years_to_clear_backlog"])
         self.assertIsNone(result["most_played_genre_in_backlog"])
 
@@ -44,6 +48,11 @@ class BacklogStatsTests(ToolDBTestCase):
         self.assertEqual(result["unplayed_pct"], 100 - round(1 / 3 * 100))
         self.assertEqual(result["unplayed_with_hltb"], 2)
         self.assertEqual(result["backlog_hours_hltb"], 30)
+        self.assertEqual(result["unknown_playtime"], 0)
+        self.assertEqual(result["unknown_pct"], 0)
+        self.assertEqual(
+            result["played_pct"] + result["unplayed_pct"] + result["unknown_pct"], 100
+        )
 
     async def test_weekly_pace_and_years_to_clear(self):
         # 2 weeks of recent playtime: 1200 minutes -> weekly = 1200/2/60 = 10.0h
@@ -75,3 +84,17 @@ class BacklogStatsTests(ToolDBTestCase):
         self.assertEqual(
             result["highest_rated_unplayed_personal"], {"name": "Rated", "score": 9.5}
         )
+
+    async def test_unknown_playtime_excluded_from_backlog(self):
+        # Manually-added / GOG-style game: NULL playtime is "unknown", not
+        # confirmed backlog. It must not pollute unplayed counts or metrics.
+        gid = await seed_game("Manual", hltb_main=10)
+        await add_platform(gid, "gog")  # no playtime -> NULL
+        await make_steam_game("RealBacklog", 1, playtime_minutes=0, hltb_main=20)
+        result = await stats.get_backlog_stats()
+        self.assertEqual(result["total_library"], 2)
+        self.assertEqual(result["unplayed"], 1)            # RealBacklog only
+        self.assertEqual(result["unknown_playtime"], 1)    # Manual
+        self.assertEqual(result["played"], 0)
+        self.assertEqual(result["unplayed_with_hltb"], 1)  # excludes unknown
+        self.assertEqual(result["backlog_hours_hltb"], 20) # excludes Manual's 10h

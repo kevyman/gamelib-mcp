@@ -31,6 +31,24 @@ LIBRARY_PLATFORMS = SYNCABLE_PLATFORMS | {"itchio", "xbox", "ea", "ubisoft", "ot
 # call from blowing the client's context with a multi-megabyte response.
 MAX_RESULT_LIMIT = 200
 
+# --- Three-state playtime classification ------------------------------------
+# NULL-aware total playtime. Unlike COALESCE(SUM(COALESCE(x, 0)), 0), this
+# yields NULL when EVERY contributing platform row is NULL (playtime genuinely
+# unknown: GOG, manual adds, Nintendo VGCS, Epic outage), preserving the
+# distinction from an authoritative 0 (e.g. Steam never-launched).
+PLAYTIME_SUM_SQL = "SUM(gp.playtime_minutes)"
+
+# Shared CASE deriving the play_state enum inside each rollup CTE. It references
+# the raw NULL-aware SUM (not a column alias) because SQLite cannot see sibling
+# column aliases within the same SELECT list. Requires the games table aliased
+# `g` and game_platforms aliased `gp` — matches all three rollup CTEs.
+PLAY_STATE_SQL = f"""CASE
+        WHEN g.is_farmed = 1            THEN 'unplayed'
+        WHEN {PLAYTIME_SUM_SQL} IS NULL THEN 'unknown'
+        WHEN {PLAYTIME_SUM_SQL} = 0     THEN 'unplayed'
+        ELSE 'played'
+    END"""
+
 
 def resolve_platform(platform: str | None) -> str | None:
     if platform is None:
