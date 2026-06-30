@@ -11,12 +11,14 @@ from ..utils import _parse_json
 from .common import (
     SERIES_NAMES_SQL as _SERIES_NAMES_SQL,
     STEAM_APPID_SQL as _STEAM_APPID_SQL,
+    PLAY_STATE_SQL as _PLAY_STATE_SQL,
+    PLAYTIME_SUM_SQL as _PLAYTIME_SUM_SQL,
     clamp_limit as _clamp_limit,
     resolve_platform as _resolve_platform,
 )
 from .search import build_name_match, fuzzy_fallback_game_ids
 
-VALID_FILTERS = {"all", "unplayed", "played", "recent", "farmed"}
+VALID_FILTERS = {"all", "unplayed", "played", "recent", "farmed", "unknown"}
 
 ResponseFormat = Literal["concise", "detailed"]
 
@@ -44,7 +46,8 @@ WITH game_rollup AS (
            g.content_type,
            g.parent_game_id,
            g.is_primary_library_item,
-           COALESCE(SUM(COALESCE(gp.playtime_minutes, 0)), 0) AS total_playtime_minutes,
+           {_PLAYTIME_SUM_SQL} AS total_playtime_minutes,
+           {_PLAY_STATE_SQL} AS play_state,
            COALESCE(SUM(COALESCE(gp.playtime_2weeks_minutes, 0)), 0) AS total_playtime_2weeks_minutes,
            MAX(CASE WHEN gp.platform = 'steam' THEN spd.protondb_tier END) AS protondb_tier,
            MAX(CASE WHEN gp.platform = 'steam' THEN spd.steam_review_desc END) AS steam_review_desc,
@@ -323,9 +326,11 @@ async def get_library_stats(
     params: list = []
 
     if filter == "unplayed":
-        conditions.append("(total_playtime_minutes = 0 OR is_farmed = 1)")
+        conditions.append("play_state = 'unplayed'")
     elif filter == "played":
-        conditions.append("(total_playtime_minutes > 0 AND is_farmed = 0)")
+        conditions.append("play_state = 'played'")
+    elif filter == "unknown":
+        conditions.append("play_state = 'unknown'")
     elif filter == "recent":
         conditions.append("total_playtime_2weeks_minutes > 0")
     elif filter == "farmed":
@@ -392,8 +397,9 @@ async def get_library_stats(
             _GAME_ROLLUP_CTE
             + f"""
             SELECT COUNT(*) AS total_games,
-                   SUM(CASE WHEN total_playtime_minutes > 0 AND is_farmed = 0 THEN 1 ELSE 0 END) AS played,
-                   SUM(CASE WHEN total_playtime_minutes = 0 OR is_farmed = 1 THEN 1 ELSE 0 END) AS unplayed,
+                   SUM(CASE WHEN play_state = 'played' THEN 1 ELSE 0 END) AS played,
+                   SUM(CASE WHEN play_state = 'unplayed' THEN 1 ELSE 0 END) AS unplayed,
+                   SUM(CASE WHEN play_state = 'unknown' THEN 1 ELSE 0 END) AS unknown,
                    SUM(CASE WHEN is_farmed = 1 THEN 1 ELSE 0 END) AS farmed_games,
                    SUM(total_playtime_minutes) AS total_minutes
             FROM game_rollup
@@ -406,6 +412,7 @@ async def get_library_stats(
         "total_games": summary["total_games"],
         "played": summary["played"] or 0,
         "unplayed": summary["unplayed"] or 0,
+        "unknown": summary["unknown"] or 0,
         "farmed_games": summary["farmed_games"] or 0,
         "total_playtime_hours": round((summary["total_minutes"] or 0) / 60, 1),
         "filter": filter,
@@ -430,13 +437,18 @@ async def _format_rows(rows, response_format: ResponseFormat = "detailed") -> li
 
 def _format_game(row, platforms: list[dict], response_format: ResponseFormat) -> dict:
     row_keys = set(row.keys())
+    play_state = row["play_state"] if "play_state" in row_keys else None
     game = {
         "game_id": row["game_id"],
         "appid": row["steam_appid"],
         "steam_appid": row["steam_appid"],
         "name": row["name"],
         "series": _parse_json(row["series"]),
-        "playtime_hours": round((row["total_playtime_minutes"] or 0) / 60, 1),
+        "playtime_hours": (
+            None
+            if play_state == "unknown"
+            else round((row["total_playtime_minutes"] or 0) / 60, 1)
+        ),
         "playtime_2weeks_hours": round((row["total_playtime_2weeks_minutes"] or 0) / 60, 1),
         "hltb_main": row["hltb_main"],
         "metacritic_score": row["metacritic_score"],
@@ -447,6 +459,7 @@ def _format_game(row, platforms: list[dict], response_format: ResponseFormat) ->
         "content_type": row["content_type"],
         "parent_game_id": row["parent_game_id"],
         "is_primary_library_item": bool(row["is_primary_library_item"]),
+        "play_state": play_state,
     }
     if "match_type" in row_keys and row["match_type"]:
         game["match_type"] = row["match_type"]

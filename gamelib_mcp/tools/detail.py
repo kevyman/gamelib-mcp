@@ -101,8 +101,20 @@ async def get_game_detail(
         default=None,
     )
 
-    total_playtime_minutes = sum(p["playtime_minutes"] or 0 for p in platforms)
+    known_playtimes = [
+        p["playtime_minutes"] for p in platforms if p["playtime_minutes"] is not None
+    ]
+    total_playtime_minutes = sum(known_playtimes) if known_playtimes else None
     total_playtime_2weeks_minutes = sum(p["playtime_2weeks_minutes"] or 0 for p in platforms)
+
+    if bool(row["is_farmed"]):
+        play_state = "unplayed"
+    elif total_playtime_minutes is None:
+        play_state = "unknown"
+    elif total_playtime_minutes == 0:
+        play_state = "unplayed"
+    else:
+        play_state = "played"
 
     result = {
         "game_id": row["id"],
@@ -112,7 +124,11 @@ async def get_game_detail(
         "release_date": row["release_date"],
         "series": series,
         "platforms": platforms,
-        "playtime_hours": round(total_playtime_minutes / 60, 1) if total_playtime_minutes else 0,
+        "playtime_hours": (
+            None
+            if play_state == "unknown"
+            else round((total_playtime_minutes or 0) / 60, 1)
+        ),
         "playtime_2weeks_hours": (
             round(total_playtime_2weeks_minutes / 60, 1)
             if total_playtime_2weeks_minutes
@@ -123,6 +139,7 @@ async def get_game_detail(
             default=None,
         ),
         "is_farmed": bool(row["is_farmed"]),
+        "play_state": play_state,
         "content_type": row["content_type"],
         "parent_game_id": row["parent_game_id"],
         "is_primary_library_item": bool(row["is_primary_library_item"]),

@@ -81,11 +81,13 @@ class GetGameDetailTests(ToolDBTestCase):
                 "hltb_complete",
                 "protondb_tier",
                 "manual_overrides",
+                "play_state",
             },
         )
         self.assertEqual(result["name"], "Celeste")
         self.assertEqual(result["appid"], 504230)
         self.assertEqual(result["playtime_hours"], 5.0)
+        self.assertEqual(result["play_state"], "played")
         self.assertEqual(result["tags"], ["platformer"])
         self.assertEqual(result["genres"], ["Indie"])
         self.assertEqual(result["content_type"], "base_game")
@@ -190,3 +192,10 @@ class GetGameDetailTests(ToolDBTestCase):
         )
         self.assertEqual(result["related_content"]["editions"], [])
         self.assertEqual(result["related_content"]["bundles"], [])
+
+    async def test_unknown_playtime_game_reports_null_hours(self):
+        gid = await seed_game("Manual")
+        await add_platform(gid, "gog")  # no playtime -> NULL
+        result = await detail.get_game_detail(game_id=gid)
+        self.assertEqual(result["play_state"], "unknown")
+        self.assertIsNone(result["playtime_hours"])
