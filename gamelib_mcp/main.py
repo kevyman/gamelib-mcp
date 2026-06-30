@@ -612,11 +612,11 @@ async def merge_games(
 @mcp.tool(annotations=MUTATION_TOOL)
 async def set_nintendo_session(cookies: str) -> NintendoSessionResponse:
     """
-    Store Nintendo Account session cookies for VGCS fallback sync.
+    Store Nintendo Account session cookies for VGCS ownership sync.
 
-    Use this when nxapi is unavailable and Nintendo digital ownership should be
-    synced from accounts.nintendo.com. The cookie JSON comes from an authenticated
-    browser session; no playtime data is available through this fallback. Returns
+    Syncs the full digital library from accounts.nintendo.com. The cookie JSON
+    comes from an authenticated browser session; no playtime data is available
+    through this source (use set_nintendo_pctl_session for playtime). Returns
     a session storage status dictionary.
 
     How to get cookies:

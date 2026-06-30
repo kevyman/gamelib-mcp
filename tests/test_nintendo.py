@@ -80,8 +80,6 @@ class SyncNintendoTests(unittest.TestCase):
         mock_upsert_enrichment = AsyncMock()
 
         with (
-            patch.dict("os.environ", {"NINTENDO_SESSION_TOKEN": ""}, clear=False),
-            patch("gamelib_mcp.data.nintendo._nxapi_available", return_value=False),
             patch("gamelib_mcp.data.nintendo._load_vgcs_cookies", return_value={"session": "cookie"}),
             patch("gamelib_mcp.data.nintendo.fetch_nintendo_library_vgcs", AsyncMock(return_value=entries)),
             patch("gamelib_mcp.data.nintendo.load_fuzzy_candidates", AsyncMock(return_value=candidates or {})),
@@ -127,32 +125,12 @@ class SyncNintendoTests(unittest.TestCase):
         with (
             patch.dict("os.environ", {}, clear=True),
             patch("gamelib_mcp.data.nintendo._load_vgcs_cookies", return_value=None),
-            patch("gamelib_mcp.data.nintendo._nxapi_available", return_value=False),
         ):
             result = asyncio.run(nintendo.sync_nintendo())
 
         self.assertEqual(result["added"], 0)
         self.assertEqual(result["sync_status"], "unconfigured")
         self.assertEqual(result["error_classification"], "missing_configuration")
-
-    def test_returns_stale_metadata_when_nxapi_auth_fails_without_fallback(self) -> None:
-        with (
-            patch.dict("os.environ", {"NINTENDO_SESSION_TOKEN": "token"}, clear=True),
-            patch("gamelib_mcp.data.nintendo._load_vgcs_cookies", return_value=None),
-            patch("gamelib_mcp.data.nintendo._nxapi_available", return_value=True),
-            patch(
-                "gamelib_mcp.data.nintendo.fetch_nintendo_play_history",
-                AsyncMock(side_effect=RuntimeError("Nintendo auth expired")),
-            ),
-        ):
-            result = asyncio.run(nintendo.sync_nintendo())
-
-        self.assertEqual(result["added"], 0)
-        self.assertEqual(result["matched"], 0)
-        self.assertEqual(result["skipped"], 0)
-        self.assertEqual(result["sync_status"], "stale")
-        self.assertEqual(result["error_classification"], "auth_stale")
-        self.assertIn("Nintendo auth expired", result["error_summary"])
 
     def test_load_vgcs_cookies_falls_back_to_local_default_file_when_env_path_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -209,8 +187,6 @@ class SyncNintendoTests(unittest.TestCase):
         mock_repair = AsyncMock()
 
         with (
-            patch.dict("os.environ", {"NINTENDO_SESSION_TOKEN": ""}, clear=False),
-            patch("gamelib_mcp.data.nintendo._nxapi_available", return_value=False),
             patch("gamelib_mcp.data.nintendo._load_vgcs_cookies", return_value={"session": "cookie"}),
             patch("gamelib_mcp.data.nintendo.fetch_nintendo_library_vgcs", AsyncMock(return_value=entries)),
             patch("gamelib_mcp.data.nintendo.load_fuzzy_candidates", AsyncMock(return_value={7: "PowerWash Simulator"})),
@@ -244,8 +220,6 @@ class SyncNintendoTests(unittest.TestCase):
         mock_repair = AsyncMock()
 
         with (
-            patch.dict("os.environ", {"NINTENDO_SESSION_TOKEN": ""}, clear=False),
-            patch("gamelib_mcp.data.nintendo._nxapi_available", return_value=False),
             patch("gamelib_mcp.data.nintendo._load_vgcs_cookies", return_value={"session": "cookie"}),
             patch("gamelib_mcp.data.nintendo.fetch_nintendo_library_vgcs", AsyncMock(return_value=entries)),
             patch("gamelib_mcp.data.nintendo.load_fuzzy_candidates", AsyncMock(return_value={7: "PowerWash Simulator"})),

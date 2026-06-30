@@ -322,8 +322,6 @@ def inspect_gog(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
 
 
 def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
-    nxapi_bin = shutil.which(os.getenv("NXAPI_BIN", "nxapi"))
-    has_session_token = bool(os.getenv("NINTENDO_SESSION_TOKEN"))
     cookies_path = Path(os.getenv("NINTENDO_COOKIES_FILE", "data/nintendo_cookies.json")).expanduser()
     has_cookies = cookies_path.is_file()
     pctl_path = Path(
@@ -332,70 +330,47 @@ def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus
     has_pctl = pctl_path.is_file()
     auth_stale = (last_sync or {}).get("last_error_classification") == "auth_stale"
 
-    if has_session_token and nxapi_bin is not None and auth_stale:
-        detected_inputs = _detected_env_inputs(("NINTENDO_SESSION_TOKEN", has_session_token))
-        detected_inputs.append(nxapi_bin)
-        return IntegrationStatus(
-            platform="nintendo",
-            overall_status="stale",
-            active_backend="nxapi",
-            summary="Nintendo auth is stale and the nxapi session token must be refreshed.",
-            capabilities=[
-                CapabilityStatus("ownership", "stale", "Nintendo auth must be refreshed before play activity can be read."),
-                CapabilityStatus("playtime", "stale", "Nintendo auth must be refreshed before playtime can be read."),
-            ],
-            checks=[
-                CheckStatus("nxapi_binary", "pass", "nxapi found in PATH"),
-                CheckStatus("nintendo_session_token", "warn", "Recent Nintendo auth failed and the session token should be refreshed"),
-            ],
-            required_inputs=["nxapi binary", "NINTENDO_SESSION_TOKEN or NINTENDO_COOKIES_FILE"],
-            detected_inputs=detected_inputs,
-            remediation_steps=[
-                "Re-run `nxapi nso auth` and update `NINTENDO_SESSION_TOKEN`.",
-                "Restart the container after updating the token.",
-            ],
-            last_sync=last_sync or {},
-        )
-
-    if has_session_token and nxapi_bin is not None:
-        detected_inputs = _detected_env_inputs(("NINTENDO_SESSION_TOKEN", has_session_token))
-        detected_inputs.append(nxapi_bin)
-        if has_cookies:
-            detected_inputs.append(str(cookies_path))
-        return IntegrationStatus(
-            platform="nintendo",
-            overall_status="ready",
-            active_backend="nxapi",
-            summary="nxapi is available and Nintendo session auth is configured.",
-            capabilities=[
-                CapabilityStatus("ownership", "ready", "Nintendo play activity can be read."),
-                CapabilityStatus("playtime", "ready", "Playtime is available through nxapi."),
-            ],
-            checks=[
-                CheckStatus("nxapi_binary", "pass", "nxapi found in PATH"),
-                CheckStatus("nintendo_session_token", "pass", "NINTENDO_SESSION_TOKEN is set"),
-                CheckStatus("nintendo_cookies_file", "pass" if has_cookies else "warn", "Cookie fallback file found" if has_cookies else "Cookie fallback file not present"),
-            ],
-            required_inputs=["nxapi binary", "NINTENDO_SESSION_TOKEN or NINTENDO_COOKIES_FILE"],
-            detected_inputs=detected_inputs,
-            remediation_steps=[],
-            last_sync=last_sync or {},
-        )
-
     if has_cookies:
+        if auth_stale:
+            capabilities = [
+                CapabilityStatus("ownership", "stale", "Nintendo cookies may be expired; re-run set_nintendo_session."),
+            ]
+            checks = [
+                CheckStatus("nintendo_cookies_file", "warn", "Cookie file present but recent auth failed"),
+            ]
+            detected_inputs = [str(cookies_path)]
+            summary = "Nintendo auth is stale; re-run set_nintendo_session."
+            remediation_steps: list[str] = ["Re-run set_nintendo_session to refresh the VGCS session cookies."]
+            if has_pctl:
+                capabilities.append(
+                    CapabilityStatus("playtime", "stale", "Parental Controls auth may be stale; re-run set_nintendo_pctl_session.")
+                )
+                checks.append(
+                    CheckStatus("nintendo_pctl_session", "warn", "Parental Controls token present but recent auth failed")
+                )
+                detected_inputs.append(str(pctl_path))
+                summary = "Nintendo auth is stale; re-run set_nintendo_session and/or set_nintendo_pctl_session."
+                remediation_steps.append("Re-run set_nintendo_pctl_session to refresh the Parental Controls token.")
+            return IntegrationStatus(
+                platform="nintendo",
+                overall_status="stale",
+                active_backend="vgcs-cookie",
+                summary=summary,
+                capabilities=capabilities,
+                checks=checks,
+                required_inputs=["NINTENDO_COOKIES_FILE"],
+                detected_inputs=detected_inputs,
+                remediation_steps=remediation_steps,
+                last_sync=last_sync or {},
+            )
+
         capabilities = [CapabilityStatus("ownership", "ready", "VGCS cookies are available.")]
         checks = [
             CheckStatus("nintendo_cookies_file", "pass", "Cookie fallback file found"),
-            CheckStatus("nxapi_binary", "warn" if nxapi_bin is None else "pass", "nxapi not found in PATH" if nxapi_bin is None else "nxapi found in PATH"),
         ]
         detected_inputs = [str(cookies_path)]
-        summary = "Nintendo cookie fallback is available for ownership-only sync."
-        remediation_steps = [
-            "Set `NINTENDO_SESSION_TOKEN` and install `nxapi` if you need playtime data.",
-        ]
-        # Parental Controls supplies playtime (and play-but-don't-own titles) with
-        # no nxapi/f-token. Surface it when configured; the no-token path is
-        # intentionally left byte-identical to before.
+        summary = "Nintendo ownership via VGCS cookies."
+        remediation_steps = []
         if has_pctl:
             capabilities.append(
                 CapabilityStatus("playtime", "ready", "Parental Controls playtime is configured.")
@@ -405,7 +380,6 @@ def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus
             )
             detected_inputs.append(str(pctl_path))
             summary = "Nintendo ownership via VGCS cookies; playtime via Parental Controls."
-            remediation_steps = []
         return IntegrationStatus(
             platform="nintendo",
             overall_status="ready",
@@ -413,16 +387,15 @@ def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus
             summary=summary,
             capabilities=capabilities,
             checks=checks,
-            required_inputs=["NINTENDO_COOKIES_FILE or NINTENDO_SESSION_TOKEN"],
+            required_inputs=["NINTENDO_COOKIES_FILE"],
             detected_inputs=detected_inputs,
             remediation_steps=remediation_steps,
             last_sync=last_sync or {},
         )
 
     if has_pctl:
-        # Playtime-only setup: Parental Controls token present but no ownership
-        # backend (cookies/nxapi). sync_nintendo still runs the playtime layer, so
-        # this is a real supported state — report it instead of "unconfigured".
+        # Playtime-only setup: Parental Controls token present but no ownership backend.
+        # sync_nintendo still runs the playtime layer, so this is a supported state.
         stale = auth_stale
         playtime_status = "stale" if stale else "ready"
         return IntegrationStatus(
@@ -470,38 +443,6 @@ def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus
             last_sync=last_sync or {},
         )
 
-    if has_session_token or nxapi_bin is not None:
-        detected_inputs = _detected_env_inputs(("NINTENDO_SESSION_TOKEN", has_session_token))
-        if nxapi_bin is not None:
-            detected_inputs.append(nxapi_bin)
-        overall_status = "degraded" if has_session_token and nxapi_bin is None else "partially_configured"
-        summary = (
-            "Nintendo session auth is present, but the nxapi binary is missing."
-            if has_session_token and nxapi_bin is None
-            else "Nintendo nxapi setup is incomplete."
-        )
-        return IntegrationStatus(
-            platform="nintendo",
-            overall_status=overall_status,
-            active_backend="nxapi" if nxapi_bin is not None else None,
-            summary=summary,
-            capabilities=[
-                CapabilityStatus("ownership", overall_status, "Nintendo setup is incomplete."),
-                CapabilityStatus("playtime", overall_status, "Nintendo setup is incomplete."),
-            ],
-            checks=[
-                CheckStatus("nxapi_binary", "pass" if nxapi_bin is not None else "fail", "nxapi found in PATH" if nxapi_bin is not None else "nxapi not found in PATH"),
-                CheckStatus("nintendo_session_token", "pass" if has_session_token else "fail", _env_check_summary("NINTENDO_SESSION_TOKEN", has_session_token)),
-            ],
-            required_inputs=["nxapi binary", "NINTENDO_SESSION_TOKEN or NINTENDO_COOKIES_FILE"],
-            detected_inputs=detected_inputs,
-            remediation_steps=[
-                "Install `nxapi` in the container image.",
-                "Set `NINTENDO_SESSION_TOKEN`, or provide `NINTENDO_COOKIES_FILE` for ownership-only fallback.",
-            ],
-            last_sync=last_sync or {},
-        )
-
     return IntegrationStatus(
         platform="nintendo",
         overall_status="unconfigured",
@@ -512,14 +453,13 @@ def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus
             CapabilityStatus("playtime", "unconfigured", "No Nintendo auth was detected."),
         ],
         checks=[
-            CheckStatus("nxapi_binary", "fail", "nxapi not found in PATH"),
-            CheckStatus("nintendo_session_token", "fail", "NINTENDO_SESSION_TOKEN is not set"),
             CheckStatus("nintendo_cookies_file", "fail", "Cookie fallback file missing"),
         ],
-        required_inputs=["nxapi binary", "NINTENDO_SESSION_TOKEN or NINTENDO_COOKIES_FILE"],
+        required_inputs=["NINTENDO_COOKIES_FILE"],
         detected_inputs=[],
         remediation_steps=[
-            "Install `nxapi` and set `NINTENDO_SESSION_TOKEN`, or mount a `NINTENDO_COOKIES_FILE` for ownership-only fallback.",
+            "Mount a NINTENDO_COOKIES_FILE for ownership sync (set_nintendo_session), "
+            "and/or set NINTENDO_PCTL_SESSION_FILE for playtime (set_nintendo_pctl_session).",
         ],
         last_sync=last_sync or {},
     )

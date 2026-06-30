@@ -6,7 +6,7 @@ Supported platforms:
   gog    — opens GOG OAuth2 flow, writes GOG_REFRESH_TOKEN to .env
   epic   — prints legendary auth instructions
   psn    — prints NPSSO cookie extraction instructions
-  switch — prints nxapi session token instructions
+  switch — prints Nintendo Switch setup instructions
 """
 
 import sys
@@ -43,11 +43,20 @@ def _setup_psn() -> None:
 
 def _setup_switch() -> None:
     print(
-        "Nintendo Switch auth requires nxapi and a one-time session token:\n"
-        "1. Install nxapi: https://github.com/samuelthomas2774/nxapi\n"
-        "2. Run: nxapi nso auth\n"
-        "3. Follow the prompts to authenticate with your Nintendo account.\n"
-        "4. Copy the session token and add to .env:  NINTENDO_SESSION_TOKEN=<value>"
+        "Nintendo Switch setup uses two independent sources:\n"
+        "\n"
+        "Ownership (VGCS digital library):\n"
+        "1. Open https://accounts.nintendo.com/portal/vgcs/ in your browser (stay logged in).\n"
+        "2. Install the 'Cookie Editor' browser extension.\n"
+        "3. Click the extension → Export → copy the JSON.\n"
+        "4. Call the set_nintendo_session MCP tool with that JSON.\n"
+        "\n"
+        "Playtime (Parental Controls API):\n"
+        "1. Call set_nintendo_pctl_session() with no argument → returns a login_url.\n"
+        "2. Open the URL, sign in, right-click 'Select this person' → Copy Link.\n"
+        "3. Call set_nintendo_pctl_session() again with that npf://auth link.\n"
+        "\n"
+        'Then run refresh_library(["switch2"]) to sync.'
     )
 
 

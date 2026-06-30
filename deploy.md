@@ -275,7 +275,6 @@ Then run `refresh_library(["switch2"])` (or a full refresh) — ownership and pl
 
 **Notes:**
 - Playtime is forward-only: Parental Controls tracks from console registration onward (no retroactive history). Today's in-progress play is captured and refines through the day.
-- The legacy `nxapi`/Coral `play-activity` path is **no longer used** — the public `f`-token providers it depended on are defunct. `NINTENDO_SESSION_TOKEN`/`NXAPI_BIN` remain wired but dormant.
 - If the control plane reports Nintendo as stale, re-run `set_nintendo_session` (ownership) and/or `set_nintendo_pctl_session` (playtime), then retry sync.
 
 ---
