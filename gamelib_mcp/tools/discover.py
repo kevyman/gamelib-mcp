@@ -9,7 +9,12 @@ from ..data.db import get_db, get_meta, load_platforms_for_games
 from ..data.protondb import TIER_ORDER
 from ..data.tag_synonyms import canonical_tag
 from ..utils import _parse_json
-from .common import STEAM_APPID_SQL as _STEAM_APPID_SQL, clamp_limit as _clamp_limit
+from .common import (
+    STEAM_APPID_SQL as _STEAM_APPID_SQL,
+    PLAY_STATE_SQL as _PLAY_STATE_SQL,
+    PLAYTIME_SUM_SQL as _PLAYTIME_SUM_SQL,
+    clamp_limit as _clamp_limit,
+)
 
 ResponseFormat = Literal["concise", "detailed"]
 
@@ -53,7 +58,8 @@ WITH game_rollup AS (
            g.hltb_main,
            g.is_farmed,
            g.is_primary_library_item,
-           COALESCE(SUM(COALESCE(gp.playtime_minutes, 0)), 0) AS total_playtime_minutes,
+           {_PLAYTIME_SUM_SQL} AS total_playtime_minutes,
+           {_PLAY_STATE_SQL} AS play_state,
            MAX(CASE WHEN gp.platform = 'steam' THEN spd.protondb_tier END) AS protondb_tier,
            MAX(CASE WHEN gp.platform = 'steam' THEN spd.steam_review_desc END) AS steam_review_desc,
            MAX(gpe.metacritic_score) AS metacritic_score,
@@ -122,7 +128,7 @@ async def discover_games(
         params.extend(tags)
 
     if unplayed_only:
-        inner_conditions.append("(total_playtime_minutes = 0 OR is_farmed = 1)")
+        inner_conditions.append("play_state IN ('unplayed', 'unknown')")
 
     if max_hltb_hours is not None:
         inner_conditions.append("hltb_main <= ?")
@@ -257,7 +263,12 @@ async def _format_rows(
             "game_id": row["game_id"],
             "appid": row["steam_appid"],
             "name": row["name"],
-            "playtime_hours": round((row["total_playtime_minutes"] or 0) / 60, 1),
+            "play_state": row["play_state"],
+            "playtime_hours": (
+                None
+                if row["play_state"] == "unknown"
+                else round((row["total_playtime_minutes"] or 0) / 60, 1)
+            ),
             "hltb_main": row["hltb_main"],
             "metacritic_score": row["metacritic_score"],
             "opencritic_score": row["opencritic_score"],

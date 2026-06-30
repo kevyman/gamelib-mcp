@@ -46,6 +46,7 @@ class VibeFilterTests(ToolDBTestCase):
                 "protondb_tier",
                 "tags",
                 "suggested_platform",
+                "play_state",
             },
         )
         self.assertEqual(game["tags"], ["roguelike", "action"])
@@ -83,6 +84,17 @@ class VibeFilterTests(ToolDBTestCase):
         game = results["results"][0]
         self.assertNotIn("platforms", game)
         self.assertNotIn("tags", game)
+
+    async def test_unplayed_only_includes_unknown_with_null_hours(self):
+        # GOG/manual-style NULL-playtime game must surface as a recommendation
+        # (not confirmed-played) and must NOT render a misleading 0.0 hours.
+        gid = await seed_game("ManualRogue", tags=["roguelike"])
+        await add_platform(gid, "gog")  # no playtime -> NULL
+        results = await discover.discover_games(vibes=["roguelike"])
+        self.assertEqual([g["name"] for g in results["results"]], ["ManualRogue"])
+        game = results["results"][0]
+        self.assertEqual(game["play_state"], "unknown")
+        self.assertIsNone(game["playtime_hours"])
 
     async def test_offset_and_has_more(self):
         await make_steam_game("Hades", 1, playtime_minutes=0, tags=["roguelike"], metacritic_score=90)
