@@ -76,4 +76,4 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml down
 
 - Start only `app` locally. The checked-in Caddy config expects a real domain and is not needed for localhost testing.
 - `caddy` is behind the `prod` Compose profile, so it will not start during local runs unless you explicitly add `--profile prod`.
-- Nintendo needs no extra binaries in the image: Switch **ownership** uses the VGCS cookie HTTP API and Switch **playtime** uses the Parental Controls API via the pure-Python `pynintendoparental` dependency (no `nxapi`/Coral `f`-token). Populate both with `set_nintendo_session` and `set_nintendo_pctl_session`.
+- Nintendo needs no extra binaries in the image: Switch **ownership** uses the VGCS cookie HTTP API and Switch **playtime** uses the Parental Controls API via the pure-Python `pynintendoparental` dependency. Populate both with `set_nintendo_session` and `set_nintendo_pctl_session`.
