@@ -216,6 +216,68 @@ async def get_sync_status() -> dict:
     }
 
 
+# Platforms with an automated wishlist sync backend. PSN has no public wishlist
+# API (confirmed: no community library exposes one) — use
+# add_game_to_platform(owned=False) for it instead.
+WISHLIST_SYNCABLE_PLATFORMS = frozenset({"steam", "switch2"})
+
+
+async def sync_wishlist(
+    platforms: list[str] | None = None,
+    ctx=None,
+) -> dict:
+    """
+    Sync wishlists from configured automated sources: Steam (official wishlist
+    API) and Nintendo/switch2 (via a DekuDeals shared wishlist export, since
+    Nintendo has no wishlist API). Defaults to both.
+
+    platforms: optional subset, e.g. ["steam"]. PSN is not included — it has no
+    wishlist API; record PSN wishlist items with
+    add_game_to_platform(name, "ps5", owned=False) instead.
+
+    A platform whose required config (STEAM_API_KEY/STEAM_ID or
+    DEKUDEALS_WISHLIST_URL) isn't set returns sync_status="unconfigured" instead
+    of erroring.
+    """
+    from ..data.dekudeals import sync_dekudeals_wishlist
+    from ..data.steam_wishlist import fetch_wishlist
+
+    def _resolve(p: str) -> str:
+        return PLATFORM_ALIASES.get(p.lower(), p.lower())
+
+    requested = list(platforms) if platforms else sorted(WISHLIST_SYNCABLE_PLATFORMS)
+    unknown = [p for p in requested if _resolve(p) not in WISHLIST_SYNCABLE_PLATFORMS]
+    if unknown:
+        valid = sorted(WISHLIST_SYNCABLE_PLATFORMS | set(PLATFORM_ALIASES))
+        raise ToolError(
+            f"Unknown wishlist platform '{', '.join(unknown)}'. Valid: {valid}. "
+            "PSN has no wishlist API — use add_game_to_platform(owned=False)."
+        )
+
+    targets = {_resolve(p) for p in requested}
+    platform_syncs = {"steam": fetch_wishlist, "switch2": sync_dekudeals_wishlist}
+    selected = [(name, fn) for name, fn in platform_syncs.items() if name in targets]
+
+    await _info(ctx, f"Syncing wishlist for {len(selected)} platform(s)")
+    await report_progress(ctx, 0, len(selected))
+    outcomes = await asyncio.gather(
+        *(fn() for _, fn in selected),
+        return_exceptions=True,
+    )
+
+    results: dict = {}
+    for index, ((name, _), outcome) in enumerate(zip(selected, outcomes, strict=True), start=1):
+        if isinstance(outcome, BaseException):
+            results[name] = {"error": str(outcome)}
+            await _info(ctx, f"Failed {name} wishlist sync: {outcome}")
+        else:
+            results[name] = outcome
+            await _info(ctx, f"Finished {name} wishlist sync")
+        await report_progress(ctx, index, len(selected))
+
+    return results
+
+
 async def set_nintendo_session(cookies: str) -> dict:
     """
     Store Nintendo Account session cookies for VGCS fallback sync.

@@ -14,6 +14,7 @@ from ..data.db import (
     upsert_game,
     upsert_game_platform,
     upsert_game_platform_identifier,
+    upsert_wishlist_entry,
 )
 from ..data.tag_synonyms import canonical_tag
 from .common import (
@@ -74,6 +75,47 @@ async def get_platform_breakdown() -> dict:
     }
 
 
+async def get_wishlist(platform: str | None = None) -> dict:
+    """
+    List wishlist items — games marked wanted but not necessarily owned.
+
+    platform: optional filter (e.g. "steam", "switch2"); omit for all platforms.
+    Populated by sync_wishlist (Steam, DekuDeals→switch2) or by
+    add_game_to_platform(owned=False) for manual entries (e.g. PSN).
+    """
+    resolved_platform = _validate_platform(platform, LIBRARY_PLATFORMS) if platform else None
+
+    where = "WHERE gp.wishlisted_at IS NOT NULL"
+    params: list = []
+    if resolved_platform:
+        where += " AND gp.platform = ?"
+        params.append(resolved_platform)
+
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            f"""SELECT g.id AS game_id, g.name, gp.platform, gp.wishlisted_at, gp.owned
+                FROM game_platforms gp
+                JOIN games g ON g.id = gp.game_id
+                {where}
+                ORDER BY gp.wishlisted_at DESC""",
+            params,
+        )
+
+    return {
+        "count": len(rows),
+        "items": [
+            {
+                "game_id": r["game_id"],
+                "name": r["name"],
+                "platform": r["platform"],
+                "wishlisted_at": r["wishlisted_at"],
+                "owned": bool(r["owned"]),
+            }
+            for r in rows
+        ],
+    }
+
+
 async def set_hardware_preference(platforms: list[str]) -> dict:
     """
     Set your hardware preference order for discover_games suggested_platform.
@@ -94,16 +136,21 @@ async def add_game_to_platform(
     identifier_type: str | None = None,
     identifier_value: str | None = None,
     playtime_minutes: int | None = None,
+    owned: bool = True,
 ) -> dict:
     """
     Manually add a game to a platform — useful for games that aren't fetched
-    automatically (e.g. physical copies, unreported digital titles).
+    automatically (e.g. physical copies, unreported digital titles), or to
+    record a wishlist item on a platform with no wishlist sync (e.g. PSN, which
+    has no public wishlist API — pass owned=False there).
 
     name: Game name (will match an existing game by exact name or create a new one)
     platform: steam | epic | gog | nintendo | switch2 | ps5 | itchio | xbox | ea | ubisoft | other (aliases: origin→ea, uplay→ubisoft)
     identifier_type: Optional store identifier type (e.g. 'steam_appid', 'gog_product_id')
     identifier_value: Optional store identifier value
     playtime_minutes: Optional known playtime in minutes
+    owned: True (default) records an owned copy; False records a wishlist entry
+        instead (playtime_minutes is ignored in that case)
     """
     # Resolve aliases (e.g. "nintendo" → "switch2") and validate in one step.
     platform = _validate_platform(platform, LIBRARY_PLATFORMS)
@@ -123,12 +170,15 @@ async def add_game_to_platform(
     created = existing is None
 
     game_id = await upsert_game(None, name)
-    game_platform_id = await upsert_game_platform(
-        game_id,
-        platform,
-        playtime_minutes=playtime_minutes,
-        owned=1,
-    )
+    if owned:
+        game_platform_id = await upsert_game_platform(
+            game_id,
+            platform,
+            playtime_minutes=playtime_minutes,
+            owned=1,
+        )
+    else:
+        game_platform_id = await upsert_wishlist_entry(game_id, platform)
 
     added_identifier = None
     if identifier_type and identifier_value:
@@ -146,7 +196,8 @@ async def add_game_to_platform(
         "game_platform_id": game_platform_id,
         "name": name,
         "platform": platform,
-        "playtime_minutes": playtime_minutes,
+        "owned": owned,
+        "playtime_minutes": playtime_minutes if owned else None,
         "identifier": added_identifier,
     }
 

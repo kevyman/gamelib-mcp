@@ -51,7 +51,7 @@ STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 
 @dataclass
@@ -1022,6 +1022,27 @@ async def _migrate_v14_to_v15(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v15_to_v16(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add game_platforms.wishlisted_at for wishlist tracking.
+
+    Nullable ISO timestamp; NULL means "not on the wishlist". Deliberately a
+    separate column from `owned` rather than overloading owned=0 — wishlist
+    writers must never flip an existing owned=1 row back to unowned, and every
+    existing `WHERE owned = 1` query keeps excluding wishlist-only rows for free.
+    Additive column only — backfilled by wishlist syncs (Steam, DekuDeals) and
+    manual adds.
+    """
+    if progress is not None:
+        progress("Migrating to v16: add game_platforms.wishlisted_at.")
+
+    cols = await _table_columns(db, "game_platforms")
+    if "wishlisted_at" not in cols:
+        await db.execute("ALTER TABLE game_platforms ADD COLUMN wishlisted_at TEXT")
+
+    await _set_user_version(db, 16)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1241,6 +1262,11 @@ async def _run_migrations(
         await _migrate_v14_to_v15(db, progress=None)
         version = 15
 
+    if version == 15:
+        _emit(progress, "Applying migration step v15 -> v16.", applied_steps)
+        await _migrate_v15_to_v16(db, progress=None)
+        version = 16
+
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
@@ -1364,6 +1390,7 @@ from .upserts import (  # noqa: E402
     GAME_EDITABLE_FIELDS,
     upsert_game,
     upsert_game_platform,
+    upsert_wishlist_entry,
     repair_misclassified_platform_row,
     upsert_game_platform_identifier,
     upsert_steam_platform_data,

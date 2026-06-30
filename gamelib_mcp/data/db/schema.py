@@ -622,6 +622,7 @@ _V9_SCHEMA_DDL = """
         playtime_2weeks_minutes INTEGER,
         last_played      TEXT,
         last_synced      TEXT,
+        wishlisted_at    TEXT,
         UNIQUE(game_id, platform)
     );
 

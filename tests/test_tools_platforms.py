@@ -74,12 +74,14 @@ class AddGameToPlatformTests(ToolDBTestCase):
                 "game_platform_id",
                 "name",
                 "platform",
+                "owned",
                 "playtime_minutes",
                 "identifier",
             },
         )
         self.assertTrue(result["created"])
         self.assertEqual(result["platform"], "switch2")
+        self.assertTrue(result["owned"])
         self.assertEqual(result["playtime_minutes"], 45)
         self.assertEqual(result["identifier"], {"type": "gog_product_id", "value": "123"})
 

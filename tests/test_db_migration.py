@@ -903,6 +903,40 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[3]["parent_game_id"], 2)
         self.assertEqual(rows[3]["is_primary_library_item"], 0)
 
+    async def test_v15_to_v16_adds_wishlisted_at_column(self) -> None:
+        ddl_without_wishlist = db_module._V12_SCHEMA_DDL.replace(
+            "        last_synced      TEXT,\n        wishlisted_at    TEXT,\n        UNIQUE(game_id, platform)",
+            "        last_synced      TEXT,\n        UNIQUE(game_id, platform)",
+        )
+        self.assertNotIn("wishlisted_at", ddl_without_wishlist)
+
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(ddl_without_wishlist)
+        conn.execute("PRAGMA user_version = 15")
+        conn.execute("INSERT INTO games (id, name) VALUES (1, 'Hollow Knight')")
+        conn.execute(
+            "INSERT INTO game_platforms (id, game_id, platform, owned, last_synced) "
+            "VALUES (1, 1, 'steam', 1, '2026-01-01T00:00:00+00:00')"
+        )
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+            async with db_module.get_db() as db:
+                version = await db_module._get_user_version(db)
+                cols = await db_module._table_columns(db, "game_platforms")
+                row = await db.execute_fetchone(
+                    "SELECT owned, wishlisted_at FROM game_platforms WHERE id = 1"
+                )
+
+        self.assertEqual(version, db_module.SCHEMA_VERSION)
+        self.assertIn("wishlisted_at", cols)
+        # Existing ownership is untouched by the additive migration.
+        self.assertEqual(row["owned"], 1)
+        self.assertIsNone(row["wishlisted_at"])
+
     async def test_v9_to_v10_adds_series_tables(self) -> None:
         conn = sqlite3.connect(self.db_path)
         conn.executescript(db_module._V9_SCHEMA_DDL)

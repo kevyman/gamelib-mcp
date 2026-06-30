@@ -199,6 +199,35 @@ async def upsert_game_platform(
         return row["id"]
 
 
+async def upsert_wishlist_entry(
+    game_id: int,
+    platform: str,
+    wishlisted_at: str | None = None,
+) -> int:
+    """Insert or update a game_platforms row's wishlisted_at and return its id.
+
+    Deliberately does not touch ``owned`` — safe to call regardless of whether
+    the game is already owned on this platform, unlike upsert_game_platform
+    (whose ON CONFLICT clause unconditionally overwrites owned). A new row is
+    created with owned=0; an existing row's ownership state is left untouched.
+    """
+    now = wishlisted_at or datetime.now(timezone.utc).isoformat()
+    async with get_db() as db:
+        await db.execute(
+            """INSERT INTO game_platforms (game_id, platform, owned, wishlisted_at)
+               VALUES (?, ?, 0, ?)
+               ON CONFLICT(game_id, platform) DO UPDATE SET
+                   wishlisted_at = excluded.wishlisted_at""",
+            (game_id, platform, now),
+        )
+        row = await db.execute_fetchone(
+            "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",
+            (game_id, platform),
+        )
+        await db.commit()
+        return row["id"]
+
+
 async def repair_misclassified_platform_row(
     *,
     source_game_id: int,
