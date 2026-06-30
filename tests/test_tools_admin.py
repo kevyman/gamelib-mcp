@@ -99,6 +99,15 @@ class DetectFarmedGamesTests(ToolDBTestCase):
         self.assertEqual(result["candidates"], 0)
         self.assertEqual(result["farming_days"], [])
 
+    async def test_null_playtime_game_is_not_a_farming_candidate(self):
+        # A game with NULL playtime has no rtime_last_played and no positive
+        # playtime; it must never be flagged as a farmed/card-farming candidate.
+        await self._seed_farming_day()
+        gid = await seed_game("Manual")
+        await add_platform(gid, "gog")  # NULL playtime, no steam data
+        result = await admin.detect_farmed_games(dry_run=True, min_games_per_day=2)
+        self.assertNotIn("Manual", [g["name"] for g in result["sample_games"]])
+
 
 class SetNintendoSessionValidationTests(ToolDBTestCase):
     async def test_invalid_json_returns_error(self):
