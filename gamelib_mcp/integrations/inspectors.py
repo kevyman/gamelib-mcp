@@ -331,13 +331,46 @@ def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus
     auth_stale = (last_sync or {}).get("last_error_classification") == "auth_stale"
 
     if has_cookies:
+        if auth_stale:
+            capabilities = [
+                CapabilityStatus("ownership", "stale", "Nintendo cookies may be expired; re-run set_nintendo_session."),
+            ]
+            checks = [
+                CheckStatus("nintendo_cookies_file", "warn", "Cookie file present but recent auth failed"),
+            ]
+            detected_inputs = [str(cookies_path)]
+            summary = "Nintendo auth is stale; re-run set_nintendo_session."
+            remediation_steps: list[str] = ["Re-run set_nintendo_session to refresh the VGCS session cookies."]
+            if has_pctl:
+                capabilities.append(
+                    CapabilityStatus("playtime", "stale", "Parental Controls auth may be stale; re-run set_nintendo_pctl_session.")
+                )
+                checks.append(
+                    CheckStatus("nintendo_pctl_session", "warn", "Parental Controls token present but recent auth failed")
+                )
+                detected_inputs.append(str(pctl_path))
+                summary = "Nintendo auth is stale; re-run set_nintendo_session and/or set_nintendo_pctl_session."
+                remediation_steps.append("Re-run set_nintendo_pctl_session to refresh the Parental Controls token.")
+            return IntegrationStatus(
+                platform="nintendo",
+                overall_status="stale",
+                active_backend="vgcs-cookie",
+                summary=summary,
+                capabilities=capabilities,
+                checks=checks,
+                required_inputs=["NINTENDO_COOKIES_FILE"],
+                detected_inputs=detected_inputs,
+                remediation_steps=remediation_steps,
+                last_sync=last_sync or {},
+            )
+
         capabilities = [CapabilityStatus("ownership", "ready", "VGCS cookies are available.")]
         checks = [
             CheckStatus("nintendo_cookies_file", "pass", "Cookie fallback file found"),
         ]
         detected_inputs = [str(cookies_path)]
         summary = "Nintendo ownership via VGCS cookies."
-        remediation_steps: list[str] = []
+        remediation_steps = []
         if has_pctl:
             capabilities.append(
                 CapabilityStatus("playtime", "ready", "Parental Controls playtime is configured.")

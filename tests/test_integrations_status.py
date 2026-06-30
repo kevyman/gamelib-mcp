@@ -148,6 +148,64 @@ def test_inspect_gog_reports_ready_when_auth_files_present(tmp_path: Path):
     assert gog.active_backend == "lgogdownloader"
 
 
+def test_inspect_nintendo_reports_stale_when_cookies_present_and_auth_failed(tmp_path: Path):
+    cookies_path = tmp_path / "nintendo_cookies.json"
+    cookies_path.write_text("{}", encoding="utf-8")
+
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "NINTENDO_COOKIES_FILE": str(cookies_path),
+                "NINTENDO_PCTL_SESSION_FILE": str(tmp_path / "absent_pctl.json"),
+            },
+            clear=True,
+        ),
+        patch("gamelib_mcp.integrations.inspectors.shutil.which", side_effect=lambda name: None),
+    ):
+        statuses = inspect_all_integrations(
+            last_sync_by_platform={"nintendo": {"last_error_classification": "auth_stale"}}
+        )
+
+    nintendo = statuses["nintendo"]
+
+    assert nintendo.overall_status == "stale"
+    assert nintendo.active_backend == "vgcs-cookie"
+    caps = {c.name: c.status for c in nintendo.capabilities}
+    assert caps["ownership"] == "stale"
+    assert any("set_nintendo_session" in step for step in nintendo.remediation_steps)
+
+
+def test_inspect_nintendo_reports_stale_with_pctl_when_cookies_present_and_auth_failed(tmp_path: Path):
+    cookies_path = tmp_path / "nintendo_cookies.json"
+    cookies_path.write_text("{}", encoding="utf-8")
+    pctl_path = tmp_path / "nintendo_pctl_session.json"
+    pctl_path.write_text("{}", encoding="utf-8")
+
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "NINTENDO_COOKIES_FILE": str(cookies_path),
+                "NINTENDO_PCTL_SESSION_FILE": str(pctl_path),
+            },
+            clear=True,
+        ),
+        patch("gamelib_mcp.integrations.inspectors.shutil.which", side_effect=lambda name: None),
+    ):
+        statuses = inspect_all_integrations(
+            last_sync_by_platform={"nintendo": {"last_error_classification": "auth_stale"}}
+        )
+
+    nintendo = statuses["nintendo"]
+
+    assert nintendo.overall_status == "stale"
+    assert nintendo.active_backend == "vgcs-cookie"
+    caps = {c.name: c.status for c in nintendo.capabilities}
+    assert caps["ownership"] == "stale"
+    assert caps["playtime"] == "stale"
+
+
 def test_inspect_nintendo_cookie_fallback_reports_vgcs_cookie_ownership_only(tmp_path: Path):
     cookies_path = tmp_path / "nintendo_cookies.json"
     cookies_path.write_text("{}", encoding="utf-8")
