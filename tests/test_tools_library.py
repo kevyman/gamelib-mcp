@@ -47,9 +47,11 @@ class SearchGamesTests(ToolDBTestCase):
                 "content_type",
                 "parent_game_id",
                 "is_primary_library_item",
+                "play_state",
             },
         )
         self.assertEqual(game["name"], "Portal 2")
+        self.assertEqual(game["play_state"], "played")
         self.assertEqual(game["appid"], 620)
         self.assertEqual(game["steam_appid"], 620)
         self.assertEqual(game["playtime_hours"], 10.0)
@@ -261,6 +263,7 @@ class LibraryStatsTests(ToolDBTestCase):
                 "total_games",
                 "played",
                 "unplayed",
+                "unknown",
                 "farmed_games",
                 "total_playtime_hours",
                 "filter",
@@ -273,6 +276,7 @@ class LibraryStatsTests(ToolDBTestCase):
         self.assertEqual(stats["total_games"], 3)
         self.assertEqual(stats["played"], 1)
         self.assertEqual(stats["unplayed"], 2)  # unplayed OR farmed
+        self.assertEqual(stats["unknown"], 0)
         self.assertEqual(stats["farmed_games"], 1)
         self.assertEqual(stats["total_playtime_hours"], round(630 / 60, 1))
         self.assertEqual(stats["filter"], "all")
@@ -336,3 +340,21 @@ class LibraryStatsTests(ToolDBTestCase):
 
         self.assertEqual(stats["total_games"], 1)
         self.assertEqual([game["name"] for game in stats["results"]], ["Sid Meier's Civilization IV"])
+
+    async def test_filter_unknown_returns_null_playtime_games(self):
+        await make_steam_game("RealUnplayed", 1, playtime_minutes=0)
+        gid = await seed_game("Manual")
+        await add_platform(gid, "gog")  # no playtime -> NULL
+        unplayed = await library.get_library_stats(filter="unplayed")
+        self.assertEqual([g["name"] for g in unplayed["results"]], ["RealUnplayed"])
+        unknown = await library.get_library_stats(filter="unknown")
+        self.assertEqual([g["name"] for g in unknown["results"]], ["Manual"])
+        self.assertEqual(unknown["unknown"], 1)
+
+    async def test_search_marks_unknown_playtime_with_null_hours(self):
+        gid = await seed_game("Manual")
+        await add_platform(gid, "gog")  # no playtime -> NULL
+        results = await library.search_games("manual", response_format="detailed")
+        game = results["results"][0]
+        self.assertEqual(game["play_state"], "unknown")
+        self.assertIsNone(game["playtime_hours"])
