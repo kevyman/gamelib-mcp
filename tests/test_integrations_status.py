@@ -148,52 +148,6 @@ def test_inspect_gog_reports_ready_when_auth_files_present(tmp_path: Path):
     assert gog.active_backend == "lgogdownloader"
 
 
-def test_inspect_nintendo_reports_degraded_when_token_present_but_nxapi_missing(tmp_path: Path):
-    missing_cookies_path = tmp_path / "missing_nintendo_cookies.json"
-
-    with (
-        patch.dict(
-            "os.environ",
-            {
-                "NINTENDO_SESSION_TOKEN": "token",
-                "NINTENDO_COOKIES_FILE": str(missing_cookies_path),
-            },
-            clear=True,
-        ),
-        patch("gamelib_mcp.integrations.inspectors.shutil.which", side_effect=lambda name: None),
-    ):
-        statuses = inspect_all_integrations()
-
-    nintendo = statuses["nintendo"]
-
-    assert nintendo.overall_status == "degraded"
-    assert nintendo.active_backend is None
-
-
-def test_inspect_nintendo_reports_stale_when_recent_auth_failure_detected(tmp_path: Path):
-    missing_cookies_path = tmp_path / "missing_nintendo_cookies.json"
-
-    with (
-        patch.dict(
-            "os.environ",
-            {
-                "NINTENDO_SESSION_TOKEN": "token",
-                "NINTENDO_COOKIES_FILE": str(missing_cookies_path),
-            },
-            clear=True,
-        ),
-        patch("gamelib_mcp.integrations.inspectors.shutil.which", return_value="/usr/bin/nxapi"),
-    ):
-        statuses = inspect_all_integrations(
-            last_sync_by_platform={"nintendo": {"last_error_classification": "auth_stale"}}
-        )
-
-    nintendo = statuses["nintendo"]
-
-    assert nintendo.overall_status == "stale"
-    assert nintendo.active_backend == "nxapi"
-
-
 def test_inspect_nintendo_cookie_fallback_reports_vgcs_cookie_ownership_only(tmp_path: Path):
     cookies_path = tmp_path / "nintendo_cookies.json"
     cookies_path.write_text("{}", encoding="utf-8")
@@ -253,7 +207,7 @@ def test_inspect_nintendo_with_parental_controls_reports_playtime(tmp_path: Path
 
 
 def test_inspect_nintendo_playtime_only_reports_parental_controls(tmp_path: Path):
-    # Only the Parental Controls token is configured (no cookies / nxapi). This is
+    # Only the Parental Controls token is configured (no cookies). This is
     # a supported state (sync_nintendo still runs the playtime layer), so the
     # control plane must report playtime ready instead of "unconfigured".
     pctl_path = tmp_path / "nintendo_pctl_session.json"

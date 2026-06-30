@@ -1,16 +1,13 @@
-"""Nintendo Switch sync — nxapi play-activity (primary) with VGCS ownership fallback.
+"""Nintendo Switch sync — VGCS ownership.
 
-PRIMARY: nxapi CLI (requires NINTENDO_SESSION_TOKEN + nxapi installed)
-  - Uses `nxapi nso play-activity --json`
-  - Provides play history with accurate playtime in minutes
-  - Only launched titles appear (Nintendo platform limitation — no workaround)
-
-FALLBACK: Nintendo Account VGCS GraphQL API (requires NINTENDO_COOKIES_FILE)
+OWNERSHIP: Nintendo Account VGCS GraphQL API (requires NINTENDO_COOKIES_FILE)
   - Uses browser session cookies from accounts.nintendo.com
   - Provides full digital library ownership including unplayed titles
   - No playtime data — playtime_minutes stored as None
-  - Activated automatically when nxapi fails or credentials are absent
   - To set/refresh cookies: use the set_nintendo_session MCP tool
+
+PLAYTIME: Parental Controls API (requires NINTENDO_PCTL_SESSION_FILE via set_nintendo_pctl_session)
+  - Handled separately in nintendo_pctl.py
 
 Platform: all titles stored as "switch2" (NX and OUNCE both map to switch2).
 """
@@ -20,7 +17,6 @@ import json
 import logging
 import os
 import re
-import shutil
 
 import httpx
 from bs4 import BeautifulSoup
@@ -39,7 +35,6 @@ from gamelib_mcp.data.title_normalization import normalize_search_text, prepare_
 
 logger = logging.getLogger(__name__)
 
-NXAPI_BIN = os.getenv("NXAPI_BIN", "nxapi")
 NINTENDO_TITLE_ID = "nintendo_title_id"
 PLATFORM = "switch2"
 
@@ -104,80 +99,7 @@ def _classify_nintendo_sync_error(message: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# nxapi helpers
-# ---------------------------------------------------------------------------
-
-def _nxapi_available() -> bool:
-    return shutil.which(NXAPI_BIN) is not None
-
-
-async def _run_nxapi(*args: str) -> str:
-    """Run an nxapi CLI command and return stdout."""
-    # Pass token via env var rather than CLI flag to avoid exposure in ps output.
-    token = os.environ.get("NINTENDO_SESSION_TOKEN")
-    env = {**os.environ}
-    if token:
-        env["NXAPI_SESSION_TOKEN"] = token
-    proc = await asyncio.create_subprocess_exec(
-        NXAPI_BIN, *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"nxapi {' '.join(args)} failed (rc={proc.returncode}): {stderr.decode()[:300]}"
-        )
-    return stdout.decode()
-
-
-async def fetch_nintendo_play_history() -> list[dict]:
-    """
-    Fetch play history via `nxapi nso play-activity --json`.
-
-    Returns a list of dicts with keys:
-      name (str), playtime_minutes (int | None), title_id (str | None)
-
-    Playtime: nxapi reports totalPlayTime in minutes (confirmed via nxapi source and
-    NSO-RPC which divides by 60 to get hours — see github.com/samuelthomas2774/nxapi
-    issue #8). No unit conversion applied.
-    """
-    raw = await _run_nxapi("nso", "play-activity", "--json")
-    data = json.loads(raw)
-
-    items = data if isinstance(data, list) else data.get("items", data.get("titles", []))
-
-    results = []
-    for item in items:
-        name = item.get("name") or item.get("title") or item.get("gameName")
-        if not name:
-            continue
-
-        minutes = (
-            item.get("totalPlayTime")
-            or item.get("playingMinutes")
-            or item.get("totalPlayedMinutes")
-        )
-
-        title_id = item.get("titleId") or item.get("id")
-        if not title_id:
-            shop_uri = item.get("shopUri", "")
-            m = re.search(r"/([0-9a-fA-F]{16})/?(?:[?#]|$)", shop_uri)
-            if m:
-                title_id = m.group(1)
-
-        results.append({
-            "name": str(name),
-            "playtime_minutes": int(minutes) if minutes else None,
-            "title_id": str(title_id) if title_id else None,
-        })
-
-    return results
-
-
-# ---------------------------------------------------------------------------
-# VGCS fallback helpers
+# VGCS helpers
 # ---------------------------------------------------------------------------
 
 def _load_vgcs_cookies() -> dict[str, str] | None:
@@ -212,7 +134,7 @@ def _load_vgcs_cookies() -> dict[str, str] | None:
 
 
 def is_nintendo_configured() -> bool:
-    return bool(os.getenv("NINTENDO_SESSION_TOKEN")) or _load_vgcs_cookies() is not None
+    return _load_vgcs_cookies() is not None
 
 
 def _parse_vgcs_page(html: str) -> tuple[str, str, str, int]:
@@ -352,60 +274,26 @@ async def _sync_nintendo_ownership() -> dict:
     Sync Nintendo Switch titles into game_platforms (platform="switch2").
 
     Strategy:
-    1. Try nxapi play-activity (requires NINTENDO_SESSION_TOKEN + nxapi binary).
-       - Provides play history with playtime in minutes.
-    2. If nxapi is unavailable or fails, fall back to VGCS GraphQL
-       (requires NINTENDO_COOKIES_FILE with valid session cookies).
+    1. Use VGCS GraphQL (requires NINTENDO_COOKIES_FILE with valid session cookies).
        - Provides full digital library ownership; playtime stored as None.
-    3. If neither is available, skip silently.
+    2. If not configured, skip silently.
 
     Returns: {"added": int, "matched": int, "skipped": int}
     """
     entries: list[dict] | None = None
 
-    has_nxapi_token = bool(os.getenv("NINTENDO_SESSION_TOKEN"))
     has_vgcs_cookies = bool(_load_vgcs_cookies())
-    nxapi_error: Exception | None = None
     vgcs_error: Exception | None = None
 
-    # --- attempt nxapi ---
-    if has_nxapi_token and _nxapi_available():
-        try:
-            entries = await fetch_nintendo_play_history()
-            logger.info("Nintendo: fetched %d titles via nxapi", len(entries))
-        except Exception as exc:
-            nxapi_error = exc
-            logger.warning("nxapi play-activity failed, trying VGCS fallback: %s", exc)
-
-    # --- attempt VGCS fallback ---
-    if entries is None and has_vgcs_cookies:
+    if has_vgcs_cookies:
         try:
             entries = await fetch_nintendo_library_vgcs()
-            logger.info("Nintendo: fetched %d titles via VGCS fallback", len(entries))
+            logger.info("Nintendo: fetched %d titles via VGCS", len(entries))
         except Exception as exc:
             vgcs_error = exc
-            logger.warning("VGCS fallback failed: %s", exc)
+            logger.warning("VGCS sync failed: %s", exc)
 
     if entries is None:
-        if nxapi_error is not None:
-            classification = _classify_nintendo_sync_error(str(nxapi_error))
-            return {
-                "added": 0,
-                "matched": 0,
-                "skipped": 0,
-                "sync_status": "stale" if classification == "auth_stale" else "failed",
-                "error_summary": f"nxapi play-activity failed: {nxapi_error}",
-                "error_classification": classification,
-            }
-        if has_nxapi_token and not _nxapi_available():
-            return {
-                "added": 0,
-                "matched": 0,
-                "skipped": 0,
-                "sync_status": "degraded",
-                "error_summary": f"{NXAPI_BIN} not in PATH",
-                "error_classification": "missing_runtime_dependency",
-            }
         if vgcs_error is not None:
             classification = _classify_nintendo_sync_error(str(vgcs_error))
             return {
@@ -413,22 +301,18 @@ async def _sync_nintendo_ownership() -> dict:
                 "matched": 0,
                 "skipped": 0,
                 "sync_status": "stale" if classification == "auth_stale" else "failed",
-                "error_summary": f"VGCS fallback failed: {vgcs_error}",
+                "error_summary": f"VGCS sync failed: {vgcs_error}",
                 "error_classification": classification,
             }
-        if not has_nxapi_token and not has_vgcs_cookies:
-            logger.info(
-                "Nintendo sync skipped — set NINTENDO_SESSION_TOKEN or NINTENDO_COOKIES_FILE"
-            )
-            return {
-                "added": 0,
-                "matched": 0,
-                "skipped": 0,
-                "sync_status": "unconfigured",
-                "error_summary": "Nintendo sync skipped: set NINTENDO_SESSION_TOKEN or NINTENDO_COOKIES_FILE",
-                "error_classification": "missing_configuration",
-            }
-        return {"added": 0, "matched": 0, "skipped": 0}
+        logger.info("Nintendo sync skipped — set NINTENDO_COOKIES_FILE")
+        return {
+            "added": 0,
+            "matched": 0,
+            "skipped": 0,
+            "sync_status": "unconfigured",
+            "error_summary": "Nintendo sync skipped: set NINTENDO_COOKIES_FILE",
+            "error_classification": "missing_configuration",
+        }
 
     added = matched = skipped = 0
     prepared_entries = []
