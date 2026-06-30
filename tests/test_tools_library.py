@@ -275,7 +275,7 @@ class LibraryStatsTests(ToolDBTestCase):
         )
         self.assertEqual(stats["total_games"], 3)
         self.assertEqual(stats["played"], 1)
-        self.assertEqual(stats["unplayed"], 2)  # unplayed OR farmed
+        self.assertEqual(stats["unplayed"], 2)  # real-unplayed + farmed (play_state='unplayed')
         self.assertEqual(stats["unknown"], 0)
         self.assertEqual(stats["farmed_games"], 1)
         self.assertEqual(stats["total_playtime_hours"], round(630 / 60, 1))

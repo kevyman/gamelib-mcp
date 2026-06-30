@@ -90,7 +90,7 @@ class VibeFilterTests(ToolDBTestCase):
         # (not confirmed-played) and must NOT render a misleading 0.0 hours.
         gid = await seed_game("ManualRogue", tags=["roguelike"])
         await add_platform(gid, "gog")  # no playtime -> NULL
-        results = await discover.discover_games(vibes=["roguelike"])
+        results = await discover.discover_games(vibes=["roguelike"], unplayed_only=True)
         self.assertEqual([g["name"] for g in results["results"]], ["ManualRogue"])
         game = results["results"][0]
         self.assertEqual(game["play_state"], "unknown")
