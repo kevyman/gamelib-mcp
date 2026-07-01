@@ -622,7 +622,6 @@ _V9_SCHEMA_DDL = """
         playtime_2weeks_minutes INTEGER,
         last_played      TEXT,
         last_synced      TEXT,
-        wishlisted_at    TEXT,
         UNIQUE(game_id, platform)
     );
 
@@ -773,4 +772,26 @@ _V12_SCHEMA_DDL = _V11_SCHEMA_DDL + """
     );
 
     CREATE INDEX IF NOT EXISTS idx_nps_app ON nintendo_play_summary(application_id);
+"""
+
+
+# v16 adds game_wishlist: "want to play" tracking, deliberately kept OUT of
+# game_platforms. That table's rows mean "a real relationship with this
+# platform exists" (owned, or a manual stub); a wishlist item may not be owned
+# anywhere yet, so overloading owned=0 there would blur that invariant and risk
+# a sync accidentally un-owning a row. A wishlist row is deleted once ownership
+# sync confirms the game is actually owned on that platform (see
+# clear_fulfilled_wishlist_entries) — the same "purchase clears the wishlist"
+# behavior storefronts like Steam implement natively.
+_V16_SCHEMA_DDL = _V12_SCHEMA_DDL + """
+    CREATE TABLE IF NOT EXISTS game_wishlist (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id       INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        platform      TEXT NOT NULL,
+        wishlisted_at TEXT NOT NULL,
+        source        TEXT,
+        UNIQUE(game_id, platform)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_game_wishlist_game_id ON game_wishlist(game_id);
 """

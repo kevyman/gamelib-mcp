@@ -72,6 +72,7 @@ class AddGameToPlatformTests(ToolDBTestCase):
                 "created",
                 "game_id",
                 "game_platform_id",
+                "wishlist_id",
                 "name",
                 "platform",
                 "owned",

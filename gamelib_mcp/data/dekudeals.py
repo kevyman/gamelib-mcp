@@ -1,4 +1,4 @@
-"""Sync a DekuDeals shared wishlist into game_platforms.wishlisted_at (switch2).
+"""Sync a DekuDeals shared wishlist into game_wishlist (switch2).
 
 Nintendo has no official wishlist API. DekuDeals exposes a public, unauthenticated
 JSON export of a shared wishlist page (append ".json" to the share URL), so this
@@ -28,7 +28,8 @@ def is_dekudeals_configured() -> bool:
 async def sync_dekudeals_wishlist() -> dict:
     """
     Fetch the configured DekuDeals shared wishlist and fuzzy-match titles to DB
-    games, upserting wishlisted_at on their switch2 platform row. Returns stats.
+    games, upserting a game_wishlist row for each on the switch2 platform.
+    Returns stats.
     """
     wishlist_url = os.getenv("DEKUDEALS_WISHLIST_URL", DEKUDEALS_WISHLIST_URL)
     if not wishlist_url:
@@ -56,7 +57,7 @@ async def sync_dekudeals_wishlist() -> dict:
             logger.debug("No match for DekuDeals wishlist title: %s", title)
             skipped += 1
             continue
-        await upsert_wishlist_entry(game_id, "switch2", wishlisted_at=now)
+        await upsert_wishlist_entry(game_id, "switch2", wishlisted_at=now, source="dekudeals")
         matched += 1
 
     return {"matched": matched, "skipped": skipped, "total_scraped": len(titles)}

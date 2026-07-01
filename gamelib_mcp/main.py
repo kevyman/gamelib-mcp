@@ -561,10 +561,12 @@ async def add_game_to_platform(
     or other games that are not synced automatically. name matches an existing
     game by exact name or creates a new entry. platform accepts steam, epic, gog,
     nintendo, switch2, ps5, itchio, xbox, or other. identifier_type and
-    identifier_value can store an external ID. playtime_minutes is optional.
-    Pass owned=False to record a wishlist entry instead of an owned copy —
-    useful for PSN, which has no wishlist API. Returns the created or updated
-    platform record.
+    identifier_value can store an external ID (requires owned=True).
+    playtime_minutes is optional. Pass owned=False to record a wishlist entry
+    instead of an owned copy — useful for PSN, which has no wishlist API.
+    Returns game_platform_id when owned, wishlist_id when not (the other is
+    null); either call also clears a matching wishlist entry that's now
+    fulfilled.
     """
     from .tools.platforms import add_game_to_platform as _add
     return await _add(name, platform, identifier_type, identifier_value, playtime_minutes, owned)

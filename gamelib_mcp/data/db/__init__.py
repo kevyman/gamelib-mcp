@@ -172,6 +172,7 @@ from .schema import (
     _V10_SCHEMA_DDL,
     _V11_SCHEMA_DDL,
     _V12_SCHEMA_DDL,
+    _V16_SCHEMA_DDL,
 )
 
 
@@ -1023,21 +1024,32 @@ async def _migrate_v14_to_v15(db: aiosqlite.Connection, progress: _Progress | No
 
 
 async def _migrate_v15_to_v16(db: aiosqlite.Connection, progress: _Progress | None) -> None:
-    """Add game_platforms.wishlisted_at for wishlist tracking.
+    """Add game_wishlist: "want to play" tracking, kept out of game_platforms.
 
-    Nullable ISO timestamp; NULL means "not on the wishlist". Deliberately a
-    separate column from `owned` rather than overloading owned=0 — wishlist
-    writers must never flip an existing owned=1 row back to unowned, and every
-    existing `WHERE owned = 1` query keeps excluding wishlist-only rows for free.
-    Additive column only — backfilled by wishlist syncs (Steam, DekuDeals) and
-    manual adds.
+    A wishlist item may not be owned anywhere yet, so it gets a games row but no
+    game_platforms row until it's actually owned — overloading owned=0 there
+    would blur that table's "real platform relationship" invariant and risk a
+    sync accidentally un-owning a row. Additive table only; a wishlist row is
+    later deleted once ownership sync confirms the game is owned on that
+    platform (see clear_fulfilled_wishlist_entries).
     """
     if progress is not None:
-        progress("Migrating to v16: add game_platforms.wishlisted_at.")
+        progress("Migrating to v16: add game_wishlist.")
 
-    cols = await _table_columns(db, "game_platforms")
-    if "wishlisted_at" not in cols:
-        await db.execute("ALTER TABLE game_platforms ADD COLUMN wishlisted_at TEXT")
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS game_wishlist (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_id       INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+            platform      TEXT NOT NULL,
+            wishlisted_at TEXT NOT NULL,
+            source        TEXT,
+            UNIQUE(game_id, platform)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_game_wishlist_game_id ON game_wishlist(game_id);
+        """
+    )
 
     await _set_user_version(db, 16)
     await db.commit()
@@ -1079,7 +1091,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V12_SCHEMA_DDL)
+    await db.executescript(_V16_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -1120,7 +1132,7 @@ async def _run_migrations(
     applied_steps: list[str] = []
 
     if detected_state == "fresh":
-        await db.executescript(_V12_SCHEMA_DDL)
+        await db.executescript(_V16_SCHEMA_DDL)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
         _emit(progress, "Initialized fresh database at schema v12.", applied_steps)
@@ -1270,7 +1282,7 @@ async def _run_migrations(
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V12_SCHEMA_DDL)
+    await db.executescript(_V16_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
@@ -1391,6 +1403,7 @@ from .upserts import (  # noqa: E402
     upsert_game,
     upsert_game_platform,
     upsert_wishlist_entry,
+    clear_fulfilled_wishlist_entries,
     repair_misclassified_platform_row,
     upsert_game_platform_identifier,
     upsert_steam_platform_data,

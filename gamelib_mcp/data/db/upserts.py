@@ -203,29 +203,64 @@ async def upsert_wishlist_entry(
     game_id: int,
     platform: str,
     wishlisted_at: str | None = None,
+    source: str | None = None,
 ) -> int:
-    """Insert or update a game_platforms row's wishlisted_at and return its id.
+    """Insert or update a game_wishlist row and return its id.
 
-    Deliberately does not touch ``owned`` — safe to call regardless of whether
-    the game is already owned on this platform, unlike upsert_game_platform
-    (whose ON CONFLICT clause unconditionally overwrites owned). A new row is
-    created with owned=0; an existing row's ownership state is left untouched.
+    Lives in its own table rather than game_platforms — a wishlist item may not
+    be owned anywhere yet, and game_platforms rows are meant to mean "a real
+    platform relationship exists" (owned, or a manual stub). source records
+    where the entry came from (e.g. "steam", "dekudeals", "manual").
     """
     now = wishlisted_at or datetime.now(timezone.utc).isoformat()
     async with get_db() as db:
         await db.execute(
-            """INSERT INTO game_platforms (game_id, platform, owned, wishlisted_at)
-               VALUES (?, ?, 0, ?)
+            """INSERT INTO game_wishlist (game_id, platform, wishlisted_at, source)
+               VALUES (?, ?, ?, ?)
                ON CONFLICT(game_id, platform) DO UPDATE SET
-                   wishlisted_at = excluded.wishlisted_at""",
-            (game_id, platform, now),
+                   wishlisted_at = excluded.wishlisted_at,
+                   source = excluded.source""",
+            (game_id, platform, now, source),
         )
         row = await db.execute_fetchone(
-            "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",
+            "SELECT id FROM game_wishlist WHERE game_id = ? AND platform = ?",
             (game_id, platform),
         )
         await db.commit()
         return row["id"]
+
+
+async def clear_fulfilled_wishlist_entries(
+    game_id: int | None = None,
+    platform: str | None = None,
+) -> int:
+    """Delete wishlist entries whose game is now owned on that platform.
+
+    Mirrors how storefronts like Steam clear a wishlist item once you buy it.
+    Call this after any sync/write that may have established ownership
+    (library refresh, wishlist sync, add_game_to_platform) — game_platforms
+    rows are the source of truth for ownership, so a wishlist row lingers only
+    until the next such call notices it's fulfilled. Optionally scoped to a
+    single game_id/platform for an immediate, targeted check. Returns the
+    number of rows deleted.
+    """
+    where = ["EXISTS (SELECT 1 FROM game_platforms gp "
+             "WHERE gp.game_id = game_wishlist.game_id "
+             "AND gp.platform = game_wishlist.platform AND gp.owned = 1)"]
+    params: list = []
+    if game_id is not None:
+        where.append("game_wishlist.game_id = ?")
+        params.append(game_id)
+    if platform is not None:
+        where.append("game_wishlist.platform = ?")
+        params.append(platform)
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            f"DELETE FROM game_wishlist WHERE {' AND '.join(where)}", params
+        )
+        await db.commit()
+        return cursor.rowcount
 
 
 async def repair_misclassified_platform_row(

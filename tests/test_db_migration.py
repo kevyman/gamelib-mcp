@@ -484,12 +484,14 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             version = await db_module._get_user_version(db)
             cols = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(game_platform_enrichment)")}
             game_cols = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(games)")}
+            tables = await db_module._table_names(db)
 
         self.assertEqual(version, db_module.SCHEMA_VERSION)
         self.assertEqual(result.final_version, db_module.SCHEMA_VERSION)
         self.assertIn("opencritic_url", cols)
         self.assertIn("opencritic_num_reviews", cols)
         self.assertIn("name_normalized", game_cols)
+        self.assertIn("game_wishlist", tables)
 
     async def test_v4_database_migrates_opencritic_scrape_columns(self) -> None:
         conn = sqlite3.connect(self.db_path)
@@ -903,15 +905,9 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[3]["parent_game_id"], 2)
         self.assertEqual(rows[3]["is_primary_library_item"], 0)
 
-    async def test_v15_to_v16_adds_wishlisted_at_column(self) -> None:
-        ddl_without_wishlist = db_module._V12_SCHEMA_DDL.replace(
-            "        last_synced      TEXT,\n        wishlisted_at    TEXT,\n        UNIQUE(game_id, platform)",
-            "        last_synced      TEXT,\n        UNIQUE(game_id, platform)",
-        )
-        self.assertNotIn("wishlisted_at", ddl_without_wishlist)
-
+    async def test_v15_to_v16_adds_game_wishlist_table(self) -> None:
         conn = sqlite3.connect(self.db_path)
-        conn.executescript(ddl_without_wishlist)
+        conn.executescript(db_module._V12_SCHEMA_DDL)
         conn.execute("PRAGMA user_version = 15")
         conn.execute("INSERT INTO games (id, name) VALUES (1, 'Hollow Knight')")
         conn.execute(
@@ -926,16 +922,18 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             await db_module.init_db()
             async with db_module.get_db() as db:
                 version = await db_module._get_user_version(db)
-                cols = await db_module._table_columns(db, "game_platforms")
-                row = await db.execute_fetchone(
-                    "SELECT owned, wishlisted_at FROM game_platforms WHERE id = 1"
+                tables = await db_module._table_names(db)
+                gp_cols = await db_module._table_columns(db, "game_platforms")
+                gp_row = await db.execute_fetchone(
+                    "SELECT owned FROM game_platforms WHERE id = 1"
                 )
 
         self.assertEqual(version, db_module.SCHEMA_VERSION)
-        self.assertIn("wishlisted_at", cols)
+        self.assertIn("game_wishlist", tables)
+        # Wishlist tracking lives in its own table, never as a game_platforms column.
+        self.assertNotIn("wishlisted_at", gp_cols)
         # Existing ownership is untouched by the additive migration.
-        self.assertEqual(row["owned"], 1)
-        self.assertIsNone(row["wishlisted_at"])
+        self.assertEqual(gp_row["owned"], 1)
 
     async def test_v9_to_v10_adds_series_tables(self) -> None:
         conn = sqlite3.connect(self.db_path)

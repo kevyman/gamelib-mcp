@@ -195,7 +195,8 @@ class HardwarePreferenceResponse(FlexibleModel):
 class AddGameToPlatformResponse(FlexibleModel):
     created: bool
     game_id: int
-    game_platform_id: int
+    game_platform_id: int | None = None
+    wishlist_id: int | None = None
     name: str
     platform: str
     owned: bool = True
@@ -212,6 +213,7 @@ class WishlistItem(FlexibleModel):
     name: str
     platform: str
     wishlisted_at: str | None = None
+    source: str | None = None
     owned: bool
 
 

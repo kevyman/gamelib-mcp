@@ -4,6 +4,12 @@ Auth reuses STEAM_API_KEY/STEAM_ID (same as steam_xml.py's owned-games fetch).
 Unlike GetOwnedGames, this endpoint returns only appid/priority/date_added —
 no title — so a wishlist item with no existing game_platforms row needs a
 follow-up Steam Store lookup (steam_store.fetch_app_name) to name it.
+
+A wishlist item that isn't owned anywhere yet gets a games row but no
+game_platforms row (see game_wishlist's schema note) — so unlike an owned sync,
+there's no steam_appid identifier to attach it to. Re-syncs before purchase
+fall back to upsert_game's exact-name matching to avoid duplicating the game
+row, the same fallback GOG already relies on for lacking a stable store id.
 """
 
 import logging
@@ -16,7 +22,6 @@ from .db import (
     STEAM_APP_ID,
     get_game_by_identifier,
     upsert_game,
-    upsert_game_platform_identifier,
     upsert_wishlist_entry,
 )
 from .steam_store import fetch_app_name
@@ -29,7 +34,7 @@ WISHLIST_URL = "https://api.steampowered.com/IWishlistService/GetWishlist/v1/"
 
 
 async def fetch_wishlist() -> dict:
-    """Fetch the Steam wishlist and upsert wishlisted_at into game_platforms.
+    """Fetch the Steam wishlist and upsert entries into game_wishlist.
 
     Returns {"added": int, "matched": int, "skipped": int}.
     """
@@ -57,7 +62,7 @@ async def fetch_wishlist() -> dict:
 
             existing = await get_game_by_identifier(STEAM_APP_ID, str(appid))
             if existing is not None:
-                await upsert_wishlist_entry(existing["id"], "steam", wishlisted_at=now)
+                await upsert_wishlist_entry(existing["id"], "steam", wishlisted_at=now, source="steam")
                 matched += 1
                 continue
 
@@ -68,10 +73,7 @@ async def fetch_wishlist() -> dict:
                 continue
 
             game_id = await upsert_game(appid, prepared_title)
-            platform_id = await upsert_wishlist_entry(game_id, "steam", wishlisted_at=now)
-            await upsert_game_platform_identifier(
-                platform_id, STEAM_APP_ID, str(appid), is_primary=True
-            )
+            await upsert_wishlist_entry(game_id, "steam", wishlisted_at=now, source="steam")
             added += 1
 
     logger.info("Steam wishlist sync: added=%d matched=%d skipped=%d", added, matched, skipped)

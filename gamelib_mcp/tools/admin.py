@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 from fastmcp.exceptions import ToolError
 
-from ..data.db import STEAM_APP_ID, get_db
+from ..data.db import STEAM_APP_ID, clear_fulfilled_wishlist_entries, get_db
 from ..data.title_normalization import normalize_search_text
 from ..data.enrich_bg import pause_background_enrichment, resume_background_enrichment
 from ..data.epic import sync_epic
@@ -126,6 +126,13 @@ async def run_library_sync(
                 await detect_farmed_games(dry_run=False)
             except Exception:
                 logger.exception("Farmed-game detection failed after Steam refresh")
+
+        # A refresh may have just established ownership of a previously-wishlisted
+        # game (e.g. bought it on Steam) — clear it the same way storefronts do.
+        try:
+            await clear_fulfilled_wishlist_entries()
+        except Exception:
+            logger.exception("Wishlist fulfillment cleanup failed after library refresh")
     finally:
         resume_background_enrichment()
 
@@ -274,6 +281,14 @@ async def sync_wishlist(
             results[name] = outcome
             await _info(ctx, f"Finished {name} wishlist sync")
         await report_progress(ctx, index, len(selected))
+
+    # A stale external wishlist can list a game already owned locally (bought
+    # elsewhere, or ownership synced since the last wishlist check) — reconcile
+    # immediately rather than waiting for the next library refresh.
+    try:
+        await clear_fulfilled_wishlist_entries()
+    except Exception:
+        logger.exception("Wishlist fulfillment cleanup failed after wishlist sync")
 
     return results
 

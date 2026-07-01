@@ -1,64 +1,123 @@
-"""Tests for wishlist tracking: the wishlisted_at column, its DB helper, the
-manual add_game_to_platform(owned=False) path, get_wishlist, and the Steam /
-DekuDeals wishlist syncs.
+"""Tests for wishlist tracking: the dedicated game_wishlist table, its DB
+helpers (upsert + fulfillment cleanup), the manual add_game_to_platform
+(owned=False) path, get_wishlist, and the Steam / DekuDeals wishlist syncs.
 """
 
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from conftest import ToolDBTestCase, add_platform, seed_game
+from fastmcp.exceptions import ToolError
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import dekudeals, steam_wishlist
 from gamelib_mcp.tools import platforms
 
 
 class UpsertWishlistEntryTests(ToolDBTestCase):
-    async def test_does_not_clobber_existing_ownership(self):
+    async def test_lives_in_its_own_table_not_game_platforms(self):
+        game_id = await seed_game("Wanted Game")
+
+        wishlist_id = await db_module.upsert_wishlist_entry(game_id, "switch2", source="manual")
+
+        async with db_module.get_db() as db:
+            wishlist_row = await db.execute_fetchone(
+                "SELECT wishlisted_at, source FROM game_wishlist WHERE id = ?", (wishlist_id,)
+            )
+            gp_row = await db.execute_fetchone(
+                "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",
+                (game_id, "switch2"),
+            )
+        self.assertIsNotNone(wishlist_row["wishlisted_at"])
+        self.assertEqual(wishlist_row["source"], "manual")
+        # No game_platforms row is created for a pure wishlist entry.
+        self.assertIsNone(gp_row)
+
+    async def test_does_not_touch_existing_ownership(self):
         game_id = await seed_game("Owned Game")
-        await add_platform(game_id, "steam", owned=1)
+        await add_platform(game_id, "steam", owned=1, playtime_minutes=120)
 
         await db_module.upsert_wishlist_entry(game_id, "steam", wishlisted_at="2026-01-01T00:00:00+00:00")
 
         async with db_module.get_db() as db:
-            row = await db.execute_fetchone(
-                "SELECT owned, wishlisted_at FROM game_platforms WHERE game_id = ? AND platform = ?",
+            gp_row = await db.execute_fetchone(
+                "SELECT owned, playtime_minutes FROM game_platforms WHERE game_id = ? AND platform = ?",
                 (game_id, "steam"),
             )
-        self.assertEqual(row["owned"], 1)
-        self.assertEqual(row["wishlisted_at"], "2026-01-01T00:00:00+00:00")
+        self.assertEqual(gp_row["owned"], 1)
+        self.assertEqual(gp_row["playtime_minutes"], 120)
 
-    async def test_new_row_defaults_to_unowned(self):
-        game_id = await seed_game("Wanted Game")
 
-        platform_id = await db_module.upsert_wishlist_entry(game_id, "switch2")
+class ClearFulfilledWishlistEntriesTests(ToolDBTestCase):
+    async def test_deletes_entry_once_platform_is_owned(self):
+        game_id = await seed_game("Bought It")
+        await db_module.upsert_wishlist_entry(game_id, "steam", source="steam")
+        await add_platform(game_id, "steam", owned=1)
 
+        deleted = await db_module.clear_fulfilled_wishlist_entries()
+
+        self.assertEqual(deleted, 1)
         async with db_module.get_db() as db:
             row = await db.execute_fetchone(
-                "SELECT owned, wishlisted_at FROM game_platforms WHERE id = ?", (platform_id,)
+                "SELECT 1 FROM game_wishlist WHERE game_id = ? AND platform = ?",
+                (game_id, "steam"),
             )
-        self.assertEqual(row["owned"], 0)
-        self.assertIsNotNone(row["wishlisted_at"])
+        self.assertIsNone(row)
+
+    async def test_leaves_unowned_entries_alone(self):
+        game_id = await seed_game("Still Wanted")
+        await db_module.upsert_wishlist_entry(game_id, "steam", source="steam")
+
+        deleted = await db_module.clear_fulfilled_wishlist_entries()
+
+        self.assertEqual(deleted, 0)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT 1 FROM game_wishlist WHERE game_id = ? AND platform = ?",
+                (game_id, "steam"),
+            )
+        self.assertIsNotNone(row)
+
+    async def test_scoped_to_game_id_and_platform(self):
+        fulfilled = await seed_game("Fulfilled Elsewhere Too")
+        await db_module.upsert_wishlist_entry(fulfilled, "steam", source="steam")
+        await add_platform(fulfilled, "steam", owned=1)
+        other_fulfilled = await seed_game("Also Fulfilled")
+        await db_module.upsert_wishlist_entry(other_fulfilled, "steam", source="steam")
+        await add_platform(other_fulfilled, "steam", owned=1)
+
+        deleted = await db_module.clear_fulfilled_wishlist_entries(game_id=fulfilled, platform="steam")
+
+        self.assertEqual(deleted, 1)
+        async with db_module.get_db() as db:
+            still_there = await db.execute_fetchone(
+                "SELECT 1 FROM game_wishlist WHERE game_id = ?", (other_fulfilled,)
+            )
+        self.assertIsNotNone(still_there)
 
 
 class AddGameToPlatformWishlistTests(ToolDBTestCase):
-    async def test_owned_false_creates_wishlist_entry_not_ownership(self):
+    async def test_owned_false_creates_wishlist_entry_with_no_platform_row(self):
         result = await platforms.add_game_to_platform("Elden Ring", "ps5", owned=False)
 
         self.assertFalse(result["owned"])
+        self.assertIsNone(result["game_platform_id"])
+        self.assertIsNotNone(result["wishlist_id"])
         self.assertIsNone(result["playtime_minutes"])
 
         async with db_module.get_db() as db:
-            row = await db.execute_fetchone(
-                "SELECT owned, wishlisted_at FROM game_platforms WHERE id = ?",
-                (result["game_platform_id"],),
+            gp_row = await db.execute_fetchone(
+                "SELECT 1 FROM game_platforms WHERE game_id = ?", (result["game_id"],)
             )
-        self.assertEqual(row["owned"], 0)
-        self.assertIsNotNone(row["wishlisted_at"])
+            wishlist_row = await db.execute_fetchone(
+                "SELECT source FROM game_wishlist WHERE id = ?", (result["wishlist_id"],)
+            )
+        self.assertIsNone(gp_row)
+        self.assertEqual(wishlist_row["source"], "manual")
 
         breakdown = await platforms.get_platform_breakdown()
         self.assertEqual(breakdown["total_unique_games"], 0)
 
-    async def test_owned_false_on_already_owned_game_does_not_unown_it(self):
+    async def test_owned_false_on_already_owned_game_clears_immediately(self):
         game_id = await seed_game("Already Owned")
         await add_platform(game_id, "ps5", owned=1, playtime_minutes=600)
 
@@ -66,12 +125,36 @@ class AddGameToPlatformWishlistTests(ToolDBTestCase):
 
         self.assertEqual(result["game_id"], game_id)
         async with db_module.get_db() as db:
-            row = await db.execute_fetchone(
+            gp_row = await db.execute_fetchone(
                 "SELECT owned, playtime_minutes FROM game_platforms WHERE game_id = ? AND platform = ?",
                 (game_id, "ps5"),
             )
-        self.assertEqual(row["owned"], 1)
-        self.assertEqual(row["playtime_minutes"], 600)
+            wishlist_row = await db.execute_fetchone(
+                "SELECT 1 FROM game_wishlist WHERE game_id = ? AND platform = ?", (game_id, "ps5")
+            )
+        # Ownership untouched...
+        self.assertEqual(gp_row["owned"], 1)
+        self.assertEqual(gp_row["playtime_minutes"], 600)
+        # ...and the just-created wishlist entry was immediately reconciled away.
+        self.assertIsNone(wishlist_row)
+
+    async def test_owned_true_clears_matching_wishlist_entry(self):
+        game_id = await seed_game("Was Wishlisted")
+        await db_module.upsert_wishlist_entry(game_id, "steam", source="steam")
+
+        await platforms.add_game_to_platform("Was Wishlisted", "steam", owned=True)
+
+        async with db_module.get_db() as db:
+            wishlist_row = await db.execute_fetchone(
+                "SELECT 1 FROM game_wishlist WHERE game_id = ? AND platform = ?", (game_id, "steam")
+            )
+        self.assertIsNone(wishlist_row)
+
+    async def test_identifier_requires_owned_true(self):
+        with self.assertRaisesRegex(ToolError, "identifier_type/identifier_value require owned=True"):
+            await platforms.add_game_to_platform(
+                "Some Game", "steam", identifier_type="steam_appid", identifier_value="1", owned=False
+            )
 
 
 class GetWishlistTests(ToolDBTestCase):
@@ -80,20 +163,35 @@ class GetWishlistTests(ToolDBTestCase):
         await add_platform(owned, "steam", owned=1)
 
         wished = await seed_game("Wished Game")
-        await db_module.upsert_wishlist_entry(wished, "steam")
-        await db_module.upsert_wishlist_entry(wished, "switch2")
+        await db_module.upsert_wishlist_entry(wished, "steam", source="steam")
+        await db_module.upsert_wishlist_entry(wished, "switch2", source="dekudeals")
 
         all_items = await platforms.get_wishlist()
         self.assertEqual(all_items["count"], 2)
         self.assertEqual({i["platform"] for i in all_items["items"]}, {"steam", "switch2"})
+        self.assertTrue(all(i["owned"] is False for i in all_items["items"]))
 
         steam_only = await platforms.get_wishlist("steam")
         self.assertEqual(steam_only["count"], 1)
         self.assertEqual(steam_only["items"][0]["name"], "Wished Game")
+        self.assertEqual(steam_only["items"][0]["source"], "steam")
+
+    async def test_surfaces_stale_owned_entry_as_diagnostic(self):
+        # A wishlist row that hasn't been cleaned up yet (cleanup didn't run)
+        # should still show up, with owned=True surfacing the stale state
+        # rather than hiding it.
+        game_id = await seed_game("Stale Entry")
+        await db_module.upsert_wishlist_entry(game_id, "steam", source="steam")
+        await add_platform(game_id, "steam", owned=1)
+
+        result = await platforms.get_wishlist()
+
+        self.assertEqual(result["count"], 1)
+        self.assertTrue(result["items"][0]["owned"])
 
 
 class FetchSteamWishlistTests(ToolDBTestCase):
-    async def test_matches_existing_game_by_appid_without_unowning_it(self):
+    async def test_matches_existing_game_by_appid_without_creating_ownership(self):
         game_id = await seed_game("Hades II")
         platform_id = await add_platform(game_id, "steam", owned=1, playtime_minutes=300)
         await db_module.upsert_game_platform_identifier(
@@ -126,15 +224,17 @@ class FetchSteamWishlistTests(ToolDBTestCase):
 
         self.assertEqual(result, {"added": 0, "matched": 1, "skipped": 0})
         async with db_module.get_db() as db:
-            row = await db.execute_fetchone(
-                "SELECT owned, wishlisted_at, playtime_minutes FROM game_platforms WHERE game_id = ?",
-                (game_id,),
+            gp_row = await db.execute_fetchone(
+                "SELECT owned, playtime_minutes FROM game_platforms WHERE game_id = ?", (game_id,)
             )
-        self.assertEqual(row["owned"], 1)
-        self.assertEqual(row["playtime_minutes"], 300)
-        self.assertIsNotNone(row["wishlisted_at"])
+            wishlist_row = await db.execute_fetchone(
+                "SELECT source FROM game_wishlist WHERE game_id = ? AND platform = ?", (game_id, "steam")
+            )
+        self.assertEqual(gp_row["owned"], 1)
+        self.assertEqual(gp_row["playtime_minutes"], 300)
+        self.assertEqual(wishlist_row["source"], "steam")
 
-    async def test_creates_new_unowned_game_for_unmatched_appid(self):
+    async def test_creates_new_unowned_game_with_no_platform_row(self):
         class _Resp:
             def raise_for_status(self):
                 return None
@@ -162,17 +262,17 @@ class FetchSteamWishlistTests(ToolDBTestCase):
 
         self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 0})
         async with db_module.get_db() as db:
-            row = await db.execute_fetchone(
-                "SELECT g.name, gp.owned, gp.wishlisted_at FROM games g "
-                "JOIN game_platforms gp ON gp.game_id = g.id WHERE g.name = 'New Game'"
+            game = await db.execute_fetchone("SELECT id FROM games WHERE name = 'New Game'")
+            self.assertIsNotNone(game)
+            gp_row = await db.execute_fetchone(
+                "SELECT 1 FROM game_platforms WHERE game_id = ?", (game["id"],)
             )
-            identifier = await db.execute_fetchone(
-                "SELECT identifier_value FROM game_platform_identifiers WHERE identifier_type = ?",
-                (db_module.STEAM_APP_ID,),
+            wishlist_row = await db.execute_fetchone(
+                "SELECT source FROM game_wishlist WHERE game_id = ?", (game["id"],)
             )
-        self.assertEqual(row["owned"], 0)
-        self.assertIsNotNone(row["wishlisted_at"])
-        self.assertEqual(identifier["identifier_value"], "222")
+        # A wishlist-only game has no game_platforms row at all.
+        self.assertIsNone(gp_row)
+        self.assertEqual(wishlist_row["source"], "steam")
 
     async def test_missing_credentials_raises(self):
         with (
@@ -205,12 +305,15 @@ class DekuDealsWishlistTests(ToolDBTestCase):
         self.assertEqual(result["matched"], 1)
         self.assertEqual(result["skipped"], 1)
         async with db_module.get_db() as db:
-            row = await db.execute_fetchone(
-                "SELECT owned, wishlisted_at FROM game_platforms WHERE game_id = ? AND platform = ?",
+            wishlist_row = await db.execute_fetchone(
+                "SELECT source FROM game_wishlist WHERE game_id = ? AND platform = ?",
                 (game_id, "switch2"),
             )
-        self.assertEqual(row["owned"], 0)
-        self.assertIsNotNone(row["wishlisted_at"])
+            gp_row = await db.execute_fetchone(
+                "SELECT 1 FROM game_platforms WHERE game_id = ?", (game_id,)
+            )
+        self.assertEqual(wishlist_row["source"], "dekudeals")
+        self.assertIsNone(gp_row)
 
 
 if __name__ == "__main__":
