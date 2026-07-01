@@ -6,6 +6,7 @@ from fastmcp.exceptions import ToolError
 from ..data.db import (
     GAME_EDITABLE_FIELDS,
     apply_manual_game_fields,
+    clear_fulfilled_wishlist_entries,
     get_db,
     invalidate_name_derived_enrichment,
     recompute_tag_affinity,
@@ -14,6 +15,7 @@ from ..data.db import (
     upsert_game,
     upsert_game_platform,
     upsert_game_platform_identifier,
+    upsert_wishlist_entry,
 )
 from ..data.tag_synonyms import canonical_tag
 from .common import (
@@ -74,6 +76,56 @@ async def get_platform_breakdown() -> dict:
     }
 
 
+async def get_wishlist(platform: str | None = None) -> dict:
+    """
+    List wishlist items — games marked wanted but not necessarily owned.
+
+    platform: optional filter (e.g. "steam", "switch2"); omit for all platforms.
+    Populated by sync_wishlist (Steam, DekuDeals→switch2) or by
+    add_game_to_platform(owned=False) for manual entries (e.g. PSN). owned
+    reflects live game_platforms state — normally False, since sync_wishlist
+    and add_game_to_platform both clear an entry once it's actually owned;
+    True here is a transient diagnostic (ownership was just established and
+    the next cleanup pass hasn't run yet), not a common case.
+    """
+    resolved_platform = _validate_platform(platform, LIBRARY_PLATFORMS) if platform else None
+
+    where = "WHERE 1=1"
+    params: list = []
+    if resolved_platform:
+        where += " AND w.platform = ?"
+        params.append(resolved_platform)
+
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            f"""SELECT g.id AS game_id, g.name, w.platform, w.wishlisted_at, w.source,
+                       EXISTS (
+                           SELECT 1 FROM game_platforms gp
+                           WHERE gp.game_id = w.game_id AND gp.platform = w.platform AND gp.owned = 1
+                       ) AS owned
+                FROM game_wishlist w
+                JOIN games g ON g.id = w.game_id
+                {where}
+                ORDER BY w.wishlisted_at DESC""",
+            params,
+        )
+
+    return {
+        "count": len(rows),
+        "items": [
+            {
+                "game_id": r["game_id"],
+                "name": r["name"],
+                "platform": r["platform"],
+                "wishlisted_at": r["wishlisted_at"],
+                "source": r["source"],
+                "owned": bool(r["owned"]),
+            }
+            for r in rows
+        ],
+    }
+
+
 async def set_hardware_preference(platforms: list[str]) -> dict:
     """
     Set your hardware preference order for discover_games suggested_platform.
@@ -94,16 +146,25 @@ async def add_game_to_platform(
     identifier_type: str | None = None,
     identifier_value: str | None = None,
     playtime_minutes: int | None = None,
+    owned: bool = True,
 ) -> dict:
     """
     Manually add a game to a platform — useful for games that aren't fetched
-    automatically (e.g. physical copies, unreported digital titles).
+    automatically (e.g. physical copies, unreported digital titles), or to
+    record a wishlist item on a platform with no wishlist sync (e.g. PSN, which
+    has no public wishlist API — pass owned=False there).
 
     name: Game name (will match an existing game by exact name or create a new one)
     platform: steam | epic | gog | nintendo | switch2 | ps5 | itchio | xbox | ea | ubisoft | other (aliases: origin→ea, uplay→ubisoft)
-    identifier_type: Optional store identifier type (e.g. 'steam_appid', 'gog_product_id')
+    identifier_type: Optional store identifier type (e.g. 'steam_appid', 'gog_product_id').
+        Requires owned=True — a wishlist entry has no platform ownership row to
+        attach an identifier to.
     identifier_value: Optional store identifier value
     playtime_minutes: Optional known playtime in minutes
+    owned: True (default) records an owned copy; False records a wishlist entry
+        instead (playtime_minutes is ignored in that case). Either way, any
+        existing wishlist entry for this game+platform that's now fulfilled is
+        cleared.
     """
     # Resolve aliases (e.g. "nintendo" → "switch2") and validate in one step.
     platform = _validate_platform(platform, LIBRARY_PLATFORMS)
@@ -113,6 +174,8 @@ async def add_game_to_platform(
         raise ToolError("name must not be empty")
     if playtime_minutes is not None and playtime_minutes < 0:
         raise ToolError("playtime_minutes must not be negative")
+    if not owned and (identifier_type or identifier_value):
+        raise ToolError("identifier_type/identifier_value require owned=True")
 
     # Check whether the game already exists before upserting
     async with get_db() as db:
@@ -123,30 +186,41 @@ async def add_game_to_platform(
     created = existing is None
 
     game_id = await upsert_game(None, name)
-    game_platform_id = await upsert_game_platform(
-        game_id,
-        platform,
-        playtime_minutes=playtime_minutes,
-        owned=1,
-    )
-
     added_identifier = None
-    if identifier_type and identifier_value:
-        await upsert_game_platform_identifier(
-            game_platform_id,
-            identifier_type,
-            identifier_value,
-            is_primary=True,
+    if owned:
+        game_platform_id = await upsert_game_platform(
+            game_id,
+            platform,
+            playtime_minutes=playtime_minutes,
+            owned=1,
         )
-        added_identifier = {"type": identifier_type, "value": identifier_value}
+        wishlist_id = None
+        if identifier_type and identifier_value:
+            await upsert_game_platform_identifier(
+                game_platform_id,
+                identifier_type,
+                identifier_value,
+                is_primary=True,
+            )
+            added_identifier = {"type": identifier_type, "value": identifier_value}
+    else:
+        game_platform_id = None
+        wishlist_id = await upsert_wishlist_entry(game_id, platform, source="manual")
+
+    # Either branch may have just made a prior wishlist entry moot (owned=True
+    # fulfills it directly; owned=False on an already-owned game reconciles it
+    # right away instead of leaving a stale row for the next sync to notice).
+    await clear_fulfilled_wishlist_entries(game_id=game_id, platform=platform)
 
     return {
         "created": created,
         "game_id": game_id,
         "game_platform_id": game_platform_id,
+        "wishlist_id": wishlist_id,
         "name": name,
         "platform": platform,
-        "playtime_minutes": playtime_minutes,
+        "owned": owned,
+        "playtime_minutes": playtime_minutes if owned else None,
         "identifier": added_identifier,
     }
 

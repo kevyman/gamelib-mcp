@@ -195,11 +195,31 @@ class HardwarePreferenceResponse(FlexibleModel):
 class AddGameToPlatformResponse(FlexibleModel):
     created: bool
     game_id: int
-    game_platform_id: int
+    game_platform_id: int | None = None
+    wishlist_id: int | None = None
     name: str
     platform: str
+    owned: bool = True
     playtime_minutes: int | None = None
     identifier: dict[str, str] | None = None
+
+
+class SyncWishlistResponse(FlexibleModel):
+    pass
+
+
+class WishlistItem(FlexibleModel):
+    game_id: int
+    name: str
+    platform: str
+    wishlisted_at: str | None = None
+    source: str | None = None
+    owned: bool
+
+
+class GetWishlistResponse(FlexibleModel):
+    count: int
+    items: list[WishlistItem]
 
 
 class NintendoSessionResponse(FlexibleModel):

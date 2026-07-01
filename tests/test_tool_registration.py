@@ -74,6 +74,7 @@ EXPECTED_TOOLS = {
     },
     "refresh_library": {"params": {"platforms"}, "required": set()},
     "get_sync_status": {"params": set(), "required": set()},
+    "sync_wishlist": {"params": {"platforms"}, "required": set()},
     "get_integration_status": {
         "params": {"platforms", "verbose", "force_refresh"},
         "required": set(),
@@ -89,9 +90,13 @@ EXPECTED_TOOLS = {
         "required": {"source_game_id", "platform", "identifier_values"},
     },
     "get_platform_breakdown": {"params": set(), "required": set()},
+    "get_wishlist": {"params": {"platform"}, "required": set()},
     "set_hardware_preference": {"params": {"platforms"}, "required": {"platforms"}},
     "add_game_to_platform": {
-        "params": {"name", "platform", "identifier_type", "identifier_value", "playtime_minutes"},
+        "params": {
+            "name", "platform", "identifier_type", "identifier_value",
+            "playtime_minutes", "owned",
+        },
         "required": {"name", "platform"},
     },
     "set_nintendo_session": {"params": {"cookies"}, "required": {"cookies"}},
@@ -145,6 +150,8 @@ EXPECTED_ANNOTATIONS = {
     "rate_game": {"readOnlyHint": False, "idempotentHint": True},
     "refresh_library": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
     "get_sync_status": {"readOnlyHint": True, "idempotentHint": True},
+    "sync_wishlist": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
+    "get_wishlist": {"readOnlyHint": True, "idempotentHint": True},
     "set_hardware_preference": {"readOnlyHint": False, "idempotentHint": True},
     "add_game_to_platform": {"readOnlyHint": False, "idempotentHint": True},
     "set_nintendo_session": {"readOnlyHint": False, "idempotentHint": True},
@@ -171,9 +178,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_25(self):
+    async def test_tool_count_is_27(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 25)
+        self.assertEqual(len(tools), 27)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()
