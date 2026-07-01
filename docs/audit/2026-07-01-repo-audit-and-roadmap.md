@@ -4,6 +4,14 @@ Scope: full-repo review — architecture, code quality, tests, security, ops, an
 forward direction. Test suite at time of audit: **558 tests + 89 subtests, all
 passing (~54s)**.
 
+> **Update (same day):** the quick wins are fixed on this branch — PR CI
+> workflow (§2), timing-safe auth compare (§5, query-string fallback kept but
+> documented), tracked startup ratings task (§6), and the smaller defects
+> below except the `/health` platform-coverage semantics. The httpx-timeout
+> nit turned out to be moot: all steam_store requests already pass an explicit
+> per-request timeout through a shared helper. Still open: static analysis
+> (§1), DB backups (§3), LICENSE (§4), `/health` coverage derivation.
+
 ## Overall verdict
 
 This is an unusually healthy codebase for a personal project: clean layer

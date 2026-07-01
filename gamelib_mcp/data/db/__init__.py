@@ -1135,7 +1135,7 @@ async def _run_migrations(
         await db.executescript(_V16_SCHEMA_DDL)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
-        _emit(progress, "Initialized fresh database at schema v12.", applied_steps)
+        _emit(progress, f"Initialized fresh database at schema v{SCHEMA_VERSION}.", applied_steps)
         return MigrationResult(
             initial_version=initial_version,
             final_version=SCHEMA_VERSION,
