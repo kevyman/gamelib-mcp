@@ -4,13 +4,51 @@ Scope: full-repo review — architecture, code quality, tests, security, ops, an
 forward direction. Test suite at time of audit: **558 tests + 89 subtests, all
 passing (~54s)**.
 
-> **Update (same day):** the quick wins are fixed on this branch — PR CI
-> workflow (§2), timing-safe auth compare (§5, query-string fallback kept but
-> documented), tracked startup ratings task (§6), and the smaller defects
-> below except the `/health` platform-coverage semantics. The httpx-timeout
-> nit turned out to be moot: all steam_store requests already pass an explicit
-> per-request timeout through a shared helper. Still open: static analysis
-> (§1), DB backups (§3), LICENSE (§4), `/health` coverage derivation.
+## Status (updated 2026-07-01)
+
+**Fixed in PR #41 (merged):** PR CI workflow (gap 2); timing-safe auth compare
+(gap 5 — the `?token=` query fallback was deliberately kept for header-less
+clients, with the log-exposure trade-off documented); tracked/cancellable
+startup ratings task (gap 6); fresh-DB init message now uses `SCHEMA_VERSION`;
+deploy.yml concurrency comment; root `test.py` moved to
+`scripts/seed_v1_sample_db.py`; Dockerfile `HEALTHCHECK`. The httpx-timeout nit
+was dropped as moot — every steam_store request already passes an explicit
+per-request timeout through a shared helper.
+
+**Fixed in the follow-up gap-resolution PR:**
+
+- **Static analysis (gap 1)** — ruff + mypy in the dev group, configured in
+  `pyproject.toml`, both gating CI alongside pytest. All pre-existing findings
+  fixed (unused imports, misplaced module-level statements, bs4 attribute
+  narrowing, missing annotations); the intentional patterns are configured,
+  not suppressed inline: the `data/db` façade's re-exports/late imports and
+  `main.py`'s post-dotenv imports get per-file ignores, and main.py's
+  dict-vs-response-model returns (validated by FastMCP at runtime) get a
+  documented `return-value` override.
+- **Pre-migration DB snapshot (gap 3, app half)** — `_run_migrations` now
+  writes `gamelib.db.pre-v{N}.bak` via `VACUUM INTO` (atomic, WAL-safe) before
+  any schema-changing migration; skipped for fresh or already-current DBs. A
+  snapshot failure aborts the migration rather than proceeding without the
+  safety net. The server half (nightly `sqlite3 .backup` cron + off-machine
+  copy) is documented in deploy.md → "Database backups" — it still needs to be
+  set up **on the Hetzner box by hand**.
+- **LICENSE (gap 4)** — MIT added. Owner should confirm the copyright line
+  (currently "kevyman") or swap the license entirely if all-rights-reserved
+  was the intent.
+- **`/health` platform coverage** — expected platforms are now derived from
+  sync history (`integration_sync_{platform}_last_success_at` in meta) instead
+  of a hardcoded five-platform list: a platform only counts as "missing" if it
+  has synced successfully before and now reports zero owned games.
+
+**Still open:**
+
+- ❌ Container runs as **root**. Not fixed deliberately: adding `USER` breaks
+  the existing deployment until the host-side data dir is chowned to the new
+  UID (`chown -R <uid> ~/mcps/data/library` on the server), and deploys
+  auto-run on merge — this needs a coordinated deploy, not a drive-by commit.
+- ❌ Nightly off-machine backup cron on the server (see deploy.md; manual step).
+- ❌ Everything under "Non-obvious improvements" (table-driven migrations,
+  connection reuse, FTS5, OAuth, Renovate) and the feature roadmap below.
 
 ## Overall verdict
 

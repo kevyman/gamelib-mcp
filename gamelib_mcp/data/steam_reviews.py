@@ -133,7 +133,8 @@ def _parse_page(html: str) -> list[dict]:
         if link is None:
             continue
 
-        m = re.search(r"/recommended/(\d+)/", link.get("href", ""))
+        href = link.get("href", "")
+        m = re.search(r"/recommended/(\d+)/", href) if isinstance(href, str) else None
         if not m:
             continue
 

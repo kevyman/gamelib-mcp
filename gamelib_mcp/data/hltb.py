@@ -145,7 +145,6 @@ def _is_fresh(cached_at: str | None, days: int) -> bool:
     if not cached_at or cached_at == "FAILED":
         return False
     try:
-        from datetime import timedelta
         dt = datetime.fromisoformat(cached_at)
         age = datetime.now(timezone.utc) - dt
         return age.total_seconds() < days * 86400

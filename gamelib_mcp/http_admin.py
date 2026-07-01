@@ -11,6 +11,7 @@ import html
 import logging
 import os
 import time
+from typing import cast
 from urllib.parse import parse_qs
 
 from starlette.requests import Request
@@ -124,21 +125,20 @@ class BearerAuthMiddleware:
 # expensive to repeat per request; status changes on the order of syncs.
 _INTEGRATION_STATUS_TTL_SECONDS = 60.0
 _integration_status_cache: tuple[float, dict] | None = None
-_EXPECTED_LIBRARY_PLATFORMS = ("epic", "gog", "ps5", "steam", "switch2")
 
 
 async def _integration_status_payload(force_refresh: bool = False) -> dict[str, dict]:
     global _integration_status_cache
 
     from .data.db import get_meta_prefix
-    from .integrations.inspectors import inspect_all_integrations_dict
+    from .integrations.inspectors import LastSyncMeta, inspect_all_integrations_dict
 
     if not force_refresh and _integration_status_cache is not None:
         cached_at, payload = _integration_status_cache
         if time.monotonic() - cached_at < _INTEGRATION_STATUS_TTL_SECONDS:
             return payload
 
-    last_sync_by_platform: dict[str, dict[str, str]] = {}
+    last_sync_by_platform: dict[str, LastSyncMeta] = {}
     try:
         all_meta = await get_meta_prefix("integration_sync_")
         for platform in SYNC_METADATA_PLATFORMS:
@@ -150,7 +150,9 @@ async def _integration_status_payload(force_refresh: bool = False) -> dict[str, 
             }
             if platform_meta:
                 inspector_name = INSPECTOR_PLATFORM_ALIASES.get(platform, platform)
-                last_sync_by_platform[inspector_name] = platform_meta
+                # The meta writer (build_platform_sync_metadata) emits exactly
+                # the LastSyncMeta key set, so this narrowing is sound.
+                last_sync_by_platform[inspector_name] = cast(LastSyncMeta, platform_meta)
     except Exception:
         logger.exception("Failed to load integration sync metadata")
 
@@ -160,7 +162,7 @@ async def _integration_status_payload(force_refresh: bool = False) -> dict[str, 
 
 
 async def _health_payload() -> dict:
-    from .data.db import SCHEMA_VERSION, _db_path, get_db, get_meta
+    from .data.db import SCHEMA_VERSION, _db_path, get_db, get_meta, get_meta_prefix
 
     db_path = _db_path()
     async with get_db() as db:
@@ -179,9 +181,17 @@ async def _health_payload() -> dict:
     library_sync_status = await get_meta("library_sync_status") or "idle"
     library_sync_error = await get_meta("library_sync_error")
 
+    # A platform is only expected to have games once it has synced successfully
+    # at least once; platforms that were never configured don't degrade health.
+    sync_meta = await get_meta_prefix("integration_sync_")
+    expected_platforms = sorted(
+        platform
+        for platform in SYNC_METADATA_PLATFORMS
+        if sync_meta.get(f"integration_sync_{platform}_last_success_at")
+    )
     missing_platforms = [
         platform
-        for platform in _EXPECTED_LIBRARY_PLATFORMS
+        for platform in expected_platforms
         if platform_counts.get(platform, 0) == 0
     ]
     db_status = "ok" if user_version == SCHEMA_VERSION else "degraded"
@@ -206,7 +216,7 @@ async def _health_payload() -> dict:
             },
             "platform_coverage": {
                 "status": platform_status,
-                "expected_platforms": list(_EXPECTED_LIBRARY_PLATFORMS),
+                "expected_platforms": expected_platforms,
                 "platform_counts": platform_counts,
                 "missing_platforms": missing_platforms,
             },

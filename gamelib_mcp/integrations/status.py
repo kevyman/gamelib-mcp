@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 
@@ -42,7 +43,9 @@ class IntegrationStatus:
     required_inputs: list[str] = field(default_factory=list)
     detected_inputs: list[str] = field(default_factory=list)
     remediation_steps: list[str] = field(default_factory=list)
-    last_sync: dict[str, str] = field(default_factory=dict)
+    # Mapping[str, object] so the inspectors' LastSyncMeta TypedDict satisfies
+    # it (mypy only accepts TypedDicts where the value type is object).
+    last_sync: Mapping[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         return {

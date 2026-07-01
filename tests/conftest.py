@@ -17,8 +17,34 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pytest
+
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.title_normalization import normalize_search_text
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _throwaway_default_database():
+    """Point the session's default DATABASE_URL at a temp file.
+
+    A few sync tests exercise production code paths whose unmocked calls reach
+    get_db(); without this guard they materialize the real default DB
+    (data/gamelib.db) in the working tree — or worse, write into a developer's
+    dev database if .env points DATABASE_URL at one. Tests that manage their
+    own DATABASE_URL (e.g. ToolDBTestCase) simply override this value.
+    """
+    prev = os.environ.get("DATABASE_URL")
+    with TemporaryDirectory() as tmpdir:
+        os.environ["DATABASE_URL"] = f"file:{Path(tmpdir) / 'session-default.sqlite'}"
+        db_module._DB_READY_PATH = None
+        try:
+            yield
+        finally:
+            db_module._DB_READY_PATH = None
+            if prev is None:
+                os.environ.pop("DATABASE_URL", None)
+            else:
+                os.environ["DATABASE_URL"] = prev
 
 
 class ToolDBTestCase(unittest.IsolatedAsyncioTestCase):

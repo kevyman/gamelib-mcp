@@ -282,6 +282,11 @@ def test_health_reports_platform_coverage_degraded_when_platforms_are_missing(tm
             await db_module.set_meta("library_synced_at", "2026-06-14T20:13:18+00:00")
             await db_module.set_meta("library_sync_status", "idle")
             await db_module.set_meta("library_sync_error", "previous transient failure")
+            # gog has synced successfully before, so its 0-game count is a real gap.
+            for platform in ("steam", "epic", "gog"):
+                await db_module.set_meta(
+                    f"integration_sync_{platform}_last_success_at", "2026-06-14T20:13:18+00:00"
+                )
 
             route = _get_route("/health")
             response = await route.endpoint(_request("/health"))
@@ -310,6 +315,11 @@ def test_admin_health_reports_platform_coverage_details_when_platforms_are_missi
             await db_module.set_meta("library_synced_at", "2026-06-14T20:13:18+00:00")
             await db_module.set_meta("library_sync_status", "idle")
             await db_module.set_meta("library_sync_error", "previous transient failure")
+            # gog has synced successfully before, so its 0-game count is a real gap.
+            for platform in ("steam", "epic", "gog"):
+                await db_module.set_meta(
+                    f"integration_sync_{platform}_last_success_at", "2026-06-14T20:13:18+00:00"
+                )
 
             route = _get_route("/admin/health")
             response = await route.endpoint(_request("/admin/health"))
@@ -326,8 +336,37 @@ def test_admin_health_reports_platform_coverage_details_when_platforms_are_missi
     assert payload["checks"]["library_sync"]["status"] == "ok"
     assert payload["checks"]["library_sync"]["error"] == "previous transient failure"
     assert payload["checks"]["platform_coverage"]["status"] == "degraded"
+    assert payload["checks"]["platform_coverage"]["expected_platforms"] == ["epic", "gog", "steam"]
     assert payload["checks"]["platform_coverage"]["platform_counts"] == {"epic": 1, "steam": 1}
-    assert payload["checks"]["platform_coverage"]["missing_platforms"] == ["gog", "ps5", "switch2"]
+    assert payload["checks"]["platform_coverage"]["missing_platforms"] == ["gog"]
+
+
+def test_health_ok_when_never_synced_platforms_have_no_games(tmp_path):
+    async def run_test():
+        db_path = tmp_path / "health-ok.sqlite"
+        db_module._DB_READY_PATH = None
+        db_module._ENV_LOADED = True
+        with patch.dict(os.environ, {"DATABASE_URL": f"file:{db_path}"}, clear=False):
+            await db_module.init_db()
+            steam_game_id = await seed_game("Portal")
+            await add_platform(steam_game_id, "steam")
+            await db_module.set_meta("library_synced_at", "2026-06-14T20:13:18+00:00")
+            # Only Steam has ever synced; the other platforms are unconfigured
+            # and must NOT count as missing coverage.
+            await db_module.set_meta(
+                "integration_sync_steam_last_success_at", "2026-06-14T20:13:18+00:00"
+            )
+
+            route = _get_route("/health")
+            response = await route.endpoint(_request("/health"))
+
+        db_module._DB_READY_PATH = None
+        return response
+
+    response = asyncio.run(run_test())
+
+    assert response.status_code == 200
+    assert json.loads(response.body) == {"status": "ok"}
 
 
 def test_health_returns_503_when_database_is_unavailable():

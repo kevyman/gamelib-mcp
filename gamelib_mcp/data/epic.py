@@ -383,7 +383,7 @@ async def sync_epic() -> dict:
         skipped,
         len(playtime_by_artifact),
     )
-    result = {"added": added, "matched": matched, "skipped": skipped}
+    result: dict[str, object] = {"added": added, "matched": matched, "skipped": skipped}
     if playtime_error is not None:
         result.update(
             {

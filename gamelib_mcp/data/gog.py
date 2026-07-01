@@ -20,9 +20,6 @@ import re
 import shutil
 from pathlib import Path
 
-_ROMAN_RE = re.compile(r"\b([IiVvXx]{2,})\b")
-_ORDINAL_RE = re.compile(r"(\d+)(St|Nd|Rd|Th)\b")
-
 from gamelib_mcp.data.db import (
     load_fuzzy_candidates,
     upsert_game_alias,
@@ -31,6 +28,9 @@ from gamelib_mcp.data.db import (
 )
 from gamelib_mcp.data.igdb import resolve_and_link_game, PLATFORM_TO_IGDB
 from gamelib_mcp.data.title_normalization import prepare_catalog_title
+
+_ROMAN_RE = re.compile(r"\b([IiVvXx]{2,})\b")
+_ORDINAL_RE = re.compile(r"(\d+)(St|Nd|Rd|Th)\b")
 
 logger = logging.getLogger(__name__)
 

@@ -12,7 +12,6 @@ PLAYTIME: Parental Controls API (requires NINTENDO_PCTL_SESSION_FILE via set_nin
 Platform: all titles stored as "switch2" (NX and OUNCE both map to switch2).
 """
 
-import asyncio
 import json
 import logging
 import os
@@ -148,7 +147,7 @@ def _parse_vgcs_page(html: str) -> tuple[str, str, str, int]:
     if not data_div:
         raise RuntimeError("VGCS page missing #data div — session cookies may have expired")
     raw_data = data_div.get("data-json")
-    if not raw_data:
+    if not raw_data or not isinstance(raw_data, str):
         raise RuntimeError("VGCS #data div missing data-json attribute — page structure may have changed")
     page_data = json.loads(raw_data)
     id_token = page_data["idToken"]
@@ -158,7 +157,7 @@ def _parse_vgcs_page(html: str) -> tuple[str, str, str, int]:
     if not state_div:
         raise RuntimeError("VGCS page missing #state div")
     raw_state = state_div.get("data-json")
-    if not raw_state:
+    if not raw_state or not isinstance(raw_state, str):
         raise RuntimeError("VGCS #state div missing data-json attribute — page structure may have changed")
     state = json.loads(raw_state)
 

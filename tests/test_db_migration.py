@@ -27,6 +27,36 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(nested_db_path.exists())
 
+    async def test_pre_migration_snapshot_preserves_old_database(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V1_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 1")
+        conn.execute("INSERT INTO games (name) VALUES ('Snapshot Me')")
+        conn.commit()
+        conn.close()
+
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            result = await db_module.migrate_db()
+
+        self.assertEqual(result.final_version, db_module.SCHEMA_VERSION)
+        backup_path = Path(f"{self.db_path}.pre-v1.bak")
+        self.assertTrue(backup_path.exists())
+        backup = sqlite3.connect(backup_path)
+        try:
+            self.assertEqual(backup.execute("PRAGMA user_version").fetchone()[0], 1)
+            names = [row[0] for row in backup.execute("SELECT name FROM games")]
+        finally:
+            backup.close()
+        self.assertEqual(names, ["Snapshot Me"])
+
+    async def test_no_snapshot_for_fresh_or_current_database(self) -> None:
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.migrate_db()  # fresh install straight to current schema
+            db_module._DB_READY_PATH = None
+            await db_module.migrate_db()  # already at the current schema
+
+        self.assertEqual(list(Path(self.tmpdir.name).glob("*.bak")), [])
+
     async def test_fresh_database_includes_v11_content_relationship_schema(self) -> None:
         with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
             db_module._DB_READY_PATH = None
