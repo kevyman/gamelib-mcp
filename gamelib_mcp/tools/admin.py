@@ -706,7 +706,7 @@ async def detect_farmed_games(
                 candidate_game_ids.add(game["game_id"])
                 candidate_appids.add(game["appid"])
 
-    sample = []
+    sample: list[dict] = []
     for row in rows:
         if row["game_id"] in candidate_game_ids and len(sample) < 10:
             sample.append(

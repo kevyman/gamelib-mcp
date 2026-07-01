@@ -135,11 +135,11 @@ def _parse_opencritic_record(html: str, source_url: str) -> dict | None:
     state_match = re.search(r"window\.__STATE__\s*=\s*(\{.*?\})\s*;", html, re.S)
     if state_match is not None:
         try:
-            state = json.loads(state_match.group(1))
+            inline_state = json.loads(state_match.group(1))
         except json.JSONDecodeError:
-            state = None
+            inline_state = None
         else:
-            record = _state_to_opencritic_record(state, source_url)
+            record = _state_to_opencritic_record(inline_state, source_url)
             if record is not None:
                 return record
 
@@ -419,6 +419,8 @@ def _parse_discovery_candidates(html: str) -> list[dict]:
 
     for anchor in soup.find_all("a", href=True):
         href = anchor["href"]
+        if not isinstance(href, str):
+            continue
         url = _extract_duckduckgo_target(href)
         if "/game/" not in url:
             continue

@@ -354,7 +354,7 @@ def _related_content_group(content_type: str) -> str:
 async def load_related_content_for_games(game_ids: Iterable[int]) -> dict[int, dict[str, list[dict]]]:
     """Load child DLC/expansion/edition/bundle rows grouped by parent game id."""
     ids = list(dict.fromkeys(game_ids))
-    empty = {"dlc": [], "expansions": [], "editions": [], "bundles": [], "other": []}
+    empty: dict[str, list[dict]] = {"dlc": [], "expansions": [], "editions": [], "bundles": [], "other": []}
     if not ids:
         return {}
 

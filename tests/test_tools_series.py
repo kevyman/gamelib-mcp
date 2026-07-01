@@ -99,7 +99,7 @@ class SeriesBreakdownTests(ToolDBTestCase):
 
     async def test_platform_filter(self):
         steam_only = await seed_game("Halo: CE")
-        gp = await add_platform(steam_only, "steam", playtime_minutes=120)
+        await add_platform(steam_only, "steam", playtime_minutes=120)
         epic_game = await seed_game("Halo Infinite")
         await add_platform(epic_game, "epic", playtime_minutes=60)
         for gid in (steam_only, epic_game):

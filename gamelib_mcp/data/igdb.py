@@ -477,10 +477,10 @@ async def search_game(
                 if sid and sname:
                     series.append((kind, sid, sname))
 
-        parent_game = item.get("parent_game") if isinstance(item.get("parent_game"), dict) else {}
-        version_parent = (
-            item.get("version_parent") if isinstance(item.get("version_parent"), dict) else {}
-        )
+        raw_parent_game = item.get("parent_game")
+        parent_game = raw_parent_game if isinstance(raw_parent_game, dict) else {}
+        raw_version_parent = item.get("version_parent")
+        version_parent = raw_version_parent if isinstance(raw_version_parent, dict) else {}
         classification = classify_igdb_game(
             title=item["name"],
             category=category,
@@ -827,6 +827,8 @@ async def upsert_backfill_platform_release_dates(game_id: int, igdb_game: IGDBGa
     platforms_by_game = await load_platforms_for_games([game_id])
     for platform in platforms_by_game.get(game_id, []):
         igdb_platform_id = PLATFORM_TO_IGDB.get(platform["platform"])
+        if igdb_platform_id is None:
+            continue
         release_date = igdb_game.platform_release_dates.get(igdb_platform_id)
         game_platform_id = platform["game_platform_id"]
         if release_date is None or game_platform_id is None:
@@ -921,7 +923,7 @@ async def resolve_steam_appids_to_igdb(appids: list[str]) -> dict[str, int]:
     unknown appids are simply omitted. Returns {} if IGDB is unconfigured.
     """
     client_id = os.environ.get("TWITCH_CLIENT_ID")
-    if not igdb_credentials_configured() or not appids:
+    if not client_id or not igdb_credentials_configured() or not appids:
         return {}
 
     unique = [str(a) for a in dict.fromkeys(appids)]
@@ -949,7 +951,7 @@ async def fetch_igdb_game_names(igdb_ids: list[int]) -> dict[int, str]:
     """Return {igdb_game_id: name} for the given IGDB game ids (for display)."""
     client_id = os.environ.get("TWITCH_CLIENT_ID")
     ids = [i for i in dict.fromkeys(igdb_ids) if i is not None]
-    if not igdb_credentials_configured() or not ids:
+    if not client_id or not igdb_credentials_configured() or not ids:
         return {}
 
     token = await _get_token()

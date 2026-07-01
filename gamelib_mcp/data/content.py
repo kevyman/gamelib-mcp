@@ -102,6 +102,8 @@ def classify_title_override(title: str) -> ContentClassification | None:
 
 
 def content_type_from_igdb_category(category: int | None) -> str:
+    if category is None:
+        return CONTENT_BASE_GAME
     return {
         1: CONTENT_DLC,
         2: CONTENT_EXPANSION,
