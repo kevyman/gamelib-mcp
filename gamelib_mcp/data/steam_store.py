@@ -202,6 +202,36 @@ async def _steam_get_json_with_retry(
     return {}
 
 
+async def fetch_app_name(appid: int, client: httpx.AsyncClient | None = None) -> str | None:
+    """Fetch just an app's store title, for appids with no game_platforms row yet.
+
+    Used by wishlist sync to name a Steam wishlist item that isn't owned (and so
+    has no game_platforms row for enrich_game's claim-based path to attach to).
+    Goes through the same shared rate gate as enrich_game.
+    """
+    async def fetch(active_client: httpx.AsyncClient) -> str | None:
+        try:
+            payload = await _steam_get_json_with_retry(
+                active_client,
+                STORE_API,
+                params={"appids": appid, "filters": "basic"},
+                timeout=15,
+            )
+            app_data = payload.get(str(appid), {})
+            if not app_data.get("success"):
+                return None
+            return (app_data.get("data") or {}).get("name") or None
+        except Exception as exc:
+            logger.warning("Steam app name fetch failed for %s: %s", appid, exc)
+            return None
+
+    if client is not None:
+        return await fetch(client)
+
+    async with httpx.AsyncClient() as owned_client:
+        return await fetch(owned_client)
+
+
 async def enrich_game(appid: int, client: httpx.AsyncClient | None = None) -> dict | None:
     """
     Fetch Steam Store data for appid and cache in DB.

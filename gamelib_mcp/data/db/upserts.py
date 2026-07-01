@@ -199,6 +199,106 @@ async def upsert_game_platform(
         return row["id"]
 
 
+async def upsert_wishlist_entry(
+    game_id: int,
+    platform: str,
+    wishlisted_at: str | None = None,
+    source: str | None = None,
+) -> int:
+    """Insert or update a game_wishlist row and return its id.
+
+    Lives in its own table rather than game_platforms — a wishlist item may not
+    be owned anywhere yet, and game_platforms rows are meant to mean "a real
+    platform relationship exists" (owned, or a manual stub). source records
+    where the entry came from (e.g. "steam", "dekudeals", "manual").
+    """
+    now = wishlisted_at or datetime.now(timezone.utc).isoformat()
+    async with get_db() as db:
+        await db.execute(
+            """INSERT INTO game_wishlist (game_id, platform, wishlisted_at, source)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(game_id, platform) DO UPDATE SET
+                   wishlisted_at = excluded.wishlisted_at,
+                   source = excluded.source""",
+            (game_id, platform, now, source),
+        )
+        row = await db.execute_fetchone(
+            "SELECT id FROM game_wishlist WHERE game_id = ? AND platform = ?",
+            (game_id, platform),
+        )
+        await db.commit()
+        return row["id"]
+
+
+async def clear_fulfilled_wishlist_entries(
+    game_id: int | None = None,
+    platform: str | None = None,
+) -> int:
+    """Delete wishlist entries whose game is now owned on that platform.
+
+    Mirrors how storefronts like Steam clear a wishlist item once you buy it.
+    Call this after any sync/write that may have established ownership
+    (library refresh, wishlist sync, add_game_to_platform) — game_platforms
+    rows are the source of truth for ownership, so a wishlist row lingers only
+    until the next such call notices it's fulfilled. Optionally scoped to a
+    single game_id/platform for an immediate, targeted check. Returns the
+    number of rows deleted.
+    """
+    where = ["EXISTS (SELECT 1 FROM game_platforms gp "
+             "WHERE gp.game_id = game_wishlist.game_id "
+             "AND gp.platform = game_wishlist.platform AND gp.owned = 1)"]
+    params: list = []
+    if game_id is not None:
+        where.append("game_wishlist.game_id = ?")
+        params.append(game_id)
+    if platform is not None:
+        where.append("game_wishlist.platform = ?")
+        params.append(platform)
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            f"DELETE FROM game_wishlist WHERE {' AND '.join(where)}", params
+        )
+        await db.commit()
+        return cursor.rowcount
+
+
+async def delete_stale_wishlist_entries(
+    platform: str,
+    source: str,
+    keep_game_ids,
+) -> int:
+    """Delete (platform, source) game_wishlist rows not in keep_game_ids.
+
+    Reconciles removals — a game taken off the upstream wishlist (without
+    being bought) shouldn't linger locally forever. Scoped to (platform,
+    source) so it never touches manual entries or another source's rows.
+
+    Callers MUST only invoke this after confirming the source wishlist was
+    fetched and resolved in full this round: keep_game_ids should be every
+    game_id the sync could account for. An empty or partial keep_game_ids from
+    a failed, partial, or per-item-unresolved fetch would otherwise wipe real
+    entries — this function has no way to tell "genuinely removed upstream"
+    apart from "we just couldn't confirm it this time".
+    """
+    keep_ids = list(keep_game_ids)
+    async with get_db() as db:
+        if not keep_ids:
+            cursor = await db.execute(
+                "DELETE FROM game_wishlist WHERE platform = ? AND source = ?",
+                (platform, source),
+            )
+        else:
+            placeholders = ",".join("?" * len(keep_ids))
+            cursor = await db.execute(
+                f"DELETE FROM game_wishlist WHERE platform = ? AND source = ? "
+                f"AND game_id NOT IN ({placeholders})",
+                (platform, source, *keep_ids),
+            )
+        await db.commit()
+        return cursor.rowcount
+
+
 async def repair_misclassified_platform_row(
     *,
     source_game_id: int,

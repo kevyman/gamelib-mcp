@@ -197,6 +197,26 @@ class RunLibrarySyncStateTests(ToolDBTestCase):
         self.assertEqual(await get_meta("sync_platform_state_steam"), "error")
         self.assertEqual(await get_meta("library_sync_status"), "idle")
 
+    async def test_clears_fulfilled_wishlist_entries_after_sync(self):
+        game_id = await seed_game("Was Wishlisted")
+        await db_module.upsert_wishlist_entry(game_id, "steam", source="steam")
+
+        async def fake_steam():
+            # Ownership established mid-sync, same as a real Steam refresh would.
+            await add_platform(game_id, "steam", owned=1)
+            return {"games_upserted": 1}
+
+        with patch("gamelib_mcp.tools.admin.fetch_library", side_effect=fake_steam), \
+             patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.admin._schedule_background_enrich", AsyncMock()):
+            await admin.run_library_sync(["steam"])
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT 1 FROM game_wishlist WHERE game_id = ? AND platform = ?", (game_id, "steam")
+            )
+        self.assertIsNone(row)
+
 
 class RefreshLibraryAckTests(ToolDBTestCase):
     async def asyncTearDown(self) -> None:
@@ -243,6 +263,49 @@ class RefreshLibraryAckTests(ToolDBTestCase):
     async def test_rejects_unknown_platform(self):
         with self.assertRaises(ToolError):
             await admin.refresh_library(["nope"])
+
+
+class SyncWishlistTests(ToolDBTestCase):
+    async def test_rejects_unknown_platform(self):
+        with self.assertRaisesRegex(ToolError, "Unknown wishlist platform 'ps5'"):
+            await admin.sync_wishlist(["ps5"])
+
+    async def test_defaults_to_steam_and_switch2(self):
+        with (
+            patch(
+                "gamelib_mcp.data.steam_wishlist.fetch_wishlist",
+                AsyncMock(return_value={"added": 1}),
+            ) as steam_fn,
+            patch(
+                "gamelib_mcp.data.dekudeals.sync_dekudeals_wishlist",
+                AsyncMock(return_value={"matched": 2}),
+            ) as deku_fn,
+        ):
+            result = await admin.sync_wishlist()
+
+        steam_fn.assert_awaited_once()
+        deku_fn.assert_awaited_once()
+        self.assertEqual(result, {"steam": {"added": 1}, "switch2": {"matched": 2}})
+
+    async def test_clears_fulfilled_wishlist_entries_after_sync(self):
+        game_id = await seed_game("Already Owned Elsewhere")
+        await add_platform(game_id, "steam", owned=1)
+        # Simulate the sync re-adding a wishlist row for an already-owned game
+        # (e.g. a stale external wishlist) by writing it directly, then check
+        # that sync_wishlist's post-sync cleanup reconciles it away.
+        await db_module.upsert_wishlist_entry(game_id, "steam", source="steam")
+
+        with patch(
+            "gamelib_mcp.data.steam_wishlist.fetch_wishlist",
+            AsyncMock(return_value={"added": 0, "matched": 1, "skipped": 0}),
+        ):
+            await admin.sync_wishlist(["steam"])
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT 1 FROM game_wishlist WHERE game_id = ? AND platform = ?", (game_id, "steam")
+            )
+        self.assertIsNone(row)
 
 
 class GetSyncStatusTests(ToolDBTestCase):
