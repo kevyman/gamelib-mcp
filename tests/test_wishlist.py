@@ -6,6 +6,8 @@ helpers (upsert + fulfillment cleanup), the manual add_game_to_platform
 import unittest
 from unittest.mock import AsyncMock, patch
 
+import httpx
+
 from conftest import ToolDBTestCase, add_platform, seed_game
 from fastmcp.exceptions import ToolError
 from gamelib_mcp.data import db as db_module
@@ -93,6 +95,67 @@ class ClearFulfilledWishlistEntriesTests(ToolDBTestCase):
                 "SELECT 1 FROM game_wishlist WHERE game_id = ?", (other_fulfilled,)
             )
         self.assertIsNotNone(still_there)
+
+
+class DeleteStaleWishlistEntriesTests(ToolDBTestCase):
+    async def test_removes_entries_not_in_keep_set(self):
+        removed_game = await seed_game("Removed From Wishlist")
+        await db_module.upsert_wishlist_entry(removed_game, "steam", source="steam")
+        kept_game = await seed_game("Still On Wishlist")
+        await db_module.upsert_wishlist_entry(kept_game, "steam", source="steam")
+
+        deleted = await db_module.delete_stale_wishlist_entries("steam", "steam", {kept_game})
+
+        self.assertEqual(deleted, 1)
+        async with db_module.get_db() as db:
+            gone = await db.execute_fetchone(
+                "SELECT 1 FROM game_wishlist WHERE game_id = ?", (removed_game,)
+            )
+            still_there = await db.execute_fetchone(
+                "SELECT 1 FROM game_wishlist WHERE game_id = ?", (kept_game,)
+            )
+        self.assertIsNone(gone)
+        self.assertIsNotNone(still_there)
+
+    async def test_empty_keep_set_deletes_all_for_that_platform_and_source(self):
+        game_id = await seed_game("Wishlist Now Empty")
+        await db_module.upsert_wishlist_entry(game_id, "steam", source="steam")
+
+        deleted = await db_module.delete_stale_wishlist_entries("steam", "steam", set())
+
+        self.assertEqual(deleted, 1)
+
+    async def test_scoped_to_source_never_touches_manual_entries(self):
+        manual_game = await seed_game("Manually Tracked")
+        await db_module.upsert_wishlist_entry(manual_game, "steam", source="manual")
+        synced_game = await seed_game("Sync Tracked")
+        await db_module.upsert_wishlist_entry(synced_game, "steam", source="steam")
+
+        # Simulate a full steam-source reconciliation that found neither game
+        # in the current fetch — only the "steam"-sourced row should go.
+        deleted = await db_module.delete_stale_wishlist_entries("steam", "steam", set())
+
+        self.assertEqual(deleted, 1)
+        async with db_module.get_db() as db:
+            manual_row = await db.execute_fetchone(
+                "SELECT 1 FROM game_wishlist WHERE game_id = ?", (manual_game,)
+            )
+        self.assertIsNotNone(manual_row)
+
+    async def test_scoped_to_platform_never_touches_other_platforms(self):
+        switch_game = await seed_game("Switch Game")
+        await db_module.upsert_wishlist_entry(switch_game, "switch2", source="dekudeals")
+        steam_game = await seed_game("Steam Game")
+        await db_module.upsert_wishlist_entry(steam_game, "steam", source="steam")
+
+        deleted = await db_module.delete_stale_wishlist_entries("steam", "steam", set())
+
+        self.assertEqual(deleted, 1)
+        async with db_module.get_db() as db:
+            switch_row = await db.execute_fetchone(
+                "SELECT 1 FROM game_wishlist WHERE game_id = ?", (switch_game,)
+            )
+        self.assertIsNotNone(switch_row)
 
 
 class AddGameToPlatformWishlistTests(ToolDBTestCase):
@@ -247,7 +310,7 @@ class FetchSteamWishlistTests(ToolDBTestCase):
         ):
             result = await steam_wishlist.fetch_wishlist()
 
-        self.assertEqual(result, {"added": 0, "matched": 1, "skipped": 0})
+        self.assertEqual(result, {"added": 0, "matched": 1, "skipped": 0, "removed": 0})
         async with db_module.get_db() as db:
             gp_row = await db.execute_fetchone(
                 "SELECT owned, playtime_minutes FROM game_platforms WHERE game_id = ?", (game_id,)
@@ -285,7 +348,7 @@ class FetchSteamWishlistTests(ToolDBTestCase):
         ):
             result = await steam_wishlist.fetch_wishlist()
 
-        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 0})
+        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 0, "removed": 0})
         async with db_module.get_db() as db:
             game = await db.execute_fetchone("SELECT id FROM games WHERE name = 'New Game'")
             self.assertIsNotNone(game)
@@ -383,6 +446,83 @@ class FetchSteamWishlistTests(ToolDBTestCase):
             )
         self.assertIsNotNone(row["wishlisted_at"])
 
+    async def test_removes_entry_no_longer_on_wishlist_when_fully_resolved(self):
+        removed_game = await seed_game("Removed From Steam Wishlist")
+        await db_module.upsert_wishlist_entry(removed_game, "steam", source="steam")
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"response": {"items": []}}
+
+        class _Client:
+            def __init__(self):
+                self.get = AsyncMock(return_value=_Resp())
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        with (
+            patch.object(steam_wishlist, "STEAM_API_KEY", "key"),
+            patch.object(steam_wishlist, "STEAM_ID", "id"),
+            patch.object(steam_wishlist.httpx, "AsyncClient", return_value=_Client()),
+        ):
+            result = await steam_wishlist.fetch_wishlist()
+
+        self.assertEqual(result["removed"], 1)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT 1 FROM game_wishlist WHERE game_id = ?", (removed_game,)
+            )
+        self.assertIsNone(row)
+
+    async def test_skips_removal_reconciliation_when_an_item_is_unresolved(self):
+        # A pre-existing wishlist-only game (no stored identifier, per design)
+        # that fails to resolve this round (e.g. a Steam Store hiccup) must not
+        # be treated as "removed from your wishlist".
+        survivor = await seed_game("Survivor Game")
+        await db_module.upsert_wishlist_entry(survivor, "steam", source="steam")
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                # One resolvable item, one whose name lookup will fail below.
+                return {"response": {"items": [{"appid": 555}]}}
+
+        class _Client:
+            def __init__(self):
+                self.get = AsyncMock(return_value=_Resp())
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        with (
+            patch.object(steam_wishlist, "STEAM_API_KEY", "key"),
+            patch.object(steam_wishlist, "STEAM_ID", "id"),
+            patch.object(steam_wishlist.httpx, "AsyncClient", return_value=_Client()),
+            patch.object(steam_wishlist, "fetch_app_name", AsyncMock(return_value=None)),
+        ):
+            result = await steam_wishlist.fetch_wishlist()
+
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(result["removed"], 0)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT 1 FROM game_wishlist WHERE game_id = ?", (survivor,)
+            )
+        # Not confirmed present, but also not wrongly deleted.
+        self.assertIsNotNone(row)
+
 
 class DekuDealsWishlistTests(ToolDBTestCase):
     async def test_unconfigured_reports_status(self):
@@ -422,6 +562,57 @@ class DekuDealsWishlistTests(ToolDBTestCase):
         # Uses the item's own wishlist-add time from the export, not sync time.
         self.assertEqual(wishlist_row["wishlisted_at"], "2025-06-29T07:43:28+00:00")
         self.assertIsNone(gp_row)
+
+    async def test_removes_entry_no_longer_in_the_fetched_wishlist(self):
+        removed_game = await seed_game("Taken Off Wishlist")
+        await db_module.upsert_wishlist_entry(removed_game, "switch2", source="dekudeals")
+        manual_game = await seed_game("Manually Added Switch Game")
+        await db_module.upsert_wishlist_entry(manual_game, "switch2", source="manual")
+
+        with (
+            patch.object(dekudeals, "DEKUDEALS_WISHLIST_URL", "https://www.dekudeals.com/wishlist/abc"),
+            patch.object(dekudeals, "_fetch_wishlist_items", AsyncMock(return_value=[])),
+        ):
+            result = await dekudeals.sync_dekudeals_wishlist()
+
+        self.assertEqual(result["removed"], 1)
+        async with db_module.get_db() as db:
+            removed_row = await db.execute_fetchone(
+                "SELECT 1 FROM game_wishlist WHERE game_id = ?", (removed_game,)
+            )
+            manual_row = await db.execute_fetchone(
+                "SELECT 1 FROM game_wishlist WHERE game_id = ?", (manual_game,)
+            )
+        self.assertIsNone(removed_row)
+        # Manual entries are never touched by the sync-source reconciliation.
+        self.assertIsNotNone(manual_row)
+
+    async def test_fetch_failure_propagates_instead_of_wiping_wishlist(self):
+        game_id = await seed_game("Should Survive A Failed Fetch")
+        await db_module.upsert_wishlist_entry(game_id, "switch2", source="dekudeals")
+
+        class _Client:
+            def __init__(self):
+                self.get = AsyncMock(side_effect=httpx.ConnectError("boom"))
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        with (
+            patch.object(dekudeals, "DEKUDEALS_WISHLIST_URL", "https://www.dekudeals.com/wishlist/abc"),
+            patch.object(dekudeals.httpx, "AsyncClient", return_value=_Client()),
+        ):
+            with self.assertRaises(httpx.ConnectError):
+                await dekudeals.sync_dekudeals_wishlist()
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT 1 FROM game_wishlist WHERE game_id = ?", (game_id,)
+            )
+        self.assertIsNotNone(row)
 
     async def test_parses_real_wishlist_export_shape(self):
         # Exact shape confirmed from a live DekuDeals wishlist ".json" export

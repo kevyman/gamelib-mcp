@@ -15,6 +15,12 @@ to Nintendo's applicationId (nintendo_title_id) used for VGCS ownership — so
 name matching is the only available bridge to owned switch2 games, not a
 shortcut taken for convenience. "added_at" is each item's real wishlist-add
 time and is used as-is for wishlisted_at (it's already ISO 8601 UTC).
+
+Removal reconciliation: a title removed from the DekuDeals wishlist is deleted
+from game_wishlist too, via delete_stale_wishlist_entries — but only after a
+successful fetch. _fetch_wishlist_items raises on failure rather than
+swallowing it to an empty list, specifically so a transient fetch error can't
+be mistaken for "the wishlist is now empty" and wipe every switch2 entry.
 """
 
 import logging
@@ -23,7 +29,12 @@ from datetime import datetime, timezone
 
 import httpx
 
-from .db import extract_best_fuzzy_key, get_db, upsert_wishlist_entry
+from .db import (
+    delete_stale_wishlist_entries,
+    extract_best_fuzzy_key,
+    get_db,
+    upsert_wishlist_entry,
+)
 
 DEKUDEALS_WISHLIST_URL = os.getenv("DEKUDEALS_WISHLIST_URL", "")
 logger = logging.getLogger(__name__)
@@ -36,14 +47,17 @@ def is_dekudeals_configured() -> bool:
 async def sync_dekudeals_wishlist() -> dict:
     """
     Fetch the configured DekuDeals shared wishlist and fuzzy-match titles to DB
-    games, upserting a game_wishlist row for each on the switch2 platform.
-    Returns stats.
+    games, upserting a game_wishlist row for each on the switch2 platform, and
+    removing any prior dekudeals-sourced entry no longer in the fetched list.
+    Returns stats. Raises if the fetch itself fails (see _fetch_wishlist_items)
+    rather than treating a failed fetch as an empty wishlist.
     """
     wishlist_url = os.getenv("DEKUDEALS_WISHLIST_URL", DEKUDEALS_WISHLIST_URL)
     if not wishlist_url:
         return {
             "matched": 0,
             "skipped": 0,
+            "removed": 0,
             "sync_status": "unconfigured",
             "error_summary": "DEKUDEALS_WISHLIST_URL is not set",
             "error_classification": "missing_configuration",
@@ -58,6 +72,7 @@ async def sync_dekudeals_wishlist() -> dict:
 
     matched = skipped = 0
     fallback_now = datetime.now(timezone.utc).isoformat()
+    resolved_game_ids: set[int] = set()
 
     for item in items:
         game_id = _match_game_id(item["title"], candidate_names, name_to_id)
@@ -69,8 +84,13 @@ async def sync_dekudeals_wishlist() -> dict:
             game_id, "switch2", wishlisted_at=item["added_at"] or fallback_now, source="dekudeals"
         )
         matched += 1
+        resolved_game_ids.add(game_id)
 
-    return {"matched": matched, "skipped": skipped, "total_scraped": len(items)}
+    # Only reached once _fetch_wishlist_items has succeeded, so an empty/partial
+    # items list here genuinely reflects the current upstream wishlist.
+    removed = await delete_stale_wishlist_entries("switch2", "dekudeals", resolved_game_ids)
+
+    return {"matched": matched, "skipped": skipped, "removed": removed, "total_scraped": len(items)}
 
 
 async def _fetch_wishlist_items(wishlist_url: str) -> list[dict]:
@@ -79,19 +99,18 @@ async def _fetch_wishlist_items(wishlist_url: str) -> list[dict]:
     Returns a list of {"title": str, "added_at": str | None} — added_at is the
     item's own wishlist-add timestamp when the export provides one (confirmed
     present in the wishlist export; None is just a defensive fallback for
-    other DekuDeals export shapes, e.g. a plain title list).
+    other DekuDeals export shapes, e.g. a plain title list). Propagates fetch
+    failures (raises) rather than swallowing them to an empty list — the
+    caller's removal reconciliation must not mistake a network hiccup for a
+    genuinely empty wishlist.
     """
     url = wishlist_url.rstrip("/")
     if not url.endswith(".json"):
         url += ".json"
 
     async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "gamelib-mcp/1.0"}) as client:
-        try:
-            resp = await client.get(url, follow_redirects=True)
-            resp.raise_for_status()
-        except Exception as e:
-            logger.warning("DekuDeals wishlist fetch failed: %s", e)
-            return []
+        resp = await client.get(url, follow_redirects=True)
+        resp.raise_for_status()
         payload = resp.json()
 
     raw_items = payload if isinstance(payload, list) else payload.get("items", payload.get("games", []))

@@ -263,6 +263,42 @@ async def clear_fulfilled_wishlist_entries(
         return cursor.rowcount
 
 
+async def delete_stale_wishlist_entries(
+    platform: str,
+    source: str,
+    keep_game_ids,
+) -> int:
+    """Delete (platform, source) game_wishlist rows not in keep_game_ids.
+
+    Reconciles removals — a game taken off the upstream wishlist (without
+    being bought) shouldn't linger locally forever. Scoped to (platform,
+    source) so it never touches manual entries or another source's rows.
+
+    Callers MUST only invoke this after confirming the source wishlist was
+    fetched and resolved in full this round: keep_game_ids should be every
+    game_id the sync could account for. An empty or partial keep_game_ids from
+    a failed, partial, or per-item-unresolved fetch would otherwise wipe real
+    entries — this function has no way to tell "genuinely removed upstream"
+    apart from "we just couldn't confirm it this time".
+    """
+    keep_ids = list(keep_game_ids)
+    async with get_db() as db:
+        if not keep_ids:
+            cursor = await db.execute(
+                "DELETE FROM game_wishlist WHERE platform = ? AND source = ?",
+                (platform, source),
+            )
+        else:
+            placeholders = ",".join("?" * len(keep_ids))
+            cursor = await db.execute(
+                f"DELETE FROM game_wishlist WHERE platform = ? AND source = ? "
+                f"AND game_id NOT IN ({placeholders})",
+                (platform, source, *keep_ids),
+            )
+        await db.commit()
+        return cursor.rowcount
+
+
 async def repair_misclassified_platform_row(
     *,
     source_game_id: int,

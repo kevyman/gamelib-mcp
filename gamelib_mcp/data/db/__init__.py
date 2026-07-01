@@ -1404,6 +1404,7 @@ from .upserts import (  # noqa: E402
     upsert_game_platform,
     upsert_wishlist_entry,
     clear_fulfilled_wishlist_entries,
+    delete_stale_wishlist_entries,
     repair_misclassified_platform_row,
     upsert_game_platform_identifier,
     upsert_steam_platform_data,

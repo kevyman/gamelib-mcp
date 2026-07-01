@@ -14,6 +14,15 @@ row, the same fallback GOG already relies on for lacking a stable store id.
 date_added is read defensively (_parse_steam_added_at accepts epoch or ISO,
 else falls back to sync time) — unlike the DekuDeals export, this endpoint's
 exact response shape hasn't been confirmed against a live account yet.
+
+Removal reconciliation: a game taken off your Steam wishlist (without being
+bought) is deleted from game_wishlist too, via delete_stale_wishlist_entries —
+but only when every fetched item resolved to a game_id this round. If any
+item couldn't be resolved (a malformed entry, or fetch_app_name failing for an
+unowned item — the Steam Store lookup shares a rate-limited gate, so this is a
+real possibility, not just a theoretical one), the removal pass is skipped
+entirely rather than risk deleting a wishlist entry that's still there and we
+simply failed to re-confirm.
 """
 
 import logging
@@ -24,6 +33,7 @@ import httpx
 
 from .db import (
     STEAM_APP_ID,
+    delete_stale_wishlist_entries,
     get_game_by_identifier,
     upsert_game,
     upsert_wishlist_entry,
@@ -68,9 +78,10 @@ def _parse_steam_added_at(value) -> str | None:
 async def fetch_wishlist() -> dict:
     """Fetch the Steam wishlist and upsert entries into game_wishlist.
 
-    Returns {"added": int, "matched": int, "skipped": int}, or an
-    "unconfigured" status dict (matching sync_dekudeals_wishlist's shape) if
-    STEAM_API_KEY/STEAM_ID aren't set.
+    Returns {"added": int, "matched": int, "skipped": int, "removed": int}, or
+    an "unconfigured" status dict (matching sync_dekudeals_wishlist's shape)
+    if STEAM_API_KEY/STEAM_ID aren't set. removed is 0 whenever the removal
+    reconciliation didn't run (see module docstring).
     """
     steam_api_key = os.getenv("STEAM_API_KEY", STEAM_API_KEY)
     steam_id = os.getenv("STEAM_ID", STEAM_ID)
@@ -79,6 +90,7 @@ async def fetch_wishlist() -> dict:
             "added": 0,
             "matched": 0,
             "skipped": 0,
+            "removed": 0,
             "sync_status": "unconfigured",
             "error_summary": "STEAM_API_KEY and STEAM_ID environment variables must be set",
             "error_classification": "missing_configuration",
@@ -94,11 +106,14 @@ async def fetch_wishlist() -> dict:
 
         added = matched = skipped = 0
         fallback_now = datetime.now(timezone.utc).isoformat()
+        resolved_game_ids: set[int] = set()
+        all_resolved = True
 
         for item in items:
             appid = item.get("appid")
             if appid is None:
                 skipped += 1
+                all_resolved = False
                 continue
             item_added_at = _parse_steam_added_at(item.get("date_added")) or fallback_now
 
@@ -108,17 +123,30 @@ async def fetch_wishlist() -> dict:
                     existing["id"], "steam", wishlisted_at=item_added_at, source="steam"
                 )
                 matched += 1
+                resolved_game_ids.add(existing["id"])
                 continue
 
             name = await fetch_app_name(appid, client=client)
             prepared_title = prepare_catalog_title(name) if name else None
             if prepared_title is None:
                 skipped += 1
+                all_resolved = False
                 continue
 
             game_id = await upsert_game(appid, prepared_title)
             await upsert_wishlist_entry(game_id, "steam", wishlisted_at=item_added_at, source="steam")
             added += 1
+            resolved_game_ids.add(game_id)
 
-    logger.info("Steam wishlist sync: added=%d matched=%d skipped=%d", added, matched, skipped)
-    return {"added": added, "matched": matched, "skipped": skipped}
+    removed = 0
+    if all_resolved:
+        removed = await delete_stale_wishlist_entries("steam", "steam", resolved_game_ids)
+    elif items:
+        logger.info(
+            "Skipping Steam wishlist removal-reconciliation: %d item(s) unresolved this sync", skipped
+        )
+
+    logger.info(
+        "Steam wishlist sync: added=%d matched=%d skipped=%d removed=%d", added, matched, skipped, removed
+    )
+    return {"added": added, "matched": matched, "skipped": skipped, "removed": removed}
