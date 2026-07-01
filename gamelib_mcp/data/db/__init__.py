@@ -1134,8 +1134,16 @@ async def _snapshot_before_migration(
     the same migration overwrites it. A snapshot failure aborts the migration
     — better not to migrate than to migrate without the safety net.
     """
-    db_path = _db_path()
-    if db_path == ":memory:" or detected_state == "fresh" or current_version == SCHEMA_VERSION:
+    if detected_state == "fresh" or current_version == SCHEMA_VERSION:
+        return None
+
+    # Resolve the file behind THIS connection (not _db_path(): callers such as
+    # tests migrate connections that aren't the configured database).
+    row = await db.execute_fetchone(  # type: ignore[attr-defined]
+        "SELECT file FROM pragma_database_list WHERE name = 'main'"
+    )
+    db_path = row[0] if row else ""
+    if not db_path:  # in-memory / temporary database — nothing on disk to back up
         return None
 
     backup_path = f"{db_path}.pre-v{current_version}.bak"
