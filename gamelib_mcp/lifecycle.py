@@ -46,6 +46,7 @@ _ENRICHMENT_TASK: asyncio.Task | None = None
 _ENRICHMENT_LOCK: asyncio.Lock | None = None
 _ENRICHMENT_RERUN_REQUESTED = False
 _RATINGS_SYNC_TASK: asyncio.Task | None = None
+_STARTUP_RATINGS_SYNC_TASK: asyncio.Task | None = None
 _LIBRARY_REFRESH_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
 _PERIODIC_REFRESH_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
 _ENRICHMENT_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
@@ -179,6 +180,12 @@ def _clear_ratings_sync_task(task: asyncio.Task) -> None:
     global _RATINGS_SYNC_TASK
     if _RATINGS_SYNC_TASK is task:
         _RATINGS_SYNC_TASK = None
+
+
+def _clear_startup_ratings_sync_task(task: asyncio.Task) -> None:
+    global _STARTUP_RATINGS_SYNC_TASK
+    if _STARTUP_RATINGS_SYNC_TASK is task:
+        _STARTUP_RATINGS_SYNC_TASK = None
 
 
 async def _run_startup_ratings_sync() -> None:
@@ -499,7 +506,11 @@ async def lifespan(app):
             pass
     if ratings_stale:
         logger.info("Ratings stale or missing — scheduling background ratings sync...")
-        asyncio.create_task(_run_startup_ratings_sync())
+        # Hold a strong reference: the event loop only weakly references tasks,
+        # so an untracked task can be garbage-collected mid-run.
+        global _STARTUP_RATINGS_SYNC_TASK
+        _STARTUP_RATINGS_SYNC_TASK = asyncio.create_task(_run_startup_ratings_sync())
+        _STARTUP_RATINGS_SYNC_TASK.add_done_callback(_clear_startup_ratings_sync_task)
     await _ensure_periodic_ratings_loop()
 
     yield
@@ -508,4 +519,5 @@ async def lifespan(app):
     await _cancel_task(_LIBRARY_REFRESH_TASK)
     await _cancel_task(_ENRICHMENT_TASK)
     await _cancel_task(_RATINGS_SYNC_TASK)
+    await _cancel_task(_STARTUP_RATINGS_SYNC_TASK)
     logger.info("Shutdown")
