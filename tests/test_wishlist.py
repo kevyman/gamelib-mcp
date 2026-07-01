@@ -190,6 +190,31 @@ class GetWishlistTests(ToolDBTestCase):
         self.assertTrue(result["items"][0]["owned"])
 
 
+class ParseSteamAddedAtTests(unittest.TestCase):
+    def test_parses_epoch_int(self):
+        self.assertEqual(
+            steam_wishlist._parse_steam_added_at(1735689600),
+            "2025-01-01T00:00:00+00:00",
+        )
+
+    def test_parses_numeric_string_as_epoch(self):
+        self.assertEqual(
+            steam_wishlist._parse_steam_added_at("1735689600"),
+            "2025-01-01T00:00:00+00:00",
+        )
+
+    def test_parses_iso_string_passthrough(self):
+        self.assertEqual(
+            steam_wishlist._parse_steam_added_at("2025-01-01T00:00:00+00:00"),
+            "2025-01-01T00:00:00+00:00",
+        )
+
+    def test_none_and_garbage_return_none(self):
+        self.assertIsNone(steam_wishlist._parse_steam_added_at(None))
+        self.assertIsNone(steam_wishlist._parse_steam_added_at("not a date"))
+        self.assertIsNone(steam_wishlist._parse_steam_added_at(True))
+
+
 class FetchSteamWishlistTests(ToolDBTestCase):
     async def test_matches_existing_game_by_appid_without_creating_ownership(self):
         game_id = await seed_game("Hades II")
@@ -274,13 +299,89 @@ class FetchSteamWishlistTests(ToolDBTestCase):
         self.assertIsNone(gp_row)
         self.assertEqual(wishlist_row["source"], "steam")
 
-    async def test_missing_credentials_raises(self):
+    async def test_missing_credentials_reports_unconfigured(self):
         with (
             patch.object(steam_wishlist, "STEAM_API_KEY", ""),
             patch.object(steam_wishlist, "STEAM_ID", ""),
         ):
-            with self.assertRaises(ValueError):
-                await steam_wishlist.fetch_wishlist()
+            result = await steam_wishlist.fetch_wishlist()
+        self.assertEqual(result["sync_status"], "unconfigured")
+        self.assertEqual(result["added"], 0)
+
+    async def test_uses_per_item_date_added_when_present(self):
+        game_id = await seed_game("Hollow Knight: Silksong")
+        platform_id = await add_platform(game_id, "steam", owned=1)
+        await db_module.upsert_game_platform_identifier(
+            platform_id, db_module.STEAM_APP_ID, "333", is_primary=True
+        )
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                # Steam Web API timestamps are conventionally Unix epoch seconds.
+                return {"response": {"items": [{"appid": 333, "date_added": 1735689600}]}}
+
+        class _Client:
+            def __init__(self):
+                self.get = AsyncMock(return_value=_Resp())
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        with (
+            patch.object(steam_wishlist, "STEAM_API_KEY", "key"),
+            patch.object(steam_wishlist, "STEAM_ID", "id"),
+            patch.object(steam_wishlist.httpx, "AsyncClient", return_value=_Client()),
+        ):
+            await steam_wishlist.fetch_wishlist()
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT wishlisted_at FROM game_wishlist WHERE game_id = ?", (game_id,)
+            )
+        self.assertEqual(row["wishlisted_at"], "2025-01-01T00:00:00+00:00")
+
+    async def test_falls_back_to_sync_time_when_date_added_missing(self):
+        game_id = await seed_game("No Timestamp Game")
+        platform_id = await add_platform(game_id, "steam", owned=1)
+        await db_module.upsert_game_platform_identifier(
+            platform_id, db_module.STEAM_APP_ID, "444", is_primary=True
+        )
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"response": {"items": [{"appid": 444}]}}
+
+        class _Client:
+            def __init__(self):
+                self.get = AsyncMock(return_value=_Resp())
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        with (
+            patch.object(steam_wishlist, "STEAM_API_KEY", "key"),
+            patch.object(steam_wishlist, "STEAM_ID", "id"),
+            patch.object(steam_wishlist.httpx, "AsyncClient", return_value=_Client()),
+        ):
+            await steam_wishlist.fetch_wishlist()
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT wishlisted_at FROM game_wishlist WHERE game_id = ?", (game_id,)
+            )
+        self.assertIsNotNone(row["wishlisted_at"])
 
 
 class DekuDealsWishlistTests(ToolDBTestCase):
