@@ -296,8 +296,13 @@ class DekuDealsWishlistTests(ToolDBTestCase):
             patch.object(dekudeals, "DEKUDEALS_WISHLIST_URL", "https://www.dekudeals.com/wishlist/abc"),
             patch.object(
                 dekudeals,
-                "_fetch_wishlist_titles",
-                AsyncMock(return_value=["Hollow Knight Silksong", "Some Untracked Game"]),
+                "_fetch_wishlist_items",
+                AsyncMock(
+                    return_value=[
+                        {"title": "Hollow Knight Silksong", "added_at": "2025-06-29T07:43:28+00:00"},
+                        {"title": "Some Untracked Game", "added_at": "2025-06-29T07:44:40+00:00"},
+                    ]
+                ),
             ),
         ):
             result = await dekudeals.sync_dekudeals_wishlist()
@@ -306,14 +311,67 @@ class DekuDealsWishlistTests(ToolDBTestCase):
         self.assertEqual(result["skipped"], 1)
         async with db_module.get_db() as db:
             wishlist_row = await db.execute_fetchone(
-                "SELECT source FROM game_wishlist WHERE game_id = ? AND platform = ?",
+                "SELECT source, wishlisted_at FROM game_wishlist WHERE game_id = ? AND platform = ?",
                 (game_id, "switch2"),
             )
             gp_row = await db.execute_fetchone(
                 "SELECT 1 FROM game_platforms WHERE game_id = ?", (game_id,)
             )
         self.assertEqual(wishlist_row["source"], "dekudeals")
+        # Uses the item's own wishlist-add time from the export, not sync time.
+        self.assertEqual(wishlist_row["wishlisted_at"], "2025-06-29T07:43:28+00:00")
         self.assertIsNone(gp_row)
+
+    async def test_parses_real_wishlist_export_shape(self):
+        # Exact shape confirmed from a live DekuDeals wishlist ".json" export
+        # (2026-07-01): {"items": [{"name", "link", "added_at"}, ...],
+        # "default_desired_price": ...} — no id/nsuid field anywhere.
+        payload = {
+            "items": [
+                {
+                    "name": "007 First Light",
+                    "link": "https://www.dekudeals.com/items/007-first-light",
+                    "added_at": "2025-06-29T07:43:28+00:00",
+                },
+                {
+                    "name": "The Legend of Zelda: Link’s Awakening",
+                    "link": "https://www.dekudeals.com/items/the-legend-of-zelda-links-awakening",
+                    "added_at": "2025-06-29T07:49:26+00:00",
+                },
+            ],
+            "default_desired_price": "drop",
+        }
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return payload
+
+        class _Client:
+            def __init__(self):
+                self.get = AsyncMock(return_value=_Resp())
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        with patch.object(dekudeals.httpx, "AsyncClient", return_value=_Client()):
+            items = await dekudeals._fetch_wishlist_items("https://www.dekudeals.com/wishlist/abc")
+
+        self.assertEqual(
+            items,
+            [
+                {"title": "007 First Light", "added_at": "2025-06-29T07:43:28+00:00"},
+                {
+                    "title": "The Legend of Zelda: Link’s Awakening",
+                    "added_at": "2025-06-29T07:49:26+00:00",
+                },
+            ],
+        )
 
 
 if __name__ == "__main__":

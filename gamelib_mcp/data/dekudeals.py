@@ -7,6 +7,14 @@ reverse-engineering Nintendo's own eShop wishlist.
 
 Configure DEKUDEALS_WISHLIST_URL to your share link, e.g.
 https://www.dekudeals.com/wishlist/<share-id> (the ".json" suffix is added here).
+
+Confirmed export shape (2026-07-01): {"items": [{"name", "link", "added_at"},
+...], "default_desired_price": ...}. There is no numeric/NSUID identifier
+anywhere in it — "link" is DekuDeals' own slug (e.g. /items/pikmin-4), unrelated
+to Nintendo's applicationId (nintendo_title_id) used for VGCS ownership — so
+name matching is the only available bridge to owned switch2 games, not a
+shortcut taken for convenience. "added_at" is each item's real wishlist-add
+time and is used as-is for wishlisted_at (it's already ISO 8601 UTC).
 """
 
 import logging
@@ -41,7 +49,7 @@ async def sync_dekudeals_wishlist() -> dict:
             "error_classification": "missing_configuration",
         }
 
-    titles = await _fetch_wishlist_titles(wishlist_url)
+    items = await _fetch_wishlist_items(wishlist_url)
 
     async with get_db() as db:
         game_rows = await db.execute_fetchall("SELECT id, name FROM games")
@@ -49,22 +57,30 @@ async def sync_dekudeals_wishlist() -> dict:
     candidate_names = {name: name for name in name_to_id}
 
     matched = skipped = 0
-    now = datetime.now(timezone.utc).isoformat()
+    fallback_now = datetime.now(timezone.utc).isoformat()
 
-    for title in titles:
-        game_id = _match_game_id(title, candidate_names, name_to_id)
+    for item in items:
+        game_id = _match_game_id(item["title"], candidate_names, name_to_id)
         if game_id is None:
-            logger.debug("No match for DekuDeals wishlist title: %s", title)
+            logger.debug("No match for DekuDeals wishlist title: %s", item["title"])
             skipped += 1
             continue
-        await upsert_wishlist_entry(game_id, "switch2", wishlisted_at=now, source="dekudeals")
+        await upsert_wishlist_entry(
+            game_id, "switch2", wishlisted_at=item["added_at"] or fallback_now, source="dekudeals"
+        )
         matched += 1
 
-    return {"matched": matched, "skipped": skipped, "total_scraped": len(titles)}
+    return {"matched": matched, "skipped": skipped, "total_scraped": len(items)}
 
 
-async def _fetch_wishlist_titles(wishlist_url: str) -> list[str]:
-    """Fetch the DekuDeals wishlist JSON export and return a list of game titles."""
+async def _fetch_wishlist_items(wishlist_url: str) -> list[dict]:
+    """Fetch the DekuDeals wishlist JSON export.
+
+    Returns a list of {"title": str, "added_at": str | None} — added_at is the
+    item's own wishlist-add timestamp when the export provides one (confirmed
+    present in the wishlist export; None is just a defensive fallback for
+    other DekuDeals export shapes, e.g. a plain title list).
+    """
     url = wishlist_url.rstrip("/")
     if not url.endswith(".json"):
         url += ".json"
@@ -78,16 +94,16 @@ async def _fetch_wishlist_titles(wishlist_url: str) -> list[str]:
             return []
         payload = resp.json()
 
-    items = payload if isinstance(payload, list) else payload.get("items", payload.get("games", []))
-    titles = []
-    for item in items:
+    raw_items = payload if isinstance(payload, list) else payload.get("items", payload.get("games", []))
+    items = []
+    for item in raw_items:
         if isinstance(item, str):
-            titles.append(item)
+            items.append({"title": item, "added_at": None})
         elif isinstance(item, dict):
             title = item.get("title") or item.get("name")
             if title:
-                titles.append(title)
-    return titles
+                items.append({"title": title, "added_at": item.get("added_at")})
+    return items
 
 
 def _match_game_id(title: str, candidate_names: dict[str, str], name_to_id: dict) -> int | None:
