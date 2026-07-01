@@ -24,13 +24,17 @@ uv run python -m gamelib_mcp.main
 # Fallback if pytest/plugin discovery is awkward in the environment
 .venv/bin/python -m unittest tests.test_igdb tests.test_enrich_bg
 
+# Lint and type check (both gate CI on pull requests)
+.venv/bin/ruff check gamelib_mcp tests scripts
+.venv/bin/mypy gamelib_mcp
+
 # Docker (production setup with Caddy reverse proxy)
 docker compose --profile prod build
 docker compose --profile prod up -d
 docker compose --profile prod logs -f app
 ```
 
-`pytest` is configured in the `dev` dependency group in `pyproject.toml`. In this workspace, the reliable test runner is the local virtualenv at `.venv/bin/python`. There is no lint framework configured.
+`pytest`, `ruff`, and `mypy` are configured in the `dev` dependency group in `pyproject.toml` (ruff/mypy settings live under `[tool.ruff]`/`[tool.mypy]` there). In this workspace, the reliable test runner is the local virtualenv at `.venv/bin/python`. CI (`ci.yml`) runs ruff, mypy, and pytest on every pull request; mypy covers `gamelib_mcp` only, not `tests/`.
 
 ### Test Environment Note
 

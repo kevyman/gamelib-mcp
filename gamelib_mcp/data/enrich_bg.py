@@ -10,7 +10,6 @@ import httpx
 
 from . import igdb
 from .db import (
-    STEAM_APP_ID,
     _claim_cutoff_iso,
     claim_game_ids_for_hltb,
     claim_game_platform_ids_for_metacritic,

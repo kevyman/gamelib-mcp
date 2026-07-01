@@ -35,7 +35,7 @@ async def _execute_fetchone(self, sql, parameters=()):
 
 
 if not hasattr(aiosqlite.Connection, "execute_fetchone"):
-    aiosqlite.Connection.execute_fetchone = _execute_fetchone  # type: ignore[method-assign]
+    aiosqlite.Connection.execute_fetchone = _execute_fetchone  # type: ignore[attr-defined]
 
 
 _DB_READY_PATH: str | None = None
@@ -187,7 +187,7 @@ async def _table_columns(db: aiosqlite.Connection, table: str) -> set[str]:
 
 
 async def _get_user_version(db: aiosqlite.Connection) -> int:
-    row = await db.execute_fetchone("PRAGMA user_version")
+    row = await db.execute_fetchone("PRAGMA user_version")  # type: ignore[attr-defined]
     return int(row[0]) if row else 0
 
 
@@ -362,7 +362,7 @@ async def _migrate_legacy_to_v1(db: aiosqlite.Connection, progress: _Progress | 
     await db.commit()
 
     for row in old_games:
-        game = await db.execute_fetchone(
+        game = await db.execute_fetchone(  # type: ignore[attr-defined]
             "SELECT id FROM games WHERE appid = ?",
             (row["appid"],),
         )
@@ -382,7 +382,7 @@ async def _migrate_legacy_to_v1(db: aiosqlite.Connection, progress: _Progress | 
     if "ratings_old" in await _table_names(db):
         old_ratings = await db.execute_fetchall("SELECT * FROM ratings_old")
         for row in old_ratings:
-            game = await db.execute_fetchone(
+            game = await db.execute_fetchone(  # type: ignore[attr-defined]
                 "SELECT id FROM games WHERE appid = ?",
                 (row["appid"],),
             )
@@ -735,9 +735,9 @@ async def _backfill_name_normalized(db: aiosqlite.Connection) -> int:
     """Populate games.name_normalized wherever it is NULL. Returns rows updated."""
     from ..title_normalization import normalize_search_text
 
-    rows = await db.execute_fetchall(
+    rows = list(await db.execute_fetchall(
         "SELECT id, name FROM games WHERE name_normalized IS NULL"
-    )
+    ))
     for row in rows:
         await db.execute(
             "UPDATE games SET name_normalized = ? WHERE id = ?",
@@ -1122,6 +1122,29 @@ async def _repair_game_foreign_keys(db: aiosqlite.Connection) -> None:
         await db.execute("PRAGMA foreign_keys=ON")
 
 
+async def _snapshot_before_migration(
+    db: aiosqlite.Connection, detected_state: str, current_version: int
+) -> str | None:
+    """Snapshot the DB file (VACUUM INTO) before a schema-changing migration.
+
+    Migration steps rebuild tables destructively, and some tables hold data
+    with no external source to re-sync from (nintendo_play_summary is
+    forward-only; manual ratings and overrides exist only here). VACUUM INTO
+    is atomic and WAL-safe. One snapshot is kept per source version; retrying
+    the same migration overwrites it. A snapshot failure aborts the migration
+    — better not to migrate than to migrate without the safety net.
+    """
+    db_path = _db_path()
+    if db_path == ":memory:" or detected_state == "fresh" or current_version == SCHEMA_VERSION:
+        return None
+
+    backup_path = f"{db_path}.pre-v{current_version}.bak"
+    Path(backup_path).unlink(missing_ok=True)
+    await db.commit()  # VACUUM cannot run inside a transaction
+    await db.execute("VACUUM INTO ?", (backup_path,))
+    return backup_path
+
+
 async def _run_migrations(
     db: aiosqlite.Connection,
     progress: _Progress | None = None,
@@ -1130,6 +1153,10 @@ async def _run_migrations(
     initial_version = await _get_user_version(db)
     version = initial_version
     applied_steps: list[str] = []
+
+    snapshot_path = await _snapshot_before_migration(db, detected_state, initial_version)
+    if snapshot_path is not None:
+        _emit(progress, f"Backed up database to {snapshot_path} before migrating.", applied_steps)
 
     if detected_state == "fresh":
         await db.executescript(_V16_SCHEMA_DDL)
