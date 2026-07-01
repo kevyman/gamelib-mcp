@@ -123,11 +123,12 @@ def _parse_page(html: str) -> list[dict]:
 
 def _find_preceding_title(card: Tag) -> str | None:
     """Walk backwards from a .review-card to find the preceding .game-name h3."""
-    sibling = card.find_previous_sibling()
     # Walk up — the card is inside a col > row structure, so we may need
     # to look at previous siblings of the card's parent containers too.
-    node = card
+    node: Tag | None = card
     for _ in range(5):  # limit depth
+        if node is None:
+            break
         prev = node.find_previous_sibling()
         if prev:
             # Check if this sibling (or something inside it) has .game-name
@@ -141,8 +142,6 @@ def _find_preceding_title(card: Tag) -> str | None:
                     return gn.get_text(strip=True)
         # Move up to parent and try again
         node = node.parent
-        if node is None:
-            break
 
     return None
 
@@ -158,7 +157,7 @@ def _extract_score(card: Tag) -> float | None:
     stars_top = card.select_one(".stars-top")
     if stars_top:
         style = stars_top.get("style", "")
-        match = re.search(r"width:\s*([\d.]+)%", style)
+        match = re.search(r"width:\s*([\d.]+)%", style) if isinstance(style, str) else None
         if match:
             pct = float(match.group(1))
             score = round(pct / 20, 1)  # 100% / 20 = 5.0

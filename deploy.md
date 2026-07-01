@@ -295,6 +295,35 @@ curl -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
 
 ---
 
+### Database backups
+
+The SQLite DB (`data/library/gamelib.db` on the server) holds data that cannot
+be re-synced if lost: `nintendo_play_summary` (the Parental Controls API is
+forward-only), manual ratings, manual overrides, and merge/split repairs.
+
+Two layers of protection:
+
+1. **Automatic pre-migration snapshot** — before any schema-changing
+   migration, the app writes `gamelib.db.pre-v{N}.bak` next to the DB
+   (via `VACUUM INTO`, atomic and WAL-safe). If a deploy's migration goes
+   wrong, stop the container and restore that file. Old snapshots are safe to
+   delete once a migration has been verified.
+
+2. **Nightly backup cron** — the snapshot only guards migrations; disk loss
+   needs an off-machine copy. On the server:
+
+```bash
+# /etc/cron.d/gamelib-backup — nightly consistent snapshot at 04:15
+15 4 * * * root sqlite3 /root/mcps/data/library/gamelib.db ".backup /root/mcps/data/library/gamelib-nightly.bak"
+```
+
+Ship `gamelib-nightly.bak` off the machine with whatever you already use
+(restic, rclone to object storage, or even scp from your local machine).
+For continuous replication instead of nightly points, use
+[Litestream](https://litestream.io/) pointed at any S3-compatible bucket.
+
+---
+
 ### Configure Claude to use gamelib-mcp
 
 In your Claude MCP config:

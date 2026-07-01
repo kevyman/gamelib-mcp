@@ -24,5 +24,11 @@ jobs:
       - name: Sync dependencies
         run: uv sync --frozen
 
+      - name: Lint (ruff)
+        run: uv run ruff check gamelib_mcp tests scripts
+
+      - name: Type check (mypy)
+        run: uv run mypy gamelib_mcp
+
       - name: Run tests
         run: uv run python -m pytest -q
