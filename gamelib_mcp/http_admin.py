@@ -6,6 +6,7 @@ importing the FastMCP instance, which keeps the dependency one-way
 (``main -> http_admin``) with no import cycle.
 """
 
+import hmac
 import html
 import logging
 import os
@@ -100,12 +101,16 @@ class BearerAuthMiddleware:
             return
 
         auth = headers.get(b"authorization", b"").decode()
-        if auth == f"Bearer {MCP_AUTH_TOKEN}":
+        if hmac.compare_digest(auth.encode(), f"Bearer {MCP_AUTH_TOKEN}".encode()):
             await self.app(scope, receive, downstream_send)
             return
 
+        # Query-string fallback for clients that can't set an Authorization
+        # header. Trade-off: the token can end up in reverse-proxy access logs
+        # and browser history — prefer the header wherever possible.
         params = parse_qs(scope.get("query_string", b"").decode())
-        if params.get("token", [None])[0] == MCP_AUTH_TOKEN:
+        query_token = params.get("token", [""])[0] or ""
+        if hmac.compare_digest(query_token.encode(), MCP_AUTH_TOKEN.encode()):
             await self.app(scope, receive, downstream_send)
             return
 

@@ -12,4 +12,6 @@ RUN apt-get update \
 COPY pyproject.toml uv.lock ./
 COPY gamelib_mcp/ gamelib_mcp/
 RUN uv sync --frozen --no-dev --no-cache
+HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
+    CMD python -c 'import os, urllib.request; urllib.request.urlopen("http://127.0.0.1:%s/health" % os.getenv("PORT", "8000"), timeout=4)'
 CMD ["python", "-m", "gamelib_mcp.main"]
