@@ -5,8 +5,8 @@ on:
     branches: [main]
   workflow_dispatch: {}
 
-# Never run two deploys at once; cancel an in-flight test run if a newer
-# push to main arrives, but let an in-flight deploy finish.
+# Never run two deploys at once: a newer push to main queues behind the
+# in-flight run instead of cancelling it.
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
