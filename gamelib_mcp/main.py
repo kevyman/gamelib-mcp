@@ -28,6 +28,7 @@ from .tools.models import (
     DetectCrossPlatformCollapsesResponse,
     DetectFarmedGamesResponse,
     GameDetailResponse,
+    GetWishlistResponse,
     HardwarePreferenceResponse,
     IntegrationStatusResponse,
     LibraryStatsResponse,
@@ -43,6 +44,7 @@ from .tools.models import (
     SplitGameResponse,
     SyncRatingsResponse,
     SyncStatusResponse,
+    SyncWishlistResponse,
     TasteProfileResponse,
     UpdateGameResponse,
 )
@@ -382,6 +384,26 @@ async def get_sync_status() -> SyncStatusResponse:
     return await _status()
 
 
+@mcp.tool(annotations=NETWORK_SYNC_TOOL)
+async def sync_wishlist(
+    ctx: Context,
+    platforms: list[str] | None = None,
+) -> SyncWishlistResponse:
+    """
+    Sync wishlists from configured automated sources and return the results.
+
+    Covers Steam (official wishlist API) and switch2 (via a DekuDeals shared
+    wishlist export — Nintendo has no wishlist API). platforms can be omitted
+    (both) or a subset such as ["steam"]. PSN has no wishlist API; record PSN
+    wishlist items with add_game_to_platform(name, "ps5", owned=False) instead.
+    A platform missing its required config (STEAM_API_KEY/STEAM_ID or
+    DEKUDEALS_WISHLIST_URL) reports sync_status="unconfigured" rather than
+    erroring. Use get_wishlist to read back the results.
+    """
+    from .tools.admin import sync_wishlist as _sync_wishlist
+    return await _sync_wishlist(platforms, ctx=ctx)
+
+
 @mcp.tool(annotations=READ_ONLY_TOOL)
 async def get_integration_status(
     platforms: list[str] | None = None,
@@ -497,6 +519,19 @@ async def get_platform_breakdown() -> PlatformBreakdownResponse:
     return await _breakdown()
 
 
+@mcp.tool(annotations=READ_ONLY_TOOL)
+async def get_wishlist(platform: str | None = None) -> GetWishlistResponse:
+    """
+    List wishlist items — games wanted but not necessarily owned.
+
+    platform: optional filter (e.g. "steam", "switch2", "ps5"); omit for all.
+    Populated by sync_wishlist (Steam, DekuDeals→switch2) or by
+    add_game_to_platform(owned=False) for manual entries (e.g. PSN).
+    """
+    from .tools.platforms import get_wishlist as _get_wishlist
+    return await _get_wishlist(platform)
+
+
 @mcp.tool(annotations=MUTATION_TOOL)
 async def set_hardware_preference(platforms: list[str]) -> HardwarePreferenceResponse:
     """
@@ -517,6 +552,7 @@ async def add_game_to_platform(
     identifier_type: str | None = None,
     identifier_value: str | None = None,
     playtime_minutes: int | None = None,
+    owned: bool = True,
 ) -> AddGameToPlatformResponse:
     """
     Manually add a game to a platform.
@@ -525,11 +561,15 @@ async def add_game_to_platform(
     or other games that are not synced automatically. name matches an existing
     game by exact name or creates a new entry. platform accepts steam, epic, gog,
     nintendo, switch2, ps5, itchio, xbox, or other. identifier_type and
-    identifier_value can store an external ID. playtime_minutes is optional.
-    Returns the created or updated platform ownership record.
+    identifier_value can store an external ID (requires owned=True).
+    playtime_minutes is optional. Pass owned=False to record a wishlist entry
+    instead of an owned copy — useful for PSN, which has no wishlist API.
+    Returns game_platform_id when owned, wishlist_id when not (the other is
+    null); either call also clears a matching wishlist entry that's now
+    fulfilled.
     """
     from .tools.platforms import add_game_to_platform as _add
-    return await _add(name, platform, identifier_type, identifier_value, playtime_minutes)
+    return await _add(name, platform, identifier_type, identifier_value, playtime_minutes, owned)
 
 
 @mcp.tool(annotations=MUTATION_TOOL)
