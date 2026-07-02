@@ -13,4 +13,5 @@ retry_deploy.sh
 .worktrees/
 gamelib.db
 .codex
-/backups/.superpowers/
+/backups/
+.superpowers/
