@@ -19,6 +19,13 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
+# Importing gamelib_mcp.main builds the process-lifetime security configuration.
+# Tests deliberately run without interactive OAuth, but must still opt out
+# explicitly so production cannot become unauthenticated through omission.
+os.environ.setdefault("MCP_AUTH_MODE", "disabled")
+os.environ.setdefault("MCP_ADMIN_AUTH_TOKEN", "test-admin-token-at-least-32-characters")
+os.environ.setdefault("FASTMCP_HOME", "/tmp/gamelib-mcp-fastmcp-tests")
+
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.title_normalization import normalize_search_text
 
