@@ -361,6 +361,31 @@ For continuous replication instead of nightly points, use
 
 ---
 
+### Running as non-root
+
+The app container runs as UID/GID **10001** (`USER app` in the Dockerfile), so
+everything it must write has to be writable by that UID on the host. Before
+deploying an image with this change (deploys auto-run on merge to main, so do
+this first), run on the server:
+
+```bash
+# The read-write data mount (SQLite DB + WAL, FASTMCP_HOME, session files)
+chown -R 10001:10001 /root/mcps/data/library
+
+# The read-only config mounts still need to be *readable* by the container UID
+chown -R 10001:10001 /root/mcps/data/legendary /root/mcps/data/lgogdownloader
+```
+
+Also confirm `.env` points every writable path at the `/data` mount —
+absolute container paths, e.g. `NINTENDO_PCTL_SESSION_FILE=/data/nintendo_pctl_session.json`.
+A relative path would resolve under `/app`, which is root-owned and read-only
+for the app user.
+
+If the container ever needs to run as root again temporarily (e.g. restoring
+a backup), `docker compose exec -u 0 app sh` still works.
+
+---
+
 ### Configure ChatGPT to use gamelib-mcp
 
 1. In ChatGPT web, enable **Settings → Apps → Advanced settings → Developer mode**.
