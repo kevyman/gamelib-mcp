@@ -57,11 +57,24 @@ curl -fsSL https://get.docker.com | sh
 git clone https://github.com/kevyman/gamelib-mcp ~/mcps
 ```
 
-#### 3. Configure the server
+#### 3. Create the GitHub OAuth App
+
+In GitHub → Settings → Developer settings → OAuth Apps, create an app with:
+
+- **Application name:** `gamelib-mcp`
+- **Homepage URL:** `https://gamelibmcp.johnwilkos.com`
+- **Authorization callback URL:** `https://gamelibmcp.johnwilkos.com/auth/callback`
+
+Record its client ID and generate a client secret. The server requests only
+GitHub's `read:user` scope and separately restricts tool access to numeric
+GitHub user ID `12233501`.
+
+#### 4. Configure the server
 
 ```bash
 cd ~/mcps
 mkdir -p data/library
+mkdir -p data/fastmcp
 nano .env
 ```
 
@@ -69,7 +82,14 @@ nano .env
 DATABASE_URL=file:/data/gamelib.db
 STEAM_API_KEY=your-key-from-steamcommunity.com/dev/apikey
 STEAM_ID=your-64bit-steamid
-MCP_AUTH_TOKEN=<generate with: openssl rand -hex 32>
+MCP_AUTH_MODE=oauth
+MCP_PUBLIC_BASE_URL=https://gamelibmcp.johnwilkos.com
+GITHUB_OAUTH_CLIENT_ID=<from the GitHub OAuth App>
+GITHUB_OAUTH_CLIENT_SECRET=<from the GitHub OAuth App>
+MCP_OAUTH_JWT_SIGNING_KEY=<generate with: openssl rand -hex 32>
+MCP_OAUTH_GITHUB_USER_ID=12233501
+MCP_ADMIN_AUTH_TOKEN=<generate separately with: openssl rand -hex 32>
+FASTMCP_HOME=/data/fastmcp
 MCP_ALLOWED_ORIGINS=https://claude.ai,https://chatgpt.com
 PORT=8000
 EPIC_LEGENDARY_HOST_PATH=/root/.config/legendary          # host path to legendary config dir (mounted read-only)
@@ -77,13 +97,23 @@ STEAM_PROFILE_ID=your-steam-community-profile-id   # your steamcommunity.com/id/
 BACKLOGGD_USER=your-backloggd-username             # your backloggd.com/u/<this part>
 ```
 
-`MCP_ALLOWED_ORIGINS` is required for browser-based MCP clients. Leave it limited to trusted web app origins; native/CLI clients that send no `Origin` header are not affected.
+Generate the JWT signing key and admin token independently. Never commit either
+secret. `MCP_ALLOWED_ORIGINS` remains limited to trusted clients; the server's
+own public origin is added automatically for the OAuth consent and callback
+flow. Native/CLI clients that send no `Origin` header are unaffected.
 
-#### 4. Add DNS record
+FastMCP encrypts OAuth registrations and upstream tokens under
+`/data/fastmcp`, which is inside the existing persistent `/data` mount. Keep
+`MCP_OAUTH_JWT_SIGNING_KEY` stable when rotating the GitHub client secret so
+that stored registrations remain decryptable. After any secret change, use
+`docker compose up -d --force-recreate app`; `docker compose restart` does not
+reload `.env`.
+
+#### 5. Add DNS record
 
 Point your subdomain to the server IP. Caddy handles TLS automatically.
 
-#### 5. Update the Caddyfile
+#### 6. Update the Caddyfile
 
 ```
 gamelibmcp.johnwilkos.com {
@@ -91,7 +121,7 @@ gamelibmcp.johnwilkos.com {
 }
 ```
 
-#### 6. Deploy
+#### 7. Deploy
 
 ```bash
 cd ~/mcps
@@ -99,10 +129,10 @@ docker compose --profile prod up -d --build
 docker compose --profile prod logs -f
 ```
 
-#### 7. Check integration status before anything else
+#### 8. Check integration status before anything else
 
 ```bash
-curl -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
+curl -H "Authorization: Bearer $MCP_ADMIN_AUTH_TOKEN" \
   https://gamelibmcp.johnwilkos.com/admin/integrations | jq
 ```
 
@@ -283,13 +313,19 @@ Then run `refresh_library(["switch2"])` (or a full refresh) — ownership and pl
 
 ```bash
 curl https://gamelibmcp.johnwilkos.com/health
-# {"status": "ok", "library_synced_at": "..."}
+# {"status": "ok"}
+
+curl https://gamelibmcp.johnwilkos.com/.well-known/oauth-protected-resource/mcp | jq
+curl https://gamelibmcp.johnwilkos.com/.well-known/oauth-authorization-server | jq
+
+# Must return 401 plus a WWW-Authenticate resource_metadata challenge.
+curl -i https://gamelibmcp.johnwilkos.com/mcp
 ```
 
 Then check:
 
 ```bash
-curl -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
+curl -H "Authorization: Bearer $MCP_ADMIN_AUTH_TOKEN" \
   https://gamelibmcp.johnwilkos.com/admin/integrations/ui
 ```
 
@@ -324,21 +360,21 @@ For continuous replication instead of nightly points, use
 
 ---
 
-### Configure Claude to use gamelib-mcp
+### Configure ChatGPT to use gamelib-mcp
 
-In your Claude MCP config:
-```json
-{
-  "mcpServers": {
-    "steam": {
-      "url": "https://gamelibmcp.johnwilkos.com/mcp",
-      "headers": {
-        "Authorization": "Bearer <YOUR_MCP_AUTH_TOKEN>"
-      }
-    }
-  }
-}
-```
+1. In ChatGPT web, enable **Settings → Apps → Advanced settings → Developer mode**.
+2. Create an app with server URL `https://gamelibmcp.johnwilkos.com/mcp`.
+3. Select **OAuth** and dynamic client registration (DCR). Do not provide a
+   static bearer token and do not add credentials to the URL.
+4. Complete the FastMCP consent screen and GitHub login as `kevyman`.
+5. Scan tools, create the app, and test one read tool followed by a
+   confirmation-gated write tool.
+6. Delete the previous no-auth/query-token ChatGPT app. Remove
+   `MCP_AUTH_TOKEN` from `.env` and never reuse its old value.
+
+If authorization fails, confirm ChatGPT's callback starts with
+`https://chatgpt.com/connector/oauth/`; other client redirect domains are
+rejected deliberately.
 
 ---
 

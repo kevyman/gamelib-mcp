@@ -42,7 +42,7 @@ git clone https://github.com/kevyman/gamelib-mcp.git
 cd gamelib-mcp
 uv sync
 
-cp .env.example .env   # then fill in at least STEAM_API_KEY and STEAM_ID
+cp .env.local.example .env   # localhost-only auth mode; then fill in Steam values
 
 # Run the server (Streamable HTTP on port 8000)
 uv run python -m gamelib_mcp.main
@@ -58,17 +58,23 @@ On startup the server initializes the SQLite database (default: `./data/gamelib.
 
 ### Connecting an MCP client
 
-Point any Streamable-HTTP-capable MCP client at `http://localhost:8000/mcp`. If `MCP_AUTH_TOKEN` is set, clients must send it as a bearer token. Browser-based clients (claude.ai, chatgpt.com) must be allowlisted via `MCP_ALLOWED_ORIGINS`; native/CLI clients that send no `Origin` header are unaffected.
+Point any Streamable-HTTP-capable MCP client at `http://localhost:8000/mcp`. The production configuration uses FastMCP's GitHub OAuth provider; local-only development can explicitly set `MCP_AUTH_MODE=disabled`. `/admin/*` always requires `Authorization: Bearer <MCP_ADMIN_AUTH_TOKEN>`. Browser-based clients must be allowlisted via `MCP_ALLOWED_ORIGINS`; native/CLI clients that send no `Origin` header are unaffected.
 
 ## Configuration
 
-All configuration is via environment variables (see [.env.example](.env.example) for the full annotated list).
+All configuration is via environment variables. Production starts from [.env.example](.env.example); localhost Docker development starts from [.env.local.example](.env.local.example).
 
 | Variable | Required | Purpose |
 |---|---|---|
 | `STEAM_API_KEY` | yes | From [steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey) |
 | `STEAM_ID` | yes | Your 64-bit Steam ID |
-| `MCP_AUTH_TOKEN` | recommended | Bearer token for the MCP endpoint (empty = open) |
+| `MCP_AUTH_MODE` | yes | `oauth` in production; `disabled` only for localhost development |
+| `MCP_PUBLIC_BASE_URL` | OAuth | Public HTTPS origin used for OAuth discovery, callbacks, and token audience |
+| `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` | OAuth | Credentials for the GitHub OAuth App |
+| `MCP_OAUTH_JWT_SIGNING_KEY` | OAuth | Independent secret used to sign FastMCP access tokens |
+| `MCP_OAUTH_GITHUB_USER_ID` | OAuth | Immutable GitHub numeric user ID allowed to use tools |
+| `MCP_ADMIN_AUTH_TOKEN` | yes | Independent header-only token for `/admin/*` |
+| `FASTMCP_HOME` | OAuth | Persistent encrypted OAuth state directory; `/data/fastmcp` in Docker |
 | `MCP_ALLOWED_ORIGINS` | recommended | Comma-separated browser origins allowed to call MCP |
 | `DATABASE_URL` | no | SQLite path; defaults to `data/gamelib.db` |
 | `PORT` | no | Server port (default `8000`) |

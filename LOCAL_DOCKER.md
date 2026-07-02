@@ -36,33 +36,21 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build a
 curl http://localhost:8000/health
 ```
 
-If `MCP_AUTH_TOKEN` is empty, the SSE endpoint is open:
+The local example explicitly sets `MCP_AUTH_MODE=disabled`, so the Streamable HTTP endpoint is open on localhost:
 
 ```bash
-curl -i http://localhost:8000/sse
-```
-
-If `MCP_AUTH_TOKEN` is set:
-
-```bash
-curl -i -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8000/sse
+curl -i http://localhost:8000/mcp
 ```
 
 ## Connect with Inspector CLI
 
-The local MCP endpoint is [http://127.0.0.1:8000/sse](/home/john/code/gamelib-mcp/LOCAL_DOCKER.md).
+The local MCP endpoint is `http://127.0.0.1:8000/mcp`.
 
 Use the repo wrapper:
 
 ```bash
 ./scripts/mcp-local-inspector --method tools/list
 ./scripts/mcp-local-inspector --method tools/call --tool-name search_games --tool-arg query=halo
-```
-
-If auth is enabled:
-
-```bash
-MCP_AUTH_TOKEN=YOUR_TOKEN ./scripts/mcp-local-inspector --method tools/list
 ```
 
 ## Logs and teardown

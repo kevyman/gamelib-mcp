@@ -1,4 +1,4 @@
-"""HTTP surface: bearer-auth ASGI middleware, /health and /admin/* routes.
+"""HTTP security middleware, /health, and /admin/* routes.
 
 Kept separate from main.py so the entrypoint stays focused on the MCP tool
 surface. Routes are registered through ``register_http_routes(mcp)`` rather than
@@ -9,10 +9,8 @@ importing the FastMCP instance, which keeps the dependency one-way
 import hmac
 import html
 import logging
-import os
 import time
 from typing import cast
-from urllib.parse import parse_qs
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
@@ -21,29 +19,26 @@ from .lifecycle import INSPECTOR_PLATFORM_ALIASES, SYNC_METADATA_PLATFORMS
 
 logger = logging.getLogger(__name__)
 
-MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "")
-_ALLOWED_ORIGINS: frozenset[str] = frozenset(
-    o.strip().rstrip("/") for o in os.getenv("MCP_ALLOWED_ORIGINS", "").split(",") if o.strip()
-)
 _CORS_ALLOW_METHODS = b"GET, POST, DELETE, OPTIONS"
 # mcp-protocol-version is required: the Streamable HTTP spec has clients send it
 # on every post-initialize request, so the preflight must allow it.
-_CORS_ALLOW_HEADERS = (
-    b"authorization, content-type, accept, mcp-session-id, last-event-id, mcp-protocol-version"
-)
+_CORS_ALLOW_HEADERS = b"authorization, content-type, accept, mcp-session-id, last-event-id, mcp-protocol-version"
 _CORS_EXPOSE_HEADERS = b"mcp-session-id"
 _CORS_MAX_AGE = b"86400"  # cache preflight for a day to cut repeat OPTIONS
 
-# Paths/prefixes that must work without auth
-_OPEN_PATHS = {"/health", "/"}
-_OPEN_PREFIXES = ("/.well-known/",)
 
+class HttpSecurityMiddleware:
+    """Validate browser origins and protect operator-only HTTP routes.
 
-class BearerAuthMiddleware:
-    """Pure ASGI middleware — safe for Streamable HTTP (no response buffering)."""
+    FastMCP's OAuth provider owns authentication for ``/mcp`` and its OAuth
+    protocol routes.  The independent admin token is intentionally accepted
+    only in the Authorization header and only for ``/admin/*``.
+    """
 
-    def __init__(self, app):
+    def __init__(self, app, *, admin_token: str, allowed_origins: frozenset[str]):
         self.app = app
+        self.admin_token = admin_token
+        self.allowed_origins = allowed_origins
 
     async def __call__(self, scope, receive, send):
         if scope["type"] not in ("http", "websocket"):
@@ -56,9 +51,17 @@ class BearerAuthMiddleware:
         # Requests without an Origin header pass (CLI tools and native MCP clients don't send one).
         # Browser-origin requests must be explicitly allowlisted via MCP_ALLOWED_ORIGINS.
         origin = headers.get(b"origin", b"").decode()
-        if origin and origin not in _ALLOWED_ORIGINS:
-            await send({"type": "http.response.start", "status": 403,
-                        "headers": [(b"content-type", b"text/plain"), (b"content-length", b"9")]})
+        if origin and origin not in self.allowed_origins:
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 403,
+                    "headers": [
+                        (b"content-type", b"text/plain"),
+                        (b"content-length", b"9"),
+                    ],
+                }
+            )
             await send({"type": "http.response.body", "body": b"Forbidden"})
             return
 
@@ -73,51 +76,48 @@ class BearerAuthMiddleware:
             ]
 
             if scope.get("method") == "OPTIONS":
-                await send({
-                    "type": "http.response.start",
-                    "status": 204,
-                    "headers": [
-                        *cors_headers,
-                        (b"access-control-max-age", _CORS_MAX_AGE),
-                        (b"content-length", b"0"),
-                    ],
-                })
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 204,
+                        "headers": [
+                            *cors_headers,
+                            (b"access-control-max-age", _CORS_MAX_AGE),
+                            (b"content-length", b"0"),
+                        ],
+                    }
+                )
                 await send({"type": "http.response.body", "body": b""})
                 return
 
         async def send_with_cors(message):
             if cors_headers and message["type"] == "http.response.start":
-                message = {**message, "headers": [*message.get("headers", []), *cors_headers]}
+                message = {
+                    **message,
+                    "headers": [*message.get("headers", []), *cors_headers],
+                }
             await send(message)
 
         downstream_send = send_with_cors if cors_headers else send
 
-        if not MCP_AUTH_TOKEN:
-            await self.app(scope, receive, downstream_send)
-            return
-
         path = scope.get("path", "")
-        if path in _OPEN_PATHS or path.startswith(_OPEN_PREFIXES):
+        if path != "/admin" and not path.startswith("/admin/"):
             await self.app(scope, receive, downstream_send)
             return
 
         auth = headers.get(b"authorization", b"").decode()
-        if hmac.compare_digest(auth.encode(), f"Bearer {MCP_AUTH_TOKEN}".encode()):
+        if hmac.compare_digest(auth.encode(), f"Bearer {self.admin_token}".encode()):
             await self.app(scope, receive, downstream_send)
             return
 
-        # Query-string fallback for clients that can't set an Authorization
-        # header. Trade-off: the token can end up in reverse-proxy access logs
-        # and browser history — prefer the header wherever possible.
-        params = parse_qs(scope.get("query_string", b"").decode())
-        query_token = params.get("token", [""])[0] or ""
-        if hmac.compare_digest(query_token.encode(), MCP_AUTH_TOKEN.encode()):
-            await self.app(scope, receive, downstream_send)
-            return
-
-        auth_headers = [(b"content-type", b"text/plain"), (b"content-length", b"12"), *cors_headers]
-        await send({"type": "http.response.start", "status": 401,
-                    "headers": auth_headers})
+        auth_headers = [
+            (b"content-type", b"text/plain"),
+            (b"content-length", b"12"),
+            *cors_headers,
+        ]
+        await send(
+            {"type": "http.response.start", "status": 401, "headers": auth_headers}
+        )
         await send({"type": "http.response.body", "body": b"Unauthorized"})
 
 

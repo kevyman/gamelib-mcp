@@ -7,7 +7,7 @@ from starlette.requests import Request
 
 from conftest import add_platform, seed_game
 from gamelib_mcp.data import db as db_module
-from gamelib_mcp.http_admin import BearerAuthMiddleware
+from gamelib_mcp.http_admin import HttpSecurityMiddleware
 from gamelib_mcp.main import mcp
 
 
@@ -39,6 +39,7 @@ async def _invoke_asgi_app(
     path: str,
     headers: list[tuple[bytes, bytes]] | None = None,
     method: str = "GET",
+    query_string: bytes = b"",
 ) -> tuple[int, dict[str, str], bytes]:
     events: list[dict] = []
 
@@ -53,23 +54,28 @@ async def _invoke_asgi_app(
             "type": "http",
             "method": method,
             "path": path,
-            "query_string": b"",
+            "query_string": query_string,
             "headers": headers or [],
         },
         receive,
         send,
     )
 
-    start = next(message for message in events if message["type"] == "http.response.start")
-    body = b"".join(message.get("body", b"") for message in events if message["type"] == "http.response.body")
+    start = next(
+        message for message in events if message["type"] == "http.response.start"
+    )
+    body = b"".join(
+        message.get("body", b"")
+        for message in events
+        if message["type"] == "http.response.body"
+    )
     response_headers = {
-        key.decode(): value.decode()
-        for key, value in start.get("headers", [])
+        key.decode(): value.decode() for key, value in start.get("headers", [])
     }
     return start["status"], response_headers, body
 
 
-def test_bearer_auth_middleware_blocks_admin_integrations_without_auth():
+def test_http_security_middleware_blocks_admin_integrations_without_auth():
     called = False
 
     async def sentinel_app(scope, receive, send):
@@ -78,10 +84,12 @@ def test_bearer_auth_middleware_blocks_admin_integrations_without_auth():
         await send({"type": "http.response.start", "status": 204, "headers": []})
         await send({"type": "http.response.body", "body": b""})
 
-    app = BearerAuthMiddleware(sentinel_app)
-
-    with patch("gamelib_mcp.http_admin.MCP_AUTH_TOKEN", "secret-token"):
-        status, headers, body = asyncio.run(_invoke_asgi_app(app, "/admin/integrations"))
+    app = HttpSecurityMiddleware(
+        sentinel_app,
+        admin_token="secret-token",
+        allowed_origins=frozenset(),
+    )
+    status, headers, body = asyncio.run(_invoke_asgi_app(app, "/admin/integrations"))
 
     assert called is False
     assert status == 401
@@ -89,7 +97,7 @@ def test_bearer_auth_middleware_blocks_admin_integrations_without_auth():
     assert body == b"Unauthorized"
 
 
-def test_bearer_auth_middleware_allows_admin_integrations_with_valid_bearer_token():
+def test_http_security_middleware_allows_admin_with_valid_bearer_token():
     called = False
 
     async def sentinel_app(scope, receive, send):
@@ -98,16 +106,18 @@ def test_bearer_auth_middleware_allows_admin_integrations_with_valid_bearer_toke
         await send({"type": "http.response.start", "status": 204, "headers": []})
         await send({"type": "http.response.body", "body": b""})
 
-    app = BearerAuthMiddleware(sentinel_app)
-
-    with patch("gamelib_mcp.http_admin.MCP_AUTH_TOKEN", "secret-token"):
-        status, headers, body = asyncio.run(
-            _invoke_asgi_app(
-                app,
-                "/admin/integrations",
-                headers=[(b"authorization", b"Bearer secret-token")],
-            )
+    app = HttpSecurityMiddleware(
+        sentinel_app,
+        admin_token="secret-token",
+        allowed_origins=frozenset(),
+    )
+    status, headers, body = asyncio.run(
+        _invoke_asgi_app(
+            app,
+            "/admin/integrations",
+            headers=[(b"authorization", b"Bearer secret-token")],
         )
+    )
 
     assert called is True
     assert status == 204
@@ -115,7 +125,7 @@ def test_bearer_auth_middleware_allows_admin_integrations_with_valid_bearer_toke
     assert body == b""
 
 
-def test_bearer_auth_middleware_allows_no_origin_when_origin_allowlist_empty():
+def test_http_security_middleware_leaves_mcp_auth_to_fastmcp():
     called = False
 
     async def sentinel_app(scope, receive, send):
@@ -124,13 +134,12 @@ def test_bearer_auth_middleware_allows_no_origin_when_origin_allowlist_empty():
         await send({"type": "http.response.start", "status": 204, "headers": []})
         await send({"type": "http.response.body", "body": b""})
 
-    app = BearerAuthMiddleware(sentinel_app)
-
-    with (
-        patch("gamelib_mcp.http_admin.MCP_AUTH_TOKEN", ""),
-        patch("gamelib_mcp.http_admin._ALLOWED_ORIGINS", frozenset()),
-    ):
-        status, headers, body = asyncio.run(_invoke_asgi_app(app, "/mcp"))
+    app = HttpSecurityMiddleware(
+        sentinel_app,
+        admin_token="secret-token",
+        allowed_origins=frozenset(),
+    )
+    status, headers, body = asyncio.run(_invoke_asgi_app(app, "/mcp"))
 
     assert called is True
     assert status == 204
@@ -138,7 +147,7 @@ def test_bearer_auth_middleware_allows_no_origin_when_origin_allowlist_empty():
     assert body == b""
 
 
-def test_bearer_auth_middleware_rejects_browser_origin_when_origin_allowlist_empty():
+def test_http_security_middleware_rejects_unknown_browser_origin():
     called = False
 
     async def sentinel_app(scope, receive, send):
@@ -147,19 +156,18 @@ def test_bearer_auth_middleware_rejects_browser_origin_when_origin_allowlist_emp
         await send({"type": "http.response.start", "status": 204, "headers": []})
         await send({"type": "http.response.body", "body": b""})
 
-    app = BearerAuthMiddleware(sentinel_app)
-
-    with (
-        patch("gamelib_mcp.http_admin.MCP_AUTH_TOKEN", ""),
-        patch("gamelib_mcp.http_admin._ALLOWED_ORIGINS", frozenset()),
-    ):
-        status, headers, body = asyncio.run(
-            _invoke_asgi_app(
-                app,
-                "/mcp",
-                headers=[(b"origin", b"https://evil.example")],
-            )
+    app = HttpSecurityMiddleware(
+        sentinel_app,
+        admin_token="secret-token",
+        allowed_origins=frozenset(),
+    )
+    status, headers, body = asyncio.run(
+        _invoke_asgi_app(
+            app,
+            "/mcp",
+            headers=[(b"origin", b"https://evil.example")],
         )
+    )
 
     assert called is False
     assert status == 403
@@ -167,7 +175,7 @@ def test_bearer_auth_middleware_rejects_browser_origin_when_origin_allowlist_emp
     assert body == b"Forbidden"
 
 
-def test_bearer_auth_middleware_allows_browser_origin_in_allowlist():
+def test_http_security_middleware_allows_browser_origin_in_allowlist():
     called = False
 
     async def sentinel_app(scope, receive, send):
@@ -176,19 +184,18 @@ def test_bearer_auth_middleware_allows_browser_origin_in_allowlist():
         await send({"type": "http.response.start", "status": 204, "headers": []})
         await send({"type": "http.response.body", "body": b""})
 
-    app = BearerAuthMiddleware(sentinel_app)
-
-    with (
-        patch("gamelib_mcp.http_admin.MCP_AUTH_TOKEN", ""),
-        patch("gamelib_mcp.http_admin._ALLOWED_ORIGINS", frozenset({"https://claude.ai"})),
-    ):
-        status, headers, body = asyncio.run(
-            _invoke_asgi_app(
-                app,
-                "/mcp",
-                headers=[(b"origin", b"https://claude.ai")],
-            )
+    app = HttpSecurityMiddleware(
+        sentinel_app,
+        admin_token="secret-token",
+        allowed_origins=frozenset({"https://claude.ai"}),
+    )
+    status, headers, body = asyncio.run(
+        _invoke_asgi_app(
+            app,
+            "/mcp",
+            headers=[(b"origin", b"https://claude.ai")],
         )
+    )
 
     assert called is True
     assert status == 204
@@ -203,7 +210,7 @@ def test_bearer_auth_middleware_allows_browser_origin_in_allowlist():
     assert body == b""
 
 
-def test_bearer_auth_middleware_answers_allowed_browser_preflight_before_app():
+def test_http_security_middleware_answers_allowed_browser_preflight_before_app():
     called = False
 
     async def sentinel_app(scope, receive, send):
@@ -212,24 +219,23 @@ def test_bearer_auth_middleware_answers_allowed_browser_preflight_before_app():
         await send({"type": "http.response.start", "status": 204, "headers": []})
         await send({"type": "http.response.body", "body": b""})
 
-    app = BearerAuthMiddleware(sentinel_app)
-
-    with (
-        patch("gamelib_mcp.http_admin.MCP_AUTH_TOKEN", "secret-token"),
-        patch("gamelib_mcp.http_admin._ALLOWED_ORIGINS", frozenset({"https://chatgpt.com"})),
-    ):
-        status, headers, body = asyncio.run(
-            _invoke_asgi_app(
-                app,
-                "/mcp",
-                headers=[
-                    (b"origin", b"https://chatgpt.com"),
-                    (b"access-control-request-method", b"POST"),
-                    (b"access-control-request-headers", b"content-type, accept"),
-                ],
-                method="OPTIONS",
-            )
+    app = HttpSecurityMiddleware(
+        sentinel_app,
+        admin_token="secret-token",
+        allowed_origins=frozenset({"https://chatgpt.com"}),
+    )
+    status, headers, body = asyncio.run(
+        _invoke_asgi_app(
+            app,
+            "/mcp",
+            headers=[
+                (b"origin", b"https://chatgpt.com"),
+                (b"access-control-request-method", b"POST"),
+                (b"access-control-request-headers", b"content-type, accept"),
+            ],
+            method="OPTIONS",
         )
+    )
 
     assert called is False
     assert status == 204
@@ -243,6 +249,59 @@ def test_bearer_auth_middleware_answers_allowed_browser_preflight_before_app():
     assert headers["access-control-max-age"] == "86400"
     assert headers["content-length"] == "0"
     assert body == b""
+
+
+def test_http_security_middleware_rejects_admin_query_token():
+    called = False
+
+    async def sentinel_app(scope, receive, send):
+        nonlocal called
+        called = True
+
+    app = HttpSecurityMiddleware(
+        sentinel_app,
+        admin_token="secret-token",
+        allowed_origins=frozenset(),
+    )
+    status, _, body = asyncio.run(
+        _invoke_asgi_app(
+            app,
+            "/admin/integrations",
+            query_string=b"token=secret-token",
+        )
+    )
+
+    assert called is False
+    assert status == 401
+    assert body == b"Unauthorized"
+
+
+def test_http_security_middleware_leaves_oauth_routes_open():
+    called = False
+
+    async def sentinel_app(scope, receive, send):
+        nonlocal called
+        called = True
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    app = HttpSecurityMiddleware(
+        sentinel_app,
+        admin_token="secret-token",
+        allowed_origins=frozenset(),
+    )
+
+    for path in (
+        "/.well-known/oauth-authorization-server",
+        "/register",
+        "/authorize",
+        "/token",
+        "/auth/callback",
+    ):
+        called = False
+        status, _, _ = asyncio.run(_invoke_asgi_app(app, path))
+        assert called is True
+        assert status == 204
 
 
 def test_get_admin_integrations_returns_json_payload():
