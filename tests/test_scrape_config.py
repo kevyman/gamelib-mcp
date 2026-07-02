@@ -50,7 +50,26 @@ class ConfigVocabularyTests(unittest.TestCase):
         problems = sc.validate_config_dict(
             "backloggd", {"url_template": "https://backloggd.com/{secret}/reviews"}
         )
-        self.assertTrue(any("placeholders" in p for p in problems))
+        self.assertTrue(any("unexpected placeholders" in p for p in problems))
+
+    def test_missing_required_placeholder_rejected(self):
+        # A page template without {page} would re-fetch page 1 until the
+        # pagination cap; validation must reject it up front.
+        problems = sc.validate_config_dict(
+            "backloggd", {"page_url_template": "https://backloggd.com/u/{user}/reviews"}
+        )
+        self.assertTrue(any("missing required placeholders" in p and "page" in p for p in problems))
+
+        problems = sc.validate_config_dict(
+            "steam_reviews",
+            {"page_url_template": "https://steamcommunity.com/id/{user}/recommended/"},
+        )
+        self.assertTrue(any("missing required placeholders" in p for p in problems))
+
+        problems = sc.validate_config_dict(
+            "metacritic", {"game_url_template": "https://www.metacritic.com/game/fixed/"}
+        )
+        self.assertTrue(any("missing required placeholders" in p and "slug" in p for p in problems))
 
     def test_invalid_selector_rejected(self):
         problems = sc.validate_config_dict("steam_reviews", {"review_box_selector": "[[["})

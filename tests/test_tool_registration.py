@@ -173,7 +173,8 @@ EXPECTED_ANNOTATIONS = {
     "diagnose_scrape": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
     "propose_scrape_config": {"readOnlyHint": False, "idempotentHint": True},
     "approve_scrape_config": {"readOnlyHint": False, "idempotentHint": True},
-    "rollback_scrape_config": {"readOnlyHint": False, "idempotentHint": True},
+    # Each call walks back one more version — a retry is not a no-op.
+    "rollback_scrape_config": {"readOnlyHint": False, "idempotentHint": False},
 }
 
 PAGINATED_OUTPUTS = {

@@ -266,6 +266,15 @@ def _validate_field(provider: str, f: Any, value: Any, problems: list[str]) -> N
             problems.append(
                 f"{name}: unexpected placeholders {sorted(extra)}; allowed: {sorted(allowed_placeholders)}"
             )
+        # Every declared placeholder is load-bearing: a page_url_template
+        # without {page} would re-fetch page 1 until the pagination cap (the
+        # live trial only fetches page 1, so it wouldn't catch that), and a
+        # template missing {user}/{slug} would scrape the wrong page entirely.
+        missing = allowed_placeholders - placeholders
+        if missing:
+            problems.append(
+                f"{name}: missing required placeholders {sorted(missing)}"
+            )
         # Substitute dummy values so urlsplit sees a concrete URL.
         concrete = value
         for placeholder in placeholders:

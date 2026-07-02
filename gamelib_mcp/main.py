@@ -504,15 +504,18 @@ async def approve_scrape_config(provider: str, version: int) -> ApproveScrapeCon
     return await _approve(provider, version)
 
 
-@mcp.tool(annotations=MUTATION_TOOL)
+# Each rollback call walks back one more version, so a blind retry after a
+# timeout would undo an extra step — explicitly non-idempotent.
+@mcp.tool(annotations=NON_IDEMPOTENT_MUTATION_TOOL)
 async def rollback_scrape_config(provider: str) -> RollbackScrapeConfigResponse:
     """
     Retire a provider's active scrape-config override.
 
     The previously superseded version becomes active again; when none exists
     the provider returns to its code-level defaults (on_defaults=true —
-    defaults are always recoverable). Call repeatedly to walk further back.
-    Returns the now-effective config.
+    defaults are always recoverable). Each call walks back one step (NOT
+    idempotent — check get_scrape_config before retrying). Returns the
+    now-effective config.
     """
     from .tools.scrape_admin import rollback_scrape_config as _rollback
     return await _rollback(provider)
