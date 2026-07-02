@@ -346,16 +346,54 @@ Two layers of protection:
    wrong, stop the container and restore that file. Old snapshots are safe to
    delete once a migration has been verified.
 
-2. **Nightly backup cron** — the snapshot only guards migrations; disk loss
-   needs an off-machine copy. On the server:
+2. **Nightly backup cron (installed 2026-07-02)** — the snapshot only guards
+   migrations; disk loss needs an off-machine copy. `/etc/cron.d/gamelib-backup`
+   on the server takes a consistent `.backup` at 04:15 UTC and hands a copy to
+   the dedicated `gamelib-backup` user (key-only SSH, no other access):
 
 ```bash
-# /etc/cron.d/gamelib-backup — nightly consistent snapshot at 04:15
-15 4 * * * root sqlite3 /root/mcps/data/library/gamelib.db ".backup /root/mcps/data/library/gamelib-nightly.bak"
+# /etc/cron.d/gamelib-backup
+15 4 * * * root sqlite3 /root/mcps/data/library/gamelib.db ".backup /root/mcps/data/library/gamelib-nightly.bak" && install -o gamelib-backup -g gamelib-backup -m 600 /root/mcps/data/library/gamelib-nightly.bak /home/gamelib-backup/gamelib-nightly.bak
 ```
 
-Ship `gamelib-nightly.bak` off the machine with whatever you already use
-(restic, rclone to object storage, or even scp from your local machine).
+3. **Off-machine pull (Windows)** — a home Windows machine pulls the nightly
+   copy via scp on a scheduled task. One-time setup on the Windows machine
+   (PowerShell):
+
+```powershell
+# Generate a dedicated key (no passphrase so the scheduled task can run unattended)
+ssh-keygen -t ed25519 -f $env:USERPROFILE\.ssh\gamelib_backup -N '""'
+Get-Content $env:USERPROFILE\.ssh\gamelib_backup.pub
+```
+
+Append that public key on the server (prefix with `restrict` to disable
+port-forwarding/PTY for this key):
+
+```bash
+echo 'restrict ssh-ed25519 AAAA... windows-backup' >> /home/gamelib-backup/.ssh/authorized_keys
+```
+
+Save this as `C:\Scripts\gamelib-backup.ps1` on the Windows machine — it pulls
+the latest snapshot into a dated file and keeps the newest 14:
+
+```powershell
+$dest = "$env:USERPROFILE\Backups\gamelib"
+New-Item -ItemType Directory -Force -Path $dest | Out-Null
+$stamp = Get-Date -Format yyyy-MM-dd
+scp -i $env:USERPROFILE\.ssh\gamelib_backup -o StrictHostKeyChecking=accept-new `
+  gamelib-backup@178.104.53.83:gamelib-nightly.bak "$dest\gamelib-$stamp.bak"
+if ($LASTEXITCODE -ne 0) { throw "gamelib backup pull failed" }
+Get-ChildItem $dest -Filter 'gamelib-*.bak' | Sort-Object Name -Descending |
+  Select-Object -Skip 14 | Remove-Item
+```
+
+Then schedule it daily at 08:00 local (comfortably after the 04:15 UTC server
+snapshot), from an elevated PowerShell:
+
+```powershell
+schtasks /Create /SC DAILY /ST 08:00 /TN GamelibBackup /TR "powershell -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\gamelib-backup.ps1"
+```
+
 For continuous replication instead of nightly points, use
 [Litestream](https://litestream.io/) pointed at any S3-compatible bucket.
 
