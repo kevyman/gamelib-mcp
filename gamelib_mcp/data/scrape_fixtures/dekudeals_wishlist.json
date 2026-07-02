@@ -1,0 +1,21 @@
+{
+  "name": "My Wishlist",
+  "default_desired_price": null,
+  "items": [
+    {
+      "name": "Pikmin 4",
+      "link": "/items/pikmin-4",
+      "added_at": "2026-05-14T18:02:11Z"
+    },
+    {
+      "name": "Metroid Prime 4: Beyond",
+      "link": "/items/metroid-prime-4-beyond",
+      "added_at": "2026-06-01T09:30:00Z"
+    },
+    {
+      "name": "Hollow Knight: Silksong",
+      "link": "/items/hollow-knight-silksong",
+      "added_at": "2026-06-20T21:45:37Z"
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<!-- Recorded structural fixture for the Backloggd reviews page (layout as of
+     2026-07): each review row is a bootstrap-style row holding a .game-name
+     column followed by a column containing the .review-card. Ratings render
+     as two overlapping star rows; .stars-top is clipped via an inline
+     width percentage (100% = 5 stars). Used by tests/test_scrape_parsers.py
+     and by scrape_validate.py's fixture replay. -->
+<html>
+<head><title>user's reviews</title></head>
+<body>
+  <div class="user-reviews">
+
+    <div class="row review-entry">
+      <div class="col game-name">
+        <h3>Hades</h3>
+        <p class="release-year">2020</p>
+      </div>
+      <div class="col">
+        <div class="review-card">
+          <div class="stars">
+            <div class="stars-bottom"><span></span><span></span><span></span><span></span><span></span></div>
+            <div class="stars-top" style="width: 90%"><span></span><span></span><span></span><span></span><span></span></div>
+          </div>
+          <div class="review-body">
+            <p class="card-text">Every run feels fresh. The narrative delivery through repetition is genius.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row review-entry">
+      <div class="col game-name">
+        <h3>Celeste</h3>
+        <p class="release-year">2018</p>
+      </div>
+      <div class="col">
+        <div class="review-card">
+          <div class="stars">
+            <div class="stars-bottom"><span></span><span></span><span></span><span></span><span></span></div>
+            <div class="stars-top" style="width: 100%"><span></span><span></span><span></span><span></span><span></span></div>
+          </div>
+          <div class="review-body">
+            <p class="card-text">Tight controls, brutal but fair. The assist mode design should be an industry standard.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row review-entry">
+      <div class="col game-name">
+        <h3>Anthem</h3>
+        <p class="release-year">2019</p>
+      </div>
+      <div class="col">
+        <div class="review-card">
+          <div class="stars">
+            <div class="stars-bottom"><span></span><span></span><span></span><span></span><span></span></div>
+            <div class="stars-top" style="width: 30%"><span></span><span></span><span></span><span></span><span></span></div>
+          </div>
+          <div class="review-body">
+            <p class="card-text">Flying feels great; everything else does not.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- A card with no rating rendered (log without stars) must be skipped. -->
+    <div class="row review-entry">
+      <div class="col game-name">
+        <h3>Unrated Game</h3>
+      </div>
+      <div class="col">
+        <div class="review-card">
+          <div class="review-body">
+            <p class="card-text">Logged but not rated.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</body>
+</html>

@@ -1,6 +1,6 @@
 import json
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 from gamelib_mcp.data import igdb, metacritic
 from gamelib_mcp.data.db import fuzzy as db_fuzzy
@@ -268,7 +268,7 @@ class MetacriticRegressionTests(unittest.IsolatedAsyncioTestCase):
         ):
             fields = await metacritic.enrich_metacritic(3, "Metal Slug Tactics", "ps5")
 
-        fetch_score.assert_awaited_once_with(expected_url)
+        fetch_score.assert_awaited_once_with(expected_url, ANY)
         upsert.assert_awaited_once()
         self.assertEqual(fields["metacritic_score"], 72)
         self.assertEqual(fields["metacritic_url"], expected_url)

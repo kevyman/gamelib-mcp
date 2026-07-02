@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import statistics
+import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -13,12 +14,18 @@ from fastmcp.exceptions import ToolError
 from ..data.db import STEAM_APP_ID, clear_fulfilled_wishlist_entries, get_db
 from ..data.title_normalization import normalize_search_text
 from ..data.enrich_bg import pause_background_enrichment, resume_background_enrichment
-from ..data.epic import sync_epic
-from ..data.gog import sync_gog
-from ..data.nintendo import sync_nintendo
-from ..data.psn import sync_psn
-from ..data.steam_xml import fetch_library
+
+# The platform sync dicts are built from platforms_registry at call time; the
+# imports below keep the functions bound on this module so existing tests can
+# patch gamelib_mcp.tools.admin.<sync_fn> (resolve_platform_functions checks
+# this namespace first). F401: referenced via getattr, not by name.
+from ..data.epic import sync_epic  # noqa: F401
+from ..data.gog import sync_gog  # noqa: F401
+from ..data.nintendo import sync_nintendo  # noqa: F401
+from ..data.psn import sync_psn  # noqa: F401
+from ..data.steam_xml import fetch_library  # noqa: F401
 from ..lifecycle import _schedule_background_enrich, get_startup_refresh_task
+from ..platforms_registry import WISHLIST_SYNCABLE_PLATFORMS, resolve_platform_functions
 from .common import PLATFORM_ALIASES, SYNCABLE_PLATFORMS, info as _info, report_progress
 
 logger = logging.getLogger(__name__)
@@ -72,13 +79,10 @@ async def run_library_sync(
             if isinstance(result, dict):
                 return result
 
-    platform_syncs = {
-        "steam":   fetch_library,
-        "epic":    sync_epic,
-        "gog":     sync_gog,
-        "switch2": sync_nintendo,
-        "ps5":     sync_psn,
-    }
+    # Derived from the platform registry; resolution prefers names bound on
+    # THIS module (the imports above), so tests patching e.g.
+    # gamelib_mcp.tools.admin.sync_epic keep intercepting the sync.
+    platform_syncs = resolve_platform_functions("sync", namespace=sys.modules[__name__])
 
     result_names = {name: name for name in targets}
     for requested in requested_targets:
@@ -223,10 +227,9 @@ async def get_sync_status() -> dict:
     }
 
 
-# Platforms with an automated wishlist sync backend. PSN has no public wishlist
-# API (confirmed: no community library exposes one) — use
-# add_game_to_platform(owned=False) for it instead.
-WISHLIST_SYNCABLE_PLATFORMS = frozenset({"steam", "switch2"})
+# WISHLIST_SYNCABLE_PLATFORMS comes from platforms_registry (specs carrying a
+# wishlist_sync ref). PSN has no public wishlist API (confirmed: no community
+# library exposes one) — use add_game_to_platform(owned=False) for it instead.
 
 
 async def sync_wishlist(
@@ -246,9 +249,6 @@ async def sync_wishlist(
     DEKUDEALS_WISHLIST_URL) isn't set returns sync_status="unconfigured" instead
     of erroring.
     """
-    from ..data.dekudeals import sync_dekudeals_wishlist
-    from ..data.steam_wishlist import fetch_wishlist
-
     def _resolve(p: str) -> str:
         return PLATFORM_ALIASES.get(p.lower(), p.lower())
 
@@ -262,7 +262,7 @@ async def sync_wishlist(
         )
 
     targets = {_resolve(p) for p in requested}
-    platform_syncs = {"steam": fetch_wishlist, "switch2": sync_dekudeals_wishlist}
+    platform_syncs = resolve_platform_functions("wishlist_sync", namespace=sys.modules[__name__])
     selected = [(name, fn) for name, fn in platform_syncs.items() if name in targets]
 
     await _info(ctx, f"Syncing wishlist for {len(selected)} platform(s)")

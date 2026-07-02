@@ -124,6 +124,17 @@ EXPECTED_TOOLS = {
         "params": {"source_game_id", "target_game_id", "dry_run"},
         "required": {"source_game_id", "target_game_id"},
     },
+    "get_scrape_config": {"params": {"provider"}, "required": {"provider"}},
+    "diagnose_scrape": {"params": {"provider"}, "required": {"provider"}},
+    "propose_scrape_config": {
+        "params": {"provider", "config", "note"},
+        "required": {"provider", "config"},
+    },
+    "approve_scrape_config": {
+        "params": {"provider", "version"},
+        "required": {"provider", "version"},
+    },
+    "rollback_scrape_config": {"params": {"provider"}, "required": {"provider"}},
 }
 
 EXPECTED_ANNOTATIONS = {
@@ -158,6 +169,12 @@ EXPECTED_ANNOTATIONS = {
     "set_nintendo_pctl_session": {"readOnlyHint": False, "idempotentHint": True},
     "update_game": {"readOnlyHint": False, "idempotentHint": True},
     "merge_games": {"readOnlyHint": False, "idempotentHint": False},
+    "get_scrape_config": {"readOnlyHint": True, "idempotentHint": True},
+    "diagnose_scrape": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
+    "propose_scrape_config": {"readOnlyHint": False, "idempotentHint": True},
+    "approve_scrape_config": {"readOnlyHint": False, "idempotentHint": True},
+    # Each call walks back one more version — a retry is not a no-op.
+    "rollback_scrape_config": {"readOnlyHint": False, "idempotentHint": False},
 }
 
 PAGINATED_OUTPUTS = {
@@ -178,9 +195,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_27(self):
+    async def test_tool_count_is_32(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 27)
+        self.assertEqual(len(tools), 32)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()

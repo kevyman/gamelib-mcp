@@ -157,6 +157,17 @@ async def _integration_status_payload(force_refresh: bool = False) -> dict[str, 
         logger.exception("Failed to load integration sync metadata")
 
     payload = inspect_all_integrations_dict(last_sync_by_platform=last_sync_by_platform)
+
+    # Surface scrape-config drift alongside the platform integrations: which
+    # scrape providers run on DB overrides (AI heals / manual edits) instead
+    # of code-level defaults, and whether proposals are pending approval.
+    try:
+        from .tools.scrape_admin import scrape_config_status_payload
+
+        payload["scrapers"] = await scrape_config_status_payload()
+    except Exception:
+        logger.exception("Failed to build scrape-config status")
+
     _integration_status_cache = (time.monotonic(), payload)
     return payload
 

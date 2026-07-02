@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<!-- Recorded structural fixture for a Metacritic game page with JSON-LD.
+     Deliberately contains BOTH aggregateRating blocks Metacritic exposes:
+     the user score (bestRating=10) FIRST and the critic Metascore
+     (bestRating=100) second — the parser must skip the user block and
+     return 88, never 8.4. Used by tests/test_scrape_parsers.py and
+     scrape_validate.py. -->
+<html>
+<head>
+  <title>Example Game Reviews</title>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "VideoGame",
+    "name": "Example Game",
+    "aggregateRating": {
+      "@type": "AggregateRating",
+      "ratingValue": "8.4",
+      "bestRating": "10",
+      "worstRating": "0",
+      "ratingCount": "2311"
+    }
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "VideoGame",
+    "name": "Example Game",
+    "aggregateRating": {
+      "@type": "AggregateRating",
+      "ratingValue": "88",
+      "bestRating": "100",
+      "worstRating": "0",
+      "ratingCount": "104"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div class="c-productHero">
+    <h1>Example Game</h1>
+  </div>
+</body>
+</html>
