@@ -39,15 +39,23 @@ per-request timeout through a shared helper.
   of a hardcoded five-platform list: a platform only counts as "missing" if it
   has synced successfully before and now reports zero owned games.
 
+**Fixed on 2026-07-02:**
+
+- ✅ **Non-root container** (PR #45) — the app container runs as UID 10001;
+  server data dirs were chowned first, then the change deployed. Verified in
+  production: container uid 10001, healthy, DB writable.
+- ✅ **Nightly backup cron** — installed on the server
+  (`/etc/cron.d/gamelib-backup`, 04:15 UTC `sqlite3 .backup` + a copy owned by
+  a dedicated key-only `gamelib-backup` user). Off-machine leg: a home Windows
+  machine pulls via scp on a scheduled task (setup documented in deploy.md →
+  "Database backups"; the Windows-side task is a manual step there).
+- ✅ **OAuth** (from "Non-obvious improvements" #4) — PR #44 replaced the
+  static bearer token with FastMCP's GitHub OAuth 2.1 proxy.
+
 **Still open:**
 
-- ❌ Container runs as **root**. Not fixed deliberately: adding `USER` breaks
-  the existing deployment until the host-side data dir is chowned to the new
-  UID (`chown -R <uid> ~/mcps/data/library` on the server), and deploys
-  auto-run on merge — this needs a coordinated deploy, not a drive-by commit.
-- ❌ Nightly off-machine backup cron on the server (see deploy.md; manual step).
-- ❌ Everything under "Non-obvious improvements" (table-driven migrations,
-  connection reuse, FTS5, OAuth, Renovate) and the feature roadmap below.
+- ❌ The remaining "Non-obvious improvements" (table-driven migrations,
+  connection reuse, FTS5, Renovate) and the feature roadmap below.
 
 ## Overall verdict
 
