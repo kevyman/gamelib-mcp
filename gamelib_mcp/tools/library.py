@@ -4,7 +4,7 @@ from typing import Literal
 
 from fastmcp.exceptions import ToolError
 
-from ..data.db import get_db, load_platforms_for_games
+from ..data.db import fts_ready, get_db, load_platforms_for_games
 from ..data.tag_synonyms import canonical_tag
 from ..data.title_normalization import normalize_search_text
 from ..utils import _parse_json
@@ -82,7 +82,7 @@ async def search_games(
     """
     limit = _clamp_limit(limit)
     platform = _resolve_platform(platform)
-    match = build_name_match(query)
+    match = build_name_match(query, use_fts=fts_ready(), id_column="game_id")
     conditions = [match.where_sql]
     params: list = list(match.where_params)
     conditions.append("is_primary_library_item = 1")
@@ -259,7 +259,7 @@ async def search_games_batch(
     results = {}
     async with get_db() as db:
         for query in queries:
-            match = build_name_match(query)
+            match = build_name_match(query, use_fts=fts_ready(), id_column="game_id")
             rows = await db.execute_fetchall(
                 _GAME_ROLLUP_CTE
                 + f"""

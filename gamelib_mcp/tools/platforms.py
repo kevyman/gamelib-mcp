@@ -7,6 +7,7 @@ from ..data.db import (
     GAME_EDITABLE_FIELDS,
     apply_manual_game_fields,
     clear_fulfilled_wishlist_entries,
+    fts_ready,
     get_db,
     invalidate_name_derived_enrichment,
     recompute_tag_affinity,
@@ -233,7 +234,7 @@ async def _resolve_game_row(name: str | None, game_id: int | None) -> dict:
                 "SELECT id, name FROM games WHERE id = ?", (game_id,)
             )
         elif name is not None:
-            match = build_name_match(name, column=NORMALIZED_NAME_SQL)
+            match = build_name_match(name, column=NORMALIZED_NAME_SQL, use_fts=fts_ready())
             row = await db.execute_fetchone(
                 f"""SELECT g.id, g.name, {match.rank_sql} AS match_rank
                     FROM games g

@@ -53,10 +53,15 @@ per-request timeout through a shared helper.
 - ✅ **OAuth** (from "Non-obvious improvements" #4) — PR #44 replaced the
   static bearer token with FastMCP's GitHub OAuth 2.1 proxy.
 
+**Fixed in PR #46 (2026-07-02):** all remaining "Non-obvious improvements" —
+table-driven migrations (registry replaces the if-ladders), connection reuse
+(opt-in checkout-exclusive per-loop pool, enabled by the server lifespan),
+FTS5 (self-healing `games_fts` trigram derived index with LIKE-parity), and
+Dependabot (uv + github-actions, weekly grouped).
+
 **Still open:**
 
-- ❌ The remaining "Non-obvious improvements" (table-driven migrations,
-  connection reuse, FTS5, Renovate) and the feature roadmap below.
+- ❌ The feature roadmap below.
 
 ## Overall verdict
 

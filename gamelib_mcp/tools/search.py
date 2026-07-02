@@ -47,11 +47,30 @@ class NameMatch:
         return not (self.is_empty_query or self.is_noise_query)
 
 
-def build_name_match(query: str, column: str = "name_normalized") -> NameMatch:
+def _fts_match_expr(tokens: list[str], id_column: str) -> tuple[str, str]:
+    """(sql_fragment, match_param) routing tokens through the trigram index."""
+    quoted = " AND ".join('"' + token.replace('"', '""') + '"' for token in tokens)
+    return (
+        f"{id_column} IN (SELECT rowid FROM games_fts WHERE games_fts MATCH ?)",
+        quoted,
+    )
+
+
+def build_name_match(
+    query: str,
+    column: str = "name_normalized",
+    *,
+    use_fts: bool = False,
+    id_column: str = "g.id",
+) -> NameMatch:
     """Build WHERE + rank SQL fragments matching ``query`` against ``column``.
 
     ``column`` must hold normalize_search_text() output (or the COALESCE
-    fallback above).
+    fallback above). With ``use_fts=True`` (callers gate on
+    ``data.db.fts_ready()``), tokens of length >= 3 filter through the
+    games_fts trigram index instead of LIKE — same match semantics, indexed.
+    The trigram tokenizer cannot see sequences shorter than 3 chars, so short
+    tokens keep their LIKE fragment. Rank tiers are unchanged.
     """
     phrase = normalize_search_text(query)
     tokens = phrase.split()
@@ -61,10 +80,19 @@ def build_name_match(query: str, column: str = "name_normalized") -> NameMatch:
         return NameMatch("1=0", [], "0", [], is_noise_query=True)
 
     escaped_phrase = _like_escape(phrase)
-    where_sql = "(" + " AND ".join(
-        rf"{column} LIKE ? ESCAPE '\'" for _ in tokens
-    ) + ")"
-    where_params = [f"%{_like_escape(token)}%" for token in tokens]
+    fts_tokens = [t for t in tokens if use_fts and len(t) >= 3]
+    like_tokens = [t for t in tokens if not (use_fts and len(t) >= 3)]
+
+    fragments = []
+    where_params: list = []
+    if fts_tokens:
+        fts_sql, fts_param = _fts_match_expr(fts_tokens, id_column)
+        fragments.append(fts_sql)
+        where_params.append(fts_param)
+    for token in like_tokens:
+        fragments.append(rf"{column} LIKE ? ESCAPE '\'")
+        where_params.append(f"%{_like_escape(token)}%")
+    where_sql = "(" + " AND ".join(fragments) + ")"
 
     rank_sql = f"""CASE
         WHEN {column} = ? THEN 0

@@ -15,13 +15,15 @@ import json
 import math
 import os
 import re
+import sqlite3
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Callable, Iterable, TypeVar
+from typing import Awaitable, Callable, Iterable, TypeVar
+from weakref import WeakKeyDictionary
 
 import aiosqlite
 
@@ -39,6 +41,7 @@ if not hasattr(aiosqlite.Connection, "execute_fetchone"):
 
 
 _DB_READY_PATH: str | None = None
+_FTS_READY_PATH: str | None = None
 _DB_INIT_LOCK: asyncio.Lock | None = None
 _ENV_LOADED = False
 _FuzzyKey = TypeVar("_FuzzyKey")
@@ -46,6 +49,54 @@ _Progress = Callable[[str], None]
 _SQLITE_CONNECT_TIMEOUT_SECONDS = 30.0
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
 _REQUIRE_ABSOLUTE_DB_PATH_ENV = "GAMELIB_REQUIRE_ABSOLUTE_DB_PATH"
+
+# ── Opt-in connection pool ────────────────────────────────────────────────────
+# get_db() defaults to connection-per-call (each aiosqlite connection is a
+# worker thread). The server lifespan enables pooling for its process; tests
+# stay per-call unless they opt in, because pooled threads have no loop-close
+# hook to die on. Checkout is exclusive: a pooled connection is never shared
+# between concurrent coroutines, so per-call transaction semantics are
+# unchanged.
+_POOL_ENABLED = False
+_POOL_MAX_IDLE = 4
+_POOL_IDLE: WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[str, list[aiosqlite.Connection]]
+] = WeakKeyDictionary()
+
+
+def enable_db_pooling() -> None:
+    """Reuse SQLite connections across get_db() calls on the current process."""
+    global _POOL_ENABLED
+    _POOL_ENABLED = True
+
+
+async def close_db_pool() -> None:
+    """Disable pooling and close idle connections owned by the current loop."""
+    global _POOL_ENABLED
+    _POOL_ENABLED = False
+    loop = asyncio.get_running_loop()
+    by_path = _POOL_IDLE.pop(loop, None) or {}
+    for conns in by_path.values():
+        for conn in conns:
+            await conn.close()
+
+
+def _pool_checkout(db_path: str) -> "aiosqlite.Connection | None":
+    loop = asyncio.get_running_loop()
+    conns = _POOL_IDLE.get(loop, {}).get(db_path)
+    if conns:
+        return conns.pop()
+    return None
+
+
+async def _pool_checkin(db_path: str, conn: aiosqlite.Connection) -> None:
+    loop = asyncio.get_running_loop()
+    conns = _POOL_IDLE.setdefault(loop, {}).setdefault(db_path, [])
+    if _POOL_ENABLED and len(conns) < _POOL_MAX_IDLE:
+        conns.append(conn)
+    else:
+        await conn.close()
+
 
 STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
@@ -60,6 +111,7 @@ class MigrationResult:
     final_version: int
     detected_state: str
     applied_steps: list[str]
+    fts_enabled: bool = False
 
     @property
     def changed(self) -> bool:
@@ -91,6 +143,11 @@ def _db_path() -> str:
         )
 
     return db_path
+
+
+def fts_ready() -> bool:
+    """True when the configured database has a live games_fts index."""
+    return _FTS_READY_PATH is not None and _FTS_READY_PATH == _db_path()
 
 
 def _ensure_db_parent_dir(db_path: str) -> None:
@@ -160,6 +217,7 @@ def extract_best_fuzzy_key(
 
 
 from .schema import (
+    _FTS_DDL,
     _V1_SCHEMA_DDL,
     _V2_SCHEMA_DDL,
     _V3_SCHEMA_DDL,
@@ -1188,6 +1246,58 @@ async def _snapshot_before_migration(
     return backup_path
 
 
+async def _sync_fts_index(db: aiosqlite.Connection) -> bool:
+    """Ensure games_fts + triggers exist and mirror games; False if no FTS5.
+
+    Runs on every migrate_db call. A destructive games-table rebuild drops the
+    triggers with the old table; CREATE ... IF NOT EXISTS restores them and the
+    full resync repairs any rows changed while triggers were absent.
+    """
+    try:
+        await db.executescript(_FTS_DDL)
+    except sqlite3.OperationalError:
+        return False  # SQLite build lacks FTS5/trigram — LIKE path still works
+    await db.execute("DELETE FROM games_fts")
+    await db.execute(
+        "INSERT INTO games_fts(rowid, name_normalized)"
+        " SELECT id, COALESCE(name_normalized, lower(name)) FROM games"
+    )
+    await db.commit()
+    return True
+
+
+_MigrationStep = Callable[[aiosqlite.Connection, "_Progress | None"], Awaitable[None]]
+
+# Pre-user_version databases are recognized by shape; recording the detected
+# version lets the step ladder below take over. Detection has no states for
+# v6 or v13-v16 (those versions changed no detectable shape).
+_RECORDED_STATE_VERSIONS: dict[str, int] = {
+    f"v{n}": n for n in (1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12)
+}
+
+# Ordered chain of (from_version, step). Each step migrates from_version ->
+# from_version + 1. Adding a schema version = one entry here + a new step
+# function + bumping SCHEMA_VERSION.
+_MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
+    (1, _migrate_v1_to_v2),
+    (2, _migrate_v2_to_v3),
+    (3, _migrate_v3_to_v4),
+    (4, _migrate_v4_to_v5),
+    (5, _migrate_v5_to_v6),
+    (6, _migrate_v6_to_v7),
+    (7, _migrate_v7_to_v8),
+    (8, _migrate_v8_to_v9),
+    (9, _migrate_v9_to_v10),
+    (10, _migrate_v10_to_v11),
+    (11, _migrate_v11_to_v12),
+    (12, _migrate_v12_to_v13),
+    (13, _migrate_v13_to_v14),
+    (14, _migrate_v14_to_v15),
+    (15, _migrate_v15_to_v16),
+    (16, _migrate_v16_to_v17),
+)
+
+
 async def _run_migrations(
     db: aiosqlite.Connection,
     progress: _Progress | None = None,
@@ -1203,6 +1313,7 @@ async def _run_migrations(
 
     if detected_state == "fresh":
         await db.executescript(_V17_SCHEMA_DDL)
+        fts_enabled = await _sync_fts_index(db)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
         _emit(progress, f"Initialized fresh database at schema v{SCHEMA_VERSION}.", applied_steps)
@@ -1211,6 +1322,7 @@ async def _run_migrations(
             final_version=SCHEMA_VERSION,
             detected_state=detected_state,
             applied_steps=applied_steps,
+            fts_enabled=fts_enabled,
         )
 
     if version == 0:
@@ -1218,141 +1330,21 @@ async def _run_migrations(
             _emit(progress, "Applying migration step v0 -> v1.", applied_steps)
             await _migrate_legacy_to_v1(db, progress=None)
             version = 1
-        elif detected_state == "v1":
-            await _set_user_version(db, 1)
+        elif detected_state in _RECORDED_STATE_VERSIONS:
+            version = _RECORDED_STATE_VERSIONS[detected_state]
+            await _set_user_version(db, version)
             await db.commit()
-            version = 1
-            _emit(progress, "Recorded existing schema as v1.", applied_steps)
-        elif detected_state == "v2":
-            await _set_user_version(db, 2)
-            await db.commit()
-            version = 2
-            _emit(progress, "Recorded existing schema as v2.", applied_steps)
-        elif detected_state == "v3":
-            await _set_user_version(db, 3)
-            await db.commit()
-            version = 3
-            _emit(progress, "Recorded existing schema as v3.", applied_steps)
-        elif detected_state == "v4":
-            await _set_user_version(db, 4)
-            await db.commit()
-            version = 4
-            _emit(progress, "Recorded existing schema as v4.", applied_steps)
-        elif detected_state == "v5":
-            await _set_user_version(db, 5)
-            await db.commit()
-            version = 5
-            _emit(progress, "Recorded existing schema as v5.", applied_steps)
-        elif detected_state == "v7":
-            await _set_user_version(db, 7)
-            await db.commit()
-            version = 7
-            _emit(progress, "Recorded existing schema as v7.", applied_steps)
-        elif detected_state == "v8":
-            await _set_user_version(db, 8)
-            await db.commit()
-            version = 8
-            _emit(progress, "Recorded existing schema as v8.", applied_steps)
-        elif detected_state == "v9":
-            await _set_user_version(db, 9)
-            await db.commit()
-            version = 9
-            _emit(progress, "Recorded existing schema as v9.", applied_steps)
-        elif detected_state == "v10":
-            await _set_user_version(db, 10)
-            await db.commit()
-            version = 10
-            _emit(progress, "Recorded existing schema as v10.", applied_steps)
-        elif detected_state == "v11":
-            await _set_user_version(db, 11)
-            await db.commit()
-            version = 11
-            _emit(progress, "Recorded existing schema as v11.", applied_steps)
-        elif detected_state == "v12":
-            await _set_user_version(db, 12)
-            await db.commit()
-            version = 12
-            _emit(progress, "Recorded existing schema as v12.", applied_steps)
+            _emit(progress, f"Recorded existing schema as v{version}.", applied_steps)
 
-    if version == 1:
-        _emit(progress, "Applying migration step v1 -> v2.", applied_steps)
-        await _migrate_v1_to_v2(db, progress=None)
-        version = 2
-
-    if version == 2:
-        _emit(progress, "Applying migration step v2 -> v3.", applied_steps)
-        await _migrate_v2_to_v3(db, progress=None)
-        version = 3
-
-    if version == 3:
-        _emit(progress, "Applying migration step v3 -> v4.", applied_steps)
-        await _migrate_v3_to_v4(db, progress=None)
-        version = 4
-
-    if version == 4:
-        _emit(progress, "Applying migration step v4 -> v5.", applied_steps)
-        await _migrate_v4_to_v5(db, progress=None)
-        version = 5
-
-    if version == 5:
-        _emit(progress, "Applying migration step v5 -> v6.", applied_steps)
-        await _migrate_v5_to_v6(db, progress=None)
-        version = 6
-
-    if version == 6:
-        _emit(progress, "Applying migration step v6 -> v7.", applied_steps)
-        await _migrate_v6_to_v7(db, progress=None)
-        version = 7
-
-    if version == 7:
-        _emit(progress, "Applying migration step v7 -> v8.", applied_steps)
-        await _migrate_v7_to_v8(db, progress=None)
-        version = 8
-
-    if version == 8:
-        _emit(progress, "Applying migration step v8 -> v9.", applied_steps)
-        await _migrate_v8_to_v9(db, progress=None)
-        version = 9
-
-    if version == 9:
-        _emit(progress, "Applying migration step v9 -> v10.", applied_steps)
-        await _migrate_v9_to_v10(db, progress=None)
-        version = 10
-
-    if version == 10:
-        _emit(progress, "Applying migration step v10 -> v11.", applied_steps)
-        await _migrate_v10_to_v11(db, progress=None)
-        version = 11
-
-    if version == 11:
-        _emit(progress, "Applying migration step v11 -> v12.", applied_steps)
-        await _migrate_v11_to_v12(db, progress=None)
-        version = 12
-
-    if version == 12:
-        _emit(progress, "Applying migration step v12 -> v13.", applied_steps)
-        await _migrate_v12_to_v13(db, progress=None)
-        version = 13
-
-    if version == 13:
-        _emit(progress, "Applying migration step v13 -> v14.", applied_steps)
-        await _migrate_v13_to_v14(db, progress=None)
-        version = 14
-
-    if version == 14:
-        _emit(progress, "Applying migration step v14 -> v15.", applied_steps)
-        await _migrate_v14_to_v15(db, progress=None)
-        version = 15
-
-    if version == 15:
-        _emit(progress, "Applying migration step v15 -> v16.", applied_steps)
-        await _migrate_v15_to_v16(db, progress=None)
-        version = 16
-
-    if version == 16:
-        _emit(progress, "Applying migration step v16 -> v17.", applied_steps)
-        await _migrate_v16_to_v17(db, progress=None)
-        version = 17
+    for from_version, step in _MIGRATION_STEPS:
+        if version == from_version:
+            _emit(
+                progress,
+                f"Applying migration step v{from_version} -> v{from_version + 1}.",
+                applied_steps,
+            )
+            await step(db, None)
+            version = from_version + 1
 
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
@@ -1362,17 +1354,19 @@ async def _run_migrations(
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
     await db.commit()
+    fts_enabled = await _sync_fts_index(db)
 
     return MigrationResult(
         initial_version=initial_version,
         final_version=version,
         detected_state=detected_state,
         applied_steps=applied_steps,
+        fts_enabled=fts_enabled,
     )
 
 
 async def _ensure_db_initialized(db: aiosqlite.Connection) -> None:
-    global _DB_READY_PATH, _DB_INIT_LOCK
+    global _DB_READY_PATH, _FTS_READY_PATH, _DB_INIT_LOCK
 
     db_path = _db_path()
     if _DB_READY_PATH == db_path:
@@ -1384,8 +1378,9 @@ async def _ensure_db_initialized(db: aiosqlite.Connection) -> None:
     async with _DB_INIT_LOCK:
         if _DB_READY_PATH == db_path:
             return
-        await _run_migrations(db)
+        result = await _run_migrations(db)
         _DB_READY_PATH = db_path
+        _FTS_READY_PATH = db_path if result.fts_enabled else None
 
 
 async def _configure_connection(conn: aiosqlite.Connection, *, enable_wal: bool) -> None:
@@ -1398,18 +1393,45 @@ async def _configure_connection(conn: aiosqlite.Connection, *, enable_wal: bool)
 
 @asynccontextmanager
 async def get_db():
-    """Async context manager for a WAL-enabled, Row-factory SQLite connection."""
+    """Async context manager for a WAL-enabled, Row-factory SQLite connection.
+
+    When pooling is enabled (server lifespan), connections are checked out
+    exclusively and reused across calls on the same event loop.
+    """
     db_path = _db_path()
     _ensure_db_parent_dir(db_path)
-    async with aiosqlite.connect(db_path, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS) as conn:
-        await _configure_connection(conn, enable_wal=_DB_READY_PATH != db_path)
-        await _ensure_db_initialized(conn)
+
+    if not _POOL_ENABLED:
+        async with aiosqlite.connect(db_path, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS) as conn:
+            await _configure_connection(conn, enable_wal=_DB_READY_PATH != db_path)
+            await _ensure_db_initialized(conn)
+            yield conn
+        return
+
+    conn = _pool_checkout(db_path)
+    if conn is None:
+        conn = await aiosqlite.connect(db_path, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS)
+        try:
+            await _configure_connection(conn, enable_wal=_DB_READY_PATH != db_path)
+            await _ensure_db_initialized(conn)
+        except BaseException:
+            await conn.close()
+            raise
+    try:
         yield conn
+        # Match per-call semantics: uncommitted work dies with the "connection".
+        await conn.rollback()
+    except BaseException:
+        # Transaction state is unknown after a failure inside the block (or if
+        # rollback() itself raised) — never return this connection to the pool.
+        await conn.close()
+        raise
+    await _pool_checkin(db_path, conn)
 
 
 async def migrate_db(progress: _Progress | None = None) -> MigrationResult:
     """Run all schema migrations against the configured DB path."""
-    global _DB_READY_PATH
+    global _DB_READY_PATH, _FTS_READY_PATH
 
     db_path = _db_path()
     _ensure_db_parent_dir(db_path)
@@ -1417,6 +1439,7 @@ async def migrate_db(progress: _Progress | None = None) -> MigrationResult:
         await _configure_connection(db, enable_wal=True)
         result = await _run_migrations(db, progress=progress)
         _DB_READY_PATH = db_path
+        _FTS_READY_PATH = db_path if result.fts_enabled else None
         return result
 
 
