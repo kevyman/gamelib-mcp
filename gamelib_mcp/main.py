@@ -655,9 +655,13 @@ async def get_wishlist_deals(
     Prices come from IsThereAnyDeal (Steam wishlist items; covers Steam/GOG/
     Epic shops) and DekuDeals (switch2 items). Cached in the DB; a fetch runs
     automatically when the cache is older than 12h, or immediately with
-    refresh=True. Filters: platform, max_price (in the configured ITAD
-    country's currency), min_cut_pct (e.g. 50 for "at least half off").
-    Items with no known price are listed separately in unpriced.
+    refresh=True. Filters: platform, max_price, min_cut_pct (e.g. 50 for "at
+    least half off"). max_price/comparisons are NOT currency-converted: they
+    compare each deal's raw numeric price in whatever currency that deal is
+    quoted in (Steam/GOG/Epic follow ITAD_COUNTRY, switch2 follows whatever
+    currency DekuDeals renders for this account's region). Set ITAD_COUNTRY
+    to match if comparing thresholds meaningfully across platforms. Items
+    with no known price are listed separately in unpriced.
     """
     from .tools.deals import get_wishlist_deals as _get_wishlist_deals
     return await _get_wishlist_deals(platform, max_price, min_cut_pct, refresh)

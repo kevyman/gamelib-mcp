@@ -158,6 +158,44 @@ class GetWishlistDealsTests(ToolDBTestCase):
         self.assertEqual(names, {"Pricey Game"})
         self.assertEqual(result["unpriced"], [])
 
+    async def test_currency_note_added_when_deals_span_multiple_currencies(self):
+        usd_id = await seed_game("USD Game")
+        await _seed_wishlist(usd_id, "steam", store_identifier="1")
+        await _seed_price(usd_id, "steam", "steam", 9.99, currency="USD")
+
+        eur_id = await seed_game("EUR Game")
+        await _seed_wishlist(eur_id, "switch2")
+        await _seed_price(eur_id, "switch2", "dekudeals", 19.99, currency="EUR")
+
+        with patch(
+            "gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.is_itad_configured", return_value=True
+        ):
+            result = await deals.get_wishlist_deals()
+
+        self.assertIn("currency_note", result)
+        self.assertIn("EUR", result["currency_note"])
+        self.assertIn("USD", result["currency_note"])
+
+    async def test_currency_note_absent_when_single_currency(self):
+        game_id = await seed_game("Single Currency Game")
+        await _seed_wishlist(game_id, "steam", store_identifier="1")
+        await _seed_price(game_id, "steam", "steam", 9.99, currency="USD")
+
+        with patch(
+            "gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.is_itad_configured", return_value=True
+        ):
+            result = await deals.get_wishlist_deals()
+
+        self.assertNotIn("currency_note", result)
+
     async def test_fetcher_exception_returns_cached_data_with_error(self):
         game_id = await seed_game("Stale Game")
         await _seed_wishlist(game_id, "steam", store_identifier="42")

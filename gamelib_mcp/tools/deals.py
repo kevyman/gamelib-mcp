@@ -94,9 +94,13 @@ async def get_wishlist_deals(
     Prices come from IsThereAnyDeal (Steam wishlist items; covers Steam/GOG/
     Epic shops) and DekuDeals (switch2 items). Cached in the DB; a fetch runs
     automatically when the cache is older than 12h, or immediately with
-    refresh=True. Filters: platform, max_price (in the configured ITAD
-    country's currency), min_cut_pct (e.g. 50 for "at least half off").
-    Items with no known price are listed separately in unpriced.
+    refresh=True. Filters: platform, max_price, min_cut_pct (e.g. 50 for "at
+    least half off"). max_price/comparisons are NOT currency-converted: they
+    compare each deal's raw numeric price in whatever currency that deal is
+    quoted in (Steam/GOG/Epic follow ITAD_COUNTRY, switch2 follows whatever
+    currency DekuDeals renders for this account's region). Set ITAD_COUNTRY
+    to match if comparing thresholds meaningfully across platforms. Items
+    with no known price are listed separately in unpriced.
     """
     resolved_platform = _validate_platform(platform, LIBRARY_PLATFORMS) if platform else None
 
@@ -211,6 +215,11 @@ async def get_wishlist_deals(
             }
         )
 
+    # Computed on the unfiltered deal set, before max_price/min_cut_pct below
+    # narrow it — those filters compare raw numeric prices with no currency
+    # conversion, so flag it whenever more than one currency is in play.
+    currencies = {d["currency"] for d in deals if d["currency"] is not None}
+
     # Filters apply AFTER cheapest-per-item selection; a filtered-out deal is
     # simply excluded, never moved to unpriced (it has a known price, it just
     # doesn't match the filter).
@@ -229,5 +238,10 @@ async def get_wishlist_deals(
     }
     if price_refresh_errors:
         response["price_refresh_errors"] = price_refresh_errors
+    if len(currencies) > 1:
+        response["currency_note"] = (
+            f"deals span multiple currencies ({', '.join(sorted(currencies))}); "
+            "max_price/min_cut_pct are not currency-converted"
+        )
     response.update(notes)
     return response

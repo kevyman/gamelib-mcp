@@ -337,3 +337,4 @@ class WishlistDealsResponse(FlexibleModel):
     count: int
     price_refresh_errors: list[str] | None = None
     itad: str | None = None
+    currency_note: str | None = None
