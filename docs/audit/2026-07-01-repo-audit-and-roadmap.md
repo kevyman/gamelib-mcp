@@ -52,6 +52,9 @@ per-request timeout through a shared helper.
   audit's backup gap is fully closed.**
 - ✅ **OAuth** (from "Non-obvious improvements" #4) — PR #44 replaced the
   static bearer token with FastMCP's GitHub OAuth 2.1 proxy.
+- ✅ **Decide on single-user (roadmap item 7)** — recorded as
+  [docs/adr/0001-single-user.md](../adr/0001-single-user.md): single-user is
+  an explicit non-goal, cross-referenced from CLAUDE.md and README.md.
 
 **Fixed in PR #46 (2026-07-02):** all remaining "Non-obvious improvements" —
 table-driven migrations (registry replaces the if-ladders), connection reuse
