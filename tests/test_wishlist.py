@@ -3,6 +3,7 @@ helpers (upsert + fulfillment cleanup), the manual add_game_to_platform
 (owned=False) path, get_wishlist, and the Steam / DekuDeals wishlist syncs.
 """
 
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -698,6 +699,9 @@ class UpsertGamePricesTests(ToolDBTestCase):
                 (game_id, "steam", "steam"),
             )
 
+        # Sleep to ensure the second upsert gets a distinct timestamp
+        await asyncio.sleep(0.01)
+
         written_second = await db_module.upsert_game_prices([
             {
                 "game_id": game_id,
@@ -723,7 +727,8 @@ class UpsertGamePricesTests(ToolDBTestCase):
         self.assertEqual(rows[0]["price"], 9.99)
         self.assertEqual(rows[0]["cut_pct"], 75)
         # fetched_at is re-stamped on every upsert, even when reusing the row.
-        self.assertGreaterEqual(rows[0]["fetched_at"], first_row["fetched_at"])
+        # Strictly greater (not just >=) to prove it actually advanced.
+        self.assertGreater(rows[0]["fetched_at"], first_row["fetched_at"])
 
     async def test_distinct_shops_for_same_game_platform_get_separate_rows(self):
         game_id = await seed_game("Multi Shop Game")
