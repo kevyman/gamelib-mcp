@@ -4,6 +4,8 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server that gives A
 
 Ask your assistant things like *"what should I play next?"*, *"find me a cozy game under 10 hours"*, or *"how big is my backlog, honestly?"* — and it can answer from your actual library.
 
+gamelib-mcp is single-user by design: one deployment serves one person's library (see [docs/adr/0001-single-user.md](docs/adr/0001-single-user.md)).
+
 ## Features
 
 - **Cross-platform library** — Steam, Epic (via [Legendary](https://github.com/derrod/legendary)), GOG (via [lgogdownloader](https://github.com/Sude-/lgogdownloader)), Nintendo Switch (digital ownership via your Nintendo Account, playtime via the Switch Parental Controls API), and PSN, unified into one canonical game list with per-platform ownership and playtime.
