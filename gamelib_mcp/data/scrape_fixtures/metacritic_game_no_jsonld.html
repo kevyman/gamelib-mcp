@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<!-- Recorded structural fixture for a Metacritic game page WITHOUT usable
+     JSON-LD, exercising the CSS-selector fallback path. The user-score
+     widget (.c-siteReviewScore only) is present as a trap: the fallback
+     selectors must return the critic score 84, not the 8.1 user score.
+     Used by tests/test_scrape_parsers.py and scrape_validate.py. -->
+<html>
+<head>
+  <title>Example Game Reviews</title>
+</head>
+<body>
+  <div class="c-productHero">
+    <h1>Example Game</h1>
+    <div class="c-siteReviewScore u-flexbox">
+      <span>8.1</span>
+    </div>
+    <div data-testid="score-meta-critic" class="c-siteReviewScore_background-critic">
+      <span>84</span>
+    </div>
+  </div>
+</body>
+</html>

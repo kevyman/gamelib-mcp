@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<!-- Recorded structural fixture for the Steam Community profile
+     "recommended" (reviews) page. Each .review_box carries a link to
+     /recommended/{appid}/ and a thumb icon; one box below has no thumb
+     class and must resolve through the "Not Recommended" text fallback.
+     Used by tests/test_scrape_parsers.py and scrape_validate.py. -->
+<html>
+<head><title>user's reviews</title></head>
+<body>
+  <div class="profile_content">
+
+    <div class="review_box">
+      <div class="leftcol">
+        <a href="https://steamcommunity.com/id/user/recommended/1145360/">
+          <img src="hades_capsule.jpg" alt="Hades">
+        </a>
+      </div>
+      <div class="rightcol">
+        <div class="vote_header">
+          <div class="thumb_up"><img src="icon_thumbsUp.png"></div>
+          <div class="title">Recommended</div>
+        </div>
+        <div class="content">
+          God-tier roguelite. The boons system keeps builds interesting forever.
+        </div>
+      </div>
+    </div>
+
+    <div class="review_box">
+      <div class="leftcol">
+        <a href="https://steamcommunity.com/id/user/recommended/504230/">
+          <img src="celeste_capsule.jpg" alt="Celeste">
+        </a>
+      </div>
+      <div class="rightcol">
+        <div class="vote_header">
+          <div class="thumb_up"><img src="icon_thumbsUp.png"></div>
+          <div class="title">Recommended</div>
+        </div>
+        <div class="content">
+          The best platformer of its generation.
+        </div>
+      </div>
+    </div>
+
+    <div class="review_box">
+      <div class="leftcol">
+        <a href="https://steamcommunity.com/id/user/recommended/261570/">
+          <img src="capsule.jpg" alt="Some Game">
+        </a>
+      </div>
+      <div class="rightcol">
+        <div class="vote_header">
+          <!-- no thumb element: parser must fall back to the title text -->
+          <div class="title">Not Recommended</div>
+        </div>
+        <div class="content">
+          Repetitive mission design and constant crashes.
+        </div>
+      </div>
+    </div>
+
+  </div>
+</body>
+</html>
