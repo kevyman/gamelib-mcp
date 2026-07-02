@@ -1385,13 +1385,13 @@ async def get_db():
             raise
     try:
         yield conn
+        # Match per-call semantics: uncommitted work dies with the "connection".
+        await conn.rollback()
     except BaseException:
-        # Transaction state is unknown after a failure inside the block —
-        # never return this connection to the pool.
+        # Transaction state is unknown after a failure inside the block (or if
+        # rollback() itself raised) — never return this connection to the pool.
         await conn.close()
         raise
-    # Match per-call semantics: uncommitted work dies with the "connection".
-    await conn.rollback()
     await _pool_checkin(db_path, conn)
 
 

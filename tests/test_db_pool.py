@@ -4,7 +4,7 @@ import asyncio
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from gamelib_mcp.data import db as db_module
 
@@ -97,6 +97,31 @@ class TestPoolEnabled(PoolTestBase):
         async with db_module.get_db() as second:
             pass
         self.assertIsNot(first, second)  # pooling is off again
+
+
+class TestLifespanStartupFailureDisablesPooling(PoolTestBase):
+    async def test_pooling_disabled_if_startup_raises_before_yield(self):
+        # enable_db_pooling() runs early in lifespan(), before init_db()/etc.
+        # If a later pre-yield startup step raises, teardown (including
+        # close_db_pool()) must still run via the finally block, or pooling
+        # is left stuck on and pooled connections leak.
+        from gamelib_mcp.lifecycle import lifespan
+
+        with patch(
+            "gamelib_mcp.data.db.init_db",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            with self.assertRaises(RuntimeError):
+                async with lifespan(object()):
+                    pass  # pragma: no cover - should never reach the yield
+
+        # Pooling must be disabled: two subsequent get_db() calls each get a
+        # fresh connection instead of reusing one from a leaked pool.
+        async with db_module.get_db() as first:
+            pass
+        async with db_module.get_db() as second:
+            pass
+        self.assertIsNot(first, second)
 
 
 if __name__ == "__main__":
