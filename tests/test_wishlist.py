@@ -34,6 +34,15 @@ class UpsertWishlistEntryTests(ToolDBTestCase):
         # No game_platforms row is created for a pure wishlist entry.
         self.assertIsNone(gp_row)
 
+    async def test_upsert_wishlist_entry_stores_store_identifier(self):
+        game_id = await seed_game("Hollow Knight: Silksong")
+        await db_module.upsert_wishlist_entry(game_id, "steam", source="steam", store_identifier="1030300")
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT store_identifier FROM game_wishlist WHERE game_id = ?", (game_id,)
+            )
+        self.assertEqual(row["store_identifier"], "1030300")
+
     async def test_does_not_touch_existing_ownership(self):
         game_id = await seed_game("Owned Game")
         await add_platform(game_id, "steam", owned=1, playtime_minutes=120)

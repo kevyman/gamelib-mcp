@@ -204,6 +204,7 @@ async def upsert_wishlist_entry(
     platform: str,
     wishlisted_at: str | None = None,
     source: str | None = None,
+    store_identifier: str | None = None,
 ) -> int:
     """Insert or update a game_wishlist row and return its id.
 
@@ -211,16 +212,18 @@ async def upsert_wishlist_entry(
     be owned anywhere yet, and game_platforms rows are meant to mean "a real
     platform relationship exists" (owned, or a manual stub). source records
     where the entry came from (e.g. "steam", "dekudeals", "manual").
+    store_identifier captures the store's own ID (e.g. Steam appid) at sync time.
     """
     now = wishlisted_at or datetime.now(timezone.utc).isoformat()
     async with get_db() as db:
         await db.execute(
-            """INSERT INTO game_wishlist (game_id, platform, wishlisted_at, source)
-               VALUES (?, ?, ?, ?)
+            """INSERT INTO game_wishlist (game_id, platform, wishlisted_at, source, store_identifier)
+               VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(game_id, platform) DO UPDATE SET
                    wishlisted_at = excluded.wishlisted_at,
-                   source = excluded.source""",
-            (game_id, platform, now, source),
+                   source = excluded.source,
+                   store_identifier = COALESCE(excluded.store_identifier, store_identifier)""",
+            (game_id, platform, now, source, store_identifier),
         )
         row = await db.execute_fetchone(
             "SELECT id FROM game_wishlist WHERE game_id = ? AND platform = ?",
