@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SERVER_URL="${MCP_SERVER_URL:-http://127.0.0.1:8000/sse}"
-TRANSPORT="${MCP_TRANSPORT:-sse}"
+SERVER_URL="${MCP_SERVER_URL:-http://127.0.0.1:8000/mcp}"
+TRANSPORT="${MCP_TRANSPORT:-streamable-http}"
 
 args=(
   --cli
   "$SERVER_URL"
   --transport "$TRANSPORT"
 )
-
-if [[ -n "${MCP_AUTH_TOKEN:-}" ]]; then
-  args+=(--header "Authorization: Bearer ${MCP_AUTH_TOKEN}")
-fi
 
 exec mcp-inspector "${args[@]}" "$@"
