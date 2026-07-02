@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+from bs4 import BeautifulSoup, Tag
 
 from .db import (
     delete_stale_wishlist_entries,
@@ -37,6 +38,10 @@ from .db import (
     upsert_wishlist_entry,
 )
 from .scrape_config import DekuDealsScrapeConfig, load_scrape_config
+
+# Leading currency symbol -> ISO 4217 code. Extend if another symbol shows up
+# in a live fetch; these three cover what's been confirmed against real pages.
+_CURRENCY_SYMBOLS = {"€": "EUR", "$": "USD", "£": "GBP"}
 
 DEKUDEALS_WISHLIST_URL = os.getenv("DEKUDEALS_WISHLIST_URL", "")
 logger = logging.getLogger(__name__)
@@ -153,6 +158,117 @@ def _parse_wishlist_payload(
             if title:
                 items.append({"title": title, "added_at": item.get(config.added_at_key)})
     return items
+
+
+def _parse_price_text(text: str) -> tuple[float, str] | None:
+    """Parse a price string like '€59,99' into (59.99, "EUR"). None if unparseable.
+
+    Detects currency from the leading symbol, then normalizes the decimal
+    separator: this account's locale renders prices with a comma decimal
+    (e.g. "€59,99" == 59.99 EUR, not 5,999) rather than the plan's originally
+    assumed "$29.99"-style dot decimal, so both must be handled.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return None
+    currency = _CURRENCY_SYMBOLS.get(stripped[0])
+    if currency is None:
+        return None
+    numeric = stripped[1:].strip()
+    # Comma-as-decimal locales never group thousands at this price scale, so a
+    # plain comma->dot swap is sufficient (no "1.234,56" grouping to handle).
+    if "," in numeric and "." not in numeric:
+        numeric = numeric.replace(",", ".")
+    try:
+        return float(numeric), currency
+    except ValueError:
+        return None
+
+
+def _parse_cut_pct(text: str) -> int | None:
+    """Parse a discount badge like '-50%' into 50. None if unparseable."""
+    stripped = text.strip().lstrip("-").rstrip("%").strip()
+    try:
+        return int(stripped)
+    except ValueError:
+        return None
+
+
+def _parse_wishlist_prices(html: str, config: DekuDealsScrapeConfig | None = None) -> dict[str, dict]:
+    """Pure HTML->prices parse, selector-driven so the heal tools can fix drift.
+
+    Returns {title: {"price", "regular_price", "cut_pct", "currency", "deal_url"}}.
+    Cards without a resolvable title or price are skipped defensively rather
+    than raising, per this module's existing convention.
+    """
+    if config is None:
+        config = DekuDealsScrapeConfig()
+
+    soup = BeautifulSoup(html, "lxml")
+    results: dict[str, dict] = {}
+
+    for card in soup.select(config.wishlist_item_selector):
+        title_el = card.select_one(config.item_title_selector)
+        title = title_el.get_text(strip=True) if title_el else None
+        if not title:
+            logger.debug("DekuDeals wishlist card has no resolvable title; skipping")
+            continue
+
+        price_el = card.select_one(config.price_selector)
+        parsed_price = _parse_price_text(price_el.get_text()) if price_el else None
+        if parsed_price is None:
+            logger.debug("DekuDeals wishlist card %r has no parsable price; skipping", title)
+            continue
+        price, currency = parsed_price
+
+        regular_price = price
+        regular_price_el = card.select_one(config.regular_price_selector)
+        if regular_price_el is not None:
+            parsed_regular = _parse_price_text(regular_price_el.get_text())
+            if parsed_regular is not None:
+                regular_price = parsed_regular[0]
+
+        cut_pct: int | None = None
+        cut_pct_el = card.select_one(config.cut_pct_selector)
+        if cut_pct_el is not None:
+            cut_pct = _parse_cut_pct(cut_pct_el.get_text())
+
+        deal_url = ""
+        link_el = card.select_one(config.item_link_selector)
+        if isinstance(link_el, Tag):
+            href = link_el.get("href")
+            if isinstance(href, str) and href:
+                deal_url = "https://www.dekudeals.com" + href if href.startswith("/") else href
+
+        results[title] = {
+            "price": price,
+            "regular_price": regular_price,
+            "cut_pct": cut_pct,
+            "currency": currency,
+            "deal_url": deal_url,
+        }
+
+    return results
+
+
+async def fetch_wishlist_prices() -> dict[str, dict]:
+    """Fetch the shared wishlist HTML page and parse current prices per title.
+
+    Raises on fetch failure (same rationale as _fetch_wishlist_items: a
+    transient error must not be mistaken for "nothing is on sale").
+    """
+    wishlist_url = os.getenv("DEKUDEALS_WISHLIST_URL", DEKUDEALS_WISHLIST_URL)
+    url = wishlist_url.rstrip("/")
+    if url.endswith(".json"):
+        url = url[: -len(".json")]
+
+    config = await load_scrape_config("dekudeals")
+
+    async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "gamelib-mcp/1.0"}) as client:
+        resp = await client.get(url, follow_redirects=True)
+        resp.raise_for_status()
+
+    return _parse_wishlist_prices(resp.text, config)
 
 
 def _match_game_id(

@@ -122,6 +122,28 @@ class DekuDealsParserTests(unittest.TestCase):
             [{"title": "Pikmin 4", "added_at": None}, {"title": "Celeste", "added_at": None}],
         )
 
+    def test_dekudeals_wishlist_price_parse(self):
+        html = _fixture_text("dekudeals_wishlist_page.html")
+        prices = dekudeals._parse_wishlist_prices(html, DekuDealsScrapeConfig())
+        self.assertIn("Pikmin 4", prices)
+        entry = prices["Pikmin 4"]
+        self.assertAlmostEqual(entry["price"], 59.99)
+        self.assertEqual(entry["currency"], "EUR")
+        self.assertIsNone(entry["cut_pct"])  # undiscounted in the fixture
+        self.assertAlmostEqual(entry["regular_price"], 59.99)
+        self.assertTrue(entry["deal_url"].startswith("https://www.dekudeals.com/items/"))
+
+        discounted = prices["Kirby and the Forgotten Land"]
+        self.assertAlmostEqual(discounted["price"], 24.99)
+        self.assertAlmostEqual(discounted["regular_price"], 49.99)
+        self.assertEqual(discounted["cut_pct"], 50)
+        self.assertEqual(discounted["currency"], "EUR")
+
+    def test_broken_wishlist_item_selector_yields_no_rows(self):
+        html = _fixture_text("dekudeals_wishlist_page.html")
+        config = DekuDealsScrapeConfig(wishlist_item_selector=".no-such-card")
+        self.assertEqual(dekudeals._parse_wishlist_prices(html, config), {})
+
 
 if __name__ == "__main__":
     unittest.main()
