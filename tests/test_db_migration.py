@@ -965,6 +965,50 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         # Existing ownership is untouched by the additive migration.
         self.assertEqual(gp_row["owned"], 1)
 
+    async def test_v17_to_v18_adds_game_prices_and_store_identifier(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V17_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 17")
+        conn.execute("INSERT INTO games (id, name) VALUES (1, 'Hollow Knight')")
+        conn.execute(
+            "INSERT INTO game_wishlist (id, game_id, platform, wishlisted_at, source) "
+            "VALUES (1, 1, 'steam', '2026-01-01T00:00:00+00:00', 'steam')"
+        )
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            result = await db_module.migrate_db()
+            async with db_module.get_db() as db:
+                cols = {
+                    row[1] for row in await db.execute_fetchall("PRAGMA table_info(game_prices)")
+                }
+                wl_cols = await db_module._table_columns(db, "game_wishlist")
+                wl_row = await db.execute_fetchone(
+                    "SELECT platform, source FROM game_wishlist WHERE id = 1"
+                )
+
+        self.assertEqual(result.final_version, 18)
+        self.assertLessEqual(
+            {
+                "game_id",
+                "platform",
+                "shop",
+                "price",
+                "regular_price",
+                "cut_pct",
+                "currency",
+                "deal_url",
+                "fetched_at",
+            },
+            cols,
+        )
+        self.assertIn("store_identifier", wl_cols)
+        # Existing wishlist row survives the additive migration untouched.
+        self.assertEqual(wl_row["platform"], "steam")
+        self.assertEqual(wl_row["source"], "steam")
+
     async def test_v9_to_v10_adds_series_tables(self) -> None:
         conn = sqlite3.connect(self.db_path)
         conn.executescript(db_module._V9_SCHEMA_DDL)

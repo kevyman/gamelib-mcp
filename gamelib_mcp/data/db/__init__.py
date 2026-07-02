@@ -102,7 +102,7 @@ STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 
 @dataclass
@@ -232,6 +232,7 @@ from .schema import (
     _V12_SCHEMA_DDL,
     _V16_SCHEMA_DDL,
     _V17_SCHEMA_DDL,
+    _V18_SCHEMA_DDL,
 )
 
 
@@ -1148,6 +1149,43 @@ async def _migrate_v16_to_v17(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v17_to_v18(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add game_prices + game_wishlist.store_identifier (see schema.py v18 note).
+
+    Additive only — no data migration. ALTER TABLE ADD COLUMN is guarded so a
+    re-run after a partial failure doesn't error.
+    """
+    if progress is not None:
+        progress("Migrating to v18: add game_prices and game_wishlist.store_identifier.")
+
+    wl_cols = await _table_columns(db, "game_wishlist")
+    if "store_identifier" not in wl_cols:
+        await db.execute("ALTER TABLE game_wishlist ADD COLUMN store_identifier TEXT")
+
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS game_prices (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_id       INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+            platform      TEXT NOT NULL,
+            shop          TEXT NOT NULL,
+            price         REAL,
+            regular_price REAL,
+            cut_pct       INTEGER,
+            currency      TEXT,
+            deal_url      TEXT,
+            fetched_at    TEXT NOT NULL,
+            UNIQUE(game_id, platform, shop)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_game_prices_game_id ON game_prices(game_id);
+        """
+    )
+
+    await _set_user_version(db, 18)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1184,7 +1222,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V17_SCHEMA_DDL)
+    await db.executescript(_V18_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -1295,6 +1333,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (14, _migrate_v14_to_v15),
     (15, _migrate_v15_to_v16),
     (16, _migrate_v16_to_v17),
+    (17, _migrate_v17_to_v18),
 )
 
 
@@ -1312,7 +1351,7 @@ async def _run_migrations(
         _emit(progress, f"Backed up database to {snapshot_path} before migrating.", applied_steps)
 
     if detected_state == "fresh":
-        await db.executescript(_V17_SCHEMA_DDL)
+        await db.executescript(_V18_SCHEMA_DDL)
         fts_enabled = await _sync_fts_index(db)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
@@ -1349,7 +1388,7 @@ async def _run_migrations(
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V17_SCHEMA_DDL)
+    await db.executescript(_V18_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
@@ -1495,6 +1534,7 @@ from .queries import (  # noqa: E402
     load_platforms_for_games,
     load_series_for_games,
     load_related_content_for_games,
+    load_wishlist_with_prices,
 )
 from .upserts import (  # noqa: E402
     GAME_EDITABLE_FIELDS,
@@ -1514,6 +1554,7 @@ from .upserts import (  # noqa: E402
     upsert_game_series_links,
     upsert_game_alias,
     upsert_nintendo_play_summary,
+    upsert_game_prices,
 )
 from .fuzzy import (  # noqa: E402
     load_fuzzy_candidates,

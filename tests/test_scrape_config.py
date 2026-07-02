@@ -257,6 +257,29 @@ class ValidationGateTests(ToolDBTestCase):
         self.assertEqual(statuses["live_trial"], "pass")
         self.assertEqual(statuses["title_overlap"], "pass")
 
+    async def test_dekudeals_defaults_pass_with_fixture_only(self):
+        # No live trial possible (env unset) → the fixture replay is the gate,
+        # covering both the JSON wishlist-item parse and the HTML price parse.
+        with patch.dict("os.environ", {"DEKUDEALS_WISHLIST_URL": ""}):
+            report = await sv.validate_candidate_config("dekudeals", {})
+        self.assertTrue(report["valid"])
+        statuses = {c["name"]: c["status"] for c in report["checks"]}
+        self.assertEqual(statuses["fixture_replay"], "pass")
+        self.assertEqual(statuses["live_trial"], "skipped")
+
+    async def test_dekudeals_wrong_price_selector_rejected_by_fixture(self):
+        # Pointing price_selector at the struck-through regular-price element
+        # parses *something* structurally valid but wrong (and misses items
+        # with no discount entirely); with no live trial the fixture replay
+        # over dekudeals_wishlist_page.html must catch it.
+        with patch.dict("os.environ", {"DEKUDEALS_WISHLIST_URL": ""}):
+            report = await sv.validate_candidate_config(
+                "dekudeals", {"price_selector": ".text-tight s"}
+            )
+        self.assertFalse(report["valid"])
+        statuses = {c["name"]: c["status"] for c in report["checks"]}
+        self.assertEqual(statuses["fixture_replay"], "fail")
+
     async def test_metacritic_live_trial_compares_against_stored_score(self):
         game_id = await seed_game("Example Game")
         from gamelib_mcp.data.db import get_db, upsert_game_platform_enrichment

@@ -122,6 +122,50 @@ class DekuDealsParserTests(unittest.TestCase):
             [{"title": "Pikmin 4", "added_at": None}, {"title": "Celeste", "added_at": None}],
         )
 
+    def test_dekudeals_wishlist_price_parse(self):
+        html = _fixture_text("dekudeals_wishlist_page.html")
+        prices = dekudeals._parse_wishlist_prices(html, DekuDealsScrapeConfig())
+        self.assertIn("Pikmin 4", prices)
+        entry = prices["Pikmin 4"]
+        self.assertAlmostEqual(entry["price"], 59.99)
+        self.assertEqual(entry["currency"], "EUR")
+        self.assertIsNone(entry["cut_pct"])  # undiscounted in the fixture
+        self.assertAlmostEqual(entry["regular_price"], 59.99)
+        self.assertTrue(entry["deal_url"].startswith("https://www.dekudeals.com/items/"))
+
+        discounted = prices["Kirby and the Forgotten Land"]
+        self.assertAlmostEqual(discounted["price"], 24.99)
+        self.assertAlmostEqual(discounted["regular_price"], 49.99)
+        self.assertEqual(discounted["cut_pct"], 50)
+
+    def test_dekudeals_wishlist_price_parse_rejects_untrusted_absolute_href(self):
+        # A scraped href that is absolute but NOT a dekudeals.com URL must
+        # never be passed through as deal_url — only "/"-relative paths
+        # (rewritten onto dekudeals.com) or an absolute dekudeals.com URL
+        # are trusted; anything else degrades to "" like a missing href.
+        html = """
+        <div class='browse-cards view-list mb-4'>
+        <div class='d-flex row row-cols-1 position-relative'>
+        <div class='d-block col'>
+        <a class='main-link' href='https://evil.example/items/x'>
+        <h6 class='line-clamp-3 m-0'>Suspicious Game</h6>
+        </a>
+        <div class='d-flex align-items-center text-tight' style='gap: 0.5rem'>
+        <strong>&euro;19,99</strong>
+        </div>
+        </div>
+        </div>
+        </div>
+        """
+        prices = dekudeals._parse_wishlist_prices(html, DekuDealsScrapeConfig())
+        self.assertIn("Suspicious Game", prices)
+        self.assertEqual(prices["Suspicious Game"]["deal_url"], "")
+
+    def test_broken_wishlist_item_selector_yields_no_rows(self):
+        html = _fixture_text("dekudeals_wishlist_page.html")
+        config = DekuDealsScrapeConfig(wishlist_item_selector=".no-such-card")
+        self.assertEqual(dekudeals._parse_wishlist_prices(html, config), {})
+
 
 if __name__ == "__main__":
     unittest.main()
