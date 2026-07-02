@@ -6,7 +6,7 @@ from typing import Literal
 from fastmcp.exceptions import ToolError
 
 from ..data.backloggd import sync_backloggd
-from ..data.db import get_db, load_platforms_for_games, recompute_tag_affinity, set_meta
+from ..data.db import fts_ready, get_db, load_platforms_for_games, recompute_tag_affinity, set_meta
 from ..data.steam_reviews import sync_steam_reviews
 from ..utils import _parse_json
 from .common import (
@@ -73,7 +73,7 @@ async def rate_game(
                 "SELECT id, name, tags FROM games WHERE id = ?", (game_id,)
             )
         elif name is not None:
-            match = build_name_match(name, column=NORMALIZED_NAME_SQL)
+            match = build_name_match(name, column=NORMALIZED_NAME_SQL, use_fts=fts_ready())
             row = await db.execute_fetchone(
                 f"""SELECT g.id, g.name, g.tags, {match.rank_sql} AS match_rank
                     FROM games g

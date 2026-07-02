@@ -15,6 +15,7 @@ import json
 import math
 import os
 import re
+import sqlite3
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -40,6 +41,7 @@ if not hasattr(aiosqlite.Connection, "execute_fetchone"):
 
 
 _DB_READY_PATH: str | None = None
+_FTS_READY_PATH: str | None = None
 _DB_INIT_LOCK: asyncio.Lock | None = None
 _ENV_LOADED = False
 _FuzzyKey = TypeVar("_FuzzyKey")
@@ -109,6 +111,7 @@ class MigrationResult:
     final_version: int
     detected_state: str
     applied_steps: list[str]
+    fts_enabled: bool = False
 
     @property
     def changed(self) -> bool:
@@ -140,6 +143,11 @@ def _db_path() -> str:
         )
 
     return db_path
+
+
+def fts_ready() -> bool:
+    """True when the configured database has a live games_fts index."""
+    return _FTS_READY_PATH is not None and _FTS_READY_PATH == _db_path()
 
 
 def _ensure_db_parent_dir(db_path: str) -> None:
@@ -209,6 +217,7 @@ def extract_best_fuzzy_key(
 
 
 from .schema import (
+    _FTS_DDL,
     _V1_SCHEMA_DDL,
     _V2_SCHEMA_DDL,
     _V3_SCHEMA_DDL,
@@ -1237,6 +1246,26 @@ async def _snapshot_before_migration(
     return backup_path
 
 
+async def _sync_fts_index(db: aiosqlite.Connection) -> bool:
+    """Ensure games_fts + triggers exist and mirror games; False if no FTS5.
+
+    Runs on every migrate_db call. A destructive games-table rebuild drops the
+    triggers with the old table; CREATE ... IF NOT EXISTS restores them and the
+    full resync repairs any rows changed while triggers were absent.
+    """
+    try:
+        await db.executescript(_FTS_DDL)
+    except sqlite3.OperationalError:
+        return False  # SQLite build lacks FTS5/trigram — LIKE path still works
+    await db.execute("DELETE FROM games_fts")
+    await db.execute(
+        "INSERT INTO games_fts(rowid, name_normalized)"
+        " SELECT id, COALESCE(name_normalized, lower(name)) FROM games"
+    )
+    await db.commit()
+    return True
+
+
 _MigrationStep = Callable[[aiosqlite.Connection, "_Progress | None"], Awaitable[None]]
 
 # Pre-user_version databases are recognized by shape; recording the detected
@@ -1284,6 +1313,7 @@ async def _run_migrations(
 
     if detected_state == "fresh":
         await db.executescript(_V17_SCHEMA_DDL)
+        fts_enabled = await _sync_fts_index(db)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
         _emit(progress, f"Initialized fresh database at schema v{SCHEMA_VERSION}.", applied_steps)
@@ -1292,6 +1322,7 @@ async def _run_migrations(
             final_version=SCHEMA_VERSION,
             detected_state=detected_state,
             applied_steps=applied_steps,
+            fts_enabled=fts_enabled,
         )
 
     if version == 0:
@@ -1323,17 +1354,19 @@ async def _run_migrations(
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
     await db.commit()
+    fts_enabled = await _sync_fts_index(db)
 
     return MigrationResult(
         initial_version=initial_version,
         final_version=version,
         detected_state=detected_state,
         applied_steps=applied_steps,
+        fts_enabled=fts_enabled,
     )
 
 
 async def _ensure_db_initialized(db: aiosqlite.Connection) -> None:
-    global _DB_READY_PATH, _DB_INIT_LOCK
+    global _DB_READY_PATH, _FTS_READY_PATH, _DB_INIT_LOCK
 
     db_path = _db_path()
     if _DB_READY_PATH == db_path:
@@ -1345,8 +1378,9 @@ async def _ensure_db_initialized(db: aiosqlite.Connection) -> None:
     async with _DB_INIT_LOCK:
         if _DB_READY_PATH == db_path:
             return
-        await _run_migrations(db)
+        result = await _run_migrations(db)
         _DB_READY_PATH = db_path
+        _FTS_READY_PATH = db_path if result.fts_enabled else None
 
 
 async def _configure_connection(conn: aiosqlite.Connection, *, enable_wal: bool) -> None:
@@ -1397,7 +1431,7 @@ async def get_db():
 
 async def migrate_db(progress: _Progress | None = None) -> MigrationResult:
     """Run all schema migrations against the configured DB path."""
-    global _DB_READY_PATH
+    global _DB_READY_PATH, _FTS_READY_PATH
 
     db_path = _db_path()
     _ensure_db_parent_dir(db_path)
@@ -1405,6 +1439,7 @@ async def migrate_db(progress: _Progress | None = None) -> MigrationResult:
         await _configure_connection(db, enable_wal=True)
         result = await _run_migrations(db, progress=progress)
         _DB_READY_PATH = db_path
+        _FTS_READY_PATH = db_path if result.fts_enabled else None
         return result
 
 
