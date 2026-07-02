@@ -356,9 +356,17 @@ Two layers of protection:
 15 4 * * * root sqlite3 /root/mcps/data/library/gamelib.db ".backup /root/mcps/data/library/gamelib-nightly.bak" && install -o gamelib-backup -g gamelib-backup -m 600 /root/mcps/data/library/gamelib-nightly.bak /home/gamelib-backup/gamelib-nightly.bak
 ```
 
-3. **Off-machine pull (Windows)** — a home Windows machine pulls the nightly
-   copy via scp on a scheduled task. One-time setup on the Windows machine
-   (PowerShell):
+3. **Off-machine pull (Windows) — installed 2026-07-02** on the home Windows
+   machine `CLOSET` (192.168.129.62): scheduled task `GamelibBackup` runs
+   `C:\Scripts\gamelib-backup.ps1` daily at 08:00 local as user `porta`,
+   pulling into `C:\Users\porta\Backups\gamelib\` with 14 rotated copies. The
+   task runs only while `porta` is logged on (no stored password — the account
+   is a passwordless Microsoft account), which matches how the machine is used.
+   Note: port 22 on CLOSET is WSL2 Ubuntu's sshd, not Windows OpenSSH — remote
+   admin goes through `ssh kevlarrelic@closet`, and Windows-side changes via
+   WSL interop (`/mnt/c/...`, `powershell.exe`, `schtasks.exe`).
+
+   To redo the setup from scratch (PowerShell on the Windows machine):
 
 ```powershell
 # Generate a dedicated key (no passphrase so the scheduled task can run unattended)
