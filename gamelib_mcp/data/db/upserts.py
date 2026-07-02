@@ -744,3 +744,49 @@ async def upsert_nintendo_play_summary(rows: list[dict]) -> int:
         )
         await db.commit()
     return len(rows)
+
+
+async def upsert_game_prices(rows: list[dict]) -> int:
+    """Upsert current-price rows into game_prices, overwriting stale prices.
+
+    Each row: {game_id, platform, shop, price, regular_price, cut_pct,
+    currency, deal_url}. This is a current-price cache, not a history table —
+    fetched_at is stamped here (UTC now) on every call, even when the price
+    is unchanged, so a later staleness check can trust it: a failed/partial
+    fetch must never delete or blank a previously cached price, but a
+    successful fetch that reconfirms the same price should still count as
+    "just refreshed". Returns the number of rows written.
+    """
+    if not rows:
+        return 0
+    now = datetime.now(timezone.utc).isoformat()
+    async with get_db() as db:
+        await db.executemany(
+            """INSERT INTO game_prices
+               (game_id, platform, shop, price, regular_price, cut_pct,
+                currency, deal_url, fetched_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(game_id, platform, shop) DO UPDATE SET
+                   price = excluded.price,
+                   regular_price = excluded.regular_price,
+                   cut_pct = excluded.cut_pct,
+                   currency = excluded.currency,
+                   deal_url = excluded.deal_url,
+                   fetched_at = excluded.fetched_at""",
+            [
+                (
+                    r["game_id"],
+                    r["platform"],
+                    r["shop"],
+                    r.get("price"),
+                    r.get("regular_price"),
+                    r.get("cut_pct"),
+                    r.get("currency"),
+                    r.get("deal_url"),
+                    now,
+                )
+                for r in rows
+            ],
+        )
+        await db.commit()
+    return len(rows)

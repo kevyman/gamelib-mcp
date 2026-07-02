@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from conftest import ToolDBTestCase, add_platform, seed_game
+from conftest import ToolDBTestCase, add_identifier, add_platform, seed_game
 from fastmcp.exceptions import ToolError
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import dekudeals, steam_wishlist
@@ -673,6 +673,161 @@ class DekuDealsWishlistTests(ToolDBTestCase):
                 },
             ],
         )
+
+
+class UpsertGamePricesTests(ToolDBTestCase):
+    async def test_reupsert_overwrites_stale_price_with_one_row(self):
+        game_id = await seed_game("Price Tracked Game")
+
+        written_first = await db_module.upsert_game_prices([
+            {
+                "game_id": game_id,
+                "platform": "steam",
+                "shop": "steam",
+                "price": 19.99,
+                "regular_price": 39.99,
+                "cut_pct": 50,
+                "currency": "USD",
+                "deal_url": "https://store.steampowered.com/app/1",
+            }
+        ])
+        async with db_module.get_db() as db:
+            first_row = await db.execute_fetchone(
+                "SELECT price, fetched_at FROM game_prices "
+                "WHERE game_id = ? AND platform = ? AND shop = ?",
+                (game_id, "steam", "steam"),
+            )
+
+        written_second = await db_module.upsert_game_prices([
+            {
+                "game_id": game_id,
+                "platform": "steam",
+                "shop": "steam",
+                "price": 9.99,
+                "regular_price": 39.99,
+                "cut_pct": 75,
+                "currency": "USD",
+                "deal_url": "https://store.steampowered.com/app/1",
+            }
+        ])
+
+        self.assertEqual(written_first, 1)
+        self.assertEqual(written_second, 1)
+        async with db_module.get_db() as db:
+            rows = await db.execute_fetchall(
+                "SELECT price, cut_pct, fetched_at FROM game_prices "
+                "WHERE game_id = ? AND platform = ? AND shop = ?",
+                (game_id, "steam", "steam"),
+            )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["price"], 9.99)
+        self.assertEqual(rows[0]["cut_pct"], 75)
+        # fetched_at is re-stamped on every upsert, even when reusing the row.
+        self.assertGreaterEqual(rows[0]["fetched_at"], first_row["fetched_at"])
+
+    async def test_distinct_shops_for_same_game_platform_get_separate_rows(self):
+        game_id = await seed_game("Multi Shop Game")
+
+        await db_module.upsert_game_prices([
+            {
+                "game_id": game_id,
+                "platform": "steam",
+                "shop": "steam",
+                "price": 19.99,
+                "regular_price": 19.99,
+                "cut_pct": 0,
+                "currency": "USD",
+                "deal_url": None,
+            },
+            {
+                "game_id": game_id,
+                "platform": "steam",
+                "shop": "gog",
+                "price": 14.99,
+                "regular_price": 19.99,
+                "cut_pct": 25,
+                "currency": "USD",
+                "deal_url": None,
+            },
+        ])
+
+        async with db_module.get_db() as db:
+            rows = await db.execute_fetchall(
+                "SELECT shop, price FROM game_prices WHERE game_id = ? ORDER BY shop", (game_id,)
+            )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([r["shop"] for r in rows], ["gog", "steam"])
+
+
+class LoadWishlistWithPricesTests(ToolDBTestCase):
+    async def test_wishlist_row_with_no_cached_price_has_null_price(self):
+        game_id = await seed_game("No Price Yet")
+        await db_module.upsert_wishlist_entry(game_id, "steam", source="steam")
+
+        rows = await db_module.load_wishlist_with_prices(None)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["game_id"], game_id)
+        self.assertIsNone(rows[0]["price"])
+
+    async def test_cached_price_surfaces_through_the_join(self):
+        game_id = await seed_game("Has A Cached Price")
+        await db_module.upsert_wishlist_entry(game_id, "steam", source="steam")
+        await db_module.upsert_game_prices([
+            {
+                "game_id": game_id,
+                "platform": "steam",
+                "shop": "steam",
+                "price": 4.99,
+                "regular_price": 19.99,
+                "cut_pct": 75,
+                "currency": "USD",
+                "deal_url": "https://store.steampowered.com/app/1",
+            }
+        ])
+
+        rows = await db_module.load_wishlist_with_prices(None)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["price"], 4.99)
+        self.assertEqual(rows[0]["shop"], "steam")
+        self.assertEqual(rows[0]["cut_pct"], 75)
+        self.assertEqual(rows[0]["deal_url"], "https://store.steampowered.com/app/1")
+
+    async def test_platform_filter_excludes_other_platform_rows(self):
+        game_id = await seed_game("On Two Wishlists")
+        await db_module.upsert_wishlist_entry(game_id, "steam", source="steam")
+        await db_module.upsert_wishlist_entry(game_id, "switch2", source="dekudeals")
+
+        steam_only = await db_module.load_wishlist_with_prices("steam")
+
+        self.assertEqual(len(steam_only), 1)
+        self.assertEqual(steam_only[0]["platform"], "steam")
+
+    async def test_steam_appid_resolves_from_store_identifier(self):
+        game_id = await seed_game("Store Identifier Game")
+        await db_module.upsert_wishlist_entry(
+            game_id, "steam", source="steam", store_identifier="123456"
+        )
+
+        rows = await db_module.load_wishlist_with_prices(None)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["steam_appid"], 123456)
+
+    async def test_steam_appid_falls_back_to_owned_row_identifier(self):
+        # Wishlisted on switch2, but owned on steam under the same game_id
+        # (e.g. a bundle/gift) — no store_identifier on the wishlist row
+        # itself, so it should fall back to the owned-row subquery.
+        game_id = await seed_game("Owned Elsewhere Game")
+        await db_module.upsert_wishlist_entry(game_id, "switch2", source="dekudeals")
+        platform_id = await add_platform(game_id, "steam", owned=1)
+        await add_identifier(platform_id, db_module.STEAM_APP_ID, "778899", is_primary=True)
+
+        rows = await db_module.load_wishlist_with_prices(None)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["steam_appid"], 778899)
 
 
 if __name__ == "__main__":

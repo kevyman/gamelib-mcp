@@ -1534,6 +1534,7 @@ from .queries import (  # noqa: E402
     load_platforms_for_games,
     load_series_for_games,
     load_related_content_for_games,
+    load_wishlist_with_prices,
 )
 from .upserts import (  # noqa: E402
     GAME_EDITABLE_FIELDS,
@@ -1553,6 +1554,7 @@ from .upserts import (  # noqa: E402
     upsert_game_series_links,
     upsert_game_alias,
     upsert_nintendo_play_summary,
+    upsert_game_prices,
 )
 from .fuzzy import (  # noqa: E402
     load_fuzzy_candidates,

@@ -386,4 +386,58 @@ async def load_related_content_for_games(game_ids: Iterable[int]) -> dict[int, d
             "platforms": platforms_by_game.get(row["game_id"], []),
         }
         grouped[row["parent_game_id"]][_related_content_group(row["content_type"])].append(entry)
+
     return grouped
+
+
+async def load_wishlist_with_prices(platform: str | None) -> list[aiosqlite.Row]:
+    """Wishlist rows LEFT JOINed to their cached price row, plus a resolved
+    Steam appid for ITAD lookups.
+
+    appid resolution: w.store_identifier first (captured at Steam-wishlist-
+    sync time for unowned items with no game_platforms row), falling back to
+    the owned-row identifier subquery (mirrors tools/common.py::STEAM_APPID_SQL)
+    for the rare case where an item is wishlisted on one platform but owned
+    on Steam under the same game_id — e.g. a bundle or gift.
+
+    Join shape: LEFT JOIN game_prices on (game_id, platform) only — NOT also
+    on shop — since a wishlist row doesn't map 1:1 to a shop. This means a
+    game with cached prices from multiple shops for the same platform yields
+    multiple result rows (one per shop), by design: this is a thin
+    data-access layer, and picking "cheapest" (or otherwise collapsing
+    per-shop rows) is business logic that belongs to the Task 6 tool layer,
+    not here.
+    """
+    where = "WHERE 1=1"
+    params: list = []
+    if platform is not None:
+        where += " AND w.platform = ?"
+        params.append(platform)
+
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            f"""SELECT w.game_id, g.name, w.platform, w.wishlisted_at, w.source,
+                       w.store_identifier,
+                       COALESCE(
+                           CAST(w.store_identifier AS INTEGER),
+                           (
+                               SELECT CAST(gpi.identifier_value AS INTEGER)
+                               FROM game_platform_identifiers gpi
+                               JOIN game_platforms sgp ON sgp.id = gpi.game_platform_id
+                               WHERE sgp.game_id = w.game_id
+                                 AND gpi.identifier_type = '{STEAM_APP_ID}'
+                               ORDER BY gpi.is_primary DESC, gpi.id ASC
+                               LIMIT 1
+                           )
+                       ) AS steam_appid,
+                       gp.shop, gp.price, gp.regular_price, gp.cut_pct,
+                       gp.currency, gp.deal_url, gp.fetched_at
+                FROM game_wishlist w
+                JOIN games g ON g.id = w.game_id
+                LEFT JOIN game_prices gp
+                    ON gp.game_id = w.game_id AND gp.platform = w.platform
+                {where}
+                ORDER BY w.wishlisted_at DESC""",
+            params,
+        )
+    return rows
