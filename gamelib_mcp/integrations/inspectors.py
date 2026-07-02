@@ -22,14 +22,19 @@ class LastSyncMeta(TypedDict, total=False):
 def inspect_all_integrations(
     last_sync_by_platform: dict[str, LastSyncMeta] | None = None,
 ) -> dict[str, IntegrationStatus]:
+    # Which probes exist, and under which name, comes from the platform
+    # registry (PlatformSpec.inspector_attr names a function in this module).
+    from ..platforms_registry import PLATFORMS
+
     last_sync_by_platform = last_sync_by_platform or {}
-    return {
-        "steam": _safe_inspect("steam", inspect_steam, last_sync_by_platform.get("steam")),
-        "epic": _safe_inspect("epic", inspect_epic, last_sync_by_platform.get("epic")),
-        "gog": _safe_inspect("gog", inspect_gog, last_sync_by_platform.get("gog")),
-        "nintendo": _safe_inspect("nintendo", inspect_nintendo, last_sync_by_platform.get("nintendo")),
-        "ps5": _safe_inspect("ps5", inspect_psn, last_sync_by_platform.get("ps5")),
-    }
+    result: dict[str, IntegrationStatus] = {}
+    for spec in PLATFORMS:
+        if spec.inspector_attr is None:
+            continue
+        name = spec.inspector_name or spec.name
+        inspector = globals()[spec.inspector_attr]
+        result[name] = _safe_inspect(name, inspector, last_sync_by_platform.get(name))
+    return result
 
 
 def inspect_all_integrations_dict(
