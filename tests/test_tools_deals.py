@@ -186,6 +186,46 @@ class GetWishlistDealsTests(ToolDBTestCase):
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["deals"][0]["price"], 14.99)
 
+    async def test_refresh_prunes_stale_cheaper_shop_from_previous_winner(self):
+        # End-to-end regression for the game_prices staleness bug: a GOG sale
+        # two weeks ago cached (steam, GOG, 5.00) as the winner. Today's ITAD
+        # refresh says Steam is now cheapest at 20.00. Without pruning, the
+        # stale GOG row would still be in the join and `min()` would report
+        # the dead 5.00 deal forever, even with refresh=True.
+        game_id = await seed_game("Sale Then Not")
+        await _seed_wishlist(game_id, "steam", store_identifier="555")
+        await _seed_price(
+            game_id,
+            "steam",
+            "GOG",
+            5.00,
+            currency="USD",
+            deal_url="https://gog.com/deal",
+            fetched_at="2020-01-01T00:00:00+00:00",  # far past the 12h TTL
+        )
+
+        with patch(
+            "gamelib_mcp.tools.deals.fetch_steam_prices",
+            AsyncMock(
+                return_value={555: PriceInfo("Steam", 20.00, 20.00, 0, "USD", "https://store.steampowered.com/app/555")}
+            ),
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.is_itad_configured", return_value=True
+        ):
+            result = await deals.get_wishlist_deals(refresh=True)
+
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["deals"][0]["shop"], "Steam")
+        self.assertEqual(result["deals"][0]["price"], 20.00)
+
+        async with db_module.get_db() as db:
+            rows = await db.execute_fetchall(
+                "SELECT shop FROM game_prices WHERE game_id = ?", (game_id,)
+            )
+        self.assertEqual([r["shop"] for r in rows], ["Steam"])
+
     async def test_unconfigured_itad_leaves_steam_rows_unpriced(self):
         game_id = await seed_game("No ITAD Game")
         await _seed_wishlist(game_id, "steam", store_identifier="7")

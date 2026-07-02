@@ -756,6 +756,17 @@ async def upsert_game_prices(rows: list[dict]) -> int:
     fetch must never delete or blank a previously cached price, but a
     successful fetch that reconfirms the same price should still count as
     "just refreshed". Returns the number of rows written.
+
+    Every caller in this system writes the *complete* current shop set for
+    each (game_id, platform) key it's refreshing in one batch (ITAD's
+    ``_best_deal`` returns exactly one winning shop per Steam appid;
+    DekuDeals always writes shop="dekudeals" for switch2), so after the
+    upsert, any pre-existing row for a key touched by this batch whose shop
+    isn't among the shops just written is a stale loser from a previous
+    refresh (e.g. last week's cheaper GOG price after Steam becomes the new
+    cheapest) and is pruned. Without this, `UNIQUE(game_id, platform, shop)`
+    lets old non-winning shop rows accumulate forever and can make a stale
+    price look permanently "cheapest".
     """
     if not rows:
         return 0
@@ -788,5 +799,16 @@ async def upsert_game_prices(rows: list[dict]) -> int:
                 for r in rows
             ],
         )
+        shops_by_key: dict[tuple[int, str], set[str]] = {}
+        for r in rows:
+            shops_by_key.setdefault((r["game_id"], r["platform"]), set()).add(r["shop"])
+        for (game_id, platform), shops in shops_by_key.items():
+            placeholders = ",".join("?" for _ in shops)
+            await db.execute(
+                f"""DELETE FROM game_prices
+                    WHERE game_id = ? AND platform = ?
+                      AND shop NOT IN ({placeholders})""",
+                (game_id, platform, *shops),
+            )
         await db.commit()
     return len(rows)

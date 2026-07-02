@@ -763,6 +763,47 @@ class UpsertGamePricesTests(ToolDBTestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual([r["shop"] for r in rows], ["gog", "steam"])
 
+    async def test_new_winning_shop_prunes_stale_losing_shop_row(self):
+        # Regression for: game_prices' UNIQUE(game_id, platform, shop) means
+        # each ITAD refresh only ever upserts the row for the CURRENT winning
+        # shop. A previous winner's row (e.g. a GOG sale two weeks ago) must
+        # not survive forever once a different shop wins, or the stale price
+        # looks permanently "cheapest" and refresh=True can never fix it.
+        game_id = await seed_game("Stale Shop Game")
+
+        await db_module.upsert_game_prices([
+            {
+                "game_id": game_id,
+                "platform": "steam",
+                "shop": "GOG",
+                "price": 5.00,
+                "regular_price": 5.00,
+                "cut_pct": 0,
+                "currency": "USD",
+                "deal_url": "https://gog.com/deal",
+            }
+        ])
+
+        # A later refresh's batch reflects only today's winning shop (Steam).
+        await db_module.upsert_game_prices([
+            {
+                "game_id": game_id,
+                "platform": "steam",
+                "shop": "Steam",
+                "price": 20.00,
+                "regular_price": 20.00,
+                "cut_pct": 0,
+                "currency": "USD",
+                "deal_url": "https://store.steampowered.com/app/1",
+            }
+        ])
+
+        async with db_module.get_db() as db:
+            rows = await db.execute_fetchall(
+                "SELECT shop, price FROM game_prices WHERE game_id = ?", (game_id,)
+            )
+        self.assertEqual([(r["shop"], r["price"]) for r in rows], [("Steam", 20.00)])
+
 
 class LoadWishlistWithPricesTests(ToolDBTestCase):
     async def test_wishlist_row_with_no_cached_price_has_null_price(self):
