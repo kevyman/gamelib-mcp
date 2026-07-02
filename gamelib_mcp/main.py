@@ -1,7 +1,7 @@
 """FastMCP server — app definition, MCP tool registration, auth, HTTP transport.
 
 Startup/shutdown and background-task orchestration live in ``lifecycle.py``; the
-bearer-auth middleware and HTTP admin routes live in ``http_admin.py``. This
+HTTP security middleware and admin routes live in ``http_admin.py``. This
 module stays deliberately thin: the FastMCP instance, the tool passthrough
 decorators (whose signatures and docstrings are the MCP wire schema), and the
 ASGI entry point.
@@ -11,14 +11,16 @@ import logging
 import os
 from typing import Literal
 
-from fastmcp import Context, FastMCP
-from mcp.types import ToolAnnotations
-
 from .env import load_project_dotenv
 
 load_project_dotenv()
 
-from .http_admin import BearerAuthMiddleware, register_http_routes
+from fastmcp import Context, FastMCP
+from fastmcp.server.middleware import AuthMiddleware
+from mcp.types import ToolAnnotations
+
+from .auth import load_security_config
+from .http_admin import HttpSecurityMiddleware, register_http_routes
 from .lifecycle import lifespan
 from .tools.integrations import get_integration_status as _filter_integration_status
 from .tools.models import (
@@ -57,6 +59,14 @@ from .tools.models import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+security_config = load_security_config()
+auth_provider = security_config.build_auth_provider()
+component_middleware = (
+    [AuthMiddleware(auth=security_config.owner_authorization_check())]
+    if auth_provider is not None
+    else []
+)
+
 _display_name = os.getenv("STEAM_PROFILE_ID") or os.getenv("BACKLOGGD_USER") or "the configured user"
 
 READ_ONLY_TOOL = ToolAnnotations(readOnlyHint=True, idempotentHint=True)
@@ -78,6 +88,8 @@ mcp = FastMCP(
         "taste match, critic score, or value. Use search and detail tools for known games, and "
         "prefer concise list responses with offset pagination when available for larger result sets."
     ),
+    auth=auth_provider,
+    middleware=component_middleware,
     lifespan=lifespan,
 )
 
@@ -800,4 +812,15 @@ if __name__ == "__main__":
     from starlette.middleware import Middleware
 
     port = int(os.getenv("PORT", "8000"))
-    mcp.run(transport="http", host="0.0.0.0", port=port, middleware=[Middleware(BearerAuthMiddleware)])
+    mcp.run(
+        transport="http",
+        host="0.0.0.0",
+        port=port,
+        middleware=[
+            Middleware(
+                HttpSecurityMiddleware,
+                admin_token=security_config.admin_token,
+                allowed_origins=security_config.allowed_origins,
+            )
+        ],
+    )

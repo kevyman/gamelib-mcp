@@ -46,13 +46,15 @@ outside the sandbox before changing test fixtures or database paths.
 
 ## Required Environment Variables
 
-Copy `.env.example` to `.env`:
+Copy `.env.example` to `.env` for a production deploy (OAuth required), or `.env.local.example` to `.env` for localhost-only development (`MCP_AUTH_MODE=disabled`):
 
 - `STEAM_API_KEY` — from steamcommunity.com/dev/apikey
 - `STEAM_ID` — 64-bit Steam ID
 - `DATABASE_URL` — SQLite path (optional). Defaults to `data/gamelib.db` when unset. Set explicitly (e.g. `file:./data/gamelib.db`) only when overriding the location.
-- `MCP_AUTH_TOKEN` — bearer token for MCP auth (empty = open)
-- `MCP_ALLOWED_ORIGINS` — comma-separated browser origins allowed to call the MCP endpoint, e.g. `https://claude.ai,https://chatgpt.com`. Requests without an `Origin` header are still allowed for native/CLI MCP clients.
+- `MCP_AUTH_MODE` — must be explicit: `oauth` in production or `disabled` for localhost-only development.
+- `MCP_PUBLIC_BASE_URL`, `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, `MCP_OAUTH_JWT_SIGNING_KEY`, `MCP_OAUTH_GITHUB_USER_IDS` (comma-separated), and `FASTMCP_HOME` configure GitHub OAuth in production.
+- `MCP_ADMIN_AUTH_TOKEN` — independent header-only bearer token for `/admin/*`.
+- `MCP_ALLOWED_ORIGINS` — comma-separated browser origins allowed to call the HTTP surface, e.g. `https://chatgpt.com`. The OAuth server's own origin is automatically included; requests without an `Origin` header are still allowed for native/CLI MCP clients.
 - `PORT` — server port (default: 8000)
 - `DEKUDEALS_WISHLIST_URL` — optional. Your DekuDeals shared wishlist URL (e.g. `https://www.dekudeals.com/wishlist/<share-id>`), used by `sync_wishlist` to populate the switch2 wishlist since Nintendo has no wishlist API.
 - `SCRAPE_HEAL_REQUIRE_APPROVAL` — optional. When set to `1`, a `propose_scrape_config` override that passes validation lands as `pending` (requiring `approve_scrape_config`) instead of activating immediately.
@@ -69,9 +71,10 @@ The project database lives at `./data/gamelib.db`. `_db_path()` defaults to `dat
 ### Entry Point & Transport
 
 App composition is split across three thin top-level modules:
-- `gamelib_mcp/main.py`: creates the FastMCP app, registers all MCP tools (declarative `@mcp.tool()` passthroughs whose signatures/docstrings are the wire schema), wires the lifespan + HTTP routes, and is the Streamable HTTP entry point (`python -m gamelib_mcp.main`).
+- `gamelib_mcp/main.py`: creates the FastMCP app, registers all MCP tools (declarative `@mcp.tool()` passthroughs whose signatures/docstrings are the wire schema), builds the security config and GitHub OAuth provider (`auth.py`), wires the lifespan + HTTP routes, and is the Streamable HTTP entry point (`python -m gamelib_mcp.main`).
+- `gamelib_mcp/auth.py`: process-lifetime `SecurityConfig` (env validation, fail-closed unless `MCP_AUTH_MODE` is explicit), GitHub OAuth provider construction, and the single/multi-owner `AuthMiddleware` authorization check restricting MCP tool access to the configured GitHub user ID(s).
 - `gamelib_mcp/lifecycle.py`: the `lifespan` context manager and all background-task orchestration — startup library refresh, background enrichment scheduling, periodic refresh loop, per-event-loop locks, and the per-platform sync-metadata helpers. On startup: DB is initialized, library refresh is scheduled if stale, and background enrichment starts without waiting for a single provider to finish first.
-- `gamelib_mcp/http_admin.py`: bearer-auth ASGI middleware plus the `/health` and `/admin/integrations*` routes, registered via `register_http_routes(mcp)`.
+- `gamelib_mcp/http_admin.py`: `HttpSecurityMiddleware` (origin allowlisting for all routes, plus an independent header-only bearer token gating `/admin/*`) and the `/health` and `/admin/integrations*` routes, registered via `register_http_routes(mcp)`. `/mcp` itself is authenticated by FastMCP's OAuth provider, not this middleware.
 
 Dependency direction is a clean DAG: `main → lifecycle`, `main → http_admin`, `tools.admin → lifecycle`. `lifecycle` reaches `tools.admin.refresh_library` lazily (no top-level import) to avoid a cycle.
 

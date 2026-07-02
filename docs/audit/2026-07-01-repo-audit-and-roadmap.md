@@ -6,9 +6,8 @@ passing (~54s)**.
 
 ## Status (updated 2026-07-01)
 
-**Fixed in PR #41 (merged):** PR CI workflow (gap 2); timing-safe auth compare
-(gap 5 — the `?token=` query fallback was deliberately kept for header-less
-clients, with the log-exposure trade-off documented); tracked/cancellable
+**Fixed in PR #41 (merged):** PR CI workflow (gap 2); timing-safe auth compare;
+tracked/cancellable
 startup ratings task (gap 6); fresh-DB init message now uses `SCHEMA_VERSION`;
 deploy.yml concurrency comment; root `test.py` moved to
 `scripts/seed_v1_sample_db.py`; Dockerfile `HEALTHCHECK`. The httpx-timeout nit
@@ -109,6 +108,11 @@ proprietary note).
   a one-line change.
 - `MCP_AUTH_TOKEN` is read at import time, so a rotate requires knowing that a
   restart is needed (worth a comment at minimum).
+
+**Resolved later:** the MCP endpoint now uses FastMCP's GitHub OAuth 2.1 proxy,
+the query-token fallback was removed, and `/admin/*` uses a separate
+header-only bearer token. OAuth and admin secret changes require recreating the
+container so the process receives the new environment.
 
 ### 6. Fire-and-forget startup task can be garbage-collected
 `lifecycle.py:502`:
