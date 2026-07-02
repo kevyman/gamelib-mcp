@@ -265,3 +265,53 @@ class DetectCrossPlatformCollapsesResponse(FlexibleModel):
     collapsed_count: int
     candidates: list[dict[str, Any]]
     igdb_configured: bool
+
+
+class ScrapeConfigVersion(FlexibleModel):
+    version: int
+    status: str
+    source: str
+    note: str | None = None
+    created_at: str
+
+
+class GetScrapeConfigResponse(FlexibleModel):
+    provider: str
+    on_defaults: bool
+    defaults: dict[str, Any]
+    active_override: dict[str, Any] | None = None
+    effective_config: dict[str, Any]
+    pending_versions: list[ScrapeConfigVersion]
+    history: list[ScrapeConfigVersion]
+    require_approval: bool
+
+
+class DiagnoseScrapeResponse(FlexibleModel):
+    provider: str
+    status: str
+    active_config: dict[str, Any] | None = None
+    parsed_rows: int | None = None
+    selector_matches: dict[str, int] | None = None
+    untrusted_page_excerpt: str | None = None
+
+
+class ProposeScrapeConfigResponse(FlexibleModel):
+    provider: str
+    applied: bool
+    status: str
+    version: int | None = None
+    validation: dict[str, Any]
+
+
+class ApproveScrapeConfigResponse(FlexibleModel):
+    provider: str
+    status: str
+    version: int
+    effective_config: dict[str, Any]
+
+
+class RollbackScrapeConfigResponse(FlexibleModel):
+    provider: str
+    restored_version: int | None = None
+    on_defaults: bool
+    effective_config: dict[str, Any]

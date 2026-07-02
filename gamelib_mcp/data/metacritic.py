@@ -1,4 +1,11 @@
-"""Platform-aware Metacritic scraper — writes to game_platform_enrichment."""
+"""Platform-aware Metacritic scraper — writes to game_platform_enrichment.
+
+The declarative surface (URL templates, the platform→slug map, the CSS
+fallback selectors, cache TTL) comes from ``scrape_config.load_scrape_config
+("metacritic")``. The JSON-LD ``bestRating == 100`` disambiguation guard stays
+in code — it is what keeps user scores (bestRating=10) from being stored as
+Metascores, and must not be healable away.
+"""
 
 import json
 import logging
@@ -9,25 +16,11 @@ import httpx
 from bs4 import BeautifulSoup
 
 from .db import upsert_game_platform_enrichment
+from .scrape_config import MetacriticScrapeConfig, load_scrape_config
 
 logger = logging.getLogger(__name__)
 
 METACRITIC_CACHE_DAYS = 30
-
-_GAME_URL = "https://www.metacritic.com/game/{slug}/"
-_PLATFORM_GAME_URL = "https://www.metacritic.com/game/{platform_slug}/{slug}/"
-
-_PLATFORM_QUERY_VALUES = {
-    "steam": "pc",
-    "epic": "pc",
-    "gog": "pc",
-    "ps5": "playstation-5",
-    "ps4": "playstation-4",
-    "switch": "nintendo-switch",
-    "switch2": "nintendo-switch-2",
-    "xbox-series-x": "xbox-series-x",
-    "xbox-one": "xbox-one",
-}
 
 _HEADERS = {
     "User-Agent": (
@@ -38,14 +31,14 @@ _HEADERS = {
 }
 
 
-def _is_fresh(cached_at: str | None) -> bool:
+def _is_fresh(cached_at: str | None, cache_days: int = METACRITIC_CACHE_DAYS) -> bool:
     if not cached_at:
         return False
     if cached_at == "FAILED":
         return True  # don't retry; background job skips FAILED entries
     try:
         dt = datetime.fromisoformat(cached_at)
-        return (datetime.now(timezone.utc) - dt).total_seconds() < METACRITIC_CACHE_DAYS * 86400
+        return (datetime.now(timezone.utc) - dt).total_seconds() < cache_days * 86400
     except ValueError:
         return False
 
@@ -59,39 +52,26 @@ def _to_slug(name: str) -> str:
     return slug
 
 
-def _candidate_urls(slug: str, platform: str) -> list[str]:
-    query_value = _PLATFORM_QUERY_VALUES.get(platform)
-    base_url = _GAME_URL.format(slug=slug)
+def _candidate_urls(slug: str, platform: str, config: MetacriticScrapeConfig | None = None) -> list[str]:
+    if config is None:
+        config = MetacriticScrapeConfig()
+
+    query_value = config.platform_query_values.get(platform)
+    base_url = config.game_url_template.format(slug=slug)
     urls: list[str] = []
 
     if query_value:
         urls.append(f"{base_url}?platform={query_value}")
-        urls.append(_PLATFORM_GAME_URL.format(platform_slug=query_value, slug=slug))
+        urls.append(config.platform_game_url_template.format(platform_slug=query_value, slug=slug))
 
     urls.append(base_url)
     return urls
 
 
-async def _fetch_score_from_url(url: str) -> tuple[int | None, str]:
-    """
-    Fetch a Metacritic game page and extract the Metascore.
-    Returns (score, final_url). Score is None if not found or page 404s.
-    """
-    try:
-        async with httpx.AsyncClient(
-            timeout=15,
-            follow_redirects=True,
-            headers=_HEADERS,
-        ) as client:
-            resp = await client.get(url)
-            if resp.status_code == 404:
-                return None, url
-            resp.raise_for_status()
-            html = resp.text
-            final_url = str(resp.url)
-    except Exception as exc:
-        logger.debug("Metacritic fetch failed for %s: %s", url, exc)
-        return None, url
+def _extract_score(html: str, config: MetacriticScrapeConfig | None = None) -> int | None:
+    """Extract the critic Metascore from a Metacritic game page. Pure."""
+    if config is None:
+        config = MetacriticScrapeConfig()
 
     soup = BeautifulSoup(html, "html.parser")
 
@@ -115,16 +95,13 @@ async def _fetch_score_from_url(url: str) -> tuple[int | None, str]:
             try:
                 if int(float(best)) != 100:
                     continue  # user score (bestRating=10), not the Metascore
-                return int(float(value)), final_url
+                return int(float(value))
             except (TypeError, ValueError):
                 continue
 
     # Fallback: critic-score-only CSS selectors. (.c-siteReviewScore is shared by
     # the user-score widget, so it is intentionally excluded here.)
-    for selector in [
-        '[data-testid="score-meta-critic"]',
-        ".metascore_w",
-    ]:
+    for selector in config.critic_score_selectors:
         el = soup.select_one(selector)
         if el:
             text = el.get_text(strip=True)
@@ -132,9 +109,35 @@ async def _fetch_score_from_url(url: str) -> tuple[int | None, str]:
             if m:
                 score = int(m.group())
                 if 0 < score <= 100:
-                    return score, final_url
+                    return score
 
-    return None, final_url
+    return None
+
+
+async def _fetch_score_from_url(
+    url: str, config: MetacriticScrapeConfig | None = None
+) -> tuple[int | None, str]:
+    """
+    Fetch a Metacritic game page and extract the Metascore.
+    Returns (score, final_url). Score is None if not found or page 404s.
+    """
+    try:
+        async with httpx.AsyncClient(
+            timeout=15,
+            follow_redirects=True,
+            headers=_HEADERS,
+        ) as client:
+            resp = await client.get(url)
+            if resp.status_code == 404:
+                return None, url
+            resp.raise_for_status()
+            html = resp.text
+            final_url = str(resp.url)
+    except Exception as exc:
+        logger.debug("Metacritic fetch failed for %s: %s", url, exc)
+        return None, url
+
+    return _extract_score(html, config), final_url
 
 
 async def enrich_metacritic(
@@ -148,21 +151,23 @@ async def enrich_metacritic(
     """
     from .db import get_db
 
+    config = await load_scrape_config("metacritic")
+
     async with get_db() as db:
         row = await db.execute_fetchone(
             "SELECT metacritic_cached_at FROM game_platform_enrichment WHERE game_platform_id = ?",
             (game_platform_id,),
         )
     cached_at = row["metacritic_cached_at"] if row else None
-    if _is_fresh(cached_at):
+    if _is_fresh(cached_at, config.cache_days):
         return None
 
     now = datetime.now(timezone.utc).isoformat()
     slug = _to_slug(game_name)
     score = None
-    final_url = _GAME_URL.format(slug=slug)
-    for url in _candidate_urls(slug, platform):
-        score, final_url = await _fetch_score_from_url(url)
+    final_url = config.game_url_template.format(slug=slug)
+    for url in _candidate_urls(slug, platform, config):
+        score, final_url = await _fetch_score_from_url(url, config)
         if score is not None:
             break
 

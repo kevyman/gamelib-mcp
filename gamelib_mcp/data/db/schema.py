@@ -795,3 +795,29 @@ _V16_SCHEMA_DDL = _V12_SCHEMA_DDL + """
 
     CREATE INDEX IF NOT EXISTS idx_game_wishlist_game_id ON game_wishlist(game_id);
 """
+
+# v17 adds scrape_config: versioned, DB-backed overrides for the declarative
+# scrape descriptors in data/scrape_config.py (URL templates, selectors, JSON
+# paths, TTLs). Rows are append-only versions per provider; at most one row per
+# provider is 'active' at a time, and code-level defaults always remain the
+# implicit version 0 (an empty table means "run on defaults"). status values:
+# active | pending (awaiting approve_scrape_config) | superseded (replaced by a
+# newer active) | rolled_back. config_json holds the (possibly partial)
+# override dict; validation_report records the check results that admitted it.
+_V17_SCHEMA_DDL = _V16_SCHEMA_DDL + """
+    CREATE TABLE IF NOT EXISTS scrape_config (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider          TEXT NOT NULL,
+        version           INTEGER NOT NULL,
+        config_json       TEXT NOT NULL,
+        status            TEXT NOT NULL CHECK (status IN ('active', 'pending', 'superseded', 'rolled_back')),
+        source            TEXT NOT NULL DEFAULT 'manual',
+        note              TEXT,
+        validation_report TEXT,
+        created_at        TEXT NOT NULL,
+        UNIQUE(provider, version)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_scrape_config_provider_status
+        ON scrape_config(provider, status);
+"""

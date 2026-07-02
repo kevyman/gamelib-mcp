@@ -26,6 +26,7 @@ be mistaken for "the wishlist is now empty" and wipe every switch2 entry.
 import logging
 import os
 from datetime import datetime, timezone
+from typing import Any
 
 import httpx
 
@@ -35,6 +36,7 @@ from .db import (
     get_db,
     upsert_wishlist_entry,
 )
+from .scrape_config import DekuDealsScrapeConfig, load_scrape_config
 
 DEKUDEALS_WISHLIST_URL = os.getenv("DEKUDEALS_WISHLIST_URL", "")
 logger = logging.getLogger(__name__)
@@ -63,7 +65,8 @@ async def sync_dekudeals_wishlist() -> dict:
             "error_classification": "missing_configuration",
         }
 
-    items = await _fetch_wishlist_items(wishlist_url)
+    config = await load_scrape_config("dekudeals")
+    items = await _fetch_wishlist_items(wishlist_url, config)
 
     async with get_db() as db:
         game_rows = await db.execute_fetchall("SELECT id, name FROM games")
@@ -75,7 +78,9 @@ async def sync_dekudeals_wishlist() -> dict:
     resolved_game_ids: set[int] = set()
 
     for item in items:
-        game_id = _match_game_id(item["title"], candidate_names, name_to_id)
+        game_id = _match_game_id(
+            item["title"], candidate_names, name_to_id, cutoff=config.fuzzy_cutoff
+        )
         if game_id is None:
             logger.debug("No match for DekuDeals wishlist title: %s", item["title"])
             skipped += 1
@@ -93,7 +98,9 @@ async def sync_dekudeals_wishlist() -> dict:
     return {"matched": matched, "skipped": skipped, "removed": removed, "total_scraped": len(items)}
 
 
-async def _fetch_wishlist_items(wishlist_url: str) -> list[dict]:
+async def _fetch_wishlist_items(
+    wishlist_url: str, config: DekuDealsScrapeConfig | None = None
+) -> list[dict]:
     """Fetch the DekuDeals wishlist JSON export.
 
     Returns a list of {"title": str, "added_at": str | None} — added_at is the
@@ -113,26 +120,51 @@ async def _fetch_wishlist_items(wishlist_url: str) -> list[dict]:
         resp.raise_for_status()
         payload = resp.json()
 
-    raw_items = payload if isinstance(payload, list) else payload.get("items", payload.get("games", []))
+    return _parse_wishlist_payload(payload, config)
+
+
+def _parse_wishlist_payload(
+    payload: Any, config: DekuDealsScrapeConfig | None = None
+) -> list[dict]:
+    """Extract {title, added_at} rows from a wishlist export payload. Pure."""
+    if config is None:
+        config = DekuDealsScrapeConfig()
+
+    if isinstance(payload, list):
+        raw_items = payload
+    else:
+        raw_items = []
+        for key in config.items_keys:
+            candidate = payload.get(key)
+            if candidate:
+                raw_items = candidate
+                break
+
     items = []
     for item in raw_items:
         if isinstance(item, str):
             items.append({"title": item, "added_at": None})
         elif isinstance(item, dict):
-            title = item.get("title") or item.get("name")
+            title = None
+            for key in config.title_keys:
+                title = item.get(key)
+                if title:
+                    break
             if title:
-                items.append({"title": title, "added_at": item.get("added_at")})
+                items.append({"title": title, "added_at": item.get(config.added_at_key)})
     return items
 
 
-def _match_game_id(title: str, candidate_names: dict[str, str], name_to_id: dict) -> int | None:
+def _match_game_id(
+    title: str, candidate_names: dict[str, str], name_to_id: dict, cutoff: int = 85
+) -> int | None:
     """Fuzzy-match a DekuDeals title to a game in the DB, returns games.id."""
     title_lower = title.lower()
 
     if title_lower in name_to_id:
         return name_to_id[title_lower]
 
-    match = extract_best_fuzzy_key(title_lower, candidate_names, cutoff=85)
+    match = extract_best_fuzzy_key(title_lower, candidate_names, cutoff=cutoff)
     if match:
         return name_to_id[match]
 
