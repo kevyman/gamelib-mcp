@@ -12,6 +12,12 @@ RUN apt-get update \
 COPY pyproject.toml uv.lock ./
 COPY gamelib_mcp/ gamelib_mcp/
 RUN uv sync --frozen --no-dev --no-cache
+# Run as a fixed non-root UID; the host data dir mounted at /data must be
+# chowned to this UID (see deploy.md "Running as non-root").
+RUN groupadd -g 10001 app \
+    && useradd -m -u 10001 -g app app
+USER app
+ENV HOME=/home/app
 HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
     CMD python -c 'import os, urllib.request; urllib.request.urlopen("http://127.0.0.1:%s/health" % os.getenv("PORT", "8000"), timeout=4)'
 CMD ["python", "-m", "gamelib_mcp.main"]
