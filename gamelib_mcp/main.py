@@ -54,6 +54,7 @@ from .tools.models import (
     SyncWishlistResponse,
     TasteProfileResponse,
     UpdateGameResponse,
+    WishlistDealsResponse,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -639,6 +640,27 @@ async def get_wishlist(platform: str | None = None) -> GetWishlistResponse:
     """
     from .tools.platforms import get_wishlist as _get_wishlist
     return await _get_wishlist(platform)
+
+
+@mcp.tool(annotations=DIAGNOSTIC_NETWORK_TOOL)
+async def get_wishlist_deals(
+    platform: str | None = None,
+    max_price: float | None = None,
+    min_cut_pct: int | None = None,
+    refresh: bool = False,
+) -> WishlistDealsResponse:
+    """
+    Current prices/deals for wishlist games, cheapest first.
+
+    Prices come from IsThereAnyDeal (Steam wishlist items; covers Steam/GOG/
+    Epic shops) and DekuDeals (switch2 items). Cached in the DB; a fetch runs
+    automatically when the cache is older than 12h, or immediately with
+    refresh=True. Filters: platform, max_price (in the configured ITAD
+    country's currency), min_cut_pct (e.g. 50 for "at least half off").
+    Items with no known price are listed separately in unpriced.
+    """
+    from .tools.deals import get_wishlist_deals as _get_wishlist_deals
+    return await _get_wishlist_deals(platform, max_price, min_cut_pct, refresh)
 
 
 @mcp.tool(annotations=MUTATION_TOOL)
