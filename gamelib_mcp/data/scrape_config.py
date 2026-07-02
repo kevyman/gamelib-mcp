@@ -173,6 +173,13 @@ class DekuDealsScrapeConfig:
     )
     added_at_key: str = field(default="added_at", metadata={"kind": "json_key"})
     fuzzy_cutoff: int = field(default=85, metadata={"kind": "int", "min": 50, "max": 100})
+    # Price-scrape selectors (shared wishlist HTML page, not the JSON export).
+    wishlist_item_selector: str = field(default=".d-block.col", metadata={"kind": "selector"})
+    item_link_selector: str = field(default="a.main-link", metadata={"kind": "selector"})
+    item_title_selector: str = field(default="a.main-link h6", metadata={"kind": "selector"})
+    price_selector: str = field(default=".text-tight strong", metadata={"kind": "selector"})
+    regular_price_selector: str = field(default=".text-tight s", metadata={"kind": "selector"})
+    cut_pct_selector: str = field(default=".badge-danger", metadata={"kind": "selector"})
 
 
 ScrapeConfig = (

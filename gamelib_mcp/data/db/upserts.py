@@ -204,6 +204,7 @@ async def upsert_wishlist_entry(
     platform: str,
     wishlisted_at: str | None = None,
     source: str | None = None,
+    store_identifier: str | None = None,
 ) -> int:
     """Insert or update a game_wishlist row and return its id.
 
@@ -211,16 +212,18 @@ async def upsert_wishlist_entry(
     be owned anywhere yet, and game_platforms rows are meant to mean "a real
     platform relationship exists" (owned, or a manual stub). source records
     where the entry came from (e.g. "steam", "dekudeals", "manual").
+    store_identifier captures the store's own ID (e.g. Steam appid) at sync time.
     """
     now = wishlisted_at or datetime.now(timezone.utc).isoformat()
     async with get_db() as db:
         await db.execute(
-            """INSERT INTO game_wishlist (game_id, platform, wishlisted_at, source)
-               VALUES (?, ?, ?, ?)
+            """INSERT INTO game_wishlist (game_id, platform, wishlisted_at, source, store_identifier)
+               VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(game_id, platform) DO UPDATE SET
                    wishlisted_at = excluded.wishlisted_at,
-                   source = excluded.source""",
-            (game_id, platform, now, source),
+                   source = excluded.source,
+                   store_identifier = COALESCE(excluded.store_identifier, store_identifier)""",
+            (game_id, platform, now, source, store_identifier),
         )
         row = await db.execute_fetchone(
             "SELECT id FROM game_wishlist WHERE game_id = ? AND platform = ?",
@@ -739,5 +742,73 @@ async def upsert_nintendo_play_summary(rows: list[dict]) -> int:
                 for r in rows
             ],
         )
+        await db.commit()
+    return len(rows)
+
+
+async def upsert_game_prices(rows: list[dict]) -> int:
+    """Upsert current-price rows into game_prices, overwriting stale prices.
+
+    Each row: {game_id, platform, shop, price, regular_price, cut_pct,
+    currency, deal_url}. This is a current-price cache, not a history table —
+    fetched_at is stamped here (UTC now) on every call, even when the price
+    is unchanged, so a later staleness check can trust it: a failed/partial
+    fetch must never delete or blank a previously cached price, but a
+    successful fetch that reconfirms the same price should still count as
+    "just refreshed". Returns the number of rows written.
+
+    Every caller in this system writes the *complete* current shop set for
+    each (game_id, platform) key it's refreshing in one batch (ITAD's
+    ``_best_deal`` returns exactly one winning shop per Steam appid;
+    DekuDeals always writes shop="dekudeals" for switch2), so after the
+    upsert, any pre-existing row for a key touched by this batch whose shop
+    isn't among the shops just written is a stale loser from a previous
+    refresh (e.g. last week's cheaper GOG price after Steam becomes the new
+    cheapest) and is pruned. Without this, `UNIQUE(game_id, platform, shop)`
+    lets old non-winning shop rows accumulate forever and can make a stale
+    price look permanently "cheapest".
+    """
+    if not rows:
+        return 0
+    now = datetime.now(timezone.utc).isoformat()
+    async with get_db() as db:
+        await db.executemany(
+            """INSERT INTO game_prices
+               (game_id, platform, shop, price, regular_price, cut_pct,
+                currency, deal_url, fetched_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(game_id, platform, shop) DO UPDATE SET
+                   price = excluded.price,
+                   regular_price = excluded.regular_price,
+                   cut_pct = excluded.cut_pct,
+                   currency = excluded.currency,
+                   deal_url = excluded.deal_url,
+                   fetched_at = excluded.fetched_at""",
+            [
+                (
+                    r["game_id"],
+                    r["platform"],
+                    r["shop"],
+                    r.get("price"),
+                    r.get("regular_price"),
+                    r.get("cut_pct"),
+                    r.get("currency"),
+                    r.get("deal_url"),
+                    now,
+                )
+                for r in rows
+            ],
+        )
+        shops_by_key: dict[tuple[int, str], set[str]] = {}
+        for r in rows:
+            shops_by_key.setdefault((r["game_id"], r["platform"]), set()).add(r["shop"])
+        for (game_id, platform), shops in shops_by_key.items():
+            placeholders = ",".join("?" for _ in shops)
+            await db.execute(
+                f"""DELETE FROM game_prices
+                    WHERE game_id = ? AND platform = ?
+                      AND shop NOT IN ({placeholders})""",
+                (game_id, platform, *shops),
+            )
         await db.commit()
     return len(rows)

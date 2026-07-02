@@ -822,6 +822,33 @@ _V17_SCHEMA_DDL = _V16_SCHEMA_DDL + """
         ON scrape_config(provider, status);
 """
 
+# v18 adds game_prices (current-price cache per game+platform+shop, refreshed
+# by get_wishlist_deals / the price sync — rows are overwritten, not appended;
+# ITAD is the historical source of record so we don't keep history here) and
+# game_wishlist.store_identifier (the store's own id captured at wishlist-sync
+# time, e.g. a Steam appid — needed because an unowned wishlist item has no
+# game_platforms row to carry a game_platform_identifiers entry).
+_V18_SCHEMA_DDL = _V17_SCHEMA_DDL.replace(
+    "        source        TEXT,",
+    "        source        TEXT,\n        store_identifier TEXT,",
+) + """
+    CREATE TABLE IF NOT EXISTS game_prices (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id       INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        platform      TEXT NOT NULL,
+        shop          TEXT NOT NULL,
+        price         REAL,
+        regular_price REAL,
+        cut_pct       INTEGER,
+        currency      TEXT,
+        deal_url      TEXT,
+        fetched_at    TEXT NOT NULL,
+        UNIQUE(game_id, platform, shop)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_game_prices_game_id ON game_prices(game_id);
+"""
+
 # Derived search index — NOT part of the versioned schema chain. Created and
 # fully resynced by _run_migrations' _sync_fts_index on every migrate_db run,
 # which self-heals after destructive games-table rebuilds (those drop the
