@@ -47,17 +47,17 @@ def _best_deal(deals: list[Any]) -> PriceInfo | None:
             shop = deal["shop"]["name"]
             amount = float(deal["price"]["amount"])
             currency = deal["price"]["currency"]
+            regular = deal.get("regular") or {}
+            info = PriceInfo(
+                shop=str(shop),
+                price=amount,
+                regular_price=float(regular["amount"]) if "amount" in regular else None,
+                cut_pct=int(deal["cut"]) if deal.get("cut") is not None else None,
+                currency=str(currency),
+                deal_url=deal.get("url"),
+            )
         except (TypeError, KeyError, ValueError):
             continue
-        regular = deal.get("regular") or {}
-        info = PriceInfo(
-            shop=str(shop),
-            price=amount,
-            regular_price=float(regular["amount"]) if "amount" in regular else None,
-            cut_pct=int(deal["cut"]) if deal.get("cut") is not None else None,
-            currency=str(currency),
-            deal_url=deal.get("url"),
-        )
         if best is None or info.price < best.price:
             best = info
     return best

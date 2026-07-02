@@ -45,6 +45,22 @@ class ItadBestDealTests(unittest.TestCase):
         assert result is not None
         self.assertEqual(result.shop, "Steam")
 
+    def test_best_deal_skips_malformed_cut_and_regular_amount(self) -> None:
+        malformed_cut = {
+            "shop": {"id": 61, "name": "Steam"},
+            "price": {"amount": 1.0, "currency": "USD"},
+            "cut": "fifty",
+        }
+        malformed_regular = {
+            "shop": {"id": 61, "name": "Steam"},
+            "price": {"amount": 2.0, "currency": "USD"},
+            "regular": {"amount": "nope"},
+        }
+        result = _best_deal([malformed_cut, malformed_regular, _SAMPLE_DEALS[0]])
+        assert result is not None
+        self.assertEqual(result.shop, "Steam")
+        self.assertEqual(result.price, 9.99)
+
 
 class ItadConfiguredTests(unittest.TestCase):
     def test_is_itad_configured_false_when_unset(self) -> None:
@@ -98,6 +114,19 @@ class ItadFetchStreamPricesTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(440, result)
         self.assertEqual(result[220].shop, "GOG")
         self.assertEqual(result[220].price, 8.99)
+
+        self.assertEqual(client.post.call_count, 2)
+        lookup_call, prices_call = client.post.call_args_list
+
+        lookup_url = lookup_call.args[0]
+        self.assertIn("/lookup/id/shop/61/v1", lookup_url)
+        self.assertEqual(lookup_call.kwargs["json"], ["app/220", "app/440"])
+
+        prices_url = prices_call.args[0]
+        self.assertIn("/games/prices/v3", prices_url)
+        self.assertEqual(
+            prices_call.kwargs["json"], ["01234567-89ab-cdef-0123-456789abcdef"]
+        )
 
 
 if __name__ == "__main__":
