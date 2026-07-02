@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Awaitable, Callable, Iterable, TypeVar
+from weakref import WeakKeyDictionary
 
 import aiosqlite
 
@@ -46,6 +47,54 @@ _Progress = Callable[[str], None]
 _SQLITE_CONNECT_TIMEOUT_SECONDS = 30.0
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
 _REQUIRE_ABSOLUTE_DB_PATH_ENV = "GAMELIB_REQUIRE_ABSOLUTE_DB_PATH"
+
+# ── Opt-in connection pool ────────────────────────────────────────────────────
+# get_db() defaults to connection-per-call (each aiosqlite connection is a
+# worker thread). The server lifespan enables pooling for its process; tests
+# stay per-call unless they opt in, because pooled threads have no loop-close
+# hook to die on. Checkout is exclusive: a pooled connection is never shared
+# between concurrent coroutines, so per-call transaction semantics are
+# unchanged.
+_POOL_ENABLED = False
+_POOL_MAX_IDLE = 4
+_POOL_IDLE: WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[str, list[aiosqlite.Connection]]
+] = WeakKeyDictionary()
+
+
+def enable_db_pooling() -> None:
+    """Reuse SQLite connections across get_db() calls on the current process."""
+    global _POOL_ENABLED
+    _POOL_ENABLED = True
+
+
+async def close_db_pool() -> None:
+    """Disable pooling and close idle connections owned by the current loop."""
+    global _POOL_ENABLED
+    _POOL_ENABLED = False
+    loop = asyncio.get_running_loop()
+    by_path = _POOL_IDLE.pop(loop, None) or {}
+    for conns in by_path.values():
+        for conn in conns:
+            await conn.close()
+
+
+def _pool_checkout(db_path: str) -> "aiosqlite.Connection | None":
+    loop = asyncio.get_running_loop()
+    conns = _POOL_IDLE.get(loop, {}).get(db_path)
+    if conns:
+        return conns.pop()
+    return None
+
+
+async def _pool_checkin(db_path: str, conn: aiosqlite.Connection) -> None:
+    loop = asyncio.get_running_loop()
+    conns = _POOL_IDLE.setdefault(loop, {}).setdefault(db_path, [])
+    if _POOL_ENABLED and len(conns) < _POOL_MAX_IDLE:
+        conns.append(conn)
+    else:
+        await conn.close()
+
 
 STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
@@ -1310,13 +1359,40 @@ async def _configure_connection(conn: aiosqlite.Connection, *, enable_wal: bool)
 
 @asynccontextmanager
 async def get_db():
-    """Async context manager for a WAL-enabled, Row-factory SQLite connection."""
+    """Async context manager for a WAL-enabled, Row-factory SQLite connection.
+
+    When pooling is enabled (server lifespan), connections are checked out
+    exclusively and reused across calls on the same event loop.
+    """
     db_path = _db_path()
     _ensure_db_parent_dir(db_path)
-    async with aiosqlite.connect(db_path, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS) as conn:
-        await _configure_connection(conn, enable_wal=_DB_READY_PATH != db_path)
-        await _ensure_db_initialized(conn)
+
+    if not _POOL_ENABLED:
+        async with aiosqlite.connect(db_path, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS) as conn:
+            await _configure_connection(conn, enable_wal=_DB_READY_PATH != db_path)
+            await _ensure_db_initialized(conn)
+            yield conn
+        return
+
+    conn = _pool_checkout(db_path)
+    if conn is None:
+        conn = await aiosqlite.connect(db_path, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS)
+        try:
+            await _configure_connection(conn, enable_wal=_DB_READY_PATH != db_path)
+            await _ensure_db_initialized(conn)
+        except BaseException:
+            await conn.close()
+            raise
+    try:
         yield conn
+    except BaseException:
+        # Transaction state is unknown after a failure inside the block —
+        # never return this connection to the pool.
+        await conn.close()
+        raise
+    # Match per-call semantics: uncommitted work dies with the "connection".
+    await conn.rollback()
+    await _pool_checkin(db_path, conn)
 
 
 async def migrate_db(progress: _Progress | None = None) -> MigrationResult:

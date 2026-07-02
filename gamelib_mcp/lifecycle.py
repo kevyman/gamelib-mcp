@@ -449,9 +449,17 @@ async def _cancel_task(task: asyncio.Task | None) -> None:
 @asynccontextmanager
 async def lifespan(app):
     """Startup: init DB, sync library if stale, kick off HLTB pre-warm."""
-    from .data.db import clear_all_enrichment_claims, init_db, get_meta, set_meta
+    from .data.db import (
+        clear_all_enrichment_claims,
+        close_db_pool,
+        enable_db_pooling,
+        init_db,
+        get_meta,
+        set_meta,
+    )
     from .data.steam_xml import STALE_HOURS
 
+    enable_db_pooling()
     await init_db()
     await clear_all_enrichment_claims()
     await reconcile_stale_sync_status()
@@ -514,4 +522,5 @@ async def lifespan(app):
     await _cancel_task(_ENRICHMENT_TASK)
     await _cancel_task(_RATINGS_SYNC_TASK)
     await _cancel_task(_STARTUP_RATINGS_SYNC_TASK)
+    await close_db_pool()
     logger.info("Shutdown")
