@@ -6,13 +6,13 @@ requires-python = ">=3.11"
 dependencies = [
     "fastmcp>=3.2.0,<4.0",
     "httpx>=0.27",
-    "howlongtobeatpy>=1.0.21",
-    "aiosqlite>=0.20,<0.22",
-    "pydantic>=2.0",
+    "howlongtobeatpy>=1.0.22",
+    "aiosqlite>=0.22.1,<0.23",
+    "pydantic>=2.13.4",
     "python-dotenv>=1.0",
-    "lxml>=5.0",
-    "beautifulsoup4>=4.12",
-    "rapidfuzz>=3.0",
+    "lxml>=6.1.1",
+    "beautifulsoup4>=4.15.0",
+    "rapidfuzz>=3.14.5",
     "psnawp>=2.1,<4.0",
     "pynintendoparental>=2.4",
 ]
@@ -27,7 +27,7 @@ packages = ["gamelib_mcp"]
 [dependency-groups]
 dev = [
     "mypy>=1.19",
-    "pytest>=9.0.2",
+    "pytest>=9.1.1",
     "ruff>=0.14",
 ]
 
