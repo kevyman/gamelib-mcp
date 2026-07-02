@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Callable, Iterable, TypeVar
+from typing import Awaitable, Callable, Iterable, TypeVar
 
 import aiosqlite
 
@@ -1188,6 +1188,38 @@ async def _snapshot_before_migration(
     return backup_path
 
 
+_MigrationStep = Callable[[aiosqlite.Connection, "_Progress | None"], Awaitable[None]]
+
+# Pre-user_version databases are recognized by shape; recording the detected
+# version lets the step ladder below take over. Detection has no states for
+# v6 or v13-v16 (those versions changed no detectable shape).
+_RECORDED_STATE_VERSIONS: dict[str, int] = {
+    f"v{n}": n for n in (1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12)
+}
+
+# Ordered chain of (from_version, step). Each step migrates from_version ->
+# from_version + 1. Adding a schema version = one entry here + a new step
+# function + bumping SCHEMA_VERSION.
+_MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
+    (1, _migrate_v1_to_v2),
+    (2, _migrate_v2_to_v3),
+    (3, _migrate_v3_to_v4),
+    (4, _migrate_v4_to_v5),
+    (5, _migrate_v5_to_v6),
+    (6, _migrate_v6_to_v7),
+    (7, _migrate_v7_to_v8),
+    (8, _migrate_v8_to_v9),
+    (9, _migrate_v9_to_v10),
+    (10, _migrate_v10_to_v11),
+    (11, _migrate_v11_to_v12),
+    (12, _migrate_v12_to_v13),
+    (13, _migrate_v13_to_v14),
+    (14, _migrate_v14_to_v15),
+    (15, _migrate_v15_to_v16),
+    (16, _migrate_v16_to_v17),
+)
+
+
 async def _run_migrations(
     db: aiosqlite.Connection,
     progress: _Progress | None = None,
@@ -1218,141 +1250,21 @@ async def _run_migrations(
             _emit(progress, "Applying migration step v0 -> v1.", applied_steps)
             await _migrate_legacy_to_v1(db, progress=None)
             version = 1
-        elif detected_state == "v1":
-            await _set_user_version(db, 1)
+        elif detected_state in _RECORDED_STATE_VERSIONS:
+            version = _RECORDED_STATE_VERSIONS[detected_state]
+            await _set_user_version(db, version)
             await db.commit()
-            version = 1
-            _emit(progress, "Recorded existing schema as v1.", applied_steps)
-        elif detected_state == "v2":
-            await _set_user_version(db, 2)
-            await db.commit()
-            version = 2
-            _emit(progress, "Recorded existing schema as v2.", applied_steps)
-        elif detected_state == "v3":
-            await _set_user_version(db, 3)
-            await db.commit()
-            version = 3
-            _emit(progress, "Recorded existing schema as v3.", applied_steps)
-        elif detected_state == "v4":
-            await _set_user_version(db, 4)
-            await db.commit()
-            version = 4
-            _emit(progress, "Recorded existing schema as v4.", applied_steps)
-        elif detected_state == "v5":
-            await _set_user_version(db, 5)
-            await db.commit()
-            version = 5
-            _emit(progress, "Recorded existing schema as v5.", applied_steps)
-        elif detected_state == "v7":
-            await _set_user_version(db, 7)
-            await db.commit()
-            version = 7
-            _emit(progress, "Recorded existing schema as v7.", applied_steps)
-        elif detected_state == "v8":
-            await _set_user_version(db, 8)
-            await db.commit()
-            version = 8
-            _emit(progress, "Recorded existing schema as v8.", applied_steps)
-        elif detected_state == "v9":
-            await _set_user_version(db, 9)
-            await db.commit()
-            version = 9
-            _emit(progress, "Recorded existing schema as v9.", applied_steps)
-        elif detected_state == "v10":
-            await _set_user_version(db, 10)
-            await db.commit()
-            version = 10
-            _emit(progress, "Recorded existing schema as v10.", applied_steps)
-        elif detected_state == "v11":
-            await _set_user_version(db, 11)
-            await db.commit()
-            version = 11
-            _emit(progress, "Recorded existing schema as v11.", applied_steps)
-        elif detected_state == "v12":
-            await _set_user_version(db, 12)
-            await db.commit()
-            version = 12
-            _emit(progress, "Recorded existing schema as v12.", applied_steps)
+            _emit(progress, f"Recorded existing schema as v{version}.", applied_steps)
 
-    if version == 1:
-        _emit(progress, "Applying migration step v1 -> v2.", applied_steps)
-        await _migrate_v1_to_v2(db, progress=None)
-        version = 2
-
-    if version == 2:
-        _emit(progress, "Applying migration step v2 -> v3.", applied_steps)
-        await _migrate_v2_to_v3(db, progress=None)
-        version = 3
-
-    if version == 3:
-        _emit(progress, "Applying migration step v3 -> v4.", applied_steps)
-        await _migrate_v3_to_v4(db, progress=None)
-        version = 4
-
-    if version == 4:
-        _emit(progress, "Applying migration step v4 -> v5.", applied_steps)
-        await _migrate_v4_to_v5(db, progress=None)
-        version = 5
-
-    if version == 5:
-        _emit(progress, "Applying migration step v5 -> v6.", applied_steps)
-        await _migrate_v5_to_v6(db, progress=None)
-        version = 6
-
-    if version == 6:
-        _emit(progress, "Applying migration step v6 -> v7.", applied_steps)
-        await _migrate_v6_to_v7(db, progress=None)
-        version = 7
-
-    if version == 7:
-        _emit(progress, "Applying migration step v7 -> v8.", applied_steps)
-        await _migrate_v7_to_v8(db, progress=None)
-        version = 8
-
-    if version == 8:
-        _emit(progress, "Applying migration step v8 -> v9.", applied_steps)
-        await _migrate_v8_to_v9(db, progress=None)
-        version = 9
-
-    if version == 9:
-        _emit(progress, "Applying migration step v9 -> v10.", applied_steps)
-        await _migrate_v9_to_v10(db, progress=None)
-        version = 10
-
-    if version == 10:
-        _emit(progress, "Applying migration step v10 -> v11.", applied_steps)
-        await _migrate_v10_to_v11(db, progress=None)
-        version = 11
-
-    if version == 11:
-        _emit(progress, "Applying migration step v11 -> v12.", applied_steps)
-        await _migrate_v11_to_v12(db, progress=None)
-        version = 12
-
-    if version == 12:
-        _emit(progress, "Applying migration step v12 -> v13.", applied_steps)
-        await _migrate_v12_to_v13(db, progress=None)
-        version = 13
-
-    if version == 13:
-        _emit(progress, "Applying migration step v13 -> v14.", applied_steps)
-        await _migrate_v13_to_v14(db, progress=None)
-        version = 14
-
-    if version == 14:
-        _emit(progress, "Applying migration step v14 -> v15.", applied_steps)
-        await _migrate_v14_to_v15(db, progress=None)
-        version = 15
-
-    if version == 15:
-        _emit(progress, "Applying migration step v15 -> v16.", applied_steps)
-        await _migrate_v15_to_v16(db, progress=None)
-        version = 16
-
-    if version == 16:
-        _emit(progress, "Applying migration step v16 -> v17.", applied_steps)
-        await _migrate_v16_to_v17(db, progress=None)
-        version = 17
+    for from_version, step in _MIGRATION_STEPS:
+        if version == from_version:
+            _emit(
+                progress,
+                f"Applying migration step v{from_version} -> v{from_version + 1}.",
+                applied_steps,
+            )
+            await step(db, None)
+            version = from_version + 1
 
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
