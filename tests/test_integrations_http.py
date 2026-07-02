@@ -304,6 +304,58 @@ def test_http_security_middleware_leaves_oauth_routes_open():
         assert status == 204
 
 
+def test_http_security_middleware_rejects_non_utf8_origin_without_crashing():
+    called = False
+
+    async def sentinel_app(scope, receive, send):
+        nonlocal called
+        called = True
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    app = HttpSecurityMiddleware(
+        sentinel_app,
+        admin_token="secret-token",
+        allowed_origins=frozenset({"https://claude.ai"}),
+    )
+    status, _, body = asyncio.run(
+        _invoke_asgi_app(
+            app,
+            "/mcp",
+            headers=[(b"origin", b"\xff\xfe not valid utf-8")],
+        )
+    )
+
+    assert called is False
+    assert status == 403
+    assert body == b"Forbidden"
+
+
+def test_http_security_middleware_rejects_non_utf8_admin_authorization_without_crashing():
+    called = False
+
+    async def sentinel_app(scope, receive, send):
+        nonlocal called
+        called = True
+
+    app = HttpSecurityMiddleware(
+        sentinel_app,
+        admin_token="secret-token",
+        allowed_origins=frozenset(),
+    )
+    status, _, body = asyncio.run(
+        _invoke_asgi_app(
+            app,
+            "/admin/integrations",
+            headers=[(b"authorization", b"Bearer \xff\xfe not valid utf-8")],
+        )
+    )
+
+    assert called is False
+    assert status == 401
+    assert body == b"Unauthorized"
+
+
 def test_get_admin_integrations_returns_json_payload():
     payload = {
         "steam": {

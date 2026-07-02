@@ -7,7 +7,6 @@ policy out of the tool-registration module.
 
 from __future__ import annotations
 
-import hmac
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -19,9 +18,25 @@ from fastmcp.server.auth.providers.github import GitHubProvider
 
 AuthMode = Literal["oauth", "disabled"]
 
-_CHATGPT_REDIRECT_URIS = ["https://chatgpt.com/connector/oauth/*"]
+# Fixed callback for Claude.ai web/desktop/mobile (https://claude.com/docs/connectors/building/authentication);
+# ChatGPT mints a per-connector suffix under its own path, hence the wildcard.
+_ALLOWED_CLIENT_REDIRECT_URIS = [
+    "https://chatgpt.com/connector/oauth/*",
+    "https://claude.ai/api/mcp/auth_callback",
+]
 _ACCESS_TOKEN_LIFETIME_SECONDS = 60 * 60
 _REFRESH_TOKEN_LIFETIME_SECONDS = 30 * 24 * 60 * 60
+
+
+@dataclass(frozen=True)
+class OAuthSecurityConfig:
+    """OAuth settings that only exist together — never partially populated."""
+
+    public_base_url: str
+    github_client_id: str
+    github_client_secret: str = field(repr=False)
+    oauth_jwt_signing_key: str = field(repr=False)
+    github_user_ids: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -31,40 +46,22 @@ class SecurityConfig:
     auth_mode: AuthMode
     admin_token: str = field(repr=False)
     allowed_origins: frozenset[str]
-    public_base_url: str | None = None
-    github_client_id: str | None = None
-    github_client_secret: str | None = field(default=None, repr=False)
-    oauth_jwt_signing_key: str | None = field(default=None, repr=False)
-    github_user_id: str | None = None
+    oauth: OAuthSecurityConfig | None = None
 
     def build_auth_provider(self, *, client_storage: Any = None) -> AuthProvider | None:
         """Build the FastMCP OAuth provider, or return None for explicit local mode."""
 
-        if self.auth_mode == "disabled":
+        if self.oauth is None:
             return None
 
-        # These values were validated by load_security_config.  Keep the guards
-        # here so type checkers and direct dataclass construction remain safe.
-        public_base_url = self.public_base_url
-        github_client_id = self.github_client_id
-        github_client_secret = self.github_client_secret
-        oauth_jwt_signing_key = self.oauth_jwt_signing_key
-        if (
-            public_base_url is None
-            or github_client_id is None
-            or github_client_secret is None
-            or oauth_jwt_signing_key is None
-        ):
-            raise RuntimeError("OAuth security configuration is incomplete")
-
         return GitHubProvider(
-            client_id=github_client_id,
-            client_secret=github_client_secret,
-            base_url=public_base_url,
+            client_id=self.oauth.github_client_id,
+            client_secret=self.oauth.github_client_secret,
+            base_url=self.oauth.public_base_url,
             required_scopes=["read:user"],
-            allowed_client_redirect_uris=_CHATGPT_REDIRECT_URIS,
+            allowed_client_redirect_uris=_ALLOWED_CLIENT_REDIRECT_URIS,
             client_storage=client_storage,
-            jwt_signing_key=oauth_jwt_signing_key,
+            jwt_signing_key=self.oauth.oauth_jwt_signing_key,
             require_authorization_consent=True,
             cache_ttl_seconds=60,
             max_cache_size=32,
@@ -73,17 +70,17 @@ class SecurityConfig:
         )
 
     def owner_authorization_check(self):
-        """Return a FastMCP auth check restricted to the configured GitHub ID."""
+        """Return a FastMCP auth check restricted to the configured GitHub IDs."""
 
-        expected_user_id = self.github_user_id
-        if self.auth_mode != "oauth" or expected_user_id is None:
+        if self.oauth is None:
             raise RuntimeError("Owner authorization requires OAuth mode")
+        allowed_user_ids = self.oauth.github_user_ids
 
         def is_configured_owner(context: AuthContext) -> bool:
             if context.token is None:
                 return False
             subject = str(context.token.claims.get("sub", ""))
-            return hmac.compare_digest(subject, expected_user_id)
+            return subject in allowed_user_ids
 
         return is_configured_owner
 
@@ -108,6 +105,17 @@ def _public_base_url(value: str) -> tuple[str, str]:
     if parsed.scheme != "https" or not parsed.netloc or parsed.path:
         raise RuntimeError("MCP_PUBLIC_BASE_URL must be an HTTPS origin without a path")
     return normalized, f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _github_user_ids(environ: Mapping[str, str]) -> frozenset[str]:
+    raw = _required(environ, "MCP_OAUTH_GITHUB_USER_IDS")
+    user_ids = {value.strip() for value in raw.split(",") if value.strip()}
+    for user_id in user_ids:
+        if not user_id.isdecimal() or int(user_id) <= 0:
+            raise RuntimeError(
+                "MCP_OAUTH_GITHUB_USER_IDS must be a comma-separated list of positive numeric GitHub IDs"
+            )
+    return frozenset(user_ids)
 
 
 def load_security_config(environ: Mapping[str, str] | None = None) -> SecurityConfig:
@@ -139,21 +147,17 @@ def load_security_config(environ: Mapping[str, str] | None = None) -> SecurityCo
     )
     allowed_origins.add(public_origin)
 
-    github_user_id = _required(values, "MCP_OAUTH_GITHUB_USER_ID")
-    if not github_user_id.isdecimal() or int(github_user_id) <= 0:
-        raise RuntimeError(
-            "MCP_OAUTH_GITHUB_USER_ID must be a positive numeric GitHub ID"
-        )
-
     _required(values, "FASTMCP_HOME")
 
     return SecurityConfig(
         auth_mode="oauth",
         admin_token=admin_token,
         allowed_origins=frozenset(allowed_origins),
-        public_base_url=public_base_url,
-        github_client_id=_required(values, "GITHUB_OAUTH_CLIENT_ID"),
-        github_client_secret=_required(values, "GITHUB_OAUTH_CLIENT_SECRET"),
-        oauth_jwt_signing_key=_secret(values, "MCP_OAUTH_JWT_SIGNING_KEY"),
-        github_user_id=github_user_id,
+        oauth=OAuthSecurityConfig(
+            public_base_url=public_base_url,
+            github_client_id=_required(values, "GITHUB_OAUTH_CLIENT_ID"),
+            github_client_secret=_required(values, "GITHUB_OAUTH_CLIENT_SECRET"),
+            oauth_jwt_signing_key=_secret(values, "MCP_OAUTH_JWT_SIGNING_KEY"),
+            github_user_ids=_github_user_ids(values),
+        ),
     )

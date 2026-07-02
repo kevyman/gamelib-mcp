@@ -50,7 +50,10 @@ class HttpSecurityMiddleware:
         # Origin header validation (MCP spec MUST for Streamable HTTP, DNS-rebinding defense).
         # Requests without an Origin header pass (CLI tools and native MCP clients don't send one).
         # Browser-origin requests must be explicitly allowlisted via MCP_ALLOWED_ORIGINS.
-        origin = headers.get(b"origin", b"").decode()
+        # errors="replace": malformed header bytes must never crash the
+        # middleware — decode to a string that can't match a real origin/token
+        # and let the normal allow/deny logic below reject it cleanly.
+        origin = headers.get(b"origin", b"").decode("utf-8", errors="replace")
         if origin and origin not in self.allowed_origins:
             await send(
                 {
@@ -105,7 +108,7 @@ class HttpSecurityMiddleware:
             await self.app(scope, receive, downstream_send)
             return
 
-        auth = headers.get(b"authorization", b"").decode()
+        auth = headers.get(b"authorization", b"").decode("utf-8", errors="replace")
         if hmac.compare_digest(auth.encode(), f"Bearer {self.admin_token}".encode()):
             await self.app(scope, receive, downstream_send)
             return

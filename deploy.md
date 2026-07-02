@@ -66,8 +66,9 @@ In GitHub → Settings → Developer settings → OAuth Apps, create an app with
 - **Authorization callback URL:** `https://gamelibmcp.johnwilkos.com/auth/callback`
 
 Record its client ID and generate a client secret. The server requests only
-GitHub's `read:user` scope and separately restricts tool access to numeric
-GitHub user ID `12233501`.
+GitHub's `read:user` scope and separately restricts tool access to the
+numeric GitHub user ID(s) listed in `MCP_OAUTH_GITHUB_USER_IDS` (e.g.
+`12233501`).
 
 #### 4. Configure the server
 
@@ -87,7 +88,7 @@ MCP_PUBLIC_BASE_URL=https://gamelibmcp.johnwilkos.com
 GITHUB_OAUTH_CLIENT_ID=<from the GitHub OAuth App>
 GITHUB_OAUTH_CLIENT_SECRET=<from the GitHub OAuth App>
 MCP_OAUTH_JWT_SIGNING_KEY=<generate with: openssl rand -hex 32>
-MCP_OAUTH_GITHUB_USER_ID=12233501
+MCP_OAUTH_GITHUB_USER_IDS=12233501   # comma-separated to authorize more than one GitHub user
 MCP_ADMIN_AUTH_TOKEN=<generate separately with: openssl rand -hex 32>
 FASTMCP_HOME=/data/fastmcp
 MCP_ALLOWED_ORIGINS=https://claude.ai,https://chatgpt.com
@@ -285,9 +286,9 @@ PSNAWP is a pure Python library — no extra system packages required in Docker.
 
 **Known limitation:** Only played titles appear in the library (`title_stats()` tracks play history, not purchases). Unplayed digital purchases will not sync. This is a PSN platform limitation.
 
-If the NPSSO token expires, repeat the browser extraction and update `.env`, then restart the container.
+If the NPSSO token expires, repeat the browser extraction, update `.env`, then `docker compose up -d --force-recreate app` (a plain `restart` does not reload `.env`).
 
-If the control plane reports PSN auth as stale, re-extract `PSN_NPSSO`, update `.env`, and restart the container.
+If the control plane reports PSN auth as stale, re-extract `PSN_NPSSO`, update `.env`, and `docker compose up -d --force-recreate app`.
 
 ---
 

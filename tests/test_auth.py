@@ -22,7 +22,7 @@ def _oauth_environment() -> dict[str, str]:
         "GITHUB_OAUTH_CLIENT_ID": "github-client-id",
         "GITHUB_OAUTH_CLIENT_SECRET": "github-client-secret",
         "MCP_OAUTH_JWT_SIGNING_KEY": "j" * 32,
-        "MCP_OAUTH_GITHUB_USER_ID": "12233501",
+        "MCP_OAUTH_GITHUB_USER_IDS": "12233501",
         "FASTMCP_HOME": "/data/fastmcp",
         "MCP_ALLOWED_ORIGINS": "https://chatgpt.com",
     }
@@ -102,7 +102,7 @@ def test_auth_mode_must_be_explicit():
         "GITHUB_OAUTH_CLIENT_ID",
         "GITHUB_OAUTH_CLIENT_SECRET",
         "MCP_OAUTH_JWT_SIGNING_KEY",
-        "MCP_OAUTH_GITHUB_USER_ID",
+        "MCP_OAUTH_GITHUB_USER_IDS",
         "FASTMCP_HOME",
     ],
 )
@@ -127,25 +127,23 @@ def test_public_origin_is_automatically_allowed():
     )
 
 
-def test_owner_authorization_accepts_only_immutable_github_user_id():
-    config = load_security_config(_oauth_environment())
+def test_owner_authorization_accepts_only_configured_github_user_ids():
+    environ = _oauth_environment()
+    environ["MCP_OAUTH_GITHUB_USER_IDS"] = "12233501, 555"
+    config = load_security_config(environ)
     check = config.owner_authorization_check()
 
-    owner = AccessToken(
-        token="owner-token",
-        client_id="client",
-        scopes=["read:user"],
-        claims={"sub": "12233501", "login": "kevyman"},
-    )
-    other_user = AccessToken(
-        token="other-token",
-        client_id="client",
-        scopes=["read:user"],
-        claims={"sub": "999", "login": "someone-else"},
-    )
+    def _token(sub: str) -> AccessToken:
+        return AccessToken(
+            token=f"{sub}-token",
+            client_id="client",
+            scopes=["read:user"],
+            claims={"sub": sub, "login": "irrelevant"},
+        )
 
-    assert check(AuthContext(token=owner, component=Mock())) is True
-    assert check(AuthContext(token=other_user, component=Mock())) is False
+    assert check(AuthContext(token=_token("12233501"), component=Mock())) is True
+    assert check(AuthContext(token=_token("555"), component=Mock())) is True
+    assert check(AuthContext(token=_token("999"), component=Mock())) is False
     assert check(AuthContext(token=None, component=Mock())) is False
 
 
@@ -196,6 +194,7 @@ def test_oauth_metadata_and_unauthenticated_challenge_are_mcp_compliant():
     ("redirect_uri", "expected_status"),
     [
         ("https://chatgpt.com/connector/oauth/callback-id", 302),
+        ("https://claude.ai/api/mcp/auth_callback", 302),
         ("https://evil.example/oauth/callback", 400),
     ],
 )
@@ -274,3 +273,53 @@ print(json.dumps(sorted(route.path for route in app.routes)))
     assert "/token" in paths
     assert "/.well-known/oauth-protected-resource/mcp" in paths
     assert "/.well-known/oauth-authorization-server" in paths
+
+
+def test_main_wires_owner_restriction_into_production_middleware(tmp_path):
+    """Regression test for the real app, not a bare FastMCP() built in-test.
+
+    ``_oauth_app()`` above builds a standalone FastMCP instance and never
+    passes ``middleware=``, so it can't catch main.py failing to wire
+    ``AuthMiddleware(auth=security_config.owner_authorization_check())`` onto
+    the actual production server. This drives that exact object.
+    """
+    environ = os.environ.copy()
+    environ.update(_oauth_environment())
+    environ["FASTMCP_HOME"] = str(tmp_path / "fastmcp")
+    environ["DATABASE_URL"] = f"file:{tmp_path / 'oauth-owner-smoke.sqlite'}"
+    script = """
+import json
+from unittest.mock import Mock
+
+from fastmcp.server.auth import AccessToken, AuthContext
+from fastmcp.server.middleware import AuthMiddleware
+
+from gamelib_mcp.main import mcp
+
+auth_middlewares = [m for m in mcp.middleware if isinstance(m, AuthMiddleware)]
+assert len(auth_middlewares) == 1, mcp.middleware
+check = auth_middlewares[0].auth
+
+
+def token(sub):
+    return AccessToken(token=f"{sub}-token", client_id="c", scopes=[], claims={"sub": sub})
+
+
+result = {
+    "owner": check(AuthContext(token=token("12233501"), component=Mock())),
+    "other_user": check(AuthContext(token=token("999"), component=Mock())),
+    "no_token": check(AuthContext(token=None, component=Mock())),
+}
+print(json.dumps(result))
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environ,
+    )
+    outcome = json.loads(result.stdout)
+
+    assert outcome == {"owner": True, "other_user": False, "no_token": False}
