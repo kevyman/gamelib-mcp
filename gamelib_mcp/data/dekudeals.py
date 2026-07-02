@@ -27,6 +27,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from bs4 import BeautifulSoup, Tag
@@ -42,6 +43,13 @@ from .scrape_config import DekuDealsScrapeConfig, load_scrape_config
 # Leading currency symbol -> ISO 4217 code. Extend if another symbol shows up
 # in a live fetch; these three cover what's been confirmed against real pages.
 _CURRENCY_SYMBOLS = {"€": "EUR", "$": "USD", "£": "GBP"}
+
+# deal_url is built from a scraped href; an absolute (non "/"-relative) href
+# is only trusted if it actually points at DekuDeals — mirrors the host-check
+# scrape_config.py's _validate_field applies to url_template overrides (see
+# ALLOWED_HOSTS there), even though DekuDeals has no configurable URL fields
+# of its own to run through that path.
+_DEKUDEALS_HOSTS = frozenset({"dekudeals.com", "www.dekudeals.com"})
 
 DEKUDEALS_WISHLIST_URL = os.getenv("DEKUDEALS_WISHLIST_URL", "")
 logger = logging.getLogger(__name__)
@@ -238,7 +246,12 @@ def _parse_wishlist_prices(html: str, config: DekuDealsScrapeConfig | None = Non
         if isinstance(link_el, Tag):
             href = link_el.get("href")
             if isinstance(href, str) and href:
-                deal_url = "https://www.dekudeals.com" + href if href.startswith("/") else href
+                if href.startswith("/"):
+                    deal_url = "https://www.dekudeals.com" + href
+                elif urlsplit(href).hostname in _DEKUDEALS_HOSTS:
+                    deal_url = href
+                # else: absolute URL pointing somewhere else — untrusted,
+                # leave deal_url as "" rather than passing it through.
 
         results[title] = {
             "price": price,
