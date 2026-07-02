@@ -46,9 +46,10 @@ per-request timeout through a shared helper.
   production: container uid 10001, healthy, DB writable.
 - ✅ **Nightly backup cron** — installed on the server
   (`/etc/cron.d/gamelib-backup`, 04:15 UTC `sqlite3 .backup` + a copy owned by
-  a dedicated key-only `gamelib-backup` user). Off-machine leg: a home Windows
-  machine pulls via scp on a scheduled task (setup documented in deploy.md →
-  "Database backups"; the Windows-side task is a manual step there).
+  a dedicated key-only `gamelib-backup` user). Off-machine leg: the home
+  Windows machine pulls via scp on a daily scheduled task (installed and
+  verified 2026-07-02; details in deploy.md → "Database backups"). **The
+  audit's backup gap is fully closed.**
 - ✅ **OAuth** (from "Non-obvious improvements" #4) — PR #44 replaced the
   static bearer token with FastMCP's GitHub OAuth 2.1 proxy.
 
