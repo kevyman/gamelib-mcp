@@ -821,3 +821,31 @@ _V17_SCHEMA_DDL = _V16_SCHEMA_DDL + """
     CREATE INDEX IF NOT EXISTS idx_scrape_config_provider_status
         ON scrape_config(provider, status);
 """
+
+# Derived search index — NOT part of the versioned schema chain. Created and
+# fully resynced by _run_migrations' _sync_fts_index on every migrate_db run,
+# which self-heals after destructive games-table rebuilds (those drop the
+# triggers with the old table). Indexes COALESCE(name_normalized, lower(name))
+# to mirror tools.search.NORMALIZED_NAME_SQL for backfill-pending rows.
+_FTS_DDL = """
+CREATE VIRTUAL TABLE IF NOT EXISTS games_fts USING fts5(
+    name_normalized,
+    tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS games_fts_ai AFTER INSERT ON games BEGIN
+    INSERT INTO games_fts(rowid, name_normalized)
+    VALUES (new.id, COALESCE(new.name_normalized, lower(new.name)));
+END;
+
+CREATE TRIGGER IF NOT EXISTS games_fts_au
+AFTER UPDATE OF name, name_normalized ON games BEGIN
+    DELETE FROM games_fts WHERE rowid = old.id;
+    INSERT INTO games_fts(rowid, name_normalized)
+    VALUES (new.id, COALESCE(new.name_normalized, lower(new.name)));
+END;
+
+CREATE TRIGGER IF NOT EXISTS games_fts_ad AFTER DELETE ON games BEGIN
+    DELETE FROM games_fts WHERE rowid = old.id;
+END;
+"""

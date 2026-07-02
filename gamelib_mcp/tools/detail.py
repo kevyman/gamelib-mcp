@@ -3,6 +3,7 @@
 from fastmcp.exceptions import ToolError
 
 from ..data.db import (
+    fts_ready,
     get_db,
     get_game_by_appid,
     get_steam_appid_for_game,
@@ -36,7 +37,7 @@ async def get_game_detail(
         elif appid is not None:
             row = await get_game_by_appid(appid)
         elif name is not None:
-            match = build_name_match(name, column=NORMALIZED_NAME_SQL)
+            match = build_name_match(name, column=NORMALIZED_NAME_SQL, use_fts=fts_ready())
             row = await db.execute_fetchone(
                 f"""SELECT g.*, {match.rank_sql} AS match_rank
                     FROM games g
