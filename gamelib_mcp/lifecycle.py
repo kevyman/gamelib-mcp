@@ -449,69 +449,83 @@ async def _cancel_task(task: asyncio.Task | None) -> None:
 @asynccontextmanager
 async def lifespan(app):
     """Startup: init DB, sync library if stale, kick off HLTB pre-warm."""
-    from .data.db import clear_all_enrichment_claims, init_db, get_meta, set_meta
+    from .data.db import (
+        clear_all_enrichment_claims,
+        close_db_pool,
+        enable_db_pooling,
+        init_db,
+        get_meta,
+        set_meta,
+    )
     from .data.steam_xml import STALE_HOURS
 
-    await init_db()
-    await clear_all_enrichment_claims()
-    await reconcile_stale_sync_status()
-    logger.info("Database initialized")
+    enable_db_pooling()
+    try:
+        await init_db()
+        await clear_all_enrichment_claims()
+        await reconcile_stale_sync_status()
+        logger.info("Database initialized")
 
-    # Seed hardware preference from env if not yet set
-    hw_pref_env = os.getenv("HARDWARE_PREFERENCE")
-    if hw_pref_env and not await get_meta("hardware_preference"):
-        import json
-        await set_meta("hardware_preference", json.dumps(hw_pref_env.split(",")))
-        logger.info("Seeded hardware_preference from HARDWARE_PREFERENCE env var")
+        # Seed hardware preference from env if not yet set
+        hw_pref_env = os.getenv("HARDWARE_PREFERENCE")
+        if hw_pref_env and not await get_meta("hardware_preference"):
+            import json
+            await set_meta("hardware_preference", json.dumps(hw_pref_env.split(",")))
+            logger.info("Seeded hardware_preference from HARDWARE_PREFERENCE env var")
 
-    # Refresh library if stale or missing
-    last_sync = await get_meta("library_synced_at")
-    needs_refresh = True
-    if last_sync:
-        try:
-            dt = datetime.fromisoformat(last_sync)
-            age_hours = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
-            needs_refresh = age_hours > STALE_HOURS
-        except ValueError:
-            pass
+        # Refresh library if stale or missing
+        last_sync = await get_meta("library_synced_at")
+        needs_refresh = True
+        if last_sync:
+            try:
+                dt = datetime.fromisoformat(last_sync)
+                age_hours = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
+                needs_refresh = age_hours > STALE_HOURS
+            except ValueError:
+                pass
 
-    if needs_refresh:
-        logger.info("Library stale or missing — scheduling background refresh...")
-        # Mark in_progress now so the startup ratings sync task sees it immediately
-        # before the refresh task has had a chance to write it itself.
-        await set_meta("library_sync_status", "in_progress")
-        await _ensure_startup_refresh()
-        await _schedule_background_enrich()
-    else:
-        # Background enrichment: store/provider metadata, ratings, and discovery signals
-        await _schedule_background_enrich()
+        if needs_refresh:
+            logger.info("Library stale or missing — scheduling background refresh...")
+            # Mark in_progress now so the startup ratings sync task sees it immediately
+            # before the refresh task has had a chance to write it itself.
+            await set_meta("library_sync_status", "in_progress")
+            await _ensure_startup_refresh()
+            await _schedule_background_enrich()
+        else:
+            # Background enrichment: store/provider metadata, ratings, and discovery signals
+            await _schedule_background_enrich()
 
-    await _ensure_periodic_refresh_loop()
+        await _ensure_periodic_refresh_loop()
 
-    # Sync ratings on startup if never run or stale (>7 days), then schedule weekly
-    last_ratings_sync = await get_meta("ratings_synced_at")
-    ratings_stale = True
-    if last_ratings_sync:
-        try:
-            dt = datetime.fromisoformat(last_ratings_sync)
-            age_seconds = (datetime.now(timezone.utc) - dt).total_seconds()
-            ratings_stale = age_seconds > RATINGS_SYNC_INTERVAL_SECONDS
-        except ValueError:
-            pass
-    if ratings_stale:
-        logger.info("Ratings stale or missing — scheduling background ratings sync...")
-        # Hold a strong reference: the event loop only weakly references tasks,
-        # so an untracked task can be garbage-collected mid-run.
-        global _STARTUP_RATINGS_SYNC_TASK
-        _STARTUP_RATINGS_SYNC_TASK = asyncio.create_task(_run_startup_ratings_sync())
-        _STARTUP_RATINGS_SYNC_TASK.add_done_callback(_clear_startup_ratings_sync_task)
-    await _ensure_periodic_ratings_loop()
+        # Sync ratings on startup if never run or stale (>7 days), then schedule weekly
+        last_ratings_sync = await get_meta("ratings_synced_at")
+        ratings_stale = True
+        if last_ratings_sync:
+            try:
+                dt = datetime.fromisoformat(last_ratings_sync)
+                age_seconds = (datetime.now(timezone.utc) - dt).total_seconds()
+                ratings_stale = age_seconds > RATINGS_SYNC_INTERVAL_SECONDS
+            except ValueError:
+                pass
+        if ratings_stale:
+            logger.info("Ratings stale or missing — scheduling background ratings sync...")
+            # Hold a strong reference: the event loop only weakly references tasks,
+            # so an untracked task can be garbage-collected mid-run.
+            global _STARTUP_RATINGS_SYNC_TASK
+            _STARTUP_RATINGS_SYNC_TASK = asyncio.create_task(_run_startup_ratings_sync())
+            _STARTUP_RATINGS_SYNC_TASK.add_done_callback(_clear_startup_ratings_sync_task)
+        await _ensure_periodic_ratings_loop()
 
-    yield
-
-    await _cancel_task(_PERIODIC_REFRESH_TASK)
-    await _cancel_task(_LIBRARY_REFRESH_TASK)
-    await _cancel_task(_ENRICHMENT_TASK)
-    await _cancel_task(_RATINGS_SYNC_TASK)
-    await _cancel_task(_STARTUP_RATINGS_SYNC_TASK)
-    logger.info("Shutdown")
+        yield
+    finally:
+        # Runs even if a startup step above raised before yield — otherwise
+        # close_db_pool() never fires and _POOL_ENABLED is stuck True with
+        # leaked pooled connections. _cancel_task is None-safe (a step can
+        # raise before its task is created), so this is safe at any point.
+        await _cancel_task(_PERIODIC_REFRESH_TASK)
+        await _cancel_task(_LIBRARY_REFRESH_TASK)
+        await _cancel_task(_ENRICHMENT_TASK)
+        await _cancel_task(_RATINGS_SYNC_TASK)
+        await _cancel_task(_STARTUP_RATINGS_SYNC_TASK)
+        await close_db_pool()
+        logger.info("Shutdown")
