@@ -27,6 +27,7 @@ gamelib-mcp is single-user by design: one deployment serves one person's library
 | `rate_game` | Rate a game 0–10 directly; feeds the taste profile immediately |
 | `get_backlog_stats` | Backlog size, completion estimates |
 | `get_platform_breakdown` | Ownership counts per platform |
+| `get_wishlist_deals` | Current prices and deals for wishlist games (Steam/GOG/Epic via IsThereAnyDeal, Switch via DekuDeals) |
 | `refresh_library` | Re-sync all platforms, or a subset (e.g. just `["gog"]`) |
 | `set_hardware_preference` | Priority order for suggested platforms |
 | `add_game_to_platform` | Manually record ownership |

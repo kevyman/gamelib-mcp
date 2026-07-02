@@ -315,3 +315,26 @@ class RollbackScrapeConfigResponse(FlexibleModel):
     restored_version: int | None = None
     on_defaults: bool
     effective_config: dict[str, Any]
+
+
+class WishlistDealEntry(FlexibleModel):
+    game_id: int
+    name: str
+    platform: str
+    shop: str
+    price: float
+    regular_price: float | None = None
+    cut_pct: int | None = None
+    currency: str | None = None
+    deal_url: str | None = None
+    wishlisted_at: str | None = None
+
+
+class WishlistDealsResponse(FlexibleModel):
+    deals: list[WishlistDealEntry]
+    unpriced: list[str]
+    fetched_at: str
+    count: int
+    price_refresh_errors: list[str] | None = None
+    itad: str | None = None
+    currency_note: str | None = None

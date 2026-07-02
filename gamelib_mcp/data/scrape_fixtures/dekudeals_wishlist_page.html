@@ -1,0 +1,77 @@
+<!--
+Trimmed from a live DekuDeals shared-wishlist page (view-list layout,
+`.browse-cards.view-list` > `.row.row-cols-1` > one `.d-block.col` per item).
+Structure and class names (main-link, line-clamp-3, text-tight, badge
+badge-danger) verified against a real fetch on 2026-07-02; irrelevant
+boilerplate (base64 image data, watch/rating/hide buttons, platform SVG
+icons) stripped for fixture size. Two items (Pikmin 4, Paper Mario: The
+Thousand-Year Door) are undiscounted exactly as fetched, EUR/comma-decimal
+as served. The third item's discount markup (<s>/<strong>/badge-danger -XX%)
+mirrors the exact structure confirmed live on /deepest-discounts, a
+DekuDeals page that lists sale items in the shared price-block partial;
+this wishlist had no on-sale item at fetch time, so the specific discounted
+numbers here are illustrative, not recorded.
+-->
+<!DOCTYPE html>
+<html lang='en'>
+<body>
+<div class='browse-cards view-list mb-4'>
+<div class='d-flex row row-cols-1 position-relative'>
+
+<div class='d-block col'>
+<div class='h-1 divider' style='margin-top: 0;'></div>
+<div class='d-flex position-relative' style='gap: 0.5rem;'>
+<div class='img-container'></div>
+<div class='d-flex flex-column-to-row flex-grow-1' style='gap: 0.15rem;'>
+<div class='d-flex flex-column flex-grow-1' style='gap: 0.15rem;'>
+<a class='main-link' href='/items/pikmin-4'>
+<h6 class='line-clamp-3 m-0'>Pikmin 4</h6>
+</a>
+<div class='d-flex align-items-center text-tight' style='gap: 0.5rem'>
+<strong>&euro;59,99</strong>
+</div>
+</div>
+</div>
+</div>
+</div>
+
+<div class='d-block col'>
+<div class='h-1 divider'></div>
+<div class='d-flex position-relative' style='gap: 0.5rem;'>
+<div class='img-container'></div>
+<div class='d-flex flex-column-to-row flex-grow-1' style='gap: 0.15rem;'>
+<div class='d-flex flex-column flex-grow-1' style='gap: 0.15rem;'>
+<a class='main-link' href='/items/paper-mario-the-thousand-year-door'>
+<h6 class='line-clamp-3 m-0'>Paper Mario: The Thousand-Year Door</h6>
+</a>
+<div class='d-flex align-items-center text-tight' style='gap: 0.5rem'>
+<strong>&euro;59,99</strong>
+</div>
+</div>
+</div>
+</div>
+</div>
+
+<div class='d-block col'>
+<div class='h-1 divider'></div>
+<div class='d-flex position-relative' style='gap: 0.5rem;'>
+<div class='img-container'></div>
+<div class='d-flex flex-column-to-row flex-grow-1' style='gap: 0.15rem;'>
+<div class='d-flex flex-column flex-grow-1' style='gap: 0.15rem;'>
+<a class='main-link' href='/items/kirby-and-the-forgotten-land'>
+<h6 class='line-clamp-3 m-0'>Kirby and the Forgotten Land</h6>
+</a>
+<div class='d-flex align-items-center text-tight flex-wrap text-responsive' style='gap: 0.5rem; row-gap: 0.2rem;'>
+<s class='text-muted'>&euro;49,99</s>
+<strong>&euro;24,99</strong>
+<span class='badge badge-danger p-1'>-50%</span>
+</div>
+</div>
+</div>
+</div>
+</div>
+
+</div>
+</div>
+</body>
+</html>

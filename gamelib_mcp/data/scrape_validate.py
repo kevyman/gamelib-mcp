@@ -112,15 +112,32 @@ def _replay_metacritic(config: Any) -> str | None:
 
 
 def _replay_dekudeals(config: Any) -> str | None:
-    from .dekudeals import _parse_wishlist_payload
+    from .dekudeals import _parse_wishlist_payload, _parse_wishlist_prices
+
+    problems = []
 
     payload = json.loads((FIXTURES_DIR / "dekudeals_wishlist.json").read_text(encoding="utf-8"))
     rows = _parse_wishlist_payload(payload, config)
     expected = ["Pikmin 4", "Metroid Prime 4: Beyond", "Hollow Knight: Silksong"]
     actual = [r["title"] for r in rows]
     if actual != expected:
-        return f"expected {expected}, got {actual}"
-    return None
+        problems.append(f"wishlist items: expected {expected}, got {actual}")
+
+    # The wishlist_item_selector/price_selector/etc. family is a separate
+    # selector surface (price scraping, added later) from items_keys/
+    # title_keys/added_at_key above (JSON wishlist parsing) — replay both, or
+    # a heal that rewrites price selectors into something wrong-but-plausible
+    # would pass fixture replay trivially.
+    html = (FIXTURES_DIR / "dekudeals_wishlist_page.html").read_text(encoding="utf-8")
+    prices = _parse_wishlist_prices(html, config)
+    pikmin = prices.get("Pikmin 4")
+    if pikmin is None or pikmin["currency"] != "EUR" or abs(pikmin["price"] - 59.99) > 0.01:
+        problems.append(f"price fixture: expected Pikmin 4 at 59.99 EUR, got {pikmin}")
+    kirby = prices.get("Kirby and the Forgotten Land")
+    if kirby is None or kirby["cut_pct"] != 50:
+        problems.append(f"price fixture: expected Kirby and the Forgotten Land at -50%, got {kirby}")
+
+    return "; ".join(problems) or None
 
 
 _FIXTURE_REPLAYS = {

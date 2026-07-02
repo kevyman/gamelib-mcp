@@ -120,7 +120,7 @@ async def fetch_wishlist() -> dict:
             existing = await get_game_by_identifier(STEAM_APP_ID, str(appid))
             if existing is not None:
                 await upsert_wishlist_entry(
-                    existing["id"], "steam", wishlisted_at=item_added_at, source="steam"
+                    existing["id"], "steam", wishlisted_at=item_added_at, source="steam", store_identifier=str(appid)
                 )
                 matched += 1
                 resolved_game_ids.add(existing["id"])
@@ -134,7 +134,7 @@ async def fetch_wishlist() -> dict:
                 continue
 
             game_id = await upsert_game(appid, prepared_title)
-            await upsert_wishlist_entry(game_id, "steam", wishlisted_at=item_added_at, source="steam")
+            await upsert_wishlist_entry(game_id, "steam", wishlisted_at=item_added_at, source="steam", store_identifier=str(appid))
             added += 1
             resolved_game_ids.add(game_id)
 
