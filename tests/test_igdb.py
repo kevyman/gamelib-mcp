@@ -152,6 +152,33 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results[0].igdb_id, 141533)
         self.assertEqual(results[0].name, "Loop Hero")
 
+    async def test_search_game_falls_back_to_game_type_when_category_missing(self) -> None:
+        # Same family as test_search_game_does_not_filter_out_results_with_missing_category,
+        # but also asserts the parsed IGDBGame reflects the game_type-derived
+        # classification (game_type=13 "pack" -> non-primary dlc) instead of
+        # defaulting to a mislabeled base_game/primary result.
+        async def fake_post(query: str, headers: dict[str, str]) -> list[dict]:
+            return [
+                {
+                    "id": 266009,
+                    "name": "Persona 3 Reload: Persona 5 Royal Persona Set 1",
+                    "category": None,
+                    "game_type": 13,
+                }
+            ]
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", new=fake_post),
+        ):
+            results = await igdb.search_game("Persona 3 Reload")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].game_type, 13)
+        self.assertEqual(results[0].content_type, "dlc")
+        self.assertFalse(results[0].is_primary_library_item)
+
     async def test_search_game_requests_content_relationship_fields_without_excluding_addons(self) -> None:
         post_mock = AsyncMock(return_value=[])
 
@@ -167,7 +194,7 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("parent_game.id, parent_game.name", query)
         self.assertIn("version_parent.id, version_parent.name", query)
         self.assertNotIn("category !=", query)
-        self.assertIn("limit 5;", query)
+        self.assertIn("limit 20;", query)
 
     async def test_search_game_requests_series_fields(self) -> None:
         post_mock = AsyncMock(return_value=[])
@@ -612,6 +639,76 @@ class IGDBBackfillTests(unittest.IsolatedAsyncioTestCase):
         release_claim.assert_awaited_once_with(7, "igdb_claimed_at")
         self.assertTrue(any("IGDB backfill leaving game retryable" in line for line in logs.output))
 
+    async def test_backfill_missing_games_fetches_by_id_when_igdb_id_already_set(self) -> None:
+        # NieR:Automata case: the row already has a matched igdb_id from an
+        # earlier pass, so the backfill must fetch it directly instead of
+        # re-resolving by name (which can drift onto a different candidate).
+        by_id_game = igdb.IGDBGame(
+            igdb_id=391942,
+            name="NieR:Automata",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2017-02-23",
+            platforms=[6, 48],
+        )
+        game_row = {"id": 9, "name": "NieR:Automata", "igdb_id": 391942}
+
+        with (
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[9])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[game_row])),
+            patch("gamelib_mcp.data.igdb.fetch_game_by_id", AsyncMock(return_value=by_id_game)) as fetch_by_id,
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock()) as platform_hint,
+            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock()) as resolve_game,
+            patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
+            patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
+        ):
+            count = await igdb.backfill_missing_games(limit=1)
+
+        self.assertEqual(count, 1)
+        fetch_by_id.assert_awaited_once_with(391942, suppress_errors=False)
+        apply_metadata.assert_awaited_once_with(9, by_id_game)
+        platform_hint.assert_not_awaited()
+        resolve_game.assert_not_awaited()
+
+    async def test_backfill_missing_games_falls_back_to_name_search_on_empty_platforms(self) -> None:
+        # A by-id fetch that returns a game with no platform data isn't useful
+        # (the whole point is populating igdb_platforms) — fall through to the
+        # existing name-based resolution path rather than applying it as-is.
+        empty_platforms_game = igdb.IGDBGame(
+            igdb_id=391942,
+            name="NieR:Automata",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2017-02-23",
+            platforms=[],
+        )
+        resolved_game = igdb.IGDBGame(
+            igdb_id=391942,
+            name="NieR:Automata",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2017-02-23",
+            platforms=[6, 48],
+        )
+        game_row = {"id": 9, "name": "NieR:Automata", "igdb_id": 391942}
+
+        with (
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[9])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[game_row])),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_game_by_id", AsyncMock(return_value=empty_platforms_game)
+            ) as fetch_by_id,
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=igdb.IGDB_PLATFORM_PC)),
+            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock(return_value=resolved_game)) as resolve_game,
+            patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
+            patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
+        ):
+            count = await igdb.backfill_missing_games(limit=1)
+
+        self.assertEqual(count, 1)
+        fetch_by_id.assert_awaited_once_with(391942, suppress_errors=False)
+        resolve_game.assert_awaited_once()
+        apply_metadata.assert_awaited_once_with(9, resolved_game)
+
 
 class ResolveGameIdentityTests(unittest.IsolatedAsyncioTestCase):
     """resolve_game must never collapse a title onto a different series entry."""
@@ -664,6 +761,116 @@ class ResolveGameIdentityTests(unittest.IsolatedAsyncioTestCase):
         result = await self._resolve("Hitman 2", ["Hitman 2", "Hitman"])
         self.assertIsNotNone(result)
         self.assertEqual(result.name, "Hitman 2")
+
+    async def test_picks_exact_title_base_game_over_dlc_shaped_higher_relevance_hits(self) -> None:
+        # Persona 3 Reload case from the handover doc: IGDB's own relevance
+        # ranking put 5 DLC/cosmetic "Persona Set"/"BGM Set" packs (game_type=13)
+        # ahead of the actual base game (game_type=8, "remake") in the result
+        # list. The base game's title is an exact match for the query; every
+        # pack's title has a longer suffix — the exact-match short-circuit must
+        # pick the base game regardless of list position.
+        packs = [
+            igdb.IGDBGame(
+                igdb_id=266009 + i,
+                name=f"Persona 3 Reload: Persona 5 Royal Persona Set {i + 1}",
+                category=None,
+                game_type=13,
+                content_type="dlc",
+                is_primary_library_item=False,
+                first_release_date="2024-02-02",
+            )
+            for i in range(5)
+        ]
+        base_game = igdb.IGDBGame(
+            igdb_id=252647,
+            name="Persona 3 Reload",
+            category=None,
+            game_type=8,
+            content_type="remake",
+            is_primary_library_item=True,
+            first_release_date="2024-02-02",
+        )
+        # Base game listed last, as IGDB's relevance ranking put it at position
+        # 11 of 20 behind DLC packs — list order must not matter.
+        candidates = [*packs, base_game]
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(return_value=candidates)),
+        ):
+            result = await igdb.resolve_game("Persona 3 Reload", igdb.IGDB_PLATFORM_SWITCH2)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.igdb_id, 252647)
+        self.assertEqual(result.name, "Persona 3 Reload")
+        self.assertTrue(result.is_primary_library_item)
+
+
+class ResolveGameZeroResultLadderTests(unittest.IsolatedAsyncioTestCase):
+    """resolve_game's zero-result fallback ladder (Fix 4)."""
+
+    async def test_ladder_variant_finds_accented_title_search_missed(self) -> None:
+        # The Seance of Blake Manor case: IGDB's search returns zero results
+        # for the stored (accent-less) title, and even a "Seance of Blake
+        # Manor"/"Seance Blake Manor" variant returns nothing — only the
+        # last-resort two-token query "Blake Manor" finds the real (accented)
+        # match. It must still be accepted, since it fuzzy/exact-matches the
+        # ORIGINAL query under ascii-folded normalization.
+        seance_game = igdb.IGDBGame(
+            igdb_id=335833,
+            name="The Séance of Blake Manor",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2024-10-29",
+        )
+
+        async def fake_search_game(name, igdb_platform_id=None, *, suppress_errors=True):
+            if name == "Blake Manor":
+                return [seance_game]
+            return []
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(side_effect=fake_search_game)),
+        ):
+            result = await igdb.resolve_game("The Seance of Blake Manor", None)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.igdb_id, 335833)
+
+    async def test_ladder_does_not_accept_unrelated_results_from_a_narrow_variant(self) -> None:
+        # A narrower fallback-ladder query (e.g. "Seance" alone) can return
+        # totally unrelated games ("Silly Seance", etc.) that don't conflict on
+        # sequel identity but also don't fuzzy-match the original query. These
+        # must not be accepted just because the variant returned something.
+        unrelated = [
+            igdb.IGDBGame(
+                igdb_id=1,
+                name="Silly Seance",
+                category=igdb.CATEGORY_MAIN_GAME,
+                first_release_date="2019-01-01",
+            ),
+            igdb.IGDBGame(
+                igdb_id=2,
+                name="Ghost Hunters Simulator",
+                category=igdb.CATEGORY_MAIN_GAME,
+                first_release_date="2020-01-01",
+            ),
+        ]
+
+        async def fake_search_game(name, igdb_platform_id=None, *, suppress_errors=True):
+            # Original query returns nothing; every ladder variant returns the
+            # same unrelated candidates.
+            if name == "The Seance of Blake Manor":
+                return []
+            return unrelated
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(side_effect=fake_search_game)),
+        ):
+            result = await igdb.resolve_game("The Seance of Blake Manor", None)
+
+        self.assertIsNone(result)
 
 
 class PlatformFilterTests(unittest.TestCase):
