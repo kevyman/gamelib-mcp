@@ -326,6 +326,8 @@ async def get_wishlist_deals(
     for game_id, state in games.items():
         options = []
         for price_platform, by_shop in state["prices"].items():
+            if price_platform in state["owned_platforms"]:
+                continue  # already owned there — never recommend buying it again
             priced = [r for r in by_shop.values() if r["price"] is not None]
             if not priced:
                 continue

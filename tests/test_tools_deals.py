@@ -379,6 +379,52 @@ class PreferenceAwareDealsTests(ToolDBTestCase):
         entry = next(d for d in result["deals"] if d["game_id"] == game_id)
         self.assertEqual(entry["platform"], "steam")
 
+    async def test_stale_owned_platform_price_excluded_from_assembly(self):
+        # Reproduces a reviewer-found bug: game_prices can carry a cached
+        # price for a platform the game is NOW owned on (e.g. cached before
+        # the purchase, or a leftover cross-platform search hit). The
+        # deal-assembly loop must exclude it the same way _candidate_platforms
+        # excludes it from refresh — not just skip refreshing it while still
+        # surfacing the stale cached row.
+        game_id = await seed_game("Bought It On Switch")
+        await add_platform(game_id, "switch2", owned=1)
+        await _seed_wishlist(game_id, "steam", store_identifier="45")
+        await _set_igdb_platforms(game_id, [6, 508])
+        await _set_hw_pref(["switch2", "steam"])
+        # Stale switch2 price predating ownership, cheaper than steam.
+        await _seed_price(game_id, "switch2", "dekudeals", 5.0, currency="EUR")
+        await _seed_price(game_id, "steam", "Steam", 9.0, currency="EUR")
+
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock()), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()) as search, \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            result = await deals.get_wishlist_deals()
+
+        search.assert_not_awaited()  # already owned there — no refresh, but also no recommend
+        entry = next(d for d in result["deals"] if d["game_id"] == game_id)
+        self.assertEqual(entry["platform"], "steam")
+        self.assertNotIn(
+            "switch2", [a["platform"] for a in entry["alternatives"]]
+        )
+
+    async def test_all_priced_platforms_owned_lands_in_unpriced(self):
+        # Edge case: the ONLY cached price is for a platform now owned —
+        # must degrade to unpriced instead of crashing on an empty options list.
+        game_id = await seed_game("Only Owned Priced")
+        await add_platform(game_id, "switch2", owned=1)
+        await _seed_wishlist(game_id, "switch2", source="dekudeals")
+        await _seed_price(game_id, "switch2", "dekudeals", 5.0, currency="EUR")
+
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock()), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()), \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            result = await deals.get_wishlist_deals()
+
+        self.assertNotIn(game_id, [d["game_id"] for d in result["deals"]])
+        self.assertIn("Only Owned Priced", result["unpriced"])
+
     async def test_search_lookup_cap_defers_overflow(self):
         await _set_hw_pref(["switch2"])
         for i in range(deals._MAX_SWITCH2_SEARCH_LOOKUPS + 3):
