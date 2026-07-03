@@ -551,7 +551,6 @@ class DekuDealsWishlistTests(ToolDBTestCase):
                 AsyncMock(
                     return_value=[
                         {"title": "Hollow Knight Silksong", "added_at": "2025-06-29T07:43:28+00:00"},
-                        {"title": "Some Untracked Game", "added_at": "2025-06-29T07:44:40+00:00"},
                     ]
                 ),
             ),
@@ -559,7 +558,8 @@ class DekuDealsWishlistTests(ToolDBTestCase):
             result = await dekudeals.sync_dekudeals_wishlist()
 
         self.assertEqual(result["matched"], 1)
-        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["skipped"], 0)
         async with db_module.get_db() as db:
             wishlist_row = await db.execute_fetchone(
                 "SELECT source, wishlisted_at FROM game_wishlist WHERE game_id = ? AND platform = ?",
@@ -572,6 +572,60 @@ class DekuDealsWishlistTests(ToolDBTestCase):
         # Uses the item's own wishlist-add time from the export, not sync time.
         self.assertEqual(wishlist_row["wishlisted_at"], "2025-06-29T07:43:28+00:00")
         self.assertIsNone(gp_row)
+
+    async def test_creates_new_unowned_game_for_a_title_not_yet_in_the_library(self):
+        # Most switch2 wishlist items are Nintendo exclusives never synced from
+        # any other platform, so they have no games row yet at all — unlike
+        # steam_wishlist.fetch_wishlist, this used to just skip them forever.
+        with (
+            patch.object(dekudeals, "DEKUDEALS_WISHLIST_URL", "https://www.dekudeals.com/wishlist/abc"),
+            patch.object(
+                dekudeals,
+                "_fetch_wishlist_items",
+                AsyncMock(
+                    return_value=[
+                        {"title": "Pikmin 4", "added_at": "2025-06-29T07:44:40+00:00"},
+                    ]
+                ),
+            ),
+        ):
+            result = await dekudeals.sync_dekudeals_wishlist()
+
+        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 0, "removed": 0, "total_scraped": 1})
+        async with db_module.get_db() as db:
+            game = await db.execute_fetchone("SELECT id FROM games WHERE name = 'Pikmin 4'")
+            self.assertIsNotNone(game)
+            wishlist_row = await db.execute_fetchone(
+                "SELECT source, wishlisted_at FROM game_wishlist WHERE game_id = ? AND platform = ?",
+                (game["id"], "switch2"),
+            )
+            gp_row = await db.execute_fetchone(
+                "SELECT 1 FROM game_platforms WHERE game_id = ?", (game["id"],)
+            )
+        self.assertEqual(wishlist_row["source"], "dekudeals")
+        self.assertEqual(wishlist_row["wishlisted_at"], "2025-06-29T07:44:40+00:00")
+        # A wishlist-only game has no game_platforms row at all.
+        self.assertIsNone(gp_row)
+
+    async def test_re_sync_matches_previously_created_wishlist_only_game(self):
+        # A second sync must not create a duplicate row for a title it already
+        # created on a prior pass — mirrors upsert_game's exact-name fallback.
+        with (
+            patch.object(dekudeals, "DEKUDEALS_WISHLIST_URL", "https://www.dekudeals.com/wishlist/abc"),
+            patch.object(
+                dekudeals,
+                "_fetch_wishlist_items",
+                AsyncMock(return_value=[{"title": "Pikmin 4", "added_at": None}]),
+            ),
+        ):
+            await dekudeals.sync_dekudeals_wishlist()
+            result = await dekudeals.sync_dekudeals_wishlist()
+
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["matched"], 1)
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS n FROM games WHERE name = 'Pikmin 4'")
+        self.assertEqual(count["n"], 1)
 
     async def test_removes_entry_no_longer_in_the_fetched_wishlist(self):
         removed_game = await seed_game("Taken Off Wishlist")

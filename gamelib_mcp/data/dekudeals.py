@@ -12,9 +12,13 @@ Confirmed export shape (2026-07-01): {"items": [{"name", "link", "added_at"},
 ...], "default_desired_price": ...}. There is no numeric/NSUID identifier
 anywhere in it — "link" is DekuDeals' own slug (e.g. /items/pikmin-4), unrelated
 to Nintendo's applicationId (nintendo_title_id) used for VGCS ownership — so
-name matching is the only available bridge to owned switch2 games, not a
-shortcut taken for convenience. "added_at" is each item's real wishlist-add
-time and is used as-is for wishlisted_at (it's already ISO 8601 UTC).
+name matching is the only available bridge to games in the DB, not a shortcut
+taken for convenience. A title with no existing fuzzy match gets a fresh
+wishlist-only games row (see sync_dekudeals_wishlist) rather than being
+skipped forever — most switch2-wishlisted titles are Nintendo exclusives never
+synced from any other platform, so they have no games row yet at all.
+"added_at" is each item's real wishlist-add time and is used as-is for
+wishlisted_at (it's already ISO 8601 UTC).
 
 Removal reconciliation: a title removed from the DekuDeals wishlist is deleted
 from game_wishlist too, via delete_stale_wishlist_entries — but only after a
@@ -36,9 +40,11 @@ from .db import (
     delete_stale_wishlist_entries,
     extract_best_fuzzy_key,
     get_db,
+    upsert_game,
     upsert_wishlist_entry,
 )
 from .scrape_config import DekuDealsScrapeConfig, load_scrape_config
+from .title_normalization import prepare_catalog_title
 
 # Leading currency symbol -> ISO 4217 code. Extend if another symbol shows up
 # in a live fetch; these three cover what's been confirmed against real pages.
@@ -64,12 +70,17 @@ async def sync_dekudeals_wishlist() -> dict:
     Fetch the configured DekuDeals shared wishlist and fuzzy-match titles to DB
     games, upserting a game_wishlist row for each on the switch2 platform, and
     removing any prior dekudeals-sourced entry no longer in the fetched list.
-    Returns stats. Raises if the fetch itself fails (see _fetch_wishlist_items)
-    rather than treating a failed fetch as an empty wishlist.
+    A title with no existing fuzzy match gets a fresh wishlist-only games row
+    (mirrors steam_wishlist.fetch_wishlist's handling of a new appid) — most
+    switch2-wishlisted titles are Nintendo exclusives never synced from any
+    other platform, so they have no games row yet at all. Returns stats.
+    Raises if the fetch itself fails (see _fetch_wishlist_items) rather than
+    treating a failed fetch as an empty wishlist.
     """
     wishlist_url = os.getenv("DEKUDEALS_WISHLIST_URL", DEKUDEALS_WISHLIST_URL)
     if not wishlist_url:
         return {
+            "added": 0,
             "matched": 0,
             "skipped": 0,
             "removed": 0,
@@ -86,7 +97,7 @@ async def sync_dekudeals_wishlist() -> dict:
     name_to_id = {r["name"].lower(): r["id"] for r in game_rows}
     candidate_names = {name: name for name in name_to_id}
 
-    matched = skipped = 0
+    added = matched = skipped = 0
     fallback_now = datetime.now(timezone.utc).isoformat()
     resolved_game_ids: set[int] = set()
 
@@ -94,21 +105,32 @@ async def sync_dekudeals_wishlist() -> dict:
         game_id = _match_game_id(
             item["title"], candidate_names, name_to_id, cutoff=config.fuzzy_cutoff
         )
-        if game_id is None:
-            logger.debug("No match for DekuDeals wishlist title: %s", item["title"])
-            skipped += 1
-            continue
+        if game_id is not None:
+            matched += 1
+        else:
+            prepared_title = prepare_catalog_title(item["title"])
+            if prepared_title is None:
+                logger.debug("Unresolvable DekuDeals wishlist title: %s", item["title"])
+                skipped += 1
+                continue
+            game_id = await upsert_game(None, prepared_title)
+            added += 1
         await upsert_wishlist_entry(
             game_id, "switch2", wishlisted_at=item["added_at"] or fallback_now, source="dekudeals"
         )
-        matched += 1
         resolved_game_ids.add(game_id)
 
     # Only reached once _fetch_wishlist_items has succeeded, so an empty/partial
     # items list here genuinely reflects the current upstream wishlist.
     removed = await delete_stale_wishlist_entries("switch2", "dekudeals", resolved_game_ids)
 
-    return {"matched": matched, "skipped": skipped, "removed": removed, "total_scraped": len(items)}
+    return {
+        "added": added,
+        "matched": matched,
+        "skipped": skipped,
+        "removed": removed,
+        "total_scraped": len(items),
+    }
 
 
 async def _fetch_wishlist_items(
