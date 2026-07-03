@@ -158,8 +158,11 @@ async def add_game_to_platform(
     name: Game name (will match an existing game by exact name or create a new one)
     platform: steam | epic | gog | nintendo | switch2 | ps5 | itchio | xbox | ea | ubisoft | other (aliases: origin→ea, uplay→ubisoft)
     identifier_type: Optional store identifier type (e.g. 'steam_appid', 'gog_product_id').
-        Requires owned=True — a wishlist entry has no platform ownership row to
-        attach an identifier to.
+        With owned=True, attaches to the new platform-ownership row. With
+        owned=False, only 'steam_appid' (with platform='steam') is accepted —
+        it's stored as the wishlist entry's store_identifier so
+        get_wishlist_deals can price it via ITAD immediately, without waiting
+        on a sync_wishlist run to discover the same appid.
     identifier_value: Optional store identifier value
     playtime_minutes: Optional known playtime in minutes
     owned: True (default) records an owned copy; False records a wishlist entry
@@ -175,8 +178,14 @@ async def add_game_to_platform(
         raise ToolError("name must not be empty")
     if playtime_minutes is not None and playtime_minutes < 0:
         raise ToolError("playtime_minutes must not be negative")
-    if not owned and (identifier_type or identifier_value):
-        raise ToolError("identifier_type/identifier_value require owned=True")
+    if not owned:
+        if identifier_type not in (None, "steam_appid"):
+            raise ToolError(
+                "identifier_type on a wishlist entry (owned=False) only supports "
+                "'steam_appid'"
+            )
+        if identifier_type == "steam_appid" and platform != "steam":
+            raise ToolError("identifier_type='steam_appid' requires platform='steam'")
 
     # Check whether the game already exists before upserting
     async with get_db() as db:
@@ -206,7 +215,12 @@ async def add_game_to_platform(
             added_identifier = {"type": identifier_type, "value": identifier_value}
     else:
         game_platform_id = None
-        wishlist_id = await upsert_wishlist_entry(game_id, platform, source="manual")
+        store_identifier = identifier_value if identifier_type == "steam_appid" else None
+        wishlist_id = await upsert_wishlist_entry(
+            game_id, platform, source="manual", store_identifier=store_identifier
+        )
+        if store_identifier:
+            added_identifier = {"type": "steam_appid", "value": store_identifier}
 
     # Either branch may have just made a prior wishlist entry moot (owned=True
     # fulfills it directly; owned=False on an already-owned game reconciles it

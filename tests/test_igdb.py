@@ -234,6 +234,27 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results[0].parent_name, "Sid Meier's Civilization IV")
         self.assertFalse(results[0].is_primary_library_item)
 
+    async def test_search_game_captures_platform_ids(self) -> None:
+        item = {
+            "id": 1,
+            "name": "Hades",
+            "category": 0,
+            "platforms": [6, 130, 508],
+            "release_dates": [{"platform": 167, "date": 1600000000}],
+        }
+
+        async def fake_post(query: str, headers: dict[str, str]) -> list[dict]:
+            return [item]
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", new=fake_post),
+        ):
+            results = await igdb.search_game("Hades", None)
+
+        self.assertEqual(results[0].platforms, [6, 130, 167, 508])
+
     async def test_search_game_retries_rate_limit_response(self) -> None:
         client = _DummyAsyncClient(
             [
@@ -643,3 +664,27 @@ class ResolveGameIdentityTests(unittest.IsolatedAsyncioTestCase):
         result = await self._resolve("Hitman 2", ["Hitman 2", "Hitman"])
         self.assertIsNotNone(result)
         self.assertEqual(result.name, "Hitman 2")
+
+
+class PlatformFilterTests(unittest.TestCase):
+    def test_single_platform_id_filter_unchanged(self):
+        query = igdb._build_search_game_query("Hades", 6)
+        self.assertIn("where platforms = 6;", query)
+
+    def test_tuple_platform_ids_render_contains_any(self):
+        query = igdb._build_search_game_query(
+            "Mario Kart World", igdb.PLATFORM_TO_IGDB_ANY["switch2"]
+        )
+        self.assertIn("where platforms = (508,130);", query)
+
+    def test_platforms_field_requested(self):
+        query = igdb._build_search_game_query("Hades")
+        self.assertIn(" platforms,", query)
+
+    def test_platform_maps_cover_switch_generations(self):
+        self.assertEqual(igdb.IGDB_PLATFORM_SWITCH2, 508)
+        self.assertEqual(igdb.PLATFORM_TO_IGDB_ANY["switch2"], (508, 130))
+        self.assertEqual(igdb.IGDB_TO_PLATFORM[130], "switch2")
+        self.assertEqual(igdb.IGDB_TO_PLATFORM[508], "switch2")
+        self.assertEqual(igdb.IGDB_TO_PLATFORM[6], "steam")
+        self.assertEqual(igdb.IGDB_TO_PLATFORM[167], "ps5")

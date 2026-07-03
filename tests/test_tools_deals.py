@@ -5,9 +5,11 @@ repo's established patching convention — see tests/test_tools_admin.py),
 not their origin modules (data.itad / data.dekudeals).
 """
 
+import json
+import unittest
 from unittest.mock import AsyncMock, patch
 
-from conftest import ToolDBTestCase, seed_game
+from conftest import ToolDBTestCase, add_platform, seed_game
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.itad import PriceInfo
@@ -73,6 +75,8 @@ class GetWishlistDealsTests(ToolDBTestCase):
         ) as mock_itad, patch(
             "gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()
         ) as mock_deku, patch(
+            "gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()
+        ), patch(
             "gamelib_mcp.tools.deals.is_itad_configured", return_value=True
         ):
             result = await deals.get_wishlist_deals()
@@ -110,6 +114,8 @@ class GetWishlistDealsTests(ToolDBTestCase):
                 }
             ),
         ) as mock_deku, patch(
+            "gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()
+        ), patch(
             "gamelib_mcp.tools.deals.is_itad_configured", return_value=True
         ):
             result = await deals.get_wishlist_deals(refresh=True)
@@ -134,6 +140,8 @@ class GetWishlistDealsTests(ToolDBTestCase):
         ), patch(
             "gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()
         ), patch(
+            "gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()
+        ), patch(
             "gamelib_mcp.tools.deals.is_itad_configured", return_value=True
         ):
             result = await deals.get_wishlist_deals(max_price=10.0)
@@ -150,6 +158,8 @@ class GetWishlistDealsTests(ToolDBTestCase):
         ), patch(
             "gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()
         ), patch(
+            "gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()
+        ), patch(
             "gamelib_mcp.tools.deals.is_itad_configured", return_value=True
         ):
             result = await deals.get_wishlist_deals(min_cut_pct=50)
@@ -157,6 +167,67 @@ class GetWishlistDealsTests(ToolDBTestCase):
         names = {d["name"] for d in result["deals"]}
         self.assertEqual(names, {"Pricey Game"})
         self.assertEqual(result["unpriced"], [])
+
+    async def test_max_price_keeps_game_when_only_alternative_qualifies(self):
+        # Reviewer-found bug: filtering only checked the RECOMMENDED option's
+        # flat price/cut_pct. Here the recommended (hardware-preferred)
+        # option is switch2 @ 50 (steam's 30 isn't below the 50% override
+        # ratio of 25, so no override fires) — but the steam alternative @ 30
+        # clearly satisfies max_price=40 and must not be hidden.
+        game_id = await seed_game("Cross Platform Game")
+        await _seed_wishlist(game_id, "steam", store_identifier="1")
+        await _seed_wishlist(game_id, "switch2", source="dekudeals")
+        await db_module.set_meta("hardware_preference", json.dumps(["switch2", "steam"]))
+        await _seed_price(game_id, "switch2", "dekudeals", 50.0, currency="EUR")
+        await _seed_price(game_id, "steam", "steam", 30.0, currency="EUR")
+
+        with patch(
+            "gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.is_itad_configured", return_value=True
+        ):
+            result = await deals.get_wishlist_deals(max_price=40.0)
+
+        entry = next((d for d in result["deals"] if d["game_id"] == game_id), None)
+        self.assertIsNotNone(entry, "game with a qualifying alternative must not be dropped")
+        # Recommended fields must stay pointed at switch2/50 — the filter
+        # decides keep-or-drop only, it never re-points recommended.
+        self.assertEqual(entry["platform"], "switch2")
+        self.assertEqual(entry["price"], 50.0)
+        self.assertEqual(
+            [a["platform"] for a in entry["alternatives"]], ["steam"]
+        )
+        self.assertEqual(result["count"], 1)
+
+    async def test_max_price_drops_game_when_no_option_qualifies(self):
+        # Inverse of the above: neither the recommended option nor any
+        # alternative satisfies max_price, so the game is correctly excluded.
+        game_id = await seed_game("Too Expensive Everywhere")
+        await _seed_wishlist(game_id, "steam", store_identifier="2")
+        await _seed_wishlist(game_id, "switch2", source="dekudeals")
+        await db_module.set_meta("hardware_preference", json.dumps(["switch2", "steam"]))
+        await _seed_price(game_id, "switch2", "dekudeals", 50.0, currency="EUR")
+        await _seed_price(game_id, "steam", "steam", 30.0, currency="EUR")
+
+        with patch(
+            "gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.is_itad_configured", return_value=True
+        ):
+            result = await deals.get_wishlist_deals(max_price=20.0)
+
+        self.assertNotIn(game_id, [d["game_id"] for d in result["deals"]])
+        # Still has a price — must not be misfiled as unpriced.
+        self.assertEqual(result["unpriced"], [])
+        self.assertEqual(result["count"], 0)
 
     async def test_currency_note_added_when_deals_span_multiple_currencies(self):
         usd_id = await seed_game("USD Game")
@@ -171,6 +242,8 @@ class GetWishlistDealsTests(ToolDBTestCase):
             "gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock()
         ), patch(
             "gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()
         ), patch(
             "gamelib_mcp.tools.deals.is_itad_configured", return_value=True
         ):
@@ -189,6 +262,8 @@ class GetWishlistDealsTests(ToolDBTestCase):
             "gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock()
         ), patch(
             "gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()
         ), patch(
             "gamelib_mcp.tools.deals.is_itad_configured", return_value=True
         ):
@@ -213,6 +288,8 @@ class GetWishlistDealsTests(ToolDBTestCase):
             AsyncMock(side_effect=RuntimeError("boom")),
         ), patch(
             "gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()
         ), patch(
             "gamelib_mcp.tools.deals.is_itad_configured", return_value=True
         ):
@@ -250,6 +327,8 @@ class GetWishlistDealsTests(ToolDBTestCase):
         ), patch(
             "gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()
         ), patch(
+            "gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()
+        ), patch(
             "gamelib_mcp.tools.deals.is_itad_configured", return_value=True
         ):
             result = await deals.get_wishlist_deals(refresh=True)
@@ -274,6 +353,8 @@ class GetWishlistDealsTests(ToolDBTestCase):
         ) as mock_itad, patch(
             "gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()
         ), patch(
+            "gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()
+        ), patch(
             "gamelib_mcp.tools.deals.is_itad_configured", return_value=False
         ):
             result = await deals.get_wishlist_deals()
@@ -284,7 +365,213 @@ class GetWishlistDealsTests(ToolDBTestCase):
         self.assertEqual(result["deals"], [])
 
 
-if __name__ == "__main__":
-    import unittest
+async def _set_igdb_platforms(game_id: int, ids: list[int]) -> None:
+    async with db_module.get_db() as db:
+        await db.execute(
+            "UPDATE games SET igdb_platforms = ?, igdb_cached_at = 'x' WHERE id = ?",
+            (json.dumps(ids), game_id),
+        )
+        await db.commit()
 
+
+async def _set_hw_pref(platforms: list[str]) -> None:
+    await db_module.set_meta("hardware_preference", json.dumps(platforms))
+
+
+class PreferenceAwareDealsTests(ToolDBTestCase):
+    async def test_steam_item_with_switch_release_gets_search_priced_and_preferred(self):
+        game_id = await seed_game("Crossplay Game")
+        await _seed_wishlist(game_id, "steam", store_identifier="42")
+        await _set_igdb_platforms(game_id, [6, 508])
+        await _set_hw_pref(["switch2", "steam"])
+
+        itad = AsyncMock(return_value={42: PriceInfo("Steam", 10.0, 10.0, 0, "EUR", "u1")})
+        search = AsyncMock(return_value={"Crossplay Game": {
+            "price": 12.0, "regular_price": 12.0, "cut_pct": 0,
+            "currency": "EUR", "deal_url": "u2"}})
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", itad), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices", search), \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            result = await deals.get_wishlist_deals()
+
+        search.assert_awaited_once_with(["Crossplay Game"])
+        entry = next(d for d in result["deals"] if d["game_id"] == game_id)
+        self.assertEqual(entry["platform"], "switch2")   # preferred wins at 12.0 vs 10.0
+        self.assertEqual(entry["price"], 12.0)
+        self.assertIn("preferred", entry["recommendation_reason"])
+        self.assertEqual(entry["alternatives"][0]["platform"], "steam")
+        self.assertEqual(entry["wishlisted_on"], ["steam"])
+
+    async def test_override_when_steam_deal_too_good(self):
+        game_id = await seed_game("Bargain Game")
+        await _seed_wishlist(game_id, "steam", store_identifier="43")
+        await _set_igdb_platforms(game_id, [6, 130])
+        await _set_hw_pref(["switch2", "steam"])
+        await _seed_price(game_id, "steam", "Steam", 4.99, currency="EUR")
+        await _seed_price(game_id, "switch2", "dekudeals", 14.0, currency="EUR")
+
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock()), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()) as search, \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            result = await deals.get_wishlist_deals()
+
+        search.assert_not_awaited()  # both platforms freshly cached
+        entry = next(d for d in result["deals"] if d["game_id"] == game_id)
+        self.assertEqual(entry["platform"], "steam")
+        self.assertIn("override", entry["recommendation_reason"])
+
+    async def test_owned_on_switch2_suppresses_candidate(self):
+        game_id = await seed_game("Already On Switch")
+        await add_platform(game_id, "switch2", owned=1)
+        await _seed_wishlist(game_id, "steam", store_identifier="44")
+        await _set_igdb_platforms(game_id, [6, 508])
+        await _set_hw_pref(["switch2", "steam"])
+        await _seed_price(game_id, "steam", "Steam", 9.0, currency="EUR")
+
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock()), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()) as search, \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            result = await deals.get_wishlist_deals()
+
+        search.assert_not_awaited()
+        entry = next(d for d in result["deals"] if d["game_id"] == game_id)
+        self.assertEqual(entry["platform"], "steam")
+
+    async def test_stale_owned_platform_price_excluded_from_assembly(self):
+        # Reproduces a reviewer-found bug: game_prices can carry a cached
+        # price for a platform the game is NOW owned on (e.g. cached before
+        # the purchase, or a leftover cross-platform search hit). The
+        # deal-assembly loop must exclude it the same way _candidate_platforms
+        # excludes it from refresh — not just skip refreshing it while still
+        # surfacing the stale cached row.
+        game_id = await seed_game("Bought It On Switch")
+        await add_platform(game_id, "switch2", owned=1)
+        await _seed_wishlist(game_id, "steam", store_identifier="45")
+        await _set_igdb_platforms(game_id, [6, 508])
+        await _set_hw_pref(["switch2", "steam"])
+        # Stale switch2 price predating ownership, cheaper than steam.
+        await _seed_price(game_id, "switch2", "dekudeals", 5.0, currency="EUR")
+        await _seed_price(game_id, "steam", "Steam", 9.0, currency="EUR")
+
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock()), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()) as search, \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            result = await deals.get_wishlist_deals()
+
+        search.assert_not_awaited()  # already owned there — no refresh, but also no recommend
+        entry = next(d for d in result["deals"] if d["game_id"] == game_id)
+        self.assertEqual(entry["platform"], "steam")
+        self.assertNotIn(
+            "switch2", [a["platform"] for a in entry["alternatives"]]
+        )
+
+    async def test_all_priced_platforms_owned_lands_in_unpriced(self):
+        # Edge case: the ONLY cached price is for a platform now owned —
+        # must degrade to unpriced instead of crashing on an empty options list.
+        game_id = await seed_game("Only Owned Priced")
+        await add_platform(game_id, "switch2", owned=1)
+        await _seed_wishlist(game_id, "switch2", source="dekudeals")
+        await _seed_price(game_id, "switch2", "dekudeals", 5.0, currency="EUR")
+
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock()), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()), \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            result = await deals.get_wishlist_deals()
+
+        self.assertNotIn(game_id, [d["game_id"] for d in result["deals"]])
+        self.assertIn("Only Owned Priced", result["unpriced"])
+
+    async def test_search_lookup_cap_defers_overflow(self):
+        await _set_hw_pref(["switch2"])
+        for i in range(deals._MAX_SWITCH2_SEARCH_LOOKUPS + 3):
+            gid = await seed_game(f"Cap Game {i}")
+            await _seed_wishlist(gid, "steam", store_identifier=str(100 + i))
+            await _set_igdb_platforms(gid, [6, 508])
+
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock(return_value={})) as search, \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            result = await deals.get_wishlist_deals()
+
+        self.assertEqual(len(search.await_args.args[0]), deals._MAX_SWITCH2_SEARCH_LOOKUPS)
+        self.assertEqual(result["switch2_lookups_deferred"], 3)
+
+    async def test_availability_pending_counts_unfetched_games(self):
+        gid = await seed_game("IGDB Pending")
+        await _seed_wishlist(gid, "steam", store_identifier="77")
+        # igdb_cached_at stays NULL from seed_game
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()) as search, \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            result = await deals.get_wishlist_deals()
+        search.assert_not_awaited()
+        self.assertEqual(result["availability_pending"], 1)
+
+
+class DealsPureHelperTests(unittest.TestCase):
+    def _opt(self, platform, price):
+        return {"platform": platform, "price": price}
+
+    def test_available_platforms_maps_igdb_ids(self):
+        self.assertEqual(deals._available_platforms("[6, 130, 508, 167, 999]"),
+                         {"steam", "switch2", "ps5"})
+        self.assertEqual(deals._available_platforms(None), set())
+        self.assertEqual(deals._available_platforms("not json"), set())
+
+    def test_candidates_add_preferred_available_unowned_priceable(self):
+        got = deals._candidate_platforms(
+            wishlisted_on={"steam"}, available={"steam", "switch2", "ps5"},
+            owned=set(), hw_pref=["switch2", "steam"],
+        )
+        self.assertEqual(got, {"steam", "switch2"})  # ps5 has no price source
+
+    def test_candidates_exclude_owned_and_respect_empty_pref(self):
+        self.assertEqual(
+            deals._candidate_platforms({"steam"}, {"steam", "switch2"}, {"switch2"}, ["switch2"]),
+            {"steam"},
+        )
+        self.assertEqual(
+            deals._candidate_platforms({"steam"}, {"steam", "switch2"}, set(), []),
+            {"steam"},
+        )
+
+    def test_pick_recommended_prefers_preferred_platform(self):
+        options = [self._opt("steam", 10.0), self._opt("switch2", 14.0)]
+        chosen, reason = deals._pick_recommended(options, ["switch2", "steam"], 0.5)
+        self.assertEqual(chosen["platform"], "switch2")
+        self.assertIn("preferred", reason)
+
+    def test_pick_recommended_overrides_when_deal_too_good(self):
+        options = [self._opt("steam", 4.99), self._opt("switch2", 14.0)]
+        chosen, reason = deals._pick_recommended(options, ["switch2", "steam"], 0.5)
+        self.assertEqual(chosen["platform"], "steam")
+        self.assertIn("override", reason)
+
+    def test_pick_recommended_boundary_is_strict(self):
+        options = [self._opt("steam", 7.0), self._opt("switch2", 14.0)]
+        chosen, _ = deals._pick_recommended(options, ["switch2"], 0.5)
+        self.assertEqual(chosen["platform"], "switch2")  # 7.0 is NOT < 0.5*14.0
+
+    def test_pick_recommended_no_pref_returns_cheapest(self):
+        options = [self._opt("switch2", 14.0), self._opt("steam", 10.0)]
+        chosen, reason = deals._pick_recommended(options, [], 0.5)
+        self.assertEqual(chosen["platform"], "steam")
+        self.assertEqual(reason, "cheapest available")
+
+    def test_pick_recommended_preferred_is_cheapest(self):
+        options = [self._opt("steam", 10.0), self._opt("switch2", 8.0)]
+        chosen, reason = deals._pick_recommended(options, ["switch2"], 0.5)
+        self.assertEqual(chosen["platform"], "switch2")
+        self.assertIn("also preferred platform", reason)
+        self.assertIn("switch2", reason)
+
+
+if __name__ == "__main__":
     unittest.main()
