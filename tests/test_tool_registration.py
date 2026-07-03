@@ -92,7 +92,7 @@ EXPECTED_TOOLS = {
     "get_platform_breakdown": {"params": set(), "required": set()},
     "get_wishlist": {"params": {"platform"}, "required": set()},
     "get_wishlist_deals": {
-        "params": {"platform", "max_price", "min_cut_pct", "refresh"},
+        "params": {"platform", "max_price", "min_cut_pct", "refresh", "preference_override_ratio"},
         "required": set(),
     },
     "set_hardware_preference": {"params": {"platforms"}, "required": {"platforms"}},
