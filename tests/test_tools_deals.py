@@ -5,6 +5,7 @@ repo's established patching convention — see tests/test_tools_admin.py),
 not their origin modules (data.itad / data.dekudeals).
 """
 
+import unittest
 from unittest.mock import AsyncMock, patch
 
 from conftest import ToolDBTestCase, seed_game
@@ -284,7 +285,56 @@ class GetWishlistDealsTests(ToolDBTestCase):
         self.assertEqual(result["deals"], [])
 
 
-if __name__ == "__main__":
-    import unittest
+class DealsPureHelperTests(unittest.TestCase):
+    def _opt(self, platform, price):
+        return {"platform": platform, "price": price}
 
+    def test_available_platforms_maps_igdb_ids(self):
+        self.assertEqual(deals._available_platforms("[6, 130, 508, 167, 999]"),
+                         {"steam", "switch2", "ps5"})
+        self.assertEqual(deals._available_platforms(None), set())
+        self.assertEqual(deals._available_platforms("not json"), set())
+
+    def test_candidates_add_preferred_available_unowned_priceable(self):
+        got = deals._candidate_platforms(
+            wishlisted_on={"steam"}, available={"steam", "switch2", "ps5"},
+            owned=set(), hw_pref=["switch2", "steam"],
+        )
+        self.assertEqual(got, {"steam", "switch2"})  # ps5 has no price source
+
+    def test_candidates_exclude_owned_and_respect_empty_pref(self):
+        self.assertEqual(
+            deals._candidate_platforms({"steam"}, {"steam", "switch2"}, {"switch2"}, ["switch2"]),
+            {"steam"},
+        )
+        self.assertEqual(
+            deals._candidate_platforms({"steam"}, {"steam", "switch2"}, set(), []),
+            {"steam"},
+        )
+
+    def test_pick_recommended_prefers_preferred_platform(self):
+        options = [self._opt("steam", 10.0), self._opt("switch2", 14.0)]
+        chosen, reason = deals._pick_recommended(options, ["switch2", "steam"], 0.5)
+        self.assertEqual(chosen["platform"], "switch2")
+        self.assertIn("preferred", reason)
+
+    def test_pick_recommended_overrides_when_deal_too_good(self):
+        options = [self._opt("steam", 4.99), self._opt("switch2", 14.0)]
+        chosen, reason = deals._pick_recommended(options, ["switch2", "steam"], 0.5)
+        self.assertEqual(chosen["platform"], "steam")
+        self.assertIn("override", reason)
+
+    def test_pick_recommended_boundary_is_strict(self):
+        options = [self._opt("steam", 7.0), self._opt("switch2", 14.0)]
+        chosen, _ = deals._pick_recommended(options, ["switch2"], 0.5)
+        self.assertEqual(chosen["platform"], "switch2")  # 7.0 is NOT < 0.5*14.0
+
+    def test_pick_recommended_no_pref_returns_cheapest(self):
+        options = [self._opt("switch2", 14.0), self._opt("steam", 10.0)]
+        chosen, reason = deals._pick_recommended(options, [], 0.5)
+        self.assertEqual(chosen["platform"], "steam")
+        self.assertEqual(reason, "cheapest available")
+
+
+if __name__ == "__main__":
     unittest.main()

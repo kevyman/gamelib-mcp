@@ -10,6 +10,7 @@ A refresh failure never raises and never touches the cache; it degrades to
 serving whatever is already cached (possibly nothing).
 """
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -30,6 +31,15 @@ from .common import validate_platform as _validate_platform
 logger = logging.getLogger(__name__)
 
 _PRICE_TTL_HOURS = 12
+
+# Platforms this tool has a price source for: ITAD (steam) / DekuDeals (switch2).
+_PRICEABLE_PLATFORMS = frozenset({"steam", "switch2"})
+# Cap on per-title DekuDeals search lookups per call — each is a live page
+# fetch with a politeness delay, so a cold cache prices at most this many
+# cross-platform candidates per call and defers the rest (12h TTL staggers
+# the remainder across subsequent calls).
+_MAX_SWITCH2_SEARCH_LOOKUPS = 12
+_DEFAULT_OVERRIDE_RATIO = 0.5
 
 
 def _fetched_at_is_stale(fetched_at: str | None) -> bool:
@@ -80,6 +90,72 @@ def _match_wishlist_game_id(
     if match:
         return name_to_id[match]
     return None
+
+
+def _available_platforms(igdb_platforms_json: str | None) -> set[str]:
+    """Internal platforms a game is released on, per games.igdb_platforms."""
+    from ..data.igdb import IGDB_TO_PLATFORM
+
+    if not igdb_platforms_json:
+        return set()
+    try:
+        ids = json.loads(igdb_platforms_json)
+    except ValueError:
+        return set()
+    if not isinstance(ids, list):
+        return set()
+    return {IGDB_TO_PLATFORM[i] for i in ids if isinstance(i, int) and i in IGDB_TO_PLATFORM}
+
+
+def _candidate_platforms(
+    wishlisted_on: set[str], available: set[str], owned: set[str], hw_pref: list[str]
+) -> set[str]:
+    """Platforms worth pricing for one game: where it's wishlisted, plus any
+    hardware-preference platform it's available on, priceable, and not
+    already owned (no point recommending a purchase of an owned copy)."""
+    candidates = set(wishlisted_on) & _PRICEABLE_PLATFORMS
+    for platform in hw_pref:
+        if (
+            platform in _PRICEABLE_PLATFORMS
+            and platform in available
+            and platform not in owned
+        ):
+            candidates.add(platform)
+    return candidates
+
+
+def _pick_recommended(
+    options: list[dict], hw_pref: list[str], override_ratio: float
+) -> tuple[dict, str]:
+    """Choose which per-platform option to recommend.
+
+    Preference order wins unless a non-preferred option's price drops
+    strictly below override_ratio × the preferred price ("the deal is just
+    too good"). options must be non-empty; prices are compared raw (no
+    currency conversion — the caller flags mixed currencies)."""
+    best = min(options, key=lambda o: o["price"])
+    preferred = next(
+        (
+            min((o for o in options if o["platform"] == platform), key=lambda o: o["price"])
+            for platform in hw_pref
+            if any(o["platform"] == platform for o in options)
+        ),
+        None,
+    )
+    if preferred is None:
+        return best, "cheapest available"
+    if preferred["platform"] == best["platform"]:
+        return preferred, f"cheapest available (also preferred platform {preferred['platform']})"
+    if best["price"] < override_ratio * preferred["price"]:
+        return best, (
+            f"preference override: {best['platform']} at {best['price']} is below "
+            f"{int(override_ratio * 100)}% of preferred {preferred['platform']} "
+            f"price {preferred['price']}"
+        )
+    return preferred, (
+        f"preferred platform {preferred['platform']} at {preferred['price']} "
+        f"(cheapest elsewhere: {best['price']} on {best['platform']})"
+    )
 
 
 async def get_wishlist_deals(
