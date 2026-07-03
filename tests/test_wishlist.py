@@ -13,6 +13,7 @@ from conftest import ToolDBTestCase, add_identifier, add_platform, seed_game
 from fastmcp.exceptions import ToolError
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import dekudeals, steam_wishlist
+from gamelib_mcp.data.scrape_validate import FIXTURES_DIR
 from gamelib_mcp.tools import platforms
 
 
@@ -752,6 +753,48 @@ class DekuDealsWishlistTests(ToolDBTestCase):
                 },
             ],
         )
+
+
+def _response(html: str):
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+    resp = _Resp()
+    resp.text = html
+    return resp
+
+
+class FetchSearchPricesTests(unittest.IsolatedAsyncioTestCase):
+    async def test_maps_requested_title_to_matched_card(self):
+        html = (FIXTURES_DIR / "dekudeals_search_page.html").read_text(encoding="utf-8")
+        with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
+            client = client_cls.return_value.__aenter__.return_value
+            client.get = AsyncMock(return_value=_response(html))
+            results = await dekudeals.fetch_search_prices(["Hades"])
+        self.assertIn("Hades", results)
+        self.assertEqual(results["Hades"]["currency"], "EUR")
+
+    async def test_fetch_error_skips_title_without_raising(self):
+        with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
+            client = client_cls.return_value.__aenter__.return_value
+            client.get = AsyncMock(side_effect=httpx.ConnectError("boom"))
+            results = await dekudeals.fetch_search_prices(["Hades"])
+        self.assertEqual(results, {})
+
+    async def test_no_fuzzy_match_yields_no_entry(self):
+        html = (FIXTURES_DIR / "dekudeals_search_page.html").read_text(encoding="utf-8")
+        with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
+            client = client_cls.return_value.__aenter__.return_value
+            client.get = AsyncMock(return_value=_response(html))
+            results = await dekudeals.fetch_search_prices(["Completely Unrelated Title XYZ"])
+        self.assertEqual(results, {})
+
+    async def test_empty_titles_returns_empty_without_fetching(self):
+        with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
+            results = await dekudeals.fetch_search_prices([])
+        self.assertEqual(results, {})
+        client_cls.assert_not_called()
 
 
 class UpsertGamePricesTests(ToolDBTestCase):

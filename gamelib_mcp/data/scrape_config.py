@@ -180,6 +180,13 @@ class DekuDealsScrapeConfig:
     price_selector: str = field(default=".text-tight strong", metadata={"kind": "selector"})
     regular_price_selector: str = field(default=".text-tight s", metadata={"kind": "selector"})
     cut_pct_selector: str = field(default=".badge-danger", metadata={"kind": "selector"})
+    # Per-title price lookup (public search page). Search results render the
+    # same card markup as the shared-wishlist page, so the wishlist selectors
+    # above are shared by both parses (verified live 2026-07-03).
+    search_url_template: str = field(
+        default="https://www.dekudeals.com/search?q={query}",
+        metadata={"kind": "url_template", "placeholders": frozenset({"query"})},
+    )
 
 
 ScrapeConfig = (
@@ -204,7 +211,7 @@ ALLOWED_HOSTS: dict[str, frozenset[str]] = {
     "backloggd": frozenset({"backloggd.com", "www.backloggd.com"}),
     "steam_reviews": frozenset({"steamcommunity.com"}),
     "metacritic": frozenset({"metacritic.com", "www.metacritic.com"}),
-    "dekudeals": frozenset(),  # no configurable URLs
+    "dekudeals": frozenset({"dekudeals.com", "www.dekudeals.com"}),
 }
 
 

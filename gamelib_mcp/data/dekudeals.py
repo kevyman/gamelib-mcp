@@ -25,13 +25,21 @@ from game_wishlist too, via delete_stale_wishlist_entries — but only after a
 successful fetch. _fetch_wishlist_items raises on failure rather than
 swallowing it to an empty list, specifically so a transient fetch error can't
 be mistaken for "the wishlist is now empty" and wipe every switch2 entry.
+
+This module also prices arbitrary titles NOT on the shared wishlist via
+DekuDeals' public search page (fetch_search_prices) — used for a game
+wishlisted on another platform that also has a Switch release, so it can get
+a switch2 price quote too. Unlike the wishlist scrape, per-title fetch/parse
+failures and non-matches are skipped rather than raised, since there is no
+removal reconciliation downstream for this path.
 """
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote_plus, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup, Tag
@@ -53,12 +61,16 @@ _CURRENCY_SYMBOLS = {"€": "EUR", "$": "USD", "£": "GBP"}
 # deal_url is built from a scraped href; an absolute (non "/"-relative) href
 # is only trusted if it actually points at DekuDeals — mirrors the host-check
 # scrape_config.py's _validate_field applies to url_template overrides (see
-# ALLOWED_HOSTS there), even though DekuDeals has no configurable URL fields
-# of its own to run through that path.
+# ALLOWED_HOSTS there). This constant covers deal_url specifically (a scraped
+# value, not a config field), so it stays separate from ALLOWED_HOSTS even
+# though the two host sets are the same.
 _DEKUDEALS_HOSTS = frozenset({"dekudeals.com", "www.dekudeals.com"})
 
 DEKUDEALS_WISHLIST_URL = os.getenv("DEKUDEALS_WISHLIST_URL", "")
 logger = logging.getLogger(__name__)
+
+# Politeness delay between per-title search requests (fetch_search_prices).
+_SEARCH_REQUEST_DELAY_SECONDS = 0.5
 
 
 def is_dekudeals_configured() -> bool:
@@ -320,3 +332,48 @@ def _match_game_id(
         return name_to_id[match]
 
     return None
+
+
+def _match_search_title(title: str, prices: dict[str, dict], cutoff: int) -> str | None:
+    """Best search-result title for a requested title, or None. Exact
+    (case-insensitive) first, then the same fuzzy matcher the wishlist
+    sync uses."""
+    by_lower = {t.lower(): t for t in prices}
+    title_lower = title.lower()
+    if title_lower in by_lower:
+        return by_lower[title_lower]
+    match = extract_best_fuzzy_key(title_lower, {k: k for k in by_lower}, cutoff=cutoff)
+    return by_lower[match] if match else None
+
+
+async def fetch_search_prices(titles: list[str]) -> dict[str, dict]:
+    """Current switch2 prices for arbitrary titles via the public DekuDeals
+    search page — used for games NOT on the shared wishlist (e.g. a
+    Steam-wishlisted game that also has a Switch release).
+
+    One GET per title; results parse with the same selector config as the
+    wishlist page (identical card markup). Returns {requested_title:
+    price_dict}. Per-title failures and non-matches are skipped rather than
+    raised: unlike the wishlist scrape there is no removal reconciliation
+    downstream, so a miss just leaves that item unpriced.
+    """
+    if not titles:
+        return {}
+    config = await load_scrape_config("dekudeals")
+    results: dict[str, dict] = {}
+    async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "gamelib-mcp/1.0"}) as client:
+        for i, title in enumerate(titles):
+            if i:
+                await asyncio.sleep(_SEARCH_REQUEST_DELAY_SECONDS)
+            url = config.search_url_template.format(query=quote_plus(title))
+            try:
+                resp = await client.get(url, follow_redirects=True)
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                logger.warning("DekuDeals search failed for %r: %s", title, exc)
+                continue
+            prices = _parse_wishlist_prices(resp.text, config)
+            matched = _match_search_title(title, prices, cutoff=config.fuzzy_cutoff)
+            if matched is not None:
+                results[title] = prices[matched]
+    return results
