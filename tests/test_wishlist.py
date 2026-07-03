@@ -4,6 +4,7 @@ helpers (upsert + fulfillment cleanup), the manual add_game_to_platform
 """
 
 import asyncio
+import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -995,6 +996,38 @@ class LoadWishlistWithPricesTests(ToolDBTestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["steam_appid"], 778899)
+
+
+class LoadWishlistWithPricesCrossPlatformTests(ToolDBTestCase):
+    async def test_returns_prices_from_other_platforms_with_metadata(self):
+        game_id = await seed_game("Crossplay Deal")
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET igdb_platforms = '[6, 508]', igdb_cached_at = 'x' WHERE id = ?",
+                (game_id,),
+            )
+            await db.commit()
+        await add_platform(game_id, "epic", owned=1)  # owned elsewhere; not on candidates
+        await db_module.upsert_wishlist_entry(game_id, "steam", source="steam", store_identifier="42")
+        await db_module.upsert_game_prices([
+            {"game_id": game_id, "platform": "steam", "shop": "Steam", "price": 10.0,
+             "regular_price": 10.0, "cut_pct": 0, "currency": "EUR", "deal_url": "u1"},
+            {"game_id": game_id, "platform": "switch2", "shop": "dekudeals", "price": 12.0,
+             "regular_price": 12.0, "cut_pct": 0, "currency": "EUR", "deal_url": "u2"},
+        ])
+
+        rows = await db_module.load_wishlist_with_prices(None)
+        mine = [r for r in rows if r["game_id"] == game_id]
+        self.assertEqual({r["price_platform"] for r in mine}, {"steam", "switch2"})
+        self.assertEqual(json.loads(mine[0]["igdb_platforms"]), [6, 508])
+        self.assertEqual(json.loads(mine[0]["owned_platforms"]), ["epic"])
+        self.assertEqual(mine[0]["steam_appid"], 42)
+
+    async def test_platform_filter_still_filters_wishlist_rows_not_price_rows(self):
+        game_id = await seed_game("Filtered")
+        await db_module.upsert_wishlist_entry(game_id, "switch2", source="dekudeals")
+        rows = await db_module.load_wishlist_with_prices("steam")
+        self.assertEqual([r for r in rows if r["game_id"] == game_id], [])
 
 
 if __name__ == "__main__":
