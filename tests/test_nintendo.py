@@ -110,7 +110,7 @@ class SyncNintendoTests(unittest.TestCase):
         mock_resolve.assert_awaited_once()
         self.assertEqual(
             mock_resolve.await_args.args[:2],
-            ("Fire Emblem Engage", igdb.PLATFORM_TO_IGDB["switch2"]),
+            ("Fire Emblem Engage", igdb.PLATFORM_TO_IGDB_ANY["switch2"]),
         )
         mock_upsert_platform.assert_awaited_once_with(
             game_id=42,
@@ -166,7 +166,7 @@ class SyncNintendoTests(unittest.TestCase):
         mock_resolve.assert_awaited_once()
         self.assertEqual(
             mock_resolve.await_args.args[:2],
-            ("Hollow Knight", igdb.PLATFORM_TO_IGDB["switch2"]),
+            ("Hollow Knight", igdb.PLATFORM_TO_IGDB_ANY["switch2"]),
         )
         mock_upsert_platform.assert_awaited_once_with(
             game_id=42,
