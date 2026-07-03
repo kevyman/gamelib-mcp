@@ -335,6 +335,13 @@ class DealsPureHelperTests(unittest.TestCase):
         self.assertEqual(chosen["platform"], "steam")
         self.assertEqual(reason, "cheapest available")
 
+    def test_pick_recommended_preferred_is_cheapest(self):
+        options = [self._opt("steam", 10.0), self._opt("switch2", 8.0)]
+        chosen, reason = deals._pick_recommended(options, ["switch2"], 0.5)
+        self.assertEqual(chosen["platform"], "switch2")
+        self.assertIn("also preferred platform", reason)
+        self.assertIn("switch2", reason)
+
 
 if __name__ == "__main__":
     unittest.main()
