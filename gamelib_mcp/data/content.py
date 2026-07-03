@@ -113,6 +113,11 @@ def content_type_from_igdb_category(category: int | None) -> str:
         9: CONTENT_REMASTER,
         10: CONTENT_EXPANDED_GAME,
         11: CONTENT_PORT,
+        # 13 ("pack") is IGDB's bucket for cosmetic/BGM/persona-set style addon
+        # content (e.g. the Persona 3 Reload "Persona Set"/"BGM Set" packs) — it
+        # is nested addon content, not a primary library item, so it maps to
+        # CONTENT_DLC rather than falling through to the base-game default.
+        13: CONTENT_DLC,
     }.get(category, CONTENT_BASE_GAME)
 
 
@@ -120,6 +125,7 @@ def classify_igdb_game(
     *,
     title: str,
     category: int | None,
+    game_type: int | None = None,
     parent_name: str | None = None,
     parent_igdb_id: int | None = None,
     version_parent_name: str | None = None,
@@ -143,7 +149,12 @@ def classify_igdb_game(
             alias_for_parent=True,
         )
 
-    content_type = content_type_from_igdb_category(category)
+    # IGDB has effectively migrated `category` -> `game_type` (same numeric
+    # enum values); some titles come back with category=None but game_type
+    # populated. Fall back to game_type only when category itself is absent —
+    # category, when present, is authoritative.
+    effective = category if category is not None else game_type
+    content_type = content_type_from_igdb_category(effective)
     if content_type in PRIMARY_CONTENT_TYPES:
         return _primary(content_type)
 

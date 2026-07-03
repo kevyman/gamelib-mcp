@@ -990,7 +990,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                     "SELECT platform, source FROM game_wishlist WHERE id = 1"
                 )
 
-        self.assertEqual(result.final_version, 19)
+        self.assertEqual(result.final_version, db_module.SCHEMA_VERSION)
         self.assertLessEqual(
             {
                 "game_id",
@@ -1045,6 +1045,55 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(rows[wished])
         self.assertIsNotNone(rows[other])
+
+    async def test_v20_reclaims_only_still_unresolved_wishlisted_games(self) -> None:
+        # Handover doc: the v19 re-claim ran, but 9 of 187 wishlisted games
+        # never got igdb_platforms populated (resolution gaps this branch
+        # fixes). v20 re-runs the identical re-claim so those stragglers are
+        # retried post-deploy with the fixed igdb.py logic — but must not
+        # re-claim wishlisted games that already resolved successfully, nor
+        # any non-wishlisted game.
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+
+            async with db_module.get_db() as db:
+                version = await db_module._get_user_version(db)
+            self.assertEqual(version, db_module.SCHEMA_VERSION)
+            self.assertEqual(db_module.SCHEMA_VERSION, 20)
+
+            unresolved = await seed_game("Still Unresolved Wishlisted Game")
+            resolved = await seed_game("Already Resolved Wishlisted Game")
+            not_wishlisted = await seed_game("Not Wishlisted")
+            async with db_module.get_db() as db:
+                await db.execute(
+                    "UPDATE games SET igdb_cached_at = '2026-01-01T00:00:00+00:00' "
+                    "WHERE id IN (?, ?, ?)",
+                    (unresolved, resolved, not_wishlisted),
+                )
+                await db.execute(
+                    "UPDATE games SET igdb_platforms = '[6]' WHERE id = ?", (resolved,)
+                )
+                await db.commit()
+            await db_module.upsert_wishlist_entry(unresolved, "steam", source="steam")
+            await db_module.upsert_wishlist_entry(resolved, "steam", source="steam")
+
+            async with db_module.get_db() as db:
+                from gamelib_mcp.data.db import _migrate_v19_to_v20
+
+                await _migrate_v19_to_v20(db, None)
+                await db.commit()
+                rows = {
+                    r["id"]: r["igdb_cached_at"]
+                    for r in await db.execute_fetchall(
+                        "SELECT id, igdb_cached_at FROM games WHERE id IN (?, ?, ?)",
+                        (unresolved, resolved, not_wishlisted),
+                    )
+                }
+
+        self.assertIsNone(rows[unresolved])
+        self.assertIsNotNone(rows[resolved])
+        self.assertIsNotNone(rows[not_wishlisted])
 
     async def test_v9_to_v10_adds_series_tables(self) -> None:
         conn = sqlite3.connect(self.db_path)
