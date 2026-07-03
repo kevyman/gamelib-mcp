@@ -776,11 +776,73 @@ class FetchSearchPricesTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Hades", results)
         self.assertEqual(results["Hades"]["currency"], "EUR")
 
+    async def test_switch2_filter_match_makes_single_request(self):
+        # Real capture: https://www.dekudeals.com/search?q=mario+kart+world&filter[platform]=switch_2
+        # "Mario Kart World" is Switch-2-exclusive and matches on the very first
+        # (switch_2-filtered) request, so no fallback request should be made.
+        html = (FIXTURES_DIR / "dekudeals_search_page_switch2_filter_match.html").read_text(
+            encoding="utf-8"
+        )
+        with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
+            client = client_cls.return_value.__aenter__.return_value
+            client.get = AsyncMock(return_value=_response(html))
+            results = await dekudeals.fetch_search_prices(["Mario Kart World"])
+        self.assertIn("Mario Kart World", results)
+        self.assertEqual(client.get.call_count, 1)
+        called_url = client.get.call_args.args[0]
+        self.assertEqual(
+            called_url,
+            "https://www.dekudeals.com/search?q=Mario+Kart+World&filter%5Bplatform%5D=switch_2",
+        )
+
+    async def test_falls_back_to_switch_filter_when_switch2_has_no_match(self):
+        # Real captures: switch_2-filtered "hades" search has no "Hades" card
+        # (only "Hades II" and its upgrade pack — the two facets are disjoint),
+        # but the switch-filtered search does have one, at EUR 24.99.
+        no_match_html = (
+            FIXTURES_DIR / "dekudeals_search_page_switch2_filter_no_match.html"
+        ).read_text(encoding="utf-8")
+        match_html = (FIXTURES_DIR / "dekudeals_search_page_switch_filter_fallback.html").read_text(
+            encoding="utf-8"
+        )
+        with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
+            client = client_cls.return_value.__aenter__.return_value
+            client.get = AsyncMock(side_effect=[_response(no_match_html), _response(match_html)])
+            with patch("gamelib_mcp.data.dekudeals.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+                results = await dekudeals.fetch_search_prices(["Hades"])
+
+        self.assertIn("Hades", results)
+        self.assertEqual(results["Hades"]["currency"], "EUR")
+        self.assertEqual(client.get.call_count, 2)
+        first_url = client.get.call_args_list[0].args[0]
+        second_url = client.get.call_args_list[1].args[0]
+        self.assertEqual(
+            first_url, "https://www.dekudeals.com/search?q=Hades&filter%5Bplatform%5D=switch_2"
+        )
+        self.assertEqual(
+            second_url, "https://www.dekudeals.com/search?q=Hades&filter%5Bplatform%5D=switch"
+        )
+        # Politeness pacing applies before the fallback request too.
+        sleep_mock.assert_awaited_once()
+
+    async def test_neither_filter_matches_title_absent_no_exception(self):
+        html = (FIXTURES_DIR / "dekudeals_search_page_switch2_filter_no_match.html").read_text(
+            encoding="utf-8"
+        )
+        with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
+            client = client_cls.return_value.__aenter__.return_value
+            client.get = AsyncMock(return_value=_response(html))
+            with patch("gamelib_mcp.data.dekudeals.asyncio.sleep", new=AsyncMock()):
+                results = await dekudeals.fetch_search_prices(["Completely Unrelated Title XYZ"])
+        self.assertEqual(results, {})
+        self.assertEqual(client.get.call_count, 2)
+
     async def test_fetch_error_skips_title_without_raising(self):
         with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
             client = client_cls.return_value.__aenter__.return_value
             client.get = AsyncMock(side_effect=httpx.ConnectError("boom"))
-            results = await dekudeals.fetch_search_prices(["Hades"])
+            with patch("gamelib_mcp.data.dekudeals.asyncio.sleep", new=AsyncMock()):
+                results = await dekudeals.fetch_search_prices(["Hades"])
         self.assertEqual(results, {})
 
     async def test_no_fuzzy_match_yields_no_entry(self):
@@ -788,7 +850,8 @@ class FetchSearchPricesTests(unittest.IsolatedAsyncioTestCase):
         with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
             client = client_cls.return_value.__aenter__.return_value
             client.get = AsyncMock(return_value=_response(html))
-            results = await dekudeals.fetch_search_prices(["Completely Unrelated Title XYZ"])
+            with patch("gamelib_mcp.data.dekudeals.asyncio.sleep", new=AsyncMock()):
+                results = await dekudeals.fetch_search_prices(["Completely Unrelated Title XYZ"])
         self.assertEqual(results, {})
 
     async def test_empty_titles_returns_empty_without_fetching(self):
