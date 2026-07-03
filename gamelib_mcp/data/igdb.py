@@ -791,6 +791,10 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
 
         overrides = await get_manual_overrides(db, game_id)
         updates: dict = {"igdb_id": igdb_game.igdb_id, "igdb_cached_at": now}
+        if igdb_game.platforms:
+            # NULL means "not fetched yet"; an empty fetch keeps NULL so the
+            # deals tool can distinguish unknown from confirmed-single-platform.
+            updates["igdb_platforms"] = json.dumps(igdb_game.platforms)
         if row["release_date"] is None and igdb_game.first_release_date and "release_date" not in overrides:
             updates["release_date"] = igdb_game.first_release_date
         if row["genres"] is None and igdb_game.genres and "genres" not in overrides:
