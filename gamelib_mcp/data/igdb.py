@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import random
+import re
 import sqlite3
 import time
 from collections import deque
@@ -447,8 +448,90 @@ def _build_search_game_query(
     ]
     if filters:
         clauses.append(f"where {' & '.join(filters)};")
-    clauses.append("limit 5;")
+    # IGDB's own relevance ranking can bury the base game behind a pile of
+    # same-franchise DLC/cosmetic packs (e.g. "Persona 3 Reload" appeared at
+    # position 11 of 20 candidates, behind 10 "Persona Set"/"BGM Set" packs).
+    # A limit of 5 truncated before the real match ever appeared.
+    clauses.append("limit 20;")
     return " ".join(clauses)
+
+
+def _parse_igdb_item(item: dict) -> IGDBGame:
+    """Convert a raw IGDB `games` endpoint item into an ``IGDBGame``.
+
+    Shared by ``search_game`` and ``fetch_game_by_id`` so the field-parsing and
+    content-classification logic (including the category/game_type fallback)
+    isn't duplicated between the search and by-id fetch paths.
+    """
+    category = item.get("category")
+    game_type = item.get("game_type")
+    # IGDB has effectively migrated `category` -> `game_type` for some titles
+    # (same numeric enum values); category comes back None while game_type is
+    # populated. Fall back so downstream consumers of IGDBGame.category see a
+    # coherent value instead of a mislabeled base-game default.
+    effective_category = category if category is not None else game_type
+
+    genres = [g["name"] for g in item.get("genres") or []]
+    themes = [t["name"] for t in item.get("themes") or []]
+    keywords = [k["name"] for k in item.get("keywords") or []]
+    tags = list(dict.fromkeys(themes + keywords))[:30]  # deduplicate, cap at 30
+
+    platform_dates: dict[int, str] = {}
+    for rd in item.get("release_dates") or []:
+        pid = rd.get("platform")
+        date_ts = rd.get("date")
+        if pid and date_ts:
+            iso = _unix_to_iso(date_ts)
+            if iso:
+                platform_dates[pid] = iso
+
+    platform_ids = sorted(
+        {int(p) for p in item.get("platforms") or [] if isinstance(p, int)}
+        | set(platform_dates)
+    )
+
+    series: list[tuple[str, int, str]] = []
+    for kind, key in (("collection", "collections"), ("franchise", "franchises")):
+        for entry in item.get(key) or []:
+            sid = entry.get("id")
+            sname = entry.get("name")
+            if sid and sname:
+                series.append((kind, sid, sname))
+
+    raw_parent_game = item.get("parent_game")
+    parent_game = raw_parent_game if isinstance(raw_parent_game, dict) else {}
+    raw_version_parent = item.get("version_parent")
+    version_parent = raw_version_parent if isinstance(raw_version_parent, dict) else {}
+    classification = classify_igdb_game(
+        title=item["name"],
+        category=category,
+        game_type=game_type,
+        parent_name=parent_game.get("name"),
+        parent_igdb_id=parent_game.get("id"),
+        version_parent_name=version_parent.get("name"),
+        version_parent_igdb_id=version_parent.get("id"),
+    )
+
+    return IGDBGame(
+        igdb_id=item["id"],
+        name=item["name"],
+        category=effective_category if effective_category is not None else CATEGORY_MAIN_GAME,
+        first_release_date=_unix_to_iso(item.get("first_release_date")),
+        genres=genres,
+        tags=tags,
+        platform_release_dates=platform_dates,
+        platforms=platform_ids,
+        series=series,
+        game_type=game_type,
+        content_type=classification.content_type,
+        parent_igdb_id=classification.parent_igdb_id,
+        parent_name=classification.parent_name,
+        version_parent_igdb_id=version_parent.get("id"),
+        version_parent_name=version_parent.get("name"),
+        version_title=item.get("version_title"),
+        is_primary_library_item=classification.is_primary_library_item,
+        alias_for_parent=classification.alias_for_parent,
+    )
 
 
 async def search_game(
@@ -459,7 +542,8 @@ async def search_game(
 ) -> list[IGDBGame]:
     """
     Search IGDB for a game by name, optionally filtered to a platform.
-    Returns up to 5 matches ranked by relevance.
+    Returns up to `limit` matches (see ``_build_search_game_query``) ranked by
+    IGDB's own relevance model.
     """
     client_id = os.environ.get("TWITCH_CLIENT_ID")
     if not client_id:
@@ -483,72 +567,163 @@ async def search_game(
         logger.warning("IGDB search failed for %r: %s", name, exc)
         return []
 
-    games = []
-    for item in results:
-        category = item.get("category")
+    return [_parse_igdb_item(item) for item in results]
 
-        genres = [g["name"] for g in item.get("genres") or []]
-        themes = [t["name"] for t in item.get("themes") or []]
-        keywords = [k["name"] for k in item.get("keywords") or []]
-        tags = list(dict.fromkeys(themes + keywords))[:30]  # deduplicate, cap at 30
 
-        platform_dates: dict[int, str] = {}
-        for rd in item.get("release_dates") or []:
-            pid = rd.get("platform")
-            date_ts = rd.get("date")
-            if pid and date_ts:
-                iso = _unix_to_iso(date_ts)
-                if iso:
-                    platform_dates[pid] = iso
+_FETCH_BY_ID_FIELDS = (
+    "fields id, name, category, game_type, first_release_date, "
+    "genres.name, themes.name, keywords.name, "
+    "collections.id, collections.name, franchises.id, franchises.name, "
+    "parent_game.id, parent_game.name, "
+    "version_parent.id, version_parent.name, version_title, "
+    "platforms, release_dates.platform, release_dates.date;"
+)
 
-        platform_ids = sorted(
-            {int(p) for p in item.get("platforms") or [] if isinstance(p, int)}
-            | set(platform_dates)
+
+async def fetch_game_by_id(
+    igdb_id: int, *, suppress_errors: bool = True
+) -> IGDBGame | None:
+    """Fetch a single IGDB game by its id (no fuzzy search involved).
+
+    Used by the backfill path when a row already has a matched `igdb_id`, so a
+    known-correct link is never re-resolved through name search (which can
+    drift onto the wrong candidate). Returns None if IGDB is unconfigured, the
+    id doesn't resolve, or the request ultimately fails while
+    ``suppress_errors`` is True.
+    """
+    client_id = os.environ.get("TWITCH_CLIENT_ID")
+    if not client_id:
+        return None
+
+    query = f"{_FETCH_BY_ID_FIELDS} where id = {igdb_id}; limit 1;"
+
+    try:
+        token = await _get_token()
+        results = await _post_igdb_games(
+            query,
+            headers={
+                "Client-ID": client_id,
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "text/plain",
+            },
         )
+    except Exception as exc:
+        if not suppress_errors:
+            raise IGDBRequestFailure(f"IGDB fetch-by-id failed for {igdb_id!r}") from exc
+        logger.warning("IGDB fetch-by-id failed for %r: %s", igdb_id, exc)
+        return None
 
-        series: list[tuple[str, int, str]] = []
-        for kind, key in (("collection", "collections"), ("franchise", "franchises")):
-            for entry in item.get(key) or []:
-                sid = entry.get("id")
-                sname = entry.get("name")
-                if sid and sname:
-                    series.append((kind, sid, sname))
+    if not results:
+        return None
+    return _parse_igdb_item(results[0])
 
-        raw_parent_game = item.get("parent_game")
-        parent_game = raw_parent_game if isinstance(raw_parent_game, dict) else {}
-        raw_version_parent = item.get("version_parent")
-        version_parent = raw_version_parent if isinstance(raw_version_parent, dict) else {}
-        classification = classify_igdb_game(
-            title=item["name"],
-            category=category,
-            parent_name=parent_game.get("name"),
-            parent_igdb_id=parent_game.get("id"),
-            version_parent_name=version_parent.get("name"),
-            version_parent_igdb_id=version_parent.get("id"),
-        )
 
-        games.append(IGDBGame(
-            igdb_id=item["id"],
-            name=item["name"],
-            category=category if category is not None else CATEGORY_MAIN_GAME,
-            first_release_date=_unix_to_iso(item.get("first_release_date")),
-            genres=genres,
-            tags=tags,
-            platform_release_dates=platform_dates,
-            platforms=platform_ids,
-            series=series,
-            game_type=item.get("game_type"),
-            content_type=classification.content_type,
-            parent_igdb_id=classification.parent_igdb_id,
-            parent_name=classification.parent_name,
-            version_parent_igdb_id=version_parent.get("id"),
-            version_parent_name=version_parent.get("name"),
-            version_title=item.get("version_title"),
-            is_primary_library_item=classification.is_primary_library_item,
-            alias_for_parent=classification.alias_for_parent,
-        ))
+# Zero-result fallback ladder (Fix 4): query-variant patterns local to
+# resolve_game. Deliberately NOT folded into title_normalization.py's shared
+# _TRAILING_VARIANT_PATTERNS — those also feed library identity matching, and
+# a generic edition-strip rule there could collapse distinct games. Here they
+# only ever widen an IGDB *search* that already returned zero results, and any
+# hit they turn up still has to clear the same identity/fuzzy gate as a normal
+# search.
+_LADDER_TRAILING_EDITION_PATTERN = re.compile(r"[:\-]?\s*\S+\s+Edition\s*$", re.IGNORECASE)
+_LADDER_LEADING_THE_PATTERN = re.compile(r"^The\s+", re.IGNORECASE)
+_LADDER_STOPWORDS = {"the", "of", "a", "an", "and", "for"}
 
-    return games
+
+def _generate_resolve_query_variants(name: str) -> list[tuple[str, bool]]:
+    """Ordered, deduplicated (query, identity_preserving) variants to retry.
+
+    Only consulted when the original name (with and without a platform
+    filter) returned zero IGDB results.
+
+    ``identity_preserving`` marks variants produced by transformations that
+    keep the title's series identity intact (catalog normalization, stripping
+    a trailing edition segment or a leading article). Their results are gated
+    against the *variant* rather than the original name — otherwise a numbered
+    edition like "Sea of Thieves: 2026 Edition" could never match the base
+    game, because the original's "2026" reads as a sequel number in
+    ``titles_conflict_on_identity``. Token-dropping variants change what the
+    query means, so they stay gated against the original.
+    """
+    variants: list[tuple[str, bool]] = []
+    seen = {name.casefold()}
+
+    def _add(candidate: str | None, *, identity_preserving: bool) -> None:
+        candidate = (candidate or "").strip()
+        key = candidate.casefold()
+        if candidate and key not in seen:
+            seen.add(key)
+            variants.append((candidate, identity_preserving))
+
+    _add(normalize_catalog_title(name), identity_preserving=True)
+    _add(_LADDER_TRAILING_EDITION_PATTERN.sub("", name).strip(), identity_preserving=True)
+    _add(_LADDER_LEADING_THE_PATTERN.sub("", name).strip(), identity_preserving=True)
+
+    tokens = [t for t in re.findall(r"\S+", name) if t.strip(",:;").casefold() not in _LADDER_STOPWORDS]
+    if tokens:
+        _add(" ".join(tokens), identity_preserving=False)
+        if len(tokens) > 2:
+            _add(" ".join(tokens[-2:]), identity_preserving=False)
+
+    return variants
+
+
+def _select_best_match(
+    name: str,
+    results: list[IGDBGame],
+    *,
+    allow_inconclusive_fallback: bool,
+) -> IGDBGame | None:
+    """Pick the best candidate from `results` for query `name`, or None.
+
+    Never collapses onto a different entry in the same series: "Xenoblade
+    Chronicles" must not resolve to "Xenoblade Chronicles 2". Candidates whose
+    sequel/version identity conflicts with the query are dropped before
+    ranking.
+
+    `allow_inconclusive_fallback` controls what happens when the fuzzy match
+    is inconclusive (score below cutoff for every candidate): the original,
+    IGDB-relevance-ranked search can fall back to its top identity-compatible
+    hit, but a narrower fallback-ladder variant query (Fix 4) must not — an
+    unrelated result from an overly-broad query (e.g. "Seance" alone matching
+    unrelated "Silly Seance"-type titles) must not be accepted just because it
+    was the only one returned.
+    """
+    from .db import extract_best_fuzzy_key, titles_conflict_on_identity
+
+    choices = {
+        i: g.name
+        for i, g in enumerate(results)
+        if not titles_conflict_on_identity(name, g.name)
+    }
+    if not choices:
+        # Every candidate disagrees on the sequel number — a confident wrong match
+        # is worse than none. Let the caller fall back to the normalized name.
+        return None
+
+    # Prefer an exact title match (under the same normalization used for
+    # library identity) over IGDB's relevance ranking. This is what rescues
+    # e.g. "Persona 3 Reload": the base game's title is an exact match while
+    # every DLC/cosmetic pack's title has a longer suffix, so it wins even
+    # though IGDB's own relevance model ranked it below all of them.
+    normalized_query = normalize_search_text(name)
+    exact_matches = [
+        i for i in choices if normalize_search_text(results[i].name) == normalized_query
+    ]
+    if exact_matches:
+        primary_exact = [i for i in exact_matches if results[i].is_primary_library_item]
+        exact_idx = primary_exact[0] if primary_exact else exact_matches[0]
+        return results[exact_idx]
+
+    best_idx: int | None = extract_best_fuzzy_key(name, choices, cutoff=70)
+    if best_idx is None:
+        if not allow_inconclusive_fallback:
+            return None
+        # Fuzzy was inconclusive; take IGDB's top *identity-compatible* relevance
+        # hit rather than forcing position 0 (which may be a conflicting entry).
+        best_idx = next(iter(choices))
+
+    return results[best_idx]
 
 
 async def resolve_game(
@@ -570,32 +745,35 @@ async def resolve_game(
         if igdb_platform_id is not None:
             results = await search_game(name, igdb_platform_id=None, suppress_errors=suppress_errors)
 
-    if not results:
-        return None
+    if results:
+        return _select_best_match(name, results, allow_inconclusive_fallback=True)
 
-    # Pick the best name match, but never collapse onto a different entry in the
-    # same series: "Xenoblade Chronicles" must not resolve to "Xenoblade
-    # Chronicles 2". Drop candidates whose sequel/version identity conflicts with
-    # the query before ranking.
-    from .db import extract_best_fuzzy_key, titles_conflict_on_identity
+    # Zero results even without a platform filter: work through a ladder of
+    # alternate query strings (Fix 4). Stop at the first variant whose results
+    # produce an accepted match; a variant that returns only unrelated titles
+    # must not be accepted just because it's non-empty.
+    tried = {name.casefold()}
+    for variant, identity_preserving in _generate_resolve_query_variants(name):
+        if variant.casefold() in tried:
+            continue
+        tried.add(variant.casefold())
 
-    choices = {
-        i: g.name
-        for i, g in enumerate(results)
-        if not titles_conflict_on_identity(name, g.name)
-    }
-    if not choices:
-        # Every candidate disagrees on the sequel number — a confident wrong match
-        # is worse than none. Let the caller fall back to the normalized name.
-        return None
+        variant_results = await search_game(variant, igdb_platform_id, suppress_errors=suppress_errors)
+        if not variant_results and igdb_platform_id is not None:
+            variant_results = await search_game(variant, igdb_platform_id=None, suppress_errors=suppress_errors)
+        if not variant_results:
+            continue
 
-    best_idx = extract_best_fuzzy_key(name, choices, cutoff=70)
-    if best_idx is None:
-        # Fuzzy was inconclusive; take IGDB's top *identity-compatible* relevance
-        # hit rather than forcing position 0 (which may be a conflicting entry).
-        best_idx = next(iter(choices))
+        # Identity-preserving variants gate against the variant itself: the
+        # transformation already vouches for series identity, and the original
+        # may carry an edition number ("… 2026 Edition") that would wrongly
+        # read as a sequel marker against the base game's title.
+        gate_name = variant if identity_preserving else name
+        match = _select_best_match(gate_name, variant_results, allow_inconclusive_fallback=False)
+        if match is not None:
+            return match
 
-    return results[best_idx]
+    return None
 
 
 async def resolve_and_link_game(
@@ -914,12 +1092,25 @@ async def backfill_missing_games(limit: int = 10) -> int:
             if row is None:
                 continue
 
-            platform_hint = await choose_igdb_platform_hint(game_id)
-            igdb_game = await resolve_game(
-                normalize_catalog_title(row["name"]),
-                platform_hint,
-                suppress_errors=False,
-            )
+            igdb_game: IGDBGame | None = None
+            existing_igdb_id = row["igdb_id"]
+            if existing_igdb_id:
+                # Row already has a matched igdb_id (e.g. from an earlier pass) —
+                # fetch it directly instead of re-resolving by name, which can
+                # drift onto a different, wrong candidate. Only trust the
+                # by-id result when it actually carries platform data; an empty
+                # fetch falls through to the normal name-based resolution below.
+                fetched = await fetch_game_by_id(existing_igdb_id, suppress_errors=False)
+                if fetched is not None and fetched.platforms:
+                    igdb_game = fetched
+
+            if igdb_game is None:
+                platform_hint = await choose_igdb_platform_hint(game_id)
+                igdb_game = await resolve_game(
+                    normalize_catalog_title(row["name"]),
+                    platform_hint,
+                    suppress_errors=False,
+                )
             if igdb_game is not None:
                 try:
                     await _apply_igdb_metadata(game_id, igdb_game)

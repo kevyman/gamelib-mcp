@@ -102,7 +102,7 @@ STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 
 @dataclass
@@ -1211,6 +1211,31 @@ async def _migrate_v18_to_v19(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v19_to_v20(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Re-run the v19 wishlist IGDB re-claim with the fixed resolution logic.
+
+    Data-only, no DDL change. The v19 re-claim ran into several IGDB
+    resolution gaps (category/game_type mismatch, a too-tight search limit
+    burying base games behind DLC, zero-result searches for a few titles, and
+    igdb_id-linked rows never being re-fetched by id) that left a handful of
+    wishlisted games with igdb_platforms still NULL after the v19 pass
+    completed. Re-run the identical re-claim UPDATE so production retries
+    those stragglers through the fixed igdb.py backfill path post-deploy.
+    """
+    if progress is not None:
+        progress("Migrating to v20: re-claim IGDB for still-unresolved wishlisted games.")
+
+    await db.execute(
+        """UPDATE games
+           SET igdb_cached_at = NULL, igdb_claimed_at = NULL
+           WHERE igdb_platforms IS NULL
+             AND id IN (SELECT game_id FROM game_wishlist)"""
+    )
+
+    await _set_user_version(db, 20)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1360,6 +1385,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (16, _migrate_v16_to_v17),
     (17, _migrate_v17_to_v18),
     (18, _migrate_v18_to_v19),
+    (19, _migrate_v19_to_v20),
 )
 
 
