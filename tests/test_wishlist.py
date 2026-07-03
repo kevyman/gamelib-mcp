@@ -223,11 +223,35 @@ class AddGameToPlatformWishlistTests(ToolDBTestCase):
             )
         self.assertIsNone(wishlist_row)
 
-    async def test_identifier_requires_owned_true(self):
-        with self.assertRaisesRegex(ToolError, "identifier_type/identifier_value require owned=True"):
+    async def test_non_steam_appid_identifier_rejected_when_unowned(self):
+        with self.assertRaisesRegex(
+            ToolError, "only supports 'steam_appid'"
+        ):
             await platforms.add_game_to_platform(
-                "Some Game", "steam", identifier_type="steam_appid", identifier_value="1", owned=False
+                "Some Game", "steam", identifier_type="gog_product_id", identifier_value="1", owned=False
             )
+
+    async def test_steam_appid_requires_steam_platform_when_unowned(self):
+        with self.assertRaisesRegex(
+            ToolError, "requires platform='steam'"
+        ):
+            await platforms.add_game_to_platform(
+                "Some Game", "ps5", identifier_type="steam_appid", identifier_value="1", owned=False
+            )
+
+    async def test_steam_appid_stored_as_wishlist_store_identifier_when_unowned(self):
+        result = await platforms.add_game_to_platform(
+            "Perfect Tides", "steam", identifier_type="steam_appid", identifier_value="2088810", owned=False
+        )
+
+        self.assertIsNone(result["game_platform_id"])
+        self.assertEqual(result["identifier"], {"type": "steam_appid", "value": "2088810"})
+
+        async with db_module.get_db() as db:
+            wishlist_row = await db.execute_fetchone(
+                "SELECT store_identifier FROM game_wishlist WHERE id = ?", (result["wishlist_id"],)
+            )
+        self.assertEqual(wishlist_row["store_identifier"], "2088810")
 
 
 class GetWishlistTests(ToolDBTestCase):
