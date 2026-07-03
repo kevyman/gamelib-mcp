@@ -630,31 +630,40 @@ _LADDER_LEADING_THE_PATTERN = re.compile(r"^The\s+", re.IGNORECASE)
 _LADDER_STOPWORDS = {"the", "of", "a", "an", "and", "for"}
 
 
-def _generate_resolve_query_variants(name: str) -> list[str]:
-    """Ordered, deduplicated list of alternate query strings to retry.
+def _generate_resolve_query_variants(name: str) -> list[tuple[str, bool]]:
+    """Ordered, deduplicated (query, identity_preserving) variants to retry.
 
     Only consulted when the original name (with and without a platform
     filter) returned zero IGDB results.
+
+    ``identity_preserving`` marks variants produced by transformations that
+    keep the title's series identity intact (catalog normalization, stripping
+    a trailing edition segment or a leading article). Their results are gated
+    against the *variant* rather than the original name — otherwise a numbered
+    edition like "Sea of Thieves: 2026 Edition" could never match the base
+    game, because the original's "2026" reads as a sequel number in
+    ``titles_conflict_on_identity``. Token-dropping variants change what the
+    query means, so they stay gated against the original.
     """
-    variants: list[str] = []
+    variants: list[tuple[str, bool]] = []
     seen = {name.casefold()}
 
-    def _add(candidate: str | None) -> None:
+    def _add(candidate: str | None, *, identity_preserving: bool) -> None:
         candidate = (candidate or "").strip()
         key = candidate.casefold()
         if candidate and key not in seen:
             seen.add(key)
-            variants.append(candidate)
+            variants.append((candidate, identity_preserving))
 
-    _add(normalize_catalog_title(name))
-    _add(_LADDER_TRAILING_EDITION_PATTERN.sub("", name).strip())
-    _add(_LADDER_LEADING_THE_PATTERN.sub("", name).strip())
+    _add(normalize_catalog_title(name), identity_preserving=True)
+    _add(_LADDER_TRAILING_EDITION_PATTERN.sub("", name).strip(), identity_preserving=True)
+    _add(_LADDER_LEADING_THE_PATTERN.sub("", name).strip(), identity_preserving=True)
 
     tokens = [t for t in re.findall(r"\S+", name) if t.strip(",:;").casefold() not in _LADDER_STOPWORDS]
     if tokens:
-        _add(" ".join(tokens))
+        _add(" ".join(tokens), identity_preserving=False)
         if len(tokens) > 2:
-            _add(" ".join(tokens[-2:]))
+            _add(" ".join(tokens[-2:]), identity_preserving=False)
 
     return variants
 
@@ -744,7 +753,7 @@ async def resolve_game(
     # produce an accepted match; a variant that returns only unrelated titles
     # must not be accepted just because it's non-empty.
     tried = {name.casefold()}
-    for variant in _generate_resolve_query_variants(name):
+    for variant, identity_preserving in _generate_resolve_query_variants(name):
         if variant.casefold() in tried:
             continue
         tried.add(variant.casefold())
@@ -755,7 +764,12 @@ async def resolve_game(
         if not variant_results:
             continue
 
-        match = _select_best_match(name, variant_results, allow_inconclusive_fallback=False)
+        # Identity-preserving variants gate against the variant itself: the
+        # transformation already vouches for series identity, and the original
+        # may carry an edition number ("… 2026 Edition") that would wrongly
+        # read as a sequel marker against the base game's title.
+        gate_name = variant if identity_preserving else name
+        match = _select_best_match(gate_name, variant_results, allow_inconclusive_fallback=False)
         if match is not None:
             return match
 

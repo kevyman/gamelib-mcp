@@ -872,6 +872,59 @@ class ResolveGameZeroResultLadderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
 
+    async def test_ladder_numbered_edition_matches_base_game(self) -> None:
+        # "Sea of Thieves: 2026 Edition" case: the edition-strip variant "Sea
+        # of Thieves" finds the base game, but gating it against the ORIGINAL
+        # title would reject it — "2026" reads as a sequel number in
+        # titles_conflict_on_identity. Identity-preserving variants must gate
+        # against the variant itself.
+        base_game = igdb.IGDBGame(
+            igdb_id=27159,
+            name="Sea of Thieves",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2018-03-20",
+            platforms=[6, 169],
+        )
+
+        async def fake_search_game(name, igdb_platform_id=None, *, suppress_errors=True):
+            if name == "Sea of Thieves":
+                return [base_game]
+            return []
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(side_effect=fake_search_game)),
+        ):
+            result = await igdb.resolve_game("Sea of Thieves: 2026 Edition", None)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.igdb_id, 27159)
+
+    async def test_ladder_token_variant_still_gates_against_original_identity(self) -> None:
+        # Token-dropping variants change what the query means, so their
+        # results must still be validated against the ORIGINAL title: a
+        # two-token query returning a numbered sequel ("Blake Manor 2") must
+        # not be accepted for a query with no sequel number.
+        sequel = igdb.IGDBGame(
+            igdb_id=99,
+            name="Blake Manor 2",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2026-01-01",
+        )
+
+        async def fake_search_game(name, igdb_platform_id=None, *, suppress_errors=True):
+            if name == "Blake Manor":
+                return [sequel]
+            return []
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(side_effect=fake_search_game)),
+        ):
+            result = await igdb.resolve_game("The Seance of Blake Manor", None)
+
+        self.assertIsNone(result)
+
 
 class PlatformFilterTests(unittest.TestCase):
     def test_single_platform_id_filter_unchanged(self):
