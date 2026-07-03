@@ -79,15 +79,39 @@ def igdb_credentials_configured() -> bool:
 IGDB_PLATFORM_PC = 6
 IGDB_PLATFORM_PS5 = 167
 IGDB_PLATFORM_PS4 = 48
-IGDB_PLATFORM_SWITCH = 130  # Switch (Switch 2 not yet in IGDB)
+IGDB_PLATFORM_SWITCH = 130  # Switch
+IGDB_PLATFORM_SWITCH2 = 508  # Nintendo Switch 2 (IGDB added it post-launch; verified 2026-07-03)
 
-# Our platform value → IGDB platform ID
+# Our platform value → IGDB platform ID (primary id; single-id platforms only —
+# for switch2, which spans two IGDB platforms, use PLATFORM_TO_IGDB_ANY).
 PLATFORM_TO_IGDB: dict[str, int] = {
     "steam": IGDB_PLATFORM_PC,
     "epic": IGDB_PLATFORM_PC,
     "gog": IGDB_PLATFORM_PC,
     "ps5": IGDB_PLATFORM_PS5,
     "switch2": IGDB_PLATFORM_SWITCH,
+}
+
+# Our platform value → all IGDB platform ids that count as it, preference-
+# ordered: the first id with a release date wins in
+# upsert_backfill_platform_release_dates. switch2 covers both generations
+# (native Switch 2 SKUs + the backward-compatible Switch library).
+PLATFORM_TO_IGDB_ANY: dict[str, tuple[int, ...]] = {
+    "steam": (IGDB_PLATFORM_PC,),
+    "epic": (IGDB_PLATFORM_PC,),
+    "gog": (IGDB_PLATFORM_PC,),
+    "ps5": (IGDB_PLATFORM_PS5,),
+    "switch2": (IGDB_PLATFORM_SWITCH2, IGDB_PLATFORM_SWITCH),
+}
+
+# Reverse map for availability checks (games.igdb_platforms → our platforms).
+# PC deliberately maps to "steam": it's the only PC storefront with a price
+# source, which is all this map is consumed for (tools/deals.py).
+IGDB_TO_PLATFORM: dict[int, str] = {
+    IGDB_PLATFORM_PC: "steam",
+    IGDB_PLATFORM_PS5: "ps5",
+    IGDB_PLATFORM_SWITCH: "switch2",
+    IGDB_PLATFORM_SWITCH2: "switch2",
 }
 
 # IGDB category values
@@ -263,6 +287,7 @@ class IGDBGame:
     genres: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)   # themes + keywords
     platform_release_dates: dict[int, str] = field(default_factory=dict)  # igdb_platform_id → ISO date
+    platforms: list[int] = field(default_factory=list)  # all IGDB platform ids the game is released on
     # Series groupings as (kind, igdb_id, name) tuples; kind is
     # "collection" (IGDB's term for a "Series") or "franchise".
     series: list[tuple[str, int, str]] = field(default_factory=list)
@@ -399,18 +424,25 @@ def _escape_igdb_search_term(term: str) -> str:
     return term.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _build_search_game_query(name: str, igdb_platform_id: int | None = None) -> str:
+def _build_search_game_query(
+    name: str, igdb_platform_id: int | tuple[int, ...] | None = None
+) -> str:
     escaped_name = _escape_igdb_search_term(name)
     filters = []
     if igdb_platform_id is not None:
-        filters.append(f"platforms = {igdb_platform_id}")
+        ids = igdb_platform_id if isinstance(igdb_platform_id, tuple) else (igdb_platform_id,)
+        if len(ids) == 1:
+            filters.append(f"platforms = {ids[0]}")
+        else:
+            # Apicalypse: (a,b) = "contains at least one of".
+            filters.append(f"platforms = ({','.join(str(i) for i in ids)})")
     clauses = [
         "fields id, name, category, game_type, first_release_date, "
         "genres.name, themes.name, keywords.name, "
         "collections.id, collections.name, franchises.id, franchises.name, "
         "parent_game.id, parent_game.name, "
         "version_parent.id, version_parent.name, version_title, "
-        "release_dates.platform, release_dates.date;",
+        "platforms, release_dates.platform, release_dates.date;",
         f'search "{escaped_name}";',
     ]
     if filters:
@@ -421,7 +453,7 @@ def _build_search_game_query(name: str, igdb_platform_id: int | None = None) -> 
 
 async def search_game(
     name: str,
-    igdb_platform_id: int | None = None,
+    igdb_platform_id: int | tuple[int, ...] | None = None,
     *,
     suppress_errors: bool = True,
 ) -> list[IGDBGame]:
@@ -469,6 +501,11 @@ async def search_game(
                 if iso:
                     platform_dates[pid] = iso
 
+        platform_ids = sorted(
+            {int(p) for p in item.get("platforms") or [] if isinstance(p, int)}
+            | set(platform_dates)
+        )
+
         series: list[tuple[str, int, str]] = []
         for kind, key in (("collection", "collections"), ("franchise", "franchises")):
             for entry in item.get(key) or []:
@@ -498,6 +535,7 @@ async def search_game(
             genres=genres,
             tags=tags,
             platform_release_dates=platform_dates,
+            platforms=platform_ids,
             series=series,
             game_type=item.get("game_type"),
             content_type=classification.content_type,
@@ -515,7 +553,7 @@ async def search_game(
 
 async def resolve_game(
     name: str,
-    igdb_platform_id: int | None,
+    igdb_platform_id: int | tuple[int, ...] | None,
     *,
     suppress_errors: bool = True,
 ) -> IGDBGame | None:
@@ -562,7 +600,7 @@ async def resolve_game(
 
 async def resolve_and_link_game(
     name: str,
-    igdb_platform_id: int | None,
+    igdb_platform_id: int | tuple[int, ...] | None,
     candidates: dict[int, str],
     *,
     platform: str | None = None,
@@ -753,6 +791,10 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
 
         overrides = await get_manual_overrides(db, game_id)
         updates: dict = {"igdb_id": igdb_game.igdb_id, "igdb_cached_at": now}
+        if igdb_game.platforms:
+            # NULL means "not fetched yet"; an empty fetch keeps NULL so the
+            # deals tool can distinguish unknown from confirmed-single-platform.
+            updates["igdb_platforms"] = json.dumps(igdb_game.platforms)
         if row["release_date"] is None and igdb_game.first_release_date and "release_date" not in overrides:
             updates["release_date"] = igdb_game.first_release_date
         if row["genres"] is None and igdb_game.genres and "genres" not in overrides:
@@ -803,7 +845,7 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
         await upsert_game_series_links(game_id, igdb_game.series)
 
 
-async def choose_igdb_platform_hint(game_id: int) -> int | None:
+async def choose_igdb_platform_hint(game_id: int) -> tuple[int, ...] | None:
     platforms_by_game = await load_platforms_for_games([game_id])
     platforms = platforms_by_game.get(game_id, [])
     if not platforms:
@@ -811,11 +853,11 @@ async def choose_igdb_platform_hint(game_id: int) -> int | None:
 
     for platform in platforms:
         if platform["platform"] == "steam":
-            return IGDB_PLATFORM_PC
+            return PLATFORM_TO_IGDB_ANY["steam"]
 
     for platform in platforms:
-        if platform.get("owned") and platform["platform"] in PLATFORM_TO_IGDB:
-            return PLATFORM_TO_IGDB[platform["platform"]]
+        if platform.get("owned") and platform["platform"] in PLATFORM_TO_IGDB_ANY:
+            return PLATFORM_TO_IGDB_ANY[platform["platform"]]
 
     return None
 
@@ -826,10 +868,15 @@ async def upsert_backfill_platform_release_dates(game_id: int, igdb_game: IGDBGa
 
     platforms_by_game = await load_platforms_for_games([game_id])
     for platform in platforms_by_game.get(game_id, []):
-        igdb_platform_id = PLATFORM_TO_IGDB.get(platform["platform"])
-        if igdb_platform_id is None:
-            continue
-        release_date = igdb_game.platform_release_dates.get(igdb_platform_id)
+        candidate_ids = PLATFORM_TO_IGDB_ANY.get(platform["platform"], ())
+        release_date = next(
+            (
+                igdb_game.platform_release_dates[pid]
+                for pid in candidate_ids
+                if pid in igdb_game.platform_release_dates
+            ),
+            None,
+        )
         game_platform_id = platform["game_platform_id"]
         if release_date is None or game_platform_id is None:
             continue

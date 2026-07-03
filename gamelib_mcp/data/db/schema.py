@@ -849,6 +849,15 @@ _V18_SCHEMA_DDL = _V17_SCHEMA_DDL.replace(
     CREATE INDEX IF NOT EXISTS idx_game_prices_game_id ON game_prices(game_id);
 """
 
+# v19 adds games.igdb_platforms: the full set of IGDB platform ids a game is
+# released on (JSON int array; NULL = not yet fetched), written by IGDB
+# enrichment regardless of ownership. Powers cross-platform availability in
+# get_wishlist_deals ("this Steam wishlist item also has a Switch release").
+_V19_SCHEMA_DDL = _V18_SCHEMA_DDL.replace(
+    "        igdb_cached_at   TEXT,",
+    "        igdb_cached_at   TEXT,\n        igdb_platforms   TEXT,",
+)
+
 # Derived search index — NOT part of the versioned schema chain. Created and
 # fully resynced by _run_migrations' _sync_fts_index on every migrate_db run,
 # which self-heals after destructive games-table rebuilds (those drop the

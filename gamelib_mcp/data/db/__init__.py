@@ -102,7 +102,7 @@ STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 
 @dataclass
@@ -233,6 +233,7 @@ from .schema import (
     _V16_SCHEMA_DDL,
     _V17_SCHEMA_DDL,
     _V18_SCHEMA_DDL,
+    _V19_SCHEMA_DDL,
 )
 
 
@@ -1186,6 +1187,30 @@ async def _migrate_v17_to_v18(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v18_to_v19(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add games.igdb_platforms (see schema.py v19 note) and re-claim IGDB
+    enrichment for wishlisted games so the backfill re-fetches their platform
+    availability. Scoped to game_wishlist rows: re-claiming the whole library
+    would burn thousands of IGDB calls for data only the deals tool reads,
+    and only wishlist items are ever priced."""
+    if progress is not None:
+        progress("Migrating to v19: add games.igdb_platforms; re-claim IGDB for wishlisted games.")
+
+    cols = await _table_columns(db, "games")
+    if "igdb_platforms" not in cols:
+        await db.execute("ALTER TABLE games ADD COLUMN igdb_platforms TEXT")
+
+    await db.execute(
+        """UPDATE games
+           SET igdb_cached_at = NULL, igdb_claimed_at = NULL
+           WHERE igdb_platforms IS NULL
+             AND id IN (SELECT game_id FROM game_wishlist)"""
+    )
+
+    await _set_user_version(db, 19)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1334,6 +1359,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (15, _migrate_v15_to_v16),
     (16, _migrate_v16_to_v17),
     (17, _migrate_v17_to_v18),
+    (18, _migrate_v18_to_v19),
 )
 
 
@@ -1351,7 +1377,7 @@ async def _run_migrations(
         _emit(progress, f"Backed up database to {snapshot_path} before migrating.", applied_steps)
 
     if detected_state == "fresh":
-        await db.executescript(_V18_SCHEMA_DDL)
+        await db.executescript(_V19_SCHEMA_DDL)
         fts_enabled = await _sync_fts_index(db)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
@@ -1388,7 +1414,7 @@ async def _run_migrations(
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V18_SCHEMA_DDL)
+    await db.executescript(_V19_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION

@@ -110,7 +110,7 @@ class SyncNintendoTests(unittest.TestCase):
         mock_resolve.assert_awaited_once()
         self.assertEqual(
             mock_resolve.await_args.args[:2],
-            ("Fire Emblem Engage", igdb.PLATFORM_TO_IGDB["switch2"]),
+            ("Fire Emblem Engage", igdb.PLATFORM_TO_IGDB_ANY["switch2"]),
         )
         mock_upsert_platform.assert_awaited_once_with(
             game_id=42,
@@ -119,6 +119,78 @@ class SyncNintendoTests(unittest.TestCase):
             owned=1,
         )
         mock_upsert_identifier.assert_awaited_once_with(99, nintendo.NINTENDO_TITLE_ID, "0100a5c00d9a2000")
+        mock_enrichment.assert_not_called()
+
+    def test_records_release_date_when_switch2_508_platform_id_present(self) -> None:
+        entries = [
+            {
+                "name": "Kirby and the Forgotten Land",
+                "playtime_minutes": None,
+                "title_id": "0100c9c00c536000",
+            }
+        ]
+        igdb_game = igdb.IGDBGame(
+            igdb_id=1234,
+            name="Kirby and the Forgotten Land",
+            category=0,
+            first_release_date="2022-03-25",
+            platform_release_dates={508: "2026-01-15", 130: "2022-03-25"},
+        )
+
+        _, _, mock_upsert_platform, _, mock_enrichment = self._run_sync(
+            entries, resolve_result=(42, igdb_game)
+        )
+
+        mock_enrichment.assert_awaited_once_with(
+            99,
+            platform_release_date="2026-01-15",
+        )
+
+    def test_records_release_date_when_only_original_switch_platform_id_present(self) -> None:
+        entries = [
+            {
+                "name": "Kirby and the Forgotten Land",
+                "playtime_minutes": None,
+                "title_id": "0100c9c00c536000",
+            }
+        ]
+        igdb_game = igdb.IGDBGame(
+            igdb_id=1234,
+            name="Kirby and the Forgotten Land",
+            category=0,
+            first_release_date="2022-03-25",
+            platform_release_dates={130: "2022-03-25"},
+        )
+
+        _, _, mock_upsert_platform, _, mock_enrichment = self._run_sync(
+            entries, resolve_result=(42, igdb_game)
+        )
+
+        mock_enrichment.assert_awaited_once_with(
+            99,
+            platform_release_date="2022-03-25",
+        )
+
+    def test_skips_enrichment_when_no_switch2_platform_id_matches(self) -> None:
+        entries = [
+            {
+                "name": "Kirby and the Forgotten Land",
+                "playtime_minutes": None,
+                "title_id": "0100c9c00c536000",
+            }
+        ]
+        igdb_game = igdb.IGDBGame(
+            igdb_id=1234,
+            name="Kirby and the Forgotten Land",
+            category=0,
+            first_release_date="2022-03-25",
+            platform_release_dates={999: "2020-01-01"},
+        )
+
+        _, _, _, _, mock_enrichment = self._run_sync(
+            entries, resolve_result=(42, igdb_game)
+        )
+
         mock_enrichment.assert_not_called()
 
     def test_skips_when_no_credentials_are_available(self) -> None:
@@ -166,7 +238,7 @@ class SyncNintendoTests(unittest.TestCase):
         mock_resolve.assert_awaited_once()
         self.assertEqual(
             mock_resolve.await_args.args[:2],
-            ("Hollow Knight", igdb.PLATFORM_TO_IGDB["switch2"]),
+            ("Hollow Knight", igdb.PLATFORM_TO_IGDB_ANY["switch2"]),
         )
         mock_upsert_platform.assert_awaited_once_with(
             game_id=42,

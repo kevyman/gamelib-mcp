@@ -25,13 +25,26 @@ from game_wishlist too, via delete_stale_wishlist_entries — but only after a
 successful fetch. _fetch_wishlist_items raises on failure rather than
 swallowing it to an empty list, specifically so a transient fetch error can't
 be mistaken for "the wishlist is now empty" and wipe every switch2 entry.
+
+This module also prices arbitrary titles NOT on the shared wishlist via
+DekuDeals' public search page (fetch_search_prices) — used for a game
+wishlisted on another platform that also has a Switch release, so it can get
+a switch2 price quote too. DekuDeals is a multi-platform tracker (Switch,
+PlayStation, Xbox, PC), so search results are always scoped with
+`filter[platform]=switch_2` first, falling back to `filter[platform]=switch`
+on a miss (see `_SEARCH_PLATFORM_FILTERS`) — an unfiltered search can surface
+a card whose price/sale-status belongs to a different platform entirely for
+a multi-platform title. Unlike the wishlist scrape, per-title fetch/parse
+failures and non-matches are skipped rather than raised, since there is no
+removal reconciliation downstream for this path.
 """
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote_plus, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup, Tag
@@ -53,12 +66,31 @@ _CURRENCY_SYMBOLS = {"€": "EUR", "$": "USD", "£": "GBP"}
 # deal_url is built from a scraped href; an absolute (non "/"-relative) href
 # is only trusted if it actually points at DekuDeals — mirrors the host-check
 # scrape_config.py's _validate_field applies to url_template overrides (see
-# ALLOWED_HOSTS there), even though DekuDeals has no configurable URL fields
-# of its own to run through that path.
+# ALLOWED_HOSTS there). This constant covers deal_url specifically (a scraped
+# value, not a config field), so it stays separate from ALLOWED_HOSTS even
+# though the two host sets are the same.
 _DEKUDEALS_HOSTS = frozenset({"dekudeals.com", "www.dekudeals.com"})
 
 DEKUDEALS_WISHLIST_URL = os.getenv("DEKUDEALS_WISHLIST_URL", "")
 logger = logging.getLogger(__name__)
+
+# Politeness delay between per-title search requests (fetch_search_prices).
+_SEARCH_REQUEST_DELAY_SECONDS = 0.5
+
+# DekuDeals is a multi-platform deal tracker (Switch, PlayStation, Xbox, PC), so an
+# UNFILTERED search for a multi-platform title can surface a card whose displayed
+# price/sale-status belongs to a different platform, not Switch. DekuDeals supports
+# a `filter[platform]=<value>` search query param to scope results; live checks
+# (2026-07-03) confirm `switch_2` and `switch` are DISJOINT facets, not a
+# superset/subset relationship — a Switch-2-exclusive title (e.g. "Mario Kart
+# World") only appears under `switch_2`, while an original-Switch title (e.g.
+# "Hades") only appears under `switch`. Since this codebase's "switch2" platform
+# value deliberately covers both the native Switch 2 catalog and the
+# backward-compatible original-Switch catalog (mirrors igdb.py's
+# PLATFORM_TO_IGDB_ANY["switch2"] = (IGDB_PLATFORM_SWITCH2, IGDB_PLATFORM_SWITCH),
+# i.e. try id 508 first, then 130), fetch_search_prices tries `switch_2` first and
+# falls back to `switch` only if the first attempt has no match.
+_SEARCH_PLATFORM_FILTERS = ("switch_2", "switch")
 
 
 def is_dekudeals_configured() -> bool:
@@ -320,3 +352,62 @@ def _match_game_id(
         return name_to_id[match]
 
     return None
+
+
+def _match_search_title(title: str, prices: dict[str, dict], cutoff: int) -> str | None:
+    """Best search-result title for a requested title, or None. Exact
+    (case-insensitive) first, then the same fuzzy matcher the wishlist
+    sync uses."""
+    by_lower = {t.lower(): t for t in prices}
+    title_lower = title.lower()
+    if title_lower in by_lower:
+        return by_lower[title_lower]
+    match = extract_best_fuzzy_key(title_lower, {k: k for k in by_lower}, cutoff=cutoff)
+    return by_lower[match] if match else None
+
+
+async def fetch_search_prices(titles: list[str]) -> dict[str, dict]:
+    """Current switch2 prices for arbitrary titles via the public DekuDeals
+    search page — used for games NOT on the shared wishlist (e.g. a
+    Steam-wishlisted game that also has a Switch release).
+
+    DekuDeals is a multi-platform tracker, so results are always scoped with
+    `filter[platform]=<value>` to avoid caching a price/sale-status that
+    actually belongs to a different platform's card for the same title. Per
+    title, tries each filter in `_SEARCH_PLATFORM_FILTERS` (switch_2, then
+    switch) in order, stopping at the first one that yields a matched card —
+    so most titles cost one GET, and only a switch_2-miss costs a second. One
+    GET per (title, filter) attempt; results parse with the same selector
+    config as the wishlist page (identical card markup). Returns
+    {requested_title: price_dict}. Per-attempt failures and non-matches are
+    skipped rather than raised: unlike the wishlist scrape there is no
+    removal reconciliation downstream, so a miss just leaves that item
+    unpriced.
+    """
+    if not titles:
+        return {}
+    config = await load_scrape_config("dekudeals")
+    results: dict[str, dict] = {}
+    request_count = 0
+    async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "gamelib-mcp/1.0"}) as client:
+        for title in titles:
+            base_url = config.search_url_template.format(query=quote_plus(title))
+            for platform_filter in _SEARCH_PLATFORM_FILTERS:
+                if request_count:
+                    await asyncio.sleep(_SEARCH_REQUEST_DELAY_SECONDS)
+                request_count += 1
+                url = f"{base_url}&filter%5Bplatform%5D={platform_filter}"
+                try:
+                    resp = await client.get(url, follow_redirects=True)
+                    resp.raise_for_status()
+                except httpx.HTTPError as exc:
+                    logger.warning(
+                        "DekuDeals search failed for %r (filter=%s): %s", title, platform_filter, exc
+                    )
+                    continue
+                prices = _parse_wishlist_prices(resp.text, config)
+                matched = _match_search_title(title, prices, cutoff=config.fuzzy_cutoff)
+                if matched is not None:
+                    results[title] = prices[matched]
+                    break
+    return results

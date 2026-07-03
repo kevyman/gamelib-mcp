@@ -29,7 +29,7 @@ from gamelib_mcp.data.db import (
     upsert_game_platform_enrichment,
     upsert_game_platform_identifier,
 )
-from gamelib_mcp.data.igdb import resolve_and_link_game, PLATFORM_TO_IGDB
+from gamelib_mcp.data.igdb import resolve_and_link_game, PLATFORM_TO_IGDB_ANY
 from gamelib_mcp.data.title_normalization import normalize_search_text, prepare_catalog_title
 
 logger = logging.getLogger(__name__)
@@ -326,7 +326,7 @@ async def _sync_nintendo_ownership() -> dict:
     candidates = await load_fuzzy_candidates()
 
     for entry, name in prepared_entries:
-        igdb_platform_id = PLATFORM_TO_IGDB.get(PLATFORM)
+        igdb_platform_id = PLATFORM_TO_IGDB_ANY.get(PLATFORM)
         title_id = entry.get("title_id")
 
         # Prefer the stable Nintendo application id so a re-sync matches the existing
@@ -366,11 +366,20 @@ async def _sync_nintendo_ownership() -> dict:
             owned=1,
         )
 
-        if igdb_game is not None and igdb_platform_id in igdb_game.platform_release_dates:
-            await upsert_game_platform_enrichment(
-                platform_id,
-                platform_release_date=igdb_game.platform_release_dates[igdb_platform_id],
+        if igdb_game is not None and igdb_platform_id:
+            release_date = next(
+                (
+                    igdb_game.platform_release_dates[pid]
+                    for pid in igdb_platform_id
+                    if pid in igdb_game.platform_release_dates
+                ),
+                None,
             )
+            if release_date is not None:
+                await upsert_game_platform_enrichment(
+                    platform_id,
+                    platform_release_date=release_date,
+                )
 
         if entry["title_id"]:
             await upsert_game_platform_identifier(

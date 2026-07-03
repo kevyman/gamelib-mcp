@@ -31,7 +31,7 @@ from gamelib_mcp.data.db import (
     upsert_game_platform_identifier,
     upsert_nintendo_play_summary,
 )
-from gamelib_mcp.data.igdb import PLATFORM_TO_IGDB, resolve_and_link_game
+from gamelib_mcp.data.igdb import PLATFORM_TO_IGDB_ANY, resolve_and_link_game
 from gamelib_mcp.data.title_normalization import prepare_catalog_title
 
 logger = logging.getLogger(__name__)
@@ -202,7 +202,7 @@ async def sync_nintendo_pctl() -> dict:
     await upsert_nintendo_play_summary(rows)
 
     totals = await get_nintendo_play_totals("day")
-    igdb_platform_id = PLATFORM_TO_IGDB.get(PLATFORM)
+    igdb_platform_id = PLATFORM_TO_IGDB_ANY.get(PLATFORM)
     candidates = await load_fuzzy_candidates()
 
     added = matched = 0

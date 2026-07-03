@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import aiosqlite
 
+from conftest import seed_game
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steam_store
 
@@ -989,7 +990,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                     "SELECT platform, source FROM game_wishlist WHERE id = 1"
                 )
 
-        self.assertEqual(result.final_version, 18)
+        self.assertEqual(result.final_version, 19)
         self.assertLessEqual(
             {
                 "game_id",
@@ -1008,6 +1009,42 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         # Existing wishlist row survives the additive migration untouched.
         self.assertEqual(wl_row["platform"], "steam")
         self.assertEqual(wl_row["source"], "steam")
+
+    async def test_v19_adds_igdb_platforms_and_reclaims_wishlisted_games(self) -> None:
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+
+            # Fresh DB is already v19: column exists.
+            async with db_module.get_db() as db:
+                cols = {r["name"] for r in await db.execute_fetchall("PRAGMA table_info(games)")}
+            self.assertIn("igdb_platforms", cols)
+
+            # Step function re-claims IGDB only for wishlisted games missing availability.
+            wished = await seed_game("Wishlisted Enriched")
+            other = await seed_game("Not Wishlisted")
+            async with db_module.get_db() as db:
+                await db.execute(
+                    "UPDATE games SET igdb_cached_at = '2026-01-01T00:00:00+00:00' WHERE id IN (?, ?)",
+                    (wished, other),
+                )
+                await db.commit()
+            await db_module.upsert_wishlist_entry(wished, "steam", source="steam")
+
+            async with db_module.get_db() as db:
+                from gamelib_mcp.data.db import _migrate_v18_to_v19
+
+                await _migrate_v18_to_v19(db, None)
+                await db.commit()
+                rows = {
+                    r["id"]: r["igdb_cached_at"]
+                    for r in await db.execute_fetchall(
+                        "SELECT id, igdb_cached_at FROM games WHERE id IN (?, ?)", (wished, other)
+                    )
+                }
+
+        self.assertIsNone(rows[wished])
+        self.assertIsNotNone(rows[other])
 
     async def test_v9_to_v10_adds_series_tables(self) -> None:
         conn = sqlite3.connect(self.db_path)

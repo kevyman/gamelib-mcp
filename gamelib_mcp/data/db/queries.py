@@ -391,8 +391,9 @@ async def load_related_content_for_games(game_ids: Iterable[int]) -> dict[int, d
 
 
 async def load_wishlist_with_prices(platform: str | None) -> list[aiosqlite.Row]:
-    """Wishlist rows LEFT JOINed to their cached price row, plus a resolved
-    Steam appid for ITAD lookups.
+    """Wishlist rows LEFT JOINed to cached price rows across ALL platforms,
+    plus a resolved Steam appid for ITAD lookups, IGDB platform-availability
+    metadata, and current ownership.
 
     appid resolution: w.store_identifier first (captured at Steam-wishlist-
     sync time for unowned items with no game_platforms row), falling back to
@@ -400,13 +401,17 @@ async def load_wishlist_with_prices(platform: str | None) -> list[aiosqlite.Row]
     for the rare case where an item is wishlisted on one platform but owned
     on Steam under the same game_id — e.g. a bundle or gift.
 
-    Join shape: LEFT JOIN game_prices on (game_id, platform) only — NOT also
-    on shop — since a wishlist row doesn't map 1:1 to a shop. This means a
-    game with cached prices from multiple shops for the same platform yields
-    multiple result rows (one per shop), by design: this is a thin
-    data-access layer, and picking "cheapest" (or otherwise collapsing
-    per-shop rows) is business logic that belongs to the Task 6 tool layer,
-    not here.
+    Join shape: LEFT JOIN game_prices on game_id ONLY — not also on platform
+    or shop. This is deliberate: a wishlist row's own `platform` column now
+    means "where this was wishlisted", not "which platform's prices are
+    relevant" — a game wishlisted on Steam may also have a cached Switch2
+    price worth surfacing (e.g. for a cheaper-elsewhere recommendation), so
+    the join fans out across every cached price row for the game_id on any
+    platform/shop. `price_platform` (the joined game_prices.platform) is what
+    disambiguates which platform each fanned-out price row belongs to. This
+    is a thin data-access layer; picking "cheapest", grouping per platform,
+    or otherwise collapsing the fanned-out rows is business logic that
+    belongs to the tool layer (tools/deals.py), not here.
     """
     where = "WHERE 1=1"
     params: list = []
@@ -418,6 +423,12 @@ async def load_wishlist_with_prices(platform: str | None) -> list[aiosqlite.Row]
         rows = await db.execute_fetchall(
             f"""SELECT w.game_id, g.name, w.platform, w.wishlisted_at, w.source,
                        w.store_identifier,
+                       g.igdb_platforms, g.igdb_cached_at,
+                       (
+                           SELECT COALESCE(json_group_array(sgp2.platform), '[]')
+                           FROM game_platforms sgp2
+                           WHERE sgp2.game_id = w.game_id AND sgp2.owned = 1
+                       ) AS owned_platforms,
                        COALESCE(
                            CAST(w.store_identifier AS INTEGER),
                            (
@@ -430,12 +441,12 @@ async def load_wishlist_with_prices(platform: str | None) -> list[aiosqlite.Row]
                                LIMIT 1
                            )
                        ) AS steam_appid,
+                       gp.platform AS price_platform,
                        gp.shop, gp.price, gp.regular_price, gp.cut_pct,
                        gp.currency, gp.deal_url, gp.fetched_at
                 FROM game_wishlist w
                 JOIN games g ON g.id = w.game_id
-                LEFT JOIN game_prices gp
-                    ON gp.game_id = w.game_id AND gp.platform = w.platform
+                LEFT JOIN game_prices gp ON gp.game_id = w.game_id
                 {where}
                 ORDER BY w.wishlisted_at DESC""",
             params,

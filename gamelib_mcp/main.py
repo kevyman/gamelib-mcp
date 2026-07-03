@@ -648,23 +648,34 @@ async def get_wishlist_deals(
     max_price: float | None = None,
     min_cut_pct: int | None = None,
     refresh: bool = False,
+    preference_override_ratio: float = 0.5,
 ) -> WishlistDealsResponse:
     """
-    Current prices/deals for wishlist games, cheapest first.
+    Current prices/deals for wishlist games — one entry per game, cheapest-
+    recommended first, honoring the set_hardware_preference platform order.
 
-    Prices come from IsThereAnyDeal (Steam wishlist items; covers Steam/GOG/
-    Epic shops) and DekuDeals (switch2 items). Cached in the DB; a fetch runs
-    automatically when the cache is older than 12h, or immediately with
-    refresh=True. Filters: platform, max_price, min_cut_pct (e.g. 50 for "at
-    least half off"). max_price/comparisons are NOT currency-converted: they
-    compare each deal's raw numeric price in whatever currency that deal is
-    quoted in (Steam/GOG/Epic follow ITAD_COUNTRY, switch2 follows whatever
-    currency DekuDeals renders for this account's region). Set ITAD_COUNTRY
-    to match if comparing thresholds meaningfully across platforms. Items
-    with no known price are listed separately in unpriced.
+    Prices come from IsThereAnyDeal (Steam wishlist items) and DekuDeals
+    (switch2 — the shared wishlist page, plus per-title search lookups for
+    games wishlisted elsewhere that IGDB says also have a Switch release;
+    search lookups are capped per call, overflow reported in
+    switch2_lookups_deferred and picked up on later calls). Cached 12h;
+    refresh=True forces a live fetch. Each deal's flat fields are the
+    RECOMMENDED purchase (preferred platform unless another platform's price
+    is below preference_override_ratio × the preferred price — "the deal is
+    too good"); other platforms appear in alternatives, reasoning in
+    recommendation_reason. availability_pending counts wishlist games whose
+    IGDB platform data hasn't been fetched yet (background enrichment fills
+    it). platform filters by where the game is WISHLISTED. max_price/
+    min_cut_pct keep a game if ANY of its priced options — recommended or
+    alternative — satisfies both given filters together, not just the
+    recommended one; they never change which option is recommended. Prices
+    are NOT currency-converted (Steam follows ITAD_COUNTRY; switch2 follows
+    the DekuDeals region); the ratio and max_price compare raw numbers.
     """
     from .tools.deals import get_wishlist_deals as _get_wishlist_deals
-    return await _get_wishlist_deals(platform, max_price, min_cut_pct, refresh)
+    return await _get_wishlist_deals(
+        platform, max_price, min_cut_pct, refresh, preference_override_ratio
+    )
 
 
 @mcp.tool(annotations=MUTATION_TOOL)
