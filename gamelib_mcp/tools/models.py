@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, RootModel
+from pydantic import BaseModel, ConfigDict, Field, RootModel
 
 
 class FlexibleModel(BaseModel):
@@ -317,6 +317,16 @@ class RollbackScrapeConfigResponse(FlexibleModel):
     effective_config: dict[str, Any]
 
 
+class WishlistDealAlternative(FlexibleModel):
+    platform: str
+    shop: str
+    price: float
+    regular_price: float | None = None
+    cut_pct: int | None = None
+    currency: str | None = None
+    deal_url: str | None = None
+
+
 class WishlistDealEntry(FlexibleModel):
     game_id: int
     name: str
@@ -328,6 +338,9 @@ class WishlistDealEntry(FlexibleModel):
     currency: str | None = None
     deal_url: str | None = None
     wishlisted_at: str | None = None
+    wishlisted_on: list[str] = Field(default_factory=list)
+    recommendation_reason: str | None = None
+    alternatives: list[WishlistDealAlternative] = Field(default_factory=list)
 
 
 class WishlistDealsResponse(FlexibleModel):
@@ -338,3 +351,5 @@ class WishlistDealsResponse(FlexibleModel):
     price_refresh_errors: list[str] | None = None
     itad: str | None = None
     currency_note: str | None = None
+    switch2_lookups_deferred: int | None = None
+    availability_pending: int | None = None

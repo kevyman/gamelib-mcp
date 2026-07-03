@@ -167,5 +167,16 @@ class DekuDealsParserTests(unittest.TestCase):
         self.assertEqual(dekudeals._parse_wishlist_prices(html, config), {})
 
 
+class DekuDealsSearchParseTests(unittest.TestCase):
+    def test_search_page_parses_with_wishlist_selectors(self):
+        html = _fixture_text("dekudeals_search_page.html")
+        results = dekudeals._parse_wishlist_prices(html)
+        self.assertIn("Hades", results)
+        hades = results["Hades"]
+        self.assertGreater(hades["price"], 0)
+        self.assertEqual(hades["currency"], "EUR")
+        self.assertTrue(hades["deal_url"].endswith("/items/hades"))
+
+
 if __name__ == "__main__":
     unittest.main()

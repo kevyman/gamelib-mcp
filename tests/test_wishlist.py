@@ -4,6 +4,7 @@ helpers (upsert + fulfillment cleanup), the manual add_game_to_platform
 """
 
 import asyncio
+import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -13,6 +14,7 @@ from conftest import ToolDBTestCase, add_identifier, add_platform, seed_game
 from fastmcp.exceptions import ToolError
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import dekudeals, steam_wishlist
+from gamelib_mcp.data.scrape_validate import FIXTURES_DIR
 from gamelib_mcp.tools import platforms
 
 
@@ -223,11 +225,35 @@ class AddGameToPlatformWishlistTests(ToolDBTestCase):
             )
         self.assertIsNone(wishlist_row)
 
-    async def test_identifier_requires_owned_true(self):
-        with self.assertRaisesRegex(ToolError, "identifier_type/identifier_value require owned=True"):
+    async def test_non_steam_appid_identifier_rejected_when_unowned(self):
+        with self.assertRaisesRegex(
+            ToolError, "only supports 'steam_appid'"
+        ):
             await platforms.add_game_to_platform(
-                "Some Game", "steam", identifier_type="steam_appid", identifier_value="1", owned=False
+                "Some Game", "steam", identifier_type="gog_product_id", identifier_value="1", owned=False
             )
+
+    async def test_steam_appid_requires_steam_platform_when_unowned(self):
+        with self.assertRaisesRegex(
+            ToolError, "requires platform='steam'"
+        ):
+            await platforms.add_game_to_platform(
+                "Some Game", "ps5", identifier_type="steam_appid", identifier_value="1", owned=False
+            )
+
+    async def test_steam_appid_stored_as_wishlist_store_identifier_when_unowned(self):
+        result = await platforms.add_game_to_platform(
+            "Perfect Tides", "steam", identifier_type="steam_appid", identifier_value="2088810", owned=False
+        )
+
+        self.assertIsNone(result["game_platform_id"])
+        self.assertEqual(result["identifier"], {"type": "steam_appid", "value": "2088810"})
+
+        async with db_module.get_db() as db:
+            wishlist_row = await db.execute_fetchone(
+                "SELECT store_identifier FROM game_wishlist WHERE id = ?", (result["wishlist_id"],)
+            )
+        self.assertEqual(wishlist_row["store_identifier"], "2088810")
 
 
 class GetWishlistTests(ToolDBTestCase):
@@ -730,6 +756,111 @@ class DekuDealsWishlistTests(ToolDBTestCase):
         )
 
 
+def _response(html: str):
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+    resp = _Resp()
+    resp.text = html
+    return resp
+
+
+class FetchSearchPricesTests(unittest.IsolatedAsyncioTestCase):
+    async def test_maps_requested_title_to_matched_card(self):
+        html = (FIXTURES_DIR / "dekudeals_search_page.html").read_text(encoding="utf-8")
+        with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
+            client = client_cls.return_value.__aenter__.return_value
+            client.get = AsyncMock(return_value=_response(html))
+            results = await dekudeals.fetch_search_prices(["Hades"])
+        self.assertIn("Hades", results)
+        self.assertEqual(results["Hades"]["currency"], "EUR")
+
+    async def test_switch2_filter_match_makes_single_request(self):
+        # Real capture: https://www.dekudeals.com/search?q=mario+kart+world&filter[platform]=switch_2
+        # "Mario Kart World" is Switch-2-exclusive and matches on the very first
+        # (switch_2-filtered) request, so no fallback request should be made.
+        html = (FIXTURES_DIR / "dekudeals_search_page_switch2_filter_match.html").read_text(
+            encoding="utf-8"
+        )
+        with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
+            client = client_cls.return_value.__aenter__.return_value
+            client.get = AsyncMock(return_value=_response(html))
+            results = await dekudeals.fetch_search_prices(["Mario Kart World"])
+        self.assertIn("Mario Kart World", results)
+        self.assertEqual(client.get.call_count, 1)
+        called_url = client.get.call_args.args[0]
+        self.assertEqual(
+            called_url,
+            "https://www.dekudeals.com/search?q=Mario+Kart+World&filter%5Bplatform%5D=switch_2",
+        )
+
+    async def test_falls_back_to_switch_filter_when_switch2_has_no_match(self):
+        # Real captures: switch_2-filtered "hades" search has no "Hades" card
+        # (only "Hades II" and its upgrade pack — the two facets are disjoint),
+        # but the switch-filtered search does have one, at EUR 24.99.
+        no_match_html = (
+            FIXTURES_DIR / "dekudeals_search_page_switch2_filter_no_match.html"
+        ).read_text(encoding="utf-8")
+        match_html = (FIXTURES_DIR / "dekudeals_search_page_switch_filter_fallback.html").read_text(
+            encoding="utf-8"
+        )
+        with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
+            client = client_cls.return_value.__aenter__.return_value
+            client.get = AsyncMock(side_effect=[_response(no_match_html), _response(match_html)])
+            with patch("gamelib_mcp.data.dekudeals.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+                results = await dekudeals.fetch_search_prices(["Hades"])
+
+        self.assertIn("Hades", results)
+        self.assertEqual(results["Hades"]["currency"], "EUR")
+        self.assertEqual(client.get.call_count, 2)
+        first_url = client.get.call_args_list[0].args[0]
+        second_url = client.get.call_args_list[1].args[0]
+        self.assertEqual(
+            first_url, "https://www.dekudeals.com/search?q=Hades&filter%5Bplatform%5D=switch_2"
+        )
+        self.assertEqual(
+            second_url, "https://www.dekudeals.com/search?q=Hades&filter%5Bplatform%5D=switch"
+        )
+        # Politeness pacing applies before the fallback request too.
+        sleep_mock.assert_awaited_once()
+
+    async def test_neither_filter_matches_title_absent_no_exception(self):
+        html = (FIXTURES_DIR / "dekudeals_search_page_switch2_filter_no_match.html").read_text(
+            encoding="utf-8"
+        )
+        with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
+            client = client_cls.return_value.__aenter__.return_value
+            client.get = AsyncMock(return_value=_response(html))
+            with patch("gamelib_mcp.data.dekudeals.asyncio.sleep", new=AsyncMock()):
+                results = await dekudeals.fetch_search_prices(["Completely Unrelated Title XYZ"])
+        self.assertEqual(results, {})
+        self.assertEqual(client.get.call_count, 2)
+
+    async def test_fetch_error_skips_title_without_raising(self):
+        with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
+            client = client_cls.return_value.__aenter__.return_value
+            client.get = AsyncMock(side_effect=httpx.ConnectError("boom"))
+            with patch("gamelib_mcp.data.dekudeals.asyncio.sleep", new=AsyncMock()):
+                results = await dekudeals.fetch_search_prices(["Hades"])
+        self.assertEqual(results, {})
+
+    async def test_no_fuzzy_match_yields_no_entry(self):
+        html = (FIXTURES_DIR / "dekudeals_search_page.html").read_text(encoding="utf-8")
+        with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
+            client = client_cls.return_value.__aenter__.return_value
+            client.get = AsyncMock(return_value=_response(html))
+            with patch("gamelib_mcp.data.dekudeals.asyncio.sleep", new=AsyncMock()):
+                results = await dekudeals.fetch_search_prices(["Completely Unrelated Title XYZ"])
+        self.assertEqual(results, {})
+
+    async def test_empty_titles_returns_empty_without_fetching(self):
+        with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
+            results = await dekudeals.fetch_search_prices([])
+        self.assertEqual(results, {})
+        client_cls.assert_not_called()
+
+
 class UpsertGamePricesTests(ToolDBTestCase):
     async def test_reupsert_overwrites_stale_price_with_one_row(self):
         game_id = await seed_game("Price Tracked Game")
@@ -928,6 +1059,38 @@ class LoadWishlistWithPricesTests(ToolDBTestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["steam_appid"], 778899)
+
+
+class LoadWishlistWithPricesCrossPlatformTests(ToolDBTestCase):
+    async def test_returns_prices_from_other_platforms_with_metadata(self):
+        game_id = await seed_game("Crossplay Deal")
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET igdb_platforms = '[6, 508]', igdb_cached_at = 'x' WHERE id = ?",
+                (game_id,),
+            )
+            await db.commit()
+        await add_platform(game_id, "epic", owned=1)  # owned elsewhere; not on candidates
+        await db_module.upsert_wishlist_entry(game_id, "steam", source="steam", store_identifier="42")
+        await db_module.upsert_game_prices([
+            {"game_id": game_id, "platform": "steam", "shop": "Steam", "price": 10.0,
+             "regular_price": 10.0, "cut_pct": 0, "currency": "EUR", "deal_url": "u1"},
+            {"game_id": game_id, "platform": "switch2", "shop": "dekudeals", "price": 12.0,
+             "regular_price": 12.0, "cut_pct": 0, "currency": "EUR", "deal_url": "u2"},
+        ])
+
+        rows = await db_module.load_wishlist_with_prices(None)
+        mine = [r for r in rows if r["game_id"] == game_id]
+        self.assertEqual({r["price_platform"] for r in mine}, {"steam", "switch2"})
+        self.assertEqual(json.loads(mine[0]["igdb_platforms"]), [6, 508])
+        self.assertEqual(json.loads(mine[0]["owned_platforms"]), ["epic"])
+        self.assertEqual(mine[0]["steam_appid"], 42)
+
+    async def test_platform_filter_still_filters_wishlist_rows_not_price_rows(self):
+        game_id = await seed_game("Filtered")
+        await db_module.upsert_wishlist_entry(game_id, "switch2", source="dekudeals")
+        rows = await db_module.load_wishlist_with_prices("steam")
+        self.assertEqual([r for r in rows if r["game_id"] == game_id], [])
 
 
 if __name__ == "__main__":

@@ -178,3 +178,41 @@ class ApplyIgdbMetadataTagUnionTests(ToolDBTestCase):
         self.assertNotIn("steam trading cards", tags)
         self.assertEqual(tags[: len(existing)], existing)  # existing kept, in order
         self.assertEqual(tags[-1], "metroidvania")  # first IGDB tag fills last slot
+
+
+class ApplyIgdbMetadataPlatformsTests(ToolDBTestCase):
+    async def test_writes_igdb_platforms_json(self) -> None:
+        game_id = await seed_game("Crossplay Game")
+        await igdb._apply_igdb_metadata(
+            game_id,
+            igdb.IGDBGame(
+                igdb_id=901,
+                name="Crossplay Game",
+                category=0,
+                first_release_date=None,
+                platforms=[6, 130, 508],
+            ),
+        )
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT igdb_platforms FROM games WHERE id = ?", (game_id,)
+            )
+        self.assertEqual(json.loads(row["igdb_platforms"]), [6, 130, 508])
+
+    async def test_empty_platforms_leaves_column_null(self) -> None:
+        game_id = await seed_game("No Platform Data")
+        await igdb._apply_igdb_metadata(
+            game_id,
+            igdb.IGDBGame(
+                igdb_id=902,
+                name="No Platform Data",
+                category=0,
+                first_release_date=None,
+                platforms=[],
+            ),
+        )
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT igdb_platforms FROM games WHERE id = ?", (game_id,)
+            )
+        self.assertIsNone(row["igdb_platforms"])
