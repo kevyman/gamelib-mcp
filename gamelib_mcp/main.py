@@ -665,9 +665,12 @@ async def get_wishlist_deals(
     too good"); other platforms appear in alternatives, reasoning in
     recommendation_reason. availability_pending counts wishlist games whose
     IGDB platform data hasn't been fetched yet (background enrichment fills
-    it). platform filters by where the game is WISHLISTED. Prices are NOT
-    currency-converted (Steam follows ITAD_COUNTRY; switch2 follows the
-    DekuDeals region); the ratio and max_price compare raw numbers.
+    it). platform filters by where the game is WISHLISTED. max_price/
+    min_cut_pct keep a game if ANY of its priced options — recommended or
+    alternative — satisfies both given filters together, not just the
+    recommended one; they never change which option is recommended. Prices
+    are NOT currency-converted (Steam follows ITAD_COUNTRY; switch2 follows
+    the DekuDeals region); the ratio and max_price compare raw numbers.
     """
     from .tools.deals import get_wishlist_deals as _get_wishlist_deals
     return await _get_wishlist_deals(

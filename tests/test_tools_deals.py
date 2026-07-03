@@ -168,6 +168,67 @@ class GetWishlistDealsTests(ToolDBTestCase):
         self.assertEqual(names, {"Pricey Game"})
         self.assertEqual(result["unpriced"], [])
 
+    async def test_max_price_keeps_game_when_only_alternative_qualifies(self):
+        # Reviewer-found bug: filtering only checked the RECOMMENDED option's
+        # flat price/cut_pct. Here the recommended (hardware-preferred)
+        # option is switch2 @ 50 (steam's 30 isn't below the 50% override
+        # ratio of 25, so no override fires) — but the steam alternative @ 30
+        # clearly satisfies max_price=40 and must not be hidden.
+        game_id = await seed_game("Cross Platform Game")
+        await _seed_wishlist(game_id, "steam", store_identifier="1")
+        await _seed_wishlist(game_id, "switch2", source="dekudeals")
+        await db_module.set_meta("hardware_preference", json.dumps(["switch2", "steam"]))
+        await _seed_price(game_id, "switch2", "dekudeals", 50.0, currency="EUR")
+        await _seed_price(game_id, "steam", "steam", 30.0, currency="EUR")
+
+        with patch(
+            "gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.is_itad_configured", return_value=True
+        ):
+            result = await deals.get_wishlist_deals(max_price=40.0)
+
+        entry = next((d for d in result["deals"] if d["game_id"] == game_id), None)
+        self.assertIsNotNone(entry, "game with a qualifying alternative must not be dropped")
+        # Recommended fields must stay pointed at switch2/50 — the filter
+        # decides keep-or-drop only, it never re-points recommended.
+        self.assertEqual(entry["platform"], "switch2")
+        self.assertEqual(entry["price"], 50.0)
+        self.assertEqual(
+            [a["platform"] for a in entry["alternatives"]], ["steam"]
+        )
+        self.assertEqual(result["count"], 1)
+
+    async def test_max_price_drops_game_when_no_option_qualifies(self):
+        # Inverse of the above: neither the recommended option nor any
+        # alternative satisfies max_price, so the game is correctly excluded.
+        game_id = await seed_game("Too Expensive Everywhere")
+        await _seed_wishlist(game_id, "steam", store_identifier="2")
+        await _seed_wishlist(game_id, "switch2", source="dekudeals")
+        await db_module.set_meta("hardware_preference", json.dumps(["switch2", "steam"]))
+        await _seed_price(game_id, "switch2", "dekudeals", 50.0, currency="EUR")
+        await _seed_price(game_id, "steam", "steam", 30.0, currency="EUR")
+
+        with patch(
+            "gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.is_itad_configured", return_value=True
+        ):
+            result = await deals.get_wishlist_deals(max_price=20.0)
+
+        self.assertNotIn(game_id, [d["game_id"] for d in result["deals"]])
+        # Still has a price — must not be misfiled as unpriced.
+        self.assertEqual(result["unpriced"], [])
+        self.assertEqual(result["count"], 0)
+
     async def test_currency_note_added_when_deals_span_multiple_currencies(self):
         usd_id = await seed_game("USD Game")
         await _seed_wishlist(usd_id, "steam", store_identifier="1")

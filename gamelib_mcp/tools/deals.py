@@ -151,6 +151,30 @@ def _candidate_platforms(
     return candidates
 
 
+def _option_passes_filters(
+    option: dict, max_price: float | None, min_cut_pct: int | None
+) -> bool:
+    """True if a single priced option satisfies BOTH provided filters
+    (whichever of max_price/min_cut_pct are not None)."""
+    if max_price is not None and option["price"] > max_price:
+        return False
+    if min_cut_pct is not None and (
+        option["cut_pct"] is None or option["cut_pct"] < min_cut_pct
+    ):
+        return False
+    return True
+
+
+def _deal_has_qualifying_option(
+    deal: dict, max_price: float | None, min_cut_pct: int | None
+) -> bool:
+    """True if the recommended option OR any alternative satisfies the
+    filter(s) — a qualifying deal is never hidden just because the
+    RECOMMENDED (e.g. hardware-preferred) platform happens to miss it."""
+    options = [deal, *deal["alternatives"]]
+    return any(_option_passes_filters(o, max_price, min_cut_pct) for o in options)
+
+
 def _pick_recommended(
     options: list[dict], hw_pref: list[str], override_ratio: float
 ) -> tuple[dict, str]:
@@ -205,7 +229,10 @@ async def get_wishlist_deals(
     below preference_override_ratio × the preferred price); other platforms'
     cheapest options appear in alternatives with the reasoning in
     recommendation_reason. platform filters by where the game is WISHLISTED,
-    not where the recommendation lands. Prices are never currency-converted.
+    not where the recommendation lands. max_price/min_cut_pct keep a game if
+    ANY of its priced options — recommended or alternative — satisfies both
+    given filters together; they never re-point the recommended fields, they
+    only decide whether the entry is kept. Prices are never currency-converted.
     """
     resolved_platform = _validate_platform(platform, LIBRARY_PLATFORMS) if platform else None
 
@@ -366,10 +393,8 @@ async def get_wishlist_deals(
         if c is not None
     }
 
-    if max_price is not None:
-        deals = [d for d in deals if d["price"] <= max_price]
-    if min_cut_pct is not None:
-        deals = [d for d in deals if d["cut_pct"] is not None and d["cut_pct"] >= min_cut_pct]
+    if max_price is not None or min_cut_pct is not None:
+        deals = [d for d in deals if _deal_has_qualifying_option(d, max_price, min_cut_pct)]
 
     deals.sort(key=lambda d: d["price"])
 
