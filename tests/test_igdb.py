@@ -1054,3 +1054,61 @@ class FetchSeriesMembersTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.assertRaises(igdb.IGDBRequestFailure):
                 await igdb.fetch_series_members("collection", 1)
+
+
+class FetchVersionParentAliasesTests(unittest.IsolatedAsyncioTestCase):
+    async def test_builds_version_parent_query_and_maps_editions(self) -> None:
+        captured = {}
+
+        async def fake_post(query: str, headers: dict[str, str]) -> list[dict]:
+            captured["query"] = query
+            return [
+                {"id": 283715, "version_parent": 80, "name": "The Witcher: Enhanced Edition"},
+                {"id": 20740, "version_parent": 478, "name": "The Witcher 2 Enhanced Edition"},
+            ]
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"TWITCH_CLIENT_ID": "client", "TWITCH_CLIENT_SECRET": "secret"},
+                clear=True,
+            ),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", side_effect=fake_post),
+        ):
+            aliases = await igdb.fetch_version_parent_aliases([80, 478])
+
+        self.assertIn("where version_parent = (80, 478)", captured["query"])
+        self.assertEqual(aliases, {283715: 80, 20740: 478})
+
+    async def test_empty_input_short_circuits_without_request(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"TWITCH_CLIENT_ID": "client", "TWITCH_CLIENT_SECRET": "secret"},
+            clear=True,
+        ):
+            aliases = await igdb.fetch_version_parent_aliases([])
+
+        self.assertEqual(aliases, {})
+
+    async def test_unconfigured_returns_empty(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            aliases = await igdb.fetch_version_parent_aliases([80])
+
+        self.assertEqual(aliases, {})
+
+    async def test_wraps_post_failure_as_igdb_request_failure(self) -> None:
+        with (
+            patch.dict(
+                "os.environ",
+                {"TWITCH_CLIENT_ID": "client", "TWITCH_CLIENT_SECRET": "secret"},
+                clear=True,
+            ),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch(
+                "gamelib_mcp.data.igdb._post_igdb_games",
+                AsyncMock(side_effect=RuntimeError("boom")),
+            ),
+        ):
+            with self.assertRaises(igdb.IGDBRequestFailure):
+                await igdb.fetch_version_parent_aliases([80])

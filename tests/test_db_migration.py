@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import aiosqlite
 
-from conftest import seed_game
+from conftest import add_platform, seed_game
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steam_store
 
@@ -893,10 +893,13 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         # SteamSpy cache cleared for steam rows; store cache untouched.
         self.assertIsNone(spd[1]["steamspy_cached_at"])
         self.assertEqual(spd[1]["store_cached_at"], "2026-01-01")
-        # IGDB cache cleared for Steam-linked games only.
+        # IGDB cache cleared for Steam-linked games by the v12->v13 step...
         self.assertIsNone(games[1]["igdb_cached_at"])
         self.assertIsNone(games[3]["igdb_cached_at"])
-        self.assertEqual(games[2]["igdb_cached_at"], "2026-01-01")
+        # ...and separately for game 2 by the v23->v24 step: it's an owned
+        # switch2 game with no igdb_id and no series membership, exactly the
+        # false-positive-gap signature that migration re-claims.
+        self.assertIsNone(games[2]["igdb_cached_at"])
 
     async def test_v14_to_v15_repairs_self_referencing_parent(self) -> None:
         conn = sqlite3.connect(self.db_path)
@@ -1060,7 +1063,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             async with db_module.get_db() as db:
                 version = await db_module._get_user_version(db)
             self.assertEqual(version, db_module.SCHEMA_VERSION)
-            self.assertEqual(db_module.SCHEMA_VERSION, 23)
+            self.assertEqual(db_module.SCHEMA_VERSION, 24)
 
             unresolved = await seed_game("Still Unresolved Wishlisted Game")
             resolved = await seed_game("Already Resolved Wishlisted Game")
@@ -1232,6 +1235,90 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.final_version, db_module.SCHEMA_VERSION)
         self.assertEqual(updated["completion_status"], "evergreen")
+
+    async def test_v23_to_v24_reclaims_owned_or_wishlisted_games_missing_series_data(
+        self,
+    ) -> None:
+        # discover_series_gaps false-positived owned games it couldn't match
+        # to a series member: (a) an owned row with no igdb_id at all (e.g.
+        # "Borderlands GOTY"), and (b) an owned row whose igdb_id resolved to
+        # an edition-specific IGDB entry with no series membership of its own
+        # (e.g. "The Witcher: Enhanced Edition"). v24 re-claims both so
+        # background IGDB backfill re-links them; games that already have a
+        # linked igdb_id AND a series membership, and games that are neither
+        # owned nor wishlisted, must be left alone.
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+
+            no_igdb_owned = await seed_game("Borderlands GOTY")
+            await add_platform(no_igdb_owned, "steam", owned=1)
+
+            edition_no_membership = await seed_game("The Witcher: Enhanced Edition")
+            await add_platform(edition_no_membership, "steam", owned=1)
+            async with db_module.get_db() as db:
+                await db.execute(
+                    "UPDATE games SET igdb_id = ? WHERE id = ?",
+                    (283715, edition_no_membership),
+                )
+                await db.commit()
+
+            fully_resolved = await seed_game("The Witcher")
+            await add_platform(fully_resolved, "steam", owned=1)
+            async with db_module.get_db() as db:
+                await db.execute(
+                    "UPDATE games SET igdb_id = ? WHERE id = ?", (80, fully_resolved)
+                )
+                await db.commit()
+            await db_module.upsert_game_series_links(
+                fully_resolved, [("collection", 900, "The Witcher")]
+            )
+
+            wishlisted_no_igdb = await seed_game("Wishlisted No IGDB")
+            await db_module.upsert_wishlist_entry(wishlisted_no_igdb, "steam", source="steam")
+
+            unowned_unwishlisted = await seed_game("Neither Owned Nor Wishlisted")
+
+            target_ids = (
+                no_igdb_owned,
+                edition_no_membership,
+                fully_resolved,
+                wishlisted_no_igdb,
+                unowned_unwishlisted,
+            )
+            async with db_module.get_db() as db:
+                await db.execute(
+                    f"UPDATE games SET igdb_cached_at = '2026-01-01T00:00:00+00:00', "
+                    f"igdb_claimed_at = '2026-01-01T00:00:00+00:00' "
+                    f"WHERE id IN ({','.join('?' * len(target_ids))})",
+                    target_ids,
+                )
+                await db.commit()
+
+                from gamelib_mcp.data.db import _migrate_v23_to_v24
+
+                await _migrate_v23_to_v24(db, None)
+                await db.commit()
+
+                rows = {
+                    r["id"]: (r["igdb_cached_at"], r["igdb_claimed_at"])
+                    for r in await db.execute_fetchall(
+                        f"SELECT id, igdb_cached_at, igdb_claimed_at FROM games "
+                        f"WHERE id IN ({','.join('?' * len(target_ids))})",
+                        target_ids,
+                    )
+                }
+
+        self.assertEqual(rows[no_igdb_owned], (None, None))
+        self.assertEqual(rows[edition_no_membership], (None, None))
+        self.assertEqual(
+            rows[fully_resolved], ("2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00")
+        )
+        self.assertEqual(rows[wishlisted_no_igdb], (None, None))
+        self.assertEqual(
+            rows[unowned_unwishlisted],
+            ("2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
 
     async def test_fresh_db_accepts_evergreen_directly(self) -> None:
         db_module._DB_READY_PATH = None

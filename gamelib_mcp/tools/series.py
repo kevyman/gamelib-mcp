@@ -204,6 +204,7 @@ async def discover_series_gaps(
     """
     from ..data.igdb import IGDB_TO_PLATFORM, IGDBRequestFailure, igdb_credentials_configured
     from ..data.series_gaps import get_series_members_cached
+    from ..data.title_normalization import normalize_series_gap_title
 
     if kind is not None and kind not in VALID_KINDS:
         raise ToolError(f"Unknown kind '{kind}'. Valid: {sorted(VALID_KINDS)}")
@@ -267,19 +268,29 @@ async def discover_series_gaps(
         # "Have" = owned on some platform (gp.owned=1) or wishlisted. Not the
         # whole games table: a games row can exist without either (an owned=0
         # manual stub, or an orphaned row left behind by an unsynced wishlist
-        # removal), and suppressing those titles would hide real gaps.
+        # removal), and suppressing those titles would hide real gaps. Not
+        # filtered to igdb_id IS NOT NULL either: an owned row can have no
+        # igdb_id at all (e.g. a GOTY-edition title IGDB backfill hasn't
+        # resolved yet), in which case only the normalized-name fallback below
+        # can recognize it as "have".
         have_rows = await db.execute_fetchall(
             """
-            SELECT igdb_id FROM games
-            WHERE igdb_id IS NOT NULL
-              AND (EXISTS (SELECT 1 FROM game_platforms gp
-                           WHERE gp.game_id = games.id AND gp.owned = 1)
-                   OR EXISTS (SELECT 1 FROM game_wishlist w
-                              WHERE w.game_id = games.id))
+            SELECT igdb_id, name FROM games
+            WHERE EXISTS (SELECT 1 FROM game_platforms gp
+                          WHERE gp.game_id = games.id AND gp.owned = 1)
+               OR EXISTS (SELECT 1 FROM game_wishlist w
+                          WHERE w.game_id = games.id)
             """
         )
 
-    have_igdb_ids = {row["igdb_id"] for row in have_rows}
+    have_igdb_ids = {row["igdb_id"] for row in have_rows if row["igdb_id"] is not None}
+    # Normalized-name fallback (Fix layer B): catches both an owned row with no
+    # igdb_id at all, and an owned row whose igdb_id is a different IGDB entry
+    # than the canonical series member (edition entries that layer A's alias
+    # map doesn't happen to cover). Deterministic exact match only — no fuzzy
+    # scoring — so it only excludes members that are the *same* title under
+    # edition/case/punctuation normalization, never a merely-similar one.
+    have_names = {normalize_series_gap_title(row["name"]) for row in have_rows if row["name"]}
     today = datetime.now(timezone.utc).date().isoformat()
 
     with_gaps: list[dict] = []
@@ -290,16 +301,30 @@ async def discover_series_gaps(
         series_igdb_id = row["igdb_id"]
         series_kind = row["kind"]
         try:
-            members = await get_series_members_cached(
+            series_result = await get_series_members_cached(
                 series_kind, series_igdb_id, refresh=refresh_cache
             )
         except IGDBRequestFailure as exc:
             errors.append({"series": row["series_name"], "error": str(exc)})
             continue
 
+        members = series_result.members
+        # Fix layer A: an owned/wishlisted igdb_id that is a version-parent
+        # alias of a member (e.g. "The Witcher: Enhanced Edition" -> the
+        # canonical "The Witcher" member) counts as owning that member.
+        owned_alias_targets = {
+            series_result.aliases[hid]
+            for hid in have_igdb_ids
+            if hid in series_result.aliases
+        }
+
         gaps = []
         for member in members:
             if member.igdb_id in have_igdb_ids:
+                continue
+            if member.igdb_id in owned_alias_targets:
+                continue
+            if normalize_series_gap_title(member.name) in have_names:
                 continue
             if not include_unreleased and (
                 member.first_release_date is None or member.first_release_date > today
