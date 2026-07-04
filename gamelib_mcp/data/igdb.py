@@ -782,12 +782,23 @@ async def resolve_game(
             results = await search_game(name, igdb_platform_id=None, suppress_errors=suppress_errors)
 
     if results:
-        return _select_best_match(name, results, allow_inconclusive_fallback=True)
+        match = _select_best_match(name, results, allow_inconclusive_fallback=True)
+        if match is not None:
+            return match
+        # Non-empty results, but every candidate was rejected (identity
+        # conflict or the strict name gate). Fall through to the ladder: an
+        # edition-carrying query like "Sea of Thieves: 2026 Edition" can
+        # return the base game yet fail the gate against the ORIGINAL title
+        # (the "2026" token survives normalization) — an identity-preserving
+        # rung re-queries with the edition stripped and gates against the
+        # rung's own query string, which passes.
 
-    # Zero results even without a platform filter: work through a ladder of
-    # alternate query strings (Fix 4). Stop at the first variant whose results
-    # produce an accepted match; a variant that returns only unrelated titles
-    # must not be accepted just because it's non-empty.
+    # Zero results even without a platform filter — or nothing accepted from
+    # the original query: work through a ladder of alternate query strings
+    # (Fix 4). Stop at the first variant whose results produce an accepted
+    # match; a variant that returns only unrelated titles must not be
+    # accepted just because it's non-empty (each rung's _select_best_match
+    # still applies the identity check and the strict name gate).
     tried = {name.casefold()}
     for variant, identity_preserving in _generate_resolve_query_variants(name):
         if variant.casefold() in tried:

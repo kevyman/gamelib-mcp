@@ -929,6 +929,58 @@ class ResolveGameZeroResultLadderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.igdb_id, 27159)
 
+    async def test_gate_rejected_nonempty_results_fall_through_to_ladder(self) -> None:
+        # P2 regression: the initial search for "Sea of Thieves: 2026
+        # Edition" RETURNS the base game (non-empty results), but the best
+        # candidate is rejected against the original title (the "2026" token
+        # survives normalization). resolve_game must not stop there — it
+        # falls through to the ladder, whose identity-preserving
+        # edition-strip rung re-queries "Sea of Thieves" and gates against
+        # the rung's own (stripped) query string, which passes.
+        base_game = igdb.IGDBGame(
+            igdb_id=27159,
+            name="Sea of Thieves",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2018-03-20",
+            platforms=[6, 169],
+        )
+
+        async def fake_search_game(name, igdb_platform_id=None, *, suppress_errors=True):
+            if name in ("Sea of Thieves: 2026 Edition", "Sea of Thieves"):
+                return [base_game]
+            return []
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(side_effect=fake_search_game)),
+        ):
+            result = await igdb.resolve_game("Sea of Thieves: 2026 Edition", None)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.igdb_id, 27159)
+
+    async def test_gate_failing_ladder_rungs_still_store_nothing(self) -> None:
+        # Fall-through must not weaken the terminal: when the original query
+        # and every ladder rung return only a differently-named candidate,
+        # each rung's gate rejects it and resolve_game returns None.
+        garbage = igdb.IGDBGame(
+            igdb_id=42,
+            name="Tower of Nonsense",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2019-01-01",
+        )
+
+        async def fake_search_game(name, igdb_platform_id=None, *, suppress_errors=True):
+            return [garbage]
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(side_effect=fake_search_game)),
+        ):
+            result = await igdb.resolve_game("Sea of Thieves: 2026 Edition", None)
+
+        self.assertIsNone(result)
+
     async def test_ladder_token_variant_still_gates_against_original_identity(self) -> None:
         # Token-dropping variants change what the query means, so their
         # results must still be validated against the ORIGINAL title: a
