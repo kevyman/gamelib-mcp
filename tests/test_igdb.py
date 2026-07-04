@@ -762,6 +762,35 @@ class ResolveGameIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.name, "Hitman 2")
 
+    async def test_name_gate_rejects_unrelated_fuzzy_or_fallback_candidate(self) -> None:
+        # Prod disaster: "Borderlands GOTY" got enriched as igdb 258897 "The
+        # Tower on the Borderland" — a completely unrelated game accepted via
+        # the inconclusive-fuzzy relevance fallback. The strict name gate must
+        # reject any candidate whose edition-stripped normalized title is not
+        # EQUAL to the query's, leaving the row unmatched.
+        result = await self._resolve("Borderlands GOTY", ["The Tower on the Borderland"])
+        self.assertIsNone(result)
+
+    async def test_name_gate_rejects_near_name_variant_candidate(self) -> None:
+        # Prod disaster: "PAYDAY 2" got enriched as "Payday 2 VR" (high fuzzy
+        # similarity, no identity conflict). "payday 2" != "payday 2 vr" after
+        # edition stripping -> no match stored.
+        result = await self._resolve("PAYDAY 2", ["Payday 2 VR"])
+        self.assertIsNone(result)
+
+    async def test_exact_name_candidate_wins_over_near_variant(self) -> None:
+        # When the true title is present alongside the near-variant, the exact
+        # match must win regardless of candidate order.
+        result = await self._resolve("PAYDAY 2", ["Payday 2 VR", "PAYDAY 2"])
+        self.assertIsNotNone(result)
+        self.assertEqual(result.name, "PAYDAY 2")
+
+    async def test_name_gate_allows_edition_stripped_equal_titles(self) -> None:
+        # Edition variants still match: both sides strip to "the witcher".
+        result = await self._resolve("The Witcher: Enhanced Edition", ["The Witcher"])
+        self.assertIsNotNone(result)
+        self.assertEqual(result.name, "The Witcher")
+
     async def test_picks_exact_title_base_game_over_dlc_shaped_higher_relevance_hits(self) -> None:
         # Persona 3 Reload case from the handover doc: IGDB's own relevance
         # ranking put 5 DLC/cosmetic "Persona Set"/"BGM Set" packs (game_type=13)
@@ -899,6 +928,58 @@ class ResolveGameZeroResultLadderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(result.igdb_id, 27159)
+
+    async def test_gate_rejected_nonempty_results_fall_through_to_ladder(self) -> None:
+        # P2 regression: the initial search for "Sea of Thieves: 2026
+        # Edition" RETURNS the base game (non-empty results), but the best
+        # candidate is rejected against the original title (the "2026" token
+        # survives normalization). resolve_game must not stop there — it
+        # falls through to the ladder, whose identity-preserving
+        # edition-strip rung re-queries "Sea of Thieves" and gates against
+        # the rung's own (stripped) query string, which passes.
+        base_game = igdb.IGDBGame(
+            igdb_id=27159,
+            name="Sea of Thieves",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2018-03-20",
+            platforms=[6, 169],
+        )
+
+        async def fake_search_game(name, igdb_platform_id=None, *, suppress_errors=True):
+            if name in ("Sea of Thieves: 2026 Edition", "Sea of Thieves"):
+                return [base_game]
+            return []
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(side_effect=fake_search_game)),
+        ):
+            result = await igdb.resolve_game("Sea of Thieves: 2026 Edition", None)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.igdb_id, 27159)
+
+    async def test_gate_failing_ladder_rungs_still_store_nothing(self) -> None:
+        # Fall-through must not weaken the terminal: when the original query
+        # and every ladder rung return only a differently-named candidate,
+        # each rung's gate rejects it and resolve_game returns None.
+        garbage = igdb.IGDBGame(
+            igdb_id=42,
+            name="Tower of Nonsense",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2019-01-01",
+        )
+
+        async def fake_search_game(name, igdb_platform_id=None, *, suppress_errors=True):
+            return [garbage]
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(side_effect=fake_search_game)),
+        ):
+            result = await igdb.resolve_game("Sea of Thieves: 2026 Edition", None)
+
+        self.assertIsNone(result)
 
     async def test_ladder_token_variant_still_gates_against_original_identity(self) -> None:
         # Token-dropping variants change what the query means, so their

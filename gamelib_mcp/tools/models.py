@@ -302,6 +302,17 @@ class DetectCrossPlatformCollapsesResponse(FlexibleModel):
     igdb_configured: bool
 
 
+class RevalidateIgdbMatchesResponse(FlexibleModel):
+    dry_run: bool
+    igdb_configured: bool
+    checked: int
+    mismatch_count: int
+    mismatches: list[dict[str, Any]]
+    reset_count: int
+    skipped_overridden: int
+    unresolved_igdb_ids: int
+
+
 class ScrapeConfigVersion(FlexibleModel):
     version: int
     status: str

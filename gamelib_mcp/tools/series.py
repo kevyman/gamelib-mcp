@@ -368,22 +368,38 @@ async def discover_series_gaps(
         }
 
         # Layer B: normalized-name fallback with row-consumption semantics. A
-        # library row that already matched a member by id/alias is CONSUMED —
-        # it explained itself and must not additionally suppress a
-        # same-named sibling (an owned DOOM-2016 row with a proper igdb_id
-        # must not hide the Doom-1993 member). Each remaining unconsumed row
+        # library row that matched a member by id/alias is CONSUMED — it
+        # explained itself and must not additionally suppress a same-named
+        # sibling (an owned DOOM-2016 row with a proper igdb_id must not hide
+        # the Doom-1993 member) — but ONLY when the consumed member's
+        # normalized name matches the row's own. When the id contradicts the
+        # name (prod: a row named "Tales from the Borderlands" whose enriched
+        # igdb_id is actually "New Tales from the Borderlands", or "PAYDAY 2"
+        # enriched as "Payday 2 VR"), the enrichment is suspect and the row
+        # keeps its one-member name-suppression right. Each such row
         # suppresses at most ONE member: the best same-named candidate per
         # _pick_name_suppression_target. Deterministic exact match on
         # edition-stripped normalized names only — no fuzzy scoring.
         members_by_norm: dict[str, list] = defaultdict(list)
+        member_by_id: dict[int, "SeriesMember"] = {}
         for m in members:
             members_by_norm[normalize_series_gap_title(m.name)].append(m)
+            member_by_id[m.igdb_id] = m
 
         for row_igdb_id, row_norm, row_year in library_rows:
-            consumed = row_igdb_id is not None and (
-                row_igdb_id in member_ids or aliases.get(row_igdb_id) in member_ids
-            )
-            if consumed or not row_norm:
+            consumed_member = None
+            if row_igdb_id is not None:
+                consumed_member = member_by_id.get(row_igdb_id)
+                if consumed_member is None:
+                    alias_target = aliases.get(row_igdb_id)
+                    if alias_target is not None:
+                        consumed_member = member_by_id.get(alias_target)
+            if consumed_member is not None and (
+                not row_norm
+                or normalize_series_gap_title(consumed_member.name) == row_norm
+            ):
+                continue  # id/alias agrees with the row's name: row is bound
+            if not row_norm:
                 continue
             candidates = [
                 m for m in members_by_norm.get(row_norm, []) if m.igdb_id not in excluded

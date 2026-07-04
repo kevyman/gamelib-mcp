@@ -34,7 +34,11 @@ from .content import (
 )
 from .tag_synonyms import canonical_tag
 from .tags import is_feature_flag
-from .title_normalization import normalize_catalog_title, normalize_search_text
+from .title_normalization import (
+    normalize_catalog_title,
+    normalize_search_text,
+    normalize_series_gap_title,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -698,6 +702,17 @@ def _select_best_match(
     unrelated result from an overly-broad query (e.g. "Seance" alone matching
     unrelated "Silly Seance"-type titles) must not be accepted just because it
     was the only one returned.
+
+    Whatever the selection path, the final candidate must clear the strict
+    name gate: its edition-stripped normalized title has to EQUAL the
+    query's. Fuzzy scores and relevance fallbacks only ever rank candidates;
+    they can no longer accept one whose name actually differs. This is what
+    stops the observed prod disasters — "Borderlands GOTY" enriched as "The
+    Tower on the Borderland", "PAYDAY 2" as "Payday 2 VR", "Tales from the
+    Borderlands" as "New Tales from the Borderlands" — while edition
+    variants ("The Witcher: Enhanced Edition" -> "The Witcher") still pass
+    because both sides strip to the same title. On gate failure the query
+    stores no match at all (row stays unenriched; logged at info).
     """
     from .db import extract_best_fuzzy_key, titles_conflict_on_identity
 
@@ -723,17 +738,28 @@ def _select_best_match(
     if exact_matches:
         primary_exact = [i for i in exact_matches if results[i].is_primary_library_item]
         exact_idx = primary_exact[0] if primary_exact else exact_matches[0]
-        return results[exact_idx]
+        selected = results[exact_idx]
+    else:
+        best_idx: int | None = extract_best_fuzzy_key(name, choices, cutoff=70)
+        if best_idx is None:
+            if not allow_inconclusive_fallback:
+                return None
+            # Fuzzy was inconclusive; take IGDB's top *identity-compatible*
+            # relevance hit rather than forcing position 0 (which may be a
+            # conflicting entry).
+            best_idx = next(iter(choices))
+        selected = results[best_idx]
 
-    best_idx: int | None = extract_best_fuzzy_key(name, choices, cutoff=70)
-    if best_idx is None:
-        if not allow_inconclusive_fallback:
-            return None
-        # Fuzzy was inconclusive; take IGDB's top *identity-compatible* relevance
-        # hit rather than forcing position 0 (which may be a conflicting entry).
-        best_idx = next(iter(choices))
-
-    return results[best_idx]
+    if normalize_series_gap_title(name) != normalize_series_gap_title(selected.name):
+        logger.info(
+            "IGDB name-match gate rejected %r -> %r (igdb_id=%s): "
+            "edition-stripped titles differ; leaving unmatched",
+            name,
+            selected.name,
+            selected.igdb_id,
+        )
+        return None
+    return selected
 
 
 async def resolve_game(
@@ -756,12 +782,23 @@ async def resolve_game(
             results = await search_game(name, igdb_platform_id=None, suppress_errors=suppress_errors)
 
     if results:
-        return _select_best_match(name, results, allow_inconclusive_fallback=True)
+        match = _select_best_match(name, results, allow_inconclusive_fallback=True)
+        if match is not None:
+            return match
+        # Non-empty results, but every candidate was rejected (identity
+        # conflict or the strict name gate). Fall through to the ladder: an
+        # edition-carrying query like "Sea of Thieves: 2026 Edition" can
+        # return the base game yet fail the gate against the ORIGINAL title
+        # (the "2026" token survives normalization) — an identity-preserving
+        # rung re-queries with the edition stripped and gates against the
+        # rung's own query string, which passes.
 
-    # Zero results even without a platform filter: work through a ladder of
-    # alternate query strings (Fix 4). Stop at the first variant whose results
-    # produce an accepted match; a variant that returns only unrelated titles
-    # must not be accepted just because it's non-empty.
+    # Zero results even without a platform filter — or nothing accepted from
+    # the original query: work through a ladder of alternate query strings
+    # (Fix 4). Stop at the first variant whose results produce an accepted
+    # match; a variant that returns only unrelated titles must not be
+    # accepted just because it's non-empty (each rung's _select_best_match
+    # still applies the identity check and the strict name gate).
     tried = {name.casefold()}
     for variant, identity_preserving in _generate_resolve_query_variants(name):
         if variant.casefold() in tried:
