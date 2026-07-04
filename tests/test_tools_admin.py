@@ -25,6 +25,16 @@ from gamelib_mcp.tools import admin
 from gamelib_mcp import lifecycle
 
 
+async def _insert_play_history(game_id: int, platform: str, day: str, minutes: int) -> None:
+    async with db_module.get_db() as db:
+        await db.execute(
+            """INSERT INTO play_history (game_id, platform, snapshot_date, playtime_minutes)
+               VALUES (?, ?, ?, ?)""",
+            (game_id, platform, day, minutes),
+        )
+        await db.commit()
+
+
 class DetectFarmedGamesTests(ToolDBTestCase):
     async def _seed_farming_day(self):
         # Two low-playtime Steam games last played on the same day (2023-11-14).
@@ -164,8 +174,8 @@ class RefreshLibraryValidationTests(ToolDBTestCase):
         ):
             result = await admin.run_library_sync(["steam", "epic"], ctx=ctx)
 
-        self.assertEqual(result["steam"], {"platform": "steam"})
-        self.assertEqual(result["epic"], {"platform": "epic"})
+        self.assertEqual(result["steam"], {"platform": "steam", "play_history_rows": 0})
+        self.assertEqual(result["epic"], {"platform": "epic", "play_history_rows": 0})
         self.assertEqual(ctx.progress, [(0, 2), (1, 2), (2, 2)])
         self.assertIn("Refreshing 2 platform(s)", ctx.infos)
         self.assertIn("Finished steam refresh", ctx.infos)
@@ -184,7 +194,9 @@ class RunLibrarySyncStateTests(ToolDBTestCase):
              patch("gamelib_mcp.tools.admin._schedule_background_enrich", AsyncMock()):
             result = await admin.run_library_sync(["steam"])
 
-        self.assertEqual(result["steam"], {"games_upserted": 3})
+        self.assertEqual(
+            result["steam"], {"games_upserted": 3, "play_history_rows": 0}
+        )
         self.assertEqual(await get_meta("sync_platform_state_steam"), "done")
         self.assertEqual(await get_meta("library_sync_status"), "idle")
 
@@ -216,6 +228,40 @@ class RunLibrarySyncStateTests(ToolDBTestCase):
                 "SELECT 1 FROM game_wishlist WHERE game_id = ? AND platform = ?", (game_id, "steam")
             )
         self.assertIsNone(row)
+
+    async def test_snapshots_play_history_after_successful_sync(self):
+        game_id = await seed_game("Hades")
+
+        async def fake_steam():
+            await add_platform(game_id, "steam", playtime_minutes=42, owned=1)
+            return {"games_upserted": 1}
+
+        with patch("gamelib_mcp.tools.admin.fetch_library", side_effect=fake_steam), \
+             patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.admin._schedule_background_enrich", AsyncMock()):
+            result = await admin.run_library_sync(["steam"])
+
+        self.assertEqual(result["steam"]["play_history_rows"], 1)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT playtime_minutes FROM play_history WHERE game_id = ? AND platform = 'steam'",
+                (game_id,),
+            )
+        self.assertIsNotNone(row)
+        self.assertEqual(row["playtime_minutes"], 42)
+
+    async def test_snapshot_failure_does_not_fail_sync(self):
+        with patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(return_value={"ok": True})), \
+             patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.admin._schedule_background_enrich", AsyncMock()), \
+             patch(
+                 "gamelib_mcp.tools.admin.record_play_history_snapshots",
+                 AsyncMock(side_effect=RuntimeError("boom")),
+             ):
+            result = await admin.run_library_sync(["steam"])
+
+        self.assertEqual(result["steam"], {"ok": True})
+        self.assertEqual(await get_meta("sync_platform_state_steam"), "done")
 
 
 class RefreshLibraryAckTests(ToolDBTestCase):
@@ -534,6 +580,7 @@ class MergeGamesTests(ToolDBTestCase):
             "platforms_moved", "platforms_merged",
             "ratings_moved", "ratings_kept_target",
             "series_memberships_transferred", "aliases_transferred",
+            "play_history_rows_transferred",
             "source_deleted",
         }
         self.assertEqual(set(result.keys()), expected_keys)
@@ -650,3 +697,52 @@ class MergeGamesTests(ToolDBTestCase):
         ) as mock_recompute:
             await admin.merge_games(src, tgt, dry_run=True)
         mock_recompute.assert_not_awaited()
+
+    async def test_play_history_transferred_with_collision_resolution(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        await add_platform(src, "steam", playtime_minutes=200)
+        await add_platform(tgt, "steam", playtime_minutes=100)
+        # Disjoint days on each side + one same-day collision.
+        await _insert_play_history(src, "steam", "2026-06-01", 50)
+        await _insert_play_history(src, "steam", "2026-06-10", 200)  # collision, src higher
+        await _insert_play_history(tgt, "steam", "2026-06-05", 80)
+        await _insert_play_history(tgt, "steam", "2026-06-10", 120)  # collision, tgt lower
+
+        result = await admin.merge_games(src, tgt)
+
+        self.assertEqual(result["play_history_rows_transferred"], 2)
+        async with db_module.get_db() as db:
+            rows = await db.execute_fetchall(
+                """SELECT snapshot_date, playtime_minutes FROM play_history
+                   WHERE game_id = ? AND platform = 'steam' ORDER BY snapshot_date""",
+                (tgt,),
+            )
+            orphans = await db.execute_fetchone(
+                "SELECT COUNT(*) AS c FROM play_history WHERE game_id = ?", (src,)
+            )
+        history = {r["snapshot_date"]: r["playtime_minutes"] for r in rows}
+        # Union of both sides survives; the collision kept MAX(200, 120).
+        self.assertEqual(
+            history, {"2026-06-01": 50, "2026-06-05": 80, "2026-06-10": 200}
+        )
+        self.assertEqual(orphans["c"], 0)
+
+    async def test_play_history_dry_run_counts_without_moving(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        await add_platform(src, "steam", playtime_minutes=50)
+        await _insert_play_history(src, "steam", "2026-06-01", 50)
+
+        result = await admin.merge_games(src, tgt, dry_run=True)
+
+        self.assertEqual(result["play_history_rows_transferred"], 1)
+        async with db_module.get_db() as db:
+            still_on_src = await db.execute_fetchone(
+                "SELECT COUNT(*) AS c FROM play_history WHERE game_id = ?", (src,)
+            )
+            on_tgt = await db.execute_fetchone(
+                "SELECT COUNT(*) AS c FROM play_history WHERE game_id = ?", (tgt,)
+            )
+        self.assertEqual(still_on_src["c"], 1)
+        self.assertEqual(on_tgt["c"], 0)

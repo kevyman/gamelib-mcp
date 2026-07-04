@@ -42,6 +42,7 @@ from .tools.models import (
     NintendoSessionResponse,
     PaginatedGamesResponse,
     PlatformBreakdownResponse,
+    PlayHistoryResponse,
     ProposeScrapeConfigResponse,
     RateGameResponse,
     RatingsResponse,
@@ -726,6 +727,33 @@ async def get_wishlist_deals(
     return await _get_wishlist_deals(
         platform, max_price, min_cut_pct, refresh, preference_override_ratio
     )
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL)
+async def get_play_history(
+    days: int = 30,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    platform: str | None = None,
+    limit: int = 20,
+) -> PlayHistoryResponse:
+    """
+    What you actually played in a time window, per game, most-played first.
+
+    Defaults to the last `days` days; or pass explicit ISO start_date/end_date
+    (inclusive) to override. Non-Nintendo platforms are computed from
+    cumulative sync snapshots (play_history), so granularity is per-sync-day
+    and history only exists from the day this feature was deployed — a
+    game's very first snapshot inside the window only counts growth after
+    that snapshot, since its prior total is unattributable. switch2 uses
+    real per-day Parental Controls data (nintendo_play_summary) instead,
+    which is likewise forward-only. platform filters to one platform (e.g.
+    "steam", "switch2"); omit for all. Returns per-game minutes,
+    per-platform totals, and the window used; switch2_unmatched_minutes
+    covers Parental Controls playtime that never resolved to a library game.
+    """
+    from .tools.history import get_play_history as _get_play_history
+    return await _get_play_history(days, start_date, end_date, platform, limit)
 
 
 @mcp.tool(annotations=MUTATION_TOOL)
