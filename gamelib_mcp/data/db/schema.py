@@ -858,6 +858,17 @@ _V19_SCHEMA_DDL = _V18_SCHEMA_DDL.replace(
     "        igdb_cached_at   TEXT,\n        igdb_platforms   TEXT,",
 )
 
+# v20 adds games.completion_status: user-declared play status. NULL means
+# "unset — infer from playtime as before" (see tools/common.py PLAY_STATE_SQL).
+# It is user-set only (update_game): no sync or enrichment writer touches it,
+# so unlike other games columns it needs no manual_overrides guard to survive
+# syncs — the override entry it still gets from update_game is just bookkeeping.
+_V20_SCHEMA_DDL = _V19_SCHEMA_DDL.replace(
+    "        is_farmed        INTEGER NOT NULL DEFAULT 0,",
+    "        is_farmed        INTEGER NOT NULL DEFAULT 0,\n"
+    "        completion_status TEXT CHECK (completion_status IN ('playing', 'completed', 'abandoned')),",
+)
+
 # Derived search index — NOT part of the versioned schema chain. Created and
 # fully resynced by _run_migrations' _sync_fts_index on every migrate_db run,
 # which self-heals after destructive games-table rebuilds (those drop the
