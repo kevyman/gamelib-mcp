@@ -731,6 +731,72 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
 
         self.assertEqual(result["results"][0]["gaps"], [])
 
+    async def test_mismatched_id_consumption_does_not_bar_name_suppression(self):
+        # Prod: row 951 "Tales from the Borderlands" was wrongly enriched with
+        # igdb 214139 — which is actually "New Tales from the Borderlands"
+        # (the 2022 sequel) and is itself a franchise member. The row
+        # id-matches that member, but the consumed member's normalized name
+        # differs from the row's own — the id contradicts the name, so the
+        # enrichment is suspect and the row RETAINS its name-suppression
+        # right: the real 2014 "Tales from the Borderlands" member (6707)
+        # must be suppressed, not reported as a gap.
+        tales = await seed_game("Tales from the Borderlands", release_date="2021-02-16")
+        await add_platform(tales, "steam", owned=1)
+        await set_igdb_id(tales, 214139)
+        other_owned = await seed_owned_game("Borderlands 2")
+        for gid in (tales, other_owned):
+            await link_series(gid, "franchise", 911, "Borderlands")
+
+        members = [
+            SeriesMember(6707, "Tales from the Borderlands", "2014-11-25", 0, []),
+            SeriesMember(214139, "New Tales from the Borderlands", "2022-10-21", 0, []),
+            SeriesMember(8000, "Borderlands 3", "2019-09-13", 0, []),
+        ]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=_members_result(members)),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        gap_ids = {g["igdb_id"] for g in result["results"][0]["gaps"]}
+        # 6707 suppressed by the retained name right; 214139 excluded by the
+        # (wrong, but present) id match; Borderlands 3 stays a true gap.
+        self.assertEqual(gap_ids, {8000})
+
+    async def test_payday2_vr_member_id_match_does_not_hide_base_game(self):
+        # Prod: row 394 "PAYDAY 2" wrongly enriched as igdb 150511 =
+        # "Payday 2 VR", which is itself a franchise member. Consumed member
+        # name ("payday 2 vr") differs from the row's ("payday 2") -> the row
+        # keeps its name right and suppresses the real PAYDAY 2 member.
+        payday2 = await seed_game("PAYDAY 2", release_date="2018-03-15")
+        await add_platform(payday2, "steam", owned=1)
+        await set_igdb_id(payday2, 150511)
+        heist = await seed_owned_game("PAYDAY: The Heist")
+        for gid in (payday2, heist):
+            await link_series(gid, "franchise", 912, "Payday")
+
+        members = [
+            SeriesMember(2058, "PAYDAY 2", "2013-08-13", 0, []),
+            SeriesMember(150511, "Payday 2 VR", "2017-11-16", 0, []),
+            SeriesMember(4000, "PAYDAY 3", "2023-09-21", 0, []),
+        ]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=_members_result(members)),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        gap_ids = {g["igdb_id"] for g in result["results"][0]["gaps"]}
+        self.assertEqual(gap_ids, {4000})
+
     async def test_true_positive_gap_preserved_by_all_three_layers(self):
         # A member that isn't owned by id, alias, or normalized name must
         # still be reported — none of the three new exclusion layers should

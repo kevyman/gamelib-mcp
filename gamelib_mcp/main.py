@@ -47,6 +47,7 @@ from .tools.models import (
     RateGameResponse,
     RatingsResponse,
     RefreshLibraryResponse,
+    RevalidateIgdbMatchesResponse,
     RollbackScrapeConfigResponse,
     SearchGamesBatchResponse,
     SeriesBreakdownResponse,
@@ -641,6 +642,27 @@ async def detect_cross_platform_collapses(limit: int = 0) -> DetectCrossPlatform
     """
     from .tools.admin import detect_cross_platform_collapses as _detect_xplat
     return await _detect_xplat(limit)
+
+
+@mcp.tool(annotations=NETWORK_SYNC_TOOL)
+async def revalidate_igdb_matches(
+    dry_run: bool = True, limit: int | None = None
+) -> RevalidateIgdbMatchesResponse:
+    """
+    Audit stored IGDB matches: does each igdb_id's IGDB name match the library row?
+
+    Wrong name-based enrichment poisons series gaps, deals availability, and
+    series memberships (e.g. a "PAYDAY 2" row enriched as "Payday 2 VR"). This
+    batch-fetches the IGDB name for every game with an igdb_id and flags rows
+    whose edition-stripped normalized titles differ — the same strict gate new
+    enrichment uses. dry_run=True (default) only reports. dry_run=False resets
+    IGDB enrichment on mismatched rows (igdb_id and series memberships cleared)
+    so background enrichment re-resolves them under the strict gate. Rows whose
+    igdb_id is a manual override are never reset. limit caps rows checked
+    (None = all). Returns mismatch list and counts.
+    """
+    from .tools.admin import revalidate_igdb_matches as _revalidate
+    return await _revalidate(dry_run, limit)
 
 
 @mcp.tool(annotations=NON_IDEMPOTENT_MUTATION_TOOL)
