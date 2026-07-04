@@ -15,3 +15,4 @@ gamelib.db
 .codex
 /backups/
 .superpowers/
+.vscode/
