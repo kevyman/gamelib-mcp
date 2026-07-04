@@ -528,6 +528,63 @@ def inspect_psn(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
     )
 
 
+def inspect_xbox(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
+    has_api_key = bool(os.getenv("OPENXBL_API_KEY"))
+    auth_stale = (last_sync or {}).get("last_error_classification") == "auth_stale"
+
+    if has_api_key and auth_stale:
+        return IntegrationStatus(
+            platform="xbox",
+            overall_status="stale",
+            active_backend="openxbl",
+            summary="OpenXBL auth appears stale; the API key may need to be regenerated.",
+            capabilities=[
+                CapabilityStatus("ownership", "stale", "OpenXBL auth must be refreshed before title history can be read."),
+                CapabilityStatus("playtime", "stale", "OpenXBL auth must be refreshed before playtime can be read."),
+            ],
+            checks=[CheckStatus("openxbl_api_key", "warn", "Recent OpenXBL auth failed and the key should be refreshed")],
+            required_inputs=["OPENXBL_API_KEY"],
+            detected_inputs=["OPENXBL_API_KEY"],
+            remediation_steps=["Regenerate a personal API key at https://xbl.io/console."],
+            last_sync=last_sync or {},
+        )
+
+    if has_api_key:
+        return IntegrationStatus(
+            platform="xbox",
+            overall_status="ready",
+            active_backend="openxbl",
+            summary="OpenXBL is configured.",
+            capabilities=[
+                CapabilityStatus("ownership", "ready", "Title history can be fetched from OpenXBL (played-on-account signal)."),
+                CapabilityStatus("playtime", "ready", "Playtime is best-effort via the OpenXBL stats endpoint."),
+            ],
+            checks=[CheckStatus("openxbl_api_key", "pass", "OPENXBL_API_KEY is set")],
+            required_inputs=["OPENXBL_API_KEY"],
+            detected_inputs=["OPENXBL_API_KEY"],
+            remediation_steps=[],
+            last_sync=last_sync or {},
+        )
+
+    return IntegrationStatus(
+        platform="xbox",
+        overall_status="unconfigured",
+        active_backend=None,
+        summary="Xbox is not configured.",
+        capabilities=[
+            CapabilityStatus("ownership", "unconfigured", "OPENXBL_API_KEY is not set."),
+            CapabilityStatus("playtime", "unconfigured", "OPENXBL_API_KEY is not set."),
+        ],
+        checks=[CheckStatus("openxbl_api_key", "fail", "OPENXBL_API_KEY is not set")],
+        required_inputs=["OPENXBL_API_KEY"],
+        detected_inputs=[],
+        remediation_steps=[
+            "Set `OPENXBL_API_KEY` to a personal key from https://xbl.io/console.",
+        ],
+        last_sync=last_sync or {},
+    )
+
+
 def _safe_inspect(
     platform: str,
     inspector,

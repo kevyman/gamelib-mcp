@@ -29,6 +29,7 @@ from ..data.gog import sync_gog  # noqa: F401
 from ..data.nintendo import sync_nintendo  # noqa: F401
 from ..data.psn import sync_psn  # noqa: F401
 from ..data.steam_xml import fetch_library  # noqa: F401
+from ..data.xbox import sync_xbox  # noqa: F401
 from ..lifecycle import _schedule_background_enrich, get_startup_refresh_task
 from ..platforms_registry import WISHLIST_SYNCABLE_PLATFORMS, resolve_platform_functions
 from .common import PLATFORM_ALIASES, SYNCABLE_PLATFORMS, info as _info, report_progress

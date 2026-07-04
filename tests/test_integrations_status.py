@@ -344,6 +344,38 @@ def test_inspect_psn_reports_unconfigured_when_token_removed_after_stale_sync():
     assert psn.active_backend is None
 
 
+def test_inspect_xbox_unconfigured():
+    with patch.dict("os.environ", {}, clear=True):
+        statuses = inspect_all_integrations()
+
+    xbox = statuses["xbox"]
+
+    assert xbox.overall_status == "unconfigured"
+    assert xbox.active_backend is None
+
+
+def test_inspect_xbox_configured():
+    with patch.dict("os.environ", {"OPENXBL_API_KEY": "test-key"}, clear=True):
+        statuses = inspect_all_integrations()
+
+    xbox = statuses["xbox"]
+
+    assert xbox.overall_status == "ready"
+    assert xbox.active_backend == "openxbl"
+
+
+def test_inspect_xbox_reports_stale_when_configured_auth_is_stale():
+    with patch.dict("os.environ", {"OPENXBL_API_KEY": "test-key"}, clear=True):
+        statuses = inspect_all_integrations(
+            last_sync_by_platform={"xbox": {"last_error_classification": "auth_stale"}}
+        )
+
+    xbox = statuses["xbox"]
+
+    assert xbox.overall_status == "stale"
+    assert xbox.active_backend == "openxbl"
+
+
 def test_inspect_steam_reports_ready_when_credentials_present():
     with patch.dict(
         "os.environ",

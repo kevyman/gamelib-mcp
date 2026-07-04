@@ -512,6 +512,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             "gog": asyncio.Event(),
             "switch2": asyncio.Event(),
             "ps5": asyncio.Event(),
+            "xbox": asyncio.Event(),
         }
         release = asyncio.Event()
 
@@ -537,6 +538,9 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         async def psn_sync() -> dict:
             return await make_sync("ps5", {"platform": "ps5", "synced": True})
 
+        async def xbox_sync() -> dict:
+            return await make_sync("xbox", {"platform": "xbox", "synced": True})
+
         with (
             _stub_sync_meta_writes(),
             patch("gamelib_mcp.tools.admin.is_steam_configured", return_value=True, create=True),
@@ -544,11 +548,13 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.tools.admin.is_gog_configured", return_value=True, create=True),
             patch("gamelib_mcp.tools.admin.is_nintendo_configured", return_value=True, create=True),
             patch("gamelib_mcp.tools.admin.is_psn_configured", return_value=True, create=True),
+            patch("gamelib_mcp.tools.admin.is_xbox_configured", return_value=True, create=True),
             patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(side_effect=steam_sync)),
             patch("gamelib_mcp.tools.admin.sync_epic", AsyncMock(side_effect=epic_sync)),
             patch("gamelib_mcp.tools.admin.sync_gog", AsyncMock(side_effect=gog_sync)),
             patch("gamelib_mcp.tools.admin.sync_nintendo", AsyncMock(side_effect=nintendo_sync)),
             patch("gamelib_mcp.tools.admin.sync_psn", AsyncMock(side_effect=psn_sync)),
+            patch("gamelib_mcp.tools.admin.sync_xbox", AsyncMock(side_effect=xbox_sync)),
             patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(return_value={"candidates": 0})) as mock_detect,
         ):
             refresh_task = asyncio.create_task(admin_tools.run_library_sync())
@@ -568,6 +574,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
                 "gog": {"platform": "gog", "synced": True, "play_history_rows": 0},
                 "switch2": {"platform": "switch2", "synced": True, "play_history_rows": 0},
                 "ps5": {"platform": "ps5", "synced": True, "play_history_rows": 0},
+                "xbox": {"platform": "xbox", "synced": True, "play_history_rows": 0},
             },
         )
         mock_detect.assert_awaited_once_with(dry_run=False)

@@ -82,6 +82,7 @@ IGDB_PLATFORM_PS5 = 167
 IGDB_PLATFORM_PS4 = 48
 IGDB_PLATFORM_SWITCH = 130  # Switch
 IGDB_PLATFORM_SWITCH2 = 508  # Nintendo Switch 2 (IGDB added it post-launch; verified 2026-07-03)
+IGDB_PLATFORM_XBOX = 169  # Xbox Series X|S; the newest family id, same style as ps5's 167
 
 # Our platform value → IGDB platform ID (primary id; single-id platforms only —
 # for switch2, which spans two IGDB platforms, use PLATFORM_TO_IGDB_ANY).
@@ -91,6 +92,7 @@ PLATFORM_TO_IGDB: dict[str, int] = {
     "gog": IGDB_PLATFORM_PC,
     "ps5": IGDB_PLATFORM_PS5,
     "switch2": IGDB_PLATFORM_SWITCH,
+    "xbox": IGDB_PLATFORM_XBOX,
 }
 
 # Our platform value → all IGDB platform ids that count as it, preference-
@@ -103,6 +105,7 @@ PLATFORM_TO_IGDB_ANY: dict[str, tuple[int, ...]] = {
     "gog": (IGDB_PLATFORM_PC,),
     "ps5": (IGDB_PLATFORM_PS5,),
     "switch2": (IGDB_PLATFORM_SWITCH2, IGDB_PLATFORM_SWITCH),
+    "xbox": (IGDB_PLATFORM_XBOX,),
 }
 
 # Reverse map for availability checks (games.igdb_platforms → our platforms).
@@ -113,6 +116,7 @@ IGDB_TO_PLATFORM: dict[int, str] = {
     IGDB_PLATFORM_PS5: "ps5",
     IGDB_PLATFORM_SWITCH: "switch2",
     IGDB_PLATFORM_SWITCH2: "switch2",
+    IGDB_PLATFORM_XBOX: "xbox",
 }
 
 # IGDB category values
