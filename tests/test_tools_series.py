@@ -10,9 +10,14 @@ from conftest import ToolDBTestCase, add_platform, add_rating, seed_game
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.igdb import IGDBRequestFailure, SeriesMember
+from gamelib_mcp.data.series_gaps import SeriesMembersResult
 from gamelib_mcp.tools import series
 
 _IGDB_ENV = {"TWITCH_CLIENT_ID": "test-client", "TWITCH_CLIENT_SECRET": "test-secret"}
+
+
+def _members_result(members: list[SeriesMember], aliases: dict[int, int] | None = None) -> SeriesMembersResult:
+    return SeriesMembersResult(members=list(members), aliases=dict(aliases or {}))
 
 
 async def link_series(game_id: int, kind: str, igdb_id: int, name: str) -> None:
@@ -222,7 +227,7 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
             patch.dict(os.environ, _IGDB_ENV),
             patch(
                 "gamelib_mcp.data.series_gaps.get_series_members_cached",
-                AsyncMock(return_value=[]),
+                AsyncMock(return_value=_members_result([])),
             ),
         ):
             result = await series.discover_series_gaps(min_owned=2)
@@ -253,7 +258,7 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
             patch.dict(os.environ, _IGDB_ENV),
             patch(
                 "gamelib_mcp.data.series_gaps.get_series_members_cached",
-                AsyncMock(return_value=members),
+                AsyncMock(return_value=_members_result(members)),
             ),
         ):
             result = await series.discover_series_gaps(min_owned=1)
@@ -278,7 +283,7 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
             patch.dict(os.environ, _IGDB_ENV),
             patch(
                 "gamelib_mcp.data.series_gaps.get_series_members_cached",
-                AsyncMock(return_value=members),
+                AsyncMock(return_value=_members_result(members)),
             ),
         ):
             default_result = await series.discover_series_gaps(min_owned=1)
@@ -308,7 +313,7 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
         async def fake_get_members(kind, igdb_id, refresh=False):
             if igdb_id == 70:
                 raise IGDBRequestFailure("IGDB is down")
-            return []
+            return _members_result([])
 
         with (
             patch.dict(os.environ, _IGDB_ENV),
@@ -337,7 +342,7 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
             patch.dict(os.environ, _IGDB_ENV),
             patch(
                 "gamelib_mcp.data.series_gaps.get_series_members_cached",
-                AsyncMock(return_value=members),
+                AsyncMock(return_value=_members_result(members)),
             ),
         ):
             result = await series.discover_series_gaps(min_owned=1)
@@ -360,7 +365,7 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
         await add_platform(unowned_stub, "switch2", owned=0)
         await link_series(unowned_stub, "franchise", 90, "Zelda")
 
-        members_mock = AsyncMock(return_value=[])
+        members_mock = AsyncMock(return_value=_members_result([]))
         with (
             patch.dict(os.environ, _IGDB_ENV),
             patch("gamelib_mcp.data.series_gaps.get_series_members_cached", members_mock),
@@ -388,7 +393,7 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
             patch.dict(os.environ, _IGDB_ENV),
             patch(
                 "gamelib_mcp.data.series_gaps.get_series_members_cached",
-                AsyncMock(return_value=[]),
+                AsyncMock(return_value=_members_result([])),
             ),
         ):
             result = await series.discover_series_gaps(min_owned=2)
@@ -424,7 +429,7 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
             patch.dict(os.environ, _IGDB_ENV),
             patch(
                 "gamelib_mcp.data.series_gaps.get_series_members_cached",
-                AsyncMock(return_value=members),
+                AsyncMock(return_value=_members_result(members)),
             ),
         ):
             result = await series.discover_series_gaps(min_owned=2)
@@ -443,7 +448,7 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
             patch.dict(os.environ, _IGDB_ENV),
             patch(
                 "gamelib_mcp.data.series_gaps.get_series_members_cached",
-                AsyncMock(return_value=[]),
+                AsyncMock(return_value=_members_result([])),
             ),
         ):
             result = await series.discover_series_gaps(min_owned=2)
@@ -454,3 +459,179 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
     async def test_invalid_kind_raises(self):
         with self.assertRaises(Exception):
             await series.discover_series_gaps(kind="saga")
+
+    async def test_name_fallback_excludes_owned_game_with_no_igdb_id(self):
+        # Root cause 1: an owned row ingested (or never IGDB-resolved) with
+        # igdb_id NULL is invisible to the igdb-id have-set diff. The
+        # normalized-name fallback (layer B) must still recognize it as
+        # "have" once its trailing "GOTY" is stripped.
+        owned = await seed_owned_game("Borderlands GOTY")
+        other_owned = await seed_owned_game("Borderlands 2")
+        for gid in (owned, other_owned):
+            await link_series(gid, "collection", 200, "Borderlands")
+
+        members = [SeriesMember(999, "Borderlands", "2009-10-20", 0, [])]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=_members_result(members)),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        self.assertEqual(result["results"][0]["gaps"], [])
+
+    async def test_version_parent_alias_excludes_owned_edition_igdb_id(self):
+        # Root cause 2: an owned row whose igdb_id points at an
+        # edition-specific IGDB entry (e.g. "The Witcher: Enhanced Edition"
+        # igdb 283715) rather than the canonical member id (80) IGDB's own
+        # collections field lists. The edition carries no series membership
+        # row of its own and its (deliberately non-matching) name can't be
+        # rescued by the normalized-name fallback either — only the
+        # version-parent alias map can recognize it.
+        linked_a = await seed_owned_game("The Witcher 2")
+        linked_b = await seed_owned_game("The Witcher 3: Wild Hunt")
+        for gid in (linked_a, linked_b):
+            await link_series(gid, "franchise", 901, "The Witcher")
+
+        edition = await seed_owned_game("Wiedzmin Rozszerzona Edycja")
+        await set_igdb_id(edition, 283715)
+
+        members = [
+            SeriesMember(80, "The Witcher", "2007-10-26", 0, []),
+            SeriesMember(999, "The Witcher 4", "2015-01-01", 0, []),
+        ]
+        aliases = {283715: 80}
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=_members_result(members, aliases)),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        gap_ids = {g["igdb_id"] for g in result["results"][0]["gaps"]}
+        self.assertEqual(gap_ids, {999})
+
+    async def test_name_fallback_excludes_owned_game_with_curly_apostrophe(self):
+        # An owned row can carry a *different* igdb_id than a series member
+        # that is nonetheless the same title, differing only by apostrophe
+        # glyph ("Marvel's" vs "Marvel’s"). The normalized-name fallback must
+        # treat these as identical and exclude the member as a gap.
+        owned = await seed_owned_game("Marvel's Spider-Man 2")
+        await set_igdb_id(owned, 5001)
+        other_owned = await seed_owned_game("Marvel's Spider-Man")
+        for gid in (owned, other_owned):
+            await link_series(gid, "franchise", 902, "Spider-Man")
+
+        members = [SeriesMember(1000, "Marvel’s Spider-Man 2", "2023-10-20", 0, [])]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=_members_result(members)),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        self.assertEqual(result["results"][0]["gaps"], [])
+
+    async def test_name_match_with_conflicting_year_does_not_suppress_true_gap(self):
+        # DOOM (2016) and Doom (1993) both normalize to "doom". Owning the
+        # 2016 reboot (with a distinct igdb_id and a known release year) must
+        # NOT suppress the 1993 member — a true gap. Year-gated name matching:
+        # both sides have years, 23 years apart, so the match does not count.
+        reboot = await seed_game("DOOM", release_date="2016-05-13")
+        await add_platform(reboot, "steam", owned=1)
+        await set_igdb_id(reboot, 7351)
+        eternal = await seed_owned_game("Doom Eternal")
+        for gid in (reboot, eternal):
+            await link_series(gid, "franchise", 904, "Doom")
+
+        members = [SeriesMember(673, "Doom", "1993-12-10", 0, [])]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=_members_result(members)),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        gap_ids = {g["igdb_id"] for g in result["results"][0]["gaps"]}
+        self.assertEqual(gap_ids, {673})
+
+    async def test_name_match_with_close_year_still_suppresses(self):
+        # Both sides have years but they agree (within ±1: editions and
+        # regional releases can straddle a year boundary) — the name match
+        # still counts as ownership.
+        owned = await seed_game("Borderlands GOTY", release_date="2010-10-12")
+        await add_platform(owned, "steam", owned=1)
+        other_owned = await seed_owned_game("Borderlands 2")
+        for gid in (owned, other_owned):
+            await link_series(gid, "collection", 905, "Borderlands")
+
+        members = [SeriesMember(999, "Borderlands", "2009-10-20", 0, [])]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=_members_result(members)),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        self.assertEqual(result["results"][0]["gaps"], [])
+
+    async def test_name_match_with_unknown_member_year_still_suppresses(self):
+        # The member side lacking a release year must not defeat the name
+        # fallback (mirrors the library-row-without-year case covered by
+        # test_name_fallback_excludes_owned_game_with_no_igdb_id).
+        owned = await seed_game("Borderlands GOTY", release_date="2010-10-12")
+        await add_platform(owned, "steam", owned=1)
+        other_owned = await seed_owned_game("Borderlands 2")
+        for gid in (owned, other_owned):
+            await link_series(gid, "collection", 906, "Borderlands")
+
+        members = [SeriesMember(999, "Borderlands", None, 0, [])]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=_members_result(members)),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2, include_unreleased=True)
+
+        self.assertEqual(result["results"][0]["gaps"], [])
+
+    async def test_true_positive_gap_preserved_by_all_three_layers(self):
+        # A member that isn't owned by id, alias, or normalized name must
+        # still be reported — none of the three new exclusion layers should
+        # over-match an unrelated (but same-series) title.
+        owned_a = await seed_owned_game("Payday 2")
+        owned_b = await seed_owned_game("Payday: The Heist")
+        for gid in (owned_a, owned_b):
+            await link_series(gid, "franchise", 903, "Payday")
+
+        members = [SeriesMember(2000, "Payday 3", "2023-09-21", 0, [])]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=_members_result(members)),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        gap_ids = {g["igdb_id"] for g in result["results"][0]["gaps"]}
+        self.assertEqual(gap_ids, {2000})

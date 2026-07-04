@@ -105,3 +105,50 @@ def prepare_catalog_title(name: str | None) -> str | None:
     if not normalized or is_non_game_title(normalized):
         return None
     return normalized
+
+
+# Trailing edition-marker phrases stripped for series-gap have/gap exclusion
+# matching only (normalize_series_gap_title below) — deliberately NOT folded
+# into _TRAILING_VARIANT_PATTERNS above, which also drive within-platform
+# game identity matching where a Remastered/Definitive/etc. release can
+# legitimately be its own catalog row (see get_series_breakdown's Fallout
+# fixture: "Fallout 4 Remastered" is a distinct primary library item). Here
+# the goal is narrower: "does this look like the same underlying game as an
+# IGDB series member" so an owned edition doesn't false-positive as a gap.
+_SERIES_GAP_EDITION_PATTERNS = (
+    re.compile(r"\s+enhanced edition\s*$", re.IGNORECASE),
+    re.compile(r"\s+game of the year(?: edition)?\s*$", re.IGNORECASE),
+    re.compile(r"\s+goty\s*$", re.IGNORECASE),
+    re.compile(r"\s+definitive edition\s*$", re.IGNORECASE),
+    re.compile(r"\s+remastered\s*$", re.IGNORECASE),
+    re.compile(r"\s+complete edition\s*$", re.IGNORECASE),
+    re.compile(r"\s+deluxe edition\s*$", re.IGNORECASE),
+    re.compile(r"\s+ultimate edition\s*$", re.IGNORECASE),
+    re.compile(r"\s+gold edition\s*$", re.IGNORECASE),
+    re.compile(r"\s+collector'?s edition\s*$", re.IGNORECASE),
+    re.compile(r"\s+director'?s cut\s*$", re.IGNORECASE),
+    re.compile(r"\s+legendary edition\s*$", re.IGNORECASE),
+    re.compile(r"\s+anniversary edition\s*$", re.IGNORECASE),
+    # Bare "edition" leftover, once a more specific pattern above has already
+    # peeled off its qualifier (or for a qualifier not otherwise listed).
+    re.compile(r"\s+edition\s*$", re.IGNORECASE),
+)
+
+
+def normalize_series_gap_title(name: str) -> str:
+    """Normalize a title for discover_series_gaps have/gap exclusion matching.
+
+    Loops off a trailing edition marker (so "Game of the Year Enhanced
+    Edition" fully collapses), then hands off to normalize_search_text for
+    case-folding and punctuation-insensitive comparison — which, since it
+    extracts only [a-z0-9]+ runs, already treats any apostrophe variant
+    (straight or curly) as a separator, so "Marvel's" and "Marvel’s"
+    normalize identically with no separate unicode-apostrophe step needed.
+    """
+    cleaned = name
+    previous = None
+    while cleaned != previous:
+        previous = cleaned
+        for pattern in _SERIES_GAP_EDITION_PATTERNS:
+            cleaned = pattern.sub("", cleaned)
+    return normalize_search_text(cleaned)

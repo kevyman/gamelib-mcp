@@ -103,7 +103,7 @@ STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
 XBOX_TITLE_ID = "xbox_title_id"
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 
 @dataclass
@@ -1362,6 +1362,54 @@ async def _migrate_v22_to_v23(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v23_to_v24(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Re-claim IGDB enrichment for owned/wishlisted games discover_series_gaps
+    was falsely reporting as gaps (data-only, no DDL change).
+
+    Two confirmed cases fall through the id-based have-set diff in
+    tools/series.py:
+
+    1. An owned row with igdb_id NULL (e.g. "Borderlands GOTY" ingested before
+       IGDB backfill resolved it, or a resolution that never landed) is
+       invisible to a diff keyed on igdb_id.
+    2. An owned row whose igdb_id points at an edition-specific IGDB entry
+       (e.g. "The Witcher: Enhanced Edition" igdb 283715 vs the canonical
+       series member id 80) rather than the canonical member IGDB's own
+       collections/franchises field lists. These entries typically carry no
+       collection/franchise of their own, so series backfill never attaches a
+       game_series_membership row for them either.
+
+    Both cases share a signature: an owned/wishlisted game with no igdb_id, or
+    with an igdb_id but zero game_series_membership rows. Resetting
+    igdb_cached_at/igdb_claimed_at to NULL re-claims these rows for the normal
+    background IGDB backfill pass, mirroring the v19/v20 wishlist IGDB
+    re-claim. discover_series_gaps' new version-parent alias and
+    normalized-name fallbacks close the same gap for future/unresolved rows
+    without waiting on this backfill, but existing rows still benefit from a
+    correctly linked igdb_id/series membership. Deletes nothing.
+    """
+    if progress is not None:
+        progress(
+            "Migrating to v24: re-claim IGDB for owned/wishlisted games with "
+            "no igdb_id or no series membership."
+        )
+
+    await db.execute(
+        """UPDATE games
+           SET igdb_cached_at = NULL, igdb_claimed_at = NULL
+           WHERE (EXISTS (SELECT 1 FROM game_platforms gp
+                          WHERE gp.game_id = games.id AND gp.owned = 1)
+                  OR EXISTS (SELECT 1 FROM game_wishlist w
+                             WHERE w.game_id = games.id))
+             AND (igdb_id IS NULL
+                  OR NOT EXISTS (SELECT 1 FROM game_series_membership m
+                                 WHERE m.game_id = games.id))"""
+    )
+
+    await _set_user_version(db, 24)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1515,6 +1563,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (20, _migrate_v20_to_v21),
     (21, _migrate_v21_to_v22),
     (22, _migrate_v22_to_v23),
+    (23, _migrate_v23_to_v24),
 )
 
 

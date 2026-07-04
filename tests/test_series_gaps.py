@@ -18,18 +18,23 @@ def _member(igdb_id: int = 1, name: str = "Pikmin") -> SeriesMember:
     )
 
 
+# No TWITCH_CLIENT_ID/SECRET is set in this test environment, so
+# fetch_version_parent_aliases short-circuits to {} without any network call —
+# tests that only care about the member list/cache mechanics don't need to
+# mock it separately.
 class GetSeriesMembersCachedTests(ToolDBTestCase):
     async def test_fresh_fetch_writes_meta_key(self) -> None:
         fetch_mock = AsyncMock(return_value=[_member()])
         with patch("gamelib_mcp.data.series_gaps.fetch_series_members", fetch_mock):
-            members = await series_gaps.get_series_members_cached("collection", 555)
+            result = await series_gaps.get_series_members_cached("collection", 555)
 
-        self.assertEqual(members, [_member()])
+        self.assertEqual(result.members, [_member()])
+        self.assertEqual(result.aliases, {})
         fetch_mock.assert_awaited_once_with("collection", 555)
 
         from gamelib_mcp.data.db import get_meta
 
-        raw = await get_meta("series_members:collection:555")
+        raw = await get_meta("series_members_v2:collection:555")
         self.assertIsNotNone(raw)
 
     async def test_second_call_within_ttl_does_not_refetch(self) -> None:
@@ -48,6 +53,18 @@ class GetSeriesMembersCachedTests(ToolDBTestCase):
 
         self.assertEqual(fetch_mock.await_count, 2)
 
+    async def test_refresh_also_refetches_aliases(self) -> None:
+        fetch_mock = AsyncMock(return_value=[_member()])
+        alias_mock = AsyncMock(return_value={})
+        with (
+            patch("gamelib_mcp.data.series_gaps.fetch_series_members", fetch_mock),
+            patch("gamelib_mcp.data.series_gaps.fetch_version_parent_aliases", alias_mock),
+        ):
+            await series_gaps.get_series_members_cached("collection", 555)
+            await series_gaps.get_series_members_cached("collection", 555, refresh=True)
+
+        self.assertEqual(alias_mock.await_count, 2)
+
     async def test_fetch_failure_with_stale_cache_serves_stale_data(self) -> None:
         fetch_mock = AsyncMock(return_value=[_member()])
         with patch("gamelib_mcp.data.series_gaps.fetch_series_members", fetch_mock):
@@ -55,11 +72,11 @@ class GetSeriesMembersCachedTests(ToolDBTestCase):
 
         failing_mock = AsyncMock(side_effect=IGDBRequestFailure("boom"))
         with patch("gamelib_mcp.data.series_gaps.fetch_series_members", failing_mock):
-            members = await series_gaps.get_series_members_cached(
+            result = await series_gaps.get_series_members_cached(
                 "collection", 555, refresh=True
             )
 
-        self.assertEqual(members, [_member()])
+        self.assertEqual(result.members, [_member()])
 
     async def test_fetch_failure_with_no_cache_raises(self) -> None:
         failing_mock = AsyncMock(side_effect=IGDBRequestFailure("boom"))
@@ -70,10 +87,50 @@ class GetSeriesMembersCachedTests(ToolDBTestCase):
     async def test_malformed_cache_entry_treated_as_absent(self) -> None:
         from gamelib_mcp.data.db import set_meta
 
-        await set_meta("series_members:collection:1", "not json")
+        await set_meta("series_members_v2:collection:1", "not json")
         fetch_mock = AsyncMock(return_value=[_member(igdb_id=2)])
         with patch("gamelib_mcp.data.series_gaps.fetch_series_members", fetch_mock):
-            members = await series_gaps.get_series_members_cached("collection", 1)
+            result = await series_gaps.get_series_members_cached("collection", 1)
 
-        self.assertEqual(members, [_member(igdb_id=2)])
+        self.assertEqual(result.members, [_member(igdb_id=2)])
         fetch_mock.assert_awaited_once()
+
+    async def test_old_format_cache_without_aliases_triggers_refetch(self) -> None:
+        # Simulates a cache entry written before aliases existed (either the
+        # pre-fix code, or — since the key was also namespaced — a stray write
+        # under the new key missing the "aliases" field). _parse_cache must
+        # treat it as absent rather than silently serving alias-less data.
+        from datetime import datetime, timezone
+
+        from gamelib_mcp.data.db import get_meta, set_meta
+        import json
+
+        old_payload = json.dumps(
+            {
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "members": [
+                    {
+                        "igdb_id": 1,
+                        "name": "Pikmin",
+                        "first_release_date": "2002-01-01",
+                        "game_type": 0,
+                        "platforms": [130],
+                    }
+                ],
+                # deliberately no "aliases" key
+            }
+        )
+        await set_meta("series_members_v2:collection:1", old_payload)
+
+        fetch_mock = AsyncMock(return_value=[_member(igdb_id=2, name="Pikmin 2")])
+        with patch("gamelib_mcp.data.series_gaps.fetch_series_members", fetch_mock):
+            result = await series_gaps.get_series_members_cached("collection", 1)
+
+        fetch_mock.assert_awaited_once()
+        self.assertEqual(result.members, [_member(igdb_id=2, name="Pikmin 2")])
+        self.assertEqual(result.aliases, {})
+
+        # And the cache was rewritten in the new (with-aliases) format.
+        raw = await get_meta("series_members_v2:collection:1")
+        assert raw is not None
+        self.assertIn("aliases", json.loads(raw))
