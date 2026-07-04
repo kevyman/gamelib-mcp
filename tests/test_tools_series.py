@@ -1,12 +1,47 @@
-"""Characterization tests for gamelib_mcp.tools.series.get_series_breakdown."""
+"""Characterization tests for gamelib_mcp.tools.series: get_series_breakdown
+and discover_series_gaps.
+"""
 
-from conftest import ToolDBTestCase, seed_game, add_platform
+import os
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
+
+from conftest import ToolDBTestCase, add_platform, add_rating, seed_game
+
 from gamelib_mcp.data import db as db_module
+from gamelib_mcp.data.igdb import IGDBRequestFailure, SeriesMember
 from gamelib_mcp.tools import series
+
+_IGDB_ENV = {"TWITCH_CLIENT_ID": "test-client", "TWITCH_CLIENT_SECRET": "test-secret"}
 
 
 async def link_series(game_id: int, kind: str, igdb_id: int, name: str) -> None:
     await db_module.upsert_game_series_links(game_id, [(kind, igdb_id, name)])
+
+
+async def set_igdb_id(game_id: int, igdb_id: int) -> None:
+    async with db_module.get_db() as db:
+        await db.execute("UPDATE games SET igdb_id = ? WHERE id = ?", (igdb_id, game_id))
+        await db.commit()
+
+
+async def add_wishlist(game_id: int, platform: str, *, source: str = "manual") -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    async with db_module.get_db() as db:
+        await db.execute(
+            """INSERT INTO game_wishlist (game_id, platform, wishlisted_at, source)
+               VALUES (?, ?, ?, ?)""",
+            (game_id, platform, now, source),
+        )
+        await db.commit()
+
+
+async def seed_owned_game(name: str, *, playtime_minutes: int | None = None) -> int:
+    """Seed a game with an owned platform row — discover_series_gaps only
+    counts games with a real owned game_platforms relationship."""
+    game_id = await seed_game(name)
+    await add_platform(game_id, "steam", playtime_minutes=playtime_minutes, owned=1)
+    return game_id
 
 
 class SeriesBreakdownTests(ToolDBTestCase):
@@ -156,3 +191,266 @@ class SeriesBreakdownTests(ToolDBTestCase):
     async def test_invalid_counting_mode_raises(self):
         with self.assertRaises(Exception):
             await series.get_series_breakdown(counting_mode="bogus")
+
+
+class DiscoverSeriesGapsTests(ToolDBTestCase):
+    async def test_unconfigured_without_igdb_credentials(self):
+        backup = {
+            key: os.environ.pop(key, None) for key in ("TWITCH_CLIENT_ID", "TWITCH_CLIENT_SECRET")
+        }
+        try:
+            result = await series.discover_series_gaps()
+        finally:
+            for key, value in backup.items():
+                if value is not None:
+                    os.environ[key] = value
+
+        self.assertEqual(result["status"], "unconfigured")
+        self.assertEqual(result["results"], [])
+        self.assertEqual(result["series_checked"], 0)
+        self.assertIn("TWITCH_CLIENT_ID", result["error_summary"])
+
+    async def test_min_owned_filters_series(self):
+        solo = await seed_owned_game("Mass Effect")
+        await link_series(solo, "collection", 10, "Mass Effect")
+        b1 = await seed_owned_game("Dragon Age")
+        b2 = await seed_owned_game("Dragon Age 2")
+        for gid in (b1, b2):
+            await link_series(gid, "collection", 20, "Dragon Age")
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=[]),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        self.assertEqual([r["series_name"] for r in result["results"]], ["Dragon Age"])
+        self.assertEqual(result["series_checked"], 1)
+
+    async def test_excludes_owned_and_wishlisted_igdb_ids(self):
+        base = await seed_owned_game("Kirby's Dream Land")
+        await link_series(base, "franchise", 30, "Kirby")
+        second = await seed_owned_game("Kirby's Dream Land 2")
+        await link_series(second, "franchise", 30, "Kirby")
+        await set_igdb_id(second, 200)
+
+        # A wishlist-only row whose game already carries an igdb_id: still
+        # counts as "have", even though it isn't a series member itself.
+        wishlisted = await seed_game("Kirby's Adventure")
+        await set_igdb_id(wishlisted, 300)
+        await add_wishlist(wishlisted, "switch2")
+
+        members = [
+            SeriesMember(200, "Kirby's Dream Land 2", "1995-03-21", 0, []),
+            SeriesMember(300, "Kirby's Adventure", "1993-03-23", 0, []),
+            SeriesMember(400, "Kirby 64: The Crystal Shards", "2000-03-24", 0, []),
+        ]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=members),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=1)
+
+        entry = result["results"][0]
+        gap_ids = {g["igdb_id"] for g in entry["gaps"]}
+        self.assertEqual(gap_ids, {400})
+
+    async def test_unreleased_filtered_unless_requested(self):
+        a = await seed_owned_game("Metroid Prime")
+        b = await seed_owned_game("Metroid Prime 2")
+        for gid in (a, b):
+            await link_series(gid, "franchise", 60, "Metroid")
+
+        members = [
+            SeriesMember(500, "Metroid Prime 4", "2099-01-01", 0, []),
+            SeriesMember(501, "Metroid Prime Undated", None, 0, []),
+            SeriesMember(502, "Metroid Prime 3", "2007-08-28", 0, []),
+        ]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=members),
+            ),
+        ):
+            default_result = await series.discover_series_gaps(min_owned=1)
+            unreleased_result = await series.discover_series_gaps(
+                min_owned=1, include_unreleased=True
+            )
+
+        default_gap_ids = {g["igdb_id"] for g in default_result["results"][0]["gaps"]}
+        self.assertEqual(default_gap_ids, {502})
+
+        unreleased_gap_ids = {g["igdb_id"] for g in unreleased_result["results"][0]["gaps"]}
+        self.assertEqual(unreleased_gap_ids, {500, 501, 502})
+
+    async def test_per_series_fetch_error_recorded_without_failing(self):
+        a1 = await seed_owned_game("Halo")
+        a2 = await seed_owned_game("Halo 2")
+        for gid in (a1, a2):
+            await link_series(gid, "franchise", 70, "Halo")
+        b1 = await seed_owned_game("Gears of War")
+        b2 = await seed_owned_game("Gears of War 2")
+        for gid in (b1, b2):
+            await link_series(gid, "franchise", 71, "Gears of War")
+        # Give "Halo" the higher rating so it's ranked (and attempted) first.
+        await add_rating(a1, "manual", 9.0, 9.0)
+        await add_rating(b1, "manual", 5.0, 5.0)
+
+        async def fake_get_members(kind, igdb_id, refresh=False):
+            if igdb_id == 70:
+                raise IGDBRequestFailure("IGDB is down")
+            return []
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(side_effect=fake_get_members),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        self.assertEqual(result["series_checked"], 2)
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertEqual(result["errors"][0]["series"], "Halo")
+        self.assertIn("IGDB is down", result["errors"][0]["error"])
+        self.assertEqual([r["series_name"] for r in result["results"]], ["Gears of War"])
+
+    async def test_available_on_maps_igdb_platforms(self):
+        a = await seed_owned_game("Hollow Knight")
+        b = await seed_owned_game("Hollow Knight: Voidheart")
+        for gid in (a, b):
+            await link_series(gid, "collection", 80, "Hollow Knight")
+
+        members = [SeriesMember(600, "Hollow Knight: Silksong", "2025-09-04", 0, [130, 6])]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=members),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=1)
+
+        gap = result["results"][0]["gaps"][0]
+        self.assertEqual(gap["available_on"], ["steam", "switch2"])
+
+    async def test_wishlist_only_games_do_not_count_toward_min_owned(self):
+        # Wishlist sync creates games rows with no owned game_platforms row,
+        # and IGDB backfill adds their series memberships — such entries must
+        # not make a series rank as "owned".
+        owned = await seed_owned_game("Zelda: Breath of the Wild")
+        await link_series(owned, "franchise", 90, "Zelda")
+
+        wishlist_only = await seed_game("Zelda: Tears of the Kingdom")
+        await add_wishlist(wishlist_only, "switch2")
+        await link_series(wishlist_only, "franchise", 90, "Zelda")
+
+        unowned_stub = await seed_game("Zelda: Echoes of Wisdom")
+        await add_platform(unowned_stub, "switch2", owned=0)
+        await link_series(unowned_stub, "franchise", 90, "Zelda")
+
+        members_mock = AsyncMock(return_value=[])
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch("gamelib_mcp.data.series_gaps.get_series_members_cached", members_mock),
+        ):
+            two_owned = await series.discover_series_gaps(min_owned=2)
+            one_owned = await series.discover_series_gaps(min_owned=1)
+
+        # Only 1 of the 3 memberships is actually owned.
+        self.assertEqual(two_owned["series_checked"], 0)
+        self.assertEqual(two_owned["results"], [])
+        self.assertEqual(one_owned["series_checked"], 1)
+        self.assertEqual(one_owned["results"][0]["owned_count"], 1)
+
+    async def test_multiple_rating_sources_do_not_inflate_playtime(self):
+        # A raw LEFT JOIN on ratings fans out per rating source; the playtime
+        # subquery would then be summed once per rating row.
+        rated_twice = await seed_owned_game("Portal", playtime_minutes=120)
+        await add_rating(rated_twice, "manual", 9.0, 9.0)
+        await add_rating(rated_twice, "backloggd", 8.0, 8.0)
+        other = await seed_owned_game("Portal 2", playtime_minutes=60)
+        for gid in (rated_twice, other):
+            await link_series(gid, "collection", 95, "Portal")
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=[]),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        entry = result["results"][0]
+        # 120 + 60 minutes = 3.0h — not doubled by the two rating rows.
+        self.assertEqual(entry["total_playtime_hours"], 3.0)
+        # avg_rating averages per-game averages: Portal (9+8)/2=8.5, Portal 2 unrated.
+        self.assertEqual(entry["avg_rating"], 8.5)
+
+    async def test_unowned_unwishlisted_games_row_still_appears_as_gap(self):
+        # A games row can carry an igdb_id while being neither owned nor
+        # wishlisted (an owned=0 stub, or an orphaned row left over after a
+        # wishlist removal). Such a title must NOT be subtracted from the
+        # member list — it's still a gap.
+        a = await seed_owned_game("Pikmin")
+        b = await seed_owned_game("Pikmin 2")
+        for gid in (a, b):
+            await link_series(gid, "collection", 96, "Pikmin")
+
+        orphan = await seed_game("Pikmin 3")
+        await set_igdb_id(orphan, 700)
+        stub = await seed_game("Pikmin 4")
+        await add_platform(stub, "switch2", owned=0)
+        await set_igdb_id(stub, 701)
+
+        members = [
+            SeriesMember(700, "Pikmin 3", "2013-07-13", 0, []),
+            SeriesMember(701, "Pikmin 4", "2023-07-21", 0, []),
+        ]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=members),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        gap_ids = {g["igdb_id"] for g in result["results"][0]["gaps"]}
+        self.assertEqual(gap_ids, {700, 701})
+
+    async def test_unowned_stub_playtime_does_not_count(self):
+        owned = await seed_owned_game("Doom", playtime_minutes=60)
+        await add_platform(owned, "epic", playtime_minutes=600, owned=0)
+        other = await seed_owned_game("Doom Eternal")
+        for gid in (owned, other):
+            await link_series(gid, "collection", 97, "Doom")
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=[]),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        # Only the owned steam row's 60 minutes counts, not the owned=0 stub's 600.
+        self.assertEqual(result["results"][0]["total_playtime_hours"], 1.0)
+
+    async def test_invalid_kind_raises(self):
+        with self.assertRaises(Exception):
+            await series.discover_series_gaps(kind="saga")

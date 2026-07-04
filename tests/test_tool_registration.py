@@ -73,6 +73,10 @@ EXPECTED_TOOLS = {
         },
         "required": set(),
     },
+    "discover_series_gaps": {
+        "params": {"kind", "min_owned", "limit", "include_unreleased", "refresh_cache"},
+        "required": set(),
+    },
     "refresh_library": {"params": {"platforms"}, "required": set()},
     "get_sync_status": {"params": set(), "required": set()},
     "sync_wishlist": {"params": {"platforms"}, "required": set()},
@@ -154,6 +158,11 @@ EXPECTED_ANNOTATIONS = {
     "get_backlog_stats": {"readOnlyHint": True, "idempotentHint": True},
     "suggest_completion_status": {"readOnlyHint": True, "idempotentHint": True},
     "get_series_breakdown": {"readOnlyHint": True, "idempotentHint": True},
+    "discover_series_gaps": {
+        "readOnlyHint": True,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
     "get_integration_status": {"readOnlyHint": True, "idempotentHint": True},
     "get_platform_breakdown": {"readOnlyHint": True, "idempotentHint": True},
     "detect_farmed_games": {"destructiveHint": False, "idempotentHint": True},
@@ -203,9 +212,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_34(self):
+    async def test_tool_count_is_35(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 34)
+        self.assertEqual(len(tools), 35)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()

@@ -49,6 +49,7 @@ from .tools.models import (
     RollbackScrapeConfigResponse,
     SearchGamesBatchResponse,
     SeriesBreakdownResponse,
+    SeriesGapsResponse,
     SplitGameResponse,
     SyncRatingsResponse,
     SyncStatusResponse,
@@ -385,6 +386,35 @@ async def get_series_breakdown(
     return await _series(
         counting_mode, kind, min_games, platform, include_games, limit, offset
     )
+
+
+@mcp.tool(annotations=DIAGNOSTIC_NETWORK_TOOL)
+async def discover_series_gaps(
+    kind: Literal["collection", "franchise"] | None = None,
+    min_owned: int = 2,
+    limit: int = 10,
+    include_unreleased: bool = False,
+    refresh_cache: bool = False,
+) -> SeriesGapsResponse:
+    """
+    Unowned entries in series you own and rate highly.
+
+    Answers "which entries am I missing in series I own and love?" by ranking
+    your series by taste (average personal rating of its games, then total
+    playtime), taking the top `limit`, fetching each one's full member list
+    live from IGDB (cached 7 days), and subtracting what you already own or
+    have wishlisted anywhere. kind filters to collection|franchise; min_owned
+    skips series where you own fewer games; include_unreleased keeps
+    unreleased/undated entries (default: dropped); refresh_cache forces a live
+    re-fetch of series membership instead of using the cache. Requires IGDB
+    credentials (TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET) — returns a structured
+    status="unconfigured" response rather than erroring when absent. A
+    per-series IGDB fetch failure is recorded under errors without failing the
+    whole call; series_checked reports how many series were ranked and
+    attempted this call.
+    """
+    from .tools.series import discover_series_gaps as _series_gaps
+    return await _series_gaps(kind, min_owned, limit, include_unreleased, refresh_cache)
 
 
 @mcp.tool(annotations=NETWORK_SYNC_TOOL)
