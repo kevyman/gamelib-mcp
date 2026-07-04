@@ -1,16 +1,17 @@
 """Meta-KV-cached IGDB series-member lookups (7-day TTL, no schema migration).
 
 Member lists for an IGDB collection/franchise are cached under
-``meta`` keys ``series_members_v2:{kind}:{igdb_id}`` so `discover_series_gaps`
+``meta`` keys ``series_members_v3:{kind}:{igdb_id}`` so `discover_series_gaps`
 doesn't re-fetch a series' full member list on every call. The payload also
-carries a version-parent alias map (edition igdb_id -> canonical member
+carries an edition/re-release alias map (child igdb_id -> canonical member
 igdb_id) so an owned edition-specific IGDB entry (e.g. "The Witcher: Enhanced
 Edition") can be recognized as owning its canonical series member even though
 it isn't itself in the member list and typically has no series membership row
-of its own (see fetch_version_parent_aliases). The cache key was bumped from
-``series_members:`` to ``series_members_v2:`` when aliases were added so any
-pre-existing cache entry (necessarily alias-less) is a clean cache miss rather
-than being silently served without alias data.
+of its own (see fetch_version_parent_aliases). The cache key is versioned:
+``series_members:`` -> ``_v2`` when aliases were added, ``_v2`` -> ``_v3``
+when the alias semantics widened to include non-DLC/expansion parent_game
+children — each bump makes stale-shaped entries a clean cache miss rather
+than being silently served with missing/narrower alias data.
 """
 
 import json
@@ -39,7 +40,7 @@ class SeriesMembersResult:
 
 
 def _cache_key(kind: str, series_igdb_id: int) -> str:
-    return f"series_members_v2:{kind}:{series_igdb_id}"
+    return f"series_members_v3:{kind}:{series_igdb_id}"
 
 
 def _parse_cache(raw: str | None) -> tuple[datetime, SeriesMembersResult] | None:
