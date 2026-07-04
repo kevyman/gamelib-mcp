@@ -55,10 +55,18 @@ def _extract_title(entry: Any) -> tuple[str | None, str | None]:
     return (str(title_id) if title_id else None, str(name) if name else None)
 
 
-async def fetch_xbox_titles() -> list[dict]:
-    """Return raw title-history entries. Raises on HTTP failure."""
+async def fetch_xbox_titles(xuid: str | None = None) -> list[dict]:
+    """Return raw title-history entries. Raises on HTTP failure.
+
+    When ``xuid`` is given, the XUID-qualified endpoint is used so the
+    ownership fetch targets that account; otherwise the unqualified endpoint
+    returns the API key owner's own title history.
+    """
+    url = f"{_OPENXBL_BASE}/player/titleHistory"
+    if xuid:
+        url = f"{url}/{xuid}"
     async with httpx.AsyncClient(timeout=_OPENXBL_TIMEOUT, headers=_headers()) as client:
-        resp = await client.get(f"{_OPENXBL_BASE}/player/titleHistory")
+        resp = await client.get(url)
         resp.raise_for_status()
         payload = resp.json()
     titles = payload.get("titles") if isinstance(payload, dict) else None
@@ -68,11 +76,7 @@ async def fetch_xbox_titles() -> list[dict]:
 
 
 async def _resolve_xuid(client: httpx.AsyncClient) -> str | None:
-    """Return OPENXBL_XUID if set, else the API key owner's own xuid."""
-    configured = os.getenv("OPENXBL_XUID")
-    if configured:
-        return configured
-
+    """Return the API key owner's own xuid via GET /account."""
     resp = await client.get(f"{_OPENXBL_BASE}/account")
     resp.raise_for_status()
     payload = resp.json()
@@ -132,14 +136,20 @@ def _parse_minutes_played(payload: Any) -> dict[str, int]:
     return result
 
 
-async def fetch_xbox_playtime(title_ids: list[str]) -> dict[str, int]:
-    """title_id -> total minutes played; best-effort ({} on any failure)."""
+async def fetch_xbox_playtime(title_ids: list[str], xuid: str | None = None) -> dict[str, int]:
+    """title_id -> total minutes played; best-effort ({} on any failure).
+
+    ``xuid`` should be the same account the title history was fetched for
+    (see ``sync_xbox``); when None, the API key owner's own xuid is resolved
+    via GET /account — consistent with the unqualified title-history fetch.
+    """
     if not title_ids:
         return {}
 
     try:
         async with httpx.AsyncClient(timeout=_OPENXBL_TIMEOUT, headers=_headers()) as client:
-            xuid = await _resolve_xuid(client)
+            if xuid is None:
+                xuid = await _resolve_xuid(client)
             if not xuid:
                 logger.warning("Xbox playtime unavailable: could not resolve an xuid")
                 return {}
@@ -176,8 +186,14 @@ async def sync_xbox() -> dict:
             "error_classification": "missing_configuration",
         }
 
+    # Resolve the pinned account once and target BOTH fetches at it, so a
+    # configured OPENXBL_XUID can never import one account's library with
+    # another account's stats. When unset, both fetches consistently fall
+    # back to the API key owner's own account.
+    xuid = os.getenv("OPENXBL_XUID") or None
+
     try:
-        titles = await fetch_xbox_titles()
+        titles = await fetch_xbox_titles(xuid)
     except Exception as exc:
         logger.warning("Xbox sync failed: %s", exc)
         return {
@@ -201,7 +217,7 @@ async def sync_xbox() -> dict:
 
     all_title_ids = [tid for tid, _ in (_extract_title(t) for t in titles) if tid]
     try:
-        playtime_by_title = await fetch_xbox_playtime(all_title_ids)
+        playtime_by_title = await fetch_xbox_playtime(all_title_ids, xuid)
     except Exception as exc:
         # fetch_xbox_playtime is documented best-effort ({} on failure), but
         # playtime must never block an ownership sync even if that contract

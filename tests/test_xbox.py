@@ -1,6 +1,7 @@
 import sys
 import types
 import asyncio
+import os
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -106,10 +107,11 @@ class IsXboxConfiguredTests(unittest.TestCase):
 
 
 class FetchXboxTitlesTests(unittest.TestCase):
-    def test_fetch_xbox_titles_returns_dict_entries(self):
+    def _run_fetch(self, xuid=None):
         mock_response = MagicMock()
         mock_response.raise_for_status.return_value = None
         mock_response.json.return_value = _SAMPLE_TITLE_HISTORY
+        requested_urls = []
 
         class _FakeClient:
             async def __aenter__(self):
@@ -118,13 +120,30 @@ class FetchXboxTitlesTests(unittest.TestCase):
             async def __aexit__(self, exc_type, exc, tb):
                 return None
 
-            async def get(self, *_args, **_kwargs):
+            async def get(self, url, *_args, **_kwargs):
+                requested_urls.append(url)
                 return mock_response
 
         with patch("gamelib_mcp.data.xbox.httpx.AsyncClient", return_value=_FakeClient()):
-            titles = asyncio.run(xbox.fetch_xbox_titles())
+            titles = asyncio.run(xbox.fetch_xbox_titles(xuid))
+
+        return titles, requested_urls
+
+    def test_fetch_xbox_titles_returns_dict_entries(self):
+        titles, requested_urls = self._run_fetch()
 
         self.assertEqual(len(titles), 3)
+        # Without a xuid, the unqualified endpoint targets the key owner.
+        self.assertEqual(requested_urls, ["https://xbl.io/api/v2/player/titleHistory"])
+
+    def test_fetch_xbox_titles_uses_xuid_qualified_path_when_xuid_given(self):
+        titles, requested_urls = self._run_fetch(xuid="2535473210914202")
+
+        self.assertEqual(len(titles), 3)
+        self.assertEqual(
+            requested_urls,
+            ["https://xbl.io/api/v2/player/titleHistory/2535473210914202"],
+        )
 
     def test_fetch_xbox_titles_raises_on_unexpected_payload(self):
         mock_response = MagicMock()
@@ -206,6 +225,43 @@ class FetchXboxPlaytimeTests(unittest.TestCase):
     def test_fetch_xbox_playtime_empty_title_ids_short_circuits(self):
         playtime = asyncio.run(xbox.fetch_xbox_playtime([]))
         self.assertEqual(playtime, {})
+
+    def test_fetch_xbox_playtime_with_explicit_xuid_skips_account_resolution(self):
+        stats_response = MagicMock()
+        stats_response.raise_for_status.return_value = None
+        stats_response.json.return_value = {
+            "groups": [
+                {
+                    "titleId": "1030027286",
+                    "statlistscollection": [
+                        {"stats": [{"name": "MinutesPlayed", "value": "120"}]}
+                    ],
+                }
+            ]
+        }
+        posted_bodies = []
+
+        class _FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def get(self, *_args, **_kwargs):
+                raise AssertionError("GET /account must not be called when a xuid is provided")
+
+            async def post(self, _url, json=None, **_kwargs):
+                posted_bodies.append(json)
+                return stats_response
+
+        with patch("gamelib_mcp.data.xbox.httpx.AsyncClient", return_value=_FakeClient()):
+            playtime = asyncio.run(
+                xbox.fetch_xbox_playtime(["1030027286"], xuid="2535473210914202")
+            )
+
+        self.assertEqual(playtime, {"1030027286": 120})
+        self.assertEqual(posted_bodies[0]["xuids"], ["2535473210914202"])
 
 
 class SyncXboxTests(unittest.TestCase):
@@ -345,6 +401,44 @@ class SyncXboxTests(unittest.TestCase):
             playtime_minutes=None,
             owned=1,
         )
+
+    def _run_sync_capturing_fetch_args(self, env):
+        mock_titles = AsyncMock(return_value=[{"titleId": "1", "name": "Halo Infinite"}])
+        mock_playtime = AsyncMock(return_value={})
+
+        with (
+            patch.dict("os.environ", env, clear=False),
+            patch("gamelib_mcp.data.xbox.fetch_xbox_titles", mock_titles),
+            patch("gamelib_mcp.data.xbox.fetch_xbox_playtime", mock_playtime),
+            patch("gamelib_mcp.data.xbox.load_fuzzy_candidates", AsyncMock(return_value={})),
+            patch("gamelib_mcp.data.xbox.get_game_by_identifier", AsyncMock(return_value=None)),
+            patch("gamelib_mcp.data.xbox.resolve_and_link_game", AsyncMock(return_value=(42, None))),
+            patch("gamelib_mcp.data.xbox.upsert_game_platform", AsyncMock(return_value=99)),
+            patch("gamelib_mcp.data.xbox.upsert_game_alias", AsyncMock()),
+            patch("gamelib_mcp.data.xbox.upsert_game_platform_enrichment", AsyncMock()),
+            patch("gamelib_mcp.data.xbox.upsert_game_platform_identifier", AsyncMock()),
+        ):
+            if "OPENXBL_XUID" not in env:
+                os.environ.pop("OPENXBL_XUID", None)
+            asyncio.run(xbox.sync_xbox())
+
+        return mock_titles, mock_playtime
+
+    def test_sync_xbox_threads_configured_xuid_through_both_fetches(self):
+        mock_titles, mock_playtime = self._run_sync_capturing_fetch_args(
+            {"OPENXBL_API_KEY": "test-key", "OPENXBL_XUID": "2535473210914202"}
+        )
+
+        mock_titles.assert_awaited_once_with("2535473210914202")
+        mock_playtime.assert_awaited_once_with(["1"], "2535473210914202")
+
+    def test_sync_xbox_without_xuid_uses_unqualified_fetches(self):
+        mock_titles, mock_playtime = self._run_sync_capturing_fetch_args(
+            {"OPENXBL_API_KEY": "test-key"}
+        )
+
+        mock_titles.assert_awaited_once_with(None)
+        mock_playtime.assert_awaited_once_with(["1"], None)
 
     def test_sync_xbox_matched_game_triggers_platform_release_date_enrichment(self):
         titles = [{"titleId": "99", "name": "Hades"}]
