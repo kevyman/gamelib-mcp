@@ -73,9 +73,13 @@ PLATFORMS: tuple[PlatformSpec, ...] = (
         sync=("gamelib_mcp.data.psn", "sync_psn"),
         inspector_attr="inspect_psn",
     ),
+    PlatformSpec(
+        "xbox",
+        sync=("gamelib_mcp.data.xbox", "sync_xbox"),
+        inspector_attr="inspect_xbox",
+    ),
     # Manual-only stores: no sync backend, no inspector.
     PlatformSpec("itchio"),
-    PlatformSpec("xbox"),
     PlatformSpec("ea", aliases=("origin",)),
     PlatformSpec("ubisoft", aliases=("uplay",)),  # Ubisoft Connect, formerly Uplay
     PlatformSpec("other"),
