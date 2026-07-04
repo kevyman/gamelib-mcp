@@ -733,6 +733,7 @@ async def update_game(
     hltb_extra: float | None = None,
     hltb_complete: float | None = None,
     is_farmed: bool | None = None,
+    completion_status: str | None = None,
     clear_overrides: list[str] | None = None,
 ) -> UpdateGameResponse:
     """
@@ -746,9 +747,10 @@ async def update_game(
     library syncs and background enrichment will NOT overwrite it. To undo a
     protection and hand a column back to automatic sync, list its name in
     clear_overrides (e.g. clear_overrides=["is_farmed"]); this keeps the current
-    value but lets future syncs update it. Editing tags recomputes the taste
-    profile. Returns the updated fields, any cleared columns, and the full
-    manual-override list.
+    value but lets future syncs update it. completion_status: playing | completed
+    | abandoned, or 'none' to reset to automatic inference. Editing tags
+    recomputes the taste profile. Returns the updated fields, any cleared
+    columns, and the full manual-override list.
     """
     from .tools.platforms import update_game as _update
     return await _update(
@@ -765,6 +767,7 @@ async def update_game(
         hltb_extra,
         hltb_complete,
         is_farmed,
+        completion_status,
         clear_overrides,
     )
 

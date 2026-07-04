@@ -120,6 +120,7 @@ EXPECTED_TOOLS = {
             "hltb_extra",
             "hltb_complete",
             "is_farmed",
+            "completion_status",
             "clear_overrides",
         },
         "required": set(),
