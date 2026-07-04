@@ -27,6 +27,7 @@ from .tools.models import (
     AddGameToPlatformResponse,
     ApproveScrapeConfigResponse,
     BacklogStatsResponse,
+    CompletionSuggestionsResponse,
     DetectCollapsedGamesResponse,
     DetectCrossPlatformCollapsesResponse,
     DetectFarmedGamesResponse,
@@ -329,6 +330,23 @@ async def get_backlog_stats() -> BacklogStatsResponse:
     """
     from .tools.stats import get_backlog_stats as _bstats
     return await _bstats()
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL)
+async def suggest_completion_status(limit: int = 25) -> CompletionSuggestionsResponse:
+    """
+    Suggest completion statuses for games you haven't classified yet.
+
+    Read-only heuristic — nothing is written. Confirm a suggestion with
+    update_game(game_id=..., completion_status=...). Two signals: completed
+    (total playtime >= HowLongToBeat main-story hours) and abandoned (at least
+    2h played, under half of HLTB main, and no activity for 12+ months).
+    Already-classified, farmed, and non-primary-library (DLC/expansion/edition)
+    games are never suggested. Ordered by confidence: completed suggestions
+    first (highest playtime/HLTB ratio), then abandoned (staler first).
+    """
+    from .tools.completion import suggest_completion_status as _suggest
+    return await _suggest(limit)
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)

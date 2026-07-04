@@ -346,6 +346,21 @@ class WishlistDealEntry(FlexibleModel):
     alternatives: list[WishlistDealAlternative] = Field(default_factory=list)
 
 
+class CompletionSuggestion(FlexibleModel):
+    game_id: int
+    name: str
+    suggested_status: str
+    reason: str
+    playtime_hours: float
+    hltb_main: float
+    last_played: str | None = None
+
+
+class CompletionSuggestionsResponse(FlexibleModel):
+    suggestions: list[CompletionSuggestion]
+    count: int
+
+
 class WishlistDealsResponse(FlexibleModel):
     deals: list[WishlistDealEntry]
     unpriced: list[str]
