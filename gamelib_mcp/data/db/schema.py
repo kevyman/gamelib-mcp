@@ -869,6 +869,24 @@ _V20_SCHEMA_DDL = _V19_SCHEMA_DDL.replace(
     "        completion_status TEXT CHECK (completion_status IN ('playing', 'completed', 'abandoned')),",
 )
 
+# v21 adds play_history: cumulative per-(game, platform) playtime snapshots,
+# at most one row per UTC day, written after each platform sync only when the
+# total changed. Deltas ("what did I play this month") are derived at read
+# time; switch2 windows are served from nintendo_play_summary's real daily
+# rows instead (see data/db/history.py). Forward-only, like
+# nintendo_play_summary — there is no retroactive source to backfill from.
+_V21_SCHEMA_DDL = _V20_SCHEMA_DDL + """
+    CREATE TABLE IF NOT EXISTS play_history (
+        game_id          INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        platform         TEXT NOT NULL,
+        snapshot_date    TEXT NOT NULL,
+        playtime_minutes INTEGER NOT NULL,
+        PRIMARY KEY (game_id, platform, snapshot_date)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_play_history_date ON play_history(snapshot_date);
+"""
+
 # Derived search index — NOT part of the versioned schema chain. Created and
 # fully resynced by _run_migrations' _sync_fts_index on every migrate_db run,
 # which self-heals after destructive games-table rebuilds (those drop the

@@ -102,7 +102,7 @@ STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 
 @dataclass
@@ -235,6 +235,7 @@ from .schema import (
     _V18_SCHEMA_DDL,
     _V19_SCHEMA_DDL,
     _V20_SCHEMA_DDL,
+    _V21_SCHEMA_DDL,
 )
 
 
@@ -1251,6 +1252,27 @@ async def _migrate_v20_to_v21(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v21_to_v22(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add play_history (cumulative playtime snapshots; see schema.py note)."""
+    if progress is not None:
+        progress("Migrating to v22: add play_history.")
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS play_history (
+            game_id          INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+            platform         TEXT NOT NULL,
+            snapshot_date    TEXT NOT NULL,
+            playtime_minutes INTEGER NOT NULL,
+            PRIMARY KEY (game_id, platform, snapshot_date)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_play_history_date ON play_history(snapshot_date);
+        """
+    )
+    await _set_user_version(db, 22)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1287,7 +1309,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V20_SCHEMA_DDL)
+    await db.executescript(_V21_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -1402,6 +1424,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (18, _migrate_v18_to_v19),
     (19, _migrate_v19_to_v20),
     (20, _migrate_v20_to_v21),
+    (21, _migrate_v21_to_v22),
 )
 
 
@@ -1419,7 +1442,7 @@ async def _run_migrations(
         _emit(progress, f"Backed up database to {snapshot_path} before migrating.", applied_steps)
 
     if detected_state == "fresh":
-        await db.executescript(_V20_SCHEMA_DDL)
+        await db.executescript(_V21_SCHEMA_DDL)
         fts_enabled = await _sync_fts_index(db)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
@@ -1456,7 +1479,7 @@ async def _run_migrations(
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V20_SCHEMA_DDL)
+    await db.executescript(_V21_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
