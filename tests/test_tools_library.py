@@ -5,6 +5,7 @@ from fastmcp.exceptions import ToolError
 from conftest import ToolDBTestCase, make_steam_game, seed_game, add_platform, add_game_alias
 from gamelib_mcp.tools import library
 from gamelib_mcp.tools.common import MAX_RESULT_LIMIT
+from gamelib_mcp.tools.platforms import update_game
 
 
 def _platform_names(game: dict) -> list[str]:
@@ -44,6 +45,7 @@ class SearchGamesTests(ToolDBTestCase):
                 "protondb_tier",
                 "steam_review_desc",
                 "is_farmed",
+                "completion_status",
                 "content_type",
                 "parent_game_id",
                 "is_primary_library_item",
@@ -350,6 +352,25 @@ class LibraryStatsTests(ToolDBTestCase):
         unknown = await library.get_library_stats(filter="unknown")
         self.assertEqual([g["name"] for g in unknown["results"]], ["Manual"])
         self.assertEqual(unknown["unknown"], 1)
+
+    async def test_filter_playing_completed_abandoned(self):
+        playing = await make_steam_game("Playing Now", 1, playtime_minutes=100)
+        await update_game(game_id=playing, completion_status="playing")
+        completed = await make_steam_game("Chrono Trigger", 2, playtime_minutes=0)
+        await update_game(game_id=completed, completion_status="completed")
+        abandoned = await make_steam_game("Starfield", 3, playtime_minutes=0)
+        await update_game(game_id=abandoned, completion_status="abandoned")
+        await make_steam_game("Untouched", 4, playtime_minutes=0)
+
+        result = await library.get_library_stats(filter="playing")
+        self.assertEqual([g["name"] for g in result["results"]], ["Playing Now"])
+
+        result = await library.get_library_stats(filter="completed")
+        self.assertEqual([g["name"] for g in result["results"]], ["Chrono Trigger"])
+        self.assertEqual(result["results"][0]["completion_status"], "completed")
+
+        result = await library.get_library_stats(filter="abandoned")
+        self.assertEqual([g["name"] for g in result["results"]], ["Starfield"])
 
     async def test_search_marks_unknown_playtime_with_null_hours(self):
         gid = await seed_game("Manual")

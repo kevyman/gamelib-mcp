@@ -57,6 +57,7 @@ WITH game_rollup AS (
            g.tags,
            g.hltb_main,
            g.is_farmed,
+           g.completion_status,
            g.is_primary_library_item,
            {_PLAYTIME_SUM_SQL} AS total_playtime_minutes,
            {_PLAY_STATE_SQL} AS play_state,
@@ -102,6 +103,7 @@ async def discover_games(
     sort_by: match (taste affinity) | critic (OpenCritic/Metacritic) |
     value (high critic score per HLTB hour — backlog hidden gems).
     min_score: floor on COALESCE(opencritic, metacritic); excludes unscored games.
+    Games marked completed or abandoned (via update_game) are never recommended.
     """
     limit = _clamp_limit(limit)
     if sort_by not in VALID_SORTS:
@@ -129,6 +131,11 @@ async def discover_games(
 
     if unplayed_only:
         inner_conditions.append("play_state IN ('unplayed', 'unknown')")
+    # A completed/abandoned game should never surface as a recommendation, even
+    # when unplayed_only=False (e.g. sort_by=critic browsing everything).
+    inner_conditions.append(
+        "(completion_status IS NULL OR completion_status NOT IN ('completed', 'abandoned'))"
+    )
 
     if max_hltb_hours is not None:
         inner_conditions.append("hltb_main <= ?")
