@@ -102,6 +102,7 @@ STEAM_PLATFORM = "steam"
 STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
+XBOX_TITLE_ID = "xbox_title_id"
 SCHEMA_VERSION = 22
 
 

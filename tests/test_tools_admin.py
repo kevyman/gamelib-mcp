@@ -181,6 +181,20 @@ class RefreshLibraryValidationTests(ToolDBTestCase):
         self.assertIn("Finished steam refresh", ctx.infos)
         self.assertIn("Finished epic refresh", ctx.infos)
 
+    async def test_refresh_library_xbox_uses_patched_sync(self):
+        with (
+            patch.object(
+                admin, "sync_xbox", AsyncMock(return_value={"added": 0, "matched": 0, "skipped": 0})
+            ) as mock_sync,
+            patch.object(admin, "detect_farmed_games", AsyncMock(return_value={"candidates": 0})),
+        ):
+            result = await admin.run_library_sync(["xbox"])
+
+        mock_sync.assert_awaited()
+        self.assertEqual(
+            result["xbox"], {"added": 0, "matched": 0, "skipped": 0, "play_history_rows": 0}
+        )
+
 
 class RunLibrarySyncStateTests(ToolDBTestCase):
     async def test_writes_done_state_for_successful_platform(self):
@@ -359,7 +373,7 @@ class GetSyncStatusTests(ToolDBTestCase):
         status = await admin.get_sync_status()
         self.assertEqual(status["status"], "idle")
         self.assertEqual(
-            set(status["platforms"]), {"steam", "epic", "gog", "switch2", "ps5"}
+            set(status["platforms"]), {"steam", "epic", "gog", "switch2", "ps5", "xbox"}
         )
         self.assertEqual(status["platforms"]["steam"]["state"], "pending")
 
