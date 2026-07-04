@@ -100,6 +100,10 @@ EXPECTED_TOOLS = {
         "params": {"platform", "max_price", "min_cut_pct", "refresh", "preference_override_ratio"},
         "required": set(),
     },
+    "get_play_history": {
+        "params": {"days", "start_date", "end_date", "platform", "limit"},
+        "required": set(),
+    },
     "set_hardware_preference": {"params": {"platforms"}, "required": {"platforms"}},
     "add_game_to_platform": {
         "params": {
@@ -180,6 +184,7 @@ EXPECTED_ANNOTATIONS = {
     "sync_wishlist": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
     "get_wishlist": {"readOnlyHint": True, "idempotentHint": True},
     "get_wishlist_deals": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
+    "get_play_history": {"readOnlyHint": True, "idempotentHint": True},
     "set_hardware_preference": {"readOnlyHint": False, "idempotentHint": True},
     "add_game_to_platform": {"readOnlyHint": False, "idempotentHint": True},
     "set_nintendo_session": {"readOnlyHint": False, "idempotentHint": True},
@@ -212,9 +217,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_35(self):
+    async def test_tool_count_is_36(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 35)
+        self.assertEqual(len(tools), 36)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()
