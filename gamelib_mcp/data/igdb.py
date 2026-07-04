@@ -25,7 +25,13 @@ from .db import (
     release_game_claim,
     upsert_game_platform_enrichment,
 )
-from .content import classify_igdb_game, classify_title_override
+from .content import (
+    CONTENT_DLC,
+    CONTENT_EXPANSION,
+    classify_igdb_game,
+    classify_title_override,
+    content_type_from_igdb_category,
+)
 from .tag_synonyms import canonical_tag
 from .tags import is_feature_flag
 from .title_normalization import normalize_catalog_title, normalize_search_text
@@ -1282,10 +1288,11 @@ async def fetch_version_parent_aliases(member_igdb_ids: list[int]) -> dict[int, 
     Queries every game whose version_parent OR parent_game is one of
     ``member_igdb_ids`` and returns {child_igdb_id: canonical_member_igdb_id}.
     version_parent children always alias. parent_game children alias only
-    when their category/game_type is NOT DLC (1) or expansion (2) — owning a
-    DLC must not read as owning the base game, but a re-release/remaster/
-    standalone GOTY entry does. When a child carries both links,
-    version_parent wins.
+    when content_type_from_igdb_category does not classify them as DLC or
+    expansion content (categories 1, 2, and 13 — pack-style add-ons) —
+    owning a DLC or cosmetic pack must not read as owning the base game, but
+    a re-release/remaster/bundle/standalone GOTY entry does. When a child
+    carries both links, version_parent wins.
 
     Raises IGDBRequestFailure on API failure; returns {} for an empty input or
     when IGDB is unconfigured (mirrors fetch_igdb_game_names).
@@ -1328,7 +1335,18 @@ async def fetch_version_parent_aliases(member_igdb_ids: list[int]) -> dict[int, 
                     # IGDB has migrated category -> game_type for some titles.
                     category = row.get("category")
                     effective = category if category is not None else row.get("game_type")
-                    if effective in (CATEGORY_DLC, CATEGORY_EXPANSION):
+                    # Alias eligibility rides on the shared content classifier
+                    # rather than a hand-rolled category set, so the two can't
+                    # drift: content_type_from_igdb_category maps DLC (1),
+                    # expansion (2), AND pack-style add-ons (13 — cosmetic/BGM/
+                    # persona-set packs) to DLC/expansion content, none of
+                    # which imply owning the base game. Everything the
+                    # classifier deems standalone-ish still aliases: bundle
+                    # (3), standalone expansion (4), remake (8), remaster (9),
+                    # expanded game (10), port (11), and unclassified
+                    # (base_game default).
+                    content_type = content_type_from_igdb_category(effective)
+                    if content_type in (CONTENT_DLC, CONTENT_EXPANSION):
                         continue
                     aliases[child_id] = parent_game
                 if len(rows) < _SERIES_MEMBERS_PAGE_SIZE:

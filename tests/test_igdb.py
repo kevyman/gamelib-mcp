@@ -1084,12 +1084,15 @@ class FetchVersionParentAliasesTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("parent_game, category, game_type", captured["query"])
         self.assertEqual(aliases, {283715: 80, 20740: 478})
 
-    async def test_parent_game_children_alias_unless_dlc_or_expansion(self) -> None:
+    async def test_parent_game_children_alias_unless_dlc_like(self) -> None:
         # parent_game children are re-releases/remasters/standalone GOTY
-        # entries (alias) or DLC/expansions (must NOT alias — owning a DLC is
-        # not owning the base game). category=None falls back to game_type,
-        # mirroring _parse_igdb_item. version_parent children always alias,
-        # and version_parent wins when a child carries both links.
+        # entries (alias) or DLC-like content (must NOT alias — owning a DLC
+        # or a cosmetic pack is not owning the base game). Eligibility rides
+        # on content_type_from_igdb_category, so pack-style add-ons (13) are
+        # excluded alongside DLC (1) and expansion (2). category=None falls
+        # back to game_type, mirroring _parse_igdb_item. version_parent
+        # children always alias, and version_parent wins when a child
+        # carries both links.
         async def fake_post(query: str, headers: dict[str, str]) -> list[dict]:
             return [
                 # 2021 "Tales from the Borderlands" re-release: parent_game
@@ -1099,6 +1102,11 @@ class FetchVersionParentAliasesTests(unittest.IsolatedAsyncioTestCase):
                 {"id": 111, "parent_game": 6707, "category": 1},
                 # Expansion via game_type fallback (category absent) -> no alias.
                 {"id": 222, "parent_game": 6707, "game_type": 2},
+                # Pack-style add-on (13: cosmetic/BGM/persona-set packs) ->
+                # classifier deems it DLC content -> no alias.
+                {"id": 666, "parent_game": 6707, "category": 13},
+                # Pack via game_type fallback -> no alias.
+                {"id": 777, "parent_game": 6707, "game_type": 13},
                 # No category/game_type at all -> not provably DLC -> alias.
                 {"id": 333, "parent_game": 6707},
                 # version_parent child that is ALSO a DLC by category: the
