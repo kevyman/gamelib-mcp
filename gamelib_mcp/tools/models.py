@@ -33,6 +33,7 @@ class GameSummary(FlexibleModel):
     protondb_tier: str | None = None
     steam_review_desc: str | None = None
     is_farmed: bool | None = None
+    completion_status: str | None = None
     content_type: str | None = None
     parent_game_id: int | None = None
     is_primary_library_item: bool | None = None
@@ -137,7 +138,9 @@ class SyncRatingsResponse(FlexibleModel):
 
 
 class BacklogStatsResponse(FlexibleModel):
-    pass
+    playing: int
+    completed: int
+    abandoned: int
 
 
 class RefreshLibraryResponse(FlexibleModel):

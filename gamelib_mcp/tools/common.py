@@ -34,7 +34,15 @@ PLAYTIME_SUM_SQL = "SUM(gp.playtime_minutes)"
 # the raw NULL-aware SUM (not a column alias) because SQLite cannot see sibling
 # column aliases within the same SELECT list. Requires the games table aliased
 # `g` and game_platforms aliased `gp` — matches all three rollup CTEs.
+#
+# An explicit completion_status='completed' counts as played even when
+# playtime is unknown (e.g. a GOG game with no playtime tracking). Deliberately
+# NOT branching on 'abandoned' here — an abandoned-at-0-minutes game stays
+# 'unplayed' by this purely playtime-derived signal; backlog/discovery exclude
+# abandoned games via their own filters instead (see get_backlog_stats,
+# discover_games, get_library_stats filter=abandoned).
 PLAY_STATE_SQL = f"""CASE
+        WHEN g.completion_status = 'completed' THEN 'played'
         WHEN g.is_farmed = 1            THEN 'unplayed'
         WHEN {PLAYTIME_SUM_SQL} IS NULL THEN 'unknown'
         WHEN {PLAYTIME_SUM_SQL} = 0     THEN 'unplayed'

@@ -158,7 +158,9 @@ async def get_library_stats(
 
     Use this for backlog slices, unplayed lists, recent activity, or farmed-game
     audits; prefer get_game_detail for one selected game. filter accepts all,
-    unplayed, played, recent, or farmed. sort_by accepts playtime, name,
+    unplayed, played, recent, farmed, unknown, playing, completed, or abandoned
+    (the last three read the user-set completion_status from update_game).
+    sort_by accepts playtime, name,
     metacritic, opencritic, or hltb. min_metacritic/min_opencritic filter on
     critic scores (unscored games are excluded). tags/genres/series filter
     case-insensitively; a game must carry every listed entry (e.g.

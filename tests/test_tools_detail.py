@@ -10,6 +10,7 @@ from fastmcp.exceptions import ToolError
 
 from conftest import ToolDBTestCase, make_steam_game, seed_game, add_rating, add_platform
 from gamelib_mcp.tools import detail
+from gamelib_mcp.tools.platforms import update_game
 
 
 class GetGameDetailTests(ToolDBTestCase):
@@ -60,6 +61,7 @@ class GetGameDetailTests(ToolDBTestCase):
                 "playtime_2weeks_hours",
                 "last_played_date",
                 "is_farmed",
+                "completion_status",
                 "content_type",
                 "parent_game_id",
                 "is_primary_library_item",
@@ -199,3 +201,16 @@ class GetGameDetailTests(ToolDBTestCase):
         result = await detail.get_game_detail(game_id=gid)
         self.assertEqual(result["play_state"], "unknown")
         self.assertIsNone(result["playtime_hours"])
+
+    async def test_completed_status_overrides_unknown_play_state(self):
+        gid = await seed_game("Manual Completed")
+        await add_platform(gid, "gog")  # no playtime -> NULL
+        await update_game(game_id=gid, completion_status="completed")
+        result = await detail.get_game_detail(game_id=gid)
+        self.assertEqual(result["play_state"], "played")
+        self.assertEqual(result["completion_status"], "completed")
+
+    async def test_completion_status_defaults_to_none(self):
+        gid = await make_steam_game("Untouched", 1, playtime_minutes=0)
+        result = await detail.get_game_detail(game_id=gid)
+        self.assertIsNone(result["completion_status"])

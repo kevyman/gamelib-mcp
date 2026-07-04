@@ -18,7 +18,10 @@ from .common import (
 )
 from .search import build_name_match, fuzzy_fallback_game_ids
 
-VALID_FILTERS = {"all", "unplayed", "played", "recent", "farmed", "unknown"}
+VALID_FILTERS = {
+    "all", "unplayed", "played", "recent", "farmed", "unknown",
+    "playing", "completed", "abandoned",
+}
 
 ResponseFormat = Literal["concise", "detailed"]
 
@@ -43,6 +46,7 @@ WITH game_rollup AS (
            g.genres,
            g.hltb_main,
            g.is_farmed,
+           g.completion_status,
            g.content_type,
            g.parent_game_id,
            g.is_primary_library_item,
@@ -300,7 +304,9 @@ async def get_library_stats(
     """
     Return filtered/sorted game list plus aggregate stats.
 
-    filter: all | unplayed | played | recent | farmed
+    filter: all | unplayed | played | recent | farmed | unknown | playing |
+    completed | abandoned (the last three read games.completion_status, set via
+    update_game)
     sort_by: playtime | name | metacritic | opencritic | hltb
     platform: steam | epic | gog | ps5 | nintendo | switch2 (optional — filter to games owned on that platform)
     tags / genres / series: case-insensitive; a game must carry EVERY listed entry.
@@ -335,6 +341,12 @@ async def get_library_stats(
         conditions.append("total_playtime_2weeks_minutes > 0")
     elif filter == "farmed":
         conditions.append("is_farmed = 1")
+    elif filter == "playing":
+        conditions.append("completion_status = 'playing'")
+    elif filter == "completed":
+        conditions.append("completion_status = 'completed'")
+    elif filter == "abandoned":
+        conditions.append("completion_status = 'abandoned'")
 
     if max_hltb_hours is not None:
         conditions.append("hltb_main <= ?")
@@ -456,6 +468,7 @@ def _format_game(row, platforms: list[dict], response_format: ResponseFormat) ->
         "protondb_tier": row["protondb_tier"],
         "steam_review_desc": row["steam_review_desc"],
         "is_farmed": bool(row["is_farmed"]),
+        "completion_status": row["completion_status"],
         "content_type": row["content_type"],
         "parent_game_id": row["parent_game_id"],
         "is_primary_library_item": bool(row["is_primary_library_item"]),
