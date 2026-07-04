@@ -34,7 +34,11 @@ from .content import (
 )
 from .tag_synonyms import canonical_tag
 from .tags import is_feature_flag
-from .title_normalization import normalize_catalog_title, normalize_search_text
+from .title_normalization import (
+    normalize_catalog_title,
+    normalize_search_text,
+    normalize_series_gap_title,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -698,6 +702,17 @@ def _select_best_match(
     unrelated result from an overly-broad query (e.g. "Seance" alone matching
     unrelated "Silly Seance"-type titles) must not be accepted just because it
     was the only one returned.
+
+    Whatever the selection path, the final candidate must clear the strict
+    name gate: its edition-stripped normalized title has to EQUAL the
+    query's. Fuzzy scores and relevance fallbacks only ever rank candidates;
+    they can no longer accept one whose name actually differs. This is what
+    stops the observed prod disasters — "Borderlands GOTY" enriched as "The
+    Tower on the Borderland", "PAYDAY 2" as "Payday 2 VR", "Tales from the
+    Borderlands" as "New Tales from the Borderlands" — while edition
+    variants ("The Witcher: Enhanced Edition" -> "The Witcher") still pass
+    because both sides strip to the same title. On gate failure the query
+    stores no match at all (row stays unenriched; logged at info).
     """
     from .db import extract_best_fuzzy_key, titles_conflict_on_identity
 
@@ -723,17 +738,28 @@ def _select_best_match(
     if exact_matches:
         primary_exact = [i for i in exact_matches if results[i].is_primary_library_item]
         exact_idx = primary_exact[0] if primary_exact else exact_matches[0]
-        return results[exact_idx]
+        selected = results[exact_idx]
+    else:
+        best_idx: int | None = extract_best_fuzzy_key(name, choices, cutoff=70)
+        if best_idx is None:
+            if not allow_inconclusive_fallback:
+                return None
+            # Fuzzy was inconclusive; take IGDB's top *identity-compatible*
+            # relevance hit rather than forcing position 0 (which may be a
+            # conflicting entry).
+            best_idx = next(iter(choices))
+        selected = results[best_idx]
 
-    best_idx: int | None = extract_best_fuzzy_key(name, choices, cutoff=70)
-    if best_idx is None:
-        if not allow_inconclusive_fallback:
-            return None
-        # Fuzzy was inconclusive; take IGDB's top *identity-compatible* relevance
-        # hit rather than forcing position 0 (which may be a conflicting entry).
-        best_idx = next(iter(choices))
-
-    return results[best_idx]
+    if normalize_series_gap_title(name) != normalize_series_gap_title(selected.name):
+        logger.info(
+            "IGDB name-match gate rejected %r -> %r (igdb_id=%s): "
+            "edition-stripped titles differ; leaving unmatched",
+            name,
+            selected.name,
+            selected.igdb_id,
+        )
+        return None
+    return selected
 
 
 async def resolve_game(

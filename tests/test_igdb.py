@@ -762,6 +762,35 @@ class ResolveGameIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.name, "Hitman 2")
 
+    async def test_name_gate_rejects_unrelated_fuzzy_or_fallback_candidate(self) -> None:
+        # Prod disaster: "Borderlands GOTY" got enriched as igdb 258897 "The
+        # Tower on the Borderland" — a completely unrelated game accepted via
+        # the inconclusive-fuzzy relevance fallback. The strict name gate must
+        # reject any candidate whose edition-stripped normalized title is not
+        # EQUAL to the query's, leaving the row unmatched.
+        result = await self._resolve("Borderlands GOTY", ["The Tower on the Borderland"])
+        self.assertIsNone(result)
+
+    async def test_name_gate_rejects_near_name_variant_candidate(self) -> None:
+        # Prod disaster: "PAYDAY 2" got enriched as "Payday 2 VR" (high fuzzy
+        # similarity, no identity conflict). "payday 2" != "payday 2 vr" after
+        # edition stripping -> no match stored.
+        result = await self._resolve("PAYDAY 2", ["Payday 2 VR"])
+        self.assertIsNone(result)
+
+    async def test_exact_name_candidate_wins_over_near_variant(self) -> None:
+        # When the true title is present alongside the near-variant, the exact
+        # match must win regardless of candidate order.
+        result = await self._resolve("PAYDAY 2", ["Payday 2 VR", "PAYDAY 2"])
+        self.assertIsNotNone(result)
+        self.assertEqual(result.name, "PAYDAY 2")
+
+    async def test_name_gate_allows_edition_stripped_equal_titles(self) -> None:
+        # Edition variants still match: both sides strip to "the witcher".
+        result = await self._resolve("The Witcher: Enhanced Edition", ["The Witcher"])
+        self.assertIsNotNone(result)
+        self.assertEqual(result.name, "The Witcher")
+
     async def test_picks_exact_title_base_game_over_dlc_shaped_higher_relevance_hits(self) -> None:
         # Persona 3 Reload case from the handover doc: IGDB's own relevance
         # ranking put 5 DLC/cosmetic "Persona Set"/"BGM Set" packs (game_type=13)
