@@ -164,8 +164,8 @@ class RefreshLibraryValidationTests(ToolDBTestCase):
         ):
             result = await admin.run_library_sync(["steam", "epic"], ctx=ctx)
 
-        self.assertEqual(result["steam"], {"platform": "steam"})
-        self.assertEqual(result["epic"], {"platform": "epic"})
+        self.assertEqual(result["steam"], {"platform": "steam", "play_history_rows": 0})
+        self.assertEqual(result["epic"], {"platform": "epic", "play_history_rows": 0})
         self.assertEqual(ctx.progress, [(0, 2), (1, 2), (2, 2)])
         self.assertIn("Refreshing 2 platform(s)", ctx.infos)
         self.assertIn("Finished steam refresh", ctx.infos)
@@ -184,7 +184,9 @@ class RunLibrarySyncStateTests(ToolDBTestCase):
              patch("gamelib_mcp.tools.admin._schedule_background_enrich", AsyncMock()):
             result = await admin.run_library_sync(["steam"])
 
-        self.assertEqual(result["steam"], {"games_upserted": 3})
+        self.assertEqual(
+            result["steam"], {"games_upserted": 3, "play_history_rows": 0}
+        )
         self.assertEqual(await get_meta("sync_platform_state_steam"), "done")
         self.assertEqual(await get_meta("library_sync_status"), "idle")
 
@@ -216,6 +218,40 @@ class RunLibrarySyncStateTests(ToolDBTestCase):
                 "SELECT 1 FROM game_wishlist WHERE game_id = ? AND platform = ?", (game_id, "steam")
             )
         self.assertIsNone(row)
+
+    async def test_snapshots_play_history_after_successful_sync(self):
+        game_id = await seed_game("Hades")
+
+        async def fake_steam():
+            await add_platform(game_id, "steam", playtime_minutes=42, owned=1)
+            return {"games_upserted": 1}
+
+        with patch("gamelib_mcp.tools.admin.fetch_library", side_effect=fake_steam), \
+             patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.admin._schedule_background_enrich", AsyncMock()):
+            result = await admin.run_library_sync(["steam"])
+
+        self.assertEqual(result["steam"]["play_history_rows"], 1)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT playtime_minutes FROM play_history WHERE game_id = ? AND platform = 'steam'",
+                (game_id,),
+            )
+        self.assertIsNotNone(row)
+        self.assertEqual(row["playtime_minutes"], 42)
+
+    async def test_snapshot_failure_does_not_fail_sync(self):
+        with patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(return_value={"ok": True})), \
+             patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.admin._schedule_background_enrich", AsyncMock()), \
+             patch(
+                 "gamelib_mcp.tools.admin.record_play_history_snapshots",
+                 AsyncMock(side_effect=RuntimeError("boom")),
+             ):
+            result = await admin.run_library_sync(["steam"])
+
+        self.assertEqual(result["steam"], {"ok": True})
+        self.assertEqual(await get_meta("sync_platform_state_steam"), "done")
 
 
 class RefreshLibraryAckTests(ToolDBTestCase):

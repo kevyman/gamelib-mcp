@@ -11,7 +11,12 @@ from datetime import datetime, timezone
 
 from fastmcp.exceptions import ToolError
 
-from ..data.db import STEAM_APP_ID, clear_fulfilled_wishlist_entries, get_db
+from ..data.db import (
+    STEAM_APP_ID,
+    clear_fulfilled_wishlist_entries,
+    get_db,
+    record_play_history_snapshots,
+)
 from ..data.title_normalization import normalize_search_text
 from ..data.enrich_bg import pause_background_enrichment, resume_background_enrichment
 
@@ -116,6 +121,15 @@ async def run_library_sync(
             else:
                 results[result_name] = outcome
                 await _mark_platform_state(name, "done")
+                try:
+                    history_rows = await record_play_history_snapshots(name)
+                except Exception:
+                    logger.warning(
+                        "play_history snapshot failed for %s", name, exc_info=True
+                    )
+                    history_rows = None
+                if isinstance(outcome, dict) and history_rows is not None:
+                    outcome["play_history_rows"] = history_rows
                 await _info(ctx, f"Finished {result_name} refresh")
             await report_progress(ctx, index, len(selected))
 
