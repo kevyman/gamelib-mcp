@@ -36,6 +36,14 @@ async def add_wishlist(game_id: int, platform: str, *, source: str = "manual") -
         await db.commit()
 
 
+async def seed_owned_game(name: str, *, playtime_minutes: int | None = None) -> int:
+    """Seed a game with an owned platform row — discover_series_gaps only
+    counts games with a real owned game_platforms relationship."""
+    game_id = await seed_game(name)
+    await add_platform(game_id, "steam", playtime_minutes=playtime_minutes, owned=1)
+    return game_id
+
+
 class SeriesBreakdownTests(ToolDBTestCase):
     async def test_empty_library(self):
         result = await series.get_series_breakdown()
@@ -203,10 +211,10 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
         self.assertIn("TWITCH_CLIENT_ID", result["error_summary"])
 
     async def test_min_owned_filters_series(self):
-        solo = await seed_game("Mass Effect")
+        solo = await seed_owned_game("Mass Effect")
         await link_series(solo, "collection", 10, "Mass Effect")
-        b1 = await seed_game("Dragon Age")
-        b2 = await seed_game("Dragon Age 2")
+        b1 = await seed_owned_game("Dragon Age")
+        b2 = await seed_owned_game("Dragon Age 2")
         for gid in (b1, b2):
             await link_series(gid, "collection", 20, "Dragon Age")
 
@@ -223,9 +231,9 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
         self.assertEqual(result["series_checked"], 1)
 
     async def test_excludes_owned_and_wishlisted_igdb_ids(self):
-        base = await seed_game("Kirby's Dream Land")
+        base = await seed_owned_game("Kirby's Dream Land")
         await link_series(base, "franchise", 30, "Kirby")
-        second = await seed_game("Kirby's Dream Land 2")
+        second = await seed_owned_game("Kirby's Dream Land 2")
         await link_series(second, "franchise", 30, "Kirby")
         await set_igdb_id(second, 200)
 
@@ -255,8 +263,8 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
         self.assertEqual(gap_ids, {400})
 
     async def test_unreleased_filtered_unless_requested(self):
-        a = await seed_game("Metroid Prime")
-        b = await seed_game("Metroid Prime 2")
+        a = await seed_owned_game("Metroid Prime")
+        b = await seed_owned_game("Metroid Prime 2")
         for gid in (a, b):
             await link_series(gid, "franchise", 60, "Metroid")
 
@@ -285,12 +293,12 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
         self.assertEqual(unreleased_gap_ids, {500, 501, 502})
 
     async def test_per_series_fetch_error_recorded_without_failing(self):
-        a1 = await seed_game("Halo")
-        a2 = await seed_game("Halo 2")
+        a1 = await seed_owned_game("Halo")
+        a2 = await seed_owned_game("Halo 2")
         for gid in (a1, a2):
             await link_series(gid, "franchise", 70, "Halo")
-        b1 = await seed_game("Gears of War")
-        b2 = await seed_game("Gears of War 2")
+        b1 = await seed_owned_game("Gears of War")
+        b2 = await seed_owned_game("Gears of War 2")
         for gid in (b1, b2):
             await link_series(gid, "franchise", 71, "Gears of War")
         # Give "Halo" the higher rating so it's ranked (and attempted) first.
@@ -318,8 +326,8 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
         self.assertEqual([r["series_name"] for r in result["results"]], ["Gears of War"])
 
     async def test_available_on_maps_igdb_platforms(self):
-        a = await seed_game("Hollow Knight")
-        b = await seed_game("Hollow Knight: Voidheart")
+        a = await seed_owned_game("Hollow Knight")
+        b = await seed_owned_game("Hollow Knight: Voidheart")
         for gid in (a, b):
             await link_series(gid, "collection", 80, "Hollow Knight")
 
@@ -336,6 +344,60 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
 
         gap = result["results"][0]["gaps"][0]
         self.assertEqual(gap["available_on"], ["steam", "switch2"])
+
+    async def test_wishlist_only_games_do_not_count_toward_min_owned(self):
+        # Wishlist sync creates games rows with no owned game_platforms row,
+        # and IGDB backfill adds their series memberships — such entries must
+        # not make a series rank as "owned".
+        owned = await seed_owned_game("Zelda: Breath of the Wild")
+        await link_series(owned, "franchise", 90, "Zelda")
+
+        wishlist_only = await seed_game("Zelda: Tears of the Kingdom")
+        await add_wishlist(wishlist_only, "switch2")
+        await link_series(wishlist_only, "franchise", 90, "Zelda")
+
+        unowned_stub = await seed_game("Zelda: Echoes of Wisdom")
+        await add_platform(unowned_stub, "switch2", owned=0)
+        await link_series(unowned_stub, "franchise", 90, "Zelda")
+
+        members_mock = AsyncMock(return_value=[])
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch("gamelib_mcp.data.series_gaps.get_series_members_cached", members_mock),
+        ):
+            two_owned = await series.discover_series_gaps(min_owned=2)
+            one_owned = await series.discover_series_gaps(min_owned=1)
+
+        # Only 1 of the 3 memberships is actually owned.
+        self.assertEqual(two_owned["series_checked"], 0)
+        self.assertEqual(two_owned["results"], [])
+        self.assertEqual(one_owned["series_checked"], 1)
+        self.assertEqual(one_owned["results"][0]["owned_count"], 1)
+
+    async def test_multiple_rating_sources_do_not_inflate_playtime(self):
+        # A raw LEFT JOIN on ratings fans out per rating source; the playtime
+        # subquery would then be summed once per rating row.
+        rated_twice = await seed_owned_game("Portal", playtime_minutes=120)
+        await add_rating(rated_twice, "manual", 9.0, 9.0)
+        await add_rating(rated_twice, "backloggd", 8.0, 8.0)
+        other = await seed_owned_game("Portal 2", playtime_minutes=60)
+        for gid in (rated_twice, other):
+            await link_series(gid, "collection", 95, "Portal")
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=[]),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        entry = result["results"][0]
+        # 120 + 60 minutes = 3.0h — not doubled by the two rating rows.
+        self.assertEqual(entry["total_playtime_hours"], 3.0)
+        # avg_rating averages per-game averages: Portal (9+8)/2=8.5, Portal 2 unrated.
+        self.assertEqual(entry["avg_rating"], 8.5)
 
     async def test_invalid_kind_raises(self):
         with self.assertRaises(Exception):

@@ -227,6 +227,13 @@ async def discover_series_gaps(
         params["kind"] = kind
 
     async with get_db() as db:
+        # Only actually-owned games count toward a series' rank: wishlist sync
+        # creates games rows with no owned game_platforms row (and IGDB backfill
+        # adds their series memberships), so without the EXISTS guard a series
+        # of wishlist-only entries could satisfy min_owned. Ratings are
+        # aggregated per game before joining — a raw LEFT JOIN ratings would
+        # fan out per rating source, inflating the summed playtime and skewing
+        # avg_rating toward multi-source games.
         rows = await db.execute_fetchall(
             f"""
             SELECT s.id AS series_id,
@@ -234,15 +241,19 @@ async def discover_series_gaps(
                    s.kind AS kind,
                    s.name AS series_name,
                    COUNT(DISTINCT m.game_id) AS owned_count,
-                   AVG(r.normalized_score) AS avg_rating,
+                   AVG(r.avg_rating) AS avg_rating,
                    COALESCE(SUM(
                        (SELECT COALESCE(SUM(gp.playtime_minutes), 0)
                         FROM game_platforms gp WHERE gp.game_id = g.id)
                    ), 0) AS total_playtime_minutes
             FROM game_series s
             JOIN game_series_membership m ON m.series_id = s.id
-            JOIN games g ON g.id = m.game_id AND g.is_primary_library_item = 1
-            LEFT JOIN ratings r ON r.game_id = g.id
+            JOIN games g ON g.id = m.game_id
+                 AND g.is_primary_library_item = 1
+                 AND EXISTS (SELECT 1 FROM game_platforms gp
+                             WHERE gp.game_id = g.id AND gp.owned = 1)
+            LEFT JOIN (SELECT game_id, AVG(normalized_score) AS avg_rating
+                       FROM ratings GROUP BY game_id) r ON r.game_id = g.id
             WHERE s.igdb_id IS NOT NULL {kind_clause}
             GROUP BY s.id
             HAVING owned_count >= :min_owned
