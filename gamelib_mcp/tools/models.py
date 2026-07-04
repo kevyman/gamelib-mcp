@@ -402,3 +402,25 @@ class WishlistDealsResponse(FlexibleModel):
     currency_note: str | None = None
     switch2_lookups_deferred: int | None = None
     availability_pending: int | None = None
+
+
+class PlayHistoryWindow(FlexibleModel):
+    start: str
+    end: str
+
+
+class PlayHistoryEntry(FlexibleModel):
+    game_id: int
+    name: str
+    platform: str
+    minutes_played: int
+    hours_played: float
+
+
+class PlayHistoryResponse(FlexibleModel):
+    window: PlayHistoryWindow
+    total_minutes: int
+    total_hours: float
+    by_platform: dict[str, int]
+    games: list[PlayHistoryEntry]
+    switch2_unmatched_minutes: int

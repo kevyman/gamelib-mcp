@@ -1060,7 +1060,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             async with db_module.get_db() as db:
                 version = await db_module._get_user_version(db)
             self.assertEqual(version, db_module.SCHEMA_VERSION)
-            self.assertEqual(db_module.SCHEMA_VERSION, 21)
+            self.assertEqual(db_module.SCHEMA_VERSION, 22)
 
             unresolved = await seed_game("Still Unresolved Wishlisted Game")
             resolved = await seed_game("Already Resolved Wishlisted Game")
@@ -1114,7 +1114,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                     "SELECT completion_status FROM games WHERE id = 1"
                 )
 
-        self.assertEqual(result.final_version, 21)
+        self.assertEqual(result.final_version, db_module.SCHEMA_VERSION)
         self.assertIn("completion_status", cols)
         # Existing row survives the additive migration untouched (NULL = unset).
         self.assertIsNone(row["completion_status"])
@@ -1132,6 +1132,25 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                     await db.execute(
                         "INSERT INTO games (name, completion_status) VALUES ('x', 'finished')"
                     )
+
+    async def test_v21_to_v22_adds_play_history(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V20_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 21")
+        conn.execute("INSERT INTO games (id, name) VALUES (1, 'Hollow Knight')")
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            result = await db_module.migrate_db()
+            async with db_module.get_db() as db:
+                cols = {
+                    row[1] for row in await db.execute_fetchall("PRAGMA table_info(play_history)")
+                }
+
+        self.assertEqual(result.final_version, db_module.SCHEMA_VERSION)
+        self.assertEqual(cols, {"game_id", "platform", "snapshot_date", "playtime_minutes"})
 
     async def test_v9_to_v10_adds_series_tables(self) -> None:
         conn = sqlite3.connect(self.db_path)

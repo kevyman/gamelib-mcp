@@ -563,11 +563,11 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             result,
             {
-                "steam": {"platform": "steam", "synced": True},
+                "steam": {"platform": "steam", "synced": True, "play_history_rows": 0},
                 "epic": {"error": "epic boom"},
-                "gog": {"platform": "gog", "synced": True},
-                "switch2": {"platform": "switch2", "synced": True},
-                "ps5": {"platform": "ps5", "synced": True},
+                "gog": {"platform": "gog", "synced": True, "play_history_rows": 0},
+                "switch2": {"platform": "switch2", "synced": True, "play_history_rows": 0},
+                "ps5": {"platform": "ps5", "synced": True, "play_history_rows": 0},
             },
         )
         mock_detect.assert_awaited_once_with(dry_run=False)
@@ -593,7 +593,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             result,
             {
-                "steam": {"platform": "steam", "synced": True},
+                "steam": {"platform": "steam", "synced": True, "play_history_rows": 0},
                 "epic": {"error": "epic cancelled"},
             },
         )
@@ -631,7 +631,9 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         ):
             result = await admin_tools.run_library_sync(["steam"])
 
-        self.assertEqual(result, {"steam": {"platform": "steam", "synced": True}})
+        self.assertEqual(
+            result, {"steam": {"platform": "steam", "synced": True, "play_history_rows": 0}}
+        )
         pause_enrichment.assert_called_once_with()
         resume_enrichment.assert_called_once_with()
         schedule_enrich.assert_awaited_once()
@@ -644,7 +646,9 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         ):
             result = await admin_tools.run_library_sync(["epic"])
 
-        self.assertEqual(result, {"epic": {"platform": "epic", "synced": True}})
+        self.assertEqual(
+            result, {"epic": {"platform": "epic", "synced": True, "play_history_rows": 0}}
+        )
         mock_detect.assert_not_awaited()
 
     async def test_refresh_library_supports_switch2_alias(self) -> None:
