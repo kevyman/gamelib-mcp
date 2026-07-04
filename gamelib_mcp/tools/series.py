@@ -244,7 +244,8 @@ async def discover_series_gaps(
                    AVG(r.avg_rating) AS avg_rating,
                    COALESCE(SUM(
                        (SELECT COALESCE(SUM(gp.playtime_minutes), 0)
-                        FROM game_platforms gp WHERE gp.game_id = g.id)
+                        FROM game_platforms gp
+                        WHERE gp.game_id = g.id AND gp.owned = 1)
                    ), 0) AS total_playtime_minutes
             FROM game_series s
             JOIN game_series_membership m ON m.series_id = s.id
@@ -263,11 +264,19 @@ async def discover_series_gaps(
             params,
         )
 
-        # The whole games table's igdb_ids count as "have": a wishlisted game's
-        # game_wishlist row already points at a games.id, so this single query
-        # covers owned-anywhere, wishlisted, and even known-but-collapsed rows.
+        # "Have" = owned on some platform (gp.owned=1) or wishlisted. Not the
+        # whole games table: a games row can exist without either (an owned=0
+        # manual stub, or an orphaned row left behind by an unsynced wishlist
+        # removal), and suppressing those titles would hide real gaps.
         have_rows = await db.execute_fetchall(
-            "SELECT igdb_id FROM games WHERE igdb_id IS NOT NULL"
+            """
+            SELECT igdb_id FROM games
+            WHERE igdb_id IS NOT NULL
+              AND (EXISTS (SELECT 1 FROM game_platforms gp
+                           WHERE gp.game_id = games.id AND gp.owned = 1)
+                   OR EXISTS (SELECT 1 FROM game_wishlist w
+                              WHERE w.game_id = games.id))
+            """
         )
 
     have_igdb_ids = {row["igdb_id"] for row in have_rows}

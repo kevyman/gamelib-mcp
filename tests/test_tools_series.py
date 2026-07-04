@@ -399,6 +399,58 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
         # avg_rating averages per-game averages: Portal (9+8)/2=8.5, Portal 2 unrated.
         self.assertEqual(entry["avg_rating"], 8.5)
 
+    async def test_unowned_unwishlisted_games_row_still_appears_as_gap(self):
+        # A games row can carry an igdb_id while being neither owned nor
+        # wishlisted (an owned=0 stub, or an orphaned row left over after a
+        # wishlist removal). Such a title must NOT be subtracted from the
+        # member list — it's still a gap.
+        a = await seed_owned_game("Pikmin")
+        b = await seed_owned_game("Pikmin 2")
+        for gid in (a, b):
+            await link_series(gid, "collection", 96, "Pikmin")
+
+        orphan = await seed_game("Pikmin 3")
+        await set_igdb_id(orphan, 700)
+        stub = await seed_game("Pikmin 4")
+        await add_platform(stub, "switch2", owned=0)
+        await set_igdb_id(stub, 701)
+
+        members = [
+            SeriesMember(700, "Pikmin 3", "2013-07-13", 0, []),
+            SeriesMember(701, "Pikmin 4", "2023-07-21", 0, []),
+        ]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=members),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        gap_ids = {g["igdb_id"] for g in result["results"][0]["gaps"]}
+        self.assertEqual(gap_ids, {700, 701})
+
+    async def test_unowned_stub_playtime_does_not_count(self):
+        owned = await seed_owned_game("Doom", playtime_minutes=60)
+        await add_platform(owned, "epic", playtime_minutes=600, owned=0)
+        other = await seed_owned_game("Doom Eternal")
+        for gid in (owned, other):
+            await link_series(gid, "collection", 97, "Doom")
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=[]),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        # Only the owned steam row's 60 minutes counts, not the owned=0 stub's 600.
+        self.assertEqual(result["results"][0]["total_playtime_hours"], 1.0)
+
     async def test_invalid_kind_raises(self):
         with self.assertRaises(Exception):
             await series.discover_series_gaps(kind="saga")
