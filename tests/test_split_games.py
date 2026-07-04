@@ -45,6 +45,28 @@ async def _set_igdb_id(game_id: int, igdb_id: int) -> None:
         await db.commit()
 
 
+async def _insert_play_history(game_id: int, platform: str, day: str, minutes: int) -> None:
+    async with db_module.get_db() as db:
+        await db.execute(
+            """INSERT INTO play_history (game_id, platform, snapshot_date, playtime_minutes)
+               VALUES (?, ?, ?, ?)""",
+            (game_id, platform, day, minutes),
+        )
+        await db.commit()
+
+
+async def _play_history_by_game(platform: str) -> dict[int, dict[str, int]]:
+    async with db_module.get_db() as db:
+        rows = await db.execute_fetchall(
+            "SELECT game_id, snapshot_date, playtime_minutes FROM play_history WHERE platform = ?",
+            (platform,),
+        )
+    out: dict[int, dict[str, int]] = {}
+    for row in rows:
+        out.setdefault(row["game_id"], {})[row["snapshot_date"]] = row["playtime_minutes"]
+    return out
+
+
 class SplitGameWholePlatformTests(ToolDBTestCase):
     async def _dead_space_collapse(self) -> int:
         # One row carrying Steam 2008 + PS5 2023 (a cross-platform collapse).
@@ -76,6 +98,30 @@ class SplitGameWholePlatformTests(ToolDBTestCase):
             )
         self.assertEqual(row["name"], "Dead Space (2023)")
         self.assertEqual(row["playtime_minutes"], 43)
+
+    async def test_moves_peeled_platform_play_history_to_new_game(self):
+        game_id = await self._dead_space_collapse()
+        # History on both the peeled platform (ps5) and the kept one (steam).
+        await _insert_play_history(game_id, "ps5", "2026-06-01", 20)
+        await _insert_play_history(game_id, "ps5", "2026-06-15", 43)
+        await _insert_play_history(game_id, "steam", "2026-06-01", 273)
+
+        result = await admin.split_game(
+            game_id, "ps5", ["PPSA03845_00"], new_name="Dead Space (2023)"
+        )
+
+        new_id = result["new_game_id"]
+        self.assertEqual(result["play_history_rows_moved"], 2)
+        # ps5 history follows the platform row to the new game...
+        self.assertEqual(
+            await _play_history_by_game("ps5"),
+            {new_id: {"2026-06-01": 20, "2026-06-15": 43}},
+        )
+        # ...while steam history stays on the source.
+        self.assertEqual(
+            await _play_history_by_game("steam"),
+            {game_id: {"2026-06-01": 273}},
+        )
 
     async def test_dry_run_writes_nothing(self):
         game_id = await self._dead_space_collapse()
@@ -124,6 +170,22 @@ class SplitGameSubsetTests(ToolDBTestCase):
         self.assertEqual(by_game[new_id], ["1693980"])
         # Both games own a steam row now (a fresh one was created for the new game).
         self.assertEqual(await _platforms_of(new_id), {"steam"})
+
+    async def test_subset_split_keeps_play_history_on_source(self):
+        # Snapshots are per-(game, platform), not per-identifier, so a subset
+        # split can't attribute past history to the peeled appid — it stays put.
+        game_id = await self._two_appid_collapse()
+        await _insert_play_history(game_id, "steam", "2026-06-01", 100)
+
+        result = await admin.split_game(
+            game_id, "steam", ["1693980"], new_name="Dead Space (2023)"
+        )
+
+        self.assertEqual(result["play_history_rows_moved"], 0)
+        self.assertEqual(
+            await _play_history_by_game("steam"),
+            {game_id: {"2026-06-01": 100}},
+        )
 
 
 class DetectCrossPlatformCollapsesTests(ToolDBTestCase):

@@ -637,6 +637,32 @@ async def merge_games(
                 )
                 if existing is None:
                     aliases_transferred += 1
+        # play_history — keyed (game_id, platform, snapshot_date) with ON DELETE
+        # CASCADE, so deleting the source game would silently drop its snapshot
+        # history and get_play_history would underreport. Transfer rows to the
+        # target first; on a same-day collision keep MAX(playtime_minutes) —
+        # snapshots are cumulative totals of the same underlying game, so the
+        # higher value is the more complete total (mirroring how the platform
+        # merge above keeps the higher playtime_minutes).
+        history_row = await db.execute_fetchone(
+            "SELECT COUNT(*) AS c FROM play_history WHERE game_id = ?",
+            (source_game_id,),
+        )
+        play_history_rows_transferred = history_row["c"] if history_row else 0
+        if not dry_run and play_history_rows_transferred:
+            await db.execute(
+                """INSERT INTO play_history (game_id, platform, snapshot_date, playtime_minutes)
+                   SELECT ?, platform, snapshot_date, playtime_minutes
+                   FROM play_history WHERE game_id = ?
+                   ON CONFLICT(game_id, platform, snapshot_date)
+                       DO UPDATE SET playtime_minutes =
+                           MAX(playtime_minutes, excluded.playtime_minutes)""",
+                (target_game_id, source_game_id),
+            )
+            await db.execute(
+                "DELETE FROM play_history WHERE game_id = ?", (source_game_id,)
+            )
+
         if not dry_run:
             await db.execute("DELETE FROM game_aliases WHERE game_id = ?", (source_game_id,))
             await db.execute("DELETE FROM games WHERE id = ?", (source_game_id,))
@@ -660,6 +686,7 @@ async def merge_games(
         "ratings_kept_target": ratings_kept_target,
         "series_memberships_transferred": series_transferred,
         "aliases_transferred": aliases_transferred,
+        "play_history_rows_transferred": play_history_rows_transferred,
         "source_deleted": not dry_run,
     }
 
@@ -888,11 +915,25 @@ async def split_game(
         )
         new_game_id = cursor.lastrowid
 
+        play_history_rows_moved = 0
         if move_whole_platform:
             await db.execute(
                 "UPDATE game_platforms SET game_id = ? WHERE id = ?",
                 (new_game_id, source_platform_id),
             )
+            # The platform relationship now belongs to the new game, so its
+            # snapshot history follows — otherwise get_play_history would keep
+            # attributing this platform's playtime to the source game. No
+            # collision possible: the new game was just created. In the subset
+            # split below, history deliberately stays on the source: snapshots
+            # are per-(game, platform), not per-identifier, so past totals
+            # can't be attributed to the peeled identifier (the same reason
+            # the platform row's playtime stays put and re-syncs).
+            cursor = await db.execute(
+                "UPDATE play_history SET game_id = ? WHERE game_id = ? AND platform = ?",
+                (new_game_id, source_game_id, platform),
+            )
+            play_history_rows_moved = cursor.rowcount
         else:
             now = datetime.now(timezone.utc).isoformat()
             cursor = await db.execute(
@@ -920,6 +961,7 @@ async def split_game(
         "identifiers_moved": sorted(requested),
         "moved_whole_platform": move_whole_platform,
         "identifiers_remaining_on_source": remaining,
+        "play_history_rows_moved": play_history_rows_moved,
         "dry_run": False,
     }
 
