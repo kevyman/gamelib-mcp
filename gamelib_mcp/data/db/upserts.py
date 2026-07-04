@@ -31,6 +31,7 @@ GAME_EDITABLE_FIELDS = {
     "content_type",
     "parent_game_id",
     "is_primary_library_item",
+    "completion_status",
 }
 
 

@@ -29,6 +29,8 @@ from .search import (
     fuzzy_fallback_game_ids,
 )
 
+COMPLETION_STATUSES = {"playing", "completed", "abandoned"}
+
 
 async def get_platform_breakdown() -> dict:
     """
@@ -287,6 +289,7 @@ async def update_game(
     hltb_extra: float | None = None,
     hltb_complete: float | None = None,
     is_farmed: bool | None = None,
+    completion_status: str | None = None,
     clear_overrides: list[str] | None = None,
 ) -> dict:
     """
@@ -301,9 +304,11 @@ async def update_game(
     recomputes the taste profile. Renaming a game (new_name) additionally clears
     its name-matched enrichment caches (IGDB series/metadata, HowLongToBeat,
     OpenCritic/Metacritic) so background workers re-fetch under the correct title;
-    any field you also pinned in the same edit stays protected. Returns the
-    updated fields, any cleared columns, the full manual-override list, and the
-    providers whose enrichment was invalidated.
+    any field you also pinned in the same edit stays protected. completion_status
+    accepts playing, completed, or abandoned, or "none" to reset to automatic
+    playtime-based inference. Returns the updated fields, any cleared columns,
+    the full manual-override list, and the providers whose enrichment was
+    invalidated.
     """
     row = await _resolve_game_row(name, game_id)
     resolved_id = row["id"]
@@ -349,6 +354,17 @@ async def update_game(
             fields[label] = float(value)
     if is_farmed is not None:
         fields["is_farmed"] = int(bool(is_farmed))
+    if completion_status is not None:
+        normalized_status = completion_status.strip().lower()
+        if normalized_status == "none":
+            fields["completion_status"] = None
+        elif normalized_status in COMPLETION_STATUSES:
+            fields["completion_status"] = normalized_status
+        else:
+            raise ToolError(
+                f"Unknown completion_status '{completion_status}'. "
+                f"Valid: {sorted(COMPLETION_STATUSES)} or 'none' to reset"
+            )
 
     if not fields and not clear:
         raise ToolError("Provide at least one field to update or clear")

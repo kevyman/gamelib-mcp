@@ -13,6 +13,7 @@ from conftest import (
 )
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import discover
+from gamelib_mcp.tools.platforms import update_game
 
 
 class VibeFilterTests(ToolDBTestCase):
@@ -202,3 +203,29 @@ class VibeHintTests(ToolDBTestCase):
         await make_steam_game("Hades", 1, playtime_minutes=0, tags=["roguelike"])
         results = await discover.discover_games(vibes=["roguelike"])
         self.assertNotIn("note", results)
+
+
+class CompletionStatusExclusionTests(ToolDBTestCase):
+    async def test_discover_excludes_abandoned_and_completed(self):
+        gid_abandoned = await make_steam_game(
+            "Starfield", 1, playtime_minutes=0, tags=["rpg"]
+        )
+        await update_game(game_id=gid_abandoned, completion_status="abandoned")
+        gid_completed = await make_steam_game(
+            "Outer Wilds", 2, playtime_minutes=0, tags=["rpg"]
+        )
+        await update_game(game_id=gid_completed, completion_status="completed")
+        await make_steam_game("Hollow Knight", 3, playtime_minutes=0, tags=["rpg"])
+
+        results = await discover.discover_games(vibes=["rpg"])
+        names = [g["name"] for g in results["results"]]
+        self.assertNotIn("Starfield", names)
+        self.assertNotIn("Outer Wilds", names)
+        self.assertIn("Hollow Knight", names)
+
+    async def test_discover_excludes_even_when_unplayed_only_false(self):
+        gid = await make_steam_game("Abandoned Game", 1, playtime_minutes=200)
+        await update_game(game_id=gid, completion_status="abandoned")
+        results = await discover.discover_games(unplayed_only=False, sort_by="critic")
+        names = [g["name"] for g in results["results"]]
+        self.assertNotIn("Abandoned Game", names)

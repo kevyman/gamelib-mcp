@@ -1060,7 +1060,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             async with db_module.get_db() as db:
                 version = await db_module._get_user_version(db)
             self.assertEqual(version, db_module.SCHEMA_VERSION)
-            self.assertEqual(db_module.SCHEMA_VERSION, 20)
+            self.assertEqual(db_module.SCHEMA_VERSION, 21)
 
             unresolved = await seed_game("Still Unresolved Wishlisted Game")
             resolved = await seed_game("Already Resolved Wishlisted Game")
@@ -1094,6 +1094,44 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(rows[unresolved])
         self.assertIsNotNone(rows[resolved])
         self.assertIsNotNone(rows[not_wishlisted])
+
+    async def test_v20_to_v21_adds_completion_status(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V19_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 20")
+        conn.execute("INSERT INTO games (id, name) VALUES (1, 'Hollow Knight')")
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            result = await db_module.migrate_db()
+            async with db_module.get_db() as db:
+                cols = {
+                    row[1] for row in await db.execute_fetchall("PRAGMA table_info(games)")
+                }
+                row = await db.execute_fetchone(
+                    "SELECT completion_status FROM games WHERE id = 1"
+                )
+
+        self.assertEqual(result.final_version, 21)
+        self.assertIn("completion_status", cols)
+        # Existing row survives the additive migration untouched (NULL = unset).
+        self.assertIsNone(row["completion_status"])
+
+    async def test_fresh_v21_db_enforces_completion_status_check(self) -> None:
+        # A freshly-initialized database gets the canonical DDL (with the CHECK
+        # constraint) directly; only in-place migrations add a plain column
+        # (see _migrate_v20_to_v21) since older SQLite versions can't add a
+        # CHECK'd column via ALTER TABLE.
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+            async with db_module.get_db() as db:
+                with self.assertRaises(Exception):
+                    await db.execute(
+                        "INSERT INTO games (name, completion_status) VALUES ('x', 'finished')"
+                    )
 
     async def test_v9_to_v10_adds_series_tables(self) -> None:
         conn = sqlite3.connect(self.db_path)
