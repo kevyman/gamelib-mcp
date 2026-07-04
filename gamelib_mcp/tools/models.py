@@ -172,6 +172,7 @@ class BacklogStatsResponse(FlexibleModel):
     playing: int
     completed: int
     abandoned: int
+    evergreen: int
 
 
 class RefreshLibraryResponse(FlexibleModel):

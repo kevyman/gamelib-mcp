@@ -229,3 +229,16 @@ class CompletionStatusExclusionTests(ToolDBTestCase):
         results = await discover.discover_games(unplayed_only=False, sort_by="critic")
         names = [g["name"] for g in results["results"]]
         self.assertNotIn("Abandoned Game", names)
+
+    async def test_discover_does_not_exclude_evergreen(self):
+        # Unlike completed/abandoned, an evergreen game (no completion concept)
+        # is still a legitimate recommendation candidate.
+        gid = await make_steam_game(
+            "Rocket League", 1, playtime_minutes=6000, tags=["rpg"]
+        )
+        await update_game(game_id=gid, completion_status="evergreen")
+        results = await discover.discover_games(
+            vibes=["rpg"], unplayed_only=False, sort_by="critic"
+        )
+        names = [g["name"] for g in results["results"]]
+        self.assertIn("Rocket League", names)

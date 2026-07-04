@@ -90,6 +90,48 @@ class SuggestCompletionStatusTests(ToolDBTestCase):
         result = await completion.suggest_completion_status()
         self.assertEqual(result["count"], 0)
 
+    async def test_huge_playtime_no_hltb_suggests_evergreen_not_completed(self):
+        # Rocket-League-shaped: an endless multiplayer game with no
+        # HowLongToBeat main-story entry at all, but hundreds of hours played.
+        await make_steam_game(
+            "Rocket League", 1, playtime_minutes=400 * 60, hltb_main=None
+        )
+        result = await completion.suggest_completion_status()
+        self.assertEqual(result["count"], 1)
+        entry = result["suggestions"][0]
+        self.assertEqual(entry["name"], "Rocket League")
+        self.assertEqual(entry["suggested_status"], "evergreen")
+        self.assertNotEqual(entry["suggested_status"], "completed")
+        self.assertIn("400h", entry["reason"])
+
+    async def test_moderate_playtime_no_hltb_produces_no_suggestion(self):
+        # Not enough playtime to distinguish "endless game" from "barely
+        # tried it" when there's no HLTB signal to lean on.
+        gid = await seed_game("Mystery Game")
+        await add_platform(gid, "steam", playtime_minutes=10 * 60)
+        result = await completion.suggest_completion_status()
+        self.assertEqual(result["count"], 0)
+
+    async def test_playtime_far_over_hltb_suggests_evergreen_not_completed(self):
+        # Tabletop-Simulator-shaped: HLTB main exists but playtime dwarfs it.
+        await make_steam_game(
+            "Tabletop Simulator", 1, playtime_minutes=150 * 60, hltb_main=8.0
+        )
+        result = await completion.suggest_completion_status()
+        self.assertEqual(result["count"], 1)
+        entry = result["suggestions"][0]
+        self.assertEqual(entry["suggested_status"], "evergreen")
+        self.assertIn("150h", entry["reason"])
+        self.assertIn("8h", entry["reason"])
+
+    async def test_evergreen_games_are_never_suggested(self):
+        gid = await make_steam_game(
+            "Rocket League", 1, playtime_minutes=400 * 60, hltb_main=None
+        )
+        await update_game(game_id=gid, completion_status="evergreen")
+        result = await completion.suggest_completion_status()
+        self.assertEqual(result["count"], 0)
+
     async def test_non_primary_library_item_excluded(self):
         parent_id = await seed_game("Base Game")
         await add_platform(parent_id, "steam", playtime_minutes=100 * 60)

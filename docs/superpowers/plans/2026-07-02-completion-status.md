@@ -15,6 +15,7 @@
 - Schema version at plan time is **17**; this plan writes migration **v17→v18**. If another migration landed first, renumber everything to `SCHEMA_VERSION + 1` (check `gamelib_mcp/data/db/__init__.py:105`).
   - **Actual execution note:** by the time this plan was implemented, `SCHEMA_VERSION` was already 20 (wishlist deals + cross-platform IGDB re-claim migrations landed first), and the tool count was already 33. The migration in this branch is **v20→v21** (`_V20_SCHEMA_DDL`, `_migrate_v20_to_v21`), and the tool-count test bumped **33→34**. Everything else in this plan applies unchanged.
 - Status vocabulary is exactly `{"playing", "completed", "abandoned"}` plus the sentinel `"none"` (accepted by `update_game` to reset to NULL). Reject anything else with a `ToolError` listing valid values.
+  - **Update (later PR, not part of this plan):** the vocabulary was extended to add `"evergreen"` (endless games with no completion concept — Rocket League, Tabletop Simulator, MMOs, sandboxes), via a v22→v23 migration that rebuilds the `games` table's CHECK constraint where needed. Everywhere in this document that enumerates `{"playing", "completed", "abandoned"}` should now be read as including `"evergreen"` too.
 - Suggestions never write — `suggest_completion_status` is strictly read-only; the human (via the AI) confirms each one through `update_game`.
 - Test runner `.venv/bin/python -m pytest`; ruff + mypy must pass before each commit.
 

@@ -1060,7 +1060,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             async with db_module.get_db() as db:
                 version = await db_module._get_user_version(db)
             self.assertEqual(version, db_module.SCHEMA_VERSION)
-            self.assertEqual(db_module.SCHEMA_VERSION, 22)
+            self.assertEqual(db_module.SCHEMA_VERSION, 23)
 
             unresolved = await seed_game("Still Unresolved Wishlisted Game")
             resolved = await seed_game("Already Resolved Wishlisted Game")
@@ -1151,6 +1151,106 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.final_version, db_module.SCHEMA_VERSION)
         self.assertEqual(cols, {"game_id", "platform", "snapshot_date", "playtime_minutes"})
+
+    async def test_v22_to_v23_rebuilds_check_constraint_for_evergreen(self) -> None:
+        # A DB fresh-initialized while SCHEMA_VERSION was 21 or 22 got the
+        # canonical DDL directly, CHECK constraint and all — _V21_SCHEMA_DDL
+        # (unchanged by this branch) still carries the pre-evergreen CHECK.
+        # Related rows (game_platforms, an FK child) must survive the rebuild.
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V21_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 22")
+        conn.execute(
+            "INSERT INTO games (id, name, completion_status) "
+            "VALUES (1, 'Rocket League', 'playing')"
+        )
+        conn.execute(
+            """INSERT INTO game_platforms
+               (id, game_id, platform, owned, last_synced)
+               VALUES (1, 1, 'steam', 1, '2024-01-01T00:00:00+00:00')"""
+        )
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            result = await db_module.migrate_db()
+            async with db_module.get_db() as db:
+                row = await db.execute_fetchone(
+                    "SELECT name, completion_status FROM games WHERE id = 1"
+                )
+                gp_row = await db.execute_fetchone(
+                    "SELECT game_id, platform FROM game_platforms WHERE id = 1"
+                )
+                # Previously rejected by the old CHECK; must succeed now.
+                await db.execute(
+                    "UPDATE games SET completion_status = 'evergreen' WHERE id = 1"
+                )
+                await db.commit()
+                updated = await db.execute_fetchone(
+                    "SELECT completion_status FROM games WHERE id = 1"
+                )
+                index_names = {
+                    r[0]
+                    for r in await db.execute_fetchall(
+                        "SELECT name FROM sqlite_master "
+                        "WHERE type = 'index' AND tbl_name = 'games'"
+                    )
+                }
+
+        self.assertEqual(result.final_version, db_module.SCHEMA_VERSION)
+        self.assertEqual(row["name"], "Rocket League")
+        self.assertEqual(row["completion_status"], "playing")
+        self.assertEqual(gp_row["game_id"], 1)
+        self.assertEqual(gp_row["platform"], "steam")
+        self.assertEqual(updated["completion_status"], "evergreen")
+        for expected_index in db_module._GAMES_TABLE_INDEXES:
+            self.assertIn(expected_index, index_names)
+
+    async def test_v22_to_v23_skips_rebuild_when_no_check_constraint(self) -> None:
+        # A DB that only ever added completion_status via the v20->v21 plain
+        # ALTER TABLE has no CHECK to begin with and needs no repair.
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V19_SCHEMA_DDL)
+        conn.execute("ALTER TABLE games ADD COLUMN completion_status TEXT")
+        conn.execute("PRAGMA user_version = 22")
+        conn.execute("INSERT INTO games (id, name) VALUES (1, 'Tabletop Simulator')")
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            result = await db_module.migrate_db()
+            async with db_module.get_db() as db:
+                await db.execute(
+                    "UPDATE games SET completion_status = 'evergreen' WHERE id = 1"
+                )
+                await db.commit()
+                updated = await db.execute_fetchone(
+                    "SELECT completion_status FROM games WHERE id = 1"
+                )
+
+        self.assertEqual(result.final_version, db_module.SCHEMA_VERSION)
+        self.assertEqual(updated["completion_status"], "evergreen")
+
+    async def test_fresh_db_accepts_evergreen_directly(self) -> None:
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+            async with db_module.get_db() as db:
+                await db.execute(
+                    "INSERT INTO games (name, completion_status) VALUES ('Rocket League', 'evergreen')"
+                )
+                await db.commit()
+                row = await db.execute_fetchone(
+                    "SELECT completion_status FROM games WHERE name = 'Rocket League'"
+                )
+                with self.assertRaises(Exception):
+                    await db.execute(
+                        "INSERT INTO games (name, completion_status) VALUES ('x', 'finished')"
+                    )
+
+        self.assertEqual(row["completion_status"], "evergreen")
 
     async def test_v9_to_v10_adds_series_tables(self) -> None:
         conn = sqlite3.connect(self.db_path)
