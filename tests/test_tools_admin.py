@@ -6,6 +6,7 @@ successful file-write path (writes to a temp NINTENDO_COOKIES_FILE).
 
 import asyncio
 import json
+import os
 
 from fastmcp.exceptions import ToolError
 from unittest.mock import AsyncMock, patch
@@ -760,3 +761,180 @@ class MergeGamesTests(ToolDBTestCase):
             )
         self.assertEqual(still_on_src["c"], 1)
         self.assertEqual(on_tgt["c"], 0)
+
+
+class RevalidateIgdbMatchesTests(ToolDBTestCase):
+    """revalidate_igdb_matches: audit stored igdb_ids against IGDB's names."""
+
+    _ENV = {"TWITCH_CLIENT_ID": "test-client", "TWITCH_CLIENT_SECRET": "test-secret"}
+
+    async def _seed(self) -> dict[str, int]:
+        good = await seed_game("The Witcher: Enhanced Edition")
+        bad_tales = await seed_game("Tales from the Borderlands")
+        bad_payday = await seed_game("PAYDAY 2")
+        pinned = await seed_game("Pinned Game")
+        unenriched = await seed_game("No IGDB Row")
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = 283715 WHERE id = ?", (good,))
+            await db.execute("UPDATE games SET igdb_id = 214139 WHERE id = ?", (bad_tales,))
+            await db.execute(
+                "UPDATE games SET igdb_id = 150511, igdb_platforms = '[6]', "
+                "igdb_cached_at = '2026-01-01', igdb_claimed_at = '2026-01-01' "
+                "WHERE id = ?",
+                (bad_payday,),
+            )
+            await db.execute(
+                "UPDATE games SET igdb_id = 999, manual_overrides = ? WHERE id = ?",
+                (json.dumps(["igdb_id"]), pinned),
+            )
+            await db.commit()
+        await db_module.upsert_game_series_links(
+            bad_payday, [("franchise", 912, "Payday")]
+        )
+        return {
+            "good": good,
+            "bad_tales": bad_tales,
+            "bad_payday": bad_payday,
+            "pinned": pinned,
+            "unenriched": unenriched,
+        }
+
+    _IGDB_NAMES = {
+        283715: "The Witcher: Enhanced Edition",  # matches (edition-strip equal anyway)
+        214139: "New Tales from the Borderlands",  # prod mismatch
+        150511: "Payday 2 VR",  # prod mismatch
+        999: "Something Else Entirely",  # mismatch but manual override
+    }
+
+    async def test_dry_run_reports_mismatches_without_changing_rows(self) -> None:
+        ids = await self._seed()
+        with (
+            patch.dict("os.environ", self._ENV),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_igdb_game_names",
+                AsyncMock(return_value=self._IGDB_NAMES),
+            ),
+        ):
+            result = await admin.revalidate_igdb_matches(dry_run=True)
+
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(result["checked"], 4)  # unenriched row not checked
+        self.assertEqual(result["mismatch_count"], 2)
+        self.assertEqual(
+            {m["game_id"] for m in result["mismatches"]},
+            {ids["bad_tales"], ids["bad_payday"]},
+        )
+        by_id = {m["game_id"]: m for m in result["mismatches"]}
+        self.assertEqual(
+            by_id[ids["bad_payday"]]["igdb_name"], "Payday 2 VR"
+        )
+        self.assertEqual(result["reset_count"], 0)
+        self.assertEqual(result["skipped_overridden"], 1)
+
+        # Nothing was modified.
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT igdb_id, igdb_cached_at FROM games WHERE id = ?",
+                (ids["bad_payday"],),
+            )
+            memberships = await db.execute_fetchall(
+                "SELECT 1 FROM game_series_membership WHERE game_id = ?",
+                (ids["bad_payday"],),
+            )
+        self.assertEqual(row["igdb_id"], 150511)
+        self.assertIsNotNone(row["igdb_cached_at"])
+        self.assertEqual(len(memberships), 1)
+
+    async def test_wet_run_resets_only_mismatched_unpinned_rows(self) -> None:
+        ids = await self._seed()
+        with (
+            patch.dict("os.environ", self._ENV),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_igdb_game_names",
+                AsyncMock(return_value=self._IGDB_NAMES),
+            ),
+        ):
+            result = await admin.revalidate_igdb_matches(dry_run=False)
+
+        self.assertFalse(result["dry_run"])
+        self.assertEqual(result["reset_count"], 2)
+        self.assertEqual(result["skipped_overridden"], 1)
+
+        async with db_module.get_db() as db:
+            rows = {
+                r["id"]: r
+                for r in await db.execute_fetchall(
+                    "SELECT id, igdb_id, igdb_platforms, igdb_cached_at, igdb_claimed_at "
+                    "FROM games"
+                )
+            }
+            memberships = await db.execute_fetchall(
+                "SELECT 1 FROM game_series_membership WHERE game_id = ?",
+                (ids["bad_payday"],),
+            )
+
+        # Mismatched rows fully reset for re-enrichment.
+        for key in ("bad_tales", "bad_payday"):
+            row = rows[ids[key]]
+            self.assertIsNone(row["igdb_id"])
+            self.assertIsNone(row["igdb_platforms"])
+            self.assertIsNone(row["igdb_cached_at"])
+            self.assertIsNone(row["igdb_claimed_at"])
+        self.assertEqual(memberships, [])
+        # Matching row and manually pinned row untouched.
+        self.assertEqual(rows[ids["good"]]["igdb_id"], 283715)
+        self.assertEqual(rows[ids["pinned"]]["igdb_id"], 999)
+
+    async def test_unresolved_igdb_ids_are_counted_and_left_alone(self) -> None:
+        ids = await self._seed()
+        # IGDB returns nothing for any id (all deleted/merged upstream).
+        with (
+            patch.dict("os.environ", self._ENV),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_igdb_game_names",
+                AsyncMock(return_value={}),
+            ),
+        ):
+            result = await admin.revalidate_igdb_matches(dry_run=False)
+
+        self.assertEqual(result["mismatch_count"], 0)
+        self.assertEqual(result["reset_count"], 0)
+        self.assertEqual(result["unresolved_igdb_ids"], 4)
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT igdb_id FROM games WHERE id = ?", (ids["bad_payday"],)
+            )
+        self.assertEqual(row["igdb_id"], 150511)
+
+    async def test_limit_caps_checked_rows(self) -> None:
+        await self._seed()
+        with (
+            patch.dict("os.environ", self._ENV),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_igdb_game_names",
+                AsyncMock(return_value=self._IGDB_NAMES),
+            ) as fetch_mock,
+        ):
+            result = await admin.revalidate_igdb_matches(dry_run=True, limit=2)
+
+        self.assertEqual(result["checked"], 2)
+        # Only the first two rows' ids were sent to IGDB.
+        self.assertEqual(len(fetch_mock.await_args.args[0]), 2)
+
+    async def test_unconfigured_returns_empty_report(self) -> None:
+        await self._seed()
+        env_backup = {
+            key: os.environ.pop(key, None)
+            for key in ("TWITCH_CLIENT_ID", "TWITCH_CLIENT_SECRET")
+        }
+        try:
+            result = await admin.revalidate_igdb_matches()
+        finally:
+            for key, value in env_backup.items():
+                if value is not None:
+                    os.environ[key] = value
+
+        self.assertFalse(result["igdb_configured"])
+        self.assertEqual(result["checked"], 0)
+        self.assertEqual(result["mismatches"], [])

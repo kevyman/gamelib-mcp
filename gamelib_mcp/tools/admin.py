@@ -1048,3 +1048,111 @@ async def detect_cross_platform_collapses(limit: int = 0) -> dict:
         "candidates": candidates,
         "igdb_configured": igdb_configured,
     }
+
+
+async def revalidate_igdb_matches(dry_run: bool = True, limit: int | None = None) -> dict:
+    """Audit every stored igdb_id against IGDB's actual name for that id.
+
+    Wrong name-based enrichment is worse than none: prod carried rows like
+    "Tales from the Borderlands" enriched as "New Tales from the Borderlands"
+    (214139), "PAYDAY 2" as "Payday 2 VR" (150511), and "Borderlands GOTY" as
+    the unrelated "The Tower on the Borderland" (258897) — poisoning series
+    gaps, deals availability, and series memberships. This tool batch-fetches
+    the IGDB name for every games row with an igdb_id (chunked, rate-gated via
+    fetch_igdb_game_names) and applies the same strict gate new enrichment
+    uses (edition-stripped normalized titles must be equal,
+    normalize_series_gap_title).
+
+    dry_run=True (default) only reports mismatches. dry_run=False resets the
+    IGDB enrichment on mismatched rows — igdb_id/igdb_platforms/
+    igdb_cached_at/igdb_claimed_at to NULL and that game's
+    game_series_membership rows deleted (they came from the bad match) — so
+    background enrichment re-resolves them under the strict gate. Rows whose
+    igdb_id is listed in games.manual_overrides are reported separately and
+    never reset. limit caps how many rows are checked (None/0 = all).
+    """
+    from ..data.db import get_manual_overrides
+    from ..data.igdb import fetch_igdb_game_names, igdb_credentials_configured
+    from ..data.title_normalization import normalize_series_gap_title
+
+    igdb_configured = igdb_credentials_configured()
+
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            "SELECT id, name, igdb_id FROM games WHERE igdb_id IS NOT NULL ORDER BY id"
+        )
+    if limit is not None and limit > 0:
+        rows = rows[:limit]
+
+    result = {
+        "dry_run": dry_run,
+        "igdb_configured": igdb_configured,
+        "checked": 0,
+        "mismatch_count": 0,
+        "mismatches": [],
+        "reset_count": 0,
+        "skipped_overridden": 0,
+        "unresolved_igdb_ids": 0,
+    }
+    if not igdb_configured or not rows:
+        return result
+
+    igdb_names = await fetch_igdb_game_names([row["igdb_id"] for row in rows])
+
+    mismatches: list[dict] = []
+    skipped_overridden = 0
+    unresolved = 0
+    async with get_db() as db:
+        for row in rows:
+            igdb_name = igdb_names.get(row["igdb_id"])
+            if igdb_name is None:
+                # IGDB no longer returns this id (deleted/merged upstream) —
+                # can't validate the name, so don't touch the row.
+                unresolved += 1
+                continue
+            if normalize_series_gap_title(row["name"]) == normalize_series_gap_title(
+                igdb_name
+            ):
+                continue
+            if "igdb_id" in await get_manual_overrides(db, row["id"]):
+                skipped_overridden += 1
+                continue
+            mismatches.append(
+                {
+                    "game_id": row["id"],
+                    "name": row["name"],
+                    "igdb_id": row["igdb_id"],
+                    "igdb_name": igdb_name,
+                }
+            )
+
+        reset_count = 0
+        if not dry_run and mismatches:
+            for mismatch in mismatches:
+                await db.execute(
+                    """UPDATE games
+                       SET igdb_id = NULL,
+                           igdb_platforms = NULL,
+                           igdb_cached_at = NULL,
+                           igdb_claimed_at = NULL
+                       WHERE id = ?""",
+                    (mismatch["game_id"],),
+                )
+                await db.execute(
+                    "DELETE FROM game_series_membership WHERE game_id = ?",
+                    (mismatch["game_id"],),
+                )
+            await db.commit()
+            reset_count = len(mismatches)
+
+    result.update(
+        {
+            "checked": len(rows),
+            "mismatch_count": len(mismatches),
+            "mismatches": mismatches,
+            "reset_count": reset_count,
+            "skipped_overridden": skipped_overridden,
+            "unresolved_igdb_ids": unresolved,
+        }
+    )
+    return result
