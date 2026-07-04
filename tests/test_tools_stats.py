@@ -22,6 +22,7 @@ class BacklogStatsTests(ToolDBTestCase):
                 "playing",
                 "completed",
                 "abandoned",
+                "evergreen",
                 "unplayed_with_hltb",
                 "backlog_hours_hltb",
                 "weekly_pace_hours",
@@ -129,3 +130,16 @@ class BacklogStatsTests(ToolDBTestCase):
         await update_game(game_id=gid, completion_status="playing")
         result = await stats.get_backlog_stats()
         self.assertEqual(result["playing"], 1)
+
+    async def test_evergreen_game_excluded_from_backlog_hours_and_counted(self):
+        gid = await make_steam_game(
+            "Rocket League", 1, playtime_minutes=0, hltb_main=40.0
+        )
+        await update_game(game_id=gid, completion_status="evergreen")
+        result = await stats.get_backlog_stats()
+        self.assertEqual(result["backlog_hours_hltb"], 0)
+        self.assertEqual(result["unplayed_with_hltb"], 0)
+        self.assertEqual(result["evergreen"], 1)
+        # Still counted as unplayed by the pure playtime signal (0 minutes) —
+        # only the backlog-hours/hltb aggregates exclude evergreen games.
+        self.assertEqual(result["unplayed"], 1)

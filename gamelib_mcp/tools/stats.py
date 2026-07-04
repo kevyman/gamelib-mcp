@@ -48,16 +48,17 @@ async def get_backlog_stats() -> dict:
                    SUM(CASE WHEN completion_status = 'playing'   THEN 1 ELSE 0 END) AS playing,
                    SUM(CASE WHEN completion_status = 'completed' THEN 1 ELSE 0 END) AS completed,
                    SUM(CASE WHEN completion_status = 'abandoned' THEN 1 ELSE 0 END) AS abandoned,
+                   SUM(CASE WHEN completion_status = 'evergreen' THEN 1 ELSE 0 END) AS evergreen,
                    SUM(CASE
                            WHEN play_state = 'unplayed' AND hltb_main IS NOT NULL
                                 AND (completion_status IS NULL
-                                     OR completion_status NOT IN ('completed', 'abandoned'))
+                                     OR completion_status NOT IN ('completed', 'abandoned', 'evergreen'))
                            THEN 1 ELSE 0
                        END) AS unplayed_with_hltb,
                    SUM(CASE
                            WHEN play_state = 'unplayed' AND hltb_main IS NOT NULL
                                 AND (completion_status IS NULL
-                                     OR completion_status NOT IN ('completed', 'abandoned'))
+                                     OR completion_status NOT IN ('completed', 'abandoned', 'evergreen'))
                            THEN hltb_main ELSE 0
                        END) AS backlog_hours_hltb,
                    SUM(total_playtime_2weeks_minutes) AS recent_minutes
@@ -70,7 +71,7 @@ async def get_backlog_stats() -> dict:
             SELECT je.value AS genre, COUNT(*) AS c
             FROM game_rollup, json_each(game_rollup.genres) je
             WHERE play_state = 'unplayed'
-              AND (completion_status IS NULL OR completion_status NOT IN ('completed', 'abandoned'))
+              AND (completion_status IS NULL OR completion_status NOT IN ('completed', 'abandoned', 'evergreen'))
             GROUP BY genre
             ORDER BY c DESC
             LIMIT 1
@@ -82,7 +83,7 @@ async def get_backlog_stats() -> dict:
             SELECT name, metacritic_score
             FROM game_rollup
             WHERE play_state = 'unplayed'
-              AND (completion_status IS NULL OR completion_status NOT IN ('completed', 'abandoned'))
+              AND (completion_status IS NULL OR completion_status NOT IN ('completed', 'abandoned', 'evergreen'))
               AND metacritic_score IS NOT NULL
             ORDER BY metacritic_score DESC
             LIMIT 1
@@ -94,7 +95,7 @@ async def get_backlog_stats() -> dict:
             SELECT name, opencritic_score
             FROM game_rollup
             WHERE play_state = 'unplayed'
-              AND (completion_status IS NULL OR completion_status NOT IN ('completed', 'abandoned'))
+              AND (completion_status IS NULL OR completion_status NOT IN ('completed', 'abandoned', 'evergreen'))
               AND opencritic_score IS NOT NULL
             ORDER BY opencritic_score DESC
             LIMIT 1
@@ -108,7 +109,7 @@ async def get_backlog_stats() -> dict:
             JOIN ratings r ON r.game_id = gr.game_id
             WHERE gr.play_state = 'unplayed'
               AND (gr.completion_status IS NULL
-                   OR gr.completion_status NOT IN ('completed', 'abandoned'))
+                   OR gr.completion_status NOT IN ('completed', 'abandoned', 'evergreen'))
             ORDER BY r.normalized_score DESC
             LIMIT 1
             """
@@ -122,6 +123,7 @@ async def get_backlog_stats() -> dict:
     playing_count = summary["playing"] or 0
     completed_count = summary["completed"] or 0
     abandoned_count = summary["abandoned"] or 0
+    evergreen_count = summary["evergreen"] or 0
     played_pct = round(played_count / total_count * 100) if total_count else 0
     unplayed_pct = round(unplayed_count / total_count * 100) if total_count else 0
     unknown_pct = round(unknown_count / total_count * 100) if total_count else 0
@@ -146,6 +148,7 @@ async def get_backlog_stats() -> dict:
         "playing": playing_count,
         "completed": completed_count,
         "abandoned": abandoned_count,
+        "evergreen": evergreen_count,
         "unplayed_with_hltb": summary["unplayed_with_hltb"] or 0,
         "backlog_hours_hltb": backlog_hours_hltb,
         "weekly_pace_hours": weekly_hours,

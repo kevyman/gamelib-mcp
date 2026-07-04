@@ -29,7 +29,7 @@ from .search import (
     fuzzy_fallback_game_ids,
 )
 
-COMPLETION_STATUSES = {"playing", "completed", "abandoned"}
+COMPLETION_STATUSES = {"playing", "completed", "abandoned", "evergreen"}
 
 
 async def get_platform_breakdown() -> dict:
@@ -305,8 +305,10 @@ async def update_game(
     its name-matched enrichment caches (IGDB series/metadata, HowLongToBeat,
     OpenCritic/Metacritic) so background workers re-fetch under the correct title;
     any field you also pinned in the same edit stays protected. completion_status
-    accepts playing, completed, or abandoned, or "none" to reset to automatic
-    playtime-based inference. Returns the updated fields, any cleared columns,
+    accepts playing, completed, abandoned, or evergreen (endless games with no
+    completion concept, e.g. Rocket League, Tabletop Simulator, MMOs, sandboxes),
+    or "none" to reset to automatic playtime-based inference. Returns the
+    updated fields, any cleared columns,
     the full manual-override list, and the providers whose enrichment was
     invalidated.
     """

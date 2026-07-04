@@ -161,9 +161,9 @@ async def get_library_stats(
 
     Use this for backlog slices, unplayed lists, recent activity, or farmed-game
     audits; prefer get_game_detail for one selected game. filter accepts all,
-    unplayed, played, recent, farmed, unknown, playing, completed, or abandoned
-    (the last three read the user-set completion_status from update_game).
-    sort_by accepts playtime, name,
+    unplayed, played, recent, farmed, unknown, playing, completed, abandoned,
+    or evergreen (the last four read the user-set completion_status from
+    update_game). sort_by accepts playtime, name,
     metacritic, opencritic, or hltb. min_metacritic/min_opencritic filter on
     critic scores (unscored games are excluded). tags/genres/series filter
     case-insensitively; a game must carry every listed entry (e.g.
@@ -340,12 +340,15 @@ async def suggest_completion_status(limit: int = 25) -> CompletionSuggestionsRes
     Suggest completion statuses for games you haven't classified yet.
 
     Read-only heuristic — nothing is written. Confirm a suggestion with
-    update_game(game_id=..., completion_status=...). Two signals: completed
-    (total playtime >= HowLongToBeat main-story hours) and abandoned (at least
-    2h played, under half of HLTB main, and no activity for 12+ months).
-    Already-classified, farmed, and non-primary-library (DLC/expansion/edition)
-    games are never suggested. Ordered by confidence: completed suggestions
-    first (highest playtime/HLTB ratio), then abandoned (staler first).
+    update_game(game_id=..., completion_status=...). Three signals: completed
+    (total playtime >= HowLongToBeat main-story hours), evergreen (playtime is
+    3x+ HLTB main, or 40h+ with no usable HLTB signal — endless/sandbox games
+    like Rocket League or Tabletop Simulator), and abandoned (at least 2h
+    played, under half of HLTB main, and no activity for 12+ months).
+    Already-classified (including evergreen), farmed, and non-primary-library
+    (DLC/expansion/edition) games are never suggested. Ordered by confidence:
+    completed suggestions first (highest playtime/HLTB ratio), then evergreen
+    (highest playtime), then abandoned (staler first).
     """
     from .tools.completion import suggest_completion_status as _suggest
     return await _suggest(limit)
@@ -825,10 +828,12 @@ async def update_game(
     library syncs and background enrichment will NOT overwrite it. To undo a
     protection and hand a column back to automatic sync, list its name in
     clear_overrides (e.g. clear_overrides=["is_farmed"]); this keeps the current
-    value but lets future syncs update it. completion_status: playing | completed
-    | abandoned, or 'none' to reset to automatic inference. Editing tags
-    recomputes the taste profile. Returns the updated fields, any cleared
-    columns, and the full manual-override list.
+    value but lets future syncs update it. completion_status: playing |
+    completed | abandoned | evergreen (endless games with no completion
+    concept, e.g. Rocket League, Tabletop Simulator, MMOs, sandboxes), or
+    'none' to reset to automatic inference. Editing tags recomputes the taste
+    profile. Returns the updated fields, any cleared columns, and the full
+    manual-override list.
     """
     from .tools.platforms import update_game as _update
     return await _update(
