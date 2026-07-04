@@ -1185,6 +1185,82 @@ async def resolve_steam_appids_to_igdb(appids: list[str]) -> dict[str, int]:
     return result
 
 
+@dataclass(frozen=True)
+class SeriesMember:
+    igdb_id: int
+    name: str
+    first_release_date: str | None  # ISO YYYY-MM-DD via _unix_to_iso
+    game_type: int
+    platforms: list[int]  # raw IGDB platform ids
+
+
+# DLC/bundles/ports are noise for "gap" purposes; keep only main-line entries.
+SERIES_MEMBER_GAME_TYPES = frozenset({0, 4, 8, 9})
+
+_SERIES_FIELD_FOR_KIND = {"collection": "collections", "franchise": "franchises"}
+
+_SERIES_MEMBERS_PAGE_SIZE = 500
+
+
+async def fetch_series_members(kind: str, series_igdb_id: int) -> list["SeriesMember"]:
+    """All main-game members of an IGDB collection or franchise.
+
+    kind is "collection" or "franchise" (matching game_series.kind). Paginates
+    (IGDB caps at 500/page; few series exceed one page). Raises
+    IGDBRequestFailure on API failure — callers decide whether a stale cache is
+    acceptable.
+    """
+    field = _SERIES_FIELD_FOR_KIND.get(kind)
+    if field is None:
+        raise ValueError(f"kind must be one of {sorted(_SERIES_FIELD_FOR_KIND)}")
+
+    client_id = os.environ.get("TWITCH_CLIENT_ID")
+    if not client_id:
+        raise IGDBRequestFailure(
+            "TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET must be set for IGDB enrichment"
+        )
+
+    try:
+        token = await _get_token()
+        headers = _igdb_headers(client_id, token)
+
+        members: list[SeriesMember] = []
+        offset = 0
+        while True:
+            query = (
+                "fields id, name, first_release_date, game_type, platforms.id; "
+                f"where {field} = ({series_igdb_id}); "
+                f"limit {_SERIES_MEMBERS_PAGE_SIZE}; offset {offset};"
+            )
+            rows = await _post_igdb_games(query, headers)
+            for row in rows:
+                game_type = row.get("game_type")
+                if game_type is None:
+                    game_type = 0
+                if game_type not in SERIES_MEMBER_GAME_TYPES:
+                    continue
+                members.append(
+                    SeriesMember(
+                        igdb_id=row["id"],
+                        name=row.get("name", ""),
+                        first_release_date=_unix_to_iso(row.get("first_release_date")),
+                        game_type=game_type,
+                        platforms=[
+                            p["id"] for p in row.get("platforms") or [] if isinstance(p, dict)
+                        ],
+                    )
+                )
+            if len(rows) < _SERIES_MEMBERS_PAGE_SIZE:
+                return members
+            offset += _SERIES_MEMBERS_PAGE_SIZE
+    except IGDBRequestFailure:
+        raise
+    except Exception as exc:
+        raise IGDBRequestFailure(
+            f"IGDB series-member fetch failed for {kind} {series_igdb_id}"
+        ) from exc
+
+
 async def fetch_igdb_game_names(igdb_ids: list[int]) -> dict[int, str]:
     """Return {igdb_game_id: name} for the given IGDB game ids (for display)."""
     client_id = os.environ.get("TWITCH_CLIENT_ID")

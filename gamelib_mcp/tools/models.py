@@ -76,6 +76,37 @@ class SeriesBreakdownResponse(FlexibleModel):
     has_more: bool
 
 
+class SeriesGapMember(FlexibleModel):
+    igdb_id: int
+    name: str
+    release_date: str | None = None
+    game_type: int
+    available_on: list[str] = Field(default_factory=list)
+
+
+class SeriesGapEntry(FlexibleModel):
+    series_id: int
+    series_name: str
+    kind: str
+    owned_count: int
+    avg_rating: float | None = None
+    total_playtime_hours: float
+    gaps: list[SeriesGapMember] = Field(default_factory=list)
+
+
+class SeriesGapsError(FlexibleModel):
+    series: str
+    error: str
+
+
+class SeriesGapsResponse(FlexibleModel):
+    results: list[SeriesGapEntry]
+    series_checked: int
+    errors: list[SeriesGapsError] = Field(default_factory=list)
+    status: str | None = None
+    error_summary: str | None = None
+
+
 class LibraryStatsResponse(PaginatedGamesResponse):
     total_games: int
     played: int
