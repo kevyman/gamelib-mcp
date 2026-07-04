@@ -1266,7 +1266,7 @@ async def fetch_series_members(kind: str, series_igdb_id: int) -> list["SeriesMe
 
 
 async def fetch_version_parent_aliases(member_igdb_ids: list[int]) -> dict[int, int]:
-    """Map edition/version IGDB ids onto a series member's id via version_parent.
+    """Map edition/re-release IGDB ids onto a series member's id.
 
     A series' member list (fetch_series_members) contains only the canonical
     entries IGDB's collections/franchises fields point at; an owned
@@ -1274,10 +1274,18 @@ async def fetch_version_parent_aliases(member_igdb_ids: list[int]) -> dict[int, 
     283715) is a *different* IGDB game whose ``version_parent`` is the
     canonical member (id 80) — and typically carries no collection/franchise
     of its own, so IGDB backfill never links it into game_series_membership.
+    The same happens through ``parent_game``: re-releases/remasters/bundled
+    GOTY entries (e.g. the 2021 "Tales from the Borderlands" re-release, igdb
+    214139, whose parent_game is the 2014 original 6707) hang off the member
+    as *children* rather than versions.
 
-    Queries every game whose version_parent is one of ``member_igdb_ids`` and
-    returns {edition_igdb_id: canonical_member_igdb_id}, so a caller's
-    have-set of owned/wishlisted igdb_ids can also match on the edition.
+    Queries every game whose version_parent OR parent_game is one of
+    ``member_igdb_ids`` and returns {child_igdb_id: canonical_member_igdb_id}.
+    version_parent children always alias. parent_game children alias only
+    when their category/game_type is NOT DLC (1) or expansion (2) — owning a
+    DLC must not read as owning the base game, but a re-release/remaster/
+    standalone GOTY entry does. When a child carries both links,
+    version_parent wins.
 
     Raises IGDBRequestFailure on API failure; returns {} for an empty input or
     when IGDB is unconfigured (mirrors fetch_igdb_game_names).
@@ -1300,16 +1308,29 @@ async def fetch_version_parent_aliases(member_igdb_ids: list[int]) -> dict[int, 
             offset = 0
             while True:
                 query = (
-                    "fields id, version_parent, name; "
-                    f"where version_parent = ({id_list}); "
+                    "fields id, version_parent, parent_game, category, game_type, name; "
+                    f"where version_parent = ({id_list}) | parent_game = ({id_list}); "
                     f"limit {_SERIES_MEMBERS_PAGE_SIZE}; offset {offset};"
                 )
                 rows = await _post_igdb_games(query, headers)
                 for row in rows:
-                    edition_id = row.get("id")
-                    parent_id = row.get("version_parent")
-                    if edition_id is not None and parent_id is not None:
-                        aliases[edition_id] = parent_id
+                    child_id = row.get("id")
+                    if child_id is None:
+                        continue
+                    version_parent = row.get("version_parent")
+                    if version_parent is not None:
+                        aliases[child_id] = version_parent
+                        continue
+                    parent_game = row.get("parent_game")
+                    if parent_game is None:
+                        continue
+                    # category/game_type fallback mirrors _parse_igdb_item:
+                    # IGDB has migrated category -> game_type for some titles.
+                    category = row.get("category")
+                    effective = category if category is not None else row.get("game_type")
+                    if effective in (CATEGORY_DLC, CATEGORY_EXPANSION):
+                        continue
+                    aliases[child_id] = parent_game
                 if len(rows) < _SERIES_MEMBERS_PAGE_SIZE:
                     break
                 offset += _SERIES_MEMBERS_PAGE_SIZE

@@ -34,7 +34,7 @@ class GetSeriesMembersCachedTests(ToolDBTestCase):
 
         from gamelib_mcp.data.db import get_meta
 
-        raw = await get_meta("series_members_v2:collection:555")
+        raw = await get_meta("series_members_v3:collection:555")
         self.assertIsNotNone(raw)
 
     async def test_second_call_within_ttl_does_not_refetch(self) -> None:
@@ -87,7 +87,7 @@ class GetSeriesMembersCachedTests(ToolDBTestCase):
     async def test_malformed_cache_entry_treated_as_absent(self) -> None:
         from gamelib_mcp.data.db import set_meta
 
-        await set_meta("series_members_v2:collection:1", "not json")
+        await set_meta("series_members_v3:collection:1", "not json")
         fetch_mock = AsyncMock(return_value=[_member(igdb_id=2)])
         with patch("gamelib_mcp.data.series_gaps.fetch_series_members", fetch_mock):
             result = await series_gaps.get_series_members_cached("collection", 1)
@@ -120,7 +120,7 @@ class GetSeriesMembersCachedTests(ToolDBTestCase):
                 # deliberately no "aliases" key
             }
         )
-        await set_meta("series_members_v2:collection:1", old_payload)
+        await set_meta("series_members_v3:collection:1", old_payload)
 
         fetch_mock = AsyncMock(return_value=[_member(igdb_id=2, name="Pikmin 2")])
         with patch("gamelib_mcp.data.series_gaps.fetch_series_members", fetch_mock):
@@ -131,6 +131,6 @@ class GetSeriesMembersCachedTests(ToolDBTestCase):
         self.assertEqual(result.aliases, {})
 
         # And the cache was rewritten in the new (with-aliases) format.
-        raw = await get_meta("series_members_v2:collection:1")
+        raw = await get_meta("series_members_v3:collection:1")
         assert raw is not None
         self.assertIn("aliases", json.loads(raw))
