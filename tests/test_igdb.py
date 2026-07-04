@@ -948,3 +948,109 @@ class PlatformFilterTests(unittest.TestCase):
         self.assertEqual(igdb.IGDB_TO_PLATFORM[508], "switch2")
         self.assertEqual(igdb.IGDB_TO_PLATFORM[6], "steam")
         self.assertEqual(igdb.IGDB_TO_PLATFORM[167], "ps5")
+
+
+class FetchSeriesMembersTests(unittest.IsolatedAsyncioTestCase):
+    async def test_builds_collection_query_and_parses(self) -> None:
+        captured = {}
+
+        async def fake_post(query: str, headers: dict[str, str]) -> list[dict]:
+            captured["query"] = query
+            return [
+                {
+                    "id": 1,
+                    "name": "Pikmin",
+                    "first_release_date": 1009843200,
+                    "game_type": 0,
+                    "platforms": [{"id": 130}],
+                },
+                {"id": 2, "name": "Pikmin 4 Bundle", "game_type": 3},
+            ]
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", side_effect=fake_post),
+        ):
+            members = await igdb.fetch_series_members("collection", 555)
+
+        self.assertIn("where collections = (555)", captured["query"])
+        self.assertEqual([m.igdb_id for m in members], [1])  # bundle filtered out
+        self.assertEqual(members[0].first_release_date, "2002-01-01")
+        self.assertEqual(members[0].platforms, [130])
+
+    async def test_builds_franchise_query(self) -> None:
+        captured = {}
+
+        async def fake_post(query: str, headers: dict[str, str]) -> list[dict]:
+            captured["query"] = query
+            return []
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", side_effect=fake_post),
+        ):
+            await igdb.fetch_series_members("franchise", 42)
+
+        self.assertIn("where franchises = (42)", captured["query"])
+
+    async def test_defaults_missing_game_type_to_main_game(self) -> None:
+        async def fake_post(query: str, headers: dict[str, str]) -> list[dict]:
+            return [{"id": 3, "name": "Undated Entry"}]
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", side_effect=fake_post),
+        ):
+            members = await igdb.fetch_series_members("collection", 1)
+
+        self.assertEqual(len(members), 1)
+        self.assertEqual(members[0].game_type, 0)
+        self.assertIsNone(members[0].first_release_date)
+
+    async def test_paginates_when_a_full_page_is_returned(self) -> None:
+        call_count = 0
+
+        async def fake_post(query: str, headers: dict[str, str]) -> list[dict]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return [
+                    {"id": i, "name": f"Game {i}", "game_type": 0}
+                    for i in range(igdb._SERIES_MEMBERS_PAGE_SIZE)
+                ]
+            return [{"id": 9999, "name": "Last Page Game", "game_type": 0}]
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", side_effect=fake_post),
+        ):
+            members = await igdb.fetch_series_members("collection", 1)
+
+        self.assertEqual(call_count, 2)
+        self.assertEqual(len(members), igdb._SERIES_MEMBERS_PAGE_SIZE + 1)
+        self.assertEqual(members[-1].igdb_id, 9999)
+
+    async def test_rejects_unknown_kind(self) -> None:
+        with self.assertRaises(ValueError):
+            await igdb.fetch_series_members("saga", 1)
+
+    async def test_raises_igdb_request_failure_without_credentials(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaises(igdb.IGDBRequestFailure):
+                await igdb.fetch_series_members("collection", 1)
+
+    async def test_wraps_post_failure_as_igdb_request_failure(self) -> None:
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch(
+                "gamelib_mcp.data.igdb._post_igdb_games",
+                AsyncMock(side_effect=RuntimeError("boom")),
+            ),
+        ):
+            with self.assertRaises(igdb.IGDBRequestFailure):
+                await igdb.fetch_series_members("collection", 1)
