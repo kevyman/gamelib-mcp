@@ -1081,6 +1081,38 @@ class FetchVersionParentAliasesTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("where version_parent = (80, 478)", captured["query"])
         self.assertEqual(aliases, {283715: 80, 20740: 478})
 
+    async def test_paginates_when_a_full_page_of_editions_is_returned(self) -> None:
+        # IGDB caps a page at 500; >500 edition children across a member-id
+        # chunk must paginate (offset loop) instead of silently dropping the
+        # overflow, mirroring fetch_series_members.
+        queries: list[str] = []
+
+        async def fake_post(query: str, headers: dict[str, str]) -> list[dict]:
+            queries.append(query)
+            if len(queries) == 1:
+                return [
+                    {"id": 10_000 + i, "version_parent": 80, "name": f"Edition {i}"}
+                    for i in range(igdb._SERIES_MEMBERS_PAGE_SIZE)
+                ]
+            return [{"id": 99_999, "version_parent": 80, "name": "Last Page Edition"}]
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"TWITCH_CLIENT_ID": "client", "TWITCH_CLIENT_SECRET": "secret"},
+                clear=True,
+            ),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", side_effect=fake_post),
+        ):
+            aliases = await igdb.fetch_version_parent_aliases([80])
+
+        self.assertEqual(len(queries), 2)
+        self.assertIn("offset 0;", queries[0])
+        self.assertIn(f"offset {igdb._SERIES_MEMBERS_PAGE_SIZE};", queries[1])
+        self.assertEqual(len(aliases), igdb._SERIES_MEMBERS_PAGE_SIZE + 1)
+        self.assertEqual(aliases[99_999], 80)
+
     async def test_empty_input_short_circuits_without_request(self) -> None:
         with patch.dict(
             "os.environ",

@@ -541,6 +541,78 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
 
         self.assertEqual(result["results"][0]["gaps"], [])
 
+    async def test_name_match_with_conflicting_year_does_not_suppress_true_gap(self):
+        # DOOM (2016) and Doom (1993) both normalize to "doom". Owning the
+        # 2016 reboot (with a distinct igdb_id and a known release year) must
+        # NOT suppress the 1993 member — a true gap. Year-gated name matching:
+        # both sides have years, 23 years apart, so the match does not count.
+        reboot = await seed_game("DOOM", release_date="2016-05-13")
+        await add_platform(reboot, "steam", owned=1)
+        await set_igdb_id(reboot, 7351)
+        eternal = await seed_owned_game("Doom Eternal")
+        for gid in (reboot, eternal):
+            await link_series(gid, "franchise", 904, "Doom")
+
+        members = [SeriesMember(673, "Doom", "1993-12-10", 0, [])]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=_members_result(members)),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        gap_ids = {g["igdb_id"] for g in result["results"][0]["gaps"]}
+        self.assertEqual(gap_ids, {673})
+
+    async def test_name_match_with_close_year_still_suppresses(self):
+        # Both sides have years but they agree (within ±1: editions and
+        # regional releases can straddle a year boundary) — the name match
+        # still counts as ownership.
+        owned = await seed_game("Borderlands GOTY", release_date="2010-10-12")
+        await add_platform(owned, "steam", owned=1)
+        other_owned = await seed_owned_game("Borderlands 2")
+        for gid in (owned, other_owned):
+            await link_series(gid, "collection", 905, "Borderlands")
+
+        members = [SeriesMember(999, "Borderlands", "2009-10-20", 0, [])]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=_members_result(members)),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        self.assertEqual(result["results"][0]["gaps"], [])
+
+    async def test_name_match_with_unknown_member_year_still_suppresses(self):
+        # The member side lacking a release year must not defeat the name
+        # fallback (mirrors the library-row-without-year case covered by
+        # test_name_fallback_excludes_owned_game_with_no_igdb_id).
+        owned = await seed_game("Borderlands GOTY", release_date="2010-10-12")
+        await add_platform(owned, "steam", owned=1)
+        other_owned = await seed_owned_game("Borderlands 2")
+        for gid in (owned, other_owned):
+            await link_series(gid, "collection", 906, "Borderlands")
+
+        members = [SeriesMember(999, "Borderlands", None, 0, [])]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=_members_result(members)),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2, include_unreleased=True)
+
+        self.assertEqual(result["results"][0]["gaps"], [])
+
     async def test_true_positive_gap_preserved_by_all_three_layers(self):
         # A member that isn't owned by id, alias, or normalized name must
         # still be reported — none of the three new exclusion layers should

@@ -1294,17 +1294,25 @@ async def fetch_version_parent_aliases(member_igdb_ids: list[int]) -> dict[int, 
         aliases: dict[int, int] = {}
         for chunk in _chunked(ids, 100):
             id_list = ", ".join(str(i) for i in chunk)
-            query = (
-                "fields id, version_parent, name; "
-                f"where version_parent = ({id_list}); "
-                "limit 500;"
-            )
-            rows = await _post_igdb_games(query, headers)
-            for row in rows:
-                edition_id = row.get("id")
-                parent_id = row.get("version_parent")
-                if edition_id is not None and parent_id is not None:
-                    aliases[edition_id] = parent_id
+            # Paginate like fetch_series_members: IGDB caps a page at 500,
+            # and a prolific series' members can have >500 edition children
+            # between them — a single page would silently drop aliases.
+            offset = 0
+            while True:
+                query = (
+                    "fields id, version_parent, name; "
+                    f"where version_parent = ({id_list}); "
+                    f"limit {_SERIES_MEMBERS_PAGE_SIZE}; offset {offset};"
+                )
+                rows = await _post_igdb_games(query, headers)
+                for row in rows:
+                    edition_id = row.get("id")
+                    parent_id = row.get("version_parent")
+                    if edition_id is not None and parent_id is not None:
+                        aliases[edition_id] = parent_id
+                if len(rows) < _SERIES_MEMBERS_PAGE_SIZE:
+                    break
+                offset += _SERIES_MEMBERS_PAGE_SIZE
         return aliases
     except IGDBRequestFailure:
         raise

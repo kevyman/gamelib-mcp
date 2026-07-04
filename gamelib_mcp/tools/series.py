@@ -185,6 +185,32 @@ async def _load_members(
     return {sid: (included.get(sid, []), collapsed.get(sid, [])) for sid in series_ids}
 
 
+def _release_year(iso_date: str | None) -> int | None:
+    """Year component of an ISO YYYY-MM-DD date string, or None."""
+    if not iso_date:
+        return None
+    try:
+        return int(str(iso_date)[:4])
+    except ValueError:
+        return None
+
+
+def _name_match_counts_as_owned(member_year: int | None, row_years: set[int | None]) -> bool:
+    """Whether a normalized-name match should exclude a member as a gap.
+
+    A same-name-different-game pair like DOOM (2016) vs Doom (1993) both
+    normalize to "doom", so a bare name match would suppress a true gap.
+    When BOTH the member and a matching library row have a known release
+    year, the match only counts if the years are within ±1 (editions and
+    regional releases can straddle a year boundary); if either side lacks a
+    year, the match stands — an unenriched row ("Borderlands GOTY" with no
+    release_date yet) must still suppress its base game.
+    """
+    if member_year is None:
+        return True
+    return any(year is None or abs(year - member_year) <= 1 for year in row_years)
+
+
 async def discover_series_gaps(
     kind: str | None = None,
     min_owned: int = 2,
@@ -275,7 +301,7 @@ async def discover_series_gaps(
         # can recognize it as "have".
         have_rows = await db.execute_fetchall(
             """
-            SELECT igdb_id, name FROM games
+            SELECT igdb_id, name, release_date FROM games
             WHERE EXISTS (SELECT 1 FROM game_platforms gp
                           WHERE gp.game_id = games.id AND gp.owned = 1)
                OR EXISTS (SELECT 1 FROM game_wishlist w
@@ -290,7 +316,16 @@ async def discover_series_gaps(
     # map doesn't happen to cover). Deterministic exact match only — no fuzzy
     # scoring — so it only excludes members that are the *same* title under
     # edition/case/punctuation normalization, never a merely-similar one.
-    have_names = {normalize_series_gap_title(row["name"]) for row in have_rows if row["name"]}
+    # Each normalized name maps to the release years of the rows carrying it,
+    # so a same-name different-game pair (DOOM 2016 vs Doom 1993) can be told
+    # apart by year in _name_match_counts_as_owned below.
+    have_name_years: dict[str, set[int | None]] = {}
+    for row in have_rows:
+        if not row["name"]:
+            continue
+        have_name_years.setdefault(normalize_series_gap_title(row["name"]), set()).add(
+            _release_year(row["release_date"])
+        )
     today = datetime.now(timezone.utc).date().isoformat()
 
     with_gaps: list[dict] = []
@@ -324,7 +359,10 @@ async def discover_series_gaps(
                 continue
             if member.igdb_id in owned_alias_targets:
                 continue
-            if normalize_series_gap_title(member.name) in have_names:
+            matched_years = have_name_years.get(normalize_series_gap_title(member.name))
+            if matched_years is not None and _name_match_counts_as_owned(
+                _release_year(member.first_release_date), matched_years
+            ):
                 continue
             if not include_unreleased and (
                 member.first_release_date is None or member.first_release_date > today
