@@ -9,17 +9,21 @@ from gamelib_mcp.tools import admin, common
 
 class RegistryDerivationTests(unittest.TestCase):
     def test_derived_sets_match_expected_vocabulary(self):
-        self.assertEqual(reg.SYNCABLE_PLATFORMS, frozenset({"steam", "epic", "gog", "switch2", "ps5"}))
+        self.assertEqual(
+            reg.SYNCABLE_PLATFORMS, frozenset({"steam", "epic", "gog", "switch2", "ps5", "xbox"})
+        )
         self.assertEqual(
             reg.LIBRARY_PLATFORMS,
-            reg.SYNCABLE_PLATFORMS | {"itchio", "xbox", "ea", "ubisoft", "other"},
+            reg.SYNCABLE_PLATFORMS | {"itchio", "ea", "ubisoft", "other"},
         )
         self.assertEqual(reg.WISHLIST_SYNCABLE_PLATFORMS, frozenset({"steam", "switch2"}))
         self.assertEqual(
             reg.PLATFORM_ALIASES,
             {"nintendo": "switch2", "switch": "switch2", "uplay": "ubisoft", "origin": "ea"},
         )
-        self.assertEqual(reg.SYNC_METADATA_PLATFORMS, ("steam", "epic", "gog", "switch2", "ps5"))
+        self.assertEqual(
+            reg.SYNC_METADATA_PLATFORMS, ("steam", "epic", "gog", "switch2", "ps5", "xbox")
+        )
         self.assertEqual(reg.INSPECTOR_PLATFORM_ALIASES, {"switch2": "nintendo"})
 
     def test_consumers_reexport_the_registry_objects(self):
