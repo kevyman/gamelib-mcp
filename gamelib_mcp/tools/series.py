@@ -1,6 +1,13 @@
-"""get_series_breakdown tool: rank game series/franchises by owned-game count."""
+"""get_series_breakdown / discover_series_gaps: series/franchise tools.
+
+get_series_breakdown ranks owned series by how many games are owned in each.
+discover_series_gaps answers a different question — "which entries am I
+missing in series I own and love?" — by combining the same game_series
+tables with live IGDB series-member lookups (data/series_gaps.py).
+"""
 
 from collections import defaultdict
+from datetime import datetime, timezone
 
 from fastmcp.exceptions import ToolError
 
@@ -176,3 +183,136 @@ async def _load_members(
                 {"name": row["name"], "reason": row["content_type"]}
             )
     return {sid: (included.get(sid, []), collapsed.get(sid, [])) for sid in series_ids}
+
+
+async def discover_series_gaps(
+    kind: str | None = None,
+    min_owned: int = 2,
+    limit: int = 10,
+    include_unreleased: bool = False,
+    refresh_cache: bool = False,
+) -> dict:
+    """
+    Unowned entries in series you own and rate highly.
+
+    Ranks your series by taste (average personal rating of its games, then
+    total playtime), takes the top `limit`, fetches each one's full member
+    list from IGDB, and subtracts what you own or already wishlisted. kind
+    filters to collection|franchise; min_owned skips series where you own
+    fewer games; include_unreleased keeps unreleased/undated entries.
+    Requires IGDB credentials (TWITCH_CLIENT_ID/SECRET).
+    """
+    from ..data.igdb import IGDB_TO_PLATFORM, IGDBRequestFailure, igdb_credentials_configured
+    from ..data.series_gaps import get_series_members_cached
+
+    if kind is not None and kind not in VALID_KINDS:
+        raise ToolError(f"Unknown kind '{kind}'. Valid: {sorted(VALID_KINDS)}")
+
+    if not igdb_credentials_configured():
+        return {
+            "results": [],
+            "series_checked": 0,
+            "errors": [],
+            "status": "unconfigured",
+            "error_summary": "TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET must be set",
+        }
+
+    min_owned = max(1, min_owned)
+    limit = clamp_limit(limit)
+
+    params: dict = {"min_owned": min_owned, "limit": limit}
+    kind_clause = ""
+    if kind is not None:
+        kind_clause = "AND s.kind = :kind"
+        params["kind"] = kind
+
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            f"""
+            SELECT s.id AS series_id,
+                   s.igdb_id AS igdb_id,
+                   s.kind AS kind,
+                   s.name AS series_name,
+                   COUNT(DISTINCT m.game_id) AS owned_count,
+                   AVG(r.normalized_score) AS avg_rating,
+                   COALESCE(SUM(
+                       (SELECT COALESCE(SUM(gp.playtime_minutes), 0)
+                        FROM game_platforms gp WHERE gp.game_id = g.id)
+                   ), 0) AS total_playtime_minutes
+            FROM game_series s
+            JOIN game_series_membership m ON m.series_id = s.id
+            JOIN games g ON g.id = m.game_id AND g.is_primary_library_item = 1
+            LEFT JOIN ratings r ON r.game_id = g.id
+            WHERE s.igdb_id IS NOT NULL {kind_clause}
+            GROUP BY s.id
+            HAVING owned_count >= :min_owned
+            ORDER BY (avg_rating IS NULL) ASC, avg_rating DESC, total_playtime_minutes DESC
+            LIMIT :limit
+            """,
+            params,
+        )
+
+        # The whole games table's igdb_ids count as "have": a wishlisted game's
+        # game_wishlist row already points at a games.id, so this single query
+        # covers owned-anywhere, wishlisted, and even known-but-collapsed rows.
+        have_rows = await db.execute_fetchall(
+            "SELECT igdb_id FROM games WHERE igdb_id IS NOT NULL"
+        )
+
+    have_igdb_ids = {row["igdb_id"] for row in have_rows}
+    today = datetime.now(timezone.utc).date().isoformat()
+
+    with_gaps: list[dict] = []
+    without_gaps: list[dict] = []
+    errors: list[dict] = []
+
+    for row in rows:
+        series_igdb_id = row["igdb_id"]
+        series_kind = row["kind"]
+        try:
+            members = await get_series_members_cached(
+                series_kind, series_igdb_id, refresh=refresh_cache
+            )
+        except IGDBRequestFailure as exc:
+            errors.append({"series": row["series_name"], "error": str(exc)})
+            continue
+
+        gaps = []
+        for member in members:
+            if member.igdb_id in have_igdb_ids:
+                continue
+            if not include_unreleased and (
+                member.first_release_date is None or member.first_release_date > today
+            ):
+                continue
+            available_on = sorted(
+                {IGDB_TO_PLATFORM[p] for p in member.platforms if p in IGDB_TO_PLATFORM}
+            )
+            gaps.append(
+                {
+                    "igdb_id": member.igdb_id,
+                    "name": member.name,
+                    "release_date": member.first_release_date,
+                    "game_type": member.game_type,
+                    "available_on": available_on,
+                }
+            )
+
+        entry = {
+            "series_id": row["series_id"],
+            "series_name": row["series_name"],
+            "kind": series_kind,
+            "owned_count": row["owned_count"],
+            "avg_rating": (
+                round(row["avg_rating"], 2) if row["avg_rating"] is not None else None
+            ),
+            "total_playtime_hours": round((row["total_playtime_minutes"] or 0) / 60, 1),
+            "gaps": gaps,
+        }
+        (with_gaps if gaps else without_gaps).append(entry)
+
+    return {
+        "results": with_gaps + without_gaps,
+        "series_checked": len(rows),
+        "errors": errors,
+    }

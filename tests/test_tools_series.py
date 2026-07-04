@@ -1,12 +1,39 @@
-"""Characterization tests for gamelib_mcp.tools.series.get_series_breakdown."""
+"""Characterization tests for gamelib_mcp.tools.series: get_series_breakdown
+and discover_series_gaps.
+"""
 
-from conftest import ToolDBTestCase, seed_game, add_platform
+import os
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
+
+from conftest import ToolDBTestCase, add_platform, add_rating, seed_game
+
 from gamelib_mcp.data import db as db_module
+from gamelib_mcp.data.igdb import IGDBRequestFailure, SeriesMember
 from gamelib_mcp.tools import series
+
+_IGDB_ENV = {"TWITCH_CLIENT_ID": "test-client", "TWITCH_CLIENT_SECRET": "test-secret"}
 
 
 async def link_series(game_id: int, kind: str, igdb_id: int, name: str) -> None:
     await db_module.upsert_game_series_links(game_id, [(kind, igdb_id, name)])
+
+
+async def set_igdb_id(game_id: int, igdb_id: int) -> None:
+    async with db_module.get_db() as db:
+        await db.execute("UPDATE games SET igdb_id = ? WHERE id = ?", (igdb_id, game_id))
+        await db.commit()
+
+
+async def add_wishlist(game_id: int, platform: str, *, source: str = "manual") -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    async with db_module.get_db() as db:
+        await db.execute(
+            """INSERT INTO game_wishlist (game_id, platform, wishlisted_at, source)
+               VALUES (?, ?, ?, ?)""",
+            (game_id, platform, now, source),
+        )
+        await db.commit()
 
 
 class SeriesBreakdownTests(ToolDBTestCase):
@@ -156,3 +183,160 @@ class SeriesBreakdownTests(ToolDBTestCase):
     async def test_invalid_counting_mode_raises(self):
         with self.assertRaises(Exception):
             await series.get_series_breakdown(counting_mode="bogus")
+
+
+class DiscoverSeriesGapsTests(ToolDBTestCase):
+    async def test_unconfigured_without_igdb_credentials(self):
+        backup = {
+            key: os.environ.pop(key, None) for key in ("TWITCH_CLIENT_ID", "TWITCH_CLIENT_SECRET")
+        }
+        try:
+            result = await series.discover_series_gaps()
+        finally:
+            for key, value in backup.items():
+                if value is not None:
+                    os.environ[key] = value
+
+        self.assertEqual(result["status"], "unconfigured")
+        self.assertEqual(result["results"], [])
+        self.assertEqual(result["series_checked"], 0)
+        self.assertIn("TWITCH_CLIENT_ID", result["error_summary"])
+
+    async def test_min_owned_filters_series(self):
+        solo = await seed_game("Mass Effect")
+        await link_series(solo, "collection", 10, "Mass Effect")
+        b1 = await seed_game("Dragon Age")
+        b2 = await seed_game("Dragon Age 2")
+        for gid in (b1, b2):
+            await link_series(gid, "collection", 20, "Dragon Age")
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=[]),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        self.assertEqual([r["series_name"] for r in result["results"]], ["Dragon Age"])
+        self.assertEqual(result["series_checked"], 1)
+
+    async def test_excludes_owned_and_wishlisted_igdb_ids(self):
+        base = await seed_game("Kirby's Dream Land")
+        await link_series(base, "franchise", 30, "Kirby")
+        second = await seed_game("Kirby's Dream Land 2")
+        await link_series(second, "franchise", 30, "Kirby")
+        await set_igdb_id(second, 200)
+
+        # A wishlist-only row whose game already carries an igdb_id: still
+        # counts as "have", even though it isn't a series member itself.
+        wishlisted = await seed_game("Kirby's Adventure")
+        await set_igdb_id(wishlisted, 300)
+        await add_wishlist(wishlisted, "switch2")
+
+        members = [
+            SeriesMember(200, "Kirby's Dream Land 2", "1995-03-21", 0, []),
+            SeriesMember(300, "Kirby's Adventure", "1993-03-23", 0, []),
+            SeriesMember(400, "Kirby 64: The Crystal Shards", "2000-03-24", 0, []),
+        ]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=members),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=1)
+
+        entry = result["results"][0]
+        gap_ids = {g["igdb_id"] for g in entry["gaps"]}
+        self.assertEqual(gap_ids, {400})
+
+    async def test_unreleased_filtered_unless_requested(self):
+        a = await seed_game("Metroid Prime")
+        b = await seed_game("Metroid Prime 2")
+        for gid in (a, b):
+            await link_series(gid, "franchise", 60, "Metroid")
+
+        members = [
+            SeriesMember(500, "Metroid Prime 4", "2099-01-01", 0, []),
+            SeriesMember(501, "Metroid Prime Undated", None, 0, []),
+            SeriesMember(502, "Metroid Prime 3", "2007-08-28", 0, []),
+        ]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=members),
+            ),
+        ):
+            default_result = await series.discover_series_gaps(min_owned=1)
+            unreleased_result = await series.discover_series_gaps(
+                min_owned=1, include_unreleased=True
+            )
+
+        default_gap_ids = {g["igdb_id"] for g in default_result["results"][0]["gaps"]}
+        self.assertEqual(default_gap_ids, {502})
+
+        unreleased_gap_ids = {g["igdb_id"] for g in unreleased_result["results"][0]["gaps"]}
+        self.assertEqual(unreleased_gap_ids, {500, 501, 502})
+
+    async def test_per_series_fetch_error_recorded_without_failing(self):
+        a1 = await seed_game("Halo")
+        a2 = await seed_game("Halo 2")
+        for gid in (a1, a2):
+            await link_series(gid, "franchise", 70, "Halo")
+        b1 = await seed_game("Gears of War")
+        b2 = await seed_game("Gears of War 2")
+        for gid in (b1, b2):
+            await link_series(gid, "franchise", 71, "Gears of War")
+        # Give "Halo" the higher rating so it's ranked (and attempted) first.
+        await add_rating(a1, "manual", 9.0, 9.0)
+        await add_rating(b1, "manual", 5.0, 5.0)
+
+        async def fake_get_members(kind, igdb_id, refresh=False):
+            if igdb_id == 70:
+                raise IGDBRequestFailure("IGDB is down")
+            return []
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(side_effect=fake_get_members),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        self.assertEqual(result["series_checked"], 2)
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertEqual(result["errors"][0]["series"], "Halo")
+        self.assertIn("IGDB is down", result["errors"][0]["error"])
+        self.assertEqual([r["series_name"] for r in result["results"]], ["Gears of War"])
+
+    async def test_available_on_maps_igdb_platforms(self):
+        a = await seed_game("Hollow Knight")
+        b = await seed_game("Hollow Knight: Voidheart")
+        for gid in (a, b):
+            await link_series(gid, "collection", 80, "Hollow Knight")
+
+        members = [SeriesMember(600, "Hollow Knight: Silksong", "2025-09-04", 0, [130, 6])]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=members),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=1)
+
+        gap = result["results"][0]["gaps"][0]
+        self.assertEqual(gap["available_on"], ["steam", "switch2"])
+
+    async def test_invalid_kind_raises(self):
+        with self.assertRaises(Exception):
+            await series.discover_series_gaps(kind="saga")
