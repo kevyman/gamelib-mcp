@@ -11,11 +11,24 @@ _ABANDONED_MIN_MINUTES = 120
 _ABANDONED_MAX_HLTB_RATIO = 0.5
 _ABANDONED_MIN_STALE_DAYS = 365
 
+# Evergreen candidates: playtime far beyond any finite completion signal —
+# the shape of an endless/sandbox game (Rocket League, Tabletop Simulator,
+# MMOs) rather than a story you'd ever mark "completed". Two conservative,
+# deterministic branches:
+#  - hltb_main present and not near-zero: playtime is a large multiple of it.
+#  - hltb_main absent or near-zero (no useful story-length signal at all):
+#    playtime alone must be substantial on its own.
+_EVERGREEN_MIN_HLTB_RATIO = 3.0
+_EVERGREEN_NEAR_ZERO_HLTB_HOURS = 1.0
+_EVERGREEN_MIN_MINUTES_NO_HLTB = 40 * 60
+
 # One rollup per currently-unclassified, non-farmed primary-library game: total
 # playtime plus the freshest last-played signal across both sources (Steam's
 # own rtime_last_played and the generic game_platforms.last_played written by
-# Nintendo/PSN). Both hltb_main and playtime are required for a signal at all —
-# there is nothing to compare playtime against otherwise.
+# Nintendo/PSN). hltb_main is intentionally NOT required here (unlike the old
+# completed/abandoned-only version) — the no-HLTB evergreen branch needs rows
+# where it's NULL to be visible at all; playtime is still required since
+# there's nothing to suggest from with none.
 _SUGGESTION_SQL = f"""
 WITH rollup AS (
     SELECT g.id AS game_id, g.name, g.hltb_main,
@@ -31,7 +44,7 @@ WITH rollup AS (
     GROUP BY g.id
 )
 SELECT * FROM rollup
-WHERE playtime_minutes IS NOT NULL AND playtime_minutes > 0 AND hltb_main IS NOT NULL
+WHERE playtime_minutes IS NOT NULL AND playtime_minutes > 0
 """
 
 
@@ -66,29 +79,82 @@ async def suggest_completion_status(limit: int = 25) -> dict:
     Suggest completion statuses for games you haven't classified yet.
 
     Read-only heuristic — nothing is written. Confirm a suggestion with
-    update_game(game_id=..., completion_status=...). Two signals:
+    update_game(game_id=..., completion_status=...). Three signals:
+    - evergreen: playtime is >= 3x HowLongToBeat main-story hours, or (when
+      HLTB main is missing/near-zero and so gives no usable signal) total
+      playtime alone is substantial (40h+). Endless/sandbox games (Rocket
+      League, Tabletop Simulator, MMOs) fit this shape, not a "completed" run.
     - completed: total playtime >= HowLongToBeat main-story hours
     - abandoned: at least 2h played, under half of HLTB main, and no activity
       for 12+ months (Steam rtime_last_played / game_platforms.last_played)
-    Games already given a completion_status, farmed games, and non-primary
-    library items (DLC/expansions/editions) are never suggested. Results are
-    ordered by confidence: completed suggestions first (highest playtime/HLTB
-    ratio first), then abandoned suggestions (staler first).
+    Games already given a completion_status (including evergreen), farmed
+    games, and non-primary library items (DLC/expansions/editions) are never
+    suggested. Results are ordered by confidence within each signal: completed
+    first (highest playtime/HLTB ratio), then evergreen (highest playtime),
+    then abandoned (staler first).
     """
     limit = _clamp_limit(limit)
     async with get_db() as db:
         rows = await db.execute_fetchall(_SUGGESTION_SQL)
 
     completed: list[tuple[float, dict]] = []
+    evergreen: list[tuple[float, dict]] = []
     abandoned: list[tuple[int, dict]] = []
     for row in rows:
         playtime_minutes = row["playtime_minutes"]
         hltb_main = row["hltb_main"]
-        hltb_minutes = hltb_main * 60
-        if hltb_minutes <= 0:
-            continue
         playtime_hours = round(playtime_minutes / 60, 1)
+
+        if hltb_main is None or hltb_main <= _EVERGREEN_NEAR_ZERO_HLTB_HOURS:
+            # No reliable story-length signal to compare against; require a
+            # large playtime on its own before suggesting anything.
+            if playtime_minutes >= _EVERGREEN_MIN_MINUTES_NO_HLTB:
+                evergreen.append(
+                    (
+                        playtime_hours,
+                        {
+                            "game_id": row["game_id"],
+                            "name": row["name"],
+                            "suggested_status": "evergreen",
+                            "reason": (
+                                f"Played {round(playtime_hours)}h with no useful "
+                                "HowLongToBeat signal — likely an endless/sandbox game"
+                            ),
+                            "playtime_hours": playtime_hours,
+                            "hltb_main": hltb_main,
+                            "last_played": _freshest_activity(
+                                row["last_played"], row["rtime_last_played"]
+                            )[1],
+                        },
+                    )
+                )
+            continue
+
+        hltb_minutes = hltb_main * 60
         ratio = playtime_minutes / hltb_minutes
+
+        if ratio >= _EVERGREEN_MIN_HLTB_RATIO:
+            evergreen.append(
+                (
+                    playtime_hours,
+                    {
+                        "game_id": row["game_id"],
+                        "name": row["name"],
+                        "suggested_status": "evergreen",
+                        "reason": (
+                            f"Played {round(playtime_hours)}h — {round(ratio, 1)}x "
+                            f"the {round(hltb_main)}h main story; looks like a "
+                            "game with no fixed ending"
+                        ),
+                        "playtime_hours": playtime_hours,
+                        "hltb_main": hltb_main,
+                        "last_played": _freshest_activity(
+                            row["last_played"], row["rtime_last_played"]
+                        )[1],
+                    },
+                )
+            )
+            continue
 
         if playtime_minutes >= hltb_minutes:
             completed.append(
@@ -143,8 +209,13 @@ async def suggest_completion_status(limit: int = 25) -> dict:
         )
 
     completed.sort(key=lambda entry: entry[0], reverse=True)
+    evergreen.sort(key=lambda entry: entry[0], reverse=True)
     abandoned.sort(key=lambda entry: entry[0], reverse=True)
-    suggestions = [entry for _, entry in completed] + [entry for _, entry in abandoned]
+    suggestions = (
+        [entry for _, entry in completed]
+        + [entry for _, entry in evergreen]
+        + [entry for _, entry in abandoned]
+    )
     suggestions = suggestions[:limit]
 
     return {
