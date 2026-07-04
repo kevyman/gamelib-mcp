@@ -1265,6 +1265,63 @@ async def fetch_series_members(kind: str, series_igdb_id: int) -> list["SeriesMe
         ) from exc
 
 
+async def fetch_version_parent_aliases(member_igdb_ids: list[int]) -> dict[int, int]:
+    """Map edition/version IGDB ids onto a series member's id via version_parent.
+
+    A series' member list (fetch_series_members) contains only the canonical
+    entries IGDB's collections/franchises fields point at; an owned
+    edition-specific entry (e.g. "The Witcher: Enhanced Edition", igdb id
+    283715) is a *different* IGDB game whose ``version_parent`` is the
+    canonical member (id 80) — and typically carries no collection/franchise
+    of its own, so IGDB backfill never links it into game_series_membership.
+
+    Queries every game whose version_parent is one of ``member_igdb_ids`` and
+    returns {edition_igdb_id: canonical_member_igdb_id}, so a caller's
+    have-set of owned/wishlisted igdb_ids can also match on the edition.
+
+    Raises IGDBRequestFailure on API failure; returns {} for an empty input or
+    when IGDB is unconfigured (mirrors fetch_igdb_game_names).
+    """
+    client_id = os.environ.get("TWITCH_CLIENT_ID")
+    ids = [i for i in dict.fromkeys(member_igdb_ids) if i is not None]
+    if not client_id or not igdb_credentials_configured() or not ids:
+        return {}
+
+    try:
+        token = await _get_token()
+        headers = _igdb_headers(client_id, token)
+
+        aliases: dict[int, int] = {}
+        for chunk in _chunked(ids, 100):
+            id_list = ", ".join(str(i) for i in chunk)
+            # Paginate like fetch_series_members: IGDB caps a page at 500,
+            # and a prolific series' members can have >500 edition children
+            # between them — a single page would silently drop aliases.
+            offset = 0
+            while True:
+                query = (
+                    "fields id, version_parent, name; "
+                    f"where version_parent = ({id_list}); "
+                    f"limit {_SERIES_MEMBERS_PAGE_SIZE}; offset {offset};"
+                )
+                rows = await _post_igdb_games(query, headers)
+                for row in rows:
+                    edition_id = row.get("id")
+                    parent_id = row.get("version_parent")
+                    if edition_id is not None and parent_id is not None:
+                        aliases[edition_id] = parent_id
+                if len(rows) < _SERIES_MEMBERS_PAGE_SIZE:
+                    break
+                offset += _SERIES_MEMBERS_PAGE_SIZE
+        return aliases
+    except IGDBRequestFailure:
+        raise
+    except Exception as exc:
+        raise IGDBRequestFailure(
+            f"IGDB version-parent alias fetch failed for {len(ids)} member ids"
+        ) from exc
+
+
 async def fetch_igdb_game_names(igdb_ids: list[int]) -> dict[int, str]:
     """Return {igdb_game_id: name} for the given IGDB game ids (for display)."""
     client_id = os.environ.get("TWITCH_CLIENT_ID")
