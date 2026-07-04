@@ -2,6 +2,7 @@
 
 from conftest import ToolDBTestCase, make_steam_game, seed_game, add_platform, add_rating
 from gamelib_mcp.tools import stats
+from gamelib_mcp.tools.platforms import update_game
 
 
 class BacklogStatsTests(ToolDBTestCase):
@@ -18,6 +19,9 @@ class BacklogStatsTests(ToolDBTestCase):
                 "unknown_playtime",
                 "unknown_pct",
                 "farmed_games",
+                "playing",
+                "completed",
+                "abandoned",
                 "unplayed_with_hltb",
                 "backlog_hours_hltb",
                 "weekly_pace_hours",
@@ -98,3 +102,30 @@ class BacklogStatsTests(ToolDBTestCase):
         self.assertEqual(result["played"], 0)
         self.assertEqual(result["unplayed_with_hltb"], 1)  # excludes unknown
         self.assertEqual(result["backlog_hours_hltb"], 20) # excludes Manual's 10h
+
+    async def test_completed_game_with_unknown_playtime_counts_as_played(self):
+        # e.g. a GOG game with no playtime tracking, marked completed by hand.
+        gid = await seed_game("Chrono Trigger")
+        await add_platform(gid, "gog")  # no playtime -> NULL
+        await update_game(game_id=gid, completion_status="completed")
+        result = await stats.get_backlog_stats()
+        self.assertEqual(result["played"], 1)
+        self.assertEqual(result["completed"], 1)
+        self.assertEqual(result["unknown_playtime"], 0)
+
+    async def test_abandoned_game_excluded_from_backlog_hours(self):
+        gid = await make_steam_game("Starfield", 1, playtime_minutes=0, hltb_main=40.0)
+        await update_game(game_id=gid, completion_status="abandoned")
+        result = await stats.get_backlog_stats()
+        self.assertEqual(result["backlog_hours_hltb"], 0)
+        self.assertEqual(result["unplayed_with_hltb"], 0)
+        self.assertEqual(result["abandoned"], 1)
+        # Still counted as unplayed by the pure playtime signal (0 minutes) —
+        # only the backlog-hours/hltb aggregates exclude abandoned games.
+        self.assertEqual(result["unplayed"], 1)
+
+    async def test_playing_count(self):
+        gid = await make_steam_game("In Progress", 1, playtime_minutes=120)
+        await update_game(game_id=gid, completion_status="playing")
+        result = await stats.get_backlog_stats()
+        self.assertEqual(result["playing"], 1)

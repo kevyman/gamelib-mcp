@@ -108,7 +108,9 @@ async def get_game_detail(
     total_playtime_minutes = sum(known_playtimes) if known_playtimes else None
     total_playtime_2weeks_minutes = sum(p["playtime_2weeks_minutes"] or 0 for p in platforms)
 
-    if bool(row["is_farmed"]):
+    if row["completion_status"] == "completed":
+        play_state = "played"
+    elif bool(row["is_farmed"]):
         play_state = "unplayed"
     elif total_playtime_minutes is None:
         play_state = "unknown"
@@ -140,6 +142,7 @@ async def get_game_detail(
             default=None,
         ),
         "is_farmed": bool(row["is_farmed"]),
+        "completion_status": row["completion_status"],
         "play_state": play_state,
         "content_type": row["content_type"],
         "parent_game_id": row["parent_game_id"],

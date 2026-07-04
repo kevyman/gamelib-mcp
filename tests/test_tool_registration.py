@@ -60,6 +60,7 @@ EXPECTED_TOOLS = {
         "required": set(),
     },
     "get_backlog_stats": {"params": set(), "required": set()},
+    "suggest_completion_status": {"params": {"limit"}, "required": set()},
     "get_series_breakdown": {
         "params": {
             "counting_mode",
@@ -120,6 +121,7 @@ EXPECTED_TOOLS = {
             "hltb_extra",
             "hltb_complete",
             "is_farmed",
+            "completion_status",
             "clear_overrides",
         },
         "required": set(),
@@ -150,6 +152,7 @@ EXPECTED_ANNOTATIONS = {
     "get_taste_profile": {"readOnlyHint": True, "idempotentHint": True},
     "get_ratings": {"readOnlyHint": True, "idempotentHint": True},
     "get_backlog_stats": {"readOnlyHint": True, "idempotentHint": True},
+    "suggest_completion_status": {"readOnlyHint": True, "idempotentHint": True},
     "get_series_breakdown": {"readOnlyHint": True, "idempotentHint": True},
     "get_integration_status": {"readOnlyHint": True, "idempotentHint": True},
     "get_platform_breakdown": {"readOnlyHint": True, "idempotentHint": True},
@@ -200,9 +203,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_33(self):
+    async def test_tool_count_is_34(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 33)
+        self.assertEqual(len(tools), 34)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()
