@@ -186,6 +186,17 @@ class UpdateGameTests(ToolDBTestCase):
         self.assertEqual(row["completion_status"], "completed")
         self.assertIn("completion_status", await self._overrides(gid))
 
+    async def test_sets_completion_status_evergreen(self):
+        gid = await seed_game("Rocket League")
+        result = await platforms.update_game(game_id=gid, completion_status="evergreen")
+        self.assertEqual(result["updated"]["completion_status"], "evergreen")
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT completion_status FROM games WHERE id = ?", (gid,)
+            )
+        self.assertEqual(row["completion_status"], "evergreen")
+        self.assertIn("completion_status", await self._overrides(gid))
+
     async def test_completion_status_none_resets(self):
         gid = await seed_game("Hades 2")
         await platforms.update_game(game_id=gid, completion_status="completed")

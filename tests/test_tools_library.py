@@ -372,6 +372,15 @@ class LibraryStatsTests(ToolDBTestCase):
         result = await library.get_library_stats(filter="abandoned")
         self.assertEqual([g["name"] for g in result["results"]], ["Starfield"])
 
+    async def test_filter_evergreen(self):
+        evergreen = await make_steam_game("Rocket League", 1, playtime_minutes=100)
+        await update_game(game_id=evergreen, completion_status="evergreen")
+        await make_steam_game("Untouched", 2, playtime_minutes=0)
+
+        result = await library.get_library_stats(filter="evergreen")
+        self.assertEqual([g["name"] for g in result["results"]], ["Rocket League"])
+        self.assertEqual(result["results"][0]["completion_status"], "evergreen")
+
     async def test_search_marks_unknown_playtime_with_null_hours(self):
         gid = await seed_game("Manual")
         await add_platform(gid, "gog")  # no playtime -> NULL

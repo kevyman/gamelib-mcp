@@ -103,7 +103,7 @@ STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
 XBOX_TITLE_ID = "xbox_title_id"
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 
 @dataclass
@@ -237,6 +237,7 @@ from .schema import (
     _V19_SCHEMA_DDL,
     _V20_SCHEMA_DDL,
     _V21_SCHEMA_DDL,
+    _V22_SCHEMA_DDL,
 )
 
 
@@ -1274,6 +1275,93 @@ async def _migrate_v21_to_v22(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+# Indexes declared directly on games() in the versioned DDL. A table rebuild
+# (see _rebuild_games_table_for_evergreen) renames games out of the way, and
+# SQLite carries indexes along with a RENAME (unlike triggers, which stay
+# bound to the old name and get dropped for free with the old table) — so
+# these names stay claimed by the renamed-away copy and must be freed
+# explicitly before the new table's CREATE INDEX IF NOT EXISTS statements can
+# (re)create them on the new table.
+_GAMES_TABLE_INDEXES = (
+    "idx_games_name_normalized",
+    "idx_games_parent_game_id",
+    "idx_games_primary_library_item",
+)
+
+
+async def _games_check_constraint_missing_evergreen(db: aiosqlite.Connection) -> bool:
+    """True if games.completion_status's CHECK predates 'evergreen'.
+
+    Only databases whose games table was created via the fresh-DB DDL while
+    SCHEMA_VERSION was 21 or 22 carry this CHECK at all — see the schema.py
+    v20/v22 notes. The v20->v21 in-place migration adds the column via plain
+    ALTER TABLE with no CHECK, so a DB that took that path has nothing to
+    repair here (SQLite has no other way to store an unconstrained value).
+    """
+    row = await db.execute_fetchone(  # type: ignore[attr-defined]
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'games'"
+    )
+    sql = row[0] if row and row[0] else ""
+    return "completion_status" in sql and "CHECK" in sql and "evergreen" not in sql
+
+
+async def _rebuild_games_table_for_evergreen(db: aiosqlite.Connection) -> None:
+    """Rebuild games with the current (evergreen-including) CHECK constraint.
+
+    SQLite cannot ALTER a CHECK constraint, so this is a rename/recreate/copy
+    dance in the same spirit as _rebuild_table_from_current_schema, but
+    targeted at games itself (that helper is only ever called for its
+    dependents, never for games). foreign_keys is toggled off around the
+    whole sequence: with it on, SQLite treats the final DROP TABLE of the
+    renamed-away copy as if it were a DELETE, cascading ON DELETE CASCADE
+    children (e.g. game_platforms) and silently wiping data that was never
+    meant to be deleted.
+    """
+    await db.execute("PRAGMA foreign_keys=OFF")
+    try:
+        await db.execute("DROP TABLE IF EXISTS games_evergreen_rebuild_old")
+        await db.execute("PRAGMA legacy_alter_table=ON")
+        await db.execute("ALTER TABLE games RENAME TO games_evergreen_rebuild_old")
+        await db.execute("PRAGMA legacy_alter_table=OFF")
+        for index_name in _GAMES_TABLE_INDEXES:
+            await db.execute(f"DROP INDEX IF EXISTS {index_name}")
+        await db.executescript(_V22_SCHEMA_DDL)
+
+        old_cols = await _table_columns(db, "games_evergreen_rebuild_old")
+        new_cols = await _table_columns(db, "games")
+        keep = [col for col in new_cols if col in old_cols]
+        cols_sql = ", ".join(keep)
+        await db.execute(
+            f"INSERT INTO games ({cols_sql}) SELECT {cols_sql} "
+            "FROM games_evergreen_rebuild_old"
+        )
+        await db.execute("DROP TABLE IF EXISTS games_evergreen_rebuild_old")
+        await db.commit()
+    finally:
+        await db.execute("PRAGMA legacy_alter_table=OFF")
+        await db.execute("PRAGMA foreign_keys=ON")
+
+
+async def _migrate_v22_to_v23(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Widen games.completion_status's CHECK to accept 'evergreen'.
+
+    Only DBs whose games table still carries the pre-evergreen CHECK (created
+    fresh while SCHEMA_VERSION was 21 or 22 — see schema.py) need the rebuild;
+    DBs that only ever added the column via the v20->v21 plain ALTER TABLE
+    have no CHECK to begin with and already accept 'evergreen'.
+    """
+    needs_rebuild = await _games_check_constraint_missing_evergreen(db)
+    if progress is not None:
+        if needs_rebuild:
+            progress("Migrating to v23: rebuilding games table for 'evergreen' CHECK.")
+        else:
+            progress("Migrating to v23: games.completion_status already accepts 'evergreen'.")
+    if needs_rebuild:
+        await _rebuild_games_table_for_evergreen(db)
+    await _set_user_version(db, 23)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1310,7 +1398,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V21_SCHEMA_DDL)
+    await db.executescript(_V22_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -1426,6 +1514,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (19, _migrate_v19_to_v20),
     (20, _migrate_v20_to_v21),
     (21, _migrate_v21_to_v22),
+    (22, _migrate_v22_to_v23),
 )
 
 
@@ -1443,7 +1532,7 @@ async def _run_migrations(
         _emit(progress, f"Backed up database to {snapshot_path} before migrating.", applied_steps)
 
     if detected_state == "fresh":
-        await db.executescript(_V21_SCHEMA_DDL)
+        await db.executescript(_V22_SCHEMA_DDL)
         fts_enabled = await _sync_fts_index(db)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
@@ -1480,7 +1569,7 @@ async def _run_migrations(
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V21_SCHEMA_DDL)
+    await db.executescript(_V22_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION

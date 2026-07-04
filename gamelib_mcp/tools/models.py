@@ -172,6 +172,7 @@ class BacklogStatsResponse(FlexibleModel):
     playing: int
     completed: int
     abandoned: int
+    evergreen: int
 
 
 class RefreshLibraryResponse(FlexibleModel):
@@ -383,7 +384,9 @@ class CompletionSuggestion(FlexibleModel):
     suggested_status: str
     reason: str
     playtime_hours: float
-    hltb_main: float
+    # None on the no-HLTB evergreen branch (a game with no HowLongToBeat
+    # main-story entry can still be suggested as evergreen on playtime alone).
+    hltb_main: float | None = None
     last_played: str | None = None
 
 

@@ -887,6 +887,19 @@ _V21_SCHEMA_DDL = _V20_SCHEMA_DDL + """
     CREATE INDEX IF NOT EXISTS idx_play_history_date ON play_history(snapshot_date);
 """
 
+# v22 widens the games.completion_status CHECK to add 'evergreen' (endless
+# games with no completion concept: Rocket League, Tabletop Simulator, MMOs,
+# sandboxes). SQLite cannot ALTER a CHECK constraint in place; existing rows
+# whose games table was rebuilt fresh (and therefore still carries the old
+# CHECK — see _migrate_v22_to_v23) need a table rebuild to accept the new
+# value. DBs that only ever ran the v20->v21 ALTER TABLE ADD COLUMN path have
+# no CHECK at all and need no repair.
+_V22_SCHEMA_DDL = _V21_SCHEMA_DDL.replace(
+    "completion_status TEXT CHECK (completion_status IN ('playing', 'completed', 'abandoned')),",
+    "completion_status TEXT CHECK (completion_status IN "
+    "('playing', 'completed', 'abandoned', 'evergreen')),",
+)
+
 # Derived search index — NOT part of the versioned schema chain. Created and
 # fully resynced by _run_migrations' _sync_fts_index on every migrate_db run,
 # which self-heals after destructive games-table rebuilds (those drop the

@@ -20,7 +20,7 @@ from .search import build_name_match, fuzzy_fallback_game_ids
 
 VALID_FILTERS = {
     "all", "unplayed", "played", "recent", "farmed", "unknown",
-    "playing", "completed", "abandoned",
+    "playing", "completed", "abandoned", "evergreen",
 }
 
 ResponseFormat = Literal["concise", "detailed"]
@@ -305,8 +305,8 @@ async def get_library_stats(
     Return filtered/sorted game list plus aggregate stats.
 
     filter: all | unplayed | played | recent | farmed | unknown | playing |
-    completed | abandoned (the last three read games.completion_status, set via
-    update_game)
+    completed | abandoned | evergreen (the last four read games.completion_status,
+    set via update_game)
     sort_by: playtime | name | metacritic | opencritic | hltb
     platform: steam | epic | gog | ps5 | nintendo | switch2 (optional — filter to games owned on that platform)
     tags / genres / series: case-insensitive; a game must carry EVERY listed entry.
@@ -347,6 +347,8 @@ async def get_library_stats(
         conditions.append("completion_status = 'completed'")
     elif filter == "abandoned":
         conditions.append("completion_status = 'abandoned'")
+    elif filter == "evergreen":
+        conditions.append("completion_status = 'evergreen'")
 
     if max_hltb_hours is not None:
         conditions.append("hltb_main <= ?")
