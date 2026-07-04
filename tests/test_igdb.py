@@ -1078,8 +1078,58 @@ class FetchVersionParentAliasesTests(unittest.IsolatedAsyncioTestCase):
         ):
             aliases = await igdb.fetch_version_parent_aliases([80, 478])
 
-        self.assertIn("where version_parent = (80, 478)", captured["query"])
+        self.assertIn(
+            "where version_parent = (80, 478) | parent_game = (80, 478)", captured["query"]
+        )
+        self.assertIn("parent_game, category, game_type", captured["query"])
         self.assertEqual(aliases, {283715: 80, 20740: 478})
+
+    async def test_parent_game_children_alias_unless_dlc_like(self) -> None:
+        # parent_game children are re-releases/remasters/standalone GOTY
+        # entries (alias) or DLC-like content (must NOT alias — owning a DLC
+        # or a cosmetic pack is not owning the base game). Eligibility rides
+        # on content_type_from_igdb_category, so pack-style add-ons (13) are
+        # excluded alongside DLC (1) and expansion (2). category=None falls
+        # back to game_type, mirroring _parse_igdb_item. version_parent
+        # children always alias, and version_parent wins when a child
+        # carries both links.
+        async def fake_post(query: str, headers: dict[str, str]) -> list[dict]:
+            return [
+                # 2021 "Tales from the Borderlands" re-release: parent_game
+                # child, remaster-ish category -> alias.
+                {"id": 214139, "parent_game": 6707, "category": 9},
+                # DLC child -> no alias.
+                {"id": 111, "parent_game": 6707, "category": 1},
+                # Expansion via game_type fallback (category absent) -> no alias.
+                {"id": 222, "parent_game": 6707, "game_type": 2},
+                # Pack-style add-on (13: cosmetic/BGM/persona-set packs) ->
+                # classifier deems it DLC content -> no alias.
+                {"id": 666, "parent_game": 6707, "category": 13},
+                # Pack via game_type fallback -> no alias.
+                {"id": 777, "parent_game": 6707, "game_type": 13},
+                # No category/game_type at all -> not provably DLC -> alias.
+                {"id": 333, "parent_game": 6707},
+                # version_parent child that is ALSO a DLC by category: the
+                # version link wins and it still aliases.
+                {"id": 444, "version_parent": 6707, "category": 1},
+                # Both links present: version_parent wins.
+                {"id": 555, "version_parent": 6707, "parent_game": 9999, "category": 9},
+            ]
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"TWITCH_CLIENT_ID": "client", "TWITCH_CLIENT_SECRET": "secret"},
+                clear=True,
+            ),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", side_effect=fake_post),
+        ):
+            aliases = await igdb.fetch_version_parent_aliases([6707])
+
+        self.assertEqual(
+            aliases, {214139: 6707, 333: 6707, 444: 6707, 555: 6707}
+        )
 
     async def test_paginates_when_a_full_page_of_editions_is_returned(self) -> None:
         # IGDB caps a page at 500; >500 edition children across a member-id

@@ -8,11 +8,15 @@ tables with live IGDB series-member lookups (data/series_gaps.py).
 
 from collections import defaultdict
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from fastmcp.exceptions import ToolError
 
 from ..data.db import get_db
 from .common import LIBRARY_PLATFORMS, clamp_limit, validate_platform
+
+if TYPE_CHECKING:
+    from ..data.igdb import SeriesMember
 
 VALID_COUNTING_MODES = {"entries", "distinct_games", "base_games_only"}
 VALID_KINDS = {"collection", "franchise"}
@@ -195,20 +199,27 @@ def _release_year(iso_date: str | None) -> int | None:
         return None
 
 
-def _name_match_counts_as_owned(member_year: int | None, row_years: set[int | None]) -> bool:
-    """Whether a normalized-name match should exclude a member as a gap.
+def _pick_name_suppression_target(
+    row_year: int | None, candidates: "list[SeriesMember]"
+) -> "SeriesMember":
+    """The single member a name-matched library row suppresses.
 
-    A same-name-different-game pair like DOOM (2016) vs Doom (1993) both
-    normalize to "doom", so a bare name match would suppress a true gap.
-    When BOTH the member and a matching library row have a known release
-    year, the match only counts if the years are within ±1 (editions and
-    regional releases can straddle a year boundary); if either side lacks a
-    year, the match stands — an unenriched row ("Borderlands GOTY" with no
-    release_date yet) must still suppress its base game.
+    When several members of a series normalize to the same name (Doom 1993
+    and DOOM 2016 both normalize to "doom"), one library row must not wipe
+    them all out. Deterministic pick: the member whose release year is
+    closest to the row's (library release dates are often the *store
+    listing/port* date, so closeness — not equality — is the signal); ties
+    and rows/members without a year fall back to the earliest-released
+    member (undated members last), then lowest igdb_id.
     """
-    if member_year is None:
-        return True
-    return any(year is None or abs(year - member_year) <= 1 for year in row_years)
+
+    def sort_key(member: "SeriesMember") -> tuple:
+        member_year = _release_year(member.first_release_date)
+        if row_year is not None and member_year is not None:
+            return (0, abs(member_year - row_year), member.first_release_date or "", member.igdb_id)
+        return (1, 0, member.first_release_date or "9999-99-99", member.igdb_id)
+
+    return min(candidates, key=sort_key)
 
 
 async def discover_series_gaps(
@@ -306,26 +317,25 @@ async def discover_series_gaps(
                           WHERE gp.game_id = games.id AND gp.owned = 1)
                OR EXISTS (SELECT 1 FROM game_wishlist w
                           WHERE w.game_id = games.id)
+            ORDER BY games.id
             """
         )
 
     have_igdb_ids = {row["igdb_id"] for row in have_rows if row["igdb_id"] is not None}
-    # Normalized-name fallback (Fix layer B): catches both an owned row with no
-    # igdb_id at all, and an owned row whose igdb_id is a different IGDB entry
-    # than the canonical series member (edition entries that layer A's alias
-    # map doesn't happen to cover). Deterministic exact match only — no fuzzy
-    # scoring — so it only excludes members that are the *same* title under
-    # edition/case/punctuation normalization, never a merely-similar one.
-    # Each normalized name maps to the release years of the rows carrying it,
-    # so a same-name different-game pair (DOOM 2016 vs Doom 1993) can be told
-    # apart by year in _name_match_counts_as_owned below.
-    have_name_years: dict[str, set[int | None]] = {}
-    for row in have_rows:
-        if not row["name"]:
-            continue
-        have_name_years.setdefault(normalize_series_gap_title(row["name"]), set()).add(
-            _release_year(row["release_date"])
+    # Library rows as (igdb_id, normalized name, release year), in stable
+    # games.id order so name-based suppression below is deterministic.
+    # release_date is NOT trusted as the original release year — for many
+    # rows it's the store listing/port date (prod: "PAYDAY 2" carries
+    # 2018-03-15 against the 2013 game) — so it's only ever used to *rank*
+    # same-named member candidates, never to veto a match.
+    library_rows: list[tuple[int | None, str | None, int | None]] = [
+        (
+            row["igdb_id"],
+            normalize_series_gap_title(row["name"]) if row["name"] else None,
+            _release_year(row["release_date"]),
         )
+        for row in have_rows
+    ]
     today = datetime.now(timezone.utc).date().isoformat()
 
     with_gaps: list[dict] = []
@@ -344,25 +354,46 @@ async def discover_series_gaps(
             continue
 
         members = series_result.members
-        # Fix layer A: an owned/wishlisted igdb_id that is a version-parent
-        # alias of a member (e.g. "The Witcher: Enhanced Edition" -> the
-        # canonical "The Witcher" member) counts as owning that member.
-        owned_alias_targets = {
-            series_result.aliases[hid]
+        member_ids = {m.igdb_id for m in members}
+        aliases = series_result.aliases
+
+        # Layer A: a member is excluded when an owned/wishlisted igdb_id is
+        # the member itself or an edition/re-release alias of it (e.g. "The
+        # Witcher: Enhanced Edition" -> the canonical "The Witcher" member).
+        excluded: set[int] = have_igdb_ids & member_ids
+        excluded |= {
+            aliases[hid]
             for hid in have_igdb_ids
-            if hid in series_result.aliases
+            if hid in aliases and aliases[hid] in member_ids
         }
+
+        # Layer B: normalized-name fallback with row-consumption semantics. A
+        # library row that already matched a member by id/alias is CONSUMED —
+        # it explained itself and must not additionally suppress a
+        # same-named sibling (an owned DOOM-2016 row with a proper igdb_id
+        # must not hide the Doom-1993 member). Each remaining unconsumed row
+        # suppresses at most ONE member: the best same-named candidate per
+        # _pick_name_suppression_target. Deterministic exact match on
+        # edition-stripped normalized names only — no fuzzy scoring.
+        members_by_norm: dict[str, list] = defaultdict(list)
+        for m in members:
+            members_by_norm[normalize_series_gap_title(m.name)].append(m)
+
+        for row_igdb_id, row_norm, row_year in library_rows:
+            consumed = row_igdb_id is not None and (
+                row_igdb_id in member_ids or aliases.get(row_igdb_id) in member_ids
+            )
+            if consumed or not row_norm:
+                continue
+            candidates = [
+                m for m in members_by_norm.get(row_norm, []) if m.igdb_id not in excluded
+            ]
+            if candidates:
+                excluded.add(_pick_name_suppression_target(row_year, candidates).igdb_id)
 
         gaps = []
         for member in members:
-            if member.igdb_id in have_igdb_ids:
-                continue
-            if member.igdb_id in owned_alias_targets:
-                continue
-            matched_years = have_name_years.get(normalize_series_gap_title(member.name))
-            if matched_years is not None and _name_match_counts_as_owned(
-                _release_year(member.first_release_date), matched_years
-            ):
+            if member.igdb_id in excluded:
                 continue
             if not include_unreleased and (
                 member.first_release_date is None or member.first_release_date > today
