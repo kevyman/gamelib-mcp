@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from conftest import ToolDBTestCase, make_steam_game, seed_game, add_platform
 from gamelib_mcp.tools import completion
+from gamelib_mcp.tools.models import CompletionSuggestionsResponse
 from gamelib_mcp.tools.platforms import update_game
 
 
@@ -103,6 +104,12 @@ class SuggestCompletionStatusTests(ToolDBTestCase):
         self.assertEqual(entry["suggested_status"], "evergreen")
         self.assertNotEqual(entry["suggested_status"], "completed")
         self.assertIn("400h", entry["reason"])
+        self.assertIsNone(entry["hltb_main"])
+        # The wire schema must accept a null hltb_main on this branch — the
+        # tool is annotated with CompletionSuggestionsResponse, so a non-null
+        # model field would make the MCP layer reject exactly this result.
+        validated = CompletionSuggestionsResponse(**result)
+        self.assertIsNone(validated.suggestions[0].hltb_main)
 
     async def test_moderate_playtime_no_hltb_produces_no_suggestion(self):
         # Not enough playtime to distinguish "endless game" from "barely
