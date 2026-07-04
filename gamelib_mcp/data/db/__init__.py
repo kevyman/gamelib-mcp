@@ -1587,6 +1587,7 @@ async def init_db() -> None:
 # ── Domain submodules (re-exported; imported last so the bottom layer above is
 # fully defined before each leaf does `from . import get_db, ...`). ───────────
 from .affinity import recompute_tag_affinity  # noqa: E402
+from .history import record_play_history_snapshots  # noqa: E402
 from .claims import (  # noqa: E402
     _claim_cutoff_iso,
     _claim_ids,
