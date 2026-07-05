@@ -398,6 +398,26 @@ GAME_CARDS_HTML = r"""<!doctype html>
     align-items: center;
     justify-content: center;
   }
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 14px;
+    z-index: 20;
+    transform: translateX(-50%) translateY(8px);
+    max-width: calc(100% - 28px);
+    padding: 8px 12px;
+    background: var(--card);
+    border: 2px solid var(--ink);
+    border-radius: 10px;
+    box-shadow: 3px 3px 0 var(--shadow-c);
+    font-size: 11.5px;
+    font-weight: 650;
+    text-align: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s ease, transform 0.15s ease;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%); }
   .loading-note { font-size: 11.5px; font-weight: 650; color: var(--muted); }
   .loading-note::after {
     content: "…";
@@ -467,16 +487,33 @@ GAME_CARDS_HTML = r"""<!doctype html>
       new Promise(function (resolve) { setTimeout(resolve, timeoutMs || 15000); }),
     ]);
   }
-  /* External links go through the host (ui/open-link, gated by the openLinks
-     host capability captured at init); window.open is the best-effort
-     fallback for hosts that don't declare it. */
+  /* External links. The sandbox usually lacks allow-popups, so window.open
+     and target=_blank fail silently (Firefox included) — the reliable route
+     is the host's ui/open-link. Try native only when the host didn't declare
+     openLinks (synchronously, inside the click gesture), then always fall
+     through to ui/open-link even undeclared: hosts often implement it
+     without declaring it, and an unsupporting one just answers
+     method-not-found — which we surface as a hint instead of silence. */
   var hostCaps = {};
   function openLink(url) {
-    if (hostCaps.openLinks) {
-      request("ui/open-link", { url: url });
-    } else {
-      try { window.open(url, "_blank", "noopener"); } catch (e) { /* sandboxed */ }
+    if (!hostCaps.openLinks) {
+      try { if (window.open(url, "_blank", "noopener")) return; } catch (e) { /* sandboxed */ }
     }
+    Promise.race([
+      request("ui/open-link", { url: url }),
+      new Promise(function (resolve) { setTimeout(function () { resolve("timeout"); }, 2500); }),
+    ]).then(function (res) {
+      if (res === undefined) flashLinkHint(); // explicit host error
+    });
+  }
+  var hintTimer = null;
+  function flashLinkHint() {
+    var t = document.querySelector(".toast");
+    if (!t) t = document.body.appendChild(el("div", "toast",
+      "This host blocked the link — right-click the pill and choose “Open in new tab”."));
+    t.classList.add("show");
+    clearTimeout(hintTimer);
+    hintTimer = setTimeout(function () { t.classList.remove("show"); }, 3200);
   }
   function resultData(result) {
     var data = result && result.structuredContent;
