@@ -55,6 +55,11 @@ async def get_series_breakdown(
     Each result is one series (a ``game_series`` row), labeled with its ``kind``.
     A game may count toward both its collection and its broader franchise, so
     the same game can appear in two rows; use ``kind`` and ``min_games`` to prune.
+
+    Counts are owned-only: a game contributes only when it has an owned
+    ``game_platforms`` row (on ``platform`` when set, anywhere otherwise).
+    Wishlist-only games rows and owned=0 manual stubs — which carry series
+    memberships via IGDB backfill — never count.
     """
     if counting_mode not in VALID_COUNTING_MODES:
         raise ToolError(
@@ -78,17 +83,28 @@ async def get_series_breakdown(
             "WHERE gp.game_id = g.id AND gp.platform = :platform AND gp.owned = 1)"
         )
         params["platform"] = resolved_platform
+    else:
+        # Owned-count semantics even without a platform filter: a wishlist-only
+        # games row (games + game_wishlist, zero game_platforms rows) or an
+        # owned=0 manual stub carries series memberships via IGDB backfill, and
+        # without this guard it would inflate a series' owned-game counts.
+        # (The platform branch's EXISTS above already implies owned-somewhere.)
+        where_clauses.append(
+            "EXISTS (SELECT 1 FROM game_platforms gp "
+            "WHERE gp.game_id = g.id AND gp.owned = 1)"
+        )
     if kind is not None:
         where_clauses.append("s.kind = :kind")
         params["kind"] = kind
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-    # Per-game playtime (scoped to the platform when set) summed over the series'
-    # member games. A correlated subquery avoids join fan-out inflating the sum.
-    platform_pt_clause = " AND gp.platform = :platform AND gp.owned = 1" if resolved_platform else ""
+    # Per-game playtime (scoped to the platform when set, owned rows only)
+    # summed over the series' member games. A correlated subquery avoids join
+    # fan-out inflating the sum.
+    platform_pt_clause = " AND gp.platform = :platform" if resolved_platform else ""
     playtime_subq = (
         "(SELECT COALESCE(SUM(gp.playtime_minutes), 0) FROM game_platforms gp "
-        f"WHERE gp.game_id = g.id{platform_pt_clause})"
+        f"WHERE gp.game_id = g.id AND gp.owned = 1{platform_pt_clause})"
     )
 
     base_sql = f"""
@@ -160,13 +176,19 @@ async def _load_members(
     """For the page's series, split member games into primary vs collapsed entries."""
     placeholders = ",".join(f":sid{i}" for i in range(len(series_ids)))
     params: dict = {f"sid{i}": sid for i, sid in enumerate(series_ids)}
-    platform_clause = ""
     if platform:
         platform_clause = (
             " AND EXISTS (SELECT 1 FROM game_platforms gp "
             "WHERE gp.game_id = g.id AND gp.platform = :platform AND gp.owned = 1)"
         )
         params["platform"] = platform
+    else:
+        # Mirror the ranking query's owned guard so included_games never lists
+        # a wishlist-only or owned=0-stub member the counts just excluded.
+        platform_clause = (
+            " AND EXISTS (SELECT 1 FROM game_platforms gp "
+            "WHERE gp.game_id = g.id AND gp.owned = 1)"
+        )
     rows = await db.execute_fetchall(
         f"""SELECT m.series_id AS series_id, g.name AS name,
                    g.content_type AS content_type,

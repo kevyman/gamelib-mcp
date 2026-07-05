@@ -71,6 +71,7 @@ class SeriesBreakdownTests(ToolDBTestCase):
             "Fallout 4 Remastered", content_type="remaster", is_primary_library_item=1
         )
         for gid in (base, dlc, edition, remaster):
+            await add_platform(gid, "steam", owned=1)
             await link_series(gid, "franchise", 100, "Fallout")
 
     async def test_counts_narrow_by_mode(self):
@@ -99,9 +100,9 @@ class SeriesBreakdownTests(ToolDBTestCase):
         self.assertEqual(base_mode["results"][0]["count"], 1)
 
     async def test_kind_filter(self):
-        col = await seed_game("Assassin's Creed II")
+        col = await seed_owned_game("Assassin's Creed II")
         await link_series(col, "collection", 1, "Assassin's Creed")
-        fr = await seed_game("Star Wars: KOTOR")
+        fr = await seed_owned_game("Star Wars: KOTOR")
         await link_series(fr, "franchise", 2, "Star Wars")
 
         collections = await series.get_series_breakdown(kind="collection")
@@ -114,11 +115,11 @@ class SeriesBreakdownTests(ToolDBTestCase):
         self.assertEqual(both["total_matches"], 2)
 
     async def test_min_games_filter(self):
-        a1 = await seed_game("Mass Effect")
-        a2 = await seed_game("Mass Effect 2")
+        a1 = await seed_owned_game("Mass Effect")
+        a2 = await seed_owned_game("Mass Effect 2")
         for gid in (a1, a2):
             await link_series(gid, "collection", 10, "Mass Effect")
-        solo = await seed_game("Solo Game")
+        solo = await seed_owned_game("Solo Game")
         await link_series(solo, "collection", 11, "Solo Series")
 
         result = await series.get_series_breakdown(min_games=2)
@@ -127,9 +128,9 @@ class SeriesBreakdownTests(ToolDBTestCase):
 
     async def test_ranking_order(self):
         for i in range(3):
-            gid = await seed_game(f"Borderlands {i}")
+            gid = await seed_owned_game(f"Borderlands {i}")
             await link_series(gid, "collection", 20, "Borderlands")
-        small = await seed_game("Bastion")
+        small = await seed_owned_game("Bastion")
         await link_series(small, "collection", 21, "Bastion Series")
 
         result = await series.get_series_breakdown()
@@ -181,7 +182,7 @@ class SeriesBreakdownTests(ToolDBTestCase):
 
     async def test_pagination(self):
         for i in range(3):
-            gid = await seed_game(f"Series {i} Game")
+            gid = await seed_owned_game(f"Series {i} Game")
             await link_series(gid, "collection", 40 + i, f"Series {i}")
 
         page1 = await series.get_series_breakdown(limit=2, offset=0)
@@ -196,6 +197,29 @@ class SeriesBreakdownTests(ToolDBTestCase):
     async def test_invalid_counting_mode_raises(self):
         with self.assertRaises(Exception):
             await series.get_series_breakdown(counting_mode="bogus")
+
+    async def test_wishlist_only_member_does_not_count_or_list(self):
+        # A wishlist-only games row (games + game_wishlist, zero game_platforms
+        # rows) carries series memberships via IGDB backfill but is not owned —
+        # a series with 2 owned + 1 wishlist-only member counts as 2, in every
+        # counting mode, and included_games never lists the wishlist-only title.
+        owned_a = await seed_owned_game("Persona 4 Golden", playtime_minutes=120)
+        owned_b = await seed_owned_game("Persona 5 Royal")
+        wishlist_only = await seed_game("Persona 3 Reload")
+        await add_wishlist(wishlist_only, "switch2", source="dekudeals")
+        for gid in (owned_a, owned_b, wishlist_only):
+            await link_series(gid, "collection", 300, "Persona")
+
+        result = await series.get_series_breakdown(include_games=True)
+
+        row = result["results"][0]
+        self.assertEqual(row["series_name"], "Persona")
+        self.assertEqual(row["count"], 2)
+        self.assertEqual(row["count_entries"], 2)
+        self.assertEqual(row["count_distinct_games"], 2)
+        self.assertEqual(row["count_base_games_only"], 2)
+        self.assertEqual(row["total_playtime_hours"], 2.0)
+        self.assertNotIn("Persona 3 Reload", row["included_games"])
 
 
 class DiscoverSeriesGapsTests(ToolDBTestCase):
