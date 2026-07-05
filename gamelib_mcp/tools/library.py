@@ -9,10 +9,12 @@ from ..data.tag_synonyms import canonical_tag
 from ..data.title_normalization import normalize_search_text
 from ..utils import _parse_json
 from .common import (
+    OWNED_SQL as _OWNED_SQL,
     SERIES_NAMES_SQL as _SERIES_NAMES_SQL,
     STEAM_APPID_SQL as _STEAM_APPID_SQL,
     PLAY_STATE_SQL as _PLAY_STATE_SQL,
     PLAYTIME_SUM_SQL as _PLAYTIME_SUM_SQL,
+    WISHLISTED_SQL as _WISHLISTED_SQL,
     clamp_limit as _clamp_limit,
     resolve_platform as _resolve_platform,
 )
@@ -50,6 +52,8 @@ WITH game_rollup AS (
            g.content_type,
            g.parent_game_id,
            g.is_primary_library_item,
+           {_OWNED_SQL} AS owned,
+           {_WISHLISTED_SQL} AS wishlisted,
            {_PLAYTIME_SUM_SQL} AS total_playtime_minutes,
            {_PLAY_STATE_SQL} AS play_state,
            COALESCE(SUM(COALESCE(gp.playtime_2weeks_minutes, 0)), 0) AS total_playtime_2weeks_minutes,
@@ -58,7 +62,12 @@ WITH game_rollup AS (
            MAX(gpe.metacritic_score) AS metacritic_score,
            MAX(gpe.opencritic_score) AS opencritic_score
     FROM games g
-    LEFT JOIN game_platforms gp ON gp.game_id = g.id
+    -- owned = 1: unowned rows (wishlist-only games have none; owned=0 manual
+    -- stubs do exist) must not feed the aggregates — a stub's playtime isn't
+    -- real playtime anywhere, so play_state/playtime/enrichment derive from
+    -- owned rows only. Unowned games still appear in search results (LEFT
+    -- JOIN keeps the games row; the owned/wishlisted flags tell them apart).
+    LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.owned = 1
     LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
     LEFT JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
     GROUP BY g.id
@@ -83,6 +92,11 @@ async def search_games(
     series: restrict to games in a series (IGDB collection/franchise) by exact,
     case-insensitive name. Pass an empty query to browse a whole series, e.g.
     search_games("", series="The Legend of Zelda").
+
+    Results can include wishlist-only titles (a games row with a wishlist
+    entry but no owned platform) — check owned/wishlisted on each result, not
+    is_primary_library_item, which is a content-type flag (real game vs
+    DLC/soundtrack/edition) and says nothing about ownership.
     """
     limit = _clamp_limit(limit)
     platform = _resolve_platform(platform)
@@ -314,6 +328,12 @@ async def get_library_stats(
 
     Note: min_metacritic, min_opencritic, and max_hltb_hours exclude games with
     no score / no HLTB data (NULL), so even min_metacritic=0 drops unscored games.
+
+    This is the OWNED library view: results and aggregate counts are always
+    scoped to games with an owned platform row, so a wishlist-only title never
+    inflates total_games/backlog totals here (use search_games or get_wishlist
+    to look up wishlist entries). is_primary_library_item is a content-type
+    flag (real game vs DLC/soundtrack/edition), not an ownership signal.
     """
     limit = _clamp_limit(limit)
     if filter not in VALID_FILTERS:
@@ -328,7 +348,11 @@ async def get_library_stats(
                 f"Unknown protondb_tier '{protondb_tier}'. Valid: {list(TIER_ORDER)}"
             )
 
-    conditions = ["is_primary_library_item = 1"]
+    # get_library_stats is the OWNED library view (unlike search_games, which
+    # also surfaces wishlist-only rows so they can be looked up by name) — a
+    # wishlist sync creates a games row with no owned game_platforms row at
+    # all, and such a row must not count toward library totals/backlog here.
+    conditions = ["is_primary_library_item = 1", "owned = 1"]
     params: list = []
 
     if filter == "unplayed":
@@ -475,6 +499,8 @@ def _format_game(row, platforms: list[dict], response_format: ResponseFormat) ->
         "parent_game_id": row["parent_game_id"],
         "is_primary_library_item": bool(row["is_primary_library_item"]),
         "play_state": play_state,
+        "owned": bool(row["owned"]),
+        "wishlisted": bool(row["wishlisted"]),
     }
     if "match_type" in row_keys and row["match_type"]:
         game["match_type"] = row["match_type"]

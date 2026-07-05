@@ -48,11 +48,15 @@ class VibeFilterTests(ToolDBTestCase):
                 "tags",
                 "suggested_platform",
                 "play_state",
+                "owned",
+                "wishlisted",
             },
         )
         self.assertEqual(game["tags"], ["roguelike", "action"])
         # no hardware_preference set -> suggested_platform falls back to first owned
         self.assertEqual(game["suggested_platform"], "steam")
+        self.assertIs(game["owned"], True)
+        self.assertIs(game["wishlisted"], False)
 
     async def test_raw_tag_string_fallback(self):
         await make_steam_game("Tetris", 1, playtime_minutes=0, tags=["falling blocks"])
@@ -203,6 +207,38 @@ class VibeHintTests(ToolDBTestCase):
         await make_steam_game("Hades", 1, playtime_minutes=0, tags=["roguelike"])
         results = await discover.discover_games(vibes=["roguelike"])
         self.assertNotIn("note", results)
+
+
+class WishlistOnlyExclusionTests(ToolDBTestCase):
+    async def test_wishlist_only_game_never_recommended(self):
+        # A wishlist sync creates a games row + game_wishlist row with zero
+        # game_platforms rows. Even with a matching tag and populated
+        # affinity, discover_games must never recommend it — is_primary_
+        # library_item is a content-type flag (game vs DLC), not ownership.
+        gid = await seed_game("Persona 3 Reload", tags=["rpg"])
+        await db_module.upsert_wishlist_entry(gid, "switch2", source="dekudeals")
+        await make_steam_game("Hollow Knight", 1, playtime_minutes=0, tags=["rpg"])
+        await set_tag_affinity("rpg", affinity_score=2.5, avg_score=9.0, game_count=2)
+
+        results = await discover.discover_games()
+
+        names = [g["name"] for g in results["results"]]
+        self.assertNotIn("Persona 3 Reload", names)
+        self.assertIn("Hollow Knight", names)
+
+    async def test_unowned_stub_playtime_does_not_hide_unplayed_game(self):
+        # An owned=0 stub's 600 minutes must not mark an otherwise-unplayed
+        # game 'played' — it would silently vanish from unplayed_only
+        # recommendations despite never actually being played.
+        gid = await make_steam_game("Doom", 1, playtime_minutes=0, tags=["shooter"])
+        await add_platform(gid, "epic", playtime_minutes=600, owned=0)
+
+        results = await discover.discover_games(vibes=["shooter"])
+
+        self.assertEqual([g["name"] for g in results["results"]], ["Doom"])
+        game = results["results"][0]
+        self.assertEqual(game["play_state"], "unplayed")
+        self.assertEqual(game["playtime_hours"], 0.0)
 
 
 class CompletionStatusExclusionTests(ToolDBTestCase):
