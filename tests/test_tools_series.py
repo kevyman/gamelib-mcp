@@ -235,15 +235,16 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
         self.assertEqual([r["series_name"] for r in result["results"]], ["Dragon Age"])
         self.assertEqual(result["series_checked"], 1)
 
-    async def test_excludes_owned_and_wishlisted_igdb_ids(self):
+    async def test_owned_excludes_but_wishlisted_member_appears_annotated(self):
         base = await seed_owned_game("Kirby's Dream Land")
         await link_series(base, "franchise", 30, "Kirby")
         second = await seed_owned_game("Kirby's Dream Land 2")
         await link_series(second, "franchise", 30, "Kirby")
         await set_igdb_id(second, 200)
 
-        # A wishlist-only row whose game already carries an igdb_id: still
-        # counts as "have", even though it isn't a series member itself.
+        # A wishlist-only row whose game already carries an igdb_id: does NOT
+        # count as "have" anymore — it must surface as a gap, annotated
+        # on_wishlist=true, rather than silently vanishing.
         wishlisted = await seed_game("Kirby's Adventure")
         await set_igdb_id(wishlisted, 300)
         await add_wishlist(wishlisted, "switch2")
@@ -264,8 +265,12 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
             result = await series.discover_series_gaps(min_owned=1)
 
         entry = result["results"][0]
-        gap_ids = {g["igdb_id"] for g in entry["gaps"]}
-        self.assertEqual(gap_ids, {400})
+        gaps_by_id = {g["igdb_id"]: g for g in entry["gaps"]}
+        # 200 excluded (owned by direct igdb_id match); 300 and 400 are gaps,
+        # but only 300 (wishlisted) is annotated.
+        self.assertEqual(set(gaps_by_id), {300, 400})
+        self.assertTrue(gaps_by_id[300]["on_wishlist"])
+        self.assertFalse(gaps_by_id[400]["on_wishlist"])
 
     async def test_unreleased_filtered_unless_requested(self):
         a = await seed_owned_game("Metroid Prime")

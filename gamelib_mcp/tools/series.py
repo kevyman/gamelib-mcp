@@ -234,10 +234,14 @@ async def discover_series_gaps(
 
     Ranks your series by taste (average personal rating of its games, then
     total playtime), takes the top `limit`, fetches each one's full member
-    list from IGDB, and subtracts what you own or already wishlisted. kind
-    filters to collection|franchise; min_owned skips series where you own
-    fewer games; include_unreleased keeps unreleased/undated entries.
-    Requires IGDB credentials (TWITCH_CLIENT_ID/SECRET).
+    list from IGDB, and subtracts what you actually OWN (games with an owned
+    game_platforms row). A wishlisted-but-unowned title is NOT subtracted —
+    it still appears as a gap, annotated on_wishlist=true, so you can see
+    "you already want this" instead of it silently disappearing. kind filters
+    to collection|franchise; min_owned skips series where you own fewer games
+    (ranking is owned-only — wishlist-only games never count toward it either);
+    include_unreleased keeps unreleased/undated entries. Requires IGDB
+    credentials (TWITCH_CLIENT_ID/SECRET).
     """
     from ..data.igdb import IGDB_TO_PLATFORM, IGDBRequestFailure, igdb_credentials_configured
     from ..data.series_gaps import get_series_members_cached
@@ -302,22 +306,34 @@ async def discover_series_gaps(
             params,
         )
 
-        # "Have" = owned on some platform (gp.owned=1) or wishlisted. Not the
-        # whole games table: a games row can exist without either (an owned=0
-        # manual stub, or an orphaned row left behind by an unsynced wishlist
-        # removal), and suppressing those titles would hide real gaps. Not
-        # filtered to igdb_id IS NOT NULL either: an owned row can have no
-        # igdb_id at all (e.g. a GOTY-edition title IGDB backfill hasn't
-        # resolved yet), in which case only the normalized-name fallback below
-        # can recognize it as "have".
+        # "Have" (suppresses a member entirely) = owned on some platform
+        # (gp.owned=1) ONLY. Wishlisted-but-unowned titles are deliberately NOT
+        # "have" here — they must still surface as gaps (annotated on_wishlist
+        # below), so a user sees "you already want this" rather than the entry
+        # silently vanishing. Not the whole games table either: a games row can
+        # exist owned=0/wishlist-less (an owned=0 manual stub, or an orphaned
+        # row left behind by an unsynced wishlist removal), and suppressing
+        # those titles would hide real gaps. Not filtered to igdb_id IS NOT
+        # NULL either: an owned row can have no igdb_id at all (e.g. a
+        # GOTY-edition title IGDB backfill hasn't resolved yet), in which case
+        # only the normalized-name fallback below can recognize it as "have".
         have_rows = await db.execute_fetchall(
             """
             SELECT igdb_id, name, release_date FROM games
             WHERE EXISTS (SELECT 1 FROM game_platforms gp
                           WHERE gp.game_id = games.id AND gp.owned = 1)
-               OR EXISTS (SELECT 1 FROM game_wishlist w
-                          WHERE w.game_id = games.id)
             ORDER BY games.id
+            """
+        )
+
+        # Wishlisted (any platform, owned or not — though an owned+wishlisted
+        # game is already excluded above via have_rows) games, for the
+        # on_wishlist annotation only. This set never suppresses a member.
+        wishlist_rows = await db.execute_fetchall(
+            """
+            SELECT igdb_id, name FROM games
+            WHERE EXISTS (SELECT 1 FROM game_wishlist w
+                          WHERE w.game_id = games.id)
             """
         )
 
@@ -336,6 +352,10 @@ async def discover_series_gaps(
         )
         for row in have_rows
     ]
+    wishlist_igdb_ids = {row["igdb_id"] for row in wishlist_rows if row["igdb_id"] is not None}
+    wishlist_norm_names = {
+        normalize_series_gap_title(row["name"]) for row in wishlist_rows if row["name"]
+    }
     today = datetime.now(timezone.utc).date().isoformat()
 
     with_gaps: list[dict] = []
@@ -357,15 +377,31 @@ async def discover_series_gaps(
         member_ids = {m.igdb_id for m in members}
         aliases = series_result.aliases
 
-        # Layer A: a member is excluded when an owned/wishlisted igdb_id is
-        # the member itself or an edition/re-release alias of it (e.g. "The
-        # Witcher: Enhanced Edition" -> the canonical "The Witcher" member).
+        # Layer A: a member is excluded when an OWNED igdb_id is the member
+        # itself or an edition/re-release alias of it (e.g. "The Witcher:
+        # Enhanced Edition" -> the canonical "The Witcher" member).
         excluded: set[int] = have_igdb_ids & member_ids
         excluded |= {
             aliases[hid]
             for hid in have_igdb_ids
             if hid in aliases and aliases[hid] in member_ids
         }
+
+        # on_wishlist annotation (never suppresses): a member is flagged when a
+        # wishlisted-but-unowned library game resolves to it via the same
+        # identity layers used for owned suppression above — direct igdb_id,
+        # edition/re-release alias, or normalized-name match. Unlike Layer B's
+        # owned-row suppression, this is purely additive: several members (or
+        # none) can be flagged and nothing here removes a gap from the list.
+        wishlisted_member_ids: set[int] = wishlist_igdb_ids & member_ids
+        wishlisted_member_ids |= {
+            aliases[hid]
+            for hid in wishlist_igdb_ids
+            if hid in aliases and aliases[hid] in member_ids
+        }
+        for m in members:
+            if normalize_series_gap_title(m.name) in wishlist_norm_names:
+                wishlisted_member_ids.add(m.igdb_id)
 
         # Layer B: normalized-name fallback with row-consumption semantics. A
         # library row that matched a member by id/alias is CONSUMED — it
@@ -425,6 +461,7 @@ async def discover_series_gaps(
                     "release_date": member.first_release_date,
                     "game_type": member.game_type,
                     "available_on": available_on,
+                    "on_wishlist": member.igdb_id in wishlisted_member_ids,
                 }
             )
 

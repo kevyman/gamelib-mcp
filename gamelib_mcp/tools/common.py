@@ -116,6 +116,33 @@ SERIES_NAMES_SQL = """
 )
 """
 
+# Correlated ownership/wishlist EXISTS checks, for use where the games table is
+# aliased ``g``. A row can exist in ``games`` with neither true (a wishlist-only
+# sync creates the games row + a game_wishlist row but zero game_platforms
+# rows; a manual owned=0 stub has a game_platforms row but owned=0) — callers
+# that assume every ``games`` row is owned (library/discover/backlog rollups)
+# must gate on OWNED_SQL explicitly rather than inferring it from
+# is_primary_library_item, which is a content-type flag (game vs DLC), not an
+# ownership signal. A distinct alias (gp2) from a rollup CTE's own
+# game_platforms join (gp) avoids ambiguity.
+OWNED_SQL = """
+(
+    EXISTS (
+        SELECT 1 FROM game_platforms gp2
+        WHERE gp2.game_id = g.id AND gp2.owned = 1
+    )
+)
+"""
+
+WISHLISTED_SQL = """
+(
+    EXISTS (
+        SELECT 1 FROM game_wishlist w
+        WHERE w.game_id = g.id
+    )
+)
+"""
+
 
 async def report_progress(ctx, progress: int, total: int) -> None:
     if ctx is not None:

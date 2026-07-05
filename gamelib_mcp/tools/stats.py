@@ -2,6 +2,7 @@
 
 from ..data.db import get_db
 from .common import (
+    OWNED_SQL as _OWNED_SQL,
     PLAY_STATE_SQL as _PLAY_STATE_SQL,
     PLAYTIME_SUM_SQL as _PLAYTIME_SUM_SQL,
 )
@@ -26,6 +27,10 @@ WITH game_rollup AS (
     LEFT JOIN game_platforms gp ON gp.game_id = g.id
     LEFT JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
     WHERE g.is_primary_library_item = 1
+      -- A wishlist-only games row (games + game_wishlist, zero game_platforms
+      -- rows) must not inflate backlog totals/hours or "best unplayed" picks —
+      -- it was never actually owned.
+      AND {_OWNED_SQL}
     GROUP BY g.id
 )
 """
@@ -35,6 +40,8 @@ async def get_backlog_stats() -> dict:
     """
     Backlog shame stats plus aggregate metrics.
     Calculates pace from recent 2-week playtime data across all platforms.
+    Scoped to actually-owned games only — a wishlist-only title never counts
+    toward the backlog.
     """
     async with get_db() as db:
         summary = await db.execute_fetchone(

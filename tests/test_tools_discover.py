@@ -48,11 +48,15 @@ class VibeFilterTests(ToolDBTestCase):
                 "tags",
                 "suggested_platform",
                 "play_state",
+                "owned",
+                "wishlisted",
             },
         )
         self.assertEqual(game["tags"], ["roguelike", "action"])
         # no hardware_preference set -> suggested_platform falls back to first owned
         self.assertEqual(game["suggested_platform"], "steam")
+        self.assertIs(game["owned"], True)
+        self.assertIs(game["wishlisted"], False)
 
     async def test_raw_tag_string_fallback(self):
         await make_steam_game("Tetris", 1, playtime_minutes=0, tags=["falling blocks"])
@@ -203,6 +207,24 @@ class VibeHintTests(ToolDBTestCase):
         await make_steam_game("Hades", 1, playtime_minutes=0, tags=["roguelike"])
         results = await discover.discover_games(vibes=["roguelike"])
         self.assertNotIn("note", results)
+
+
+class WishlistOnlyExclusionTests(ToolDBTestCase):
+    async def test_wishlist_only_game_never_recommended(self):
+        # A wishlist sync creates a games row + game_wishlist row with zero
+        # game_platforms rows. Even with a matching tag and populated
+        # affinity, discover_games must never recommend it — is_primary_
+        # library_item is a content-type flag (game vs DLC), not ownership.
+        gid = await seed_game("Persona 3 Reload", tags=["rpg"])
+        await db_module.upsert_wishlist_entry(gid, "switch2", source="dekudeals")
+        await make_steam_game("Hollow Knight", 1, playtime_minutes=0, tags=["rpg"])
+        await set_tag_affinity("rpg", affinity_score=2.5, avg_score=9.0, game_count=2)
+
+        results = await discover.discover_games()
+
+        names = [g["name"] for g in results["results"]]
+        self.assertNotIn("Persona 3 Reload", names)
+        self.assertIn("Hollow Knight", names)
 
 
 class CompletionStatusExclusionTests(ToolDBTestCase):

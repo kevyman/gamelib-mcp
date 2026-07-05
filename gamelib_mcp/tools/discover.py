@@ -10,9 +10,11 @@ from ..data.protondb import TIER_ORDER
 from ..data.tag_synonyms import canonical_tag
 from ..utils import _parse_json
 from .common import (
+    OWNED_SQL as _OWNED_SQL,
     STEAM_APPID_SQL as _STEAM_APPID_SQL,
     PLAY_STATE_SQL as _PLAY_STATE_SQL,
     PLAYTIME_SUM_SQL as _PLAYTIME_SUM_SQL,
+    WISHLISTED_SQL as _WISHLISTED_SQL,
     clamp_limit as _clamp_limit,
 )
 
@@ -59,6 +61,8 @@ WITH game_rollup AS (
            g.is_farmed,
            g.completion_status,
            g.is_primary_library_item,
+           {_OWNED_SQL} AS owned,
+           {_WISHLISTED_SQL} AS wishlisted,
            {_PLAYTIME_SUM_SQL} AS total_playtime_minutes,
            {_PLAY_STATE_SQL} AS play_state,
            MAX(CASE WHEN gp.platform = 'steam' THEN spd.protondb_tier END) AS protondb_tier,
@@ -70,6 +74,10 @@ WITH game_rollup AS (
     LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
     LEFT JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
     WHERE g.is_primary_library_item = 1
+      -- discover_games only ever recommends what's actually owned: a
+      -- wishlist-only games row (games + game_wishlist, zero game_platforms
+      -- rows) must never surface as a recommendation.
+      AND {_OWNED_SQL}
     GROUP BY g.id
 )
 """
@@ -103,7 +111,9 @@ async def discover_games(
     sort_by: match (taste affinity) | critic (OpenCritic/Metacritic) |
     value (high critic score per HLTB hour — backlog hidden gems).
     min_score: floor on COALESCE(opencritic, metacritic); excludes unscored games.
-    Games marked completed or abandoned (via update_game) are never recommended.
+    Games marked completed or abandoned (via update_game) are never recommended,
+    and only actually-owned games are ever recommended — a wishlist-only title
+    (wishlisted but not owned anywhere) never appears here.
     """
     limit = _clamp_limit(limit)
     if sort_by not in VALID_SORTS:
@@ -281,6 +291,8 @@ async def _format_rows(
             "opencritic_score": row["opencritic_score"],
             "steam_review_desc": row["steam_review_desc"],
             "protondb_tier": row["protondb_tier"],
+            "owned": bool(row["owned"]),
+            "wishlisted": bool(row["wishlisted"]),
         }
         if response_format == "detailed":
             game["platforms"] = platforms_by_game.get(row["game_id"], [])

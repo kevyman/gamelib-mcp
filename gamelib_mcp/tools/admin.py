@@ -967,6 +967,56 @@ async def split_game(
     }
 
 
+async def detect_orphan_games() -> dict:
+    """Find primary-library games rows with no ownership and no wishlist entry.
+
+    ``is_primary_library_item`` is a content-type flag (real game vs
+    DLC/soundtrack/edition) — it says nothing about ownership. A games row can
+    legitimately exist with zero ``game_platforms`` rows in two shapes:
+
+    * wishlist-only (a ``game_wishlist`` row exists) — a normal, intentional
+      shape produced by ``sync_wishlist``/``add_game_to_platform(owned=False)``.
+      Counted in ``wishlist_only_count`` but not returned as a candidate.
+    * a true orphan (no ``game_platforms`` row AND no ``game_wishlist`` row) —
+      e.g. a wishlist entry that was later removed upstream
+      (``delete_stale_wishlist_entries``) without ever being owned, leaving the
+      ``games`` row dangling with nothing pointing at it. These are returned in
+      ``orphans`` for review; no write happens (use ``merge_games`` or a manual
+      DB cleanup — there is no dedicated delete tool since a false positive
+      here would silently destroy a game row and its ratings/series links).
+    """
+    async with get_db() as db:
+        orphan_rows = await db.execute_fetchall(
+            """SELECT g.id AS game_id, g.name, g.igdb_id
+               FROM games g
+               WHERE g.is_primary_library_item = 1
+                 AND NOT EXISTS (SELECT 1 FROM game_platforms gp WHERE gp.game_id = g.id)
+                 AND NOT EXISTS (SELECT 1 FROM game_wishlist w WHERE w.game_id = g.id)
+               ORDER BY g.id"""
+        )
+        wishlist_only_row = await db.execute_fetchone(
+            """SELECT COUNT(*) AS c
+               FROM games g
+               WHERE g.is_primary_library_item = 1
+                 AND NOT EXISTS (SELECT 1 FROM game_platforms gp WHERE gp.game_id = g.id)
+                 AND EXISTS (SELECT 1 FROM game_wishlist w WHERE w.game_id = g.id)"""
+        )
+
+    orphans = [
+        {
+            "game_id": row["game_id"],
+            "name": row["name"],
+            "igdb_id": row["igdb_id"],
+        }
+        for row in orphan_rows
+    ]
+    return {
+        "orphans": orphans,
+        "orphan_count": len(orphans),
+        "wishlist_only_count": wishlist_only_row["c"] if wishlist_only_row else 0,
+    }
+
+
 async def detect_cross_platform_collapses(limit: int = 0) -> dict:
     """Flag multi-platform games whose Steam appid is a *different* IGDB game.
 

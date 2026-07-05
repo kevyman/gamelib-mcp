@@ -3,6 +3,7 @@
 from fastmcp.exceptions import ToolError
 
 from conftest import ToolDBTestCase, make_steam_game, seed_game, add_platform, add_game_alias
+from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import library
 from gamelib_mcp.tools.common import MAX_RESULT_LIMIT
 from gamelib_mcp.tools.platforms import update_game
@@ -50,6 +51,8 @@ class SearchGamesTests(ToolDBTestCase):
                 "parent_game_id",
                 "is_primary_library_item",
                 "play_state",
+                "owned",
+                "wishlisted",
             },
         )
         self.assertEqual(game["name"], "Portal 2")
@@ -62,6 +65,8 @@ class SearchGamesTests(ToolDBTestCase):
         self.assertEqual(game["protondb_tier"], "platinum")
         self.assertEqual(game["steam_review_desc"], "Overwhelmingly Positive")
         self.assertIs(game["is_farmed"], False)
+        self.assertIs(game["owned"], True)
+        self.assertIs(game["wishlisted"], False)
         self.assertEqual(_platform_names(game), ["steam"])
 
     async def test_orders_by_playtime_desc_within_same_match_rank(self):
@@ -388,3 +393,34 @@ class LibraryStatsTests(ToolDBTestCase):
         game = results["results"][0]
         self.assertEqual(game["play_state"], "unknown")
         self.assertIsNone(game["playtime_hours"])
+
+
+class WishlistOnlyOwnershipFlagTests(ToolDBTestCase):
+    """A wishlist sync creates a games row + game_wishlist row with zero
+    game_platforms rows (e.g. prod: Persona 3 Reload, wishlist-only). Such a
+    row is still is_primary_library_item=1 (content-type, not ownership) and
+    must be presented as owned:false/wishlisted:true rather than looking like
+    an owned game with no platforms.
+    """
+
+    async def test_search_games_flags_wishlist_only_game(self):
+        gid = await seed_game("Persona 3 Reload")
+        await db_module.upsert_wishlist_entry(gid, "switch2", source="dekudeals")
+
+        results = await library.search_games("persona 3 reload", response_format="detailed")
+
+        self.assertEqual(results["total_matches"], 1)
+        game = results["results"][0]
+        self.assertIs(game["owned"], False)
+        self.assertIs(game["wishlisted"], True)
+        self.assertEqual(game["platforms"], [])
+
+    async def test_get_library_stats_excludes_wishlist_only_game(self):
+        await make_steam_game("Owned Game", 1, playtime_minutes=60)
+        wishlist_only = await seed_game("Persona 3 Reload")
+        await db_module.upsert_wishlist_entry(wishlist_only, "switch2", source="dekudeals")
+
+        results = await library.get_library_stats()
+
+        self.assertEqual(results["total_games"], 1)
+        self.assertEqual([g["name"] for g in results["results"]], ["Owned Game"])

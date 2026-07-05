@@ -1,6 +1,7 @@
 """Characterization tests for gamelib_mcp.tools.stats."""
 
 from conftest import ToolDBTestCase, make_steam_game, seed_game, add_platform, add_rating
+from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import stats
 from gamelib_mcp.tools.platforms import update_game
 
@@ -143,3 +144,20 @@ class BacklogStatsTests(ToolDBTestCase):
         # Still counted as unplayed by the pure playtime signal (0 minutes) —
         # only the backlog-hours/hltb aggregates exclude evergreen games.
         self.assertEqual(result["unplayed"], 1)
+
+    async def test_wishlist_only_game_excluded_from_totals(self):
+        # A wishlist sync creates a games row + a game_wishlist row with zero
+        # game_platforms rows. is_primary_library_item is a content-type flag
+        # (game vs DLC), not ownership — this row must not inflate backlog
+        # totals, unplayed counts, or backlog hours (its 100h hltb_main would
+        # leak into backlog_hours_hltb if the ownership guard were missing).
+        await make_steam_game("Owned Backlog", 1, playtime_minutes=0, hltb_main=10)
+        wishlist_only = await seed_game("Persona 3 Reload", hltb_main=100)
+        await db_module.upsert_wishlist_entry(wishlist_only, "switch2", source="dekudeals")
+
+        result = await stats.get_backlog_stats()
+
+        self.assertEqual(result["total_library"], 1)
+        self.assertEqual(result["unplayed"], 1)
+        self.assertEqual(result["unplayed_with_hltb"], 1)
+        self.assertEqual(result["backlog_hours_hltb"], 10)
