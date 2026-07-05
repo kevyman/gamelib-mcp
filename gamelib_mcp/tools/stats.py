@@ -2,6 +2,7 @@
 
 from ..data.db import get_db
 from .common import (
+    OWNED_SQL as _OWNED_SQL,
     PLAY_STATE_SQL as _PLAY_STATE_SQL,
     PLAYTIME_SUM_SQL as _PLAYTIME_SUM_SQL,
 )
@@ -23,9 +24,17 @@ WITH game_rollup AS (
            MAX(gpe.metacritic_score) AS metacritic_score,
            MAX(gpe.opencritic_score) AS opencritic_score
     FROM games g
-    LEFT JOIN game_platforms gp ON gp.game_id = g.id
+    -- owned = 1: an owned=0 stub's playtime/enrichment must not feed the
+    -- aggregates (play_state, backlog hours, best-unplayed) — it isn't real
+    -- playtime anywhere. The OWNED_SQL guard below only admits the game; this
+    -- join condition keeps the unowned rows out of its rollup.
+    LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.owned = 1
     LEFT JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
     WHERE g.is_primary_library_item = 1
+      -- A wishlist-only games row (games + game_wishlist, zero game_platforms
+      -- rows) must not inflate backlog totals/hours or "best unplayed" picks —
+      -- it was never actually owned.
+      AND {_OWNED_SQL}
     GROUP BY g.id
 )
 """
@@ -35,6 +44,8 @@ async def get_backlog_stats() -> dict:
     """
     Backlog shame stats plus aggregate metrics.
     Calculates pace from recent 2-week playtime data across all platforms.
+    Scoped to actually-owned games only — a wishlist-only title never counts
+    toward the backlog.
     """
     async with get_db() as db:
         summary = await db.execute_fetchone(

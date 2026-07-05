@@ -30,6 +30,11 @@ async def get_game_detail(
     """
     Return full detail for a game, triggering lazy enrichment.
     Accepts game_id, a Steam appid when available, or a partial name.
+
+    Can resolve to a wishlist-only title (wishlisted but not owned anywhere) —
+    check owned/wishlisted, not is_primary_library_item, which is a
+    content-type flag (real game vs DLC/soundtrack/edition) and says nothing
+    about ownership. A wishlist-only game reports platforms=[].
     """
     async with get_db() as db:
         if game_id is not None:
@@ -78,6 +83,9 @@ async def get_game_detail(
                ORDER BY source
                LIMIT 1""",
             (game_id,),
+        )
+        wishlist_row = await db.execute_fetchone(
+            "SELECT 1 FROM game_wishlist WHERE game_id = ? LIMIT 1", (game_id,)
         )
 
     platforms = (await load_platforms_for_games([game_id])).get(game_id, [])
@@ -147,6 +155,8 @@ async def get_game_detail(
         "content_type": row["content_type"],
         "parent_game_id": row["parent_game_id"],
         "is_primary_library_item": bool(row["is_primary_library_item"]),
+        "owned": any(p["owned"] for p in platforms),
+        "wishlisted": wishlist_row is not None,
         "related_content": related_content,
         "genres": _parse_json(row["genres"]),
         "tags": _parse_json(row["tags"]),

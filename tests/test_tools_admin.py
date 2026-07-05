@@ -120,6 +120,68 @@ class DetectFarmedGamesTests(ToolDBTestCase):
         self.assertNotIn("Manual", [g["name"] for g in result["sample_games"]])
 
 
+class DetectOrphanGamesTests(ToolDBTestCase):
+    async def test_clean_library_reports_nothing(self):
+        await make_steam_game("Dead Space", 17470)
+        result = await admin.detect_orphan_games()
+        self.assertEqual(result["orphans"], [])
+        self.assertEqual(result["orphan_count"], 0)
+        self.assertEqual(result["wishlist_only_count"], 0)
+
+    async def test_wishlist_only_game_counted_but_not_listed(self):
+        # Legit shape: games row + game_wishlist row, no game_platforms rows.
+        # Must be counted in wishlist_only_count, NOT reported as an orphan.
+        wishlist_only = await seed_game("Persona 3 Reload")
+        await db_module.upsert_wishlist_entry(wishlist_only, "switch2", source="dekudeals")
+
+        result = await admin.detect_orphan_games()
+
+        self.assertEqual(result["orphans"], [])
+        self.assertEqual(result["orphan_count"], 0)
+        self.assertEqual(result["wishlist_only_count"], 1)
+
+    async def test_true_orphan_reported_as_candidate(self):
+        # No game_platforms row and no game_wishlist row at all — e.g. a
+        # wishlist entry that was later removed upstream without ever being
+        # owned, leaving the games row dangling.
+        orphan = await seed_game("Dangling Game")
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET igdb_id = ? WHERE id = ?", (12345, orphan)
+            )
+            await db.commit()
+
+        result = await admin.detect_orphan_games()
+
+        self.assertEqual(result["orphan_count"], 1)
+        self.assertEqual(result["wishlist_only_count"], 0)
+        candidate = result["orphans"][0]
+        self.assertEqual(candidate["game_id"], orphan)
+        self.assertEqual(candidate["name"], "Dangling Game")
+        self.assertEqual(candidate["igdb_id"], 12345)
+
+    async def test_owned_and_manual_stub_games_are_not_orphans(self):
+        await make_steam_game("Owned", 1)
+        stub = await seed_game("Manual Stub")
+        await add_platform(stub, "switch2", owned=0)
+
+        result = await admin.detect_orphan_games()
+
+        self.assertEqual(result["orphans"], [])
+        self.assertEqual(result["orphan_count"], 0)
+
+    async def test_non_primary_library_item_is_not_flagged(self):
+        # DLC/expansion rows are never real orphans in this sense — they are
+        # deliberately excluded by is_primary_library_item, which is a
+        # content-type flag, not an ownership one.
+        await seed_game(
+            "Some DLC", content_type="dlc", is_primary_library_item=0
+        )
+        result = await admin.detect_orphan_games()
+        self.assertEqual(result["orphans"], [])
+        self.assertEqual(result["orphan_count"], 0)
+
+
 class SetNintendoSessionValidationTests(ToolDBTestCase):
     async def test_invalid_json_returns_error(self):
         with self.assertRaisesRegex(ToolError, "Invalid JSON"):

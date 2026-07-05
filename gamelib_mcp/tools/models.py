@@ -36,7 +36,11 @@ class GameSummary(FlexibleModel):
     completion_status: str | None = None
     content_type: str | None = None
     parent_game_id: int | None = None
+    # Content-type flag (real game vs DLC/soundtrack/edition) — NOT ownership.
+    # Use owned/wishlisted below to know whether a game is actually owned.
     is_primary_library_item: bool | None = None
+    owned: bool | None = None
+    wishlisted: bool | None = None
     play_state: str | None = None
     matched_alias: str | None = None
     tags: list[str] | None = None
@@ -82,6 +86,9 @@ class SeriesGapMember(FlexibleModel):
     release_date: str | None = None
     game_type: int
     available_on: list[str] = Field(default_factory=list)
+    # True when a wishlisted (but unowned) library game resolves to this
+    # member by igdb_id, edition alias, or normalized name.
+    on_wishlist: bool = False
 
 
 class SeriesGapEntry(FlexibleModel):
@@ -204,6 +211,18 @@ class DetectFarmedGamesResponse(FlexibleModel):
 class DetectCollapsedGamesResponse(FlexibleModel):
     collapsed_count: int
     candidates: list[dict[str, Any]]
+
+
+class OrphanGameEntry(FlexibleModel):
+    game_id: int
+    name: str
+    igdb_id: int | None = None
+
+
+class DetectOrphanGamesResponse(FlexibleModel):
+    orphans: list[OrphanGameEntry]
+    orphan_count: int
+    wishlist_only_count: int
 
 
 class PlatformBreakdownResponse(FlexibleModel):

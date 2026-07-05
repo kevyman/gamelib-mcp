@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 from fastmcp.exceptions import ToolError
 
 from conftest import ToolDBTestCase, make_steam_game, seed_game, add_rating, add_platform
+from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import detail
 from gamelib_mcp.tools.platforms import update_game
 
@@ -84,6 +85,8 @@ class GetGameDetailTests(ToolDBTestCase):
                 "protondb_tier",
                 "manual_overrides",
                 "play_state",
+                "owned",
+                "wishlisted",
             },
         )
         self.assertEqual(result["name"], "Celeste")
@@ -95,6 +98,8 @@ class GetGameDetailTests(ToolDBTestCase):
         self.assertEqual(result["content_type"], "base_game")
         self.assertIsNone(result["parent_game_id"])
         self.assertIs(result["is_primary_library_item"], True)
+        self.assertIs(result["owned"], True)
+        self.assertIs(result["wishlisted"], False)
         self.assertEqual(
             result["related_content"],
             {"dlc": [], "expansions": [], "editions": [], "bundles": [], "other": []},
@@ -214,3 +219,18 @@ class GetGameDetailTests(ToolDBTestCase):
         gid = await make_steam_game("Untouched", 1, playtime_minutes=0)
         result = await detail.get_game_detail(game_id=gid)
         self.assertIsNone(result["completion_status"])
+
+    async def test_wishlist_only_game_reports_owned_false(self):
+        # prod: Persona 3 Reload, wishlist-only, no game_platforms row at all.
+        # is_primary_library_item is a content-type flag (game vs DLC), not
+        # ownership — the tool must expose owned/wishlisted explicitly rather
+        # than looking like an owned game with an empty platforms list.
+        gid = await seed_game("Persona 3 Reload")
+        await db_module.upsert_wishlist_entry(gid, "switch2", source="dekudeals")
+
+        result = await detail.get_game_detail(game_id=gid)
+
+        self.assertIs(result["owned"], False)
+        self.assertIs(result["wishlisted"], True)
+        self.assertEqual(result["platforms"], [])
+        self.assertIs(result["is_primary_library_item"], True)
