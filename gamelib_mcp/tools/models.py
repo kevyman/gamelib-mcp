@@ -24,6 +24,8 @@ class GameSummary(FlexibleModel):
     appid: int | None = None
     steam_appid: int | None = None
     name: str
+    # IGDB cover art (Steam capsule fallback); rendered by the game-cards app.
+    cover_url: str | None = None
     platforms: list[PlatformEntry] | None = None
     playtime_hours: float | None = None
     playtime_2weeks_hours: float | None = None

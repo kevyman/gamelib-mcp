@@ -38,6 +38,7 @@ class VibeFilterTests(ToolDBTestCase):
                 "game_id",
                 "appid",
                 "name",
+                "cover_url",
                 "platforms",
                 "playtime_hours",
                 "hltb_main",

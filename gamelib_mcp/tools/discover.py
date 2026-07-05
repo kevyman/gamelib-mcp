@@ -16,6 +16,7 @@ from .common import (
     PLAYTIME_SUM_SQL as _PLAYTIME_SUM_SQL,
     WISHLISTED_SQL as _WISHLISTED_SQL,
     clamp_limit as _clamp_limit,
+    cover_url as _cover_url,
 )
 
 ResponseFormat = Literal["concise", "detailed"]
@@ -56,6 +57,7 @@ WITH game_rollup AS (
     SELECT g.id AS game_id,
            g.name,
            {_STEAM_APPID_SQL} AS steam_appid,
+           g.cover_image_id,
            g.tags,
            g.hltb_main,
            g.is_farmed,
@@ -283,6 +285,7 @@ async def _format_rows(
             "game_id": row["game_id"],
             "appid": row["steam_appid"],
             "name": row["name"],
+            "cover_url": _cover_url(row["cover_image_id"], row["steam_appid"]),
             "play_state": row["play_state"],
             "playtime_hours": (
                 None

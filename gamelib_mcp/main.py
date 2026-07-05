@@ -19,6 +19,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.server.middleware import AuthMiddleware
 from mcp.types import ToolAnnotations
 
+from .apps import GAME_CARDS_APP, register_apps
 from .auth import load_security_config
 from .http_admin import HttpSecurityMiddleware, register_http_routes
 from .lifecycle import lifespan
@@ -98,6 +99,8 @@ mcp = FastMCP(
     middleware=component_middleware,
     lifespan=lifespan,
 )
+
+register_apps(mcp)
 
 
 # ── Tools ──────────────────────────────────────────────────────────────────────
@@ -194,7 +197,7 @@ async def get_library_stats(
     )
 
 
-@mcp.tool(annotations=READ_ONLY_TOOL)
+@mcp.tool(annotations=READ_ONLY_TOOL, app=GAME_CARDS_APP)
 async def get_game_detail(
     name: str | None = None,
     appid: int | None = None,
@@ -213,7 +216,7 @@ async def get_game_detail(
     return await _detail(name, appid, game_id)
 
 
-@mcp.tool(annotations=READ_ONLY_TOOL)
+@mcp.tool(annotations=READ_ONLY_TOOL, app=GAME_CARDS_APP)
 async def discover_games(
     vibes: list[str] | None = None,
     sort_by: Literal["match", "critic", "value"] = "match",
