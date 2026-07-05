@@ -12,6 +12,15 @@ whose payload carries an ``offset`` (discover_games — genuinely rank-ordered)
 get "№ 01"-style rank badges numbered globally across pagination; payloads
 without that signal (e.g. the detail card) never show a rank.
 
+Rating chips borrow each source's own visual identity (colors verified
+against the sites' stylesheets): Metacritic scores render as its square
+metascore box (green/yellow/red at the games thresholds 75/50), OpenCritic
+as its round score in the tier palette (mighty #fc430a, strong #9e00b4,
+fair #4aa1ce, weak #80b06a), and Steam summaries in Steam's text colors
+(#66c0f4 positive / #b9a074 mixed / #c85e2d negative) plus a 9-step fill
+meter of our own — Steam itself colors all four positive tiers identically,
+so the meter is what makes "Very" vs "Overwhelmingly" visually distinct.
+
 The HTML is deliberately dependency-free: the host↔iframe bridge is the
 ~40-line JSON-RPC postMessage handshake from the MCP Apps spec
 (ui/initialize → ui/notifications/initialized → ui/notifications/tool-result)
@@ -61,6 +70,11 @@ GAME_CARDS_HTML = r"""<!doctype html>
     --p3: #d8f2c4;
     --p4: #ffd6e7;
   }
+  :root {
+    --steam-pos: #d6edfd;
+    --steam-mixed: #ede3c9;
+    --steam-neg: #f7d8c2;
+  }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #191610;
@@ -75,6 +89,9 @@ GAME_CARDS_HTML = r"""<!doctype html>
       --p2: #6d4d1e;
       --p3: #3d5c2a;
       --p4: #6e3350;
+      --steam-pos: #1e4c6d;
+      --steam-mixed: #57492a;
+      --steam-neg: #63351b;
     }
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -124,6 +141,20 @@ GAME_CARDS_HTML = r"""<!doctype html>
     box-shadow: 2px 2px 0 var(--shadow-c);
     transform: rotate(4deg);
   }
+  /* Source-shaped score chips: Metacritic's metascore is a square box,
+     OpenCritic's score is round. Colors are each site's own (metascore
+     green/yellow/red at the games thresholds; OpenCritic tier palette from
+     their stylesheet). Text is fixed near-black/white per background for
+     contrast — brand hexes don't shift with our light/dark scheme. */
+  .score-chip.mc { border-radius: 5px; }
+  .score-chip.oc { border-radius: 999px; }
+  .mc-hi { background: #6c3; color: #17140e; }
+  .mc-mid { background: #fc3; color: #17140e; }
+  .mc-lo { background: #f00; color: #17140e; }
+  .oc-mighty { background: #fc430a; color: #17140e; }
+  .oc-strong { background: #9e00b4; color: #ffffff; }
+  .oc-fair { background: #4aa1ce; color: #17140e; }
+  .oc-weak { background: #80b06a; color: #17140e; }
   .pills { display: flex; gap: 5px; flex-wrap: wrap; }
   .pill {
     font-size: 10px;
@@ -167,21 +198,23 @@ GAME_CARDS_HTML = r"""<!doctype html>
      (render() adds .ranked and seeds the counter from the payload offset). */
   .grid.ranked { counter-reset: rank; }
   .grid.ranked .card { counter-increment: rank; }
+  /* Quieter than the score chip on the right: tucked into the corner,
+     smaller type, thinner border, shallower shadow. */
   .grid.ranked .cover-wrap::before {
     content: "№ " counter(rank, decimal-leading-zero);
     position: absolute;
-    top: 8px;
-    left: 8px;
+    top: 5px;
+    left: 5px;
     z-index: 1;
-    font-size: 10.5px;
-    font-weight: 800;
-    padding: 3px 8px;
+    font-size: 9px;
+    font-weight: 750;
+    padding: 1.5px 6px;
     border-radius: 999px;
     background: var(--card);
-    color: var(--ink);
-    border: 2px solid var(--ink);
-    box-shadow: 2px 2px 0 var(--shadow-c);
-    transform: rotate(-4deg);
+    color: var(--muted);
+    border: 1.5px solid var(--ink);
+    box-shadow: 1.5px 1.5px 0 var(--shadow-c);
+    transform: rotate(-3deg);
   }
 
   .card-body { padding: 10px 11px 12px; display: flex; flex-direction: column; gap: 6px; flex: 1; }
@@ -244,6 +277,37 @@ GAME_CARDS_HTML = r"""<!doctype html>
   .badge:nth-child(3n) { background: var(--p3); }
   .badge:nth-child(4n) { background: var(--p4); }
   .badge b { font-weight: 800; }
+  /* Brand-colored rating badges override the pastel nth-child cycle. */
+  .badges .badge.mc-hi { background: #6c3; color: #17140e; }
+  .badges .badge.mc-mid { background: #fc3; color: #17140e; }
+  .badges .badge.mc-lo { background: #f00; color: #17140e; }
+  .badges .badge.mc { border-radius: 7px; }
+  .badges .badge.oc-mighty { background: #fc430a; color: #17140e; }
+  .badges .badge.oc-strong { background: #9e00b4; color: #ffffff; }
+  .badges .badge.oc-fair { background: #4aa1ce; color: #17140e; }
+  .badges .badge.oc-weak { background: #80b06a; color: #17140e; }
+  /* Steam styles its review summaries as colored text only (one blue for
+     every positive tier); the fill meter is our addition — same palette,
+     but it makes Very vs Overwhelmingly Positive visually distinct. */
+  .badges .badge.steam { display: inline-flex; align-items: center; gap: 7px; }
+  .badges .badge.steam-pos { background: var(--steam-pos); }
+  .badges .badge.steam-mixed { background: var(--steam-mixed); }
+  .badges .badge.steam-neg { background: var(--steam-neg); }
+  .badges .badge.steam-none { background: var(--card); color: var(--muted); }
+  .meter {
+    width: 44px;
+    height: 8px;
+    border: 1.5px solid var(--ink);
+    border-radius: 999px;
+    background: var(--card);
+    overflow: hidden;
+    display: inline-block;
+    flex: none;
+  }
+  .meter-fill { display: block; height: 100%; }
+  .steam-pos .meter-fill { background: #66c0f4; }
+  .steam-mixed .meter-fill { background: #b9a074; }
+  .steam-neg .meter-fill { background: #c85e2d; }
   .desc {
     font-size: 12.5px;
     color: var(--muted);
@@ -352,7 +416,30 @@ GAME_CARDS_HTML = r"""<!doctype html>
     if (game.metacritic_score != null) return { n: game.metacritic_score, src: "Metacritic" };
     return null;
   }
-  function scoreColor(n) { return n >= 80 ? "var(--good)" : n >= 60 ? "var(--ok)" : "var(--bad)"; }
+  /* Metacritic's games thresholds: green >=75, yellow 50-74, red <50. */
+  function mcTier(n) { return n >= 75 ? "mc-hi" : n >= 50 ? "mc-mid" : "mc-lo"; }
+  /* OpenCritic tiers are percentile-based; prefer the real tier when the
+     payload has one, else approximate from the score. */
+  function ocTier(game, n) {
+    var t = String(game.opencritic_tier || "").toLowerCase();
+    if (["mighty", "strong", "fair", "weak"].indexOf(t) < 0) {
+      t = n >= 84 ? "mighty" : n >= 75 ? "strong" : n >= 65 ? "fair" : "weak";
+    }
+    return "oc-" + t;
+  }
+  /* Steam's nine summary tiers, most-specific phrases first. */
+  var STEAM_TIERS = [
+    ["overwhelmingly positive", 9], ["very positive", 8], ["mostly positive", 6],
+    ["positive", 7], ["mixed", 5], ["overwhelmingly negative", 1],
+    ["very negative", 2], ["mostly negative", 4], ["negative", 3],
+  ];
+  function steamTier(desc) {
+    var d = String(desc || "").toLowerCase();
+    for (var i = 0; i < STEAM_TIERS.length; i++) {
+      if (d.indexOf(STEAM_TIERS[i][0]) >= 0) return STEAM_TIERS[i][1];
+    }
+    return null;
+  }
 
   function hoursLabel(h) {
     if (h == null) return null;
@@ -370,8 +457,10 @@ GAME_CARDS_HTML = r"""<!doctype html>
     var cover = coverNode(game);
     var score = critic(game);
     if (score) {
-      var chip = el("span", "score-chip", String(score.n));
-      chip.style.color = scoreColor(score.n);
+      var cls = score.src === "OpenCritic"
+        ? "score-chip oc " + ocTier(game, score.n)
+        : "score-chip mc " + mcTier(score.n);
+      var chip = el("span", cls, String(score.n));
       chip.title = score.src;
       cover.appendChild(chip);
     }
@@ -401,14 +490,29 @@ GAME_CARDS_HTML = r"""<!doctype html>
     return card;
   }
 
-  function badge(parent, label, value, color) {
+  function badge(parent, label, value, cls) {
     if (value === undefined || value === null || value === "") return;
-    var b = el("span", "badge");
+    var b = el("span", "badge" + (cls ? " " + cls : ""));
     b.appendChild(el("span", null, label + " "));
-    var v = el("b", null, String(value));
-    if (color) v.style.color = color;
-    b.appendChild(v);
+    b.appendChild(el("b", null, String(value)));
     parent.appendChild(b);
+    return b;
+  }
+
+  function steamBadge(parent, desc) {
+    if (!desc) return;
+    var tier = steamTier(desc);
+    var cls = tier == null ? "steam-none"
+      : tier >= 6 ? "steam-pos" : tier === 5 ? "steam-mixed" : "steam-neg";
+    var b = badge(parent, "Steam", desc, "steam " + cls);
+    if (tier != null) {
+      var meter = el("span", "meter");
+      var fill = el("span", "meter-fill");
+      fill.style.width = Math.round((tier / 9) * 100) + "%";
+      meter.appendChild(fill);
+      b.appendChild(meter);
+      b.title = tier + "/9 on Steam's review-summary scale";
+    }
   }
 
   function detailCard(game) {
@@ -429,10 +533,12 @@ GAME_CARDS_HTML = r"""<!doctype html>
 
     var badges = el("div", "badges");
     if (game.opencritic_score != null)
-      badge(badges, "OpenCritic", game.opencritic_score, scoreColor(game.opencritic_score));
+      badge(badges, "OpenCritic", game.opencritic_score,
+            "oc " + ocTier(game, game.opencritic_score));
     if (game.metacritic_score != null)
-      badge(badges, "Metacritic", game.metacritic_score, scoreColor(game.metacritic_score));
-    badge(badges, "Steam", game.steam_review_desc);
+      badge(badges, "Metacritic", game.metacritic_score,
+            "mc " + mcTier(game.metacritic_score));
+    steamBadge(badges, game.steam_review_desc);
     badge(badges, "HLTB", hoursLabel(game.hltb_main));
     badge(badges, "ProtonDB", game.protondb_tier);
     if (badges.childNodes.length) info.appendChild(badges);

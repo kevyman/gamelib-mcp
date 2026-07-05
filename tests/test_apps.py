@@ -79,6 +79,18 @@ class GameCardsResourceTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertIn(marker, html)
 
+    def test_rating_chips_use_source_brand_colors(self) -> None:
+        # Verified against the sites' own stylesheets: OpenCritic tier
+        # variables, Steam's .game_review_summary rules, Metacritic's classic
+        # metascore box colors. Locks the research so a restyle can't silently
+        # drift off-brand.
+        for hex_color in (
+            "#fc430a", "#9e00b4", "#4aa1ce", "#80b06a",  # OpenCritic tiers
+            "#66c0f4", "#b9a074", "#c85e2d",             # Steam summary text
+            "#6c3", "#fc3", "#f00",                      # Metacritic metascore
+        ):
+            self.assertIn(hex_color, apps.GAME_CARDS_HTML)
+
     def test_csp_allows_exactly_the_cover_hosts(self) -> None:
         domains = apps._GAME_CARDS_CSP.resource_domains
         self.assertEqual(
