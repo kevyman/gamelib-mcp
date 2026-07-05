@@ -72,6 +72,7 @@ class GameCardsResourceTests(unittest.IsolatedAsyncioTestCase):
         # result notification, and handle preview injection for local review.
         for marker in (
             "ui/initialize",
+            "appInfo",              # required by the ext-apps SDK schema
             "ui/notifications/initialized",
             "ui/notifications/tool-result",
             "ui/notifications/size-changed",

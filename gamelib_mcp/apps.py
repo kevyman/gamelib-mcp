@@ -891,8 +891,11 @@ GAME_CARDS_HTML = r"""<!doctype html>
     request("ui/initialize", {
       protocolVersion: "2026-01-26",
       appCapabilities: {},
+      // appInfo per the ext-apps SDK schema (required there); clientInfo kept
+      // as a legacy alias — the published 2026-01-26 spec example used it,
+      // and schema-validating hosts strip unknown keys.
+      appInfo: { name: "gamelib-game-cards", version: "1.0" },
       clientInfo: { name: "gamelib-game-cards", version: "1.0" },
-      capabilities: {},
     }).then(function (res) {
       hostCaps = (res && res.hostCapabilities) || {};
       notify("ui/notifications/initialized");
