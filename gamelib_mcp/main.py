@@ -240,9 +240,10 @@ async def discover_games(
     (taste affinity), critic (best OpenCritic/Metacritic), or value (highly
     rated AND short — backlog hidden gems, includes a value_note). min_score
     filters on critic score. Results include matched_tags explaining WHY each
-    game ranks (top affinity tags) and suggested_platform from the hardware
-    preference. response_format=concise omits platform arrays and tags.
-    Returns results, total_matches, has_more, and offset.
+    game ranks (top affinity tags), match_percent (match_score normalized
+    against the library-wide best match, 0-100), and suggested_platform from
+    the hardware preference. response_format=concise omits platform arrays
+    and tags. Returns results, total_matches, has_more, and offset.
     """
     from .tools.discover import discover_games as _discover
     return await _discover(

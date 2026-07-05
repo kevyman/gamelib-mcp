@@ -214,6 +214,14 @@ async def discover_games(
             (*params, *outer_params, limit, offset),
         )
         affinity_row = await db.execute_fetchone("SELECT COUNT(*) AS c FROM tag_affinity")
+        # Library-wide best average affinity: the anchor that turns raw match
+        # scores (unbounded tag-affinity averages) into an honest percentage —
+        # 100% = the strongest match in the whole owned library, stable across
+        # vibe filters and pagination.
+        max_match_row = await db.execute_fetchone(
+            _GAME_ROLLUP_CTE + f"SELECT MAX({_MATCH_SCORE_SQL}) AS m FROM game_rollup"
+        )
+        max_match = max_match_row["m"] if max_match_row else None
 
     hw_pref_raw = await get_meta("hardware_preference")
     hw_pref: list[str] = json.loads(hw_pref_raw) if hw_pref_raw else []
@@ -226,6 +234,7 @@ async def discover_games(
             matched_tags=matched_tags,
             include_value_note=sort_by == "value",
             response_format=response_format,
+            max_match=max_match,
         ),
         total["c"],
         limit,
@@ -276,6 +285,7 @@ async def _format_rows(
     matched_tags: dict[int, list[dict]] | None = None,
     include_value_note: bool = False,
     response_format: ResponseFormat = "detailed",
+    max_match: float | None = None,
 ) -> list[dict]:
     platforms_by_game = await load_platforms_for_games(row["game_id"] for row in rows)
     formatted = []
@@ -310,6 +320,10 @@ async def _format_rows(
         )
         if row["match_score"] is not None:
             game["match_score"] = round(row["match_score"], 3)
+            if max_match:
+                game["match_percent"] = max(
+                    0, min(100, round(100 * row["match_score"] / max_match))
+                )
         game_matches = (matched_tags or {}).get(row["game_id"])
         if game_matches:
             game["matched_tags"] = game_matches

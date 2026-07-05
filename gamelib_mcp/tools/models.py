@@ -49,6 +49,8 @@ class GameSummary(FlexibleModel):
     series: list[Any] | None = None
     suggested_platform: str | None = None
     match_score: float | None = None
+    # match_score normalized against the library-wide best match (0-100).
+    match_percent: int | None = None
     match_type: str | None = None
 
 

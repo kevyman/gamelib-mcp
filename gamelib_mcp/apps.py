@@ -237,6 +237,22 @@ GAME_CARDS_HTML = r"""<!doctype html>
     flex-wrap: wrap;
   }
   .card-body .pills { margin-top: auto; padding-top: 2px; }
+  /* Secondary-ratings row on grid cards: mini branded chips. */
+  .scores { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+  .mini {
+    font-size: 10px;
+    font-weight: 800;
+    padding: 1.5px 6px;
+    border-radius: 999px;
+    border: 1.5px solid var(--ink);
+    box-shadow: 1.5px 1.5px 0 var(--shadow-c);
+  }
+  .mini.mc { border-radius: 4px; }
+  .mini.steam { display: inline-flex; align-items: center; padding: 3px 6px; }
+  .mini.steam-pos { background: var(--steam-pos); }
+  .mini.steam-mixed { background: var(--steam-mixed); }
+  .mini.steam-neg { background: var(--steam-neg); }
+  .scores .meter { width: 34px; height: 6px; }
 
   /* ---- detail mode ---- */
   .detail {
@@ -411,9 +427,11 @@ GAME_CARDS_HTML = r"""<!doctype html>
     return wrap;
   }
 
+  /* Providers use negative sentinels for "no score yet" — never show those. */
+  function realScore(n) { return n != null && n >= 0; }
   function critic(game) {
-    if (game.opencritic_score != null) return { n: game.opencritic_score, src: "OpenCritic" };
-    if (game.metacritic_score != null) return { n: game.metacritic_score, src: "Metacritic" };
+    if (realScore(game.opencritic_score)) return { n: game.opencritic_score, src: "OpenCritic" };
+    if (realScore(game.metacritic_score)) return { n: game.metacritic_score, src: "Metacritic" };
     return null;
   }
   /* Metacritic's games thresholds: green >=75, yellow 50-74, red <50. */
@@ -476,9 +494,32 @@ GAME_CARDS_HTML = r"""<!doctype html>
     if (game.playtime_hours) meta.appendChild(el("span", null, game.playtime_hours + "h played"));
     if (meta.childNodes.length) body.appendChild(meta);
 
+    // Secondary ratings: whatever the cover chip doesn't show. All available
+    // sources stay visible per card without stacking chips on the artwork.
+    var scores = el("div", "scores");
+    if (score && score.src === "OpenCritic" && realScore(game.metacritic_score)) {
+      var mini = el("span", "mini mc " + mcTier(game.metacritic_score),
+                    String(game.metacritic_score));
+      mini.title = "Metacritic";
+      scores.appendChild(mini);
+    }
+    var st = steamTier(game.steam_review_desc);
+    if (st != null) {
+      var sCls = st >= 6 ? "steam-pos" : st === 5 ? "steam-mixed" : "steam-neg";
+      var sChip = el("span", "mini steam " + sCls);
+      var meter = el("span", "meter");
+      var fill = el("span", "meter-fill");
+      fill.style.width = Math.round((st / 9) * 100) + "%";
+      meter.appendChild(fill);
+      sChip.appendChild(meter);
+      sChip.title = "Steam: " + game.steam_review_desc;
+      scores.appendChild(sChip);
+    }
+    if (scores.childNodes.length) body.appendChild(scores);
+
     var pills = el("div", "pills");
-    if (game.match_score != null) {
-      pills.appendChild(el("span", "pill match", Math.round(game.match_score * 100) + "% match"));
+    if (game.match_percent != null) {
+      pills.appendChild(el("span", "pill match", game.match_percent + "% match"));
     }
     matchedTagNames(game).slice(0, 3).forEach(function (t) {
       pills.appendChild(el("span", "pill", t));
@@ -532,10 +573,10 @@ GAME_CARDS_HTML = r"""<!doctype html>
     if (subBits.length) info.appendChild(el("div", "sub", subBits.join("  ·  ")));
 
     var badges = el("div", "badges");
-    if (game.opencritic_score != null)
+    if (realScore(game.opencritic_score))
       badge(badges, "OpenCritic", game.opencritic_score,
             "oc " + ocTier(game, game.opencritic_score));
-    if (game.metacritic_score != null)
+    if (realScore(game.metacritic_score))
       badge(badges, "Metacritic", game.metacritic_score,
             "mc " + mcTier(game.metacritic_score));
     steamBadge(badges, game.steam_review_desc);

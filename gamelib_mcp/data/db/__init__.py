@@ -103,7 +103,7 @@ STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
 XBOX_TITLE_ID = "xbox_title_id"
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 
 @dataclass
@@ -1441,6 +1441,33 @@ async def _migrate_v24_to_v25(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v25_to_v26(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """NULL out OpenCritic's 'no score yet' sentinels (data-only, no DDL).
+
+    OpenCritic's API reports an unscored game as topCriticScore -1 with an
+    empty tier (percentRecommended may be -1 too); enrichment stored those
+    raw, so -1 surfaced as a real score in tool responses and the game-cards
+    widget. The write path now normalizes to NULL; this cleans rows written
+    before the fix.
+    """
+    if progress is not None:
+        progress("Migrating to v26: NULL out OpenCritic no-score sentinels.")
+
+    await db.execute(
+        "UPDATE game_platform_enrichment SET opencritic_score = NULL WHERE opencritic_score < 0"
+    )
+    await db.execute(
+        "UPDATE game_platform_enrichment SET opencritic_percent_rec = NULL"
+        " WHERE opencritic_percent_rec < 0"
+    )
+    await db.execute(
+        "UPDATE game_platform_enrichment SET opencritic_tier = NULL WHERE opencritic_tier = ''"
+    )
+
+    await _set_user_version(db, 26)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1596,6 +1623,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (22, _migrate_v22_to_v23),
     (23, _migrate_v23_to_v24),
     (24, _migrate_v24_to_v25),
+    (25, _migrate_v25_to_v26),
 )
 
 
