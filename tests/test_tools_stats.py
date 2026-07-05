@@ -145,6 +145,23 @@ class BacklogStatsTests(ToolDBTestCase):
         # only the backlog-hours/hltb aggregates exclude evergreen games.
         self.assertEqual(result["unplayed"], 1)
 
+    async def test_unowned_stub_playtime_does_not_leak_into_aggregates(self):
+        # A stale/manual owned=0 stub's playtime must not feed play_state or
+        # backlog aggregates: with owned steam at 0 minutes and a 600-minute
+        # owned=0 stub, the game is still UNPLAYED backlog (before the join
+        # guard, the stub's minutes marked it 'played' and dropped its HLTB
+        # hours from the backlog).
+        gid = await make_steam_game("Doom", 1, playtime_minutes=0, hltb_main=10)
+        await add_platform(gid, "epic", playtime_minutes=600, owned=0)
+
+        result = await stats.get_backlog_stats()
+
+        self.assertEqual(result["total_library"], 1)
+        self.assertEqual(result["played"], 0)
+        self.assertEqual(result["unplayed"], 1)
+        self.assertEqual(result["unplayed_with_hltb"], 1)
+        self.assertEqual(result["backlog_hours_hltb"], 10)
+
     async def test_wishlist_only_game_excluded_from_totals(self):
         # A wishlist sync creates a games row + a game_wishlist row with zero
         # game_platforms rows. is_primary_library_item is a content-type flag

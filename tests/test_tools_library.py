@@ -424,3 +424,18 @@ class WishlistOnlyOwnershipFlagTests(ToolDBTestCase):
 
         self.assertEqual(results["total_games"], 1)
         self.assertEqual([g["name"] for g in results["results"]], ["Owned Game"])
+
+    async def test_unowned_stub_playtime_excluded_from_aggregates(self):
+        # An owned=0 stub's 600 minutes aren't real playtime anywhere — search
+        # and library-stats playtime/play_state must derive from the owned
+        # steam row's 60 minutes only.
+        gid = await make_steam_game("Doom", 1, playtime_minutes=60)
+        await add_platform(gid, "epic", playtime_minutes=600, owned=0)
+
+        results = await library.search_games("doom")
+        game = results["results"][0]
+        self.assertEqual(game["playtime_hours"], 1.0)
+        self.assertEqual(game["play_state"], "played")
+
+        stats = await library.get_library_stats()
+        self.assertEqual(stats["total_playtime_hours"], 1.0)

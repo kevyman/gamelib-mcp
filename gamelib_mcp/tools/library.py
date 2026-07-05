@@ -62,7 +62,12 @@ WITH game_rollup AS (
            MAX(gpe.metacritic_score) AS metacritic_score,
            MAX(gpe.opencritic_score) AS opencritic_score
     FROM games g
-    LEFT JOIN game_platforms gp ON gp.game_id = g.id
+    -- owned = 1: unowned rows (wishlist-only games have none; owned=0 manual
+    -- stubs do exist) must not feed the aggregates — a stub's playtime isn't
+    -- real playtime anywhere, so play_state/playtime/enrichment derive from
+    -- owned rows only. Unowned games still appear in search results (LEFT
+    -- JOIN keeps the games row; the owned/wishlisted flags tell them apart).
+    LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.owned = 1
     LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
     LEFT JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
     GROUP BY g.id

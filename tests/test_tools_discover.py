@@ -226,6 +226,20 @@ class WishlistOnlyExclusionTests(ToolDBTestCase):
         self.assertNotIn("Persona 3 Reload", names)
         self.assertIn("Hollow Knight", names)
 
+    async def test_unowned_stub_playtime_does_not_hide_unplayed_game(self):
+        # An owned=0 stub's 600 minutes must not mark an otherwise-unplayed
+        # game 'played' — it would silently vanish from unplayed_only
+        # recommendations despite never actually being played.
+        gid = await make_steam_game("Doom", 1, playtime_minutes=0, tags=["shooter"])
+        await add_platform(gid, "epic", playtime_minutes=600, owned=0)
+
+        results = await discover.discover_games(vibes=["shooter"])
+
+        self.assertEqual([g["name"] for g in results["results"]], ["Doom"])
+        game = results["results"][0]
+        self.assertEqual(game["play_state"], "unplayed")
+        self.assertEqual(game["playtime_hours"], 0.0)
+
 
 class CompletionStatusExclusionTests(ToolDBTestCase):
     async def test_discover_excludes_abandoned_and_completed(self):

@@ -24,7 +24,11 @@ WITH game_rollup AS (
            MAX(gpe.metacritic_score) AS metacritic_score,
            MAX(gpe.opencritic_score) AS opencritic_score
     FROM games g
-    LEFT JOIN game_platforms gp ON gp.game_id = g.id
+    -- owned = 1: an owned=0 stub's playtime/enrichment must not feed the
+    -- aggregates (play_state, backlog hours, best-unplayed) — it isn't real
+    -- playtime anywhere. The OWNED_SQL guard below only admits the game; this
+    -- join condition keeps the unowned rows out of its rollup.
+    LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.owned = 1
     LEFT JOIN game_platform_enrichment gpe ON gpe.game_platform_id = gp.id
     WHERE g.is_primary_library_item = 1
       -- A wishlist-only games row (games + game_wishlist, zero game_platforms
