@@ -325,4 +325,7 @@ def _envelope(results: list[dict], total_matches: int, limit: int, offset: int) 
         "results": results,
         "total_matches": total_matches,
         "has_more": offset + len(results) < total_matches,
+        # Results are always rank-ordered (match/critic/value); offset lets the
+        # game-cards app number them globally, so page two starts at № 21.
+        "offset": offset,
     }

@@ -56,6 +56,9 @@ class PaginatedGamesResponse(FlexibleModel):
     results: list[GameSummary]
     total_matches: int
     has_more: bool
+    # Present when results are rank-ordered (discover_games): the pagination
+    # offset, used by the game-cards app to number cards globally.
+    offset: int | None = None
 
 
 class SearchGamesBatchResponse(RootModel[dict[str, list[GameSummary]]]):

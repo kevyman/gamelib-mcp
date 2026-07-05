@@ -6,6 +6,12 @@ otherwise (get_game_detail). Clients that don't speak the Apps extension
 ignore the tool metadata entirely and see the normal JSON responses, so
 attaching ``GAME_CARDS_APP`` to a tool is purely additive.
 
+Visual language ("toybox"): thick ink borders, hard offset shadows, chunky
+type, pastel tag stickers, adapting to the viewer's light/dark scheme. Grids
+whose payload carries an ``offset`` (discover_games — genuinely rank-ordered)
+get "№ 01"-style rank badges numbered globally across pagination; payloads
+without that signal (e.g. the detail card) never show a rank.
+
 The HTML is deliberately dependency-free: the host↔iframe bridge is the
 ~40-line JSON-RPC postMessage handshake from the MCP Apps spec
 (ui/initialize → ui/notifications/initialized → ui/notifications/tool-result)
@@ -42,54 +48,45 @@ GAME_CARDS_HTML = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root {
-    --bg: transparent;
-    --card: #ffffff;
-    --text: #1a1d21;
-    --muted: #6b7280;
-    --border: rgba(0, 0, 0, 0.08);
-    --shadow: 0 1px 3px rgba(0, 0, 0, 0.10), 0 4px 14px rgba(0, 0, 0, 0.06);
-    --pill: rgba(0, 0, 0, 0.05);
-    --good: #16a34a;
-    --ok: #ca8a04;
-    --bad: #dc2626;
+    --bg: #f5efe2;
+    --card: #fffdf6;
+    --ink: #17140e;
+    --shadow-c: #17140e;
+    --muted: #6d6553;
+    --good: #1a7f37;
+    --ok: #96650a;
+    --bad: #b3223c;
+    --p1: #cfe6ff;
+    --p2: #ffe0b8;
+    --p3: #d8f2c4;
+    --p4: #ffd6e7;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --card: #23262b;
-      --text: #e8eaed;
-      --muted: #9aa1ab;
-      --border: rgba(255, 255, 255, 0.09);
-      --shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 4px 14px rgba(0, 0, 0, 0.3);
-      --pill: rgba(255, 255, 255, 0.08);
-      --good: #4ade80;
-      --ok: #facc15;
-      --bad: #f87171;
+      --bg: #191610;
+      --card: #241f15;
+      --ink: #ece5d3;
+      --shadow-c: #000000;
+      --muted: #a89d86;
+      --good: #7ee2a0;
+      --ok: #ffd66b;
+      --bad: #ff9eb0;
+      --p1: #274a68;
+      --p2: #6d4d1e;
+      --p3: #3d5c2a;
+      --p4: #6e3350;
     }
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     background: var(--bg);
-    color: var(--text);
-    padding: 12px;
+    color: var(--ink);
+    padding: 16px;
     -webkit-font-smoothing: antialiased;
   }
 
-  /* ---- grid mode ---- */
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(138px, 1fr));
-    gap: 14px;
-  }
-  .card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    box-shadow: var(--shadow);
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-  }
+  /* ---- shared cover block ---- */
   .cover-wrap { position: relative; aspect-ratio: 2 / 3; }
   .cover-wrap img, .cover-fallback {
     position: absolute;
@@ -103,10 +100,10 @@ GAME_CARDS_HTML = r"""<!doctype html>
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 16px;
-    font-weight: 650;
+    font-size: 15px;
+    font-weight: 800;
     line-height: 1.3;
-    color: rgba(255, 255, 255, 0.88);
+    color: rgba(255, 255, 255, 0.92);
     text-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
     padding: 12px;
     text-align: center;
@@ -115,77 +112,157 @@ GAME_CARDS_HTML = r"""<!doctype html>
   }
   .score-chip {
     position: absolute;
-    top: 7px;
-    right: 7px;
-    font-size: 11.5px;
-    font-weight: 700;
-    padding: 2px 7px;
+    top: 8px;
+    right: 8px;
+    z-index: 1;
+    font-size: 12.5px;
+    font-weight: 800;
+    padding: 3px 8px;
     border-radius: 999px;
-    background: rgba(17, 17, 17, 0.78);
-    backdrop-filter: blur(2px);
+    background: var(--card);
+    border: 2px solid var(--ink);
+    box-shadow: 2px 2px 0 var(--shadow-c);
+    transform: rotate(4deg);
   }
-  .card-body { padding: 9px 10px 10px; display: flex; flex-direction: column; gap: 5px; flex: 1; }
+  .pills { display: flex; gap: 5px; flex-wrap: wrap; }
+  .pill {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1.5px solid var(--ink);
+    background: var(--p1);
+    color: var(--ink);
+    white-space: nowrap;
+    transform: rotate(-1.2deg);
+  }
+  .pill:nth-child(2n) { background: var(--p2); transform: rotate(1.1deg); }
+  .pill:nth-child(3n) { background: var(--p3); transform: rotate(-0.8deg); }
+  .pill:nth-child(4n) { background: var(--p4); transform: rotate(1.4deg); }
+  .pill.match { background: var(--good); color: var(--card); border-color: var(--ink); }
+
+  /* ---- grid mode ---- */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(142px, 1fr));
+    gap: 18px;
+  }
+  .card {
+    background: var(--card);
+    border: 2px solid var(--ink);
+    border-radius: 12px;
+    box-shadow: 4px 4px 0 var(--shadow-c);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+  }
+  .card:hover {
+    transform: translate(-2px, -2px);
+    box-shadow: 7px 7px 0 var(--shadow-c);
+  }
+  .card .cover-wrap { border-bottom: 2px solid var(--ink); }
+
+  /* Rank badge — only on grids whose payload is genuinely rank-ordered
+     (render() adds .ranked and seeds the counter from the payload offset). */
+  .grid.ranked { counter-reset: rank; }
+  .grid.ranked .card { counter-increment: rank; }
+  .grid.ranked .cover-wrap::before {
+    content: "№ " counter(rank, decimal-leading-zero);
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 1;
+    font-size: 10.5px;
+    font-weight: 800;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: var(--card);
+    color: var(--ink);
+    border: 2px solid var(--ink);
+    box-shadow: 2px 2px 0 var(--shadow-c);
+    transform: rotate(-4deg);
+  }
+
+  .card-body { padding: 10px 11px 12px; display: flex; flex-direction: column; gap: 6px; flex: 1; }
   .title {
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 13.5px;
+    font-weight: 800;
     line-height: 1.25;
+    letter-spacing: -0.01em;
     display: -webkit-box;
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
-  .meta { font-size: 11.5px; color: var(--muted); display: flex; gap: 7px; flex-wrap: wrap; }
-  .pills { display: flex; gap: 4px; flex-wrap: wrap; }
-  .card-body .pills { margin-top: auto; }
-  .pill {
-    font-size: 10px;
-    padding: 2px 7px;
-    border-radius: 999px;
-    background: var(--pill);
+  .meta {
+    font-size: 11px;
+    font-weight: 650;
     color: var(--muted);
-    white-space: nowrap;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
   }
-  .pill.match { color: var(--good); font-weight: 600; }
+  .card-body .pills { margin-top: auto; padding-top: 2px; }
 
   /* ---- detail mode ---- */
   .detail {
     display: flex;
-    gap: 18px;
+    gap: 20px;
     background: var(--card);
-    border: 1px solid var(--border);
+    border: 2px solid var(--ink);
     border-radius: 14px;
-    box-shadow: var(--shadow);
-    padding: 16px;
+    box-shadow: 5px 5px 0 var(--shadow-c);
+    padding: 18px;
     max-width: 720px;
   }
-  .detail .cover-wrap { flex: 0 0 168px; aspect-ratio: 2 / 3; border-radius: 10px; overflow: hidden; align-self: flex-start; }
+  .detail .cover-wrap {
+    flex: 0 0 168px;
+    aspect-ratio: 2 / 3;
+    border: 2px solid var(--ink);
+    border-radius: 10px;
+    overflow: hidden;
+    align-self: flex-start;
+    box-shadow: 4px 4px 0 var(--shadow-c);
+    transform: rotate(-1.5deg);
+    margin: 4px 6px 8px 2px;
+  }
   .detail-info { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-  .detail-info h1 { font-size: 19px; font-weight: 700; line-height: 1.2; }
-  .sub { font-size: 12.5px; color: var(--muted); }
+  .detail-info h1 { font-size: 20px; font-weight: 800; line-height: 1.15; letter-spacing: -0.01em; }
+  .sub { font-size: 12.5px; font-weight: 650; color: var(--muted); }
   .badges { display: flex; gap: 6px; flex-wrap: wrap; }
   .badge {
     font-size: 11.5px;
-    font-weight: 600;
-    padding: 3px 9px;
-    border-radius: 7px;
-    background: var(--pill);
+    font-weight: 700;
+    padding: 3px 10px;
+    border-radius: 999px;
+    border: 1.5px solid var(--ink);
+    background: var(--p1);
+    color: var(--ink);
   }
-  .badge b { font-weight: 700; }
+  .badge:nth-child(2n) { background: var(--p2); }
+  .badge:nth-child(3n) { background: var(--p3); }
+  .badge:nth-child(4n) { background: var(--p4); }
+  .badge b { font-weight: 800; }
   .desc {
     font-size: 12.5px;
     color: var(--muted);
-    line-height: 1.5;
+    line-height: 1.55;
     display: -webkit-box;
     -webkit-line-clamp: 4;
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
-  .rating-row { font-size: 13px; }
-  .rating-row b { font-size: 15px; }
-  .empty { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
+  .rating-row { font-size: 13px; font-weight: 650; }
+  .rating-row b { font-size: 16px; font-weight: 800; }
+  .empty { color: var(--muted); font-size: 13px; font-weight: 650; padding: 20px; text-align: center; }
   @media (max-width: 460px) {
     .detail { flex-direction: column; }
     .detail .cover-wrap { flex-basis: auto; width: 150px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .card { transition: none; }
+    .card:hover { transform: none; box-shadow: 4px 4px 0 var(--shadow-c); }
   }
 </style>
 </head>
@@ -387,6 +464,13 @@ GAME_CARDS_HTML = r"""<!doctype html>
         root.appendChild(el("div", "empty", "No games matched."));
       } else {
         var grid = el("div", "grid");
+        // Rank badges only when the payload is explicitly rank-ordered:
+        // discover_games sends its pagination offset, so numbering is global
+        // (page two starts at № 21). Payloads without it stay unnumbered.
+        if (typeof data.offset === "number") {
+          grid.classList.add("ranked");
+          grid.style.counterReset = "rank " + data.offset;
+        }
         data.results.forEach(function (g) { grid.appendChild(gridCard(g)); });
         root.appendChild(grid);
       }
