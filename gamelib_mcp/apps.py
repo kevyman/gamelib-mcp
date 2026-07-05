@@ -32,14 +32,10 @@ For local visual iteration outside any MCP host, the widget renders
 see scripts/preview_game_cards.py.
 """
 
+import hashlib
 from typing import Any
 
 from fastmcp.apps import AppConfig, ResourceCSP
-
-GAME_CARDS_URI = "ui://gamelib/game-cards.html"
-
-# Attached to tools whose results the widget renders.
-GAME_CARDS_APP = AppConfig(resource_uri=GAME_CARDS_URI)
 
 # Cover art hosts (see tools/common.py cover_url). resource_domains feeds
 # img-src in the host's iframe CSP; everything else stays deny-by-default.
@@ -659,6 +655,18 @@ GAME_CARDS_HTML = r"""<!doctype html>
 </body>
 </html>
 """
+
+
+# Hosts cache ui:// resources by URI (and may preload them from tool _meta),
+# so a stable URI can pin clients to a stale widget across deploys — claude.ai
+# kept rendering an old bundle after the server updated. Hashing the content
+# into the URI makes every widget change a URI the host has never cached.
+GAME_CARDS_URI = (
+    f"ui://gamelib/game-cards-{hashlib.sha1(GAME_CARDS_HTML.encode()).hexdigest()[:8]}.html"
+)
+
+# Attached to tools whose results the widget renders.
+GAME_CARDS_APP = AppConfig(resource_uri=GAME_CARDS_URI)
 
 
 def register_apps(mcp: Any) -> None:
