@@ -302,6 +302,13 @@ GAME_CARDS_HTML = r"""<!doctype html>
   .badge:nth-child(3n) { background: var(--p3); }
   .badge:nth-child(4n) { background: var(--p4); }
   .badge b { font-weight: 800; }
+  a.badge { text-decoration: none; color: inherit; }
+  .badge[data-link] { cursor: pointer; transition: transform 0.1s ease, box-shadow 0.1s ease; }
+  .badge[data-link]:hover, .badge[data-link]:focus-visible {
+    transform: translate(-1px, -1px);
+    box-shadow: 2px 2px 0 var(--shadow-c);
+  }
+  .badge .ext { font-size: 9px; margin-left: 3px; opacity: 0.65; }
   /* Brand-colored rating badges override the pastel nth-child cycle. */
   .badges .badge.mc-hi { background: #6c3; color: #17140e; }
   .badges .badge.mc-mid { background: #fc3; color: #17140e; }
@@ -347,30 +354,31 @@ GAME_CARDS_HTML = r"""<!doctype html>
   .empty { color: var(--muted); font-size: 13px; font-weight: 650; padding: 20px; text-align: center; }
 
   /* ---- click-to-expand overlay ---- */
+  /* Anchored near the clicked card rather than centered in the (possibly
+     very tall) iframe — hosts that don't auto-scroll to modals would
+     otherwise open it off-screen. JS sets the panel's top and the overlay's
+     height to span the whole document. */
   .overlay {
-    position: fixed;
-    inset: 0;
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
     z-index: 10;
     background: rgba(12, 10, 6, 0.5);
-    display: flex;
-    align-items: safe center;
-    justify-content: center;
-    padding: 14px;
     opacity: 0;
     transition: opacity 0.16s ease;
   }
   .overlay.open { opacity: 1; }
   .overlay-panel {
-    position: relative;
-    width: 100%;
+    position: absolute;
+    left: 50%;
+    width: calc(100% - 28px);
     max-width: 720px;
-    max-height: 100%;
-    overflow-y: auto;
     border-radius: 16px;
-    transform: scale(0.93) translateY(12px);
+    transform: translateX(-50%) scale(0.93) translateY(12px);
     transition: transform 0.19s ease;
   }
-  .overlay.open .overlay-panel { transform: none; }
+  .overlay.open .overlay-panel { transform: translateX(-50%); }
   .overlay-panel .detail { max-width: none; box-shadow: none; margin: 0; }
   .overlay-close {
     position: absolute;
@@ -459,6 +467,17 @@ GAME_CARDS_HTML = r"""<!doctype html>
       new Promise(function (resolve) { setTimeout(resolve, timeoutMs || 15000); }),
     ]);
   }
+  /* External links go through the host (ui/open-link, gated by the openLinks
+     host capability captured at init); window.open is the best-effort
+     fallback for hosts that don't declare it. */
+  var hostCaps = {};
+  function openLink(url) {
+    if (hostCaps.openLinks) {
+      request("ui/open-link", { url: url });
+    } else {
+      try { window.open(url, "_blank", "noopener"); } catch (e) { /* sandboxed */ }
+    }
+  }
   function resultData(result) {
     var data = result && result.structuredContent;
     if (!data && result && result.content) {
@@ -509,11 +528,6 @@ GAME_CARDS_HTML = r"""<!doctype html>
 
   /* Providers use negative sentinels for "no score yet" — never show those. */
   function realScore(n) { return n != null && n >= 0; }
-  function critic(game) {
-    if (realScore(game.opencritic_score)) return { n: game.opencritic_score, src: "OpenCritic" };
-    if (realScore(game.metacritic_score)) return { n: game.metacritic_score, src: "Metacritic" };
-    return null;
-  }
   /* Metacritic's games thresholds: green >=75, yellow 50-74, red <50. */
   function mcTier(n) { return n >= 75 ? "mc-hi" : n >= 50 ? "mc-mid" : "mc-lo"; }
   /* OpenCritic tiers are percentile-based; prefer the real tier when the
@@ -594,6 +608,18 @@ GAME_CARDS_HTML = r"""<!doctype html>
     overlayState = { node: overlay, trigger: trigger, keydown: keydown };
 
     document.body.appendChild(overlay);
+
+    // Anchor the panel near the clicked card, clamped inside the document;
+    // stretch the backdrop over the full document height.
+    function position() {
+      var docH = document.documentElement.scrollHeight;
+      var scrollTop = window.scrollY || document.documentElement.scrollTop || 0;
+      var anchor = trigger ? trigger.getBoundingClientRect().top + scrollTop - 8 : 12;
+      var top = Math.max(12, Math.min(anchor, docH - panel.offsetHeight - 12));
+      panel.style.top = top + "px";
+      overlay.style.height = Math.max(docH, top + panel.offsetHeight + 14) + "px";
+    }
+    position();
     requestAnimationFrame(function () { overlay.classList.add("open"); });
     panel.focus({ preventScroll: true });
 
@@ -604,6 +630,7 @@ GAME_CARDS_HTML = r"""<!doctype html>
       if (data && data.name) {
         var full = detailCard(data);
         panel.replaceChild(full, lite);
+        position(); // content height changed
       } else {
         note.remove(); // host declined or timed out: keep the lite view
       }
@@ -625,13 +652,13 @@ GAME_CARDS_HTML = r"""<!doctype html>
       });
     }
     var cover = coverNode(game);
-    var score = critic(game);
-    if (score) {
-      var cls = score.src === "OpenCritic"
-        ? "score-chip oc " + ocTier(game, score.n)
-        : "score-chip mc " + mcTier(score.n);
-      var chip = el("span", cls, String(score.n));
-      chip.title = score.src;
+    // The cover chip is always Metacritic (the fullest-coverage source in
+    // this library) so the top-right corner never switches identity between
+    // sources; everything else lives in the scores row below.
+    if (realScore(game.metacritic_score)) {
+      var chip = el("span", "score-chip mc " + mcTier(game.metacritic_score),
+                    String(game.metacritic_score));
+      chip.title = "Metacritic";
       cover.appendChild(chip);
     }
     card.appendChild(cover);
@@ -646,13 +673,12 @@ GAME_CARDS_HTML = r"""<!doctype html>
     if (game.playtime_hours) meta.appendChild(el("span", null, game.playtime_hours + "h played"));
     if (meta.childNodes.length) body.appendChild(meta);
 
-    // Secondary ratings: whatever the cover chip doesn't show. All available
-    // sources stay visible per card without stacking chips on the artwork.
+    // Secondary ratings: OpenCritic and Steam always live here.
     var scores = el("div", "scores");
-    if (score && score.src === "OpenCritic" && realScore(game.metacritic_score)) {
-      var mini = el("span", "mini mc " + mcTier(game.metacritic_score),
-                    String(game.metacritic_score));
-      mini.title = "Metacritic";
+    if (realScore(game.opencritic_score)) {
+      var mini = el("span", "mini oc " + ocTier(game, game.opencritic_score),
+                    String(game.opencritic_score));
+      mini.title = "OpenCritic";
       scores.appendChild(mini);
     }
     var st = steamTier(game.steam_review_desc);
@@ -683,27 +709,37 @@ GAME_CARDS_HTML = r"""<!doctype html>
     return card;
   }
 
-  function badge(parent, label, value, cls) {
+  function badge(parent, label, value, cls, url) {
     if (value === undefined || value === null || value === "") return;
-    var b = el("span", "badge" + (cls ? " " + cls : ""));
+    var b = el(url ? "a" : "span", "badge" + (cls ? " " + cls : ""));
     b.appendChild(el("span", null, label + " "));
     b.appendChild(el("b", null, String(value)));
+    if (url) {
+      b.href = url;
+      b.setAttribute("data-link", "");
+      b.appendChild(el("span", "ext", "↗"));
+      b.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        openLink(url);
+      });
+    }
     parent.appendChild(b);
     return b;
   }
 
-  function steamBadge(parent, desc) {
+  function steamBadge(parent, desc, url) {
     if (!desc) return;
     var tier = steamTier(desc);
     var cls = tier == null ? "steam-none"
       : tier >= 6 ? "steam-pos" : tier === 5 ? "steam-mixed" : "steam-neg";
-    var b = badge(parent, "Steam", desc, "steam " + cls);
+    var b = badge(parent, "Steam", desc, "steam " + cls, url);
     if (tier != null) {
       var meter = el("span", "meter");
       var fill = el("span", "meter-fill");
       fill.style.width = Math.round((tier / 9) * 100) + "%";
       meter.appendChild(fill);
-      b.appendChild(meter);
+      b.insertBefore(meter, b.querySelector(".ext")); // meter before the link arrow
       b.title = tier + "/9 on Steam's review-summary scale";
     }
   }
@@ -724,16 +760,22 @@ GAME_CARDS_HTML = r"""<!doctype html>
     if (game.wishlisted && !game.owned) subBits.push("wishlisted");
     if (subBits.length) info.appendChild(el("div", "sub", subBits.join("  ·  ")));
 
+    // Metacritic leads (it's the cover-chip source); every pill links out to
+    // its source page via the host when a URL is known or derivable.
+    var appid = game.steam_appid != null ? game.steam_appid : game.appid;
     var badges = el("div", "badges");
-    if (realScore(game.opencritic_score))
-      badge(badges, "OpenCritic", game.opencritic_score,
-            "oc " + ocTier(game, game.opencritic_score));
     if (realScore(game.metacritic_score))
       badge(badges, "Metacritic", game.metacritic_score,
-            "mc " + mcTier(game.metacritic_score));
-    steamBadge(badges, game.steam_review_desc);
-    badge(badges, "HLTB", hoursLabel(game.hltb_main));
-    badge(badges, "ProtonDB", game.protondb_tier);
+            "mc " + mcTier(game.metacritic_score), game.metacritic_url);
+    if (realScore(game.opencritic_score))
+      badge(badges, "OpenCritic", game.opencritic_score,
+            "oc " + ocTier(game, game.opencritic_score), game.opencritic_url);
+    steamBadge(badges, game.steam_review_desc,
+               appid != null ? "https://store.steampowered.com/app/" + appid + "/" : null);
+    badge(badges, "HLTB", hoursLabel(game.hltb_main), null,
+          game.name ? "https://howlongtobeat.com/?q=" + encodeURIComponent(game.name) : null);
+    badge(badges, "ProtonDB", game.protondb_tier, null,
+          appid != null ? "https://www.protondb.com/app/" + appid : null);
     if (badges.childNodes.length) info.appendChild(badges);
 
     if (game.my_rating && game.my_rating.normalized_score != null) {
@@ -783,15 +825,20 @@ GAME_CARDS_HTML = r"""<!doctype html>
 
   /* ---------- sizing ---------- */
   var sizeTimer = null;
+  var lastSize = "";
   function reportSize() {
     if (window.__PREVIEW_DATA__) return;
     clearTimeout(sizeTimer);
     sizeTimer = setTimeout(function () {
-      notify("ui/notifications/size-changed", {
-        width: document.documentElement.scrollWidth,
-        height: document.documentElement.scrollHeight,
-      });
-    }, 60);
+      // Only notify on real changes: some hosts (Android app) get confused
+      // by a stream of identical/oscillating size notifications.
+      var w = Math.ceil(document.documentElement.scrollWidth);
+      var h = Math.ceil(document.documentElement.scrollHeight);
+      var key = w + "x" + h;
+      if (key === lastSize) return;
+      lastSize = key;
+      notify("ui/notifications/size-changed", { width: w, height: h });
+    }, 120);
   }
   if (window.ResizeObserver) new ResizeObserver(reportSize).observe(document.body);
 
@@ -809,7 +856,10 @@ GAME_CARDS_HTML = r"""<!doctype html>
       appCapabilities: {},
       clientInfo: { name: "gamelib-game-cards", version: "1.0" },
       capabilities: {},
-    }).then(function () { notify("ui/notifications/initialized"); });
+    }).then(function (res) {
+      hostCaps = (res && res.hostCapabilities) || {};
+      notify("ui/notifications/initialized");
+    });
   }
 })();
 </script>

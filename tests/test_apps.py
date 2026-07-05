@@ -77,6 +77,7 @@ class GameCardsResourceTests(unittest.IsolatedAsyncioTestCase):
             "ui/notifications/size-changed",
             "tools/call",           # click-to-expand fetches get_game_detail
             "get_game_detail",
+            "ui/open-link",         # rating pills link out via the host
             "__PREVIEW_DATA__",
         ):
             self.assertIn(marker, html)
