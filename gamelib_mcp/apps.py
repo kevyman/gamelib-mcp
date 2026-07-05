@@ -21,11 +21,18 @@ fair #4aa1ce, weak #80b06a), and Steam summaries in Steam's text colors
 meter of our own — Steam itself colors all four positive tiers identically,
 so the meter is what makes "Very" vs "Overwhelmingly" visually distinct.
 
+Grid cards are interactive: clicking (or Enter/Space — cards are keyboard
+buttons) opens an overlay that renders instantly from the card's own data,
+then upgrades in place when a live ``get_game_detail`` result arrives via an
+app-initiated ``tools/call`` through the bridge. If the host denies or does
+not support app tool calls, the overlay simply keeps the lite view.
+
 The HTML is deliberately dependency-free: the host↔iframe bridge is the
 ~40-line JSON-RPC postMessage handshake from the MCP Apps spec
-(ui/initialize → ui/notifications/initialized → ui/notifications/tool-result)
-rather than @modelcontextprotocol/ext-apps, so nothing is fetched from a CDN
-and the CSP only has to allow the two cover-art image hosts.
+(ui/initialize → ui/notifications/initialized → ui/notifications/tool-result,
+plus app-initiated tools/call) rather than @modelcontextprotocol/ext-apps, so
+nothing is fetched from a CDN and the CSP only has to allow the two cover-art
+image hosts.
 
 For local visual iteration outside any MCP host, the widget renders
 ``window.__PREVIEW_DATA__`` when present instead of waiting on the bridge —
@@ -183,10 +190,16 @@ GAME_CARDS_HTML = r"""<!doctype html>
     display: flex;
     flex-direction: column;
     transition: transform 0.12s ease, box-shadow 0.12s ease;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
   }
   .card:hover {
     transform: translate(-2px, -2px);
     box-shadow: 7px 7px 0 var(--shadow-c);
+  }
+  .card:focus-visible {
+    outline: 3px solid var(--ink);
+    outline-offset: 2px;
   }
   .card .cover-wrap { border-bottom: 2px solid var(--ink); }
 
@@ -332,13 +345,71 @@ GAME_CARDS_HTML = r"""<!doctype html>
   .rating-row { font-size: 13px; font-weight: 650; }
   .rating-row b { font-size: 16px; font-weight: 800; }
   .empty { color: var(--muted); font-size: 13px; font-weight: 650; padding: 20px; text-align: center; }
+
+  /* ---- click-to-expand overlay ---- */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    background: rgba(12, 10, 6, 0.5);
+    display: flex;
+    align-items: safe center;
+    justify-content: center;
+    padding: 14px;
+    opacity: 0;
+    transition: opacity 0.16s ease;
+  }
+  .overlay.open { opacity: 1; }
+  .overlay-panel {
+    position: relative;
+    width: 100%;
+    max-width: 720px;
+    max-height: 100%;
+    overflow-y: auto;
+    border-radius: 16px;
+    transform: scale(0.93) translateY(12px);
+    transition: transform 0.19s ease;
+  }
+  .overlay.open .overlay-panel { transform: none; }
+  .overlay-panel .detail { max-width: none; box-shadow: none; margin: 0; }
+  .overlay-close {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 2;
+    width: 36px;
+    height: 36px;
+    border-radius: 999px;
+    border: 2px solid var(--ink);
+    background: var(--card);
+    color: var(--ink);
+    font: 800 16px/1 system-ui, sans-serif;
+    box-shadow: 2px 2px 0 var(--shadow-c);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .loading-note { font-size: 11.5px; font-weight: 650; color: var(--muted); }
+  .loading-note::after {
+    content: "…";
+    display: inline-block;
+    animation: pulse 1.1s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { opacity: 0.25; } }
+
+  @media (max-width: 480px) {
+    body { padding: 12px; }
+    .grid { gap: 14px; }
+  }
   @media (max-width: 460px) {
     .detail { flex-direction: column; }
     .detail .cover-wrap { flex-basis: auto; width: 150px; }
   }
   @media (prefers-reduced-motion: reduce) {
-    .card { transition: none; }
+    .card, .overlay, .overlay-panel { transition: none; }
     .card:hover { transform: none; box-shadow: 4px 4px 0 var(--shadow-c); }
+    .loading-note::after { animation: none; }
   }
 </style>
 </head>
@@ -367,7 +438,7 @@ GAME_CARDS_HTML = r"""<!doctype html>
     if (!m || m.jsonrpc !== "2.0") return;
     if (m.id !== undefined && m.method === undefined) {          // response
       var cb = pending[m.id];
-      if (cb) { delete pending[m.id]; cb(m.result); }
+      if (cb) { delete pending[m.id]; cb(m.error ? undefined : m.result); }
       return;
     }
     if (m.method === "ui/notifications/tool-result") {
@@ -379,12 +450,25 @@ GAME_CARDS_HTML = r"""<!doctype html>
              error: { code: -32601, message: "Method not found" } });
     }
   });
-  function handleToolResult(result) {
+  /* App-initiated tool call, proxied by the host (MCP Apps shares the core
+     tools/call method). Resolves undefined on error, denial, or timeout so
+     callers can fall back to the data they already have. */
+  function callTool(name, args, timeoutMs) {
+    return Promise.race([
+      request("tools/call", { name: name, arguments: args }),
+      new Promise(function (resolve) { setTimeout(resolve, timeoutMs || 15000); }),
+    ]);
+  }
+  function resultData(result) {
     var data = result && result.structuredContent;
     if (!data && result && result.content) {
       var text = (result.content.find(function (c) { return c.type === "text"; }) || {}).text;
       try { data = JSON.parse(text); } catch (e) { /* leave undefined */ }
     }
+    return data;
+  }
+  function handleToolResult(result) {
+    var data = resultData(result);
     if (data) render(data);
   }
 
@@ -466,8 +550,80 @@ GAME_CARDS_HTML = r"""<!doctype html>
     }).filter(Boolean);
   }
 
+  /* ---- click-to-expand: grid card -> live detail overlay ---- */
+  var overlayState = null; // { node, trigger, keydown }
+
+  function closeOverlay() {
+    if (!overlayState) return;
+    var s = overlayState;
+    overlayState = null;
+    document.removeEventListener("keydown", s.keydown);
+    s.node.classList.remove("open");
+    setTimeout(function () { s.node.remove(); }, 200);
+    if (s.trigger && s.trigger.focus) s.trigger.focus();
+  }
+
+  function openDetail(game, trigger) {
+    closeOverlay();
+    var overlay = el("div", "overlay");
+    var panel = el("div", "overlay-panel");
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-modal", "true");
+    panel.setAttribute("aria-label", game.name || "Game details");
+    panel.tabIndex = -1;
+
+    var close = el("button", "overlay-close", "✕");
+    close.setAttribute("aria-label", "Close details");
+    close.addEventListener("click", closeOverlay);
+    panel.appendChild(close);
+
+    // Instant view from the data already on the card; the live
+    // get_game_detail result replaces it when it arrives.
+    var lite = detailCard(game);
+    var note = el("div", "loading-note", "loading full details");
+    var liteInfo = lite.querySelector(".detail-info");
+    if (liteInfo) liteInfo.appendChild(note);
+    panel.appendChild(lite);
+
+    overlay.appendChild(panel);
+    overlay.addEventListener("click", function (ev) {
+      if (ev.target === overlay) closeOverlay();
+    });
+    var keydown = function (ev) { if (ev.key === "Escape") closeOverlay(); };
+    document.addEventListener("keydown", keydown);
+    overlayState = { node: overlay, trigger: trigger, keydown: keydown };
+
+    document.body.appendChild(overlay);
+    requestAnimationFrame(function () { overlay.classList.add("open"); });
+    panel.focus({ preventScroll: true });
+
+    if (window.__PREVIEW_DATA__) { note.remove(); return; }
+    callTool("get_game_detail", { game_id: game.game_id }).then(function (res) {
+      if (overlayState && overlayState.node !== overlay) return; // superseded
+      var data = resultData(res);
+      if (data && data.name) {
+        var full = detailCard(data);
+        panel.replaceChild(full, lite);
+      } else {
+        note.remove(); // host declined or timed out: keep the lite view
+      }
+    });
+  }
+
   function gridCard(game) {
     var card = el("div", "card");
+    if (game.game_id != null) {
+      card.tabIndex = 0;
+      card.setAttribute("role", "button");
+      card.setAttribute("aria-label", "Show details for " + (game.name || "game"));
+      card.addEventListener("click", function () { openDetail(game, card); });
+      card.addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          openDetail(game, card);
+        }
+      });
+    }
     var cover = coverNode(game);
     var score = critic(game);
     if (score) {
@@ -642,6 +798,11 @@ GAME_CARDS_HTML = r"""<!doctype html>
   /* ---------- startup ---------- */
   if (window.__PREVIEW_DATA__) {
     render(window.__PREVIEW_DATA__);
+    if (window.__PREVIEW_OPEN_INDEX__ != null) {
+      var previewCards = root.querySelectorAll(".card");
+      var target = previewCards[window.__PREVIEW_OPEN_INDEX__];
+      if (target) target.click();
+    }
   } else {
     request("ui/initialize", {
       protocolVersion: "2026-01-26",

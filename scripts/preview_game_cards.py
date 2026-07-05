@@ -43,15 +43,22 @@ def main() -> None:
     parser.add_argument("--vibes", nargs="*", help="vibe filters for grid mode")
     parser.add_argument("--sort", default="match", choices=["match", "critic", "value"])
     parser.add_argument("--limit", type=int, default=12)
+    parser.add_argument(
+        "--open", type=int, default=None, metavar="N",
+        help="grid mode: auto-open the detail overlay for card N (0-based)",
+    )
     parser.add_argument("-o", "--out", type=Path, help="output path (default: stdout)")
     args = parser.parse_args()
     if args.mode == "detail" and not args.name:
         parser.error("detail mode requires --name")
 
     data = asyncio.run(_build_data(args))
+    preview_globals = "window.__PREVIEW_DATA__ = " + json.dumps(data) + ";"
+    if args.open is not None:
+        preview_globals += f" window.__PREVIEW_OPEN_INDEX__ = {args.open};"
     html = GAME_CARDS_HTML.replace(
         "<script>",
-        "<script>window.__PREVIEW_DATA__ = " + json.dumps(data) + ";</script>\n<script>",
+        "<script>" + preview_globals + "</script>\n<script>",
         1,
     )
     if args.out:

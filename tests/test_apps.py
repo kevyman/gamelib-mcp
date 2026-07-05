@@ -75,6 +75,8 @@ class GameCardsResourceTests(unittest.IsolatedAsyncioTestCase):
             "ui/notifications/initialized",
             "ui/notifications/tool-result",
             "ui/notifications/size-changed",
+            "tools/call",           # click-to-expand fetches get_game_detail
+            "get_game_detail",
             "__PREVIEW_DATA__",
         ):
             self.assertIn(marker, html)
