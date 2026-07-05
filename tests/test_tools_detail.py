@@ -55,6 +55,7 @@ class GetGameDetailTests(ToolDBTestCase):
                 "appid",
                 "steam_appid",
                 "name",
+                "cover_url",
                 "release_date",
                 "series",
                 "platforms",
