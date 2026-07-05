@@ -144,6 +144,23 @@ WISHLISTED_SQL = """
 """
 
 
+# Cover art is assembled at read time, never stored as a URL: IGDB's cover
+# slug (games.cover_image_id, backfilled by IGDB enrichment) is preferred, and
+# Steam games fall back to the store's library capsule by appid so they render
+# a cover even before that backfill lands. Both hosts are public CDNs that
+# need no auth; the MCP Apps widget declares them in its resource CSP.
+IGDB_COVER_URL = "https://images.igdb.com/igdb/image/upload/t_cover_big/{image_id}.jpg"
+STEAM_CAPSULE_URL = "https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/library_600x900.jpg"
+
+
+def cover_url(cover_image_id: str | None, steam_appid: int | None) -> str | None:
+    if cover_image_id:
+        return IGDB_COVER_URL.format(image_id=cover_image_id)
+    if steam_appid:
+        return STEAM_CAPSULE_URL.format(appid=steam_appid)
+    return None
+
+
 async def report_progress(ctx, progress: int, total: int) -> None:
     if ctx is not None:
         await ctx.report_progress(progress, total)

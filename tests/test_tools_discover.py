@@ -27,7 +27,7 @@ class VibeFilterTests(ToolDBTestCase):
         )
         await make_steam_game("Stardew", 413150, playtime_minutes=0, tags=["cozy"])
         results = await discover.discover_games(vibes=["roguelike"], response_format="detailed")
-        self.assertEqual(set(results), {"results", "total_matches", "has_more"})
+        self.assertEqual(set(results), {"results", "total_matches", "has_more", "offset"})
         self.assertEqual(results["total_matches"], 1)
         self.assertFalse(results["has_more"])
         self.assertEqual([g["name"] for g in results["results"]], ["Hades"])
@@ -38,6 +38,7 @@ class VibeFilterTests(ToolDBTestCase):
                 "game_id",
                 "appid",
                 "name",
+                "cover_url",
                 "platforms",
                 "playtime_hours",
                 "hltb_main",

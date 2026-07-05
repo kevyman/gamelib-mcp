@@ -24,6 +24,8 @@ class GameSummary(FlexibleModel):
     appid: int | None = None
     steam_appid: int | None = None
     name: str
+    # IGDB cover art (Steam capsule fallback); rendered by the game-cards app.
+    cover_url: str | None = None
     platforms: list[PlatformEntry] | None = None
     playtime_hours: float | None = None
     playtime_2weeks_hours: float | None = None
@@ -47,6 +49,8 @@ class GameSummary(FlexibleModel):
     series: list[Any] | None = None
     suggested_platform: str | None = None
     match_score: float | None = None
+    # match_score normalized against the library-wide best match (0-100).
+    match_percent: int | None = None
     match_type: str | None = None
 
 
@@ -54,6 +58,9 @@ class PaginatedGamesResponse(FlexibleModel):
     results: list[GameSummary]
     total_matches: int
     has_more: bool
+    # Present when results are rank-ordered (discover_games): the pagination
+    # offset, used by the game-cards app to number cards globally.
+    offset: int | None = None
 
 
 class SearchGamesBatchResponse(RootModel[dict[str, list[GameSummary]]]):

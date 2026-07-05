@@ -75,6 +75,43 @@ class OpenCriticParserTests(unittest.TestCase):
             ],
         )
 
+    def test_state_record_nulls_no_score_sentinels(self) -> None:
+        # OpenCritic reports "no aggregate score yet" as topCriticScore -1
+        # with an empty tier; those must land as NULL, never as real values.
+        record = opencritic._state_to_opencritic_record(
+            {
+                "id": 123,
+                "topCriticScore": -1,
+                "tier": "",
+                "percentRecommended": -1,
+                "numReviews": 3,
+                "url": "https://opencritic.com/game/123/some-game",
+            },
+            "https://opencritic.com/game/123/some-game/export",
+        )
+        assert record is not None
+        self.assertIsNone(record["opencritic_score"])
+        self.assertIsNone(record["opencritic_tier"])
+        self.assertIsNone(record["opencritic_percent_rec"])
+        self.assertEqual(record["opencritic_num_reviews"], 3)
+
+    def test_state_record_keeps_real_scores(self) -> None:
+        record = opencritic._state_to_opencritic_record(
+            {
+                "id": 123,
+                "topCriticScore": 86.4,
+                "tier": "Mighty",
+                "percentRecommended": 92.1,
+                "numReviews": 40,
+                "url": "https://opencritic.com/game/123/some-game",
+            },
+            "https://opencritic.com/game/123/some-game/export",
+        )
+        assert record is not None
+        self.assertEqual(record["opencritic_score"], 86)
+        self.assertEqual(record["opencritic_tier"], "Mighty")
+        self.assertEqual(record["opencritic_percent_rec"], 92.1)
+
     def test_parse_discovery_candidates_extracts_duckduckgo_redirect_targets(self) -> None:
         html = """
         <html><body>

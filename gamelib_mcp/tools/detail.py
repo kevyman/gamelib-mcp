@@ -15,6 +15,7 @@ from ..data.hltb import get_hltb
 from ..data.protondb import get_protondb
 from ..data.steam_store import enrich_game
 from ..utils import _parse_json
+from .common import cover_url
 from .search import (
     NORMALIZED_NAME_SQL,
     build_name_match,
@@ -132,6 +133,7 @@ async def get_game_detail(
         "appid": steam_appid,
         "steam_appid": steam_appid,
         "name": row["name"],
+        "cover_url": cover_url(row["cover_image_id"], steam_appid),
         "release_date": row["release_date"],
         "series": series,
         "platforms": platforms,

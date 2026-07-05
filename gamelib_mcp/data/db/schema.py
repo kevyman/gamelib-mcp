@@ -900,6 +900,17 @@ _V22_SCHEMA_DDL = _V21_SCHEMA_DDL.replace(
     "('playing', 'completed', 'abandoned', 'evergreen')),",
 )
 
+# v25 adds games.cover_image_id: the IGDB cover image slug (an images.igdb.com
+# URL path segment, e.g. "co1wyy"), written during IGDB enrichment. NULL means
+# "not fetched yet". Read-side cover URLs fall back to the Steam library
+# capsule by appid (tools/common.py cover_url), so Steam games render covers
+# even before this backfills; only non-Steam games strictly depend on it.
+# (v23 and v24 were data-only migrations — no DDL constants exist for them.)
+_V25_SCHEMA_DDL = _V22_SCHEMA_DDL.replace(
+    "        igdb_platforms   TEXT,",
+    "        igdb_platforms   TEXT,\n        cover_image_id   TEXT,",
+)
+
 # Derived search index — NOT part of the versioned schema chain. Created and
 # fully resynced by _run_migrations' _sync_fts_index on every migrate_db run,
 # which self-heals after destructive games-table rebuilds (those drop the

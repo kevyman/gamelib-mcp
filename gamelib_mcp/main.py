@@ -19,6 +19,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.server.middleware import AuthMiddleware
 from mcp.types import ToolAnnotations
 
+from .apps import GAME_CARDS_APP, register_apps
 from .auth import load_security_config
 from .http_admin import HttpSecurityMiddleware, register_http_routes
 from .lifecycle import lifespan
@@ -98,6 +99,8 @@ mcp = FastMCP(
     middleware=component_middleware,
     lifespan=lifespan,
 )
+
+register_apps(mcp)
 
 
 # ── Tools ──────────────────────────────────────────────────────────────────────
@@ -194,7 +197,7 @@ async def get_library_stats(
     )
 
 
-@mcp.tool(annotations=READ_ONLY_TOOL)
+@mcp.tool(annotations=READ_ONLY_TOOL, app=GAME_CARDS_APP)
 async def get_game_detail(
     name: str | None = None,
     appid: int | None = None,
@@ -213,7 +216,7 @@ async def get_game_detail(
     return await _detail(name, appid, game_id)
 
 
-@mcp.tool(annotations=READ_ONLY_TOOL)
+@mcp.tool(annotations=READ_ONLY_TOOL, app=GAME_CARDS_APP)
 async def discover_games(
     vibes: list[str] | None = None,
     sort_by: Literal["match", "critic", "value"] = "match",
@@ -237,9 +240,10 @@ async def discover_games(
     (taste affinity), critic (best OpenCritic/Metacritic), or value (highly
     rated AND short — backlog hidden gems, includes a value_note). min_score
     filters on critic score. Results include matched_tags explaining WHY each
-    game ranks (top affinity tags) and suggested_platform from the hardware
-    preference. response_format=concise omits platform arrays and tags.
-    Returns results, total_matches, and has_more.
+    game ranks (top affinity tags), match_percent (match_score normalized
+    against the library-wide best match, 0-100), and suggested_platform from
+    the hardware preference. response_format=concise omits platform arrays
+    and tags. Returns results, total_matches, has_more, and offset.
     """
     from .tools.discover import discover_games as _discover
     return await _discover(

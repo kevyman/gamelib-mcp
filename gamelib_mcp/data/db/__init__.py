@@ -103,7 +103,7 @@ STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
 XBOX_TITLE_ID = "xbox_title_id"
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 26
 
 
 @dataclass
@@ -238,6 +238,7 @@ from .schema import (
     _V20_SCHEMA_DDL,
     _V21_SCHEMA_DDL,
     _V22_SCHEMA_DDL,
+    _V25_SCHEMA_DDL,
 )
 
 
@@ -1410,6 +1411,63 @@ async def _migrate_v23_to_v24(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v24_to_v25(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add games.cover_image_id (see schema.py v25 note) and re-claim IGDB
+    enrichment for igdb_id-linked library/wishlist games so the backfill
+    re-fetches their cover slug. Scoped to rows with an igdb_id: those re-fetch
+    through the exact fetch-by-id path (no fuzzy-resolution risk), while rows
+    without one are already claimed or failed for unrelated reasons and would
+    burn search calls for no cover. Steam games render a capsule-art fallback
+    by appid regardless, so a slow backfill only delays non-Steam covers."""
+    if progress is not None:
+        progress("Migrating to v25: add games.cover_image_id; re-claim IGDB for covers.")
+
+    cols = await _table_columns(db, "games")
+    if "cover_image_id" not in cols:
+        await db.execute("ALTER TABLE games ADD COLUMN cover_image_id TEXT")
+
+    await db.execute(
+        """UPDATE games
+           SET igdb_cached_at = NULL, igdb_claimed_at = NULL
+           WHERE cover_image_id IS NULL
+             AND igdb_id IS NOT NULL
+             AND (EXISTS (SELECT 1 FROM game_platforms gp
+                          WHERE gp.game_id = games.id AND gp.owned = 1)
+                  OR EXISTS (SELECT 1 FROM game_wishlist w
+                             WHERE w.game_id = games.id))"""
+    )
+
+    await _set_user_version(db, 25)
+    await db.commit()
+
+
+async def _migrate_v25_to_v26(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """NULL out OpenCritic's 'no score yet' sentinels (data-only, no DDL).
+
+    OpenCritic's API reports an unscored game as topCriticScore -1 with an
+    empty tier (percentRecommended may be -1 too); enrichment stored those
+    raw, so -1 surfaced as a real score in tool responses and the game-cards
+    widget. The write path now normalizes to NULL; this cleans rows written
+    before the fix.
+    """
+    if progress is not None:
+        progress("Migrating to v26: NULL out OpenCritic no-score sentinels.")
+
+    await db.execute(
+        "UPDATE game_platform_enrichment SET opencritic_score = NULL WHERE opencritic_score < 0"
+    )
+    await db.execute(
+        "UPDATE game_platform_enrichment SET opencritic_percent_rec = NULL"
+        " WHERE opencritic_percent_rec < 0"
+    )
+    await db.execute(
+        "UPDATE game_platform_enrichment SET opencritic_tier = NULL WHERE opencritic_tier = ''"
+    )
+
+    await _set_user_version(db, 26)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1446,7 +1504,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V22_SCHEMA_DDL)
+    await db.executescript(_V25_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -1564,6 +1622,8 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (21, _migrate_v21_to_v22),
     (22, _migrate_v22_to_v23),
     (23, _migrate_v23_to_v24),
+    (24, _migrate_v24_to_v25),
+    (25, _migrate_v25_to_v26),
 )
 
 
@@ -1581,7 +1641,7 @@ async def _run_migrations(
         _emit(progress, f"Backed up database to {snapshot_path} before migrating.", applied_steps)
 
     if detected_state == "fresh":
-        await db.executescript(_V22_SCHEMA_DDL)
+        await db.executescript(_V25_SCHEMA_DDL)
         fts_enabled = await _sync_fts_index(db)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
@@ -1618,7 +1678,7 @@ async def _run_migrations(
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V22_SCHEMA_DDL)
+    await db.executescript(_V25_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION

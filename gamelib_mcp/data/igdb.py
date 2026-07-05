@@ -315,6 +315,7 @@ class IGDBGame:
     version_title: str | None = None
     is_primary_library_item: bool = True
     alias_for_parent: bool = False
+    cover_image_id: str | None = None  # images.igdb.com URL slug
 
 
 async def _get_token() -> str:
@@ -456,7 +457,7 @@ def _build_search_game_query(
         "genres.name, themes.name, keywords.name, "
         "collections.id, collections.name, franchises.id, franchises.name, "
         "parent_game.id, parent_game.name, "
-        "version_parent.id, version_parent.name, version_title, "
+        "version_parent.id, version_parent.name, version_title, cover.image_id, "
         "platforms, release_dates.platform, release_dates.date;",
         f'search "{escaped_name}";',
     ]
@@ -545,6 +546,11 @@ def _parse_igdb_item(item: dict) -> IGDBGame:
         version_title=item.get("version_title"),
         is_primary_library_item=classification.is_primary_library_item,
         alias_for_parent=classification.alias_for_parent,
+        cover_image_id=(
+            (item.get("cover") or {}).get("image_id")
+            if isinstance(item.get("cover"), dict)
+            else None
+        ),
     )
 
 
@@ -589,7 +595,7 @@ _FETCH_BY_ID_FIELDS = (
     "genres.name, themes.name, keywords.name, "
     "collections.id, collections.name, franchises.id, franchises.name, "
     "parent_game.id, parent_game.name, "
-    "version_parent.id, version_parent.name, version_title, "
+    "version_parent.id, version_parent.name, version_title, cover.image_id, "
     "platforms, release_dates.platform, release_dates.date;"
 )
 
@@ -1020,6 +1026,8 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
             # NULL means "not fetched yet"; an empty fetch keeps NULL so the
             # deals tool can distinguish unknown from confirmed-single-platform.
             updates["igdb_platforms"] = json.dumps(igdb_game.platforms)
+        if igdb_game.cover_image_id and "cover_image_id" not in overrides:
+            updates["cover_image_id"] = igdb_game.cover_image_id
         if row["release_date"] is None and igdb_game.first_release_date and "release_date" not in overrides:
             updates["release_date"] = igdb_game.first_release_date
         if row["genres"] is None and igdb_game.genres and "genres" not in overrides:

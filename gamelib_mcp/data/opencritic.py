@@ -199,12 +199,16 @@ def _state_to_opencritic_record(state: dict, source_url: str) -> dict | None:
         return None
 
     canonical = state.get("url")
+    # OpenCritic reports "no aggregate score yet" as -1 (and an empty tier);
+    # store those as NULL so a sentinel never surfaces as a real rating.
+    score = float(state["topCriticScore"])
+    percent = float(state["percentRecommended"])
     return {
         "opencritic_id": int(state["id"]),
         "opencritic_url": canonical if canonical else source_url.removesuffix("/export"),
-        "opencritic_score": int(round(float(state["topCriticScore"]))),
-        "opencritic_tier": state["tier"],
-        "opencritic_percent_rec": float(state["percentRecommended"]),
+        "opencritic_score": int(round(score)) if score >= 0 else None,
+        "opencritic_tier": state["tier"] or None,
+        "opencritic_percent_rec": percent if percent >= 0 else None,
         "opencritic_num_reviews": int(state["numReviews"]),
     }
 
