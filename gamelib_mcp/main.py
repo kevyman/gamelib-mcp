@@ -31,6 +31,7 @@ from .tools.models import (
     DetectCollapsedGamesResponse,
     DetectCrossPlatformCollapsesResponse,
     DetectFarmedGamesResponse,
+    DetectOrphanGamesResponse,
     DiagnoseScrapeResponse,
     GameDetailResponse,
     GetScrapeConfigResponse,
@@ -407,16 +408,19 @@ async def discover_series_gaps(
     Answers "which entries am I missing in series I own and love?" by ranking
     your series by taste (average personal rating of its games, then total
     playtime), taking the top `limit`, fetching each one's full member list
-    live from IGDB (cached 7 days), and subtracting what you already own or
-    have wishlisted anywhere. kind filters to collection|franchise; min_owned
-    skips series where you own fewer games; include_unreleased keeps
+    live from IGDB (cached 7 days), and subtracting what you actually OWN.
+    A wishlisted-but-unowned title is NOT subtracted — it still appears as a
+    gap, annotated on_wishlist=true, rather than silently disappearing. kind
+    filters to collection|franchise; min_owned skips series where you own
+    fewer games (ranking is owned-only); include_unreleased keeps
     unreleased/undated entries (default: dropped); refresh_cache forces a live
     re-fetch of series membership instead of using the cache. Requires IGDB
     credentials (TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET) — returns a structured
     status="unconfigured" response rather than erroring when absent. A
     per-series IGDB fetch failure is recorded under errors without failing the
     whole call; series_checked reports how many series were ranked and
-    attempted this call.
+    attempted this call. Each gap carries on_wishlist: true when a
+    wishlisted-but-unowned library title already resolves to it.
     """
     from .tools.series import discover_series_gaps as _series_gaps
     return await _series_gaps(kind, min_owned, limit, include_unreleased, refresh_cache)
@@ -624,6 +628,25 @@ async def detect_collapsed_games() -> DetectCollapsedGamesResponse:
     """
     from .tools.admin import detect_collapsed_games as _detect_collapsed
     return await _detect_collapsed()
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL)
+async def detect_orphan_games() -> DetectOrphanGamesResponse:
+    """
+    Find primary-library games rows with no ownership and no wishlist entry.
+
+    is_primary_library_item is a content-type flag (real game vs
+    DLC/soundtrack/edition) — NOT ownership. A games row can have zero
+    game_platforms rows in two shapes: wishlist-only (a game_wishlist row
+    exists — normal, e.g. from sync_wishlist) or a true orphan (neither a
+    game_platforms nor a game_wishlist row — e.g. a wishlist entry later
+    removed upstream without ever being owned). Read-only: only true orphans
+    are listed as candidates for review; wishlist_only_count reports the
+    (legitimate) other shape without listing them. Returns orphans (id, name,
+    igdb_id) plus orphan_count and wishlist_only_count.
+    """
+    from .tools.admin import detect_orphan_games as _detect_orphans
+    return await _detect_orphans()
 
 
 @mcp.tool(annotations=NETWORK_SYNC_TOOL)
