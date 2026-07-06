@@ -16,3 +16,7 @@ gamelib.db
 /backups/
 .superpowers/
 .vscode/
+
+# The Stacks build artifacts
+stacks/assets/
+stacks/.cover_cache/

@@ -477,3 +477,18 @@ rejected deliberately.
    ```bash
    cd ~/mcps && git pull && docker compose --profile prod up -d --build
    ```
+
+### The Stacks (static 3D library visualization)
+
+Served by Caddy at `/stacks/` on both `gamelibmcp.johnwilkos.com` and
+`gamelib.johnwilkos.com` (the latter needs a **DNS-only** A record →
+`178.104.53.83`; a Cloudflare-proxied record would break Caddy's ACME
+certificate issuance). It is a public, unauthenticated static site.
+
+- Code (`stacks/index.html`, `main.js`, `vendor/`, `assets_static/`) deploys
+  with the repo; Caddy mounts `./stacks` read-only at `/srv/stacks`.
+- Data (`stacks/assets/`: `library.json` + cover atlases) is generated from
+  the prod DB, personal, and gitignored — deploy it with
+  `scripts/deploy_stacks_assets.sh` (snapshots prod DB, re-exports locally,
+  rsyncs to `/root/mcps/stacks/assets/`). Re-run it whenever the library
+  should be re-reflected; the site has no server-side moving parts.

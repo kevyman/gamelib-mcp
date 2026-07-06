@@ -1,5 +1,25 @@
 gamelibmcp.johnwilkos.com {
-    reverse_proxy app:8000
+    redir /stacks /stacks/ 308
+    handle_path /stacks/* {
+        root * /srv/stacks
+        encode zstd gzip
+        file_server
+    }
+    handle {
+        reverse_proxy app:8000
+    }
+}
+
+# The Stacks — 3D library visualization (static site, no auth).
+# Needs a DNS-only A record: gamelib.johnwilkos.com -> 178.104.53.83
+gamelib.johnwilkos.com {
+    redir / /stacks/ 302
+    redir /stacks /stacks/ 308
+    handle_path /stacks/* {
+        root * /srv/stacks
+        encode zstd gzip
+        file_server
+    }
 }
 
 # Add future MCPs here, e.g.:
