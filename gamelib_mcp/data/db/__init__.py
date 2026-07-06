@@ -103,7 +103,7 @@ STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
 XBOX_TITLE_ID = "xbox_title_id"
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 
 @dataclass
@@ -1468,6 +1468,72 @@ async def _migrate_v25_to_v26(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v26_to_v27(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Re-quarantine feature flags from games.tags with the widened vocabulary.
+
+    STEAM_FEATURE_FLAGS grew Steam accessibility categories ("save anytime",
+    "custom volume controls") and IGDB distribution keywords ("digital
+    distribution", "achievements") — capability metadata, not taste. Rows
+    written before the widening still carry them in tags, polluting
+    tag_affinity, match-score denominators, and matched_tags explanations.
+    Same shape as the v7->v8 split, but merges into existing games.features
+    instead of overwriting.
+    """
+    from ..tags import STEAM_FEATURE_FLAGS, split_features
+
+    if progress is not None:
+        progress("Migrating to v27: quarantine widened feature-flag vocabulary.")
+
+    db.row_factory = aiosqlite.Row
+    rows = await db.execute_fetchall(
+        "SELECT id, tags, features FROM games WHERE tags IS NOT NULL"
+    )
+    emptied_game_ids: list[int] = []
+    for row in rows:
+        try:
+            tags = json.loads(row["tags"])
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(tags, list):
+            continue
+        real_tags, new_features = split_features(tags)
+        if not new_features:
+            continue
+        try:
+            features = json.loads(row["features"]) if row["features"] else []
+        except (ValueError, TypeError):
+            features = []
+        if not isinstance(features, list):
+            features = []
+        merged = features + [f for f in new_features if f not in features]
+        await db.execute(
+            "UPDATE games SET tags = ?, features = ? WHERE id = ?",
+            (json.dumps(real_tags), json.dumps(merged), row["id"]),
+        )
+        if not real_tags:
+            emptied_game_ids.append(row["id"])
+
+    for game_id in emptied_game_ids:
+        await db.execute(
+            """UPDATE steam_platform_data
+                  SET store_cached_at = NULL, steamspy_cached_at = NULL
+                WHERE game_platform_id IN (
+                    SELECT id FROM game_platforms
+                    WHERE game_id = ? AND platform = ?
+                )""",
+            (game_id, STEAM_PLATFORM),
+        )
+
+    flag_placeholders = ",".join("?" * len(STEAM_FEATURE_FLAGS))
+    await db.execute(
+        f"DELETE FROM tag_affinity WHERE lower(tag) IN ({flag_placeholders})",
+        tuple(STEAM_FEATURE_FLAGS),
+    )
+
+    await _set_user_version(db, 27)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1624,6 +1690,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (23, _migrate_v23_to_v24),
     (24, _migrate_v24_to_v25),
     (25, _migrate_v25_to_v26),
+    (26, _migrate_v26_to_v27),
 )
 
 
@@ -1712,8 +1779,18 @@ async def _ensure_db_initialized(db: aiosqlite.Connection) -> None:
         _FTS_READY_PATH = db_path if result.fts_enabled else None
 
 
+def _gl_ln(value: float | int | None) -> float | None:
+    if value is None or value <= 0:
+        return None
+    return math.log(value)
+
+
 async def _configure_connection(conn: aiosqlite.Connection, *, enable_wal: bool) -> None:
     conn.row_factory = aiosqlite.Row
+    # Natural log for SQL scoring (IDF weights in discover_games). SQLite's
+    # builtin ln() only exists when compiled with SQLITE_ENABLE_MATH_FUNCTIONS,
+    # so ship our own under a distinct name rather than depend on the build.
+    await conn.create_function("gl_ln", 1, _gl_ln, deterministic=True)
     await conn.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
     await conn.execute("PRAGMA foreign_keys=ON")
     if enable_wal:
@@ -1776,10 +1853,14 @@ async def init_db() -> None:
     """Create tables if they don't exist and migrate to the latest schema."""
     result = await migrate_db()
     # The v12->v13 migration canonicalizes games.tags in place, which can orphan
-    # tag_affinity rows still keyed on the old synonym form. Rebuild affinity once
-    # so discover/taste scoring matches the canonicalized tags even for libraries
-    # the background enrichment pass won't re-process (e.g. no Steam games).
-    if any("v12 -> v13" in step for step in result.applied_steps):
+    # tag_affinity rows still keyed on the old synonym form; v26->v27 changes
+    # the affinity formula itself (mean-centered/shrunk), so rows computed on
+    # the old avg*log(count) scale would be misread as signed centered values.
+    # Rebuild affinity once so discover/taste scoring is correct immediately,
+    # without waiting for the next sync_ratings/rate_game/enrichment pass.
+    if any(
+        "v12 -> v13" in step or "v26 -> v27" in step for step in result.applied_steps
+    ):
         await recompute_tag_affinity()
 
 

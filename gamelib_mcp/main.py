@@ -235,14 +235,17 @@ async def discover_games(
     rate_game first); pass one or more vibes to filter by mood — known vibes
     include roguelike, cozy, horror, metroidvania, souls, open world, crafting,
     puzzle, platformer, rpg, strategy, simulation, stealth, narrative, co-op,
-    shooter, survival, indie, cyberpunk, fantasy, card game, fighting, or any
-    raw tag string; multiple vibes must ALL match. sort_by accepts match
-    (taste affinity), critic (best OpenCritic/Metacritic), or value (highly
-    rated AND short — backlog hidden gems, includes a value_note). min_score
-    filters on critic score. Results include matched_tags explaining WHY each
-    game ranks (top affinity tags), match_percent (match_score normalized
-    against the library-wide best match, 0-100), and suggested_platform from
-    the hardware preference. response_format=concise omits platform arrays
+    shooter, survival, indie, cyberpunk, fantasy, card game, fighting, racing,
+    sports, or any raw tag string; multiple vibes must ALL match, and a vibe
+    only matches a game's prominent tags (an open-world game with a minor
+    "racing" tag is not a racing game). sort_by accepts match (taste
+    affinity: IDF-weighted, mean-centered tag affinity over the game's whole
+    tag set), critic (best OpenCritic/Metacritic), or value (highly rated AND
+    short — backlog hidden gems, includes a value_note). min_score filters on
+    critic score. Results include matched_tags explaining WHY each game ranks
+    (top affinity tags), match_percent (match_score normalized against the
+    library-wide best match, 0-100), and suggested_platform from the hardware
+    preference. response_format=concise omits platform arrays
     and tags. Returns results, total_matches, has_more, and offset.
     """
     from .tools.discover import discover_games as _discover
@@ -265,7 +268,9 @@ async def get_taste_profile() -> TasteProfileResponse:
     Show the current tag affinity profile.
 
     Use this to explain why recommendations rank certain genres or tags highly;
-    call sync_ratings first if the profile may be stale. Returns loved and
+    call sync_ratings first if the profile may be stale. Affinity scores are
+    signed and mean-centered: positive = rated/played above your own average,
+    near zero = neutral, negative = actively avoided. Returns loved and
     avoided tags plus rating source and score summaries.
     """
     from .tools.ratings import get_taste_profile as _profile

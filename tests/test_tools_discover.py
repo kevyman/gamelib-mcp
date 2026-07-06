@@ -1,6 +1,7 @@
 """Characterization tests for gamelib_mcp.tools.discover (discover_games)."""
 
 import json
+import math
 
 from fastmcp.exceptions import ToolError
 
@@ -64,6 +65,21 @@ class VibeFilterTests(ToolDBTestCase):
         results = await discover.discover_games(vibes=["falling blocks"])
         self.assertEqual([g["name"] for g in results["results"]], ["Tetris"])
 
+    async def test_vibe_only_matches_prominent_tags(self):
+        # An open-world game carrying a low-vote "racing" tag deep in its
+        # prominence-ordered list is not a racing game; a real racer with
+        # "racing" up top is.
+        filler = [f"tag{i}" for i in range(discover.VIBE_TAG_PROMINENCE_CUTOFF)]
+        await make_steam_game(
+            "OpenWorldDriver", 1, playtime_minutes=0, tags=filler + ["racing"]
+        )
+        await make_steam_game(
+            "ActualRacer", 2, playtime_minutes=0, tags=["racing", "driving"]
+        )
+        results = await discover.discover_games(vibes=["racing"])
+        self.assertEqual([g["name"] for g in results["results"]], ["ActualRacer"])
+        self.assertNotIn("note", results)
+
     async def test_multiple_vibes_must_all_match(self):
         await make_steam_game("CozyRogue", 1, playtime_minutes=0, tags=["roguelike", "cozy"])
         await make_steam_game("HardRogue", 2, playtime_minutes=0, tags=["roguelike"])
@@ -119,10 +135,56 @@ class MatchSortTests(ToolDBTestCase):
         await set_tag_affinity("sports", affinity_score=0.2, avg_score=3.0, game_count=2)
         results = await discover.discover_games()
         self.assertEqual([g["name"] for g in results["results"]], ["LikedGame", "MehGame"])
-        self.assertIn("match_score", results["results"][0])
-        self.assertEqual(results["results"][0]["match_score"], round(2.5, 3))
-        self.assertEqual(results["results"][1]["match_score"], round(0.2, 3))
+        # IDF-weighted damped mean: N=2 games, each tag on 1 game, so
+        # idf = ln(1 + 2/1) and score = affinity·idf / (idf + prior).
+        idf = math.log(3.0)
+        self.assertEqual(
+            results["results"][0]["match_score"],
+            round(2.5 * idf / (idf + discover._MATCH_PRIOR), 3),
+        )
+        self.assertEqual(
+            results["results"][1]["match_score"],
+            round(0.2 * idf / (idf + discover._MATCH_PRIOR), 3),
+        )
         self.assertEqual(results["total_matches"], 2)
+
+    async def test_single_ubiquitous_tag_cannot_dominate(self):
+        # The "100% match on a single 'action' tag" failure mode: a game whose
+        # only scored tag is one common loved tag must rank below a game whose
+        # whole (rarer) tag set matches the profile.
+        for i, name in enumerate(["Filler1", "Filler2", "Filler3"]):
+            await make_steam_game(name, 100 + i, playtime_minutes=600, tags=["action"])
+        await make_steam_game("OneTagWonder", 1, playtime_minutes=0, tags=["action"])
+        await make_steam_game(
+            "RealFit", 2, playtime_minutes=0, tags=["roguelike", "deckbuilder", "action"]
+        )
+        await set_tag_affinity("action", affinity_score=2.0, avg_score=8.0, game_count=5)
+        await set_tag_affinity("roguelike", affinity_score=1.8, avg_score=8.5, game_count=3)
+        await set_tag_affinity("deckbuilder", affinity_score=1.6, avg_score=8.4, game_count=2)
+
+        results = await discover.discover_games()
+
+        names = [g["name"] for g in results["results"]]
+        self.assertLess(names.index("RealFit"), names.index("OneTagWonder"))
+
+    async def test_unrated_tags_dilute_the_match(self):
+        # A game stuffed with tags the profile knows nothing about is a weaker
+        # bet than a lean game whose every tag is loved — unrated tags count
+        # as neutral in the denominator instead of being ignored.
+        await make_steam_game("PureFit", 1, playtime_minutes=0, tags=["roguelike"])
+        await make_steam_game(
+            "DilutedFit",
+            2,
+            playtime_minutes=0,
+            tags=["roguelike", "mystery1", "mystery2", "mystery3", "mystery4"],
+        )
+        await set_tag_affinity("roguelike", affinity_score=2.5, avg_score=9.0, game_count=4)
+
+        results = await discover.discover_games()
+
+        self.assertEqual(
+            [g["name"] for g in results["results"]], ["PureFit", "DilutedFit"]
+        )
 
     async def test_excludes_games_without_affinity_tags(self):
         await make_steam_game("NoAffinity", 1, playtime_minutes=0, tags=["obscure"])

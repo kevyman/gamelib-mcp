@@ -1,10 +1,12 @@
-"""Tag hygiene: separate Steam storefront/feature categories from real tags.
+"""Tag hygiene: separate storefront/feature/capability labels from real tags.
 
 Steam's appdetails ``categories`` mix gameplay modes (co-op, PvP — useful taste
 signals consumed by the vibe mappings) with storefront/platform features
 (Steam Trading Cards, Family Sharing) that carry no taste information and used
-to pollute tag_affinity. Feature flags are quarantined into ``games.features``;
-gameplay-mode categories stay in ``games.tags`` on purpose.
+to pollute tag_affinity; Steam's accessibility categories and a few IGDB
+distribution keywords are the same kind of noise. Feature flags are
+quarantined into ``games.features``; gameplay-mode categories stay in
+``games.tags`` on purpose.
 """
 
 from typing import Iterable
@@ -44,6 +46,34 @@ STEAM_FEATURE_FLAGS: frozenset[str] = frozenset(
         "vr only",
         "vr support",
         "vr supported",
+        # Steam accessibility categories (2025+): capability metadata, not
+        # taste. Left in tags they dominate matched_tags explanations ("save
+        # anytime" is nobody's reason to love a game).
+        "adjustable difficulty",
+        "adjustable text colors",
+        "adjustable text size",
+        "camera comfort",
+        "chat speech to text",
+        "chat text to speech",
+        "color alternatives",
+        "custom volume controls",
+        "keyboard only option",
+        "mono sound",
+        "mouse only option",
+        "narrated game menus",
+        "playable without timed input",
+        "save anytime",
+        "stereo sound",
+        "subtitle options",
+        "surround sound",
+        "touch-friendly",
+        # IGDB keywords that describe distribution/platform, not the game.
+        "achievements",
+        "controller",
+        "crowdfunding - kickstarter",
+        "digital distribution",
+        "steam",
+        "vr",
     }
 )
 

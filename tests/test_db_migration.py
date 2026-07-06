@@ -1063,7 +1063,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             async with db_module.get_db() as db:
                 version = await db_module._get_user_version(db)
             self.assertEqual(version, db_module.SCHEMA_VERSION)
-            self.assertEqual(db_module.SCHEMA_VERSION, 26)
+            self.assertEqual(db_module.SCHEMA_VERSION, 27)
 
             unresolved = await seed_game("Still Unresolved Wishlisted Game")
             resolved = await seed_game("Already Resolved Wishlisted Game")
@@ -1154,6 +1154,64 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.final_version, db_module.SCHEMA_VERSION)
         self.assertEqual(cols, {"game_id", "platform", "snapshot_date", "playtime_minutes"})
+
+    async def test_v26_to_v27_quarantines_widened_feature_vocabulary(self) -> None:
+        # v26 -> v27 is data-only (schema identical), so a fresh current-schema
+        # DB downgraded to user_version 26 exercises it directly.
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA user_version = 26")
+        conn.execute(
+            "INSERT INTO games (id, name, tags, features) VALUES "
+            "(1, 'Racer', '[\"racing\", \"save anytime\", \"digital distribution\"]',"
+            " '[\"steam cloud\"]')"
+        )
+        conn.execute(
+            "INSERT INTO ratings (game_id, source, raw_score, normalized_score, synced_at)"
+            " VALUES (1, 'manual', 9.0, 9.0, 'now')"
+        )
+        # Stale rows on the pre-v27 avg*log(count) scale — the new read side
+        # would misinterpret them as signed centered affinities.
+        conn.execute(
+            "INSERT INTO tag_affinity (tag, affinity_score, avg_score, game_count, updated_at)"
+            " VALUES ('save anytime', 0.4, 7.0, 3, 'now')"
+        )
+        conn.execute(
+            "INSERT INTO tag_affinity (tag, affinity_score, avg_score, game_count, updated_at)"
+            " VALUES ('racing', 6.2, 9.0, 1, 'now')"
+        )
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT tags, features FROM games WHERE id = 1").fetchone()
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        affinity = {
+            r["tag"]: r["affinity_score"]
+            for r in conn.execute("SELECT tag, affinity_score FROM tag_affinity")
+        }
+        conn.close()
+
+        self.assertEqual(version, db_module.SCHEMA_VERSION)
+        self.assertEqual(row["tags"], '["racing"]')
+        # Merged into existing features, not overwritten.
+        self.assertEqual(
+            row["features"], '["steam cloud", "save anytime", "digital distribution"]'
+        )
+        # init_db recomputed affinity under the new formula: the quarantined
+        # tag is gone and the surviving tag is on the mean-centered scale (a
+        # single 9.0 rating IS the mean, so it centers to zero) rather than
+        # keeping its stale 6.2.
+        self.assertEqual(set(affinity), {"racing"})
+        self.assertAlmostEqual(affinity["racing"], 0.0, places=6)
 
     async def test_v22_to_v23_rebuilds_check_constraint_for_evergreen(self) -> None:
         # A DB fresh-initialized while SCHEMA_VERSION was 21 or 22 got the

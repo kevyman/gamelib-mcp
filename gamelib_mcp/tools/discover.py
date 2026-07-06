@@ -22,7 +22,8 @@ from .common import (
 ResponseFormat = Literal["concise", "detailed"]
 
 # Vibe -> tag mappings. A game matches a vibe when it carries ANY tag in the
-# group; multiple vibes combine with AND.
+# group within its most-prominent tags (see VIBE_TAG_PROMINENCE_CUTOFF);
+# multiple vibes combine with AND.
 VIBE_TAGS: dict[str, list[str]] = {
     "roguelike": ["roguelike", "rogue-lite", "roguelite", "roguelike deckbuilder", "deckbuilder", "deck building"],
     "cozy": ["cozy", "relaxing", "casual", "wholesome"],
@@ -46,9 +47,19 @@ VIBE_TAGS: dict[str, list[str]] = {
     "fantasy": ["fantasy", "dark fantasy", "high fantasy"],
     "card game": ["card game", "card battler", "deckbuilder", "roguelike deckbuilder"],
     "fighting": ["fighting", "beat 'em up", "brawler"],
+    # Deliberately no "driving"/"automobile sim": those tags are prominent on
+    # open-world crime games and truck sims, which are not racing games.
+    "racing": ["racing", "arcade racing", "combat racing", "rally", "offroad", "motocross"],
+    "sports": ["sports", "football", "soccer", "basketball", "golf", "skateboarding", "skating"],
 }
 
 VALID_SORTS = {"match", "critic", "value"}
+
+# games.tags is prominence-ordered (SteamSpy tags sorted by community votes,
+# IGDB tags appended after) — a vibe only matches a tag inside this prefix, so
+# GTA V's low-vote "racing" tag (position 10) no longer makes it a racing
+# recommendation while every genuine racer's (position 0-4) still does.
+VIBE_TAG_PROMINENCE_CUTOFF = 8
 
 # NOTE: discover-specific CTE — no 2-week playtime column; tags drive vibe/affinity
 # matching. Distinct from the library and stats variants on purpose.
@@ -87,12 +98,37 @@ WITH game_rollup AS (
 )
 """
 
-# Correlated per-game taste score: average affinity over the game's tags.
-_MATCH_SCORE_SQL = """
+# IDF weights: how rare each tag is across the owned library. A tag on every
+# game ("action", "indie") carries little information about THIS game; a tag on
+# three games carries a lot. Classic content-based TF-IDF weighting.
+_SCORING_CTES = _GAME_ROLLUP_CTE + """,
+lib_size AS (SELECT COUNT(*) AS n FROM game_rollup),
+lib_tag_df AS (
+    SELECT lower(je.value) AS tag, COUNT(DISTINCT gr.game_id) AS df
+    FROM game_rollup gr, json_each(COALESCE(gr.tags, '[]')) je
+    GROUP BY lower(je.value)
+)
+"""
+
+# Shrinkage prior in the score denominator (in IDF units): a game whose only
+# scored tag is one loved-but-common tag gets pulled toward neutral instead of
+# inheriting that tag's full affinity — the "100% match on a single 'action'
+# tag" failure mode.
+_MATCH_PRIOR = 3.0
+
+# Correlated per-game taste score: IDF-weighted mean affinity over ALL of the
+# game's tags (unrated tags contribute 0 = neutral), damped by _MATCH_PRIOR.
+# NULL when no tag has an affinity row — the profile can't score the game.
+_MATCH_SCORE_SQL = f"""
 (
-    SELECT AVG(ta.affinity_score)
+    SELECT CASE WHEN COUNT(ta.tag) = 0 THEN NULL
+           ELSE SUM(COALESCE(ta.affinity_score, 0) * gl_ln(1.0 + ls.n * 1.0 / df.df))
+                / (SUM(gl_ln(1.0 + ls.n * 1.0 / df.df)) + {_MATCH_PRIOR})
+           END
     FROM json_each(COALESCE(game_rollup.tags, '[]')) je
-    JOIN tag_affinity ta ON ta.tag = lower(je.value)
+    CROSS JOIN lib_size ls
+    JOIN lib_tag_df df ON df.tag = lower(je.value)
+    LEFT JOIN tag_affinity ta ON ta.tag = lower(je.value)
 )
 """
 
@@ -133,13 +169,16 @@ async def discover_games(
         if tags is None:
             tags = [vibe.lower()]
             unknown_vibes.append(vibe)
-        # Match against the canonical vocabulary stored in games.tags.
+        # Match against the canonical vocabulary stored in games.tags. The
+        # `key <` prominence gate keeps a barely-there tag deep in the list
+        # from qualifying the game for the vibe.
         tags = [canonical_tag(t) for t in tags]
         placeholders = ",".join("?" * len(tags))
         inner_conditions.append(
             f"""EXISTS (
                 SELECT 1 FROM json_each(COALESCE(tags, '[]'))
                 WHERE lower(value) IN ({placeholders})
+                  AND key < {VIBE_TAG_PROMINENCE_CUTOFF}
             )"""
         )
         params.extend(tags)
@@ -198,12 +237,12 @@ async def discover_games(
 
     async with get_db() as db:
         total = await db.execute_fetchone(
-            _GAME_ROLLUP_CTE
+            _SCORING_CTES
             + f"SELECT COUNT(*) AS c FROM ({scored_select}) WHERE {outer_where}",
             (*params, *outer_params),
         )
         rows = await db.execute_fetchall(
-            _GAME_ROLLUP_CTE
+            _SCORING_CTES
             + f"""
             SELECT * FROM ({scored_select})
             WHERE {outer_where}
@@ -214,12 +253,11 @@ async def discover_games(
             (*params, *outer_params, limit, offset),
         )
         affinity_row = await db.execute_fetchone("SELECT COUNT(*) AS c FROM tag_affinity")
-        # Library-wide best average affinity: the anchor that turns raw match
-        # scores (unbounded tag-affinity averages) into an honest percentage —
-        # 100% = the strongest match in the whole owned library, stable across
-        # vibe filters and pagination.
+        # Library-wide best match score: the anchor that turns raw match scores
+        # into an honest percentage — 100% = the strongest match in the whole
+        # owned library, stable across vibe filters and pagination.
         max_match_row = await db.execute_fetchone(
-            _GAME_ROLLUP_CTE + f"SELECT MAX({_MATCH_SCORE_SQL}) AS m FROM game_rollup"
+            _SCORING_CTES + f"SELECT MAX({_MATCH_SCORE_SQL}) AS m FROM game_rollup"
         )
         max_match = max_match_row["m"] if max_match_row else None
 
@@ -255,18 +293,39 @@ async def discover_games(
 
 
 async def _load_matched_tags(game_ids: list[int]) -> dict[int, list[dict]]:
-    """Top-3 affinity tags per game — the 'why' behind each result."""
+    """Top-3 contributing tags per game — the 'why' behind each result.
+
+    Ordered by affinity x IDF (the same weighting the match score uses), not
+    raw affinity — otherwise ubiquitous mildly-liked tags ("indie", storefront
+    keywords) crowd out the rare tags that actually drove the ranking.
+    """
     if not game_ids:
         return {}
     placeholders = ",".join("?" * len(game_ids))
     async with get_db() as db:
         rows = await db.execute_fetchall(
-            f"""SELECT g.id AS game_id, lower(je.value) AS tag, ta.affinity_score
+            f"""WITH owned AS (
+                    SELECT g2.id AS game_id, g2.tags
+                    FROM games g2
+                    WHERE g2.is_primary_library_item = 1
+                      AND EXISTS (SELECT 1 FROM game_platforms gp
+                                  WHERE gp.game_id = g2.id AND gp.owned = 1)
+                ),
+                lib_size AS (SELECT COUNT(*) AS n FROM owned),
+                tag_df AS (
+                    SELECT lower(je.value) AS tag, COUNT(DISTINCT owned.game_id) AS df
+                    FROM owned, json_each(COALESCE(owned.tags, '[]')) je
+                    GROUP BY lower(je.value)
+                )
+                SELECT g.id AS game_id, lower(je.value) AS tag, ta.affinity_score
                 FROM games g
                 JOIN json_each(COALESCE(g.tags, '[]')) je
                 JOIN tag_affinity ta ON ta.tag = lower(je.value)
+                JOIN tag_df df ON df.tag = lower(je.value)
+                CROSS JOIN lib_size ls
                 WHERE g.id IN ({placeholders})
-                ORDER BY g.id, ta.affinity_score DESC""",
+                ORDER BY g.id,
+                         ta.affinity_score * gl_ln(1.0 + ls.n * 1.0 / df.df) DESC""",
             tuple(game_ids),
         )
     matched: dict[int, list[dict]] = {}
@@ -320,7 +379,9 @@ async def _format_rows(
         )
         if row["match_score"] is not None:
             game["match_score"] = round(row["match_score"], 3)
-            if max_match:
+            # Affinity is mean-centered, so scores (and the anchor) can be
+            # negative; a percentage only makes sense against a positive best.
+            if max_match and max_match > 0:
                 game["match_percent"] = max(
                     0, min(100, round(100 * row["match_score"] / max_match))
                 )
