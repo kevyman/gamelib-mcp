@@ -16,7 +16,7 @@ import httpx
 from bs4 import BeautifulSoup, Tag
 
 from .db import extract_best_fuzzy_key, get_db
-from .scrape_config import BackloggdScrapeConfig, load_scrape_config
+from .scrape_config import BackloggdScrapeConfig, fetch_allowlisted, load_scrape_config
 
 _BACKLOGGD_USER = os.getenv("BACKLOGGD_USER", "")
 BASE_URL = f"https://backloggd.com/u/{_BACKLOGGD_USER}/reviews"
@@ -89,7 +89,9 @@ async def _scrape_all_pages(config: BackloggdScrapeConfig | None = None) -> list
     async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "gamelib-mcp/1.0"}) as client:
         while True:
             try:
-                resp = await client.get(_page_url(page, config), follow_redirects=True)
+                resp = await fetch_allowlisted(
+                    client, _page_url(page, config), provider="backloggd"
+                )
                 resp.raise_for_status()
             except Exception as e:
                 logger.warning("Backloggd page %d fetch failed: %s", page, e)
