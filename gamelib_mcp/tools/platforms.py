@@ -18,6 +18,7 @@ from ..data.db import (
     upsert_game_platform_identifier,
     upsert_wishlist_entry,
 )
+from ..data.content import NESTED_CONTENT_TYPES, PRIMARY_CONTENT_TYPES
 from ..data.tag_synonyms import canonical_tag
 from .common import (
     LIBRARY_PLATFORMS,
@@ -30,6 +31,7 @@ from .search import (
 )
 
 COMPLETION_STATUSES = {"playing", "completed", "abandoned", "evergreen"}
+CONTENT_TYPES = PRIMARY_CONTENT_TYPES | NESTED_CONTENT_TYPES
 
 
 async def get_platform_breakdown() -> dict:
@@ -290,6 +292,7 @@ async def update_game(
     hltb_complete: float | None = None,
     is_farmed: bool | None = None,
     completion_status: str | None = None,
+    content_type: str | None = None,
     clear_overrides: list[str] | None = None,
 ) -> dict:
     """
@@ -307,7 +310,11 @@ async def update_game(
     any field you also pinned in the same edit stays protected. completion_status
     accepts playing, completed, abandoned, or evergreen (endless games with no
     completion concept, e.g. Rocket League, Tabletop Simulator, MMOs, sandboxes),
-    or "none" to reset to automatic playtime-based inference. Returns the
+    or "none" to reset to automatic playtime-based inference. content_type
+    corrects a wrong DLC/bundle/edition classification (e.g. a "X + Y"
+    compilation misfiled as a bundle); it re-derives is_primary_library_item
+    (which controls whether the game appears in stats/series/discover) and, when
+    promoting to a primary type, detaches any wrong parent. Returns the
     updated fields, any cleared columns,
     the full manual-override list, and the providers whose enrichment was
     invalidated.
@@ -367,6 +374,24 @@ async def update_game(
                 f"Unknown completion_status '{completion_status}'. "
                 f"Valid: {sorted(COMPLETION_STATUSES)} or 'none' to reset"
             )
+    if content_type is not None:
+        normalized_ct = content_type.strip().lower()
+        if normalized_ct not in CONTENT_TYPES:
+            raise ToolError(
+                f"Unknown content_type '{content_type}'. Valid: {sorted(CONTENT_TYPES)}"
+            )
+        fields["content_type"] = normalized_ct
+        # is_primary_library_item is derived from the content type, never set
+        # by hand — recompute it (and record it as an override) so the row's
+        # visibility in rollups matches the corrected classification.
+        is_primary = normalized_ct in PRIMARY_CONTENT_TYPES
+        fields["is_primary_library_item"] = int(is_primary)
+        # A primary library item must not keep a parent: it is excluded from
+        # search/rollups by the is_primary filter yet unreachable as any other
+        # row's edition, so a leftover parent from a wrong nested classification
+        # would orphan it. Clear (and protect) it when promoting to primary.
+        if is_primary:
+            fields["parent_game_id"] = None
 
     if not fields and not clear:
         raise ToolError("Provide at least one field to update or clear")
@@ -403,7 +428,7 @@ async def update_game(
     def _display(key: str, value):
         if key in {"genres", "tags", "features"}:
             return json.loads(value)
-        if key == "is_farmed":
+        if key in {"is_farmed", "is_primary_library_item"}:
             return bool(value)
         return value
 

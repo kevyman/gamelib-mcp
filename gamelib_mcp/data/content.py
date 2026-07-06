@@ -1,8 +1,24 @@
 """Content relationship classification for DLC, expansions, and editions."""
 
+import re
 from dataclasses import dataclass
 
 from .title_normalization import normalize_search_text
+
+
+# "A + B" compilation titles (e.g. Nintendo's "Super Mario 3D World + Bowser's
+# Fury") ship as a single owned SKU with their own store identifier and
+# playtime — they are primary library items, not IGDB bundles. IGDB tags such
+# titles category 3 (bundle) or hangs a version_parent on them, either of which
+# would demote them out of the library rollups (get_library_stats, series,
+# discover). Requires non-space text on both sides of a spaced "+" so we don't
+# match a trailing "+" or a lone operator.
+_COMPILATION_TITLE_RE = re.compile(r"\S\s+\+\s+\S")
+
+
+def is_compilation_title(title: str) -> bool:
+    """True for "A + B" compilation titles that are primary library items."""
+    return bool(_COMPILATION_TITLE_RE.search(title or ""))
 
 
 CONTENT_BASE_GAME = "base_game"
@@ -141,7 +157,14 @@ def classify_igdb_game(
             alias_for_parent=override.alias_for_parent,
         )
 
+    # A compilation SKU is a primary library item regardless of the version_parent
+    # IGDB hangs on it (which would otherwise nest it as an edition) or a
+    # category=bundle tag below.
+    compilation = is_compilation_title(title)
+
     if version_parent_name or version_parent_igdb_id:
+        if compilation:
+            return _primary(CONTENT_BASE_GAME)
         return _nested(
             CONTENT_EDITION,
             version_parent_name,
@@ -155,6 +178,8 @@ def classify_igdb_game(
     # category, when present, is authoritative.
     effective = category if category is not None else game_type
     content_type = content_type_from_igdb_category(effective)
+    if content_type == CONTENT_BUNDLE and compilation:
+        return _primary(CONTENT_BASE_GAME)
     if content_type in PRIMARY_CONTENT_TYPES:
         return _primary(content_type)
 
