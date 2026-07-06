@@ -90,6 +90,20 @@ class PlaytimeSignalTests(ToolDBTestCase):
         self.assertIn("deckbuilder", rows)
         self.assertEqual(rows["deckbuilder"]["game_count"], 1)
 
+    async def test_non_primary_item_playtime_carries_no_signal(self):
+        # DLC/editions/bundles are excluded from the discover rollup, so their
+        # playtime must not shift how primary games rank.
+        gid = await make_steam_game("Big DLC", 1, playtime_minutes=6000, tags=["horror"])
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET is_primary_library_item = 0 WHERE id = ?", (gid,)
+            )
+            await db.commit()
+
+        await db_module.recompute_tag_affinity()
+
+        self.assertEqual(await _affinity_rows(), {})
+
     async def test_farmed_game_playtime_carries_no_signal(self):
         # Idle/card-farming games rack up huge playtime that says nothing
         # about taste.

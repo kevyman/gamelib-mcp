@@ -67,7 +67,11 @@ async def recompute_tag_affinity() -> int:
             JOIN game_platforms gp ON gp.game_id = g.id AND gp.owned = 1
             -- Farmed games (idle/card farming) rack up huge playtime that says
             -- nothing about taste; an explicit rating on one still counts.
+            -- Non-primary rows (DLC/editions/bundles) are excluded to match
+            -- the discover rollup — a row that can never be recommended
+            -- shouldn't shift how primary games rank.
             WHERE g.is_farmed = 0
+              AND g.is_primary_library_item = 1
               AND g.tags IS NOT NULL
               AND gp.playtime_minutes IS NOT NULL
               AND NOT EXISTS (

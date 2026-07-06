@@ -1853,10 +1853,14 @@ async def init_db() -> None:
     """Create tables if they don't exist and migrate to the latest schema."""
     result = await migrate_db()
     # The v12->v13 migration canonicalizes games.tags in place, which can orphan
-    # tag_affinity rows still keyed on the old synonym form. Rebuild affinity once
-    # so discover/taste scoring matches the canonicalized tags even for libraries
-    # the background enrichment pass won't re-process (e.g. no Steam games).
-    if any("v12 -> v13" in step for step in result.applied_steps):
+    # tag_affinity rows still keyed on the old synonym form; v26->v27 changes
+    # the affinity formula itself (mean-centered/shrunk), so rows computed on
+    # the old avg*log(count) scale would be misread as signed centered values.
+    # Rebuild affinity once so discover/taste scoring is correct immediately,
+    # without waiting for the next sync_ratings/rate_game/enrichment pass.
+    if any(
+        "v12 -> v13" in step or "v26 -> v27" in step for step in result.applied_steps
+    ):
         await recompute_tag_affinity()
 
 
