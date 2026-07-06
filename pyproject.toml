@@ -27,6 +27,7 @@ packages = ["gamelib_mcp"]
 [dependency-groups]
 dev = [
     "mypy>=1.19",
+    "pillow>=12.3.0",
     "pytest>=9.1.1",
     "ruff>=0.14",
 ]

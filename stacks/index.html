@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Stacks</title>
+<style>
+  :root {
+    --bg: #101216;
+    --panel: rgba(22, 25, 31, 0.88);
+    --ink: #e8eaf0;
+    --ink-2: #9aa3b2;
+    --ink-3: #6b7382;
+    --line: rgba(255, 255, 255, 0.09);
+    --accent: #e6c86e;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; background: var(--bg);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); }
+  canvas { display: block; }
+
+  #topbar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 12px 18px;
+    background: linear-gradient(to bottom, rgba(16,18,22,0.92), rgba(16,18,22,0));
+    pointer-events: none;
+  }
+  #topbar > * { pointer-events: auto; }
+  #title { font-size: 17px; font-weight: 700; letter-spacing: 0.14em; }
+  #title span { color: var(--accent); }
+  #stats { font-size: 12.5px; color: var(--ink-2); }
+  #modes { display: flex; gap: 6px; flex-wrap: wrap; }
+  #modes button {
+    font: inherit; font-size: 12.5px; color: var(--ink-2);
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 999px; padding: 6px 14px; cursor: pointer;
+  }
+  #modes button:hover { color: var(--ink); border-color: rgba(255,255,255,0.22); }
+  #modes button.active { color: #14161a; background: var(--accent); border-color: var(--accent); font-weight: 600; }
+
+  #card {
+    position: fixed; z-index: 20; display: none; width: 340px;
+    background: var(--panel); backdrop-filter: blur(10px);
+    border: 1px solid var(--line); border-radius: 12px;
+    padding: 12px; pointer-events: none;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.55);
+  }
+  #card.show { display: flex; gap: 12px; }
+  #card img { width: 96px; height: 144px; object-fit: cover; border-radius: 6px;
+    background: #23262d; flex-shrink: 0; }
+  #card .c-body { min-width: 0; }
+  #card .c-name { font-size: 14.5px; font-weight: 650; line-height: 1.25; margin-bottom: 3px; }
+  #card .c-meta { font-size: 11.5px; color: var(--ink-2); margin-bottom: 8px; }
+  #card .c-row { font-size: 12px; color: var(--ink-2); margin-top: 3px;
+    display: flex; align-items: center; gap: 6px; }
+  #card .c-row b { color: var(--ink); font-weight: 600; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+  #hint {
+    position: fixed; left: 18px; bottom: 14px; z-index: 10;
+    font-size: 11.5px; color: var(--ink-3); pointer-events: none;
+  }
+  #loading {
+    position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px; background: var(--bg);
+    transition: opacity 0.5s; }
+  #loading.done { opacity: 0; pointer-events: none; }
+  #loading .l-title { font-size: 15px; letter-spacing: 0.18em; font-weight: 700; }
+  #loading .l-title span { color: var(--accent); }
+  #loading .l-sub { font-size: 12px; color: var(--ink-3); }
+</style>
+<script type="importmap">
+{ "imports": {
+    "three": "./vendor/three.module.min.js",
+    "three/addons/controls/OrbitControls.js": "./vendor/OrbitControls.js"
+} }
+</script>
+</head>
+<body>
+  <div id="loading">
+    <div class="l-title">THE <span>STACKS</span></div>
+    <div class="l-sub" id="loadmsg">loading library…</div>
+  </div>
+
+  <div id="topbar">
+    <div id="title">THE <span>STACKS</span></div>
+    <div id="modes"></div>
+    <div id="stats"></div>
+  </div>
+
+  <div id="card">
+    <img id="card-img" alt="">
+    <div class="c-body">
+      <div class="c-name" id="card-name"></div>
+      <div class="c-meta" id="card-meta"></div>
+      <div id="card-rows"></div>
+    </div>
+  </div>
+
+  <div id="hint">drag to orbit &nbsp;·&nbsp; scroll to zoom &nbsp;·&nbsp; hover a case to pull it out &nbsp;·&nbsp; click a stack to spread it out, click away to restack</div>
+
+  <script>
+    // surface boot failures on the loading screen (also aids headless debugging)
+    const bootFail = (msg) => {
+      const el = document.getElementById("loadmsg");
+      if (el) el.textContent = "failed to load: " + msg;
+    };
+    addEventListener("error", (e) => bootFail(e.message));
+    addEventListener("unhandledrejection", (e) => bootFail(e.reason?.message ?? e.reason));
+  </script>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
