@@ -11,6 +11,8 @@ class _FakeResponse:
         self.text = html
         self.url = url
         self.status_code = status_code
+        self.headers: dict[str, str] = {}
+        self.is_redirect = False
 
     def raise_for_status(self):
         return None
@@ -26,7 +28,7 @@ class _FakeAsyncClient:
     async def __aexit__(self, *exc):
         return False
 
-    async def get(self, url):
+    async def get(self, url, **kwargs):
         return self._response
 
 

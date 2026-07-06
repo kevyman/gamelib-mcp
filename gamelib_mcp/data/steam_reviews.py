@@ -15,7 +15,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from .db import STEAM_APP_ID, get_db
-from .scrape_config import SteamReviewsScrapeConfig, load_scrape_config
+from .scrape_config import SteamReviewsScrapeConfig, fetch_allowlisted, load_scrape_config
 
 _STEAM_PROFILE_ID = os.getenv("STEAM_PROFILE_ID", "")
 BASE_URL = f"https://steamcommunity.com/id/{_STEAM_PROFILE_ID}/recommended/"
@@ -116,11 +116,12 @@ async def _scrape_all_pages(config: SteamReviewsScrapeConfig | None = None) -> l
     async with httpx.AsyncClient(
         timeout=15,
         headers={"User-Agent": "Mozilla/5.0 (compatible; gamelib-mcp/1.0)"},
-        follow_redirects=True,
     ) as client:
         while True:
             try:
-                resp = await client.get(_page_url(page, config))
+                resp = await fetch_allowlisted(
+                    client, _page_url(page, config), provider="steam_reviews"
+                )
                 resp.raise_for_status()
             except Exception as e:
                 logger.warning("Steam reviews page %d fetch failed: %s", page, e)

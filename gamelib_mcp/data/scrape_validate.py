@@ -40,6 +40,7 @@ from .scrape_config import (
     SCRAPE_PROVIDERS,
     ScrapeConfigError,
     config_from_dict,
+    fetch_allowlisted,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,8 +48,14 @@ logger = logging.getLogger(__name__)
 FIXTURES_DIR = Path(__file__).parent / "scrape_fixtures"
 
 _EXCERPT_MAX_CHARS = 6000
-_LIVE_TITLE_OVERLAP_MIN = 0.25
-_LIVE_APPID_OVERLAP_MIN = 0.25
+# The overlap gate is the defense against a wrong-but-plausible selector that
+# returns structurally valid garbage. A *fraction* alone is too weak: a
+# mostly-real page with a minority of poisoned rows clears a low bar, and on a
+# tiny sample a single match can hit any fraction. So a heal must clear BOTH a
+# majority fraction AND an absolute floor of matched rows.
+_LIVE_TITLE_OVERLAP_MIN = 0.5
+_LIVE_APPID_OVERLAP_MIN = 0.5
+_LIVE_MATCH_ABS_MIN = 3
 _METACRITIC_SCORE_TOLERANCE = 20
 
 _FETCH_HEADERS = {
@@ -62,9 +69,12 @@ def _check(name: str, status: str, detail: str) -> dict[str, str]:
     return {"name": name, "status": status, "detail": detail}
 
 
-async def _fetch_text(url: str) -> str:
-    async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=_FETCH_HEADERS) as client:
-        resp = await client.get(url)
+async def _fetch_text(url: str, provider: str) -> str:
+    # Redirects are followed only while each hop stays on the provider's host
+    # allowlist (fetch_allowlisted validates before each request), so a live
+    # trial / diagnose can never be bounced to an off-allowlist host.
+    async with httpx.AsyncClient(timeout=20, headers=_FETCH_HEADERS) as client:
+        resp = await fetch_allowlisted(client, url, provider=provider)
         resp.raise_for_status()
         return resp.text
 
@@ -162,8 +172,8 @@ def replay_fixture(provider: str, config: Any) -> dict[str, str]:
 # ── Live trial + history sanity checks ───────────────────────────────────────
 
 
-async def _title_overlap_fraction(titles: list[str], cutoff: int) -> float | None:
-    """Fraction of scraped titles fuzzy-matching games already in the library.
+async def _title_overlap(titles: list[str], cutoff: int) -> tuple[int, int] | None:
+    """(matched, sampled) count of scraped titles fuzzy-matching library games.
 
     Returns None when the library is empty (no basis for the check).
     """
@@ -181,7 +191,24 @@ async def _title_overlap_fraction(titles: list[str], cutoff: int) -> float | Non
         lowered = title.lower()
         if lowered in candidates or extract_best_fuzzy_key(lowered, candidates, cutoff=cutoff):
             matched += 1
-    return matched / len(sample)
+    return matched, len(sample)
+
+
+def _overlap_shortfall(matched: int, sampled: int, fraction_min: float) -> str | None:
+    """Return a failure detail if the overlap is too weak, else None.
+
+    A heal must clear both the fraction floor and an absolute matched-row floor
+    (capped at the sample size, so a genuinely tiny library still passes when
+    every sampled row matches)."""
+    fraction = matched / sampled
+    abs_floor = min(sampled, _LIVE_MATCH_ABS_MIN)
+    if fraction < fraction_min or matched < abs_floor:
+        return (
+            f"only {matched}/{sampled} ({fraction:.0%}) of scraped rows match the library "
+            f"(need >= {fraction_min:.0%} and >= {abs_floor} matches) — "
+            "selector may be extracting the wrong element"
+        )
+    return None
 
 
 async def _live_backloggd(config: Any) -> list[dict[str, str]]:
@@ -191,26 +218,24 @@ async def _live_backloggd(config: Any) -> list[dict[str, str]]:
     if not user:
         return [_check("live_trial", "skipped", "BACKLOGGD_USER is not set")]
 
-    html = await _fetch_text(_page_url(1, config))
+    html = await _fetch_text(_page_url(1, config), "backloggd")
     rows = _parse_page(html, config)
     if not rows:
         return [_check("live_trial", "fail", "candidate config extracts 0 reviews from the live page")]
 
     checks = [_check("live_trial", "pass", f"extracted {len(rows)} reviews from the live page")]
-    overlap = await _title_overlap_fraction([r["title"] for r in rows], config.fuzzy_cutoff)
+    overlap = await _title_overlap([r["title"] for r in rows], config.fuzzy_cutoff)
     if overlap is None:
         checks.append(_check("title_overlap", "skipped", "library is empty; no overlap baseline"))
-    elif overlap < _LIVE_TITLE_OVERLAP_MIN:
-        checks.append(
-            _check(
-                "title_overlap",
-                "fail",
-                f"only {overlap:.0%} of scraped titles match library games "
-                f"(need {_LIVE_TITLE_OVERLAP_MIN:.0%}) — selector may be extracting the wrong element",
-            )
-        )
     else:
-        checks.append(_check("title_overlap", "pass", f"{overlap:.0%} of scraped titles match library games"))
+        matched, sampled = overlap
+        shortfall = _overlap_shortfall(matched, sampled, _LIVE_TITLE_OVERLAP_MIN)
+        if shortfall:
+            checks.append(_check("title_overlap", "fail", shortfall))
+        else:
+            checks.append(
+                _check("title_overlap", "pass", f"{matched}/{sampled} scraped titles match library games")
+            )
     return checks
 
 
@@ -222,7 +247,7 @@ async def _live_steam_reviews(config: Any) -> list[dict[str, str]]:
     if not user:
         return [_check("live_trial", "skipped", "STEAM_PROFILE_ID is not set")]
 
-    html = await _fetch_text(_page_url(1, config))
+    html = await _fetch_text(_page_url(1, config), "steam_reviews")
     rows = _parse_page(html, config)
     if not rows:
         return [_check("live_trial", "fail", "candidate config extracts 0 reviews from the live page")]
@@ -238,18 +263,14 @@ async def _live_steam_reviews(config: Any) -> list[dict[str, str]]:
         checks.append(_check("appid_overlap", "skipped", "no Steam appids in library; no overlap baseline"))
         return checks
     sample = [str(r["appid"]) for r in rows][:20]
-    overlap = sum(1 for appid in sample if appid in known) / len(sample)
-    if overlap < _LIVE_APPID_OVERLAP_MIN:
-        checks.append(
-            _check(
-                "appid_overlap",
-                "fail",
-                f"only {overlap:.0%} of scraped appids belong to owned Steam games "
-                f"(need {_LIVE_APPID_OVERLAP_MIN:.0%}) — appid extraction looks wrong",
-            )
-        )
+    matched = sum(1 for appid in sample if appid in known)
+    shortfall = _overlap_shortfall(matched, len(sample), _LIVE_APPID_OVERLAP_MIN)
+    if shortfall:
+        checks.append(_check("appid_overlap", "fail", shortfall.replace("scraped rows", "scraped appids")))
     else:
-        checks.append(_check("appid_overlap", "pass", f"{overlap:.0%} of scraped appids match owned games"))
+        checks.append(
+            _check("appid_overlap", "pass", f"{matched}/{len(sample)} scraped appids match owned games")
+        )
     return checks
 
 
@@ -281,7 +302,7 @@ async def _live_metacritic(config: Any) -> list[dict[str, str]]:
         slug = _to_slug(sample["name"])
         for url in _candidate_urls(slug, sample["platform"], config):
             try:
-                html = await _fetch_text(url)
+                html = await _fetch_text(url, "metacritic")
             except httpx.HTTPError:
                 continue
             score = _extract_score(html, config)
@@ -476,7 +497,7 @@ async def diagnose(provider: str) -> dict[str, Any]:
             result["detail"] = "BACKLOGGD_USER is not set"
             return result
         url = _bl_page_url(1, config)
-        html = await _fetch_text(url)
+        html = await _fetch_text(url, "backloggd")
         rows = _bl_parse_page(html, config)
         result.update(
             status="ok",
@@ -499,7 +520,7 @@ async def diagnose(provider: str) -> dict[str, Any]:
             result["detail"] = "STEAM_PROFILE_ID is not set"
             return result
         url = _sr_page_url(1, config)
-        html = await _fetch_text(url)
+        html = await _fetch_text(url, "steam_reviews")
         rows = _sr_parse_page(html, config)
         result.update(
             status="ok",
@@ -529,7 +550,7 @@ async def diagnose(provider: str) -> dict[str, Any]:
             return result
         sample = samples[0]
         url = _candidate_urls(_to_slug(sample["name"]), sample["platform"], config)[0]
-        html = await _fetch_text(url)
+        html = await _fetch_text(url, "metacritic")
         score = _extract_score(html, config)
         soup = BeautifulSoup(html, "lxml")
         result.update(

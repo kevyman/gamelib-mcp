@@ -396,5 +396,129 @@ class ScrapeAdminToolTests(ToolDBTestCase):
         self.assertFalse(payload["providers"]["backloggd"]["on_defaults"])
 
 
+class HostAllowlistFetchTests(unittest.IsolatedAsyncioTestCase):
+    """fetch_allowlisted keeps the ALLOWED_HOSTS frozen host a true network
+    boundary — a redirect off the allowlist is blocked before the request is
+    ever sent, closing the follow_redirects SSRF gap."""
+
+    class _Resp:
+        def __init__(self, *, is_redirect=False, location=None, text=""):
+            self.is_redirect = is_redirect
+            self.headers = {"location": location} if location else {}
+            self.text = text
+
+    async def test_same_host_redirect_is_followed(self):
+        requested: list[str] = []
+
+        class _Client:
+            async def get(_self, url, follow_redirects=False, **_kw):
+                requested.append(url)
+                if url == "https://backloggd.com/a":
+                    return HostAllowlistFetchTests._Resp(
+                        is_redirect=True, location="https://www.backloggd.com/b"
+                    )
+                return HostAllowlistFetchTests._Resp(text="ok")
+
+        resp = await sc.fetch_allowlisted(
+            _Client(), "https://backloggd.com/a", provider="backloggd"
+        )
+        self.assertEqual(resp.text, "ok")
+        # Both hops stayed on the allowlist, so both were fetched.
+        self.assertEqual(requested, ["https://backloggd.com/a", "https://www.backloggd.com/b"])
+
+    async def test_offsite_redirect_blocked_before_request(self):
+        requested: list[str] = []
+
+        class _Client:
+            async def get(_self, url, follow_redirects=False, **_kw):
+                requested.append(url)
+                return HostAllowlistFetchTests._Resp(
+                    is_redirect=True, location="https://evil.example.com/steal"
+                )
+
+        with self.assertRaises(sc.DisallowedHostError):
+            await sc.fetch_allowlisted(
+                _Client(), "https://backloggd.com/a", provider="backloggd"
+            )
+        # The off-allowlist redirect target was never contacted.
+        self.assertEqual(requested, ["https://backloggd.com/a"])
+
+    async def test_initial_offsite_url_never_fetched(self):
+        class _Client:
+            async def get(_self, *_a, **_kw):
+                raise AssertionError("off-allowlist URL must not be fetched")
+
+        with self.assertRaises(sc.DisallowedHostError):
+            await sc.fetch_allowlisted(
+                _Client(), "https://evil.example.com/", provider="backloggd"
+            )
+
+    async def test_redirect_loop_is_capped(self):
+        class _Client:
+            async def get(_self, url, follow_redirects=False, **_kw):
+                # Infinite same-host redirect chain.
+                return HostAllowlistFetchTests._Resp(
+                    is_redirect=True, location="https://backloggd.com/loop"
+                )
+
+        with self.assertRaises(sc.DisallowedHostError):
+            await sc.fetch_allowlisted(
+                _Client(), "https://backloggd.com/loop", provider="backloggd", max_redirects=3
+            )
+
+
+class OverlapFloorTests(ToolDBTestCase):
+    """The live-trial overlap gate requires both a majority fraction and an
+    absolute matched-row floor, so a mostly-wrong page can't clear a low bar."""
+
+    async def test_minority_overlap_rejected(self):
+        # 2 of 5 scraped titles match the library (40%) — under the old 25%
+        # threshold this passed; it must now fail on the fraction floor.
+        for name in ("Hades", "Celeste"):
+            await seed_game(name)
+
+        live_rows = [
+            {"title": "Hades", "score": 4.5, "text": ""},
+            {"title": "Celeste", "score": 5.0, "text": ""},
+            {"title": "Trending Now", "score": 4.0, "text": ""},
+            {"title": "Sign in", "score": 3.0, "text": ""},
+            {"title": "Newsletter", "score": 2.0, "text": ""},
+        ]
+        with (
+            patch.dict("os.environ", {"BACKLOGGD_USER": "someone"}),
+            patch.object(sv, "_fetch_text", AsyncMock(return_value="<html></html>")),
+            patch("gamelib_mcp.data.backloggd._parse_page", return_value=live_rows),
+        ):
+            report = await sv.validate_candidate_config("backloggd", {})
+
+        self.assertFalse(report["valid"])
+        statuses = {c["name"]: c["status"] for c in report["checks"]}
+        self.assertEqual(statuses["title_overlap"], "fail")
+
+    async def test_absolute_floor_blocks_high_fraction_low_count(self):
+        # 2 of 3 scraped rows match (67% — clears the fraction bar) but only 2
+        # matched, below the absolute floor of 3. This is the poisoned-minority
+        # case: a mostly-real page with one injected row on a small sample must
+        # not validate a selector change on fraction alone.
+        for name in ("Hades", "Celeste"):
+            await seed_game(name)
+
+        live_rows = [
+            {"title": "Hades", "score": 4.5, "text": ""},
+            {"title": "Celeste", "score": 5.0, "text": ""},
+            {"title": "Sponsored: Buy Now", "score": 4.0, "text": ""},
+        ]
+        with (
+            patch.dict("os.environ", {"BACKLOGGD_USER": "someone"}),
+            patch.object(sv, "_fetch_text", AsyncMock(return_value="<html></html>")),
+            patch("gamelib_mcp.data.backloggd._parse_page", return_value=live_rows),
+        ):
+            report = await sv.validate_candidate_config("backloggd", {})
+
+        self.assertFalse(report["valid"])
+        statuses = {c["name"]: c["status"] for c in report["checks"]}
+        self.assertEqual(statuses["title_overlap"], "fail")
+
+
 if __name__ == "__main__":
     unittest.main()
