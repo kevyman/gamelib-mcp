@@ -725,6 +725,9 @@ class DekuDealsWishlistTests(ToolDBTestCase):
         }
 
         class _Resp:
+            headers: dict[str, str] = {}
+            is_redirect = False
+
             def raise_for_status(self):
                 return None
 
@@ -758,6 +761,9 @@ class DekuDealsWishlistTests(ToolDBTestCase):
 
 def _response(html: str):
     class _Resp:
+        headers: dict[str, str] = {}
+        is_redirect = False
+
         def raise_for_status(self):
             return None
 

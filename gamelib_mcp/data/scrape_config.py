@@ -41,6 +41,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpx
 import soupsieve
 
 logger = logging.getLogger(__name__)
@@ -213,6 +214,60 @@ ALLOWED_HOSTS: dict[str, frozenset[str]] = {
     "metacritic": frozenset({"metacritic.com", "www.metacritic.com"}),
     "dekudeals": frozenset({"dekudeals.com", "www.dekudeals.com"}),
 }
+
+_MAX_SCRAPE_REDIRECTS = 5
+
+
+class DisallowedHostError(Exception):
+    """A scrape fetch targeted or was redirected to an off-allowlist host.
+
+    Raised *before* the disallowed request is sent, so the host frozen by
+    ``ALLOWED_HOSTS`` is a true network boundary, not a post-hoc response
+    filter — a redirect off the allowlist can never reach the target.
+    """
+
+
+def host_allowed(provider: str, url: str) -> bool:
+    """True when ``url``'s host is in ``provider``'s frozen allowlist."""
+    host = urlsplit(str(url)).hostname
+    return host is not None and host in ALLOWED_HOSTS.get(provider, frozenset())
+
+
+async def fetch_allowlisted(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    provider: str,
+    max_redirects: int = _MAX_SCRAPE_REDIRECTS,
+    **kwargs: Any,
+) -> httpx.Response:
+    """GET ``url``, following redirects only while every hop stays on the
+    provider's host allowlist.
+
+    Each hop's host is validated *before* the request is issued, so an
+    off-allowlist redirect target (an internal service, a cloud metadata
+    endpoint, an exfiltration sink) is never actually contacted. This closes
+    the SSRF gap that ``follow_redirects=True`` leaves open: the URL-template
+    host check only constrains the *initial* URL, not where a 3xx points.
+
+    Raises ``DisallowedHostError`` on an off-allowlist hop or a redirect loop
+    exceeding ``max_redirects``; propagates httpx errors otherwise.
+    """
+    current = str(url)
+    for _ in range(max_redirects + 1):
+        if not host_allowed(provider, current):
+            host = urlsplit(current).hostname
+            raise DisallowedHostError(
+                f"{provider} fetch blocked: host {host!r} not in allowlist "
+                f"{sorted(ALLOWED_HOSTS.get(provider, frozenset()))}"
+            )
+        resp = await client.get(current, follow_redirects=False, **kwargs)
+        location = resp.headers.get("location")
+        if resp.is_redirect and location:
+            current = str(httpx.URL(current).join(location))
+            continue
+        return resp
+    raise DisallowedHostError(f"{provider} fetch exceeded {max_redirects} redirects")
 
 
 def default_config(provider: str) -> Any:
