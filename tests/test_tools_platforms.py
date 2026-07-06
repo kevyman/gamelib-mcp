@@ -213,6 +213,53 @@ class UpdateGameTests(ToolDBTestCase):
         with self.assertRaisesRegex(ToolError, "Unknown completion_status 'finished'"):
             await platforms.update_game(game_id=gid, completion_status="finished")
 
+    async def test_content_type_promotes_bundle_back_to_primary(self):
+        # A "+" compilation IGDB mis-filed as a bundle: is_primary=0 hides it
+        # from stats/series/discover, and a stray parent orphans it.
+        parent = await seed_game("Super Mario 3D World")
+        gid = await seed_game(
+            "Super Mario 3D World + Bowser's Fury",
+            content_type="bundle",
+            is_primary_library_item=0,
+            parent_game_id=parent,
+        )
+        result = await platforms.update_game(game_id=gid, content_type="base_game")
+        self.assertEqual(result["updated"]["content_type"], "base_game")
+        self.assertIs(result["updated"]["is_primary_library_item"], True)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT content_type, is_primary_library_item, parent_game_id "
+                "FROM games WHERE id = ?",
+                (gid,),
+            )
+        self.assertEqual(row["content_type"], "base_game")
+        self.assertEqual(row["is_primary_library_item"], 1)
+        self.assertIsNone(row["parent_game_id"])
+        # All three columns are protected so the next IGDB pass can't re-demote it.
+        self.assertEqual(
+            {"content_type", "is_primary_library_item", "parent_game_id"},
+            await self._overrides(gid),
+        )
+
+    async def test_content_type_nested_demotes_and_keeps_parent(self):
+        gid = await seed_game("Some DLC", is_primary_library_item=1)
+        result = await platforms.update_game(game_id=gid, content_type="dlc")
+        self.assertIs(result["updated"]["is_primary_library_item"], False)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT is_primary_library_item FROM games WHERE id = ?", (gid,)
+            )
+        self.assertEqual(row["is_primary_library_item"], 0)
+        # Demotion does not touch parent_game_id, so it isn't recorded.
+        self.assertEqual(
+            {"content_type", "is_primary_library_item"}, await self._overrides(gid)
+        )
+
+    async def test_rejects_bad_content_type(self):
+        gid = await seed_game("Whatever")
+        with self.assertRaisesRegex(ToolError, "Unknown content_type 'game'"):
+            await platforms.update_game(game_id=gid, content_type="game")
+
     async def test_requires_a_field(self):
         gid = await seed_game("Bare")
         with self.assertRaisesRegex(ToolError, "at least one field"):

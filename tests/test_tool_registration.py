@@ -132,6 +132,7 @@ EXPECTED_TOOLS = {
             "hltb_complete",
             "is_farmed",
             "completion_status",
+            "content_type",
             "clear_overrides",
         },
         "required": set(),

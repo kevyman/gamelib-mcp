@@ -83,3 +83,54 @@ def test_classify_category_present_takes_precedence_over_game_type():
 
     assert result.content_type == "dlc"
     assert result.is_primary_library_item is False
+
+
+def test_is_compilation_title_matches_spaced_plus_only():
+    from gamelib_mcp.data import content
+
+    assert content.is_compilation_title("Super Mario 3D World + Bowser's Fury")
+    assert content.is_compilation_title("Portal + Portal 2")
+    # No spaced "+" separator, so not a compilation.
+    assert not content.is_compilation_title("Ni no Kuni")
+    assert not content.is_compilation_title("C++ Programming")
+    assert not content.is_compilation_title("Game +")
+
+
+def test_compilation_bundle_stays_primary_base_game():
+    from gamelib_mcp.data import content
+
+    # IGDB tags "Super Mario 3D World + Bowser's Fury" category 3 (bundle),
+    # which would demote it out of the library rollups. The "+" compilation
+    # is a single owned SKU, so it must classify as a primary base game.
+    result = content.classify_igdb_game(
+        title="Super Mario 3D World + Bowser's Fury", category=3
+    )
+
+    assert result.content_type == content.CONTENT_BASE_GAME
+    assert result.is_primary_library_item is True
+
+
+def test_compilation_version_parent_stays_primary_base_game():
+    from gamelib_mcp.data import content
+
+    # A version_parent would normally nest the row as an edition; a "+"
+    # compilation overrides that and stays a primary library item.
+    result = content.classify_igdb_game(
+        title="Super Mario 3D World + Bowser's Fury",
+        category=None,
+        version_parent_name="Super Mario 3D World",
+        version_parent_igdb_id=1234,
+    )
+
+    assert result.content_type == content.CONTENT_BASE_GAME
+    assert result.is_primary_library_item is True
+
+
+def test_non_compilation_bundle_still_nested():
+    from gamelib_mcp.data import content
+
+    # A genuine bundle without a "+" compilation title is unaffected.
+    result = content.classify_igdb_game(title="The Orange Box", category=3)
+
+    assert result.content_type == content.CONTENT_BUNDLE
+    assert result.is_primary_library_item is False

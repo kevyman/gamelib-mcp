@@ -869,6 +869,7 @@ async def update_game(
     hltb_complete: float | None = None,
     is_farmed: bool | None = None,
     completion_status: str | None = None,
+    content_type: str | None = None,
     clear_overrides: list[str] | None = None,
 ) -> UpdateGameResponse:
     """
@@ -885,7 +886,11 @@ async def update_game(
     value but lets future syncs update it. completion_status: playing |
     completed | abandoned | evergreen (endless games with no completion
     concept, e.g. Rocket League, Tabletop Simulator, MMOs, sandboxes), or
-    'none' to reset to automatic inference. Editing tags recomputes the taste
+    'none' to reset to automatic inference. content_type corrects a wrong
+    DLC/bundle/edition classification (e.g. a "X + Y" compilation misfiled as a
+    bundle); it re-derives is_primary_library_item — which controls whether the
+    game shows up in stats/series/discover — and detaches any wrong parent when
+    promoting to a primary type. Editing tags recomputes the taste
     profile. Returns the updated fields, any cleared columns, and the full
     manual-override list.
     """
@@ -905,6 +910,7 @@ async def update_game(
         hltb_complete,
         is_farmed,
         completion_status,
+        content_type,
         clear_overrides,
     )
 
