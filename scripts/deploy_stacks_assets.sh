@@ -3,7 +3,7 @@
 #
 # The stacks/assets/ payload (library.json + cover atlases) is generated,
 # personal, and gitignored — it deploys via rsync, not git. Run this after
-# library changes you want reflected at gamelib.johnwilkos.com/stacks.
+# library changes you want reflected at gamelibmcp.johnwilkos.com/stacks.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -21,4 +21,4 @@ echo "==> exporting library + cover atlases"
 echo "==> rsyncing assets to server"
 rsync -az --delete stacks/assets/ "$SERVER:/root/mcps/stacks/assets/"
 
-echo "done — https://gamelib.johnwilkos.com/stacks/"
+echo "done — https://gamelibmcp.johnwilkos.com/stacks/"

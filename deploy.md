@@ -480,10 +480,8 @@ rejected deliberately.
 
 ### The Stacks (static 3D library visualization)
 
-Served by Caddy at `/stacks/` on both `gamelibmcp.johnwilkos.com` and
-`gamelib.johnwilkos.com` (the latter needs a **DNS-only** A record →
-`178.104.53.83`; a Cloudflare-proxied record would break Caddy's ACME
-certificate issuance). It is a public, unauthenticated static site.
+Served by Caddy at `gamelibmcp.johnwilkos.com/stacks/`. It is a public,
+unauthenticated static site.
 
 - Code (`stacks/index.html`, `main.js`, `vendor/`, `assets_static/`) deploys
   with the repo; Caddy mounts `./stacks` read-only at `/srv/stacks`.

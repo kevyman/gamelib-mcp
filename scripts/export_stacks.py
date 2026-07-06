@@ -257,7 +257,8 @@ async def fetch_covers(games: list[dict], cache_dir: Path) -> dict[int, Path]:
         if resp.status_code == 200 and resp.content:
             path.write_bytes(resp.content)
             return path
-        miss.touch()
+        if resp.status_code in (404, 410):
+            miss.touch()  # only permanent misses; 429/5xx retry next run
         return None
 
     async def fetch(client: httpx.AsyncClient, g: dict) -> None:
@@ -342,6 +343,8 @@ def build_atlases(
         col, row = i % COLS, i // COLS
         sheets[sheet_no].paste(tile, (col * TILE_W, row * TILE_H))
         g["tile"] = idx
+    for stale in out_dir.glob("atlas_*.jpg"):
+        stale.unlink()  # fewer sheets than last run must not leave old ones
     for n, sheet in enumerate(sheets):
         sheet.save(out_dir / f"atlas_{n}.jpg", quality=82, optimize=True)
     print(f"  atlases: {len(sheets)} sheets, {placeholders} placeholder tiles")
