@@ -56,7 +56,12 @@ from .db import (
     upsert_game,
     upsert_wishlist_entry,
 )
-from .scrape_config import DekuDealsScrapeConfig, load_scrape_config
+from .scrape_config import (
+    DekuDealsScrapeConfig,
+    DisallowedHostError,
+    fetch_allowlisted,
+    load_scrape_config,
+)
 from .title_normalization import prepare_catalog_title
 
 # Leading currency symbol -> ISO 4217 code. Extend if another symbol shows up
@@ -183,7 +188,7 @@ async def _fetch_wishlist_items(
         url += ".json"
 
     async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "gamelib-mcp/1.0"}) as client:
-        resp = await client.get(url, follow_redirects=True)
+        resp = await fetch_allowlisted(client, url, provider="dekudeals")
         resp.raise_for_status()
         payload = resp.json()
 
@@ -332,7 +337,7 @@ async def fetch_wishlist_prices() -> dict[str, dict]:
     config = await load_scrape_config("dekudeals")
 
     async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "gamelib-mcp/1.0"}) as client:
-        resp = await client.get(url, follow_redirects=True)
+        resp = await fetch_allowlisted(client, url, provider="dekudeals")
         resp.raise_for_status()
 
     return _parse_wishlist_prices(resp.text, config)
@@ -398,9 +403,9 @@ async def fetch_search_prices(titles: list[str]) -> dict[str, dict]:
                 request_count += 1
                 url = f"{base_url}&filter%5Bplatform%5D={platform_filter}"
                 try:
-                    resp = await client.get(url, follow_redirects=True)
+                    resp = await fetch_allowlisted(client, url, provider="dekudeals")
                     resp.raise_for_status()
-                except httpx.HTTPError as exc:
+                except (httpx.HTTPError, DisallowedHostError) as exc:
                     logger.warning(
                         "DekuDeals search failed for %r (filter=%s): %s", title, platform_filter, exc
                     )

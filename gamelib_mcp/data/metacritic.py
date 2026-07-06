@@ -16,7 +16,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from .db import upsert_game_platform_enrichment
-from .scrape_config import MetacriticScrapeConfig, load_scrape_config
+from .scrape_config import MetacriticScrapeConfig, fetch_allowlisted, load_scrape_config
 
 logger = logging.getLogger(__name__)
 
@@ -124,10 +124,9 @@ async def _fetch_score_from_url(
     try:
         async with httpx.AsyncClient(
             timeout=15,
-            follow_redirects=True,
             headers=_HEADERS,
         ) as client:
-            resp = await client.get(url)
+            resp = await fetch_allowlisted(client, url, provider="metacritic")
             if resp.status_code == 404:
                 return None, url
             resp.raise_for_status()
