@@ -1017,6 +1017,63 @@ async def detect_orphan_games() -> dict:
     }
 
 
+async def detect_stranded_duplicates() -> dict:
+    """List same-name game pairs where a sync forked a stranded duplicate row.
+
+    The fingerprint: two games rows share a normalized name and an owned
+    platform, and exactly one side's platform row carries store identifiers —
+    the identifier-less twin was ingested before that identifier type was
+    recorded, and a later sync (whose identifier lookup missed) refused to
+    attach onto it (anti-collapse guard) and created a fresh row instead.
+    The sync paths now adopt the identifier onto such rows, so new pairs
+    should not appear; existing ones are merge_games candidates. Read-only.
+    Pairs where BOTH sides carry identifiers are deliberately excluded — those
+    are distinct store entries (see detect_collapsed_games for the inverse
+    over-merge shape).
+    """
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            """SELECT ga.id   AS game_id,
+                      gb.id   AS duplicate_game_id,
+                      ga.name AS name,
+                      gb.name AS duplicate_name,
+                      gpa.platform,
+                      gpa.playtime_minutes AS playtime_minutes,
+                      gpb.playtime_minutes AS duplicate_playtime_minutes,
+                      (SELECT GROUP_CONCAT(gpi.identifier_type || '=' || gpi.identifier_value)
+                       FROM game_platform_identifiers gpi
+                       WHERE gpi.game_platform_id = gpa.id) AS identifiers
+               FROM games ga
+               JOIN games gb
+                 ON gb.id != ga.id
+                AND COALESCE(gb.name_normalized, '') = COALESCE(ga.name_normalized, '')
+                AND ga.name_normalized IS NOT NULL
+               JOIN game_platforms gpa ON gpa.game_id = ga.id AND gpa.owned = 1
+               JOIN game_platforms gpb
+                 ON gpb.game_id = gb.id AND gpb.platform = gpa.platform AND gpb.owned = 1
+               WHERE EXISTS (SELECT 1 FROM game_platform_identifiers gpi
+                             WHERE gpi.game_platform_id = gpa.id)
+                 AND NOT EXISTS (SELECT 1 FROM game_platform_identifiers gpi
+                                 WHERE gpi.game_platform_id = gpb.id)
+               ORDER BY ga.name, gpa.platform""",
+        )
+
+    candidates = [
+        {
+            "game_id": row["game_id"],
+            "name": row["name"],
+            "duplicate_game_id": row["duplicate_game_id"],
+            "duplicate_name": row["duplicate_name"],
+            "platform": row["platform"],
+            "playtime_minutes": row["playtime_minutes"],
+            "duplicate_playtime_minutes": row["duplicate_playtime_minutes"],
+            "identifiers": (row["identifiers"] or "").split(",") if row["identifiers"] else [],
+        }
+        for row in rows
+    ]
+    return {"stranded_count": len(candidates), "candidates": candidates}
+
+
 async def detect_cross_platform_collapses(limit: int = 0) -> dict:
     """Flag multi-platform games whose Steam appid is a *different* IGDB game.
 

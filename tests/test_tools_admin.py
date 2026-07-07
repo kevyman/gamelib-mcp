@@ -1000,3 +1000,56 @@ class RevalidateIgdbMatchesTests(ToolDBTestCase):
         self.assertFalse(result["igdb_configured"])
         self.assertEqual(result["checked"], 0)
         self.assertEqual(result["mismatches"], [])
+
+
+class DetectStrandedDuplicatesTests(ToolDBTestCase):
+    async def _insert_duplicate_game(self, name: str) -> int:
+        """Raw insert (seed_game would name-match onto the existing row)."""
+        from gamelib_mcp.data.title_normalization import normalize_search_text
+
+        async with db_module.get_db() as db:
+            cursor = await db.execute(
+                "INSERT INTO games (name, name_normalized) VALUES (?, ?)",
+                (name, normalize_search_text(name)),
+            )
+            await db.commit()
+            return cursor.lastrowid
+
+    async def test_reports_only_identifierless_twin_pairs(self):
+        # Stranded pair: same name, same owned platform, exactly one side
+        # carries a store identifier (the prod Tiny Tina's Wonderlands shape).
+        keeper = await seed_game("Tiny Tina's Wonderlands")
+        keeper_gpid = await add_platform(keeper, "ps5", playtime_minutes=671)
+        await add_identifier(keeper_gpid, "psn_title_id", "PPSA01492_00")
+        twin = await self._insert_duplicate_game("Tiny Tina's Wonderlands")
+        await add_platform(twin, "ps5", playtime_minutes=671)
+
+        # Both-identifiers pair: two distinct store entries (anti-collapse) —
+        # must NOT be flagged.
+        original = await seed_game("Dead Space")
+        original_gpid = await add_platform(original, "steam")
+        await add_identifier(original_gpid, "steam_appid", "17470")
+        remake = await self._insert_duplicate_game("Dead Space")
+        remake_gpid = await add_platform(remake, "steam")
+        await add_identifier(remake_gpid, "steam_appid", "1693980")
+
+        # Same name on different platforms: not a duplicate — must NOT be
+        # flagged.
+        steam_side = await seed_game("Hades")
+        steam_gpid = await add_platform(steam_side, "steam")
+        await add_identifier(steam_gpid, "steam_appid", "1145360")
+        switch_side = await self._insert_duplicate_game("Hades")
+        await add_platform(switch_side, "switch2")
+
+        result = await admin.detect_stranded_duplicates()
+
+        self.assertEqual(result["stranded_count"], 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["game_id"], keeper)
+        self.assertEqual(candidate["duplicate_game_id"], twin)
+        self.assertEqual(candidate["platform"], "ps5")
+        self.assertEqual(candidate["identifiers"], ["psn_title_id=PPSA01492_00"])
+
+    async def test_empty_library_reports_nothing(self):
+        result = await admin.detect_stranded_duplicates()
+        self.assertEqual(result, {"stranded_count": 0, "candidates": []})

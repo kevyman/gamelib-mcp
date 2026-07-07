@@ -21,6 +21,7 @@ import shutil
 from pathlib import Path
 
 from gamelib_mcp.data.db import (
+    get_platform_game_by_normalized_name,
     load_fuzzy_candidates,
     upsert_game_alias,
     upsert_game_platform,
@@ -209,12 +210,28 @@ async def sync_gog() -> dict:
             skipped += 1
             continue
         igdb_platform_id = PLATFORM_TO_IGDB.get("gog")
-        game_id, igdb_game = await resolve_and_link_game(prepared_title, igdb_platform_id, candidates)
-        if game_id in candidates:
+
+        # GOG has no per-item store id, so the title IS the stable key: a
+        # same-normalized-name row that already owns gog is this exact catalog
+        # item re-syncing. Match it directly — re-running the title through
+        # IGDB can land on a *different* same-named IGDB candidate whose
+        # conflicting release year makes the fuzzy fallback refuse the
+        # existing row and fork a duplicate (observed in prod: "Agony",
+        # "Sigma Theory", "Under The Moon" pairs).
+        existing = await get_platform_game_by_normalized_name(prepared_title, "gog")
+        if existing is not None:
+            game_id = existing["id"]
+            igdb_game = None
             matched += 1
         else:
-            candidates[game_id] = prepared_title
-            added += 1
+            game_id, igdb_game = await resolve_and_link_game(
+                prepared_title, igdb_platform_id, candidates
+            )
+            if game_id in candidates:
+                matched += 1
+            else:
+                candidates[game_id] = prepared_title
+                added += 1
 
         if title != prepared_title:
             await upsert_game_alias(

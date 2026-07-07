@@ -20,6 +20,7 @@ import httpx
 
 from gamelib_mcp.data.db import (
     EPIC_ARTIFACT_ID,
+    adopt_platform_identifier,
     get_game_by_identifier,
     load_fuzzy_candidates,
     upsert_game_platform,
@@ -336,8 +337,25 @@ async def sync_epic() -> dict:
         existing = (
             await get_game_by_identifier(EPIC_ARTIFACT_ID, artifact_id) if artifact_id else None
         )
+        # Identifier miss but a same-name Epic row exists without any
+        # epic_artifact_id: adopt the identifier onto it instead of letting the
+        # exclude_platform guard fork a stranded duplicate.
+        adopted_game_id = (
+            await adopt_platform_identifier(
+                name=prepared_title,
+                platform="epic",
+                identifier_type=EPIC_ARTIFACT_ID,
+                identifier_value=artifact_id,
+            )
+            if existing is None and artifact_id
+            else None
+        )
         if existing is not None:
             game_id = existing["id"]
+            igdb_game = None
+            matched += 1
+        elif adopted_game_id is not None:
+            game_id = adopted_game_id
             igdb_game = None
             matched += 1
         else:

@@ -15,6 +15,20 @@ def _claim_cutoff_iso(minutes: int = 15) -> str:
     return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
 
 
+# How long an HLTB "NOT_FOUND:<iso>" marker suppresses re-fetching. NOT_FOUND
+# is deliberately retryable (unlike the old permanent sentinel): matcher
+# improvements and HLTB catalog additions get picked up automatically. Lives
+# here (not hltb.py) because the claim predicate below and hltb.py's freshness
+# check must share it, and hltb.py already imports from this package.
+HLTB_NOT_FOUND_RETRY_DAYS = 30
+
+
+def _hltb_not_found_cutoff_iso() -> str:
+    return (
+        datetime.now(timezone.utc) - timedelta(days=HLTB_NOT_FOUND_RETRY_DAYS)
+    ).isoformat()
+
+
 async def clear_claim(table: str, claim_column: str, row_id: int, id_column: str = "id") -> None:
     async with get_db() as db:
         await db.execute(
@@ -140,20 +154,30 @@ async def claim_game_ids_for_igdb(limit: int, stale_before: str) -> list[int]:
 
 
 async def claim_game_ids_for_hltb(limit: int, stale_before: str) -> list[int]:
+    # Claimable rows: never fetched, legacy FAILED sentinel, or an expired
+    # NOT_FOUND marker. NOT_FOUND markers carry their write time as
+    # "NOT_FOUND:<iso>"; substr(x, 11) is the ISO part ("NOT_FOUND:" is 10
+    # chars) and compares lexicographically. A bare legacy "NOT_FOUND" yields
+    # '' which always reads as expired.
+    not_found_cutoff = _hltb_not_found_cutoff_iso()
+    claimable = (
+        "(hltb_cached_at IS NULL OR hltb_cached_at = 'FAILED'"
+        " OR (hltb_cached_at LIKE 'NOT_FOUND%' AND substr(hltb_cached_at, 11) < ?))"
+    )
     return await _claim_ids(
-        """SELECT id
+        f"""SELECT id
            FROM games
-           WHERE (hltb_cached_at IS NULL OR hltb_cached_at = 'FAILED')
+           WHERE {claimable}
              AND (hltb_claimed_at IS NULL OR hltb_claimed_at < ?)
            ORDER BY is_farmed ASC, id
            LIMIT ?""",
-        (stale_before, limit),
-        """UPDATE games
+        (not_found_cutoff, stale_before, limit),
+        f"""UPDATE games
            SET hltb_claimed_at = ?
            WHERE id = ?
-             AND (hltb_cached_at IS NULL OR hltb_cached_at = 'FAILED')
+             AND {claimable}
              AND (hltb_claimed_at IS NULL OR hltb_claimed_at < ?)""",
-        lambda now, game_id: (now, game_id, stale_before),
+        lambda now, game_id: (now, game_id, not_found_cutoff, stale_before),
     )
 
 
@@ -282,6 +306,12 @@ async def claim_game_platform_ids_for_metacritic(limit: int, stale_before: str) 
 
 
 async def load_games_for_igdb_backfill(game_ids: Iterable[int]) -> list[aiosqlite.Row]:
+    """Rows for the IGDB backfill: identity + steam_appid + manual_overrides.
+
+    steam_appid feeds the external_games-first resolution (the authoritative
+    appid -> IGDB mapping); manual_overrides lets the backfill honor a pinned
+    igdb_id without a per-row lookup.
+    """
     ids = list(dict.fromkeys(game_ids))
     if not ids:
         return []
@@ -289,11 +319,19 @@ async def load_games_for_igdb_backfill(game_ids: Iterable[int]) -> list[aiosqlit
     placeholders = ",".join("?" for _ in ids)
     async with get_db() as db:
         return await db.execute_fetchall(
-            f"""SELECT id, name, igdb_id
-                FROM games
-                WHERE id IN ({placeholders})
-                ORDER BY id""",
-            ids,
+            f"""SELECT g.id, g.name, g.igdb_id, g.manual_overrides,
+                       (SELECT gpi.identifier_value
+                        FROM game_platforms gp
+                        JOIN game_platform_identifiers gpi
+                          ON gpi.game_platform_id = gp.id
+                         AND gpi.identifier_type = ?
+                        WHERE gp.game_id = g.id
+                        ORDER BY gpi.is_primary DESC, gpi.id ASC
+                        LIMIT 1) AS steam_appid
+                FROM games g
+                WHERE g.id IN ({placeholders})
+                ORDER BY g.id""",
+            [STEAM_APP_ID, *ids],
         )
 
 
