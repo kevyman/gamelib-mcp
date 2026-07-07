@@ -21,6 +21,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from gamelib_mcp.data.db import (
+    adopt_platform_identifier,
     find_conflicting_fuzzy_key,
     get_game_by_identifier,
     load_fuzzy_candidates,
@@ -335,8 +336,25 @@ async def _sync_nintendo_ownership() -> dict:
         existing = (
             await get_game_by_identifier(NINTENDO_TITLE_ID, title_id) if title_id else None
         )
+        # Identifier miss but a same-name switch2 row exists without any
+        # nintendo_title_id: adopt the identifier onto it instead of letting the
+        # exclude_platform guard fork a stranded duplicate.
+        adopted_game_id = (
+            await adopt_platform_identifier(
+                name=name,
+                platform=PLATFORM,
+                identifier_type=NINTENDO_TITLE_ID,
+                identifier_value=title_id,
+            )
+            if existing is None and title_id
+            else None
+        )
         if existing is not None:
             game_id = existing["id"]
+            igdb_game = None
+            matched += 1
+        elif adopted_game_id is not None:
+            game_id = adopted_game_id
             igdb_game = None
             matched += 1
         else:
