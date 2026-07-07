@@ -568,7 +568,10 @@ class IGDBBackfillTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7])),
             patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[game_row])),
             patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=igdb.IGDB_PLATFORM_PC)),
-            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock(return_value=igdb_game)),
+            patch(
+                "gamelib_mcp.data.igdb._resolve_game_with_status",
+                AsyncMock(return_value=igdb._ResolveOutcome(game=igdb_game, saw_candidates=True)),
+            ),
             patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
             patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
             patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
@@ -606,7 +609,15 @@ class IGDBBackfillTests(unittest.IsolatedAsyncioTestCase):
                 "gamelib_mcp.data.igdb.choose_igdb_platform_hint",
                 AsyncMock(side_effect=[igdb.IGDB_PLATFORM_PC, igdb.IGDB_PLATFORM_PC]),
             ),
-            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock(side_effect=[duplicate_game, unique_game])),
+            patch(
+                "gamelib_mcp.data.igdb._resolve_game_with_status",
+                AsyncMock(
+                    side_effect=[
+                        igdb._ResolveOutcome(game=duplicate_game, saw_candidates=True),
+                        igdb._ResolveOutcome(game=unique_game, saw_candidates=True),
+                    ]
+                ),
+            ),
             patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock(side_effect=apply_metadata)),
             patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
             patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
@@ -626,7 +637,7 @@ class IGDBBackfillTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[game_row])),
             patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=igdb.IGDB_PLATFORM_PC)),
             patch(
-                "gamelib_mcp.data.igdb.resolve_game",
+                "gamelib_mcp.data.igdb._resolve_game_with_status",
                 AsyncMock(side_effect=igdb.IGDBRequestFailure("retry exhausted")),
             ),
             patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
@@ -658,7 +669,7 @@ class IGDBBackfillTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[game_row])),
             patch("gamelib_mcp.data.igdb.fetch_game_by_id", AsyncMock(return_value=by_id_game)) as fetch_by_id,
             patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock()) as platform_hint,
-            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock()) as resolve_game,
+            patch("gamelib_mcp.data.igdb._resolve_game_with_status", AsyncMock()) as resolve_status,
             patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
             patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
             patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
@@ -669,7 +680,7 @@ class IGDBBackfillTests(unittest.IsolatedAsyncioTestCase):
         fetch_by_id.assert_awaited_once_with(391942, suppress_errors=False)
         apply_metadata.assert_awaited_once_with(9, by_id_game)
         platform_hint.assert_not_awaited()
-        resolve_game.assert_not_awaited()
+        resolve_status.assert_not_awaited()
 
     async def test_backfill_missing_games_falls_back_to_name_search_on_empty_platforms(self) -> None:
         # A by-id fetch that returns a game with no platform data isn't useful
@@ -698,7 +709,10 @@ class IGDBBackfillTests(unittest.IsolatedAsyncioTestCase):
                 "gamelib_mcp.data.igdb.fetch_game_by_id", AsyncMock(return_value=empty_platforms_game)
             ) as fetch_by_id,
             patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=igdb.IGDB_PLATFORM_PC)),
-            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock(return_value=resolved_game)) as resolve_game,
+            patch(
+                "gamelib_mcp.data.igdb._resolve_game_with_status",
+                AsyncMock(return_value=igdb._ResolveOutcome(game=resolved_game, saw_candidates=True)),
+            ) as resolve_status,
             patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
             patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
             patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
@@ -707,7 +721,7 @@ class IGDBBackfillTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(count, 1)
         fetch_by_id.assert_awaited_once_with(391942, suppress_errors=False)
-        resolve_game.assert_awaited_once()
+        resolve_status.assert_awaited_once()
         apply_metadata.assert_awaited_once_with(9, resolved_game)
 
 
@@ -1349,14 +1363,28 @@ class IGDBBackfillCircuitBreakerTests(unittest.IsolatedAsyncioTestCase):
     def _rows(self, ids: list[int]) -> list[dict]:
         return [{"id": i, "name": f"Game {i}", "igdb_id": None} for i in ids]
 
-    async def test_breaker_aborts_pass_and_leaves_all_rows_retryable(self) -> None:
+    @staticmethod
+    def _miss() -> "igdb._ResolveOutcome":
+        """Zero-candidate search — the only outcome that may count as outage."""
+        return igdb._ResolveOutcome(game=None, saw_candidates=False)
+
+    @staticmethod
+    def _gate_rejection() -> "igdb._ResolveOutcome":
+        """Candidates returned but all gate-rejected — proof the API is alive."""
+        return igdb._ResolveOutcome(game=None, saw_candidates=True)
+
+    async def test_breaker_aborts_pass_when_canary_confirms_outage(self) -> None:
         ids = list(range(1, 13))  # 12 claimed; breaker trips at the 10th miss
 
         with (
             patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=ids)),
             patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=self._rows(ids))),
             patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=None)),
-            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock(return_value=None)) as resolve_game,
+            patch(
+                "gamelib_mcp.data.igdb._resolve_game_with_status",
+                AsyncMock(return_value=self._miss()),
+            ) as resolve_status,
+            patch("gamelib_mcp.data.igdb._igdb_canary_alive", AsyncMock(return_value=False)) as canary,
             patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
             patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()) as release_claim,
             self.assertLogs("gamelib_mcp.data.igdb", level="ERROR") as logs,
@@ -1365,11 +1393,102 @@ class IGDBBackfillCircuitBreakerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(count, 0)
         mark_checked.assert_not_awaited()
+        canary.assert_awaited_once()
         # Ten rows were attempted before the trip; the remaining two are
         # released without ever being attempted.
-        self.assertEqual(resolve_game.await_count, 10)
+        self.assertEqual(resolve_status.await_count, 10)
         self.assertEqual(release_claim.await_count, 12)
         self.assertTrue(any("circuit breaker tripped" in line for line in logs.output))
+
+    async def test_breaker_trip_with_alive_canary_commits_pending_and_continues(self) -> None:
+        # The livelock killer: 10+ consecutive genuinely-IGDB-absent titles at
+        # the head of the deterministic claim order must not deadlock the heal.
+        ids = list(range(1, 13))
+
+        with (
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=ids)),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=self._rows(ids))),
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=None)),
+            patch(
+                "gamelib_mcp.data.igdb._resolve_game_with_status",
+                AsyncMock(return_value=self._miss()),
+            ) as resolve_status,
+            patch("gamelib_mcp.data.igdb._igdb_canary_alive", AsyncMock(return_value=True)) as canary,
+            patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()) as release_claim,
+            self.assertLogs("gamelib_mcp.data.igdb", level="WARNING") as logs,
+        ):
+            count = await igdb.backfill_missing_games(limit=12)
+
+        # All 12 rows reach a terminal state: 10 committed when the canary
+        # proved the API alive at the would-be trip, 2 more at pass end.
+        self.assertEqual(count, 12)
+        self.assertEqual(resolve_status.await_count, 12)
+        self.assertEqual(mark_checked.await_count, 12)
+        self.assertEqual(release_claim.await_count, 12)
+        canary.assert_awaited_once()
+        self.assertEqual(igdb._consecutive_backfill_misses, 2)
+        self.assertTrue(any("canary" in line for line in logs.output))
+
+    async def test_gate_rejection_cluster_commits_rows_without_tripping(self) -> None:
+        # The prod livelock shape: the first 10 claimable rows are old titles
+        # whose IGDB candidates all fail the name-match gate ('Cogs' ->
+        # 'Dr. Cog', 'Counter-Strike' -> 'Counter-Strike Nexon', ...). The
+        # search API answered every time — these are genuine refuse-to-guess
+        # no-matches and must commit + never count toward the breaker.
+        ids = list(range(1, 13))
+
+        with (
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=ids)),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=self._rows(ids))),
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=None)),
+            patch(
+                "gamelib_mcp.data.igdb._resolve_game_with_status",
+                AsyncMock(return_value=self._gate_rejection()),
+            ),
+            patch("gamelib_mcp.data.igdb._igdb_canary_alive", AsyncMock()) as canary,
+            patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()) as release_claim,
+        ):
+            count = await igdb.backfill_missing_games(limit=12)
+
+        self.assertEqual(count, 12)
+        self.assertEqual(mark_checked.await_count, 12)
+        self.assertEqual(release_claim.await_count, 12)
+        canary.assert_not_awaited()
+        self.assertEqual(igdb._consecutive_backfill_misses, 0)
+
+    async def test_gate_rejection_flushes_pending_and_resets_inherited_counter(self) -> None:
+        # Recovery path after a confirmed-outage abort: the counter survives
+        # the abort (fast re-trip is deliberate), so the next healthy pass
+        # must be able to reset it — here via a gate rejection (API alive).
+        igdb._consecutive_backfill_misses = 15
+        ids = [1, 2]
+        outcomes = [self._miss(), self._gate_rejection()]
+
+        with (
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=ids)),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=self._rows(ids))),
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=None)),
+            patch(
+                "gamelib_mcp.data.igdb._resolve_game_with_status",
+                AsyncMock(side_effect=outcomes),
+            ),
+            # Row 1's miss re-trips the inherited counter; the canary answers
+            # alive, so the pass continues into row 2's gate rejection.
+            patch("gamelib_mcp.data.igdb._igdb_canary_alive", AsyncMock(return_value=True)) as canary,
+            patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
+            self.assertLogs("gamelib_mcp.data.igdb", level="WARNING"),
+        ):
+            count = await igdb.backfill_missing_games(limit=2)
+
+        self.assertEqual(count, 2)
+        canary.assert_awaited_once()
+        self.assertEqual(
+            sorted(call.args[0] for call in mark_checked.await_args_list), [1, 2]
+        )
+        self.assertEqual(igdb._consecutive_backfill_misses, 0)
 
     async def test_breaker_counter_spans_passes(self) -> None:
         first_ids = list(range(1, 6))
@@ -1385,7 +1504,11 @@ class IGDBBackfillCircuitBreakerTests(unittest.IsolatedAsyncioTestCase):
                 AsyncMock(side_effect=[self._rows(first_ids), self._rows(second_ids)]),
             ),
             patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=None)),
-            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock(return_value=None)),
+            patch(
+                "gamelib_mcp.data.igdb._resolve_game_with_status",
+                AsyncMock(return_value=self._miss()),
+            ),
+            patch("gamelib_mcp.data.igdb._igdb_canary_alive", AsyncMock(return_value=False)),
             patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
             patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
         ):
@@ -1394,7 +1517,8 @@ class IGDBBackfillCircuitBreakerTests(unittest.IsolatedAsyncioTestCase):
                 second_count = await igdb.backfill_missing_games(limit=5)
 
         # Pass one stays under the threshold, so its misses are committed as
-        # genuine no-matches; the counter carries over and pass two trips.
+        # genuine no-matches; the counter carries over and pass two trips
+        # (canary confirms the outage).
         self.assertEqual(first_count, 5)
         self.assertEqual(mark_checked.await_count, 5)
         self.assertEqual(second_count, 0)
@@ -1417,8 +1541,14 @@ class IGDBBackfillCircuitBreakerTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=rows)),
             patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=None)),
             patch(
-                "gamelib_mcp.data.igdb.resolve_game",
-                AsyncMock(side_effect=[None, hit, None]),
+                "gamelib_mcp.data.igdb._resolve_game_with_status",
+                AsyncMock(
+                    side_effect=[
+                        self._miss(),
+                        igdb._ResolveOutcome(game=hit, saw_candidates=True),
+                        self._miss(),
+                    ]
+                ),
             ),
             patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()),
             patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
@@ -1481,7 +1611,7 @@ class IGDBBackfillExternalGamesTests(unittest.IsolatedAsyncioTestCase):
                 AsyncMock(return_value={"391720": 111}),
             ) as external,
             patch("gamelib_mcp.data.igdb.fetch_game_by_id", AsyncMock(return_value=fetched)) as fetch_by_id,
-            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock()) as resolve_game,
+            patch("gamelib_mcp.data.igdb._resolve_game_with_status", AsyncMock()) as resolve_game,
             patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock()),
             patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
             patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
@@ -1516,7 +1646,7 @@ class IGDBBackfillExternalGamesTests(unittest.IsolatedAsyncioTestCase):
                 AsyncMock(return_value={"391720": 111}),
             ),
             patch("gamelib_mcp.data.igdb.fetch_game_by_id", AsyncMock(return_value=fetched)) as fetch_by_id,
-            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock()) as resolve_game,
+            patch("gamelib_mcp.data.igdb._resolve_game_with_status", AsyncMock()) as resolve_game,
             patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock()),
             patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
             patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
@@ -1551,7 +1681,7 @@ class IGDBBackfillExternalGamesTests(unittest.IsolatedAsyncioTestCase):
                 AsyncMock(return_value={"391720": 111}),
             ),
             patch("gamelib_mcp.data.igdb.fetch_game_by_id", AsyncMock(return_value=pinned)) as fetch_by_id,
-            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock()) as resolve_game,
+            patch("gamelib_mcp.data.igdb._resolve_game_with_status", AsyncMock()) as resolve_game,
             patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock()),
             patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
             patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
@@ -1579,7 +1709,7 @@ class IGDBBackfillExternalGamesTests(unittest.IsolatedAsyncioTestCase):
                 AsyncMock(side_effect=RuntimeError("IGDB down")),
             ),
             patch("gamelib_mcp.data.igdb.fetch_game_by_id", AsyncMock()) as fetch_by_id,
-            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock()) as resolve_game,
+            patch("gamelib_mcp.data.igdb._resolve_game_with_status", AsyncMock()) as resolve_game,
             patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
             patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()) as release_claim,
             self.assertLogs("gamelib_mcp.data.igdb", level="WARNING") as logs,
@@ -1592,3 +1722,118 @@ class IGDBBackfillExternalGamesTests(unittest.IsolatedAsyncioTestCase):
         mark_checked.assert_not_awaited()
         self.assertEqual(release_claim.await_count, 2)
         self.assertTrue(any("external_games lookup failed" in line for line in logs.output))
+
+
+class IGDBCanaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_alive_when_candidates_returned(self) -> None:
+        witcher = igdb.IGDBGame(
+            igdb_id=1942,
+            name="The Witcher 3: Wild Hunt",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2015-05-19",
+        )
+        with patch(
+            "gamelib_mcp.data.igdb.search_game", AsyncMock(return_value=[witcher])
+        ) as search:
+            self.assertTrue(await igdb._igdb_canary_alive())
+        search.assert_awaited_once_with(igdb._CANARY_TITLE, suppress_errors=False)
+
+    async def test_dead_when_blockbuster_returns_zero_candidates(self) -> None:
+        with patch("gamelib_mcp.data.igdb.search_game", AsyncMock(return_value=[])):
+            self.assertFalse(await igdb._igdb_canary_alive())
+
+    async def test_dead_when_search_fails_operationally(self) -> None:
+        with (
+            patch(
+                "gamelib_mcp.data.igdb.search_game",
+                AsyncMock(side_effect=igdb.IGDBRequestFailure("down")),
+            ),
+            self.assertLogs("gamelib_mcp.data.igdb", level="WARNING") as logs,
+        ):
+            self.assertFalse(await igdb._igdb_canary_alive())
+        self.assertTrue(any("canary" in line for line in logs.output))
+
+
+class NameGateCandidateWalkTests(unittest.IsolatedAsyncioTestCase):
+    """The strict name gate walks ALL identity-compatible candidates.
+
+    Previously only the single ranked pick was gated: a decorated sibling at
+    the top ('Counter-Strike' -> 'Counter-Strike Nexon', 'Cogs' -> 'Dr. Cog')
+    rejected the whole game even when a gate-passing candidate sat further
+    down the result list.
+    """
+
+    def _game(self, igdb_id: int, name: str, *, primary: bool = True) -> "igdb.IGDBGame":
+        return igdb.IGDBGame(
+            igdb_id=igdb_id,
+            name=name,
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date=None,
+            is_primary_library_item=primary,
+        )
+
+    async def test_walk_accepts_gate_passing_candidate_behind_decorated_top_hit(self) -> None:
+        # Fuzzy is inconclusive for both, so the relevance fallback selects
+        # the (wrong) first candidate; the gate must walk on to the
+        # edition-variant whose stripped title equals the query.
+        results = [
+            self._game(1, "Dr. Cog"),
+            self._game(2, "Cogs Definitive Edition"),
+        ]
+        match = igdb._select_best_match("Cogs", results, allow_inconclusive_fallback=True)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.igdb_id, 2)
+
+    async def test_walk_applies_on_ladder_rungs_without_relevance_fallback(self) -> None:
+        results = [
+            self._game(1, "Dr. Cog"),
+            self._game(2, "Cogs Definitive Edition"),
+        ]
+        match = igdb._select_best_match("Cogs", results, allow_inconclusive_fallback=False)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.igdb_id, 2)
+
+    async def test_walk_prefers_primary_library_items(self) -> None:
+        # Both edition variants strip to "cogs" and pass the gate; the walk
+        # must prefer the primary library item over the non-primary one even
+        # though the non-primary sits earlier in relevance order.
+        results = [
+            self._game(1, "Dr. Cog"),
+            self._game(2, "Cogs Definitive Edition", primary=False),
+            self._game(3, "Cogs Anniversary Edition"),
+        ]
+        match = igdb._select_best_match("Cogs", results, allow_inconclusive_fallback=True)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.igdb_id, 3)
+
+    async def test_walk_still_rejects_when_no_candidate_passes(self) -> None:
+        results = [
+            self._game(1, "Counter-Strike Nexon"),
+            self._game(2, "Counter-Strike Condition Zero"),
+        ]
+        with self.assertLogs("gamelib_mcp.data.igdb", level="INFO") as logs:
+            match = igdb._select_best_match(
+                "Counter-Strike", results, allow_inconclusive_fallback=True
+            )
+        self.assertIsNone(match)
+        self.assertTrue(any("gate rejected" in line for line in logs.output))
+
+    async def test_resolve_reports_gate_rejection_as_candidates_seen(self) -> None:
+        # The status the backfill's breaker consumes: gate-rejected != outage.
+        rejected = [self._game(1, "Counter-Strike Nexon")]
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "cid"}, clear=False),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(return_value=rejected)),
+        ):
+            outcome = await igdb._resolve_game_with_status("Counter-Strike", None)
+        self.assertIsNone(outcome.game)
+        self.assertTrue(outcome.saw_candidates)
+
+    async def test_resolve_reports_zero_candidates(self) -> None:
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "cid"}, clear=False),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(return_value=[])),
+        ):
+            outcome = await igdb._resolve_game_with_status("Totally Absent Game", None)
+        self.assertIsNone(outcome.game)
+        self.assertFalse(outcome.saw_candidates)
