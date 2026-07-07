@@ -564,9 +564,19 @@ async def search_game(
     Search IGDB for a game by name, optionally filtered to a platform.
     Returns up to `limit` matches (see ``_build_search_game_query``) ranked by
     IGDB's own relevance model.
+
+    Missing credentials are an *operational* condition, not "not found": with
+    ``suppress_errors=False`` they raise ``IGDBRequestFailure`` so callers that
+    persist no-match markers (the backfill) can never cache a creds outage as a
+    permanent no-match. (Prod 2026-07-05: a deploy briefly ran without
+    TWITCH_CLIENT_ID and 800+ owned games were marked "checked, no match".)
     """
     client_id = os.environ.get("TWITCH_CLIENT_ID")
     if not client_id:
+        if not suppress_errors:
+            raise IGDBRequestFailure(
+                f"IGDB credentials not configured; cannot search for {name!r}"
+            )
         return []
 
     query = _build_search_game_query(name, igdb_platform_id)
@@ -609,10 +619,15 @@ async def fetch_game_by_id(
     known-correct link is never re-resolved through name search (which can
     drift onto the wrong candidate). Returns None if IGDB is unconfigured, the
     id doesn't resolve, or the request ultimately fails while
-    ``suppress_errors`` is True.
+    ``suppress_errors`` is True. With ``suppress_errors=False`` missing
+    credentials raise ``IGDBRequestFailure`` (see ``search_game``).
     """
     client_id = os.environ.get("TWITCH_CLIENT_ID")
     if not client_id:
+        if not suppress_errors:
+            raise IGDBRequestFailure(
+                f"IGDB credentials not configured; cannot fetch igdb_id {igdb_id!r}"
+            )
         return None
 
     query = f"{_FETCH_BY_ID_FIELDS} where id = {igdb_id}; limit 1;"
@@ -775,10 +790,17 @@ async def resolve_game(
     suppress_errors: bool = True,
 ) -> IGDBGame | None:
     """
-    Find the best IGDB match for a game name + platform. Returns None if not found
-    or IGDB credentials are not configured.
+    Find the best IGDB match for a game name + platform. Returns None if not
+    found. Unconfigured credentials return None only while ``suppress_errors``
+    is True; with ``suppress_errors=False`` they raise ``IGDBRequestFailure``
+    so a caller that records "checked, no match" can never mistake an
+    operational outage for a genuine miss.
     """
     if not os.environ.get("TWITCH_CLIENT_ID"):
+        if not suppress_errors:
+            raise IGDBRequestFailure(
+                f"IGDB credentials not configured; cannot resolve {name!r}"
+            )
         return None
 
     results = await search_game(name, igdb_platform_id, suppress_errors=suppress_errors)
@@ -1131,7 +1153,59 @@ async def mark_igdb_checked(game_id: int) -> None:
         await db.commit()
 
 
+# Systemic-failure circuit breaker for the backfill: famous library titles miss
+# genuinely far less than this often, so this many *consecutive* name-search
+# no-matches means the search API is effectively down (prod 2026-07-05: an IGDB
+# outage window yielded ~0% matches and every miss was cached as a permanent
+# no-match). The counter is process-wide and survives across passes so an
+# outage cannot slip through on pass boundaries; any successful name-search
+# resolution resets it.
+_BACKFILL_MISS_CIRCUIT_BREAKER = 10
+_consecutive_backfill_misses = 0
+
+
+def _decode_manual_overrides(raw) -> set[str]:
+    if not raw:
+        return set()
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return set()
+    return set(data) if isinstance(data, list) else set()
+
+
+def _row_value(row, key: str):
+    """Tolerant row access: sqlite3.Row raises IndexError, dicts KeyError."""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
 async def backfill_missing_games(limit: int = 10) -> int:
+    """Resolve claimed games to IGDB and persist their metadata.
+
+    Resolution order per row:
+      1. ``external_games`` (authoritative Steam appid -> IGDB game mapping,
+         batched once per pass). This also *self-corrects* a stored igdb_id
+         that disagrees with what the appid actually is (wrong-edition links
+         like Layers of Fear 2016 pointing at the 2023 remake).
+      2. Fetch by the stored igdb_id (never re-resolve a known link by name).
+      3. Name search (``resolve_game``).
+
+    Operational hygiene: any operational failure (missing credentials, request
+    failure) leaves the row retryable — never marked "checked". Name-search
+    no-matches are only committed as checked once the pass demonstrates the
+    search API works (a successful search resolution), or at pass end while
+    the consecutive-miss circuit breaker has not tripped; a tripped breaker
+    aborts the pass and leaves every pending/unprocessed row retryable.
+
+    Returns the number of rows that reached a terminal state (matched or
+    confidently marked no-match) so the enrichment loop goes quiescent instead
+    of spinning while the breaker is tripping.
+    """
+    global _consecutive_backfill_misses
+
     stale_before = _claim_cutoff_iso()
     game_ids = await claim_game_ids_for_igdb(limit=limit, stale_before=stale_before)
     if not game_ids:
@@ -1139,17 +1213,69 @@ async def backfill_missing_games(limit: int = 10) -> int:
 
     rows = await load_games_for_igdb_backfill(game_ids)
     rows_by_id = {row["id"]: row for row in rows}
-    processed = 0
 
-    for game_id in game_ids:
+    # One authoritative external_games batch per pass for every claimed row
+    # with a Steam appid. An operational failure here aborts the whole pass
+    # (all rows stay retryable) rather than degrading to name search, which
+    # could mass-produce wrong or missing links during an outage.
+    appids = [
+        str(_row_value(row, "steam_appid"))
+        for row in rows
+        if _row_value(row, "steam_appid")
+    ]
+    external_by_appid: dict[str, int] = {}
+    if appids and igdb_credentials_configured():
+        try:
+            external_by_appid = await resolve_steam_appids_to_igdb(appids)
+        except Exception as exc:
+            logger.warning(
+                "IGDB external_games lookup failed; leaving backfill pass retryable: %s",
+                exc,
+            )
+            for game_id in game_ids:
+                await release_game_claim(game_id, "igdb_claimed_at")
+            return 0
+
+    processed = 0
+    pending_no_match: list[int] = []
+    breaker_tripped = False
+    next_index = 0
+
+    for next_index, game_id in enumerate(game_ids, start=1):
         row = rows_by_id.get(game_id)
         try:
             if row is None:
                 continue
 
             igdb_game: IGDBGame | None = None
+            resolved_via_search = False
             existing_igdb_id = row["igdb_id"]
-            if existing_igdb_id:
+            overrides = _decode_manual_overrides(_row_value(row, "manual_overrides"))
+
+            appid = _row_value(row, "steam_appid")
+            external_igdb_id = external_by_appid.get(str(appid)) if appid else None
+            if external_igdb_id is not None and "igdb_id" not in overrides:
+                # Authoritative store mapping first. When it disagrees with the
+                # stored igdb_id, re-resolve instead of trusting the stored link
+                # (name-based resolution attached wrong editions in the past).
+                # Column-level manual_overrides are still honored inside
+                # _apply_igdb_metadata; an explicit igdb_id override pins the
+                # stored link entirely.
+                if existing_igdb_id and existing_igdb_id != external_igdb_id:
+                    logger.info(
+                        "IGDB backfill re-linking game_id=%s name=%r: stored igdb_id=%s "
+                        "but external_games maps steam_appid=%s to igdb_id=%s",
+                        game_id,
+                        row["name"],
+                        existing_igdb_id,
+                        appid,
+                        external_igdb_id,
+                    )
+                fetched = await fetch_game_by_id(external_igdb_id, suppress_errors=False)
+                if fetched is not None:
+                    igdb_game = fetched
+
+            if igdb_game is None and existing_igdb_id:
                 # Row already has a matched igdb_id (e.g. from an earlier pass) —
                 # fetch it directly instead of re-resolving by name, which can
                 # drift onto a different, wrong candidate. Only trust the
@@ -1161,6 +1287,7 @@ async def backfill_missing_games(limit: int = 10) -> int:
 
             if igdb_game is None:
                 platform_hint = await choose_igdb_platform_hint(game_id)
+                resolved_via_search = True
                 igdb_game = await resolve_game(
                     normalize_catalog_title(row["name"]),
                     platform_hint,
@@ -1178,9 +1305,30 @@ async def backfill_missing_games(limit: int = 10) -> int:
                         igdb_game.igdb_id,
                     )
                     await mark_igdb_checked(game_id)
+                processed += 1
+                if resolved_via_search:
+                    # Search demonstrably works, so buffered no-matches are
+                    # genuine — commit them. By-id/external successes prove
+                    # nothing about the search index and do not flush.
+                    _consecutive_backfill_misses = 0
+                    for miss_id in pending_no_match:
+                        await mark_igdb_checked(miss_id)
+                    processed += len(pending_no_match)
+                    pending_no_match.clear()
             else:
-                await mark_igdb_checked(game_id)
-            processed += 1
+                pending_no_match.append(game_id)
+                _consecutive_backfill_misses += 1
+                if _consecutive_backfill_misses >= _BACKFILL_MISS_CIRCUIT_BREAKER:
+                    breaker_tripped = True
+                    logger.error(
+                        "IGDB backfill circuit breaker tripped: %d consecutive "
+                        "name-search no-matches — treating as an IGDB outage, "
+                        "aborting the pass and leaving %d pending and %d "
+                        "unprocessed row(s) retryable",
+                        _consecutive_backfill_misses,
+                        len(pending_no_match),
+                        len(game_ids) - next_index,
+                    )
         except IGDBRequestFailure as exc:
             logger.warning(
                 "IGDB backfill leaving game retryable after operational failure: game_id=%s name=%r error=%s",
@@ -1190,6 +1338,18 @@ async def backfill_missing_games(limit: int = 10) -> int:
             )
         finally:
             await release_game_claim(game_id, "igdb_claimed_at")
+        if breaker_tripped:
+            break
+
+    if breaker_tripped:
+        # Rows never reached after the trip still hold fresh claims; release
+        # them so the next healthy pass can pick them up immediately.
+        for game_id in game_ids[next_index:]:
+            await release_game_claim(game_id, "igdb_claimed_at")
+    else:
+        for miss_id in pending_no_match:
+            await mark_igdb_checked(miss_id)
+        processed += len(pending_no_match)
 
     return processed
 

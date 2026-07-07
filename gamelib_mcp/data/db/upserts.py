@@ -344,6 +344,71 @@ async def repair_misclassified_platform_row(
         return True
 
 
+async def adopt_platform_identifier(
+    *,
+    name: str,
+    platform: str,
+    identifier_type: str,
+    identifier_value: str | int,
+    reference_release_date: str | None = None,
+) -> int | None:
+    """Attach a store identifier to an existing identifier-less platform row.
+
+    Sync reconciliation calls this after the store-identifier lookup missed.
+    If exactly one games row has the same normalized name AND already owns a
+    ``platform`` row carrying NO identifier of ``identifier_type`` (typically a
+    row ingested before that identifier type was recorded), the identifier is
+    adopted onto that platform row and the game id returned — instead of the
+    name/fuzzy fallback's ``exclude_platform`` guard pushing the sync into
+    creating a stranded duplicate game row (observed in prod: 6 PS5 pairs like
+    "Tiny Tina's Wonderlands" with one identifier-bearing and one frozen
+    identifier-less twin).
+
+    Returns None (caller falls back to normal resolution) when:
+    * no candidate, or more than one same-name candidate (ambiguous);
+    * the candidate's release year conflicts with ``reference_release_date``
+      (same year guard as find_game_by_name_fuzzy — never adopt across a
+      remake boundary);
+    * every same-name platform row already has an identifier of this type —
+      two identifier-bearing rows are distinct store entries and must stay
+      separate (anti-collapse invariant).
+    """
+    normalized = normalize_search_text(name)
+    if not normalized:
+        return None
+
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            """SELECT g.id AS game_id, g.release_date, gp.id AS game_platform_id
+               FROM games g
+               JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = ?
+               WHERE COALESCE(g.name_normalized, '') = ?
+                 AND NOT EXISTS (
+                     SELECT 1 FROM game_platform_identifiers gpi
+                     WHERE gpi.game_platform_id = gp.id
+                       AND gpi.identifier_type = ?
+                 )""",
+            (platform, normalized, identifier_type),
+        )
+
+    if len(rows) != 1:
+        return None
+    row = rows[0]
+
+    if reference_release_date:
+        from .fuzzy import _release_year
+
+        ref_year = _release_year(reference_release_date)
+        row_year = _release_year(row["release_date"])
+        if ref_year is not None and row_year is not None and ref_year != row_year:
+            return None
+
+    await upsert_game_platform_identifier(
+        row["game_platform_id"], identifier_type, identifier_value
+    )
+    return row["game_id"]
+
+
 async def upsert_game_platform_identifier(
     game_platform_id: int,
     identifier_type: str,
