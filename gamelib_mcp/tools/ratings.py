@@ -23,6 +23,17 @@ from .search import (
 
 ResponseFormat = Literal["concise", "detailed"]
 
+# Support shrinkage for taste-profile ranking: a tag seen on only one game can
+# hit a maximal signed affinity from a single high/low rating and crowd out
+# genuinely predictive multi-game tags. Rank by affinity damped toward zero by
+# game_count / (game_count + k) so single-game outliers rank honestly. This is a
+# display-only adjustment — the stored affinity_score (what discover_games uses)
+# is left untouched and still shown verbatim.
+_SUPPORT_SHRINKAGE_K = 2.0
+_SUPPORT_ADJUSTED_RANK_SQL = (
+    "affinity_score * game_count / (game_count + ?)"
+)
+
 
 async def sync_ratings(ctx=None) -> dict:
     """
@@ -208,19 +219,27 @@ async def get_ratings(
 
 
 async def get_taste_profile() -> dict:
-    """Show tag affinities plus rating stats summary."""
+    """Show tag affinities plus rating stats summary.
+
+    top/bottom tags are ranked by support-shrunk affinity (affinity damped by
+    game_count) so a tag seen on a single high/low rating doesn't outrank
+    tags backed by several games. The displayed affinity_score is the raw
+    stored value discover_games uses; only the ordering is adjusted.
+    """
     async with get_db() as db:
         top_tags = await db.execute_fetchall(
-            """SELECT tag, affinity_score, avg_score, game_count
+            f"""SELECT tag, affinity_score, avg_score, game_count
                FROM tag_affinity
-               ORDER BY affinity_score DESC
-               LIMIT 20"""
+               ORDER BY {_SUPPORT_ADJUSTED_RANK_SQL} DESC
+               LIMIT 20""",
+            (_SUPPORT_SHRINKAGE_K,),
         )
         bottom_tags = await db.execute_fetchall(
-            """SELECT tag, affinity_score, avg_score, game_count
+            f"""SELECT tag, affinity_score, avg_score, game_count
                FROM tag_affinity
-               ORDER BY affinity_score ASC
-               LIMIT 10"""
+               ORDER BY {_SUPPORT_ADJUSTED_RANK_SQL} ASC
+               LIMIT 10""",
+            (_SUPPORT_SHRINKAGE_K,),
         )
         rating_stats = await db.execute_fetchone(
             """SELECT
