@@ -24,6 +24,7 @@ import logging
 import os
 
 from gamelib_mcp.data.db import (
+    adopt_platform_identifier,
     get_game_by_identifier,
     get_nintendo_play_totals,
     load_fuzzy_candidates,
@@ -228,6 +229,27 @@ async def sync_nintendo_pctl() -> dict:
         # played on this console). Create it and link as a normal owned switch2 title.
         name = prepare_catalog_title(info["app_name"] or application_id)
         if not name:
+            continue
+        # Identifier miss but a same-name switch2 row exists without any
+        # nintendo_title_id (e.g. ingested by the ownership sync before this
+        # title id was seen): adopt the identifier onto it instead of letting
+        # the exclude_platform guard fork a stranded duplicate.
+        adopted_game_id = await adopt_platform_identifier(
+            name=name,
+            platform=PLATFORM,
+            identifier_type=NINTENDO_TITLE_ID,
+            identifier_value=application_id,
+        )
+        if adopted_game_id is not None:
+            await upsert_game_platform(
+                game_id=adopted_game_id,
+                platform=PLATFORM,
+                playtime_minutes=total_minutes,
+                playtime_2weeks_minutes=minutes_2weeks,
+                last_played=last_played,
+                owned=1,
+            )
+            matched += 1
             continue
         game_id, _igdb_game = await resolve_and_link_game(
             name, igdb_platform_id, candidates, platform=PLATFORM

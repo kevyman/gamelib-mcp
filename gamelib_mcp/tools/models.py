@@ -232,6 +232,11 @@ class DetectOrphanGamesResponse(FlexibleModel):
     wishlist_only_count: int
 
 
+class DetectStrandedDuplicatesResponse(FlexibleModel):
+    stranded_count: int
+    candidates: list[dict[str, Any]]
+
+
 class PlatformBreakdownResponse(FlexibleModel):
     by_platform: list[dict[str, Any]]
     total_unique_games: int

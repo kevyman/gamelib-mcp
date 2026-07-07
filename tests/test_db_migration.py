@@ -1063,7 +1063,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             async with db_module.get_db() as db:
                 version = await db_module._get_user_version(db)
             self.assertEqual(version, db_module.SCHEMA_VERSION)
-            self.assertEqual(db_module.SCHEMA_VERSION, 27)
+            self.assertEqual(db_module.SCHEMA_VERSION, 28)
 
             unresolved = await seed_game("Still Unresolved Wishlisted Game")
             resolved = await seed_game("Already Resolved Wishlisted Game")
@@ -1097,6 +1097,74 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(rows[unresolved])
         self.assertIsNotNone(rows[resolved])
         self.assertIsNotNone(rows[not_wishlisted])
+
+    async def test_v27_to_v28_reclaims_poisoned_enrichment_rows(self) -> None:
+        # 2026-07-05 prod audit: (1) IGDB operational failures cached as
+        # permanent no-matches, (2) igdb-linked rows enriched before cover
+        # fetching existed, (3) HLTB permanent NOT_FOUND sentinels. The v28
+        # step re-claims exactly those three shapes and nothing else.
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+
+            stamp = "2026-07-05T02:00:00+00:00"
+            false_no_match = await seed_game("Rocket League")
+            missing_cover = await seed_game("Layers of Fear")
+            healthy = await seed_game("Portal 2")
+            never_checked = await seed_game("Fresh Import")
+            hltb_not_found = await seed_game("HITMAN 2")
+            hltb_cached = await seed_game("Elden Ring")
+            async with db_module.get_db() as db:
+                await db.execute(
+                    "UPDATE games SET igdb_cached_at = ?, igdb_claimed_at = ? WHERE id = ?",
+                    (stamp, stamp, false_no_match),
+                )
+                await db.execute(
+                    "UPDATE games SET igdb_id = 111, igdb_cached_at = ? WHERE id = ?",
+                    (stamp, missing_cover),
+                )
+                await db.execute(
+                    "UPDATE games SET igdb_id = 222, cover_image_id = 'co123', "
+                    "igdb_cached_at = ? WHERE id = ?",
+                    (stamp, healthy),
+                )
+                await db.execute(
+                    "UPDATE games SET hltb_cached_at = 'NOT_FOUND', hltb_claimed_at = ? "
+                    "WHERE id = ?",
+                    (stamp, hltb_not_found),
+                )
+                await db.execute(
+                    "UPDATE games SET hltb_cached_at = ? WHERE id = ?",
+                    (stamp, hltb_cached),
+                )
+                await db.commit()
+
+            async with db_module.get_db() as db:
+                from gamelib_mcp.data.db import _migrate_v27_to_v28
+
+                await _migrate_v27_to_v28(db, None)
+                await db.commit()
+                rows = {
+                    r["id"]: r
+                    for r in await db.execute_fetchall(
+                        "SELECT id, igdb_cached_at, igdb_claimed_at, hltb_cached_at, "
+                        "hltb_claimed_at FROM games"
+                    )
+                }
+
+        # False no-match: fully re-claimed.
+        self.assertIsNone(rows[false_no_match]["igdb_cached_at"])
+        self.assertIsNone(rows[false_no_match]["igdb_claimed_at"])
+        # Linked but missing a cover: re-claimed (re-fetches by id).
+        self.assertIsNone(rows[missing_cover]["igdb_cached_at"])
+        # Linked with a cover: untouched.
+        self.assertEqual(rows[healthy]["igdb_cached_at"], stamp)
+        # Never checked at all: nothing to reset.
+        self.assertIsNone(rows[never_checked]["igdb_cached_at"])
+        # HLTB NOT_FOUND sentinel: re-claimed; ordinary cache stamp untouched.
+        self.assertIsNone(rows[hltb_not_found]["hltb_cached_at"])
+        self.assertIsNone(rows[hltb_not_found]["hltb_claimed_at"])
+        self.assertEqual(rows[hltb_cached]["hltb_cached_at"], stamp)
 
     async def test_v20_to_v21_adds_completion_status(self) -> None:
         conn = sqlite3.connect(self.db_path)
@@ -1455,10 +1523,14 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         # Matched game is requeued (both timestamps cleared) so the IGDB worker
-        # revisits it and backfills series; unmatched game is untouched.
+        # revisits it and backfills series. The unmatched game used to stay
+        # untouched here (v10 only requeues igdb_id-matched rows), but the full
+        # chain now ends at v28 which deliberately re-claims every checked
+        # no-match row (the 2026-07-05 false no-match audit), so it ends up
+        # requeued too.
         self.assertIsNone(matched["igdb_cached_at"])
         self.assertIsNone(matched["igdb_claimed_at"])
-        self.assertEqual(unmatched["igdb_cached_at"], "2026-01-01T00:00:00+00:00")
+        self.assertIsNone(unmatched["igdb_cached_at"])
 
     async def test_upsert_game_maintains_name_normalized(self) -> None:
         db_module._DB_READY_PATH = None

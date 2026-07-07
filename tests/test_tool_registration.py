@@ -90,6 +90,7 @@ EXPECTED_TOOLS = {
     },
     "detect_collapsed_games": {"params": set(), "required": set()},
     "detect_orphan_games": {"params": set(), "required": set()},
+    "detect_stranded_duplicates": {"params": set(), "required": set()},
     "detect_cross_platform_collapses": {"params": {"limit"}, "required": set()},
     "revalidate_igdb_matches": {"params": {"dry_run", "limit"}, "required": set()},
     "split_game": {
@@ -175,6 +176,7 @@ EXPECTED_ANNOTATIONS = {
     "detect_farmed_games": {"destructiveHint": False, "idempotentHint": True},
     "detect_collapsed_games": {"readOnlyHint": True, "idempotentHint": True},
     "detect_orphan_games": {"readOnlyHint": True, "idempotentHint": True},
+    "detect_stranded_duplicates": {"readOnlyHint": True, "idempotentHint": True},
     "detect_cross_platform_collapses": {
         "readOnlyHint": False,
         "idempotentHint": True,
@@ -226,9 +228,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_38(self):
+    async def test_tool_count_is_39(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 38)
+        self.assertEqual(len(tools), 39)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()

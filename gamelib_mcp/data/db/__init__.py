@@ -103,7 +103,7 @@ STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
 XBOX_TITLE_ID = "xbox_title_id"
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 
 @dataclass
@@ -1534,6 +1534,57 @@ async def _migrate_v26_to_v27(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v27_to_v28(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Re-claim enrichment rows poisoned by operational failures (data-only).
+
+    A 2026-07-05 prod audit found three classes of false-terminal cache state:
+
+    1. IGDB false no-matches: an outage/creds window caused ~944 rows
+       (687 owned base games, incl. Rocket League and Baldur's Gate 3) to be
+       marked "checked, no match" (igdb_cached_at set, igdb_id NULL). The
+       write paths are now failure-hygienic (creds-missing raises, plus a
+       consecutive-miss circuit breaker in backfill_missing_games), so a
+       one-time re-claim retries them; genuine no-matches just retry once.
+    2. Rows enriched before cover fetching existed (igdb_id set,
+       cover_image_id NULL, 84 rows) — re-claim so the exact by-id /
+       external_games backfill path re-fetches the cover slug. This also
+       routes steam-linked rows through the new self-correcting
+       external_games-first resolution, repairing wrong-edition links like
+       Layers of Fear (2016 appid pointing at the 2023 remake's igdb_id).
+    3. HLTB permanent NOT_FOUND sentinels (309 rows, e.g. "HITMAN 2",
+       "Grand Theft Auto V Legacy") written by the old matcher. NOT_FOUND is
+       now a retryable timestamped marker and the matcher tries normalized /
+       title-cased / edition-stripped variants, so reset for one immediate
+       retry under the improved matcher.
+
+    Mirrors the v19/v20/v24/v25 re-claim pattern (cached_at + claimed_at to
+    NULL). Deletes nothing; existing enrichment values are preserved
+    (_apply_igdb_metadata only fills NULL/non-overridden columns, and the
+    HLTB writer keeps prior durations on a not-found result).
+    """
+    if progress is not None:
+        progress(
+            "Migrating to v28: re-claim IGDB false no-matches, missing covers, "
+            "and HLTB NOT_FOUND rows."
+        )
+
+    await db.execute(
+        "UPDATE games SET igdb_cached_at = NULL, igdb_claimed_at = NULL "
+        "WHERE igdb_id IS NULL AND igdb_cached_at IS NOT NULL"
+    )
+    await db.execute(
+        "UPDATE games SET igdb_cached_at = NULL, igdb_claimed_at = NULL "
+        "WHERE igdb_id IS NOT NULL AND cover_image_id IS NULL"
+    )
+    await db.execute(
+        "UPDATE games SET hltb_cached_at = NULL, hltb_claimed_at = NULL "
+        "WHERE hltb_cached_at LIKE 'NOT_FOUND%'"
+    )
+
+    await _set_user_version(db, 28)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1691,6 +1742,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (24, _migrate_v24_to_v25),
     (25, _migrate_v25_to_v26),
     (26, _migrate_v26_to_v27),
+    (27, _migrate_v27_to_v28),
 )
 
 
@@ -1869,6 +1921,7 @@ async def init_db() -> None:
 from .affinity import recompute_tag_affinity  # noqa: E402
 from .history import record_play_history_snapshots  # noqa: E402
 from .claims import (  # noqa: E402
+    HLTB_NOT_FOUND_RETRY_DAYS,
     _claim_cutoff_iso,
     _claim_ids,
     clear_claim,
@@ -1899,6 +1952,7 @@ from .queries import (  # noqa: E402
     get_game_by_appid,
     get_game_by_igdb_id,
     get_game_by_name_exact,
+    get_platform_game_by_normalized_name,
     get_steam_appid_for_game,
     get_steam_platform_row_by_appid,
     _coerce_identifier_value,
@@ -1910,6 +1964,7 @@ from .queries import (  # noqa: E402
 )
 from .upserts import (  # noqa: E402
     GAME_EDITABLE_FIELDS,
+    adopt_platform_identifier,
     upsert_game,
     upsert_game_platform,
     upsert_wishlist_entry,

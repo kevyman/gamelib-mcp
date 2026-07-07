@@ -33,6 +33,7 @@ from .tools.models import (
     DetectCrossPlatformCollapsesResponse,
     DetectFarmedGamesResponse,
     DetectOrphanGamesResponse,
+    DetectStrandedDuplicatesResponse,
     DiagnoseScrapeResponse,
     GameDetailResponse,
     GetScrapeConfigResponse,
@@ -656,6 +657,23 @@ async def detect_orphan_games() -> DetectOrphanGamesResponse:
     """
     from .tools.admin import detect_orphan_games as _detect_orphans
     return await _detect_orphans()
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL)
+async def detect_stranded_duplicates() -> DetectStrandedDuplicatesResponse:
+    """
+    Find same-name game pairs where a sync forked a stranded duplicate row.
+
+    The fingerprint is two games sharing a normalized name and an owned
+    platform where exactly one side's platform row carries store identifiers —
+    the identifier-less twin predates identifier tracking and a later sync
+    created a fresh row instead of attaching to it. These are merge_games
+    candidates. Read-only; pairs where both sides carry identifiers are
+    excluded (distinct store entries — see detect_collapsed_games for the
+    inverse over-merge shape). Returns a count and the candidate pair list.
+    """
+    from .tools.admin import detect_stranded_duplicates as _detect_stranded
+    return await _detect_stranded()
 
 
 @mcp.tool(annotations=NETWORK_SYNC_TOOL)

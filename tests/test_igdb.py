@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sqlite3
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -1275,3 +1276,319 @@ class FetchVersionParentAliasesTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.assertRaises(igdb.IGDBRequestFailure):
                 await igdb.fetch_version_parent_aliases([80])
+
+
+class IGDBCredentialHygieneTests(unittest.IsolatedAsyncioTestCase):
+    """Missing credentials are operational failures, never 'no match'.
+
+    Prod 2026-07-05: a deploy briefly ran without TWITCH_CLIENT_ID and the
+    backfill cached 800+ owned games as permanent no-matches because the
+    creds-missing early returns were indistinguishable from 'not found'.
+    """
+
+    def _no_creds_env(self):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("TWITCH_")}
+        return patch.dict("os.environ", env, clear=True)
+
+    async def test_search_game_raises_without_credentials_when_unsuppressed(self) -> None:
+        with self._no_creds_env():
+            with self.assertRaises(igdb.IGDBRequestFailure):
+                await igdb.search_game("Portal 2", suppress_errors=False)
+
+    async def test_search_game_returns_empty_without_credentials_when_suppressed(self) -> None:
+        with self._no_creds_env():
+            self.assertEqual(await igdb.search_game("Portal 2"), [])
+
+    async def test_fetch_game_by_id_raises_without_credentials_when_unsuppressed(self) -> None:
+        with self._no_creds_env():
+            with self.assertRaises(igdb.IGDBRequestFailure):
+                await igdb.fetch_game_by_id(620, suppress_errors=False)
+
+    async def test_fetch_game_by_id_returns_none_without_credentials_when_suppressed(self) -> None:
+        with self._no_creds_env():
+            self.assertIsNone(await igdb.fetch_game_by_id(620))
+
+    async def test_resolve_game_raises_without_credentials_when_unsuppressed(self) -> None:
+        with self._no_creds_env():
+            with self.assertRaises(igdb.IGDBRequestFailure):
+                await igdb.resolve_game("Portal 2", None, suppress_errors=False)
+
+    async def test_resolve_game_returns_none_without_credentials_when_suppressed(self) -> None:
+        with self._no_creds_env():
+            self.assertIsNone(await igdb.resolve_game("Portal 2", None))
+
+    async def test_backfill_leaves_rows_retryable_without_credentials(self) -> None:
+        game_row = {"id": 7, "name": "Rocket League", "igdb_id": None}
+
+        with (
+            self._no_creds_env(),
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[game_row])),
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=None)),
+            patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()) as release_claim,
+            self.assertLogs("gamelib_mcp.data.igdb", level="WARNING") as logs,
+        ):
+            count = await igdb.backfill_missing_games(limit=1)
+
+        self.assertEqual(count, 0)
+        mark_checked.assert_not_awaited()
+        release_claim.assert_awaited_once_with(7, "igdb_claimed_at")
+        self.assertTrue(any("leaving game retryable" in line for line in logs.output))
+
+
+class IGDBBackfillCircuitBreakerTests(unittest.IsolatedAsyncioTestCase):
+    """Consecutive name-search no-matches must read as an outage, not misses."""
+
+    def setUp(self) -> None:
+        igdb._consecutive_backfill_misses = 0
+
+    def tearDown(self) -> None:
+        igdb._consecutive_backfill_misses = 0
+
+    def _rows(self, ids: list[int]) -> list[dict]:
+        return [{"id": i, "name": f"Game {i}", "igdb_id": None} for i in ids]
+
+    async def test_breaker_aborts_pass_and_leaves_all_rows_retryable(self) -> None:
+        ids = list(range(1, 13))  # 12 claimed; breaker trips at the 10th miss
+
+        with (
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=ids)),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=self._rows(ids))),
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=None)),
+            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock(return_value=None)) as resolve_game,
+            patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()) as release_claim,
+            self.assertLogs("gamelib_mcp.data.igdb", level="ERROR") as logs,
+        ):
+            count = await igdb.backfill_missing_games(limit=12)
+
+        self.assertEqual(count, 0)
+        mark_checked.assert_not_awaited()
+        # Ten rows were attempted before the trip; the remaining two are
+        # released without ever being attempted.
+        self.assertEqual(resolve_game.await_count, 10)
+        self.assertEqual(release_claim.await_count, 12)
+        self.assertTrue(any("circuit breaker tripped" in line for line in logs.output))
+
+    async def test_breaker_counter_spans_passes(self) -> None:
+        first_ids = list(range(1, 6))
+        second_ids = list(range(6, 11))
+
+        with (
+            patch(
+                "gamelib_mcp.data.igdb.claim_game_ids_for_igdb",
+                AsyncMock(side_effect=[first_ids, second_ids]),
+            ),
+            patch(
+                "gamelib_mcp.data.igdb.load_games_for_igdb_backfill",
+                AsyncMock(side_effect=[self._rows(first_ids), self._rows(second_ids)]),
+            ),
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=None)),
+            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock(return_value=None)),
+            patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
+        ):
+            first_count = await igdb.backfill_missing_games(limit=5)
+            with self.assertLogs("gamelib_mcp.data.igdb", level="ERROR"):
+                second_count = await igdb.backfill_missing_games(limit=5)
+
+        # Pass one stays under the threshold, so its misses are committed as
+        # genuine no-matches; the counter carries over and pass two trips.
+        self.assertEqual(first_count, 5)
+        self.assertEqual(mark_checked.await_count, 5)
+        self.assertEqual(second_count, 0)
+
+    async def test_search_success_flushes_pending_misses_and_resets_counter(self) -> None:
+        ids = [1, 2, 3]
+        rows = self._rows(ids)
+        hit = igdb.IGDBGame(
+            igdb_id=620,
+            name="Game 2",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2011-04-19",
+        )
+        # Inherited near-trip counter: row 1's miss brings it to 9 — one more
+        # miss would trip, but row 2's search success resets it first.
+        igdb._consecutive_backfill_misses = 8
+
+        with (
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=ids)),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=rows)),
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=None)),
+            patch(
+                "gamelib_mcp.data.igdb.resolve_game",
+                AsyncMock(side_effect=[None, hit, None]),
+            ),
+            patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
+        ):
+            count = await igdb.backfill_missing_games(limit=3)
+
+        # Row 1's miss was buffered until row 2's search success proved the
+        # API works; the success also reset the inherited counter, so row 3's
+        # miss did not trip and was committed at pass end.
+        self.assertEqual(count, 3)
+        self.assertEqual(
+            [call.args[0] for call in mark_checked.await_args_list], [1, 3]
+        )
+        self.assertEqual(igdb._consecutive_backfill_misses, 1)
+
+
+class IGDBBackfillExternalGamesTests(unittest.IsolatedAsyncioTestCase):
+    """external_games (Steam appid -> IGDB id) is authoritative and comes first."""
+
+    def setUp(self) -> None:
+        igdb._consecutive_backfill_misses = 0
+
+    def tearDown(self) -> None:
+        igdb._consecutive_backfill_misses = 0
+
+    def _creds_env(self):
+        return patch.dict(
+            "os.environ",
+            {"TWITCH_CLIENT_ID": "cid", "TWITCH_CLIENT_SECRET": "secret"},
+            clear=False,
+        )
+
+    def _game(self, igdb_id: int, name: str) -> "igdb.IGDBGame":
+        return igdb.IGDBGame(
+            igdb_id=igdb_id,
+            name=name,
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2016-02-16",
+            platforms=[6],
+        )
+
+    async def test_external_mapping_resolves_before_name_search(self) -> None:
+        row = {
+            "id": 7,
+            "name": "Layers of Fear",
+            "igdb_id": None,
+            "manual_overrides": None,
+            "steam_appid": "391720",
+        }
+        fetched = self._game(111, "Layers of Fear")
+
+        with (
+            self._creds_env(),
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[row])),
+            patch(
+                "gamelib_mcp.data.igdb.resolve_steam_appids_to_igdb",
+                AsyncMock(return_value={"391720": 111}),
+            ) as external,
+            patch("gamelib_mcp.data.igdb.fetch_game_by_id", AsyncMock(return_value=fetched)) as fetch_by_id,
+            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock()) as resolve_game,
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock()),
+            patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
+            patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
+        ):
+            count = await igdb.backfill_missing_games(limit=1)
+
+        self.assertEqual(count, 1)
+        external.assert_awaited_once_with(["391720"])
+        fetch_by_id.assert_awaited_once_with(111, suppress_errors=False)
+        resolve_game.assert_not_awaited()
+        apply_metadata.assert_awaited_once_with(7, fetched)
+
+    async def test_external_disagreement_relinks_stored_igdb_id(self) -> None:
+        # Layers of Fear case: steam appid 391720 (the 2016 game) stored with
+        # igdb_id 254177 (the 2023 remake). external_games wins.
+        row = {
+            "id": 7,
+            "name": "Layers of Fear",
+            "igdb_id": 254177,
+            "manual_overrides": None,
+            "steam_appid": "391720",
+        }
+        fetched = self._game(111, "Layers of Fear")
+
+        with (
+            self._creds_env(),
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[row])),
+            patch(
+                "gamelib_mcp.data.igdb.resolve_steam_appids_to_igdb",
+                AsyncMock(return_value={"391720": 111}),
+            ),
+            patch("gamelib_mcp.data.igdb.fetch_game_by_id", AsyncMock(return_value=fetched)) as fetch_by_id,
+            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock()) as resolve_game,
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock()),
+            patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
+            patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
+            self.assertLogs("gamelib_mcp.data.igdb", level="INFO") as logs,
+        ):
+            count = await igdb.backfill_missing_games(limit=1)
+
+        self.assertEqual(count, 1)
+        # The stored (wrong) id is never fetched — only the authoritative one.
+        fetch_by_id.assert_awaited_once_with(111, suppress_errors=False)
+        resolve_game.assert_not_awaited()
+        apply_metadata.assert_awaited_once_with(7, fetched)
+        self.assertTrue(any("re-linking" in line for line in logs.output))
+
+    async def test_manual_igdb_override_pins_stored_link(self) -> None:
+        row = {
+            "id": 7,
+            "name": "Layers of Fear",
+            "igdb_id": 254177,
+            "manual_overrides": '["igdb_id"]',
+            "steam_appid": "391720",
+        }
+        pinned = self._game(254177, "Layers of Fear")
+
+        with (
+            self._creds_env(),
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[row])),
+            patch(
+                "gamelib_mcp.data.igdb.resolve_steam_appids_to_igdb",
+                AsyncMock(return_value={"391720": 111}),
+            ),
+            patch("gamelib_mcp.data.igdb.fetch_game_by_id", AsyncMock(return_value=pinned)) as fetch_by_id,
+            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock()) as resolve_game,
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock()),
+            patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
+            patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
+        ):
+            count = await igdb.backfill_missing_games(limit=1)
+
+        self.assertEqual(count, 1)
+        fetch_by_id.assert_awaited_once_with(254177, suppress_errors=False)
+        resolve_game.assert_not_awaited()
+        apply_metadata.assert_awaited_once_with(7, pinned)
+
+    async def test_external_lookup_failure_leaves_whole_pass_retryable(self) -> None:
+        rows = [
+            {"id": 7, "name": "A", "igdb_id": None, "manual_overrides": None, "steam_appid": "1"},
+            {"id": 8, "name": "B", "igdb_id": None, "manual_overrides": None, "steam_appid": "2"},
+        ]
+
+        with (
+            self._creds_env(),
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7, 8])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=rows)),
+            patch(
+                "gamelib_mcp.data.igdb.resolve_steam_appids_to_igdb",
+                AsyncMock(side_effect=RuntimeError("IGDB down")),
+            ),
+            patch("gamelib_mcp.data.igdb.fetch_game_by_id", AsyncMock()) as fetch_by_id,
+            patch("gamelib_mcp.data.igdb.resolve_game", AsyncMock()) as resolve_game,
+            patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()) as release_claim,
+            self.assertLogs("gamelib_mcp.data.igdb", level="WARNING") as logs,
+        ):
+            count = await igdb.backfill_missing_games(limit=2)
+
+        self.assertEqual(count, 0)
+        fetch_by_id.assert_not_awaited()
+        resolve_game.assert_not_awaited()
+        mark_checked.assert_not_awaited()
+        self.assertEqual(release_claim.await_count, 2)
+        self.assertTrue(any("external_games lookup failed" in line for line in logs.output))

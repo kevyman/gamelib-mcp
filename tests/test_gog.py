@@ -250,6 +250,48 @@ class SyncGogSyncTests(unittest.TestCase):
             ("Cyberpunk 2077", igdb.PLATFORM_TO_IGDB["gog"]),
         )
 
+    def test_resync_reuses_existing_gog_row_without_reresolving(self) -> None:
+        """A same-normalized-name row that already owns gog IS this catalog item.
+
+        GOG has no per-item store id, so the title is the stable key. Prod dupe
+        root cause: re-running the title through IGDB landed on a *different*
+        same-named IGDB candidate whose conflicting release year made the fuzzy
+        fallback refuse the existing row and fork a duplicate ("Agony" pair).
+        The pre-match must short-circuit before any IGDB resolution.
+        """
+        proc = self._make_proc(b"agony\n")
+        mock_resolve = AsyncMock(
+            side_effect=AssertionError("re-sync must not re-resolve through IGDB")
+        )
+        mock_upsert_platform = AsyncMock(return_value=99)
+        existing_row = {"id": 7, "name": "Agony"}
+
+        with (
+            patch("gamelib_mcp.data.gog.shutil.which", return_value="/usr/bin/lgogdownloader"),
+            patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": "/config/lgogdownloader"}, clear=False),
+            patch("pathlib.Path.exists", return_value=True),
+            patch("gamelib_mcp.data.gog._has_auth_files", return_value=True),
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            patch(
+                "gamelib_mcp.data.gog.get_platform_game_by_normalized_name",
+                AsyncMock(return_value=existing_row),
+            ) as prematch,
+            patch("gamelib_mcp.data.gog.resolve_and_link_game", mock_resolve),
+            patch("gamelib_mcp.data.gog.upsert_game_platform", mock_upsert_platform),
+            patch("gamelib_mcp.data.gog.load_fuzzy_candidates", AsyncMock(return_value={})),
+        ):
+            result = asyncio.run(gog.sync_gog())
+
+        self.assertEqual(result["matched"], 1)
+        self.assertEqual(result["added"], 0)
+        prematch.assert_awaited_once_with("Agony", "gog")
+        mock_upsert_platform.assert_awaited_once_with(
+            game_id=7,
+            platform="gog",
+            playtime_minutes=None,
+            owned=1,
+        )
+
     def test_non_game_rows_are_skipped_before_resolving(self) -> None:
         proc = self._make_proc(b"quake_ii_quad_damage_game\nq_u_b_e_2_soundtrack\n")
         mock_resolve = AsyncMock(return_value=(5, None))

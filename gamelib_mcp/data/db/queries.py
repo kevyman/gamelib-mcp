@@ -119,6 +119,36 @@ async def get_game_by_name_exact(name: str) -> aiosqlite.Row | None:
         )
 
 
+async def get_platform_game_by_normalized_name(
+    name: str, platform: str
+) -> aiosqlite.Row | None:
+    """The oldest games row with this normalized name already owning ``platform``.
+
+    The stable-identifier equivalent for identifier-less stores (GOG): a store
+    whose catalog is keyed only by title must treat "same normalized name on
+    the same platform" as a re-sync of the same item. Without this pre-match,
+    re-resolving the title through IGDB can land on a *different* IGDB
+    candidate whose conflicting release year makes the fuzzy fallback refuse
+    the existing row and fork a duplicate (observed in prod: 4 GOG pairs like
+    "Agony" id 2037/3061).
+    """
+    from ..title_normalization import normalize_search_text
+
+    normalized = normalize_search_text(name)
+    if not normalized:
+        return None
+    async with get_db() as db:
+        return await db.execute_fetchone(
+            """SELECT g.*
+               FROM games g
+               JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = ?
+               WHERE COALESCE(g.name_normalized, '') = ?
+               ORDER BY g.id
+               LIMIT 1""",
+            (platform, normalized),
+        )
+
+
 async def get_steam_appid_for_game(game_id: int) -> int | None:
     async with get_db() as db:
         row = await db.execute_fetchone(
