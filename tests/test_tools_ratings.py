@@ -100,6 +100,25 @@ class GetTasteProfileTests(ToolDBTestCase):
         self.assertEqual(top["affinity_score"], round(2.123456, 3))
         self.assertEqual(top["avg_score"], round(8.987, 2))
 
+    async def test_single_game_tag_does_not_outrank_multi_game_tag(self):
+        # A lone high rating produces a maximal affinity for its rare tags; they
+        # must not crowd out a tag backed by several games with a similar score.
+        await set_tag_affinity("go-kart", affinity_score=1.396, avg_score=10.0, game_count=1)
+        await set_tag_affinity("deck-building", affinity_score=1.37, avg_score=8.5, game_count=6)
+        profile = await ratings.get_taste_profile()
+        tags = [t["tag"] for t in profile["top_tags"]]
+        self.assertLess(tags.index("deck-building"), tags.index("go-kart"))
+        # Raw stored affinity is still surfaced verbatim (discover uses it).
+        go_kart = next(t for t in profile["top_tags"] if t["tag"] == "go-kart")
+        self.assertEqual(go_kart["affinity_score"], 1.396)
+
+    async def test_single_game_negative_tag_does_not_dominate_bottom(self):
+        await set_tag_affinity("penguin", affinity_score=-1.4, avg_score=1.0, game_count=1)
+        await set_tag_affinity("walking-sim", affinity_score=-1.3, avg_score=2.0, game_count=5)
+        profile = await ratings.get_taste_profile()
+        tags = [t["tag"] for t in profile["bottom_tags"]]
+        self.assertLess(tags.index("walking-sim"), tags.index("penguin"))
+
     async def test_empty_ratings_summary(self):
         profile = await ratings.get_taste_profile()
         self.assertEqual(profile["summary"]["total_rated"], 0)
