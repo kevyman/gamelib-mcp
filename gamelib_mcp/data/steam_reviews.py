@@ -32,6 +32,14 @@ async def sync_steam_reviews() -> dict:
       - Thumbs up  → 6–10, scaled by community score (higher = better)
       - Thumbs down → 1–4, scaled by community score (lower  = worse)
       - No community score → fallback 7.5 (up) / 2.5 (down)
+
+    Returns scrape/upsert *volume* alongside the resulting distinct-game count,
+    which can differ: several scraped review rows (paginated re-appearances, or
+    distinct appids that reconcile to one game) collapse onto a single
+    UNIQUE(game_id, source) rating. ``scraped_rows``/``rows_upserted`` are the
+    raw volume; ``distinct_games_after`` is the authoritative count of games
+    carrying a steam_review rating post-sync — the number get_ratings and
+    get_taste_profile report — so a 52-vs-27 gap reads as dedup, not lost writes.
     """
     config = await load_scrape_config("steam_reviews")
     reviews = await _scrape_all_pages(config)
@@ -81,7 +89,15 @@ async def sync_steam_reviews() -> dict:
 
         await db.commit()
 
-    return {"synced": synced, "total_scraped": len(reviews)}
+        distinct_row = await db.execute_fetchone(
+            "SELECT COUNT(DISTINCT game_id) AS c FROM ratings WHERE source = 'steam_review'"
+        )
+
+    return {
+        "scraped_rows": len(reviews),
+        "rows_upserted": synced,
+        "distinct_games_after": distinct_row["c"] if distinct_row else 0,
+    }
 
 
 def _compute_score(vote: int, community_score: int | None) -> float:
