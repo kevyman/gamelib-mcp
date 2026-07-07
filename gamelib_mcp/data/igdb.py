@@ -732,8 +732,17 @@ def _select_best_match(
     Tower on the Borderland", "PAYDAY 2" as "Payday 2 VR", "Tales from the
     Borderlands" as "New Tales from the Borderlands" — while edition
     variants ("The Witcher: Enhanced Edition" -> "The Witcher") still pass
-    because both sides strip to the same title. On gate failure the query
-    stores no match at all (row stays unenriched; logged at info).
+    because both sides strip to the same title.
+
+    The gate walks the WHOLE identity-compatible candidate list (selected
+    candidate first, primaries preferred among the rest), not just the single
+    ranked pick: fuzzy/relevance ranking can put a decorated sibling first
+    ("Counter-Strike" -> "Counter-Strike Nexon", "DEFCON" -> "DEFCON VR")
+    while a gate-passing candidate sits further down the results. Accepting a
+    non-first candidate is safe precisely because the gate demands
+    edition-stripped-normalized equality with the query — it cannot land on a
+    different game. Only when NO candidate passes does the query store no
+    match at all (row stays unenriched; logged at info).
     """
     from .db import extract_best_fuzzy_key, titles_conflict_on_identity
 
@@ -756,53 +765,78 @@ def _select_best_match(
     exact_matches = [
         i for i in choices if normalize_search_text(results[i].name) == normalized_query
     ]
+    selected_idx: int | None
     if exact_matches:
         primary_exact = [i for i in exact_matches if results[i].is_primary_library_item]
-        exact_idx = primary_exact[0] if primary_exact else exact_matches[0]
-        selected = results[exact_idx]
+        selected_idx = primary_exact[0] if primary_exact else exact_matches[0]
     else:
-        best_idx: int | None = extract_best_fuzzy_key(name, choices, cutoff=70)
-        if best_idx is None:
-            if not allow_inconclusive_fallback:
-                return None
+        selected_idx = extract_best_fuzzy_key(name, choices, cutoff=70)
+        if selected_idx is None and allow_inconclusive_fallback:
             # Fuzzy was inconclusive; take IGDB's top *identity-compatible*
             # relevance hit rather than forcing position 0 (which may be a
-            # conflicting entry).
-            best_idx = next(iter(choices))
-        selected = results[best_idx]
+            # conflicting entry). Without the fallback the gate walk below
+            # still runs — a candidate that passes strict name equality is
+            # acceptable even from a narrow ladder query.
+            selected_idx = next(iter(choices))
 
-    if normalize_series_gap_title(name) != normalize_series_gap_title(selected.name):
+    # Gate walk: the ranked pick goes first (preserving all prior selection
+    # behavior when it passes); the remaining identity-compatible candidates
+    # follow in relevance order with primary library items preferred.
+    rest = sorted(
+        (i for i in choices if i != selected_idx),
+        key=lambda i: (not results[i].is_primary_library_item, i),
+    )
+    ordered = ([selected_idx] if selected_idx is not None else []) + rest
+    gate_target = normalize_series_gap_title(name)
+    for idx in ordered:
+        if normalize_series_gap_title(results[idx].name) == gate_target:
+            return results[idx]
+
+    if selected_idx is not None:
         logger.info(
             "IGDB name-match gate rejected %r -> %r (igdb_id=%s): "
-            "edition-stripped titles differ; leaving unmatched",
+            "edition-stripped titles differ on every candidate; leaving unmatched",
             name,
-            selected.name,
-            selected.igdb_id,
+            results[selected_idx].name,
+            results[selected_idx].igdb_id,
         )
-        return None
-    return selected
+    return None
 
 
-async def resolve_game(
+@dataclass(frozen=True)
+class _ResolveOutcome:
+    """Result of a status-carrying name resolution (see _resolve_game_with_status).
+
+    ``saw_candidates`` distinguishes "IGDB returned candidates but every one
+    was rejected by the identity/name gate" (a genuine refuse-to-guess
+    no-match from a demonstrably alive API) from "every query returned zero
+    candidates" (which, in bulk, is outage-shaped). The backfill's circuit
+    breaker must only count the latter.
+    """
+
+    game: IGDBGame | None
+    saw_candidates: bool
+
+
+async def _resolve_game_with_status(
     name: str,
     igdb_platform_id: int | tuple[int, ...] | None,
     *,
     suppress_errors: bool = True,
-) -> IGDBGame | None:
-    """
-    Find the best IGDB match for a game name + platform. Returns None if not
-    found. Unconfigured credentials return None only while ``suppress_errors``
-    is True; with ``suppress_errors=False`` they raise ``IGDBRequestFailure``
-    so a caller that records "checked, no match" can never mistake an
-    operational outage for a genuine miss.
+) -> _ResolveOutcome:
+    """resolve_game's implementation, reporting whether any query returned candidates.
+
+    Internal: only the backfill needs the status. Everything else should keep
+    calling the public ``resolve_game``.
     """
     if not os.environ.get("TWITCH_CLIENT_ID"):
         if not suppress_errors:
             raise IGDBRequestFailure(
                 f"IGDB credentials not configured; cannot resolve {name!r}"
             )
-        return None
+        return _ResolveOutcome(game=None, saw_candidates=False)
 
+    saw_candidates = False
     results = await search_game(name, igdb_platform_id, suppress_errors=suppress_errors)
     if not results:
         # Try without platform filter as fallback
@@ -810,9 +844,10 @@ async def resolve_game(
             results = await search_game(name, igdb_platform_id=None, suppress_errors=suppress_errors)
 
     if results:
+        saw_candidates = True
         match = _select_best_match(name, results, allow_inconclusive_fallback=True)
         if match is not None:
-            return match
+            return _ResolveOutcome(game=match, saw_candidates=True)
         # Non-empty results, but every candidate was rejected (identity
         # conflict or the strict name gate). Fall through to the ladder: an
         # edition-carrying query like "Sea of Thieves: 2026 Edition" can
@@ -838,6 +873,7 @@ async def resolve_game(
             variant_results = await search_game(variant, igdb_platform_id=None, suppress_errors=suppress_errors)
         if not variant_results:
             continue
+        saw_candidates = True
 
         # Identity-preserving variants gate against the variant itself: the
         # transformation already vouches for series identity, and the original
@@ -846,9 +882,28 @@ async def resolve_game(
         gate_name = variant if identity_preserving else name
         match = _select_best_match(gate_name, variant_results, allow_inconclusive_fallback=False)
         if match is not None:
-            return match
+            return _ResolveOutcome(game=match, saw_candidates=True)
 
-    return None
+    return _ResolveOutcome(game=None, saw_candidates=saw_candidates)
+
+
+async def resolve_game(
+    name: str,
+    igdb_platform_id: int | tuple[int, ...] | None,
+    *,
+    suppress_errors: bool = True,
+) -> IGDBGame | None:
+    """
+    Find the best IGDB match for a game name + platform. Returns None if not
+    found. Unconfigured credentials return None only while ``suppress_errors``
+    is True; with ``suppress_errors=False`` they raise ``IGDBRequestFailure``
+    so a caller that records "checked, no match" can never mistake an
+    operational outage for a genuine miss.
+    """
+    outcome = await _resolve_game_with_status(
+        name, igdb_platform_id, suppress_errors=suppress_errors
+    )
+    return outcome.game
 
 
 async def resolve_and_link_game(
@@ -1153,15 +1208,42 @@ async def mark_igdb_checked(game_id: int) -> None:
         await db.commit()
 
 
-# Systemic-failure circuit breaker for the backfill: famous library titles miss
-# genuinely far less than this often, so this many *consecutive* name-search
-# no-matches means the search API is effectively down (prod 2026-07-05: an IGDB
-# outage window yielded ~0% matches and every miss was cached as a permanent
-# no-match). The counter is process-wide and survives across passes so an
-# outage cannot slip through on pass boundaries; any successful name-search
-# resolution resets it.
+# Systemic-failure circuit breaker for the backfill: this many *consecutive*
+# zero-candidate name searches suggests the search API is effectively down
+# (prod 2026-07-05: an IGDB outage window yielded ~0% matches and every miss
+# was cached as a permanent no-match). Only zero-candidate searches count —
+# a search whose candidates were all rejected by the identity/name gate is
+# proof the API is alive, and counting it caused a prod livelock (2026-07-07:
+# a deterministic cluster of gate-rejected titles at the head of the claim
+# order tripped the breaker forever, freezing the heal at ~19/1028 rows).
+# The counter is process-wide and survives across passes so an outage cannot
+# slip through on pass boundaries; it resets on any search that returns
+# candidates (resolved or gate-rejected) and on a live canary probe.
 _BACKFILL_MISS_CIRCUIT_BREAKER = 10
 _consecutive_backfill_misses = 0
+
+# Canary title for the breaker's trip check: guaranteed to exist on IGDB, so a
+# zero-candidate or failing search for it confirms a real outage while a
+# candidate-returning search proves the miss streak was a genuine run of
+# IGDB-absent titles (possible under the deterministic claim order) rather
+# than an outage.
+_CANARY_TITLE = "The Witcher 3: Wild Hunt"
+
+
+async def _igdb_canary_alive() -> bool:
+    """One search for a certainly-existing title: is IGDB search actually up?
+
+    True when candidates come back (API alive — a tripping miss streak is a
+    genuine run of no-matches). False when the search fails operationally OR
+    returns zero candidates for a blockbuster (both outage-shaped: the abort
+    stands and rows stay retryable).
+    """
+    try:
+        results = await search_game(_CANARY_TITLE, suppress_errors=False)
+    except IGDBRequestFailure as exc:
+        logger.warning("IGDB canary search failed: %s", exc)
+        return False
+    return bool(results)
 
 
 def _decode_manual_overrides(raw) -> set[str]:
@@ -1194,11 +1276,18 @@ async def backfill_missing_games(limit: int = 10) -> int:
       3. Name search (``resolve_game``).
 
     Operational hygiene: any operational failure (missing credentials, request
-    failure) leaves the row retryable — never marked "checked". Name-search
-    no-matches are only committed as checked once the pass demonstrates the
-    search API works (a successful search resolution), or at pass end while
-    the consecutive-miss circuit breaker has not tripped; a tripped breaker
-    aborts the pass and leaves every pending/unprocessed row retryable.
+    failure) leaves the row retryable — never marked "checked". A search that
+    returned candidates which were ALL gate/identity-rejected is committed as
+    checked immediately (the API answered; refusing to guess is a genuine
+    no-match) and resets the breaker. Zero-candidate no-matches are buffered
+    and only committed once the pass demonstrates the search API works (a
+    search that returned candidates), or at pass end while the breaker has
+    not tripped. When the consecutive zero-candidate counter reaches the
+    threshold, a canary search for a certainly-existing title arbitrates:
+    canary alive -> the streak is a genuine run of IGDB-absent titles, commit
+    it and continue; canary dead -> abort the pass leaving every pending and
+    unprocessed row retryable (the counter deliberately survives the abort so
+    the next pass re-trips — and re-probes — after a single miss).
 
     Returns the number of rows that reached a terminal state (matched or
     confidently marked no-match) so the enrichment loop goes quiescent instead
@@ -1285,14 +1374,17 @@ async def backfill_missing_games(limit: int = 10) -> int:
                 if fetched is not None and fetched.platforms:
                     igdb_game = fetched
 
+            search_saw_candidates = False
             if igdb_game is None:
                 platform_hint = await choose_igdb_platform_hint(game_id)
                 resolved_via_search = True
-                igdb_game = await resolve_game(
+                outcome = await _resolve_game_with_status(
                     normalize_catalog_title(row["name"]),
                     platform_hint,
                     suppress_errors=False,
                 )
+                igdb_game = outcome.game
+                search_saw_candidates = outcome.saw_candidates
             if igdb_game is not None:
                 try:
                     await _apply_igdb_metadata(game_id, igdb_game)
@@ -1315,20 +1407,58 @@ async def backfill_missing_games(limit: int = 10) -> int:
                         await mark_igdb_checked(miss_id)
                     processed += len(pending_no_match)
                     pending_no_match.clear()
+            elif search_saw_candidates:
+                # Candidates came back but every one was rejected by the
+                # identity/name gate — a refuse-to-guess no-match from a
+                # demonstrably alive API. Commit it directly, and treat it as
+                # proof of life: reset the breaker and flush buffered
+                # zero-candidate misses as genuine. Counting these as outage
+                # evidence livelocked prod (a deterministic cluster of
+                # gate-rejected titles at the head of the claim order tripped
+                # the breaker on every pass).
+                _consecutive_backfill_misses = 0
+                await mark_igdb_checked(game_id)
+                processed += 1
+                for miss_id in pending_no_match:
+                    await mark_igdb_checked(miss_id)
+                processed += len(pending_no_match)
+                pending_no_match.clear()
             else:
                 pending_no_match.append(game_id)
                 _consecutive_backfill_misses += 1
                 if _consecutive_backfill_misses >= _BACKFILL_MISS_CIRCUIT_BREAKER:
-                    breaker_tripped = True
-                    logger.error(
-                        "IGDB backfill circuit breaker tripped: %d consecutive "
-                        "name-search no-matches — treating as an IGDB outage, "
-                        "aborting the pass and leaving %d pending and %d "
-                        "unprocessed row(s) retryable",
-                        _consecutive_backfill_misses,
-                        len(pending_no_match),
-                        len(game_ids) - next_index,
-                    )
+                    if await _igdb_canary_alive():
+                        # The API answers for a blockbuster, so this streak is
+                        # a genuine run of IGDB-absent titles (the
+                        # deterministic claim order can serve such a cluster
+                        # forever) — commit them and keep going instead of
+                        # aborting into a livelock.
+                        logger.warning(
+                            "IGDB backfill hit %d consecutive zero-candidate "
+                            "misses but canary search %r returned candidates — "
+                            "API is alive; committing %d pending no-match(es) "
+                            "and continuing the pass",
+                            _consecutive_backfill_misses,
+                            _CANARY_TITLE,
+                            len(pending_no_match),
+                        )
+                        _consecutive_backfill_misses = 0
+                        for miss_id in pending_no_match:
+                            await mark_igdb_checked(miss_id)
+                        processed += len(pending_no_match)
+                        pending_no_match.clear()
+                    else:
+                        breaker_tripped = True
+                        logger.error(
+                            "IGDB backfill circuit breaker tripped: %d consecutive "
+                            "zero-candidate name searches and the canary search %r "
+                            "confirmed the outage — aborting the pass and leaving "
+                            "%d pending and %d unprocessed row(s) retryable",
+                            _consecutive_backfill_misses,
+                            _CANARY_TITLE,
+                            len(pending_no_match),
+                            len(game_ids) - next_index,
+                        )
         except IGDBRequestFailure as exc:
             logger.warning(
                 "IGDB backfill leaving game retryable after operational failure: game_id=%s name=%r error=%s",
