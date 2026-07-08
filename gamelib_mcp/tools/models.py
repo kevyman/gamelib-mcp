@@ -301,6 +301,65 @@ class UpdateGameResponse(FlexibleModel):
     manual_overrides: list[str]
 
 
+class AcquisitionInfo(FlexibleModel):
+    acquired_at: str | None = None
+    price_paid: float | None = None
+    price_currency: str | None = None
+    purchase_source: str | None = None
+    bundle_name: str | None = None
+
+
+class SetAcquisitionResponse(FlexibleModel):
+    game_id: int
+    name: str
+    platform: str
+    game_platform_id: int
+    platform_row_created: bool
+    acquisition: AcquisitionInfo
+    cleared: list[str]
+
+
+class AcquisitionBatchItemResult(FlexibleModel):
+    # applied | filled | no_change | unmatched | no_platform_row | error
+    status: str
+    platform: str | None = None
+    game_id: int | None = None
+    matched_name: str | None = None
+    match_type: str | None = None  # id | name | fuzzy
+    acquisition: AcquisitionInfo | None = None
+    # Present on no_platform_row: the platforms the game IS owned/recorded on.
+    platforms: list[str] | None = None
+    error: str | None = None
+    # Original item payload, echoed on unmatched/no_platform_row/error.
+    item: dict[str, Any] | None = None
+
+
+class SetAcquisitionsBatchResponse(FlexibleModel):
+    results: list[AcquisitionBatchItemResult]
+    total: int
+    applied: int
+    filled: int
+    no_change: int
+    unmatched: list[dict[str, Any]]
+    no_platform_row: int
+    errors: int
+
+
+class SpendingStatsResponse(FlexibleModel):
+    owned_rows: int
+    priced_rows: int
+    coverage_pct: float
+    zero_cost_rows: int
+    # Monetary aggregates are grouped by currency, never summed across them.
+    totals: list[dict[str, Any]]
+    by_year: list[dict[str, Any]]
+    by_source: list[dict[str, Any]]
+    by_platform: list[dict[str, Any]]
+    by_bundle: list[dict[str, Any]]
+    top_expensive: list[dict[str, Any]]
+    cost_per_hour: dict[str, Any]
+
+
 class MergeGamesResponse(FlexibleModel):
     dry_run: bool
     source: dict[str, Any]

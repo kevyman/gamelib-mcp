@@ -55,6 +55,9 @@ from .tools.models import (
     SearchGamesBatchResponse,
     SeriesBreakdownResponse,
     SeriesGapsResponse,
+    SetAcquisitionResponse,
+    SetAcquisitionsBatchResponse,
+    SpendingStatsResponse,
     SplitGameResponse,
     SyncRatingsResponse,
     SyncStatusResponse,
@@ -931,6 +934,124 @@ async def update_game(
         content_type,
         clear_overrides,
     )
+
+
+@mcp.tool(annotations=MUTATION_TOOL)
+async def set_acquisition(
+    name: str | None = None,
+    game_id: int | None = None,
+    platform: str | None = None,
+    acquired_at: str | None = None,
+    price_paid: float | None = None,
+    price_currency: str | None = None,
+    purchase_source: str | None = None,
+    bundle_name: str | None = None,
+    clear: list[str] | None = None,
+    create_platform_row: bool = True,
+) -> SetAcquisitionResponse:
+    """
+    Record when, where, and for how much a game was acquired on one platform.
+
+    Resolve the game with game_id or name (partial/fuzzy match), pass the
+    platform it was acquired on (required), then set any subset of:
+    acquired_at (YYYY, YYYY-MM, or YYYY-MM-DD — as precise as you know),
+    price_paid (>= 0; use 0 for a free acquisition), price_currency (3-letter
+    ISO code, defaults to USD when a price is given), purchase_source, and
+    bundle_name (the bundle/promotion the game came in). For a bundle, record
+    price_paid as this game's share of the bundle's total price (e.g. a $12
+    three-game bundle → 4.00 each, or weight it however you prefer) and put
+    the bundle's name in bundle_name so get_spending_stats can group it.
+
+    purchase_source is one of: steam, gog, epic, eshop, psn, xbox, humble,
+    fanatical, itchio, ea, ubisoft, physical, gift, free, subscription, other
+    (common aliases like "Humble Bundle", "PS Store", "Game Pass" are
+    normalized). Use "free" for a no-strings giveaway you keep forever (e.g.
+    an Epic weekly), and "subscription" for a title claimed through a paid
+    membership (Game Pass, PS+, Humble Choice) whose access may lapse.
+
+    clear lists acquisition columns to reset to NULL (acquired_at, price_paid,
+    price_currency, purchase_source, bundle_name); a column cannot be set and
+    cleared in the same call. If the game has no row on that platform yet, one
+    is created (owned) and platform_row_created=true is returned; pass
+    create_platform_row=False to error instead. Acquisition columns are only
+    ever written by these tools — library syncs never touch them. Returns the
+    row's full post-write acquisition state.
+    """
+    from .tools.acquisition import set_acquisition as _set_acquisition
+    return await _set_acquisition(
+        name,
+        game_id,
+        platform,
+        acquired_at,
+        price_paid,
+        price_currency,
+        purchase_source,
+        bundle_name,
+        clear,
+        create_platform_row,
+    )
+
+
+@mcp.tool(annotations=MUTATION_TOOL)
+async def set_acquisitions_batch(
+    items: list[dict],
+    overwrite: bool = False,
+    create_platform_rows: bool = False,
+) -> SetAcquisitionsBatchResponse:
+    """
+    Bulk-import acquisition data for many games in one call (max 200 items).
+
+    Each item is {name or game_id, platform, plus any of acquired_at,
+    price_paid, price_currency, purchase_source, bundle_name} with the same
+    validation and vocabulary as set_acquisition (for bundles, price_paid is
+    the per-game share of the bundle's total). One bad item never fails the
+    call: every item gets a per-item result with a status — applied
+    (overwrite=True wrote the fields), filled (default mode wrote at least one
+    previously-NULL field), no_change (every requested field already had a
+    value), unmatched (no library game matched — the original payloads are
+    also echoed in the top-level unmatched list for retry), no_platform_row
+    (game matched but isn't recorded on that platform; its actual platforms
+    are listed — pass create_platform_rows=True to create owned rows instead),
+    or error (validation failure, with the message and original item).
+
+    The default overwrite=False only fills missing (NULL) columns, so
+    re-importing a purchase-history export never clobbers values you've
+    already set or corrected; overwrite=True replaces the provided fields
+    unconditionally. This tool never creates games rows. Name matches report
+    match_type ("name" for tiered exact/prefix/substring matching, "fuzzy" for
+    the misspelling fallback) and matched_name — review match_type="fuzzy"
+    results to confirm they resolved to the intended game.
+    """
+    from .tools.acquisition import set_acquisitions_batch as _set_batch
+    return await _set_batch(items, overwrite, create_platform_rows)
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL)
+async def get_spending_stats(
+    year: int | None = None,
+    platform: str | None = None,
+    purchase_source: str | None = None,
+) -> SpendingStatsResponse:
+    """
+    Analyze game spending from recorded acquisition data (see set_acquisition).
+
+    Covers owned platform rows only (DLC/editions included — money spent is
+    money spent). Optional filters: year (matches the acquired_at year; rows
+    without an acquired_at are excluded when set), platform, and
+    purchase_source (same vocabulary/aliases as set_acquisition). Monetary
+    aggregates are grouped per currency and NEVER summed across currencies.
+
+    Returns owned_rows/priced_rows/coverage_pct (how much of the library has a
+    recorded price), zero_cost_rows (price 0 — gifts/giveaways), totals per
+    currency, breakdowns by_year / by_source / by_platform / by_bundle, the
+    top 10 most expensive purchases, and cost_per_hour analysis: overall $/h
+    per currency, best_value (cheapest cost per hour — a 0-price game you
+    played counts as 0.0), worst_value (most expensive per hour; free games
+    excluded), unpriced_playtime_rows (played but no recorded price), and
+    unplayed_spend (money spent on games with zero recorded playtime).
+    """
+    from .tools.acquisition import get_spending_stats as _spending
+    return await _spending(year, platform, purchase_source)
 
 
 @mcp.tool(annotations=NON_IDEMPOTENT_MUTATION_TOOL)

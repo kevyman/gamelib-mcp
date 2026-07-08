@@ -138,6 +138,29 @@ EXPECTED_TOOLS = {
         },
         "required": set(),
     },
+    "set_acquisition": {
+        "params": {
+            "name",
+            "game_id",
+            "platform",
+            "acquired_at",
+            "price_paid",
+            "price_currency",
+            "purchase_source",
+            "bundle_name",
+            "clear",
+            "create_platform_row",
+        },
+        "required": set(),
+    },
+    "set_acquisitions_batch": {
+        "params": {"items", "overwrite", "create_platform_rows"},
+        "required": {"items"},
+    },
+    "get_spending_stats": {
+        "params": {"year", "platform", "purchase_source"},
+        "required": set(),
+    },
     "merge_games": {
         "params": {"source_game_id", "target_game_id", "dry_run"},
         "required": {"source_game_id", "target_game_id"},
@@ -201,6 +224,9 @@ EXPECTED_ANNOTATIONS = {
     "set_nintendo_session": {"readOnlyHint": False, "idempotentHint": True},
     "set_nintendo_pctl_session": {"readOnlyHint": False, "idempotentHint": True},
     "update_game": {"readOnlyHint": False, "idempotentHint": True},
+    "set_acquisition": {"readOnlyHint": False, "idempotentHint": True},
+    "set_acquisitions_batch": {"readOnlyHint": False, "idempotentHint": True},
+    "get_spending_stats": {"readOnlyHint": True, "idempotentHint": True},
     "merge_games": {"readOnlyHint": False, "idempotentHint": False},
     "get_scrape_config": {"readOnlyHint": True, "idempotentHint": True},
     "diagnose_scrape": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
@@ -228,9 +254,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_39(self):
+    async def test_tool_count_is_42(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 39)
+        self.assertEqual(len(tools), 42)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()
