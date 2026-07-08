@@ -200,6 +200,58 @@ async def upsert_game_platform(
         return row["id"]
 
 
+# game_platforms columns holding user/importer-supplied acquisition data. No
+# sync writer references them (upsert_game_platform / bulk_upsert_steam_library
+# enumerate their columns explicitly), so they never need manual_overrides
+# protection — set_platform_acquisition is their only write path.
+ACQUISITION_FIELDS = (
+    "acquired_at",
+    "price_paid",
+    "price_currency",
+    "purchase_source",
+    "bundle_name",
+)
+
+
+async def set_platform_acquisition(
+    game_platform_id: int,
+    fields: dict,
+    *,
+    only_if_null: bool = False,
+) -> dict:
+    """Write acquisition columns on one game_platforms row.
+
+    Overwrite mode (default): ``col = ?`` — an explicit None clears the column.
+    ``only_if_null`` (importer mode): ``col = COALESCE(col, ?)`` — never
+    replaces an existing value, so re-imports can't clobber manual edits.
+
+    Returns the row's resulting acquisition state (the 5 columns), letting
+    callers distinguish "filled" from "already set" without a second query.
+    """
+    unknown = set(fields) - set(ACQUISITION_FIELDS)
+    if unknown:
+        raise ValueError(f"not acquisition columns: {sorted(unknown)}")
+
+    async with get_db() as db:
+        if fields:
+            if only_if_null:
+                cols_sql = ", ".join(f"{col} = COALESCE({col}, ?)" for col in fields)
+            else:
+                cols_sql = ", ".join(f"{col} = ?" for col in fields)
+            await db.execute(
+                f"UPDATE game_platforms SET {cols_sql} WHERE id = ?",
+                (*fields.values(), game_platform_id),
+            )
+            await db.commit()
+        row = await db.execute_fetchone(
+            f"SELECT {', '.join(ACQUISITION_FIELDS)} FROM game_platforms WHERE id = ?",
+            (game_platform_id,),
+        )
+    if row is None:
+        raise ValueError(f"game_platforms row {game_platform_id} not found")
+    return {col: row[col] for col in ACQUISITION_FIELDS}
+
+
 async def upsert_wishlist_entry(
     game_id: int,
     platform: str,
