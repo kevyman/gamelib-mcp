@@ -1077,10 +1077,21 @@ async def import_purchases(
       Needs session cookies from set_nintendo_ec_session. Refunds and
       consumables are skipped (reported in skipped); free downloads are
       recorded with price 0.
+    - "gog": GOG order history (embed.gog.com) → gog. Reuses the
+      lgogdownloader session (galaxy_tokens.json bearer token, cookies.txt
+      fallback) — run `lgogdownloader --login` if it errors. Per-product
+      prices are preferred; when only an order total exists it is split
+      evenly across the order's products. Giveaways get price 0.
     - "humble": Humble Bundle orders → steam/gog/other by key type. Needs
       the _simpleauth_sess cookie from set_humble_session. Bundle prices are
       split evenly across the bundle's games (bundle_name groups them);
       Humble Choice items get purchase_source "subscription".
+    - "steam": Steam licenses + purchase history (store.steampowered.com)
+      → steam. Needs the steamLoginSecure cookie from
+      set_steam_store_session. Cart totals are split evenly across the
+      cart's items; refunds, market/in-game transactions and gift purchases
+      (bought for someone else) are skipped; Complimentary and Gift/Guest
+      Pass licenses become price-0 records (purchase_source "free"/"gift").
 
     Sources run concurrently; one source's auth/network failure (status
     "error", nothing written for it) never blocks the others. Each ok source
@@ -1210,6 +1221,31 @@ async def set_humble_session(cookies: str) -> NintendoSessionResponse:
     """
     from .tools.admin import set_humble_session as _set_humble
     return await _set_humble(cookies)
+
+
+@mcp.tool(annotations=MUTATION_TOOL)
+async def set_steam_store_session(cookies: str) -> NintendoSessionResponse:
+    """
+    Store Steam store session cookies for purchase-history import.
+
+    Enables import_purchases(sources=["steam"]) to read your Steam licenses
+    and purchase history pages (acquisition dates, prices, free/gift
+    licenses). Only the steamLoginSecure cookie is strictly required;
+    sessionid is recommended too (used by the history load-more endpoint).
+    These are browser cookies from store.steampowered.com — unrelated to
+    STEAM_API_KEY.
+
+    How to get cookies:
+    1. Open https://store.steampowered.com/account/ (stay logged in)
+    2. Install the "Cookie Editor" browser extension
+    3. Click the extension → Export → copy the JSON
+    4. Pass that JSON string here (object or Cookie Editor array format)
+
+    Cookies are saved to STEAM_STORE_COOKIES_FILE
+    (default: data/steam_store_cookies.json).
+    """
+    from .tools.admin import set_steam_store_session as _set_steam_store
+    return await _set_steam_store(cookies)
 
 
 @mcp.tool(annotations=MUTATION_TOOL)

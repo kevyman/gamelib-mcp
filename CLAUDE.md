@@ -28,6 +28,7 @@ Copy `.env.example` → `.env` for production (OAuth required) or `.env.local.ex
 - `MCP_ADMIN_AUTH_TOKEN` — independent header-only bearer token gating `/admin/*`.
 - `MCP_ALLOWED_ORIGINS` — browser origins allowed on the HTTP surface; requests without an `Origin` header (native/CLI clients) still pass.
 - Optional: `PORT` (default 8000); `DEKUDEALS_WISHLIST_URL` (switch2 wishlist source — Nintendo has no wishlist API); `ITAD_API_KEY`/`ITAD_COUNTRY` (Steam/GOG/Epic prices for `get_wishlist_deals`; without a key those land in `unpriced`); `SCRAPE_HEAL_REQUIRE_APPROVAL=1` (validated scrape overrides land `pending` instead of auto-activating).
+- Optional cookie-file paths for `import_purchases` sessions: `NINTENDO_EC_COOKIES_FILE`, `HUMBLE_COOKIES_FILE`, `STEAM_STORE_COOKIES_FILE` — populated by the matching `set_*_session` tools; defaults live under `data/`.
 
 ## Architecture
 
@@ -51,8 +52,9 @@ Top-level modules:
 - `completion.py`: suggest_completion_status — read-only heuristic, never writes; a human confirms via update_game
 - `deals.py`: get_wishlist_deals — honors `hardware_preference` with a `preference_override_ratio` escape hatch; 12h TTL, `refresh=True` forces live fetch
 - `history.py`: get_play_history (see playtime-history pattern below)
-- `admin.py`: refresh_library, sync_wishlist, detect_farmed_games, detect_collapsed_games (read-only, within-platform over-merges), detect_cross_platform_collapses (via IGDB external_games), split_game (inverse of merge_games), set_nintendo_session, set_nintendo_pctl_session
+- `admin.py`: refresh_library, sync_wishlist, detect_farmed_games, detect_collapsed_games (read-only, within-platform over-merges), detect_cross_platform_collapses (via IGDB external_games), split_game (inverse of merge_games), set_nintendo_session, set_nintendo_pctl_session, plus the cookie-session setters sharing `_save_session_cookies`: set_nintendo_ec_session, set_humble_session, set_steam_store_session
 - `platforms.py`: get_platform_breakdown, get_wishlist, set_hardware_preference, add_game_to_platform (`owned=False` = manual wishlist entry — the only path for PSN), update_game (manual edits recorded in `games.manual_overrides`)
+- `acquisition.py`: set_acquisition, set_acquisitions_batch (fill-only by default — re-imports never clobber manual edits), get_spending_stats (per-currency, never summed across currencies), import_purchases (orchestrates `data/purchases/` fetchers; per-source failures don't block other sources)
 - `integrations.py`: get_integration_status
 - `scrape_admin.py`: scrape-heal tools — get/diagnose/propose/approve/rollback_scrape_config
 - `common.py`: shared subqueries + platform-alias resolver. The three `_GAME_ROLLUP_CTE` variants deliberately stay in their own modules; they differ.
@@ -66,6 +68,7 @@ Top-level modules:
 - Platform syncs: `epic.py`, `gog.py`, `nintendo.py`, `psn.py`, `xbox.py` (+ `title_normalization.py`). Xbox uses OpenXBL (`OPENXBL_API_KEY`, optional `OPENXBL_XUID`); ownership = title history (documented approximation), playtime best-effort (`None` when unavailable, like GOG).
 - Wishlists: `steam_wishlist.py` (official `IWishlistService/GetWishlist`; returns appid only, so unowned titles come from `steam_store.fetch_app_name`) and `dekudeals.py` (shared-wishlist `.json` export: `{"items": [{"name", "link", "added_at"}]}` — no NSUID anywhere, so fuzzy name matching is the only bridge; `added_at` becomes `wishlisted_at`). `dekudeals.py` also scrapes wishlist and search-page prices (shared selectors).
 - Nintendo switch2 uses two complementary sources: `nintendo.py` = **ownership** (VGCS cookies, no playtime); `nintendo_pctl.py` = **playtime** (Parental Controls API, ownership-agnostic — titles played under another account get auto-added as owned). Daily summaries accumulate idempotently in `nintendo_play_summary`; switch2 total playtime is their `SUM`. Forward-only — no retroactive history exists.
+- `purchases/`: per-store purchase-history importers (eshop `nintendo_ec.py`, `humble.py`, `gog_orders.py`, `steam_history.py`) behind `import_purchases` — each exposes `fetch_*(*, transport=None) -> (records, skipped)` and is registered in `PURCHASE_IMPORTERS`; GOG reuses the lgogdownloader session, Steam scrapes the logged-in licenses/history store pages.
 - `scrape_config.py` / `scrape_validate.py` / `scrape_fixtures/`: the healable-scraper layer (pattern below).
 
 ### Other packages
@@ -77,7 +80,7 @@ Top-level modules:
 
 Auto-migrated on startup in `db.init_db()`:
 - `games`: canonical rows + shared enrichment. `igdb_platforms` = ownership-independent JSON of IGDB platform ids (Switch 2 = 508, Switch = 130, both → internal switch2). `completion_status` (nullable; `playing`/`completed`/`abandoned`/`evergreen`) is user-set only. `cover_image_id` = IGDB cover slug; `tools/common.py::cover_url` prefers it, falls back to the Steam capsule by appid.
-- `game_platforms`: ownership/playtime per platform. A row here always means a real platform relationship — never a wishlist-only entry.
+- `game_platforms`: ownership/playtime per platform. A row here always means a real platform relationship — never a wishlist-only entry. Also carries the 5 acquisition columns (`acquired_at`, `price_paid`, `price_currency`, `purchase_source`, `bundle_name`) — user/importer-supplied only; sync SQL never references them.
 - `game_platform_identifiers`: provider IDs (`steam_appid`, `gog_product_id`, `xbox_title_id`, …).
 - `game_wishlist`: want-to-play tracking, deliberately separate from `game_platforms` (see wishlist pattern). `UNIQUE(game_id, platform)`; `source` ∈ steam/dekudeals/manual; `store_identifier` captured at sync time for unowned items.
 - `game_prices`: current-price cache, overwritten in place — not history (ITAD is the historical source of record).

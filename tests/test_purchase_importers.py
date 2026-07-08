@@ -6,6 +6,7 @@ fetch functions as imported INTO tools.acquisition (this repo's established
 patching convention — see tests/test_tools_deals.py).
 """
 
+import contextlib
 import json
 import os
 import tempfile
@@ -19,9 +20,32 @@ from conftest import ToolDBTestCase, add_platform, seed_game
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.purchases import PURCHASE_IMPORTERS, PurchaseRecord
+from gamelib_mcp.data.purchases import gog_orders
 from gamelib_mcp.data.purchases import humble as humble_module
 from gamelib_mcp.data.purchases import nintendo_ec
+from gamelib_mcp.data.purchases import steam_history
+from gamelib_mcp.data.scrape_validate import FIXTURES_DIR
 from gamelib_mcp.tools import acquisition, admin
+
+_FETCHER_ATTRS = (
+    "fetch_eshop_purchases",
+    "fetch_gog_purchases",
+    "fetch_humble_purchases",
+    "fetch_steam_purchases",
+)
+
+
+@contextlib.contextmanager
+def _patch_fetchers(**overrides):
+    """Patch every registered fetcher on tools.acquisition; unnamed ones
+    return ([], []) so no real fetcher (filesystem/HTTP) ever runs."""
+    with contextlib.ExitStack() as stack:
+        mocks = {}
+        for attr in _FETCHER_ATTRS:
+            mock = overrides.get(attr) or AsyncMock(return_value=([], []))
+            stack.enter_context(patch.object(acquisition, attr, mock))
+            mocks[attr] = mock
+        yield mocks
 
 
 def _eshop_record(title: str, **overrides) -> PurchaseRecord:
@@ -51,7 +75,7 @@ class PurchaseRegistryTests(unittest.TestCase):
     def test_registry_entries_resolve_to_real_callables(self):
         import importlib
 
-        self.assertEqual(set(PURCHASE_IMPORTERS), {"eshop", "humble"})
+        self.assertEqual(set(PURCHASE_IMPORTERS), {"eshop", "gog", "humble", "steam"})
         for module_path, attr in PURCHASE_IMPORTERS.values():
             fn = getattr(importlib.import_module(module_path), attr)
             self.assertTrue(callable(fn))
@@ -412,10 +436,402 @@ class HumbleFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([r.title for r in records], ["Hollow Knight"])
 
 
+class GogOrderParserTests(unittest.TestCase):
+    def test_price_amount_shape_int_unix_date_and_product_id(self):
+        order = {
+            "publicId": "order-1",
+            "date": 1615464000,  # 2021-03-11 UTC
+            "products": [
+                {
+                    "id": 1207658924,
+                    "title": "The Witcher 3: Wild Hunt",
+                    "price": {"amount": "9.99", "baseAmount": "39.99", "symbol": "€"},
+                },
+            ],
+        }
+
+        records, skipped = gog_orders.parse_order(order)
+
+        self.assertEqual(skipped, [])
+        record = records[0]
+        self.assertEqual(record.title, "The Witcher 3: Wild Hunt")
+        self.assertEqual(record.platform, "gog")
+        self.assertEqual(record.purchase_source, "gog")
+        self.assertEqual(record.acquired_at, "2021-03-11")
+        self.assertEqual(record.price_paid, 9.99)
+        self.assertEqual(record.price_currency, "EUR")
+        self.assertEqual(record.store_identifier, "1207658924")
+        # GOG orders are carts, never bundles.
+        self.assertIsNone(record.bundle_name)
+
+    def test_cash_value_shape_and_string_unix_date(self):
+        order = {
+            "publicId": "order-2",
+            "date": "1391212800",  # 2014-02-01 UTC, string form
+            "products": [
+                {"id": "42", "title": "Papers, Please", "cashValue": {"amount": 4.99, "symbol": "$"}},
+            ],
+        }
+
+        records, _ = gog_orders.parse_order(order)
+
+        self.assertEqual(records[0].acquired_at, "2014-02-01")
+        self.assertEqual(records[0].price_paid, 4.99)
+        self.assertEqual(records[0].price_currency, "USD")
+
+    def test_free_giveaway_product_records_zero_price(self):
+        order = {
+            "publicId": "order-3",
+            "date": 1600000000,
+            "currency": "PLN",
+            "products": [{"title": "Gwent Giveaway", "price": {"amount": "0.00", "symbol": "zł"}}],
+        }
+
+        records, _ = gog_orders.parse_order(order)
+
+        self.assertEqual(records[0].price_paid, 0.0)
+        self.assertEqual(records[0].price_currency, "PLN")
+        self.assertEqual(records[0].purchase_source, "gog")
+
+    def test_multi_product_order_with_only_total_splits_evenly(self):
+        order = {
+            "publicId": "order-4",
+            "date": 1650000000,
+            "total": {"amount": "25.00", "symbol": "$"},
+            "products": [
+                {"id": 1, "title": "Game A"},
+                {"id": 2, "title": "Game B"},
+                {"id": 3, "title": "Game C"},
+            ],
+        }
+
+        records, skipped = gog_orders.parse_order(order)
+
+        self.assertEqual(skipped, [])
+        self.assertEqual([r.price_paid for r in records], [8.33, 8.33, 8.34])
+        self.assertAlmostEqual(sum(r.price_paid for r in records), 25.00)
+        self.assertEqual({r.price_currency for r in records}, {"USD"})
+
+    def test_order_without_products_is_skipped_with_reason(self):
+        records, skipped = gog_orders.parse_order({"publicId": "empty-1", "date": 1600000000})
+        self.assertEqual(records, [])
+        self.assertEqual(skipped[0]["description"], "empty-1")
+        self.assertIn("no products", skipped[0]["reason"])
+
+
+class GogFetchTests(unittest.IsolatedAsyncioTestCase):
+    def _write_config(self, tmp: str, tokens: dict | None = None, cookies_txt: str | None = None):
+        if tokens is not None:
+            with open(os.path.join(tmp, "galaxy_tokens.json"), "w", encoding="utf-8") as f:
+                json.dump(tokens, f)
+        if cookies_txt is not None:
+            with open(os.path.join(tmp, "cookies.txt"), "w", encoding="utf-8") as f:
+                f.write(cookies_txt)
+
+    @staticmethod
+    def _order(public_id: str, title: str) -> dict:
+        return {
+            "publicId": public_id,
+            "date": 1615464000,
+            "products": [{"id": 7, "title": title, "price": {"amount": "9.99", "symbol": "$"}}],
+        }
+
+    async def test_missing_session_files_raise_lgogdownloader_advice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"LGOGDOWNLOADER_CONFIG_PATH": tmp}):
+                with self.assertRaisesRegex(RuntimeError, "lgogdownloader --login"):
+                    await gog_orders.fetch_gog_purchases()
+
+    async def test_bearer_token_happy_path_paginates(self):
+        seen: list[tuple[int, str | None]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            page = int(request.url.params["page"])
+            seen.append((page, request.headers.get("Authorization")))
+            orders = [self._order(f"order-p{page}", f"Game {page}")]
+            return httpx.Response(
+                200,
+                json={"orders": orders, "totalPages": 2},
+                headers={"content-type": "application/json"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Nested lgogdownloader token shape: keyed by OAuth client id.
+            self._write_config(tmp, tokens={"46899977096215655": {"access_token": "tok123"}})
+            with patch.dict(os.environ, {"LGOGDOWNLOADER_CONFIG_PATH": tmp}):
+                records, skipped = await gog_orders.fetch_gog_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
+
+        self.assertEqual(seen, [(1, "Bearer tok123"), (2, "Bearer tok123")])
+        self.assertEqual([r.title for r in records], ["Game 1", "Game 2"])
+        self.assertEqual(skipped, [])
+
+    async def test_401_with_token_and_no_cookies_raises_advice(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, json={"error": "unauthorized"})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_config(tmp, tokens={"access_token": "stale"})
+            with patch.dict(os.environ, {"LGOGDOWNLOADER_CONFIG_PATH": tmp}):
+                with self.assertRaisesRegex(RuntimeError, "lgogdownloader --login"):
+                    await gog_orders.fetch_gog_purchases(
+                        transport=httpx.MockTransport(handler)
+                    )
+
+    async def test_401_with_token_retries_once_with_cookie_jar(self):
+        cookies_txt = (
+            "# Netscape HTTP Cookie File\n"
+            "#HttpOnly_.gog.com\tTRUE\t/\tTRUE\t1999999999\tgog-al\tcookie-session\n"
+            ".gog.com\tTRUE\t/\tFALSE\t1999999999\tcsrf\tabc\n"
+            ".example.com\tTRUE\t/\tFALSE\t1999999999\tunrelated\tnope\n"
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.headers.get("Authorization"):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            cookie_header = request.headers.get("Cookie", "")
+            assert "gog-al=cookie-session" in cookie_header
+            assert "unrelated" not in cookie_header
+            return httpx.Response(
+                200,
+                json={"orders": [self._order("order-c", "Cookie Game")], "totalPages": 1},
+                headers={"content-type": "application/json"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_config(
+                tmp, tokens={"access_token": "stale"}, cookies_txt=cookies_txt
+            )
+            with patch.dict(os.environ, {"LGOGDOWNLOADER_CONFIG_PATH": tmp}):
+                records, _ = await gog_orders.fetch_gog_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
+
+        self.assertEqual([r.title for r in records], ["Cookie Game"])
+
+
+def _fixture(name: str) -> str:
+    return (FIXTURES_DIR / name).read_text(encoding="utf-8")
+
+
+class SteamLicensesParserTests(unittest.TestCase):
+    def test_parse_licenses_fixture(self):
+        licenses = steam_history.parse_licenses(_fixture("steam_licenses_sample.html"))
+
+        self.assertEqual(len(licenses), 4)
+        self.assertEqual(
+            licenses[0],
+            {
+                # The "Remove" free-license link div is stripped from the name.
+                "name": "Total War: WARHAMMER",
+                "date": "2021-03-12",
+                "acquisition_type": "Store Purchase",
+            },
+        )
+        self.assertEqual(licenses[1]["name"], "Portal 2 Beta")
+        self.assertEqual(licenses[1]["date"], "2020-01-03")
+        self.assertEqual(licenses[1]["acquisition_type"], "Complimentary")
+        self.assertEqual(licenses[2]["acquisition_type"], "Gift/Guest Pass")
+        self.assertEqual(licenses[3]["acquisition_type"], "Retail")
+
+    def test_strip_package_suffix(self):
+        self.assertEqual(steam_history.strip_package_suffix("Left 4 Dead 2 Retail"), "Left 4 Dead 2")
+        self.assertEqual(steam_history.strip_package_suffix("Portal 2 Beta"), "Portal 2")
+        self.assertEqual(steam_history.strip_package_suffix("Half-Life 2"), "Half-Life 2")
+        self.assertEqual(
+            steam_history.strip_package_suffix("Dota 2 Steam Store and Retail Key"),
+            "Dota 2",
+        )
+
+    def test_parse_steam_date(self):
+        self.assertEqual(steam_history.parse_steam_date("12 Mar, 2021"), "2021-03-12")
+        self.assertEqual(steam_history.parse_steam_date("3 Jan, 2020"), "2020-01-03")
+        self.assertIsNone(steam_history.parse_steam_date("not a date"))
+
+
+class SteamHistoryParserTests(unittest.TestCase):
+    def test_parse_wallet_history_fixture(self):
+        purchases, skipped, cursor = steam_history.parse_wallet_history(
+            _fixture("steam_history_sample.html")
+        )
+
+        self.assertEqual(len(purchases), 2)
+        single = purchases[0]
+        self.assertEqual(single["date"], "2021-03-12")
+        self.assertEqual(single["items"], ["Total War: WARHAMMER"])
+        self.assertEqual(single["total"], 59.99)
+        self.assertEqual(single["currency"], "USD")
+
+        cart = purchases[1]
+        self.assertEqual(cart["items"], ["Hollow Knight", "Celeste", "Dead Cells"])
+        self.assertEqual(cart["total"], 25.00)
+        self.assertEqual(cart["currency"], "EUR")
+
+        reasons = " | ".join(s["reason"] for s in skipped)
+        self.assertEqual(len(skipped), 4)
+        self.assertIn("Refund", reasons)
+        self.assertIn("Market Transaction", reasons)
+        self.assertIn("In-Game Purchase", reasons)
+        self.assertIn("Gift Purchase", reasons)
+
+        self.assertEqual(cursor["wallet_txnid"], "9990001")
+        self.assertEqual(cursor["timestamp_newest"], 1615500000)
+
+    def test_price_string_currency_variants(self):
+        cases = [
+            ("$19.99", 19.99, "USD"),
+            ("19,99€", 19.99, "EUR"),
+            ("CDN$ 12.00", 12.00, "CAD"),
+            ("£3.99", 3.99, "GBP"),
+            ("1 234,56 zł", 1234.56, "PLN"),
+            ("12.00 USD", 12.00, "USD"),
+            ("R$ 1.234,56", 1234.56, "BRL"),
+        ]
+        for text, amount, currency in cases:
+            with self.subTest(text=text):
+                self.assertEqual(steam_history.parse_price_string(text), (amount, currency))
+
+    def test_merge_adds_free_and_gift_records_only_when_unmatched(self):
+        licenses = steam_history.parse_licenses(_fixture("steam_licenses_sample.html"))
+        purchase_records = [
+            PurchaseRecord(
+                title="Total War: WARHAMMER",
+                platform="steam",
+                purchase_source="steam",
+                acquired_at="2021-03-12",
+                price_paid=59.99,
+                price_currency="USD",
+            )
+        ]
+
+        merged = steam_history.merge_license_records(licenses, purchase_records)
+
+        by_title = {r.title: r for r in merged}
+        # Suffix-stripped Complimentary license → "free"; Gift/Guest Pass → "gift".
+        self.assertEqual(set(by_title), {"Portal 2", "Left 4 Dead 2"})
+        self.assertEqual(by_title["Portal 2"].purchase_source, "free")
+        self.assertEqual(by_title["Portal 2"].price_paid, 0.0)
+        self.assertEqual(by_title["Portal 2"].acquired_at, "2020-01-03")
+        self.assertEqual(by_title["Left 4 Dead 2"].purchase_source, "gift")
+        self.assertEqual(by_title["Left 4 Dead 2"].price_paid, 0.0)
+
+    def test_merge_skips_license_already_covered_by_history(self):
+        licenses = [
+            {"name": "Portal 2 Beta", "date": "2020-01-03", "acquisition_type": "Complimentary"}
+        ]
+        purchase_records = [
+            PurchaseRecord(
+                title="Portal 2",
+                platform="steam",
+                purchase_source="steam",
+                acquired_at="2020-01-02",
+                price_paid=4.99,
+                price_currency="USD",
+            )
+        ]
+        self.assertEqual(
+            steam_history.merge_license_records(licenses, purchase_records), []
+        )
+
+
+class SteamFetchTests(unittest.IsolatedAsyncioTestCase):
+    def _write_cookies(self, tmp: str) -> str:
+        path = os.path.join(tmp, "steam_cookies.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"steamLoginSecure": "765-abc", "sessionid": "sess-1"}, f)
+        return path
+
+    async def test_missing_cookie_file_raises_clear_error(self):
+        with patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": "/nonexistent/steam.json"}):
+            with self.assertRaisesRegex(RuntimeError, "set_steam_store_session"):
+                await steam_history.fetch_steam_purchases()
+
+    async def test_full_fetch_with_ajax_follow_up_and_license_merge(self):
+        from urllib.parse import parse_qs
+
+        ajax_calls: list[dict] = []
+        ajax_fragment = (
+            '<tr class="wallet_table_row">'
+            '<td class="wht_date">20 Nov, 2020</td>'
+            '<td class="wht_items">Hades</td>'
+            '<td class="wht_type"><div>Purchase</div></td>'
+            '<td class="wht_total">$24.99</td>'
+            "</tr>"
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/account/licenses/":
+                return httpx.Response(200, text=_fixture("steam_licenses_sample.html"))
+            if request.url.path == "/account/history/":
+                return httpx.Response(200, text=_fixture("steam_history_sample.html"))
+            self.assertEqual(request.url.path, "/account/AjaxLoadMoreHistory/")
+            form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
+            ajax_calls.append(form)
+            return httpx.Response(
+                200,
+                json={"html": ajax_fragment, "cursor": None},
+                headers={"content-type": "application/json"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp)
+            with patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}):
+                records, skipped = await steam_history.fetch_steam_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
+
+        # One follow-up call, carrying the cursor fields + sessionid.
+        self.assertEqual(len(ajax_calls), 1)
+        self.assertEqual(ajax_calls[0]["sessionid"], "sess-1")
+        self.assertEqual(ajax_calls[0]["cursor[wallet_txnid]"], "9990001")
+
+        by_title = {r.title: r for r in records}
+        self.assertEqual(
+            set(by_title),
+            {
+                "Total War: WARHAMMER", "Hollow Knight", "Celeste", "Dead Cells",
+                "Hades", "Portal 2", "Left 4 Dead 2",
+            },
+        )
+        # Multi-item cart split, last share absorbs the rounding remainder.
+        self.assertEqual(by_title["Hollow Knight"].price_paid, 8.33)
+        self.assertEqual(by_title["Dead Cells"].price_paid, 8.34)
+        self.assertEqual(by_title["Celeste"].price_currency, "EUR")
+        # AJAX-loaded row is a normal purchase record.
+        self.assertEqual(by_title["Hades"].price_paid, 24.99)
+        self.assertEqual(by_title["Hades"].acquired_at, "2020-11-20")
+        # License-only rows: complimentary → free, gift pass → gift, price 0.
+        self.assertEqual(by_title["Portal 2"].purchase_source, "free")
+        self.assertEqual(by_title["Left 4 Dead 2"].purchase_source, "gift")
+        # The "Retail" license is deliberately not imported.
+        self.assertNotIn("Counter-Strike: Source", by_title)
+        self.assertEqual(len(skipped), 4)
+
+    async def test_login_redirect_raises_session_advice(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                text=(
+                    "<html><body><a href=\"https://store.steampowered.com/login"
+                    "/?redir=account\">Sign In</a></body></html>"
+                ),
+                headers={"content-type": "text/html; charset=utf-8"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp)
+            with patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}):
+                with self.assertRaisesRegex(RuntimeError, "set_steam_store_session"):
+                    await steam_history.fetch_steam_purchases(
+                        transport=httpx.MockTransport(handler)
+                    )
+
+
 class ImportPurchasesTests(ToolDBTestCase):
     async def test_unknown_source_raises_tool_error(self):
         with self.assertRaisesRegex(ToolError, "Unknown purchase source"):
-            await acquisition.import_purchases(sources=["gog"])
+            await acquisition.import_purchases(sources=["origin"])
 
     async def test_dry_run_returns_proposed_and_writes_nothing(self):
         gid = await seed_game("Hades")
@@ -423,14 +839,8 @@ class ImportPurchasesTests(ToolDBTestCase):
         records = [_eshop_record("Hades")]
         skipped = [{"title": "Bad Port", "reason": "transaction_type 'refund' is not a purchase"}]
 
-        with (
-            patch.object(
-                acquisition, "fetch_eshop_purchases",
-                AsyncMock(return_value=(records, skipped)),
-            ),
-            patch.object(
-                acquisition, "fetch_humble_purchases", AsyncMock(return_value=([], [])),
-            ),
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, skipped)),
         ):
             result = await acquisition.import_purchases(dry_run=True)
 
@@ -464,14 +874,8 @@ class ImportPurchasesTests(ToolDBTestCase):
         await add_platform(gid, "switch2")
 
         records = [_eshop_record("Hades"), _eshop_record("Totally Absent Game")]
-        with (
-            patch.object(
-                acquisition, "fetch_eshop_purchases",
-                AsyncMock(return_value=(records, [])),
-            ),
-            patch.object(
-                acquisition, "fetch_humble_purchases", AsyncMock(return_value=([], [])),
-            ),
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
         ):
             result = await acquisition.import_purchases()
 
@@ -505,15 +909,9 @@ class ImportPurchasesTests(ToolDBTestCase):
                 price_currency="USD",
             )
         ]
-        with (
-            patch.object(
-                acquisition, "fetch_eshop_purchases",
-                AsyncMock(side_effect=RuntimeError("cookies expired")),
-            ),
-            patch.object(
-                acquisition, "fetch_humble_purchases",
-                AsyncMock(return_value=(humble_records, [])),
-            ),
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(side_effect=RuntimeError("cookies expired")),
+            fetch_humble_purchases=AsyncMock(return_value=(humble_records, [])),
         ):
             result = await acquisition.import_purchases()
 
@@ -552,17 +950,75 @@ class ImportPurchasesTests(ToolDBTestCase):
         self.assertEqual(row["acquired_at"], "2024-03-01")
 
     async def test_selected_source_only_runs_that_fetcher(self):
-        eshop_mock = AsyncMock(return_value=([], []))
-        humble_mock = AsyncMock(return_value=([], []))
-        with (
-            patch.object(acquisition, "fetch_eshop_purchases", eshop_mock),
-            patch.object(acquisition, "fetch_humble_purchases", humble_mock),
-        ):
+        with _patch_fetchers() as mocks:
             result = await acquisition.import_purchases(sources=["humble"])
 
         self.assertEqual(set(result["sources"]), {"humble"})
-        eshop_mock.assert_not_awaited()
-        humble_mock.assert_awaited_once()
+        mocks["fetch_eshop_purchases"].assert_not_awaited()
+        mocks["fetch_gog_purchases"].assert_not_awaited()
+        mocks["fetch_steam_purchases"].assert_not_awaited()
+        mocks["fetch_humble_purchases"].assert_awaited_once()
+
+    async def test_all_four_sources_aggregate_totals(self):
+        hades = await seed_game("Hades")
+        await add_platform(hades, "switch2")
+        hollow = await seed_game("Hollow Knight")
+        await add_platform(hollow, "steam")
+        witcher = await seed_game("The Witcher 3 Wild Hunt")
+        await add_platform(witcher, "gog")
+        celeste = await seed_game("Celeste")
+        await add_platform(celeste, "steam")
+
+        def _rec(title, platform, source, **overrides):
+            fields = {
+                "title": title,
+                "platform": platform,
+                "purchase_source": source,
+                "acquired_at": "2024-01-01",
+                "price_paid": 10.0,
+                "price_currency": "USD",
+            }
+            fields.update(overrides)
+            return PurchaseRecord(**fields)
+
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(
+                return_value=([_rec("Hades", "switch2", "eshop")], []),
+            ),
+            fetch_gog_purchases=AsyncMock(
+                return_value=(
+                    [_rec("The Witcher 3 Wild Hunt", "gog", "gog")],
+                    [{"description": "order-1", "reason": "order has no products"}],
+                ),
+            ),
+            fetch_humble_purchases=AsyncMock(
+                return_value=([_rec("Hollow Knight", "steam", "humble")], []),
+            ),
+            fetch_steam_purchases=AsyncMock(
+                return_value=(
+                    [
+                        _rec("Celeste", "steam", "steam"),
+                        _rec("Totally Absent Game", "steam", "steam"),
+                    ],
+                    [],
+                ),
+            ),
+        ):
+            result = await acquisition.import_purchases()
+
+        self.assertEqual(set(result["sources"]), {"eshop", "gog", "humble", "steam"})
+        for source in ("eshop", "gog", "humble", "steam"):
+            self.assertEqual(result["sources"][source]["status"], "ok")
+        self.assertEqual(result["totals"]["fetched"], 5)
+        self.assertEqual(result["totals"]["filled"], 4)
+        self.assertEqual(result["totals"]["unmatched"], 1)
+        self.assertEqual(result["totals"]["errors"], 0)
+        self.assertEqual(len(result["sources"]["gog"]["skipped"]), 1)
+
+        row = await _acquisition_row(witcher, "gog")
+        self.assertEqual(row["purchase_source"], "gog")
+        row = await _acquisition_row(celeste, "steam")
+        self.assertEqual(row["purchase_source"], "steam")
 
 
 class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
@@ -608,6 +1064,21 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
             # The saved file round-trips through the eShop fetcher's loader.
             with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
                 self.assertEqual(nintendo_ec._load_ec_cookies(), {"NASID": "token"})
+
+    async def test_set_steam_store_session_writes_to_steam_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "steam.json")
+            with patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}):
+                result = await admin.set_steam_store_session(
+                    json.dumps({"steamLoginSecure": "765-abc", "sessionid": "s1"})
+                )
+            self.assertEqual(result, {"cookie_count": 2, "path": path})
+            # The saved file round-trips through the Steam fetcher's loader.
+            with patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}):
+                self.assertEqual(
+                    steam_history._load_steam_cookies(),
+                    {"steamLoginSecure": "765-abc", "sessionid": "s1"},
+                )
 
     async def test_set_nintendo_session_still_works_after_refactor(self):
         with tempfile.TemporaryDirectory() as tmp:

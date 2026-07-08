@@ -14,7 +14,7 @@ as ``(module_path, attr)`` strings and resolved lazily, so importing this
 package never drags in provider modules, and resolution can prefer names bound
 on a caller-supplied namespace (which keeps the
 ``patch("gamelib_mcp.tools.acquisition.fetch_eshop_purchases", ...)`` test
-pattern working). Adding an importer (gog/steam are planned) = write
+pattern working). Adding an importer = write
 ``data/purchases/<source>.py`` + one entry here.
 """
 
@@ -46,7 +46,9 @@ class PurchaseRecord:
 # source key → (module_path, attr) of the fetch coroutine, resolved lazily.
 PURCHASE_IMPORTERS: dict[str, tuple[str, str]] = {
     "eshop": ("gamelib_mcp.data.purchases.nintendo_ec", "fetch_eshop_purchases"),
+    "gog": ("gamelib_mcp.data.purchases.gog_orders", "fetch_gog_purchases"),
     "humble": ("gamelib_mcp.data.purchases.humble", "fetch_humble_purchases"),
+    "steam": ("gamelib_mcp.data.purchases.steam_history", "fetch_steam_purchases"),
 }
 
 

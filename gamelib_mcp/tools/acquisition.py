@@ -31,8 +31,10 @@ from ..data.purchases import PURCHASE_IMPORTERS, PurchaseRecord
 # gamelib_mcp.tools.acquisition.<fetch_fn> (_resolve_purchase_fetchers checks
 # this namespace first, mirroring platforms_registry.resolve_platform_functions).
 # F401: referenced via getattr, not by name.
+from ..data.purchases.gog_orders import fetch_gog_purchases  # noqa: F401
 from ..data.purchases.humble import fetch_humble_purchases  # noqa: F401
 from ..data.purchases.nintendo_ec import fetch_eshop_purchases  # noqa: F401
+from ..data.purchases.steam_history import fetch_steam_purchases  # noqa: F401
 from .common import (
     LIBRARY_PLATFORMS,
     validate_platform as _validate_platform,

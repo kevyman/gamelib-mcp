@@ -408,6 +408,29 @@ async def set_humble_session(cookies: str) -> dict:
     )
 
 
+async def set_steam_store_session(cookies: str) -> dict:
+    """
+    Store Steam store session cookies for purchase-history import.
+
+    Accepts the same JSON shapes as set_nintendo_session (object or Cookie
+    Editor array). Only the ``steamLoginSecure`` cookie is strictly required;
+    ``sessionid`` is recommended too (the history load-more endpoint wants
+    it). These store.steampowered.com cookies are unrelated to STEAM_API_KEY.
+
+    How to get your cookies:
+    1. Open https://store.steampowered.com/account/ in your browser (logged in)
+    2. Install the "Cookie Editor" browser extension
+    3. Click the extension icon → Export → copy the JSON
+    4. Pass that JSON string to this tool
+
+    Cookies are saved to the path in STEAM_STORE_COOKIES_FILE
+    (default: data/steam_store_cookies.json).
+    """
+    return _save_session_cookies(
+        cookies, "STEAM_STORE_COOKIES_FILE", "data/steam_store_cookies.json", "Steam store"
+    )
+
+
 # Holds the PKCE code_verifier between the two set_nintendo_pctl_session calls.
 # The verifier that generated the login URL must be the one used to exchange the
 # pasted code, so it has to survive across the (interactive) gap.
