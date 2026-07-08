@@ -275,6 +275,7 @@ class LibraryStatsTests(ToolDBTestCase):
                 "total_playtime_hours",
                 "filter",
                 "sort_by",
+                "spending",
                 "results",
                 "total_matches",
                 "has_more",
@@ -393,6 +394,72 @@ class LibraryStatsTests(ToolDBTestCase):
         game = results["results"][0]
         self.assertEqual(game["play_state"], "unknown")
         self.assertIsNone(game["playtime_hours"])
+
+    async def test_spending_block_empty_library(self):
+        stats = await library.get_library_stats()
+        self.assertEqual(
+            stats["spending"],
+            {"totals": [], "owned_rows": 0, "priced_rows": 0, "coverage_pct": 0.0},
+        )
+
+    async def test_spending_block_totals_and_coverage(self):
+        priced_usd = await make_steam_game("Priced USD", 1, playtime_minutes=0)
+        another_usd = await make_steam_game("Another USD", 2, playtime_minutes=100)
+        priced_eur = await make_steam_game("Priced EUR", 3, playtime_minutes=0)
+        await make_steam_game("Unpriced", 4, playtime_minutes=0)
+        for gid, price, currency in (
+            (priced_usd, 10.0, "USD"),
+            (another_usd, 30.0, "USD"),
+            (priced_eur, 20.0, "EUR"),
+        ):
+            async with db_module.get_db() as db:
+                gp = await db.execute_fetchone(
+                    "SELECT id FROM game_platforms WHERE game_id = ?", (gid,)
+                )
+            await db_module.set_platform_acquisition(
+                gp["id"], {"price_paid": price, "price_currency": currency}
+            )
+
+        stats = await library.get_library_stats()
+
+        spending = stats["spending"]
+        self.assertEqual(spending["owned_rows"], 4)
+        self.assertEqual(spending["priced_rows"], 3)
+        self.assertEqual(spending["coverage_pct"], 75.0)
+        # Per-currency, never summed across; ordered by total_spent DESC.
+        self.assertEqual(
+            spending["totals"],
+            [
+                {"currency": "USD", "total_spent": 40.0, "priced_rows": 2},
+                {"currency": "EUR", "total_spent": 20.0, "priced_rows": 1},
+            ],
+        )
+
+    async def test_spending_block_ignores_unowned_rows_and_filter_params(self):
+        owned = await make_steam_game("Owned Priced", 1, playtime_minutes=600)
+        async with db_module.get_db() as db:
+            gp = await db.execute_fetchone(
+                "SELECT id FROM game_platforms WHERE game_id = ?", (owned,)
+            )
+        await db_module.set_platform_acquisition(
+            gp["id"], {"price_paid": 12.5, "price_currency": "USD"}
+        )
+        # owned=0 stub with a price must not count.
+        stub = await seed_game("Unowned Stub")
+        stub_gpid = await add_platform(stub, "epic", owned=0)
+        await db_module.set_platform_acquisition(stub_gpid, {"price_paid": 99.0})
+
+        # filter=unplayed excludes the played game from results, but the
+        # spending summary is library-wide and unaffected.
+        stats = await library.get_library_stats(filter="unplayed")
+
+        self.assertEqual(stats["results"], [])
+        self.assertEqual(stats["spending"]["owned_rows"], 1)
+        self.assertEqual(stats["spending"]["priced_rows"], 1)
+        self.assertEqual(
+            stats["spending"]["totals"],
+            [{"currency": "USD", "total_spent": 12.5, "priced_rows": 1}],
+        )
 
 
 class WishlistOnlyOwnershipFlagTests(ToolDBTestCase):

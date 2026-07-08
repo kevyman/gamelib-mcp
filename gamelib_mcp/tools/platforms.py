@@ -13,6 +13,7 @@ from ..data.db import (
     recompute_tag_affinity,
     remove_manual_overrides,
     set_meta,
+    set_platform_acquisition,
     upsert_game,
     upsert_game_platform,
     upsert_game_platform_identifier,
@@ -20,6 +21,10 @@ from ..data.db import (
 )
 from ..data.content import NESTED_CONTENT_TYPES, PRIMARY_CONTENT_TYPES
 from ..data.tag_synonyms import canonical_tag
+# Safe direction: acquisition.py never imports this module at top level (it
+# lazy-imports _resolve_game_row inside functions), so importing its validator
+# helpers here cannot form a cycle.
+from .acquisition import _validated_fields as _validated_acquisition_fields
 from .common import (
     LIBRARY_PLATFORMS,
     validate_platform as _validate_platform,
@@ -152,6 +157,11 @@ async def add_game_to_platform(
     identifier_value: str | None = None,
     playtime_minutes: int | None = None,
     owned: bool = True,
+    acquired_at: str | None = None,
+    price_paid: float | None = None,
+    price_currency: str | None = None,
+    purchase_source: str | None = None,
+    bundle_name: str | None = None,
 ) -> dict:
     """
     Manually add a game to a platform — useful for games that aren't fetched
@@ -173,6 +183,11 @@ async def add_game_to_platform(
         instead (playtime_minutes is ignored in that case). Either way, any
         existing wishlist entry for this game+platform that's now fulfilled is
         cleared.
+    acquired_at / price_paid / price_currency / purchase_source / bundle_name:
+        optional acquisition details recorded on the new ownership row, with
+        the same validation and vocabulary as set_acquisition. They require
+        owned=True — a wishlist entry has no platform-ownership row to record
+        them on.
     """
     # Resolve aliases (e.g. "nintendo" → "switch2") and validate in one step.
     platform = _validate_platform(platform, LIBRARY_PLATFORMS)
@@ -182,6 +197,16 @@ async def add_game_to_platform(
         raise ToolError("name must not be empty")
     if playtime_minutes is not None and playtime_minutes < 0:
         raise ToolError("playtime_minutes must not be negative")
+    acquisition_params = (
+        acquired_at, price_paid, price_currency, purchase_source, bundle_name
+    )
+    if not owned and any(value is not None for value in acquisition_params):
+        raise ToolError(
+            "Acquisition fields require owned=True — a wishlist entry "
+            "(owned=False) has no platform-ownership row to record them on"
+        )
+    # Validate before any write so a bad price/source/date leaves no partial row.
+    acquisition_fields = _validated_acquisition_fields(*acquisition_params)
     if not owned:
         if identifier_type not in (None, "steam_appid"):
             raise ToolError(
@@ -201,6 +226,7 @@ async def add_game_to_platform(
 
     game_id = await upsert_game(None, name)
     added_identifier = None
+    acquisition = None
     if owned:
         game_platform_id = await upsert_game_platform(
             game_id,
@@ -208,6 +234,10 @@ async def add_game_to_platform(
             playtime_minutes=playtime_minutes,
             owned=1,
         )
+        if acquisition_fields:
+            acquisition = await set_platform_acquisition(
+                game_platform_id, acquisition_fields
+            )
         wishlist_id = None
         if identifier_type and identifier_value:
             await upsert_game_platform_identifier(
@@ -241,6 +271,7 @@ async def add_game_to_platform(
         "owned": owned,
         "playtime_minutes": playtime_minutes if owned else None,
         "identifier": added_identifier,
+        "acquisition": acquisition,
     }
 
 

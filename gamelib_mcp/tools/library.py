@@ -446,6 +446,28 @@ async def get_library_stats(
             tuple(params),
         )
 
+        # Library-wide acquisition spend, same scoping as get_spending_stats
+        # totals: every owned game_platforms row (DLC/editions included —
+        # money spent is money spent), independent of the filter params above.
+        # Monetary totals group per currency and are never summed across.
+        spend_summary = await db.execute_fetchone(
+            """SELECT COUNT(*) AS owned_rows,
+                      SUM(CASE WHEN price_paid IS NOT NULL THEN 1 ELSE 0 END) AS priced_rows
+               FROM game_platforms
+               WHERE owned = 1"""
+        )
+        spend_totals = await db.execute_fetchall(
+            """SELECT price_currency AS currency,
+                      ROUND(SUM(price_paid), 2) AS total_spent,
+                      COUNT(*) AS priced_rows
+               FROM game_platforms
+               WHERE owned = 1 AND price_paid IS NOT NULL
+               GROUP BY price_currency
+               ORDER BY total_spent DESC"""
+        )
+
+    spend_owned_rows = spend_summary["owned_rows"] or 0
+    spend_priced_rows = spend_summary["priced_rows"] or 0
     return {
         "total_games": summary["total_games"],
         "played": summary["played"] or 0,
@@ -455,6 +477,16 @@ async def get_library_stats(
         "total_playtime_hours": round((summary["total_minutes"] or 0) / 60, 1),
         "filter": filter,
         "sort_by": sort_by,
+        "spending": {
+            "totals": [dict(r) for r in spend_totals],
+            "owned_rows": spend_owned_rows,
+            "priced_rows": spend_priced_rows,
+            "coverage_pct": (
+                round(spend_priced_rows / spend_owned_rows * 100, 1)
+                if spend_owned_rows
+                else 0.0
+            ),
+        },
         "results": await _format_rows(rows, response_format=response_format),
         "total_matches": summary["total_games"],
         "has_more": offset + len(rows) < summary["total_games"],

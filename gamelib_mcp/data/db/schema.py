@@ -911,6 +911,25 @@ _V25_SCHEMA_DDL = _V22_SCHEMA_DDL.replace(
     "        igdb_platforms   TEXT,\n        cover_image_id   TEXT,",
 )
 
+# v29 adds per-ownership acquisition tracking to game_platforms: when and how
+# a game was acquired on that platform, what was paid, and (for multi-game
+# bundles) which bundle it came from. price_paid holds the per-game allocation
+# of a bundle's total; bundle_name groups the members. No sync writer ever
+# touches these columns (all sync SQL enumerates its columns explicitly) —
+# they are supplied only by set_acquisition / set_acquisitions_batch /
+# import_purchases / add_game_to_platform.
+# (v26-v28 were data-only migrations — no DDL constants exist for them.)
+_V29_SCHEMA_DDL = _V25_SCHEMA_DDL.replace(
+    "        last_synced      TEXT,\n        UNIQUE(game_id, platform)",
+    "        last_synced      TEXT,\n"
+    "        acquired_at      TEXT,\n"
+    "        price_paid       REAL,\n"
+    "        price_currency   TEXT,\n"
+    "        purchase_source  TEXT,\n"
+    "        bundle_name      TEXT,\n"
+    "        UNIQUE(game_id, platform)",
+)
+
 # Derived search index — NOT part of the versioned schema chain. Created and
 # fully resynced by _run_migrations' _sync_fts_index on every migrate_db run,
 # which self-heals after destructive games-table rebuilds (those drop the

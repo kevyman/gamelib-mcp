@@ -78,6 +78,7 @@ class AddGameToPlatformTests(ToolDBTestCase):
                 "owned",
                 "playtime_minutes",
                 "identifier",
+                "acquisition",
             },
         )
         self.assertTrue(result["created"])
@@ -118,6 +119,73 @@ class AddGameToPlatformTests(ToolDBTestCase):
     async def test_rejects_negative_playtime(self):
         with self.assertRaisesRegex(ToolError, "playtime_minutes must not be negative"):
             await platforms.add_game_to_platform("Some Game", "gog", playtime_minutes=-5)
+
+    async def test_acquisition_params_persisted_on_owned_add(self):
+        result = await platforms.add_game_to_platform(
+            "Boxed Copy",
+            "switch2",
+            acquired_at="2024-11-29",
+            price_paid=39.99,
+            price_currency="eur",
+            purchase_source="retail",  # alias -> physical
+            bundle_name="Black Friday Haul",
+        )
+        self.assertEqual(
+            result["acquisition"],
+            {
+                "acquired_at": "2024-11-29",
+                "price_paid": 39.99,
+                "price_currency": "EUR",
+                "purchase_source": "physical",
+                "bundle_name": "Black Friday Haul",
+            },
+        )
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                """SELECT acquired_at, price_paid, price_currency,
+                          purchase_source, bundle_name
+                   FROM game_platforms WHERE id = ?""",
+                (result["game_platform_id"],),
+            )
+        self.assertEqual(row["acquired_at"], "2024-11-29")
+        self.assertEqual(row["price_paid"], 39.99)
+        self.assertEqual(row["price_currency"], "EUR")
+        self.assertEqual(row["purchase_source"], "physical")
+        self.assertEqual(row["bundle_name"], "Black Friday Haul")
+
+    async def test_acquisition_omitted_leaves_acquisition_null(self):
+        result = await platforms.add_game_to_platform("Plain Add", "gog")
+        self.assertIsNone(result["acquisition"])
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT price_paid, purchase_source FROM game_platforms WHERE id = ?",
+                (result["game_platform_id"],),
+            )
+        self.assertIsNone(row["price_paid"])
+        self.assertIsNone(row["purchase_source"])
+
+    async def test_acquisition_param_with_owned_false_raises(self):
+        with self.assertRaisesRegex(ToolError, "require owned=True"):
+            await platforms.add_game_to_platform(
+                "Wishlist Wanted", "ps5", owned=False, price_paid=19.99
+            )
+        # Validation happens before any write — no games row is left behind.
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT id FROM games WHERE name = 'Wishlist Wanted'"
+            )
+        self.assertIsNone(row)
+
+    async def test_invalid_acquisition_value_raises_before_write(self):
+        with self.assertRaisesRegex(ToolError, "Unknown purchase_source"):
+            await platforms.add_game_to_platform(
+                "Bad Source", "steam", purchase_source="carrier pigeon"
+            )
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT id FROM games WHERE name = 'Bad Source'"
+            )
+        self.assertIsNone(row)
 
 
 class UpdateGameTests(ToolDBTestCase):

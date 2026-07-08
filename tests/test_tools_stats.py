@@ -32,6 +32,7 @@ class BacklogStatsTests(ToolDBTestCase):
                 "highest_rated_unplayed_metacritic",
                 "highest_rated_unplayed_opencritic",
                 "highest_rated_unplayed_personal",
+                "unplayed_spend",
             },
         )
         self.assertEqual(result["total_library"], 0)
@@ -41,6 +42,7 @@ class BacklogStatsTests(ToolDBTestCase):
         self.assertEqual(result["unknown_pct"], 0)
         self.assertIsNone(result["years_to_clear_backlog"])
         self.assertIsNone(result["most_played_genre_in_backlog"])
+        self.assertEqual(result["unplayed_spend"], {"totals": [], "top": []})
 
     async def test_counts_and_percentages(self):
         await make_steam_game("Played", 1, playtime_minutes=600)
@@ -161,6 +163,84 @@ class BacklogStatsTests(ToolDBTestCase):
         self.assertEqual(result["unplayed"], 1)
         self.assertEqual(result["unplayed_with_hltb"], 1)
         self.assertEqual(result["backlog_hours_hltb"], 10)
+
+    async def _price_platform(self, game_id: int, platform: str, price: float,
+                              currency: str = "USD") -> None:
+        async with db_module.get_db() as db:
+            gpid = await db.execute_fetchone(
+                "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",
+                (game_id, platform),
+            )
+        await db_module.set_platform_acquisition(
+            gpid["id"], {"price_paid": price, "price_currency": currency}
+        )
+
+    async def test_unplayed_spend_counts_priced_unplayed_only(self):
+        played = await make_steam_game("Played Purchase", 1, playtime_minutes=600)
+        await self._price_platform(played, "steam", 59.99)
+        unplayed = await make_steam_game("Shelfware", 2, playtime_minutes=0)
+        await self._price_platform(unplayed, "steam", 39.99)
+        also_unplayed = await make_steam_game("More Shelfware", 3, playtime_minutes=0)
+        await self._price_platform(also_unplayed, "steam", 10.00)
+        # Priced but free (0) never counts; unpriced-unplayed never counts.
+        free = await make_steam_game("Epic Freebie", 4, playtime_minutes=0)
+        await self._price_platform(free, "steam", 0.0)
+        await make_steam_game("Unpriced Backlog", 5, playtime_minutes=0)
+
+        result = await stats.get_backlog_stats()
+
+        spend = result["unplayed_spend"]
+        self.assertEqual(
+            spend["totals"], [{"currency": "USD", "spent": 49.99, "count": 2}]
+        )
+        self.assertEqual(
+            [(t["name"], t["price_paid"], t["currency"]) for t in spend["top"]],
+            [("Shelfware", 39.99, "USD"), ("More Shelfware", 10.0, "USD")],
+        )
+        top = spend["top"][0]
+        self.assertEqual(set(top), {"game_id", "name", "platform", "price_paid", "currency"})
+        self.assertEqual(top["platform"], "steam")
+
+    async def test_unplayed_spend_groups_by_currency(self):
+        usd = await make_steam_game("USD Buy", 1, playtime_minutes=0)
+        await self._price_platform(usd, "steam", 20.0, "USD")
+        eur = await make_steam_game("EUR Buy", 2, playtime_minutes=0)
+        await self._price_platform(eur, "steam", 30.0, "EUR")
+
+        result = await stats.get_backlog_stats()
+
+        self.assertEqual(
+            result["unplayed_spend"]["totals"],
+            [
+                {"currency": "EUR", "spent": 30.0, "count": 1},
+                {"currency": "USD", "spent": 20.0, "count": 1},
+            ],
+        )
+
+    async def test_unplayed_spend_includes_unknown_playtime_and_excludes_written_off(self):
+        # NULL playtime (GOG-style) with a price: still effectively unplayed.
+        unknown = await seed_game("Priced GOG Mystery")
+        await add_platform(unknown, "gog")  # no playtime -> NULL
+        await self._price_platform(unknown, "gog", 15.0)
+        # Written-off statuses leave the backlog, mirroring backlog-hours.
+        abandoned = await make_steam_game("Abandoned Buy", 1, playtime_minutes=0)
+        await self._price_platform(abandoned, "steam", 25.0)
+        await update_game(game_id=abandoned, completion_status="abandoned")
+        completed = await seed_game("Completed On GOG")
+        await add_platform(completed, "gog")
+        await self._price_platform(completed, "gog", 35.0)
+        await update_game(game_id=completed, completion_status="completed")
+
+        result = await stats.get_backlog_stats()
+
+        self.assertEqual(
+            result["unplayed_spend"]["totals"],
+            [{"currency": "USD", "spent": 15.0, "count": 1}],
+        )
+        self.assertEqual(
+            [t["name"] for t in result["unplayed_spend"]["top"]],
+            ["Priced GOG Mystery"],
+        )
 
     async def test_wishlist_only_game_excluded_from_totals(self):
         # A wishlist sync creates a games row + a game_wishlist row with zero
