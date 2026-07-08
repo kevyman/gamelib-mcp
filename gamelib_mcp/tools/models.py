@@ -130,6 +130,9 @@ class LibraryStatsResponse(PaginatedGamesResponse):
     total_playtime_hours: float
     filter: str
     sort_by: str
+    # Library-wide spending summary over owned rows (per-currency totals,
+    # never cross-currency) — independent of the current filter parameters.
+    spending: dict[str, Any]
 
 
 class GameRating(FlexibleModel):
@@ -187,6 +190,9 @@ class BacklogStatsResponse(FlexibleModel):
     completed: int
     abandoned: int
     evergreen: int
+    # Money recorded on owned, effectively-unplayed games:
+    # {"totals": [{currency, spent, count}], "top": [up to 5 priced games]}.
+    unplayed_spend: dict[str, Any]
 
 
 class RefreshLibraryResponse(FlexibleModel):
@@ -258,6 +264,14 @@ class HardwarePreferenceResponse(FlexibleModel):
     hardware_preference: list[str]
 
 
+class AcquisitionInfo(FlexibleModel):
+    acquired_at: str | None = None
+    price_paid: float | None = None
+    price_currency: str | None = None
+    purchase_source: str | None = None
+    bundle_name: str | None = None
+
+
 class AddGameToPlatformResponse(FlexibleModel):
     created: bool
     game_id: int
@@ -268,6 +282,8 @@ class AddGameToPlatformResponse(FlexibleModel):
     owned: bool = True
     playtime_minutes: int | None = None
     identifier: dict[str, str] | None = None
+    # Populated when acquisition params were passed (owned=True only).
+    acquisition: AcquisitionInfo | None = None
 
 
 class SyncWishlistResponse(FlexibleModel):
@@ -299,6 +315,67 @@ class UpdateGameResponse(FlexibleModel):
     updated: dict[str, Any]
     cleared: list[str]
     manual_overrides: list[str]
+
+
+class SetAcquisitionResponse(FlexibleModel):
+    game_id: int
+    name: str
+    platform: str
+    game_platform_id: int
+    platform_row_created: bool
+    acquisition: AcquisitionInfo
+    cleared: list[str]
+
+
+class AcquisitionBatchItemResult(FlexibleModel):
+    # applied | filled | no_change | unmatched | no_platform_row | error
+    status: str
+    platform: str | None = None
+    game_id: int | None = None
+    matched_name: str | None = None
+    match_type: str | None = None  # identifier | id | name | fuzzy
+    acquisition: AcquisitionInfo | None = None
+    # Present on no_platform_row: the platforms the game IS owned/recorded on.
+    platforms: list[str] | None = None
+    error: str | None = None
+    # Original item payload, echoed on unmatched/no_platform_row/error.
+    item: dict[str, Any] | None = None
+
+
+class SetAcquisitionsBatchResponse(FlexibleModel):
+    results: list[AcquisitionBatchItemResult]
+    total: int
+    applied: int
+    filled: int
+    no_change: int
+    unmatched: list[dict[str, Any]]
+    no_platform_row: int
+    errors: int
+
+
+class ImportPurchasesResponse(FlexibleModel):
+    # Per-source results keyed by importer name (eshop, humble, ...). Each is
+    # {source, status: "ok"|"error", ...} — ok carries fetched/applied/filled/
+    # no_change/unmatched/no_platform_row/errors/skipped (or dry_run+proposed),
+    # error carries the fetch failure message.
+    sources: dict[str, dict[str, Any]]
+    dry_run: bool
+    totals: dict[str, Any]
+
+
+class SpendingStatsResponse(FlexibleModel):
+    owned_rows: int
+    priced_rows: int
+    coverage_pct: float
+    zero_cost_rows: int
+    # Monetary aggregates are grouped by currency, never summed across them.
+    totals: list[dict[str, Any]]
+    by_year: list[dict[str, Any]]
+    by_source: list[dict[str, Any]]
+    by_platform: list[dict[str, Any]]
+    by_bundle: list[dict[str, Any]]
+    top_expensive: list[dict[str, Any]]
+    cost_per_hour: dict[str, Any]
 
 
 class MergeGamesResponse(FlexibleModel):

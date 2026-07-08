@@ -441,6 +441,11 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                 "playtime_2weeks_minutes": 0,
                 "last_played": None,
                 "last_synced": "2026-04-07T00:00:00+00:00",
+                "acquired_at": None,
+                "price_paid": None,
+                "price_currency": None,
+                "purchase_source": None,
+                "bundle_name": None,
                 "platform_release_date": "2024-02-01",
                 "metacritic_score": 88,
                 "metacritic_url": "https://www.metacritic.com/game/pc/portal-2/",
@@ -1049,6 +1054,39 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(rows[wished])
         self.assertIsNotNone(rows[other])
 
+    async def test_v29_adds_acquisition_columns_and_preserves_rows(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V25_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 28")
+        conn.execute("INSERT INTO games (id, name) VALUES (1, 'Portal 2')")
+        conn.execute(
+            "INSERT INTO game_platforms (game_id, platform, owned, playtime_minutes)"
+            " VALUES (1, 'steam', 1, 90)"
+        )
+        # Pre-adding one column exercises the ALTER guard (no duplicate-column error).
+        conn.execute("ALTER TABLE game_platforms ADD COLUMN price_paid REAL")
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+
+            async with db_module.get_db() as db:
+                version = await db_module._get_user_version(db)
+                row = await db.execute_fetchone(
+                    "SELECT platform, owned, playtime_minutes, acquired_at, price_paid,"
+                    "       price_currency, purchase_source, bundle_name"
+                    " FROM game_platforms WHERE game_id = 1"
+                )
+
+        self.assertEqual(version, db_module.SCHEMA_VERSION)
+        self.assertEqual(row["platform"], "steam")
+        self.assertEqual(row["playtime_minutes"], 90)
+        for column in ("acquired_at", "price_paid", "price_currency",
+                       "purchase_source", "bundle_name"):
+            self.assertIsNone(row[column])
+
     async def test_v20_reclaims_only_still_unresolved_wishlisted_games(self) -> None:
         # Handover doc: the v19 re-claim ran, but 9 of 187 wishlisted games
         # never got igdb_platforms populated (resolution gaps this branch
@@ -1063,7 +1101,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             async with db_module.get_db() as db:
                 version = await db_module._get_user_version(db)
             self.assertEqual(version, db_module.SCHEMA_VERSION)
-            self.assertEqual(db_module.SCHEMA_VERSION, 28)
+            self.assertEqual(db_module.SCHEMA_VERSION, 29)
 
             unresolved = await seed_game("Still Unresolved Wishlisted Game")
             resolved = await seed_game("Already Resolved Wishlisted Game")

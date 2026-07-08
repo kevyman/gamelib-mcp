@@ -39,6 +39,7 @@ from .tools.models import (
     GetScrapeConfigResponse,
     GetWishlistResponse,
     HardwarePreferenceResponse,
+    ImportPurchasesResponse,
     IntegrationStatusResponse,
     LibraryStatsResponse,
     MergeGamesResponse,
@@ -55,6 +56,9 @@ from .tools.models import (
     SearchGamesBatchResponse,
     SeriesBreakdownResponse,
     SeriesGapsResponse,
+    SetAcquisitionResponse,
+    SetAcquisitionsBatchResponse,
+    SpendingStatsResponse,
     SplitGameResponse,
     SyncRatingsResponse,
     SyncStatusResponse,
@@ -178,7 +182,9 @@ async def get_library_stats(
     accepts native, platinum, gold, silver, bronze, or borked. platform can
     filter to steam, epic, gog, nintendo, switch2, or ps5.
     response_format=concise omits platform arrays. Returns aggregate counts,
-    paged results, total_matches, and has_more.
+    paged results, total_matches, and has_more, plus a library-wide spending
+    summary (per-currency totals over owned rows with a recorded price and
+    price coverage — see set_acquisition / get_spending_stats).
     """
     from .tools.library import get_library_stats as _stats
     return await _stats(
@@ -340,7 +346,9 @@ async def get_backlog_stats() -> BacklogStatsResponse:
 
     Use this for high-level backlog health, weekly pace, years to clear, and top
     unplayed highlights; prefer get_library_stats for the underlying filtered
-    game list. Returns aggregate backlog metrics and highlight games.
+    game list. Returns aggregate backlog metrics and highlight games, plus an
+    unplayed_spend block (money recorded via set_acquisition on owned games
+    that were never played — per-currency totals and the top 5 offenders).
     """
     from .tools.stats import get_backlog_stats as _bstats
     return await _bstats()
@@ -852,6 +860,11 @@ async def add_game_to_platform(
     identifier_value: str | None = None,
     playtime_minutes: int | None = None,
     owned: bool = True,
+    acquired_at: str | None = None,
+    price_paid: float | None = None,
+    price_currency: str | None = None,
+    purchase_source: str | None = None,
+    bundle_name: str | None = None,
 ) -> AddGameToPlatformResponse:
     """
     Manually add a game to a platform.
@@ -863,12 +876,29 @@ async def add_game_to_platform(
     identifier_value can store an external ID (requires owned=True).
     playtime_minutes is optional. Pass owned=False to record a wishlist entry
     instead of an owned copy — useful for PSN, which has no wishlist API.
-    Returns game_platform_id when owned, wishlist_id when not (the other is
-    null); either call also clears a matching wishlist entry that's now
-    fulfilled.
+    acquired_at (YYYY / YYYY-MM / YYYY-MM-DD), price_paid (currency defaults
+    to USD), price_currency, purchase_source, and bundle_name optionally
+    record the acquisition on the new ownership row in the same call — same
+    validation and vocabulary as set_acquisition; they require owned=True (a
+    wishlist entry has nowhere to store them) and are echoed back in the
+    acquisition field. Returns game_platform_id when owned, wishlist_id when
+    not (the other is null); either call also clears a matching wishlist
+    entry that's now fulfilled.
     """
     from .tools.platforms import add_game_to_platform as _add
-    return await _add(name, platform, identifier_type, identifier_value, playtime_minutes, owned)
+    return await _add(
+        name,
+        platform,
+        identifier_type,
+        identifier_value,
+        playtime_minutes,
+        owned,
+        acquired_at,
+        price_paid,
+        price_currency,
+        purchase_source,
+        bundle_name,
+    )
 
 
 @mcp.tool(annotations=MUTATION_TOOL)
@@ -933,6 +963,183 @@ async def update_game(
     )
 
 
+@mcp.tool(annotations=MUTATION_TOOL)
+async def set_acquisition(
+    name: str | None = None,
+    game_id: int | None = None,
+    platform: str | None = None,
+    acquired_at: str | None = None,
+    price_paid: float | None = None,
+    price_currency: str | None = None,
+    purchase_source: str | None = None,
+    bundle_name: str | None = None,
+    clear: list[str] | None = None,
+    create_platform_row: bool = True,
+) -> SetAcquisitionResponse:
+    """
+    Record when, where, and for how much a game was acquired on one platform.
+
+    Resolve the game with game_id or name (partial/fuzzy match), pass the
+    platform it was acquired on (required), then set any subset of:
+    acquired_at (YYYY, YYYY-MM, or YYYY-MM-DD — as precise as you know),
+    price_paid (>= 0; use 0 for a free acquisition), price_currency (3-letter
+    ISO code, defaults to USD when a price is given), purchase_source, and
+    bundle_name (the bundle/promotion the game came in). For a bundle, record
+    price_paid as this game's share of the bundle's total price (e.g. a $12
+    three-game bundle → 4.00 each, or weight it however you prefer) and put
+    the bundle's name in bundle_name so get_spending_stats can group it.
+
+    purchase_source is one of: steam, gog, epic, eshop, psn, xbox, humble,
+    fanatical, itchio, ea, ubisoft, physical, gift, free, subscription, other
+    (common aliases like "Humble Bundle", "PS Store", "Game Pass" are
+    normalized). Use "free" for a no-strings giveaway you keep forever (e.g.
+    an Epic weekly), and "subscription" for a title claimed through a paid
+    membership (Game Pass, PS+, Humble Choice) whose access may lapse.
+
+    clear lists acquisition columns to reset to NULL (acquired_at, price_paid,
+    price_currency, purchase_source, bundle_name); a column cannot be set and
+    cleared in the same call. If the game has no row on that platform yet, one
+    is created (owned) and platform_row_created=true is returned; pass
+    create_platform_row=False to error instead. Acquisition columns are only
+    ever written by these tools — library syncs never touch them. Returns the
+    row's full post-write acquisition state.
+    """
+    from .tools.acquisition import set_acquisition as _set_acquisition
+    return await _set_acquisition(
+        name,
+        game_id,
+        platform,
+        acquired_at,
+        price_paid,
+        price_currency,
+        purchase_source,
+        bundle_name,
+        clear,
+        create_platform_row,
+    )
+
+
+@mcp.tool(annotations=MUTATION_TOOL)
+async def set_acquisitions_batch(
+    items: list[dict],
+    overwrite: bool = False,
+    create_platform_rows: bool = False,
+) -> SetAcquisitionsBatchResponse:
+    """
+    Bulk-import acquisition data for many games in one call (max 200 items).
+
+    Each item is {name or game_id, platform, plus any of acquired_at,
+    price_paid, price_currency, purchase_source, bundle_name} with the same
+    validation and vocabulary as set_acquisition (for bundles, price_paid is
+    the per-game share of the bundle's total). An item may also carry
+    identifier_type + identifier_value (both together or neither — e.g.
+    steam_appid, gog_product_id, nintendo_title_id): the store identifier is
+    tried first and resolves exactly even when the item's name differs from
+    the library title; a miss falls back to game_id/name matching, and when
+    create_platform_rows=True creates the platform row the identifier is
+    attached to it. One bad item never fails the
+    call: every item gets a per-item result with a status — applied
+    (overwrite=True wrote the fields), filled (default mode wrote at least one
+    previously-NULL field), no_change (every requested field already had a
+    value), unmatched (no library game matched — the original payloads are
+    also echoed in the top-level unmatched list for retry), no_platform_row
+    (game matched but isn't recorded on that platform; its actual platforms
+    are listed — pass create_platform_rows=True to create owned rows instead),
+    or error (validation failure, with the message and original item).
+
+    The default overwrite=False only fills missing (NULL) columns, so
+    re-importing a purchase-history export never clobbers values you've
+    already set or corrected; overwrite=True replaces the provided fields
+    unconditionally. This tool never creates games rows. Matches report
+    match_type ("identifier" for store-identifier hits, "id" for game_id,
+    "name" for tiered exact/prefix/substring matching, "fuzzy" for the
+    misspelling fallback) and matched_name — review match_type="fuzzy"
+    results to confirm they resolved to the intended game.
+    """
+    from .tools.acquisition import set_acquisitions_batch as _set_batch
+    return await _set_batch(items, overwrite, create_platform_rows)
+
+
+@mcp.tool(annotations=NETWORK_SYNC_TOOL)
+async def import_purchases(
+    sources: list[str] | None = None,
+    dry_run: bool = False,
+    overwrite: bool = False,
+    create_platform_rows: bool = False,
+) -> ImportPurchasesResponse:
+    """
+    Import purchase history (dates, prices, bundles) from storefront accounts.
+
+    Fetches each source's purchase history and records it through the same
+    machinery as set_acquisitions_batch: by default only missing (NULL)
+    acquisition fields are filled, so re-running an import never clobbers
+    values you set or corrected by hand (overwrite=True replaces them).
+    Games rows are never created; purchases that don't match a library game
+    are echoed in each source's unmatched list. Records carrying a store
+    identifier (eShop title ids, GOG product ids, Steam appids) are matched
+    identifier-first, so a renamed or localized library title still resolves;
+    the name-based tiers remain the fallback. Pass dry_run=True to preview
+    the converted items (capped at 200 per source, with a truncated flag)
+    without writing anything.
+
+    sources defaults to all registered importers; currently:
+    - "eshop": Nintendo eShop transactions (ec.nintendo.com) → switch2.
+      Needs session cookies from set_nintendo_ec_session. Refunds and
+      consumables are skipped (reported in skipped); free downloads are
+      recorded with price 0.
+    - "gog": GOG order history (embed.gog.com) → gog. Reuses the
+      lgogdownloader session (galaxy_tokens.json bearer token, cookies.txt
+      fallback) — run `lgogdownloader --login` if it errors. Per-product
+      prices are preferred; when only an order total exists it is split
+      evenly across the order's products. Giveaways get price 0.
+    - "humble": Humble Bundle orders → steam/gog/other by key type. Needs
+      the _simpleauth_sess cookie from set_humble_session. Bundle prices are
+      split evenly across the bundle's games (bundle_name groups them);
+      Humble Choice items get purchase_source "subscription".
+    - "steam": Steam licenses + purchase history (store.steampowered.com)
+      → steam. Needs the steamLoginSecure cookie from
+      set_steam_store_session. Cart totals are split evenly across the
+      cart's items; refunds, market/in-game transactions and gift purchases
+      (bought for someone else) are skipped; Complimentary and Gift/Guest
+      Pass licenses become price-0 records (purchase_source "free"/"gift").
+
+    Sources run concurrently; one source's auth/network failure (status
+    "error", nothing written for it) never blocks the others. Each ok source
+    reports fetched/applied/filled/no_change/unmatched/no_platform_row/errors
+    plus the rows it skipped, and totals aggregates across sources.
+    """
+    from .tools.acquisition import import_purchases as _import_purchases
+    return await _import_purchases(sources, dry_run, overwrite, create_platform_rows)
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL)
+async def get_spending_stats(
+    year: int | None = None,
+    platform: str | None = None,
+    purchase_source: str | None = None,
+) -> SpendingStatsResponse:
+    """
+    Analyze game spending from recorded acquisition data (see set_acquisition).
+
+    Covers owned platform rows only (DLC/editions included — money spent is
+    money spent). Optional filters: year (matches the acquired_at year; rows
+    without an acquired_at are excluded when set), platform, and
+    purchase_source (same vocabulary/aliases as set_acquisition). Monetary
+    aggregates are grouped per currency and NEVER summed across currencies.
+
+    Returns owned_rows/priced_rows/coverage_pct (how much of the library has a
+    recorded price), zero_cost_rows (price 0 — gifts/giveaways), totals per
+    currency, breakdowns by_year / by_source / by_platform / by_bundle, the
+    top 10 most expensive purchases, and cost_per_hour analysis: overall $/h
+    per currency, best_value (cheapest cost per hour — a 0-price game you
+    played counts as 0.0), worst_value (most expensive per hour; free games
+    excluded), unpriced_playtime_rows (played but no recorded price), and
+    unplayed_spend (money spent on games with zero recorded playtime).
+    """
+    from .tools.acquisition import get_spending_stats as _spending
+    return await _spending(year, platform, purchase_source)
+
+
 @mcp.tool(annotations=NON_IDEMPOTENT_MUTATION_TOOL)
 async def merge_games(
     source_game_id: int,
@@ -979,6 +1186,76 @@ async def set_nintendo_session(cookies: str) -> NintendoSessionResponse:
     """
     from .tools.admin import set_nintendo_session as _set_session
     return await _set_session(cookies)
+
+
+@mcp.tool(annotations=MUTATION_TOOL)
+async def set_nintendo_ec_session(cookies: str) -> NintendoSessionResponse:
+    """
+    Store ec.nintendo.com session cookies for eShop purchase-history import.
+
+    Enables import_purchases(sources=["eshop"]) to read your Nintendo eShop
+    transaction history (purchase dates and prices). These cookies come from
+    the ec.nintendo.com domain and are separate from the VGCS cookies used by
+    set_nintendo_session.
+
+    How to get cookies:
+    1. Open https://ec.nintendo.com/my/transactions/ (stay logged in)
+    2. Install the "Cookie Editor" browser extension
+    3. Click the extension → Export → copy the JSON
+    4. Pass that JSON string here (object or Cookie Editor array format)
+
+    Cookies are saved to NINTENDO_EC_COOKIES_FILE
+    (default: data/nintendo_ec_cookies.json).
+    """
+    from .tools.admin import set_nintendo_ec_session as _set_ec_session
+    return await _set_ec_session(cookies)
+
+
+@mcp.tool(annotations=MUTATION_TOOL)
+async def set_humble_session(cookies: str) -> NintendoSessionResponse:
+    """
+    Store Humble Bundle session cookies for purchase-history import.
+
+    Enables import_purchases(sources=["humble"]) to read your Humble order
+    history (bundles, prices, Humble Choice months). Only the
+    _simpleauth_sess cookie is strictly needed, but storing the full
+    humblebundle.com cookie export is fine.
+
+    How to get cookies:
+    1. Open https://www.humblebundle.com/ (stay logged in)
+    2. Install the "Cookie Editor" browser extension
+    3. Click the extension → Export → copy the JSON
+    4. Pass that JSON string here (object or Cookie Editor array format)
+
+    Cookies are saved to HUMBLE_COOKIES_FILE (default: data/humble_cookies.json).
+    """
+    from .tools.admin import set_humble_session as _set_humble
+    return await _set_humble(cookies)
+
+
+@mcp.tool(annotations=MUTATION_TOOL)
+async def set_steam_store_session(cookies: str) -> NintendoSessionResponse:
+    """
+    Store Steam store session cookies for purchase-history import.
+
+    Enables import_purchases(sources=["steam"]) to read your Steam licenses
+    and purchase history pages (acquisition dates, prices, free/gift
+    licenses). Only the steamLoginSecure cookie is strictly required;
+    sessionid is recommended too (used by the history load-more endpoint).
+    These are browser cookies from store.steampowered.com — unrelated to
+    STEAM_API_KEY.
+
+    How to get cookies:
+    1. Open https://store.steampowered.com/account/ (stay logged in)
+    2. Install the "Cookie Editor" browser extension
+    3. Click the extension → Export → copy the JSON
+    4. Pass that JSON string here (object or Cookie Editor array format)
+
+    Cookies are saved to STEAM_STORE_COOKIES_FILE
+    (default: data/steam_store_cookies.json).
+    """
+    from .tools.admin import set_steam_store_session as _set_steam_store
+    return await _set_steam_store(cookies)
 
 
 @mcp.tool(annotations=MUTATION_TOOL)
