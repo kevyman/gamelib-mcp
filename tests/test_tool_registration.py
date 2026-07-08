@@ -118,6 +118,8 @@ EXPECTED_TOOLS = {
         "required": {"name", "platform"},
     },
     "set_nintendo_session": {"params": {"cookies"}, "required": {"cookies"}},
+    "set_nintendo_ec_session": {"params": {"cookies"}, "required": {"cookies"}},
+    "set_humble_session": {"params": {"cookies"}, "required": {"cookies"}},
     "set_nintendo_pctl_session": {"params": {"response"}, "required": set()},
     "update_game": {
         "params": {
@@ -158,6 +160,10 @@ EXPECTED_TOOLS = {
     "set_acquisitions_batch": {
         "params": {"items", "overwrite", "create_platform_rows"},
         "required": {"items"},
+    },
+    "import_purchases": {
+        "params": {"sources", "dry_run", "overwrite", "create_platform_rows"},
+        "required": set(),
     },
     "get_spending_stats": {
         "params": {"year", "platform", "purchase_source"},
@@ -224,10 +230,17 @@ EXPECTED_ANNOTATIONS = {
     "set_hardware_preference": {"readOnlyHint": False, "idempotentHint": True},
     "add_game_to_platform": {"readOnlyHint": False, "idempotentHint": True},
     "set_nintendo_session": {"readOnlyHint": False, "idempotentHint": True},
+    "set_nintendo_ec_session": {"readOnlyHint": False, "idempotentHint": True},
+    "set_humble_session": {"readOnlyHint": False, "idempotentHint": True},
     "set_nintendo_pctl_session": {"readOnlyHint": False, "idempotentHint": True},
     "update_game": {"readOnlyHint": False, "idempotentHint": True},
     "set_acquisition": {"readOnlyHint": False, "idempotentHint": True},
     "set_acquisitions_batch": {"readOnlyHint": False, "idempotentHint": True},
+    "import_purchases": {
+        "readOnlyHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
     "get_spending_stats": {"readOnlyHint": True, "idempotentHint": True},
     "merge_games": {"readOnlyHint": False, "idempotentHint": False},
     "get_scrape_config": {"readOnlyHint": True, "idempotentHint": True},
@@ -256,9 +269,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_42(self):
+    async def test_tool_count_is_45(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 42)
+        self.assertEqual(len(tools), 45)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()

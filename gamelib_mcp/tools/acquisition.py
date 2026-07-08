@@ -9,7 +9,10 @@ that needs a platforms.py helper must lazy-import it inside the function to
 avoid an import cycle.
 """
 
+import asyncio
+import importlib
 import re
+import sys
 from datetime import date
 
 from fastmcp.exceptions import ToolError
@@ -21,6 +24,15 @@ from ..data.db import (
     set_platform_acquisition,
     upsert_game_platform,
 )
+from ..data.purchases import PURCHASE_IMPORTERS, PurchaseRecord
+
+# The importer dict is resolved at call time; the imports below keep the
+# fetchers bound on this module so tests can patch
+# gamelib_mcp.tools.acquisition.<fetch_fn> (_resolve_purchase_fetchers checks
+# this namespace first, mirroring platforms_registry.resolve_platform_functions).
+# F401: referenced via getattr, not by name.
+from ..data.purchases.humble import fetch_humble_purchases  # noqa: F401
+from ..data.purchases.nintendo_ec import fetch_eshop_purchases  # noqa: F401
 from .common import (
     LIBRARY_PLATFORMS,
     validate_platform as _validate_platform,
@@ -398,6 +410,163 @@ async def set_acquisitions_batch(
         "no_platform_row": _count("no_platform_row"),
         "errors": _count("error"),
     }
+
+
+# How many proposed items a dry_run echoes back per source before truncating.
+_DRY_RUN_ECHO_CAP = 200
+
+
+def _resolve_purchase_fetchers(sources: list[str]) -> dict:
+    """{source: fetch coroutine} for the selected importer sources.
+
+    Prefers a name bound on THIS module (the imports at the top), so tests
+    patching gamelib_mcp.tools.acquisition.fetch_eshop_purchases keep
+    intercepting the fetch; falls back to importing the registry module.
+    """
+    namespace = sys.modules[__name__]
+    fetchers = {}
+    for source in sources:
+        module_path, attr = PURCHASE_IMPORTERS[source]
+        fn = getattr(namespace, attr, None)
+        if fn is None:
+            fn = getattr(importlib.import_module(module_path), attr)
+        fetchers[source] = fn
+    return fetchers
+
+
+def _record_to_batch_item(record: PurchaseRecord) -> dict:
+    """One PurchaseRecord → a set_acquisitions_batch item dict (no None fields)."""
+    item: dict = {
+        "name": record.title,
+        "platform": record.platform,
+        "purchase_source": record.purchase_source,
+    }
+    if record.acquired_at is not None:
+        item["acquired_at"] = record.acquired_at
+    if record.price_paid is not None:
+        item["price_paid"] = record.price_paid
+        # A currency without a price fails validation, so it only rides along
+        # when the record actually carries a price.
+        if record.price_currency is not None:
+            item["price_currency"] = record.price_currency
+    if record.bundle_name is not None:
+        item["bundle_name"] = record.bundle_name
+    return item
+
+
+async def _import_one_source(
+    source: str,
+    fetch,
+    dry_run: bool,
+    overwrite: bool,
+    create_platform_rows: bool,
+) -> dict:
+    """Fetch one source and (unless dry_run) push its records through the
+    batch writer. Fetch exceptions propagate — the caller gathers them, and a
+    mid-fetch failure must never partially import."""
+    records, skipped = await fetch()
+    items = [_record_to_batch_item(r) for r in records]
+
+    if dry_run:
+        return {
+            "source": source,
+            "status": "ok",
+            "dry_run": True,
+            "fetched": len(records),
+            "proposed": items[:_DRY_RUN_ECHO_CAP],
+            "truncated": len(items) > _DRY_RUN_ECHO_CAP,
+            "skipped": skipped,
+        }
+
+    applied = filled = no_change = no_platform_row = errors = 0
+    unmatched: list[dict] = []
+    for start in range(0, len(items), _BATCH_ITEM_CAP):
+        batch = await set_acquisitions_batch(
+            items[start : start + _BATCH_ITEM_CAP],
+            overwrite=overwrite,
+            create_platform_rows=create_platform_rows,
+        )
+        applied += batch["applied"]
+        filled += batch["filled"]
+        no_change += batch["no_change"]
+        no_platform_row += batch["no_platform_row"]
+        errors += batch["errors"]
+        unmatched.extend(batch["unmatched"])
+
+    return {
+        "source": source,
+        "status": "ok",
+        "fetched": len(records),
+        "applied": applied,
+        "filled": filled,
+        "no_change": no_change,
+        "unmatched": unmatched,
+        "no_platform_row": no_platform_row,
+        "errors": errors,
+        "skipped": skipped,
+    }
+
+
+async def import_purchases(
+    sources: list[str] | None = None,
+    dry_run: bool = False,
+    overwrite: bool = False,
+    create_platform_rows: bool = False,
+) -> dict:
+    """
+    Fetch purchase histories from registered storefront importers and record
+    them through set_acquisitions_batch.
+
+    sources None = every registered importer. Sources run concurrently; a
+    fetch failure yields {status: "error"} for that source (nothing written
+    for it — a partial fetch must not partially import) while the others
+    proceed. dry_run previews the converted batch items without writing.
+    """
+    if sources is None:
+        selected = sorted(PURCHASE_IMPORTERS)
+    else:
+        unknown = [s for s in sources if s not in PURCHASE_IMPORTERS]
+        if unknown:
+            raise ToolError(
+                f"Unknown purchase source(s): {unknown}. "
+                f"Valid: {sorted(PURCHASE_IMPORTERS)}"
+            )
+        selected = list(dict.fromkeys(sources))
+    if not selected:
+        raise ToolError("sources must not be empty")
+
+    fetchers = _resolve_purchase_fetchers(selected)
+    outcomes = await asyncio.gather(
+        *(
+            _import_one_source(
+                source, fetchers[source], dry_run, overwrite, create_platform_rows
+            )
+            for source in selected
+        ),
+        return_exceptions=True,
+    )
+
+    results: dict[str, dict] = {}
+    for source, outcome in zip(selected, outcomes, strict=True):
+        if isinstance(outcome, BaseException):
+            results[source] = {"source": source, "status": "error", "error": str(outcome)}
+        else:
+            results[source] = outcome
+
+    def _total(key: str) -> int:
+        return sum(r.get(key, 0) for r in results.values())
+
+    totals = {
+        "fetched": _total("fetched"),
+        "applied": _total("applied"),
+        "filled": _total("filled"),
+        "no_change": _total("no_change"),
+        "unmatched": sum(len(r.get("unmatched", [])) for r in results.values()),
+        # Per-item validation errors plus whole-source fetch failures.
+        "errors": _total("errors")
+        + sum(1 for r in results.values() if r["status"] == "error"),
+    }
+    return {"sources": results, "dry_run": dry_run, "totals": totals}
 
 
 def _rounded(value) -> float | None:

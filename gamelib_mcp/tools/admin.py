@@ -309,6 +309,38 @@ async def sync_wishlist(
     return results
 
 
+def _save_session_cookies(cookies: str, env_var: str, default_path: str, label: str) -> dict:
+    """Normalize a pasted cookie-export JSON and save it as {name: value}.
+
+    Shared by every cookie-based session setter. Accepts either a JSON object
+    ({"cookie_name": "value", ...}) or a Cookie Editor / EditThisCookie array
+    ([{"name": ..., "value": ...}, ...]); saves to the path in ``env_var``
+    (falling back to ``default_path``).
+    """
+    try:
+        raw = json.loads(cookies)
+    except json.JSONDecodeError as exc:
+        raise ToolError(f"Invalid JSON: {exc}") from exc
+
+    if isinstance(raw, list):
+        normalized = {c["name"]: c["value"] for c in raw if "name" in c and "value" in c}
+    elif isinstance(raw, dict):
+        normalized = raw
+    else:
+        raise ToolError("Expected a JSON object or array")
+
+    if not normalized:
+        raise ToolError("No valid cookies found in input")
+
+    path = os.getenv(env_var, default_path)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(normalized, f, indent=2)
+
+    logger.info("%s session cookies saved to %s (%d cookies)", label, path, len(normalized))
+    return {"cookie_count": len(normalized), "path": path}
+
+
 async def set_nintendo_session(cookies: str) -> dict:
     """
     Store Nintendo Account session cookies for VGCS fallback sync.
@@ -327,28 +359,53 @@ async def set_nintendo_session(cookies: str) -> dict:
     Cookies are saved to the path in NINTENDO_COOKIES_FILE
     (default: data/nintendo_cookies.json).
     """
-    try:
-        raw = json.loads(cookies)
-    except json.JSONDecodeError as exc:
-        raise ToolError(f"Invalid JSON: {exc}") from exc
+    return _save_session_cookies(
+        cookies, "NINTENDO_COOKIES_FILE", "data/nintendo_cookies.json", "Nintendo"
+    )
 
-    if isinstance(raw, list):
-        normalized = {c["name"]: c["value"] for c in raw if "name" in c and "value" in c}
-    elif isinstance(raw, dict):
-        normalized = raw
-    else:
-        raise ToolError("Expected a JSON object or array")
 
-    if not normalized:
-        raise ToolError("No valid cookies found in input")
+async def set_nintendo_ec_session(cookies: str) -> dict:
+    """
+    Store ec.nintendo.com session cookies for eShop purchase-history import.
 
-    path = os.getenv("NINTENDO_COOKIES_FILE", "data/nintendo_cookies.json")
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(normalized, f, indent=2)
+    Accepts the same JSON shapes as set_nintendo_session (object or Cookie
+    Editor array). These cookies are separate from the VGCS ones — they must
+    come from the ec.nintendo.com domain.
 
-    logger.info("Nintendo session cookies saved to %s (%d cookies)", path, len(normalized))
-    return {"cookie_count": len(normalized), "path": path}
+    How to get your cookies:
+    1. Open https://ec.nintendo.com/my/transactions/ in your browser (logged in)
+    2. Install the "Cookie Editor" browser extension
+    3. Click the extension icon → Export → copy the JSON
+    4. Pass that JSON string to this tool
+
+    Cookies are saved to the path in NINTENDO_EC_COOKIES_FILE
+    (default: data/nintendo_ec_cookies.json).
+    """
+    return _save_session_cookies(
+        cookies, "NINTENDO_EC_COOKIES_FILE", "data/nintendo_ec_cookies.json", "Nintendo eShop"
+    )
+
+
+async def set_humble_session(cookies: str) -> dict:
+    """
+    Store Humble Bundle session cookies for purchase-history import.
+
+    Accepts the same JSON shapes as set_nintendo_session (object or Cookie
+    Editor array). Only the ``_simpleauth_sess`` cookie is strictly needed,
+    but exporting/storing all humblebundle.com cookies is fine.
+
+    How to get your cookies:
+    1. Open https://www.humblebundle.com/ in your browser (logged in)
+    2. Install the "Cookie Editor" browser extension
+    3. Click the extension icon → Export → copy the JSON
+    4. Pass that JSON string to this tool
+
+    Cookies are saved to the path in HUMBLE_COOKIES_FILE
+    (default: data/humble_cookies.json).
+    """
+    return _save_session_cookies(
+        cookies, "HUMBLE_COOKIES_FILE", "data/humble_cookies.json", "Humble Bundle"
+    )
 
 
 # Holds the PKCE code_verifier between the two set_nintendo_pctl_session calls.

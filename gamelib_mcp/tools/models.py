@@ -353,6 +353,16 @@ class SetAcquisitionsBatchResponse(FlexibleModel):
     errors: int
 
 
+class ImportPurchasesResponse(FlexibleModel):
+    # Per-source results keyed by importer name (eshop, humble, ...). Each is
+    # {source, status: "ok"|"error", ...} — ok carries fetched/applied/filled/
+    # no_change/unmatched/no_platform_row/errors/skipped (or dry_run+proposed),
+    # error carries the fetch failure message.
+    sources: dict[str, dict[str, Any]]
+    dry_run: bool
+    totals: dict[str, Any]
+
+
 class SpendingStatsResponse(FlexibleModel):
     owned_rows: int
     priced_rows: int

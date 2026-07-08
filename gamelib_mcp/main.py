@@ -39,6 +39,7 @@ from .tools.models import (
     GetScrapeConfigResponse,
     GetWishlistResponse,
     HardwarePreferenceResponse,
+    ImportPurchasesResponse,
     IntegrationStatusResponse,
     LibraryStatsResponse,
     MergeGamesResponse,
@@ -1052,6 +1053,44 @@ async def set_acquisitions_batch(
     return await _set_batch(items, overwrite, create_platform_rows)
 
 
+@mcp.tool(annotations=NETWORK_SYNC_TOOL)
+async def import_purchases(
+    sources: list[str] | None = None,
+    dry_run: bool = False,
+    overwrite: bool = False,
+    create_platform_rows: bool = False,
+) -> ImportPurchasesResponse:
+    """
+    Import purchase history (dates, prices, bundles) from storefront accounts.
+
+    Fetches each source's purchase history and records it through the same
+    machinery as set_acquisitions_batch: by default only missing (NULL)
+    acquisition fields are filled, so re-running an import never clobbers
+    values you set or corrected by hand (overwrite=True replaces them).
+    Games rows are never created; purchases that don't match a library game
+    are echoed in each source's unmatched list. Pass dry_run=True to preview
+    the converted items (capped at 200 per source, with a truncated flag)
+    without writing anything.
+
+    sources defaults to all registered importers; currently:
+    - "eshop": Nintendo eShop transactions (ec.nintendo.com) → switch2.
+      Needs session cookies from set_nintendo_ec_session. Refunds and
+      consumables are skipped (reported in skipped); free downloads are
+      recorded with price 0.
+    - "humble": Humble Bundle orders → steam/gog/other by key type. Needs
+      the _simpleauth_sess cookie from set_humble_session. Bundle prices are
+      split evenly across the bundle's games (bundle_name groups them);
+      Humble Choice items get purchase_source "subscription".
+
+    Sources run concurrently; one source's auth/network failure (status
+    "error", nothing written for it) never blocks the others. Each ok source
+    reports fetched/applied/filled/no_change/unmatched/no_platform_row/errors
+    plus the rows it skipped, and totals aggregates across sources.
+    """
+    from .tools.acquisition import import_purchases as _import_purchases
+    return await _import_purchases(sources, dry_run, overwrite, create_platform_rows)
+
+
 @mcp.tool(annotations=READ_ONLY_TOOL)
 async def get_spending_stats(
     year: int | None = None,
@@ -1126,6 +1165,51 @@ async def set_nintendo_session(cookies: str) -> NintendoSessionResponse:
     """
     from .tools.admin import set_nintendo_session as _set_session
     return await _set_session(cookies)
+
+
+@mcp.tool(annotations=MUTATION_TOOL)
+async def set_nintendo_ec_session(cookies: str) -> NintendoSessionResponse:
+    """
+    Store ec.nintendo.com session cookies for eShop purchase-history import.
+
+    Enables import_purchases(sources=["eshop"]) to read your Nintendo eShop
+    transaction history (purchase dates and prices). These cookies come from
+    the ec.nintendo.com domain and are separate from the VGCS cookies used by
+    set_nintendo_session.
+
+    How to get cookies:
+    1. Open https://ec.nintendo.com/my/transactions/ (stay logged in)
+    2. Install the "Cookie Editor" browser extension
+    3. Click the extension → Export → copy the JSON
+    4. Pass that JSON string here (object or Cookie Editor array format)
+
+    Cookies are saved to NINTENDO_EC_COOKIES_FILE
+    (default: data/nintendo_ec_cookies.json).
+    """
+    from .tools.admin import set_nintendo_ec_session as _set_ec_session
+    return await _set_ec_session(cookies)
+
+
+@mcp.tool(annotations=MUTATION_TOOL)
+async def set_humble_session(cookies: str) -> NintendoSessionResponse:
+    """
+    Store Humble Bundle session cookies for purchase-history import.
+
+    Enables import_purchases(sources=["humble"]) to read your Humble order
+    history (bundles, prices, Humble Choice months). Only the
+    _simpleauth_sess cookie is strictly needed, but storing the full
+    humblebundle.com cookie export is fine.
+
+    How to get cookies:
+    1. Open https://www.humblebundle.com/ (stay logged in)
+    2. Install the "Cookie Editor" browser extension
+    3. Click the extension → Export → copy the JSON
+    4. Pass that JSON string here (object or Cookie Editor array format)
+
+    Cookies are saved to HUMBLE_COOKIES_FILE (default: data/humble_cookies.json).
+    """
+    from .tools.admin import set_humble_session as _set_humble
+    return await _set_humble(cookies)
 
 
 @mcp.tool(annotations=MUTATION_TOOL)
