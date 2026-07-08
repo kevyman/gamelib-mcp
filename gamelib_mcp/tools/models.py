@@ -333,7 +333,7 @@ class AcquisitionBatchItemResult(FlexibleModel):
     platform: str | None = None
     game_id: int | None = None
     matched_name: str | None = None
-    match_type: str | None = None  # id | name | fuzzy
+    match_type: str | None = None  # identifier | id | name | fuzzy
     acquisition: AcquisitionInfo | None = None
     # Present on no_platform_row: the platforms the game IS owned/recorded on.
     platforms: list[str] | None = None

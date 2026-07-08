@@ -75,6 +75,53 @@ class PlatformMisclassificationRepairTests(ToolDBTestCase):
         self.assertIsNone(source_row)
         self.assertEqual(identifier_row["game_platform_id"], target_platform_id)
 
+    async def test_repair_collision_preserves_source_acquisition_fields(self) -> None:
+        source_game_id = await seed_game("Dead Space")
+        target_game_id = await seed_game("Dead Space Remake")
+        source_platform_id = await add_platform(source_game_id, "steam")
+        target_platform_id = await add_platform(target_game_id, "steam")
+        await db_module.set_platform_acquisition(
+            source_platform_id,
+            {
+                "acquired_at": "2024-03-01",
+                "price_paid": 19.99,
+                "price_currency": "EUR",
+                "purchase_source": "steam",
+                "bundle_name": "Spring Sale Haul",
+            },
+        )
+        # The target already knows its own acquired_at — it must win.
+        await db_module.set_platform_acquisition(
+            target_platform_id, {"acquired_at": "2020-01-01"}
+        )
+
+        repaired = await db_module.repair_misclassified_platform_row(
+            source_game_id=source_game_id,
+            target_game_id=target_game_id,
+            platform="steam",
+        )
+
+        self.assertTrue(repaired)
+        async with db_module.get_db() as db:
+            source_row = await db.execute_fetchone(
+                "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",
+                (source_game_id, "steam"),
+            )
+            target_row = await db.execute_fetchone(
+                f"""SELECT {', '.join(db_module.ACQUISITION_FIELDS)}
+                    FROM game_platforms WHERE id = ?""",
+                (target_platform_id,),
+            )
+
+        self.assertIsNone(source_row)
+        # Conflicting column: target's own value survives.
+        self.assertEqual(target_row["acquired_at"], "2020-01-01")
+        # NULL target columns inherit the source's values.
+        self.assertEqual(target_row["price_paid"], 19.99)
+        self.assertEqual(target_row["price_currency"], "EUR")
+        self.assertEqual(target_row["purchase_source"], "steam")
+        self.assertEqual(target_row["bundle_name"], "Spring Sale Haul")
+
 
 if __name__ == "__main__":
     unittest.main()

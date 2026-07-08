@@ -1031,7 +1031,13 @@ async def set_acquisitions_batch(
     Each item is {name or game_id, platform, plus any of acquired_at,
     price_paid, price_currency, purchase_source, bundle_name} with the same
     validation and vocabulary as set_acquisition (for bundles, price_paid is
-    the per-game share of the bundle's total). One bad item never fails the
+    the per-game share of the bundle's total). An item may also carry
+    identifier_type + identifier_value (both together or neither — e.g.
+    steam_appid, gog_product_id, nintendo_title_id): the store identifier is
+    tried first and resolves exactly even when the item's name differs from
+    the library title; a miss falls back to game_id/name matching, and when
+    create_platform_rows=True creates the platform row the identifier is
+    attached to it. One bad item never fails the
     call: every item gets a per-item result with a status — applied
     (overwrite=True wrote the fields), filled (default mode wrote at least one
     previously-NULL field), no_change (every requested field already had a
@@ -1044,9 +1050,10 @@ async def set_acquisitions_batch(
     The default overwrite=False only fills missing (NULL) columns, so
     re-importing a purchase-history export never clobbers values you've
     already set or corrected; overwrite=True replaces the provided fields
-    unconditionally. This tool never creates games rows. Name matches report
-    match_type ("name" for tiered exact/prefix/substring matching, "fuzzy" for
-    the misspelling fallback) and matched_name — review match_type="fuzzy"
+    unconditionally. This tool never creates games rows. Matches report
+    match_type ("identifier" for store-identifier hits, "id" for game_id,
+    "name" for tiered exact/prefix/substring matching, "fuzzy" for the
+    misspelling fallback) and matched_name — review match_type="fuzzy"
     results to confirm they resolved to the intended game.
     """
     from .tools.acquisition import set_acquisitions_batch as _set_batch
@@ -1068,7 +1075,10 @@ async def import_purchases(
     acquisition fields are filled, so re-running an import never clobbers
     values you set or corrected by hand (overwrite=True replaces them).
     Games rows are never created; purchases that don't match a library game
-    are echoed in each source's unmatched list. Pass dry_run=True to preview
+    are echoed in each source's unmatched list. Records carrying a store
+    identifier (eShop title ids, GOG product ids, Steam appids) are matched
+    identifier-first, so a renamed or localized library title still resolves;
+    the name-based tiers remain the fallback. Pass dry_run=True to preview
     the converted items (capped at 200 per source, with a truncated flag)
     without writing anything.
 

@@ -365,9 +365,10 @@ async def repair_misclassified_platform_row(
     if source_game_id == target_game_id:
         return False
 
+    acquisition_cols = ", ".join(ACQUISITION_FIELDS)
     async with get_db() as db:
         source = await db.execute_fetchone(
-            "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",
+            f"SELECT id, {acquisition_cols} FROM game_platforms WHERE game_id = ? AND platform = ?",
             (source_game_id, platform),
         )
         if source is None:
@@ -389,6 +390,16 @@ async def repair_misclassified_platform_row(
             await db.execute(
                 "UPDATE game_platform_identifiers SET game_platform_id = ? WHERE game_platform_id = ?",
                 (target_platform_id, source_platform_id),
+            )
+            # Acquisition data would be silently dropped with the source row's
+            # DELETE below: fill each target column that is NULL from the
+            # source (target wins on conflict — mirrors merge_games).
+            acq_sql = ", ".join(
+                f"{col} = COALESCE({col}, ?)" for col in ACQUISITION_FIELDS
+            )
+            await db.execute(
+                f"UPDATE game_platforms SET {acq_sql} WHERE id = ?",
+                (*(source[col] for col in ACQUISITION_FIELDS), target_platform_id),
             )
             await db.execute("DELETE FROM game_platforms WHERE id = ?", (source_platform_id,))
 

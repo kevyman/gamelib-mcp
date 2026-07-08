@@ -23,6 +23,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from gamelib_mcp.data.db import GOG_PRODUCT_ID, STEAM_APP_ID
+
 
 @dataclass(frozen=True)
 class PurchaseRecord:
@@ -49,6 +51,19 @@ PURCHASE_IMPORTERS: dict[str, tuple[str, str]] = {
     "gog": ("gamelib_mcp.data.purchases.gog_orders", "fetch_gog_purchases"),
     "humble": ("gamelib_mcp.data.purchases.humble", "fetch_humble_purchases"),
     "steam": ("gamelib_mcp.data.purchases.steam_history", "fetch_steam_purchases"),
+}
+
+# source key → game_platform_identifiers.identifier_type carried by that
+# source's PurchaseRecord.store_identifier, letting set_acquisitions_batch
+# match identifier-first (a renamed/localized library title still resolves).
+# No "humble" entry — Humble orders carry no store identifiers. "eshop" uses
+# the literal value of gamelib_mcp.data.nintendo.NINTENDO_TITLE_ID: importing
+# data.nintendo here would drag httpx/bs4/igdb into this deliberately light
+# package (see module docstring).
+IDENTIFIER_TYPES: dict[str, str] = {
+    "eshop": "nintendo_title_id",  # gamelib_mcp.data.nintendo.NINTENDO_TITLE_ID
+    "gog": GOG_PRODUCT_ID,
+    "steam": STEAM_APP_ID,
 }
 
 

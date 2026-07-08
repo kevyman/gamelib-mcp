@@ -16,10 +16,14 @@ from unittest.mock import AsyncMock, patch
 import httpx
 from fastmcp.exceptions import ToolError
 
-from conftest import ToolDBTestCase, add_platform, seed_game
+from conftest import ToolDBTestCase, add_identifier, add_platform, seed_game
 
 from gamelib_mcp.data import db as db_module
-from gamelib_mcp.data.purchases import PURCHASE_IMPORTERS, PurchaseRecord
+from gamelib_mcp.data.purchases import (
+    IDENTIFIER_TYPES,
+    PURCHASE_IMPORTERS,
+    PurchaseRecord,
+)
 from gamelib_mcp.data.purchases import gog_orders
 from gamelib_mcp.data.purchases import humble as humble_module
 from gamelib_mcp.data.purchases import nintendo_ec
@@ -79,6 +83,23 @@ class PurchaseRegistryTests(unittest.TestCase):
         for module_path, attr in PURCHASE_IMPORTERS.values():
             fn = getattr(importlib.import_module(module_path), attr)
             self.assertTrue(callable(fn))
+
+    def test_identifier_types_align_with_provider_constants(self):
+        # "eshop" is a literal in data/purchases/__init__.py (importing
+        # data.nintendo there would drag httpx/bs4/igdb into the package);
+        # this guards it against drifting from the real constant.
+        from gamelib_mcp.data.nintendo import NINTENDO_TITLE_ID
+
+        self.assertEqual(
+            IDENTIFIER_TYPES,
+            {
+                "eshop": NINTENDO_TITLE_ID,
+                "gog": db_module.GOG_PRODUCT_ID,
+                "steam": db_module.STEAM_APP_ID,
+            },
+        )
+        # Humble orders carry no store identifiers — deliberately no entry.
+        self.assertNotIn("humble", IDENTIFIER_TYPES)
 
 
 class NintendoEcParserTests(unittest.TestCase):
@@ -894,6 +915,48 @@ class ImportPurchasesTests(ToolDBTestCase):
         self.assertEqual(row["price_paid"], 19.99)
         self.assertEqual(row["price_currency"], "USD")
         self.assertEqual(row["purchase_source"], "eshop")
+
+    async def test_identifier_first_match_fills_renamed_library_title(self):
+        # The library title differs from the eShop transaction title (renamed/
+        # localized), but the seeded nintendo_title_id matches exactly.
+        gid = await seed_game("Dragon Quest III HD-2D Remake")
+        gpid = await add_platform(gid, "switch2")
+        await add_identifier(gpid, "nintendo_title_id", "70010000012345")
+
+        records = [
+            _eshop_record(
+                "DRAGON QUEST III (localized)",
+                store_identifier="70010000012345",
+            )
+        ]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["eshop"])
+
+        eshop = result["sources"]["eshop"]
+        self.assertEqual(eshop["status"], "ok")
+        self.assertEqual(eshop["filled"], 1)
+        self.assertEqual(eshop["unmatched"], [])
+        self.assertEqual(result["totals"]["unmatched"], 0)
+
+        row = await _acquisition_row(gid, "switch2")
+        self.assertEqual(row["acquired_at"], "2024-03-01")
+        self.assertEqual(row["price_paid"], 19.99)
+        self.assertEqual(row["purchase_source"], "eshop")
+
+    async def test_dry_run_proposed_item_carries_identifier_keys(self):
+        records = [_eshop_record("Hades", store_identifier="70010000099999")]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(
+                sources=["eshop"], dry_run=True
+            )
+
+        proposed = result["sources"]["eshop"]["proposed"][0]
+        self.assertEqual(proposed["identifier_type"], "nintendo_title_id")
+        self.assertEqual(proposed["identifier_value"], "70010000099999")
 
     async def test_source_error_does_not_block_other_source(self):
         gid = await seed_game("Hollow Knight")

@@ -4,7 +4,13 @@ from datetime import datetime, timezone
 
 from fastmcp.exceptions import ToolError
 
-from conftest import ToolDBTestCase, add_platform, make_steam_game, seed_game
+from conftest import (
+    ToolDBTestCase,
+    add_identifier,
+    add_platform,
+    make_steam_game,
+    seed_game,
+)
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import acquisition
 
@@ -317,6 +323,109 @@ class SetAcquisitionsBatchTests(ToolDBTestCase):
         items = [{"game_id": 1, "platform": "steam", "price_paid": 1.0}] * 201
         with self.assertRaisesRegex(ToolError, "capped at 200"):
             await acquisition.set_acquisitions_batch(items)
+
+    async def test_identifier_match_beats_unmatchable_name(self):
+        # "Localized title" scenario: the purchase export's name matches
+        # nothing in the library, but the store identifier hits exactly.
+        gid = await seed_game("Dragon Quest III HD-2D Remake")
+        gpid = await add_platform(gid, "switch2")
+        await add_identifier(gpid, "nintendo_title_id", "70010000012345")
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Totally Different Localized Name",
+                "platform": "switch2",
+                "price_paid": 59.99,
+                "identifier_type": "nintendo_title_id",
+                "identifier_value": "70010000012345",
+            }]
+        )
+
+        entry = result["results"][0]
+        self.assertEqual(entry["status"], "filled")
+        self.assertEqual(entry["match_type"], "identifier")
+        self.assertEqual(entry["game_id"], gid)
+        self.assertEqual(entry["matched_name"], "Dragon Quest III HD-2D Remake")
+        row = await _acquisition_row(gid, "switch2")
+        self.assertEqual(row["price_paid"], 59.99)
+
+    async def test_identifier_keys_are_both_or_neither(self):
+        gid = await seed_game("Paired")
+        await add_platform(gid, "steam")
+
+        result = await acquisition.set_acquisitions_batch(
+            [
+                {
+                    "game_id": gid,
+                    "platform": "steam",
+                    "price_paid": 1.0,
+                    "identifier_type": "steam_appid",
+                },
+                {
+                    "game_id": gid,
+                    "platform": "steam",
+                    "price_paid": 1.0,
+                    "identifier_value": "440",
+                },
+            ]
+        )
+
+        self.assertEqual(result["errors"], 2)
+        for entry in result["results"]:
+            self.assertEqual(entry["status"], "error")
+            self.assertIn("together", entry["error"])
+        row = await _acquisition_row(gid, "steam")
+        self.assertIsNone(row["price_paid"])
+
+    async def test_identifier_miss_falls_through_to_name(self):
+        # A first-time import may predate the sync that attaches the id — the
+        # unknown identifier must not be terminal when the name still matches.
+        gid = await seed_game("Celeste")
+        await add_platform(gid, "switch2")
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Celeste",
+                "platform": "switch2",
+                "price_paid": 4.99,
+                "identifier_type": "nintendo_title_id",
+                "identifier_value": "700100000never",
+            }]
+        )
+
+        entry = result["results"][0]
+        self.assertEqual(entry["status"], "filled")
+        self.assertEqual(entry["match_type"], "name")
+        self.assertEqual(entry["game_id"], gid)
+
+    async def test_create_platform_rows_attaches_carried_identifier(self):
+        gid = await seed_game("Expandable Deluxe")
+        await add_platform(gid, "steam")
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Expandable Deluxe",
+                "platform": "gog",
+                "price_paid": 3.0,
+                "identifier_type": "gog_product_id",
+                "identifier_value": "1207658924",
+            }],
+            create_platform_rows=True,
+        )
+
+        self.assertEqual(result["results"][0]["status"], "filled")
+        self.assertEqual(result["results"][0]["match_type"], "name")
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                """SELECT gpi.identifier_value
+                   FROM game_platform_identifiers gpi
+                   JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+                   WHERE gp.game_id = ? AND gp.platform = 'gog'
+                     AND gpi.identifier_type = 'gog_product_id'""",
+                (gid,),
+            )
+        self.assertIsNotNone(row)
+        self.assertEqual(row["identifier_value"], "1207658924")
 
 
 class SyncNoClobberTests(ToolDBTestCase):

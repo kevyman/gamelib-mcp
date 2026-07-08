@@ -21,10 +21,12 @@ from ..data.db import (
     ACQUISITION_FIELDS,
     fts_ready,
     get_db,
+    get_game_by_identifier,
     set_platform_acquisition,
     upsert_game_platform,
+    upsert_game_platform_identifier,
 )
-from ..data.purchases import PURCHASE_IMPORTERS, PurchaseRecord
+from ..data.purchases import IDENTIFIER_TYPES, PURCHASE_IMPORTERS, PurchaseRecord
 
 # The importer dict is resolved at call time; the imports below keep the
 # fetchers bound on this module so tests can patch
@@ -92,7 +94,10 @@ _ACQUIRED_AT_RE = re.compile(r"^\d{4}(-\d{2}(-\d{2})?)?$")
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
 _BATCH_ITEM_CAP = 200
-_BATCH_ITEM_KEYS = frozenset({"name", "game_id", "platform", *ACQUISITION_FIELDS})
+_BATCH_ITEM_KEYS = frozenset({
+    "name", "game_id", "platform", "identifier_type", "identifier_value",
+    *ACQUISITION_FIELDS,
+})
 
 
 def _normalize_source(value: str) -> str:
@@ -249,12 +254,26 @@ async def set_acquisition(
     }
 
 
-async def _match_batch_game(name: str | None, game_id: int | None):
+async def _match_batch_game(
+    name: str | None,
+    game_id: int | None,
+    identifier_type: str | None = None,
+    identifier_value: str | None = None,
+):
     """Resolve one batch item to (row, match_type); (None, None) on a miss.
 
     Same tiers as platforms._resolve_game_row (id > tiered name > fuzzy) but
     never raises — a batch import reports unmatched items instead of failing.
+    A store identifier (e.g. nintendo_title_id) is tried first: it's exact
+    where names are fragile (renamed/localized library titles). An identifier
+    miss is NOT terminal — a first import can predate the sync that attaches
+    the id, so name matching may still save the item.
     """
+    if identifier_type is not None and identifier_value is not None:
+        row = await get_game_by_identifier(identifier_type, str(identifier_value))
+        if row is not None:
+            return row, "identifier"
+
     async with get_db() as db:
         if game_id is not None:
             row = await db.execute_fetchone(
@@ -303,6 +322,12 @@ async def _apply_batch_item(
         platform = _validate_platform(raw_platform, LIBRARY_PLATFORMS)
         if item.get("name") is None and item.get("game_id") is None:
             raise ToolError("Provide game_id or name")
+        identifier_type = item.get("identifier_type")
+        identifier_value = item.get("identifier_value")
+        if (identifier_type is None) != (identifier_value is None):
+            raise ToolError(
+                "identifier_type and identifier_value must be provided together"
+            )
         fields = _validated_fields(
             item.get("acquired_at"),
             item.get("price_paid"),
@@ -320,7 +345,9 @@ async def _apply_batch_item(
             "item": item,
         }
 
-    row, match_type = await _match_batch_game(item.get("name"), item.get("game_id"))
+    row, match_type = await _match_batch_game(
+        item.get("name"), item.get("game_id"), identifier_type, identifier_value
+    )
     if row is None:
         return {"status": "unmatched", "platform": platform, "item": item}
     resolved_id = row["id"]
@@ -347,6 +374,13 @@ async def _apply_batch_item(
     gpid = gp["id"] if gp is not None else await upsert_game_platform(
         resolved_id, platform, owned=1
     )
+    if gp is None and identifier_type is not None and match_type != "identifier":
+        # A freshly created platform row would otherwise lose the store id the
+        # item carried (an identifier match implies the id is already attached
+        # to an existing row somewhere, so only non-identifier matches attach).
+        await upsert_game_platform_identifier(
+            gpid, identifier_type, str(identifier_value)
+        )
 
     if overwrite:
         acquisition = await set_platform_acquisition(gpid, fields)
@@ -382,7 +416,9 @@ async def set_acquisitions_batch(
     """
     Bulk-import acquisition data; per-item errors never fail the whole call.
 
-    Each item: {name or game_id, platform, + any of the 5 acquisition fields}.
+    Each item: {name or game_id, platform, + any of the 5 acquisition fields,
+    optionally identifier_type + identifier_value (both or neither) for
+    identifier-first matching}.
     Default (overwrite=False) fills only NULL columns so a re-import never
     clobbers manual edits. Never creates games rows; missing games land in
     unmatched, missing platform rows in no_platform_row unless
@@ -436,7 +472,7 @@ def _resolve_purchase_fetchers(sources: list[str]) -> dict:
     return fetchers
 
 
-def _record_to_batch_item(record: PurchaseRecord) -> dict:
+def _record_to_batch_item(record: PurchaseRecord, source: str) -> dict:
     """One PurchaseRecord → a set_acquisitions_batch item dict (no None fields)."""
     item: dict = {
         "name": record.title,
@@ -453,6 +489,11 @@ def _record_to_batch_item(record: PurchaseRecord) -> dict:
             item["price_currency"] = record.price_currency
     if record.bundle_name is not None:
         item["bundle_name"] = record.bundle_name
+    if record.store_identifier is not None and source in IDENTIFIER_TYPES:
+        # Lets the batch writer match identifier-first, so a renamed or
+        # localized library title still resolves to the right game.
+        item["identifier_type"] = IDENTIFIER_TYPES[source]
+        item["identifier_value"] = record.store_identifier
     return item
 
 
@@ -467,7 +508,7 @@ async def _import_one_source(
     batch writer. Fetch exceptions propagate — the caller gathers them, and a
     mid-fetch failure must never partially import."""
     records, skipped = await fetch()
-    items = [_record_to_batch_item(r) for r in records]
+    items = [_record_to_batch_item(r, source) for r in records]
 
     if dry_run:
         return {
