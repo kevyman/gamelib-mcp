@@ -126,6 +126,46 @@ async def get_backlog_stats() -> dict:
             """
         )
 
+        # Money recorded (via set_acquisition) on effectively-unplayed games:
+        # play_state unplayed (summed playtime 0) or unknown (all NULL — the
+        # priced copy was still never played), mirroring the backlog-hours
+        # exclusions above (explicit completed is already play_state='played';
+        # abandoned/evergreen are written off, not backlog). Priced rows join
+        # on owned=1 like the rollup — an owned=0 stub's price is not real
+        # spend on this game. Grouped per currency, never summed across.
+        unplayed_spend_where = """
+            WHERE gr.play_state IN ('unplayed', 'unknown')
+              AND (gr.completion_status IS NULL
+                   OR gr.completion_status NOT IN ('completed', 'abandoned', 'evergreen'))
+              AND gp.price_paid IS NOT NULL
+              AND gp.price_paid > 0
+        """
+        unplayed_spend_totals = await db.execute_fetchall(
+            _GAME_ROLLUP_CTE
+            + f"""
+            SELECT gp.price_currency AS currency,
+                   ROUND(SUM(gp.price_paid), 2) AS spent,
+                   COUNT(*) AS count
+            FROM game_rollup gr
+            JOIN game_platforms gp ON gp.game_id = gr.game_id AND gp.owned = 1
+            {unplayed_spend_where}
+            GROUP BY gp.price_currency
+            ORDER BY spent DESC
+            """
+        )
+        unplayed_spend_top = await db.execute_fetchall(
+            _GAME_ROLLUP_CTE
+            + f"""
+            SELECT gr.game_id, gr.name, gp.platform,
+                   gp.price_paid, gp.price_currency AS currency
+            FROM game_rollup gr
+            JOIN game_platforms gp ON gp.game_id = gr.game_id AND gp.owned = 1
+            {unplayed_spend_where}
+            ORDER BY gp.price_paid DESC
+            LIMIT 5
+            """
+        )
+
     total_count = summary["total_library"] or 0
     played_count = summary["played"] or 0
     unplayed_count = summary["unplayed"] or 0
@@ -191,4 +231,8 @@ async def get_backlog_stats() -> dict:
             if best_unplayed_rated
             else None
         ),
+        "unplayed_spend": {
+            "totals": [dict(r) for r in unplayed_spend_totals],
+            "top": [dict(r) for r in unplayed_spend_top],
+        },
     }

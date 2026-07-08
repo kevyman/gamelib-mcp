@@ -542,6 +542,94 @@ class MergeGamesTests(ToolDBTestCase):
             )
         self.assertEqual(row["playtime_minutes"], 150)
 
+    async def _target_acquisition(self, tgt: int, platform: str = "ps5") -> dict:
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                """SELECT acquired_at, price_paid, price_currency,
+                          purchase_source, bundle_name
+                   FROM game_platforms WHERE game_id = ? AND platform = ?""",
+                (tgt, platform),
+            )
+        return dict(row)
+
+    async def test_platform_merged_fills_target_acquisition_from_source(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        src_gpid = await add_platform(src, "ps5", playtime_minutes=10)
+        await add_platform(tgt, "ps5", playtime_minutes=20)
+        await db_module.set_platform_acquisition(
+            src_gpid,
+            {
+                "acquired_at": "2023-06-01",
+                "price_paid": 24.99,
+                "price_currency": "USD",
+                "purchase_source": "psn",
+                "bundle_name": "Summer Sale",
+            },
+        )
+
+        result = await admin.merge_games(src, tgt)
+
+        self.assertEqual(result["platforms_merged"], ["ps5"])
+        self.assertEqual(
+            await self._target_acquisition(tgt),
+            {
+                "acquired_at": "2023-06-01",
+                "price_paid": 24.99,
+                "price_currency": "USD",
+                "purchase_source": "psn",
+                "bundle_name": "Summer Sale",
+            },
+        )
+
+    async def test_platform_merged_target_acquisition_wins_on_conflict(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        src_gpid = await add_platform(src, "ps5")
+        tgt_gpid = await add_platform(tgt, "ps5")
+        await db_module.set_platform_acquisition(
+            src_gpid,
+            {
+                "acquired_at": "2021-01-01",
+                "price_paid": 59.99,
+                "price_currency": "USD",
+                "purchase_source": "physical",
+            },
+        )
+        # Target already knows its price but not the date or source: the merge
+        # must keep the target's values and only fill its NULL columns.
+        await db_module.set_platform_acquisition(
+            tgt_gpid, {"price_paid": 9.99, "price_currency": "EUR"}
+        )
+
+        await admin.merge_games(src, tgt)
+
+        self.assertEqual(
+            await self._target_acquisition(tgt),
+            {
+                "acquired_at": "2021-01-01",   # filled from source
+                "price_paid": 9.99,            # target wins
+                "price_currency": "EUR",       # target wins
+                "purchase_source": "physical", # filled from source
+                "bundle_name": None,
+            },
+        )
+
+    async def test_platform_moved_carries_acquisition_data(self):
+        src = await seed_game("Source Only PSN")
+        tgt = await seed_game("Target Without PSN")
+        src_gpid = await add_platform(src, "ps5")
+        await db_module.set_platform_acquisition(
+            src_gpid, {"price_paid": 14.99, "price_currency": "USD"}
+        )
+
+        result = await admin.merge_games(src, tgt)
+
+        self.assertEqual(result["platforms_moved"], ["ps5"])
+        row = await self._target_acquisition(tgt)
+        self.assertEqual(row["price_paid"], 14.99)
+        self.assertEqual(row["price_currency"], "USD")
+
     async def test_ratings_moved_when_target_lacks_source(self):
         src = await seed_game("Source")
         tgt = await seed_game("Target")
