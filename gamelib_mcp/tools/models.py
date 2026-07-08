@@ -130,6 +130,9 @@ class LibraryStatsResponse(PaginatedGamesResponse):
     total_playtime_hours: float
     filter: str
     sort_by: str
+    # Library-wide spending summary over owned rows (per-currency totals,
+    # never cross-currency) — independent of the current filter parameters.
+    spending: dict[str, Any]
 
 
 class GameRating(FlexibleModel):
@@ -187,6 +190,9 @@ class BacklogStatsResponse(FlexibleModel):
     completed: int
     abandoned: int
     evergreen: int
+    # Money recorded on owned, effectively-unplayed games:
+    # {"totals": [{currency, spent, count}], "top": [up to 5 priced games]}.
+    unplayed_spend: dict[str, Any]
 
 
 class RefreshLibraryResponse(FlexibleModel):
@@ -258,6 +264,14 @@ class HardwarePreferenceResponse(FlexibleModel):
     hardware_preference: list[str]
 
 
+class AcquisitionInfo(FlexibleModel):
+    acquired_at: str | None = None
+    price_paid: float | None = None
+    price_currency: str | None = None
+    purchase_source: str | None = None
+    bundle_name: str | None = None
+
+
 class AddGameToPlatformResponse(FlexibleModel):
     created: bool
     game_id: int
@@ -268,6 +282,8 @@ class AddGameToPlatformResponse(FlexibleModel):
     owned: bool = True
     playtime_minutes: int | None = None
     identifier: dict[str, str] | None = None
+    # Populated when acquisition params were passed (owned=True only).
+    acquisition: AcquisitionInfo | None = None
 
 
 class SyncWishlistResponse(FlexibleModel):
@@ -299,14 +315,6 @@ class UpdateGameResponse(FlexibleModel):
     updated: dict[str, Any]
     cleared: list[str]
     manual_overrides: list[str]
-
-
-class AcquisitionInfo(FlexibleModel):
-    acquired_at: str | None = None
-    price_paid: float | None = None
-    price_currency: str | None = None
-    purchase_source: str | None = None
-    bundle_name: str | None = None
 
 
 class SetAcquisitionResponse(FlexibleModel):

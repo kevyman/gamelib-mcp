@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from fastmcp.exceptions import ToolError
 
 from ..data.db import (
+    ACQUISITION_FIELDS,
     STEAM_APP_ID,
     clear_fulfilled_wishlist_entries,
     get_db,
@@ -460,8 +461,10 @@ async def merge_games(
         if target_row is None:
             raise ToolError(f"Target game {target_game_id} not found")
 
+        acquisition_cols = ", ".join(ACQUISITION_FIELDS)
         source_platforms = await db.execute_fetchall(
-            "SELECT id, platform, playtime_minutes, owned, last_played FROM game_platforms WHERE game_id = ?",
+            f"""SELECT id, platform, playtime_minutes, owned, last_played, {acquisition_cols}
+                FROM game_platforms WHERE game_id = ?""",
             (source_game_id,),
         )
 
@@ -472,12 +475,15 @@ async def merge_games(
             sp_id: int = sp["id"]
             platform: str = sp["platform"]
             target_platform = await db.execute_fetchone(
-                "SELECT id, playtime_minutes, last_played, owned FROM game_platforms WHERE game_id = ? AND platform = ?",
+                f"""SELECT id, playtime_minutes, last_played, owned, {acquisition_cols}
+                    FROM game_platforms WHERE game_id = ? AND platform = ?""",
                 (target_game_id, platform),
             )
 
             if not dry_run:
                 if target_platform is None:
+                    # Re-pointing the whole row carries its acquisition
+                    # columns (and everything else) along untouched.
                     await db.execute(
                         "UPDATE game_platforms SET game_id = ? WHERE id = ?",
                         (target_game_id, sp_id),
@@ -509,6 +515,21 @@ async def merge_games(
                         await db.execute(
                             "UPDATE game_platforms SET owned = 1 WHERE id = ?",
                             (tp_id,),
+                        )
+                    # Acquisition data would be silently dropped with the source
+                    # row's DELETE below: fill each target column that is NULL
+                    # from the source (target wins on conflict — matches the
+                    # merge's keep-target philosophy).
+                    acq_updates = {
+                        col: sp[col]
+                        for col in ACQUISITION_FIELDS
+                        if target_platform[col] is None and sp[col] is not None
+                    }
+                    if acq_updates:
+                        acq_sql = ", ".join(f"{col} = ?" for col in acq_updates)
+                        await db.execute(
+                            f"UPDATE game_platforms SET {acq_sql} WHERE id = ?",
+                            (*acq_updates.values(), tp_id),
                         )
                     # Move identifiers: UPDATE OR IGNORE keeps target row on unique conflict
                     await db.execute(

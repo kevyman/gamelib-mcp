@@ -181,7 +181,9 @@ async def get_library_stats(
     accepts native, platinum, gold, silver, bronze, or borked. platform can
     filter to steam, epic, gog, nintendo, switch2, or ps5.
     response_format=concise omits platform arrays. Returns aggregate counts,
-    paged results, total_matches, and has_more.
+    paged results, total_matches, and has_more, plus a library-wide spending
+    summary (per-currency totals over owned rows with a recorded price and
+    price coverage — see set_acquisition / get_spending_stats).
     """
     from .tools.library import get_library_stats as _stats
     return await _stats(
@@ -343,7 +345,9 @@ async def get_backlog_stats() -> BacklogStatsResponse:
 
     Use this for high-level backlog health, weekly pace, years to clear, and top
     unplayed highlights; prefer get_library_stats for the underlying filtered
-    game list. Returns aggregate backlog metrics and highlight games.
+    game list. Returns aggregate backlog metrics and highlight games, plus an
+    unplayed_spend block (money recorded via set_acquisition on owned games
+    that were never played — per-currency totals and the top 5 offenders).
     """
     from .tools.stats import get_backlog_stats as _bstats
     return await _bstats()
@@ -855,6 +859,11 @@ async def add_game_to_platform(
     identifier_value: str | None = None,
     playtime_minutes: int | None = None,
     owned: bool = True,
+    acquired_at: str | None = None,
+    price_paid: float | None = None,
+    price_currency: str | None = None,
+    purchase_source: str | None = None,
+    bundle_name: str | None = None,
 ) -> AddGameToPlatformResponse:
     """
     Manually add a game to a platform.
@@ -866,12 +875,29 @@ async def add_game_to_platform(
     identifier_value can store an external ID (requires owned=True).
     playtime_minutes is optional. Pass owned=False to record a wishlist entry
     instead of an owned copy — useful for PSN, which has no wishlist API.
-    Returns game_platform_id when owned, wishlist_id when not (the other is
-    null); either call also clears a matching wishlist entry that's now
-    fulfilled.
+    acquired_at (YYYY / YYYY-MM / YYYY-MM-DD), price_paid (currency defaults
+    to USD), price_currency, purchase_source, and bundle_name optionally
+    record the acquisition on the new ownership row in the same call — same
+    validation and vocabulary as set_acquisition; they require owned=True (a
+    wishlist entry has nowhere to store them) and are echoed back in the
+    acquisition field. Returns game_platform_id when owned, wishlist_id when
+    not (the other is null); either call also clears a matching wishlist
+    entry that's now fulfilled.
     """
     from .tools.platforms import add_game_to_platform as _add
-    return await _add(name, platform, identifier_type, identifier_value, playtime_minutes, owned)
+    return await _add(
+        name,
+        platform,
+        identifier_type,
+        identifier_value,
+        playtime_minutes,
+        owned,
+        acquired_at,
+        price_paid,
+        price_currency,
+        purchase_source,
+        bundle_name,
+    )
 
 
 @mcp.tool(annotations=MUTATION_TOOL)
