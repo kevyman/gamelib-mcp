@@ -1020,12 +1020,14 @@ class ImportPurchasesTests(ToolDBTestCase):
         with _patch_fetchers(
             fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
         ):
-            result = await acquisition.import_purchases()
+            # create_missing=False keeps the unmatched-reporting behavior under test.
+            result = await acquisition.import_purchases(create_missing=False)
 
         eshop = result["sources"]["eshop"]
         self.assertEqual(eshop["status"], "ok")
         self.assertEqual(eshop["fetched"], 2)
         self.assertEqual(eshop["filled"], 1)
+        self.assertEqual(eshop["created"], 0)
         self.assertEqual(len(eshop["unmatched"]), 1)
         self.assertEqual(eshop["unmatched"][0]["name"], "Totally Absent Game")
         self.assertEqual(result["totals"]["filled"], 1)
@@ -1037,6 +1039,60 @@ class ImportPurchasesTests(ToolDBTestCase):
         self.assertEqual(row["price_paid"], 19.99)
         self.assertEqual(row["price_currency"], "USD")
         self.assertEqual(row["purchase_source"], "eshop")
+
+    async def test_create_missing_default_mints_new_owned_game(self):
+        # A purchase that matches nothing becomes an owned library game — a
+        # purchase is a stronger ownership signal than inferred playtime.
+        gid = await seed_game("Hades")
+        await add_platform(gid, "switch2")
+
+        records = [_eshop_record("Hades"), _eshop_record("F-ZERO 99")]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["eshop"])
+
+        eshop = result["sources"]["eshop"]
+        self.assertEqual(eshop["filled"], 1)
+        self.assertEqual(eshop["created"], 1)
+        self.assertEqual(eshop["unmatched"], [])
+        self.assertEqual(result["totals"]["created"], 1)
+        detail = eshop["created_details"]
+        self.assertEqual(len(detail), 1)
+        self.assertEqual(detail[0]["name"], "F-ZERO 99")
+        self.assertEqual(detail[0]["platform"], "switch2")
+
+        # The new game is owned on switch2 and carries its acquisition (eShop
+        # transactions expose no title id, so it reconciles by name later).
+        new_id = detail[0]["game_id"]
+        row = await _acquisition_row(new_id, "switch2")
+        self.assertEqual(row["price_paid"], 19.99)
+        self.assertEqual(row["purchase_source"], "eshop")
+        async with db_module.get_db() as db:
+            owned = await db.execute_fetchone(
+                "SELECT owned FROM game_platforms WHERE game_id = ? AND platform = ?",
+                (new_id, "switch2"),
+            )
+        self.assertEqual(owned["owned"], 1)
+
+    async def test_dry_run_previews_would_create(self):
+        gid = await seed_game("Hades")
+        await add_platform(gid, "switch2")
+        records = [_eshop_record("Hades"), _eshop_record("F-ZERO 99")]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["eshop"], dry_run=True)
+
+        eshop = result["sources"]["eshop"]
+        names = [item["name"] for item in eshop["would_create"]]
+        self.assertEqual(names, ["F-ZERO 99"])
+        # Nothing was written — the game does not exist yet.
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT id FROM games WHERE name = ?", ("F-ZERO 99",)
+            )
+        self.assertIsNone(row)
 
     async def test_bundle_diverted_to_needs_split_not_unmatched(self):
         gid = await seed_game("Hades")
@@ -1283,13 +1339,14 @@ class ImportPurchasesTests(ToolDBTestCase):
                 ),
             ),
         ):
-            result = await acquisition.import_purchases()
+            result = await acquisition.import_purchases(create_missing=False)
 
         self.assertEqual(set(result["sources"]), {"eshop", "gog", "humble", "steam"})
         for source in ("eshop", "gog", "humble", "steam"):
             self.assertEqual(result["sources"][source]["status"], "ok")
         self.assertEqual(result["totals"]["fetched"], 5)
         self.assertEqual(result["totals"]["filled"], 4)
+        self.assertEqual(result["totals"]["created"], 0)
         self.assertEqual(result["totals"]["unmatched"], 1)
         self.assertEqual(result["totals"]["errors"], 0)
         self.assertEqual(len(result["sources"]["gog"]["skipped"]), 1)

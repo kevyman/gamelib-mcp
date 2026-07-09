@@ -159,7 +159,7 @@ EXPECTED_TOOLS = {
         "required": set(),
     },
     "set_acquisitions_batch": {
-        "params": {"items", "overwrite", "create_platform_rows"},
+        "params": {"items", "overwrite", "create_platform_rows", "create_missing"},
         "required": {"items"},
     },
     "split_bundle_acquisition": {
@@ -178,7 +178,13 @@ EXPECTED_TOOLS = {
         "required": {"bundle_name", "platform", "games"},
     },
     "import_purchases": {
-        "params": {"sources", "dry_run", "overwrite", "create_platform_rows"},
+        "params": {
+            "sources",
+            "dry_run",
+            "overwrite",
+            "create_platform_rows",
+            "create_missing",
+        },
         "required": set(),
     },
     "get_spending_stats": {

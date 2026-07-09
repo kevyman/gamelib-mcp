@@ -1025,6 +1025,7 @@ async def set_acquisitions_batch(
     items: list[dict],
     overwrite: bool = False,
     create_platform_rows: bool = False,
+    create_missing: bool = False,
 ) -> SetAcquisitionsBatchResponse:
     """
     Bulk-import acquisition data for many games in one call (max 200 items).
@@ -1042,23 +1043,28 @@ async def set_acquisitions_batch(
     call: every item gets a per-item result with a status — applied
     (overwrite=True wrote the fields), filled (default mode wrote at least one
     previously-NULL field), no_change (every requested field already had a
-    value), unmatched (no library game matched — the original payloads are
-    also echoed in the top-level unmatched list for retry), no_platform_row
-    (game matched but isn't recorded on that platform; its actual platforms
-    are listed — pass create_platform_rows=True to create owned rows instead),
-    or error (validation failure, with the message and original item).
+    value), created (create_missing minted a new owned game — its identifier is
+    attached; names surface in created_details), unmatched (no library game
+    matched and create_missing was off — the original payloads are also echoed
+    in the top-level unmatched list for retry), no_platform_row (game matched
+    but isn't recorded on that platform; its actual platforms are listed — pass
+    create_platform_rows=True to create owned rows instead), or error
+    (validation failure, with the message and original item).
 
     The default overwrite=False only fills missing (NULL) columns, so
     re-importing a purchase-history export never clobbers values you've
     already set or corrected; overwrite=True replaces the provided fields
-    unconditionally. This tool never creates games rows. Matches report
+    unconditionally. create_missing=False (default) never creates games rows;
+    set it True to mint an owned game (name required) when identifier, name,
+    and fuzzy matching all miss — a purchase is real ownership. Matches report
     match_type ("identifier" for store-identifier hits, "id" for game_id,
     "name" for tiered exact/prefix/substring matching, "fuzzy" for the
-    misspelling fallback) and matched_name — review match_type="fuzzy"
-    results to confirm they resolved to the intended game.
+    misspelling fallback, "created" for a freshly minted game) and matched_name
+    — review match_type="fuzzy" results to confirm they resolved to the
+    intended game.
     """
     from .tools.acquisition import set_acquisitions_batch as _set_batch
-    return await _set_batch(items, overwrite, create_platform_rows)
+    return await _set_batch(items, overwrite, create_platform_rows, create_missing)
 
 
 @mcp.tool(annotations=MUTATION_TOOL)
@@ -1141,6 +1147,7 @@ async def import_purchases(
     dry_run: bool = False,
     overwrite: bool = False,
     create_platform_rows: bool = False,
+    create_missing: bool = True,
 ) -> ImportPurchasesResponse:
     """
     Import purchase history (dates, prices, bundles) from storefront accounts.
@@ -1149,13 +1156,21 @@ async def import_purchases(
     machinery as set_acquisitions_batch: by default only missing (NULL)
     acquisition fields are filled, so re-running an import never clobbers
     values you set or corrected by hand (overwrite=True replaces them).
-    Games rows are never created; purchases that don't match a library game
-    are echoed in each source's unmatched list. Records carrying a store
-    identifier (eShop title ids, GOG product ids, Steam appids) are matched
-    identifier-first, so a renamed or localized library title still resolves;
-    the name-based tiers remain the fallback. Pass dry_run=True to preview
-    the converted items (capped at 200 per source, with a truncated flag)
-    without writing anything.
+    Records carrying a store identifier (GOG product ids, Steam appids) are
+    matched identifier-first, so a renamed or localized library title still
+    resolves; the name-based tiers remain the fallback (eShop transactions
+    expose no title id, so they match — and reconcile with later syncs — by
+    name).
+
+    A purchase is a definitive ownership signal — stronger than the playtime
+    some platforms use to infer ownership — so create_missing defaults True: a
+    single-game purchase that matches no library game (identifier, name, and
+    fuzzy all miss) is created as an owned game, reported under each source's
+    created count / created_details (game_id, name, platform). Set
+    create_missing=False to route those to unmatched instead. Pass dry_run=True
+    to preview the converted items (capped at 200 per source, with a truncated
+    flag) plus a would_create list naming the new games — created rows have no
+    delete tool, so preview when in doubt — without writing anything.
 
     sources defaults to all registered importers; currently:
     - "eshop": Nintendo eShop transactions (ec.nintendo.com) → switch2.
@@ -1192,12 +1207,14 @@ async def import_purchases(
 
     Sources run concurrently; one source's auth/network failure (status
     "error", nothing written for it) never blocks the others. Each ok source
-    reports fetched/applied/filled/no_change/unmatched/no_platform_row/
-    bundles_needing_split/errors plus the rows it skipped, and totals
-    aggregates across sources.
+    reports fetched/applied/filled/no_change/created/created_details/unmatched/
+    no_platform_row/bundles_needing_split/errors plus the rows it skipped, and
+    totals aggregates across sources.
     """
     from .tools.acquisition import import_purchases as _import_purchases
-    return await _import_purchases(sources, dry_run, overwrite, create_platform_rows)
+    return await _import_purchases(
+        sources, dry_run, overwrite, create_platform_rows, create_missing
+    )
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)

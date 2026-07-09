@@ -328,12 +328,12 @@ class SetAcquisitionResponse(FlexibleModel):
 
 
 class AcquisitionBatchItemResult(FlexibleModel):
-    # applied | filled | no_change | unmatched | no_platform_row | error
+    # applied | filled | no_change | created | unmatched | no_platform_row | error
     status: str
     platform: str | None = None
     game_id: int | None = None
     matched_name: str | None = None
-    match_type: str | None = None  # identifier | id | name | fuzzy
+    match_type: str | None = None  # identifier | id | name | fuzzy | created
     acquisition: AcquisitionInfo | None = None
     # Present on no_platform_row: the platforms the game IS owned/recorded on.
     platforms: list[str] | None = None
@@ -348,6 +348,10 @@ class SetAcquisitionsBatchResponse(FlexibleModel):
     applied: int
     filled: int
     no_change: int
+    created: int
+    # New owned games minted by create_missing (game_id, name, platform) — a
+    # created row has no delete tool, so callers eyeball this list.
+    created_details: list[dict[str, Any]]
     unmatched: list[dict[str, Any]]
     no_platform_row: int
     # Detail for the no_platform_row rows (game_id, matched_name, platforms),
@@ -388,10 +392,12 @@ class SplitBundleAcquisitionResponse(FlexibleModel):
 class ImportPurchasesResponse(FlexibleModel):
     # Per-source results keyed by importer name (eshop, humble, ...). Each is
     # {source, status: "ok"|"error", ...} — ok carries fetched/applied/filled/
-    # no_change/unmatched/no_platform_row/bundles_needing_split/errors/skipped
-    # (or dry_run+proposed), error carries the fetch failure message.
-    # bundles_needing_split holds multi-game bundles to hand to
-    # split_bundle_acquisition (they're never written by this tool).
+    # no_change/created/created_details/unmatched/no_platform_row/
+    # bundles_needing_split/errors/skipped (or dry_run+proposed+would_create),
+    # error carries the fetch failure message. bundles_needing_split holds
+    # multi-game bundles to hand to split_bundle_acquisition (they're never
+    # written by this tool); created_details names games minted from
+    # unmatched single-game purchases (create_missing, default on).
     sources: dict[str, dict[str, Any]]
     dry_run: bool
     totals: dict[str, Any]

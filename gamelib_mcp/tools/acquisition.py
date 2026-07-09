@@ -332,7 +332,10 @@ async def _match_batch_game(
 
 
 async def _apply_batch_item(
-    item: dict, overwrite: bool, create_platform_rows: bool
+    item: dict,
+    overwrite: bool,
+    create_platform_rows: bool,
+    create_missing: bool,
 ) -> dict:
     """Process one batch item into its per-item result dict. Never raises."""
     try:
@@ -373,8 +376,25 @@ async def _apply_batch_item(
     row, match_type = await _match_batch_game(
         item.get("name"), item.get("game_id"), identifier_type, identifier_value
     )
+    created = False
     if row is None:
-        return {"status": "unmatched", "platform": platform, "item": item}
+        name = item.get("name")
+        if not (create_missing and name):
+            return {"status": "unmatched", "platform": platform, "item": item}
+        # A purchase is a definitive ownership signal — stronger than the
+        # playtime some platforms lean on to infer ownership — so a genuinely
+        # new purchased title becomes an owned library game. The matcher
+        # (identifier → edition-stripped name → fuzzy) has already missed, so
+        # this is a real gap, not a near-duplicate; the store identifier is
+        # attached below so a later platform sync reconciles onto this row
+        # instead of minting a second one.
+        new_id = await upsert_game(None, str(name).strip())
+        async with get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT id, name FROM games WHERE id = ?", (new_id,)
+            )
+        created = True
+        match_type = "created"
     resolved_id = row["id"]
 
     async with get_db() as db:
@@ -382,7 +402,10 @@ async def _apply_batch_item(
             "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",
             (resolved_id, platform),
         )
-        if gp is None and not create_platform_rows:
+        # A freshly created game has no platform row yet, and the purchase means
+        # you own it here — so it always gets its owned row (the create_platform_rows
+        # gate only governs games that already exist on some OTHER platform).
+        if gp is None and not create_platform_rows and not created:
             platform_rows = await db.execute_fetchall(
                 "SELECT platform FROM game_platforms WHERE game_id = ? ORDER BY platform",
                 (resolved_id,),
@@ -409,7 +432,7 @@ async def _apply_batch_item(
 
     if overwrite:
         acquisition = await set_platform_acquisition(gpid, fields)
-        status = "applied"
+        status = "created" if created else "applied"
     else:
         # Pre-state read: only_if_null COALESCE writes can't tell us which
         # fields were actually filled, and "filled vs no_change" is the whole
@@ -421,7 +444,7 @@ async def _apply_batch_item(
             )
         acquisition = await set_platform_acquisition(gpid, fields, only_if_null=True)
         newly_written = [col for col in fields if pre[col] is None]
-        status = "filled" if newly_written else "no_change"
+        status = "created" if created else ("filled" if newly_written else "no_change")
 
     return {
         "status": status,
@@ -437,6 +460,7 @@ async def set_acquisitions_batch(
     items: list[dict],
     overwrite: bool = False,
     create_platform_rows: bool = False,
+    create_missing: bool = False,
 ) -> dict:
     """
     Bulk-import acquisition data; per-item errors never fail the whole call.
@@ -445,8 +469,11 @@ async def set_acquisitions_batch(
     optionally identifier_type + identifier_value (both or neither) for
     identifier-first matching}.
     Default (overwrite=False) fills only NULL columns so a re-import never
-    clobbers manual edits. Never creates games rows; missing games land in
-    unmatched, missing platform rows in no_platform_row unless
+    clobbers manual edits. With create_missing=True an item (name required)
+    that matches no existing game — identifier, edition-stripped name, and
+    fuzzy all miss — is created as an owned library game (status "created",
+    store identifier attached); otherwise it lands in unmatched. Missing
+    platform rows on an already-existing game land in no_platform_row unless
     create_platform_rows=True.
     """
     if not items:
@@ -458,7 +485,11 @@ async def set_acquisitions_batch(
 
     results = []
     for item in items:
-        results.append(await _apply_batch_item(item, overwrite, create_platform_rows))
+        results.append(
+            await _apply_batch_item(
+                item, overwrite, create_platform_rows, create_missing
+            )
+        )
 
     def _count(status: str) -> int:
         return sum(1 for r in results if r["status"] == status)
@@ -469,6 +500,19 @@ async def set_acquisitions_batch(
         "applied": _count("applied"),
         "filled": _count("filled"),
         "no_change": _count("no_change"),
+        "created": _count("created"),
+        # New owned games minted from purchases that matched nothing. Surfaced
+        # by name so the caller can eyeball what was added — created games rows
+        # have no delete tool, so a bad create wants to be visible.
+        "created_details": [
+            {
+                "game_id": r["game_id"],
+                "name": r["matched_name"],
+                "platform": r["platform"],
+            }
+            for r in results
+            if r["status"] == "created"
+        ],
         "unmatched": [r["item"] for r in results if r["status"] == "unmatched"],
         "no_platform_row": _count("no_platform_row"),
         # Detail for the no_platform_row rows: which game matched but has no
@@ -893,6 +937,7 @@ async def _import_one_source(
     dry_run: bool,
     overwrite: bool,
     create_platform_rows: bool,
+    create_missing: bool,
 ) -> dict:
     """Fetch one source and (unless dry_run) push its records through the
     batch writer. Fetch exceptions propagate — the caller gathers them, and a
@@ -906,6 +951,19 @@ async def _import_one_source(
     items = [_record_to_batch_item(r, source) for r in importable]
 
     if dry_run:
+        # Run the matcher (not the writer) so the preview can name the genuinely
+        # new games create_missing would mint — the "no delete tool" safety net.
+        would_create: list[dict] = []
+        if create_missing:
+            for item in items:
+                row, _ = await _match_batch_game(
+                    item.get("name"),
+                    item.get("game_id"),
+                    item.get("identifier_type"),
+                    item.get("identifier_value"),
+                )
+                if row is None and item.get("name"):
+                    would_create.append(item)
         return {
             "source": source,
             "status": "ok",
@@ -913,25 +971,30 @@ async def _import_one_source(
             "fetched": len(records),
             "proposed": items[:_DRY_RUN_ECHO_CAP],
             "truncated": len(items) > _DRY_RUN_ECHO_CAP,
+            "would_create": would_create[:_DRY_RUN_ECHO_CAP],
             "bundles_needing_split": bundles,
             "skipped": skipped,
         }
 
-    applied = filled = no_change = no_platform_row = errors = 0
+    applied = filled = no_change = created = no_platform_row = errors = 0
     unmatched: list[dict] = []
+    created_details: list[dict] = []
     no_platform_row_details: list[dict] = []
     for start in range(0, len(items), _BATCH_ITEM_CAP):
         batch = await set_acquisitions_batch(
             items[start : start + _BATCH_ITEM_CAP],
             overwrite=overwrite,
             create_platform_rows=create_platform_rows,
+            create_missing=create_missing,
         )
         applied += batch["applied"]
         filled += batch["filled"]
         no_change += batch["no_change"]
+        created += batch["created"]
         no_platform_row += batch["no_platform_row"]
         errors += batch["errors"]
         unmatched.extend(batch["unmatched"])
+        created_details.extend(batch["created_details"])
         no_platform_row_details.extend(batch["no_platform_row_details"])
 
     return {
@@ -941,6 +1004,8 @@ async def _import_one_source(
         "applied": applied,
         "filled": filled,
         "no_change": no_change,
+        "created": created,
+        "created_details": created_details,
         "unmatched": unmatched,
         "no_platform_row": no_platform_row,
         "no_platform_row_details": no_platform_row_details,
@@ -955,6 +1020,7 @@ async def import_purchases(
     dry_run: bool = False,
     overwrite: bool = False,
     create_platform_rows: bool = False,
+    create_missing: bool = True,
 ) -> dict:
     """
     Fetch purchase histories from registered storefront importers and record
@@ -963,11 +1029,16 @@ async def import_purchases(
     sources None = every registered importer. Sources run concurrently; a
     fetch failure yields {status: "error"} for that source (nothing written
     for it — a partial fetch must not partially import) while the others
-    proceed. dry_run previews the converted batch items without writing.
+    proceed. dry_run previews the converted batch items (and, under
+    create_missing, the would_create list) without writing.
 
-    Multi-game bundles are diverted to each source's bundles_needing_split
-    list (name, platform, total_price, date) rather than the single-game
-    matcher — feed each to split_bundle_acquisition with its looked-up games.
+    A purchase is a definitive ownership signal, so create_missing defaults
+    True: a single-game purchase that matches no existing game is created as an
+    owned library game (reported under each source's created/created_details).
+    Set it False to route those to unmatched instead. Multi-game bundles are
+    always diverted to each source's bundles_needing_split list (name, platform,
+    total_price, date) rather than the single-game matcher — feed each to
+    split_bundle_acquisition with its looked-up games.
     """
     if sources is None:
         selected = sorted(PURCHASE_IMPORTERS)
@@ -986,7 +1057,12 @@ async def import_purchases(
     outcomes = await asyncio.gather(
         *(
             _import_one_source(
-                source, fetchers[source], dry_run, overwrite, create_platform_rows
+                source,
+                fetchers[source],
+                dry_run,
+                overwrite,
+                create_platform_rows,
+                create_missing,
             )
             for source in selected
         ),
@@ -1008,6 +1084,7 @@ async def import_purchases(
         "applied": _total("applied"),
         "filled": _total("filled"),
         "no_change": _total("no_change"),
+        "created": _total("created"),
         "unmatched": sum(len(r.get("unmatched", [])) for r in results.values()),
         "bundles_needing_split": sum(
             len(r.get("bundles_needing_split", [])) for r in results.values()
