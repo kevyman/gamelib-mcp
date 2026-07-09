@@ -1197,12 +1197,12 @@ async def set_nintendo_ec_session(cookies: str) -> NintendoSessionResponse:
     Enables import_purchases(sources=["eshop"]) to read your Nintendo eShop
     transaction history (purchase dates and prices). These cookies come from
     the ec.nintendo.com domain and are separate from the VGCS cookies used by
-    set_nintendo_session.
+    set_nintendo_session. The export MUST include __Secure-next-auth.session-token.
 
     How to get cookies:
     1. Open https://ec.nintendo.com/my/transactions/ (stay logged in)
     2. Install the "Cookie Editor" browser extension
-    3. Click the extension → Export → copy the JSON
+    3. Click the extension → Export → copy the JSON (export everything)
     4. Pass that JSON string here (object or Cookie Editor array format)
 
     Cookies are saved to NINTENDO_EC_COOKIES_FILE

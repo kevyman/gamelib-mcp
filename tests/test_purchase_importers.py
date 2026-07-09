@@ -85,159 +85,202 @@ class PurchaseRegistryTests(unittest.TestCase):
             self.assertTrue(callable(fn))
 
     def test_identifier_types_align_with_provider_constants(self):
-        # "eshop" is a literal in data/purchases/__init__.py (importing
-        # data.nintendo there would drag httpx/bs4/igdb into the package);
-        # this guards it against drifting from the real constant.
-        from gamelib_mcp.data.nintendo import NINTENDO_TITLE_ID
-
         self.assertEqual(
             IDENTIFIER_TYPES,
             {
-                "eshop": NINTENDO_TITLE_ID,
                 "gog": db_module.GOG_PRODUCT_ID,
                 "steam": db_module.STEAM_APP_ID,
             },
         )
-        # Humble orders carry no store identifiers — deliberately no entry.
+        # Humble orders and eShop transactions carry no store identifiers
+        # (the eShop GraphQL API exposes no product id) — deliberately no entry.
         self.assertNotIn("humble", IDENTIFIER_TYPES)
+        self.assertNotIn("eshop", IDENTIFIER_TYPES)
+
+
+def _ec_transactions_fixture() -> list:
+    """Inner transactionHistories list from the captured real API response."""
+    with open(
+        os.path.join(FIXTURES_DIR, "nintendo_ec_transactions.json"), encoding="utf-8"
+    ) as f:
+        envelope = json.load(f)
+    return envelope["data"]["account"]["transactionHistories"]["transactionHistories"]
 
 
 class NintendoEcParserTests(unittest.TestCase):
-    def test_parse_transactions_fixture(self):
-        transactions = [
-            {  # normal paid purchase, amount as object
-                "title": "Hades",
-                "transaction_type": "purchase",
-                "content_type": "title",
-                "date": "2024-03-01T12:34:56Z",
-                "amount": {"currency": "EUR", "raw_value": "24.99", "formatted_value": "€24.99"},
-                "title_id": "70010000012345",
-                "some_unknown_field": {"nested": True},
-            },
-            {  # free download: purchase with no amount block
-                "title": "Fortnite",
-                "transaction_type": "purchase",
-                "content_type": "title",
-                "date": "2023-11-20T08:00:00.000+09:00",
-            },
-            {  # refund → skipped
-                "title": "Bad Port",
-                "transaction_type": "refund",
-                "content_type": "title",
-                "date": "2024-01-05T00:00:00Z",
-                "amount": {"currency": "EUR", "raw_value": "59.99"},
-            },
-            {  # consumable → skipped
-                "title": "500 Gold Bars",
-                "transaction_type": "purchase",
-                "content_type": "consumable",
-                "date": "2024-02-02T00:00:00Z",
-                "amount": {"currency": "EUR", "raw_value": "4.99"},
-            },
-            {  # DLC with zero raw_value → price 0.0
-                "title": "Hades - Artbook DLC",
-                "transaction_type": "purchase",
-                "content_type": "aoc",
-                "date": "2024-03-02T12:00:00Z",
-                "amount": {"currency": "EUR", "raw_value": 0},
-            },
-            {  # missing title → skipped
-                "transaction_type": "purchase",
-                "content_type": "title",
-                "date": "2024-04-01T00:00:00Z",
-            },
-            {  # missing date → skipped
-                "title": "No Date Game",
-                "transaction_type": "purchase",
-                "content_type": "title",
-            },
-        ]
+    def test_parse_transactions_real_fixture(self):
+        # Trimmed from a real ec.nintendo.com GraphQL response: paid app,
+        # bundle, free DLC upgrade, a Switch-2 (BEE) title, a REDEEM (voucher),
+        # and an ExternalEcTransactionHistory grant carrying two granted items.
+        records, skipped = nintendo_ec.parse_transactions(_ec_transactions_fixture())
 
-        records, skipped = nintendo_ec.parse_transactions(transactions)
+        # Four PURCHASE rows import; REDEEM + the two grant items are skipped.
+        self.assertEqual([r.title for r in records], [
+            "Dead Cells",
+            "Dead Cells: DLC Bundle",
+            "Hollow Knight – Nintendo Switch 2 Edition-upgradepack",
+            "Xenoblade Chronicles: Definitive Edition – Nintendo Switch 2 Edition",
+        ])
 
-        self.assertEqual(len(records), 3)
-        hades = records[0]
-        self.assertEqual(hades.title, "Hades")
-        self.assertEqual(hades.platform, "switch2")
-        self.assertEqual(hades.purchase_source, "eshop")
-        self.assertEqual(hades.acquired_at, "2024-03-01")
-        self.assertEqual(hades.price_paid, 24.99)
-        self.assertEqual(hades.price_currency, "EUR")
-        self.assertEqual(hades.store_identifier, "70010000012345")
+        dead_cells = records[0]
+        self.assertEqual(dead_cells.platform, "switch2")
+        self.assertEqual(dead_cells.purchase_source, "eshop")
+        self.assertEqual(dead_cells.acquired_at, "2026-07-08")
+        self.assertEqual(dead_cells.price_paid, 12.49)
+        self.assertEqual(dead_cells.price_currency, "EUR")
+        # The API exposes no product id, so eShop records match by title only.
+        self.assertIsNone(dead_cells.store_identifier)
 
-        free = records[1]
-        self.assertEqual(free.title, "Fortnite")
-        self.assertEqual(free.price_paid, 0.0)
-        self.assertEqual(free.acquired_at, "2023-11-20")
-
-        dlc = records[2]
-        self.assertEqual(dlc.price_paid, 0.0)
-        self.assertEqual(dlc.price_currency, "EUR")
+        # Free DLC upgrade ("€ 0,00") → price 0.0, not None.
+        self.assertEqual(records[2].price_paid, 0.0)
+        self.assertEqual(records[2].price_currency, "EUR")
+        self.assertEqual(records[3].price_paid, 69.99)
 
         reasons = [s["reason"] for s in skipped]
-        self.assertEqual(len(skipped), 4)
-        self.assertIn("transaction_type 'refund' is not a purchase", reasons)
-        self.assertIn("content_type 'consumable' is not importable", reasons)
-        self.assertIn("missing title", reasons)
-        self.assertIn("missing or unparseable date", reasons)
-        self.assertEqual(skipped[0]["title"], "Bad Port")
+        titles = [s["title"] for s in skipped]
+        self.assertEqual(len(skipped), 3)
+        self.assertIn("transaction_type 'REDEEM' is not a purchase", reasons)
+        self.assertIn("Mario Kart World", titles)
+        # The multi-game external grant is reported item-by-item, never dropped.
+        self.assertEqual(
+            reasons.count("external eShop grant (not a purchase)"), 2
+        )
+        self.assertIn("Super Mario 3D World + Bowser's Fury", titles)
+        self.assertIn("Luigi's Mansion 3", titles)
 
-    def test_missing_type_fields_are_tolerated_as_purchase(self):
+    def test_missing_item_type_tolerated_as_application(self):
         records, skipped = nintendo_ec.parse_transactions(
-            [{"title": "Minimal", "date": "2022-05-05T00:00:00Z"}]
+            [{
+                "__typename": "TransactionHistory",
+                "transactionType": "PURCHASE",
+                "title": "Minimal",
+                "datetime": "2022-05-05T00:00:00+00:00",
+                "amount": {"formattedValue": "€ 5,00"},
+            }]
         )
         self.assertEqual(skipped, [])
         self.assertEqual(records[0].title, "Minimal")
-        self.assertEqual(records[0].price_paid, 0.0)
+        self.assertEqual(records[0].price_paid, 5.0)
 
-    def test_unparseable_amount_keeps_record_unpriced(self):
+    def test_null_amount_on_purchase_keeps_record_unpriced(self):
         records, skipped = nintendo_ec.parse_transactions(
-            [
-                {
-                    "title": "Weird Amount",
-                    "transaction_type": "purchase",
-                    "content_type": "title",
-                    "date": "2024-06-06T00:00:00Z",
-                    "amount": {"currency": "USD", "raw_value": "n/a"},
-                }
-            ]
+            [{
+                "__typename": "TransactionHistory",
+                "transactionType": "PURCHASE",
+                "itemType": "APPLICATION",
+                "title": "No Price",
+                "datetime": "2024-06-06T00:00:00+00:00",
+                "amount": None,
+            }]
         )
         self.assertEqual(skipped, [])
         self.assertIsNone(records[0].price_paid)
+        self.assertIsNone(records[0].price_currency)
+
+    def test_non_importable_item_type_is_skipped(self):
+        records, skipped = nintendo_ec.parse_transactions(
+            [{
+                "__typename": "TransactionHistory",
+                "transactionType": "PURCHASE",
+                "itemType": "CONSUMABLE",
+                "title": "500 Gold Bars",
+                "datetime": "2024-02-02T00:00:00+00:00",
+                "amount": {"formattedValue": "€ 4,99"},
+            }]
+        )
+        self.assertEqual(records, [])
+        self.assertEqual(skipped[0]["title"], "500 Gold Bars")
+        self.assertIn("is not importable", skipped[0]["reason"])
+
+    def test_missing_title_or_date_is_skipped_with_reason(self):
+        records, skipped = nintendo_ec.parse_transactions([
+            {  # missing title
+                "__typename": "TransactionHistory",
+                "transactionType": "PURCHASE",
+                "datetime": "2024-04-01T00:00:00+00:00",
+            },
+            {  # missing datetime
+                "__typename": "TransactionHistory",
+                "transactionType": "PURCHASE",
+                "title": "No Date Game",
+            },
+        ])
+        self.assertEqual(records, [])
+        reasons = [s["reason"] for s in skipped]
+        self.assertIn("missing title", reasons)
+        self.assertIn("missing or unparseable date", reasons)
+
+    def test_amount_parsing_across_locales(self):
+        cases = {
+            "€ 12,49": (12.49, "EUR"),
+            "€ 0,00": (0.0, "EUR"),
+            "€ 1.234,56": (1234.56, "EUR"),
+            "$9.99": (9.99, "USD"),
+            "US$ 1,234.56": (1234.56, "USD"),
+            "£19.99": (19.99, "GBP"),
+            "¥1,480": (1480.0, "JPY"),
+        }
+        for formatted, expected in cases.items():
+            self.assertEqual(
+                nintendo_ec._parse_amount({"formattedValue": formatted}),
+                expected,
+                msg=formatted,
+            )
+        # Unparseable value keeps the currency but drops the price.
+        self.assertEqual(
+            nintendo_ec._parse_amount({"formattedValue": "€ N/A"}), (None, "EUR")
+        )
+        self.assertEqual(nintendo_ec._parse_amount(None), (None, None))
+        self.assertEqual(nintendo_ec._parse_amount({}), (None, None))
+
+
+def _ec_envelope(rows: list, total: int | None = None) -> dict:
+    """Wrap transaction rows in the GraphQL response envelope shape."""
+    return {"data": {"account": {"transactionHistories": {
+        "offsetInfo": {
+            "length": len(rows),
+            "offset": 0,
+            "total": len(rows) if total is None else total,
+            "__typename": "OffsetInfo",
+        },
+        "transactionHistories": rows,
+        "__typename": "TransactionHistoriesSegment",
+    }, "__typename": "Account"}}}
+
+
+_SESSION_OK = {"idToken": "tok-xyz", "country": "BE", "localeInfo": {"language": "nl"}}
 
 
 class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
+    def _write_cookies(self, tmp: str, cookies: dict | None = None) -> str:
+        path = os.path.join(tmp, "ec_cookies.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cookies or {"__Secure-next-auth.session-token": "sess"}, f)
+        return path
+
     async def test_missing_cookie_file_raises_clear_error(self):
         with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": "/nonexistent/ec.json"}):
             with self.assertRaisesRegex(RuntimeError, "set_nintendo_ec_session"):
                 await nintendo_ec.fetch_eshop_purchases()
 
-    def _write_cookies(self, tmp: str) -> str:
-        path = os.path.join(tmp, "ec_cookies.json")
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"NASID": "abc"}, f)
-        return path
+    async def test_missing_session_token_cookie_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp, {"NASID": "abc"})
+            with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
+                with self.assertRaisesRegex(RuntimeError, "next-auth.session-token"):
+                    await nintendo_ec.fetch_eshop_purchases()
 
-    async def test_pagination_stops_on_short_page(self):
-        def _transaction(i: int) -> dict:
-            return {
-                "title": f"Game {i}",
-                "transaction_type": "purchase",
-                "content_type": "title",
-                "date": "2024-01-02T03:04:05Z",
-                "amount": {"currency": "USD", "raw_value": "9.99"},
-            }
-
-        requested_offsets: list[int] = []
+    async def test_fetches_and_parses_real_response(self):
+        captured: dict = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
-            offset = int(request.url.params["offset"])
-            requested_offsets.append(offset)
-            page = [_transaction(offset + i) for i in range(min(50, 53 - offset))]
+            if request.url.path == "/api/auth/session":
+                return httpx.Response(200, json=_SESSION_OK)
+            captured["request"] = request
             return httpx.Response(
                 200,
-                json={"transactions": page, "total": 53},
-                headers={"content-type": "application/json"},
+                json=_ec_envelope(_ec_transactions_fixture()),
+                headers={"content-type": "application/graphql-response+json"},
             )
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -247,32 +290,70 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
                     transport=httpx.MockTransport(handler)
                 )
 
-        self.assertEqual(requested_offsets, [0, 50])
-        self.assertEqual(len(records), 53)
-        self.assertEqual(skipped, [])
+        self.assertEqual([r.title for r in records][:1], ["Dead Cells"])
+        self.assertEqual(len(records), 4)
+        self.assertEqual(len(skipped), 3)
 
-    async def test_bare_list_payload_is_accepted(self):
+        # The GraphQL step carried the session idToken + pinned query identity.
+        req = captured["request"]
+        variables = json.loads(req.url.params["variables"])
+        self.assertEqual(variables["idToken"], "tok-xyz")
+        self.assertEqual(variables["country"], "BE")
+        self.assertEqual(variables["language"], "nl")
+        extensions = json.loads(req.url.params["extensions"])
+        self.assertEqual(
+            extensions["persistedQuery"]["sha256Hash"], nintendo_ec._DEFAULT_QUERY_HASH
+        )
+        self.assertEqual(
+            req.headers["x-nintendo-savanna-client-id"], nintendo_ec._DEFAULT_CLIENT_ID
+        )
+
+    async def test_pagination_advances_offset(self):
+        def _tx(i: int) -> dict:
+            return {
+                "__typename": "TransactionHistory",
+                "transactionType": "PURCHASE",
+                "itemType": "APPLICATION",
+                "title": f"Game {i}",
+                "datetime": "2024-01-02T03:04:05+00:00",
+                "amount": {"formattedValue": "€ 9,99"},
+            }
+
+        offsets: list[int] = []
+
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                200,
-                json=[{
-                    "title": "Solo",
-                    "transaction_type": "purchase",
-                    "content_type": "title",
-                    "date": "2024-01-01T00:00:00Z",
-                }],
-                headers={"content-type": "application/json"},
-            )
+            if request.url.path == "/api/auth/session":
+                return httpx.Response(200, json=_SESSION_OK)
+            offset = json.loads(request.url.params["variables"])["offset"]
+            offsets.append(offset)
+            rows = [_tx(offset + i) for i in range(min(50, 53 - offset))]
+            return httpx.Response(200, json=_ec_envelope(rows, total=53))
 
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_cookies(tmp)
             with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
-                records, _ = await nintendo_ec.fetch_eshop_purchases(
+                records, skipped = await nintendo_ec.fetch_eshop_purchases(
                     transport=httpx.MockTransport(handler)
                 )
-        self.assertEqual([r.title for r in records], ["Solo"])
 
-    async def test_auth_failure_status_raises(self):
+        self.assertEqual(offsets, [0, 50])
+        self.assertEqual(len(records), 53)
+        self.assertEqual(skipped, [])
+
+    async def test_expired_session_without_token_raises(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            # An expired session returns 200 with an empty user / no idToken.
+            return httpx.Response(200, json={"user": {}})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp)
+            with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
+                with self.assertRaisesRegex(RuntimeError, "set_nintendo_ec_session"):
+                    await nintendo_ec.fetch_eshop_purchases(
+                        transport=httpx.MockTransport(handler)
+                    )
+
+    async def test_session_auth_failure_status_raises(self):
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(403, json={"error": "forbidden"})
 
@@ -296,6 +377,20 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
             path = self._write_cookies(tmp)
             with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
                 with self.assertRaisesRegex(RuntimeError, "set_nintendo_ec_session"):
+                    await nintendo_ec.fetch_eshop_purchases(
+                        transport=httpx.MockTransport(handler)
+                    )
+
+    async def test_graphql_error_payload_raises(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/auth/session":
+                return httpx.Response(200, json=_SESSION_OK)
+            return httpx.Response(200, json={"errors": [{"message": "INVALID_PARAM"}]})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp)
+            with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
+                with self.assertRaisesRegex(RuntimeError, "GraphQL error"):
                     await nintendo_ec.fetch_eshop_purchases(
                         transport=httpx.MockTransport(handler)
                     )
@@ -917,46 +1012,62 @@ class ImportPurchasesTests(ToolDBTestCase):
         self.assertEqual(row["purchase_source"], "eshop")
 
     async def test_identifier_first_match_fills_renamed_library_title(self):
-        # The library title differs from the eShop transaction title (renamed/
-        # localized), but the seeded nintendo_title_id matches exactly.
+        # The library title differs from the store transaction title (renamed/
+        # localized), but the seeded steam_appid matches exactly. Steam is used
+        # because it carries a store identifier; eShop matches by title only.
         gid = await seed_game("Dragon Quest III HD-2D Remake")
-        gpid = await add_platform(gid, "switch2")
-        await add_identifier(gpid, "nintendo_title_id", "70010000012345")
+        gpid = await add_platform(gid, "steam")
+        await add_identifier(gpid, db_module.STEAM_APP_ID, "1234567")
 
         records = [
-            _eshop_record(
-                "DRAGON QUEST III (localized)",
-                store_identifier="70010000012345",
+            PurchaseRecord(
+                title="DRAGON QUEST III (localized)",
+                platform="steam",
+                purchase_source="steam",
+                acquired_at="2024-03-01",
+                price_paid=19.99,
+                price_currency="USD",
+                store_identifier="1234567",
             )
         ]
         with _patch_fetchers(
-            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+            fetch_steam_purchases=AsyncMock(return_value=(records, [])),
         ):
-            result = await acquisition.import_purchases(sources=["eshop"])
+            result = await acquisition.import_purchases(sources=["steam"])
 
-        eshop = result["sources"]["eshop"]
-        self.assertEqual(eshop["status"], "ok")
-        self.assertEqual(eshop["filled"], 1)
-        self.assertEqual(eshop["unmatched"], [])
+        steam = result["sources"]["steam"]
+        self.assertEqual(steam["status"], "ok")
+        self.assertEqual(steam["filled"], 1)
+        self.assertEqual(steam["unmatched"], [])
         self.assertEqual(result["totals"]["unmatched"], 0)
 
-        row = await _acquisition_row(gid, "switch2")
+        row = await _acquisition_row(gid, "steam")
         self.assertEqual(row["acquired_at"], "2024-03-01")
         self.assertEqual(row["price_paid"], 19.99)
-        self.assertEqual(row["purchase_source"], "eshop")
+        self.assertEqual(row["purchase_source"], "steam")
 
     async def test_dry_run_proposed_item_carries_identifier_keys(self):
-        records = [_eshop_record("Hades", store_identifier="70010000099999")]
+        records = [
+            PurchaseRecord(
+                title="Hades",
+                platform="steam",
+                purchase_source="steam",
+                acquired_at="2024-03-01",
+                price_paid=19.99,
+                price_currency="USD",
+                store_identifier="99999",
+            )
+        ]
         with _patch_fetchers(
-            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+            fetch_steam_purchases=AsyncMock(return_value=(records, [])),
         ):
             result = await acquisition.import_purchases(
-                sources=["eshop"], dry_run=True
+                sources=["steam"], dry_run=True
             )
 
-        proposed = result["sources"]["eshop"]["proposed"][0]
-        self.assertEqual(proposed["identifier_type"], "nintendo_title_id")
-        self.assertEqual(proposed["identifier_value"], "70010000099999")
+        proposed = result["sources"]["steam"]["proposed"][0]
+        self.assertEqual(proposed["identifier_type"], db_module.STEAM_APP_ID)
+        self.assertEqual(proposed["identifier_value"], "99999")
 
     async def test_source_error_does_not_block_other_source(self):
         gid = await seed_game("Hollow Knight")
