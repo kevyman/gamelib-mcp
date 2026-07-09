@@ -97,6 +97,29 @@ def normalize_catalog_title(name: str) -> str:
     return cleaned.strip()
 
 
+# A Switch-2 paid upgrade purchase arrives as "…Edition-upgradepack" /
+# "…- upgrade pack" — a suffix no library row carries. Peeled before
+# normalize_catalog_title so the "Nintendo Switch 2 Edition" pattern beneath it
+# can also apply ("Hollow Knight – Nintendo Switch 2 Edition-upgradepack" →
+# "Hollow Knight").
+_UPGRADE_PACK_RE = re.compile(r"[\s:–—-]*upgrade\s*pack\s*$", re.IGNORECASE)
+
+
+def normalize_purchase_title(name: str) -> str:
+    """Strip storefront edition/platform/upgrade-pack suffixes for match retry.
+
+    A purchase title ("DAVE THE DIVER Nintendo Switch™ 2 Edition") carries
+    marketing suffixes the canonical library row never does; token-AND name
+    matching needs every query token present in the candidate, so those extra
+    tokens sink the match until peeled off. Reuses normalize_catalog_title for
+    the shared edition/™/en-dash handling, adding only the eShop upgrade-pack
+    marker. Used solely as a fallback query — never to alter game identity or
+    what gets written — so over-stripping only ever widens the net after an
+    exact match has already failed.
+    """
+    return normalize_catalog_title(_UPGRADE_PACK_RE.sub("", name))
+
+
 def prepare_catalog_title(name: str | None) -> str | None:
     if not name:
         return None
