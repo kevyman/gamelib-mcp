@@ -136,6 +136,12 @@ class NintendoEcParserTests(unittest.TestCase):
         self.assertEqual(records[2].price_currency, "EUR")
         self.assertEqual(records[3].price_paid, 69.99)
 
+        # itemType BUNDLE is flagged so import routes it to bundles_needing_split;
+        # single-game rows are not.
+        self.assertEqual(
+            [r.is_bundle for r in records], [False, True, False, False]
+        )
+
         reasons = [s["reason"] for s in skipped]
         titles = [s["title"] for s in skipped]
         self.assertEqual(len(skipped), 3)
@@ -1031,6 +1037,58 @@ class ImportPurchasesTests(ToolDBTestCase):
         self.assertEqual(row["price_paid"], 19.99)
         self.assertEqual(row["price_currency"], "USD")
         self.assertEqual(row["purchase_source"], "eshop")
+
+    async def test_bundle_diverted_to_needs_split_not_unmatched(self):
+        gid = await seed_game("Hades")
+        await add_platform(gid, "switch2")
+        records = [
+            _eshop_record("Hades"),
+            _eshop_record(
+                "BioShock: The Collection", is_bundle=True, price_paid=9.99
+            ),
+        ]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["eshop"])
+
+        eshop = result["sources"]["eshop"]
+        # The bundle never reaches the single-game matcher, so unmatched is empty.
+        self.assertEqual(eshop["unmatched"], [])
+        self.assertEqual(eshop["filled"], 1)
+        self.assertEqual(
+            eshop["bundles_needing_split"],
+            [{
+                "bundle_name": "BioShock: The Collection",
+                "platform": "switch2",
+                "total_price": 9.99,
+                "price_currency": "USD",
+                "acquired_at": "2024-03-01",
+                "purchase_source": "eshop",
+            }],
+        )
+        self.assertEqual(result["totals"]["bundles_needing_split"], 1)
+        self.assertEqual(result["totals"]["unmatched"], 0)
+
+    async def test_dry_run_surfaces_bundles_and_excludes_from_proposed(self):
+        records = [
+            _eshop_record("Hades"),
+            _eshop_record("Some Bundle", is_bundle=True),
+        ]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(
+                sources=["eshop"], dry_run=True
+            )
+
+        eshop = result["sources"]["eshop"]
+        proposed_names = [item["name"] for item in eshop["proposed"]]
+        self.assertEqual(proposed_names, ["Hades"])  # bundle not a proposed item
+        self.assertEqual(len(eshop["bundles_needing_split"]), 1)
+        self.assertEqual(
+            eshop["bundles_needing_split"][0]["bundle_name"], "Some Bundle"
+        )
 
     async def test_identifier_first_match_fills_renamed_library_title(self):
         # The library title differs from the store transaction title (renamed/

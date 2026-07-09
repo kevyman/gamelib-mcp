@@ -1164,10 +1164,19 @@ async def import_purchases(
       (bought for someone else) are skipped; Complimentary and Gift/Guest
       Pass licenses become price-0 records (purchase_source "free"/"gift").
 
+    Multi-game bundles (e.g. "BioShock: The Collection") can't attach to a
+    single library row, so instead of landing in unmatched they're diverted to
+    each source's bundles_needing_split list — {bundle_name, platform,
+    total_price, price_currency, acquired_at, purchase_source}. Look up each
+    bundle's constituent games and pass it to split_bundle_acquisition (its
+    keys line up with that tool's parameters); nothing is written for a bundle
+    here.
+
     Sources run concurrently; one source's auth/network failure (status
     "error", nothing written for it) never blocks the others. Each ok source
-    reports fetched/applied/filled/no_change/unmatched/no_platform_row/errors
-    plus the rows it skipped, and totals aggregates across sources.
+    reports fetched/applied/filled/no_change/unmatched/no_platform_row/
+    bundles_needing_split/errors plus the rows it skipped, and totals
+    aggregates across sources.
     """
     from .tools.acquisition import import_purchases as _import_purchases
     return await _import_purchases(sources, dry_run, overwrite, create_platform_rows)

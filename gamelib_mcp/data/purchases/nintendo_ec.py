@@ -279,6 +279,10 @@ def parse_transactions(
                 acquired_at=acquired_at,
                 price_paid=price,
                 price_currency=currency,
+                # A BUNDLE's title is a multi-game bundle name, not a single
+                # game — flagged so import_purchases routes it to
+                # bundles_needing_split rather than the single-game matcher.
+                is_bundle=item_type == "bundle",
             )
         )
     return records, skipped

@@ -809,6 +809,22 @@ def _record_to_batch_item(record: PurchaseRecord, source: str) -> dict:
     return item
 
 
+def _record_to_bundle_entry(record: PurchaseRecord) -> dict:
+    """One bundle PurchaseRecord → a split_bundle_acquisition-shaped hand-off.
+
+    Keys mirror the tool's parameters so a caller can look up the constituents
+    and forward the rest verbatim (the record's title IS the bundle name).
+    """
+    return {
+        "bundle_name": record.title,
+        "platform": record.platform,
+        "total_price": record.price_paid,
+        "price_currency": record.price_currency,
+        "acquired_at": record.acquired_at,
+        "purchase_source": record.purchase_source,
+    }
+
+
 async def _import_one_source(
     source: str,
     fetch,
@@ -820,7 +836,12 @@ async def _import_one_source(
     batch writer. Fetch exceptions propagate — the caller gathers them, and a
     mid-fetch failure must never partially import."""
     records, skipped = await fetch()
-    items = [_record_to_batch_item(r, source) for r in records]
+    # Multi-game bundles can't attach to a single row — divert them to a
+    # dedicated bucket (with price/date) for split_bundle_acquisition instead
+    # of feeding them to the single-game matcher, where they'd only ever miss.
+    bundles = [_record_to_bundle_entry(r) for r in records if r.is_bundle]
+    importable = [r for r in records if not r.is_bundle]
+    items = [_record_to_batch_item(r, source) for r in importable]
 
     if dry_run:
         return {
@@ -830,6 +851,7 @@ async def _import_one_source(
             "fetched": len(records),
             "proposed": items[:_DRY_RUN_ECHO_CAP],
             "truncated": len(items) > _DRY_RUN_ECHO_CAP,
+            "bundles_needing_split": bundles,
             "skipped": skipped,
         }
 
@@ -860,6 +882,7 @@ async def _import_one_source(
         "unmatched": unmatched,
         "no_platform_row": no_platform_row,
         "no_platform_row_details": no_platform_row_details,
+        "bundles_needing_split": bundles,
         "errors": errors,
         "skipped": skipped,
     }
@@ -879,6 +902,10 @@ async def import_purchases(
     fetch failure yields {status: "error"} for that source (nothing written
     for it — a partial fetch must not partially import) while the others
     proceed. dry_run previews the converted batch items without writing.
+
+    Multi-game bundles are diverted to each source's bundles_needing_split
+    list (name, platform, total_price, date) rather than the single-game
+    matcher — feed each to split_bundle_acquisition with its looked-up games.
     """
     if sources is None:
         selected = sorted(PURCHASE_IMPORTERS)
@@ -920,6 +947,9 @@ async def import_purchases(
         "filled": _total("filled"),
         "no_change": _total("no_change"),
         "unmatched": sum(len(r.get("unmatched", [])) for r in results.values()),
+        "bundles_needing_split": sum(
+            len(r.get("bundles_needing_split", [])) for r in results.values()
+        ),
         # Per-item validation errors plus whole-source fetch failures.
         "errors": _total("errors")
         + sum(1 for r in results.values() if r["status"] == "error"),

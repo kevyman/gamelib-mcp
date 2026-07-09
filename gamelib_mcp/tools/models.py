@@ -385,8 +385,10 @@ class SplitBundleAcquisitionResponse(FlexibleModel):
 class ImportPurchasesResponse(FlexibleModel):
     # Per-source results keyed by importer name (eshop, humble, ...). Each is
     # {source, status: "ok"|"error", ...} — ok carries fetched/applied/filled/
-    # no_change/unmatched/no_platform_row/errors/skipped (or dry_run+proposed),
-    # error carries the fetch failure message.
+    # no_change/unmatched/no_platform_row/bundles_needing_split/errors/skipped
+    # (or dry_run+proposed), error carries the fetch failure message.
+    # bundles_needing_split holds multi-game bundles to hand to
+    # split_bundle_acquisition (they're never written by this tool).
     sources: dict[str, dict[str, Any]]
     dry_run: bool
     totals: dict[str, Any]
