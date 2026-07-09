@@ -1075,6 +1075,28 @@ class ImportPurchasesTests(ToolDBTestCase):
             )
         self.assertEqual(owned["owned"], 1)
 
+    async def test_created_game_uses_edition_stripped_title(self):
+        # A suffix-laden storefront title that matches nothing is created under
+        # its CLEAN name, so a later name-based ownership sync ("Hollow Knight")
+        # reconciles onto this row instead of stranding a duplicate.
+        records = [
+            _eshop_record("Hollow Knight – Nintendo Switch 2 Edition-upgradepack"),
+        ]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["eshop"])
+
+        eshop = result["sources"]["eshop"]
+        self.assertEqual(eshop["created"], 1)
+        self.assertEqual(eshop["created_details"][0]["name"], "Hollow Knight")
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT name FROM games WHERE id = ?",
+                (eshop["created_details"][0]["game_id"],),
+            )
+        self.assertEqual(row["name"], "Hollow Knight")
+
     async def test_dry_run_previews_would_create(self):
         gid = await seed_game("Hades")
         await add_platform(gid, "switch2")

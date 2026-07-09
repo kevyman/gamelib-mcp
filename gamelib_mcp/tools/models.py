@@ -367,7 +367,10 @@ class BundleGameResult(FlexibleModel):
     name: str | None = None  # input name, present on unmatched
     matched_name: str | None = None
     match_type: str | None = None  # identifier | id | name | fuzzy | created
-    price_paid: float | None = None
+    price_paid: float | None = None  # the proposed split share for this game
+    # What actually persisted on the row (fill-only can preserve an older price,
+    # so this may differ from price_paid); drives allocated_price/reconciled.
+    recorded_price: float | None = None
     acquisition: AcquisitionInfo | None = None
     item: dict[str, Any] | None = None  # echoed on unmatched
 

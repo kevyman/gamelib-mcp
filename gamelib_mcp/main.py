@@ -1122,9 +1122,12 @@ async def split_bundle_acquisition(
     stripping included; deliberately no fuzzy fallback — "BioShock 2" must not
     collapse onto "BioShock"); each gets an owned platform row on the bundle's
     platform (created if missing). Per-game results carry status (applied/
-    filled/no_change/created/unmatched), matched_name, match_type, and the
-    assigned price_paid; recorded counts rows actually written (no_change
-    excluded); reconciled is false when a shortfall had no game to land on.
+    filled/no_change/created/unmatched), matched_name, match_type, the proposed
+    price_paid (the split share) and recorded_price (what actually persisted).
+    recorded counts rows actually written (no_change excluded). allocated_price
+    sums recorded_price, so reconciled is false when the persisted total falls
+    short — a shortfall with no game to land on, OR a fill-only constituent that
+    already had a price and kept it (rerun with overwrite=True to re-attribute).
     """
     from .tools.acquisition import split_bundle_acquisition as _split_bundle
     return await _split_bundle(

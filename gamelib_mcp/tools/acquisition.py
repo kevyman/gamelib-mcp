@@ -385,10 +385,18 @@ async def _apply_batch_item(
         # playtime some platforms lean on to infer ownership — so a genuinely
         # new purchased title becomes an owned library game. The matcher
         # (identifier → edition-stripped name → fuzzy) has already missed, so
-        # this is a real gap, not a near-duplicate; the store identifier is
-        # attached below so a later platform sync reconciles onto this row
-        # instead of minting a second one.
-        new_id = await upsert_game(None, str(name).strip())
+        # this is a real gap, not a near-duplicate.
+        #
+        # Create under the edition-STRIPPED title, not the raw storefront one:
+        # an identifier-less import (eShop carries no title id) is reconciled by
+        # a later ownership sync via NAME, and that sync prepares the clean title
+        # ("Hollow Knight") — which can't adopt a row named "Hollow Knight –
+        # Nintendo Switch 2 Edition-upgradepack", so the raw name would strand a
+        # duplicate. Both forms already missed the library, so the clean name has
+        # no base row to collide with. When present, the store identifier is
+        # attached below as the stronger reconciliation key.
+        create_name = normalize_purchase_title(str(name)).strip() or str(name).strip()
+        new_id = await upsert_game(None, create_name)
         async with get_db() as db:
             row = await db.execute_fetchone(
                 "SELECT id, name FROM games WHERE id = ?", (new_id,)
@@ -695,10 +703,14 @@ async def split_bundle_acquisition(
     def _count(*statuses: str) -> int:
         return sum(1 for r in results if r["status"] in statuses)
 
+    # Allocation is what actually landed on the rows (recorded_price), not the
+    # proposed split: in fill-only mode a constituent that already had a price
+    # keeps it, so the proposed share never persisted — counting it would claim
+    # the bundle was fully recorded when it wasn't (rerun with overwrite=True).
     allocated = sum(
-        r["price_paid"]
+        r["recorded_price"]
         for r in results
-        if r["price_paid"] is not None and r["status"] != "unmatched"
+        if r.get("recorded_price") is not None and r["status"] != "unmatched"
     )
     unallocated += sum(
         r["price_paid"]
@@ -775,6 +787,9 @@ async def _apply_bundle_game(
                 "status": "unmatched",
                 "name": name,
                 "price_paid": price,
+                # Nothing is persisted for an unmatched constituent — its share
+                # is reported as unallocated, not allocated.
+                "recorded_price": None,
                 "item": item,
             }
         if dry_run:
@@ -784,6 +799,7 @@ async def _apply_bundle_game(
                 "matched_name": str(name).strip(),
                 "match_type": "created",
                 "price_paid": price,
+                "recorded_price": price,  # fresh row: the proposed price persists
                 "acquisition": fields,
             }
         game_id = await upsert_game(None, str(name).strip())
@@ -802,10 +818,14 @@ async def _apply_bundle_game(
         )
 
     if dry_run:
+        # recorded_price is what WOULD persist: fill-only leaves an existing
+        # price untouched, so the proposed share is not what lands there.
         if overwrite:
             status = "applied"
+            recorded_price = price
         elif gp is None:
             status = "filled"  # fresh row: every column is NULL
+            recorded_price = price
         else:
             async with get_db() as db:
                 pre = await db.execute_fetchone(
@@ -814,12 +834,14 @@ async def _apply_bundle_game(
                 )
             newly_written = [col for col in fields if pre[col] is None]
             status = "filled" if newly_written else "no_change"
+            recorded_price = pre["price_paid"] if pre["price_paid"] is not None else price
         return {
             "status": status,
             "game_id": resolved_id,
             "matched_name": row["name"],
             "match_type": match_type,
             "price_paid": price,
+            "recorded_price": recorded_price,
             "acquisition": fields,
         }
 
@@ -854,6 +876,9 @@ async def _apply_bundle_game(
         "matched_name": row["name"],
         "match_type": match_type,
         "price_paid": price,
+        # The price actually on the row now (fill-only may have preserved an
+        # older one) — this is what get_spending_stats attributes to the bundle.
+        "recorded_price": acquisition["price_paid"],
         "acquisition": acquisition,
     }
 

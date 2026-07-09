@@ -640,8 +640,13 @@ class SplitBundleAcquisitionTests(ToolDBTestCase):
         self.assertEqual(result["games"][0]["status"], "filled")
         row = await _acquisition_row(gid, "switch2")
         self.assertEqual(row["price_paid"], 1.0)  # manual value preserved
+        # Allocation reflects what PERSISTED (1.0), not the proposed 8.0 share,
+        # so reconciled is false — the bundle total wasn't actually recorded.
+        self.assertEqual(result["games"][0]["recorded_price"], 1.0)
+        self.assertEqual(result["allocated_price"], 1.0)
+        self.assertFalse(result["reconciled"])
 
-        # overwrite=True re-attributes it.
+        # overwrite=True re-attributes it and reconciles.
         result = await acquisition.split_bundle_acquisition(
             bundle_name="Nope Bundle",
             platform="switch2",
@@ -650,8 +655,34 @@ class SplitBundleAcquisitionTests(ToolDBTestCase):
             overwrite=True,
         )
         self.assertEqual(result["games"][0]["status"], "applied")
+        self.assertEqual(result["allocated_price"], 8.0)
+        self.assertTrue(result["reconciled"])
         row = await _acquisition_row(gid, "switch2")
         self.assertEqual(row["price_paid"], 8.0)
+
+    async def test_dry_run_predicts_preserved_price_reconciliation(self):
+        # dry_run must foresee that fill-only keeps the existing price, so its
+        # allocated_price/reconciled match the real run (no surprise on apply).
+        gid = await seed_game("Preserved")
+        await add_platform(gid, "switch2")
+        await acquisition.set_acquisition(
+            game_id=gid, platform="switch2", price_paid=1.0
+        )
+
+        result = await acquisition.split_bundle_acquisition(
+            bundle_name="Nope Bundle",
+            platform="switch2",
+            games=[{"game_id": gid}],
+            total_price=8.0,
+            dry_run=True,
+        )
+        self.assertEqual(result["games"][0]["recorded_price"], 1.0)
+        self.assertEqual(result["allocated_price"], 1.0)
+        self.assertFalse(result["reconciled"])
+        # Truly a preview — the price is still the manual 1.0.
+        row = await _acquisition_row(gid, "switch2")
+        self.assertEqual(row["price_paid"], 1.0)
+        self.assertIsNone(row["bundle_name"])
 
     async def test_membership_without_prices(self):
         gid = await seed_game("Priceless")
