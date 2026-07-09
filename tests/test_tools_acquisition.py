@@ -501,6 +501,182 @@ class SetAcquisitionsBatchTests(ToolDBTestCase):
         self.assertEqual(row["identifier_value"], "1207658924")
 
 
+class SplitBundleAcquisitionTests(ToolDBTestCase):
+    async def test_even_split_across_existing_games_sums_to_total(self):
+        p1 = await seed_game("Portal")
+        await add_platform(p1, "switch2")
+        p2 = await seed_game("Portal 2")
+        await add_platform(p2, "switch2")
+
+        result = await acquisition.split_bundle_acquisition(
+            bundle_name="Portal: Companion Collection",
+            platform="switch2",
+            games=[{"game_id": p1}, {"game_id": p2}],
+            total_price=4.75,
+            price_currency="eur",
+            acquired_at="2026-07-06",
+            purchase_source="eshop",
+        )
+        self.assertTrue(result["reconciled"])
+        self.assertEqual(result["written"], 2)
+        self.assertEqual(result["allocated_price"], 4.75)
+        # 475 cents / 2 = 238 + 237 (leftover cent to the first game).
+        prices = sorted(r["price_paid"] for r in result["games"])
+        self.assertEqual(prices, [2.37, 2.38])
+        row = await _acquisition_row(p1, "switch2")
+        self.assertEqual(row["bundle_name"], "Portal: Companion Collection")
+        self.assertEqual(row["price_currency"], "EUR")
+        self.assertEqual(row["acquired_at"], "2026-07-06")
+
+    async def test_explicit_prices_excluded_from_split(self):
+        a = await seed_game("Alpha")
+        await add_platform(a, "steam")
+        b = await seed_game("Beta")
+        await add_platform(b, "steam")
+        c = await seed_game("Gamma")
+        await add_platform(c, "steam")
+
+        result = await acquisition.split_bundle_acquisition(
+            bundle_name="Trio Pack",
+            platform="steam",
+            games=[
+                {"game_id": a, "price_paid": 5.0},
+                {"game_id": b},
+                {"game_id": c},
+            ],
+            total_price=11.0,
+        )
+        by_id = {r["game_id"]: r["price_paid"] for r in result["games"]}
+        self.assertEqual(by_id[a], 5.0)
+        # Remaining 6.00 split evenly across Beta and Gamma.
+        self.assertEqual(by_id[b], 3.0)
+        self.assertEqual(by_id[c], 3.0)
+        self.assertTrue(result["reconciled"])
+
+    async def test_explicit_prices_exceeding_total_raise(self):
+        a = await seed_game("Spendy")
+        await add_platform(a, "steam")
+        with self.assertRaisesRegex(ToolError, "exceed total_price"):
+            await acquisition.split_bundle_acquisition(
+                bundle_name="Overbudget",
+                platform="steam",
+                games=[{"game_id": a, "price_paid": 99.0}],
+                total_price=10.0,
+            )
+
+    async def test_create_missing_makes_new_owned_game(self):
+        existing = await seed_game("BioShock")
+        await add_platform(existing, "switch2")
+
+        result = await acquisition.split_bundle_acquisition(
+            bundle_name="BioShock: The Collection",
+            platform="switch2",
+            games=[
+                {"name": "BioShock"},
+                {"name": "BioShock 2"},  # not yet in library
+            ],
+            total_price=10.0,
+            create_missing=True,
+        )
+        statuses = {r["status"] for r in result["games"]}
+        self.assertEqual(result["created"], 1)
+        self.assertIn("created", statuses)
+        # The new game exists and is owned on switch2 with its bundle share.
+        row = await _acquisition_row(
+            next(r["game_id"] for r in result["games"] if r["status"] == "created"),
+            "switch2",
+        )
+        self.assertEqual(row["owned"], 1)
+        self.assertEqual(row["price_paid"], 5.0)
+        self.assertEqual(row["bundle_name"], "BioShock: The Collection")
+
+    async def test_unmatched_share_surfaces_as_unallocated(self):
+        a = await seed_game("Known Game")
+        await add_platform(a, "switch2")
+
+        result = await acquisition.split_bundle_acquisition(
+            bundle_name="Half Missing",
+            platform="switch2",
+            games=[{"name": "Known Game"}, {"name": "Nonexistent Zzz Title"}],
+            total_price=10.0,
+            create_missing=False,
+        )
+        self.assertEqual(result["unmatched"], 1)
+        self.assertEqual(result["allocated_price"], 5.0)
+        self.assertEqual(result["unallocated_price"], 5.0)
+        # Still "reconciled": allocated + unallocated == total.
+        self.assertTrue(result["reconciled"])
+
+    async def test_creates_platform_row_for_matched_game(self):
+        # Game exists but only on steam; bundle bought on switch2.
+        gid = await seed_game("Cross Platform")
+        await add_platform(gid, "steam")
+
+        result = await acquisition.split_bundle_acquisition(
+            bundle_name="Switch Bundle",
+            platform="switch2",
+            games=[{"game_id": gid}],
+            total_price=8.0,
+        )
+        self.assertEqual(result["written"], 1)
+        row = await _acquisition_row(gid, "switch2")
+        self.assertEqual(row["owned"], 1)
+        self.assertEqual(row["price_paid"], 8.0)
+
+    async def test_fill_only_default_preserves_manual_price(self):
+        gid = await seed_game("Preserved")
+        await add_platform(gid, "switch2")
+        await acquisition.set_acquisition(
+            game_id=gid, platform="switch2", price_paid=1.0
+        )
+
+        result = await acquisition.split_bundle_acquisition(
+            bundle_name="Nope Bundle",
+            platform="switch2",
+            games=[{"game_id": gid}],
+            total_price=8.0,
+        )
+        # bundle_name is newly filled, but the pre-existing price is untouched.
+        self.assertEqual(result["games"][0]["status"], "filled")
+        row = await _acquisition_row(gid, "switch2")
+        self.assertEqual(row["price_paid"], 1.0)  # manual value preserved
+
+        # overwrite=True re-attributes it.
+        result = await acquisition.split_bundle_acquisition(
+            bundle_name="Nope Bundle",
+            platform="switch2",
+            games=[{"game_id": gid}],
+            total_price=8.0,
+            overwrite=True,
+        )
+        self.assertEqual(result["games"][0]["status"], "applied")
+        row = await _acquisition_row(gid, "switch2")
+        self.assertEqual(row["price_paid"], 8.0)
+
+    async def test_membership_without_prices(self):
+        gid = await seed_game("Priceless")
+        await add_platform(gid, "switch2")
+
+        result = await acquisition.split_bundle_acquisition(
+            bundle_name="Freebie Bundle",
+            platform="switch2",
+            games=[{"game_id": gid}],
+        )
+        self.assertTrue(result["reconciled"])
+        self.assertIsNone(result["games"][0]["price_paid"])
+        row = await _acquisition_row(gid, "switch2")
+        self.assertEqual(row["bundle_name"], "Freebie Bundle")
+        self.assertIsNone(row["price_paid"])
+
+    async def test_rejects_unknown_game_key(self):
+        with self.assertRaisesRegex(ToolError, "unknown key"):
+            await acquisition.split_bundle_acquisition(
+                bundle_name="Bad",
+                platform="steam",
+                games=[{"game_id": 1, "playtime_minutes": 5}],
+            )
+
+
 class SyncNoClobberTests(ToolDBTestCase):
     async def test_platform_syncs_never_touch_acquisition_columns(self):
         gid = await make_steam_game("Clobber Bait", 4242, playtime_minutes=30)

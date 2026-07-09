@@ -350,7 +350,36 @@ class SetAcquisitionsBatchResponse(FlexibleModel):
     no_change: int
     unmatched: list[dict[str, Any]]
     no_platform_row: int
+    # Detail for the no_platform_row rows (game_id, matched_name, platforms),
+    # so a caller can triage by name instead of an opaque count.
+    no_platform_row_details: list[dict[str, Any]]
     errors: int
+
+
+class BundleGameResult(FlexibleModel):
+    # applied | filled | no_change | created | unmatched
+    status: str
+    game_id: int | None = None
+    name: str | None = None  # input name, present on unmatched
+    matched_name: str | None = None
+    match_type: str | None = None  # identifier | id | name | fuzzy | created
+    price_paid: float | None = None
+    acquisition: AcquisitionInfo | None = None
+    item: dict[str, Any] | None = None  # echoed on unmatched
+
+
+class SplitBundleAcquisitionResponse(FlexibleModel):
+    bundle_name: str
+    platform: str
+    total_price: float | None = None
+    price_currency: str | None = None
+    games: list[BundleGameResult]
+    written: int
+    created: int
+    unmatched: int
+    allocated_price: float
+    unallocated_price: float
+    reconciled: bool
 
 
 class ImportPurchasesResponse(FlexibleModel):

@@ -59,6 +59,7 @@ from .tools.models import (
     SetAcquisitionResponse,
     SetAcquisitionsBatchResponse,
     SpendingStatsResponse,
+    SplitBundleAcquisitionResponse,
     SplitGameResponse,
     SyncRatingsResponse,
     SyncStatusResponse,
@@ -1058,6 +1059,66 @@ async def set_acquisitions_batch(
     """
     from .tools.acquisition import set_acquisitions_batch as _set_batch
     return await _set_batch(items, overwrite, create_platform_rows)
+
+
+@mcp.tool(annotations=MUTATION_TOOL)
+async def split_bundle_acquisition(
+    bundle_name: str,
+    platform: str,
+    games: list[dict],
+    total_price: float | None = None,
+    price_currency: str | None = None,
+    acquired_at: str | None = None,
+    purchase_source: str | None = None,
+    create_missing: bool = False,
+    overwrite: bool = False,
+) -> SplitBundleAcquisitionResponse:
+    """
+    Record a multi-game bundle purchase across its constituent games.
+
+    A storefront bundle ("Portal: Companion Collection" contains Portal and
+    Portal 2; "BioShock: The Collection" contains BioShock, BioShock 2, and
+    BioShock Infinite) can't attach to a single library row. Look up the games
+    the bundle contains, pass them here, and this splits the price across them
+    and tags each with the same bundle_name — so get_spending_stats still groups
+    the purchase and each game gets a per-game cost for value/cost-per-hour.
+
+    bundle_name: the storefront bundle title (recorded on every constituent).
+    platform: the platform the bundle was bought on (e.g. switch2, steam).
+    games: list of {name or game_id, optional price_paid, optionally
+        identifier_type + identifier_value together (e.g. steam_appid)}. A game
+        with an explicit price_paid keeps it; the rest share total_price.
+    total_price: the bundle's total, split evenly (to the cent, sum-preserving)
+        across the games that don't carry their own price_paid. Omit to record
+        membership without prices (or price every game explicitly).
+    price_currency: 3-letter ISO code for total_price / per-game prices (USD
+        default). acquired_at (YYYY / YYYY-MM / YYYY-MM-DD) and purchase_source
+        (see set_acquisition's vocabulary) apply to every constituent.
+    create_missing: when a constituent matches no library game, create it as a
+        new owned game on the platform (name required). Default False reports it
+        as unmatched instead, and its share is surfaced in unallocated_price.
+    overwrite: default False fills only NULL acquisition columns (never clobbers
+        a manual correction); True replaces the fields unconditionally — use it
+        to re-attribute a bundle that was previously imported wrong.
+
+    Games resolve by identifier, then game_id, then name (edition-suffix
+    stripping and fuzzy fallback included); each keeps its owned platform row
+    (created if missing). Per-game results carry status (applied/filled/
+    no_change/created/unmatched), matched_name, match_type, and the assigned
+    price_paid; reconciled is false when a shortfall had no game to land on.
+    """
+    from .tools.acquisition import split_bundle_acquisition as _split_bundle
+    return await _split_bundle(
+        bundle_name,
+        platform,
+        games,
+        total_price,
+        price_currency,
+        acquired_at,
+        purchase_source,
+        create_missing,
+        overwrite,
+    )
 
 
 @mcp.tool(annotations=NETWORK_SYNC_TOOL)

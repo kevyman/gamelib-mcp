@@ -19,10 +19,12 @@ from fastmcp.exceptions import ToolError
 
 from ..data.db import (
     ACQUISITION_FIELDS,
+    clear_fulfilled_wishlist_entries,
     fts_ready,
     get_db,
     get_game_by_identifier,
     set_platform_acquisition,
+    upsert_game,
     upsert_game_platform,
     upsert_game_platform_identifier,
 )
@@ -260,6 +262,8 @@ async def _match_batch_game(
     game_id: int | None,
     identifier_type: str | None = None,
     identifier_value: str | None = None,
+    *,
+    fuzzy: bool = True,
 ):
     """Resolve one batch item to (row, match_type); (None, None) on a miss.
 
@@ -269,6 +273,10 @@ async def _match_batch_game(
     where names are fragile (renamed/localized library titles). An identifier
     miss is NOT terminal — a first import can predate the sync that attaches
     the id, so name matching may still save the item.
+
+    fuzzy=False drops the token-sort fallback, keeping only exact/token name
+    tiers — callers that would rather create a new row than risk a sequel-number
+    near-miss ("BioShock 2" fuzzy-matching "BioShock") pass it.
     """
     if identifier_type is not None and identifier_value is not None:
         row = await get_game_by_identifier(identifier_type, str(identifier_value))
@@ -311,7 +319,7 @@ async def _match_batch_game(
         if row is not None:
             return row, "name"
 
-    for query in queries:
+    for query in queries if fuzzy else []:
         fuzzy_ids = await fuzzy_fallback_game_ids(query)
         if fuzzy_ids:
             async with get_db() as db:
@@ -478,6 +486,279 @@ async def set_acquisitions_batch(
             if r["status"] == "no_platform_row"
         ],
         "errors": _count("error"),
+    }
+
+
+_BUNDLE_GAME_CAP = 50
+_BUNDLE_GAME_KEYS = frozenset(
+    {"name", "game_id", "identifier_type", "identifier_value", "price_paid"}
+)
+
+
+def _split_cents(remainder_cents: int, n: int) -> list[int]:
+    """Split an integer cent amount into n parts summing exactly to it.
+
+    The remainder cents (amount not evenly divisible) are handed to the first
+    few parts, so the pieces differ by at most one cent and always re-sum to
+    the original — a bundle total is never lost or invented to rounding.
+    """
+    base, extra = divmod(remainder_cents, n)
+    return [base + (1 if i < extra else 0) for i in range(n)]
+
+
+def _bundle_game_price(item: dict) -> float | None:
+    """Validate one bundle game's explicit price_paid (None if absent)."""
+    price = item.get("price_paid")
+    if price is None:
+        return None
+    if not isinstance(price, (int, float)) or isinstance(price, bool):
+        raise ToolError(f"price_paid must be a number (got {price!r})")
+    if price < 0:
+        raise ToolError("price_paid must not be negative")
+    return float(price)
+
+
+def _bundle_share_prices(
+    games: list[dict], total_price: float | None
+) -> tuple[list[float | None], float]:
+    """Per-game prices + unallocated remainder for a bundle.
+
+    Games carrying an explicit price_paid keep it; total_price (if given) is
+    split evenly, in cents, across the games that don't — so a caller can pin
+    a few known prices and let the rest share the leftover. Returns the
+    aligned price list plus any remainder that had no game to land on (all
+    games priced explicitly but their sum fell short of the total).
+    """
+    explicit = [_bundle_game_price(item) for item in games]
+    if total_price is None:
+        return explicit, 0.0
+
+    total_cents = round(total_price * 100)
+    explicit_cents = sum(round(p * 100) for p in explicit if p is not None)
+    remainder_cents = total_cents - explicit_cents
+    if remainder_cents < 0:
+        raise ToolError(
+            "explicit price_paid values exceed total_price "
+            f"({explicit_cents / 100:.2f} > {total_price:.2f})"
+        )
+
+    unpriced_idx = [i for i, p in enumerate(explicit) if p is None]
+    if not unpriced_idx:
+        # Every game was priced explicitly; any shortfall can't be placed.
+        return explicit, remainder_cents / 100
+
+    shares = _split_cents(remainder_cents, len(unpriced_idx))
+    prices = list(explicit)
+    for idx, cents in zip(unpriced_idx, shares, strict=True):
+        prices[idx] = cents / 100
+    return prices, 0.0
+
+
+async def split_bundle_acquisition(
+    bundle_name: str,
+    platform: str,
+    games: list[dict],
+    total_price: float | None = None,
+    price_currency: str | None = None,
+    acquired_at: str | None = None,
+    purchase_source: str | None = None,
+    create_missing: bool = False,
+    overwrite: bool = False,
+) -> dict:
+    """
+    Record one multi-game bundle purchase across its constituent games.
+
+    A storefront bundle ("Portal: Companion Collection" = Portal + Portal 2)
+    can't attach to a single library row. Provide the constituents the AI
+    looked up and this splits the price across them, tagging each with the same
+    bundle_name so get_spending_stats still groups the purchase.
+
+    Each games[i] is {name or game_id, optional price_paid, optionally
+    identifier_type + identifier_value together}. total_price is split evenly
+    (to the cent, sum-preserving) across games without an explicit price_paid;
+    games with an explicit price keep it and are excluded from the split.
+
+    Games matched by identifier/id/name (edition-suffix stripping and fuzzy
+    fallback included) get an owned platform row created if missing, then the
+    bundle acquisition written. Constituents that match nothing are created as
+    new games when create_missing=True (name required) or reported as unmatched
+    otherwise (their share lands in unallocated_price). overwrite=False (default)
+    only fills NULL acquisition columns so a manual correction is never clobbered.
+    """
+    cleaned_bundle = bundle_name.strip()
+    if not cleaned_bundle:
+        raise ToolError("bundle_name must not be empty")
+    platform = _validate_platform(platform, LIBRARY_PLATFORMS)
+    if not games:
+        raise ToolError("games must not be empty")
+    if len(games) > _BUNDLE_GAME_CAP:
+        raise ToolError(f"games is capped at {_BUNDLE_GAME_CAP} (got {len(games)})")
+
+    # Structural validation up front: a bad item aborts the whole call before
+    # any write, since the price split depends on every game being known.
+    for item in games:
+        unknown = set(item) - _BUNDLE_GAME_KEYS
+        if unknown:
+            raise ToolError(
+                f"game has unknown key(s): {sorted(unknown)}. Valid: {sorted(_BUNDLE_GAME_KEYS)}"
+            )
+        if item.get("name") is None and item.get("game_id") is None:
+            raise ToolError("each game needs a name or game_id")
+        if (item.get("identifier_type") is None) != (item.get("identifier_value") is None):
+            raise ToolError(
+                "identifier_type and identifier_value must be provided together"
+            )
+        _bundle_game_price(item)
+
+    # A currency is needed the moment any price will be written; borrow the
+    # shared validator via a representative amount.
+    _, currency = _validate_price(
+        total_price if total_price is not None else 0.0, price_currency
+    )
+    validated_acquired_at = (
+        _validate_acquired_at(str(acquired_at)) if acquired_at is not None else None
+    )
+    normalized_source = (
+        _normalize_source(purchase_source) if purchase_source is not None else None
+    )
+
+    prices, unallocated = _bundle_share_prices(games, total_price)
+
+    results = []
+    for item, price in zip(games, prices, strict=True):
+        results.append(
+            await _apply_bundle_game(
+                item,
+                price,
+                platform=platform,
+                bundle_name=cleaned_bundle,
+                currency=currency,
+                acquired_at=validated_acquired_at,
+                purchase_source=normalized_source,
+                create_missing=create_missing,
+                overwrite=overwrite,
+            )
+        )
+
+    def _count(*statuses: str) -> int:
+        return sum(1 for r in results if r["status"] in statuses)
+
+    written = _count("applied", "filled", "no_change", "created")
+    allocated = sum(
+        r["price_paid"]
+        for r in results
+        if r["price_paid"] is not None and r["status"] != "unmatched"
+    )
+    unallocated += sum(
+        r["price_paid"]
+        for r in results
+        if r["price_paid"] is not None and r["status"] == "unmatched"
+    )
+    reconciled = total_price is None or abs(allocated + unallocated - total_price) < 0.01
+
+    return {
+        "bundle_name": cleaned_bundle,
+        "platform": platform,
+        "total_price": total_price,
+        "price_currency": currency if total_price is not None else None,
+        "games": results,
+        "written": written,
+        "created": _count("created"),
+        "unmatched": _count("unmatched"),
+        "allocated_price": round(allocated, 2),
+        "unallocated_price": round(unallocated, 2),
+        "reconciled": reconciled,
+    }
+
+
+async def _apply_bundle_game(
+    item: dict,
+    price: float | None,
+    *,
+    platform: str,
+    bundle_name: str,
+    currency: str | None,
+    acquired_at: str | None,
+    purchase_source: str | None,
+    create_missing: bool,
+    overwrite: bool,
+) -> dict:
+    """Resolve (or create) one bundle constituent and write its acquisition."""
+    fields: dict = {"bundle_name": bundle_name}
+    if price is not None:
+        fields["price_paid"] = price
+        fields["price_currency"] = currency
+    if acquired_at is not None:
+        fields["acquired_at"] = acquired_at
+    if purchase_source is not None:
+        fields["purchase_source"] = purchase_source
+
+    name = item.get("name")
+    row, match_type = await _match_batch_game(
+        name,
+        item.get("game_id"),
+        item.get("identifier_type"),
+        item.get("identifier_value"),
+        # A bundle constituent is a precise, AI-supplied title; a fuzzy near-miss
+        # is likelier a distinct sequel than a typo, so match exactly or create.
+        fuzzy=False,
+    )
+
+    created = False
+    if row is None:
+        if not (create_missing and name):
+            return {
+                "status": "unmatched",
+                "name": name,
+                "price_paid": price,
+                "item": item,
+            }
+        game_id = await upsert_game(None, str(name).strip())
+        async with get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT id, name FROM games WHERE id = ?", (game_id,)
+            )
+        created = True
+        match_type = "created"
+
+    resolved_id = row["id"]
+    async with get_db() as db:
+        gp = await db.execute_fetchone(
+            "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",
+            (resolved_id, platform),
+        )
+    # A bundle purchase means you now own each game on this platform, so the
+    # platform row is created unconditionally (unlike set_acquisitions_batch).
+    gpid = gp["id"] if gp is not None else await upsert_game_platform(
+        resolved_id, platform, owned=1
+    )
+    identifier_type = item.get("identifier_type")
+    if gp is None and identifier_type is not None and match_type not in ("identifier",):
+        await upsert_game_platform_identifier(
+            gpid, identifier_type, str(item.get("identifier_value"))
+        )
+    await clear_fulfilled_wishlist_entries(game_id=resolved_id, platform=platform)
+
+    if overwrite:
+        acquisition = await set_platform_acquisition(gpid, fields)
+        status = "created" if created else "applied"
+    else:
+        async with get_db() as db:
+            pre = await db.execute_fetchone(
+                f"SELECT {', '.join(ACQUISITION_FIELDS)} FROM game_platforms WHERE id = ?",
+                (gpid,),
+            )
+        acquisition = await set_platform_acquisition(gpid, fields, only_if_null=True)
+        newly_written = [col for col in fields if pre[col] is None]
+        status = "created" if created else ("filled" if newly_written else "no_change")
+
+    return {
+        "status": status,
+        "game_id": resolved_id,
+        "matched_name": row["name"],
+        "match_type": match_type,
+        "price_paid": price,
+        "acquisition": acquisition,
     }
 
 
