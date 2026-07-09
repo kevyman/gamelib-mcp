@@ -59,6 +59,7 @@ from .tools.models import (
     SetAcquisitionResponse,
     SetAcquisitionsBatchResponse,
     SpendingStatsResponse,
+    SplitBundleAcquisitionResponse,
     SplitGameResponse,
     SyncRatingsResponse,
     SyncStatusResponse,
@@ -1024,6 +1025,7 @@ async def set_acquisitions_batch(
     items: list[dict],
     overwrite: bool = False,
     create_platform_rows: bool = False,
+    create_missing: bool = False,
 ) -> SetAcquisitionsBatchResponse:
     """
     Bulk-import acquisition data for many games in one call (max 200 items).
@@ -1041,23 +1043,105 @@ async def set_acquisitions_batch(
     call: every item gets a per-item result with a status — applied
     (overwrite=True wrote the fields), filled (default mode wrote at least one
     previously-NULL field), no_change (every requested field already had a
-    value), unmatched (no library game matched — the original payloads are
-    also echoed in the top-level unmatched list for retry), no_platform_row
-    (game matched but isn't recorded on that platform; its actual platforms
-    are listed — pass create_platform_rows=True to create owned rows instead),
-    or error (validation failure, with the message and original item).
+    value), created (create_missing minted a new owned game — its identifier is
+    attached; names surface in created_details), unmatched (no library game
+    matched and create_missing was off — the original payloads are also echoed
+    in the top-level unmatched list for retry), no_platform_row (game matched
+    but isn't recorded on that platform; its actual platforms are listed — pass
+    create_platform_rows=True to create owned rows instead), or error
+    (validation failure, with the message and original item).
 
     The default overwrite=False only fills missing (NULL) columns, so
     re-importing a purchase-history export never clobbers values you've
     already set or corrected; overwrite=True replaces the provided fields
-    unconditionally. This tool never creates games rows. Matches report
+    unconditionally. create_missing=False (default) never creates games rows;
+    set it True to mint an owned game (name required) when identifier, name,
+    and fuzzy matching all miss — a purchase is real ownership. Matches report
     match_type ("identifier" for store-identifier hits, "id" for game_id,
     "name" for tiered exact/prefix/substring matching, "fuzzy" for the
-    misspelling fallback) and matched_name — review match_type="fuzzy"
-    results to confirm they resolved to the intended game.
+    misspelling fallback, "created" for a freshly minted game) and matched_name
+    — review match_type="fuzzy" results to confirm they resolved to the
+    intended game.
     """
     from .tools.acquisition import set_acquisitions_batch as _set_batch
-    return await _set_batch(items, overwrite, create_platform_rows)
+    return await _set_batch(items, overwrite, create_platform_rows, create_missing)
+
+
+@mcp.tool(annotations=MUTATION_TOOL)
+async def split_bundle_acquisition(
+    bundle_name: str,
+    platform: str,
+    games: list[dict],
+    total_price: float | None = None,
+    price_currency: str | None = None,
+    acquired_at: str | None = None,
+    purchase_source: str | None = None,
+    create_missing: bool = False,
+    overwrite: bool = False,
+    dry_run: bool = False,
+) -> SplitBundleAcquisitionResponse:
+    """
+    Record a multi-game bundle purchase across its constituent games.
+
+    A storefront bundle ("Portal: Companion Collection" contains Portal and
+    Portal 2; "BioShock: The Collection" contains BioShock, BioShock 2, and
+    BioShock Infinite) can't attach to a single library row. Look up the games
+    the bundle contains, pass them here, and this splits the price across them
+    and tags each with the same bundle_name — so get_spending_stats still groups
+    the purchase and each game gets a per-game cost for value/cost-per-hour.
+
+    For a DLC/add-on bundle for ONE game ("Dead Cells: DLC Bundle"), don't
+    invent per-DLC games — pass the base game as the single constituent so the
+    spend attaches there. Note the default fill-only mode won't add its price
+    onto a base game that already has one recorded.
+
+    bundle_name: the storefront bundle title (recorded on every constituent).
+    platform: the platform the bundle was bought on (e.g. switch2, steam).
+    games: list of {name or game_id, optional price_paid, optionally
+        identifier_type + identifier_value together (e.g. steam_appid)}. A game
+        with an explicit price_paid keeps it; the rest share total_price.
+    total_price: the bundle's total, split evenly (to the cent, sum-preserving)
+        across the games that don't carry their own price_paid. Omit to record
+        membership without prices (or price every game explicitly).
+    price_currency: 3-letter ISO code for total_price / per-game prices (USD
+        default). acquired_at (YYYY / YYYY-MM / YYYY-MM-DD) and purchase_source
+        (see set_acquisition's vocabulary) apply to every constituent.
+    create_missing: when a constituent matches no library game, create it as a
+        new owned game on the platform (name required). Default False reports it
+        as unmatched instead, and its share is surfaced in unallocated_price.
+    overwrite: default False fills only NULL acquisition columns (never clobbers
+        a manual correction); True replaces the fields unconditionally — use it
+        to re-attribute a bundle that was previously imported wrong.
+    dry_run: True previews — resolves matches and computes the price split,
+        returning the exact statuses/prices a real run would produce, without
+        writing. ALWAYS preview first when using create_missing: constituent
+        lists come from lookup and can be wrong, and created games rows have no
+        delete tool.
+
+    Games resolve by identifier, then game_id, then name (edition-suffix
+    stripping included; deliberately no fuzzy fallback — "BioShock 2" must not
+    collapse onto "BioShock"); each gets an owned platform row on the bundle's
+    platform (created if missing). Per-game results carry status (applied/
+    filled/no_change/created/unmatched), matched_name, match_type, the proposed
+    price_paid (the split share) and recorded_price (what actually persisted).
+    recorded counts rows actually written (no_change excluded). allocated_price
+    sums recorded_price, so reconciled is false when the persisted total falls
+    short — a shortfall with no game to land on, OR a fill-only constituent that
+    already had a price and kept it (rerun with overwrite=True to re-attribute).
+    """
+    from .tools.acquisition import split_bundle_acquisition as _split_bundle
+    return await _split_bundle(
+        bundle_name,
+        platform,
+        games,
+        total_price,
+        price_currency,
+        acquired_at,
+        purchase_source,
+        create_missing,
+        overwrite,
+        dry_run,
+    )
 
 
 @mcp.tool(annotations=NETWORK_SYNC_TOOL)
@@ -1066,6 +1150,7 @@ async def import_purchases(
     dry_run: bool = False,
     overwrite: bool = False,
     create_platform_rows: bool = False,
+    create_missing: bool = True,
 ) -> ImportPurchasesResponse:
     """
     Import purchase history (dates, prices, bundles) from storefront accounts.
@@ -1074,13 +1159,21 @@ async def import_purchases(
     machinery as set_acquisitions_batch: by default only missing (NULL)
     acquisition fields are filled, so re-running an import never clobbers
     values you set or corrected by hand (overwrite=True replaces them).
-    Games rows are never created; purchases that don't match a library game
-    are echoed in each source's unmatched list. Records carrying a store
-    identifier (eShop title ids, GOG product ids, Steam appids) are matched
-    identifier-first, so a renamed or localized library title still resolves;
-    the name-based tiers remain the fallback. Pass dry_run=True to preview
-    the converted items (capped at 200 per source, with a truncated flag)
-    without writing anything.
+    Records carrying a store identifier (GOG product ids, Steam appids) are
+    matched identifier-first, so a renamed or localized library title still
+    resolves; the name-based tiers remain the fallback (eShop transactions
+    expose no title id, so they match — and reconcile with later syncs — by
+    name).
+
+    A purchase is a definitive ownership signal — stronger than the playtime
+    some platforms use to infer ownership — so create_missing defaults True: a
+    single-game purchase that matches no library game (identifier, name, and
+    fuzzy all miss) is created as an owned game, reported under each source's
+    created count / created_details (game_id, name, platform). Set
+    create_missing=False to route those to unmatched instead. Pass dry_run=True
+    to preview the converted items (capped at 200 per source, with a truncated
+    flag) plus a would_create list naming the new games — created rows have no
+    delete tool, so preview when in doubt — without writing anything.
 
     sources defaults to all registered importers; currently:
     - "eshop": Nintendo eShop transactions (ec.nintendo.com) → switch2.
@@ -1103,13 +1196,28 @@ async def import_purchases(
       (bought for someone else) are skipped; Complimentary and Gift/Guest
       Pass licenses become price-0 records (purchase_source "free"/"gift").
 
+    Multi-game bundles (e.g. "BioShock: The Collection") can't attach to a
+    single library row, so instead of landing in unmatched they're diverted to
+    each source's bundles_needing_split list — {bundle_name, platform,
+    total_price, price_currency, acquired_at, purchase_source,
+    already_recorded}. Look up each bundle's constituent games and pass it to
+    split_bundle_acquisition (its keys line up with that tool's parameters);
+    nothing is written for a bundle here. already_recorded=True means a
+    previous split already wrote this bundle_name on this platform — skip it
+    (every import re-surfaces every bundle; the fetch can't know it was
+    handled). DLC bundles for one game land here too — split them onto the
+    base game, not invented per-DLC rows.
+
     Sources run concurrently; one source's auth/network failure (status
     "error", nothing written for it) never blocks the others. Each ok source
-    reports fetched/applied/filled/no_change/unmatched/no_platform_row/errors
-    plus the rows it skipped, and totals aggregates across sources.
+    reports fetched/applied/filled/no_change/created/created_details/unmatched/
+    no_platform_row/bundles_needing_split/errors plus the rows it skipped, and
+    totals aggregates across sources.
     """
     from .tools.acquisition import import_purchases as _import_purchases
-    return await _import_purchases(sources, dry_run, overwrite, create_platform_rows)
+    return await _import_purchases(
+        sources, dry_run, overwrite, create_platform_rows, create_missing
+    )
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)

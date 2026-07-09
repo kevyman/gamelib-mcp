@@ -43,6 +43,11 @@ class PurchaseRecord:
     store_identifier: str | None = None
     # Free-form annotation (e.g. "refund"); used for skip reporting.
     note: str | None = None
+    # A multi-game bundle whose `title` is the bundle name, not a single game.
+    # import_purchases diverts these to `bundles_needing_split` instead of the
+    # single-game matcher (which they'd only ever miss) — a human/AI looks up
+    # the constituents and calls split_bundle_acquisition.
+    is_bundle: bool = False
 
 
 # source key → (module_path, attr) of the fetch coroutine, resolved lazily.
