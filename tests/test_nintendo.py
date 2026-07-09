@@ -204,25 +204,28 @@ class SyncNintendoTests(unittest.TestCase):
         self.assertEqual(result["sync_status"], "unconfigured")
         self.assertEqual(result["error_classification"], "missing_configuration")
 
-    def test_load_vgcs_cookies_falls_back_to_local_default_file_when_env_path_is_missing(self) -> None:
+    def test_load_vgcs_cookies_falls_back_to_default_data_dir_when_env_path_is_missing(self) -> None:
+        # When NINTENDO_COOKIES_FILE points at a missing file, the loader falls
+        # back to nintendo_cookies.json in the DB's data directory (default_data_dir),
+        # so a stale/absolute env path doesn't hide cookies written beside the DB.
         with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            local_data_dir = tmp_path / "data"
-            local_data_dir.mkdir()
-            fallback_file = local_data_dir / "nintendo_cookies.json"
-            fallback_file.write_text(json.dumps({"session": "cookie"}), encoding="utf-8")
+            data_dir = Path(tmpdir)
+            (data_dir / "nintendo_cookies.json").write_text(
+                json.dumps({"session": "cookie"}), encoding="utf-8"
+            )
 
-            with patch.dict(
-                os.environ,
-                {"NINTENDO_COOKIES_FILE": "/data/nintendo_cookies.json"},
-                clear=False,
+            with (
+                patch.dict(
+                    os.environ,
+                    {"NINTENDO_COOKIES_FILE": "/nonexistent/nintendo_cookies.json"},
+                    clear=False,
+                ),
+                patch(
+                    "gamelib_mcp.data.nintendo.default_data_dir",
+                    return_value=data_dir,
+                ),
             ):
-                original_cwd = os.getcwd()
-                try:
-                    os.chdir(tmp_path)
-                    cookies = nintendo._load_vgcs_cookies()
-                finally:
-                    os.chdir(original_cwd)
+                cookies = nintendo._load_vgcs_cookies()
 
         self.assertEqual(cookies, {"session": "cookie"})
 

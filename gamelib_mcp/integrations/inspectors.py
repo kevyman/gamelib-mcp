@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 from typing import TypedDict
 
+from ..data.db import default_data_dir
 from ..data.epic import _legendary_config_path as _epic_root
 from ..data.gog import _AUTH_FILE_TOKENS as _GOG_AUTH_FILE_TOKENS
 from ..data.gog import _config_dir as _gog_root
@@ -327,10 +328,13 @@ def inspect_gog(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
 
 
 def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
-    cookies_path = Path(os.getenv("NINTENDO_COOKIES_FILE", "data/nintendo_cookies.json")).expanduser()
+    cookies_path = Path(
+        os.getenv("NINTENDO_COOKIES_FILE") or str(default_data_dir() / "nintendo_cookies.json")
+    ).expanduser()
     has_cookies = cookies_path.is_file()
     pctl_path = Path(
-        os.getenv("NINTENDO_PCTL_SESSION_FILE", "data/nintendo_pctl_session.json")
+        os.getenv("NINTENDO_PCTL_SESSION_FILE")
+        or str(default_data_dir() / "nintendo_pctl_session.json")
     ).expanduser()
     has_pctl = pctl_path.is_file()
     auth_stale = (last_sync or {}).get("last_error_classification") == "auth_stale"
