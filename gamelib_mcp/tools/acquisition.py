@@ -27,6 +27,7 @@ from ..data.db import (
     upsert_game_platform_identifier,
 )
 from ..data.purchases import IDENTIFIER_TYPES, PURCHASE_IMPORTERS, PurchaseRecord
+from ..data.title_normalization import normalize_purchase_title, normalize_search_text
 
 # The importer dict is resolved at call time; the imports below keep the
 # fetchers bound on this module so tests can patch
@@ -274,35 +275,51 @@ async def _match_batch_game(
         if row is not None:
             return row, "identifier"
 
-    async with get_db() as db:
-        if game_id is not None:
+    if game_id is not None:
+        async with get_db() as db:
             row = await db.execute_fetchone(
                 "SELECT id, name FROM games WHERE id = ?", (game_id,)
             )
-            return row, ("id" if row is not None else None)
+        return row, ("id" if row is not None else None)
 
-        match = build_name_match(name or "", column=NORMALIZED_NAME_SQL, use_fts=fts_ready())
+    # Try the raw purchase title first, then an edition/platform/upgrade-pack
+    # -stripped form. A storefront title ("DAVE THE DIVER Nintendo Switch 2
+    # Edition") carries suffixes no library row has, and token-AND matching
+    # needs every query token present in the candidate — so the extra tokens
+    # sink the match until peeled off. Raw goes first so a genuinely distinct
+    # edition row (e.g. a separate "Remastered") still wins its exact match
+    # before the stripped form would collapse it onto the base game.
+    raw = name or ""
+    queries = [raw]
+    stripped = normalize_purchase_title(raw)
+    if stripped and normalize_search_text(stripped) != normalize_search_text(raw):
+        queries.append(stripped)
+
+    for query in queries:
+        match = build_name_match(query, column=NORMALIZED_NAME_SQL, use_fts=fts_ready())
         if not match.fuzzy_eligible:
-            return None, None
-        row = await db.execute_fetchone(
-            f"""SELECT g.id, g.name, {match.rank_sql} AS match_rank
-                FROM games g
-                WHERE {match.where_sql}
-                ORDER BY match_rank ASC, length(g.name) ASC, g.id ASC
-                LIMIT 1""",
-            (*match.rank_params, *match.where_params),
-        )
-    if row is not None:
-        return row, "name"
-
-    fuzzy_ids = await fuzzy_fallback_game_ids(name or "")
-    if fuzzy_ids:
+            continue
         async with get_db() as db:
             row = await db.execute_fetchone(
-                "SELECT id, name FROM games WHERE id = ?", (fuzzy_ids[0],)
+                f"""SELECT g.id, g.name, {match.rank_sql} AS match_rank
+                    FROM games g
+                    WHERE {match.where_sql}
+                    ORDER BY match_rank ASC, length(g.name) ASC, g.id ASC
+                    LIMIT 1""",
+                (*match.rank_params, *match.where_params),
             )
         if row is not None:
-            return row, "fuzzy"
+            return row, "name"
+
+    for query in queries:
+        fuzzy_ids = await fuzzy_fallback_game_ids(query)
+        if fuzzy_ids:
+            async with get_db() as db:
+                row = await db.execute_fetchone(
+                    "SELECT id, name FROM games WHERE id = ?", (fuzzy_ids[0],)
+                )
+            if row is not None:
+                return row, "fuzzy"
     return None, None
 
 
@@ -446,6 +463,20 @@ async def set_acquisitions_batch(
         "no_change": _count("no_change"),
         "unmatched": [r["item"] for r in results if r["status"] == "unmatched"],
         "no_platform_row": _count("no_platform_row"),
+        # Detail for the no_platform_row rows: which game matched but has no
+        # platform row to write onto. Mirrors `unmatched` so a caller can triage
+        # by name/id instead of an opaque count (import_purchases surfaces it).
+        "no_platform_row_details": [
+            {
+                "game_id": r["game_id"],
+                "matched_name": r["matched_name"],
+                "match_type": r["match_type"],
+                "platform": r["platform"],
+                "platforms": r["platforms"],
+            }
+            for r in results
+            if r["status"] == "no_platform_row"
+        ],
         "errors": _count("error"),
     }
 
@@ -523,6 +554,7 @@ async def _import_one_source(
 
     applied = filled = no_change = no_platform_row = errors = 0
     unmatched: list[dict] = []
+    no_platform_row_details: list[dict] = []
     for start in range(0, len(items), _BATCH_ITEM_CAP):
         batch = await set_acquisitions_batch(
             items[start : start + _BATCH_ITEM_CAP],
@@ -535,6 +567,7 @@ async def _import_one_source(
         no_platform_row += batch["no_platform_row"]
         errors += batch["errors"]
         unmatched.extend(batch["unmatched"])
+        no_platform_row_details.extend(batch["no_platform_row_details"])
 
     return {
         "source": source,
@@ -545,6 +578,7 @@ async def _import_one_source(
         "no_change": no_change,
         "unmatched": unmatched,
         "no_platform_row": no_platform_row,
+        "no_platform_row_details": no_platform_row_details,
         "errors": errors,
         "skipped": skipped,
     }

@@ -255,6 +255,79 @@ class SetAcquisitionsBatchTests(ToolDBTestCase):
             row = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
         self.assertEqual(row["c"], 0)
 
+    async def test_edition_suffix_stripped_matches_base_game(self):
+        # An eShop purchase title carries a platform/edition suffix the library
+        # row never does; token-AND fails on the raw title until it is peeled.
+        gid = await seed_game("DAVE THE DIVER")
+        await add_platform(gid, "switch2")
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "DAVE THE DIVER Nintendo Switch™ 2 Edition",
+                "platform": "switch2",
+                "price_paid": 19.99,
+            }]
+        )
+        entry = result["results"][0]
+        self.assertEqual(entry["status"], "filled")
+        self.assertEqual(entry["game_id"], gid)
+        self.assertEqual(entry["match_type"], "name")
+
+    async def test_switch2_upgrade_pack_suffix_matches_base_game(self):
+        gid = await seed_game("Hollow Knight")
+        await add_platform(gid, "switch2")
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Hollow Knight – Nintendo Switch 2 Edition-upgradepack",
+                "platform": "switch2",
+                "price_paid": 0.0,
+            }]
+        )
+        self.assertEqual(result["results"][0]["game_id"], gid)
+
+    async def test_distinct_edition_row_wins_before_stripping(self):
+        # When the exact edition row exists, the raw title must match it rather
+        # than collapsing onto a base-game row via the stripped fallback.
+        base = await seed_game("LUMINES")
+        await add_platform(base, "switch2")
+        remaster = await seed_game("LUMINES REMASTERED")
+        await add_platform(remaster, "switch2")
+
+        result = await acquisition.set_acquisitions_batch(
+            [{"name": "LUMINES REMASTERED", "platform": "switch2", "price_paid": 9.99}]
+        )
+        self.assertEqual(result["results"][0]["game_id"], remaster)
+
+    async def test_bundle_name_does_not_false_match_single_game(self):
+        # "Blasphemous" exists; a multi-game bundle title must NOT silently
+        # attach its whole price to that one row — it stays unmatched.
+        gid = await seed_game("Blasphemous")
+        await add_platform(gid, "switch2")
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Blasphemous + Blasphemous 2 Bundle",
+                "platform": "switch2",
+                "price_paid": 11.24,
+            }]
+        )
+        self.assertEqual(result["results"][0]["status"], "unmatched")
+
+    async def test_no_platform_row_details_carry_names(self):
+        gid = await seed_game("Detailed")
+        await add_platform(gid, "steam")
+
+        item = {"game_id": gid, "platform": "gog", "price_paid": 3.0}
+        result = await acquisition.set_acquisitions_batch([item])
+        self.assertEqual(result["no_platform_row"], 1)
+        details = result["no_platform_row_details"]
+        self.assertEqual(len(details), 1)
+        self.assertEqual(details[0]["game_id"], gid)
+        self.assertEqual(details[0]["matched_name"], "Detailed")
+        self.assertEqual(details[0]["platform"], "gog")
+        self.assertEqual(details[0]["platforms"], ["steam"])
+
     async def test_match_types(self):
         gid = await seed_game("Stardew Valley")
         await add_platform(gid, "steam")
