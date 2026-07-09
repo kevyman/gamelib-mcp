@@ -27,6 +27,7 @@ import os
 import httpx
 
 from . import PurchaseRecord, normalize_purchase_date
+from gamelib_mcp.data.db import default_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +54,9 @@ def _load_ec_cookies() -> dict[str, str] | None:
     Mirrors data/nintendo.py::_load_vgcs_cookies: configured path first, then
     the default path; accepts both {name: value} and Cookie Editor array JSON.
     """
-    configured_path = os.getenv("NINTENDO_EC_COOKIES_FILE", "data/nintendo_ec_cookies.json")
+    fallback_path = str(default_data_dir() / "nintendo_ec_cookies.json")
+    configured_path = os.getenv("NINTENDO_EC_COOKIES_FILE") or fallback_path
     candidate_paths = [configured_path]
-    fallback_path = "data/nintendo_ec_cookies.json"
     if configured_path != fallback_path:
         candidate_paths.append(fallback_path)
 
