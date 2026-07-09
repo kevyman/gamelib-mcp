@@ -101,6 +101,22 @@ _AUTH_ERROR = (
 )
 
 
+def _has_session_cookie(cookies: dict[str, str]) -> bool:
+    """True when the export carries the NextAuth session cookie.
+
+    NextAuth splits a large session cookie into numbered chunks
+    (``__Secure-next-auth.session-token.0``, ``.1``, …); browsers send every
+    chunk and ``/api/auth/session`` reassembles them server-side. Accept either
+    the unsuffixed cookie or any chunk so chunked exports aren't rejected.
+    """
+    if _SESSION_COOKIE in cookies:
+        return True
+    prefix = _SESSION_COOKIE + "."
+    return any(
+        name.startswith(prefix) and name[len(prefix):].isdigit() for name in cookies
+    )
+
+
 def _load_ec_cookies() -> dict[str, str] | None:
     """Load eShop session cookies from NINTENDO_EC_COOKIES_FILE.
 
@@ -312,7 +328,7 @@ async def fetch_eshop_purchases(
             "No Nintendo eShop session cookies found (NINTENDO_EC_COOKIES_FILE "
             "not set or missing) — run set_nintendo_ec_session first."
         )
-    if _SESSION_COOKIE not in cookies:
+    if not _has_session_cookie(cookies):
         raise RuntimeError(
             f"Nintendo eShop cookie export is missing '{_SESSION_COOKIE}' — export "
             "your ec.nintendo.com cookies while logged in, then re-run "

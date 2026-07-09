@@ -270,6 +270,27 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(RuntimeError, "next-auth.session-token"):
                     await nintendo_ec.fetch_eshop_purchases()
 
+    async def test_chunked_session_cookie_is_accepted(self):
+        # NextAuth splits large session cookies into .0/.1 chunks; the export
+        # then carries those instead of the unsuffixed name. The guard must not
+        # reject it — the chunks are forwarded and reassembled server-side.
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/auth/session":
+                return httpx.Response(200, json=_SESSION_OK)
+            return httpx.Response(200, json=_ec_envelope([]))
+
+        chunked = {
+            "__Secure-next-auth.session-token.0": "part0",
+            "__Secure-next-auth.session-token.1": "part1",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp, chunked)
+            with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
+                records, _ = await nintendo_ec.fetch_eshop_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
+        self.assertEqual(records, [])
+
     async def test_fetches_and_parses_real_response(self):
         captured: dict = {}
 
