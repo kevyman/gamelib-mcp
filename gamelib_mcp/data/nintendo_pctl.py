@@ -15,7 +15,7 @@ each finalized day is stored idempotently in ``nintendo_play_summary`` and the s
 playtime total is ``SUM`` of those days, so re-syncing never double-counts.
 
 Auth: a Nintendo Account session token (Parental Controls OAuth client) stored in
-``NINTENDO_PCTL_SESSION_FILE`` (default ``data/nintendo_pctl_session.json``), populated
+``NINTENDO_PCTL_SESSION_FILE`` (defaults beside the database), populated
 via the ``set_nintendo_pctl_session`` MCP tool.
 """
 
@@ -25,6 +25,7 @@ import os
 
 from gamelib_mcp.data.db import (
     adopt_platform_identifier,
+    default_data_dir,
     get_game_by_identifier,
     get_nintendo_play_totals,
     load_fuzzy_candidates,
@@ -41,11 +42,12 @@ PLATFORM = "switch2"
 NINTENDO_TITLE_ID = "nintendo_title_id"
 # Parental Controls (Nintendo Switch app, "znma") OAuth client.
 PCTL_CLIENT_ID = "54789befb391a838"
-_DEFAULT_TOKEN_FILE = "data/nintendo_pctl_session.json"
 
 
 def _token_file_path() -> str:
-    return os.getenv("NINTENDO_PCTL_SESSION_FILE", _DEFAULT_TOKEN_FILE)
+    return os.getenv("NINTENDO_PCTL_SESSION_FILE") or str(
+        default_data_dir() / "nintendo_pctl_session.json"
+    )
 
 
 def _load_pctl_session_token() -> str | None:
