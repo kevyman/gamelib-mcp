@@ -1,0 +1,116 @@
+{
+  "data": {
+    "account": {
+      "transactionHistories": {
+        "offsetInfo": {
+          "length": 6,
+          "offset": 0,
+          "total": 6,
+          "__typename": "OffsetInfo"
+        },
+        "transactionHistories": [
+          {
+            "__typename": "TransactionHistory",
+            "datetime": "2026-07-08T00:06:20+02:00",
+            "transactionId": 52535915241,
+            "labelPlatform": "HAC",
+            "itemType": "APPLICATION",
+            "transactionType": "PURCHASE",
+            "amount": {
+              "formattedValue": "€ 12,49",
+              "__typename": "Money"
+            },
+            "title": "Dead Cells",
+            "ticketItem": null,
+            "consumableItemName": null,
+            "privileges": []
+          },
+          {
+            "__typename": "TransactionHistory",
+            "datetime": "2026-07-08T00:06:50+02:00",
+            "transactionId": 52535915726,
+            "labelPlatform": "HAC",
+            "itemType": "BUNDLE",
+            "transactionType": "PURCHASE",
+            "amount": {
+              "formattedValue": "€ 7,19",
+              "__typename": "Money"
+            },
+            "title": "Dead Cells: DLC Bundle",
+            "ticketItem": null,
+            "consumableItemName": null,
+            "privileges": []
+          },
+          {
+            "__typename": "TransactionHistory",
+            "datetime": "2026-02-06T22:32:45+01:00",
+            "transactionId": 52265201912,
+            "labelPlatform": "BEE",
+            "itemType": "DLC",
+            "transactionType": "PURCHASE",
+            "amount": {
+              "formattedValue": "€ 0,00",
+              "__typename": "Money"
+            },
+            "title": "Hollow Knight – Nintendo Switch 2 Edition-upgradepack",
+            "ticketItem": null,
+            "consumableItemName": null,
+            "privileges": []
+          },
+          {
+            "__typename": "TransactionHistory",
+            "datetime": "2026-06-10T02:35:09+02:00",
+            "transactionId": 52487640179,
+            "labelPlatform": "BEE",
+            "itemType": "APPLICATION",
+            "transactionType": "PURCHASE",
+            "amount": {
+              "formattedValue": "€ 69,99",
+              "__typename": "Money"
+            },
+            "title": "Xenoblade Chronicles: Definitive Edition – Nintendo Switch 2 Edition ",
+            "ticketItem": null,
+            "consumableItemName": null,
+            "privileges": []
+          },
+          {
+            "__typename": "TransactionHistory",
+            "datetime": "2025-06-27T10:28:03+02:00",
+            "transactionId": 51876195048,
+            "labelPlatform": "BEE",
+            "itemType": "APPLICATION",
+            "transactionType": "REDEEM",
+            "amount": null,
+            "title": "Mario Kart World",
+            "ticketItem": null,
+            "consumableItemName": null,
+            "privileges": []
+          },
+          {
+            "__typename": "ExternalEcTransactionHistory",
+            "datetime": "2026-03-15T00:15:22+01:00",
+            "transactionId": 52336501205,
+            "grantedItems": [
+              {
+                "__typename": "ExternalEcGrantedItem",
+                "labelPlatform": "HAC",
+                "itemType": "APPLICATION",
+                "title": "Super Mario 3D World + Bowser's Fury",
+                "privileges": []
+              },
+              {
+                "__typename": "ExternalEcGrantedItem",
+                "labelPlatform": "HAC",
+                "itemType": "APPLICATION",
+                "title": "Luigi's Mansion 3",
+                "privileges": []
+              }
+            ]
+          }
+        ],
+        "__typename": "TransactionHistoriesSegment"
+      },
+      "__typename": "Account"
+    }
+  }
+}
