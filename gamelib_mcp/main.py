@@ -1072,6 +1072,7 @@ async def split_bundle_acquisition(
     purchase_source: str | None = None,
     create_missing: bool = False,
     overwrite: bool = False,
+    dry_run: bool = False,
 ) -> SplitBundleAcquisitionResponse:
     """
     Record a multi-game bundle purchase across its constituent games.
@@ -1082,6 +1083,11 @@ async def split_bundle_acquisition(
     the bundle contains, pass them here, and this splits the price across them
     and tags each with the same bundle_name — so get_spending_stats still groups
     the purchase and each game gets a per-game cost for value/cost-per-hour.
+
+    For a DLC/add-on bundle for ONE game ("Dead Cells: DLC Bundle"), don't
+    invent per-DLC games — pass the base game as the single constituent so the
+    spend attaches there. Note the default fill-only mode won't add its price
+    onto a base game that already has one recorded.
 
     bundle_name: the storefront bundle title (recorded on every constituent).
     platform: the platform the bundle was bought on (e.g. switch2, steam).
@@ -1100,12 +1106,19 @@ async def split_bundle_acquisition(
     overwrite: default False fills only NULL acquisition columns (never clobbers
         a manual correction); True replaces the fields unconditionally — use it
         to re-attribute a bundle that was previously imported wrong.
+    dry_run: True previews — resolves matches and computes the price split,
+        returning the exact statuses/prices a real run would produce, without
+        writing. ALWAYS preview first when using create_missing: constituent
+        lists come from lookup and can be wrong, and created games rows have no
+        delete tool.
 
     Games resolve by identifier, then game_id, then name (edition-suffix
-    stripping and fuzzy fallback included); each keeps its owned platform row
-    (created if missing). Per-game results carry status (applied/filled/
-    no_change/created/unmatched), matched_name, match_type, and the assigned
-    price_paid; reconciled is false when a shortfall had no game to land on.
+    stripping included; deliberately no fuzzy fallback — "BioShock 2" must not
+    collapse onto "BioShock"); each gets an owned platform row on the bundle's
+    platform (created if missing). Per-game results carry status (applied/
+    filled/no_change/created/unmatched), matched_name, match_type, and the
+    assigned price_paid; recorded counts rows actually written (no_change
+    excluded); reconciled is false when a shortfall had no game to land on.
     """
     from .tools.acquisition import split_bundle_acquisition as _split_bundle
     return await _split_bundle(
@@ -1118,6 +1131,7 @@ async def split_bundle_acquisition(
         purchase_source,
         create_missing,
         overwrite,
+        dry_run,
     )
 
 
@@ -1167,10 +1181,14 @@ async def import_purchases(
     Multi-game bundles (e.g. "BioShock: The Collection") can't attach to a
     single library row, so instead of landing in unmatched they're diverted to
     each source's bundles_needing_split list — {bundle_name, platform,
-    total_price, price_currency, acquired_at, purchase_source}. Look up each
-    bundle's constituent games and pass it to split_bundle_acquisition (its
-    keys line up with that tool's parameters); nothing is written for a bundle
-    here.
+    total_price, price_currency, acquired_at, purchase_source,
+    already_recorded}. Look up each bundle's constituent games and pass it to
+    split_bundle_acquisition (its keys line up with that tool's parameters);
+    nothing is written for a bundle here. already_recorded=True means a
+    previous split already wrote this bundle_name on this platform — skip it
+    (every import re-surfaces every bundle; the fetch can't know it was
+    handled). DLC bundles for one game land here too — split them onto the
+    base game, not invented per-DLC rows.
 
     Sources run concurrently; one source's auth/network failure (status
     "error", nothing written for it) never blocks the others. Each ok source

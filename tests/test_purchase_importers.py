@@ -1065,10 +1065,36 @@ class ImportPurchasesTests(ToolDBTestCase):
                 "price_currency": "USD",
                 "acquired_at": "2024-03-01",
                 "purchase_source": "eshop",
+                "already_recorded": False,
             }],
         )
         self.assertEqual(result["totals"]["bundles_needing_split"], 1)
         self.assertEqual(result["totals"]["unmatched"], 0)
+
+    async def test_reimport_flags_bundle_already_recorded(self):
+        # After split_bundle_acquisition writes the bundle, a repeat import
+        # re-surfaces it (the fetch can't know) but flags it as handled.
+        gid = await seed_game("BioShock")
+        await add_platform(gid, "switch2")
+        await acquisition.split_bundle_acquisition(
+            bundle_name="BioShock: The Collection",
+            platform="switch2",
+            games=[{"game_id": gid}],
+            total_price=9.99,
+        )
+
+        records = [
+            _eshop_record(
+                "BioShock: The Collection", is_bundle=True, price_paid=9.99
+            ),
+        ]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["eshop"])
+
+        entry = result["sources"]["eshop"]["bundles_needing_split"][0]
+        self.assertTrue(entry["already_recorded"])
 
     async def test_dry_run_surfaces_bundles_and_excludes_from_proposed(self):
         records = [

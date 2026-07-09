@@ -564,6 +564,7 @@ async def split_bundle_acquisition(
     purchase_source: str | None = None,
     create_missing: bool = False,
     overwrite: bool = False,
+    dry_run: bool = False,
 ) -> dict:
     """
     Record one multi-game bundle purchase across its constituent games.
@@ -578,12 +579,18 @@ async def split_bundle_acquisition(
     (to the cent, sum-preserving) across games without an explicit price_paid;
     games with an explicit price keep it and are excluded from the split.
 
-    Games matched by identifier/id/name (edition-suffix stripping and fuzzy
-    fallback included) get an owned platform row created if missing, then the
-    bundle acquisition written. Constituents that match nothing are created as
-    new games when create_missing=True (name required) or reported as unmatched
-    otherwise (their share lands in unallocated_price). overwrite=False (default)
-    only fills NULL acquisition columns so a manual correction is never clobbered.
+    Games matched by identifier/id/name (edition-suffix stripping, no fuzzy —
+    a near-miss is likelier a sequel than a typo) get an owned platform row
+    created if missing, then the bundle acquisition written. Constituents that
+    match nothing are created as new games when create_missing=True (name
+    required) or reported as unmatched otherwise (their share lands in
+    unallocated_price). overwrite=False (default) only fills NULL acquisition
+    columns so a manual correction is never clobbered.
+
+    dry_run=True resolves matches and computes the price split but writes
+    nothing — statuses/prices show exactly what a real run would do. Constituent
+    lists come from AI lookup and created games rows have no delete tool, so
+    preview before any call that uses create_missing.
     """
     cleaned_bundle = bundle_name.strip()
     if not cleaned_bundle:
@@ -637,13 +644,13 @@ async def split_bundle_acquisition(
                 purchase_source=normalized_source,
                 create_missing=create_missing,
                 overwrite=overwrite,
+                dry_run=dry_run,
             )
         )
 
     def _count(*statuses: str) -> int:
         return sum(1 for r in results if r["status"] in statuses)
 
-    written = _count("applied", "filled", "no_change", "created")
     allocated = sum(
         r["price_paid"]
         for r in results
@@ -656,14 +663,21 @@ async def split_bundle_acquisition(
     )
     reconciled = total_price is None or abs(allocated + unallocated - total_price) < 0.01
 
+    # Any price implies a currency was applied — a bare total_price check would
+    # misreport explicit-per-game-price calls as currencyless.
+    priced = any(p is not None for p in prices)
+
     return {
         "bundle_name": cleaned_bundle,
         "platform": platform,
+        "dry_run": dry_run,
         "total_price": total_price,
-        "price_currency": currency if total_price is not None else None,
+        "price_currency": currency if priced else None,
         "games": results,
-        "written": written,
+        # no_change rows had nothing written, so they don't count as recorded.
+        "recorded": _count("applied", "filled", "created"),
         "created": _count("created"),
+        "no_change": _count("no_change"),
         "unmatched": _count("unmatched"),
         "allocated_price": round(allocated, 2),
         "unallocated_price": round(unallocated, 2),
@@ -682,8 +696,14 @@ async def _apply_bundle_game(
     purchase_source: str | None,
     create_missing: bool,
     overwrite: bool,
+    dry_run: bool,
 ) -> dict:
-    """Resolve (or create) one bundle constituent and write its acquisition."""
+    """Resolve (or create) one bundle constituent and write its acquisition.
+
+    dry_run resolves and computes the exact same status a real run would
+    return (including the filled-vs-no_change pre-read) but performs no write;
+    its acquisition echo is the proposed field dict rather than row state.
+    """
     fields: dict = {"bundle_name": bundle_name}
     if price is not None:
         fields["price_paid"] = price
@@ -713,6 +733,15 @@ async def _apply_bundle_game(
                 "price_paid": price,
                 "item": item,
             }
+        if dry_run:
+            return {
+                "status": "created",
+                "game_id": None,
+                "matched_name": str(name).strip(),
+                "match_type": "created",
+                "price_paid": price,
+                "acquisition": fields,
+            }
         game_id = await upsert_game(None, str(name).strip())
         async with get_db() as db:
             row = await db.execute_fetchone(
@@ -727,6 +756,29 @@ async def _apply_bundle_game(
             "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",
             (resolved_id, platform),
         )
+
+    if dry_run:
+        if overwrite:
+            status = "applied"
+        elif gp is None:
+            status = "filled"  # fresh row: every column is NULL
+        else:
+            async with get_db() as db:
+                pre = await db.execute_fetchone(
+                    f"SELECT {', '.join(ACQUISITION_FIELDS)} FROM game_platforms WHERE id = ?",
+                    (gp["id"],),
+                )
+            newly_written = [col for col in fields if pre[col] is None]
+            status = "filled" if newly_written else "no_change"
+        return {
+            "status": status,
+            "game_id": resolved_id,
+            "matched_name": row["name"],
+            "match_type": match_type,
+            "price_paid": price,
+            "acquisition": fields,
+        }
+
     # A bundle purchase means you now own each game on this platform, so the
     # platform row is created unconditionally (unlike set_acquisitions_batch).
     gpid = gp["id"] if gp is not None else await upsert_game_platform(
@@ -809,12 +861,21 @@ def _record_to_batch_item(record: PurchaseRecord, source: str) -> dict:
     return item
 
 
-def _record_to_bundle_entry(record: PurchaseRecord) -> dict:
+async def _record_to_bundle_entry(record: PurchaseRecord) -> dict:
     """One bundle PurchaseRecord → a split_bundle_acquisition-shaped hand-off.
 
     Keys mirror the tool's parameters so a caller can look up the constituents
     and forward the rest verbatim (the record's title IS the bundle name).
+    already_recorded flags bundles a previous split already wrote (the fetch
+    can't know — it re-surfaces every bundle on every import forever), so a
+    repeat import doesn't re-ask for the same lookup.
     """
+    async with get_db() as db:
+        existing = await db.execute_fetchone(
+            """SELECT COUNT(*) AS c FROM game_platforms
+               WHERE bundle_name = ? AND platform = ?""",
+            (record.title, record.platform),
+        )
     return {
         "bundle_name": record.title,
         "platform": record.platform,
@@ -822,6 +883,7 @@ def _record_to_bundle_entry(record: PurchaseRecord) -> dict:
         "price_currency": record.price_currency,
         "acquired_at": record.acquired_at,
         "purchase_source": record.purchase_source,
+        "already_recorded": existing["c"] > 0,
     }
 
 
@@ -839,7 +901,7 @@ async def _import_one_source(
     # Multi-game bundles can't attach to a single row — divert them to a
     # dedicated bucket (with price/date) for split_bundle_acquisition instead
     # of feeding them to the single-game matcher, where they'd only ever miss.
-    bundles = [_record_to_bundle_entry(r) for r in records if r.is_bundle]
+    bundles = [await _record_to_bundle_entry(r) for r in records if r.is_bundle]
     importable = [r for r in records if not r.is_bundle]
     items = [_record_to_batch_item(r, source) for r in importable]
 

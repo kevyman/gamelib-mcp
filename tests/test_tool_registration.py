@@ -173,6 +173,7 @@ EXPECTED_TOOLS = {
             "purchase_source",
             "create_missing",
             "overwrite",
+            "dry_run",
         },
         "required": {"bundle_name", "platform", "games"},
     },

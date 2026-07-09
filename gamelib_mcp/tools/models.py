@@ -371,11 +371,14 @@ class BundleGameResult(FlexibleModel):
 class SplitBundleAcquisitionResponse(FlexibleModel):
     bundle_name: str
     platform: str
+    dry_run: bool
     total_price: float | None = None
     price_currency: str | None = None
     games: list[BundleGameResult]
-    written: int
+    # Rows actually written (applied+filled+created) — no_change rows excluded.
+    recorded: int
     created: int
+    no_change: int
     unmatched: int
     allocated_price: float
     unallocated_price: float
