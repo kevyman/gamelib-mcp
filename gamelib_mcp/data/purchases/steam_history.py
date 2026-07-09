@@ -37,6 +37,7 @@ import httpx
 from bs4 import BeautifulSoup, Tag
 
 from . import PurchaseRecord
+from gamelib_mcp.data.db import default_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -84,9 +85,9 @@ _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 def _load_steam_cookies() -> dict[str, str] | None:
     """Load Steam store cookies from STEAM_STORE_COOKIES_FILE (same shape as
     the Nintendo/Humble cookie files: {name: value} or a Cookie Editor array)."""
-    configured_path = os.getenv("STEAM_STORE_COOKIES_FILE", "data/steam_store_cookies.json")
+    fallback_path = str(default_data_dir() / "steam_store_cookies.json")
+    configured_path = os.getenv("STEAM_STORE_COOKIES_FILE") or fallback_path
     candidate_paths = [configured_path]
-    fallback_path = "data/steam_store_cookies.json"
     if configured_path != fallback_path:
         candidate_paths.append(fallback_path)
 

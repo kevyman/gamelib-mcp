@@ -1182,7 +1182,8 @@ async def set_nintendo_session(cookies: str) -> NintendoSessionResponse:
     3. Click the extension → Export → copy the JSON
     4. Pass that JSON string here
 
-    Cookies are saved to NINTENDO_COOKIES_FILE (default: data/nintendo_cookies.json).
+    Cookies are saved to NINTENDO_COOKIES_FILE (defaults to nintendo_cookies.json
+    beside the database).
     """
     from .tools.admin import set_nintendo_session as _set_session
     return await _set_session(cookies)
@@ -1205,7 +1206,7 @@ async def set_nintendo_ec_session(cookies: str) -> NintendoSessionResponse:
     4. Pass that JSON string here (object or Cookie Editor array format)
 
     Cookies are saved to NINTENDO_EC_COOKIES_FILE
-    (default: data/nintendo_ec_cookies.json).
+    (defaults to nintendo_ec_cookies.json beside the database).
     """
     from .tools.admin import set_nintendo_ec_session as _set_ec_session
     return await _set_ec_session(cookies)
@@ -1227,7 +1228,8 @@ async def set_humble_session(cookies: str) -> NintendoSessionResponse:
     3. Click the extension → Export → copy the JSON
     4. Pass that JSON string here (object or Cookie Editor array format)
 
-    Cookies are saved to HUMBLE_COOKIES_FILE (default: data/humble_cookies.json).
+    Cookies are saved to HUMBLE_COOKIES_FILE (defaults to humble_cookies.json
+    beside the database).
     """
     from .tools.admin import set_humble_session as _set_humble
     return await _set_humble(cookies)
@@ -1252,7 +1254,7 @@ async def set_steam_store_session(cookies: str) -> NintendoSessionResponse:
     4. Pass that JSON string here (object or Cookie Editor array format)
 
     Cookies are saved to STEAM_STORE_COOKIES_FILE
-    (default: data/steam_store_cookies.json).
+    (defaults to steam_store_cookies.json beside the database).
     """
     from .tools.admin import set_steam_store_session as _set_steam_store
     return await _set_steam_store(cookies)
@@ -1273,7 +1275,8 @@ async def set_nintendo_pctl_session(response: str = "") -> dict:
        Nintendo account, right-click "Select this person" and copy the link.
     2. Call again with that npf://auth link (or a bare session token) → stored.
 
-    Saved to NINTENDO_PCTL_SESSION_FILE (default: data/nintendo_pctl_session.json).
+    Saved to NINTENDO_PCTL_SESSION_FILE (defaults to nintendo_pctl_session.json
+    beside the database).
     """
     from .tools.admin import set_nintendo_pctl_session as _set_pctl
     return await _set_pctl(response)

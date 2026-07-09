@@ -22,6 +22,7 @@ from bs4 import BeautifulSoup
 
 from gamelib_mcp.data.db import (
     adopt_platform_identifier,
+    default_data_dir,
     find_conflicting_fuzzy_key,
     get_game_by_identifier,
     load_fuzzy_candidates,
@@ -104,9 +105,9 @@ def _classify_nintendo_sync_error(message: str) -> str:
 
 def _load_vgcs_cookies() -> dict[str, str] | None:
     """Load Nintendo session cookies from NINTENDO_COOKIES_FILE."""
-    configured_path = os.getenv("NINTENDO_COOKIES_FILE", "data/nintendo_cookies.json")
+    fallback_path = str(default_data_dir() / "nintendo_cookies.json")
+    configured_path = os.getenv("NINTENDO_COOKIES_FILE") or fallback_path
     candidate_paths = [configured_path]
-    fallback_path = "data/nintendo_cookies.json"
     if configured_path != fallback_path:
         candidate_paths.append(fallback_path)
 

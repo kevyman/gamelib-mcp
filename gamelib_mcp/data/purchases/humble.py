@@ -32,6 +32,7 @@ import os
 import httpx
 
 from . import PurchaseRecord, normalize_purchase_date
+from gamelib_mcp.data.db import default_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +55,9 @@ _AUTH_ERROR = (
 def _load_humble_cookies() -> dict[str, str] | None:
     """Load Humble session cookies from HUMBLE_COOKIES_FILE (same shape as
     the Nintendo cookie files: {name: value} or a Cookie Editor array)."""
-    configured_path = os.getenv("HUMBLE_COOKIES_FILE", "data/humble_cookies.json")
+    fallback_path = str(default_data_dir() / "humble_cookies.json")
+    configured_path = os.getenv("HUMBLE_COOKIES_FILE") or fallback_path
     candidate_paths = [configured_path]
-    fallback_path = "data/humble_cookies.json"
     if configured_path != fallback_path:
         candidate_paths.append(fallback_path)
 

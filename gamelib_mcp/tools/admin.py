@@ -15,6 +15,7 @@ from ..data.db import (
     ACQUISITION_FIELDS,
     STEAM_APP_ID,
     clear_fulfilled_wishlist_entries,
+    default_data_dir,
     get_db,
     record_play_history_snapshots,
 )
@@ -309,13 +310,16 @@ async def sync_wishlist(
     return results
 
 
-def _save_session_cookies(cookies: str, env_var: str, default_path: str, label: str) -> dict:
+def _save_session_cookies(cookies: str, env_var: str, default_filename: str, label: str) -> dict:
     """Normalize a pasted cookie-export JSON and save it as {name: value}.
 
     Shared by every cookie-based session setter. Accepts either a JSON object
     ({"cookie_name": "value", ...}) or a Cookie Editor / EditThisCookie array
-    ([{"name": ..., "value": ...}, ...]); saves to the path in ``env_var``
-    (falling back to ``default_path``).
+    ([{"name": ..., "value": ...}, ...]); saves to the path in ``env_var``,
+    falling back to ``default_filename`` inside ``default_data_dir()`` (the
+    DB's writable directory — a mounted ``/data`` volume in production) so a
+    relative ``data/`` that the non-root container process can't create never
+    triggers ``PermissionError: [Errno 13] Permission denied: 'data'``.
     """
     try:
         raw = json.loads(cookies)
@@ -332,7 +336,7 @@ def _save_session_cookies(cookies: str, env_var: str, default_path: str, label: 
     if not normalized:
         raise ToolError("No valid cookies found in input")
 
-    path = os.getenv(env_var, default_path)
+    path = os.getenv(env_var) or str(default_data_dir() / default_filename)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(normalized, f, indent=2)
@@ -357,10 +361,10 @@ async def set_nintendo_session(cookies: str) -> dict:
     4. Pass that JSON string to this tool
 
     Cookies are saved to the path in NINTENDO_COOKIES_FILE
-    (default: data/nintendo_cookies.json).
+    (defaults to nintendo_cookies.json beside the database).
     """
     return _save_session_cookies(
-        cookies, "NINTENDO_COOKIES_FILE", "data/nintendo_cookies.json", "Nintendo"
+        cookies, "NINTENDO_COOKIES_FILE", "nintendo_cookies.json", "Nintendo"
     )
 
 
@@ -379,10 +383,10 @@ async def set_nintendo_ec_session(cookies: str) -> dict:
     4. Pass that JSON string to this tool
 
     Cookies are saved to the path in NINTENDO_EC_COOKIES_FILE
-    (default: data/nintendo_ec_cookies.json).
+    (defaults to nintendo_ec_cookies.json beside the database).
     """
     return _save_session_cookies(
-        cookies, "NINTENDO_EC_COOKIES_FILE", "data/nintendo_ec_cookies.json", "Nintendo eShop"
+        cookies, "NINTENDO_EC_COOKIES_FILE", "nintendo_ec_cookies.json", "Nintendo eShop"
     )
 
 
@@ -401,10 +405,10 @@ async def set_humble_session(cookies: str) -> dict:
     4. Pass that JSON string to this tool
 
     Cookies are saved to the path in HUMBLE_COOKIES_FILE
-    (default: data/humble_cookies.json).
+    (defaults to humble_cookies.json beside the database).
     """
     return _save_session_cookies(
-        cookies, "HUMBLE_COOKIES_FILE", "data/humble_cookies.json", "Humble Bundle"
+        cookies, "HUMBLE_COOKIES_FILE", "humble_cookies.json", "Humble Bundle"
     )
 
 
@@ -424,10 +428,10 @@ async def set_steam_store_session(cookies: str) -> dict:
     4. Pass that JSON string to this tool
 
     Cookies are saved to the path in STEAM_STORE_COOKIES_FILE
-    (default: data/steam_store_cookies.json).
+    (defaults to steam_store_cookies.json beside the database).
     """
     return _save_session_cookies(
-        cookies, "STEAM_STORE_COOKIES_FILE", "data/steam_store_cookies.json", "Steam store"
+        cookies, "STEAM_STORE_COOKIES_FILE", "steam_store_cookies.json", "Steam store"
     )
 
 
@@ -452,7 +456,8 @@ async def set_nintendo_pctl_session(response: str = "") -> dict:
     2. Call again with that `npf…://auth` link (or a bare session token) → the
        session token is stored for playtime sync.
 
-    Saved to NINTENDO_PCTL_SESSION_FILE (default: data/nintendo_pctl_session.json).
+    Saved to NINTENDO_PCTL_SESSION_FILE (defaults to nintendo_pctl_session.json
+    beside the database).
     """
     import aiohttp
     from pynintendoparental.authenticator import Authenticator

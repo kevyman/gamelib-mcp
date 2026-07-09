@@ -146,6 +146,23 @@ def _db_path() -> str:
     return db_path
 
 
+def default_data_dir() -> Path:
+    """Writable directory for app-managed state files (session cookies, tokens).
+
+    Derives from the configured database location so these files land in the
+    same writable place as the DB — the mounted ``/data`` volume in production,
+    ``data/`` in local dev — rather than a hardcoded relative ``data/`` that,
+    under the container's root-owned ``/app`` cwd, the non-root process cannot
+    create (``PermissionError: [Errno 13] Permission denied: 'data'``).
+    """
+    db_path = _db_path()
+    if db_path != ":memory:":
+        parent = Path(db_path).expanduser().parent
+        if str(parent) not in ("", "."):
+            return parent
+    return Path("/data") if os.getenv(_REQUIRE_ABSOLUTE_DB_PATH_ENV) else Path("data")
+
+
 def fts_ready() -> bool:
     """True when the configured database has a live games_fts index."""
     return _FTS_READY_PATH is not None and _FTS_READY_PATH == _db_path()
