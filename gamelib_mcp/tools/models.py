@@ -328,12 +328,12 @@ class SetAcquisitionResponse(FlexibleModel):
 
 
 class AcquisitionBatchItemResult(FlexibleModel):
-    # applied | filled | no_change | unmatched | no_platform_row | error
+    # applied | filled | no_change | created | unmatched | no_platform_row | error
     status: str
     platform: str | None = None
     game_id: int | None = None
     matched_name: str | None = None
-    match_type: str | None = None  # identifier | id | name | fuzzy
+    match_type: str | None = None  # identifier | id | name | fuzzy | created
     acquisition: AcquisitionInfo | None = None
     # Present on no_platform_row: the platforms the game IS owned/recorded on.
     platforms: list[str] | None = None
@@ -348,16 +348,59 @@ class SetAcquisitionsBatchResponse(FlexibleModel):
     applied: int
     filled: int
     no_change: int
+    created: int
+    # New owned games minted by create_missing (game_id, name, platform) — a
+    # created row has no delete tool, so callers eyeball this list.
+    created_details: list[dict[str, Any]]
     unmatched: list[dict[str, Any]]
     no_platform_row: int
+    # Detail for the no_platform_row rows (game_id, matched_name, platforms),
+    # so a caller can triage by name instead of an opaque count.
+    no_platform_row_details: list[dict[str, Any]]
     errors: int
+
+
+class BundleGameResult(FlexibleModel):
+    # applied | filled | no_change | created | unmatched
+    status: str
+    game_id: int | None = None
+    name: str | None = None  # input name, present on unmatched
+    matched_name: str | None = None
+    match_type: str | None = None  # identifier | id | name | fuzzy | created
+    price_paid: float | None = None  # the proposed split share for this game
+    # What actually persisted on the row (fill-only can preserve an older price,
+    # so this may differ from price_paid); drives allocated_price/reconciled.
+    recorded_price: float | None = None
+    acquisition: AcquisitionInfo | None = None
+    item: dict[str, Any] | None = None  # echoed on unmatched
+
+
+class SplitBundleAcquisitionResponse(FlexibleModel):
+    bundle_name: str
+    platform: str
+    dry_run: bool
+    total_price: float | None = None
+    price_currency: str | None = None
+    games: list[BundleGameResult]
+    # Rows actually written (applied+filled+created) — no_change rows excluded.
+    recorded: int
+    created: int
+    no_change: int
+    unmatched: int
+    allocated_price: float
+    unallocated_price: float
+    reconciled: bool
 
 
 class ImportPurchasesResponse(FlexibleModel):
     # Per-source results keyed by importer name (eshop, humble, ...). Each is
     # {source, status: "ok"|"error", ...} — ok carries fetched/applied/filled/
-    # no_change/unmatched/no_platform_row/errors/skipped (or dry_run+proposed),
-    # error carries the fetch failure message.
+    # no_change/created/created_details/unmatched/no_platform_row/
+    # bundles_needing_split/errors/skipped (or dry_run+proposed+would_create),
+    # error carries the fetch failure message. bundles_needing_split holds
+    # multi-game bundles to hand to split_bundle_acquisition (they're never
+    # written by this tool); created_details names games minted from
+    # unmatched single-game purchases (create_missing, default on).
     sources: dict[str, dict[str, Any]]
     dry_run: bool
     totals: dict[str, Any]

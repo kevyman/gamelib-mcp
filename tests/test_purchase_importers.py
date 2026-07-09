@@ -136,6 +136,12 @@ class NintendoEcParserTests(unittest.TestCase):
         self.assertEqual(records[2].price_currency, "EUR")
         self.assertEqual(records[3].price_paid, 69.99)
 
+        # itemType BUNDLE is flagged so import routes it to bundles_needing_split;
+        # single-game rows are not.
+        self.assertEqual(
+            [r.is_bundle for r in records], [False, True, False, False]
+        )
+
         reasons = [s["reason"] for s in skipped]
         titles = [s["title"] for s in skipped]
         self.assertEqual(len(skipped), 3)
@@ -1014,12 +1020,14 @@ class ImportPurchasesTests(ToolDBTestCase):
         with _patch_fetchers(
             fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
         ):
-            result = await acquisition.import_purchases()
+            # create_missing=False keeps the unmatched-reporting behavior under test.
+            result = await acquisition.import_purchases(create_missing=False)
 
         eshop = result["sources"]["eshop"]
         self.assertEqual(eshop["status"], "ok")
         self.assertEqual(eshop["fetched"], 2)
         self.assertEqual(eshop["filled"], 1)
+        self.assertEqual(eshop["created"], 0)
         self.assertEqual(len(eshop["unmatched"]), 1)
         self.assertEqual(eshop["unmatched"][0]["name"], "Totally Absent Game")
         self.assertEqual(result["totals"]["filled"], 1)
@@ -1031,6 +1039,160 @@ class ImportPurchasesTests(ToolDBTestCase):
         self.assertEqual(row["price_paid"], 19.99)
         self.assertEqual(row["price_currency"], "USD")
         self.assertEqual(row["purchase_source"], "eshop")
+
+    async def test_create_missing_default_mints_new_owned_game(self):
+        # A purchase that matches nothing becomes an owned library game — a
+        # purchase is a stronger ownership signal than inferred playtime.
+        gid = await seed_game("Hades")
+        await add_platform(gid, "switch2")
+
+        records = [_eshop_record("Hades"), _eshop_record("F-ZERO 99")]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["eshop"])
+
+        eshop = result["sources"]["eshop"]
+        self.assertEqual(eshop["filled"], 1)
+        self.assertEqual(eshop["created"], 1)
+        self.assertEqual(eshop["unmatched"], [])
+        self.assertEqual(result["totals"]["created"], 1)
+        detail = eshop["created_details"]
+        self.assertEqual(len(detail), 1)
+        self.assertEqual(detail[0]["name"], "F-ZERO 99")
+        self.assertEqual(detail[0]["platform"], "switch2")
+
+        # The new game is owned on switch2 and carries its acquisition (eShop
+        # transactions expose no title id, so it reconciles by name later).
+        new_id = detail[0]["game_id"]
+        row = await _acquisition_row(new_id, "switch2")
+        self.assertEqual(row["price_paid"], 19.99)
+        self.assertEqual(row["purchase_source"], "eshop")
+        async with db_module.get_db() as db:
+            owned = await db.execute_fetchone(
+                "SELECT owned FROM game_platforms WHERE game_id = ? AND platform = ?",
+                (new_id, "switch2"),
+            )
+        self.assertEqual(owned["owned"], 1)
+
+    async def test_created_game_uses_edition_stripped_title(self):
+        # A suffix-laden storefront title that matches nothing is created under
+        # its CLEAN name, so a later name-based ownership sync ("Hollow Knight")
+        # reconciles onto this row instead of stranding a duplicate.
+        records = [
+            _eshop_record("Hollow Knight – Nintendo Switch 2 Edition-upgradepack"),
+        ]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["eshop"])
+
+        eshop = result["sources"]["eshop"]
+        self.assertEqual(eshop["created"], 1)
+        self.assertEqual(eshop["created_details"][0]["name"], "Hollow Knight")
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT name FROM games WHERE id = ?",
+                (eshop["created_details"][0]["game_id"],),
+            )
+        self.assertEqual(row["name"], "Hollow Knight")
+
+    async def test_dry_run_previews_would_create(self):
+        gid = await seed_game("Hades")
+        await add_platform(gid, "switch2")
+        records = [_eshop_record("Hades"), _eshop_record("F-ZERO 99")]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["eshop"], dry_run=True)
+
+        eshop = result["sources"]["eshop"]
+        names = [item["name"] for item in eshop["would_create"]]
+        self.assertEqual(names, ["F-ZERO 99"])
+        # Nothing was written — the game does not exist yet.
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT id FROM games WHERE name = ?", ("F-ZERO 99",)
+            )
+        self.assertIsNone(row)
+
+    async def test_bundle_diverted_to_needs_split_not_unmatched(self):
+        gid = await seed_game("Hades")
+        await add_platform(gid, "switch2")
+        records = [
+            _eshop_record("Hades"),
+            _eshop_record(
+                "BioShock: The Collection", is_bundle=True, price_paid=9.99
+            ),
+        ]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["eshop"])
+
+        eshop = result["sources"]["eshop"]
+        # The bundle never reaches the single-game matcher, so unmatched is empty.
+        self.assertEqual(eshop["unmatched"], [])
+        self.assertEqual(eshop["filled"], 1)
+        self.assertEqual(
+            eshop["bundles_needing_split"],
+            [{
+                "bundle_name": "BioShock: The Collection",
+                "platform": "switch2",
+                "total_price": 9.99,
+                "price_currency": "USD",
+                "acquired_at": "2024-03-01",
+                "purchase_source": "eshop",
+                "already_recorded": False,
+            }],
+        )
+        self.assertEqual(result["totals"]["bundles_needing_split"], 1)
+        self.assertEqual(result["totals"]["unmatched"], 0)
+
+    async def test_reimport_flags_bundle_already_recorded(self):
+        # After split_bundle_acquisition writes the bundle, a repeat import
+        # re-surfaces it (the fetch can't know) but flags it as handled.
+        gid = await seed_game("BioShock")
+        await add_platform(gid, "switch2")
+        await acquisition.split_bundle_acquisition(
+            bundle_name="BioShock: The Collection",
+            platform="switch2",
+            games=[{"game_id": gid}],
+            total_price=9.99,
+        )
+
+        records = [
+            _eshop_record(
+                "BioShock: The Collection", is_bundle=True, price_paid=9.99
+            ),
+        ]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["eshop"])
+
+        entry = result["sources"]["eshop"]["bundles_needing_split"][0]
+        self.assertTrue(entry["already_recorded"])
+
+    async def test_dry_run_surfaces_bundles_and_excludes_from_proposed(self):
+        records = [
+            _eshop_record("Hades"),
+            _eshop_record("Some Bundle", is_bundle=True),
+        ]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(
+                sources=["eshop"], dry_run=True
+            )
+
+        eshop = result["sources"]["eshop"]
+        proposed_names = [item["name"] for item in eshop["proposed"]]
+        self.assertEqual(proposed_names, ["Hades"])  # bundle not a proposed item
+        self.assertEqual(len(eshop["bundles_needing_split"]), 1)
+        self.assertEqual(
+            eshop["bundles_needing_split"][0]["bundle_name"], "Some Bundle"
+        )
 
     async def test_identifier_first_match_fills_renamed_library_title(self):
         # The library title differs from the store transaction title (renamed/
@@ -1199,13 +1361,14 @@ class ImportPurchasesTests(ToolDBTestCase):
                 ),
             ),
         ):
-            result = await acquisition.import_purchases()
+            result = await acquisition.import_purchases(create_missing=False)
 
         self.assertEqual(set(result["sources"]), {"eshop", "gog", "humble", "steam"})
         for source in ("eshop", "gog", "humble", "steam"):
             self.assertEqual(result["sources"][source]["status"], "ok")
         self.assertEqual(result["totals"]["fetched"], 5)
         self.assertEqual(result["totals"]["filled"], 4)
+        self.assertEqual(result["totals"]["created"], 0)
         self.assertEqual(result["totals"]["unmatched"], 1)
         self.assertEqual(result["totals"]["errors"], 0)
         self.assertEqual(len(result["sources"]["gog"]["skipped"]), 1)

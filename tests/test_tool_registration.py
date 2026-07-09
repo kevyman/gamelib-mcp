@@ -159,11 +159,32 @@ EXPECTED_TOOLS = {
         "required": set(),
     },
     "set_acquisitions_batch": {
-        "params": {"items", "overwrite", "create_platform_rows"},
+        "params": {"items", "overwrite", "create_platform_rows", "create_missing"},
         "required": {"items"},
     },
+    "split_bundle_acquisition": {
+        "params": {
+            "bundle_name",
+            "platform",
+            "games",
+            "total_price",
+            "price_currency",
+            "acquired_at",
+            "purchase_source",
+            "create_missing",
+            "overwrite",
+            "dry_run",
+        },
+        "required": {"bundle_name", "platform", "games"},
+    },
     "import_purchases": {
-        "params": {"sources", "dry_run", "overwrite", "create_platform_rows"},
+        "params": {
+            "sources",
+            "dry_run",
+            "overwrite",
+            "create_platform_rows",
+            "create_missing",
+        },
         "required": set(),
     },
     "get_spending_stats": {
@@ -238,6 +259,7 @@ EXPECTED_ANNOTATIONS = {
     "update_game": {"readOnlyHint": False, "idempotentHint": True},
     "set_acquisition": {"readOnlyHint": False, "idempotentHint": True},
     "set_acquisitions_batch": {"readOnlyHint": False, "idempotentHint": True},
+    "split_bundle_acquisition": {"readOnlyHint": False, "idempotentHint": True},
     "import_purchases": {
         "readOnlyHint": False,
         "idempotentHint": True,
@@ -271,9 +293,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_46(self):
+    async def test_tool_count_is_47(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 46)
+        self.assertEqual(len(tools), 47)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()

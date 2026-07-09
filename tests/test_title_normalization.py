@@ -1,6 +1,7 @@
 import unittest
 
 from gamelib_mcp.data.title_normalization import (
+    normalize_purchase_title,
     normalize_search_text,
     prepare_catalog_title,
 )
@@ -93,3 +94,46 @@ class TitleNormalizationTests(unittest.TestCase):
         self.assertEqual(
             prepare_catalog_title("Batman: Arkham Asylum"), "Batman: Arkham Asylum"
         )
+
+
+class NormalizePurchaseTitleTests(unittest.TestCase):
+    def test_strips_switch2_edition_and_trademark_glyphs(self) -> None:
+        self.assertEqual(
+            normalize_purchase_title("DAVE THE DIVER Nintendo Switch™ 2 Edition"),
+            "DAVE THE DIVER",
+        )
+        self.assertEqual(
+            normalize_purchase_title("No Man's Sky – Nintendo Switch™ 2 Edition"),
+            "No Man's Sky",
+        )
+
+    def test_strips_switch2_upgrade_pack_marker(self) -> None:
+        # The upgrade-pack marker sits below the edition suffix; both peel off.
+        self.assertEqual(
+            normalize_purchase_title(
+                "Hollow Knight – Nintendo Switch 2 Edition-upgradepack"
+            ),
+            "Hollow Knight",
+        )
+        self.assertEqual(
+            normalize_purchase_title(
+                "Red Dead Redemption: Nintendo Switch™ 2 Edition-upgradepack"
+            ),
+            "Red Dead Redemption",
+        )
+
+    def test_strips_marketing_editions(self) -> None:
+        self.assertEqual(
+            normalize_purchase_title("Danganronpa: Trigger Happy Havoc Anniversary Edition"),
+            "Danganronpa: Trigger Happy Havoc",
+        )
+        self.assertEqual(normalize_purchase_title("LUMINES REMASTERED"), "LUMINES")
+
+    def test_leaves_bundle_and_sequel_titles_intact(self) -> None:
+        # A bundle name is NOT an edition suffix — it must survive so it can't
+        # false-match a single constituent game. Sequel numbers stay too.
+        self.assertEqual(
+            normalize_purchase_title("Blasphemous + Blasphemous 2 Bundle"),
+            "Blasphemous + Blasphemous 2 Bundle",
+        )
+        self.assertEqual(normalize_purchase_title("Portal 2"), "Portal 2")
