@@ -56,12 +56,10 @@ PURCHASE_IMPORTERS: dict[str, tuple[str, str]] = {
 # source key → game_platform_identifiers.identifier_type carried by that
 # source's PurchaseRecord.store_identifier, letting set_acquisitions_batch
 # match identifier-first (a renamed/localized library title still resolves).
-# No "humble" entry — Humble orders carry no store identifiers. "eshop" uses
-# the literal value of gamelib_mcp.data.nintendo.NINTENDO_TITLE_ID: importing
-# data.nintendo here would drag httpx/bs4/igdb into this deliberately light
-# package (see module docstring).
+# No "humble" or "eshop" entry — neither exposes a per-item store identifier
+# (Humble orders carry none; the eShop GraphQL API returns no product id), so
+# both fall back to title matching.
 IDENTIFIER_TYPES: dict[str, str] = {
-    "eshop": "nintendo_title_id",  # gamelib_mcp.data.nintendo.NINTENDO_TITLE_ID
     "gog": GOG_PRODUCT_ID,
     "steam": STEAM_APP_ID,
 }

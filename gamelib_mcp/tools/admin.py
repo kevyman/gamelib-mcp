@@ -374,12 +374,15 @@ async def set_nintendo_ec_session(cookies: str) -> dict:
 
     Accepts the same JSON shapes as set_nintendo_session (object or Cookie
     Editor array). These cookies are separate from the VGCS ones — they must
-    come from the ec.nintendo.com domain.
+    come from the ec.nintendo.com domain, and the export MUST include the
+    ``__Secure-next-auth.session-token`` cookie (the importer exchanges it for a
+    short-lived account token; without it the import fails immediately).
 
     How to get your cookies:
     1. Open https://ec.nintendo.com/my/transactions/ in your browser (logged in)
     2. Install the "Cookie Editor" browser extension
-    3. Click the extension icon → Export → copy the JSON
+    3. Click the extension icon → Export → copy the JSON (export everything on
+       the page; it will include __Secure-next-auth.session-token)
     4. Pass that JSON string to this tool
 
     Cookies are saved to the path in NINTENDO_EC_COOKIES_FILE
