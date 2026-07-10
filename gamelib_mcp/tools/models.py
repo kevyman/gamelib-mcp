@@ -425,6 +425,13 @@ class SpendingStatsResponse(FlexibleModel):
     by_source: list[dict[str, Any]]
     by_platform: list[dict[str, Any]]
     by_bundle: list[dict[str, Any]]
+    # Content-grouped spend: base game + its owned DLC/expansions rolled up per
+    # content family (root COALESCE(parent_game_id, id)), only for families with
+    # a real nested addon, top 10 per currency. Each: {family_game_id,
+    # family_name, currency, base_spent, addon_spent, total_spent, addon_count,
+    # family_playtime_hours, family_cost_per_hour}. Distinct from by_bundle,
+    # which groups by a purchase's bundle_name.
+    by_family: list[dict[str, Any]]
     top_expensive: list[dict[str, Any]]
     cost_per_hour: dict[str, Any]
 

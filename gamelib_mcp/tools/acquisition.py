@@ -17,12 +17,19 @@ from datetime import date
 
 from fastmcp.exceptions import ToolError
 
+from ..data.content import (
+    NESTED_CONTENT_TYPES,
+    PRIMARY_CONTENT_TYPES,
+    derive_is_primary,
+    split_addon_title,
+)
 from ..data.db import (
     ACQUISITION_FIELDS,
     clear_fulfilled_wishlist_entries,
     fts_ready,
     get_db,
     get_game_by_identifier,
+    resolve_parent_game,
     set_platform_acquisition,
     upsert_game,
     upsert_game_platform,
@@ -99,8 +106,55 @@ _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 _BATCH_ITEM_CAP = 200
 _BATCH_ITEM_KEYS = frozenset({
     "name", "game_id", "platform", "identifier_type", "identifier_value",
+    "content_type",
     *ACQUISITION_FIELDS,
 })
+
+# Every valid content_type an item may carry (primary + nested vocabularies).
+_VALID_CONTENT_TYPES = PRIMARY_CONTENT_TYPES | NESTED_CONTENT_TYPES
+
+
+def _validate_content_type(value) -> str | None:
+    """Validate an item's optional content_type. None = no signal (allowed)."""
+    if value is None:
+        return None
+    if value not in _VALID_CONTENT_TYPES:
+        raise ToolError(
+            f"unknown content_type '{value}'. Valid: {sorted(_VALID_CONTENT_TYPES)}"
+        )
+    return value
+
+
+async def _addon_mint_fields(
+    create_name: str, content_type: str | None
+) -> tuple[dict, int | None, str | None]:
+    """Extra upsert_game fields for a create terminal, DLC-aware.
+
+    For a NESTED content_type (dlc/expansion/edition/…) the new row is minted
+    nested: content_type set, is_primary_library_item=0, and — when a
+    split_addon_title candidate resolves to an EXISTING games row — its
+    parent_game_id linked. A parent is NEVER minted from a title guess
+    (resolve_parent_game(create=False)); an unresolved parent leaves the addon
+    parentless. A primary/None content_type returns no extra fields, so the row
+    mints as a base_game default exactly as before. Returns
+    (fields, parent_game_id, parent_name); parent_* are None when unresolved.
+    """
+    if content_type is None or content_type not in NESTED_CONTENT_TYPES:
+        return {}, None, None
+    fields: dict = {
+        "content_type": content_type,
+        "is_primary_library_item": int(derive_is_primary(content_type)),
+    }
+    for candidate in split_addon_title(create_name):
+        parent_id = await resolve_parent_game(candidate, create=False)
+        if parent_id is not None:
+            async with get_db() as db:
+                prow = await db.execute_fetchone(
+                    "SELECT name FROM games WHERE id = ?", (parent_id,)
+                )
+            fields["parent_game_id"] = parent_id
+            return fields, parent_id, (prow["name"] if prow else None)
+    return fields, None, None
 
 
 def _normalize_source(value: str) -> str:
@@ -264,6 +318,7 @@ async def _match_batch_game(
     identifier_value: str | None = None,
     *,
     fuzzy: bool = True,
+    exact_only: bool = False,
 ):
     """Resolve one batch item to (row, match_type); (None, None) on a miss.
 
@@ -277,6 +332,15 @@ async def _match_batch_game(
     fuzzy=False drops the token-sort fallback, keeping only exact/token name
     tiers — callers that would rather create a new row than risk a sequel-number
     near-miss ("BioShock 2" fuzzy-matching "BioShock") pass it.
+
+    exact_only restricts the name tiers to an EXACT normalized match (rank 0 of
+    build_name_match) — no prefix, substring, token-AND, or fuzzy — and is set
+    for items carrying a NESTED content_type (DLC/expansion/edition). Rationale:
+    a DLC title that token- or substring-matched its base game ("Hollow Knight:
+    Silksong Pack" onto "Hollow Knight") would attach the DLC's spend onto the
+    base row, corrupting both the base game's price data and its content
+    classification. Identifier and explicit game_id tiers stay safe under
+    exact_only and are unaffected.
     """
     if identifier_type is not None and identifier_value is not None:
         row = await get_game_by_identifier(identifier_type, str(identifier_value))
@@ -317,9 +381,13 @@ async def _match_batch_game(
                 (*match.rank_params, *match.where_params),
             )
         if row is not None:
+            # Nested items accept only rank-0 (exact normalized) matches; a
+            # broader tier here would risk collapsing a DLC onto its base game.
+            if exact_only and row["match_rank"] != 0:
+                continue
             return row, "name"
 
-    for query in queries if fuzzy else []:
+    for query in queries if (fuzzy and not exact_only) else []:
         fuzzy_ids = await fuzzy_fallback_game_ids(query)
         if fuzzy_ids:
             async with get_db() as db:
@@ -365,6 +433,7 @@ async def _apply_batch_item(
         )
         if not fields:
             raise ToolError("Provide at least one acquisition field")
+        content_type = _validate_content_type(item.get("content_type"))
     except ToolError as exc:
         return {
             "status": "error",
@@ -373,10 +442,20 @@ async def _apply_batch_item(
             "item": item,
         }
 
+    # A nested item (DLC/expansion/edition) must not ride the broad name tiers
+    # that could attach its spend onto the base game — restrict to exact matches.
+    nested = content_type is not None and content_type in NESTED_CONTENT_TYPES
     row, match_type = await _match_batch_game(
-        item.get("name"), item.get("game_id"), identifier_type, identifier_value
+        item.get("name"),
+        item.get("game_id"),
+        identifier_type,
+        identifier_value,
+        exact_only=nested,
     )
     created = False
+    mint_content_type: str | None = None
+    mint_parent_id: int | None = None
+    mint_parent_name: str | None = None
     if row is None:
         name = item.get("name")
         if not (create_missing and name):
@@ -396,13 +475,21 @@ async def _apply_batch_item(
         # no base row to collide with. When present, the store identifier is
         # attached below as the stronger reconciliation key.
         create_name = normalize_purchase_title(str(name)).strip() or str(name).strip()
-        new_id = await upsert_game(None, create_name)
+        # A nested content_type mints a nested row (content_type + is_primary=0)
+        # linked to an existing parent when split_addon_title resolves one; a
+        # primary/None content_type mints a base_game default (unchanged).
+        mint_fields, mint_parent_id, mint_parent_name = await _addon_mint_fields(
+            create_name, content_type
+        )
+        new_id = await upsert_game(None, create_name, **mint_fields)
         async with get_db() as db:
             row = await db.execute_fetchone(
                 "SELECT id, name FROM games WHERE id = ?", (new_id,)
             )
         created = True
         match_type = "created"
+        if mint_fields:
+            mint_content_type = content_type
     resolved_id = row["id"]
 
     async with get_db() as db:
@@ -454,7 +541,7 @@ async def _apply_batch_item(
         newly_written = [col for col in fields if pre[col] is None]
         status = "created" if created else ("filled" if newly_written else "no_change")
 
-    return {
+    result = {
         "status": status,
         "game_id": resolved_id,
         "matched_name": row["name"],
@@ -462,6 +549,14 @@ async def _apply_batch_item(
         "platform": platform,
         "acquisition": acquisition,
     }
+    # A DLC/expansion/edition minted here carries its content_type (and parent,
+    # when linked) so the import surfaces what was created and its family tie.
+    if created and mint_content_type is not None:
+        result["content_type"] = mint_content_type
+        if mint_parent_id is not None:
+            result["parent_game_id"] = mint_parent_id
+            result["parent_name"] = mint_parent_name
+    return result
 
 
 async def set_acquisitions_batch(
@@ -475,14 +570,19 @@ async def set_acquisitions_batch(
 
     Each item: {name or game_id, platform, + any of the 5 acquisition fields,
     optionally identifier_type + identifier_value (both or neither) for
-    identifier-first matching}.
+    identifier-first matching, optionally content_type (a primary or nested
+    vocabulary value, e.g. "dlc")}.
     Default (overwrite=False) fills only NULL columns so a re-import never
-    clobbers manual edits. With create_missing=True an item (name required)
-    that matches no existing game — identifier, edition-stripped name, and
-    fuzzy all miss — is created as an owned library game (status "created",
-    store identifier attached); otherwise it lands in unmatched. Missing
-    platform rows on an already-existing game land in no_platform_row unless
-    create_platform_rows=True.
+    clobbers manual edits. An item carrying a NESTED content_type (dlc/
+    expansion/edition/…) matches by identifier, game_id, or EXACT name only —
+    never the prefix/substring/token/fuzzy tiers — so a DLC's spend can't
+    collapse onto its base game. With create_missing=True an item (name
+    required) that matches no existing game is created as an owned library game
+    (status "created", store identifier attached); a nested content_type mints
+    it nested (is_primary_library_item=0) linked to an existing parent resolved
+    from the title when possible (created_details then carries content_type and
+    parent_game_id/parent_name). Missing platform rows on an already-existing
+    game land in no_platform_row unless create_platform_rows=True.
     """
     if not items:
         raise ToolError("items must not be empty")
@@ -517,6 +617,17 @@ async def set_acquisitions_batch(
                 "game_id": r["game_id"],
                 "name": r["matched_name"],
                 "platform": r["platform"],
+                # DLC-aware minting surfaces the minted content_type and, when a
+                # parent was linked, its id/name so an import shows the family tie.
+                **({"content_type": r["content_type"]} if r.get("content_type") else {}),
+                **(
+                    {
+                        "parent_game_id": r["parent_game_id"],
+                        "parent_name": r["parent_name"],
+                    }
+                    if r.get("parent_game_id")
+                    else {}
+                ),
             }
             for r in results
             if r["status"] == "created"
@@ -543,7 +654,8 @@ async def set_acquisitions_batch(
 
 _BUNDLE_GAME_CAP = 50
 _BUNDLE_GAME_KEYS = frozenset(
-    {"name", "game_id", "identifier_type", "identifier_value", "price_paid"}
+    {"name", "game_id", "identifier_type", "identifier_value", "price_paid",
+     "content_type"}
 )
 
 
@@ -627,9 +739,13 @@ async def split_bundle_acquisition(
     bundle_name so get_spending_stats still groups the purchase.
 
     Each games[i] is {name or game_id, optional price_paid, optionally
-    identifier_type + identifier_value together}. total_price is split evenly
-    (to the cent, sum-preserving) across games without an explicit price_paid;
-    games with an explicit price keep it and are excluded from the split.
+    identifier_type + identifier_value together, optional content_type}. A
+    constituent carrying a NESTED content_type (dlc/expansion/edition) matches
+    by exact name only and, under create_missing, mints nested (is_primary=0)
+    linked to a resolved parent — same DLC-aware guard as set_acquisitions_batch.
+    total_price is split evenly (to the cent, sum-preserving) across games
+    without an explicit price_paid; games with an explicit price keep it and are
+    excluded from the split.
 
     Games matched by identifier/id/name (edition-suffix stripping, no fuzzy —
     a near-miss is likelier a sequel than a typo) get an owned platform row
@@ -668,6 +784,7 @@ async def split_bundle_acquisition(
                 "identifier_type and identifier_value must be provided together"
             )
         _bundle_game_price(item)
+        _validate_content_type(item.get("content_type"))
 
     # A currency is needed the moment any price will be written; borrow the
     # shared validator via a representative amount.
@@ -769,6 +886,10 @@ async def _apply_bundle_game(
     if purchase_source is not None:
         fields["purchase_source"] = purchase_source
 
+    content_type = _validate_content_type(item.get("content_type"))
+    # A nested constituent (DLC/expansion/edition) restricts to exact name
+    # matches so its share can't collapse onto the base game row.
+    nested = content_type is not None and content_type in NESTED_CONTENT_TYPES
     name = item.get("name")
     row, match_type = await _match_batch_game(
         name,
@@ -778,9 +899,13 @@ async def _apply_bundle_game(
         # A bundle constituent is a precise, AI-supplied title; a fuzzy near-miss
         # is likelier a distinct sequel than a typo, so match exactly or create.
         fuzzy=False,
+        exact_only=nested,
     )
 
     created = False
+    mint_content_type: str | None = None
+    mint_parent_id: int | None = None
+    mint_parent_name: str | None = None
     if row is None:
         if not (create_missing and name):
             return {
@@ -792,17 +917,29 @@ async def _apply_bundle_game(
                 "recorded_price": None,
                 "item": item,
             }
+        create_name = str(name).strip()
+        mint_fields, mint_parent_id, mint_parent_name = await _addon_mint_fields(
+            create_name, content_type
+        )
+        if mint_fields:
+            mint_content_type = content_type
         if dry_run:
-            return {
+            created_result = {
                 "status": "created",
                 "game_id": None,
-                "matched_name": str(name).strip(),
+                "matched_name": create_name,
                 "match_type": "created",
                 "price_paid": price,
                 "recorded_price": price,  # fresh row: the proposed price persists
                 "acquisition": fields,
             }
-        game_id = await upsert_game(None, str(name).strip())
+            if mint_content_type is not None:
+                created_result["content_type"] = mint_content_type
+                if mint_parent_id is not None:
+                    created_result["parent_game_id"] = mint_parent_id
+                    created_result["parent_name"] = mint_parent_name
+            return created_result
+        game_id = await upsert_game(None, create_name, **mint_fields)
         async with get_db() as db:
             row = await db.execute_fetchone(
                 "SELECT id, name FROM games WHERE id = ?", (game_id,)
@@ -870,7 +1007,7 @@ async def _apply_bundle_game(
         newly_written = [col for col in fields if pre[col] is None]
         status = "created" if created else ("filled" if newly_written else "no_change")
 
-    return {
+    bundle_result = {
         "status": status,
         "game_id": resolved_id,
         "matched_name": row["name"],
@@ -881,6 +1018,12 @@ async def _apply_bundle_game(
         "recorded_price": acquisition["price_paid"],
         "acquisition": acquisition,
     }
+    if created and mint_content_type is not None:
+        bundle_result["content_type"] = mint_content_type
+        if mint_parent_id is not None:
+            bundle_result["parent_game_id"] = mint_parent_id
+            bundle_result["parent_name"] = mint_parent_name
+    return bundle_result
 
 
 # How many proposed items a dry_run echoes back per source before truncating.
@@ -922,6 +1065,10 @@ def _record_to_batch_item(record: PurchaseRecord, source: str) -> dict:
             item["price_currency"] = record.price_currency
     if record.bundle_name is not None:
         item["bundle_name"] = record.bundle_name
+    if record.content_type is not None:
+        # DLC-aware matching/minting downstream: a nested content_type restricts
+        # matching to exact and mints the row nested with a resolved parent.
+        item["content_type"] = record.content_type
     if record.store_identifier is not None and source in IDENTIFIER_TYPES:
         # Lets the batch writer match identifier-first, so a renamed or
         # localized library title still resolves to the right game.
@@ -981,14 +1128,33 @@ async def _import_one_source(
         would_create: list[dict] = []
         if create_missing:
             for item in items:
+                content_type = item.get("content_type")
+                nested = (
+                    content_type is not None and content_type in NESTED_CONTENT_TYPES
+                )
                 row, _ = await _match_batch_game(
                     item.get("name"),
                     item.get("game_id"),
                     item.get("identifier_type"),
                     item.get("identifier_value"),
+                    exact_only=nested,
                 )
                 if row is None and item.get("name"):
-                    would_create.append(item)
+                    # The item already carries content_type; enrich with the
+                    # parent a real mint would link so the preview is faithful.
+                    entry = dict(item)
+                    if nested:
+                        create_name = (
+                            normalize_purchase_title(str(item["name"])).strip()
+                            or str(item["name"]).strip()
+                        )
+                        _, pid, pname = await _addon_mint_fields(
+                            create_name, content_type
+                        )
+                        if pid is not None:
+                            entry["parent_game_id"] = pid
+                            entry["parent_name"] = pname
+                    would_create.append(entry)
         return {
             "source": source,
             "status": "ok",
@@ -1060,7 +1226,11 @@ async def import_purchases(
     A purchase is a definitive ownership signal, so create_missing defaults
     True: a single-game purchase that matches no existing game is created as an
     owned library game (reported under each source's created/created_details).
-    Set it False to route those to unmatched instead. Multi-game bundles are
+    A record whose content_type is nested (e.g. an eShop DLC purchase) matches
+    by exact name only and, when minted, is created nested (is_primary=0) linked
+    to a resolved parent — so a DLC never becomes a phantom base game nor
+    attaches its spend onto the base row. Set create_missing False to route
+    unmatched purchases to unmatched instead. Multi-game bundles are
     always diverted to each source's bundles_needing_split list (name, platform,
     total_price, date) rather than the single-game matcher — feed each to
     split_bundle_acquisition with its looked-up games.
@@ -1135,7 +1305,11 @@ async def get_spending_stats(
 
     Monetary aggregates group by currency and are never summed across
     currencies. Deliberately NOT filtered on is_primary_library_item —
-    money spent on DLC/editions is still money spent.
+    money spent on DLC/editions is still money spent. by_family rolls spend
+    up per content family (base game + its DLC/expansions, rooted at
+    COALESCE(parent_game_id, id)) — surfaced only for families with a real
+    nested contributor, top 10 per currency — as a content-grouped counterpart
+    to by_bundle's purchase grouping.
     """
     where = ["gp.owned = 1"]
     params: list = []
@@ -1226,6 +1400,55 @@ async def get_spending_stats(
             params,
         )
 
+        # by_family: content-grouped spend (base game + its DLC/expansions),
+        # rooted at COALESCE(parent_game_id, id). Only families with a real
+        # nested contributor (a priced row that is is_primary_library_item=0 AND
+        # parent_game_id IS NOT NULL) are surfaced. That HAVING clause also
+        # EXCLUDES orphan nested rows (parent_game_id NULL, is_primary=0): they
+        # root a singleton family whose only rows have a NULL parent, so the
+        # nested-contributor count is 0 — a lone addon with no base is noise the
+        # collapse detectors handle, not a family. base_spent is the root row's
+        # own spend (parent_game_id IS NULL), addon_spent the children's; the
+        # root's name is taken from a join so it shows even when unpriced.
+        # Playtime is the ROOT game's summed playtime across ALL its platforms
+        # (unfiltered — "across platforms"), so family_cost_per_hour is null
+        # when the base game has no playtime.
+        by_family_rows = await db.execute_fetchall(
+            f"""WITH fam AS (
+                    SELECT COALESCE(g.parent_game_id, g.id) AS family_root,
+                           gp.price_currency AS currency,
+                           gp.price_paid AS price_paid,
+                           g.id AS game_id,
+                           g.parent_game_id AS parent_game_id,
+                           g.is_primary_library_item AS is_primary
+                    {priced}
+                )
+                SELECT f.family_root AS family_game_id,
+                       gr.name AS family_name,
+                       f.currency AS currency,
+                       ROUND(SUM(CASE WHEN f.parent_game_id IS NULL
+                                      THEN f.price_paid ELSE 0 END), 2) AS base_spent,
+                       ROUND(SUM(CASE WHEN f.parent_game_id IS NOT NULL
+                                      THEN f.price_paid ELSE 0 END), 2) AS addon_spent,
+                       ROUND(SUM(f.price_paid), 2) AS total_spent,
+                       COUNT(DISTINCT CASE WHEN f.parent_game_id IS NOT NULL
+                                           THEN f.game_id END) AS addon_count,
+                       ROUND(pt.total_minutes / 60.0, 1) AS family_playtime_hours
+                FROM fam f
+                JOIN games gr ON gr.id = f.family_root
+                LEFT JOIN (
+                    SELECT game_id, SUM(playtime_minutes) AS total_minutes
+                    FROM game_platforms
+                    WHERE playtime_minutes IS NOT NULL
+                    GROUP BY game_id
+                ) pt ON pt.game_id = f.family_root
+                GROUP BY f.family_root, f.currency
+                HAVING SUM(CASE WHEN f.parent_game_id IS NOT NULL
+                                 AND f.is_primary = 0 THEN 1 ELSE 0 END) > 0
+                ORDER BY total_spent DESC""",
+            params,
+        )
+
         played_priced = f"{priced} AND gp.playtime_minutes > 0"
         cph_overall = await db.execute_fetchall(
             f"""SELECT gp.price_currency AS currency,
@@ -1278,6 +1501,31 @@ async def get_spending_stats(
             params,
         )
 
+    # Cap at the top 10 families per currency (rows arrive ordered by
+    # total_spent DESC across all currencies, so per-currency relative order is
+    # preserved) and derive cost-per-hour. A null/zero root playtime yields a
+    # null family_cost_per_hour (no division).
+    by_family: list[dict] = []
+    _family_seen: dict[str, int] = {}
+    for r in by_family_rows:
+        currency = r["currency"]
+        if _family_seen.get(currency, 0) >= 10:
+            continue
+        _family_seen[currency] = _family_seen.get(currency, 0) + 1
+        hours = r["family_playtime_hours"]
+        total = r["total_spent"]
+        by_family.append({
+            "family_game_id": r["family_game_id"],
+            "family_name": r["family_name"],
+            "currency": currency,
+            "base_spent": r["base_spent"],
+            "addon_spent": r["addon_spent"],
+            "total_spent": total,
+            "addon_count": r["addon_count"],
+            "family_playtime_hours": hours,
+            "family_cost_per_hour": round(total / hours, 2) if hours else None,
+        })
+
     owned_rows = summary["owned_rows"]
     priced_rows = summary["priced_rows"] or 0
     return {
@@ -1290,6 +1538,9 @@ async def get_spending_stats(
         "by_source": [dict(r) for r in by_source],
         "by_platform": [dict(r) for r in by_platform],
         "by_bundle": [dict(r) for r in by_bundle],
+        # Content-grouped spend (base game + its DLC/expansions), distinct from
+        # by_bundle's purchase grouping. Per currency, top 10 families by total.
+        "by_family": by_family,
         "top_expensive": [dict(r) for r in top_expensive],
         "cost_per_hour": {
             "overall": [

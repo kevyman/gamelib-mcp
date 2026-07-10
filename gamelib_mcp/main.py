@@ -1053,7 +1053,13 @@ async def set_acquisitions_batch(
     tried first and resolves exactly even when the item's name differs from
     the library title; a miss falls back to game_id/name matching, and when
     create_platform_rows=True creates the platform row the identifier is
-    attached to it. One bad item never fails the
+    attached to it. An item may also carry content_type (e.g. "dlc",
+    "expansion", "edition"): a NESTED content_type restricts name matching to
+    EXACT only — never prefix/substring/token/fuzzy — so a DLC's price can't
+    attach onto its base game, and when created (see below) the new row is minted
+    nested (is_primary_library_item=0) linked to an existing parent resolved from
+    the title when one is found (created_details then carries content_type and
+    parent_game_id/parent_name). One bad item never fails the
     call: every item gets a per-item result with a status — applied
     (overwrite=True wrote the fields), filled (default mode wrote at least one
     previously-NULL field), no_change (every requested field already had a
@@ -1112,8 +1118,12 @@ async def split_bundle_acquisition(
     bundle_name: the storefront bundle title (recorded on every constituent).
     platform: the platform the bundle was bought on (e.g. switch2, steam).
     games: list of {name or game_id, optional price_paid, optionally
-        identifier_type + identifier_value together (e.g. steam_appid)}. A game
-        with an explicit price_paid keeps it; the rest share total_price.
+        identifier_type + identifier_value together (e.g. steam_appid), optional
+        content_type}. A game with an explicit price_paid keeps it; the rest
+        share total_price. A constituent with a NESTED content_type (dlc/
+        expansion/edition) matches by exact name only and, under create_missing,
+        is minted nested (is_primary=0) linked to a resolved parent — the same
+        DLC-aware guard as set_acquisitions_batch.
     total_price: the bundle's total, split evenly (to the cent, sum-preserving)
         across the games that don't carry their own price_paid. Omit to record
         membership without prices (or price every game explicitly).
@@ -1183,11 +1193,16 @@ async def import_purchases(
     some platforms use to infer ownership — so create_missing defaults True: a
     single-game purchase that matches no library game (identifier, name, and
     fuzzy all miss) is created as an owned game, reported under each source's
-    created count / created_details (game_id, name, platform). Set
-    create_missing=False to route those to unmatched instead. Pass dry_run=True
-    to preview the converted items (capped at 200 per source, with a truncated
-    flag) plus a would_create list naming the new games — created rows have no
-    delete tool, so preview when in doubt — without writing anything.
+    created count / created_details (game_id, name, platform). A record whose
+    content_type is nested (e.g. an eShop DLC purchase) matches by exact name
+    only and, when minted, is created nested (is_primary_library_item=0) linked
+    to a resolved parent — so a DLC never becomes a phantom base game nor
+    attaches its spend onto the base row; created_details/would_create carry its
+    content_type and parent link. Set create_missing=False to route those to
+    unmatched instead. Pass dry_run=True to preview the converted items (capped
+    at 200 per source, with a truncated flag) plus a would_create list naming
+    the new games — created rows have no delete tool, so preview when in doubt —
+    without writing anything.
 
     sources defaults to all registered importers; currently:
     - "eshop": Nintendo eShop transactions (ec.nintendo.com) → switch2.
@@ -1252,7 +1267,13 @@ async def get_spending_stats(
     Returns owned_rows/priced_rows/coverage_pct (how much of the library has a
     recorded price), zero_cost_rows (price 0 — gifts/giveaways), totals per
     currency, breakdowns by_year / by_source / by_platform / by_bundle, the
-    top 10 most expensive purchases, and cost_per_hour analysis: overall $/h
+    top 10 most expensive purchases, and cost_per_hour analysis. Note by_bundle
+    groups by a purchase's bundle_name, while by_family is content-grouped:
+    per currency it rolls each base game together with its owned DLC/expansions
+    (rooted at COALESCE(parent_game_id, id)), reporting base_spent, addon_spent,
+    total_spent, addon_count, the base game's playtime and cost-per-hour — only
+    for families with a real nested addon, top 10 per currency. cost_per_hour:
+    overall $/h
     per currency, best_value (cheapest cost per hour — a 0-price game you
     played counts as 0.0), worst_value (most expensive per hour; free games
     excluded), unpriced_playtime_rows (played but no recorded price), and
