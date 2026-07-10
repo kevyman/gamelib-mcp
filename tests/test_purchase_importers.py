@@ -505,6 +505,29 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
         variables = json.loads(captured["request"].url.params["variables"])
         self.assertEqual(variables["idToken"], "tok-xyz")
 
+    async def test_account_session_scoped_off_savanna_and_reaches_authorize(self):
+        # The long-lived account cookies must reach the accounts.nintendo.com
+        # authorize hop but never the Savanna GraphQL host (nintendo.NET) — a
+        # domainless seed would leak them to every request in the shared jar.
+        sent: dict[str, str] = {}
+        base = self._accounts_sso_handler()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            sent[request.url.host] = request.headers.get("cookie", "")
+            return base(request)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            acc = self._write_accounts_cookies(tmp)
+            with patch.dict(os.environ, {
+                "NINTENDO_COOKIES_FILE": acc,
+                "NINTENDO_EC_COOKIES_FILE": "/nonexistent/ec.json",
+            }):
+                await nintendo_ec.fetch_eshop_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
+        self.assertIn("NASID", sent.get("accounts.nintendo.com", ""))
+        self.assertNotIn("NASID", sent.get("wb.lp1.savanna.srv.nintendo.net", ""))
+
     async def test_accounts_session_expired_raises_reexport(self):
         with tempfile.TemporaryDirectory() as tmp:
             acc = self._write_accounts_cookies(tmp)

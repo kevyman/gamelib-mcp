@@ -231,8 +231,12 @@ async def _establish_ec_session(
     login page (the central account session has expired) or otherwise fails to
     produce a session cookie.
     """
+    # Scope the account session to *.nintendo.com so it reaches the accounts and
+    # eShop OAuth hops (both first-party Nintendo .com) but never the Savanna
+    # GraphQL host (wb.lp1.savanna.srv.nintendo.NET) or any other host — a
+    # domainless cookie would otherwise be sent everywhere in the shared jar.
     for name, value in accounts_cookies.items():
-        client.cookies.set(name, value)
+        client.cookies.set(name, value, domain=".nintendo.com")
 
     headers = {"User-Agent": _USER_AGENT, "Referer": f"{_BASE_URL}/"}
 
