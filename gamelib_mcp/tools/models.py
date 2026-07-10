@@ -45,6 +45,10 @@ class GameSummary(FlexibleModel):
     wishlisted: bool | None = None
     play_state: str | None = None
     matched_alias: str | None = None
+    # Only populated for nested-content search hits (match_type="nested_content")
+    # and addon listings — the name of the parent game this DLC/expansion/
+    # edition belongs to.
+    parent_name: str | None = None
     tags: list[str] | None = None
     series: list[Any] | None = None
     suggested_platform: str | None = None
@@ -133,6 +137,10 @@ class LibraryStatsResponse(PaginatedGamesResponse):
     # Library-wide spending summary over owned rows (per-currency totals,
     # never cross-currency) — independent of the current filter parameters.
     spending: dict[str, Any]
+    # Always-present, additive summary of owned nested content (DLC/expansions/
+    # editions), independent of the `content` param: {count, spend:
+    # {currency: total_price_paid}, top_parents: [{game_id, name, addon_count}]}.
+    addons: dict[str, Any] | None = None
 
 
 class GameRating(FlexibleModel):

@@ -240,23 +240,25 @@ async def apply_content_classification(
     Returns True iff a write happened; ``source`` labels the log line only.
     """
     resolved_parent = parent_game_id
-    if resolved_parent is None:
-        if classification.parent_steam_appid is not None:
-            resolved_parent = await resolve_parent_game(
-                None,
-                steam_appid=classification.parent_steam_appid,
-                exclude_game_id=game_id,
-            )
-        elif classification.parent_igdb_id is not None:
-            from .queries import get_game_by_igdb_id
+    # Each parent id is tried in strength order, but a miss falls through to
+    # the next: a Steam fullgame appid the library doesn't know must not block
+    # resolving the same parent by name (e.g. base game owned on GOG).
+    if resolved_parent is None and classification.parent_steam_appid is not None:
+        resolved_parent = await resolve_parent_game(
+            None,
+            steam_appid=classification.parent_steam_appid,
+            exclude_game_id=game_id,
+        )
+    if resolved_parent is None and classification.parent_igdb_id is not None:
+        from .queries import get_game_by_igdb_id
 
-            parent = await get_game_by_igdb_id(classification.parent_igdb_id)
-            if parent is not None and parent["id"] != game_id:
-                resolved_parent = parent["id"]
-        elif classification.parent_name:
-            resolved_parent = await resolve_parent_game(
-                classification.parent_name, exclude_game_id=game_id, create=False
-            )
+        parent = await get_game_by_igdb_id(classification.parent_igdb_id)
+        if parent is not None and parent["id"] != game_id:
+            resolved_parent = parent["id"]
+    if resolved_parent is None and classification.parent_name:
+        resolved_parent = await resolve_parent_game(
+            classification.parent_name, exclude_game_id=game_id, create=False
+        )
 
     # Self-parent guard: a parent that is the row itself would orphan it (excluded
     # from search/rollups by the is_primary filter yet unreachable as any other

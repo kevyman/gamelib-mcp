@@ -137,6 +137,42 @@ class SearchGamesTests(ToolDBTestCase):
 
         self.assertEqual([game["name"] for game in results["results"]], ["Fallout: New Vegas"])
 
+    async def test_search_finds_nested_content_via_fallback(self):
+        parent_id = await seed_game("Fallout: New Vegas")
+        await add_platform(parent_id, "steam")
+        dlc_id = await seed_game(
+            "Fallout New Vegas: Dead Money",
+            content_type="dlc",
+            parent_game_id=parent_id,
+            is_primary_library_item=0,
+        )
+        await add_platform(dlc_id, "epic")
+
+        results = await library.search_games("dead money")
+
+        self.assertEqual(results["total_matches"], 1)
+        game = results["results"][0]
+        self.assertEqual(game["name"], "Fallout New Vegas: Dead Money")
+        self.assertEqual(game["match_type"], "nested_content")
+        self.assertEqual(game["parent_name"], "Fallout: New Vegas")
+
+    async def test_search_prefers_primary_match_over_nested_when_both_match(self):
+        parent_id = await seed_game("Civilization VI")
+        await add_platform(parent_id, "steam")
+        dlc_id = await seed_game(
+            "Civilization VI: Gathering Storm",
+            content_type="expansion",
+            parent_game_id=parent_id,
+            is_primary_library_item=0,
+        )
+        await add_platform(dlc_id, "steam")
+
+        results = await library.search_games("civilization vi")
+
+        self.assertEqual(results["total_matches"], 1)
+        self.assertEqual(results["results"][0]["name"], "Civilization VI")
+        self.assertNotIn("match_type", results["results"][0])
+
     async def test_concise_drops_platform_arrays(self):
         await make_steam_game("Portal 2", 620, playtime_minutes=600, tags=["puzzle"])
         results = await library.search_games("portal")
@@ -256,6 +292,25 @@ class SearchGamesBatchTests(ToolDBTestCase):
         self.assertEqual(results["portal"][0]["name"], "Portal")
         self.assertEqual(results["missing"], [])
 
+    async def test_batch_resolves_nested_content_via_fallback(self):
+        parent_id = await seed_game("Fallout: New Vegas")
+        await add_platform(parent_id, "steam")
+        dlc_id = await seed_game(
+            "Fallout New Vegas: Dead Money",
+            content_type="dlc",
+            parent_game_id=parent_id,
+            is_primary_library_item=0,
+        )
+        await add_platform(dlc_id, "epic")
+
+        results = await library.search_games_batch(["dead money"])
+
+        self.assertEqual(len(results["dead money"]), 1)
+        game = results["dead money"][0]
+        self.assertEqual(game["name"], "Fallout New Vegas: Dead Money")
+        self.assertEqual(game["match_type"], "nested_content")
+        self.assertEqual(game["parent_name"], "Fallout: New Vegas")
+
 
 class LibraryStatsTests(ToolDBTestCase):
     async def test_summary_counts_and_echoes(self):
@@ -276,6 +331,7 @@ class LibraryStatsTests(ToolDBTestCase):
                 "filter",
                 "sort_by",
                 "spending",
+                "addons",
                 "results",
                 "total_matches",
                 "has_more",
@@ -402,6 +458,13 @@ class LibraryStatsTests(ToolDBTestCase):
             {"totals": [], "owned_rows": 0, "priced_rows": 0, "coverage_pct": 0.0},
         )
 
+    async def test_addons_block_empty_library(self):
+        stats = await library.get_library_stats()
+        self.assertEqual(
+            stats["addons"],
+            {"count": 0, "spend": {}, "top_parents": []},
+        )
+
     async def test_spending_block_totals_and_coverage(self):
         priced_usd = await make_steam_game("Priced USD", 1, playtime_minutes=0)
         another_usd = await make_steam_game("Another USD", 2, playtime_minutes=100)
@@ -460,6 +523,81 @@ class LibraryStatsTests(ToolDBTestCase):
             stats["spending"]["totals"],
             [{"currency": "USD", "total_spent": 12.5, "priced_rows": 1}],
         )
+
+
+class LibraryStatsContentTests(ToolDBTestCase):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.parent_id = await seed_game("Sid Meier's Civilization VI")
+        await add_platform(self.parent_id, "steam")
+        self.dlc_id = await seed_game(
+            "Civilization VI: Gathering Storm",
+            content_type="expansion",
+            parent_game_id=self.parent_id,
+            is_primary_library_item=0,
+        )
+        dlc_gpid = await add_platform(self.dlc_id, "steam")
+        await db_module.set_platform_acquisition(
+            dlc_gpid, {"price_paid": 25.0, "price_currency": "USD"}
+        )
+        # Unowned nested row: no game_platforms row at all, so it must not
+        # count toward the addons block or content="addons"/"all" listings.
+        await seed_game(
+            "Civilization VI: Rise and Fall",
+            content_type="expansion",
+            parent_game_id=self.parent_id,
+            is_primary_library_item=0,
+        )
+
+    async def test_default_content_excludes_addons_but_reports_addons_block(self):
+        stats = await library.get_library_stats()
+
+        self.assertEqual(stats["total_games"], 1)
+        self.assertEqual(
+            [g["name"] for g in stats["results"]], ["Sid Meier's Civilization VI"]
+        )
+        self.assertEqual(stats["addons"]["count"], 1)
+        self.assertEqual(stats["addons"]["spend"], {"USD": 25.0})
+        self.assertEqual(
+            stats["addons"]["top_parents"],
+            [
+                {
+                    "game_id": self.parent_id,
+                    "name": "Sid Meier's Civilization VI",
+                    "addon_count": 1,
+                }
+            ],
+        )
+
+    async def test_content_addons_lists_only_owned_nested_rows(self):
+        stats = await library.get_library_stats(content="addons")
+
+        self.assertEqual(stats["total_games"], 1)
+        self.assertEqual(
+            [g["name"] for g in stats["results"]], ["Civilization VI: Gathering Storm"]
+        )
+
+    async def test_content_all_lists_both_primary_and_owned_nested(self):
+        stats = await library.get_library_stats(content="all")
+
+        self.assertEqual(stats["total_games"], 2)
+        self.assertEqual(
+            {g["name"] for g in stats["results"]},
+            {"Sid Meier's Civilization VI", "Civilization VI: Gathering Storm"},
+        )
+
+    async def test_invalid_content_raises(self):
+        with self.assertRaisesRegex(ToolError, "Unknown content 'bogus'"):
+            await library.get_library_stats(content="bogus")
+
+    async def test_addons_block_is_library_wide_and_ignores_filter_params(self):
+        # The addons block is computed independently of filter/tags/genres
+        # (same pattern as `spending`) — an unrelated genre filter that
+        # zeroes out `results` must not affect it.
+        stats = await library.get_library_stats(genres=["nonexistent-genre"])
+        self.assertEqual(stats["results"], [])
+        self.assertEqual(stats["addons"]["count"], 1)
+        self.assertEqual(stats["addons"]["spend"], {"USD": 25.0})
 
 
 class WishlistOnlyOwnershipFlagTests(ToolDBTestCase):

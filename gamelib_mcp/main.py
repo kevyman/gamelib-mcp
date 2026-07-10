@@ -125,9 +125,13 @@ async def search_games(
 
     Matching is punctuation-insensitive and token-based ("sekiro shadow" finds
     "Sekiro: Shadows Die Twice"), ranked by relevance, with a fuzzy fallback
-    for misspellings (those results carry match_type="fuzzy"). Prefer
-    get_game_detail after selecting one result. platform can filter to steam,
-    epic, gog, nintendo, switch2, or ps5. series restricts to a single
+    for misspellings (those results carry match_type="fuzzy"). When nothing at
+    all matches among real games, a final fallback searches DLC/expansions/
+    editions (match_type="nested_content", with a parent_name naming the base
+    game, e.g. "Phantom Liberty — expansion of Cyberpunk 2077") — this only
+    fires when the query itself matches nothing, not for filters-only browsing.
+    Prefer get_game_detail after selecting one result. platform can filter to
+    steam, epic, gog, nintendo, switch2, or ps5. series restricts to a single
     game series (IGDB collection/franchise) by exact, case-insensitive name —
     pass an empty query to browse a whole series, e.g.
     search_games("", series="The Legend of Zelda"). Each result carries its
@@ -144,8 +148,11 @@ async def search_games_batch(queries: list[str], limit_per_query: int = 5) -> Se
     Look up multiple game names in one read-only call.
 
     Use this instead of repeatedly calling search_games when comparing or resolving
-    several titles. limit_per_query caps matches per query. Returns a dictionary
-    keyed by the original query, with matching game summary lists as values.
+    several titles. limit_per_query caps matches per query. Shares search_games's
+    fuzzy and nested-content (DLC/expansion/edition, match_type="nested_content")
+    fallbacks per name when the tiered name match finds nothing. Returns a
+    dictionary keyed by the original query, with matching game summary lists as
+    values.
     """
     from .tools.library import search_games_batch as _batch
     return await _batch(queries, limit_per_query)
@@ -166,6 +173,7 @@ async def get_library_stats(
     tags: list[str] | None = None,
     genres: list[str] | None = None,
     series: list[str] | None = None,
+    content: str = "games",
 ) -> LibraryStatsResponse:
     """
     Get aggregate library stats plus a filtered and sorted game list.
@@ -181,11 +189,16 @@ async def get_library_stats(
     genres=["RPG"] with max_hltb_hours=10 for short RPGs; series=["Final
     Fantasy"] for one IGDB collection/franchise). protondb_tier
     accepts native, platinum, gold, silver, bronze, or borked. platform can
-    filter to steam, epic, gog, nintendo, switch2, or ps5.
-    response_format=concise omits platform arrays. Returns aggregate counts,
-    paged results, total_matches, and has_more, plus a library-wide spending
-    summary (per-currency totals over owned rows with a recorded price and
-    price coverage — see set_acquisition / get_spending_stats).
+    filter to steam, epic, gog, nintendo, switch2, or ps5. content accepts
+    games (default: real games only, today's behavior), addons (DLC/
+    expansions/editions only), or all (both) — it only changes which rows are
+    listed and aggregated. response_format=concise omits platform arrays.
+    Returns aggregate counts, paged results, total_matches, and has_more, plus
+    a library-wide spending summary (per-currency totals over owned rows with
+    a recorded price and price coverage — see set_acquisition /
+    get_spending_stats) and an always-present addons block summarizing owned
+    DLC/expansions/editions library-wide (count, per-currency spend, and up to
+    5 top_parents by owned addon count), independent of the content param.
     """
     from .tools.library import get_library_stats as _stats
     return await _stats(
@@ -202,6 +215,7 @@ async def get_library_stats(
         tags,
         genres,
         series,
+        content,
     )
 
 

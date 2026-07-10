@@ -142,6 +142,12 @@ class NintendoEcParserTests(unittest.TestCase):
             [r.is_bundle for r in records], [False, True, False, False]
         )
 
+        # Only itemType DLC carries a content_type hint; APPLICATION/BUNDLE
+        # rows leave it unset (base games and bundles aren't DLC).
+        self.assertEqual(
+            [r.content_type for r in records], [None, None, "dlc", None]
+        )
+
         reasons = [s["reason"] for s in skipped]
         titles = [s["title"] for s in skipped]
         self.assertEqual(len(skipped), 3)
@@ -182,6 +188,50 @@ class NintendoEcParserTests(unittest.TestCase):
         self.assertEqual(skipped, [])
         self.assertIsNone(records[0].price_paid)
         self.assertIsNone(records[0].price_currency)
+
+    def test_content_type_hint_only_for_dlc(self):
+        # itemType is compared case-insensitively; content_type should only be
+        # set for DLC, never for APPLICATION or BUNDLE rows.
+        records, skipped = nintendo_ec.parse_transactions([
+            {
+                "__typename": "TransactionHistory",
+                "transactionType": "PURCHASE",
+                "itemType": "APPLICATION",
+                "title": "Some Game",
+                "datetime": "2024-01-01T00:00:00+00:00",
+                "amount": {"formattedValue": "€ 19,99"},
+            },
+            {
+                "__typename": "TransactionHistory",
+                "transactionType": "PURCHASE",
+                "itemType": "BUNDLE",
+                "title": "Some Bundle",
+                "datetime": "2024-01-02T00:00:00+00:00",
+                "amount": {"formattedValue": "€ 29,99"},
+            },
+            {
+                "__typename": "TransactionHistory",
+                "transactionType": "PURCHASE",
+                "itemType": "DLC",
+                "title": "Some DLC",
+                "datetime": "2024-01-03T00:00:00+00:00",
+                "amount": {"formattedValue": "€ 4,99"},
+            },
+            {
+                "__typename": "TransactionHistory",
+                "transactionType": "PURCHASE",
+                "itemType": "dlc",
+                "title": "Some Lowercase DLC",
+                "datetime": "2024-01-04T00:00:00+00:00",
+                "amount": {"formattedValue": "€ 2,99"},
+            },
+        ])
+        self.assertEqual(skipped, [])
+        by_title = {r.title: r.content_type for r in records}
+        self.assertEqual(by_title["Some Game"], None)
+        self.assertEqual(by_title["Some Bundle"], None)
+        self.assertEqual(by_title["Some DLC"], "dlc")
+        self.assertEqual(by_title["Some Lowercase DLC"], "dlc")
 
     def test_non_importable_item_type_is_skipped(self):
         records, skipped = nintendo_ec.parse_transactions(

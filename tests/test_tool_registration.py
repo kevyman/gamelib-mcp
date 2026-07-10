@@ -31,6 +31,7 @@ EXPECTED_TOOLS = {
             "tags",
             "genres",
             "series",
+            "content",
         },
         "required": set(),
     },
