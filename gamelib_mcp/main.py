@@ -772,7 +772,12 @@ async def get_platform_breakdown() -> PlatformBreakdownResponse:
 
     Use this to compare platform coverage or find duplicate ownership. Returns
     per-platform game counts, total unique games, and games owned on multiple
-    platforms.
+    platforms. Counts are games only (primary library items) — owned DLC/
+    expansions/editions no longer inflate them; each platform entry also
+    carries owned_addons, and total_unique_addons totals it library-wide, so
+    addon ownership stays visible without corrupting the "how many games"
+    numbers. The overlap list is likewise primary-only (overlapping addons
+    are noise, not duplicate ownership).
     """
     from .tools.platforms import get_platform_breakdown as _breakdown
     return await _breakdown()
@@ -786,6 +791,8 @@ async def get_wishlist(platform: str | None = None) -> GetWishlistResponse:
     platform: optional filter (e.g. "steam", "switch2", "ps5"); omit for all.
     Populated by sync_wishlist (Steam, DekuDeals→switch2) or by
     add_game_to_platform(owned=False) for manual entries (e.g. PSN).
+    content_type labels each item (base_game normally; dlc/expansion/edition/…
+    when the wishlisted item is itself nested content rather than a base game).
     """
     from .tools.platforms import get_wishlist as _get_wishlist
     return await _get_wishlist(platform)
@@ -933,6 +940,8 @@ async def update_game(
     is_farmed: bool | None = None,
     completion_status: str | None = None,
     content_type: str | None = None,
+    parent_game_id: int | None = None,
+    parent_name: str | None = None,
     clear_overrides: list[str] | None = None,
 ) -> UpdateGameResponse:
     """
@@ -953,7 +962,17 @@ async def update_game(
     DLC/bundle/edition classification (e.g. a "X + Y" compilation misfiled as a
     bundle); it re-derives is_primary_library_item — which controls whether the
     game shows up in stats/series/discover — and detaches any wrong parent when
-    promoting to a primary type. Editing tags recomputes the taste
+    promoting to a primary type.
+
+    parent_game_id/parent_name (mutually exclusive) attach this game under a
+    base game — the repair workflow: detect_misclassified_dlc suggests the
+    args, update_game applies them. The target must be an existing PRIMARY
+    library item (not another nested row) and can't be the game itself;
+    linking only succeeds once the row is (or is being) classified with a
+    nested content_type — pass one alongside if it isn't already. Pass
+    parent_game_id=0 to detach the parent without changing content_type.
+    Setting a parent together with a primary content_type in the same call is
+    rejected as contradictory. Editing tags recomputes the taste
     profile. Returns the updated fields, any cleared columns, and the full
     manual-override list.
     """
@@ -974,6 +993,8 @@ async def update_game(
         is_farmed,
         completion_status,
         content_type,
+        parent_game_id,
+        parent_name,
         clear_overrides,
     )
 

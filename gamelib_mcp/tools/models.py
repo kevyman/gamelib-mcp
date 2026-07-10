@@ -252,8 +252,13 @@ class DetectStrandedDuplicatesResponse(FlexibleModel):
 
 
 class PlatformBreakdownResponse(FlexibleModel):
+    # Each by_platform entry: {platform, owned_games (primary items only),
+    # owned_addons (owned DLC/expansions/editions on that platform)}.
     by_platform: list[dict[str, Any]]
     total_unique_games: int
+    # Owned nested-content rows (DLC/expansions/editions/bundles), counted
+    # separately from total_unique_games so addon ownership doesn't inflate it.
+    total_unique_addons: int
     overlap_count: int
     overlap_games: list[dict[str, Any]]
 
@@ -305,6 +310,9 @@ class WishlistItem(FlexibleModel):
     wishlisted_at: str | None = None
     source: str | None = None
     owned: bool
+    # base_game (the common case) or a nested type (dlc/expansion/edition/…)
+    # when the wishlisted item is itself DLC/an edition rather than a base game.
+    content_type: str | None = None
 
 
 class GetWishlistResponse(FlexibleModel):

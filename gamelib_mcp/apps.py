@@ -175,6 +175,30 @@ GAME_CARDS_HTML = r"""<!doctype html>
   .pill:nth-child(4n) { background: var(--p4); transform: rotate(1.4deg); }
   .pill.match { background: var(--good); color: var(--card); border-color: var(--ink); }
 
+  /* Nested-content chip (DLC/expansion/bundle/edition/add-on) — a quiet
+     identity tag, not a rating, so it stays out of the .pill/.mini rotation
+     and always renders the same color. */
+  .type-chip {
+    align-self: flex-start;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.02em;
+    padding: 2px 7px;
+    border-radius: 999px;
+    border: 1.5px solid var(--ink);
+    background: var(--p1);
+    color: var(--ink);
+  }
+  /* Subtle "part of <base game>" line under the title on nested rows. */
+  .parent-sub {
+    font-size: 11px;
+    font-weight: 650;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   /* ---- grid mode ---- */
   .grid {
     display: grid;
@@ -326,6 +350,9 @@ GAME_CARDS_HTML = r"""<!doctype html>
   .badges .badge.steam-mixed { background: var(--steam-mixed); }
   .badges .badge.steam-neg { background: var(--steam-neg); }
   .badges .badge.steam-none { background: var(--card); color: var(--muted); }
+  /* Nested-content badge — always the same quiet color, regardless of
+     position among the other (position-cycled) badges. */
+  .badges .badge.content-badge { background: var(--p1); }
   .meter {
     width: 44px;
     height: 8px;
@@ -601,6 +628,27 @@ GAME_CARDS_HTML = r"""<!doctype html>
     }).filter(Boolean);
   }
 
+  /* Nested content types (data/content.py::NESTED_CONTENT_TYPES) get a human
+     badge; primary types (base_game, standalone_expansion, remake, remaster,
+     expanded_game, port) are absent from this map and render no badge. */
+  var CONTENT_TYPE_LABELS = {
+    dlc: "DLC",
+    expansion: "Expansion",
+    bundle: "Bundle",
+    edition: "Edition",
+    unknown_addon: "Add-on",
+  };
+  function contentTypeLabel(game) {
+    return CONTENT_TYPE_LABELS[game.content_type] || null;
+  }
+  /* Grid/search rows carry a flat parent_name; get_game_detail carries a
+     parent: {game_id, name} back-pointer on nested rows. Support both. */
+  function parentName(game) {
+    if (game.parent && game.parent.name) return game.parent.name;
+    if (game.parent_name) return game.parent_name;
+    return null;
+  }
+
   /* ---- click-to-expand: grid card -> live detail overlay ---- */
   var overlayState = null; // { node, trigger, keydown }
 
@@ -701,7 +749,11 @@ GAME_CARDS_HTML = r"""<!doctype html>
     card.appendChild(cover);
 
     var body = el("div", "card-body");
+    var typeLabel = contentTypeLabel(game);
+    if (typeLabel) body.appendChild(el("span", "type-chip", typeLabel));
     body.appendChild(el("div", "title", game.name));
+    var pName = parentName(game);
+    if (pName) body.appendChild(el("div", "parent-sub", "⤷ " + pName));
 
     var meta = el("div", "meta");
     var hltb = hoursLabel(game.hltb_main);
@@ -787,6 +839,8 @@ GAME_CARDS_HTML = r"""<!doctype html>
 
     var info = el("div", "detail-info");
     info.appendChild(el("h1", null, game.name));
+    var pName = parentName(game);
+    if (pName) info.appendChild(el("div", "sub parent-sub", "part of " + pName));
 
     var subBits = [];
     if (game.release_date) subBits.push(String(game.release_date).slice(0, 4));
@@ -801,6 +855,8 @@ GAME_CARDS_HTML = r"""<!doctype html>
     // its source page via the host when a URL is known or derivable.
     var appid = game.steam_appid != null ? game.steam_appid : game.appid;
     var badges = el("div", "badges");
+    var typeLabel = contentTypeLabel(game);
+    if (typeLabel) badges.appendChild(el("span", "badge content-badge", typeLabel));
     if (realScore(game.metacritic_score))
       badge(badges, "Metacritic", game.metacritic_score,
             "mc " + mcTier(game.metacritic_score), game.metacritic_url);

@@ -140,6 +140,8 @@ EXPECTED_TOOLS = {
             "is_farmed",
             "completion_status",
             "content_type",
+            "parent_game_id",
+            "parent_name",
             "clear_overrides",
         },
         "required": set(),

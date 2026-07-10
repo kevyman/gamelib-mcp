@@ -1,5 +1,6 @@
 """Tests for the MCP Apps game-cards widget and cover-art plumbing."""
 
+import hashlib
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -101,6 +102,76 @@ class GameCardsResourceTests(unittest.IsolatedAsyncioTestCase):
             domains,
             ["https://images.igdb.com", "https://cdn.cloudflare.steamstatic.com"],
         )
+
+
+class ContentTypeBadgeTests(unittest.TestCase):
+    """The DLC/expansion/edition badge + "part of <base game>" subtitle.
+
+    apps.py has no headless-DOM test harness (see GameCardsResourceTests
+    above), so these follow the same source-presence style: they assert the
+    label map and render call-sites exist with the right shape rather than
+    executing the JS.
+    """
+
+    def test_nested_content_types_have_human_labels(self) -> None:
+        # Nested types (data/content.py::NESTED_CONTENT_TYPES) each map to a
+        # short human label used for both the grid chip and the detail badge.
+        for key, label in (
+            ("dlc", "DLC"),
+            ("expansion", "Expansion"),
+            ("bundle", "Bundle"),
+            ("edition", "Edition"),
+            ("unknown_addon", "Add-on"),
+        ):
+            self.assertIn(f'{key}: "{label}"', apps.GAME_CARDS_HTML)
+
+    def test_primary_content_types_are_not_in_the_label_map(self) -> None:
+        # Primary types (data/content.py::PRIMARY_CONTENT_TYPES) must render
+        # no badge at all — contentTypeLabel() falls back to null for any key
+        # not in CONTENT_TYPE_LABELS, so the map must never mention them.
+        start = apps.GAME_CARDS_HTML.index("var CONTENT_TYPE_LABELS")
+        end = apps.GAME_CARDS_HTML.index("};", start)
+        label_map_src = apps.GAME_CARDS_HTML[start:end]
+        for primary_type in (
+            "base_game",
+            "standalone_expansion",
+            "remake",
+            "remaster",
+            "expanded_game",
+            "port",
+        ):
+            self.assertNotIn(primary_type, label_map_src)
+
+    def test_grid_card_renders_type_chip_and_parent_subtitle(self) -> None:
+        self.assertIn('el("span", "type-chip", typeLabel)', apps.GAME_CARDS_HTML)
+        self.assertIn('el("div", "parent-sub", "⤷ " + pName)', apps.GAME_CARDS_HTML)
+
+    def test_detail_card_renders_content_badge_and_parent_subtitle(self) -> None:
+        self.assertIn(
+            'el("span", "badge content-badge", typeLabel)', apps.GAME_CARDS_HTML
+        )
+        self.assertIn('el("div", "sub parent-sub", "part of " + pName)', apps.GAME_CARDS_HTML)
+
+    def test_parent_name_supports_both_grid_and_detail_shapes(self) -> None:
+        # Grid/search rows carry a flat parent_name; get_game_detail carries
+        # parent: {game_id, name} on nested rows. parentName() must read both.
+        self.assertIn("game.parent && game.parent.name", apps.GAME_CARDS_HTML)
+        self.assertIn("game.parent_name", apps.GAME_CARDS_HTML)
+
+    def test_badge_and_subtitle_text_use_textcontent_not_innerhtml(self) -> None:
+        # The widget's only escaping mechanism is el()'s use of textContent
+        # (never innerHTML with payload data) — verify the new badge/subtitle
+        # strings go through that same helper rather than string concatenation
+        # into markup.
+        self.assertNotIn("innerHTML", apps.GAME_CARDS_HTML)
+
+    def test_uri_is_content_hashed_and_reflects_current_html(self) -> None:
+        expected = (
+            "ui://gamelib/game-cards-"
+            + hashlib.sha1(apps.GAME_CARDS_HTML.encode()).hexdigest()[:8]
+            + ".html"
+        )
+        self.assertEqual(apps.GAME_CARDS_URI, expected)
 
 
 if __name__ == "__main__":
