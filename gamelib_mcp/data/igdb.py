@@ -20,9 +20,11 @@ import httpx
 from .db import (
     _claim_cutoff_iso,
     claim_game_ids_for_igdb,
+    get_meta,
     load_games_for_igdb_backfill,
     load_platforms_for_games,
     release_game_claim,
+    set_meta,
     upsert_game_platform_enrichment,
 )
 from .content import (
@@ -1720,3 +1722,107 @@ async def fetch_igdb_game_names(igdb_ids: list[int]) -> dict[int, str]:
             if row.get("id") is not None and row.get("name"):
                 names[row["id"]] = row["name"]
     return names
+
+
+# On-demand DLC/expansion children catalog, used as a fallback dlc_ownership
+# source (tools/detail.py) for primary games that have no Steam DLC catalog
+# (e.g. Switch-only titles). Deliberately NOT folded into _FETCH_BY_ID_FIELDS /
+# _build_search_game_query: those feed every enrichment/backfill pass, and
+# dlcs/expansions are only ever needed lazily, at detail-view time.
+_IGDB_CHILDREN_FIELDS = "fields dlcs.id, dlcs.name, expansions.id, expansions.name;"
+
+_IGDB_CHILDREN_CACHE_TTL_DAYS = 7
+
+
+async def fetch_igdb_children(igdb_id: int) -> list[dict] | None:
+    """Fetch an IGDB game's DLC + expansion children (one request).
+
+    Returns a combined list of ``{"igdb_id", "name", "kind"}`` entries
+    (``kind`` is ``"dlc"`` or ``"expansion"``), empty when the game genuinely
+    has neither. Returns ``None`` on any operational failure (missing
+    credentials, request error) — a sentinel distinct from a confirmed-empty
+    catalog, so ``get_igdb_children_cached`` can serve a stale cache instead
+    of mistaking an IGDB outage for "this game has no DLC".
+    """
+    client_id = os.environ.get("TWITCH_CLIENT_ID")
+    if not client_id or not igdb_credentials_configured():
+        return None
+
+    query = f"{_IGDB_CHILDREN_FIELDS} where id = {igdb_id}; limit 1;"
+
+    try:
+        token = await _get_token()
+        headers = _igdb_headers(client_id, token)
+        results = await _post_igdb_games(query, headers)
+    except Exception as exc:
+        logger.warning("IGDB children fetch failed for igdb_id=%s: %s", igdb_id, exc)
+        return None
+
+    if not results:
+        return []
+
+    item = results[0]
+    children: list[dict] = []
+    for dlc in item.get("dlcs") or []:
+        if dlc.get("id") is not None and dlc.get("name"):
+            children.append({"igdb_id": dlc["id"], "name": dlc["name"], "kind": "dlc"})
+    for expansion in item.get("expansions") or []:
+        if expansion.get("id") is not None and expansion.get("name"):
+            children.append(
+                {"igdb_id": expansion["id"], "name": expansion["name"], "kind": "expansion"}
+            )
+    return children
+
+
+def _igdb_children_cache_key(igdb_id: int) -> str:
+    return f"igdb_children:{igdb_id}"
+
+
+def _parse_igdb_children_cache(raw: str | None) -> tuple[datetime, list[dict]] | None:
+    """Parse a cached meta value, treating any malformed entry as absent."""
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+        fetched_at = datetime.fromisoformat(data["fetched_at"])
+        children = data["children"]
+        if not isinstance(children, list):
+            return None
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+    return fetched_at, children
+
+
+async def get_igdb_children_cached(igdb_id: int) -> list[dict] | None:
+    """``fetch_igdb_children`` with a meta-KV cache (7-day TTL, stale-on-failure).
+
+    Mirrors ``data/series_gaps.py``'s series-member caching. A cache hit
+    within TTL returns without a network call. On fetch failure (
+    ``fetch_igdb_children`` returning ``None``) with a stale cache present,
+    serves the stale copy (logged); with no cache at all, returns ``None`` so
+    the caller can simply omit ``dlc_ownership`` rather than surface an
+    error. A game with NO children caches an empty list — itself a valid,
+    cache-worthy answer that avoids refetching on every detail view.
+    """
+    key = _igdb_children_cache_key(igdb_id)
+    cached = _parse_igdb_children_cache(await get_meta(key))
+
+    if cached is not None:
+        fetched_at, children = cached
+        age = datetime.now(timezone.utc) - fetched_at
+        if age < timedelta(days=_IGDB_CHILDREN_CACHE_TTL_DAYS):
+            return children
+
+    fetched = await fetch_igdb_children(igdb_id)
+    if fetched is None:
+        if cached is not None:
+            logger.warning(
+                "IGDB children fetch failed for igdb_id=%s; serving stale cache",
+                igdb_id,
+            )
+            return cached[1]
+        return None
+
+    now = datetime.now(timezone.utc).isoformat()
+    await set_meta(key, json.dumps({"fetched_at": now, "children": fetched}))
+    return fetched

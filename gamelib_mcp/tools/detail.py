@@ -16,6 +16,7 @@ from ..data.db import (
     load_series_for_games,
 )
 from ..data.hltb import get_hltb
+from ..data.igdb import get_igdb_children_cached
 from ..data.protondb import get_protondb
 from ..data.steam_store import enrich_game
 from ..utils import _parse_json
@@ -148,7 +149,36 @@ async def get_game_detail(
                     for child in group
                     if child.get("owned")
                 )
-                dlc_ownership = {"owned": owned_children, "known": len(catalog_appids)}
+                dlc_ownership = {
+                    "owned": owned_children,
+                    "known": len(catalog_appids),
+                    "source": "steam",
+                }
+
+    # Fallback catalog source for primary games without a Steam DLC catalog
+    # (e.g. Switch-only titles): IGDB's dlcs/expansions child arrays, lazily
+    # fetched at most once per 7 days per game via a meta-KV cache
+    # (get_igdb_children_cached, data/igdb.py). A fetch failure there returns
+    # None/serves stale and never raises, so a slow or down IGDB can only
+    # ever leave this key absent, never break the response.
+    if (
+        dlc_ownership is None
+        and bool(row["is_primary_library_item"])
+        and row["igdb_id"] is not None
+    ):
+        children = await get_igdb_children_cached(row["igdb_id"])
+        if children:
+            owned_children = sum(
+                1
+                for group in related_content.values()
+                for child in group
+                if child.get("owned")
+            )
+            dlc_ownership = {
+                "owned": owned_children,
+                "known": len(children),
+                "source": "igdb",
+            }
 
     # Best-of-platforms critic scores, hoisted so clients don't have to dig
     # through the platforms array (mirrors the MAX() rollup in list tools).

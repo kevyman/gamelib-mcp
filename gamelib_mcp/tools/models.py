@@ -476,6 +476,18 @@ class DetectCrossPlatformCollapsesResponse(FlexibleModel):
     igdb_configured: bool
 
 
+class DetectMisclassifiedDlcResponse(FlexibleModel):
+    # Each candidate: {game_id, name, reason (bucket), evidence, suggested_update
+    # (ready-to-apply update_game kwargs, or null)}. counts maps each bucket to
+    # its candidate count; probed/probe_remaining track the live Steam probe;
+    # skipped lists appids whose live fetch errored.
+    candidates: list[dict[str, Any]]
+    counts: dict[str, int]
+    probed: int
+    probe_remaining: int
+    skipped: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class RevalidateIgdbMatchesResponse(FlexibleModel):
     dry_run: bool
     igdb_configured: bool

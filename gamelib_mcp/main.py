@@ -32,6 +32,7 @@ from .tools.models import (
     DetectCollapsedGamesResponse,
     DetectCrossPlatformCollapsesResponse,
     DetectFarmedGamesResponse,
+    DetectMisclassifiedDlcResponse,
     DetectOrphanGamesResponse,
     DetectStrandedDuplicatesResponse,
     DiagnoseScrapeResponse,
@@ -715,6 +716,44 @@ async def detect_cross_platform_collapses(limit: int = 0) -> DetectCrossPlatform
     """
     from .tools.admin import detect_cross_platform_collapses as _detect_xplat
     return await _detect_xplat(limit)
+
+
+@mcp.tool(annotations=DIAGNOSTIC_NETWORK_TOOL)
+async def detect_misclassified_dlc(
+    limit: int = 25, probe_steam: bool = True
+) -> DetectMisclassifiedDlcResponse:
+    """
+    Find primary library rows that are really nested content (DLC/soundtrack/etc).
+
+    Read-only detector that powers a human-confirmed repair loop: never writes,
+    never mints parents. Each candidate carries a suggested_update that is a
+    ready-to-apply set of update_game arguments (game_id + content_type and/or
+    parent) — apply one to reclassify the row and record the manual override.
+
+    Offline buckets (a row lands in its FIRST matching bucket only — order:
+    needs_parent, purchase_minted_suspect, addon_name_pattern):
+    - needs_parent: a nested row (is_primary_library_item=0) with no parent link.
+      Suggests parent_game_id when a split-title candidate resolves to an existing
+      primary game; suggested_update is null when no parent can be guessed.
+    - purchase_minted_suspect: a primary base_game with no store identifiers, a
+      purchase_source on an owned platform, no igdb_id, and either an addon-ish
+      name or a resolvable parent — the phantom shape a purchase import mints.
+    - addon_name_pattern: a primary base_game whose NAME reads like addon content
+      (season pass, soundtrack, "DLC", upgrade/costume pack, artbook, …). Rows
+      whose content_type is a manual override are skipped. Suggests content_type
+      dlc (or unknown_addon for soundtrack/artbook), plus parent_name if resolved.
+
+    Live probe (probe_steam=True, default): walks owned-Steam base_game rows
+    oldest-cached first, capped at limit appdetails fetches, and flags rows Steam
+    itself calls dlc/music/demo (steam_type_mismatch). probed = fetches done this
+    call; probe_remaining = matching rows beyond the cap, so repeated calls walk
+    the whole library; per-appid fetch errors land in skipped. probe_steam=False
+    skips the network entirely (probed=0). limit bounds only the probe (offline
+    buckets are capped at 200 each). Returns candidates, per-bucket counts, and
+    the probe bookkeeping.
+    """
+    from .tools.admin import detect_misclassified_dlc as _detect_misclassified
+    return await _detect_misclassified(limit, probe_steam)
 
 
 @mcp.tool(annotations=NETWORK_SYNC_TOOL)

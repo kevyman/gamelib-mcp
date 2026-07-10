@@ -5,6 +5,7 @@ test characterizes lookup + formatting only, without network.
 """
 
 import json
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 from fastmcp.exceptions import ToolError
@@ -286,7 +287,9 @@ class GetGameDetailTests(ToolDBTestCase):
 
         result = await detail.get_game_detail(game_id=gid)
 
-        self.assertEqual(result["dlc_ownership"], {"owned": 2, "known": 3})
+        self.assertEqual(
+            result["dlc_ownership"], {"owned": 2, "known": 3, "source": "steam"}
+        )
 
     async def test_dlc_ownership_absent_without_catalog(self):
         gid = await make_steam_game("No Catalog Game", 2000)
@@ -296,6 +299,85 @@ class GetGameDetailTests(ToolDBTestCase):
     async def test_dlc_ownership_absent_on_malformed_meta(self):
         gid = await make_steam_game("Malformed Meta Game", 3000)
         await db_module.set_meta("steam_dlc_catalog:3000", "not valid json")
+
+        result = await detail.get_game_detail(game_id=gid)
+
+        self.assertNotIn("dlc_ownership", result)
+
+    async def test_dlc_ownership_falls_back_to_igdb_catalog_without_steam(self):
+        # Switch-only base game: no Steam appid, so no steam_dlc_catalog key
+        # was ever written. igdb_children:{igdb_id} is seeded directly (as
+        # get_igdb_children_cached would leave it after a live fetch) so this
+        # exercises the full cache-hit path without any network involved.
+        gid = await seed_game("Switch Base Game")
+        await add_platform(gid, "switch2", owned=1)
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = ? WHERE id = ?", (777, gid))
+            await db.commit()
+        now = datetime.now(timezone.utc).isoformat()
+        await db_module.set_meta(
+            "igdb_children:777",
+            json.dumps(
+                {
+                    "fetched_at": now,
+                    "children": [
+                        {"igdb_id": 1, "name": "DLC One", "kind": "dlc"},
+                        {"igdb_id": 2, "name": "DLC Two", "kind": "dlc"},
+                        {"igdb_id": 3, "name": "Expansion One", "kind": "expansion"},
+                    ],
+                }
+            ),
+        )
+        owned_child = await seed_game(
+            "Switch Base Game: DLC One",
+            content_type="dlc",
+            parent_game_id=gid,
+            is_primary_library_item=0,
+        )
+        await add_platform(owned_child, "switch2", owned=1)
+        unowned_child = await seed_game(
+            "Switch Base Game: DLC Two",
+            content_type="dlc",
+            parent_game_id=gid,
+            is_primary_library_item=0,
+        )
+        await add_platform(unowned_child, "switch2", owned=0)
+
+        result = await detail.get_game_detail(game_id=gid)
+
+        self.assertEqual(
+            result["dlc_ownership"], {"owned": 1, "known": 3, "source": "igdb"}
+        )
+
+    async def test_dlc_ownership_prefers_steam_catalog_over_igdb(self):
+        gid = await make_steam_game("Steam Wins Game", 4000, playtime_minutes=10)
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = ? WHERE id = ?", (888, gid))
+            await db.commit()
+        await db_module.set_meta(
+            "steam_dlc_catalog:4000",
+            json.dumps({"appids": [10], "fetched_at": "2024-01-01T00:00:00+00:00"}),
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        await db_module.set_meta(
+            "igdb_children:888",
+            json.dumps(
+                {
+                    "fetched_at": now,
+                    "children": [{"igdb_id": 1, "name": "DLC One", "kind": "dlc"}],
+                }
+            ),
+        )
+
+        result = await detail.get_game_detail(game_id=gid)
+
+        self.assertEqual(
+            result["dlc_ownership"], {"owned": 0, "known": 1, "source": "steam"}
+        )
+
+    async def test_dlc_ownership_absent_without_igdb_id_or_steam_catalog(self):
+        gid = await seed_game("No Igdb Id No Catalog")
+        await add_platform(gid, "switch2", owned=1)
 
         result = await detail.get_game_detail(game_id=gid)
 

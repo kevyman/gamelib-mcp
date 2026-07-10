@@ -1,7 +1,9 @@
 import asyncio
+import json
 import os
 import sqlite3
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -1837,3 +1839,201 @@ class NameGateCandidateWalkTests(unittest.IsolatedAsyncioTestCase):
             outcome = await igdb._resolve_game_with_status("Totally Absent Game", None)
         self.assertIsNone(outcome.game)
         self.assertFalse(outcome.saw_candidates)
+
+
+class FetchIgdbChildrenTests(unittest.IsolatedAsyncioTestCase):
+    """fetch_igdb_children: the one-shot dlcs+expansions lookup for a single
+    IGDB game id (fallback dlc_ownership source for non-Steam games)."""
+
+    async def test_parses_dlcs_and_expansions_into_combined_shape(self) -> None:
+        captured = {}
+
+        async def fake_post(query: str, headers: dict[str, str]) -> list[dict]:
+            captured["query"] = query
+            return [
+                {
+                    "dlcs": [
+                        {"id": 1, "name": "DLC One"},
+                        {"id": 2, "name": "DLC Two"},
+                    ],
+                    "expansions": [{"id": 3, "name": "Expansion One"}],
+                }
+            ]
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"TWITCH_CLIENT_ID": "client", "TWITCH_CLIENT_SECRET": "secret"},
+                clear=True,
+            ),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", side_effect=fake_post),
+        ):
+            children = await igdb.fetch_igdb_children(42)
+
+        self.assertIn("where id = 42;", captured["query"])
+        self.assertIn(
+            "dlcs.id, dlcs.name, expansions.id, expansions.name", captured["query"]
+        )
+        self.assertEqual(
+            children,
+            [
+                {"igdb_id": 1, "name": "DLC One", "kind": "dlc"},
+                {"igdb_id": 2, "name": "DLC Two", "kind": "dlc"},
+                {"igdb_id": 3, "name": "Expansion One", "kind": "expansion"},
+            ],
+        )
+
+    async def test_no_results_returns_empty_list(self) -> None:
+        async def fake_post(query: str, headers: dict[str, str]) -> list[dict]:
+            return []
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"TWITCH_CLIENT_ID": "client", "TWITCH_CLIENT_SECRET": "secret"},
+                clear=True,
+            ),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", side_effect=fake_post),
+        ):
+            children = await igdb.fetch_igdb_children(42)
+
+        self.assertEqual(children, [])
+
+    async def test_game_with_no_children_returns_empty_list(self) -> None:
+        async def fake_post(query: str, headers: dict[str, str]) -> list[dict]:
+            return [{"id": 42}]
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"TWITCH_CLIENT_ID": "client", "TWITCH_CLIENT_SECRET": "secret"},
+                clear=True,
+            ),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", side_effect=fake_post),
+        ):
+            children = await igdb.fetch_igdb_children(42)
+
+        self.assertEqual(children, [])
+
+    async def test_returns_none_without_credentials(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertIsNone(await igdb.fetch_igdb_children(42))
+
+    async def test_returns_none_on_request_failure(self) -> None:
+        with (
+            patch.dict(
+                "os.environ",
+                {"TWITCH_CLIENT_ID": "client", "TWITCH_CLIENT_SECRET": "secret"},
+                clear=True,
+            ),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch(
+                "gamelib_mcp.data.igdb._post_igdb_games",
+                AsyncMock(side_effect=RuntimeError("boom")),
+            ),
+        ):
+            self.assertIsNone(await igdb.fetch_igdb_children(42))
+
+
+class GetIgdbChildrenCachedTests(unittest.IsolatedAsyncioTestCase):
+    """get_igdb_children_cached: meta-KV cache (7-day TTL, stale-on-failure)
+    around fetch_igdb_children, mirroring data/series_gaps.py's semantics."""
+
+    async def test_fresh_fetch_stores_meta_and_returns_children(self) -> None:
+        children = [{"igdb_id": 1, "name": "DLC One", "kind": "dlc"}]
+        stored: dict[str, str] = {}
+
+        async def fake_set_meta(key: str, value: str) -> None:
+            stored[key] = value
+
+        with (
+            patch("gamelib_mcp.data.igdb.get_meta", AsyncMock(return_value=None)),
+            patch("gamelib_mcp.data.igdb.set_meta", AsyncMock(side_effect=fake_set_meta)),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_igdb_children",
+                AsyncMock(return_value=children),
+            ),
+        ):
+            result = await igdb.get_igdb_children_cached(42)
+
+        self.assertEqual(result, children)
+        self.assertIn("igdb_children:42", stored)
+        payload = json.loads(stored["igdb_children:42"])
+        self.assertEqual(payload["children"], children)
+        self.assertIn("fetched_at", payload)
+
+    async def test_cache_hit_within_ttl_skips_network(self) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        cached_children = [{"igdb_id": 5, "name": "Old DLC", "kind": "dlc"}]
+        raw = json.dumps({"fetched_at": now, "children": cached_children})
+        fetch_mock = AsyncMock(side_effect=AssertionError("should not fetch"))
+
+        with (
+            patch("gamelib_mcp.data.igdb.get_meta", AsyncMock(return_value=raw)),
+            patch("gamelib_mcp.data.igdb.fetch_igdb_children", fetch_mock),
+        ):
+            result = await igdb.get_igdb_children_cached(42)
+
+        self.assertEqual(result, cached_children)
+        fetch_mock.assert_not_called()
+
+    async def test_expired_cache_with_fetch_failure_serves_stale(self) -> None:
+        old = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+        stale_children = [{"igdb_id": 9, "name": "Stale DLC", "kind": "dlc"}]
+        raw = json.dumps({"fetched_at": old, "children": stale_children})
+
+        with (
+            patch("gamelib_mcp.data.igdb.get_meta", AsyncMock(return_value=raw)),
+            patch("gamelib_mcp.data.igdb.fetch_igdb_children", AsyncMock(return_value=None)),
+            patch("gamelib_mcp.data.igdb.set_meta", AsyncMock()) as set_meta_mock,
+        ):
+            result = await igdb.get_igdb_children_cached(42)
+
+        self.assertEqual(result, stale_children)
+        set_meta_mock.assert_not_called()
+
+    async def test_no_cache_and_fetch_failure_returns_none(self) -> None:
+        with (
+            patch("gamelib_mcp.data.igdb.get_meta", AsyncMock(return_value=None)),
+            patch("gamelib_mcp.data.igdb.fetch_igdb_children", AsyncMock(return_value=None)),
+        ):
+            result = await igdb.get_igdb_children_cached(42)
+
+        self.assertIsNone(result)
+
+    async def test_empty_children_list_is_cached_and_served(self) -> None:
+        stored: dict[str, str] = {}
+
+        async def fake_set_meta(key: str, value: str) -> None:
+            stored[key] = value
+
+        with (
+            patch("gamelib_mcp.data.igdb.get_meta", AsyncMock(return_value=None)),
+            patch("gamelib_mcp.data.igdb.set_meta", AsyncMock(side_effect=fake_set_meta)),
+            patch("gamelib_mcp.data.igdb.fetch_igdb_children", AsyncMock(return_value=[])),
+        ):
+            result = await igdb.get_igdb_children_cached(42)
+
+        self.assertEqual(result, [])
+        payload = json.loads(stored["igdb_children:42"])
+        self.assertEqual(payload["children"], [])
+
+        # Second call within TTL must serve the cached empty list without
+        # re-fetching — an empty catalog is itself a valid, cache-worthy
+        # answer, not a miss.
+        with (
+            patch(
+                "gamelib_mcp.data.igdb.get_meta",
+                AsyncMock(return_value=stored["igdb_children:42"]),
+            ),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_igdb_children",
+                AsyncMock(side_effect=AssertionError("should not fetch")),
+            ),
+        ):
+            result2 = await igdb.get_igdb_children_cached(42)
+
+        self.assertEqual(result2, [])
