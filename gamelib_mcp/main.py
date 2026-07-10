@@ -233,7 +233,10 @@ async def get_game_detail(
     ownership, HLTB, Metacritic, OpenCritic, ProtonDB, tags, and personal
     ratings. Provide game_id, name (partial or fuzzy match), or Steam appid
     when available. This may trigger lazy metadata fetches. Returns one
-    detailed game dictionary.
+    detailed game dictionary carrying related_content (children with ownership/
+    prices/acquisition), parent link (for nested DLC/editions), and dlc_ownership
+    (for base games with a cached Steam or IGDB DLC catalog, comparing known
+    catalog size vs. actually-owned children).
     """
     from .tools.detail import get_game_detail as _detail
     return await _detail(name, appid, game_id)
@@ -349,7 +352,8 @@ async def rate_game(
     source='manual', feeds the taste profile at full weight, and immediately
     recomputes tag affinity so recommendations reflect it. Provide game_id or
     name (partial/fuzzy match). Re-rating the same game overwrites the previous
-    manual rating. Returns the stored rating and affected tags.
+    manual rating. Returns the stored rating, content_type, parent_name (if
+    nested), and affected tags.
     """
     from .tools.ratings import rate_game as _rate
     return await _rate(name, game_id, score, review_text)
