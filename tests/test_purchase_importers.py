@@ -258,6 +258,13 @@ _SESSION_OK = {"idToken": "tok-xyz", "country": "BE", "localeInfo": {"language":
 
 
 class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # Neutralize the shared Nintendo Account cookie path by default so
+        # legacy-ec tests take the fallback path; account tests override this key.
+        env = patch.dict(os.environ, {"NINTENDO_COOKIES_FILE": "/nonexistent/default-acc.json"})
+        env.start()
+        self.addCleanup(env.stop)
+
     def _write_cookies(self, tmp: str, cookies: dict | None = None) -> str:
         path = os.path.join(tmp, "ec_cookies.json")
         with open(path, "w", encoding="utf-8") as f:
@@ -266,14 +273,16 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_cookie_file_raises_clear_error(self):
         with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": "/nonexistent/ec.json"}):
-            with self.assertRaisesRegex(RuntimeError, "set_nintendo_ec_session"):
+            with self.assertRaisesRegex(RuntimeError, r"set_nintendo_session\b"):
                 await nintendo_ec.fetch_eshop_purchases()
 
     async def test_missing_session_token_cookie_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_cookies(tmp, {"NASID": "abc"})
             with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(RuntimeError, "next-auth.session-token"):
+                # An ec export without the session-token cookie is not a usable
+                # legacy session, and no accounts cookies exist → accounts hint.
+                with self.assertRaisesRegex(RuntimeError, r"set_nintendo_session\b"):
                     await nintendo_ec.fetch_eshop_purchases()
 
     async def test_chunked_session_cookie_is_accepted(self):
@@ -375,7 +384,7 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_cookies(tmp)
             with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(RuntimeError, "set_nintendo_ec_session"):
+                with self.assertRaisesRegex(RuntimeError, r"set_nintendo_session\b"):
                     await nintendo_ec.fetch_eshop_purchases(
                         transport=httpx.MockTransport(handler)
                     )
@@ -387,7 +396,7 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_cookies(tmp)
             with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(RuntimeError, "set_nintendo_ec_session"):
+                with self.assertRaisesRegex(RuntimeError, r"set_nintendo_session\b"):
                     await nintendo_ec.fetch_eshop_purchases(
                         transport=httpx.MockTransport(handler)
                     )
@@ -403,7 +412,7 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_cookies(tmp)
             with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(RuntimeError, "set_nintendo_ec_session"):
+                with self.assertRaisesRegex(RuntimeError, r"set_nintendo_session\b"):
                     await nintendo_ec.fetch_eshop_purchases(
                         transport=httpx.MockTransport(handler)
                     )
@@ -421,6 +430,122 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
                     await nintendo_ec.fetch_eshop_purchases(
                         transport=httpx.MockTransport(handler)
                     )
+
+    # ── Accounts SSO re-auth path (the preferred, long-lived credential) ──
+
+    def _accounts_sso_handler(self, *, expired: bool = False, on_graphql=None):
+        """MockTransport handler replaying the browser's silent OAuth handshake.
+
+        csrf → signin → authorize (302 → callback or /login) → callback (sets a
+        fresh session-token) → transactions → session → graphql. ``expired`` makes
+        authorize bounce to accounts.nintendo.com/login (dead account session).
+        """
+        def handler(request: httpx.Request) -> httpx.Response:
+            host, path = request.url.host, request.url.path
+            if host == "ec.nintendo.com" and path == "/api/auth/csrf":
+                return httpx.Response(200, json={"csrfToken": "csrf-abc"})
+            if host == "ec.nintendo.com" and path == "/api/auth/signin/nintendo":
+                return httpx.Response(
+                    200,
+                    json={"url": "https://accounts.nintendo.com/connect/1.0.0/authorize?client_id=x&state=st"},
+                    headers={"set-cookie": "__Secure-next-auth.state=state-jwe; Path=/; Secure; HttpOnly"},
+                )
+            if host == "accounts.nintendo.com" and path == "/connect/1.0.0/authorize":
+                if expired:
+                    return httpx.Response(302, headers={"location": "https://accounts.nintendo.com/login"})
+                return httpx.Response(
+                    302,
+                    headers={"location": "https://ec.nintendo.com/api/auth/callback/nintendo?code=c&state=st"},
+                )
+            if host == "accounts.nintendo.com" and path == "/login":
+                return httpx.Response(200, text="<html>login</html>", headers={"content-type": "text/html"})
+            if host == "ec.nintendo.com" and path == "/api/auth/callback/nintendo":
+                return httpx.Response(
+                    302,
+                    headers={
+                        "location": "https://ec.nintendo.com/my/transactions/1",
+                        "set-cookie": f"{nintendo_ec._SESSION_COOKIE}=fresh-session; Path=/; Secure; HttpOnly",
+                    },
+                )
+            if host == "ec.nintendo.com" and path == "/my/transactions/1":
+                return httpx.Response(200, text="<html>ok</html>", headers={"content-type": "text/html"})
+            if host == "ec.nintendo.com" and path == "/api/auth/session":
+                return httpx.Response(200, json=_SESSION_OK)
+            if on_graphql is not None:
+                return on_graphql(request)
+            return httpx.Response(200, json=_ec_envelope([]))
+
+        return handler
+
+    def _write_accounts_cookies(self, tmp: str) -> str:
+        path = os.path.join(tmp, "accounts_cookies.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"NASID": "s", "NATID": "t", "NAID": "id"}, f)
+        return path
+
+    async def test_accounts_sso_mints_session_and_fetches(self):
+        captured: dict = {}
+
+        def on_graphql(request: httpx.Request) -> httpx.Response:
+            captured["request"] = request
+            return httpx.Response(200, json=_ec_envelope(_ec_transactions_fixture()))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            acc = self._write_accounts_cookies(tmp)
+            with patch.dict(os.environ, {
+                "NINTENDO_COOKIES_FILE": acc,
+                "NINTENDO_EC_COOKIES_FILE": "/nonexistent/ec.json",
+            }):
+                records, skipped = await nintendo_ec.fetch_eshop_purchases(
+                    transport=httpx.MockTransport(self._accounts_sso_handler(on_graphql=on_graphql))
+                )
+
+        self.assertEqual(len(records), 4)
+        # The Savanna call carried the idToken the minted session produced.
+        variables = json.loads(captured["request"].url.params["variables"])
+        self.assertEqual(variables["idToken"], "tok-xyz")
+
+    async def test_accounts_session_expired_raises_reexport(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            acc = self._write_accounts_cookies(tmp)
+            with patch.dict(os.environ, {
+                "NINTENDO_COOKIES_FILE": acc,
+                "NINTENDO_EC_COOKIES_FILE": "/nonexistent/ec.json",
+            }):
+                with self.assertRaisesRegex(RuntimeError, "accounts.nintendo.com"):
+                    await nintendo_ec.fetch_eshop_purchases(
+                        transport=httpx.MockTransport(self._accounts_sso_handler(expired=True))
+                    )
+
+    async def test_no_session_configured_raises_accounts_hint(self):
+        with patch.dict(os.environ, {
+            "NINTENDO_COOKIES_FILE": "/nonexistent/acc.json",
+            "NINTENDO_EC_COOKIES_FILE": "/nonexistent/ec.json",
+        }):
+            with self.assertRaisesRegex(RuntimeError, r"set_nintendo_session\b"):
+                await nintendo_ec.fetch_eshop_purchases()
+
+    async def test_accounts_path_preferred_over_legacy_ec(self):
+        # When both are present, the SSO handshake runs (csrf is hit); the legacy
+        # raw session-token is not used directly.
+        hits: list[str] = []
+        base = self._accounts_sso_handler()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            hits.append(request.url.path)
+            return base(request)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            acc = self._write_accounts_cookies(tmp)
+            ec = self._write_cookies(tmp)
+            with patch.dict(os.environ, {
+                "NINTENDO_COOKIES_FILE": acc,
+                "NINTENDO_EC_COOKIES_FILE": ec,
+            }):
+                await nintendo_ec.fetch_eshop_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
+        self.assertIn("/api/auth/csrf", hits)
 
 
 class HumbleParserTests(unittest.TestCase):
@@ -1422,6 +1547,20 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
             # The saved file round-trips through the eShop fetcher's loader.
             with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
                 self.assertEqual(nintendo_ec._load_ec_cookies(), {"NASID": "token"})
+
+    async def test_nintendo_session_shared_between_ownership_and_eshop(self):
+        # The one accounts.nintendo.com session set_nintendo_session stores is the
+        # same one the eShop importer's account loader reads — no separate export.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "nintendo_cookies.json")
+            with patch.dict(os.environ, {"NINTENDO_COOKIES_FILE": path}):
+                result = await admin.set_nintendo_session(
+                    json.dumps({"NASID": "s", "NATID": "t"})
+                )
+                self.assertEqual(result, {"cookie_count": 2, "path": path})
+                self.assertEqual(
+                    nintendo_ec._load_account_cookies(), {"NASID": "s", "NATID": "t"}
+                )
 
     async def test_set_steam_store_session_writes_to_steam_path(self):
         with tempfile.TemporaryDirectory() as tmp:
