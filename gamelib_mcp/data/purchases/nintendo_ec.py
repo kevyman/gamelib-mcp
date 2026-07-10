@@ -1,12 +1,37 @@
 """Nintendo eShop purchase-history importer.
 
 Reads the transaction history behind https://ec.nintendo.com/my/transactions/
-via the Savanna GraphQL API that page calls. Two steps per sync:
+via the Savanna GraphQL API that page calls.
 
-1. ``GET https://ec.nintendo.com/api/auth/session`` with the browser session
-   cookie ``__Secure-next-auth.session-token`` returns a short-lived Nintendo
-   Account ``idToken`` (~15 min) plus the account's ``country``/``language``.
-2. ``GET https://wb.lp1.savanna.srv.nintendo.net/graphql`` with that ``idToken``
+Auth (why we store *accounts.nintendo.com* cookies, not the eShop session):
+The eShop session cookie ``__Secure-next-auth.session-token`` is a NextAuth JWE
+with a hard 1-hour lifetime — storing it directly means re-pasting hourly. But a
+logged-in browser never re-prompts, because when that cookie lapses the eShop web
+app silently re-runs a Nintendo Account OAuth code exchange that only succeeds
+thanks to the long-lived central login session on ``accounts.nintendo.com`` (the
+``NASID``/``NATID``/``NAID``-family cookies — the same session that keeps you
+signed in across every Nintendo web property, good for weeks-to-months). So this
+module reuses *those* cookies — the very same accounts.nintendo.com session that
+VGCS ownership sync already stores (``set_nintendo_session`` → ``NINTENDO_COOKIES_FILE``)
+— and replicates that silent handshake on demand (:func:`_establish_ec_session`),
+minting a fresh session on every import with no keep-warm loop and no dependence
+on process uptime:
+
+1. ``GET  /api/auth/csrf``               → NextAuth CSRF token (+ csrf cookie).
+2. ``POST /api/auth/signin/nintendo``    (``callbackUrl``/``csrfToken``/``json=true``)
+   → the ``accounts.nintendo.com/connect/1.0.0/authorize`` URL, and a
+   ``__Secure-next-auth.state`` cookie.
+3. ``GET  <authorize URL>``              with the accounts cookies → 302 to the
+   callback carrying an OAuth ``code`` (no login page while the account session
+   is alive; a redirect to ``/login`` means it finally expired → re-export).
+4. ``GET  /api/auth/callback/nintendo``  validates ``state``, exchanges the code
+   server-side, and sets a fresh ``__Secure-next-auth.session-token``.
+
+Then, as before:
+
+5. ``GET  /api/auth/session``            → short-lived Nintendo Account ``idToken``
+   (~15 min) plus the account's ``country``/``language``.
+6. ``GET  https://wb.lp1.savanna.srv.nintendo.net/graphql`` with that ``idToken``
    in the query string (auth is the token, NOT cookies) returns paginated
    transactions. The query is a *persisted query* — the server only accepts the
    SHA-256 hash of the exact query Nintendo's web build ships; arbitrary GraphQL
@@ -14,9 +39,13 @@ via the Savanna GraphQL API that page calls. Two steps per sync:
    drift, ``NINTENDO_EC_QUERY_HASH`` / ``NINTENDO_EC_CLIENT_ID`` override the
    pinned defaults without a code change.
 
-Set the session cookie with the ``set_nintendo_ec_session`` MCP tool (export
-your ec.nintendo.com cookies while logged in on the transactions page — the
-export includes ``__Secure-next-auth.session-token``).
+Configure with the ``set_nintendo_session`` MCP tool (export your
+accounts.nintendo.com cookies while logged in) — the same tool/session used for
+Switch ownership, so eShop purchase import needs no extra setup. The legacy
+``set_nintendo_ec_session`` path (a raw ec.nintendo.com session-token, valid ≤1h)
+still works as a fallback when no account cookies are stored, but has to be
+re-pasted every hour. The longer-lived mobile ``session_token`` flow used by
+``nintendo_pctl.py`` is NOT available for this web OAuth client.
 
 Response schema (``data.account.transactionHistories.transactionHistories[]``):
 - ``TransactionHistory``: ``transactionType`` (PURCHASE/REDEEM), ``itemType``
@@ -57,9 +86,20 @@ logger = logging.getLogger(__name__)
 PLATFORM = "switch2"
 PURCHASE_SOURCE = "eshop"
 
-_SESSION_URL = "https://ec.nintendo.com/api/auth/session"
+_BASE_URL = "https://ec.nintendo.com"
+_SESSION_URL = f"{_BASE_URL}/api/auth/session"
+_CSRF_URL = f"{_BASE_URL}/api/auth/csrf"
+_SIGNIN_URL = f"{_BASE_URL}/api/auth/signin/nintendo"
+_CALLBACK_URL = f"{_BASE_URL}/my/transactions/1"
 _GRAPHQL_URL = "https://wb.lp1.savanna.srv.nintendo.net/graphql"
 _SESSION_COOKIE = "__Secure-next-auth.session-token"
+_DEFAULT_COOKIES_FILENAME = "nintendo_ec_cookies.json"
+# The eShop importer shares the one Nintendo Account session that VGCS ownership
+# already stores (data/nintendo.py, set_nintendo_session) — same accounts.nintendo.com
+# login cookies, same file. No separate export.
+_ACCOUNT_COOKIES_ENV = "NINTENDO_COOKIES_FILE"
+_ACCOUNT_COOKIES_FILENAME = "nintendo_cookies.json"
+_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0"
 
 # Pinned to Nintendo's current eShop web build. If Nintendo redeploys and these
 # drift, the GraphQL call 400s (INVALID_PARAM) — override via env without a
@@ -95,9 +135,16 @@ _CURRENCY_SYMBOLS: tuple[tuple[str, str], ...] = (
 _ISO_CODE_RE = re.compile(r"\b([A-Z]{3})\b")
 
 _AUTH_ERROR = (
-    "Nintendo eShop session is missing or expired — re-run set_nintendo_ec_session "
-    "with a fresh cookie export from ec.nintendo.com (logged in, on the "
-    "transactions page)."
+    "Nintendo eShop session is missing or expired — re-run set_nintendo_session "
+    "with a fresh cookie export from accounts.nintendo.com (logged in)."
+)
+# Raised when the silent OAuth handshake bounced to a login page: the central
+# accounts.nintendo.com session itself has expired (months, not hours), so a
+# fresh export from that domain is the only fix.
+_ACCOUNTS_AUTH_ERROR = (
+    "Nintendo Account session (accounts.nintendo.com) has expired — sign in again "
+    "in your browser, re-export your accounts.nintendo.com cookies, and re-run "
+    "set_nintendo_session. (The same session also drives Switch ownership sync.)"
 )
 
 
@@ -117,14 +164,15 @@ def _has_session_cookie(cookies: dict[str, str]) -> bool:
     )
 
 
-def _load_ec_cookies() -> dict[str, str] | None:
-    """Load eShop session cookies from NINTENDO_EC_COOKIES_FILE.
+def _load_cookies(env_var: str, default_filename: str, label: str) -> dict[str, str] | None:
+    """Load a stored cookie export as {name: value}.
 
-    Mirrors data/nintendo.py::_load_vgcs_cookies: configured path first, then
-    the default path; accepts both {name: value} and Cookie Editor array JSON.
+    Mirrors data/nintendo.py::_load_vgcs_cookies: configured path (``env_var``)
+    first, then the default beside the database; accepts both {name: value} and
+    Cookie Editor array JSON.
     """
-    fallback_path = str(default_data_dir() / "nintendo_ec_cookies.json")
-    configured_path = os.getenv("NINTENDO_EC_COOKIES_FILE") or fallback_path
+    fallback_path = str(default_data_dir() / default_filename)
+    configured_path = os.getenv(env_var) or fallback_path
     candidate_paths = [configured_path]
     if configured_path != fallback_path:
         candidate_paths.append(fallback_path)
@@ -138,7 +186,7 @@ def _load_ec_cookies() -> dict[str, str] | None:
         except FileNotFoundError:
             continue
         except Exception as exc:
-            logger.warning("Failed to load Nintendo eShop cookies from %s: %s", path, exc)
+            logger.warning("Failed to load %s cookies from %s: %s", label, path, exc)
             return None
 
     if raw is None:
@@ -149,6 +197,91 @@ def _load_ec_cookies() -> dict[str, str] | None:
     if isinstance(raw, dict):
         return raw
     return None
+
+
+def _load_account_cookies() -> dict[str, str] | None:
+    """Load the shared Nintendo Account session (accounts.nintendo.com cookies).
+
+    This is the SAME file VGCS ownership sync uses (``NINTENDO_COOKIES_FILE``,
+    written by ``set_nintendo_session``) — one login session powers both
+    ownership and eShop purchase history, so there is nothing extra to export.
+    """
+    return _load_cookies(_ACCOUNT_COOKIES_ENV, _ACCOUNT_COOKIES_FILENAME, "Nintendo Account")
+
+
+def _load_ec_cookies() -> dict[str, str] | None:
+    """Load the legacy ec.nintendo.com session cookies (raw session-token, ≤1h)."""
+    return _load_cookies(
+        "NINTENDO_EC_COOKIES_FILE", _DEFAULT_COOKIES_FILENAME, "Nintendo eShop"
+    )
+
+
+async def _establish_ec_session(
+    client: httpx.AsyncClient, accounts_cookies: dict[str, str]
+) -> None:
+    """Mint a fresh eShop session by replaying the browser's silent SSO handshake.
+
+    Runs csrf → signin → authorize → callback (see module docstring). On success
+    the client's jar carries a fresh ``__Secure-next-auth.session-token`` and the
+    caller can proceed to :func:`_fetch_id_token`. The accounts cookies are seeded
+    into the jar so the ``accounts.nintendo.com`` ``authorize`` hop is satisfied
+    without a login prompt.
+
+    Raises RuntimeError(_ACCOUNTS_AUTH_ERROR) when the handshake bounces to a
+    login page (the central account session has expired) or otherwise fails to
+    produce a session cookie.
+    """
+    # Scope the account session to *.nintendo.com so it reaches the accounts and
+    # eShop OAuth hops (both first-party Nintendo .com) but never the Savanna
+    # GraphQL host (wb.lp1.savanna.srv.nintendo.NET) or any other host — a
+    # domainless cookie would otherwise be sent everywhere in the shared jar.
+    for name, value in accounts_cookies.items():
+        client.cookies.set(name, value, domain=".nintendo.com")
+
+    headers = {"User-Agent": _USER_AGENT, "Referer": f"{_BASE_URL}/"}
+
+    csrf_resp = await client.get(_CSRF_URL, headers={**headers, "Accept": "application/json"})
+    csrf_resp.raise_for_status()
+    csrf_token = None
+    try:
+        csrf_token = csrf_resp.json().get("csrfToken")
+    except Exception:
+        csrf_token = None
+    if not csrf_token:
+        raise RuntimeError(_ACCOUNTS_AUTH_ERROR)
+
+    signin_resp = await client.post(
+        _SIGNIN_URL,
+        data={"callbackUrl": _CALLBACK_URL, "csrfToken": csrf_token, "json": "true"},
+        headers={
+            **headers,
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+    )
+    signin_resp.raise_for_status()
+    try:
+        authorize_url = signin_resp.json().get("url")
+    except Exception:
+        authorize_url = None
+    if not authorize_url or "authorize" not in authorize_url:
+        raise RuntimeError(_ACCOUNTS_AUTH_ERROR)
+
+    # Follows authorize → callback → transactions. The 302 to the callback carries
+    # the OAuth code; the ec cookies set during csrf/signin (state) validate it.
+    final = await client.get(authorize_url, headers=headers)
+    landed_on_login = "/login" in str(final.url) or "accounts.nintendo.com" in final.url.host
+    if landed_on_login or not _has_session_cookie(_jar_names(client)):
+        raise RuntimeError(_ACCOUNTS_AUTH_ERROR)
+
+
+def _jar_names(client: httpx.AsyncClient) -> dict[str, str]:
+    """Current jar as {name: value} (host-scoped cookies win name collisions)."""
+    flat: dict[str, str] = {}
+    for cookie in sorted(client.cookies.jar, key=lambda c: bool(c.domain)):
+        if cookie.value is not None:
+            flat[cookie.name] = cookie.value
+    return flat
 
 
 def _skip(skipped: list[dict], title: object, reason: str) -> None:
@@ -320,23 +453,22 @@ async def fetch_eshop_purchases(
 ) -> tuple[list[PurchaseRecord], list[dict]]:
     """Fetch the full eShop transaction history as purchase records.
 
-    Resolves a session ``idToken`` then paginates the Savanna GraphQL API
-    (?limit=50&offset=N) until a page returns fewer than the limit (or the
-    reported total is reached), hard-capped at _MAX_PAGES. Raises RuntimeError
-    on missing/stale auth; the orchestrator catches per source. ``transport``
-    exists for tests (httpx.MockTransport) — production callers pass nothing.
+    Auth resolves in one of two ways: preferred is a stored accounts.nintendo.com
+    session, from which :func:`_establish_ec_session` mints a fresh eShop session
+    on the spot; the fallback is a legacy raw ec.nintendo.com session-token used
+    directly (valid ≤1h). Then paginates the Savanna GraphQL API (?limit=50&
+    offset=N) until a page returns fewer than the limit (or the reported total is
+    reached), hard-capped at _MAX_PAGES. Raises RuntimeError on missing/stale
+    auth; the orchestrator catches per source. ``transport`` exists for tests
+    (httpx.MockTransport) — production callers pass nothing.
     """
-    cookies = _load_ec_cookies()
-    if not cookies:
+    accounts_cookies = _load_account_cookies()
+    ec_cookies = _load_ec_cookies()
+    if not accounts_cookies and not (ec_cookies and _has_session_cookie(ec_cookies)):
         raise RuntimeError(
-            "No Nintendo eShop session cookies found (NINTENDO_EC_COOKIES_FILE "
-            "not set or missing) — run set_nintendo_ec_session first."
-        )
-    if not _has_session_cookie(cookies):
-        raise RuntimeError(
-            f"Nintendo eShop cookie export is missing '{_SESSION_COOKIE}' — export "
-            "your ec.nintendo.com cookies while logged in, then re-run "
-            "set_nintendo_ec_session."
+            "No Nintendo Account session found — run set_nintendo_session with a "
+            "cookie export from accounts.nintendo.com (logged in). The same session "
+            "also drives Switch ownership sync."
         )
 
     query_hash = os.getenv("NINTENDO_EC_QUERY_HASH") or _DEFAULT_QUERY_HASH
@@ -346,22 +478,24 @@ async def fetch_eshop_purchases(
     except ValueError:
         shop_id = _DEFAULT_SHOP_ID
 
-    user_agent = (
-        "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0"
-    )
     extensions = json.dumps(
         {"persistedQuery": {"sha256Hash": query_hash, "version": 1}},
         separators=(",", ":"),
     )
 
     raw_transactions: list = []
+    # Legacy path seeds the raw session-token; the accounts path seeds nothing
+    # here and mints the session via the SSO handshake below.
+    seed_cookies = {} if accounts_cookies else (ec_cookies or {})
     async with httpx.AsyncClient(
-        cookies=cookies, follow_redirects=True, timeout=30, transport=transport
+        cookies=seed_cookies, follow_redirects=True, timeout=30, transport=transport
     ) as client:
+        if accounts_cookies:
+            await _establish_ec_session(client, accounts_cookies)
         id_token, country, language = await _fetch_id_token(client)
 
         headers = {
-            "User-Agent": user_agent,
+            "User-Agent": _USER_AGENT,
             "Accept": "application/graphql-response+json, application/json",
             "content-type": "application/json",
             "x-nintendo-savanna-client-id": client_id,

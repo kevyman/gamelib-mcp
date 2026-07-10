@@ -1277,12 +1277,13 @@ async def merge_games(
 @mcp.tool(annotations=MUTATION_TOOL)
 async def set_nintendo_session(cookies: str) -> NintendoSessionResponse:
     """
-    Store Nintendo Account session cookies for VGCS ownership sync.
+    Store Nintendo Account session cookies (accounts.nintendo.com).
 
-    Syncs the full digital library from accounts.nintendo.com. The cookie JSON
-    comes from an authenticated browser session; no playtime data is available
-    through this source (use set_nintendo_pctl_session for playtime). Returns
-    a session storage status dictionary.
+    This one login session drives BOTH Switch ownership sync (the full digital
+    library, via VGCS) AND eShop purchase-history import (import_purchases
+    sources=["eshop"], via a silent OAuth handshake) — no separate export for
+    purchases. No playtime through this source (use set_nintendo_pctl_session for
+    playtime). Returns a session storage status dictionary.
 
     How to get cookies:
     1. Open https://accounts.nintendo.com/portal/vgcs/ (stay logged in)
@@ -1300,12 +1301,14 @@ async def set_nintendo_session(cookies: str) -> NintendoSessionResponse:
 @mcp.tool(annotations=MUTATION_TOOL)
 async def set_nintendo_ec_session(cookies: str) -> NintendoSessionResponse:
     """
-    Store ec.nintendo.com session cookies for eShop purchase-history import.
+    Store a raw ec.nintendo.com session-token (legacy, ~1h) for eShop imports.
 
-    Enables import_purchases(sources=["eshop"]) to read your Nintendo eShop
-    transaction history (purchase dates and prices). These cookies come from
-    the ec.nintendo.com domain and are separate from the VGCS cookies used by
-    set_nintendo_session. The export MUST include __Secure-next-auth.session-token.
+    Fallback for import_purchases(sources=["eshop"]) when no Nintendo Account
+    session is stored. The __Secure-next-auth.session-token this captures expires
+    in about an hour, so it must be re-pasted before each import — prefer
+    set_nintendo_session, whose accounts.nintendo.com login lasts weeks-to-months
+    and also drives Switch ownership. The export MUST include
+    __Secure-next-auth.session-token.
 
     How to get cookies:
     1. Open https://ec.nintendo.com/my/transactions/ (stay logged in)
