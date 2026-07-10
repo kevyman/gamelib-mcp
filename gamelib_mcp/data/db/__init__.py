@@ -2007,6 +2007,8 @@ from .upserts import (  # noqa: E402
     ACQUISITION_FIELDS,
     GAME_EDITABLE_FIELDS,
     adopt_platform_identifier,
+    apply_content_classification,
+    resolve_parent_game,
     set_platform_acquisition,
     upsert_game,
     upsert_game_platform,

@@ -19,7 +19,7 @@ from ..data.db import (
     upsert_game_platform_identifier,
     upsert_wishlist_entry,
 )
-from ..data.content import NESTED_CONTENT_TYPES, PRIMARY_CONTENT_TYPES
+from ..data.content import NESTED_CONTENT_TYPES, PRIMARY_CONTENT_TYPES, derive_is_primary
 from ..data.tag_synonyms import canonical_tag
 # Safe direction: acquisition.py never imports this module at top level (it
 # lazy-imports _resolve_game_row inside functions), so importing its validator
@@ -415,7 +415,7 @@ async def update_game(
         # is_primary_library_item is derived from the content type, never set
         # by hand — recompute it (and record it as an override) so the row's
         # visibility in rollups matches the corrected classification.
-        is_primary = normalized_ct in PRIMARY_CONTENT_TYPES
+        is_primary = derive_is_primary(normalized_ct)
         fields["is_primary_library_item"] = int(is_primary)
         # A primary library item must not keep a parent: it is excluded from
         # search/rollups by the is_primary filter yet unreachable as any other

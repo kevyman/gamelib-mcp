@@ -1116,6 +1116,11 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
                 updates["tags"] = json.dumps(merged)
         # Content classification: never let a default ("base_game"/primary,
         # no parent) re-fetch clobber a prior non-default classification.
+        # NOTE: the same guard semantics live in
+        # db/upserts.py::apply_content_classification (the reusable writer for
+        # the Steam/purchase classifiers) — keep the two in sync. This IGDB path
+        # keeps extra IGDB-only behavior (alias handling, parent minting, series)
+        # and is deliberately not routed through that helper.
         # IGDB search can return a bare main-game hit on a later pass, and
         # silently flipping a nested DLC back to primary would resurface it as
         # its own library item. Only apply when the fetch carries a real signal
