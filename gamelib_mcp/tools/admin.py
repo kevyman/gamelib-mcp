@@ -347,7 +347,11 @@ def _save_session_cookies(cookies: str, env_var: str, default_filename: str, lab
 
 async def set_nintendo_session(cookies: str) -> dict:
     """
-    Store Nintendo Account session cookies for VGCS fallback sync.
+    Store Nintendo Account session cookies (accounts.nintendo.com).
+
+    This one login session drives BOTH Switch ownership sync (VGCS) AND eShop
+    purchase-history import (import_purchases sources=["eshop"], via a silent
+    OAuth handshake) — no separate cookie export for purchases.
 
     Accepts either:
     - A JSON object: {"cookie_name": "value", ...}
