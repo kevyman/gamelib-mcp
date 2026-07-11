@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 from fastmcp.exceptions import ToolError
 
-from ..data.content import CONTENT_DLC, CONTENT_UNKNOWN_ADDON
+from ..data.content import CONTENT_DLC, CONTENT_UNKNOWN_ADDON, NESTED_CONTENT_TYPES
 from ..data.db import (
     ACQUISITION_FIELDS,
     STEAM_APP_ID,
@@ -1301,7 +1301,12 @@ def _match_addon_name(name: str | None) -> tuple[str, str] | None:
 
 
 def _pinned_columns(raw) -> set[str]:
-    """Parse a games.manual_overrides JSON blob into a set of column names."""
+    """Parse a games.manual_overrides JSON blob into a set of column names.
+
+    Duplicates data/db/upserts.py::_decode_overrides (private, per-connection
+    API) for rows already loaded in bulk — keep the two in sync if the
+    manual_overrides encoding ever changes.
+    """
     if not raw:
         return set()
     try:
@@ -1361,18 +1366,19 @@ async def _resolve_primary_parent(
 async def _fetch_steam_appdetails(appid: int) -> dict | None:
     """Fetch one Steam app's appdetails ``data`` payload (type/fullgame).
 
-    Reuses steam_store's rate-gated fetch path (``_fetch_all``, whose review
-    half is best-effort and discarded here). Returns the store-data dict, or
-    None on failure / no data. Module-level so the DLC probe's only network call
+    Store-only (no review half) through steam_store's rate-gated fetch path —
+    the probe has no use for reviews and every request costs a slot on the
+    shared 1-req/s gate. Module-level so the DLC probe's only network call
     can be patched in tests (gamelib_mcp.tools.admin._fetch_steam_appdetails).
     """
-    from ..data.steam_store import _fetch_all
+    from ..data.steam_store import fetch_store_appdetails
 
-    store_data, _ = await _fetch_all(appid)
-    return store_data
+    return await fetch_store_appdetails(appid)
 
 
-async def detect_misclassified_dlc(limit: int = 25, probe_steam: bool = True) -> dict:
+async def detect_misclassified_dlc(
+    limit: int = 25, probe_steam: bool = True, probe_offset: int = 0
+) -> dict:
     """Surface primary rows that are really nested content (DLC/soundtrack/etc).
 
     Read-only detector powering the human-confirmed repair loop: each candidate
@@ -1395,13 +1401,18 @@ async def detect_misclassified_dlc(limit: int = 25, probe_steam: bool = True) ->
       parent_name when one resolves.
 
     Live probe (probe_steam=True, the default): walks owned-Steam base_game rows
-    oldest-cached first, capped at ``limit`` appdetails fetches, and flags rows
-    Steam itself reports as dlc/music/demo (steam_type_mismatch). ``probed`` is
-    how many were fetched this call and ``probe_remaining`` how many matching
-    rows remain beyond the cap, so repeated calls walk the whole library;
-    per-appid fetch errors are collected in ``skipped`` and skipped. Pass
-    probe_steam=False to skip the network entirely (probed=0). ``limit`` bounds
-    only the probe; the offline buckets are capped at 200 candidates each.
+    oldest-cached first, capped at ``limit`` appdetails fetches (``limit=0`` =
+    no cap, probe everything — rate-gated at ~1 request/second, so a large
+    library takes minutes), and flags rows Steam itself reports as
+    dlc/music/demo (steam_type_mismatch). The tool is read-only, so the
+    ordering never changes between calls — to walk the whole library, pass the
+    returned ``next_probe_offset`` back as ``probe_offset`` on the next call
+    (``next_probe_offset`` is null once the walk is complete). ``probed`` is
+    how many rows were fetched this call and ``probe_remaining`` how many
+    remain beyond this call's window; per-appid fetch errors are collected in
+    ``skipped``. Pass probe_steam=False to skip the network entirely
+    (probed=0). ``limit``/``probe_offset`` bound only the probe; the offline
+    buckets are capped at 200 candidates each.
     """
     from ..data.content import classify_steam_app_type, split_addon_title
 
@@ -1415,13 +1426,20 @@ async def detect_misclassified_dlc(limit: int = 25, probe_steam: bool = True) ->
 
     # --- offline bucket: needs_parent (nested rows lacking a parent link) ---
     async with get_db() as db:
+        # Restricted to rows whose stored content_type is genuinely nested: an
+        # is_primary=0 row with a PRIMARY content_type is a desync artifact,
+        # and the parent-only suggested_update emitted here would be rejected
+        # by update_game ("row must end up nested") — breaking the
+        # ready-to-apply contract.
+        nested_placeholders = ", ".join("?" for _ in NESTED_CONTENT_TYPES)
         nested_rows = await db.execute_fetchall(
-            """SELECT id AS game_id, name, content_type
+            f"""SELECT id AS game_id, name, content_type
                FROM games
                WHERE is_primary_library_item = 0 AND parent_game_id IS NULL
+                 AND content_type IN ({nested_placeholders})
                ORDER BY id
                LIMIT ?""",
-            (_MISCLASSIFIED_BUCKET_CAP,),
+            (*sorted(NESTED_CONTENT_TYPES), _MISCLASSIFIED_BUCKET_CAP),
         )
     for row in nested_rows:
         parent = await _resolve_primary_parent(
@@ -1473,18 +1491,31 @@ async def detect_misclassified_dlc(limit: int = 25, probe_steam: bool = True) ->
         gid = row["game_id"]
         name = row["name"]
         addon = _match_addon_name(name)
-        parent = await _resolve_primary_parent(split_addon_title(name or ""), gid)
-
-        # purchase_minted_suspect takes precedence over addon_name_pattern.
-        is_purchase_suspect = (
+        # Parent resolution runs unindexed name lookups per split candidate —
+        # only pay for it on rows that can actually still become a candidate.
+        may_be_purchase_suspect = (
             not row["has_identifier"]
             and row["purchase_source"] is not None
             and row["igdb_id"] is None
-            and (addon is not None or parent is not None)
+            and purchase_count < _MISCLASSIFIED_BUCKET_CAP
+        )
+        addon_pinned = addon is not None and "content_type" in _pinned_columns(
+            row["manual_overrides"]
+        )
+        may_be_addon_candidate = (
+            addon is not None
+            and not addon_pinned
+            and addon_count < _MISCLASSIFIED_BUCKET_CAP
+        )
+        if not (may_be_purchase_suspect or may_be_addon_candidate):
+            continue
+        parent = await _resolve_primary_parent(split_addon_title(name or ""), gid)
+
+        # purchase_minted_suspect takes precedence over addon_name_pattern.
+        is_purchase_suspect = may_be_purchase_suspect and (
+            addon is not None or parent is not None
         )
         if is_purchase_suspect:
-            if purchase_count >= _MISCLASSIFIED_BUCKET_CAP:
-                continue
             content_type = addon[0] if addon is not None else CONTENT_DLC
             evidence = {
                 "purchase_source": row["purchase_source"],
@@ -1510,19 +1541,18 @@ async def detect_misclassified_dlc(limit: int = 25, probe_steam: bool = True) ->
             purchase_count += 1
             continue
 
-        if addon is not None:
-            # The user already decided this row's type — leave it be.
-            if "content_type" in _pinned_columns(row["manual_overrides"]):
-                continue
-            if addon_count >= _MISCLASSIFIED_BUCKET_CAP:
-                continue
-            content_type, label = addon
+        # Pinned rows (user already decided the type) and full buckets were
+        # excluded above, before the parent resolution was paid for.
+        if may_be_addon_candidate:
+            content_type, label = addon  # type: ignore[misc]
             evidence = {"matched_pattern": label}
             suggested = {"game_id": gid, "content_type": content_type}
             if parent is not None:
                 evidence["parent_game_id"] = parent[0]
                 evidence["parent_name"] = parent[1]
-                suggested["parent_name"] = parent[1]
+                # By id, like every other bucket: the exact row this detector
+                # validated as primary, with no name re-resolution at apply time.
+                suggested["parent_game_id"] = parent[0]
             candidates.append(
                 {
                     "game_id": gid,
@@ -1540,6 +1570,7 @@ async def detect_misclassified_dlc(limit: int = 25, probe_steam: bool = True) ->
     # --- live probe: steam_type_mismatch ---
     probed = 0
     probe_remaining = 0
+    next_probe_offset: int | None = None
     skipped: list[dict] = []
     if probe_steam:
         async with get_db() as db:
@@ -1558,8 +1589,15 @@ async def detect_misclassified_dlc(limit: int = 25, probe_steam: bool = True) ->
                    ORDER BY spd.store_cached_at IS NOT NULL, spd.store_cached_at, g.id""",
                 (STEAM_APP_ID,),
             )
-        to_probe = list(steam_rows[:limit]) if limit and limit > 0 else []
-        probe_remaining = len(steam_rows) - len(to_probe)
+        # The tool is read-only, so the store_cached_at ordering never changes
+        # between calls — the caller advances the walk explicitly by passing
+        # back next_probe_offset. limit=0 means "no cap" (sibling detector
+        # convention), i.e. probe everything from probe_offset on.
+        start = max(0, probe_offset)
+        end = len(steam_rows) if limit <= 0 else start + limit
+        to_probe = list(steam_rows[start:end])
+        probe_remaining = max(0, len(steam_rows) - min(end, len(steam_rows)))
+        next_probe_offset = end if end < len(steam_rows) else None
 
         from ..data.steam_store import _parse_content_fields
 
@@ -1631,6 +1669,7 @@ async def detect_misclassified_dlc(limit: int = 25, probe_steam: bool = True) ->
         "counts": counts,
         "probed": probed,
         "probe_remaining": probe_remaining,
+        "next_probe_offset": next_probe_offset,
         "skipped": skipped,
     }
 

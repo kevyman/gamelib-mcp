@@ -11,7 +11,12 @@ from . import (
     _iter_chunks,
     get_db,
 )
-from ..content import CONTENT_BASE_GAME, ContentClassification, derive_is_primary
+from ..content import (
+    CONTENT_BASE_GAME,
+    NESTED_CONTENT_TYPES,
+    ContentClassification,
+    derive_is_primary,
+)
 from ..title_normalization import normalize_search_text
 
 logger = logging.getLogger(__name__)
@@ -148,11 +153,16 @@ async def upsert_game(
         updates = {"name": name, "name_normalized": normalize_search_text(name), **fields}
         # Never persist a self-referencing parent: it would orphan the row from
         # both search (the is_primary filter) and its parent's editions list. Drop
-        # the self-parent and keep the row a primary library item.
+        # the self-parent and keep the row a primary library item — forcing the
+        # content_type back to base_game too, so is_primary stays derived from
+        # content_type (a 'dlc' + primary row would be invisible to BOTH the
+        # games and addons views).
         if updates.get("parent_game_id") == game_id:
             updates["parent_game_id"] = None
             if "is_primary_library_item" in updates:
                 updates["is_primary_library_item"] = 1
+                if updates.get("content_type") in NESTED_CONTENT_TYPES:
+                    updates["content_type"] = CONTENT_BASE_GAME
         cols_sql = ", ".join(f"{column} = ?" for column in updates)
         await db.execute(
             f"UPDATE games SET {cols_sql} WHERE id = ?",
@@ -296,18 +306,44 @@ async def apply_content_classification(
             if resolved_parent is not None and "parent_game_id" not in overrides:
                 updates["parent_game_id"] = resolved_parent
             if "is_primary_library_item" not in overrides:
+                # Derive is_primary from the content_type that will ACTUALLY be
+                # stored: when the content_type write was skipped (pinned by a
+                # manual override), deriving from the incoming classification
+                # would desync the pair (e.g. a pinned 'dlc' row flipped primary
+                # by a later remaster verdict).
+                final_content_type = updates.get("content_type", row["content_type"])
                 updates["is_primary_library_item"] = int(
-                    derive_is_primary(classification.content_type)
+                    derive_is_primary(final_content_type)
                 )
 
         if not updates:
             return False
 
+        # Optimistic concurrency: the read→guard→write above spans awaits, and
+        # the Steam path has no claim serialization (a lazy detail-view enrich
+        # and the background store worker can race the same stale appid). Guard
+        # the UPDATE on the snapshot we judged against; losing the race means
+        # the other writer's verdict is at least as fresh — discard ours.
         cols_sql = ", ".join(f"{col} = ?" for col in updates)
-        await db.execute(
-            f"UPDATE games SET {cols_sql} WHERE id = ?",
-            (*updates.values(), game_id),
+        cursor = await db.execute(
+            f"""UPDATE games SET {cols_sql}
+                WHERE id = ? AND content_type IS ? AND parent_game_id IS ?
+                  AND is_primary_library_item = ?""",
+            (
+                *updates.values(),
+                game_id,
+                row["content_type"],
+                row["parent_game_id"],
+                row["is_primary_library_item"],
+            ),
         )
+        if cursor.rowcount == 0:
+            logger.debug(
+                "content classification (%s) for game %s lost a concurrent write; skipped",
+                source,
+                game_id,
+            )
+            return False
         await db.commit()
 
     logger.info("applied content classification (%s) to game %s: %s", source, game_id, updates)

@@ -334,9 +334,17 @@ async def enrich_game(appid: int, client: httpx.AsyncClient | None = None) -> di
     return dict(refreshed) if refreshed else None
 
 
-async def _fetch_all(appid: int, client: httpx.AsyncClient | None = None) -> tuple[dict | None, dict]:
-    """Fetch appdetails and appreviews concurrently. Returns (store_data, review_summary)."""
-    async def fetch_store(active_client: httpx.AsyncClient):
+async def fetch_store_appdetails(
+    appid: int, client: httpx.AsyncClient | None = None
+) -> dict | None:
+    """Fetch ONE app's appdetails ``data`` payload; None on failure/no data.
+
+    The store half of ``_fetch_all``, exposed on its own for callers that have
+    no use for the review summary (e.g. detect_misclassified_dlc's type probe)
+    — every request goes through the shared 1-req/s gate, so a discarded
+    reviews call would halve a probe's effective budget.
+    """
+    async def fetch(active_client: httpx.AsyncClient) -> dict | None:
         try:
             payload = await _steam_get_json_with_retry(
                 active_client,
@@ -354,6 +362,18 @@ async def _fetch_all(appid: int, client: httpx.AsyncClient | None = None) -> tup
         except Exception as exc:
             logger.warning("Steam store details fetch failed for %s: %s", appid, exc)
             return None
+
+    if client is not None:
+        return await fetch(client)
+
+    async with httpx.AsyncClient() as owned_client:
+        return await fetch(owned_client)
+
+
+async def _fetch_all(appid: int, client: httpx.AsyncClient | None = None) -> tuple[dict | None, dict]:
+    """Fetch appdetails and appreviews concurrently. Returns (store_data, review_summary)."""
+    async def fetch_store(active_client: httpx.AsyncClient):
+        return await fetch_store_appdetails(appid, client=active_client)
 
     async def fetch_reviews(active_client: httpx.AsyncClient):
         try:

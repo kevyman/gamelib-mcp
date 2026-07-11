@@ -724,7 +724,7 @@ async def detect_cross_platform_collapses(limit: int = 0) -> DetectCrossPlatform
 
 @mcp.tool(annotations=DIAGNOSTIC_NETWORK_TOOL)
 async def detect_misclassified_dlc(
-    limit: int = 25, probe_steam: bool = True
+    limit: int = 25, probe_steam: bool = True, probe_offset: int = 0
 ) -> DetectMisclassifiedDlcResponse:
     """
     Find primary library rows that are really nested content (DLC/soundtrack/etc).
@@ -748,16 +748,20 @@ async def detect_misclassified_dlc(
       dlc (or unknown_addon for soundtrack/artbook), plus parent_name if resolved.
 
     Live probe (probe_steam=True, default): walks owned-Steam base_game rows
-    oldest-cached first, capped at limit appdetails fetches, and flags rows Steam
-    itself calls dlc/music/demo (steam_type_mismatch). probed = fetches done this
-    call; probe_remaining = matching rows beyond the cap, so repeated calls walk
-    the whole library; per-appid fetch errors land in skipped. probe_steam=False
-    skips the network entirely (probed=0). limit bounds only the probe (offline
+    oldest-cached first, capped at limit appdetails fetches (limit=0 = no cap,
+    probe everything — rate-gated at ~1 request/second), and flags rows Steam
+    itself calls dlc/music/demo (steam_type_mismatch). The tool is read-only so
+    the ordering never changes between calls: to walk the whole library, pass
+    the returned next_probe_offset back as probe_offset on the next call
+    (next_probe_offset is null once the walk is complete). probed = fetches
+    done this call; probe_remaining = rows left beyond this call's window;
+    per-appid fetch errors land in skipped. probe_steam=False skips the network
+    entirely (probed=0). limit/probe_offset bound only the probe (offline
     buckets are capped at 200 each). Returns candidates, per-bucket counts, and
     the probe bookkeeping.
     """
     from .tools.admin import detect_misclassified_dlc as _detect_misclassified
-    return await _detect_misclassified(limit, probe_steam)
+    return await _detect_misclassified(limit, probe_steam, probe_offset)
 
 
 @mcp.tool(annotations=NETWORK_SYNC_TOOL)

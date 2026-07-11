@@ -1192,8 +1192,10 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
         )
         self.assertEqual(by_id[soundtrack]["evidence"]["matched_pattern"], "soundtrack")
 
-    async def test_addon_name_pattern_with_resolvable_parent_suggests_parent_name(self):
-        await seed_game("Elden Ring")
+    async def test_addon_name_pattern_with_resolvable_parent_suggests_parent_id(self):
+        # By id, like every other bucket: the exact row the detector validated
+        # as primary, with no name re-resolution at apply time.
+        parent = await seed_game("Elden Ring")
         pass_id = await seed_game("Elden Ring: Season Pass")
 
         result = await admin.detect_misclassified_dlc(probe_steam=False)
@@ -1201,8 +1203,23 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
         by_id = {c["game_id"]: c for c in self._by_reason(result, "addon_name_pattern")}
         self.assertEqual(
             by_id[pass_id]["suggested_update"],
-            {"game_id": pass_id, "content_type": "dlc", "parent_name": "Elden Ring"},
+            {"game_id": pass_id, "content_type": "dlc", "parent_game_id": parent},
         )
+
+    async def test_needs_parent_skips_desync_rows(self):
+        # An is_primary=0 row with a PRIMARY content_type is a desync artifact;
+        # its parent-only suggested_update would be rejected by update_game, so
+        # the bucket is restricted to genuinely nested content_types.
+        await seed_game("Desync Base")
+        desync = await seed_game(
+            "Desync Base: Weird Row",
+            content_type="base_game",
+            is_primary_library_item=0,
+        )
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        needs_parent_ids = {c["game_id"] for c in self._by_reason(result, "needs_parent")}
+        self.assertNotIn(desync, needs_parent_ids)
 
     async def test_addon_name_pattern_excludes_content_type_override(self):
         from gamelib_mcp.tools import platforms
@@ -1290,8 +1307,55 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
 
         self.assertEqual(result["probed"], 1)
         self.assertEqual(result["probe_remaining"], 1)
+        self.assertEqual(result["next_probe_offset"], 1)
         self.assertEqual(len(self._by_reason(result, "steam_type_mismatch")), 1)
         self.assertEqual(fetch_mock.await_count, 1)
+
+    async def test_probe_offset_walks_distinct_rows(self):
+        # The tool is read-only so the ordering never changes between calls —
+        # the walk advances by passing next_probe_offset back as probe_offset.
+        await make_steam_game("Walk One", 111)
+        await make_steam_game("Walk Two", 222)
+        await make_steam_game("Walk Three", 333)
+
+        seen: list[int] = []
+
+        async def fake_fetch(appid):
+            seen.append(appid)
+            return {"type": "game"}
+
+        offset = 0
+        with patch.object(
+            admin, "_fetch_steam_appdetails", AsyncMock(side_effect=fake_fetch)
+        ):
+            for _ in range(3):
+                result = await admin.detect_misclassified_dlc(
+                    limit=1, probe_steam=True, probe_offset=offset
+                )
+                self.assertEqual(result["probed"], 1)
+                if result["next_probe_offset"] is None:
+                    break
+                offset = result["next_probe_offset"]
+
+        self.assertEqual(sorted(seen), [111, 222, 333])
+        self.assertEqual(len(set(seen)), 3)
+        self.assertIsNone(result["next_probe_offset"])
+        self.assertEqual(result["probe_remaining"], 0)
+
+    async def test_probe_limit_zero_probes_all(self):
+        # limit=0 = no cap (sibling detector convention) — probe everything.
+        await make_steam_game("All One", 111)
+        await make_steam_game("All Two", 222)
+
+        with patch.object(
+            admin, "_fetch_steam_appdetails", AsyncMock(return_value={"type": "game"})
+        ) as fetch_mock:
+            result = await admin.detect_misclassified_dlc(limit=0, probe_steam=True)
+
+        self.assertEqual(result["probed"], 2)
+        self.assertEqual(fetch_mock.await_count, 2)
+        self.assertEqual(result["probe_remaining"], 0)
+        self.assertIsNone(result["next_probe_offset"])
 
     async def test_probe_fetch_error_is_skipped(self):
         err_game = await make_steam_game("Err Game", 111)

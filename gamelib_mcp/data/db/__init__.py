@@ -1098,8 +1098,12 @@ async def _migrate_v14_to_v15(db: aiosqlite.Connection, progress: _Progress | No
     if progress is not None:
         progress("Migrating to v15: repair self-referencing parent_game_id rows.")
 
+    # content_type is forced back to base_game alongside is_primary so the pair
+    # stays consistent (is_primary is always derived from content_type — a
+    # 'dlc' + primary row would be invisible to both games and addons views).
     await db.execute(
-        "UPDATE games SET parent_game_id = NULL, is_primary_library_item = 1 "
+        "UPDATE games SET parent_game_id = NULL, is_primary_library_item = 1, "
+        "content_type = 'base_game' "
         "WHERE parent_game_id = id"
     )
 

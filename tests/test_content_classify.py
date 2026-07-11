@@ -5,6 +5,8 @@ The pure classifier tests are sync; the writer tests use ToolDBTestCase (temp
 SQLite + real migrations) and exercise the production upsert paths.
 """
 
+import json
+
 from conftest import ToolDBTestCase, seed_game
 
 from gamelib_mcp.data import content
@@ -337,4 +339,78 @@ class ApplyContentClassificationTest(ToolDBTestCase):
         row = await _get_content_row(child_id)
         self.assertEqual(row["content_type"], content.CONTENT_DLC)
         self.assertIsNone(row["parent_game_id"])
+        self.assertEqual(row["is_primary_library_item"], 0)
+
+    async def test_pinned_content_type_keeps_is_primary_derived(self):
+        # A row pinned to 'dlc' whose is_primary override was later cleared
+        # (update_game clear_overrides=["is_primary_library_item"]) must not be
+        # flipped primary by a later non-default primary verdict: is_primary
+        # derives from the content_type ACTUALLY stored (the pinned 'dlc').
+        from gamelib_mcp.data.content import _primary
+        from gamelib_mcp.data.db import apply_content_classification, get_db
+
+        parent_id = await seed_game("Base Game")
+        child_id = await seed_game(
+            "Base Game: The DLC",
+            content_type=content.CONTENT_DLC,
+            parent_game_id=parent_id,
+            is_primary_library_item=0,
+        )
+        async with get_db() as db:
+            await db.execute(
+                "UPDATE games SET manual_overrides = ? WHERE id = ?",
+                (json.dumps(["content_type"]), child_id),
+            )
+            await db.commit()
+
+        # Non-default primary signal (remaster): content_type write is pinned
+        # away, so is_primary must stay derived from the stored 'dlc'.
+        await apply_content_classification(
+            child_id, _primary(content.CONTENT_REMASTER), source="test"
+        )
+        row = await _get_content_row(child_id)
+        self.assertEqual(row["content_type"], content.CONTENT_DLC)
+        self.assertEqual(row["is_primary_library_item"], 0)
+
+    async def test_concurrent_write_discards_stale_verdict(self):
+        # The read->guard->write spans awaits and the Steam path has no claim
+        # serialization: if another writer lands a fresh classification between
+        # our snapshot and our UPDATE, the compare-and-swap must discard ours.
+        from unittest.mock import patch
+
+        from gamelib_mcp.data.content import _primary
+        from gamelib_mcp.data.db import (
+            apply_content_classification,
+            get_db,
+            get_manual_overrides,
+        )
+        from gamelib_mcp.data.db import upserts as upserts_module
+
+        parent_id = await seed_game("Raced Base")
+        child_id = await seed_game("Raced Base: DLC")
+
+        async def overrides_with_concurrent_write(db, game_id):
+            # Simulate the other enricher committing a nested verdict between
+            # our snapshot read and our UPDATE.
+            async with get_db() as other:
+                await other.execute(
+                    "UPDATE games SET content_type = 'dlc', parent_game_id = ?, "
+                    "is_primary_library_item = 0 WHERE id = ?",
+                    (parent_id, game_id),
+                )
+                await other.commit()
+            return await get_manual_overrides(db, game_id)
+
+        with patch.object(
+            upserts_module, "get_manual_overrides", overrides_with_concurrent_write
+        ):
+            wrote = await apply_content_classification(
+                child_id, _primary(content.CONTENT_REMASTER), source="test"
+            )
+
+        self.assertFalse(wrote)
+        row = await _get_content_row(child_id)
+        # The concurrent (fresher) verdict survives; the stale one is discarded.
+        self.assertEqual(row["content_type"], content.CONTENT_DLC)
+        self.assertEqual(row["parent_game_id"], parent_id)
         self.assertEqual(row["is_primary_library_item"], 0)

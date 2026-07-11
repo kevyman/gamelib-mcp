@@ -511,15 +511,25 @@ async def get_library_stats(
     sort_dir = "ASC" if sort_by == "name" else "DESC"
 
     async with get_db() as db:
+        # parent.name rides along so addon listings (content="addons"/"all")
+        # can say which base game each nested row belongs to; primary rows have
+        # no parent, so the default games view is unaffected. The page is
+        # filtered/ordered in the subquery (bare column names — a direct join
+        # would make them ambiguous against games'), then the parent joined on.
         rows = await db.execute_fetchall(
             _GAME_ROLLUP_CTE
             + f"""
-            SELECT *
-            FROM game_rollup
-            {where}
-            ORDER BY {sort_col} {sort_dir} NULLS LAST, name ASC
-            LIMIT ?
-            OFFSET ?
+            SELECT filtered.*, parent.name AS parent_name
+            FROM (
+                SELECT *
+                FROM game_rollup
+                {where}
+                ORDER BY {sort_col} {sort_dir} NULLS LAST, name ASC
+                LIMIT ?
+                OFFSET ?
+            ) AS filtered
+            LEFT JOIN games parent ON parent.id = filtered.parent_game_id
+            ORDER BY filtered.{sort_col} {sort_dir} NULLS LAST, filtered.name ASC
             """,
             (*params, limit, offset),
         )

@@ -364,7 +364,17 @@ async def _match_batch_game(
     raw = name or ""
     queries = [raw]
     stripped = normalize_purchase_title(raw)
-    if stripped and normalize_search_text(stripped) != normalize_search_text(raw):
+    # The stripped tier is for reconciling BASE-GAME purchases whose storefront
+    # titles carry suffixes. Nested items must never use it: stripping an
+    # edition/upgrade suffix yields the base game's own name ("Hades: Deluxe
+    # Edition" -> "Hades"), which exact-matches the base row at rank 0 and would
+    # attach the nested item's spend to it — the exact corruption exact_only
+    # exists to prevent.
+    if (
+        not exact_only
+        and stripped
+        and normalize_search_text(stripped) != normalize_search_text(raw)
+    ):
         queries.append(stripped)
 
     for query in queries:
@@ -465,23 +475,39 @@ async def _apply_batch_item(
         # new purchased title becomes an owned library game. The matcher
         # (identifier → edition-stripped name → fuzzy) has already missed, so
         # this is a real gap, not a near-duplicate.
-        #
-        # Create under the edition-STRIPPED title, not the raw storefront one:
-        # an identifier-less import (eShop carries no title id) is reconciled by
-        # a later ownership sync via NAME, and that sync prepares the clean title
-        # ("Hollow Knight") — which can't adopt a row named "Hollow Knight –
-        # Nintendo Switch 2 Edition-upgradepack", so the raw name would strand a
-        # duplicate. Both forms already missed the library, so the clean name has
-        # no base row to collide with. When present, the store identifier is
-        # attached below as the stronger reconciliation key.
-        create_name = normalize_purchase_title(str(name)).strip() or str(name).strip()
+        nested = content_type is not None and content_type in NESTED_CONTENT_TYPES
+        if nested:
+            # A nested row's identity IS its full storefront title. Stripping an
+            # edition/upgrade suffix can collapse the name onto the base game's
+            # own ("Hades: Deluxe Edition" -> "Hades"), and upsert_game's name
+            # adoption would then DEMOTE the real base game to nested content
+            # instead of creating a child row. So: mint under the raw title,
+            # never adopt an existing row by name, and resolve the parent from
+            # the raw title too (stripping can delete the very separator the
+            # parent guess needs).
+            create_name = str(name).strip()
+        else:
+            # Create under the edition-STRIPPED title, not the raw storefront
+            # one: an identifier-less import (eShop carries no title id) is
+            # reconciled by a later ownership sync via NAME, and that sync
+            # prepares the clean title ("Hollow Knight") — which can't adopt a
+            # row named "Hollow Knight – Nintendo Switch 2 Edition-upgradepack",
+            # so the raw name would strand a duplicate. Both forms already
+            # missed the library, so the clean name has no base row to collide
+            # with. When present, the store identifier is attached below as the
+            # stronger reconciliation key.
+            create_name = (
+                normalize_purchase_title(str(name)).strip() or str(name).strip()
+            )
         # A nested content_type mints a nested row (content_type + is_primary=0)
         # linked to an existing parent when split_addon_title resolves one; a
         # primary/None content_type mints a base_game default (unchanged).
         mint_fields, mint_parent_id, mint_parent_name = await _addon_mint_fields(
             create_name, content_type
         )
-        new_id = await upsert_game(None, create_name, **mint_fields)
+        new_id = await upsert_game(
+            None, create_name, match_existing_by_name=not nested, **mint_fields
+        )
         async with get_db() as db:
             row = await db.execute_fetchone(
                 "SELECT id, name FROM games WHERE id = ?", (new_id,)
@@ -939,7 +965,12 @@ async def _apply_bundle_game(
                     created_result["parent_game_id"] = mint_parent_id
                     created_result["parent_name"] = mint_parent_name
             return created_result
-        game_id = await upsert_game(None, create_name, **mint_fields)
+        # A nested constituent must never ADOPT an existing row by name —
+        # upsert_game's lower(name) match could seize the base game itself and
+        # demote it with the mint fields (see _apply_batch_item's create path).
+        game_id = await upsert_game(
+            None, create_name, match_existing_by_name=not nested, **mint_fields
+        )
         async with get_db() as db:
             row = await db.execute_fetchone(
                 "SELECT id, name FROM games WHERE id = ?", (game_id,)
@@ -1144,10 +1175,10 @@ async def _import_one_source(
                     # parent a real mint would link so the preview is faithful.
                     entry = dict(item)
                     if nested:
-                        create_name = (
-                            normalize_purchase_title(str(item["name"])).strip()
-                            or str(item["name"]).strip()
-                        )
+                        # Mirror the real mint: nested rows keep their RAW title
+                        # (see _apply_batch_item), so the parent preview must
+                        # resolve from the raw title too.
+                        create_name = str(item["name"]).strip()
                         _, pid, pname = await _addon_mint_fields(
                             create_name, content_type
                         )
@@ -1403,12 +1434,15 @@ async def get_spending_stats(
         # by_family: content-grouped spend (base game + its DLC/expansions),
         # rooted at COALESCE(parent_game_id, id). Only families with a real
         # nested contributor (a priced row that is is_primary_library_item=0 AND
-        # parent_game_id IS NOT NULL) are surfaced. That HAVING clause also
-        # EXCLUDES orphan nested rows (parent_game_id NULL, is_primary=0): they
-        # root a singleton family whose only rows have a NULL parent, so the
-        # nested-contributor count is 0 — a lone addon with no base is noise the
-        # collapse detectors handle, not a family. base_spent is the root row's
-        # own spend (parent_game_id IS NULL), addon_spent the children's; the
+        # parent_game_id IS NOT NULL) are surfaced. Qualification is decided
+        # ACROSS the whole family — not per currency group — so a base game
+        # bought in USD with its expansion bought in EUR still surfaces both
+        # rows (one per currency; amounts are never summed across currencies).
+        # The qualifying filter also EXCLUDES orphan nested rows (parent NULL,
+        # is_primary=0): they root a singleton family whose only rows have a
+        # NULL parent — a lone addon with no base is noise the collapse
+        # detectors handle, not a family. base_spent is the root row's own
+        # spend (parent_game_id IS NULL), addon_spent the children's; the
         # root's name is taken from a join so it shows even when unpriced.
         # Playtime is the ROOT game's summed playtime across ALL its platforms
         # (unfiltered — "across platforms"), so family_cost_per_hour is null
@@ -1422,6 +1456,11 @@ async def get_spending_stats(
                            g.parent_game_id AS parent_game_id,
                            g.is_primary_library_item AS is_primary
                     {priced}
+                ),
+                qualifying AS (
+                    SELECT DISTINCT family_root
+                    FROM fam
+                    WHERE parent_game_id IS NOT NULL AND is_primary = 0
                 )
                 SELECT f.family_root AS family_game_id,
                        gr.name AS family_name,
@@ -1435,6 +1474,7 @@ async def get_spending_stats(
                                            THEN f.game_id END) AS addon_count,
                        ROUND(pt.total_minutes / 60.0, 1) AS family_playtime_hours
                 FROM fam f
+                JOIN qualifying q ON q.family_root = f.family_root
                 JOIN games gr ON gr.id = f.family_root
                 LEFT JOIN (
                     SELECT game_id, SUM(playtime_minutes) AS total_minutes
@@ -1443,8 +1483,6 @@ async def get_spending_stats(
                     GROUP BY game_id
                 ) pt ON pt.game_id = f.family_root
                 GROUP BY f.family_root, f.currency
-                HAVING SUM(CASE WHEN f.parent_game_id IS NOT NULL
-                                 AND f.is_primary = 0 THEN 1 ELSE 0 END) > 0
                 ORDER BY total_spent DESC""",
             params,
         )

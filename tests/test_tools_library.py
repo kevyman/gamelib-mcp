@@ -576,6 +576,14 @@ class LibraryStatsContentTests(ToolDBTestCase):
         self.assertEqual(
             [g["name"] for g in stats["results"]], ["Civilization VI: Gathering Storm"]
         )
+        # Addon listings say which base game each row belongs to (the
+        # GameSummary.parent_name contract); the default games view is
+        # unaffected (primary rows have no parent).
+        self.assertEqual(
+            stats["results"][0]["parent_name"], "Sid Meier's Civilization VI"
+        )
+        default_stats = await library.get_library_stats()
+        self.assertNotIn("parent_name", default_stats["results"][0])
 
     async def test_content_all_lists_both_primary_and_owned_nested(self):
         stats = await library.get_library_stats(content="all")

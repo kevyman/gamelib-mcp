@@ -94,7 +94,7 @@ EXPECTED_TOOLS = {
     "detect_stranded_duplicates": {"params": set(), "required": set()},
     "detect_cross_platform_collapses": {"params": {"limit"}, "required": set()},
     "detect_misclassified_dlc": {
-        "params": {"limit", "probe_steam"},
+        "params": {"limit", "probe_steam", "probe_offset"},
         "required": set(),
     },
     "revalidate_igdb_matches": {"params": {"dry_run", "limit"}, "required": set()},

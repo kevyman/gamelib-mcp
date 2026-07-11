@@ -30,9 +30,11 @@ from .db import (
 from .content import (
     CONTENT_DLC,
     CONTENT_EXPANSION,
+    NESTED_CONTENT_TYPES,
     classify_igdb_game,
     classify_title_override,
     content_type_from_igdb_category,
+    derive_is_primary,
 )
 from .tag_synonyms import canonical_tag
 from .tags import is_feature_flag
@@ -1139,15 +1141,28 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
             and row["parent_game_id"] is None
         )
         if not new_is_default or stored_is_default:
+            content_type = igdb_game.content_type
+            # Without a real (distinct) parent a nested item has nowhere to be
+            # reached from, so a self-referential parent forces the row to stay
+            # a primary BASE GAME — content_type included, keeping is_primary
+            # derived from content_type (a 'dlc' + primary row would be
+            # invisible to both the games and addons views).
+            if self_referential_parent and content_type in NESTED_CONTENT_TYPES:
+                content_type = "base_game"
             if "content_type" not in overrides:
-                updates["content_type"] = igdb_game.content_type
+                updates["content_type"] = content_type
             if parent_game_id is not None and "parent_game_id" not in overrides:
                 updates["parent_game_id"] = parent_game_id
-            # Without a real (distinct) parent a nested item has nowhere to be
-            # reached from, so a self-referential parent forces it to stay primary.
-            is_primary = igdb_game.is_primary_library_item or self_referential_parent
             if "is_primary_library_item" not in overrides:
-                updates["is_primary_library_item"] = int(is_primary)
+                # Derive from the content_type that will ACTUALLY be stored:
+                # when the content_type write was skipped (pinned by a manual
+                # override), deriving from the incoming value would desync the
+                # pair (e.g. a pinned 'dlc' row flipped primary by a later
+                # remaster verdict).
+                final_content_type = updates.get("content_type", row["content_type"])
+                updates["is_primary_library_item"] = int(
+                    derive_is_primary(final_content_type)
+                )
 
         cols_sql = ", ".join(f"{col} = ?" for col in updates)
         await db.execute(
@@ -1732,6 +1747,9 @@ async def fetch_igdb_game_names(igdb_ids: list[int]) -> dict[int, str]:
 _IGDB_CHILDREN_FIELDS = "fields dlcs.id, dlcs.name, expansions.id, expansions.name;"
 
 _IGDB_CHILDREN_CACHE_TTL_DAYS = 7
+# Failure markers expire fast: long enough to ride out an IGDB outage without
+# hammering the retry ladder from detail views, short enough to self-heal.
+_IGDB_CHILDREN_FAILURE_TTL_HOURS = 6
 
 
 async def fetch_igdb_children(igdb_id: int) -> list[dict] | None:
@@ -1778,19 +1796,26 @@ def _igdb_children_cache_key(igdb_id: int) -> str:
     return f"igdb_children:{igdb_id}"
 
 
-def _parse_igdb_children_cache(raw: str | None) -> tuple[datetime, list[dict]] | None:
-    """Parse a cached meta value, treating any malformed entry as absent."""
+def _parse_igdb_children_cache(
+    raw: str | None,
+) -> tuple[datetime, list[dict], bool] | None:
+    """Parse a cached meta value, treating any malformed entry as absent.
+
+    Returns (fetched_at, children, failed) — ``failed`` marks a short-lived
+    negative entry written after a fetch failure with no prior cache.
+    """
     if raw is None:
         return None
     try:
         data = json.loads(raw)
         fetched_at = datetime.fromisoformat(data["fetched_at"])
         children = data["children"]
+        failed = bool(data.get("failed", False))
         if not isinstance(children, list):
             return None
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None
-    return fetched_at, children
+    return fetched_at, children, failed
 
 
 async def get_igdb_children_cached(igdb_id: int) -> list[dict] | None:
@@ -1799,28 +1824,40 @@ async def get_igdb_children_cached(igdb_id: int) -> list[dict] | None:
     Mirrors ``data/series_gaps.py``'s series-member caching. A cache hit
     within TTL returns without a network call. On fetch failure (
     ``fetch_igdb_children`` returning ``None``) with a stale cache present,
-    serves the stale copy (logged); with no cache at all, returns ``None`` so
-    the caller can simply omit ``dlc_ownership`` rather than surface an
-    error. A game with NO children caches an empty list — itself a valid,
+    serves the stale copy (logged); with no cache at all, writes a short-lived
+    NEGATIVE entry (failed=True, ~6h TTL) and returns ``None`` — this runs
+    inline in get_game_detail, and without the marker an IGDB outage would
+    re-run the full retry ladder on every detail view of every affected game.
+    A later successful fetch overwrites the marker with a normal 7-day entry.
+    A game with NO children caches an empty list — itself a valid,
     cache-worthy answer that avoids refetching on every detail view.
     """
     key = _igdb_children_cache_key(igdb_id)
     cached = _parse_igdb_children_cache(await get_meta(key))
 
     if cached is not None:
-        fetched_at, children = cached
+        fetched_at, children, failed = cached
         age = datetime.now(timezone.utc) - fetched_at
-        if age < timedelta(days=_IGDB_CHILDREN_CACHE_TTL_DAYS):
-            return children
+        ttl = timedelta(
+            hours=_IGDB_CHILDREN_FAILURE_TTL_HOURS
+        ) if failed else timedelta(days=_IGDB_CHILDREN_CACHE_TTL_DAYS)
+        if age < ttl:
+            # A live failure marker suppresses refetching; the caller sees "no
+            # catalog" (dlc_ownership omitted), never an error.
+            return None if failed else children
 
     fetched = await fetch_igdb_children(igdb_id)
     if fetched is None:
-        if cached is not None:
+        if cached is not None and not cached[2]:
             logger.warning(
                 "IGDB children fetch failed for igdb_id=%s; serving stale cache",
                 igdb_id,
             )
             return cached[1]
+        now = datetime.now(timezone.utc).isoformat()
+        await set_meta(
+            key, json.dumps({"fetched_at": now, "children": [], "failed": True})
+        )
         return None
 
     now = datetime.now(timezone.utc).isoformat()

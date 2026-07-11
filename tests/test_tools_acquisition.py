@@ -1067,6 +1067,76 @@ class NestedContentGuardTests(ToolDBTestCase):
             count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
         self.assertEqual(count["c"], 1)
 
+    async def test_edition_mint_never_adopts_existing_base_game(self):
+        # "Hades: Deluxe Edition" strips to exactly "Hades" — upsert_game's
+        # lower(name) adoption would seize the real base game and demote it
+        # with the mint fields. Nested mints must create a NEW row under the
+        # RAW storefront title and leave the base untouched.
+        base = await seed_game("Hades")
+        await add_platform(base, "steam")
+        await acquisition.set_acquisition(
+            game_id=base, platform="steam", price_paid=24.99
+        )
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Hades: Deluxe Edition",
+                "platform": "steam",
+                "price_paid": 9.99,
+                "content_type": "edition",
+            }],
+            create_missing=True,
+        )
+        entry = result["results"][0]
+        self.assertEqual(entry["status"], "created")
+        self.assertNotEqual(entry["game_id"], base)
+        self.assertEqual(entry["matched_name"], "Hades: Deluxe Edition")
+        self.assertEqual(entry["parent_game_id"], base)
+
+        base_row = await _game_row(base)
+        self.assertEqual(base_row["content_type"], "base_game")
+        self.assertEqual(base_row["is_primary_library_item"], 1)
+        self.assertIsNone(base_row["parent_game_id"])
+        base_acq = await _acquisition_row(base, "steam")
+        self.assertEqual(base_acq["price_paid"], 24.99)
+
+        minted = await _game_row(entry["game_id"])
+        self.assertEqual(minted["content_type"], "edition")
+        self.assertEqual(minted["parent_game_id"], base)
+        self.assertEqual(minted["is_primary_library_item"], 0)
+
+    async def test_stripped_title_tier_disabled_for_nested_items(self):
+        # The edition-stripped query ("X - Game of the Year Edition" -> "X")
+        # rank-0 exact-matches the base game; for nested items that tier must
+        # be skipped entirely or the edition's spend lands on the base row.
+        base = await seed_game("The Witcher 3: Wild Hunt")
+        await add_platform(base, "gog")
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "The Witcher 3: Wild Hunt - Game of the Year Edition",
+                "platform": "gog",
+                "price_paid": 49.99,
+                "content_type": "edition",
+            }]
+        )
+        self.assertEqual(result["results"][0]["status"], "unmatched")
+        base_acq = await _acquisition_row(base, "gog")
+        self.assertIsNone(base_acq["price_paid"])
+
+        # Without a content_type the stripped tier still reconciles base-game
+        # purchases exactly as before (regression).
+        result2 = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "The Witcher 3: Wild Hunt - Game of the Year Edition",
+                "platform": "gog",
+                "price_paid": 49.99,
+            }]
+        )
+        entry2 = result2["results"][0]
+        self.assertEqual(entry2["game_id"], base)
+        self.assertEqual(entry2["match_type"], "name")
+
     async def test_exact_name_still_matches_nested_row(self):
         cp = await seed_game("Cyberpunk 2077")
         await add_platform(cp, "steam")
@@ -1364,6 +1434,39 @@ class SpendingByFamilyTests(ToolDBTestCase):
             f["family_game_id"] for f in families if f["currency"] == "USD"
         ]
         self.assertEqual(usd_order, [ids["elden"], ids["witcher"]])
+
+    async def test_by_family_base_currency_row_survives_cross_currency_family(self):
+        # Base bought in USD, its ONLY DLC bought in EUR: qualification is
+        # decided across the whole family, so the USD row (base_spent=60,
+        # addon_spent=0) must surface alongside the EUR row — a per-currency
+        # HAVING would hide the base spend entirely.
+        base = await seed_game("Cross Currency Base")
+        await add_platform(base, "steam", playtime_minutes=120)
+        await acquisition.set_acquisition(
+            game_id=base, platform="steam", price_paid=60.0
+        )
+        dlc = await seed_game(
+            "Cross Currency Base: DLC",
+            content_type="dlc",
+            parent_game_id=base,
+            is_primary_library_item=0,
+        )
+        await add_platform(dlc, "gog")
+        await acquisition.set_acquisition(
+            game_id=dlc, platform="gog", price_paid=30.0, price_currency="EUR"
+        )
+
+        stats = await acquisition.get_spending_stats()
+        by_key = {(f["family_game_id"], f["currency"]): f for f in stats["by_family"]}
+
+        usd = by_key[(base, "USD")]
+        self.assertEqual(usd["base_spent"], 60.0)
+        self.assertEqual(usd["addon_spent"], 0.0)
+        self.assertEqual(usd["total_spent"], 60.0)
+
+        eur = by_key[(base, "EUR")]
+        self.assertEqual(eur["base_spent"], 0.0)
+        self.assertEqual(eur["addon_spent"], 30.0)
 
     async def test_by_family_respects_filters(self):
         ids = await self._seed_families()
