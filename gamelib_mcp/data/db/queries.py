@@ -418,12 +418,41 @@ async def load_related_content_for_games(game_ids: Iterable[int]) -> dict[int, d
         game_id: {key: list(value) for key, value in empty.items()} for game_id in ids
     }
     for row in rows:
+        child_platforms = platforms_by_game.get(row["game_id"], [])
+
+        # Ownership mirrors tools/common.py::OWNED_SQL's notion (any
+        # game_platforms row with owned=1) — here expressed over the
+        # already-loaded platform dicts rather than a fresh EXISTS subquery,
+        # since load_platforms_for_games() already carries each row's `owned`.
+        owned = any(p["owned"] for p in child_platforms)
+
+        # A child can carry owned rows on multiple platforms (e.g. bought on
+        # both Steam and Switch2); hoist a single deterministic scalar rather
+        # than expose a list. Preference: among *owned* rows, the one with a
+        # non-null price_paid; ties/absences broken by earliest acquired_at,
+        # then lowest game_platform_id. If no owned row has a recorded price,
+        # all three hoisted fields are null (no owned row is preferred over
+        # another on acquired_at alone without a price to go with it).
+        priced_owned = [p for p in child_platforms if p["owned"] and p["price_paid"] is not None]
+        priced_owned.sort(
+            key=lambda p: (
+                p["acquired_at"] is None,
+                p["acquired_at"] or "",
+                p["game_platform_id"],
+            )
+        )
+        best = priced_owned[0] if priced_owned else None
+
         entry = {
             "game_id": row["game_id"],
             "name": row["name"],
             "content_type": row["content_type"],
             "is_primary_library_item": bool(row["is_primary_library_item"]),
-            "platforms": platforms_by_game.get(row["game_id"], []),
+            "platforms": child_platforms,
+            "owned": owned,
+            "price_paid": best["price_paid"] if best else None,
+            "price_currency": best["price_currency"] if best else None,
+            "acquired_at": best["acquired_at"] if best else None,
         }
         grouped[row["parent_game_id"]][_related_content_group(row["content_type"])].append(entry)
 

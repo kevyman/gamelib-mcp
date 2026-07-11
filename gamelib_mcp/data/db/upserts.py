@@ -1,6 +1,7 @@
 """Game/platform/identifier/enrichment upserts, incl. bulk Steam library sync."""
 
 import json
+import logging
 from datetime import datetime, timezone
 
 from . import (
@@ -10,7 +11,15 @@ from . import (
     _iter_chunks,
     get_db,
 )
+from ..content import (
+    CONTENT_BASE_GAME,
+    NESTED_CONTENT_TYPES,
+    ContentClassification,
+    derive_is_primary,
+)
 from ..title_normalization import normalize_search_text
+
+logger = logging.getLogger(__name__)
 
 # games columns the update_game tool may set manually. A subset of these is
 # recorded per-row in games.manual_overrides so background sync/enrichment knows
@@ -144,11 +153,16 @@ async def upsert_game(
         updates = {"name": name, "name_normalized": normalize_search_text(name), **fields}
         # Never persist a self-referencing parent: it would orphan the row from
         # both search (the is_primary filter) and its parent's editions list. Drop
-        # the self-parent and keep the row a primary library item.
+        # the self-parent and keep the row a primary library item — forcing the
+        # content_type back to base_game too, so is_primary stays derived from
+        # content_type (a 'dlc' + primary row would be invisible to BOTH the
+        # games and addons views).
         if updates.get("parent_game_id") == game_id:
             updates["parent_game_id"] = None
             if "is_primary_library_item" in updates:
                 updates["is_primary_library_item"] = 1
+                if updates.get("content_type") in NESTED_CONTENT_TYPES:
+                    updates["content_type"] = CONTENT_BASE_GAME
         cols_sql = ", ".join(f"{column} = ?" for column in updates)
         await db.execute(
             f"UPDATE games SET {cols_sql} WHERE id = ?",
@@ -156,6 +170,184 @@ async def upsert_game(
         )
         await db.commit()
         return game_id
+
+
+async def resolve_parent_game(
+    name: str | None,
+    *,
+    steam_appid: int | None = None,
+    exclude_game_id: int | None = None,
+    create: bool = False,
+) -> int | None:
+    """Find (or optionally mint) the games row a nested item belongs under.
+
+    Used by non-IGDB classifiers (Steam store enrichment, purchase importers) to
+    resolve a parent before writing content classification. Tries the Steam
+    ``steam_appid`` identifier first, then an exact ``lower(name)`` match, then a
+    normalized-name match (same fallback ladder upsert_game/adopt use). A
+    candidate equal to ``exclude_game_id`` (the child itself) is never returned.
+    With ``create=True`` and a non-empty name, an unmatched name mints a bare
+    primary row via upsert_game; ``create=False`` returns None instead.
+    """
+    if steam_appid is not None:
+        from .queries import get_game_by_identifier
+
+        row = await get_game_by_identifier(STEAM_APP_ID, str(steam_appid))
+        if row is not None and row["id"] != exclude_game_id:
+            return row["id"]
+
+    cleaned = name.strip() if name else ""
+    if cleaned:
+        async with get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT id FROM games WHERE lower(name) = lower(?) ORDER BY id LIMIT 1",
+                (cleaned,),
+            )
+            if row is None:
+                normalized = normalize_search_text(cleaned)
+                if normalized:
+                    row = await db.execute_fetchone(
+                        "SELECT id FROM games WHERE COALESCE(name_normalized, '') = ? "
+                        "ORDER BY id LIMIT 1",
+                        (normalized,),
+                    )
+        if row is not None and row["id"] != exclude_game_id:
+            return row["id"]
+
+    if create and cleaned:
+        return await upsert_game(None, cleaned)
+
+    return None
+
+
+async def apply_content_classification(
+    game_id: int,
+    classification: ContentClassification,
+    *,
+    source: str,
+    parent_game_id: int | None = None,
+) -> bool:
+    """Write a ContentClassification onto a games row, honoring the shared guards.
+
+    The reusable writer behind non-IGDB classifiers (Steam store enrichment,
+    purchase importers). It never mints parent rows: callers that want minting
+    resolve the parent themselves (e.g. resolve_parent_game(create=True)) and
+    pass it as ``parent_game_id`` — supplying that kwarg skips resolution
+    entirely. Otherwise the parent is resolved (non-minting) from the
+    classification's parent_steam_appid, then parent_igdb_id, then parent_name.
+
+    Guards, in order, kept faithful to igdb.py::_apply_igdb_metadata (the two
+    MUST stay in sync — see the mirroring note there):
+      1. manual-overrides skip — content_type/parent_game_id/is_primary_library_item
+         writes are dropped for any column the user pinned via update_game.
+      2. default-clobber guard — a bare base_game/primary/no-parent signal never
+         overwrites a stored non-default classification (a later Steam/purchase
+         pass must not flip a nested DLC back to a primary library item).
+      3. self-parent guard — a parent equal to game_id is dropped (the row keeps
+         its content_type, parent nulled).
+    is_primary_library_item is always derived from content_type via
+    derive_is_primary, never taken from the classification independently.
+    Returns True iff a write happened; ``source`` labels the log line only.
+    """
+    resolved_parent = parent_game_id
+    # Each parent id is tried in strength order, but a miss falls through to
+    # the next: a Steam fullgame appid the library doesn't know must not block
+    # resolving the same parent by name (e.g. base game owned on GOG).
+    if resolved_parent is None and classification.parent_steam_appid is not None:
+        resolved_parent = await resolve_parent_game(
+            None,
+            steam_appid=classification.parent_steam_appid,
+            exclude_game_id=game_id,
+        )
+    if resolved_parent is None and classification.parent_igdb_id is not None:
+        from .queries import get_game_by_igdb_id
+
+        parent = await get_game_by_igdb_id(classification.parent_igdb_id)
+        if parent is not None and parent["id"] != game_id:
+            resolved_parent = parent["id"]
+    if resolved_parent is None and classification.parent_name:
+        resolved_parent = await resolve_parent_game(
+            classification.parent_name, exclude_game_id=game_id, create=False
+        )
+
+    # Self-parent guard: a parent that is the row itself would orphan it (excluded
+    # from search/rollups by the is_primary filter yet unreachable as any other
+    # row's edition), so drop it and keep the content_type write.
+    if resolved_parent == game_id:
+        resolved_parent = None
+
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            "SELECT content_type, parent_game_id, is_primary_library_item "
+            "FROM games WHERE id = ?",
+            (game_id,),
+        )
+        if row is None:
+            return False
+
+        overrides = await get_manual_overrides(db, game_id)
+
+        # Default-clobber guard — mirrors igdb.py's new_is_default/stored_is_default.
+        new_is_default = (
+            classification.content_type == CONTENT_BASE_GAME
+            and classification.is_primary_library_item
+            and resolved_parent is None
+        )
+        stored_is_default = (
+            row["content_type"] == CONTENT_BASE_GAME
+            and bool(row["is_primary_library_item"])
+            and row["parent_game_id"] is None
+        )
+
+        updates: dict = {}
+        if not new_is_default or stored_is_default:
+            if "content_type" not in overrides:
+                updates["content_type"] = classification.content_type
+            if resolved_parent is not None and "parent_game_id" not in overrides:
+                updates["parent_game_id"] = resolved_parent
+            if "is_primary_library_item" not in overrides:
+                # Derive is_primary from the content_type that will ACTUALLY be
+                # stored: when the content_type write was skipped (pinned by a
+                # manual override), deriving from the incoming classification
+                # would desync the pair (e.g. a pinned 'dlc' row flipped primary
+                # by a later remaster verdict).
+                final_content_type = updates.get("content_type", row["content_type"])
+                updates["is_primary_library_item"] = int(
+                    derive_is_primary(final_content_type)
+                )
+
+        if not updates:
+            return False
+
+        # Optimistic concurrency: the read→guard→write above spans awaits, and
+        # the Steam path has no claim serialization (a lazy detail-view enrich
+        # and the background store worker can race the same stale appid). Guard
+        # the UPDATE on the snapshot we judged against; losing the race means
+        # the other writer's verdict is at least as fresh — discard ours.
+        cols_sql = ", ".join(f"{col} = ?" for col in updates)
+        cursor = await db.execute(
+            f"""UPDATE games SET {cols_sql}
+                WHERE id = ? AND content_type IS ? AND parent_game_id IS ?
+                  AND is_primary_library_item = ?""",
+            (
+                *updates.values(),
+                game_id,
+                row["content_type"],
+                row["parent_game_id"],
+                row["is_primary_library_item"],
+            ),
+        )
+        if cursor.rowcount == 0:
+            logger.debug(
+                "content classification (%s) for game %s lost a concurrent write; skipped",
+                source,
+                game_id,
+            )
+            return False
+        await db.commit()
+
+    logger.info("applied content classification (%s) to game %s: %s", source, game_id, updates)
+    return True
 
 
 async def upsert_game_platform(

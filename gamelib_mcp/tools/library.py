@@ -25,6 +25,8 @@ VALID_FILTERS = {
     "playing", "completed", "abandoned", "evergreen",
 }
 
+VALID_CONTENT = {"games", "addons", "all"}
+
 ResponseFormat = Literal["concise", "detailed"]
 
 SORT_COLUMNS = {
@@ -148,6 +150,11 @@ async def search_games(
         fuzzy_results = await _fuzzy_search(query, platform, limit, offset, response_format)
         if fuzzy_results is not None:
             return fuzzy_results
+        nested_results = await _nested_content_fallback(
+            query, platform, limit, offset, response_format
+        )
+        if nested_results is not None:
+            return nested_results
 
     return _envelope(
         await _format_rows(rows, response_format=response_format),
@@ -268,6 +275,70 @@ async def _alias_search(
     )
 
 
+async def _nested_content_fallback(
+    query: str,
+    platform: str | None,
+    limit: int,
+    offset: int,
+    response_format: ResponseFormat,
+) -> dict | None:
+    """Primary-item tiers + alias + fuzzy all found nothing — retry the tiered
+    name match restricted to nested content (DLC/expansions/editions,
+    is_primary_library_item=0). Primary rows were already covered by the first
+    pass, so this only searches the rows that pass excluded. None = no match.
+    """
+    match = build_name_match(
+        query, column="gr.name_normalized", use_fts=fts_ready(), id_column="gr.game_id"
+    )
+    if not match.fuzzy_eligible:
+        return None
+
+    conditions = [match.where_sql, "gr.is_primary_library_item = 0"]
+    params: list = list(match.where_params)
+    if platform:
+        conditions.append(
+            "gr.game_id IN (SELECT game_id FROM game_platforms WHERE platform = ? AND owned = 1)"
+        )
+        params.append(platform)
+    where = " AND ".join(conditions)
+
+    async with get_db() as db:
+        total = await db.execute_fetchone(
+            _GAME_ROLLUP_CTE
+            + f"""
+            SELECT COUNT(*) AS c
+            FROM game_rollup gr
+            WHERE {where}
+            """,
+            tuple(params),
+        )
+        if total["c"] == 0:
+            return None
+
+        rows = await db.execute_fetchall(
+            _GAME_ROLLUP_CTE
+            + f"""
+            SELECT gr.*, parent.name AS parent_name,
+                   'nested_content' AS match_type,
+                   {match.rank_sql} AS match_rank
+            FROM game_rollup gr
+            LEFT JOIN games parent ON parent.id = gr.parent_game_id
+            WHERE {where}
+            ORDER BY match_rank ASC, gr.total_playtime_minutes DESC, gr.name ASC
+            LIMIT ?
+            OFFSET ?
+            """,
+            (*match.rank_params, *params, limit, offset),
+        )
+
+    return _envelope(
+        await _format_rows(rows, response_format=response_format),
+        total["c"],
+        limit,
+        offset,
+    )
+
+
 async def search_games_batch(
     queries: list[str],
     limit_per_query: int = 5,
@@ -297,6 +368,10 @@ async def search_games_batch(
         fuzzy = await _fuzzy_search(query, None, limit_per_query, 0, "detailed")
         if fuzzy is not None:
             results[query] = fuzzy["results"]
+            continue
+        nested = await _nested_content_fallback(query, None, limit_per_query, 0, "detailed")
+        if nested is not None:
+            results[query] = nested["results"]
     return results
 
 
@@ -314,6 +389,7 @@ async def get_library_stats(
     tags: list[str] | None = None,
     genres: list[str] | None = None,
     series: list[str] | None = None,
+    content: str = "games",
 ) -> dict:
     """
     Return filtered/sorted game list plus aggregate stats.
@@ -325,6 +401,10 @@ async def get_library_stats(
     platform: steam | epic | gog | ps5 | nintendo | switch2 (optional — filter to games owned on that platform)
     tags / genres / series: case-insensitive; a game must carry EVERY listed entry.
     series matches IGDB collections/franchises (e.g. "The Legend of Zelda").
+    content: games (default — is_primary_library_item=1, today's behavior) |
+    addons (only DLC/expansion/edition rows, is_primary_library_item=0) | all
+    (both). Only affects the listed/aggregated rows themselves — the always-
+    present addons block below is computed independently of this param.
 
     Note: min_metacritic, min_opencritic, and max_hltb_hours exclude games with
     no score / no HLTB data (NULL), so even min_metacritic=0 drops unscored games.
@@ -334,12 +414,19 @@ async def get_library_stats(
     inflates total_games/backlog totals here (use search_games or get_wishlist
     to look up wishlist entries). is_primary_library_item is a content-type
     flag (real game vs DLC/soundtrack/edition), not an ownership signal.
+
+    Regardless of content/filter, the response always carries an additive
+    addons block — {count, spend: {currency: total_price_paid}, top_parents:
+    [{game_id, name, addon_count}] up to 5} — summarizing owned nested content
+    library-wide, the same way spending summarizes acquisition cost.
     """
     limit = _clamp_limit(limit)
     if filter not in VALID_FILTERS:
         raise ToolError(f"Unknown filter '{filter}'. Valid: {sorted(VALID_FILTERS)}")
     if sort_by not in SORT_COLUMNS:
         raise ToolError(f"Unknown sort_by '{sort_by}'. Valid: {sorted(SORT_COLUMNS)}")
+    if content not in VALID_CONTENT:
+        raise ToolError(f"Unknown content '{content}'. Valid: {sorted(VALID_CONTENT)}")
     if protondb_tier is not None:
         from ..data.protondb import TIER_ORDER
 
@@ -352,7 +439,12 @@ async def get_library_stats(
     # also surfaces wishlist-only rows so they can be looked up by name) — a
     # wishlist sync creates a games row with no owned game_platforms row at
     # all, and such a row must not count toward library totals/backlog here.
-    conditions = ["is_primary_library_item = 1", "owned = 1"]
+    if content == "games":
+        conditions = ["is_primary_library_item = 1", "owned = 1"]
+    elif content == "addons":
+        conditions = ["is_primary_library_item = 0", "owned = 1"]
+    else:  # "all"
+        conditions = ["owned = 1"]
     params: list = []
 
     if filter == "unplayed":
@@ -419,15 +511,25 @@ async def get_library_stats(
     sort_dir = "ASC" if sort_by == "name" else "DESC"
 
     async with get_db() as db:
+        # parent.name rides along so addon listings (content="addons"/"all")
+        # can say which base game each nested row belongs to; primary rows have
+        # no parent, so the default games view is unaffected. The page is
+        # filtered/ordered in the subquery (bare column names — a direct join
+        # would make them ambiguous against games'), then the parent joined on.
         rows = await db.execute_fetchall(
             _GAME_ROLLUP_CTE
             + f"""
-            SELECT *
-            FROM game_rollup
-            {where}
-            ORDER BY {sort_col} {sort_dir} NULLS LAST, name ASC
-            LIMIT ?
-            OFFSET ?
+            SELECT filtered.*, parent.name AS parent_name
+            FROM (
+                SELECT *
+                FROM game_rollup
+                {where}
+                ORDER BY {sort_col} {sort_dir} NULLS LAST, name ASC
+                LIMIT ?
+                OFFSET ?
+            ) AS filtered
+            LEFT JOIN games parent ON parent.id = filtered.parent_game_id
+            ORDER BY filtered.{sort_col} {sort_dir} NULLS LAST, filtered.name ASC
             """,
             (*params, limit, offset),
         )
@@ -466,8 +568,43 @@ async def get_library_stats(
                ORDER BY total_spent DESC"""
         )
 
+        # addons block: always present, independent of the `content` param
+        # (same pattern as `spending` above) — a library-wide summary of owned
+        # nested content (DLC/expansions/editions). "Owned" here follows the
+        # OWNED_SQL notion in tools/common.py: a nested games row counts once
+        # it has at least one owned game_platforms row.
+        addons_summary = await db.execute_fetchone(
+            f"""SELECT COUNT(*) AS count
+                FROM games g
+                WHERE g.is_primary_library_item = 0 AND {_OWNED_SQL}"""
+        )
+        addons_spend_rows = await db.execute_fetchall(
+            """SELECT gp.price_currency AS currency,
+                      ROUND(SUM(gp.price_paid), 2) AS total_spent
+               FROM game_platforms gp
+               JOIN games g ON g.id = gp.game_id
+               WHERE gp.owned = 1 AND gp.price_paid IS NOT NULL
+                     AND g.is_primary_library_item = 0
+               GROUP BY gp.price_currency"""
+        )
+        addons_top_parents = await db.execute_fetchall(
+            f"""SELECT parent.id AS game_id, parent.name AS name,
+                       COUNT(*) AS addon_count
+                FROM games g
+                JOIN games parent ON parent.id = g.parent_game_id
+                WHERE g.is_primary_library_item = 0 AND {_OWNED_SQL}
+                GROUP BY parent.id, parent.name
+                ORDER BY addon_count DESC, parent.name ASC
+                LIMIT 5"""
+        )
+
     spend_owned_rows = spend_summary["owned_rows"] or 0
     spend_priced_rows = spend_summary["priced_rows"] or 0
+    addons_block = {
+        "count": addons_summary["count"] or 0,
+        "spend": {row["currency"]: row["total_spent"] for row in addons_spend_rows},
+        "top_parents": [dict(r) for r in addons_top_parents],
+    }
     return {
         "total_games": summary["total_games"],
         "played": summary["played"] or 0,
@@ -487,6 +624,7 @@ async def get_library_stats(
                 else 0.0
             ),
         },
+        "addons": addons_block,
         "results": await _format_rows(rows, response_format=response_format),
         "total_matches": summary["total_games"],
         "has_more": offset + len(rows) < summary["total_games"],
@@ -538,6 +676,8 @@ def _format_game(row, platforms: list[dict], response_format: ResponseFormat) ->
         game["match_type"] = row["match_type"]
     if "matched_alias" in row_keys and row["matched_alias"]:
         game["matched_alias"] = row["matched_alias"]
+    if "parent_name" in row_keys and row["parent_name"]:
+        game["parent_name"] = row["parent_name"]
     if response_format == "detailed":
         game["platforms"] = platforms
     return game

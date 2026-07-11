@@ -97,6 +97,49 @@ class ApplyIgdbMetadataGuardTests(ToolDBTestCase):
         after = await _read_classification(game_id)
         self.assertIsNone(after["parent_game_id"])
         self.assertEqual(after["is_primary_library_item"], 1)
+        # is_primary is always DERIVED from content_type: forcing the row
+        # primary must force the nested content_type back to base_game too —
+        # a 'edition' + primary row would be invisible to both the games and
+        # addons views.
+        self.assertEqual(after["content_type"], "base_game")
+
+    async def test_pinned_content_type_keeps_is_primary_derived(self) -> None:
+        # A row pinned to 'dlc' whose is_primary override was later cleared
+        # (update_game clear_overrides=["is_primary_library_item"]) must NOT be
+        # flipped primary by a later non-default primary verdict: is_primary
+        # derives from the content_type that is ACTUALLY stored (the pinned
+        # 'dlc'), not the incoming one.
+        parent_id = await seed_game("Bloodborne")
+        dlc_id = await seed_game(
+            "Bloodborne: The Old Hunters",
+            content_type="dlc",
+            parent_game_id=parent_id,
+            is_primary_library_item=0,
+        )
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET manual_overrides = ? WHERE id = ?",
+                (json.dumps(["content_type"]), dlc_id),
+            )
+            await db.commit()
+
+        # Non-default primary verdict (remaster) — content_type write is pinned
+        # away, so is_primary must stay derived from the stored 'dlc'.
+        await igdb._apply_igdb_metadata(
+            dlc_id,
+            igdb.IGDBGame(
+                igdb_id=4000,
+                name="Bloodborne: The Old Hunters",
+                category=9,
+                first_release_date=None,
+                content_type="remaster",
+                is_primary_library_item=True,
+            ),
+        )
+
+        after = await _read_classification(dlc_id)
+        self.assertEqual(after["content_type"], "dlc")
+        self.assertEqual(after["is_primary_library_item"], 0)
 
 
 class UpsertGameSelfParentTests(ToolDBTestCase):
@@ -114,11 +157,15 @@ class UpsertGameSelfParentTests(ToolDBTestCase):
         self.assertEqual(returned_id, game_id)
         async with db_module.get_db() as db:
             row = await db.execute_fetchone(
-                "SELECT parent_game_id, is_primary_library_item FROM games WHERE id = ?",
+                "SELECT parent_game_id, is_primary_library_item, content_type "
+                "FROM games WHERE id = ?",
                 (game_id,),
             )
         self.assertIsNone(row["parent_game_id"])
         self.assertEqual(row["is_primary_library_item"], 1)
+        # Forcing primary forces the nested content_type back to base_game so
+        # the pair stays consistent (is_primary is derived from content_type).
+        self.assertEqual(row["content_type"], "base_game")
 
 
 class ApplyIgdbMetadataTagUnionTests(ToolDBTestCase):

@@ -45,6 +45,10 @@ class GameSummary(FlexibleModel):
     wishlisted: bool | None = None
     play_state: str | None = None
     matched_alias: str | None = None
+    # Only populated for nested-content search hits (match_type="nested_content")
+    # and addon listings — the name of the parent game this DLC/expansion/
+    # edition belongs to.
+    parent_name: str | None = None
     tags: list[str] | None = None
     series: list[Any] | None = None
     suggested_platform: str | None = None
@@ -133,6 +137,10 @@ class LibraryStatsResponse(PaginatedGamesResponse):
     # Library-wide spending summary over owned rows (per-currency totals,
     # never cross-currency) — independent of the current filter parameters.
     spending: dict[str, Any]
+    # Always-present, additive summary of owned nested content (DLC/expansions/
+    # editions), independent of the `content` param: {count, spend:
+    # {currency: total_price_paid}, top_parents: [{game_id, name, addon_count}]}.
+    addons: dict[str, Any] | None = None
 
 
 class GameRating(FlexibleModel):
@@ -244,8 +252,13 @@ class DetectStrandedDuplicatesResponse(FlexibleModel):
 
 
 class PlatformBreakdownResponse(FlexibleModel):
+    # Each by_platform entry: {platform, owned_games (primary items only),
+    # owned_addons (owned DLC/expansions/editions on that platform)}.
     by_platform: list[dict[str, Any]]
     total_unique_games: int
+    # Owned nested-content rows (DLC/expansions/editions/bundles), counted
+    # separately from total_unique_games so addon ownership doesn't inflate it.
+    total_unique_addons: int
     overlap_count: int
     overlap_games: list[dict[str, Any]]
 
@@ -297,6 +310,9 @@ class WishlistItem(FlexibleModel):
     wishlisted_at: str | None = None
     source: str | None = None
     owned: bool
+    # base_game (the common case) or a nested type (dlc/expansion/edition/…)
+    # when the wishlisted item is itself DLC/an edition rather than a base game.
+    content_type: str | None = None
 
 
 class GetWishlistResponse(FlexibleModel):
@@ -417,6 +433,13 @@ class SpendingStatsResponse(FlexibleModel):
     by_source: list[dict[str, Any]]
     by_platform: list[dict[str, Any]]
     by_bundle: list[dict[str, Any]]
+    # Content-grouped spend: base game + its owned DLC/expansions rolled up per
+    # content family (root COALESCE(parent_game_id, id)), only for families with
+    # a real nested addon, top 10 per currency. Each: {family_game_id,
+    # family_name, currency, base_spent, addon_spent, total_spent, addon_count,
+    # family_playtime_hours, family_cost_per_hour}. Distinct from by_bundle,
+    # which groups by a purchase's bundle_name.
+    by_family: list[dict[str, Any]]
     top_expensive: list[dict[str, Any]]
     cost_per_hour: dict[str, Any]
 
@@ -451,6 +474,18 @@ class DetectCrossPlatformCollapsesResponse(FlexibleModel):
     collapsed_count: int
     candidates: list[dict[str, Any]]
     igdb_configured: bool
+
+
+class DetectMisclassifiedDlcResponse(FlexibleModel):
+    # Each candidate: {game_id, name, reason (bucket), evidence, suggested_update
+    # (ready-to-apply update_game kwargs, or null)}. counts maps each bucket to
+    # its candidate count; probed/probe_remaining track the live Steam probe;
+    # skipped lists appids whose live fetch errored.
+    candidates: list[dict[str, Any]]
+    counts: dict[str, int]
+    probed: int
+    probe_remaining: int
+    skipped: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class RevalidateIgdbMatchesResponse(FlexibleModel):

@@ -32,6 +32,7 @@ from .tools.models import (
     DetectCollapsedGamesResponse,
     DetectCrossPlatformCollapsesResponse,
     DetectFarmedGamesResponse,
+    DetectMisclassifiedDlcResponse,
     DetectOrphanGamesResponse,
     DetectStrandedDuplicatesResponse,
     DiagnoseScrapeResponse,
@@ -125,9 +126,13 @@ async def search_games(
 
     Matching is punctuation-insensitive and token-based ("sekiro shadow" finds
     "Sekiro: Shadows Die Twice"), ranked by relevance, with a fuzzy fallback
-    for misspellings (those results carry match_type="fuzzy"). Prefer
-    get_game_detail after selecting one result. platform can filter to steam,
-    epic, gog, nintendo, switch2, or ps5. series restricts to a single
+    for misspellings (those results carry match_type="fuzzy"). When nothing at
+    all matches among real games, a final fallback searches DLC/expansions/
+    editions (match_type="nested_content", with a parent_name naming the base
+    game, e.g. "Phantom Liberty — expansion of Cyberpunk 2077") — this only
+    fires when the query itself matches nothing, not for filters-only browsing.
+    Prefer get_game_detail after selecting one result. platform can filter to
+    steam, epic, gog, nintendo, switch2, or ps5. series restricts to a single
     game series (IGDB collection/franchise) by exact, case-insensitive name —
     pass an empty query to browse a whole series, e.g.
     search_games("", series="The Legend of Zelda"). Each result carries its
@@ -144,8 +149,11 @@ async def search_games_batch(queries: list[str], limit_per_query: int = 5) -> Se
     Look up multiple game names in one read-only call.
 
     Use this instead of repeatedly calling search_games when comparing or resolving
-    several titles. limit_per_query caps matches per query. Returns a dictionary
-    keyed by the original query, with matching game summary lists as values.
+    several titles. limit_per_query caps matches per query. Shares search_games's
+    fuzzy and nested-content (DLC/expansion/edition, match_type="nested_content")
+    fallbacks per name when the tiered name match finds nothing. Returns a
+    dictionary keyed by the original query, with matching game summary lists as
+    values.
     """
     from .tools.library import search_games_batch as _batch
     return await _batch(queries, limit_per_query)
@@ -166,6 +174,7 @@ async def get_library_stats(
     tags: list[str] | None = None,
     genres: list[str] | None = None,
     series: list[str] | None = None,
+    content: str = "games",
 ) -> LibraryStatsResponse:
     """
     Get aggregate library stats plus a filtered and sorted game list.
@@ -181,11 +190,16 @@ async def get_library_stats(
     genres=["RPG"] with max_hltb_hours=10 for short RPGs; series=["Final
     Fantasy"] for one IGDB collection/franchise). protondb_tier
     accepts native, platinum, gold, silver, bronze, or borked. platform can
-    filter to steam, epic, gog, nintendo, switch2, or ps5.
-    response_format=concise omits platform arrays. Returns aggregate counts,
-    paged results, total_matches, and has_more, plus a library-wide spending
-    summary (per-currency totals over owned rows with a recorded price and
-    price coverage — see set_acquisition / get_spending_stats).
+    filter to steam, epic, gog, nintendo, switch2, or ps5. content accepts
+    games (default: real games only, today's behavior), addons (DLC/
+    expansions/editions only), or all (both) — it only changes which rows are
+    listed and aggregated. response_format=concise omits platform arrays.
+    Returns aggregate counts, paged results, total_matches, and has_more, plus
+    a library-wide spending summary (per-currency totals over owned rows with
+    a recorded price and price coverage — see set_acquisition /
+    get_spending_stats) and an always-present addons block summarizing owned
+    DLC/expansions/editions library-wide (count, per-currency spend, and up to
+    5 top_parents by owned addon count), independent of the content param.
     """
     from .tools.library import get_library_stats as _stats
     return await _stats(
@@ -202,6 +216,7 @@ async def get_library_stats(
         tags,
         genres,
         series,
+        content,
     )
 
 
@@ -218,7 +233,10 @@ async def get_game_detail(
     ownership, HLTB, Metacritic, OpenCritic, ProtonDB, tags, and personal
     ratings. Provide game_id, name (partial or fuzzy match), or Steam appid
     when available. This may trigger lazy metadata fetches. Returns one
-    detailed game dictionary.
+    detailed game dictionary carrying related_content (children with ownership/
+    prices/acquisition), parent link (for nested DLC/editions), and dlc_ownership
+    (for base games with a cached Steam or IGDB DLC catalog, comparing known
+    catalog size vs. actually-owned children).
     """
     from .tools.detail import get_game_detail as _detail
     return await _detail(name, appid, game_id)
@@ -334,7 +352,8 @@ async def rate_game(
     source='manual', feeds the taste profile at full weight, and immediately
     recomputes tag affinity so recommendations reflect it. Provide game_id or
     name (partial/fuzzy match). Re-rating the same game overwrites the previous
-    manual rating. Returns the stored rating and affected tags.
+    manual rating. Returns the stored rating, content_type, parent_name (if
+    nested), and affected tags.
     """
     from .tools.ratings import rate_game as _rate
     return await _rate(name, game_id, score, review_text)
@@ -703,6 +722,48 @@ async def detect_cross_platform_collapses(limit: int = 0) -> DetectCrossPlatform
     return await _detect_xplat(limit)
 
 
+@mcp.tool(annotations=DIAGNOSTIC_NETWORK_TOOL)
+async def detect_misclassified_dlc(
+    limit: int = 25, probe_steam: bool = True, probe_offset: int = 0
+) -> DetectMisclassifiedDlcResponse:
+    """
+    Find primary library rows that are really nested content (DLC/soundtrack/etc).
+
+    Read-only detector that powers a human-confirmed repair loop: never writes,
+    never mints parents. Each candidate carries a suggested_update that is a
+    ready-to-apply set of update_game arguments (game_id + content_type and/or
+    parent) — apply one to reclassify the row and record the manual override.
+
+    Offline buckets (a row lands in its FIRST matching bucket only — order:
+    needs_parent, purchase_minted_suspect, addon_name_pattern):
+    - needs_parent: a nested row (is_primary_library_item=0) with no parent link.
+      Suggests parent_game_id when a split-title candidate resolves to an existing
+      primary game; suggested_update is null when no parent can be guessed.
+    - purchase_minted_suspect: a primary base_game with no store identifiers, a
+      purchase_source on an owned platform, no igdb_id, and either an addon-ish
+      name or a resolvable parent — the phantom shape a purchase import mints.
+    - addon_name_pattern: a primary base_game whose NAME reads like addon content
+      (season pass, soundtrack, "DLC", upgrade/costume pack, artbook, …). Rows
+      whose content_type is a manual override are skipped. Suggests content_type
+      dlc (or unknown_addon for soundtrack/artbook), plus parent_name if resolved.
+
+    Live probe (probe_steam=True, default): walks owned-Steam base_game rows
+    oldest-cached first, capped at limit appdetails fetches (limit=0 = no cap,
+    probe everything — rate-gated at ~1 request/second), and flags rows Steam
+    itself calls dlc/music/demo (steam_type_mismatch). The tool is read-only so
+    the ordering never changes between calls: to walk the whole library, pass
+    the returned next_probe_offset back as probe_offset on the next call
+    (next_probe_offset is null once the walk is complete). probed = fetches
+    done this call; probe_remaining = rows left beyond this call's window;
+    per-appid fetch errors land in skipped. probe_steam=False skips the network
+    entirely (probed=0). limit/probe_offset bound only the probe (offline
+    buckets are capped at 200 each). Returns candidates, per-bucket counts, and
+    the probe bookkeeping.
+    """
+    from .tools.admin import detect_misclassified_dlc as _detect_misclassified
+    return await _detect_misclassified(limit, probe_steam, probe_offset)
+
+
 @mcp.tool(annotations=NETWORK_SYNC_TOOL)
 async def revalidate_igdb_matches(
     dry_run: bool = True, limit: int | None = None
@@ -758,7 +819,12 @@ async def get_platform_breakdown() -> PlatformBreakdownResponse:
 
     Use this to compare platform coverage or find duplicate ownership. Returns
     per-platform game counts, total unique games, and games owned on multiple
-    platforms.
+    platforms. Counts are games only (primary library items) — owned DLC/
+    expansions/editions no longer inflate them; each platform entry also
+    carries owned_addons, and total_unique_addons totals it library-wide, so
+    addon ownership stays visible without corrupting the "how many games"
+    numbers. The overlap list is likewise primary-only (overlapping addons
+    are noise, not duplicate ownership).
     """
     from .tools.platforms import get_platform_breakdown as _breakdown
     return await _breakdown()
@@ -772,6 +838,8 @@ async def get_wishlist(platform: str | None = None) -> GetWishlistResponse:
     platform: optional filter (e.g. "steam", "switch2", "ps5"); omit for all.
     Populated by sync_wishlist (Steam, DekuDeals→switch2) or by
     add_game_to_platform(owned=False) for manual entries (e.g. PSN).
+    content_type labels each item (base_game normally; dlc/expansion/edition/…
+    when the wishlisted item is itself nested content rather than a base game).
     """
     from .tools.platforms import get_wishlist as _get_wishlist
     return await _get_wishlist(platform)
@@ -919,6 +987,8 @@ async def update_game(
     is_farmed: bool | None = None,
     completion_status: str | None = None,
     content_type: str | None = None,
+    parent_game_id: int | None = None,
+    parent_name: str | None = None,
     clear_overrides: list[str] | None = None,
 ) -> UpdateGameResponse:
     """
@@ -939,7 +1009,17 @@ async def update_game(
     DLC/bundle/edition classification (e.g. a "X + Y" compilation misfiled as a
     bundle); it re-derives is_primary_library_item — which controls whether the
     game shows up in stats/series/discover — and detaches any wrong parent when
-    promoting to a primary type. Editing tags recomputes the taste
+    promoting to a primary type.
+
+    parent_game_id/parent_name (mutually exclusive) attach this game under a
+    base game — the repair workflow: detect_misclassified_dlc suggests the
+    args, update_game applies them. The target must be an existing PRIMARY
+    library item (not another nested row) and can't be the game itself;
+    linking only succeeds once the row is (or is being) classified with a
+    nested content_type — pass one alongside if it isn't already. Pass
+    parent_game_id=0 to detach the parent without changing content_type.
+    Setting a parent together with a primary content_type in the same call is
+    rejected as contradictory. Editing tags recomputes the taste
     profile. Returns the updated fields, any cleared columns, and the full
     manual-override list.
     """
@@ -960,6 +1040,8 @@ async def update_game(
         is_farmed,
         completion_status,
         content_type,
+        parent_game_id,
+        parent_name,
         clear_overrides,
     )
 
@@ -1039,7 +1121,16 @@ async def set_acquisitions_batch(
     tried first and resolves exactly even when the item's name differs from
     the library title; a miss falls back to game_id/name matching, and when
     create_platform_rows=True creates the platform row the identifier is
-    attached to it. One bad item never fails the
+    attached to it. An item may also carry content_type (e.g. "dlc",
+    "expansion", "edition"): a NESTED content_type restricts name matching to
+    EXACT only — never prefix/substring/token/fuzzy — so a DLC's price can't
+    attach onto its base game, and when created (see below) the new row is minted
+    nested (is_primary_library_item=0) linked to an existing parent resolved from
+    the title when one is found (created_details then carries content_type and
+    parent_game_id/parent_name). An exact match landing on a row still at the
+    default base_game classification is reclassified nested with a resolved
+    parent (per-item result carries reclassified=true); manually overridden,
+    already-classified, and already-nested rows are never touched. One bad item never fails the
     call: every item gets a per-item result with a status — applied
     (overwrite=True wrote the fields), filled (default mode wrote at least one
     previously-NULL field), no_change (every requested field already had a
@@ -1098,8 +1189,14 @@ async def split_bundle_acquisition(
     bundle_name: the storefront bundle title (recorded on every constituent).
     platform: the platform the bundle was bought on (e.g. switch2, steam).
     games: list of {name or game_id, optional price_paid, optionally
-        identifier_type + identifier_value together (e.g. steam_appid)}. A game
-        with an explicit price_paid keeps it; the rest share total_price.
+        identifier_type + identifier_value together (e.g. steam_appid), optional
+        content_type}. A game with an explicit price_paid keeps it; the rest
+        share total_price. A constituent with a NESTED content_type (dlc/
+        expansion/edition) matches by exact name only and, under create_missing,
+        is minted nested (is_primary=0) linked to a resolved parent — the same
+        DLC-aware guard as set_acquisitions_batch; a match landing on a row
+        still at the default base_game classification is reclassified nested
+        (result carries reclassified=true; overridden/classified rows untouched).
     total_price: the bundle's total, split evenly (to the cent, sum-preserving)
         across the games that don't carry their own price_paid. Omit to record
         membership without prices (or price every game explicitly).
@@ -1169,11 +1266,16 @@ async def import_purchases(
     some platforms use to infer ownership — so create_missing defaults True: a
     single-game purchase that matches no library game (identifier, name, and
     fuzzy all miss) is created as an owned game, reported under each source's
-    created count / created_details (game_id, name, platform). Set
-    create_missing=False to route those to unmatched instead. Pass dry_run=True
-    to preview the converted items (capped at 200 per source, with a truncated
-    flag) plus a would_create list naming the new games — created rows have no
-    delete tool, so preview when in doubt — without writing anything.
+    created count / created_details (game_id, name, platform). A record whose
+    content_type is nested (e.g. an eShop DLC purchase) matches by exact name
+    only and, when minted, is created nested (is_primary_library_item=0) linked
+    to a resolved parent — so a DLC never becomes a phantom base game nor
+    attaches its spend onto the base row; created_details/would_create carry its
+    content_type and parent link. Set create_missing=False to route those to
+    unmatched instead. Pass dry_run=True to preview the converted items (capped
+    at 200 per source, with a truncated flag) plus a would_create list naming
+    the new games — created rows have no delete tool, so preview when in doubt —
+    without writing anything.
 
     sources defaults to all registered importers; currently:
     - "eshop": Nintendo eShop transactions (ec.nintendo.com) → switch2.
@@ -1238,7 +1340,13 @@ async def get_spending_stats(
     Returns owned_rows/priced_rows/coverage_pct (how much of the library has a
     recorded price), zero_cost_rows (price 0 — gifts/giveaways), totals per
     currency, breakdowns by_year / by_source / by_platform / by_bundle, the
-    top 10 most expensive purchases, and cost_per_hour analysis: overall $/h
+    top 10 most expensive purchases, and cost_per_hour analysis. Note by_bundle
+    groups by a purchase's bundle_name, while by_family is content-grouped:
+    per currency it rolls each base game together with its owned DLC/expansions
+    (rooted at COALESCE(parent_game_id, id)), reporting base_spent, addon_spent,
+    total_spent, addon_count, the base game's playtime and cost-per-hour — only
+    for families with a real nested addon, top 10 per currency. cost_per_hour:
+    overall $/h
     per currency, best_value (cheapest cost per hour — a 0-price game you
     played counts as 0.0), worst_value (most expensive per hour; free games
     excluded), unpriced_playtime_rows (played but no recorded price), and

@@ -416,6 +416,10 @@ def parse_transactions(
                 # game — flagged so import_purchases routes it to
                 # bundles_needing_split rather than the single-game matcher.
                 is_bundle=item_type == "bundle",
+                # DLC is the only itemType with a useful content-type signal:
+                # APPLICATION is a base game (adds nothing) and BUNDLE is
+                # handled by the split tool, not minted directly.
+                content_type="dlc" if item_type == "dlc" else None,
             )
         )
     return records, skipped
