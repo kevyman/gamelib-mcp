@@ -20,11 +20,13 @@ from fastmcp.exceptions import ToolError
 from ..data.content import (
     NESTED_CONTENT_TYPES,
     PRIMARY_CONTENT_TYPES,
+    ContentClassification,
     derive_is_primary,
     split_addon_title,
 )
 from ..data.db import (
     ACQUISITION_FIELDS,
+    apply_content_classification,
     clear_fulfilled_wishlist_entries,
     fts_ready,
     get_db,
@@ -126,17 +128,23 @@ def _validate_content_type(value) -> str | None:
 
 
 async def _addon_mint_fields(
-    create_name: str, content_type: str | None
+    create_name: str,
+    content_type: str | None,
+    *,
+    exclude_game_id: int | None = None,
 ) -> tuple[dict, int | None, str | None]:
     """Extra upsert_game fields for a create terminal, DLC-aware.
 
     For a NESTED content_type (dlc/expansion/edition/…) the new row is minted
     nested: content_type set, is_primary_library_item=0, and — when a
-    split_addon_title candidate resolves to an EXISTING games row — its
-    parent_game_id linked. A parent is NEVER minted from a title guess
-    (resolve_parent_game(create=False)); an unresolved parent leaves the addon
-    parentless. A primary/None content_type returns no extra fields, so the row
-    mints as a base_game default exactly as before. Returns
+    split_addon_title candidate resolves to an EXISTING PRIMARY games row — its
+    parent_game_id linked. A candidate resolving to a nested row is skipped and
+    the next (shorter) candidate tried: "Game: Expansion: Soundtrack" must
+    parent under "Game", not under the "Game: Expansion" addon (update_game
+    rejects such chains, and nothing walks them). A parent is NEVER minted from
+    a title guess (resolve_parent_game(create=False)); an unresolved parent
+    leaves the addon parentless. A primary/None content_type returns no extra
+    fields, so the row mints as a base_game default exactly as before. Returns
     (fields, parent_game_id, parent_name); parent_* are None when unresolved.
     """
     if content_type is None or content_type not in NESTED_CONTENT_TYPES:
@@ -146,15 +154,60 @@ async def _addon_mint_fields(
         "is_primary_library_item": int(derive_is_primary(content_type)),
     }
     for candidate in split_addon_title(create_name):
-        parent_id = await resolve_parent_game(candidate, create=False)
-        if parent_id is not None:
-            async with get_db() as db:
-                prow = await db.execute_fetchone(
-                    "SELECT name FROM games WHERE id = ?", (parent_id,)
-                )
-            fields["parent_game_id"] = parent_id
-            return fields, parent_id, (prow["name"] if prow else None)
+        parent_id = await resolve_parent_game(
+            candidate, create=False, exclude_game_id=exclude_game_id
+        )
+        if parent_id is None:
+            continue
+        async with get_db() as db:
+            prow = await db.execute_fetchone(
+                "SELECT name, is_primary_library_item FROM games WHERE id = ?",
+                (parent_id,),
+            )
+        if prow is None or not prow["is_primary_library_item"]:
+            continue
+        fields["parent_game_id"] = parent_id
+        return fields, parent_id, prow["name"]
     return fields, None, None
+
+
+async def _reclassify_matched_nested(
+    game_id: int, item_name: str | None, content_type: str | None
+) -> tuple[bool, int | None, str | None]:
+    """Apply a nested importer hint to a MATCHED row still at the default.
+
+    ADR 0002's precedence chain places the importer hint above the default: a
+    DLC purchase exact-matching a row that is still base_game/primary (a
+    pre-classification phantom mint, or a manual seed) records its spend but
+    would otherwise keep inflating game counts forever. A row that is already
+    nested is left entirely alone — a split-title guess must never second-guess
+    an existing classification or clobber a curated parent link — and
+    apply_content_classification's guards (manual overrides, default-clobber,
+    self-parent, compare-and-swap) cover the rest. Returns
+    (reclassified, parent_game_id, parent_name).
+    """
+    if content_type is None or content_type not in NESTED_CONTENT_TYPES:
+        return False, None, None
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            "SELECT name, is_primary_library_item FROM games WHERE id = ?",
+            (game_id,),
+        )
+    if row is None or not row["is_primary_library_item"]:
+        return False, None, None
+    guess_source = (item_name or row["name"] or "").strip()
+    _, parent_id, parent_name = await _addon_mint_fields(
+        guess_source, content_type, exclude_game_id=game_id
+    )
+    applied = await apply_content_classification(
+        game_id,
+        ContentClassification(content_type=content_type, is_primary_library_item=False),
+        source="purchase_import",
+        parent_game_id=parent_id,
+    )
+    if not applied:
+        return False, None, None
+    return True, parent_id, parent_name
 
 
 def _normalize_source(value: str) -> str:
@@ -475,7 +528,6 @@ async def _apply_batch_item(
         # new purchased title becomes an owned library game. The matcher
         # (identifier → edition-stripped name → fuzzy) has already missed, so
         # this is a real gap, not a near-duplicate.
-        nested = content_type is not None and content_type in NESTED_CONTENT_TYPES
         if nested:
             # A nested row's identity IS its full storefront title. Stripping an
             # edition/upgrade suffix can collapse the name onto the base game's
@@ -517,6 +569,21 @@ async def _apply_batch_item(
         if mint_fields:
             mint_content_type = content_type
     resolved_id = row["id"]
+
+    reclassified = False
+    if nested and not created:
+        # The exact match can land on a row still classified base_game/primary
+        # (a phantom minted before classification existed, or a manual seed) —
+        # the importer hint reclassifies it so the spend doesn't land on a row
+        # that keeps inflating game counts. Guarded; already-nested rows and
+        # pinned/classified rows are untouched.
+        reclassified, mint_parent_id, mint_parent_name = (
+            await _reclassify_matched_nested(
+                resolved_id, item.get("name"), content_type
+            )
+        )
+        if reclassified:
+            mint_content_type = content_type
 
     async with get_db() as db:
         gp = await db.execute_fetchone(
@@ -575,13 +642,16 @@ async def _apply_batch_item(
         "platform": platform,
         "acquisition": acquisition,
     }
-    # A DLC/expansion/edition minted here carries its content_type (and parent,
-    # when linked) so the import surfaces what was created and its family tie.
-    if created and mint_content_type is not None:
+    # A DLC/expansion/edition minted OR reclassified here carries its
+    # content_type (and parent, when linked) so the import surfaces what was
+    # created/repaired and its family tie.
+    if (created or reclassified) and mint_content_type is not None:
         result["content_type"] = mint_content_type
         if mint_parent_id is not None:
             result["parent_game_id"] = mint_parent_id
             result["parent_name"] = mint_parent_name
+    if reclassified:
+        result["reclassified"] = True
     return result
 
 
@@ -602,7 +672,11 @@ async def set_acquisitions_batch(
     clobbers manual edits. An item carrying a NESTED content_type (dlc/
     expansion/edition/…) matches by identifier, game_id, or EXACT name only —
     never the prefix/substring/token/fuzzy tiers — so a DLC's spend can't
-    collapse onto its base game. With create_missing=True an item (name
+    collapse onto its base game; when such a match lands on a row still at the
+    default base_game classification (a phantom minted before classification
+    existed), the hint reclassifies it nested with a resolved parent (result
+    carries reclassified=true) — manual overrides, already-classified, and
+    already-nested rows are never touched. With create_missing=True an item (name
     required) that matches no existing game is created as an owned library game
     (status "created", store identifier attached); a nested content_type mints
     it nested (is_primary_library_item=0) linked to an existing parent resolved
@@ -979,6 +1053,18 @@ async def _apply_bundle_game(
         match_type = "created"
 
     resolved_id = row["id"]
+    reclassified = False
+    if nested and not created and not dry_run:
+        # Same repair as _apply_batch_item: an exact match landing on a row
+        # still at the default classification (phantom mint / manual seed) is
+        # reclassified by the importer hint — guarded, already-nested rows and
+        # pinned rows untouched. Skipped on dry_run (read-only preview).
+        reclassified, mint_parent_id, mint_parent_name = (
+            await _reclassify_matched_nested(resolved_id, name, content_type)
+        )
+        if reclassified:
+            mint_content_type = content_type
+
     async with get_db() as db:
         gp = await db.execute_fetchone(
             "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",
@@ -1049,11 +1135,13 @@ async def _apply_bundle_game(
         "recorded_price": acquisition["price_paid"],
         "acquisition": acquisition,
     }
-    if created and mint_content_type is not None:
+    if (created or reclassified) and mint_content_type is not None:
         bundle_result["content_type"] = mint_content_type
         if mint_parent_id is not None:
             bundle_result["parent_game_id"] = mint_parent_id
             bundle_result["parent_name"] = mint_parent_name
+    if reclassified:
+        bundle_result["reclassified"] = True
     return bundle_result
 
 

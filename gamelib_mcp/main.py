@@ -1127,7 +1127,10 @@ async def set_acquisitions_batch(
     attach onto its base game, and when created (see below) the new row is minted
     nested (is_primary_library_item=0) linked to an existing parent resolved from
     the title when one is found (created_details then carries content_type and
-    parent_game_id/parent_name). One bad item never fails the
+    parent_game_id/parent_name). An exact match landing on a row still at the
+    default base_game classification is reclassified nested with a resolved
+    parent (per-item result carries reclassified=true); manually overridden,
+    already-classified, and already-nested rows are never touched. One bad item never fails the
     call: every item gets a per-item result with a status — applied
     (overwrite=True wrote the fields), filled (default mode wrote at least one
     previously-NULL field), no_change (every requested field already had a
@@ -1191,7 +1194,9 @@ async def split_bundle_acquisition(
         share total_price. A constituent with a NESTED content_type (dlc/
         expansion/edition) matches by exact name only and, under create_missing,
         is minted nested (is_primary=0) linked to a resolved parent — the same
-        DLC-aware guard as set_acquisitions_batch.
+        DLC-aware guard as set_acquisitions_batch; a match landing on a row
+        still at the default base_game classification is reclassified nested
+        (result carries reclassified=true; overridden/classified rows untouched).
     total_price: the bundle's total, split evenly (to the cent, sum-preserving)
         across the games that don't carry their own price_paid. Omit to record
         membership without prices (or price every game explicitly).

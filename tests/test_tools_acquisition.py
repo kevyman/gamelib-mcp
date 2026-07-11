@@ -1067,6 +1067,117 @@ class NestedContentGuardTests(ToolDBTestCase):
             count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
         self.assertEqual(count["c"], 1)
 
+    async def test_parent_resolution_skips_nested_candidates(self):
+        # "Game: Expansion: Soundtrack" splits longest-first; the "Game:
+        # Expansion" candidate is itself nested, so resolution must fall
+        # through to the primary "Game" — update_game rejects nested parents
+        # and nothing walks parent chains.
+        base = await seed_game("Chained Game")
+        await seed_game(
+            "Chained Game: Expansion",
+            content_type="expansion",
+            parent_game_id=base,
+            is_primary_library_item=0,
+        )
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Chained Game: Expansion: Soundtrack",
+                "platform": "steam",
+                "price_paid": 3.0,
+                "content_type": "unknown_addon",
+            }],
+            create_missing=True,
+        )
+        entry = result["results"][0]
+        self.assertEqual(entry["status"], "created")
+        self.assertEqual(entry["parent_game_id"], base)
+        self.assertEqual(entry["parent_name"], "Chained Game")
+
+    async def test_matched_default_row_is_reclassified_by_nested_hint(self):
+        # A DLC purchase exact-matching a row still at the default
+        # classification (a phantom minted before classification existed) must
+        # reclassify it — otherwise the spend records but the row keeps
+        # inflating game counts forever.
+        base = await seed_game("Cyberpunk 2077")
+        await add_platform(base, "steam")
+        phantom = await seed_game("Cyberpunk 2077: Phantom Liberty")
+        await add_platform(phantom, "steam")
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Cyberpunk 2077: Phantom Liberty",
+                "platform": "steam",
+                "price_paid": 29.99,
+                "content_type": "dlc",
+            }]
+        )
+        entry = result["results"][0]
+        self.assertEqual(entry["game_id"], phantom)
+        self.assertEqual(entry["status"], "filled")
+        self.assertTrue(entry["reclassified"])
+        self.assertEqual(entry["content_type"], "dlc")
+        self.assertEqual(entry["parent_game_id"], base)
+
+        row = await _game_row(phantom)
+        self.assertEqual(row["content_type"], "dlc")
+        self.assertEqual(row["parent_game_id"], base)
+        self.assertEqual(row["is_primary_library_item"], 0)
+
+    async def test_matched_pinned_row_is_not_reclassified(self):
+        from gamelib_mcp.data.db import apply_manual_game_fields
+
+        pinned = await seed_game("Deliberate Game: DLC Sounding Name")
+        await add_platform(pinned, "steam")
+        # The user already decided this row is a real game — pin it.
+        await apply_manual_game_fields(
+            pinned, {"content_type": "base_game", "is_primary_library_item": 1}
+        )
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Deliberate Game: DLC Sounding Name",
+                "platform": "steam",
+                "price_paid": 9.99,
+                "content_type": "dlc",
+            }]
+        )
+        entry = result["results"][0]
+        self.assertEqual(entry["game_id"], pinned)
+        self.assertNotIn("reclassified", entry)
+        row = await _game_row(pinned)
+        self.assertEqual(row["content_type"], "base_game")
+        self.assertEqual(row["is_primary_library_item"], 1)
+
+    async def test_matched_nested_row_keeps_curated_parent(self):
+        # An already-nested match is left entirely alone: a split-title guess
+        # must never clobber a curated parent link.
+        real_parent = await seed_game("Real Parent")
+        decoy = await seed_game("Decoy Prefix")
+        child = await seed_game(
+            "Decoy Prefix: The DLC",
+            content_type="dlc",
+            parent_game_id=real_parent,
+            is_primary_library_item=0,
+        )
+        await add_platform(child, "steam")
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Decoy Prefix: The DLC",
+                "platform": "steam",
+                "price_paid": 4.99,
+                "content_type": "dlc",
+            }]
+        )
+        entry = result["results"][0]
+        self.assertEqual(entry["game_id"], child)
+        self.assertNotIn("reclassified", entry)
+        row = await _game_row(child)
+        # The curated parent survives; the "Decoy Prefix" guess never applied.
+        self.assertEqual(row["parent_game_id"], real_parent)
+        self.assertNotEqual(row["parent_game_id"], decoy)
+
     async def test_edition_mint_never_adopts_existing_base_game(self):
         # "Hades: Deluxe Edition" strips to exactly "Hades" — upsert_game's
         # lower(name) adoption would seize the real base game and demote it
