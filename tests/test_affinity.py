@@ -2,7 +2,7 @@
 
 import unittest
 
-from conftest import ToolDBTestCase, add_rating, make_steam_game
+from conftest import ToolDBTestCase, add_rating, add_platform, make_steam_game, seed_game
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.db.affinity import (
     MIN_PLAYTIME_SIGNAL_MINUTES,
@@ -137,6 +137,54 @@ class PlaytimeSignalTests(ToolDBTestCase):
         self.assertAlmostEqual(playtime_pseudo_score(600), 7.0, places=1)
         # Capped below a true 10 so explicit loves outrank inferred ones.
         self.assertLessEqual(playtime_pseudo_score(600000), 9.5)
+
+
+class DLCHandlingTests(ToolDBTestCase):
+    async def test_explicit_rating_on_nested_row_contributes_to_affinity(self):
+        # A user's explicit rating on a DLC/expansion is taste data — it should
+        # contribute to tag affinity even though the row is not primary.
+        parent_id = await make_steam_game("Bloodborne", 1, tags=["horror", "action"])
+        dlc_id = await seed_game(
+            "The Old Hunters",
+            tags=["horror", "action"],
+            content_type="dlc",
+            parent_game_id=parent_id,
+            is_primary_library_item=0,
+        )
+        # Rate the DLC highly
+        await add_rating(dlc_id, "manual", raw_score=9.0, normalized_score=9.0)
+        # Rate the parent lower to establish a mean
+        await add_rating(parent_id, "manual", raw_score=5.0, normalized_score=5.0)
+
+        await db_module.recompute_tag_affinity()
+
+        rows = await _affinity_rows()
+        self.assertIn("horror", rows)
+        self.assertIn("action", rows)
+        # Both tags should appear (from both parent and dlc ratings).
+        self.assertEqual(rows["horror"]["game_count"], 2)
+        self.assertEqual(rows["action"]["game_count"], 2)
+
+    async def test_unrated_nested_row_playtime_does_not_contribute(self):
+        # A nested (non-primary) row with big playtime but no explicit rating
+        # should NOT contribute a pseudo-rating to tag affinity, even though it's
+        # owned and heavily played. Only primary rows' playtime signals count.
+        parent_id = await make_steam_game("Portal", 1, tags=["puzzle"])
+        dlc_id = await seed_game(
+            "Portal 2: Peer Review",
+            tags=["puzzle"],
+            content_type="dlc",
+            parent_game_id=parent_id,
+            is_primary_library_item=0,
+        )
+        # Add a platform with significant playtime but no rating
+        await add_platform(dlc_id, "steam", playtime_minutes=6000)
+
+        await db_module.recompute_tag_affinity()
+
+        rows = await _affinity_rows()
+        # puzzle tag should not appear because the DLC's playtime signal is ignored
+        self.assertNotIn("puzzle", rows)
 
 
 if __name__ == "__main__":

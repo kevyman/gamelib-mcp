@@ -2,7 +2,7 @@
 
 from fastmcp.exceptions import ToolError
 
-from conftest import ToolDBTestCase, add_identifier, add_platform, seed_game
+from conftest import ToolDBTestCase, add_identifier, add_platform, seed_game, make_steam_game
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import history
 
@@ -190,3 +190,29 @@ class GetPlayHistoryTests(ToolDBTestCase):
         self.assertEqual(result["total_minutes"], 0)
         window = result["window"]
         self.assertTrue(window["start"] <= window["end"])
+
+    async def test_nested_dlc_row_with_playtime_appears_in_history(self):
+        # Regression: a nested (dlc) row with owned platform and playtime
+        # snapshots must appear in get_play_history deltas like any other row.
+        # This tests the pass-through behavior: platforms report what they
+        # report without special handling.
+        parent_id = await make_steam_game("Portal 2", 100, playtime_minutes=100)
+        dlc_id = await seed_game(
+            "Portal 2: Peer Review",
+            content_type="dlc",
+            parent_game_id=parent_id,
+            is_primary_library_item=0,
+        )
+        await add_platform(dlc_id, "steam", playtime_minutes=50)
+        await _snapshot(dlc_id, "steam", "2026-06-25", 20)  # baseline before window
+        await _snapshot(dlc_id, "steam", "2026-07-02", 50)  # inside window
+
+        result = await history.get_play_history(
+            start_date="2026-07-01", end_date="2026-07-03", platform="steam"
+        )
+
+        self.assertEqual(result["total_minutes"], 30)  # 50 - 20
+        self.assertEqual(len(result["games"]), 1)
+        self.assertEqual(result["games"][0]["game_id"], dlc_id)
+        self.assertEqual(result["games"][0]["name"], "Portal 2: Peer Review")
+        self.assertEqual(result["games"][0]["minutes_played"], 30)

@@ -1,4 +1,12 @@
-"""Tag-affinity recomputation from rated + heavily-played games (drives recommendations)."""
+"""Tag-affinity recomputation from rated + heavily-played games (drives recommendations).
+
+DLC/nested content handling: Explicit ratings on nested rows (DLC, expansions,
+etc.) DO contribute to tag affinity — a deliberate 10/10 on an expansion like
+"The Old Hunters" is a real taste signal for its parent game's tags. However,
+implicit playtime pseudo-ratings remain primary-only (is_primary_library_item = 1
+filter), since non-primary rows are excluded from discovery rollups and should
+not shift how primary games rank in recommendations.
+"""
 
 import json
 import math
@@ -51,6 +59,8 @@ async def recompute_tag_affinity() -> int:
     Returns number of tags updated.
     """
     async with get_db() as db:
+        # Explicit ratings include nested rows (DLC, expansions, etc.) — the user's
+        # direct 10/10 on an expansion is taste data even if it's not primary.
         rated_rows = await db.execute_fetchall(
             """
             SELECT r.game_id, r.source, r.normalized_score, g.tags

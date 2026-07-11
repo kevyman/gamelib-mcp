@@ -12,6 +12,7 @@ from ..data.db import (
     invalidate_name_derived_enrichment,
     recompute_tag_affinity,
     remove_manual_overrides,
+    resolve_parent_game,
     set_meta,
     set_platform_acquisition,
     upsert_game,
@@ -19,7 +20,7 @@ from ..data.db import (
     upsert_game_platform_identifier,
     upsert_wishlist_entry,
 )
-from ..data.content import NESTED_CONTENT_TYPES, PRIMARY_CONTENT_TYPES
+from ..data.content import NESTED_CONTENT_TYPES, PRIMARY_CONTENT_TYPES, derive_is_primary
 from ..data.tag_synonyms import canonical_tag
 # Safe direction: acquisition.py never imports this module at top level (it
 # lazy-imports _resolve_game_row inside functions), so importing its validator
@@ -43,18 +44,35 @@ async def get_platform_breakdown() -> dict:
     """
     Return per-platform game counts, total unique games, and overlap list
     (games owned on 2+ platforms).
+
+    Counts split games (primary library items) from addons (owned DLC/
+    expansions/editions/bundles etc.) — an owned addon no longer inflates
+    owned_games/total_unique_games/overlap_games; it's reported separately
+    via owned_addons/total_unique_addons so DLC ownership stays visible
+    without corrupting the "how many games do I own" numbers.
     """
     async with get_db() as db:
         platform_rows = await db.execute_fetchall(
-            """SELECT platform, COUNT(DISTINCT game_id) AS count
-               FROM game_platforms
-               WHERE owned = 1
-               GROUP BY platform
-               ORDER BY count DESC"""
+            """SELECT gp.platform AS platform,
+                      COUNT(DISTINCT CASE WHEN g.is_primary_library_item = 1
+                                           THEN gp.game_id END) AS owned_games,
+                      COUNT(DISTINCT CASE WHEN g.is_primary_library_item = 0
+                                           THEN gp.game_id END) AS owned_addons
+               FROM game_platforms gp
+               JOIN games g ON g.id = gp.game_id
+               WHERE gp.owned = 1
+               GROUP BY gp.platform
+               ORDER BY owned_games DESC"""
         )
 
         total = await db.execute_fetchone(
-            "SELECT COUNT(DISTINCT game_id) AS c FROM game_platforms WHERE owned = 1"
+            """SELECT COUNT(DISTINCT CASE WHEN g.is_primary_library_item = 1
+                                           THEN gp.game_id END) AS games,
+                      COUNT(DISTINCT CASE WHEN g.is_primary_library_item = 0
+                                           THEN gp.game_id END) AS addons
+               FROM game_platforms gp
+               JOIN games g ON g.id = gp.game_id
+               WHERE gp.owned = 1"""
         )
 
         overlap_rows = await db.execute_fetchall(
@@ -63,6 +81,7 @@ async def get_platform_breakdown() -> dict:
                       GROUP_CONCAT(gp.platform) AS platforms
                FROM games g
                JOIN game_platforms gp ON gp.game_id = g.id AND gp.owned = 1
+               WHERE g.is_primary_library_item = 1
                GROUP BY g.id
                HAVING platform_count >= 2
                ORDER BY platform_count DESC"""
@@ -70,10 +89,15 @@ async def get_platform_breakdown() -> dict:
 
     return {
         "by_platform": [
-            {"platform": r["platform"], "owned_games": r["count"]}
+            {
+                "platform": r["platform"],
+                "owned_games": r["owned_games"],
+                "owned_addons": r["owned_addons"],
+            }
             for r in platform_rows
         ],
-        "total_unique_games": total["c"],
+        "total_unique_games": total["games"],
+        "total_unique_addons": total["addons"],
         "overlap_count": len(overlap_rows),
         "overlap_games": [
             {
@@ -108,7 +132,8 @@ async def get_wishlist(platform: str | None = None) -> dict:
 
     async with get_db() as db:
         rows = await db.execute_fetchall(
-            f"""SELECT g.id AS game_id, g.name, w.platform, w.wishlisted_at, w.source,
+            f"""SELECT g.id AS game_id, g.name, g.content_type, w.platform,
+                       w.wishlisted_at, w.source,
                        EXISTS (
                            SELECT 1 FROM game_platforms gp
                            WHERE gp.game_id = w.game_id AND gp.platform = w.platform AND gp.owned = 1
@@ -130,6 +155,7 @@ async def get_wishlist(platform: str | None = None) -> dict:
                 "wishlisted_at": r["wishlisted_at"],
                 "source": r["source"],
                 "owned": bool(r["owned"]),
+                "content_type": r["content_type"],
             }
             for r in rows
         ],
@@ -276,16 +302,26 @@ async def add_game_to_platform(
 
 
 async def _resolve_game_row(name: str | None, game_id: int | None) -> dict:
-    """Resolve a single game by id or name (tiered match + fuzzy fallback)."""
+    """Resolve a single game by id or name (tiered match + fuzzy fallback).
+
+    Selects content_type/parent_game_id/is_primary_library_item alongside
+    id/name so update_game's parent-linking logic can inspect the row's
+    current classification without a second round-trip; other callers
+    (set_acquisition) simply ignore the extra columns.
+    """
     async with get_db() as db:
         if game_id is not None:
             row = await db.execute_fetchone(
-                "SELECT id, name FROM games WHERE id = ?", (game_id,)
+                """SELECT id, name, content_type, parent_game_id,
+                          is_primary_library_item
+                   FROM games WHERE id = ?""",
+                (game_id,),
             )
         elif name is not None:
             match = build_name_match(name, column=NORMALIZED_NAME_SQL, use_fts=fts_ready())
             row = await db.execute_fetchone(
-                f"""SELECT g.id, g.name, {match.rank_sql} AS match_rank
+                f"""SELECT g.id, g.name, g.content_type, g.parent_game_id,
+                           g.is_primary_library_item, {match.rank_sql} AS match_rank
                     FROM games g
                     WHERE {match.where_sql}
                     ORDER BY match_rank ASC, length(g.name) ASC, g.id ASC
@@ -300,7 +336,10 @@ async def _resolve_game_row(name: str | None, game_id: int | None) -> dict:
         if fuzzy_ids:
             async with get_db() as db:
                 row = await db.execute_fetchone(
-                    "SELECT id, name FROM games WHERE id = ?", (fuzzy_ids[0],)
+                    """SELECT id, name, content_type, parent_game_id,
+                              is_primary_library_item
+                       FROM games WHERE id = ?""",
+                    (fuzzy_ids[0],),
                 )
 
     if row is None:
@@ -324,6 +363,8 @@ async def update_game(
     is_farmed: bool | None = None,
     completion_status: str | None = None,
     content_type: str | None = None,
+    parent_game_id: int | None = None,
+    parent_name: str | None = None,
     clear_overrides: list[str] | None = None,
 ) -> dict:
     """
@@ -345,10 +386,24 @@ async def update_game(
     corrects a wrong DLC/bundle/edition classification (e.g. a "X + Y"
     compilation misfiled as a bundle); it re-derives is_primary_library_item
     (which controls whether the game appears in stats/series/discover) and, when
-    promoting to a primary type, detaches any wrong parent. Returns the
-    updated fields, any cleared columns,
-    the full manual-override list, and the providers whose enrichment was
-    invalidated.
+    promoting to a primary type, detaches any wrong parent.
+
+    parent_game_id/parent_name link this row under a base game (the repair
+    workflow: detect_misclassified_dlc suggests the args, update_game applies
+    them) — provide at most one, not both. The target must resolve to an
+    existing PRIMARY library item (never another nested row — no parent
+    chains) and can't be the game itself. Linking a parent only succeeds when
+    the row will END UP nested: either content_type is also set to a nested
+    value (dlc/expansion/bundle/edition/unknown_addon) in this same call, or
+    the row is already nested; otherwise pass a nested content_type alongside
+    it. Pass parent_game_id=0 to detach (null) the parent without touching
+    content_type — 0 is never a real game id, so it's used the same way
+    completion_status="none" resets that field. Setting a parent while also
+    promoting content_type to a primary type in the same call is a
+    contradiction and raises an error (a primary item can't have a parent).
+
+    Returns the updated fields, any cleared columns, the full manual-override
+    list, and the providers whose enrichment was invalidated.
     """
     row = await _resolve_game_row(name, game_id)
     resolved_id = row["id"]
@@ -415,7 +470,7 @@ async def update_game(
         # is_primary_library_item is derived from the content type, never set
         # by hand — recompute it (and record it as an override) so the row's
         # visibility in rollups matches the corrected classification.
-        is_primary = normalized_ct in PRIMARY_CONTENT_TYPES
+        is_primary = derive_is_primary(normalized_ct)
         fields["is_primary_library_item"] = int(is_primary)
         # A primary library item must not keep a parent: it is excluded from
         # search/rollups by the is_primary filter yet unreachable as any other
@@ -423,6 +478,63 @@ async def update_game(
         # would orphan it. Clear (and protect) it when promoting to primary.
         if is_primary:
             fields["parent_game_id"] = None
+
+    if parent_game_id is not None and parent_name is not None:
+        raise ToolError("Provide parent_game_id or parent_name, not both")
+
+    if parent_game_id == 0:
+        # 0 is never a real game id (AUTOINCREMENT starts at 1) — used here as
+        # a detach sentinel, mirroring completion_status="none" above: a value
+        # that means "clear it" rather than a real id. Works regardless of
+        # content_type, and does not conflict with a primary promotion's own
+        # parent-clearing above (both just null the same column).
+        fields["parent_game_id"] = None
+    elif parent_game_id is not None or parent_name is not None:
+        if fields.get("is_primary_library_item") == 1:
+            raise ToolError(
+                "Cannot set a parent while also promoting content_type to a "
+                "primary type in the same call — a primary library item "
+                "cannot have a parent"
+            )
+        if parent_game_id is not None:
+            async with get_db() as db:
+                parent_row = await db.execute_fetchone(
+                    "SELECT id, name, is_primary_library_item FROM games WHERE id = ?",
+                    (parent_game_id,),
+                )
+            if parent_row is None:
+                raise ToolError(f"No game with id {parent_game_id}")
+        else:
+            assert parent_name is not None  # guaranteed by the elif condition above
+            cleaned_parent_name = parent_name.strip()
+            if not cleaned_parent_name:
+                raise ToolError("parent_name must not be empty")
+            resolved_parent_id = await resolve_parent_game(cleaned_parent_name, create=False)
+            if resolved_parent_id is None:
+                raise ToolError(f"No game named '{parent_name}' found in library")
+            async with get_db() as db:
+                parent_row = await db.execute_fetchone(
+                    "SELECT id, name, is_primary_library_item FROM games WHERE id = ?",
+                    (resolved_parent_id,),
+                )
+
+        if parent_row["id"] == resolved_id:
+            raise ToolError("A game cannot be its own parent")
+        if not parent_row["is_primary_library_item"]:
+            raise ToolError(
+                f"'{parent_row['name']}' is nested content itself and cannot "
+                "be a parent — nesting under nested content is not supported"
+            )
+        # The row must END UP nested: either content_type is also being set to
+        # a nested value in this same call, or it's already nested.
+        final_content_type = fields.get("content_type", row["content_type"])
+        if final_content_type not in NESTED_CONTENT_TYPES:
+            raise ToolError(
+                f"'{row['name']}' is not nested content (content_type="
+                f"'{final_content_type}'); pass a nested content_type in this "
+                f"call ({sorted(NESTED_CONTENT_TYPES)}) to set a parent"
+            )
+        fields["parent_game_id"] = parent_row["id"]
 
     if not fields and not clear:
         raise ToolError("Provide at least one field to update or clear")

@@ -48,6 +48,9 @@ class PurchaseRecord:
     # single-game matcher (which they'd only ever miss) — a human/AI looks up
     # the constituents and calls split_bundle_acquisition.
     is_bundle: bool = False
+    # A nested content-type hint (e.g. "dlc") from the store's own item
+    # typing, when the source exposes one. None = no signal.
+    content_type: str | None = None
 
 
 # source key → (module_path, attr) of the fetch coroutine, resolved lazily.

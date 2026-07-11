@@ -1,6 +1,8 @@
 """Tests for the acquisition tools (set/batch/spending stats)."""
 
+import contextlib
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
 
 from fastmcp.exceptions import ToolError
 
@@ -12,7 +14,38 @@ from conftest import (
     seed_game,
 )
 from gamelib_mcp.data import db as db_module
+from gamelib_mcp.data.purchases import PurchaseRecord
 from gamelib_mcp.tools import acquisition
+
+# Mirrors tests/test_purchase_importers.py's helper: patch every registered
+# fetcher on tools.acquisition so no real fetch (HTTP/filesystem) ever runs.
+_FETCHER_ATTRS = (
+    "fetch_eshop_purchases",
+    "fetch_gog_purchases",
+    "fetch_humble_purchases",
+    "fetch_steam_purchases",
+)
+
+
+@contextlib.contextmanager
+def _patch_fetchers(**overrides):
+    with contextlib.ExitStack() as stack:
+        mocks = {}
+        for attr in _FETCHER_ATTRS:
+            mock = overrides.get(attr) or AsyncMock(return_value=([], []))
+            stack.enter_context(patch.object(acquisition, attr, mock))
+            mocks[attr] = mock
+        yield mocks
+
+
+async def _game_row(game_id: int) -> dict:
+    async with db_module.get_db() as db:
+        row = await db.execute_fetchone(
+            "SELECT id, name, content_type, parent_game_id, is_primary_library_item "
+            "FROM games WHERE id = ?",
+            (game_id,),
+        )
+    return dict(row) if row is not None else {}
 
 
 async def _acquisition_row(game_id: int, platform: str) -> dict:
@@ -965,3 +998,593 @@ class SpendingStatsTests(ToolDBTestCase):
         self.assertEqual(stats["coverage_pct"], 0.0)
         self.assertEqual(stats["totals"], [])
         self.assertEqual(stats["cost_per_hour"]["best_value"], [])
+        self.assertEqual(stats["by_family"], [])
+
+
+class NestedContentGuardTests(ToolDBTestCase):
+    async def test_dlc_title_matches_base_without_content_type(self):
+        # Baseline (pre-fix behavior the guard prevents): with no content_type
+        # hint the DLC-ish title fuzzy-collapses onto the base game row.
+        base = await seed_game("Hollow Knight")
+        await add_platform(base, "steam")
+
+        result = await acquisition.set_acquisitions_batch(
+            [{"name": "Hollow Knight: Pack", "platform": "steam", "price_paid": 5.0}]
+        )
+        entry = result["results"][0]
+        self.assertEqual(entry["match_type"], "fuzzy")
+        self.assertEqual(entry["game_id"], base)
+
+    async def test_nested_dlc_guard_blocks_base_and_mints_with_parent(self):
+        base = await seed_game("Hollow Knight")
+        await add_platform(base, "steam")
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Hollow Knight: Pack",
+                "platform": "steam",
+                "price_paid": 5.0,
+                "content_type": "dlc",
+            }],
+            create_missing=True,
+        )
+        entry = result["results"][0]
+        self.assertEqual(entry["status"], "created")
+        self.assertNotEqual(entry["game_id"], base)
+        self.assertEqual(entry["content_type"], "dlc")
+        self.assertEqual(entry["parent_game_id"], base)
+        self.assertEqual(entry["parent_name"], "Hollow Knight")
+
+        detail = result["created_details"][0]
+        self.assertEqual(detail["content_type"], "dlc")
+        self.assertEqual(detail["parent_game_id"], base)
+        self.assertEqual(detail["parent_name"], "Hollow Knight")
+
+        row = await _game_row(entry["game_id"])
+        self.assertEqual(row["content_type"], "dlc")
+        self.assertEqual(row["parent_game_id"], base)
+        self.assertEqual(row["is_primary_library_item"], 0)
+
+        # The base game row is untouched — no DLC spend attached to it.
+        base_row = await _acquisition_row(base, "steam")
+        self.assertIsNone(base_row["price_paid"])
+
+    async def test_nested_dlc_unmatched_without_create_missing(self):
+        base = await seed_game("Hollow Knight")
+        await add_platform(base, "steam")
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Hollow Knight: Pack",
+                "platform": "steam",
+                "price_paid": 5.0,
+                "content_type": "dlc",
+            }]
+        )
+        # Guard blocks the base match; create_missing off → unmatched, no mint.
+        self.assertEqual(result["results"][0]["status"], "unmatched")
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
+        self.assertEqual(count["c"], 1)
+
+    async def test_parent_resolution_skips_nested_candidates(self):
+        # "Game: Expansion: Soundtrack" splits longest-first; the "Game:
+        # Expansion" candidate is itself nested, so resolution must fall
+        # through to the primary "Game" — update_game rejects nested parents
+        # and nothing walks parent chains.
+        base = await seed_game("Chained Game")
+        await seed_game(
+            "Chained Game: Expansion",
+            content_type="expansion",
+            parent_game_id=base,
+            is_primary_library_item=0,
+        )
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Chained Game: Expansion: Soundtrack",
+                "platform": "steam",
+                "price_paid": 3.0,
+                "content_type": "unknown_addon",
+            }],
+            create_missing=True,
+        )
+        entry = result["results"][0]
+        self.assertEqual(entry["status"], "created")
+        self.assertEqual(entry["parent_game_id"], base)
+        self.assertEqual(entry["parent_name"], "Chained Game")
+
+    async def test_matched_default_row_is_reclassified_by_nested_hint(self):
+        # A DLC purchase exact-matching a row still at the default
+        # classification (a phantom minted before classification existed) must
+        # reclassify it — otherwise the spend records but the row keeps
+        # inflating game counts forever.
+        base = await seed_game("Cyberpunk 2077")
+        await add_platform(base, "steam")
+        phantom = await seed_game("Cyberpunk 2077: Phantom Liberty")
+        await add_platform(phantom, "steam")
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Cyberpunk 2077: Phantom Liberty",
+                "platform": "steam",
+                "price_paid": 29.99,
+                "content_type": "dlc",
+            }]
+        )
+        entry = result["results"][0]
+        self.assertEqual(entry["game_id"], phantom)
+        self.assertEqual(entry["status"], "filled")
+        self.assertTrue(entry["reclassified"])
+        self.assertEqual(entry["content_type"], "dlc")
+        self.assertEqual(entry["parent_game_id"], base)
+
+        row = await _game_row(phantom)
+        self.assertEqual(row["content_type"], "dlc")
+        self.assertEqual(row["parent_game_id"], base)
+        self.assertEqual(row["is_primary_library_item"], 0)
+
+    async def test_matched_pinned_row_is_not_reclassified(self):
+        from gamelib_mcp.data.db import apply_manual_game_fields
+
+        pinned = await seed_game("Deliberate Game: DLC Sounding Name")
+        await add_platform(pinned, "steam")
+        # The user already decided this row is a real game — pin it.
+        await apply_manual_game_fields(
+            pinned, {"content_type": "base_game", "is_primary_library_item": 1}
+        )
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Deliberate Game: DLC Sounding Name",
+                "platform": "steam",
+                "price_paid": 9.99,
+                "content_type": "dlc",
+            }]
+        )
+        entry = result["results"][0]
+        self.assertEqual(entry["game_id"], pinned)
+        self.assertNotIn("reclassified", entry)
+        row = await _game_row(pinned)
+        self.assertEqual(row["content_type"], "base_game")
+        self.assertEqual(row["is_primary_library_item"], 1)
+
+    async def test_matched_nested_row_keeps_curated_parent(self):
+        # An already-nested match is left entirely alone: a split-title guess
+        # must never clobber a curated parent link.
+        real_parent = await seed_game("Real Parent")
+        decoy = await seed_game("Decoy Prefix")
+        child = await seed_game(
+            "Decoy Prefix: The DLC",
+            content_type="dlc",
+            parent_game_id=real_parent,
+            is_primary_library_item=0,
+        )
+        await add_platform(child, "steam")
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Decoy Prefix: The DLC",
+                "platform": "steam",
+                "price_paid": 4.99,
+                "content_type": "dlc",
+            }]
+        )
+        entry = result["results"][0]
+        self.assertEqual(entry["game_id"], child)
+        self.assertNotIn("reclassified", entry)
+        row = await _game_row(child)
+        # The curated parent survives; the "Decoy Prefix" guess never applied.
+        self.assertEqual(row["parent_game_id"], real_parent)
+        self.assertNotEqual(row["parent_game_id"], decoy)
+
+    async def test_edition_mint_never_adopts_existing_base_game(self):
+        # "Hades: Deluxe Edition" strips to exactly "Hades" — upsert_game's
+        # lower(name) adoption would seize the real base game and demote it
+        # with the mint fields. Nested mints must create a NEW row under the
+        # RAW storefront title and leave the base untouched.
+        base = await seed_game("Hades")
+        await add_platform(base, "steam")
+        await acquisition.set_acquisition(
+            game_id=base, platform="steam", price_paid=24.99
+        )
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Hades: Deluxe Edition",
+                "platform": "steam",
+                "price_paid": 9.99,
+                "content_type": "edition",
+            }],
+            create_missing=True,
+        )
+        entry = result["results"][0]
+        self.assertEqual(entry["status"], "created")
+        self.assertNotEqual(entry["game_id"], base)
+        self.assertEqual(entry["matched_name"], "Hades: Deluxe Edition")
+        self.assertEqual(entry["parent_game_id"], base)
+
+        base_row = await _game_row(base)
+        self.assertEqual(base_row["content_type"], "base_game")
+        self.assertEqual(base_row["is_primary_library_item"], 1)
+        self.assertIsNone(base_row["parent_game_id"])
+        base_acq = await _acquisition_row(base, "steam")
+        self.assertEqual(base_acq["price_paid"], 24.99)
+
+        minted = await _game_row(entry["game_id"])
+        self.assertEqual(minted["content_type"], "edition")
+        self.assertEqual(minted["parent_game_id"], base)
+        self.assertEqual(minted["is_primary_library_item"], 0)
+
+    async def test_stripped_title_tier_disabled_for_nested_items(self):
+        # The edition-stripped query ("X - Game of the Year Edition" -> "X")
+        # rank-0 exact-matches the base game; for nested items that tier must
+        # be skipped entirely or the edition's spend lands on the base row.
+        base = await seed_game("The Witcher 3: Wild Hunt")
+        await add_platform(base, "gog")
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "The Witcher 3: Wild Hunt - Game of the Year Edition",
+                "platform": "gog",
+                "price_paid": 49.99,
+                "content_type": "edition",
+            }]
+        )
+        self.assertEqual(result["results"][0]["status"], "unmatched")
+        base_acq = await _acquisition_row(base, "gog")
+        self.assertIsNone(base_acq["price_paid"])
+
+        # Without a content_type the stripped tier still reconciles base-game
+        # purchases exactly as before (regression).
+        result2 = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "The Witcher 3: Wild Hunt - Game of the Year Edition",
+                "platform": "gog",
+                "price_paid": 49.99,
+            }]
+        )
+        entry2 = result2["results"][0]
+        self.assertEqual(entry2["game_id"], base)
+        self.assertEqual(entry2["match_type"], "name")
+
+    async def test_exact_name_still_matches_nested_row(self):
+        cp = await seed_game("Cyberpunk 2077")
+        await add_platform(cp, "steam")
+        pl = await seed_game(
+            "Phantom Liberty",
+            content_type="dlc",
+            parent_game_id=cp,
+            is_primary_library_item=0,
+        )
+        await add_platform(pl, "steam")
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Phantom Liberty",
+                "platform": "steam",
+                "price_paid": 29.99,
+                "content_type": "dlc",
+            }]
+        )
+        entry = result["results"][0]
+        self.assertEqual(entry["status"], "filled")
+        self.assertEqual(entry["match_type"], "name")
+        self.assertEqual(entry["game_id"], pl)
+        # No mint — exact tier resolved to the existing nested row.
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
+        self.assertEqual(count["c"], 2)
+        row = await _acquisition_row(pl, "steam")
+        self.assertEqual(row["price_paid"], 29.99)
+
+    async def test_primary_content_type_mints_as_base_game(self):
+        # A primary/None content_type keeps today's behavior: base_game default.
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Brand New Remake",
+                "platform": "steam",
+                "price_paid": 39.99,
+                "content_type": "remake",
+            }],
+            create_missing=True,
+        )
+        entry = result["results"][0]
+        self.assertEqual(entry["status"], "created")
+        # No nested minting surfaced (mints as default base_game).
+        self.assertNotIn("content_type", entry)
+        row = await _game_row(entry["game_id"])
+        self.assertEqual(row["content_type"], "base_game")
+        self.assertIsNone(row["parent_game_id"])
+        self.assertEqual(row["is_primary_library_item"], 1)
+
+    async def test_invalid_content_type_is_per_item_error(self):
+        gid = await seed_game("Some Game")
+        await add_platform(gid, "steam")
+
+        result = await acquisition.set_acquisitions_batch(
+            [{
+                "game_id": gid,
+                "platform": "steam",
+                "price_paid": 1.0,
+                "content_type": "nonsense",
+            }]
+        )
+        self.assertEqual(result["results"][0]["status"], "error")
+        self.assertIn("content_type", result["results"][0]["error"])
+
+
+class SplitBundleNestedTests(ToolDBTestCase):
+    async def test_nested_constituent_mints_nested_with_parent(self):
+        base = await seed_game("The Witcher 3")
+        await add_platform(base, "gog")
+
+        result = await acquisition.split_bundle_acquisition(
+            bundle_name="The Witcher 3 GOTY",
+            platform="gog",
+            games=[
+                {"name": "The Witcher 3"},
+                {"name": "The Witcher 3: Blood and Wine", "content_type": "expansion"},
+            ],
+            total_price=10.0,
+            create_missing=True,
+        )
+        created = [r for r in result["games"] if r["status"] == "created"]
+        self.assertEqual(len(created), 1)
+        entry = created[0]
+        self.assertEqual(entry["content_type"], "expansion")
+        self.assertEqual(entry["parent_game_id"], base)
+        self.assertEqual(entry["parent_name"], "The Witcher 3")
+        # Price split is unchanged by the guard: 10.0 across two → 5.0 each.
+        self.assertEqual(entry["price_paid"], 5.0)
+
+        row = await _game_row(entry["game_id"])
+        self.assertEqual(row["content_type"], "expansion")
+        self.assertEqual(row["parent_game_id"], base)
+        self.assertEqual(row["is_primary_library_item"], 0)
+
+    async def test_dry_run_created_surfaces_content_type_and_parent(self):
+        base = await seed_game("The Witcher 3")
+        await add_platform(base, "gog")
+
+        result = await acquisition.split_bundle_acquisition(
+            bundle_name="The Witcher 3 GOTY",
+            platform="gog",
+            games=[
+                {"name": "The Witcher 3: Blood and Wine", "content_type": "expansion"},
+            ],
+            total_price=5.0,
+            create_missing=True,
+            dry_run=True,
+        )
+        entry = result["games"][0]
+        self.assertEqual(entry["status"], "created")
+        self.assertEqual(entry["content_type"], "expansion")
+        self.assertEqual(entry["parent_game_id"], base)
+        self.assertEqual(entry["parent_name"], "The Witcher 3")
+        # Preview only — no new row written.
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
+        self.assertEqual(count["c"], 1)
+
+
+class ImportPurchasesDlcTests(ToolDBTestCase):
+    def _dlc_record(self) -> PurchaseRecord:
+        return PurchaseRecord(
+            title="Cyberpunk 2077: Phantom Liberty",
+            platform="switch2",
+            purchase_source="eshop",
+            acquired_at="2024-09-01",
+            price_paid=29.99,
+            price_currency="USD",
+            content_type="dlc",
+        )
+
+    async def test_dlc_purchase_mints_nested_linked_to_parent(self):
+        parent = await seed_game("Cyberpunk 2077")
+        await add_platform(parent, "switch2")
+
+        eshop = AsyncMock(return_value=([self._dlc_record()], []))
+        with _patch_fetchers(fetch_eshop_purchases=eshop):
+            result = await acquisition.import_purchases(sources=["eshop"])
+
+        src = result["sources"]["eshop"]
+        self.assertEqual(src["created"], 1)
+        detail = src["created_details"][0]
+        self.assertEqual(detail["content_type"], "dlc")
+        self.assertEqual(detail["parent_game_id"], parent)
+        self.assertEqual(detail["parent_name"], "Cyberpunk 2077")
+
+        new_id = detail["game_id"]
+        row = await _game_row(new_id)
+        self.assertEqual(row["content_type"], "dlc")
+        self.assertEqual(row["parent_game_id"], parent)
+        # Absent from primary rollups — it is nested, not a phantom base game.
+        self.assertEqual(row["is_primary_library_item"], 0)
+
+        # The DLC spend still lands in totals and by_family.
+        stats = await acquisition.get_spending_stats()
+        totals = {t["currency"]: t["total_spent"] for t in stats["totals"]}
+        self.assertEqual(totals["USD"], 29.99)
+        fam = [f for f in stats["by_family"] if f["family_game_id"] == parent]
+        self.assertEqual(len(fam), 1)
+        self.assertEqual(fam[0]["family_name"], "Cyberpunk 2077")
+        self.assertEqual(fam[0]["addon_spent"], 29.99)
+        self.assertEqual(fam[0]["addon_count"], 1)
+
+    async def test_dry_run_would_create_shows_content_type_and_parent(self):
+        parent = await seed_game("Cyberpunk 2077")
+        await add_platform(parent, "switch2")
+
+        eshop = AsyncMock(return_value=([self._dlc_record()], []))
+        with _patch_fetchers(fetch_eshop_purchases=eshop):
+            result = await acquisition.import_purchases(
+                sources=["eshop"], dry_run=True
+            )
+
+        would_create = result["sources"]["eshop"]["would_create"]
+        self.assertEqual(len(would_create), 1)
+        self.assertEqual(would_create[0]["content_type"], "dlc")
+        self.assertEqual(would_create[0]["parent_game_id"], parent)
+        self.assertEqual(would_create[0]["parent_name"], "Cyberpunk 2077")
+        # Nothing written.
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
+        self.assertEqual(count["c"], 1)
+
+
+class SpendingByFamilyTests(ToolDBTestCase):
+    async def _seed_families(self) -> dict[str, int]:
+        ids: dict[str, int] = {}
+        # Elden Ring family: base (USD, 10h playtime) + USD DLC + EUR DLC.
+        ids["elden"] = await seed_game("Elden Ring")
+        await add_platform(ids["elden"], "steam", playtime_minutes=600)
+        await acquisition.set_acquisition(
+            game_id=ids["elden"], platform="steam", price_paid=40.0
+        )
+        ids["erdtree"] = await seed_game(
+            "Shadow of the Erdtree",
+            content_type="dlc",
+            parent_game_id=ids["elden"],
+            is_primary_library_item=0,
+        )
+        await add_platform(ids["erdtree"], "steam")
+        await acquisition.set_acquisition(
+            game_id=ids["erdtree"], platform="steam", price_paid=30.0
+        )
+        ids["eur_dlc"] = await seed_game(
+            "Elden Ring EUR Pack",
+            content_type="dlc",
+            parent_game_id=ids["elden"],
+            is_primary_library_item=0,
+        )
+        await add_platform(ids["eur_dlc"], "gog")
+        await acquisition.set_acquisition(
+            game_id=ids["eur_dlc"],
+            platform="gog",
+            price_paid=10.0,
+            price_currency="EUR",
+        )
+
+        # Witcher family (USD, lower total) — checks per-currency ordering.
+        ids["witcher"] = await seed_game("The Witcher 3")
+        await add_platform(ids["witcher"], "gog")
+        await acquisition.set_acquisition(
+            game_id=ids["witcher"], platform="gog", price_paid=20.0
+        )
+        ids["blood"] = await seed_game(
+            "Blood and Wine",
+            content_type="expansion",
+            parent_game_id=ids["witcher"],
+            is_primary_library_item=0,
+        )
+        await add_platform(ids["blood"], "gog")
+        await acquisition.set_acquisition(
+            game_id=ids["blood"], platform="gog", price_paid=5.0
+        )
+
+        # Unrelated standalone (no nested contributor) — excluded from by_family.
+        ids["solo"] = await seed_game("Random Solo")
+        await add_platform(ids["solo"], "steam")
+        await acquisition.set_acquisition(
+            game_id=ids["solo"], platform="steam", price_paid=15.0
+        )
+
+        # Orphan nested row (parent_game_id NULL, is_primary=0), priced —
+        # excluded from by_family (a lone addon with no base is noise).
+        ids["orphan"] = await seed_game(
+            "Orphan Addon", content_type="dlc", is_primary_library_item=0
+        )
+        await add_platform(ids["orphan"], "steam")
+        await acquisition.set_acquisition(
+            game_id=ids["orphan"], platform="steam", price_paid=3.0
+        )
+        return ids
+
+    async def test_by_family_grouping_and_edge_cases(self):
+        ids = await self._seed_families()
+        stats = await acquisition.get_spending_stats()
+        families = stats["by_family"]
+
+        by_key = {(f["family_game_id"], f["currency"]): f for f in families}
+
+        # Elden USD: base 40 + addon 30 = 70, one addon, 10h playtime.
+        elden_usd = by_key[(ids["elden"], "USD")]
+        self.assertEqual(elden_usd["family_name"], "Elden Ring")
+        self.assertEqual(elden_usd["base_spent"], 40.0)
+        self.assertEqual(elden_usd["addon_spent"], 30.0)
+        self.assertEqual(elden_usd["total_spent"], 70.0)
+        self.assertEqual(elden_usd["addon_count"], 1)
+        self.assertEqual(elden_usd["family_playtime_hours"], 10.0)
+        self.assertEqual(elden_usd["family_cost_per_hour"], 7.0)
+
+        # Elden EUR: the root has no EUR spend, only the EUR DLC (currency
+        # isolation — never summed with USD).
+        elden_eur = by_key[(ids["elden"], "EUR")]
+        self.assertEqual(elden_eur["base_spent"], 0.0)
+        self.assertEqual(elden_eur["addon_spent"], 10.0)
+        self.assertEqual(elden_eur["total_spent"], 10.0)
+        self.assertEqual(elden_eur["addon_count"], 1)
+        # Playtime is the root game's, currency-independent → cost/hour 1.0.
+        self.assertEqual(elden_eur["family_playtime_hours"], 10.0)
+        self.assertEqual(elden_eur["family_cost_per_hour"], 1.0)
+
+        # Witcher USD family present with no playtime → null cost/hour.
+        witcher = by_key[(ids["witcher"], "USD")]
+        self.assertEqual(witcher["total_spent"], 25.0)
+        self.assertIsNone(witcher["family_playtime_hours"])
+        self.assertIsNone(witcher["family_cost_per_hour"])
+
+        # Standalone and orphan excluded.
+        family_ids = {f["family_game_id"] for f in families}
+        self.assertNotIn(ids["solo"], family_ids)
+        self.assertNotIn(ids["orphan"], family_ids)
+
+        # Per-currency ordering by total_spent DESC: Elden (70) before Witcher (25).
+        usd_order = [
+            f["family_game_id"] for f in families if f["currency"] == "USD"
+        ]
+        self.assertEqual(usd_order, [ids["elden"], ids["witcher"]])
+
+    async def test_by_family_base_currency_row_survives_cross_currency_family(self):
+        # Base bought in USD, its ONLY DLC bought in EUR: qualification is
+        # decided across the whole family, so the USD row (base_spent=60,
+        # addon_spent=0) must surface alongside the EUR row — a per-currency
+        # HAVING would hide the base spend entirely.
+        base = await seed_game("Cross Currency Base")
+        await add_platform(base, "steam", playtime_minutes=120)
+        await acquisition.set_acquisition(
+            game_id=base, platform="steam", price_paid=60.0
+        )
+        dlc = await seed_game(
+            "Cross Currency Base: DLC",
+            content_type="dlc",
+            parent_game_id=base,
+            is_primary_library_item=0,
+        )
+        await add_platform(dlc, "gog")
+        await acquisition.set_acquisition(
+            game_id=dlc, platform="gog", price_paid=30.0, price_currency="EUR"
+        )
+
+        stats = await acquisition.get_spending_stats()
+        by_key = {(f["family_game_id"], f["currency"]): f for f in stats["by_family"]}
+
+        usd = by_key[(base, "USD")]
+        self.assertEqual(usd["base_spent"], 60.0)
+        self.assertEqual(usd["addon_spent"], 0.0)
+        self.assertEqual(usd["total_spent"], 60.0)
+
+        eur = by_key[(base, "EUR")]
+        self.assertEqual(eur["base_spent"], 0.0)
+        self.assertEqual(eur["addon_spent"], 30.0)
+
+    async def test_by_family_respects_filters(self):
+        ids = await self._seed_families()
+        # Platform filter narrows spend rows (playtime stays root-wide).
+        stats = await acquisition.get_spending_stats(platform="gog")
+        by_key = {(f["family_game_id"], f["currency"]): f for f in stats["by_family"]}
+        # Elden USD base is on steam (filtered out); only the EUR gog DLC remains.
+        self.assertNotIn((ids["elden"], "USD"), by_key)
+        self.assertIn((ids["elden"], "EUR"), by_key)
+        self.assertEqual(by_key[(ids["elden"], "EUR")]["addon_spent"], 10.0)

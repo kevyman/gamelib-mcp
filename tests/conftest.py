@@ -10,8 +10,10 @@ pytest's default ``prepend`` import mode puts ``tests/`` on ``sys.path`` (no
 ``__init__.py`` here), so other test modules can ``from conftest import ...``.
 """
 
+import asyncio
 import json
 import os
+import shutil
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,7 +73,19 @@ class ToolDBTestCase(unittest.IsolatedAsyncioTestCase):
             os.environ.pop("DATABASE_URL", None)
         else:
             os.environ["DATABASE_URL"] = self._prev_database_url
-        self._tmpdir.cleanup()
+        # A test that cancelled an in-flight background task (e.g. the refresh
+        # ack tests) can race cleanup: the task's aiosqlite worker thread may
+        # recreate WAL/SHM files between rmtree's listing and rmdir, failing the
+        # whole test on "directory not empty". Give stragglers a beat, then stop
+        # letting temp-dir residue fail an otherwise-passing test.
+        for _ in range(3):
+            try:
+                self._tmpdir.cleanup()
+                return
+            except OSError:
+                await asyncio.sleep(0.05)
+        shutil.rmtree(self._tmpdir.name, ignore_errors=True)
+
 
 
 # --- seed helpers (write through production paths) ---------------------------

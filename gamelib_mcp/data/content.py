@@ -57,6 +57,9 @@ class ContentClassification:
     is_primary_library_item: bool
     parent_name: str | None = None
     parent_igdb_id: int | None = None
+    # Steam's own parent pointer (fullgame appid on a DLC's store record). IGDB
+    # has no equivalent here, so this stays None on the IGDB path.
+    parent_steam_appid: int | None = None
     alias_for_parent: bool = False
 
 
@@ -69,12 +72,14 @@ def _nested(
     parent_name: str | None = None,
     *,
     parent_igdb_id: int | None = None,
+    parent_steam_appid: int | None = None,
     alias_for_parent: bool = False,
 ) -> ContentClassification:
     return ContentClassification(
         content_type=content_type,
         parent_name=parent_name,
         parent_igdb_id=parent_igdb_id,
+        parent_steam_appid=parent_steam_appid,
         is_primary_library_item=False,
         alias_for_parent=alias_for_parent,
     )
@@ -125,6 +130,15 @@ def content_type_from_igdb_category(category: int | None) -> str:
         2: CONTENT_EXPANSION,
         3: CONTENT_BUNDLE,
         4: CONTENT_STANDALONE_EXPANSION,
+        # 5 ("mod") is independently playable — hiding an owned mod would lose a
+        # real library item, so it stays a primary base game.
+        5: CONTENT_BASE_GAME,
+        # 6 ("episode") is a sub-purchase of a parent; IGDB carries a parent_game
+        # for it, so it nests like DLC.
+        6: CONTENT_DLC,
+        # 7 ("season") is the sellable, playable unit (Telltale-style), so it is a
+        # primary base game, not nested content.
+        7: CONTENT_BASE_GAME,
         8: CONTENT_REMAKE,
         9: CONTENT_REMASTER,
         10: CONTENT_EXPANDED_GAME,
@@ -184,3 +198,70 @@ def classify_igdb_game(
         return _primary(content_type)
 
     return _nested(content_type, parent_name, parent_igdb_id=parent_igdb_id)
+
+
+def classify_steam_app_type(
+    app_type: str | None,
+    *,
+    title: str | None = None,
+    fullgame_name: str | None = None,
+    fullgame_appid: int | None = None,
+) -> ContentClassification | None:
+    """Classify a Steam store ``type`` string, or None for "no signal".
+
+    A title override wins first (consistency with classify_igdb_game). Steam's
+    own type is authoritative for its own store, so the "A + B" compilation
+    escape — which exists only to undo IGDB's bundle mislabeling — is NOT
+    applied here. Unknown/unmapped types ("video", "hardware", "mod", "series",
+    None, …) return None so the caller writes nothing rather than forcing a
+    row to base_game off a type we don't understand.
+    """
+    if title is not None:
+        override = classify_title_override(title)
+        if override is not None:
+            return override
+
+    normalized = (app_type or "").strip().lower()
+    if normalized == "game":
+        return _primary(CONTENT_BASE_GAME)
+    if normalized == "dlc":
+        return _nested(CONTENT_DLC, fullgame_name, parent_steam_appid=fullgame_appid)
+    if normalized in ("music", "demo"):
+        # Soundtracks/demos are noise in game counts, not primary items.
+        return _nested(CONTENT_UNKNOWN_ADDON, fullgame_name)
+    return None
+
+
+def derive_is_primary(content_type: str) -> bool:
+    """Whether a content_type is a primary (library-visible) item."""
+    return content_type in PRIMARY_CONTENT_TYPES
+
+
+def split_addon_title(title: str) -> list[str]:
+    """Ordered candidate parent names from separator splitting.
+
+    For each separator (colon first, then the three dash variants) return the
+    left side of every split point, longest-first when a separator occurs more
+    than once (e.g. "A: B: C" -> ["A: B", "A"]). Deduplicated; empties,
+    whitespace-only candidates, and the whole title are excluded; [] when no
+    separator is present. Deliberately dumb and predictable — it feeds an
+    exact-match parent lookup only.
+    """
+    candidates: list[str] = []
+    for sep in (": ", " - ", " – ", " — "):
+        starts: list[int] = []
+        idx = title.find(sep)
+        while idx != -1:
+            starts.append(idx)
+            idx = title.find(sep, idx + 1)
+        # Later occurrences yield longer left sides, so walk them back-to-front.
+        for start in reversed(starts):
+            candidates.append(title[:start])
+
+    result: list[str] = []
+    for candidate in candidates:
+        if not candidate.strip() or candidate == title:
+            continue
+        if candidate not in result:
+            result.append(candidate)
+    return result

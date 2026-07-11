@@ -31,6 +31,7 @@ EXPECTED_TOOLS = {
             "tags",
             "genres",
             "series",
+            "content",
         },
         "required": set(),
     },
@@ -92,6 +93,10 @@ EXPECTED_TOOLS = {
     "detect_orphan_games": {"params": set(), "required": set()},
     "detect_stranded_duplicates": {"params": set(), "required": set()},
     "detect_cross_platform_collapses": {"params": {"limit"}, "required": set()},
+    "detect_misclassified_dlc": {
+        "params": {"limit", "probe_steam", "probe_offset"},
+        "required": set(),
+    },
     "revalidate_igdb_matches": {"params": {"dry_run", "limit"}, "required": set()},
     "split_game": {
         "params": {"source_game_id", "platform", "identifier_values", "new_name", "dry_run"},
@@ -139,6 +144,8 @@ EXPECTED_TOOLS = {
             "is_farmed",
             "completion_status",
             "content_type",
+            "parent_game_id",
+            "parent_name",
             "clear_overrides",
         },
         "required": set(),
@@ -235,6 +242,11 @@ EXPECTED_ANNOTATIONS = {
         "idempotentHint": True,
         "openWorldHint": True,
     },
+    "detect_misclassified_dlc": {
+        "readOnlyHint": True,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
     "revalidate_igdb_matches": {
         "readOnlyHint": False,
         "idempotentHint": True,
@@ -293,9 +305,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_47(self):
+    async def test_tool_count_is_48(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 47)
+        self.assertEqual(len(tools), 48)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()

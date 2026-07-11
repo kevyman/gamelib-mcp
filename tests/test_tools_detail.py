@@ -4,6 +4,8 @@ Enrichment calls (Steam Store / ProtonDB / HLTB) are patched to no-ops so the
 test characterizes lookup + formatting only, without network.
 """
 
+import json
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 from fastmcp.exceptions import ToolError
@@ -220,6 +222,166 @@ class GetGameDetailTests(ToolDBTestCase):
         gid = await make_steam_game("Untouched", 1, playtime_minutes=0)
         result = await detail.get_game_detail(game_id=gid)
         self.assertIsNone(result["completion_status"])
+
+    async def test_nested_row_with_parent_includes_parent_object(self):
+        parent_id = await seed_game("Fallout: New Vegas")
+        dlc_id = await seed_game(
+            "Fallout New Vegas: Dead Money",
+            content_type="dlc",
+            parent_game_id=parent_id,
+            is_primary_library_item=0,
+        )
+        await add_platform(dlc_id, "steam")
+
+        result = await detail.get_game_detail(game_id=dlc_id)
+
+        self.assertEqual(
+            result["parent"], {"game_id": parent_id, "name": "Fallout: New Vegas"}
+        )
+
+    async def test_primary_row_has_no_parent_key(self):
+        gid = await make_steam_game("Celeste", 504230)
+        result = await detail.get_game_detail(game_id=gid)
+        self.assertNotIn("parent", result)
+
+    async def test_nested_row_without_parent_has_no_parent_key(self):
+        gid = await seed_game(
+            "Orphan DLC", content_type="dlc", is_primary_library_item=0
+        )
+        await add_platform(gid, "steam")
+
+        result = await detail.get_game_detail(game_id=gid)
+
+        self.assertNotIn("parent", result)
+
+    async def test_dlc_ownership_present_for_base_game_with_catalog(self):
+        gid = await make_steam_game("Base Game", 1000, playtime_minutes=60)
+        await db_module.set_meta(
+            "steam_dlc_catalog:1000",
+            json.dumps({"appids": [10, 20, 30], "fetched_at": "2024-01-01T00:00:00+00:00"}),
+        )
+        owned_steam_child = await seed_game(
+            "Base Game: DLC1",
+            content_type="dlc",
+            parent_game_id=gid,
+            is_primary_library_item=0,
+        )
+        await add_platform(owned_steam_child, "steam", owned=1)
+        # An owned child on a different platform than the base game still
+        # counts toward `owned` — ownership is ownership regardless of where
+        # Steam's own catalog was fetched from.
+        owned_switch_child = await seed_game(
+            "Base Game: DLC2",
+            content_type="dlc",
+            parent_game_id=gid,
+            is_primary_library_item=0,
+        )
+        await add_platform(owned_switch_child, "switch2", owned=1)
+        unowned_child = await seed_game(
+            "Base Game: DLC3",
+            content_type="dlc",
+            parent_game_id=gid,
+            is_primary_library_item=0,
+        )
+        await add_platform(unowned_child, "steam", owned=0)
+
+        result = await detail.get_game_detail(game_id=gid)
+
+        self.assertEqual(
+            result["dlc_ownership"], {"owned": 2, "known": 3, "source": "steam"}
+        )
+
+    async def test_dlc_ownership_absent_without_catalog(self):
+        gid = await make_steam_game("No Catalog Game", 2000)
+        result = await detail.get_game_detail(game_id=gid)
+        self.assertNotIn("dlc_ownership", result)
+
+    async def test_dlc_ownership_absent_on_malformed_meta(self):
+        gid = await make_steam_game("Malformed Meta Game", 3000)
+        await db_module.set_meta("steam_dlc_catalog:3000", "not valid json")
+
+        result = await detail.get_game_detail(game_id=gid)
+
+        self.assertNotIn("dlc_ownership", result)
+
+    async def test_dlc_ownership_falls_back_to_igdb_catalog_without_steam(self):
+        # Switch-only base game: no Steam appid, so no steam_dlc_catalog key
+        # was ever written. igdb_children:{igdb_id} is seeded directly (as
+        # get_igdb_children_cached would leave it after a live fetch) so this
+        # exercises the full cache-hit path without any network involved.
+        gid = await seed_game("Switch Base Game")
+        await add_platform(gid, "switch2", owned=1)
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = ? WHERE id = ?", (777, gid))
+            await db.commit()
+        now = datetime.now(timezone.utc).isoformat()
+        await db_module.set_meta(
+            "igdb_children:777",
+            json.dumps(
+                {
+                    "fetched_at": now,
+                    "children": [
+                        {"igdb_id": 1, "name": "DLC One", "kind": "dlc"},
+                        {"igdb_id": 2, "name": "DLC Two", "kind": "dlc"},
+                        {"igdb_id": 3, "name": "Expansion One", "kind": "expansion"},
+                    ],
+                }
+            ),
+        )
+        owned_child = await seed_game(
+            "Switch Base Game: DLC One",
+            content_type="dlc",
+            parent_game_id=gid,
+            is_primary_library_item=0,
+        )
+        await add_platform(owned_child, "switch2", owned=1)
+        unowned_child = await seed_game(
+            "Switch Base Game: DLC Two",
+            content_type="dlc",
+            parent_game_id=gid,
+            is_primary_library_item=0,
+        )
+        await add_platform(unowned_child, "switch2", owned=0)
+
+        result = await detail.get_game_detail(game_id=gid)
+
+        self.assertEqual(
+            result["dlc_ownership"], {"owned": 1, "known": 3, "source": "igdb"}
+        )
+
+    async def test_dlc_ownership_prefers_steam_catalog_over_igdb(self):
+        gid = await make_steam_game("Steam Wins Game", 4000, playtime_minutes=10)
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = ? WHERE id = ?", (888, gid))
+            await db.commit()
+        await db_module.set_meta(
+            "steam_dlc_catalog:4000",
+            json.dumps({"appids": [10], "fetched_at": "2024-01-01T00:00:00+00:00"}),
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        await db_module.set_meta(
+            "igdb_children:888",
+            json.dumps(
+                {
+                    "fetched_at": now,
+                    "children": [{"igdb_id": 1, "name": "DLC One", "kind": "dlc"}],
+                }
+            ),
+        )
+
+        result = await detail.get_game_detail(game_id=gid)
+
+        self.assertEqual(
+            result["dlc_ownership"], {"owned": 0, "known": 1, "source": "steam"}
+        )
+
+    async def test_dlc_ownership_absent_without_igdb_id_or_steam_catalog(self):
+        gid = await seed_game("No Igdb Id No Catalog")
+        await add_platform(gid, "switch2", owned=1)
+
+        result = await detail.get_game_detail(game_id=gid)
+
+        self.assertNotIn("dlc_ownership", result)
 
     async def test_wishlist_only_game_reports_owned_false(self):
         # prod: Persona 3 Reload, wishlist-only, no game_platforms row at all.

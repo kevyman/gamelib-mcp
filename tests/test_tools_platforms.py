@@ -28,15 +28,45 @@ class PlatformBreakdownTests(ToolDBTestCase):
         result = await platforms.get_platform_breakdown()
         self.assertEqual(
             set(result),
-            {"by_platform", "total_unique_games", "overlap_count", "overlap_games"},
+            {
+                "by_platform",
+                "total_unique_games",
+                "total_unique_addons",
+                "overlap_count",
+                "overlap_games",
+            },
         )
         self.assertEqual(result["total_unique_games"], 2)
+        self.assertEqual(result["total_unique_addons"], 0)
         counts = {r["platform"]: r["owned_games"] for r in result["by_platform"]}
         self.assertEqual(counts, {"steam": 2, "switch2": 1})
+        # No addons anywhere in this seed — every platform still reports the key.
+        addon_counts = {r["platform"]: r["owned_addons"] for r in result["by_platform"]}
+        self.assertEqual(addon_counts, {"steam": 0, "switch2": 0})
         self.assertEqual(result["overlap_count"], 1)
         overlap = result["overlap_games"][0]
         self.assertEqual(overlap["name"], "Multiplat")
         self.assertEqual(set(overlap["owned_on"]), {"steam", "switch2"})
+
+    async def test_owned_dlc_excluded_from_games_counted_as_addons(self):
+        base = await seed_game("Base Game")
+        await add_platform(base, "steam")
+        dlc = await seed_game(
+            "Base Game DLC", content_type="dlc", is_primary_library_item=0,
+            parent_game_id=base,
+        )
+        await add_platform(dlc, "steam")
+        result = await platforms.get_platform_breakdown()
+        self.assertEqual(result["total_unique_games"], 1)
+        self.assertEqual(result["total_unique_addons"], 1)
+        steam_entry = next(r for r in result["by_platform"] if r["platform"] == "steam")
+        self.assertEqual(steam_entry["owned_games"], 1)
+        self.assertEqual(steam_entry["owned_addons"], 1)
+        # The overlap list stays primary-only even when a DLC row also
+        # happens to be owned on multiple platforms.
+        await add_platform(dlc, "switch2")
+        result2 = await platforms.get_platform_breakdown()
+        self.assertEqual(result2["overlap_count"], 0)
 
 
 class SetHardwarePreferenceTests(ToolDBTestCase):
@@ -371,6 +401,146 @@ class UpdateGameTests(ToolDBTestCase):
             await platforms.update_game(game_id=gid, tags=["a"], clear_overrides=["tags"])
 
 
+class UpdateGameParentTests(ToolDBTestCase):
+    async def _overrides(self, game_id: int) -> set[str]:
+        async with db_module.get_db() as db:
+            return await db_module.get_manual_overrides(db, game_id)
+
+    async def test_parent_by_name_with_nested_content_type(self):
+        parent = await seed_game("Base Game")
+        gid = await seed_game("Base Game DLC")
+        result = await platforms.update_game(
+            game_id=gid, content_type="dlc", parent_name="Base Game"
+        )
+        self.assertEqual(result["updated"]["parent_game_id"], parent)
+        self.assertEqual(result["updated"]["content_type"], "dlc")
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT content_type, parent_game_id, is_primary_library_item "
+                "FROM games WHERE id = ?",
+                (gid,),
+            )
+        self.assertEqual(row["content_type"], "dlc")
+        self.assertEqual(row["parent_game_id"], parent)
+        self.assertEqual(row["is_primary_library_item"], 0)
+        self.assertEqual(
+            {"content_type", "is_primary_library_item", "parent_game_id"},
+            await self._overrides(gid),
+        )
+
+    async def test_parent_by_id(self):
+        parent = await seed_game("Parent By Id")
+        gid = await seed_game(
+            "Nested Already", content_type="dlc", is_primary_library_item=0
+        )
+        result = await platforms.update_game(game_id=gid, parent_game_id=parent)
+        self.assertEqual(result["updated"]["parent_game_id"], parent)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT parent_game_id FROM games WHERE id = ?", (gid,)
+            )
+        self.assertEqual(row["parent_game_id"], parent)
+
+    async def test_parent_name_unresolved_raises(self):
+        gid = await seed_game(
+            "Orphan DLC", content_type="dlc", is_primary_library_item=0
+        )
+        with self.assertRaisesRegex(ToolError, "No game named"):
+            await platforms.update_game(game_id=gid, parent_name="Nonexistent Game XYZ")
+
+    async def test_parent_cannot_be_self(self):
+        gid = await seed_game(
+            "Self Referential", content_type="dlc", is_primary_library_item=0
+        )
+        with self.assertRaisesRegex(ToolError, "cannot be its own parent"):
+            await platforms.update_game(game_id=gid, parent_game_id=gid)
+
+    async def test_parent_cannot_be_nested_content(self):
+        nested_parent = await seed_game(
+            "Nested Parent Candidate", content_type="dlc", is_primary_library_item=0
+        )
+        gid = await seed_game(
+            "Needs A Parent", content_type="dlc", is_primary_library_item=0
+        )
+        with self.assertRaisesRegex(ToolError, "nested content itself"):
+            await platforms.update_game(game_id=gid, parent_game_id=nested_parent)
+
+    async def test_both_parent_params_raises(self):
+        parent = await seed_game("Either Parent")
+        gid = await seed_game(
+            "Ambiguous Parent Call", content_type="dlc", is_primary_library_item=0
+        )
+        with self.assertRaisesRegex(ToolError, "not both"):
+            await platforms.update_game(
+                game_id=gid, parent_game_id=parent, parent_name="Either Parent"
+            )
+
+    async def test_parent_without_nested_content_type_on_base_game_raises(self):
+        parent = await seed_game("Waiting Parent")
+        gid = await seed_game("Still A Base Game")  # defaults to base_game
+        with self.assertRaisesRegex(ToolError, "not nested content"):
+            await platforms.update_game(game_id=gid, parent_game_id=parent)
+
+    async def test_parent_on_already_nested_row_without_content_type_in_call(self):
+        parent = await seed_game("Existing Parent")
+        gid = await seed_game(
+            "Already Nested Row", content_type="dlc", is_primary_library_item=0
+        )
+        result = await platforms.update_game(game_id=gid, parent_game_id=parent)
+        self.assertEqual(result["updated"], {"parent_game_id": parent})
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT content_type, parent_game_id FROM games WHERE id = ?", (gid,)
+            )
+        self.assertEqual(row["content_type"], "dlc")  # untouched
+        self.assertEqual(row["parent_game_id"], parent)
+
+    async def test_primary_content_type_and_parent_in_same_call_raises(self):
+        parent = await seed_game("Would Be Parent")
+        gid = await seed_game(
+            "Bundle Mistake", content_type="bundle", is_primary_library_item=0,
+            parent_game_id=parent,
+        )
+        with self.assertRaisesRegex(ToolError, "Cannot set a parent"):
+            await platforms.update_game(
+                game_id=gid, content_type="base_game", parent_game_id=parent
+            )
+
+    async def test_detach_idiom_nulls_parent(self):
+        parent = await seed_game("Detach Parent")
+        gid = await seed_game(
+            "Detach Child", content_type="dlc", is_primary_library_item=0,
+            parent_game_id=parent,
+        )
+        result = await platforms.update_game(game_id=gid, parent_game_id=0)
+        self.assertIsNone(result["updated"]["parent_game_id"])
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT parent_game_id, content_type FROM games WHERE id = ?", (gid,)
+            )
+        self.assertIsNone(row["parent_game_id"])
+        self.assertEqual(row["content_type"], "dlc")  # untouched by detach
+        self.assertIn("parent_game_id", await self._overrides(gid))
+
+    async def test_promotion_to_primary_still_clears_parent_regression(self):
+        parent = await seed_game("Regression Parent")
+        gid = await seed_game(
+            "Regression Compilation",
+            content_type="bundle",
+            is_primary_library_item=0,
+            parent_game_id=parent,
+        )
+        result = await platforms.update_game(game_id=gid, content_type="base_game")
+        self.assertIsNone(result["updated"]["parent_game_id"])
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT parent_game_id, is_primary_library_item FROM games WHERE id = ?",
+                (gid,),
+            )
+        self.assertIsNone(row["parent_game_id"])
+        self.assertEqual(row["is_primary_library_item"], 1)
+
+
 class UpdateGameProtectionTests(ToolDBTestCase):
     async def test_steamspy_does_not_clobber_manual_tags(self):
         gid = await make_steam_game("Spy Game", 555, tags=["original"])
@@ -548,3 +718,19 @@ class UpdateGameRenameReenrichTests(ToolDBTestCase):
         self.assertEqual(edited["enrichment_invalidated"], [])
         caches = await self._caches(gid)
         self.assertTrue(all(v == "2026-01-01" for v in caches.values()), caches)
+
+
+class GetWishlistContentTypeTests(ToolDBTestCase):
+    async def test_labels_content_type_per_item(self):
+        base = await seed_game("Wishlisted Base Game")
+        await db_module.upsert_wishlist_entry(base, "steam", source="steam")
+        dlc = await seed_game(
+            "Wishlisted DLC", content_type="dlc", is_primary_library_item=0
+        )
+        await db_module.upsert_wishlist_entry(dlc, "steam", source="steam")
+
+        result = await platforms.get_wishlist("steam")
+
+        by_name = {i["name"]: i["content_type"] for i in result["items"]}
+        self.assertEqual(by_name["Wishlisted Base Game"], "base_game")
+        self.assertEqual(by_name["Wishlisted DLC"], "dlc")

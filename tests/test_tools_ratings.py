@@ -221,3 +221,31 @@ class RateGameTests(ToolDBTestCase):
 
         with self.assertRaisesRegex(ToolError, "Provide game_id or name"):
             await ratings.rate_game(score=5)
+
+    async def test_includes_content_type_and_parent_name_for_dlc(self):
+        # Parent game
+        parent_id = await make_steam_game("Bloodborne", 100, tags=["Horror", "Action"])
+        # DLC as a nested game
+        dlc_id = await seed_game(
+            "The Old Hunters",
+            tags=["Horror", "Action"],
+            content_type="dlc",
+            parent_game_id=parent_id,
+            is_primary_library_item=0,
+        )
+
+        result = await ratings.rate_game(game_id=dlc_id, score=9.5, review_text="excellent expansion")
+
+        self.assertEqual(result["name"], "The Old Hunters")
+        self.assertEqual(result["content_type"], "dlc")
+        self.assertEqual(result["parent_name"], "Bloodborne")
+        self.assertIn("parent_name", result)
+
+    async def test_includes_content_type_none_for_primary_game(self):
+        game_id = await make_steam_game("Hades", 1, tags=["Roguelike"])
+
+        result = await ratings.rate_game(game_id=game_id, score=9.0)
+
+        self.assertEqual(result["name"], "Hades")
+        self.assertEqual(result["content_type"], "base_game")  # default value from schema
+        self.assertNotIn("parent_name", result)  # No parent should mean no parent_name key

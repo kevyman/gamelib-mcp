@@ -20,17 +20,21 @@ import httpx
 from .db import (
     _claim_cutoff_iso,
     claim_game_ids_for_igdb,
+    get_meta,
     load_games_for_igdb_backfill,
     load_platforms_for_games,
     release_game_claim,
+    set_meta,
     upsert_game_platform_enrichment,
 )
 from .content import (
     CONTENT_DLC,
     CONTENT_EXPANSION,
+    NESTED_CONTENT_TYPES,
     classify_igdb_game,
     classify_title_override,
     content_type_from_igdb_category,
+    derive_is_primary,
 )
 from .tag_synonyms import canonical_tag
 from .tags import is_feature_flag
@@ -1116,6 +1120,11 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
                 updates["tags"] = json.dumps(merged)
         # Content classification: never let a default ("base_game"/primary,
         # no parent) re-fetch clobber a prior non-default classification.
+        # NOTE: the same guard semantics live in
+        # db/upserts.py::apply_content_classification (the reusable writer for
+        # the Steam/purchase classifiers) — keep the two in sync. This IGDB path
+        # keeps extra IGDB-only behavior (alias handling, parent minting, series)
+        # and is deliberately not routed through that helper.
         # IGDB search can return a bare main-game hit on a later pass, and
         # silently flipping a nested DLC back to primary would resurface it as
         # its own library item. Only apply when the fetch carries a real signal
@@ -1132,15 +1141,28 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
             and row["parent_game_id"] is None
         )
         if not new_is_default or stored_is_default:
+            content_type = igdb_game.content_type
+            # Without a real (distinct) parent a nested item has nowhere to be
+            # reached from, so a self-referential parent forces the row to stay
+            # a primary BASE GAME — content_type included, keeping is_primary
+            # derived from content_type (a 'dlc' + primary row would be
+            # invisible to both the games and addons views).
+            if self_referential_parent and content_type in NESTED_CONTENT_TYPES:
+                content_type = "base_game"
             if "content_type" not in overrides:
-                updates["content_type"] = igdb_game.content_type
+                updates["content_type"] = content_type
             if parent_game_id is not None and "parent_game_id" not in overrides:
                 updates["parent_game_id"] = parent_game_id
-            # Without a real (distinct) parent a nested item has nowhere to be
-            # reached from, so a self-referential parent forces it to stay primary.
-            is_primary = igdb_game.is_primary_library_item or self_referential_parent
             if "is_primary_library_item" not in overrides:
-                updates["is_primary_library_item"] = int(is_primary)
+                # Derive from the content_type that will ACTUALLY be stored:
+                # when the content_type write was skipped (pinned by a manual
+                # override), deriving from the incoming value would desync the
+                # pair (e.g. a pinned 'dlc' row flipped primary by a later
+                # remaster verdict).
+                final_content_type = updates.get("content_type", row["content_type"])
+                updates["is_primary_library_item"] = int(
+                    derive_is_primary(final_content_type)
+                )
 
         cols_sql = ", ".join(f"{col} = ?" for col in updates)
         await db.execute(
@@ -1715,3 +1737,129 @@ async def fetch_igdb_game_names(igdb_ids: list[int]) -> dict[int, str]:
             if row.get("id") is not None and row.get("name"):
                 names[row["id"]] = row["name"]
     return names
+
+
+# On-demand DLC/expansion children catalog, used as a fallback dlc_ownership
+# source (tools/detail.py) for primary games that have no Steam DLC catalog
+# (e.g. Switch-only titles). Deliberately NOT folded into _FETCH_BY_ID_FIELDS /
+# _build_search_game_query: those feed every enrichment/backfill pass, and
+# dlcs/expansions are only ever needed lazily, at detail-view time.
+_IGDB_CHILDREN_FIELDS = "fields dlcs.id, dlcs.name, expansions.id, expansions.name;"
+
+_IGDB_CHILDREN_CACHE_TTL_DAYS = 7
+# Failure markers expire fast: long enough to ride out an IGDB outage without
+# hammering the retry ladder from detail views, short enough to self-heal.
+_IGDB_CHILDREN_FAILURE_TTL_HOURS = 6
+
+
+async def fetch_igdb_children(igdb_id: int) -> list[dict] | None:
+    """Fetch an IGDB game's DLC + expansion children (one request).
+
+    Returns a combined list of ``{"igdb_id", "name", "kind"}`` entries
+    (``kind`` is ``"dlc"`` or ``"expansion"``), empty when the game genuinely
+    has neither. Returns ``None`` on any operational failure (missing
+    credentials, request error) — a sentinel distinct from a confirmed-empty
+    catalog, so ``get_igdb_children_cached`` can serve a stale cache instead
+    of mistaking an IGDB outage for "this game has no DLC".
+    """
+    client_id = os.environ.get("TWITCH_CLIENT_ID")
+    if not client_id or not igdb_credentials_configured():
+        return None
+
+    query = f"{_IGDB_CHILDREN_FIELDS} where id = {igdb_id}; limit 1;"
+
+    try:
+        token = await _get_token()
+        headers = _igdb_headers(client_id, token)
+        results = await _post_igdb_games(query, headers)
+    except Exception as exc:
+        logger.warning("IGDB children fetch failed for igdb_id=%s: %s", igdb_id, exc)
+        return None
+
+    if not results:
+        return []
+
+    item = results[0]
+    children: list[dict] = []
+    for dlc in item.get("dlcs") or []:
+        if dlc.get("id") is not None and dlc.get("name"):
+            children.append({"igdb_id": dlc["id"], "name": dlc["name"], "kind": "dlc"})
+    for expansion in item.get("expansions") or []:
+        if expansion.get("id") is not None and expansion.get("name"):
+            children.append(
+                {"igdb_id": expansion["id"], "name": expansion["name"], "kind": "expansion"}
+            )
+    return children
+
+
+def _igdb_children_cache_key(igdb_id: int) -> str:
+    return f"igdb_children:{igdb_id}"
+
+
+def _parse_igdb_children_cache(
+    raw: str | None,
+) -> tuple[datetime, list[dict], bool] | None:
+    """Parse a cached meta value, treating any malformed entry as absent.
+
+    Returns (fetched_at, children, failed) — ``failed`` marks a short-lived
+    negative entry written after a fetch failure with no prior cache.
+    """
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+        fetched_at = datetime.fromisoformat(data["fetched_at"])
+        children = data["children"]
+        failed = bool(data.get("failed", False))
+        if not isinstance(children, list):
+            return None
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+    return fetched_at, children, failed
+
+
+async def get_igdb_children_cached(igdb_id: int) -> list[dict] | None:
+    """``fetch_igdb_children`` with a meta-KV cache (7-day TTL, stale-on-failure).
+
+    Mirrors ``data/series_gaps.py``'s series-member caching. A cache hit
+    within TTL returns without a network call. On fetch failure (
+    ``fetch_igdb_children`` returning ``None``) with a stale cache present,
+    serves the stale copy (logged); with no cache at all, writes a short-lived
+    NEGATIVE entry (failed=True, ~6h TTL) and returns ``None`` — this runs
+    inline in get_game_detail, and without the marker an IGDB outage would
+    re-run the full retry ladder on every detail view of every affected game.
+    A later successful fetch overwrites the marker with a normal 7-day entry.
+    A game with NO children caches an empty list — itself a valid,
+    cache-worthy answer that avoids refetching on every detail view.
+    """
+    key = _igdb_children_cache_key(igdb_id)
+    cached = _parse_igdb_children_cache(await get_meta(key))
+
+    if cached is not None:
+        fetched_at, children, failed = cached
+        age = datetime.now(timezone.utc) - fetched_at
+        ttl = timedelta(
+            hours=_IGDB_CHILDREN_FAILURE_TTL_HOURS
+        ) if failed else timedelta(days=_IGDB_CHILDREN_CACHE_TTL_DAYS)
+        if age < ttl:
+            # A live failure marker suppresses refetching; the caller sees "no
+            # catalog" (dlc_ownership omitted), never an error.
+            return None if failed else children
+
+    fetched = await fetch_igdb_children(igdb_id)
+    if fetched is None:
+        if cached is not None and not cached[2]:
+            logger.warning(
+                "IGDB children fetch failed for igdb_id=%s; serving stale cache",
+                igdb_id,
+            )
+            return cached[1]
+        now = datetime.now(timezone.utc).isoformat()
+        await set_meta(
+            key, json.dumps({"fetched_at": now, "children": [], "failed": True})
+        )
+        return None
+
+    now = datetime.now(timezone.utc).isoformat()
+    await set_meta(key, json.dumps({"fetched_at": now, "children": fetched}))
+    return fetched

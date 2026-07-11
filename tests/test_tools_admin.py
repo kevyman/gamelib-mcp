@@ -1141,3 +1141,298 @@ class DetectStrandedDuplicatesTests(ToolDBTestCase):
     async def test_empty_library_reports_nothing(self):
         result = await admin.detect_stranded_duplicates()
         self.assertEqual(result, {"stranded_count": 0, "candidates": []})
+
+
+class DetectMisclassifiedDlcTests(ToolDBTestCase):
+    """detect_misclassified_dlc: read-only detector + repair-loop suggestions."""
+
+    def _by_reason(self, result: dict, reason: str) -> list[dict]:
+        return [c for c in result["candidates"] if c["reason"] == reason]
+
+    async def test_needs_parent_with_resolvable_parent(self):
+        base = await seed_game("Base Thing")
+        child = await seed_game(
+            "Base Thing: The Extra", content_type="dlc", is_primary_library_item=0
+        )
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+
+        needs = self._by_reason(result, "needs_parent")
+        self.assertEqual([c["game_id"] for c in needs], [child])
+        cand = needs[0]
+        self.assertEqual(cand["suggested_update"], {"game_id": child, "parent_game_id": base})
+        self.assertEqual(cand["evidence"]["parent_game_id"], base)
+        self.assertEqual(result["counts"]["needs_parent"], 1)
+        self.assertEqual(result["probed"], 0)
+
+    async def test_needs_parent_without_resolvable_parent(self):
+        child = await seed_game(
+            "Standalone Mystery Widget", content_type="dlc", is_primary_library_item=0
+        )
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+
+        needs = self._by_reason(result, "needs_parent")
+        self.assertEqual([c["game_id"] for c in needs], [child])
+        self.assertIsNone(needs[0]["suggested_update"])
+        self.assertEqual(needs[0]["evidence"]["note"], "no parent candidate resolved")
+
+    async def test_addon_name_pattern_dlc_and_unknown_addon(self):
+        season = await seed_game("Elden Ring Season Pass")
+        soundtrack = await seed_game("Celeste Soundtrack")
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+
+        by_id = {c["game_id"]: c for c in self._by_reason(result, "addon_name_pattern")}
+        self.assertEqual(by_id[season]["suggested_update"], {"game_id": season, "content_type": "dlc"})
+        self.assertEqual(by_id[season]["evidence"]["matched_pattern"], "season pass")
+        self.assertEqual(
+            by_id[soundtrack]["suggested_update"],
+            {"game_id": soundtrack, "content_type": "unknown_addon"},
+        )
+        self.assertEqual(by_id[soundtrack]["evidence"]["matched_pattern"], "soundtrack")
+
+    async def test_addon_name_pattern_with_resolvable_parent_suggests_parent_id(self):
+        # By id, like every other bucket: the exact row the detector validated
+        # as primary, with no name re-resolution at apply time.
+        parent = await seed_game("Elden Ring")
+        pass_id = await seed_game("Elden Ring: Season Pass")
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+
+        by_id = {c["game_id"]: c for c in self._by_reason(result, "addon_name_pattern")}
+        self.assertEqual(
+            by_id[pass_id]["suggested_update"],
+            {"game_id": pass_id, "content_type": "dlc", "parent_game_id": parent},
+        )
+
+    async def test_needs_parent_skips_desync_rows(self):
+        # An is_primary=0 row with a PRIMARY content_type is a desync artifact;
+        # its parent-only suggested_update would be rejected by update_game, so
+        # the bucket is restricted to genuinely nested content_types.
+        await seed_game("Desync Base")
+        desync = await seed_game(
+            "Desync Base: Weird Row",
+            content_type="base_game",
+            is_primary_library_item=0,
+        )
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        needs_parent_ids = {c["game_id"] for c in self._by_reason(result, "needs_parent")}
+        self.assertNotIn(desync, needs_parent_ids)
+
+    async def test_addon_name_pattern_excludes_content_type_override(self):
+        from gamelib_mcp.tools import platforms
+
+        pinned = await seed_game("Halo Season Pass")
+        # User pins content_type via update_game — the detector must not nag.
+        await platforms.update_game(game_id=pinned, content_type="base_game")
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+
+        self.assertNotIn(
+            pinned, [c["game_id"] for c in self._by_reason(result, "addon_name_pattern")]
+        )
+
+    async def test_purchase_minted_suspect_flagged(self):
+        await seed_game("Hollow Knight")
+        phantom = await seed_game("Hollow Knight: Voidheart Pack")
+        gpid = await add_platform(phantom, "steam", owned=1)
+        await db_module.set_platform_acquisition(gpid, {"purchase_source": "humble"})
+        # No identifier, no igdb_id — the phantom shape.
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+
+        suspects = {c["game_id"]: c for c in self._by_reason(result, "purchase_minted_suspect")}
+        self.assertIn(phantom, suspects)
+        cand = suspects[phantom]
+        self.assertEqual(cand["evidence"]["purchase_source"], "humble")
+        self.assertEqual(cand["suggested_update"]["content_type"], "dlc")
+        self.assertEqual(cand["suggested_update"]["game_id"], phantom)
+        # parent resolved via the "Hollow Knight" prefix.
+        self.assertEqual(cand["evidence"]["parent_name"], "Hollow Knight")
+
+    async def test_purchase_minted_not_flagged_when_identifier_present(self):
+        await seed_game("Hollow Knight")
+        owned = await seed_game("Hollow Knight: Voidheart Pack")
+        gpid = await add_platform(owned, "steam", owned=1)
+        await db_module.set_platform_acquisition(gpid, {"purchase_source": "humble"})
+        await add_identifier(gpid, "steam_appid", "424481")
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+
+        self.assertNotIn(
+            owned, [c["game_id"] for c in self._by_reason(result, "purchase_minted_suspect")]
+        )
+
+    async def test_bucket_dedup_nested_addon_name_lands_in_needs_parent(self):
+        await seed_game("Cool Game")
+        child = await seed_game(
+            "Cool Game: Season Pass", content_type="dlc", is_primary_library_item=0
+        )
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+
+        matching = [c for c in result["candidates"] if c["game_id"] == child]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]["reason"], "needs_parent")
+
+    async def test_probe_flags_steam_type_mismatch(self):
+        base = await seed_game("Base Game")
+        game = await make_steam_game("Mysterious Content", 555)
+
+        payload = {"type": "dlc", "fullgame": {"appid": 999, "name": "Base Game"}}
+        with patch.object(admin, "_fetch_steam_appdetails", AsyncMock(return_value=payload)):
+            result = await admin.detect_misclassified_dlc(limit=5, probe_steam=True)
+
+        mismatches = {c["game_id"]: c for c in self._by_reason(result, "steam_type_mismatch")}
+        self.assertIn(game, mismatches)
+        cand = mismatches[game]
+        self.assertEqual(cand["evidence"]["steam_type"], "dlc")
+        self.assertEqual(
+            cand["suggested_update"],
+            {"game_id": game, "content_type": "dlc", "parent_game_id": base},
+        )
+        self.assertGreaterEqual(result["probed"], 1)
+
+    async def test_probe_respects_cap(self):
+        await make_steam_game("Alpha Thing", 111)
+        await make_steam_game("Beta Thing", 222)
+
+        payload = {"type": "dlc", "fullgame": {"appid": 999, "name": "Unknown"}}
+        with patch.object(
+            admin, "_fetch_steam_appdetails", AsyncMock(return_value=payload)
+        ) as fetch_mock:
+            result = await admin.detect_misclassified_dlc(limit=1, probe_steam=True)
+
+        self.assertEqual(result["probed"], 1)
+        self.assertEqual(result["probe_remaining"], 1)
+        self.assertEqual(result["next_probe_offset"], 1)
+        self.assertEqual(len(self._by_reason(result, "steam_type_mismatch")), 1)
+        self.assertEqual(fetch_mock.await_count, 1)
+
+    async def test_probe_offset_walks_distinct_rows(self):
+        # The tool is read-only so the ordering never changes between calls —
+        # the walk advances by passing next_probe_offset back as probe_offset.
+        await make_steam_game("Walk One", 111)
+        await make_steam_game("Walk Two", 222)
+        await make_steam_game("Walk Three", 333)
+
+        seen: list[int] = []
+
+        async def fake_fetch(appid):
+            seen.append(appid)
+            return {"type": "game"}
+
+        offset = 0
+        with patch.object(
+            admin, "_fetch_steam_appdetails", AsyncMock(side_effect=fake_fetch)
+        ):
+            for _ in range(3):
+                result = await admin.detect_misclassified_dlc(
+                    limit=1, probe_steam=True, probe_offset=offset
+                )
+                self.assertEqual(result["probed"], 1)
+                if result["next_probe_offset"] is None:
+                    break
+                offset = result["next_probe_offset"]
+
+        self.assertEqual(sorted(seen), [111, 222, 333])
+        self.assertEqual(len(set(seen)), 3)
+        self.assertIsNone(result["next_probe_offset"])
+        self.assertEqual(result["probe_remaining"], 0)
+
+    async def test_probe_limit_zero_probes_all(self):
+        # limit=0 = no cap (sibling detector convention) — probe everything.
+        await make_steam_game("All One", 111)
+        await make_steam_game("All Two", 222)
+
+        with patch.object(
+            admin, "_fetch_steam_appdetails", AsyncMock(return_value={"type": "game"})
+        ) as fetch_mock:
+            result = await admin.detect_misclassified_dlc(limit=0, probe_steam=True)
+
+        self.assertEqual(result["probed"], 2)
+        self.assertEqual(fetch_mock.await_count, 2)
+        self.assertEqual(result["probe_remaining"], 0)
+        self.assertIsNone(result["next_probe_offset"])
+
+    async def test_probe_fetch_error_is_skipped(self):
+        err_game = await make_steam_game("Err Game", 111)
+        ok_game = await make_steam_game("Ok Game", 222)
+
+        async def fake_fetch(appid):
+            if appid == 111:
+                raise RuntimeError("boom")
+            return {"type": "dlc", "fullgame": {"appid": 999, "name": "Unknown"}}
+
+        with patch.object(admin, "_fetch_steam_appdetails", AsyncMock(side_effect=fake_fetch)):
+            result = await admin.detect_misclassified_dlc(limit=5, probe_steam=True)
+
+        self.assertEqual(result["probed"], 2)
+        self.assertEqual([s["steam_appid"] for s in result["skipped"]], ["111"])
+        self.assertEqual(
+            [c["game_id"] for c in self._by_reason(result, "steam_type_mismatch")], [ok_game]
+        )
+        self.assertNotEqual(err_game, ok_game)
+
+    async def test_probe_steam_false_does_no_fetch(self):
+        await make_steam_game("Some Game", 555)
+
+        with patch.object(admin, "_fetch_steam_appdetails", AsyncMock()) as fetch_mock:
+            result = await admin.detect_misclassified_dlc(probe_steam=False)
+
+        fetch_mock.assert_not_awaited()
+        self.assertEqual(result["probed"], 0)
+        self.assertEqual(result["probe_remaining"], 0)
+
+    async def test_repair_loop_applies_suggested_update(self):
+        from gamelib_mcp.data.db.queries import load_related_content_for_games
+        from gamelib_mcp.tools import platforms
+
+        base = await seed_game("Repairable Base")
+        child = await seed_game(
+            "Repairable Base: Story DLC", content_type="dlc", is_primary_library_item=0
+        )
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        cand = self._by_reason(result, "needs_parent")[0]
+        self.assertEqual(cand["game_id"], child)
+
+        # Replay the suggestion through the real update_game — the repair loop.
+        await platforms.update_game(**cand["suggested_update"])
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT parent_game_id, content_type, manual_overrides FROM games WHERE id = ?",
+                (child,),
+            )
+        self.assertEqual(row["parent_game_id"], base)
+        self.assertEqual(row["content_type"], "dlc")
+        self.assertIn("parent_game_id", json.loads(row["manual_overrides"]))
+
+        related = await load_related_content_for_games([base])
+        self.assertIn(child, [entry["game_id"] for entry in related[base]["dlc"]])
+
+    async def test_full_run_is_read_only(self):
+        await seed_game("Base Thing")
+        await seed_game(
+            "Base Thing: The Extra", content_type="dlc", is_primary_library_item=0
+        )
+        await seed_game("Elden Ring Season Pass")
+        await make_steam_game("Mysterious Content", 555)
+
+        async def snapshot() -> list[tuple]:
+            async with db_module.get_db() as db:
+                rows = await db.execute_fetchall(
+                    "SELECT id, content_type, parent_game_id, is_primary_library_item, "
+                    "manual_overrides FROM games ORDER BY id"
+                )
+            return [tuple(r) for r in rows]
+
+        before = await snapshot()
+        with patch.object(admin, "_fetch_steam_appdetails", AsyncMock(return_value=None)):
+            await admin.detect_misclassified_dlc(limit=10, probe_steam=True)
+        after = await snapshot()
+
+        self.assertEqual(before, after)
