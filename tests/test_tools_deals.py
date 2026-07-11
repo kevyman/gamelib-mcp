@@ -9,7 +9,7 @@ import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from conftest import ToolDBTestCase, add_platform, seed_game
+from conftest import ToolDBTestCase, add_platform, seed_game, make_steam_game
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.itad import PriceInfo
@@ -363,6 +363,38 @@ class GetWishlistDealsTests(ToolDBTestCase):
         self.assertEqual(result["unpriced"], ["No ITAD Game"])
         self.assertEqual(result["itad"], "unconfigured")
         self.assertEqual(result["deals"], [])
+
+    async def test_wishlist_nested_dlc_row_flows_through_without_crash(self):
+        # Regression: nested (dlc) rows in a wishlist must pass through
+        # without crashing and appear in the output with pricing applied
+        # by the same rules as any entry.
+        parent_id = await make_steam_game("Bloodborne", 100, tags=["Horror"])
+        dlc_id = await seed_game(
+            "The Old Hunters",
+            tags=["Horror"],
+            content_type="dlc",
+            parent_game_id=parent_id,
+            is_primary_library_item=0,
+        )
+        await _seed_wishlist(dlc_id, "steam", store_identifier="101")
+        await _seed_price(dlc_id, "steam", "steam", 19.99, cut_pct=10)
+
+        with patch(
+            "gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.is_itad_configured", return_value=True
+        ):
+            result = await deals.get_wishlist_deals()
+
+        self.assertEqual(result["count"], 1)
+        deal = result["deals"][0]
+        self.assertEqual(deal["game_id"], dlc_id)
+        self.assertEqual(deal["name"], "The Old Hunters")
+        self.assertEqual(deal["price"], 19.99)
 
 
 async def _set_igdb_platforms(game_id: int, ids: list[int]) -> None:

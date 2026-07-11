@@ -81,13 +81,18 @@ async def rate_game(
     async with get_db() as db:
         if game_id is not None:
             row = await db.execute_fetchone(
-                "SELECT id, name, tags FROM games WHERE id = ?", (game_id,)
+                """SELECT g.id, g.name, g.tags, g.content_type, p.name AS parent_name
+                   FROM games g
+                   LEFT JOIN games p ON g.parent_game_id = p.id
+                   WHERE g.id = ?""",
+                (game_id,)
             )
         elif name is not None:
             match = build_name_match(name, column=NORMALIZED_NAME_SQL, use_fts=fts_ready())
             row = await db.execute_fetchone(
-                f"""SELECT g.id, g.name, g.tags, {match.rank_sql} AS match_rank
+                f"""SELECT g.id, g.name, g.tags, g.content_type, p.name AS parent_name, {match.rank_sql} AS match_rank
                     FROM games g
+                    LEFT JOIN games p ON g.parent_game_id = p.id
                     WHERE {match.where_sql}
                     ORDER BY match_rank ASC, length(g.name) ASC, g.id ASC
                     LIMIT 1""",
@@ -101,7 +106,11 @@ async def rate_game(
         if fuzzy_ids:
             async with get_db() as db:
                 row = await db.execute_fetchone(
-                    "SELECT id, name, tags FROM games WHERE id = ?", (fuzzy_ids[0],)
+                    """SELECT g.id, g.name, g.tags, g.content_type, p.name AS parent_name
+                       FROM games g
+                       LEFT JOIN games p ON g.parent_game_id = p.id
+                       WHERE g.id = ?""",
+                    (fuzzy_ids[0],)
                 )
 
     if row is None:
@@ -124,7 +133,7 @@ async def rate_game(
 
     tag_count = await recompute_tag_affinity()
 
-    return {
+    result = {
         "game_id": row["id"],
         "name": row["name"],
         "source": "manual",
@@ -132,7 +141,12 @@ async def rate_game(
         "review_text": review_text,
         "tags_affected": _parse_json(row["tags"]) or [],
         "tag_affinity_tags_updated": tag_count,
+        "content_type": row["content_type"],
     }
+    if row["parent_name"] is not None:
+        result["parent_name"] = row["parent_name"]
+
+    return result
 
 
 async def get_ratings(

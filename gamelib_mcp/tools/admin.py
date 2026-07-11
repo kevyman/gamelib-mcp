@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import statistics
 import sys
 from collections import defaultdict
@@ -11,6 +12,7 @@ from datetime import datetime, timezone
 
 from fastmcp.exceptions import ToolError
 
+from ..data.content import CONTENT_DLC, CONTENT_UNKNOWN_ADDON, NESTED_CONTENT_TYPES
 from ..data.db import (
     ACQUISITION_FIELDS,
     STEAM_APP_ID,
@@ -1267,6 +1269,408 @@ async def detect_cross_platform_collapses(limit: int = 0) -> dict:
         "collapsed_count": len(candidates),
         "candidates": candidates,
         "igdb_configured": igdb_configured,
+    }
+
+
+# Name patterns that betray addon content misfiled as a primary base_game.
+# Case-insensitive; "dlc" matches only as a whole word so "Half-Life" and
+# friends never trip it. soundtrack/artbook are noise in game counts with no
+# real parent gameplay, so they map to unknown_addon; the rest map to dlc.
+_ADDON_NAME_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
+    (re.compile(r"season pass", re.IGNORECASE), CONTENT_DLC, "season pass"),
+    (re.compile(r"expansion pass", re.IGNORECASE), CONTENT_DLC, "expansion pass"),
+    (re.compile(r"soundtrack", re.IGNORECASE), CONTENT_UNKNOWN_ADDON, "soundtrack"),
+    (re.compile(r"upgrade pack", re.IGNORECASE), CONTENT_DLC, "upgrade pack"),
+    (re.compile(r"\bdlc\b", re.IGNORECASE), CONTENT_DLC, "dlc"),
+    (re.compile(r"bonus content", re.IGNORECASE), CONTENT_DLC, "bonus content"),
+    (re.compile(r"character pass", re.IGNORECASE), CONTENT_DLC, "character pass"),
+    (re.compile(r"cosmetic", re.IGNORECASE), CONTENT_DLC, "cosmetic"),
+    (re.compile(r"costume pack", re.IGNORECASE), CONTENT_DLC, "costume pack"),
+    (re.compile(r"art\s?book", re.IGNORECASE), CONTENT_UNKNOWN_ADDON, "artbook"),
+)
+
+_MISCLASSIFIED_BUCKET_CAP = 200
+
+
+def _match_addon_name(name: str | None) -> tuple[str, str] | None:
+    """First addon-ish name pattern hit → (suggested content_type, label)."""
+    for pattern, content_type, label in _ADDON_NAME_PATTERNS:
+        if pattern.search(name or ""):
+            return content_type, label
+    return None
+
+
+def _pinned_columns(raw) -> set[str]:
+    """Parse a games.manual_overrides JSON blob into a set of column names.
+
+    Duplicates data/db/upserts.py::_decode_overrides (private, per-connection
+    API) for rows already loaded in bulk — keep the two in sync if the
+    manual_overrides encoding ever changes.
+    """
+    if not raw:
+        return set()
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return set()
+    return set(data) if isinstance(data, list) else set()
+
+
+async def _resolve_primary_parent(
+    candidate_names, exclude_game_id: int, *, steam_appid: int | None = None
+) -> tuple[int, str] | None:
+    """First candidate that resolves to an existing PRIMARY library game.
+
+    Tries the Steam ``steam_appid`` identifier first (when given), then each name
+    in ``candidate_names`` in order, via resolve_parent_game(create=False) — so a
+    parent is never minted. A resolved row is returned only when it is a primary
+    library item and is not the child itself. Returns (parent_game_id,
+    parent_name) or None.
+    """
+    from ..data.db import resolve_parent_game
+
+    async def _primary(parent_id: int | None) -> tuple[int, str] | None:
+        if parent_id is None or parent_id == exclude_game_id:
+            return None
+        async with get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT id, name, is_primary_library_item FROM games WHERE id = ?",
+                (parent_id,),
+            )
+        if row is not None and row["is_primary_library_item"]:
+            return row["id"], row["name"]
+        return None
+
+    if steam_appid is not None:
+        found = await _primary(
+            await resolve_parent_game(
+                None, steam_appid=steam_appid, exclude_game_id=exclude_game_id
+            )
+        )
+        if found is not None:
+            return found
+
+    for candidate in candidate_names:
+        if not candidate:
+            continue
+        found = await _primary(
+            await resolve_parent_game(
+                candidate, exclude_game_id=exclude_game_id, create=False
+            )
+        )
+        if found is not None:
+            return found
+    return None
+
+
+async def _fetch_steam_appdetails(appid: int) -> dict | None:
+    """Fetch one Steam app's appdetails ``data`` payload (type/fullgame).
+
+    Store-only (no review half) through steam_store's rate-gated fetch path —
+    the probe has no use for reviews and every request costs a slot on the
+    shared 1-req/s gate. Module-level so the DLC probe's only network call
+    can be patched in tests (gamelib_mcp.tools.admin._fetch_steam_appdetails).
+    """
+    from ..data.steam_store import fetch_store_appdetails
+
+    return await fetch_store_appdetails(appid)
+
+
+async def detect_misclassified_dlc(
+    limit: int = 25, probe_steam: bool = True, probe_offset: int = 0
+) -> dict:
+    """Surface primary rows that are really nested content (DLC/soundtrack/etc).
+
+    Read-only detector powering the human-confirmed repair loop: each candidate
+    carries a ``suggested_update`` that is a ready-to-apply set of update_game
+    kwargs. It NEVER writes and never mints parent rows. Buckets (a row lands in
+    its first matching bucket only — order: needs_parent, purchase_minted_suspect,
+    addon_name_pattern):
+
+    * needs_parent — a nested row (is_primary_library_item=0) with no
+      parent_game_id. When a split-title candidate resolves to an existing
+      primary game, the suggestion sets parent_game_id; otherwise it is null.
+    * purchase_minted_suspect — a primary base_game with no store identifiers, a
+      purchase_source on an owned platform row, no igdb_id, and either an
+      addon-ish name or a resolvable parent — the phantom shape a purchase import
+      mints. Suggests a nested content_type (+ parent when resolved).
+    * addon_name_pattern — a primary base_game whose NAME reads like addon
+      content (season pass, soundtrack, "DLC", upgrade/costume pack, artbook, …).
+      Rows whose content_type is a manual override are skipped (already decided).
+      Suggests content_type dlc (or unknown_addon for soundtrack/artbook), plus a
+      parent_name when one resolves.
+
+    Live probe (probe_steam=True, the default): walks owned-Steam base_game rows
+    oldest-cached first, capped at ``limit`` appdetails fetches (``limit=0`` =
+    no cap, probe everything — rate-gated at ~1 request/second, so a large
+    library takes minutes), and flags rows Steam itself reports as
+    dlc/music/demo (steam_type_mismatch). The tool is read-only, so the
+    ordering never changes between calls — to walk the whole library, pass the
+    returned ``next_probe_offset`` back as ``probe_offset`` on the next call
+    (``next_probe_offset`` is null once the walk is complete). ``probed`` is
+    how many rows were fetched this call and ``probe_remaining`` how many
+    remain beyond this call's window; per-appid fetch errors are collected in
+    ``skipped``. Pass probe_steam=False to skip the network entirely
+    (probed=0). ``limit``/``probe_offset`` bound only the probe; the offline
+    buckets are capped at 200 candidates each.
+    """
+    from ..data.content import classify_steam_app_type, split_addon_title
+
+    candidates: list[dict] = []
+    counts = {
+        "needs_parent": 0,
+        "purchase_minted_suspect": 0,
+        "addon_name_pattern": 0,
+        "steam_type_mismatch": 0,
+    }
+
+    # --- offline bucket: needs_parent (nested rows lacking a parent link) ---
+    async with get_db() as db:
+        # Restricted to rows whose stored content_type is genuinely nested: an
+        # is_primary=0 row with a PRIMARY content_type is a desync artifact,
+        # and the parent-only suggested_update emitted here would be rejected
+        # by update_game ("row must end up nested") — breaking the
+        # ready-to-apply contract.
+        nested_placeholders = ", ".join("?" for _ in NESTED_CONTENT_TYPES)
+        nested_rows = await db.execute_fetchall(
+            f"""SELECT id AS game_id, name, content_type
+               FROM games
+               WHERE is_primary_library_item = 0 AND parent_game_id IS NULL
+                 AND content_type IN ({nested_placeholders})
+               ORDER BY id
+               LIMIT ?""",
+            (*sorted(NESTED_CONTENT_TYPES), _MISCLASSIFIED_BUCKET_CAP),
+        )
+    for row in nested_rows:
+        parent = await _resolve_primary_parent(
+            split_addon_title(row["name"] or ""), row["game_id"]
+        )
+        evidence: dict = {"content_type": row["content_type"]}
+        if parent is not None:
+            evidence["parent_game_id"] = parent[0]
+            evidence["parent_name"] = parent[1]
+            suggested: dict | None = {
+                "game_id": row["game_id"],
+                "parent_game_id": parent[0],
+            }
+        else:
+            evidence["note"] = "no parent candidate resolved"
+            suggested = None
+        candidates.append(
+            {
+                "game_id": row["game_id"],
+                "name": row["name"],
+                "reason": "needs_parent",
+                "evidence": evidence,
+                "suggested_update": suggested,
+            }
+        )
+    counts["needs_parent"] = len(candidates)
+
+    # --- offline buckets over PRIMARY base_game rows ---
+    async with get_db() as db:
+        base_rows = await db.execute_fetchall(
+            """SELECT g.id AS game_id, g.name, g.igdb_id, g.manual_overrides,
+                      EXISTS(SELECT 1 FROM game_platforms gp
+                             JOIN game_platform_identifiers gpi
+                               ON gpi.game_platform_id = gp.id
+                             WHERE gp.game_id = g.id) AS has_identifier,
+                      (SELECT gp.purchase_source FROM game_platforms gp
+                        WHERE gp.game_id = g.id AND gp.owned = 1
+                          AND gp.purchase_source IS NOT NULL
+                        LIMIT 1) AS purchase_source
+               FROM games g
+               WHERE g.content_type = 'base_game'
+                 AND g.is_primary_library_item = 1
+               ORDER BY g.id"""
+        )
+
+    purchase_count = 0
+    addon_count = 0
+    for row in base_rows:
+        gid = row["game_id"]
+        name = row["name"]
+        addon = _match_addon_name(name)
+        # Parent resolution runs unindexed name lookups per split candidate —
+        # only pay for it on rows that can actually still become a candidate.
+        may_be_purchase_suspect = (
+            not row["has_identifier"]
+            and row["purchase_source"] is not None
+            and row["igdb_id"] is None
+            and purchase_count < _MISCLASSIFIED_BUCKET_CAP
+        )
+        addon_pinned = addon is not None and "content_type" in _pinned_columns(
+            row["manual_overrides"]
+        )
+        may_be_addon_candidate = (
+            addon is not None
+            and not addon_pinned
+            and addon_count < _MISCLASSIFIED_BUCKET_CAP
+        )
+        if not (may_be_purchase_suspect or may_be_addon_candidate):
+            continue
+        parent = await _resolve_primary_parent(split_addon_title(name or ""), gid)
+
+        # purchase_minted_suspect takes precedence over addon_name_pattern.
+        is_purchase_suspect = may_be_purchase_suspect and (
+            addon is not None or parent is not None
+        )
+        if is_purchase_suspect:
+            content_type = addon[0] if addon is not None else CONTENT_DLC
+            evidence = {
+                "purchase_source": row["purchase_source"],
+                "igdb_id": None,
+                "has_identifier": False,
+            }
+            if addon is not None:
+                evidence["matched_pattern"] = addon[1]
+            suggested = {"game_id": gid, "content_type": content_type}
+            if parent is not None:
+                evidence["parent_game_id"] = parent[0]
+                evidence["parent_name"] = parent[1]
+                suggested["parent_game_id"] = parent[0]
+            candidates.append(
+                {
+                    "game_id": gid,
+                    "name": name,
+                    "reason": "purchase_minted_suspect",
+                    "evidence": evidence,
+                    "suggested_update": suggested,
+                }
+            )
+            purchase_count += 1
+            continue
+
+        # Pinned rows (user already decided the type) and full buckets were
+        # excluded above, before the parent resolution was paid for.
+        if may_be_addon_candidate:
+            content_type, label = addon  # type: ignore[misc]
+            evidence = {"matched_pattern": label}
+            suggested = {"game_id": gid, "content_type": content_type}
+            if parent is not None:
+                evidence["parent_game_id"] = parent[0]
+                evidence["parent_name"] = parent[1]
+                # By id, like every other bucket: the exact row this detector
+                # validated as primary, with no name re-resolution at apply time.
+                suggested["parent_game_id"] = parent[0]
+            candidates.append(
+                {
+                    "game_id": gid,
+                    "name": name,
+                    "reason": "addon_name_pattern",
+                    "evidence": evidence,
+                    "suggested_update": suggested,
+                }
+            )
+            addon_count += 1
+
+    counts["purchase_minted_suspect"] = purchase_count
+    counts["addon_name_pattern"] = addon_count
+
+    # --- live probe: steam_type_mismatch ---
+    probed = 0
+    probe_remaining = 0
+    next_probe_offset: int | None = None
+    skipped: list[dict] = []
+    if probe_steam:
+        async with get_db() as db:
+            steam_rows = await db.execute_fetchall(
+                """SELECT g.id AS game_id, g.name,
+                          gpi.identifier_value AS steam_appid
+                   FROM games g
+                   JOIN game_platforms gp
+                     ON gp.game_id = g.id AND gp.platform = 'steam' AND gp.owned = 1
+                   JOIN game_platform_identifiers gpi
+                     ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
+                   LEFT JOIN steam_platform_data spd
+                     ON spd.game_platform_id = gp.id
+                   WHERE g.content_type = 'base_game'
+                     AND g.is_primary_library_item = 1
+                   ORDER BY spd.store_cached_at IS NOT NULL, spd.store_cached_at, g.id""",
+                (STEAM_APP_ID,),
+            )
+        # The tool is read-only, so the store_cached_at ordering never changes
+        # between calls — the caller advances the walk explicitly by passing
+        # back next_probe_offset. limit=0 means "no cap" (sibling detector
+        # convention), i.e. probe everything from probe_offset on.
+        start = max(0, probe_offset)
+        end = len(steam_rows) if limit <= 0 else start + limit
+        to_probe = list(steam_rows[start:end])
+        probe_remaining = max(0, len(steam_rows) - min(end, len(steam_rows)))
+        next_probe_offset = end if end < len(steam_rows) else None
+
+        from ..data.steam_store import _parse_content_fields
+
+        for row in to_probe:
+            probed += 1
+            try:
+                appid = int(str(row["steam_appid"]).strip())
+            except (TypeError, ValueError):
+                appid = None
+            if appid is None:
+                continue
+            try:
+                store_data = await _fetch_steam_appdetails(appid)
+            except Exception as exc:
+                skipped.append(
+                    {
+                        "game_id": row["game_id"],
+                        "steam_appid": row["steam_appid"],
+                        "error": str(exc),
+                    }
+                )
+                continue
+            if not store_data:
+                continue
+            store_type, fullgame_name, fullgame_appid, _dlc = _parse_content_fields(
+                store_data
+            )
+            classification = classify_steam_app_type(
+                store_type,
+                title=row["name"],
+                fullgame_name=fullgame_name,
+                fullgame_appid=fullgame_appid,
+            )
+            # Only a nested Steam verdict on a primary row is a mismatch.
+            if classification is None or classification.is_primary_library_item:
+                continue
+            parent = await _resolve_primary_parent(
+                [classification.parent_name] if classification.parent_name else [],
+                row["game_id"],
+                steam_appid=classification.parent_steam_appid,
+            )
+            evidence = {
+                "steam_appid": row["steam_appid"],
+                "steam_type": store_type,
+                "content_type": classification.content_type,
+            }
+            suggested = {"game_id": row["game_id"], "content_type": classification.content_type}
+            if parent is not None:
+                evidence["parent_game_id"] = parent[0]
+                evidence["parent_name"] = parent[1]
+                suggested["parent_game_id"] = parent[0]
+            elif classification.parent_name:
+                evidence["parent_name"] = classification.parent_name
+            candidates.append(
+                {
+                    "game_id": row["game_id"],
+                    "name": row["name"],
+                    "reason": "steam_type_mismatch",
+                    "evidence": evidence,
+                    "suggested_update": suggested,
+                }
+            )
+        counts["steam_type_mismatch"] = sum(
+            1 for c in candidates if c["reason"] == "steam_type_mismatch"
+        )
+
+    return {
+        "candidates": candidates,
+        "counts": counts,
+        "probed": probed,
+        "probe_remaining": probe_remaining,
+        "next_probe_offset": next_probe_offset,
+        "skipped": skipped,
     }
 
 

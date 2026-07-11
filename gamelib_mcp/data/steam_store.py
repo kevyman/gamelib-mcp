@@ -15,10 +15,13 @@ from weakref import WeakKeyDictionary
 
 import httpx
 
+from .content import classify_steam_app_type
 from .db import (
+    apply_content_classification,
     get_db,
     get_manual_overrides,
     get_steam_platform_row_by_appid,
+    set_meta,
     upsert_game_platform_enrichment,
     upsert_steam_platform_data,
 )
@@ -300,18 +303,56 @@ async def enrich_game(appid: int, client: httpx.AsyncClient | None = None) -> di
                 enrichment_fields["metacritic_url"] = metacritic_url
             await upsert_game_platform_enrichment(row["game_platform_id"], **enrichment_fields)
 
+    # Content classification from Steam's own type/fullgame signal. Live-fetch
+    # only: the 7-day store cache (steam_platform_data.store_cached_at) persists
+    # no type/fullgame/dlc columns, and adding some would need a schema
+    # migration, so classification is re-derived on each live fetch and heals on
+    # the 7-day refresh cycle rather than on a cache hit.
+    if store_data is not None:
+        store_type, fullgame_name, fullgame_appid, dlc_appids = _parse_content_fields(store_data)
+        classification = classify_steam_app_type(
+            store_type,
+            title=row["name"],
+            fullgame_name=fullgame_name,
+            fullgame_appid=fullgame_appid,
+        )
+        if classification is not None:
+            # apply_content_classification carries the manual-override,
+            # default-clobber, and self-parent guards, so a bare "game" type
+            # never demotes a stored DLC classification.
+            await apply_content_classification(row["game_id"], classification, source="steam_store")
+
+        # A base game with DLC carries a dlc:[appids] catalog — cache it in the
+        # meta KV for later DLC backfill. Never mints games rows from this list.
+        if (store_type or "").strip().lower() == "game" and dlc_appids:
+            await set_meta(
+                f"steam_dlc_catalog:{appid}",
+                json.dumps({"appids": dlc_appids, "fetched_at": now}),
+            )
+
     refreshed = await get_steam_platform_row_by_appid(appid)
     return dict(refreshed) if refreshed else None
 
 
-async def _fetch_all(appid: int, client: httpx.AsyncClient | None = None) -> tuple[dict | None, dict]:
-    """Fetch appdetails and appreviews concurrently. Returns (store_data, review_summary)."""
-    async def fetch_store(active_client: httpx.AsyncClient):
+async def fetch_store_appdetails(
+    appid: int, client: httpx.AsyncClient | None = None
+) -> dict | None:
+    """Fetch ONE app's appdetails ``data`` payload; None on failure/no data.
+
+    The store half of ``_fetch_all``, exposed on its own for callers that have
+    no use for the review summary (e.g. detect_misclassified_dlc's type probe)
+    — every request goes through the shared 1-req/s gate, so a discarded
+    reviews call would halve a probe's effective budget.
+    """
+    async def fetch(active_client: httpx.AsyncClient) -> dict | None:
         try:
             payload = await _steam_get_json_with_retry(
                 active_client,
                 STORE_API,
-                params={"appids": appid, "filters": "basic,genres,categories,short_description,metacritic,release_date"},
+                params={
+                    "appids": appid,
+                    "filters": "basic,genres,categories,short_description,metacritic,release_date,dlc",
+                },
                 timeout=15,
             )
             app_data = payload.get(str(appid), {})
@@ -321,6 +362,18 @@ async def _fetch_all(appid: int, client: httpx.AsyncClient | None = None) -> tup
         except Exception as exc:
             logger.warning("Steam store details fetch failed for %s: %s", appid, exc)
             return None
+
+    if client is not None:
+        return await fetch(client)
+
+    async with httpx.AsyncClient() as owned_client:
+        return await fetch(owned_client)
+
+
+async def _fetch_all(appid: int, client: httpx.AsyncClient | None = None) -> tuple[dict | None, dict]:
+    """Fetch appdetails and appreviews concurrently. Returns (store_data, review_summary)."""
+    async def fetch_store(active_client: httpx.AsyncClient):
+        return await fetch_store_appdetails(appid, client=active_client)
 
     async def fetch_reviews(active_client: httpx.AsyncClient):
         try:
@@ -345,6 +398,52 @@ async def _fetch_all(appid: int, client: httpx.AsyncClient | None = None) -> tup
             fetch_reviews(owned_client),
         )
         return store_data, review_summary
+
+
+def _coerce_appid(value) -> int | None:
+    """Best-effort int coercion for a Steam appid (JSON gives it as int or str)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_content_fields(data: dict) -> tuple[str | None, str | None, int | None, list[int]]:
+    """Extract Steam's (type, fullgame name, fullgame appid, dlc appids), tolerantly.
+
+    appdetails' ``basic`` group carries ``type`` (game/dlc/demo/music/...) and,
+    on a DLC record, ``fullgame: {appid, name}`` pointing at its base game. A
+    base game with DLC carries a ``dlc: [appids]`` array (requested via the
+    ``dlc`` filter). Any field that is missing or the wrong shape yields
+    None/[] — never raises — so a partial payload still enriches everything else.
+    """
+    raw_type = data.get("type")
+    store_type = raw_type.strip() if isinstance(raw_type, str) else None
+
+    fullgame_name: str | None = None
+    fullgame_appid: int | None = None
+    fullgame = data.get("fullgame")
+    if isinstance(fullgame, dict):
+        name = fullgame.get("name")
+        if isinstance(name, str) and name.strip():
+            fullgame_name = name
+        fullgame_appid = _coerce_appid(fullgame.get("appid"))
+
+    dlc_appids: list[int] = []
+    raw_dlc = data.get("dlc")
+    if isinstance(raw_dlc, list):
+        for item in raw_dlc:
+            appid = _coerce_appid(item)
+            if appid is not None:
+                dlc_appids.append(appid)
+
+    return store_type, fullgame_name, fullgame_appid, dlc_appids
 
 
 def _extract_tags(data: dict) -> tuple[str, str]:

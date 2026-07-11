@@ -1,17 +1,22 @@
 """get_game_detail: full info for one game, with platform-aware output."""
 
+import json
+
 from fastmcp.exceptions import ToolError
 
+from ..data.content import NESTED_CONTENT_TYPES
 from ..data.db import (
     fts_ready,
     get_db,
     get_game_by_appid,
+    get_meta,
     get_steam_appid_for_game,
     load_platforms_for_games,
     load_related_content_for_games,
     load_series_for_games,
 )
 from ..data.hltb import get_hltb
+from ..data.igdb import get_igdb_children_cached
 from ..data.protondb import get_protondb
 from ..data.steam_store import enrich_game
 from ..utils import _parse_json
@@ -97,6 +102,83 @@ async def get_game_detail(
     )
     steam_platform = next((p for p in platforms if p["platform"] == "steam"), None)
     steam_data = steam_platform["provider_data"] if steam_platform else {}
+
+    # Nested rows (DLC/expansion/edition/bundle) get a `parent` back-pointer so
+    # a client landing on a nested row can jump to its base game. Mirrors the
+    # is_primary_library_item/content_type nesting test used elsewhere
+    # (data/content.py::NESTED_CONTENT_TYPES) rather than trusting either
+    # signal alone. Omitted entirely (not null) for primary rows and for
+    # parentless nested rows — the widget/response convention here is to
+    # leave optional keys out rather than send null placeholders.
+    is_nested = (not bool(row["is_primary_library_item"])) or (
+        row["content_type"] in NESTED_CONTENT_TYPES
+    )
+    parent_info = None
+    if is_nested and row["parent_game_id"] is not None:
+        async with get_db() as db:
+            parent_row = await db.execute_fetchone(
+                "SELECT id, name FROM games WHERE id = ?", (row["parent_game_id"],)
+            )
+        if parent_row is not None:
+            parent_info = {"game_id": parent_row["id"], "name": parent_row["name"]}
+
+    # dlc_ownership: for a primary/base Steam game, compare the Steam DLC
+    # catalog cached at enrichment time (steam_dlc_catalog:{appid} meta key —
+    # never live-fetched here) against how many of this game's nested
+    # children the library actually owns. `known` is Steam's catalog size;
+    # `owned` counts owned children across ALL platforms (a Switch expansion
+    # of a Steam base game still counts as owned) — so `owned` can exceed a
+    # naive appid-by-appid match against `known`. That asymmetry is
+    # intentional: ownership is ownership, and this stays a simple, honest
+    # signal rather than a precise appid reconciliation. Key is omitted
+    # entirely when there's no cached catalog (never enriched, or not a
+    # Steam base game with DLC).
+    dlc_ownership = None
+    if bool(row["is_primary_library_item"]) and steam_appid is not None:
+        raw_catalog = await get_meta(f"steam_dlc_catalog:{steam_appid}")
+        if raw_catalog:
+            try:
+                catalog = json.loads(raw_catalog)
+                catalog_appids = catalog["appids"]
+            except (ValueError, TypeError, KeyError):
+                catalog_appids = None
+            if catalog_appids is not None:
+                owned_children = sum(
+                    1
+                    for group in related_content.values()
+                    for child in group
+                    if child.get("owned")
+                )
+                dlc_ownership = {
+                    "owned": owned_children,
+                    "known": len(catalog_appids),
+                    "source": "steam",
+                }
+
+    # Fallback catalog source for primary games without a Steam DLC catalog
+    # (e.g. Switch-only titles): IGDB's dlcs/expansions child arrays, lazily
+    # fetched at most once per 7 days per game via a meta-KV cache
+    # (get_igdb_children_cached, data/igdb.py). A fetch failure there returns
+    # None/serves stale and never raises, so a slow or down IGDB can only
+    # ever leave this key absent, never break the response.
+    if (
+        dlc_ownership is None
+        and bool(row["is_primary_library_item"])
+        and row["igdb_id"] is not None
+    ):
+        children = await get_igdb_children_cached(row["igdb_id"])
+        if children:
+            owned_children = sum(
+                1
+                for group in related_content.values()
+                for child in group
+                if child.get("owned")
+            )
+            dlc_ownership = {
+                "owned": owned_children,
+                "known": len(children),
+                "source": "igdb",
+            }
 
     # Best-of-platforms critic scores, hoisted so clients don't have to dig
     # through the platforms array (mirrors the MAX() rollup in list tools).
@@ -188,5 +270,11 @@ async def get_game_detail(
             "normalized_score": rating["normalized_score"],
             "review_text": rating["review_text"],
         }
+
+    if parent_info is not None:
+        result["parent"] = parent_info
+
+    if dlc_ownership is not None:
+        result["dlc_ownership"] = dlc_ownership
 
     return result
