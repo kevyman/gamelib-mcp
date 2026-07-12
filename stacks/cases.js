@@ -147,6 +147,14 @@ for (const g of games) {
 }
 
 export function composeMatrix(g) {
+  if (g.curQuat) {
+    // quaternion fast-path: physics (or a physics→tween handoff) owns the
+    // full orientation, which yaw/tilt scalars can't represent
+    _s.setScalar(g.curScale);
+    _m.compose(g.cur, g.curQuat, _s);
+    g._mesh.setMatrixAt(g._i, _m);
+    return;
+  }
   _e.set(g.curTilt, g.curYaw, 0, "YXZ");   // yaw about world Y, then tilt
   _q.setFromEuler(_e);
   _s.setScalar(g.curScale);
@@ -171,6 +179,7 @@ export function snapAll() {
     g.curYaw = g.toYaw;
     g.curTilt = g.toTilt;
     g.curScale = g.toScale;
+    g.fromQuat = g.curQuat = null;
     g.t = 1;
     composeMatrix(g);
   }
@@ -194,6 +203,15 @@ export function stepTransition(dt) {
     g.curYaw = g.fromYaw + (g.toYaw - g.fromYaw) * k;
     g.curTilt = g.fromTilt + (g.toTilt - g.fromTilt) * k;
     g.curScale = g.fromScale + (g.toScale - g.fromScale) * k;
+    if (g.fromQuat) {
+      // seeded by a physics handoff: slerp from the arbitrary physics pose
+      // toward the layout's yaw/tilt target
+      _e.set(g.toTilt, g.toYaw, 0, "YXZ");
+      _q.setFromEuler(_e);
+      g.curQuat = (g.curQuat ?? new THREE.Quaternion())
+        .slerpQuaternions(g.fromQuat, _q, k);
+      if (g.t >= 1) g.fromQuat = g.curQuat = null;
+    }
     composeMatrix(g);
     if (g.t < 1) busy = true;
   }

@@ -78,8 +78,12 @@ export const MODES = {
 // UI modules register callbacks here; called with the new mode key after a
 // layout is applied (keeps this module free of DOM knowledge).
 export const applyHooks = [];
+// Run before the new layout reads g.cur — physics modes register a teardown
+// here so any mode switch hands transforms back to the tween system first.
+export const preApplyHooks = [];
 
 export function applyMode(modeKey) {
+  for (const h of preApplyHooks) h(modeKey);
   S.exploded = null;   // mode switch recomputes every target anyway
   const prevModeKey = S.currentModeKey;
   S.currentModeKey = modeKey;

@@ -11,6 +11,7 @@ import {
 import { meshes, snapAll } from "../cases.js";
 import { MODES, applyMode, groupGames } from "../layouts.js";
 import { setHovered, pickGame } from "./orbit.js";
+import { teardownRain } from "./rain.js";
 import { endFlythrough } from "../flythrough.js";
 import { S } from "../state.js";
 import { CASE_H, CASE_D, STAGGER, jitter } from "../util.js";
@@ -145,6 +146,7 @@ function layoutShelves() {
 export function enterWalk(opts = {}) {
   if (S.walking) return;
   endFlythrough(false);   // a Monolith climb shouldn't fight the walk camera
+  teardownRain();         // nor should live physics
   headless = !!opts.headless;
   S.walking = true;
   S.exploded = null;
