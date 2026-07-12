@@ -19,7 +19,8 @@ import { renderer, scene, camera, controls, declutterLabels } from "./scene.js";
 import { meshes, composeMatrix, setDust, snapAll, stepTransition } from "./cases.js";
 import { MODES, applyMode, applyHooks } from "./layouts.js";
 import { isFlying, stepFlythrough } from "./flythrough.js";
-import { updatePicking, explodeStack } from "./modes/orbit.js";
+import { updatePicking, updatePop, explodeStack } from "./modes/orbit.js";
+import { enterWalk, stepWalk } from "./modes/walk.js";
 import { S } from "./state.js";
 import { hours } from "./util.js";
 
@@ -60,6 +61,15 @@ splitBtn.onclick = () => {
   if (S.currentModeKey === "monolith") applyMode("monolith");
 };
 document.getElementById("opts").appendChild(splitBtn);
+
+// first-person walk (desktop-only: pointer lock + WASD makes no sense on touch)
+const walkBtn = document.createElement("button");
+walkBtn.textContent = "Walk";
+walkBtn.title = "walk the aisles in first person (WASD + mouse, ESC to leave)";
+walkBtn.onclick = () => enterWalk();
+if (matchMedia("(hover: none), (pointer: coarse)").matches)
+  walkBtn.style.display = "none";
+document.getElementById("opts").appendChild(walkBtn);
 
 // dust toggle
 const dustBtn = document.createElement("button");
@@ -112,12 +122,14 @@ const clock = new THREE.Clock();
 
 function tick() {
   const dt = Math.min(clock.getDelta(), 0.05);
-  if (isFlying()) stepFlythrough(dt);
+  if (S.walking) stepWalk(dt);
+  else if (isFlying()) stepFlythrough(dt);
   else controls.update();
 
   if (S.animating) stepTransition(dt);
 
-  updatePicking(dt);
+  if (S.walking) updatePop(dt);   // walk does its own crosshair picking
+  else updatePicking(dt);
   declutterLabels();
   renderer.render(scene, camera);
 }
@@ -135,4 +147,8 @@ applyMode(MODES[startMode] ? startMode : "platform");
 if (S.SNAP && params.get("explode")) {   // deterministic explode, for screenshots
   const g = games.find((x) => x._stack && x._stack.length >= 20);
   if (g) { explodeStack(g._stack); snapAll(); }
+}
+if (params.get("walk") === "1") {   // deterministic walk view, for screenshots
+  enterWalk({ headless: true });
+  if (S.SNAP) snapAll();
 }

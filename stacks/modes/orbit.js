@@ -78,7 +78,7 @@ addEventListener("pointerup", (e) => {
   if (!downAt) return;
   const moved = Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y);
   downAt = null;
-  if (moved > 6 || S.animating) return;
+  if (moved > 6 || S.animating || S.walking) return;   // walk has its own clicks
   mouse.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
   raycaster.setFromCamera(mouse, camera);
   const hit = raycaster.intersectObjects(meshes, false)[0];
@@ -123,30 +123,27 @@ function placeCard() {
   card.style.top = y + "px";
 }
 
-// Per-frame picking + pop easing; called from the main loop.
-export function updatePicking(dt) {
-  // hover raycast (skip during big transitions)
-  if (!S.animating) {
-    raycaster.setFromCamera(mouse, camera);
-    const hit = raycaster.intersectObjects(meshes, false)[0];
-    let g = null;
-    if (hit && hit.instanceId != null) {
-      g = hit.object.userData.games[hit.instanceId] ?? null;
-    }
-    if (g !== S.hovered) {
-      if (S.hovered) S.hovered.popT = 0;
-      S.hovered = g;
-      if (S.hovered) { S.hovered.popT = 1; showCard(S.hovered); }
-      else hideCard();
-    }
-  } else if (S.hovered) {
-    S.hovered.popT = 0; S.hovered = null;
-    hideCard();
-  }
-  if (S.hovered) placeCard();
+// Change the hovered game (shared with the walk mode's crosshair picking).
+export function setHovered(g) {
+  if (g === S.hovered) return;
+  if (S.hovered) S.hovered.popT = 0;
+  S.hovered = g;
+  if (S.hovered) { S.hovered.popT = 1; showCard(S.hovered); }
+  else hideCard();
+}
 
-  // pop animation (hovered case rises, released cases settle) — drives the
-  // aGlow attribute only; instance matrices stay put for stable raycasting
+// Raycast from an NDC point and return the game under it, if any.
+export function pickGame(ndc) {
+  raycaster.setFromCamera(ndc, camera);
+  const hit = raycaster.intersectObjects(meshes, false)[0];
+  return hit?.instanceId != null
+    ? hit.object.userData.games[hit.instanceId] ?? null
+    : null;
+}
+
+// Pop easing (hovered case rises, released cases settle) — drives the
+// aGlow attribute only; instance matrices stay put for stable raycasting.
+export function updatePop(dt) {
   for (const g of games) {
     const target = g.popT ?? 0;
     if (g.pop !== target) {
@@ -155,4 +152,17 @@ export function updatePicking(dt) {
       setGlow(g, g.pop);
     }
   }
+}
+
+// Per-frame picking + pop easing; called from the main loop in orbit mode.
+export function updatePicking(dt) {
+  // hover raycast (skip during big transitions)
+  if (!S.animating) {
+    setHovered(pickGame(mouse));
+  } else if (S.hovered) {
+    setHovered(null);
+  }
+  if (S.hovered) placeCard();
+
+  updatePop(dt);
 }
