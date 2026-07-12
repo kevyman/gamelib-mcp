@@ -156,8 +156,9 @@ export function updatePop(dt) {
 
 // Per-frame picking + pop easing; called from the main loop in orbit mode.
 export function updatePicking(dt) {
-  // hover raycast (skip during big transitions)
-  if (!S.animating) {
+  // hover raycast (skip during big transitions and while the rain is live —
+  // matrices churn every frame until >95 % of the bodies sleep)
+  if (!S.animating && !(S.rainActive && !S.rainSettled)) {
     setHovered(pickGame(mouse));
   } else if (S.hovered) {
     setHovered(null);

@@ -21,6 +21,7 @@ import { MODES, applyMode, applyHooks } from "./layouts.js";
 import { isFlying, stepFlythrough } from "./flythrough.js";
 import { updatePicking, updatePop, explodeStack } from "./modes/orbit.js";
 import { enterWalk, stepWalk } from "./modes/walk.js";
+import { enterRain, stepRain, restack } from "./modes/rain.js";
 import { S } from "./state.js";
 import { hours } from "./util.js";
 
@@ -70,6 +71,32 @@ walkBtn.onclick = () => enterWalk();
 if (matchMedia("(hover: none), (pointer: coarse)").matches)
   walkBtn.style.display = "none";
 document.getElementById("opts").appendChild(walkBtn);
+
+// ragdoll rain: an action, not a layout — no ?mode= deep link, just a button.
+// Rapier (vendored WASM, ~2 MB) lazy-loads on the first click.
+const rainBtn = document.createElement("button");
+rainBtn.textContent = "Rain";
+rainBtn.title = "drop the entire library on a mannequin (Rapier physics)";
+rainBtn.onclick = async () => {
+  if (S.rainActive) {
+    restack();               // from-chaos-to-order is half the joy
+  } else {
+    rainBtn.disabled = true;
+    rainBtn.textContent = "loading physics…";
+    try {
+      await enterRain();
+    } finally {
+      rainBtn.disabled = false;
+    }
+  }
+  updateRainBtn();
+};
+function updateRainBtn() {
+  rainBtn.textContent = S.rainActive ? "Restack" : "Rain";
+  rainBtn.classList.toggle("active", S.rainActive);
+}
+document.getElementById("opts").appendChild(rainBtn);
+applyHooks.push(() => updateRainBtn());   // any mode click mid-rain restacks
 
 // dust toggle
 const dustBtn = document.createElement("button");
@@ -126,6 +153,7 @@ function tick() {
   else if (isFlying()) stepFlythrough(dt);
   else controls.update();
 
+  if (S.rainActive) stepRain(dt);
   if (S.animating) stepTransition(dt);
 
   if (S.walking) updatePop(dt);   // walk does its own crosshair picking
