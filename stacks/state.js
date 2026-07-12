@@ -13,4 +13,5 @@ export const S = {
   monolithFlown: false,    // fly the Monolith camera only on first entry
   dustEnabled: false,
   dustUserChoice: null,    // null = follow the mode default
+  walking: false,          // first-person walk mode active
 };
