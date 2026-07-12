@@ -83,7 +83,9 @@ scene.backgroundIntensity = 0.7;       // keep the warehouse moody, covers pop
 scene.backgroundBlurriness = 0.04;
 scene.environment = envTex;            // IBL for the standard-material figure
 
-const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 500);
+// far plane sized for the Monolith pull-back: a 2,609-case tower is ~420
+// units tall and the final framing sits ~550 units out
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 3000);
 camera.position.set(0, 26, 44);
 
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -368,6 +370,10 @@ const MODES = {
     label: "Hours",
     layout: () => layoutHours(),   // custom layout: size = playtime, not piles
   },
+  monolith: {
+    label: "Monolith",
+    layout: () => layoutMonolith(),   // one tower + cinematic flythrough
+  },
   era: {
     label: "Release era",
     buckets: (g) => g.year == null ? "none" : g.year < 2000 ? "90s" : g.year < 2010 ? "00s" : g.year < 2020 ? "10s" : "20s",
@@ -388,11 +394,28 @@ function clearLabels() {
   labelSprites.length = 0;
 }
 
+// non-sprite helper meshes owned by the current mode (marker rings etc.)
+const modeObjects = [];
+function clearModeObjects() {
+  for (const o of modeObjects) {
+    scene.remove(o);
+    o.geometry?.dispose();
+    o.material?.dispose();
+  }
+  modeObjects.length = 0;
+}
+
 function applyMode(modeKey) {
   exploded = null;   // mode switch recomputes every target anyway
+  const prevModeKey = currentModeKey;
   currentModeKey = modeKey;
   const mode = MODES[modeKey];
   clearLabels();
+  clearModeObjects();
+  if (modeKey !== "monolith" && prevModeKey === "monolith") {
+    endFlythrough(false);
+    controls.maxDistance = 160;
+  }
 
   if (mode.layout) mode.layout();
   else layoutPiles(mode);
@@ -407,6 +430,8 @@ function applyMode(modeKey) {
   // defaults off — until the user clicks the toggle, whose choice then sticks
   setDust(dustUserChoice ?? (modeKey === "playtime" ? 1 : 0));
   farmedBtn.style.display = modeKey === "hours" ? "" : "none";
+  splitBtn.style.display = modeKey === "monolith" ? "" : "none";
+  if (modeKey !== "monolith") monolithFlown = false;   // re-entry re-flies
 
   for (const b of modeBtns) b.classList.toggle("active", b.dataset.mode === modeKey);
 }
@@ -571,6 +596,179 @@ function layoutHours() {
   figureLabel.position.set(-TARGET_W / 2 - 6, 9.5, -depth / 2);
 }
 
+// The Monolith: every case in one physical stack, camera pulling back past
+// real-world reference silhouettes until the whole tower fits in frame.
+// Scene units are 10 cm, so meters × 10.
+const M = 10;
+const LANDMARKS = [
+  // the chair (0.85 m) is already in the scene at the base — not listed here
+  ["human", 1.75],
+  ["semi truck", 4.1],
+  ["giraffe", 5.5],
+  ["3-story house", 10],
+  ["blue whale", 25],
+  ["Statue of Liberty (statue)", 46],
+  ["Leaning Tower of Pisa", 57],
+  ["Eiffel Tower", 330],
+];
+let splitMonolith = false;   // twin towers: played vs never played
+let monolithFlown = false;   // fly the camera only on first entry
+
+function buildTower(gs, x) {
+  // most-played on top: the tower's crown is the games that earned it
+  gs.sort((a, b) => b.minutes - a.minutes || a.name.localeCompare(b.name));
+  gs.forEach((g, level) => {
+    g._stack = null;
+    g.from.copy(g.cur);
+    g.fromYaw = g.curYaw;
+    g.fromTilt = g.curTilt;
+    g.fromScale = g.curScale;
+    g.to.set(
+      x + jitter(g.id, 7) * 0.05,
+      (gs.length - 1 - level) * CASE_D + CASE_D / 2,
+      jitter(g.id, 8) * 0.05
+    );
+    g.toYaw = jitter(g.id, 9) * 0.07;
+    g.toTilt = FLAT_TILT;
+    g.toScale = 1;
+    g.t = 0;
+    g.delay = ((gs.length - level) / gs.length) * STAGGER * 2;
+  });
+  return gs.length * CASE_D;
+}
+
+function addHeightMarker(y, title, sub, gated) {
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(3.4, 0.05, 6, 72),
+    new THREE.MeshBasicMaterial({ color: 0xe6c86e, transparent: true, opacity: 0.75 })
+  );
+  ring.rotation.x = Math.PI / 2;
+  ring.position.y = y;
+  ring.userData.gated = gated;
+  ring.visible = !gated;
+  scene.add(ring);
+  modeObjects.push(ring);
+
+  const spr = makeLabelSprite(title, sub, 0.05);
+  spr.position.set(4.2, y, 0);
+  spr.userData.prio = 5;
+  spr.userData.gated = gated;
+  scene.add(spr);
+  labelSprites.push(spr);
+  return [ring, spr];
+}
+
+function layoutMonolith() {
+  const played = games.filter((g) => g.minutes > 0);
+  const unplayed = games.filter((g) => g.minutes === 0);
+  let height;
+  if (splitMonolith) {
+    const h1 = buildTower(played, -3.5);
+    const h2 = buildTower(unplayed, 3.5);
+    height = Math.max(h1, h2);
+  } else {
+    height = buildTower([...games], 0);
+  }
+  const meters = height / M;
+
+  figure.position.set(-8, 0, 2);
+  figureLabel.position.set(-8, 9.5, 2);
+
+  // markers appear as the flythrough climbs past them (all visible in snap)
+  const gated = !SNAP && !monolithFlown;
+  for (const [name, m] of LANDMARKS) {
+    if (m * M <= height * 1.15) addHeightMarker(m * M, name, `${m} m`, gated);
+  }
+
+  // closing stat plate: the multiplication spelled out, plus scale conversions
+  const eiffel = ((meters / 330) * 100).toFixed(1);
+  const nearMiss = LANDMARKS.find(([, m]) => m * M > height * 1.15);
+  const stat = makeLabelSprite(
+    `${meters.toFixed(1)} m tall`,
+    `${games.length.toLocaleString()} cases × ${CASE_D * 100} mm · ` +
+    `${(meters / 0.85).toFixed(1)} chairs · ${(meters / 5.5).toFixed(1)} giraffes · ` +
+    (nearMiss ? `${eiffel}% of the Eiffel Tower` : "taller than everything on the list"),
+    0.085
+  );
+  stat.position.set(-5.5, height + 2.5, 0);
+  stat.userData.prio = 1e9;   // the headline always wins declutter
+  scene.add(stat);
+  labelSprites.push(stat);
+
+  // let the orbit camera actually back out far enough to frame the tower
+  controls.maxDistance = Math.max(160, height * 2.2);
+
+  const finalPos = new THREE.Vector3(height * 0.55, height * 0.6, height * 1.4);
+  const finalTarget = new THREE.Vector3(0, height * 0.5, 0);
+  if (SNAP || monolithFlown) {
+    camera.position.copy(finalPos);
+    controls.target.copy(finalTarget);
+  } else {
+    monolithFlown = true;
+    flythrough([
+      { pos: new THREE.Vector3(7, 2.5, 13), target: new THREE.Vector3(0, 9, 0) },
+      { pos: new THREE.Vector3(-14, height * 0.3, 20), target: new THREE.Vector3(0, height * 0.38, 0) },
+      { pos: new THREE.Vector3(-26, height * 0.72, -26), target: new THREE.Vector3(0, height * 0.7, 0) },
+      { pos: new THREE.Vector3(height * 0.2, height * 0.95, height * 0.55), target: new THREE.Vector3(0, height * 0.8, 0) },
+      { pos: finalPos, target: finalTarget },
+    ], 9);
+  }
+}
+
+// ---------- keyframed camera flythrough ----------
+// Generic: the walkable-library mode can reuse this for entry moves.
+
+let fly = null;   // { keys, dur, t }
+
+function flythrough(keys, duration) {
+  controls.enabled = false;
+  fly = { keys, dur: duration, t: 0 };
+}
+
+function endFlythrough(snapToEnd = true) {
+  if (!fly) return;
+  if (snapToEnd) {
+    const last = fly.keys[fly.keys.length - 1];
+    camera.position.copy(last.pos);
+    controls.target.copy(last.target);
+  }
+  fly = null;
+  controls.enabled = true;
+  // whatever the flythrough hadn't revealed yet shows now (ESC skip included)
+  for (const o of [...modeObjects, ...labelSprites]) {
+    if (o.userData.gated) {
+      o.userData.gated = false;
+      o.visible = true;
+    }
+  }
+}
+
+const _p = new THREE.Vector3(), _t = new THREE.Vector3();
+function stepFlythrough(dt) {
+  fly.t = Math.min(1, fly.t + dt / fly.dur);
+  const k = ease(fly.t);
+  const u = k * (fly.keys.length - 1);
+  const i = Math.min(Math.floor(u), fly.keys.length - 2);
+  const f = u - i;
+  _p.lerpVectors(fly.keys[i].pos, fly.keys[i + 1].pos, f);
+  _t.lerpVectors(fly.keys[i].target, fly.keys[i + 1].target, f);
+  camera.position.copy(_p);
+  controls.target.copy(_t);
+  camera.lookAt(_t);
+  // reveal height markers as the camera climbs past them; they stay revealed
+  for (const o of [...modeObjects, ...labelSprites]) {
+    if (o.userData.gated && camera.position.y > o.position.y - 2) {
+      o.userData.gated = false;
+      o.visible = true;
+    }
+  }
+  if (fly.t >= 1) endFlythrough(false);
+}
+
+addEventListener("keydown", (e) => {
+  if (e.key === "Escape") endFlythrough();   // skippable, never traps the camera
+});
+
 // ---------- UI ----------
 
 const modesEl = document.getElementById("modes");
@@ -598,6 +796,18 @@ farmedBtn.onclick = () => {
   if (currentModeKey === "hours") applyMode("hours");   // re-layout
 };
 document.getElementById("opts").appendChild(farmedBtn);
+
+// twin-towers toggle (Monolith mode only): played vs never played
+const splitBtn = document.createElement("button");
+splitBtn.textContent = "played vs unplayed";
+splitBtn.title = "split the tower into played / never-played twin towers";
+splitBtn.style.display = "none";
+splitBtn.onclick = () => {
+  splitMonolith = !splitMonolith;
+  splitBtn.classList.toggle("active", splitMonolith);
+  if (currentModeKey === "monolith") applyMode("monolith");
+};
+document.getElementById("opts").appendChild(splitBtn);
 
 // dust toggle
 let dustEnabled = false;
@@ -782,7 +992,8 @@ const clock = new THREE.Clock();
 
 function tick() {
   const dt = Math.min(clock.getDelta(), 0.05);
-  controls.update();
+  if (fly) stepFlythrough(dt);
+  else controls.update();
 
   if (animating) {
     transitionClock += dt;
@@ -852,6 +1063,7 @@ function declutterLabels() {
     .map((spr) => ({ spr, prio: spr.userData.prio ?? -1 }))
     .sort((a, b) => b.prio - a.prio);
   for (const { spr } of items) {
+    if (spr.userData.gated) { spr.visible = false; continue; }   // not revealed yet
     _v.copy(spr.position).project(camera);
     if (_v.z >= 1) { spr.visible = false; continue; }   // behind the camera
     const w = spr.scale.x * F, h = spr.scale.y * F;
