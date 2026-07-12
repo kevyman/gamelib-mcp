@@ -5,16 +5,17 @@ on:
     branches: [main]
   workflow_dispatch: {}
 
-# Never run two deploys at once: a newer push to main queues behind the
-# in-flight run instead of cancelling it.
+# Never run two deploys at once. A newer push supersedes an in-flight run so a
+# stuck test cannot block the latest main commit from deploying for hours.
 concurrency:
   group: deploy-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -27,7 +28,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Run tests
-        run: uv run python -m pytest -q
+        run: uv run python -m pytest -vv
 
   deploy:
     name: Deploy to Hetzner
