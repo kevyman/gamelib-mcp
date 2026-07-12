@@ -113,12 +113,18 @@ function setDustUI(v) {
 }
 
 // per-mode UI state (button highlights, toggle visibility, dust default)
+const hintEl = document.getElementById("hint");
+const defaultHint = hintEl.textContent;
+
 applyHooks.push((modeKey) => {
   // dust reads best against Playtime's played/unplayed piles; elsewhere it
   // defaults off — until the user clicks the toggle, whose choice then sticks
   setDustUI(S.dustUserChoice ?? (modeKey === "playtime" ? 1 : 0));
   farmedBtn.style.display = modeKey === "hours" ? "" : "none";
   splitBtn.style.display = modeKey === "monolith" ? "" : "none";
+  hintEl.textContent = modeKey === "galaxy"
+    ? "drag to orbit · scroll to zoom · hover a case for details · double-click a cluster label to fly there"
+    : defaultHint;
   for (const b of modeBtns) b.classList.toggle("active", b.dataset.mode === modeKey);
 });
 

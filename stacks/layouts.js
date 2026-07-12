@@ -531,6 +531,7 @@ function layoutGalaxy() {
     );
     spr.position.set(c.pos[0], c.pos[1] + GALAXY_LIFT + (c.r ?? 8) + 1.5, c.pos[2]);
     spr.userData.prio = c.count;
+    spr.userData.cluster = c;   // double-click flies the camera to this island
     scene.add(spr);
     labelSprites.push(spr);
   }
@@ -565,3 +566,44 @@ function layoutGalaxy() {
     ], 2.5);
   }
 }
+
+// Double-click a cluster label to fly the camera to that island. Sprite
+// raycasting is unreliable for sizeAttenuation:false sprites (their world
+// scale isn't their screen scale), so hit-test the label plates in screen
+// space with the same math declutterLabels uses.
+const _pv = new THREE.Vector3();
+
+function clusterLabelAt(px, py) {
+  const F = innerHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
+  for (const spr of labelSprites) {
+    if (!spr.userData.cluster || !spr.visible) continue;
+    _pv.copy(spr.position).project(camera);
+    if (_pv.z >= 1) continue;
+    const w = spr.scale.x * F, h = spr.scale.y * F;
+    const cx = (_pv.x * 0.5 + 0.5) * innerWidth;
+    const by = (-_pv.y * 0.5 + 0.5) * innerHeight;   // plate bottom edge
+    if (px >= cx - w / 2 && px <= cx + w / 2 && py >= by - h && py <= by) {
+      return spr.userData.cluster;
+    }
+  }
+  return null;
+}
+
+addEventListener("dblclick", (e) => {
+  if (S.currentModeKey !== "galaxy" || S.walking || S.rainActive) return;
+  const c = clusterLabelAt(e.clientX, e.clientY);
+  if (!c) return;
+  const center = new THREE.Vector3(c.pos[0], c.pos[1] + GALAXY_LIFT, c.pos[2]);
+  const r = c.r ?? 8;
+  // approach along the current sight line so the flight feels continuous,
+  // arriving slightly above the island and far enough back to frame it
+  const dir = camera.position.clone().sub(center);
+  if (dir.lengthSq() < 1) dir.set(0.4, 0.25, 1);
+  dir.normalize();
+  const pos = center.clone().addScaledVector(dir, Math.max(r * 3.2, 26));
+  pos.y = Math.max(pos.y, center.y + r * 0.6);
+  flythrough([
+    { pos: camera.position.clone(), target: controls.target.clone() },
+    { pos, target: center.clone() },
+  ], 1.6);
+});
