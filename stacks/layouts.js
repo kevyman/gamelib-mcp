@@ -3,12 +3,12 @@
 // modules subscribe to applyHooks instead of being imported here.
 
 import * as THREE from "three";
-import { games, FAMILY_LABEL } from "./data.js";
+import { games, meta, FAMILY_LABEL } from "./data.js";
 import {
   scene, camera, controls, figure, figureLabel,
   makeLabelSprite, labelSprites, clearLabels, clearModeObjects, modeObjects,
 } from "./scene.js";
-import { snapAll } from "./cases.js";
+import { snapAll, setGalaxyShading } from "./cases.js";
 import { S } from "./state.js";
 import { flythrough, endFlythrough } from "./flythrough.js";
 import {
@@ -65,6 +65,10 @@ export const MODES = {
     label: "Monolith",
     layout: () => layoutMonolith(),   // one tower + cinematic flythrough
   },
+  galaxy: {
+    label: "Galaxy",
+    layout: () => layoutGalaxy(),     // taste-space fly-through (export-side embedding)
+  },
   era: {
     label: "Release era",
     buckets: (g) => g.year == null ? "none" : g.year < 2000 ? "90s" : g.year < 2010 ? "00s" : g.year < 2020 ? "10s" : "20s",
@@ -74,6 +78,9 @@ export const MODES = {
     sub: (gs) => gs.length ? "" : "",
   },
 };
+
+// the galaxy needs export-side embedding data; older library.json lacks it
+if (!games.some((g) => g.pos)) delete MODES.galaxy;
 
 // UI modules register callbacks here; called with the new mode key after a
 // layout is applied (keeps this module free of DOM knowledge).
@@ -90,10 +97,12 @@ export function applyMode(modeKey) {
   const mode = MODES[modeKey];
   clearLabels();
   clearModeObjects();
-  if (modeKey !== "monolith" && prevModeKey === "monolith") {
-    endFlythrough(false);
-    controls.maxDistance = 160;
-  }
+  if (prevModeKey === "monolith") endFlythrough(false);
+  controls.maxDistance = 160;   // monolith/galaxy layouts raise it as needed
+  setGalaxyShading(modeKey === "galaxy");
+  // lights out for the galaxy: the dim warehouse turns the additive nebulae,
+  // constellation lines and affinity glow into the brightest things on screen
+  scene.backgroundIntensity = modeKey === "galaxy" ? 0.08 : 0.7;
 
   if (mode.layout) mode.layout();
   else layoutPiles(mode);
@@ -394,3 +403,208 @@ function layoutMonolith() {
     ], 9);
   }
 }
+
+// Tag constellations: the library floats as labeled nebula islands, one per
+// semantic tag cluster — clustering and layout precomputed offline by
+// scripts/export_stacks.py (spherical k-means in tag space, then islands
+// with guaranteed separation), so this stays a dumb placement pass. The
+// visual grammar is borrowed from the readable embedding maps (Nomic
+// Atlas, Map of GitHub): one hue per cluster, a soft nebula glow behind
+// each island, labels at the centroids, faint constellation lines between
+// nearest neighbors.
+const GALAXY_LIFT = 78;   // float the cloud well clear of the floor disc
+
+let galaxyLines = null;   // { mesh, edges, settled } while galaxy is active
+const nebulaMeshes = [];
+let nebulaTex = null;
+
+function nebulaTexture() {
+  if (nebulaTex) return nebulaTex;
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = 256;
+  const ctx = cv.getContext("2d");
+  const grad = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
+  grad.addColorStop(0, "rgba(255,255,255,0.75)");
+  grad.addColorStop(0.35, "rgba(255,255,255,0.26)");
+  grad.addColorStop(0.7, "rgba(255,255,255,0.07)");
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 256, 256);
+  nebulaTex = new THREE.CanvasTexture(cv);   // shared; never disposed
+  return nebulaTex;
+}
+
+// Constellation lines between each game and its strongest same-cluster
+// neighbors (pairs exported in meta.edges). Endpoints track g.cur, so the
+// lines stretch with the pile→galaxy explosion, then settle and brighten.
+function buildGalaxyLines() {
+  const edges = meta.edges ?? [];
+  if (!edges.length) return null;
+  const posArr = new Float32Array(edges.length * 6);
+  const colArr = new Float32Array(edges.length * 6);
+  const c = new THREE.Color();
+  edges.forEach(([a], e) => {
+    c.set(meta.clusters?.[games[a].cl]?.color ?? "#8899aa").multiplyScalar(0.6);
+    for (const v of [0, 3]) {
+      colArr[e * 6 + v] = c.r;
+      colArr[e * 6 + v + 1] = c.g;
+      colArr[e * 6 + v + 2] = c.b;
+    }
+  });
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(posArr, 3));
+  geo.setAttribute("color", new THREE.BufferAttribute(colArr, 3));
+  const mesh = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  }));
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+  modeObjects.push(mesh);
+  return { mesh, edges, settled: false };
+}
+
+function updateGalaxyLinePositions() {
+  const attr = galaxyLines.mesh.geometry.getAttribute("position");
+  galaxyLines.edges.forEach(([a, b], e) => {
+    attr.setXYZ(e * 2, games[a].cur.x, games[a].cur.y, games[a].cur.z);
+    attr.setXYZ(e * 2 + 1, games[b].cur.x, games[b].cur.y, games[b].cur.z);
+  });
+  attr.needsUpdate = true;
+}
+
+// Per-frame galaxy work, called from the main loop: billboard the nebula
+// planes, track line endpoints while cases are in flight, fade lines in.
+export function galaxyFrame(dt) {
+  if (S.currentModeKey !== "galaxy") return;
+  for (const n of nebulaMeshes) n.quaternion.copy(camera.quaternion);
+  if (!galaxyLines) return;
+  if (S.animating || S.rainActive || !galaxyLines.settled) {
+    updateGalaxyLinePositions();
+    galaxyLines.settled = !S.animating && !S.rainActive;
+  }
+  const target = S.animating ? 0.12 : 0.38;
+  const mat = galaxyLines.mesh.material;
+  mat.opacity += (target - mat.opacity) * Math.min(1, dt * 1.5);
+}
+
+function layoutGalaxy() {
+  nebulaMeshes.length = 0;   // prior mode objects were already cleared
+  for (const g of games) {
+    const p = g.pos ?? [0, 0, 0];
+    g._stack = null;
+    g.from.copy(g.cur);
+    g.fromYaw = g.curYaw;
+    g.fromTilt = g.curTilt;
+    g.fromScale = g.curScale;
+    g.to.set(p[0], p[1] + GALAXY_LIFT, p[2]);
+    g.toYaw = jitter(g.id, 16) * Math.PI;
+    g.toTilt = 0;
+    g.toScale = 0.65;
+    g.t = 0;
+    g.delay = Math.abs(jitter(g.id, 17)) * STAGGER * 1.6;
+  }
+
+  // one soft additive glow plane per island, in the island's hue — the
+  // clusters read as colored gas clouds from any distance
+  const clusters = meta.clusters ?? [];
+  const maxCount = Math.max(1, ...clusters.map((c) => c.count));
+  for (const c of clusters) {
+    if (c.color) {
+      const size = (c.r ?? 8) * 3.1;
+      const neb = new THREE.Mesh(
+        new THREE.PlaneGeometry(size, size),
+        new THREE.MeshBasicMaterial({
+          map: nebulaTexture(), color: c.color, transparent: true,
+          opacity: 0.34, blending: THREE.AdditiveBlending, depthWrite: false,
+        })
+      );
+      neb.position.set(c.pos[0], c.pos[1] + GALAXY_LIFT, c.pos[2]);
+      scene.add(neb);
+      modeObjects.push(neb);
+      nebulaMeshes.push(neb);
+    }
+    const spr = makeLabelSprite(
+      c.label, `${c.count} games`,
+      0.05 + 0.035 * Math.sqrt(c.count / maxCount),
+      c.color ?? "#ffffff"
+    );
+    spr.position.set(c.pos[0], c.pos[1] + GALAXY_LIFT + (c.r ?? 8) + 1.5, c.pos[2]);
+    spr.userData.prio = c.count;
+    spr.userData.cluster = c;   // double-click flies the camera to this island
+    scene.add(spr);
+    labelSprites.push(spr);
+  }
+
+  galaxyLines = buildGalaxyLines();
+  if (galaxyLines && S.SNAP) galaxyLines.mesh.material.opacity = 0.38;
+
+  const uncharted = games.filter((g) => g.uncharted);
+  if (uncharted.length) {
+    const shellR = Math.max(...uncharted.map((g) => Math.hypot(g.pos[0], g.pos[2])));
+    const spr = makeLabelSprite("uncharted", `${uncharted.length} thin-tagged games`, 0.05);
+    spr.position.set(shellR, GALAXY_LIFT + 18, 0);
+    spr.userData.prio = 1;
+    scene.add(spr);
+    labelSprites.push(spr);
+  }
+
+  figure.position.set(0, 0, 0);   // the chair stays grounded under the stars
+  figureLabel.position.set(0, 9.5, 0);
+  controls.maxDistance = 420;     // room to pull back and see the whole galaxy
+
+  // frame the cloud (it floats far above the default pile framing)
+  const finalPos = new THREE.Vector3(70, GALAXY_LIFT + 30, 128);
+  const finalTarget = new THREE.Vector3(0, GALAXY_LIFT, 0);
+  if (S.SNAP) {
+    camera.position.copy(finalPos);
+    controls.target.copy(finalTarget);
+  } else {
+    flythrough([
+      { pos: camera.position.clone(), target: controls.target.clone() },
+      { pos: finalPos, target: finalTarget },
+    ], 2.5);
+  }
+}
+
+// Double-click a cluster label to fly the camera to that island. Sprite
+// raycasting is unreliable for sizeAttenuation:false sprites (their world
+// scale isn't their screen scale), so hit-test the label plates in screen
+// space with the same math declutterLabels uses.
+const _pv = new THREE.Vector3();
+
+function clusterLabelAt(px, py) {
+  const F = innerHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
+  for (const spr of labelSprites) {
+    if (!spr.userData.cluster || !spr.visible) continue;
+    _pv.copy(spr.position).project(camera);
+    if (_pv.z >= 1) continue;
+    const w = spr.scale.x * F, h = spr.scale.y * F;
+    const cx = (_pv.x * 0.5 + 0.5) * innerWidth;
+    const by = (-_pv.y * 0.5 + 0.5) * innerHeight;   // plate bottom edge
+    if (px >= cx - w / 2 && px <= cx + w / 2 && py >= by - h && py <= by) {
+      return spr.userData.cluster;
+    }
+  }
+  return null;
+}
+
+addEventListener("dblclick", (e) => {
+  // S.flying too: a scripted flythrough would fight the WASD stick
+  if (S.currentModeKey !== "galaxy" || S.walking || S.flying || S.rainActive) return;
+  const c = clusterLabelAt(e.clientX, e.clientY);
+  if (!c) return;
+  const center = new THREE.Vector3(c.pos[0], c.pos[1] + GALAXY_LIFT, c.pos[2]);
+  const r = c.r ?? 8;
+  // approach along the current sight line so the flight feels continuous,
+  // arriving slightly above the island and far enough back to frame it
+  const dir = camera.position.clone().sub(center);
+  if (dir.lengthSq() < 1) dir.set(0.4, 0.25, 1);
+  dir.normalize();
+  const pos = center.clone().addScaledVector(dir, Math.max(r * 3.2, 26));
+  pos.y = Math.max(pos.y, center.y + r * 0.6);
+  flythrough([
+    { pos: camera.position.clone(), target: controls.target.clone() },
+    { pos, target: center.clone() },
+  ], 1.6);
+});
