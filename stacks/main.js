@@ -17,7 +17,7 @@ import * as THREE from "three";
 import { games } from "./data.js";
 import { renderer, scene, camera, controls, declutterLabels } from "./scene.js";
 import { meshes, composeMatrix, setDust, snapAll, stepTransition } from "./cases.js";
-import { MODES, applyMode, applyHooks } from "./layouts.js";
+import { MODES, applyMode, applyHooks, galaxyFrame } from "./layouts.js";
 import { isFlying, stepFlythrough } from "./flythrough.js";
 import { updatePicking, updatePop, explodeStack } from "./modes/orbit.js";
 import { enterWalk, stepWalk } from "./modes/walk.js";
@@ -155,6 +155,7 @@ function tick() {
 
   if (S.rainActive) stepRain(dt);
   if (S.animating) stepTransition(dt);
+  galaxyFrame(dt);   // nebula billboards + constellation lines (galaxy only)
 
   if (S.walking) updatePop(dt);   // walk does its own crosshair picking
   else updatePicking(dt);

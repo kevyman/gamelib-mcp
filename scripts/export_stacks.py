@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import colorsys
 import hashlib
 import json
 import math
@@ -53,18 +54,30 @@ FAMILY_PRIORITY = ["nintendo", "sony", "xbox", "pc"]
 
 
 # ---------------------------------------------------------------------------
-# Galaxy embedding (issue #78): TF-IDF tag vectors -> cosine kNN graph ->
-# 3D force layout, all offline so the frontend stays dumb. Deterministic
-# seed so re-exports don't reshuffle the galaxy.
+# Galaxy embedding (issue #78): cluster FIRST, embed SECOND. A single global
+# force layout collapses into one undifferentiated blob and positional
+# k-means afterwards just carves that blob into arbitrary chunks — the
+# readable embedding maps (Nomic Atlas, Map of GitHub, PixPlot; see
+# "Cluster and then Embed", arXiv:2509.03373) all do the reverse: find
+# semantic clusters in the high-dimensional space, lay the clusters out as
+# separated islands, then lay members out locally inside their island.
+# All offline so the frontend stays dumb; deterministic seed so re-exports
+# don't reshuffle the galaxy.
 # ---------------------------------------------------------------------------
 
 GALAXY_SEED = 78
 GALAXY_RADIUS = 60.0        # scene units; frontend lifts the cloud off the floor
 GALAXY_TAG_CAP = 8          # mirror VIBE_TAG_PROMINENCE_CUTOFF: prominent tags only
 GALAXY_MIN_TAGS = 2         # thinner-tagged games go to the "uncharted" shell
+GALAXY_MIN_CHARTED = 24     # fewer tagged games than this: skip the mode
 KNN_K = 12
-KMEANS_K = 16
-LAYOUT_ITERS = 250
+KMEANS_MAX_K = 16
+MIN_CLUSTER = 5             # smaller clusters merge into their nearest sibling
+MEMBER_SPACING = 2.2        # cluster radius = MEMBER_SPACING * cbrt(count)
+ANCHOR_GAP = 6.0            # guaranteed empty space between any two islands
+ANCHOR_SPREAD = 42.0        # extra distance for dissimilar clusters
+Y_SQUASH = 0.6              # oblate galaxy: labels spread on screen, disc read
+EDGES_PER_GAME = 2          # constellation lines: strongest in-cluster neighbors
 
 
 def prominent_tags(raw_tags: object, cap: int = GALAXY_TAG_CAP) -> list[str]:
@@ -132,113 +145,255 @@ def knn_edges(
     return [(i, j, s) for (i, j), s in edges.items()]
 
 
-def force_layout_3d(
-    n: int,
-    edges: list[tuple[int, int, float]],
-    seed: int = GALAXY_SEED,
-    iters: int = LAYOUT_ITERS,
-) -> list[list[float]]:
-    """Spring layout on the kNN edges + sampled repulsion (cheap Barnes-Hut
-    stand-in: a handful of random repulsors per node per iteration)."""
+def _dot(a: dict[str, float], b: dict[str, float]) -> float:
+    if len(b) < len(a):
+        a, b = b, a
+    return sum(w * b.get(t, 0.0) for t, w in a.items())
+
+
+def _mean_centers(
+    vecs: list[dict[str, float]], assign: list[int], k: int
+) -> list[dict[str, float]]:
+    sums: list[dict[str, float]] = [{} for _ in range(k)]
+    for v, a in zip(vecs, assign):
+        s = sums[a]
+        for t, w in v.items():
+            s[t] = s.get(t, 0.0) + w
+    out = []
+    for s in sums:
+        norm = math.sqrt(sum(w * w for w in s.values()))
+        out.append({t: w / norm for t, w in s.items()} if norm else {})
+    return out
+
+
+def spherical_kmeans(
+    vecs: list[dict[str, float]], k: int, seed: int = GALAXY_SEED, iters: int = 40
+) -> tuple[list[int], list[dict[str, float]]]:
+    """Deterministic spherical k-means over sparse unit TF-IDF vectors.
+
+    Clustering happens HERE, in tag space — not on 3D positions after the
+    fact. Farthest-point seeding after one seeded random pick; every tie
+    breaks on index, so re-exports are stable."""
+    n = len(vecs)
+    k = max(1, min(k, n))
     rng = random.Random(seed)
-    pos = [
-        [rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-1, 1)] for _ in range(n)
-    ]
-    if n < 2:
-        return pos
-    vel = [[0.0, 0.0, 0.0] for _ in range(n)]
-    for it in range(iters):
-        cool = 1.0 - it / iters
-        step = 0.05 + 0.1 * cool
-        # springs: stronger similarity pulls to a shorter rest length
-        for i, j, s in edges:
-            rest = 0.25 * (1.5 - s)
-            dx = pos[j][0] - pos[i][0]
-            dy = pos[j][1] - pos[i][1]
-            dz = pos[j][2] - pos[i][2]
-            d = math.sqrt(dx * dx + dy * dy + dz * dz) or 1e-6
-            f = (d - rest) / d * 0.5 * s
-            for axis, delta in ((0, dx), (1, dy), (2, dz)):
-                vel[i][axis] += f * delta * step
-                vel[j][axis] -= f * delta * step
-        # sampled repulsion keeps clusters from collapsing into one blob
-        for i in range(n):
-            for _ in range(6):
-                j = rng.randrange(n)
+    centers = [dict(vecs[rng.randrange(n)])]
+    best = [_dot(v, centers[0]) for v in vecs]
+    while len(centers) < k:
+        far = min(range(n), key=lambda idx: (best[idx], idx))
+        centers.append(dict(vecs[far]))
+        for idx, v in enumerate(vecs):
+            s = _dot(v, centers[-1])
+            if s > best[idx]:
+                best[idx] = s
+    assign = [-1] * n
+    for _ in range(iters):
+        changed = False
+        for i, v in enumerate(vecs):
+            b, bs = 0, -1.0
+            for c_i, c in enumerate(centers):
+                s = _dot(v, c)
+                if s > bs:
+                    b, bs = c_i, s
+            if b != assign[i]:
+                assign[i] = b
+                changed = True
+        if not changed:
+            break
+        centers = _mean_centers(vecs, assign, len(centers))
+    return assign, centers
+
+
+def merge_small_clusters(
+    assign: list[int],
+    vecs: list[dict[str, float]],
+    centers: list[dict[str, float]],
+    min_size: int = MIN_CLUSTER,
+) -> tuple[list[int], list[dict[str, float]]]:
+    """Fold sub-min_size clusters into their members' nearest big cluster,
+    then compact ids so cluster 0 is the largest (colors/labels rank-stable)."""
+    counts: dict[int, int] = {}
+    for a in assign:
+        counts[a] = counts.get(a, 0) + 1
+    big = [c_i for c_i in range(len(centers)) if counts.get(c_i, 0) >= min_size]
+    if not big:
+        big = [max(counts, key=lambda c: (counts[c], -c))]
+    for i, v in enumerate(vecs):
+        if assign[i] not in big:
+            assign[i] = max(big, key=lambda c_i: (_dot(v, centers[c_i]), -c_i))
+    counts = {}
+    for a in assign:
+        counts[a] = counts.get(a, 0) + 1
+    order = sorted(counts, key=lambda c: (-counts[c], c))
+    idmap = {old: new for new, old in enumerate(order)}
+    new_assign = [idmap[a] for a in assign]
+    return new_assign, _mean_centers(vecs, new_assign, len(order))
+
+
+def layout_cluster_anchors(
+    centers: list[dict[str, float]],
+    radii: list[float],
+    seed: int = GALAXY_SEED,
+) -> list[list[float]]:
+    """Islands, not a blob: every anchor pair is sprung toward an ideal
+    distance of (r_i + r_j + gap) plus extra for dissimilar clusters — the
+    Kamada-Kawai idea at cluster granularity. Related nebulae end up
+    adjacent, unrelated ones across the galaxy, and no two ever touch."""
+    k = len(centers)
+    if k == 1:
+        return [[0.0, 0.0, 0.0]]
+    rng = random.Random(seed + 1)
+    pos = [[rng.uniform(-20, 20) for _ in range(3)] for _ in range(k)]
+    sims = [[_dot(centers[i], centers[j]) for j in range(k)] for i in range(k)]
+    for it in range(400):
+        step = 0.1 * (1.0 - it / 440) / (k - 1)
+        for i in range(k):
+            mx = my = mz = 0.0
+            for j in range(k):
                 if j == i:
                     continue
                 dx = pos[i][0] - pos[j][0]
                 dy = pos[i][1] - pos[j][1]
                 dz = pos[i][2] - pos[j][2]
-                d2 = dx * dx + dy * dy + dz * dz + 1e-4
-                f = min(0.05 / d2, 2.0)
-                pos[i][0] += dx * f * step
-                pos[i][1] += dy * f * step
-                pos[i][2] += dz * f * step
-        for i in range(n):
-            for axis in range(3):
-                pos[i][axis] += vel[i][axis] * step
-                vel[i][axis] *= 0.6
+                d = math.sqrt(dx * dx + dy * dy + dz * dz) or 1e-6
+                want = (
+                    radii[i] + radii[j] + ANCHOR_GAP
+                    + (1.0 - max(0.0, sims[i][j])) * ANCHOR_SPREAD
+                )
+                f = (want - d) / d  # >0 pushes apart, <0 pulls together
+                mx += f * dx
+                my += f * dy
+                mz += f * dz
+            pos[i][0] += mx * step
+            pos[i][1] += my * step
+            pos[i][2] += mz * step
+    # hard resolution pass: springs approximate, this guarantees — any pair
+    # still closer than touching + gap is projected apart symmetrically
+    for _ in range(80):
+        clean = True
+        for i in range(k):
+            for j in range(i + 1, k):
+                dx = pos[i][0] - pos[j][0]
+                dy = pos[i][1] - pos[j][1]
+                dz = pos[i][2] - pos[j][2]
+                d = math.sqrt(dx * dx + dy * dy + dz * dz) or 1e-6
+                need = radii[i] + radii[j] + ANCHOR_GAP
+                if d < need:
+                    clean = False
+                    push = (need - d) / d * 0.5
+                    for axis, delta in ((0, dx), (1, dy), (2, dz)):
+                        pos[i][axis] += delta * push
+                        pos[j][axis] -= delta * push
+        if clean:
+            break
     return pos
 
 
-def normalize_positions(
-    pos: list[list[float]], radius: float = GALAXY_RADIUS
+def fit_anchors(
+    pos: list[list[float]], radii: list[float]
+) -> tuple[list[list[float]], list[float]]:
+    """Center, squash y (disc read), and scale anchors AND radii together so
+    the whole charted volume exactly fills GALAXY_RADIUS — uniform scaling
+    keeps the guaranteed inter-island gaps."""
+    n = len(pos)
+    cx = sum(p[0] for p in pos) / n
+    cy = sum(p[1] for p in pos) / n
+    cz = sum(p[2] for p in pos) / n
+    pos = [[p[0] - cx, (p[1] - cy) * Y_SQUASH, p[2] - cz] for p in pos]
+    extent = max(
+        math.sqrt(p[0] ** 2 + p[1] ** 2 + p[2] ** 2) + r
+        for p, r in zip(pos, radii)
+    ) or 1.0
+    k = GALAXY_RADIUS / extent
+    return (
+        [[p[0] * k, p[1] * k, p[2] * k] for p in pos],
+        [r * k for r in radii],
+    )
+
+
+def layout_members(
+    count: int,
+    edges_local: list[tuple[int, int, float]],
+    radius: float,
+    seed: int,
 ) -> list[list[float]]:
-    if not pos:
-        return pos
-    cx = sum(p[0] for p in pos) / len(pos)
-    cy = sum(p[1] for p in pos) / len(pos)
-    cz = sum(p[2] for p in pos) / len(pos)
-    centered = [[p[0] - cx, p[1] - cy, p[2] - cz] for p in pos]
-    extent = max(max(abs(c) for c in p) for p in centered) or 1.0
-    k = radius / extent
-    return [[p[0] * k, p[1] * k, p[2] * k] for p in centered]
-
-
-def kmeans_3d(
-    pos: list[list[float]], k: int = KMEANS_K, seed: int = GALAXY_SEED, iters: int = 30
-) -> list[int]:
-    """Plain k-means over embedded positions; returns a cluster id per point."""
+    """Local force layout inside one island: kNN springs give internal
+    structure, all-pairs (small) or sampled (large) repulsion spreads the
+    cloud, gravity + a hard clamp keep everything inside the island."""
     rng = random.Random(seed)
-    k = min(k, len(pos))
-    if k == 0:
-        return []
-    centers = [list(p) for p in rng.sample(pos, k)]
-    assign = [0] * len(pos)
-    for _ in range(iters):
-        for i, p in enumerate(pos):
-            best, best_d = 0, float("inf")
-            for c_i, c in enumerate(centers):
-                d = (p[0] - c[0]) ** 2 + (p[1] - c[1]) ** 2 + (p[2] - c[2]) ** 2
-                if d < best_d:
-                    best, best_d = c_i, d
-            assign[i] = best
-        sums = [[0.0, 0.0, 0.0, 0] for _ in range(k)]
-        for i, p in enumerate(pos):
-            s = sums[assign[i]]
-            s[0] += p[0]
-            s[1] += p[1]
-            s[2] += p[2]
-            s[3] += 1
-        for c_i, s in enumerate(sums):
-            if s[3]:
-                centers[c_i] = [s[0] / s[3], s[1] / s[3], s[2] / s[3]]
-    return assign
+    pos = []
+    for _ in range(count):
+        while True:
+            p = [rng.uniform(-1.0, 1.0) for _ in range(3)]
+            if p[0] ** 2 + p[1] ** 2 + p[2] ** 2 <= 1.0:
+                break
+        pos.append([c * radius * 0.85 for c in p])
+    if count < 2:
+        return [[0.0, 0.0, 0.0]] * count
+    rep = radius * radius * 0.02
+    for it in range(120):
+        step = 0.12 * (1.0 - it / 130)
+        for a, b, s in edges_local:
+            rest = radius * 0.45 * (1.35 - s)
+            dx = pos[b][0] - pos[a][0]
+            dy = pos[b][1] - pos[a][1]
+            dz = pos[b][2] - pos[a][2]
+            d = math.sqrt(dx * dx + dy * dy + dz * dz) or 1e-6
+            f = (d - rest) / d * 0.4 * s * step
+            pos[a][0] += f * dx
+            pos[a][1] += f * dy
+            pos[a][2] += f * dz
+            pos[b][0] -= f * dx
+            pos[b][1] -= f * dy
+            pos[b][2] -= f * dz
+        for i in range(count):
+            others = range(count) if count <= 90 else (
+                rng.randrange(count) for _ in range(8)
+            )
+            for j in others:
+                if j == i:
+                    continue
+                dx = pos[i][0] - pos[j][0]
+                dy = pos[i][1] - pos[j][1]
+                dz = pos[i][2] - pos[j][2]
+                d2 = dx * dx + dy * dy + dz * dz + 1e-3
+                f = min(rep / d2, 1.5) * step
+                pos[i][0] += dx * f
+                pos[i][1] += dy * f
+                pos[i][2] += dz * f
+            # gravity + clamp inside the island radius
+            r = math.sqrt(sum(c * c for c in pos[i])) or 1e-6
+            pull = 0.02 * step if r < radius else (r - radius) / r + 0.02 * step
+            pos[i][0] -= pos[i][0] * pull
+            pos[i][1] -= pos[i][1] * pull
+            pos[i][2] -= pos[i][2] * pull
+    return [[p[0], p[1] * 0.75, p[2]] for p in pos]
+
+
+def cluster_color(rank: int) -> str:
+    """Golden-angle hue walk — the Nomic-Atlas-style categorical palette:
+    consecutive cluster ranks land far apart on the wheel, deterministic."""
+    h = (rank * 137.508) % 360.0 / 360.0
+    r, g, b = colorsys.hls_to_rgb(h, 0.62, 0.72)
+    return f"#{round(r * 255):02x}{round(g * 255):02x}{round(b * 255):02x}"
 
 
 def cluster_label(
-    member_tags: list[list[str]], df: dict[str, int], total: int
+    member_tags: list[list[str]],
+    df: dict[str, int],
+    total: int,
+    used: set[str] | None = None,
 ) -> str | None:
     """The most-overrepresented tag among a cluster's members: highest ratio
-    of in-cluster frequency to library-wide frequency, needing >=3 carriers."""
+    of in-cluster frequency to library-wide frequency, needing >=3 carriers.
+    Tags already naming another cluster are skipped so labels stay unique."""
     counts: dict[str, int] = {}
     for tags in member_tags:
         for t in tags:
             counts[t] = counts.get(t, 0) + 1
     best, best_score = None, 0.0
     for t, c in counts.items():
-        if c < 3:
+        if c < 3 or (used and t in used):
             continue
         score = (c / len(member_tags)) / (df.get(t, 1) / total)
         if score > best_score:
@@ -261,23 +416,60 @@ def affinity_of(
 def galaxy_embedding(
     games: list[dict], affinity: dict[str, float]
 ) -> dict[str, object] | None:
-    """Compute pos/aff per game (mutates the dicts) and return clusters meta.
+    """Compute pos/aff/cl per game (mutates the dicts) and return meta:
+    labeled+colored clusters and the constellation edge list.
 
+    Pipeline: spherical k-means in TAG space -> cluster islands laid out
+    with hard separation -> members laid out locally inside their island.
     Games with fewer than GALAXY_MIN_TAGS tags are parked in an "uncharted"
     shell at the galaxy edge rather than polluting the clusters.
     """
     tag_lists = [g["tags"] for g in games]
     core_idx = [i for i, t in enumerate(tag_lists) if len(t) >= GALAXY_MIN_TAGS]
-    if len(core_idx) < KMEANS_K:
+    if len(core_idx) < GALAXY_MIN_CHARTED:
         return None   # not enough tagged games to chart anything
 
     core_tags = [tag_lists[i] for i in core_idx]
     vecs, idf = tfidf_vectors(core_tags)
+    n = len(vecs)
+
+    k = max(4, min(KMEANS_MAX_K, n // 25))
+    assign, centers = spherical_kmeans(vecs, k)
+    assign, centers = merge_small_clusters(assign, vecs, centers)
+    n_clusters = max(assign) + 1
+
+    counts = [0] * n_clusters
+    for a in assign:
+        counts[a] += 1
+    radii = [max(3.0, MEMBER_SPACING * c ** (1 / 3)) for c in counts]
+    anchors = layout_cluster_anchors(centers, radii)
+    anchors, radii = fit_anchors(anchors, radii)
+
+    # members: local layout per island, sprung on the in-cluster kNN edges
+    members: list[list[int]] = [[] for _ in range(n_clusters)]
+    local_of: list[int] = [0] * n
+    for i, a in enumerate(assign):
+        local_of[i] = len(members[a])
+        members[a].append(i)
     edges = knn_edges(vecs)
-    raw = force_layout_3d(len(core_idx), edges)
-    pos = normalize_positions(raw)
-    for local, i in enumerate(core_idx):
-        games[i]["pos"] = [round(c, 2) for c in pos[local]]
+    intra: list[list[tuple[int, int, float]]] = [[] for _ in range(n_clusters)]
+    for i, j, s in edges:
+        if assign[i] == assign[j]:
+            intra[assign[i]].append((local_of[i], local_of[j], s))
+
+    pos: list[list[float]] = [[0.0, 0.0, 0.0]] * n
+    for c_i in range(n_clusters):
+        local = layout_members(
+            counts[c_i], intra[c_i], radii[c_i], GALAXY_SEED + 10 + c_i
+        )
+        ax, ay, az = anchors[c_i]
+        for li, i in enumerate(members[c_i]):
+            p = local[li]
+            pos[i] = [ax + p[0], ay + p[1], az + p[2]]
+
+    for local_i, i in enumerate(core_idx):
+        games[i]["pos"] = [round(c, 2) for c in pos[local_i]]
+        games[i]["cl"] = assign[local_i]
 
     # uncharted shell: deterministic ring just outside the charted volume
     shell_r = GALAXY_RADIUS * 1.12
@@ -296,32 +488,44 @@ def galaxy_embedding(
     for tags in core_tags:
         for t in tags:
             df[t] = df.get(t, 0) + 1
-    assign = kmeans_3d(pos)
     clusters = []
-    for c_i in range(max(assign) + 1 if assign else 0):
-        members = [i for i, a in enumerate(assign) if a == c_i]
-        if len(members) < 5:
-            continue
-        label = cluster_label([core_tags[m] for m in members], df, len(core_tags))
-        if not label:
-            continue
-        cx = sum(pos[m][0] for m in members) / len(members)
-        cy = sum(pos[m][1] for m in members) / len(members)
-        cz = sum(pos[m][2] for m in members) / len(members)
+    used: set[str] = set()
+    for c_i in range(n_clusters):
+        label = cluster_label(
+            [core_tags[m] for m in members[c_i]], df, len(core_tags), used
+        )
+        if label:
+            used.add(label)
         clusters.append(
             {
-                "label": label,
-                "pos": [round(cx, 2), round(cy, 2), round(cz, 2)],
-                "count": len(members),
+                "label": label or "misc",
+                "pos": [round(v, 2) for v in anchors[c_i]],
+                "r": round(radii[c_i], 2),
+                "count": counts[c_i],
+                "color": cluster_color(c_i),
             }
         )
+
+    # constellation edges: each game's strongest same-cluster neighbors,
+    # exported as index pairs into the games array for the line pass
+    strongest: dict[int, list[tuple[float, int]]] = {}
+    for i, j, s in edges:
+        if assign[i] != assign[j]:
+            continue
+        strongest.setdefault(i, []).append((s, j))
+        strongest.setdefault(j, []).append((s, i))
+    pairs: set[tuple[int, int]] = set()
+    for i, lst in strongest.items():
+        for s, j in sorted(lst, key=lambda t: (-t[0], t[1]))[:EDGES_PER_GAME]:
+            pairs.add((min(i, j), max(i, j)))
+    game_edges = [[core_idx[i], core_idx[j]] for i, j in sorted(pairs)]
 
     for g in games:
         aff = affinity_of(g["tags"], affinity, idf)
         if aff is not None:
             g["aff"] = round(aff, 3)
 
-    return {"clusters": clusters}
+    return {"clusters": clusters, "edges": game_edges}
 
 
 def hash_angle(game_id: int, salt: int) -> float:

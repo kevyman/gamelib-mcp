@@ -2,14 +2,17 @@
 
 The script isn't a package module, so load it by path. These tests pin the
 properties the feature depends on: determinism across re-exports, tag
-hygiene (canonicalization, feature-flag quarantine, prominence cap), and
-the embedding actually separating disjoint taste cliques.
+hygiene (canonicalization, feature-flag quarantine, prominence cap), and —
+the point of the cluster-first pipeline — that semantic clusters become
+visually separated islands (no cluster mixes disjoint tastes, members stay
+inside their island's radius, constellation edges never bridge islands).
 """
 
 from __future__ import annotations
 
 import importlib.util
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -92,9 +95,10 @@ def test_cliques_separate_and_thin_games_go_uncharted() -> None:
     def mean_spread(gs: list[dict], c: tuple[float, float, float]) -> float:
         return sum(math.dist(g["pos"], c) for g in gs) / len(gs)
 
-    # the two nebulae sit further apart than either one is wide
-    assert inter > mean_spread(rogues, ca)
-    assert inter > mean_spread(cozies, cb)
+    # the two taste families sit far apart relative to their own width —
+    # islands with guaranteed gaps, not lobes of one blob
+    assert inter > 1.5 * mean_spread(rogues, ca)
+    assert inter > 1.5 * mean_spread(cozies, cb)
 
     # thin/untagged games are parked on the shell outside the charted volume
     for g in games:
@@ -106,6 +110,37 @@ def test_cliques_separate_and_thin_games_go_uncharted() -> None:
     labels = {c["label"] for c in meta["clusters"]}
     assert labels & {"roguelike", "deckbuilder", "turn-based", "dungeon crawler",
                      "cozy", "farming-sim", "relaxing", "life sim"}
+
+
+def test_clusters_are_semantic_islands() -> None:
+    """Clustering happens in tag space, so no cluster mixes the two tastes;
+    every member sits inside its island's exported radius; constellation
+    edges stay within an island; colors/labels are unique and well-formed."""
+    games = _clique_games()
+    meta = export_stacks.galaxy_embedding(games, {})
+    assert meta is not None
+
+    charted = [g for g in games if not g.get("uncharted")]
+    assert all("cl" in g for g in charted)
+    rogue_cl = {g["cl"] for g in charted if "roguelike" in g["tags"]}
+    cozy_cl = {g["cl"] for g in charted if "cozy" in g["tags"]}
+    assert rogue_cl.isdisjoint(cozy_cl)
+
+    clusters = meta["clusters"]
+    for g in charted:
+        c = clusters[g["cl"]]
+        assert math.dist(g["pos"], c["pos"]) <= c["r"] + 0.1
+
+    assert meta["edges"]
+    for a, b in meta["edges"]:
+        assert games[a]["cl"] == games[b]["cl"]
+
+    colors = [c["color"] for c in clusters]
+    assert all(re.fullmatch(r"#[0-9a-f]{6}", col) for col in colors)
+    assert len(set(colors)) == len(colors)
+    labels = [c["label"] for c in clusters]
+    assert len(set(labels)) == len(labels)
+    assert all(c["r"] > 0 and c["count"] >= 1 for c in clusters)
 
 
 def test_affinity_is_idf_weighted_mean() -> None:

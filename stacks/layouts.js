@@ -8,7 +8,7 @@ import {
   scene, camera, controls, figure, figureLabel,
   makeLabelSprite, labelSprites, clearLabels, clearModeObjects, modeObjects,
 } from "./scene.js";
-import { snapAll, setAffinityGlow } from "./cases.js";
+import { snapAll, setGalaxyShading } from "./cases.js";
 import { S } from "./state.js";
 import { flythrough, endFlythrough } from "./flythrough.js";
 import {
@@ -99,7 +99,10 @@ export function applyMode(modeKey) {
   clearModeObjects();
   if (prevModeKey === "monolith") endFlythrough(false);
   controls.maxDistance = 160;   // monolith/galaxy layouts raise it as needed
-  setAffinityGlow(modeKey === "galaxy");
+  setGalaxyShading(modeKey === "galaxy");
+  // lights out for the galaxy: the dim warehouse turns the additive nebulae,
+  // constellation lines and affinity glow into the brightest things on screen
+  scene.backgroundIntensity = modeKey === "galaxy" ? 0.08 : 0.7;
 
   if (mode.layout) mode.layout();
   else layoutPiles(mode);
@@ -401,12 +404,92 @@ function layoutMonolith() {
   }
 }
 
-// Tag constellations: the library floats as star clusters organized by tag
-// similarity — positions precomputed offline by scripts/export_stacks.py
-// (TF-IDF kNN + 3D force layout), so this stays a dumb placement pass.
+// Tag constellations: the library floats as labeled nebula islands, one per
+// semantic tag cluster — clustering and layout precomputed offline by
+// scripts/export_stacks.py (spherical k-means in tag space, then islands
+// with guaranteed separation), so this stays a dumb placement pass. The
+// visual grammar is borrowed from the readable embedding maps (Nomic
+// Atlas, Map of GitHub): one hue per cluster, a soft nebula glow behind
+// each island, labels at the centroids, faint constellation lines between
+// nearest neighbors.
 const GALAXY_LIFT = 78;   // float the cloud well clear of the floor disc
 
+let galaxyLines = null;   // { mesh, edges, settled } while galaxy is active
+const nebulaMeshes = [];
+let nebulaTex = null;
+
+function nebulaTexture() {
+  if (nebulaTex) return nebulaTex;
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = 256;
+  const ctx = cv.getContext("2d");
+  const grad = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
+  grad.addColorStop(0, "rgba(255,255,255,0.75)");
+  grad.addColorStop(0.35, "rgba(255,255,255,0.26)");
+  grad.addColorStop(0.7, "rgba(255,255,255,0.07)");
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 256, 256);
+  nebulaTex = new THREE.CanvasTexture(cv);   // shared; never disposed
+  return nebulaTex;
+}
+
+// Constellation lines between each game and its strongest same-cluster
+// neighbors (pairs exported in meta.edges). Endpoints track g.cur, so the
+// lines stretch with the pile→galaxy explosion, then settle and brighten.
+function buildGalaxyLines() {
+  const edges = meta.edges ?? [];
+  if (!edges.length) return null;
+  const posArr = new Float32Array(edges.length * 6);
+  const colArr = new Float32Array(edges.length * 6);
+  const c = new THREE.Color();
+  edges.forEach(([a], e) => {
+    c.set(meta.clusters?.[games[a].cl]?.color ?? "#8899aa").multiplyScalar(0.6);
+    for (const v of [0, 3]) {
+      colArr[e * 6 + v] = c.r;
+      colArr[e * 6 + v + 1] = c.g;
+      colArr[e * 6 + v + 2] = c.b;
+    }
+  });
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(posArr, 3));
+  geo.setAttribute("color", new THREE.BufferAttribute(colArr, 3));
+  const mesh = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  }));
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+  modeObjects.push(mesh);
+  return { mesh, edges, settled: false };
+}
+
+function updateGalaxyLinePositions() {
+  const attr = galaxyLines.mesh.geometry.getAttribute("position");
+  galaxyLines.edges.forEach(([a, b], e) => {
+    attr.setXYZ(e * 2, games[a].cur.x, games[a].cur.y, games[a].cur.z);
+    attr.setXYZ(e * 2 + 1, games[b].cur.x, games[b].cur.y, games[b].cur.z);
+  });
+  attr.needsUpdate = true;
+}
+
+// Per-frame galaxy work, called from the main loop: billboard the nebula
+// planes, track line endpoints while cases are in flight, fade lines in.
+export function galaxyFrame(dt) {
+  if (S.currentModeKey !== "galaxy") return;
+  for (const n of nebulaMeshes) n.quaternion.copy(camera.quaternion);
+  if (!galaxyLines) return;
+  if (S.animating || S.rainActive || !galaxyLines.settled) {
+    updateGalaxyLinePositions();
+    galaxyLines.settled = !S.animating && !S.rainActive;
+  }
+  const target = S.animating ? 0.12 : 0.38;
+  const mat = galaxyLines.mesh.material;
+  mat.opacity += (target - mat.opacity) * Math.min(1, dt * 1.5);
+}
+
 function layoutGalaxy() {
+  nebulaMeshes.length = 0;   // prior mode objects were already cleared
   for (const g of games) {
     const p = g.pos ?? [0, 0, 0];
     g._stack = null;
@@ -417,23 +500,49 @@ function layoutGalaxy() {
     g.to.set(p[0], p[1] + GALAXY_LIFT, p[2]);
     g.toYaw = jitter(g.id, 16) * Math.PI;
     g.toTilt = 0;
-    g.toScale = 0.5;
+    g.toScale = 0.65;
     g.t = 0;
     g.delay = Math.abs(jitter(g.id, 17)) * STAGGER * 1.6;
   }
 
-  // cluster labels: k-means labels computed offline live in meta.clusters
-  for (const c of meta.clusters ?? []) {
-    const spr = makeLabelSprite(c.label, `${c.count} games`, 0.06);
-    spr.position.set(c.pos[0], c.pos[1] + GALAXY_LIFT + 4, c.pos[2]);
+  // one soft additive glow plane per island, in the island's hue — the
+  // clusters read as colored gas clouds from any distance
+  const clusters = meta.clusters ?? [];
+  const maxCount = Math.max(1, ...clusters.map((c) => c.count));
+  for (const c of clusters) {
+    if (c.color) {
+      const size = (c.r ?? 8) * 3.1;
+      const neb = new THREE.Mesh(
+        new THREE.PlaneGeometry(size, size),
+        new THREE.MeshBasicMaterial({
+          map: nebulaTexture(), color: c.color, transparent: true,
+          opacity: 0.34, blending: THREE.AdditiveBlending, depthWrite: false,
+        })
+      );
+      neb.position.set(c.pos[0], c.pos[1] + GALAXY_LIFT, c.pos[2]);
+      scene.add(neb);
+      modeObjects.push(neb);
+      nebulaMeshes.push(neb);
+    }
+    const spr = makeLabelSprite(
+      c.label, `${c.count} games`,
+      0.05 + 0.035 * Math.sqrt(c.count / maxCount),
+      c.color ?? "#ffffff"
+    );
+    spr.position.set(c.pos[0], c.pos[1] + GALAXY_LIFT + (c.r ?? 8) + 1.5, c.pos[2]);
     spr.userData.prio = c.count;
     scene.add(spr);
     labelSprites.push(spr);
   }
-  const uncharted = games.filter((g) => g.uncharted).length;
-  if (uncharted) {
-    const spr = makeLabelSprite("uncharted", `${uncharted} thin-tagged games`, 0.05);
-    spr.position.set(GALAXY_RADIUS_SHELL, GALAXY_LIFT + 18, 0);
+
+  galaxyLines = buildGalaxyLines();
+  if (galaxyLines && S.SNAP) galaxyLines.mesh.material.opacity = 0.38;
+
+  const uncharted = games.filter((g) => g.uncharted);
+  if (uncharted.length) {
+    const shellR = Math.max(...uncharted.map((g) => Math.hypot(g.pos[0], g.pos[2])));
+    const spr = makeLabelSprite("uncharted", `${uncharted.length} thin-tagged games`, 0.05);
+    spr.position.set(shellR, GALAXY_LIFT + 18, 0);
     spr.userData.prio = 1;
     scene.add(spr);
     labelSprites.push(spr);
@@ -444,7 +553,7 @@ function layoutGalaxy() {
   controls.maxDistance = 420;     // room to pull back and see the whole galaxy
 
   // frame the cloud (it floats far above the default pile framing)
-  const finalPos = new THREE.Vector3(85, GALAXY_LIFT + 35, 150);
+  const finalPos = new THREE.Vector3(70, GALAXY_LIFT + 30, 128);
   const finalTarget = new THREE.Vector3(0, GALAXY_LIFT, 0);
   if (S.SNAP) {
     camera.position.copy(finalPos);
@@ -456,4 +565,3 @@ function layoutGalaxy() {
     ], 2.5);
   }
 }
-const GALAXY_RADIUS_SHELL = 60 * 1.12;

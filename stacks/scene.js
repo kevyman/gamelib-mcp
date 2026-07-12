@@ -46,7 +46,7 @@ figure.rotation.y = Math.PI * 0.3;    // casual angle toward the piles
 scene.add(figure);                    // positioned per-layout in applyMode
 
 // In-scene text sprites: depth-tested (piles in front occlude them) and big.
-export function makeLabelSprite(title, sub, heightFrac = 0.13) {
+export function makeLabelSprite(title, sub, heightFrac = 0.13, titleColor = "#ffffff") {
   const pad = 30, titleSize = 76, subSize = 42, gap = 14;
   const cv = document.createElement("canvas");
   const ctx = cv.getContext("2d");
@@ -65,7 +65,7 @@ export function makeLabelSprite(title, sub, heightFrac = 0.13) {
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
   ctx.font = titleFont;
-  ctx.fillStyle = "#ffffff";
+  ctx.fillStyle = titleColor;
   ctx.fillText(title, cv.width / 2, pad);
   if (sub) {
     ctx.font = subFont;
