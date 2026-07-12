@@ -107,7 +107,7 @@ function buildRagdoll() {
 
 // He resists this many simulated seconds of bombardment before giving in
 // (most of the pile has already come down on and around him by then).
-const COLLAPSE_AT_T = 2.8;
+const COLLAPSE_AT_T = 0.8;
 let ragdollLive = false;
 let rainClock = 0;
 
