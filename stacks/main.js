@@ -296,6 +296,7 @@ for (const g of games) {
   g.to = g.cur.clone();
   g.curYaw = g.fromYaw = g.toYaw = jitter(g.id, 4) * Math.PI;
   g.curTilt = g.fromTilt = g.toTilt = FLAT_TILT;
+  g.curScale = g.fromScale = g.toScale = 1;
   g.t = 1; g.delay = 0;
   g.pop = 0; g.popT = 0;
 }
@@ -303,6 +304,7 @@ for (const g of games) {
 function composeMatrix(g) {
   _e.set(g.curTilt, g.curYaw, 0, "YXZ");   // yaw about world Y, then tilt
   _q.setFromEuler(_e);
+  _s.setScalar(g.curScale);
   _m.compose(g.cur, _q, _s);
   g._mesh.setMatrixAt(g._i, _m);
 }
@@ -362,6 +364,10 @@ const MODES = {
     sort: (a, b) => b.minutes - a.minutes,
     sub: (gs) => { const t = gs.reduce((s, g) => s + g.minutes, 0); return t ? fmtH(t) : ""; },
   },
+  hours: {
+    label: "Hours",
+    layout: () => layoutHours(),   // custom layout: size = playtime, not piles
+  },
   era: {
     label: "Release era",
     buckets: (g) => g.year == null ? "none" : g.year < 2000 ? "90s" : g.year < 2010 ? "00s" : g.year < 2020 ? "10s" : "20s",
@@ -384,7 +390,28 @@ function clearLabels() {
 
 function applyMode(modeKey) {
   exploded = null;   // mode switch recomputes every target anyway
+  currentModeKey = modeKey;
   const mode = MODES[modeKey];
+  clearLabels();
+
+  if (mode.layout) mode.layout();
+  else layoutPiles(mode);
+
+  if (SNAP) snapAll();
+  else {
+    transitionClock = 0;
+    animating = true;
+  }
+
+  // dust reads best against Playtime's played/unplayed piles; elsewhere it
+  // defaults off — until the user clicks the toggle, whose choice then sticks
+  setDust(dustUserChoice ?? (modeKey === "playtime" ? 1 : 0));
+  farmedBtn.style.display = modeKey === "hours" ? "" : "none";
+
+  for (const b of modeBtns) b.classList.toggle("active", b.dataset.mode === modeKey);
+}
+
+function layoutPiles(mode) {
   const groups = new Map(mode.order.map((k) => [k, []]));
   for (const g of games) {
     const k = mode.buckets(g);
@@ -406,7 +433,6 @@ function applyMode(modeKey) {
   }
   const totalW = piles.reduce((s, p) => s + p.width, 0) + GROUP_GAP * (piles.length - 1);
 
-  clearLabels();
   let x0 = -totalW / 2;
   figure.position.set(x0 - 6, 0, 0);   // sits at the head of the row
   figureLabel.position.set(x0 - 6, 9.5, 0);
@@ -434,6 +460,8 @@ function applyMode(modeKey) {
         g.from.copy(g.cur);
         g.fromYaw = g.curYaw;
         g.fromTilt = g.curTilt;
+        g.fromScale = g.curScale;
+        g.toScale = 1;
         g.to.set(
           x0 + col * SPACING_X + SPACING_X / 2 + jitter(g.id, 7) * 0.10,
           (st.length - 1 - level) * CASE_D + CASE_D / 2,
@@ -457,18 +485,90 @@ function applyMode(modeKey) {
     labelSprites.push(spr);
     x0 += p.width + GROUP_GAP;
   }
+}
 
-  if (SNAP) snapAll();
-  else {
-    transitionClock = 0;
-    animating = true;
+// Hours as mass: every case upright in one wide field, sorted by playtime,
+// physically scaled by log-hours — the visceral version of get_play_history.
+const HOURS_K = 6.5;         // gain into the log curve (tuned by eye)
+const HOURS_MIN_S = 0.45;    // floor: unplayed carpet of slivers
+const HOURS_MAX_S = 4.5;     // cap: even 1,000+ h can't leave the field
+let includeFarmed = false;   // farmed playtime is inflated — excluded by default
+
+function layoutHours() {
+  const effMin = (g) => (g.farmed && !includeFarmed ? 0 : g.minutes);
+  const sorted = [...games].sort(
+    (a, b) => effMin(b) - effMin(a)
+      || (a.ph ? 1 : 0) - (b.ph ? 1 : 0)
+      || a.name.localeCompare(b.name)
+  );
+  const maxH = Math.max(1, hours(effMin(sorted[0])));
+  const scaleOf = (g) => {
+    const h = hours(effMin(g));
+    if (h <= 0) return HOURS_MIN_S;
+    // log scale is non-negotiable: linear would turn farmed titles into towers
+    const s = HOURS_MIN_S + 0.55 * (Math.log2(1 + h) / Math.log2(1 + maxH)) * HOURS_K;
+    return Math.min(Math.max(s, HOURS_MIN_S), HOURS_MAX_S);
+  };
+
+  // variable-width row packing: walk the sorted list, wrap when the row is
+  // full; each row steps back far enough to clear the tallest case before it.
+  // Row width adapts to the library so the field stays square-ish.
+  const GAP = 0.34, ROW_GAP = 1.1;
+  const totalRowLen = sorted.reduce((s, g) => s + CASE_W * scaleOf(g) + GAP, 0);
+  const TARGET_W = Math.max(30, Math.sqrt(totalRowLen * (ROW_GAP + 1.1)));
+  const BANDS = [
+    [500, "500+ h"], [100, "100–500 h"], [10, "10–100 h"],
+    [2, "2–10 h"], [1e-9, "< 2 h"], [-1, "never played"],
+  ];
+  let x = -TARGET_W / 2, z = 0, rowTallest = 0, band = 0;
+  const bandCounts = BANDS.map(() => 0);
+  sorted.forEach((g, i) => {
+    const s = scaleOf(g);
+    const w = CASE_W * s;
+    if (x + w > TARGET_W / 2 && x > -TARGET_W / 2) {
+      x = -TARGET_W / 2;
+      z += CASE_H * rowTallest * 0.12 + CASE_D * rowTallest + ROW_GAP;
+      rowTallest = 0;
+    }
+    rowTallest = Math.max(rowTallest, s);
+    g._stack = null;                     // no piles to explode in this mode
+    g.from.copy(g.cur);
+    g.fromYaw = g.curYaw;
+    g.fromTilt = g.curTilt;
+    g.fromScale = g.curScale;
+    g.to.set(x + w / 2, (CASE_H * s) / 2, z + jitter(g.id, 8) * 0.06);
+    g.toYaw = jitter(g.id, 9) * 0.06;
+    g.toTilt = 0;                        // standing upright, cover forward
+    g.toScale = s;
+    g.t = 0;
+    g.delay = (i / sorted.length) * STAGGER * (0.6 + 0.4 * Math.abs(jitter(g.id, 5)));
+    x += w + GAP;
+
+    const h = hours(effMin(g));
+    while (band < BANDS.length && h < BANDS[band][0]) band++;
+    const bi = Math.min(band, BANDS.length - 1);
+    bandCounts[bi]++;
+    if (bandCounts[bi] === 1) {
+      const spr = makeLabelSprite(BANDS[bi][1], "", 0.075);
+      spr.position.set(g.to.x, CASE_H * s + 1.4, g.to.z);
+      spr.userData._band = bi;
+      scene.add(spr);
+      labelSprites.push(spr);
+    }
+  });
+  for (const spr of labelSprites) {
+    if (spr.userData._band != null)
+      spr.userData.prio = bandCounts[spr.userData._band];
   }
 
-  // dust reads best against Playtime's played/unplayed piles; elsewhere it
-  // defaults off — until the user clicks the toggle, whose choice then sticks
-  setDust(dustUserChoice ?? (modeKey === "playtime" ? 1 : 0));
+  // center the field on z (giants end up at the far edge, carpet up front —
+  // nothing occludes anything from the default camera)
+  const depth = z + CASE_D * rowTallest;
+  for (const g of sorted) g.to.z -= depth / 2;
+  for (const spr of labelSprites) spr.position.z -= depth / 2;
 
-  for (const b of modeBtns) b.classList.toggle("active", b.dataset.mode === modeKey);
+  figure.position.set(-TARGET_W / 2 - 6, 0, -depth / 2);
+  figureLabel.position.set(-TARGET_W / 2 - 6, 9.5, -depth / 2);
 }
 
 // ---------- UI ----------
@@ -483,6 +583,21 @@ for (const [key, m] of Object.entries(MODES)) {
   modesEl.appendChild(b);
   modeBtns.push(b);
 }
+
+let currentModeKey = null;
+
+// include-farmed toggle (Hours mode only): farmed titles' playtime is
+// inflated by idling, so it's treated as unplayed unless opted in
+const farmedBtn = document.createElement("button");
+farmedBtn.textContent = "include farmed";
+farmedBtn.title = "count playtime from farmed (idled) games";
+farmedBtn.style.display = "none";
+farmedBtn.onclick = () => {
+  includeFarmed = !includeFarmed;
+  farmedBtn.classList.toggle("active", includeFarmed);
+  if (currentModeKey === "hours") applyMode("hours");   // re-layout
+};
+document.getElementById("opts").appendChild(farmedBtn);
 
 // dust toggle
 let dustEnabled = false;
@@ -544,10 +659,11 @@ function explodeStack(stack) {
 
   exploded = { games: stack, home: new Map() };
   stack.forEach((g, i) => {
-    exploded.home.set(g, { pos: g.to.clone(), yaw: g.toYaw, tilt: g.toTilt });
+    exploded.home.set(g, { pos: g.to.clone(), yaw: g.toYaw, tilt: g.toTilt, scale: g.toScale });
     const cx = (i % cols) - (cols - 1) / 2;
     const cy = rows - 1 - Math.floor(i / cols);   // best game top-left
     g.from.copy(g.cur); g.fromYaw = g.curYaw; g.fromTilt = g.curTilt;
+    g.fromScale = g.curScale; g.toScale = 1;      // wall reads at uniform size
     g.to.copy(center).addScaledVector(right, cx * sx).addScaledVector(out, 10);
     g.to.y = 2.2 + cy * sy + CASE_H / 2;
     g.toYaw = az;
@@ -564,7 +680,8 @@ function collapseStack() {
   exploded.games.forEach((g, i) => {
     const h = exploded.home.get(g);
     g.from.copy(g.cur); g.fromYaw = g.curYaw; g.fromTilt = g.curTilt;
-    g.to.copy(h.pos); g.toYaw = h.yaw; g.toTilt = h.tilt;
+    g.fromScale = g.curScale;
+    g.to.copy(h.pos); g.toYaw = h.yaw; g.toTilt = h.tilt; g.toScale = h.scale;
     g.t = 0;
     g.delay = i * 0.008;
   });
@@ -651,6 +768,7 @@ function snapAll() {
     g.cur.copy(g.to);
     g.curYaw = g.toYaw;
     g.curTilt = g.toTilt;
+    g.curScale = g.toScale;
     g.t = 1;
     composeMatrix(g);
   }
@@ -677,6 +795,7 @@ function tick() {
       g.cur.lerpVectors(g.from, g.to, k);
       g.curYaw = g.fromYaw + (g.toYaw - g.fromYaw) * k;
       g.curTilt = g.fromTilt + (g.toTilt - g.fromTilt) * k;
+      g.curScale = g.fromScale + (g.toScale - g.fromScale) * k;
       composeMatrix(g);
       if (g.t < 1) busy = true;
     }
