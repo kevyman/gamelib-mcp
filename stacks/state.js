@@ -14,6 +14,7 @@ export const S = {
   dustEnabled: false,
   dustUserChoice: null,    // null = follow the mode default
   walking: false,          // first-person walk mode active
+  flying: false,           // free-fly through the galaxy active
   rainActive: false,       // Rapier owns the case transforms
   rainSettled: false,      // >95 % of rain bodies are asleep
 };

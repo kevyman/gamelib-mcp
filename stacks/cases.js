@@ -14,18 +14,24 @@ const caseGeo = new THREE.BoxGeometry(CASE_W, CASE_H, CASE_D);
 const vert = /* glsl */ `
   attribute vec2 aUv;
   attribute vec3 aColor;
+  attribute vec3 aCl;
   attribute float aGlow;
   attribute float aDust;
+  attribute float aAff;
   uniform vec2 uTileScale;
   varying vec2 vUv;
   varying vec2 vUvEdge;
   varying vec3 vColor;
+  varying vec3 vCl;
   varying vec3 vNormal;
   varying float vFront;
   varying float vGlow;
   varying float vDust;
+  varying float vAff;
   void main() {
     vDust = aDust;
+    vAff = aAff;
+    vCl = aCl;
     vUv = aUv + uv * uTileScale;
     // Edge faces sample a stripe through the middle of the cover, like a
     // printed spine: the long sides read the art vertically, top/bottom
@@ -49,16 +55,24 @@ const vert = /* glsl */ `
 const frag = /* glsl */ `
   uniform sampler2D uAtlas;
   uniform float uDust;
+  uniform float uGalaxy;
   varying vec2 vUv;
   varying vec2 vUvEdge;
   varying vec3 vColor;
+  varying vec3 vCl;
   varying vec3 vNormal;
   varying float vFront;
   varying float vGlow;
   varying float vDust;
+  varying float vAff;
   void main() {
     vec3 art = texture2D(uAtlas, vUv).rgb;
-    vec3 spine = mix(texture2D(uAtlas, vUvEdge).rgb, vColor, 0.25) * 0.9;
+    // Galaxy: the case plastic takes its nebula's hue instead of the
+    // platform family's, so each island reads as one colored cloud even
+    // before its label resolves (the Atlas/Map-of-GitHub trick).
+    vec3 plastic = mix(vColor, vCl, uGalaxy * 0.85);
+    vec3 spine = mix(texture2D(uAtlas, vUvEdge).rgb, plastic,
+                     0.25 + 0.35 * uGalaxy) * 0.9;
     vec3 base = mix(spine, art, vFront);
     // Dust film on never-touched games: cheap desaturate + grey lift, gated
     // by the global toggle so the attribute never has to be rewritten.
@@ -69,9 +83,20 @@ const frag = /* glsl */ `
     float d2 = max(dot(n, normalize(vec3(-0.6, 0.25, -0.5))), 0.0);
     vec3 c = base * (0.52 + 0.52 * d1 + 0.18 * d2);
     c += vGlow * vec3(0.30, 0.27, 0.18);
+    // Galaxy: a whisper of the cluster hue on every face...
+    c += uGalaxy * vCl * 0.10;
+    // ...and affinity on top: loved-tag regions glow warm, low stays cool
+    float aff = vAff * uGalaxy;
+    c += max(aff, 0.0) * vec3(0.34, 0.22, 0.05);
+    c = mix(c, c * vec3(0.72, 0.82, 1.10), max(-aff, 0.0) * 0.55);
     gl_FragColor = vec4(c, 1.0);
   }
 `;
+
+// Taste affinity normalized to [-1, 1] for the galaxy's warm/cool glow.
+const affMax = Math.max(1e-6, ...games.map((g) => Math.abs(g.aff ?? 0)));
+const affNorm = (g) =>
+  Math.max(-1, Math.min(1, (g.aff ?? 0) / affMax));
 
 // One InstancedMesh per atlas sheet; record where each game lives.
 export const meshes = [];
@@ -90,6 +115,7 @@ for (const [sheet, indices] of [...bySheet.entries()].sort((a, b) => a[0] - b[0]
       uAtlas: { value: atlases[sheet] },
       uTileScale: { value: new THREE.Vector2(...tileScale) },
       uDust: { value: 0 },
+      uGalaxy: { value: 0 },
     },
     vertexShader: vert,
     fragmentShader: frag,
@@ -100,11 +126,17 @@ for (const [sheet, indices] of [...bySheet.entries()].sort((a, b) => a[0] - b[0]
 
   const uvArr = new Float32Array(n * 2);
   const colArr = new Float32Array(n * 3);
+  const clArr = new Float32Array(n * 3);
   const glowArr = new Float32Array(n);
   const dustArr = new Float32Array(n);
+  const affArr = new Float32Array(n);
   const col = new THREE.Color();
   indices.forEach((gi, i) => {
     const g = games[gi];
+    affArr[i] = affNorm(g);
+    // cluster hue for the galaxy pass; uncharted games stay a dim grey
+    col.set(meta.clusters?.[g.cl]?.color ?? "#3d434d");
+    clArr[i * 3] = col.r; clArr[i * 3 + 1] = col.g; clArr[i * 3 + 2] = col.b;
     // dusty = never touched: zero minutes AND no human-set completion status
     // (an unplayed game marked completed elsewhere shouldn't be dusty)
     dustArr[i] = g.minutes === 0 && !g.status ? 1 : 0;
@@ -121,8 +153,10 @@ for (const [sheet, indices] of [...bySheet.entries()].sort((a, b) => a[0] - b[0]
   mesh.geometry = caseGeo.clone();
   mesh.geometry.setAttribute("aUv", new THREE.InstancedBufferAttribute(uvArr, 2));
   mesh.geometry.setAttribute("aColor", new THREE.InstancedBufferAttribute(colArr, 3));
+  mesh.geometry.setAttribute("aCl", new THREE.InstancedBufferAttribute(clArr, 3));
   mesh.geometry.setAttribute("aGlow", new THREE.InstancedBufferAttribute(glowArr, 1));
   mesh.geometry.setAttribute("aDust", new THREE.InstancedBufferAttribute(dustArr, 1));
+  mesh.geometry.setAttribute("aAff", new THREE.InstancedBufferAttribute(affArr, 1));
   scene.add(mesh);
   meshes.push(mesh);
 }
@@ -171,6 +205,10 @@ export function setGlow(g, v) {
 export function setDust(v) {
   S.dustEnabled = !!v;
   for (const m of meshes) m.material.uniforms.uDust.value = S.dustEnabled ? 1 : 0;
+}
+
+export function setGalaxyShading(v) {
+  for (const m of meshes) m.material.uniforms.uGalaxy.value = v ? 1 : 0;
 }
 
 export function snapAll() {
