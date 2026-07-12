@@ -3,12 +3,12 @@
 // modules subscribe to applyHooks instead of being imported here.
 
 import * as THREE from "three";
-import { games, FAMILY_LABEL } from "./data.js";
+import { games, meta, FAMILY_LABEL } from "./data.js";
 import {
   scene, camera, controls, figure, figureLabel,
   makeLabelSprite, labelSprites, clearLabels, clearModeObjects, modeObjects,
 } from "./scene.js";
-import { snapAll } from "./cases.js";
+import { snapAll, setAffinityGlow } from "./cases.js";
 import { S } from "./state.js";
 import { flythrough, endFlythrough } from "./flythrough.js";
 import {
@@ -65,6 +65,10 @@ export const MODES = {
     label: "Monolith",
     layout: () => layoutMonolith(),   // one tower + cinematic flythrough
   },
+  galaxy: {
+    label: "Galaxy",
+    layout: () => layoutGalaxy(),     // taste-space fly-through (export-side embedding)
+  },
   era: {
     label: "Release era",
     buckets: (g) => g.year == null ? "none" : g.year < 2000 ? "90s" : g.year < 2010 ? "00s" : g.year < 2020 ? "10s" : "20s",
@@ -74,6 +78,9 @@ export const MODES = {
     sub: (gs) => gs.length ? "" : "",
   },
 };
+
+// the galaxy needs export-side embedding data; older library.json lacks it
+if (!games.some((g) => g.pos)) delete MODES.galaxy;
 
 // UI modules register callbacks here; called with the new mode key after a
 // layout is applied (keeps this module free of DOM knowledge).
@@ -90,10 +97,9 @@ export function applyMode(modeKey) {
   const mode = MODES[modeKey];
   clearLabels();
   clearModeObjects();
-  if (modeKey !== "monolith" && prevModeKey === "monolith") {
-    endFlythrough(false);
-    controls.maxDistance = 160;
-  }
+  if (prevModeKey === "monolith") endFlythrough(false);
+  controls.maxDistance = 160;   // monolith/galaxy layouts raise it as needed
+  setAffinityGlow(modeKey === "galaxy");
 
   if (mode.layout) mode.layout();
   else layoutPiles(mode);
@@ -394,3 +400,60 @@ function layoutMonolith() {
     ], 9);
   }
 }
+
+// Tag constellations: the library floats as star clusters organized by tag
+// similarity — positions precomputed offline by scripts/export_stacks.py
+// (TF-IDF kNN + 3D force layout), so this stays a dumb placement pass.
+const GALAXY_LIFT = 78;   // float the cloud well clear of the floor disc
+
+function layoutGalaxy() {
+  for (const g of games) {
+    const p = g.pos ?? [0, 0, 0];
+    g._stack = null;
+    g.from.copy(g.cur);
+    g.fromYaw = g.curYaw;
+    g.fromTilt = g.curTilt;
+    g.fromScale = g.curScale;
+    g.to.set(p[0], p[1] + GALAXY_LIFT, p[2]);
+    g.toYaw = jitter(g.id, 16) * Math.PI;
+    g.toTilt = 0;
+    g.toScale = 0.5;
+    g.t = 0;
+    g.delay = Math.abs(jitter(g.id, 17)) * STAGGER * 1.6;
+  }
+
+  // cluster labels: k-means labels computed offline live in meta.clusters
+  for (const c of meta.clusters ?? []) {
+    const spr = makeLabelSprite(c.label, `${c.count} games`, 0.06);
+    spr.position.set(c.pos[0], c.pos[1] + GALAXY_LIFT + 4, c.pos[2]);
+    spr.userData.prio = c.count;
+    scene.add(spr);
+    labelSprites.push(spr);
+  }
+  const uncharted = games.filter((g) => g.uncharted).length;
+  if (uncharted) {
+    const spr = makeLabelSprite("uncharted", `${uncharted} thin-tagged games`, 0.05);
+    spr.position.set(GALAXY_RADIUS_SHELL, GALAXY_LIFT + 18, 0);
+    spr.userData.prio = 1;
+    scene.add(spr);
+    labelSprites.push(spr);
+  }
+
+  figure.position.set(0, 0, 0);   // the chair stays grounded under the stars
+  figureLabel.position.set(0, 9.5, 0);
+  controls.maxDistance = 420;     // room to pull back and see the whole galaxy
+
+  // frame the cloud (it floats far above the default pile framing)
+  const finalPos = new THREE.Vector3(85, GALAXY_LIFT + 35, 150);
+  const finalTarget = new THREE.Vector3(0, GALAXY_LIFT, 0);
+  if (S.SNAP) {
+    camera.position.copy(finalPos);
+    controls.target.copy(finalTarget);
+  } else {
+    flythrough([
+      { pos: camera.position.clone(), target: controls.target.clone() },
+      { pos: finalPos, target: finalTarget },
+    ], 2.5);
+  }
+}
+const GALAXY_RADIUS_SHELL = 60 * 1.12;

@@ -16,6 +16,7 @@ const vert = /* glsl */ `
   attribute vec3 aColor;
   attribute float aGlow;
   attribute float aDust;
+  attribute float aAff;
   uniform vec2 uTileScale;
   varying vec2 vUv;
   varying vec2 vUvEdge;
@@ -24,8 +25,10 @@ const vert = /* glsl */ `
   varying float vFront;
   varying float vGlow;
   varying float vDust;
+  varying float vAff;
   void main() {
     vDust = aDust;
+    vAff = aAff;
     vUv = aUv + uv * uTileScale;
     // Edge faces sample a stripe through the middle of the cover, like a
     // printed spine: the long sides read the art vertically, top/bottom
@@ -49,6 +52,7 @@ const vert = /* glsl */ `
 const frag = /* glsl */ `
   uniform sampler2D uAtlas;
   uniform float uDust;
+  uniform float uAffMode;
   varying vec2 vUv;
   varying vec2 vUvEdge;
   varying vec3 vColor;
@@ -56,6 +60,7 @@ const frag = /* glsl */ `
   varying float vFront;
   varying float vGlow;
   varying float vDust;
+  varying float vAff;
   void main() {
     vec3 art = texture2D(uAtlas, vUv).rgb;
     vec3 spine = mix(texture2D(uAtlas, vUvEdge).rgb, vColor, 0.25) * 0.9;
@@ -69,9 +74,18 @@ const frag = /* glsl */ `
     float d2 = max(dot(n, normalize(vec3(-0.6, 0.25, -0.5))), 0.0);
     vec3 c = base * (0.52 + 0.52 * d1 + 0.18 * d2);
     c += vGlow * vec3(0.30, 0.27, 0.18);
+    // Galaxy affinity: loved-tag regions glow warm, low-affinity stays cool
+    float aff = vAff * uAffMode;
+    c += max(aff, 0.0) * vec3(0.34, 0.22, 0.05);
+    c = mix(c, c * vec3(0.72, 0.82, 1.10), max(-aff, 0.0) * 0.55);
     gl_FragColor = vec4(c, 1.0);
   }
 `;
+
+// Taste affinity normalized to [-1, 1] for the galaxy's warm/cool glow.
+const affMax = Math.max(1e-6, ...games.map((g) => Math.abs(g.aff ?? 0)));
+const affNorm = (g) =>
+  Math.max(-1, Math.min(1, (g.aff ?? 0) / affMax));
 
 // One InstancedMesh per atlas sheet; record where each game lives.
 export const meshes = [];
@@ -90,6 +104,7 @@ for (const [sheet, indices] of [...bySheet.entries()].sort((a, b) => a[0] - b[0]
       uAtlas: { value: atlases[sheet] },
       uTileScale: { value: new THREE.Vector2(...tileScale) },
       uDust: { value: 0 },
+      uAffMode: { value: 0 },
     },
     vertexShader: vert,
     fragmentShader: frag,
@@ -102,9 +117,11 @@ for (const [sheet, indices] of [...bySheet.entries()].sort((a, b) => a[0] - b[0]
   const colArr = new Float32Array(n * 3);
   const glowArr = new Float32Array(n);
   const dustArr = new Float32Array(n);
+  const affArr = new Float32Array(n);
   const col = new THREE.Color();
   indices.forEach((gi, i) => {
     const g = games[gi];
+    affArr[i] = affNorm(g);
     // dusty = never touched: zero minutes AND no human-set completion status
     // (an unplayed game marked completed elsewhere shouldn't be dusty)
     dustArr[i] = g.minutes === 0 && !g.status ? 1 : 0;
@@ -123,6 +140,7 @@ for (const [sheet, indices] of [...bySheet.entries()].sort((a, b) => a[0] - b[0]
   mesh.geometry.setAttribute("aColor", new THREE.InstancedBufferAttribute(colArr, 3));
   mesh.geometry.setAttribute("aGlow", new THREE.InstancedBufferAttribute(glowArr, 1));
   mesh.geometry.setAttribute("aDust", new THREE.InstancedBufferAttribute(dustArr, 1));
+  mesh.geometry.setAttribute("aAff", new THREE.InstancedBufferAttribute(affArr, 1));
   scene.add(mesh);
   meshes.push(mesh);
 }
@@ -171,6 +189,10 @@ export function setGlow(g, v) {
 export function setDust(v) {
   S.dustEnabled = !!v;
   for (const m of meshes) m.material.uniforms.uDust.value = S.dustEnabled ? 1 : 0;
+}
+
+export function setAffinityGlow(v) {
+  for (const m of meshes) m.material.uniforms.uAffMode.value = v ? 1 : 0;
 }
 
 export function snapAll() {
