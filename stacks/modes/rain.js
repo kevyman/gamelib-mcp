@@ -69,8 +69,14 @@ const JOINTS = [
 function buildRagdoll() {
   const byName = {};
   for (const [name, r, hh, x, y] of PARTS) {
+    // Fixed at first: he stands his ground, games bounce off. stepRain flips
+    // everything dynamic partway through the rain — THEN he goes down.
     const body = world.createRigidBody(
-      RAPIER.RigidBodyDesc.dynamic().setTranslation(x, y, 0)
+      RAPIER.RigidBodyDesc.fixed()
+        .setTranslation(x, y, 0)
+        // damping tames post-collapse joint jitter once dynamic
+        .setLinearDamping(0.3)
+        .setAngularDamping(1.2)
     );
     const desc = hh > 0
       ? RAPIER.ColliderDesc.capsule(hh, r)
@@ -80,19 +86,36 @@ function buildRagdoll() {
       ? new THREE.CapsuleGeometry(r, hh * 2, 4, 10)
       : new THREE.SphereGeometry(r, 16, 12);
     const mesh = new THREE.Mesh(geo, ragdollMat);
+    mesh.position.set(x, y, 0);   // standing pose; sync takes over on collapse
     scene.add(mesh);
     ragdoll.push({ body, mesh });
     byName[name] = body;
   }
   for (const [a, b, pa, pb] of JOINTS) {
-    world.createImpulseJoint(
+    const joint = world.createImpulseJoint(
       RAPIER.JointData.spherical(
         { x: pa[0], y: pa[1], z: pa[2] },
         { x: pb[0], y: pb[1], z: pb[2] }
       ),
       byName[a], byName[b], true
     );
+    // adjacent capsules overlap at every joint; without this the solver
+    // fights those contacts forever and the mannequin convulses on the floor
+    joint.setContactsEnabled(false);
   }
+}
+
+// He resists this many simulated seconds of bombardment before giving in
+// (most of the pile has already come down on and around him by then).
+const COLLAPSE_AT_T = 2.8;
+let ragdollLive = false;
+let rainClock = 0;
+
+function collapseRagdoll() {
+  for (const part of ragdoll) {
+    part.body.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
+  }
+  ragdollLive = true;
 }
 
 export async function enterRain() {
@@ -112,9 +135,15 @@ export async function enterRain() {
   figureLabel.userData.gated = true;   // the chair is about to stop being ordinary
 
   world = new RAPIER.World({ x: 0, y: GRAVITY, z: 0 });
+  // 2 solver iterations (default 4) read fine for a junk pile and roughly
+  // halve step cost at 2.6k live boxes — the frame budget matters more than
+  // stacking precision here
+  world.numSolverIterations = 2;
   world.createCollider(
     RAPIER.ColliderDesc.cuboid(85, 0.5, 85).setTranslation(0, -0.5, 0).setFriction(0.7)
   );
+  ragdollLive = false;
+  rainClock = 0;
   buildRagdoll();
 
   // the chair deserves to be buried too
@@ -177,16 +206,25 @@ export function stepRain(dt) {
     spawnTimer = SPAWN_EVERY;
   }
 
-  // fixed timestep with an accumulator; cap steps/frame to avoid the
-  // spiral of death on slow machines
-  acc = Math.min(acc + dt, STEP * 3);
+  // fixed timestep with an accumulator, capped at 2 steps/frame: on slow
+  // machines the sim runs slightly slow-motion instead of eating the frame
+  acc = Math.min(acc + dt, STEP * 2);
   while (acc >= STEP) {
     world.step();
+    rainClock += STEP;
     acc -= STEP;
   }
 
-  // physics → instance matrices (and g.cur, so raycasting/handoff stay true)
+  // he stands his ground through the worst of it, then gives in and
+  // ragdolls under whatever is still falling
+  if (!ragdollLive && rainClock >= COLLAPSE_AT_T) collapseRagdoll();
+
+  // physics → instance matrices (and g.cur, so raycasting/handoff stay
+  // true). Sleeping bodies haven't moved, and by the settling tail that's
+  // most of the pile — skipping them saves thousands of WASM-boundary calls
+  // (each translation()/rotation() also allocates) per frame.
   for (const [g, body] of bodies) {
+    if (body.isSleeping()) continue;
     const t = body.translation();
     const r = body.rotation();
     g.cur.set(t.x, t.y, t.z);
@@ -197,6 +235,7 @@ export function stepRain(dt) {
   for (const m of meshes) m.instanceMatrix.needsUpdate = true;
 
   for (const part of ragdoll) {
+    if (!ragdollLive || part.body.isSleeping()) continue;
     const t = part.body.translation();
     const r = part.body.rotation();
     part.mesh.position.set(t.x, t.y, t.z);
