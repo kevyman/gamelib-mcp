@@ -30,14 +30,15 @@
   #title { font-size: 17px; font-weight: 700; letter-spacing: 0.14em; }
   #title span { color: var(--accent); }
   #stats { font-size: 12.5px; color: var(--ink-2); }
-  #modes { display: flex; gap: 6px; flex-wrap: wrap; }
-  #modes button {
+  #modes, #opts { display: flex; gap: 6px; flex-wrap: wrap; }
+  #modes button, #opts button {
     font: inherit; font-size: 12.5px; color: var(--ink-2);
     background: var(--panel); border: 1px solid var(--line);
     border-radius: 999px; padding: 6px 14px; cursor: pointer;
   }
-  #modes button:hover { color: var(--ink); border-color: rgba(255,255,255,0.22); }
+  #modes button:hover, #opts button:hover { color: var(--ink); border-color: rgba(255,255,255,0.22); }
   #modes button.active { color: #14161a; background: var(--accent); border-color: var(--accent); font-weight: 600; }
+  #opts button.active { color: var(--ink); border-color: var(--accent); }
 
   #card {
     position: fixed; z-index: 20; display: none; width: 340px;
@@ -86,6 +87,7 @@
   <div id="topbar">
     <div id="title">THE <span>STACKS</span></div>
     <div id="modes"></div>
+    <div id="opts"></div>
     <div id="stats"></div>
   </div>
 
