@@ -21,6 +21,7 @@ import { MODES, applyMode, applyHooks, galaxyFrame } from "./layouts.js";
 import { isFlying, stepFlythrough } from "./flythrough.js";
 import { updatePicking, updatePop, explodeStack } from "./modes/orbit.js";
 import { enterWalk, stepWalk } from "./modes/walk.js";
+import { enterFly, exitFly, stepFly } from "./modes/fly.js";
 import { enterRain, stepRain, restack } from "./modes/rain.js";
 import { S } from "./state.js";
 import { hours } from "./util.js";
@@ -68,9 +69,17 @@ const walkBtn = document.createElement("button");
 walkBtn.textContent = "Walk";
 walkBtn.title = "walk the aisles in first person (WASD + mouse, ESC to leave)";
 walkBtn.onclick = () => enterWalk();
-if (matchMedia("(hover: none), (pointer: coarse)").matches)
-  walkBtn.style.display = "none";
+const isTouch = matchMedia("(hover: none), (pointer: coarse)").matches;
+if (isTouch) walkBtn.style.display = "none";
 document.getElementById("opts").appendChild(walkBtn);
+
+// free-fly through the galaxy (Galaxy mode only, desktop-only like Walk)
+const flyBtn = document.createElement("button");
+flyBtn.textContent = "Fly";
+flyBtn.title = "free-fly the galaxy (WASD + mouse, ESC returns to orbit)";
+flyBtn.style.display = "none";
+flyBtn.onclick = () => enterFly();
+document.getElementById("opts").appendChild(flyBtn);
 
 // ragdoll rain: an action, not a layout — no ?mode= deep link, just a button.
 // Rapier (vendored WASM, ~2 MB) lazy-loads on the first click.
@@ -122,8 +131,10 @@ applyHooks.push((modeKey) => {
   setDustUI(S.dustUserChoice ?? (modeKey === "playtime" ? 1 : 0));
   farmedBtn.style.display = modeKey === "hours" ? "" : "none";
   splitBtn.style.display = modeKey === "monolith" ? "" : "none";
+  flyBtn.style.display = modeKey === "galaxy" && !isTouch ? "" : "none";
+  if (modeKey !== "galaxy") exitFly();   // leaving the stars grounds the pilot
   hintEl.textContent = modeKey === "galaxy"
-    ? "drag to orbit · scroll to zoom · hover a case for details · double-click a cluster label to fly there"
+    ? "drag to orbit · scroll to zoom · hover a case for details · double-click a cluster label to fly there · Fly for free flight"
     : defaultHint;
   for (const b of modeBtns) b.classList.toggle("active", b.dataset.mode === modeKey);
 });
@@ -155,7 +166,8 @@ const clock = new THREE.Clock();
 
 function tick() {
   const dt = Math.min(clock.getDelta(), 0.05);
-  if (S.walking) stepWalk(dt);
+  if (S.flying) stepFly(dt);
+  else if (S.walking) stepWalk(dt);
   else if (isFlying()) stepFlythrough(dt);
   else controls.update();
 
@@ -163,7 +175,7 @@ function tick() {
   if (S.animating) stepTransition(dt);
   galaxyFrame(dt);   // nebula billboards + constellation lines (galaxy only)
 
-  if (S.walking) updatePop(dt);   // walk does its own crosshair picking
+  if (S.walking || S.flying) updatePop(dt);   // they do their own crosshair picking
   else updatePicking(dt);
   declutterLabels();
   renderer.render(scene, camera);
@@ -186,4 +198,7 @@ if (S.SNAP && params.get("explode")) {   // deterministic explode, for screensho
 if (params.get("walk") === "1") {   // deterministic walk view, for screenshots
   enterWalk({ headless: true });
   if (S.SNAP) snapAll();
+}
+if (params.get("fly") === "1" && S.currentModeKey === "galaxy") {
+  enterFly({ headless: true });     // deterministic free-fly, for screenshots
 }

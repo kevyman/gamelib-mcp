@@ -590,7 +590,8 @@ function clusterLabelAt(px, py) {
 }
 
 addEventListener("dblclick", (e) => {
-  if (S.currentModeKey !== "galaxy" || S.walking || S.rainActive) return;
+  // S.flying too: a scripted flythrough would fight the WASD stick
+  if (S.currentModeKey !== "galaxy" || S.walking || S.flying || S.rainActive) return;
   const c = clusterLabelAt(e.clientX, e.clientY);
   if (!c) return;
   const center = new THREE.Vector3(c.pos[0], c.pos[1] + GALAXY_LIFT, c.pos[2]);
