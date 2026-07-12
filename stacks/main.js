@@ -161,6 +161,7 @@ const vert = /* glsl */ `
   attribute vec2 aUv;
   attribute vec3 aColor;
   attribute float aGlow;
+  attribute float aDust;
   uniform vec2 uTileScale;
   varying vec2 vUv;
   varying vec2 vUvEdge;
@@ -168,7 +169,9 @@ const vert = /* glsl */ `
   varying vec3 vNormal;
   varying float vFront;
   varying float vGlow;
+  varying float vDust;
   void main() {
+    vDust = aDust;
     vUv = aUv + uv * uTileScale;
     // Edge faces sample a stripe through the middle of the cover, like a
     // printed spine: the long sides read the art vertically, top/bottom
@@ -191,16 +194,22 @@ const vert = /* glsl */ `
 `;
 const frag = /* glsl */ `
   uniform sampler2D uAtlas;
+  uniform float uDust;
   varying vec2 vUv;
   varying vec2 vUvEdge;
   varying vec3 vColor;
   varying vec3 vNormal;
   varying float vFront;
   varying float vGlow;
+  varying float vDust;
   void main() {
     vec3 art = texture2D(uAtlas, vUv).rgb;
     vec3 spine = mix(texture2D(uAtlas, vUvEdge).rgb, vColor, 0.25) * 0.9;
     vec3 base = mix(spine, art, vFront);
+    // Dust film on never-touched games: cheap desaturate + grey lift, gated
+    // by the global toggle so the attribute never has to be rewritten.
+    base = mix(base, vec3(dot(base, vec3(0.299, 0.587, 0.114))) * 0.75 + 0.12,
+               vDust * uDust * 0.55);
     vec3 n = normalize(vNormal);
     float d1 = max(dot(n, normalize(vec3(0.35, 0.9, 0.45))), 0.0);
     float d2 = max(dot(n, normalize(vec3(-0.6, 0.25, -0.5))), 0.0);
@@ -226,6 +235,7 @@ for (const [sheet, indices] of [...bySheet.entries()].sort((a, b) => a[0] - b[0]
     uniforms: {
       uAtlas: { value: atlases[sheet] },
       uTileScale: { value: new THREE.Vector2(...tileScale) },
+      uDust: { value: 0 },
     },
     vertexShader: vert,
     fragmentShader: frag,
@@ -237,9 +247,13 @@ for (const [sheet, indices] of [...bySheet.entries()].sort((a, b) => a[0] - b[0]
   const uvArr = new Float32Array(n * 2);
   const colArr = new Float32Array(n * 3);
   const glowArr = new Float32Array(n);
+  const dustArr = new Float32Array(n);
   const col = new THREE.Color();
   indices.forEach((gi, i) => {
     const g = games[gi];
+    // dusty = never touched: zero minutes AND no human-set completion status
+    // (an unplayed game marked completed elsewhere shouldn't be dusty)
+    dustArr[i] = g.minutes === 0 && !g.status ? 1 : 0;
     const local = g.tile % meta.tilesPerSheet;
     const cx = local % meta.cols, cy = Math.floor(local / meta.cols);
     uvArr[i * 2] = cx * tileScale[0];
@@ -254,6 +268,7 @@ for (const [sheet, indices] of [...bySheet.entries()].sort((a, b) => a[0] - b[0]
   mesh.geometry.setAttribute("aUv", new THREE.InstancedBufferAttribute(uvArr, 2));
   mesh.geometry.setAttribute("aColor", new THREE.InstancedBufferAttribute(colArr, 3));
   mesh.geometry.setAttribute("aGlow", new THREE.InstancedBufferAttribute(glowArr, 1));
+  mesh.geometry.setAttribute("aDust", new THREE.InstancedBufferAttribute(dustArr, 1));
   scene.add(mesh);
   meshes.push(mesh);
 }
@@ -449,6 +464,10 @@ function applyMode(modeKey) {
     animating = true;
   }
 
+  // dust reads best against Playtime's played/unplayed piles; elsewhere it
+  // defaults off — until the user clicks the toggle, whose choice then sticks
+  setDust(dustUserChoice ?? (modeKey === "playtime" ? 1 : 0));
+
   for (const b of modeBtns) b.classList.toggle("active", b.dataset.mode === modeKey);
 }
 
@@ -465,9 +484,43 @@ for (const [key, m] of Object.entries(MODES)) {
   modeBtns.push(b);
 }
 
+// dust toggle
+let dustEnabled = false;
+let dustUserChoice = null;   // null = follow the mode default
+function setDust(v) {
+  dustEnabled = !!v;
+  for (const m of meshes) m.material.uniforms.uDust.value = dustEnabled ? 1 : 0;
+  dustBtn.classList.toggle("active", dustEnabled);
+}
+const dustBtn = document.createElement("button");
+dustBtn.textContent = "dust";
+dustBtn.title = "grey film on never-played games";
+dustBtn.onclick = () => {
+  dustUserChoice = !dustEnabled;
+  setDust(dustUserChoice);
+};
+document.getElementById("opts").appendChild(dustBtn);
+
 const totalMin = games.reduce((s, g) => s + g.minutes, 0);
-document.getElementById("stats").textContent =
-  `${games.length.toLocaleString()} games · ${Math.round(hours(totalMin)).toLocaleString()} hours on record`;
+// Backlog measured in years: HLTB story hours over unplayed games, with the
+// same exclusions as get_backlog_stats (completed/abandoned/evergreen out).
+const BACKLOG_EXCLUDE = new Set(["completed", "abandoned", "evergreen"]);
+const backlogGames = games.filter(
+  (g) => g.minutes === 0 && !BACKLOG_EXCLUDE.has(g.status)
+);
+const backlogH = backlogGames.reduce((s, g) => s + (g.hltb ?? 0), 0);
+const hltbCovered = backlogGames.filter((g) => g.hltb != null).length;
+const backlogYears = backlogH / (2 * 365);   // at 2 h/day
+const statsEl = document.getElementById("stats");
+statsEl.textContent =
+  `${games.length.toLocaleString()} games · ${Math.round(hours(totalMin)).toLocaleString()} hours on record` +
+  (backlogH > 0
+    ? ` · backlog ~${Math.round(backlogH).toLocaleString()} h ≈ ${backlogYears.toFixed(1)} years at 2 h/day`
+    : "");
+statsEl.title =
+  `backlog estimated from ${hltbCovered.toLocaleString()} of ` +
+  `${backlogGames.length.toLocaleString()} unplayed games with story lengths ` +
+  `(games without HLTB data count as 0; completed/abandoned/evergreen excluded)`;
 
 // ---------- explode a stack ----------
 
@@ -708,6 +761,7 @@ document.getElementById("loading").classList.add("done");
 const params = new URLSearchParams(location.search);
 const SNAP = params.get("snap") === "1";   // skip transitions (also: screenshots)
 const startMode = params.get("mode");
+if (params.has("dust")) dustUserChoice = params.get("dust") === "1";
 applyMode(MODES[startMode] ? startMode : "platform");
 if (SNAP && params.get("explode")) {   // deterministic explode, for screenshots
   const g = games.find((x) => x._stack && x._stack.length >= 20);
