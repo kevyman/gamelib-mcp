@@ -83,7 +83,9 @@ scene.backgroundIntensity = 0.7;       // keep the warehouse moody, covers pop
 scene.backgroundBlurriness = 0.04;
 scene.environment = envTex;            // IBL for the standard-material figure
 
-const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 500);
+// far plane sized for the Monolith pull-back: a 2,609-case tower is ~420
+// units tall and the final framing sits ~550 units out
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 3000);
 camera.position.set(0, 26, 44);
 
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -296,6 +298,7 @@ for (const g of games) {
   g.to = g.cur.clone();
   g.curYaw = g.fromYaw = g.toYaw = jitter(g.id, 4) * Math.PI;
   g.curTilt = g.fromTilt = g.toTilt = FLAT_TILT;
+  g.curScale = g.fromScale = g.toScale = 1;
   g.t = 1; g.delay = 0;
   g.pop = 0; g.popT = 0;
 }
@@ -303,6 +306,7 @@ for (const g of games) {
 function composeMatrix(g) {
   _e.set(g.curTilt, g.curYaw, 0, "YXZ");   // yaw about world Y, then tilt
   _q.setFromEuler(_e);
+  _s.setScalar(g.curScale);
   _m.compose(g.cur, _q, _s);
   g._mesh.setMatrixAt(g._i, _m);
 }
@@ -362,6 +366,14 @@ const MODES = {
     sort: (a, b) => b.minutes - a.minutes,
     sub: (gs) => { const t = gs.reduce((s, g) => s + g.minutes, 0); return t ? fmtH(t) : ""; },
   },
+  hours: {
+    label: "Hours",
+    layout: () => layoutHours(),   // custom layout: size = playtime, not piles
+  },
+  monolith: {
+    label: "Monolith",
+    layout: () => layoutMonolith(),   // one tower + cinematic flythrough
+  },
   era: {
     label: "Release era",
     buckets: (g) => g.year == null ? "none" : g.year < 2000 ? "90s" : g.year < 2010 ? "00s" : g.year < 2020 ? "10s" : "20s",
@@ -382,9 +394,49 @@ function clearLabels() {
   labelSprites.length = 0;
 }
 
+// non-sprite helper meshes owned by the current mode (marker rings etc.)
+const modeObjects = [];
+function clearModeObjects() {
+  for (const o of modeObjects) {
+    scene.remove(o);
+    o.geometry?.dispose();
+    o.material?.dispose();
+  }
+  modeObjects.length = 0;
+}
+
 function applyMode(modeKey) {
   exploded = null;   // mode switch recomputes every target anyway
+  const prevModeKey = currentModeKey;
+  currentModeKey = modeKey;
   const mode = MODES[modeKey];
+  clearLabels();
+  clearModeObjects();
+  if (modeKey !== "monolith" && prevModeKey === "monolith") {
+    endFlythrough(false);
+    controls.maxDistance = 160;
+  }
+
+  if (mode.layout) mode.layout();
+  else layoutPiles(mode);
+
+  if (SNAP) snapAll();
+  else {
+    transitionClock = 0;
+    animating = true;
+  }
+
+  // dust reads best against Playtime's played/unplayed piles; elsewhere it
+  // defaults off — until the user clicks the toggle, whose choice then sticks
+  setDust(dustUserChoice ?? (modeKey === "playtime" ? 1 : 0));
+  farmedBtn.style.display = modeKey === "hours" ? "" : "none";
+  splitBtn.style.display = modeKey === "monolith" ? "" : "none";
+  if (modeKey !== "monolith") monolithFlown = false;   // re-entry re-flies
+
+  for (const b of modeBtns) b.classList.toggle("active", b.dataset.mode === modeKey);
+}
+
+function layoutPiles(mode) {
   const groups = new Map(mode.order.map((k) => [k, []]));
   for (const g of games) {
     const k = mode.buckets(g);
@@ -406,7 +458,6 @@ function applyMode(modeKey) {
   }
   const totalW = piles.reduce((s, p) => s + p.width, 0) + GROUP_GAP * (piles.length - 1);
 
-  clearLabels();
   let x0 = -totalW / 2;
   figure.position.set(x0 - 6, 0, 0);   // sits at the head of the row
   figureLabel.position.set(x0 - 6, 9.5, 0);
@@ -434,6 +485,8 @@ function applyMode(modeKey) {
         g.from.copy(g.cur);
         g.fromYaw = g.curYaw;
         g.fromTilt = g.curTilt;
+        g.fromScale = g.curScale;
+        g.toScale = 1;
         g.to.set(
           x0 + col * SPACING_X + SPACING_X / 2 + jitter(g.id, 7) * 0.10,
           (st.length - 1 - level) * CASE_D + CASE_D / 2,
@@ -457,19 +510,264 @@ function applyMode(modeKey) {
     labelSprites.push(spr);
     x0 += p.width + GROUP_GAP;
   }
+}
 
-  if (SNAP) snapAll();
-  else {
-    transitionClock = 0;
-    animating = true;
+// Hours as mass: every case upright in one wide field, sorted by playtime,
+// physically scaled by log-hours — the visceral version of get_play_history.
+const HOURS_K = 6.5;         // gain into the log curve (tuned by eye)
+const HOURS_MIN_S = 0.45;    // floor: unplayed carpet of slivers
+const HOURS_MAX_S = 4.5;     // cap: even 1,000+ h can't leave the field
+let includeFarmed = false;   // farmed playtime is inflated — excluded by default
+
+function layoutHours() {
+  const effMin = (g) => (g.farmed && !includeFarmed ? 0 : g.minutes);
+  const sorted = [...games].sort(
+    (a, b) => effMin(b) - effMin(a)
+      || (a.ph ? 1 : 0) - (b.ph ? 1 : 0)
+      || a.name.localeCompare(b.name)
+  );
+  const maxH = Math.max(1, hours(effMin(sorted[0])));
+  const scaleOf = (g) => {
+    const h = hours(effMin(g));
+    if (h <= 0) return HOURS_MIN_S;
+    // log scale is non-negotiable: linear would turn farmed titles into towers
+    const s = HOURS_MIN_S + 0.55 * (Math.log2(1 + h) / Math.log2(1 + maxH)) * HOURS_K;
+    return Math.min(Math.max(s, HOURS_MIN_S), HOURS_MAX_S);
+  };
+
+  // variable-width row packing: walk the sorted list, wrap when the row is
+  // full; each row steps back far enough to clear the tallest case before it.
+  // Row width adapts to the library so the field stays square-ish.
+  const GAP = 0.34, ROW_GAP = 1.1;
+  const totalRowLen = sorted.reduce((s, g) => s + CASE_W * scaleOf(g) + GAP, 0);
+  const TARGET_W = Math.max(30, Math.sqrt(totalRowLen * (ROW_GAP + 1.1)));
+  const BANDS = [
+    [500, "500+ h"], [100, "100–500 h"], [10, "10–100 h"],
+    [2, "2–10 h"], [1e-9, "< 2 h"], [-1, "never played"],
+  ];
+  let x = -TARGET_W / 2, z = 0, rowTallest = 0, band = 0;
+  const bandCounts = BANDS.map(() => 0);
+  sorted.forEach((g, i) => {
+    const s = scaleOf(g);
+    const w = CASE_W * s;
+    if (x + w > TARGET_W / 2 && x > -TARGET_W / 2) {
+      x = -TARGET_W / 2;
+      z += CASE_H * rowTallest * 0.12 + CASE_D * rowTallest + ROW_GAP;
+      rowTallest = 0;
+    }
+    rowTallest = Math.max(rowTallest, s);
+    g._stack = null;                     // no piles to explode in this mode
+    g.from.copy(g.cur);
+    g.fromYaw = g.curYaw;
+    g.fromTilt = g.curTilt;
+    g.fromScale = g.curScale;
+    g.to.set(x + w / 2, (CASE_H * s) / 2, z + jitter(g.id, 8) * 0.06);
+    g.toYaw = jitter(g.id, 9) * 0.06;
+    g.toTilt = 0;                        // standing upright, cover forward
+    g.toScale = s;
+    g.t = 0;
+    g.delay = (i / sorted.length) * STAGGER * (0.6 + 0.4 * Math.abs(jitter(g.id, 5)));
+    x += w + GAP;
+
+    const h = hours(effMin(g));
+    while (band < BANDS.length && h < BANDS[band][0]) band++;
+    const bi = Math.min(band, BANDS.length - 1);
+    bandCounts[bi]++;
+    if (bandCounts[bi] === 1) {
+      const spr = makeLabelSprite(BANDS[bi][1], "", 0.075);
+      spr.position.set(g.to.x, CASE_H * s + 1.4, g.to.z);
+      spr.userData._band = bi;
+      scene.add(spr);
+      labelSprites.push(spr);
+    }
+  });
+  for (const spr of labelSprites) {
+    if (spr.userData._band != null)
+      spr.userData.prio = bandCounts[spr.userData._band];
   }
 
-  // dust reads best against Playtime's played/unplayed piles; elsewhere it
-  // defaults off — until the user clicks the toggle, whose choice then sticks
-  setDust(dustUserChoice ?? (modeKey === "playtime" ? 1 : 0));
+  // center the field on z (giants end up at the far edge, carpet up front —
+  // nothing occludes anything from the default camera)
+  const depth = z + CASE_D * rowTallest;
+  for (const g of sorted) g.to.z -= depth / 2;
+  for (const spr of labelSprites) spr.position.z -= depth / 2;
 
-  for (const b of modeBtns) b.classList.toggle("active", b.dataset.mode === modeKey);
+  figure.position.set(-TARGET_W / 2 - 6, 0, -depth / 2);
+  figureLabel.position.set(-TARGET_W / 2 - 6, 9.5, -depth / 2);
 }
+
+// The Monolith: every case in one physical stack, camera pulling back past
+// real-world reference silhouettes until the whole tower fits in frame.
+// Scene units are 10 cm, so meters × 10.
+const M = 10;
+const LANDMARKS = [
+  // the chair (0.85 m) is already in the scene at the base — not listed here
+  ["human", 1.75],
+  ["semi truck", 4.1],
+  ["giraffe", 5.5],
+  ["3-story house", 10],
+  ["blue whale", 25],
+  ["Statue of Liberty (statue)", 46],
+  ["Leaning Tower of Pisa", 57],
+  ["Eiffel Tower", 330],
+];
+let splitMonolith = false;   // twin towers: played vs never played
+let monolithFlown = false;   // fly the camera only on first entry
+
+function buildTower(gs, x) {
+  // most-played on top: the tower's crown is the games that earned it
+  gs.sort((a, b) => b.minutes - a.minutes || a.name.localeCompare(b.name));
+  gs.forEach((g, level) => {
+    g._stack = null;
+    g.from.copy(g.cur);
+    g.fromYaw = g.curYaw;
+    g.fromTilt = g.curTilt;
+    g.fromScale = g.curScale;
+    g.to.set(
+      x + jitter(g.id, 7) * 0.05,
+      (gs.length - 1 - level) * CASE_D + CASE_D / 2,
+      jitter(g.id, 8) * 0.05
+    );
+    g.toYaw = jitter(g.id, 9) * 0.07;
+    g.toTilt = FLAT_TILT;
+    g.toScale = 1;
+    g.t = 0;
+    g.delay = ((gs.length - level) / gs.length) * STAGGER * 2;
+  });
+  return gs.length * CASE_D;
+}
+
+function addHeightMarker(y, title, sub, gated) {
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(3.4, 0.05, 6, 72),
+    new THREE.MeshBasicMaterial({ color: 0xe6c86e, transparent: true, opacity: 0.75 })
+  );
+  ring.rotation.x = Math.PI / 2;
+  ring.position.y = y;
+  ring.userData.gated = gated;
+  ring.visible = !gated;
+  scene.add(ring);
+  modeObjects.push(ring);
+
+  const spr = makeLabelSprite(title, sub, 0.05);
+  spr.position.set(4.2, y, 0);
+  spr.userData.prio = 5;
+  spr.userData.gated = gated;
+  scene.add(spr);
+  labelSprites.push(spr);
+  return [ring, spr];
+}
+
+function layoutMonolith() {
+  const played = games.filter((g) => g.minutes > 0);
+  const unplayed = games.filter((g) => g.minutes === 0);
+  let height;
+  if (splitMonolith) {
+    const h1 = buildTower(played, -3.5);
+    const h2 = buildTower(unplayed, 3.5);
+    height = Math.max(h1, h2);
+  } else {
+    height = buildTower([...games], 0);
+  }
+  const meters = height / M;
+
+  figure.position.set(-8, 0, 2);
+  figureLabel.position.set(-8, 9.5, 2);
+
+  // markers appear as the flythrough climbs past them (all visible in snap)
+  const gated = !SNAP && !monolithFlown;
+  for (const [name, m] of LANDMARKS) {
+    if (m * M <= height * 1.15) addHeightMarker(m * M, name, `${m} m`, gated);
+  }
+
+  // closing stat plate: the multiplication spelled out, plus scale conversions
+  const eiffel = ((meters / 330) * 100).toFixed(1);
+  const nearMiss = LANDMARKS.find(([, m]) => m * M > height * 1.15);
+  const stat = makeLabelSprite(
+    `${meters.toFixed(1)} m tall`,
+    `${games.length.toLocaleString()} cases × ${CASE_D * 100} mm · ` +
+    `${(meters / 0.85).toFixed(1)} chairs · ${(meters / 5.5).toFixed(1)} giraffes · ` +
+    (nearMiss ? `${eiffel}% of the Eiffel Tower` : "taller than everything on the list"),
+    0.085
+  );
+  stat.position.set(-5.5, height + 2.5, 0);
+  stat.userData.prio = 1e9;   // the headline always wins declutter
+  scene.add(stat);
+  labelSprites.push(stat);
+
+  // let the orbit camera actually back out far enough to frame the tower
+  controls.maxDistance = Math.max(160, height * 2.2);
+
+  const finalPos = new THREE.Vector3(height * 0.55, height * 0.6, height * 1.4);
+  const finalTarget = new THREE.Vector3(0, height * 0.5, 0);
+  if (SNAP || monolithFlown) {
+    camera.position.copy(finalPos);
+    controls.target.copy(finalTarget);
+  } else {
+    monolithFlown = true;
+    flythrough([
+      { pos: new THREE.Vector3(7, 2.5, 13), target: new THREE.Vector3(0, 9, 0) },
+      { pos: new THREE.Vector3(-14, height * 0.3, 20), target: new THREE.Vector3(0, height * 0.38, 0) },
+      { pos: new THREE.Vector3(-26, height * 0.72, -26), target: new THREE.Vector3(0, height * 0.7, 0) },
+      { pos: new THREE.Vector3(height * 0.2, height * 0.95, height * 0.55), target: new THREE.Vector3(0, height * 0.8, 0) },
+      { pos: finalPos, target: finalTarget },
+    ], 9);
+  }
+}
+
+// ---------- keyframed camera flythrough ----------
+// Generic: the walkable-library mode can reuse this for entry moves.
+
+let fly = null;   // { keys, dur, t }
+
+function flythrough(keys, duration) {
+  controls.enabled = false;
+  fly = { keys, dur: duration, t: 0 };
+}
+
+function endFlythrough(snapToEnd = true) {
+  if (!fly) return;
+  if (snapToEnd) {
+    const last = fly.keys[fly.keys.length - 1];
+    camera.position.copy(last.pos);
+    controls.target.copy(last.target);
+  }
+  fly = null;
+  controls.enabled = true;
+  // whatever the flythrough hadn't revealed yet shows now (ESC skip included)
+  for (const o of [...modeObjects, ...labelSprites]) {
+    if (o.userData.gated) {
+      o.userData.gated = false;
+      o.visible = true;
+    }
+  }
+}
+
+const _p = new THREE.Vector3(), _t = new THREE.Vector3();
+function stepFlythrough(dt) {
+  fly.t = Math.min(1, fly.t + dt / fly.dur);
+  const k = ease(fly.t);
+  const u = k * (fly.keys.length - 1);
+  const i = Math.min(Math.floor(u), fly.keys.length - 2);
+  const f = u - i;
+  _p.lerpVectors(fly.keys[i].pos, fly.keys[i + 1].pos, f);
+  _t.lerpVectors(fly.keys[i].target, fly.keys[i + 1].target, f);
+  camera.position.copy(_p);
+  controls.target.copy(_t);
+  camera.lookAt(_t);
+  // reveal height markers as the camera climbs past them; they stay revealed
+  for (const o of [...modeObjects, ...labelSprites]) {
+    if (o.userData.gated && camera.position.y > o.position.y - 2) {
+      o.userData.gated = false;
+      o.visible = true;
+    }
+  }
+  if (fly.t >= 1) endFlythrough(false);
+}
+
+addEventListener("keydown", (e) => {
+  if (e.key === "Escape") endFlythrough();   // skippable, never traps the camera
+});
 
 // ---------- UI ----------
 
@@ -483,6 +781,33 @@ for (const [key, m] of Object.entries(MODES)) {
   modesEl.appendChild(b);
   modeBtns.push(b);
 }
+
+let currentModeKey = null;
+
+// include-farmed toggle (Hours mode only): farmed titles' playtime is
+// inflated by idling, so it's treated as unplayed unless opted in
+const farmedBtn = document.createElement("button");
+farmedBtn.textContent = "include farmed";
+farmedBtn.title = "count playtime from farmed (idled) games";
+farmedBtn.style.display = "none";
+farmedBtn.onclick = () => {
+  includeFarmed = !includeFarmed;
+  farmedBtn.classList.toggle("active", includeFarmed);
+  if (currentModeKey === "hours") applyMode("hours");   // re-layout
+};
+document.getElementById("opts").appendChild(farmedBtn);
+
+// twin-towers toggle (Monolith mode only): played vs never played
+const splitBtn = document.createElement("button");
+splitBtn.textContent = "played vs unplayed";
+splitBtn.title = "split the tower into played / never-played twin towers";
+splitBtn.style.display = "none";
+splitBtn.onclick = () => {
+  splitMonolith = !splitMonolith;
+  splitBtn.classList.toggle("active", splitMonolith);
+  if (currentModeKey === "monolith") applyMode("monolith");
+};
+document.getElementById("opts").appendChild(splitBtn);
 
 // dust toggle
 let dustEnabled = false;
@@ -544,10 +869,11 @@ function explodeStack(stack) {
 
   exploded = { games: stack, home: new Map() };
   stack.forEach((g, i) => {
-    exploded.home.set(g, { pos: g.to.clone(), yaw: g.toYaw, tilt: g.toTilt });
+    exploded.home.set(g, { pos: g.to.clone(), yaw: g.toYaw, tilt: g.toTilt, scale: g.toScale });
     const cx = (i % cols) - (cols - 1) / 2;
     const cy = rows - 1 - Math.floor(i / cols);   // best game top-left
     g.from.copy(g.cur); g.fromYaw = g.curYaw; g.fromTilt = g.curTilt;
+    g.fromScale = g.curScale; g.toScale = 1;      // wall reads at uniform size
     g.to.copy(center).addScaledVector(right, cx * sx).addScaledVector(out, 10);
     g.to.y = 2.2 + cy * sy + CASE_H / 2;
     g.toYaw = az;
@@ -564,7 +890,8 @@ function collapseStack() {
   exploded.games.forEach((g, i) => {
     const h = exploded.home.get(g);
     g.from.copy(g.cur); g.fromYaw = g.curYaw; g.fromTilt = g.curTilt;
-    g.to.copy(h.pos); g.toYaw = h.yaw; g.toTilt = h.tilt;
+    g.fromScale = g.curScale;
+    g.to.copy(h.pos); g.toYaw = h.yaw; g.toTilt = h.tilt; g.toScale = h.scale;
     g.t = 0;
     g.delay = i * 0.008;
   });
@@ -651,6 +978,7 @@ function snapAll() {
     g.cur.copy(g.to);
     g.curYaw = g.toYaw;
     g.curTilt = g.toTilt;
+    g.curScale = g.toScale;
     g.t = 1;
     composeMatrix(g);
   }
@@ -664,7 +992,8 @@ const clock = new THREE.Clock();
 
 function tick() {
   const dt = Math.min(clock.getDelta(), 0.05);
-  controls.update();
+  if (fly) stepFlythrough(dt);
+  else controls.update();
 
   if (animating) {
     transitionClock += dt;
@@ -677,6 +1006,7 @@ function tick() {
       g.cur.lerpVectors(g.from, g.to, k);
       g.curYaw = g.fromYaw + (g.toYaw - g.fromYaw) * k;
       g.curTilt = g.fromTilt + (g.toTilt - g.fromTilt) * k;
+      g.curScale = g.fromScale + (g.toScale - g.fromScale) * k;
       composeMatrix(g);
       if (g.t < 1) busy = true;
     }
@@ -733,6 +1063,7 @@ function declutterLabels() {
     .map((spr) => ({ spr, prio: spr.userData.prio ?? -1 }))
     .sort((a, b) => b.prio - a.prio);
   for (const { spr } of items) {
+    if (spr.userData.gated) { spr.visible = false; continue; }   // not revealed yet
     _v.copy(spr.position).project(camera);
     if (_v.z >= 1) { spr.visible = false; continue; }   // behind the camera
     const w = spr.scale.x * F, h = spr.scale.y * F;
