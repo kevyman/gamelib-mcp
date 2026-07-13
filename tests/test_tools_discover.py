@@ -136,15 +136,16 @@ class MatchSortTests(ToolDBTestCase):
         results = await discover.discover_games()
         self.assertEqual([g["name"] for g in results["results"]], ["LikedGame", "MehGame"])
         # IDF-weighted damped mean: N=2 games, each tag on 1 game, so
-        # idf = ln(1 + 2/1) and score = affinity·idf / (idf + prior).
+        # idf = ln(1 + 2/1) and score = affinity·support·idf / (idf + prior)
+        # where support = game_count / (game_count + _SUPPORT_K).
         idf = math.log(3.0)
         self.assertEqual(
             results["results"][0]["match_score"],
-            round(2.5 * idf / (idf + discover._MATCH_PRIOR), 3),
+            round(2.5 * (4 / (4 + discover._SUPPORT_K)) * idf / (idf + discover._MATCH_PRIOR), 3),
         )
         self.assertEqual(
             results["results"][1]["match_score"],
-            round(0.2 * idf / (idf + discover._MATCH_PRIOR), 3),
+            round(0.2 * (2 / (2 + discover._SUPPORT_K)) * idf / (idf + discover._MATCH_PRIOR), 3),
         )
         self.assertEqual(results["total_matches"], 2)
 
@@ -166,6 +167,29 @@ class MatchSortTests(ToolDBTestCase):
 
         names = [g["name"] for g in results["results"]]
         self.assertLess(names.index("RealFit"), names.index("OneTagWonder"))
+
+    async def test_single_rare_low_support_tag_cannot_dominate(self):
+        # The "Down in Bermuda" failure mode: a game whose ONLY tag is a rare
+        # IGDB keyword ("dinosaurs") loved via 2 ratings gets both a huge IDF
+        # and a near-ceiling affinity, and used to top every match ranking.
+        # Support damping plus the larger prior must rank the rich, consistent
+        # profile above it.
+        for i in range(20):
+            await make_steam_game(f"Filler{i}", 100 + i, playtime_minutes=600, tags=["action"])
+        await make_steam_game("RareKeywordOnly", 1, playtime_minutes=0, tags=["dinosaurs"])
+        await make_steam_game(
+            "RichProfileFit", 2, playtime_minutes=0,
+            tags=["roguelike", "deckbuilder", "narrative"],
+        )
+        await set_tag_affinity("dinosaurs", affinity_score=1.6, avg_score=10.0, game_count=2)
+        await set_tag_affinity("roguelike", affinity_score=1.0, avg_score=8.5, game_count=13)
+        await set_tag_affinity("deckbuilder", affinity_score=1.1, avg_score=8.4, game_count=6)
+        await set_tag_affinity("narrative", affinity_score=1.1, avg_score=8.9, game_count=12)
+
+        results = await discover.discover_games()
+
+        names = [g["name"] for g in results["results"]]
+        self.assertLess(names.index("RichProfileFit"), names.index("RareKeywordOnly"))
 
     async def test_unrated_tags_dilute_the_match(self):
         # A game stuffed with tags the profile knows nothing about is a weaker

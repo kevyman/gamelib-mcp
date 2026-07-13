@@ -1101,7 +1101,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             async with db_module.get_db() as db:
                 version = await db_module._get_user_version(db)
             self.assertEqual(version, db_module.SCHEMA_VERSION)
-            self.assertEqual(db_module.SCHEMA_VERSION, 29)
+            self.assertEqual(db_module.SCHEMA_VERSION, 30)
 
             unresolved = await seed_game("Still Unresolved Wishlisted Game")
             resolved = await seed_game("Already Resolved Wishlisted Game")
@@ -1318,6 +1318,59 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         # keeping its stale 6.2.
         self.assertEqual(set(affinity), {"racing"})
         self.assertAlmostEqual(affinity["racing"], 0.0, places=6)
+
+    async def test_v29_to_v30_quarantines_igdb_metadata_keyword_families(self) -> None:
+        # v29 -> v30 is data-only (schema identical), so a fresh current-schema
+        # DB downgraded to user_version 29 exercises it directly. The affinity
+        # purge must catch prefix-family members ("previously on - ...") that
+        # an IN-list over STEAM_FEATURE_FLAGS cannot express.
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA user_version = 29")
+        conn.execute(
+            "INSERT INTO games (id, name, tags, features) VALUES "
+            "(1, 'Shogun', '[\"deck-building\", \"previously on - prime gaming\","
+            " \"pax west 2017\", \"kickstarter\"]', '[\"steam cloud\"]')"
+        )
+        conn.execute(
+            "INSERT INTO ratings (game_id, source, raw_score, normalized_score, synced_at)"
+            " VALUES (1, 'manual', 10.0, 10.0, 'now')"
+        )
+        conn.execute(
+            "INSERT INTO tag_affinity (tag, affinity_score, avg_score, game_count, updated_at)"
+            " VALUES ('previously on - prime gaming', 0.97, 9.15, 3, 'now')"
+        )
+        conn.execute(
+            "INSERT INTO tag_affinity (tag, affinity_score, avg_score, game_count, updated_at)"
+            " VALUES ('deck-building', 1.35, 9.23, 6, 'now')"
+        )
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT tags, features FROM games WHERE id = 1").fetchone()
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        affinity_tags = {
+            r["tag"] for r in conn.execute("SELECT tag FROM tag_affinity")
+        }
+        conn.close()
+
+        self.assertEqual(version, db_module.SCHEMA_VERSION)
+        self.assertEqual(row["tags"], '["deck-building"]')
+        self.assertEqual(
+            row["features"],
+            '["steam cloud", "previously on - prime gaming", "pax west 2017", "kickstarter"]',
+        )
+        self.assertIn("deck-building", affinity_tags)
+        self.assertNotIn("previously on - prime gaming", affinity_tags)
 
     async def test_v22_to_v23_rebuilds_check_constraint_for_evergreen(self) -> None:
         # A DB fresh-initialized while SCHEMA_VERSION was 21 or 22 got the

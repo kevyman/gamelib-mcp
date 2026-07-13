@@ -100,24 +100,35 @@ class GetTasteProfileTests(ToolDBTestCase):
         self.assertEqual(top["affinity_score"], round(2.123456, 3))
         self.assertEqual(top["avg_score"], round(8.987, 2))
 
-    async def test_single_game_tag_does_not_outrank_multi_game_tag(self):
-        # A lone high rating produces a maximal affinity for its rare tags; they
-        # must not crowd out a tag backed by several games with a similar score.
+    async def test_low_support_tag_excluded_from_top(self):
+        # A lone high rating produces a maximal affinity for its rare tags;
+        # below _MIN_PROFILE_SUPPORT distinct games they don't belong in the
+        # displayed profile at all ("cow" was topping the real one).
         await set_tag_affinity("go-kart", affinity_score=1.396, avg_score=10.0, game_count=1)
+        await set_tag_affinity("cow", affinity_score=1.65, avg_score=10.0, game_count=2)
         await set_tag_affinity("deck-building", affinity_score=1.37, avg_score=8.5, game_count=6)
         profile = await ratings.get_taste_profile()
         tags = [t["tag"] for t in profile["top_tags"]]
-        self.assertLess(tags.index("deck-building"), tags.index("go-kart"))
-        # Raw stored affinity is still surfaced verbatim (discover uses it).
-        go_kart = next(t for t in profile["top_tags"] if t["tag"] == "go-kart")
-        self.assertEqual(go_kart["affinity_score"], 1.396)
+        self.assertEqual(tags, ["deck-building"])
+        # Raw stored affinity is still surfaced verbatim.
+        deck = profile["top_tags"][0]
+        self.assertEqual(deck["affinity_score"], 1.37)
 
-    async def test_single_game_negative_tag_does_not_dominate_bottom(self):
+    async def test_support_shrinkage_still_ranks_within_included_tags(self):
+        # Above the floor, a small-sample outlier must still rank below a tag
+        # backed by more games at a similar affinity.
+        await set_tag_affinity("princess", affinity_score=1.5, avg_score=9.5, game_count=3)
+        await set_tag_affinity("emotional", affinity_score=1.08, avg_score=8.7, game_count=12)
+        profile = await ratings.get_taste_profile()
+        tags = [t["tag"] for t in profile["top_tags"]]
+        self.assertLess(tags.index("emotional"), tags.index("princess"))
+
+    async def test_low_support_negative_tag_excluded_from_bottom(self):
         await set_tag_affinity("penguin", affinity_score=-1.4, avg_score=1.0, game_count=1)
         await set_tag_affinity("walking-sim", affinity_score=-1.3, avg_score=2.0, game_count=5)
         profile = await ratings.get_taste_profile()
         tags = [t["tag"] for t in profile["bottom_tags"]]
-        self.assertLess(tags.index("walking-sim"), tags.index("penguin"))
+        self.assertEqual(tags, ["walking-sim"])
 
     async def test_empty_ratings_summary(self):
         profile = await ratings.get_taste_profile()

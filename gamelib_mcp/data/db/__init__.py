@@ -103,7 +103,7 @@ STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
 XBOX_TITLE_ID = "xbox_title_id"
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 
 
 @dataclass
@@ -1629,6 +1629,70 @@ async def _migrate_v28_to_v29(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v29_to_v30(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Re-quarantine feature flags from games.tags with the widened vocabulary.
+
+    STEAM_FEATURE_FLAGS grew IGDB storefront/funding/capability keywords
+    ("previously on - prime gaming", "kickstarter", "controller
+    recommendation") plus the open-ended FEATURE_FLAG_PREFIXES families
+    (subscription catalogs, expo appearances, award nominations). Same shape
+    as v26->v27; the tag_affinity purge filters via is_feature_flag in Python
+    because prefix families can't be expressed as an IN list.
+    """
+    from ..tags import is_feature_flag, split_features
+
+    if progress is not None:
+        progress("Migrating to v30: quarantine IGDB metadata-keyword families.")
+
+    db.row_factory = aiosqlite.Row
+    rows = await db.execute_fetchall(
+        "SELECT id, tags, features FROM games WHERE tags IS NOT NULL"
+    )
+    emptied_game_ids: list[int] = []
+    for row in rows:
+        try:
+            tags = json.loads(row["tags"])
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(tags, list):
+            continue
+        real_tags, new_features = split_features(tags)
+        if not new_features:
+            continue
+        try:
+            features = json.loads(row["features"]) if row["features"] else []
+        except (ValueError, TypeError):
+            features = []
+        if not isinstance(features, list):
+            features = []
+        merged = features + [f for f in new_features if f not in features]
+        await db.execute(
+            "UPDATE games SET tags = ?, features = ? WHERE id = ?",
+            (json.dumps(real_tags), json.dumps(merged), row["id"]),
+        )
+        if not real_tags:
+            emptied_game_ids.append(row["id"])
+
+    for game_id in emptied_game_ids:
+        await db.execute(
+            """UPDATE steam_platform_data
+                  SET store_cached_at = NULL, steamspy_cached_at = NULL
+                WHERE game_platform_id IN (
+                    SELECT id FROM game_platforms
+                    WHERE game_id = ? AND platform = ?
+                )""",
+            (game_id, STEAM_PLATFORM),
+        )
+
+    affinity_rows = await db.execute_fetchall("SELECT tag FROM tag_affinity")
+    junk = [row["tag"] for row in affinity_rows if is_feature_flag(row["tag"])]
+    for tag in junk:
+        await db.execute("DELETE FROM tag_affinity WHERE tag = ?", (tag,))
+
+    await _set_user_version(db, 30)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1788,6 +1852,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (26, _migrate_v26_to_v27),
     (27, _migrate_v27_to_v28),
     (28, _migrate_v28_to_v29),
+    (29, _migrate_v29_to_v30),
 )
 
 
