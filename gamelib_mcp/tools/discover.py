@@ -110,19 +110,32 @@ lib_tag_df AS (
 )
 """
 
-# Shrinkage prior in the score denominator (in IDF units): a game whose only
-# scored tag is one loved-but-common tag gets pulled toward neutral instead of
-# inheriting that tag's full affinity — the "100% match on a single 'action'
-# tag" failure mode.
-_MATCH_PRIOR = 3.0
+# Shrinkage prior in the score denominator (in IDF units): a game with little
+# tag evidence gets pulled toward neutral instead of inheriting its tags' full
+# affinity. Sized against the IDF ceiling — a library-unique tag carries
+# idf = ln(1 + N) ≈ 8 at N≈3000, so a prior of 3 let a game whose ONLY tag was
+# one rare loved keyword ("dinosaurs") outrank every rich-profile match; 9
+# caps that single-tag case at ~47% of the tag's affinity while barely moving
+# games whose tag sets carry 30+ IDF units of evidence.
+_MATCH_PRIOR = 9.0
 
-# Correlated per-game taste score: IDF-weighted mean affinity over ALL of the
-# game's tags (unrated tags contribute 0 = neutral), damped by _MATCH_PRIOR.
-# NULL when no tag has an affinity row — the profile can't score the game.
+# Affinity support damping (matches _SUPPORT_SHRINKAGE_K in tools/ratings.py):
+# an affinity backed by 1-2 rated games is mostly noise — IGDB one-off
+# keywords on a single 10/10 game ("cow", "go-kart") otherwise get BOTH the
+# highest affinities (tiny samples hit the score ceiling) and the highest IDF
+# (rare by construction), a compounding error that put single-keyword games at
+# the top of every match ranking.
+_SUPPORT_K = 2.0
+_DAMPED_AFFINITY_SQL = f"ta.affinity_score * ta.game_count / (ta.game_count + {_SUPPORT_K})"
+
+# Correlated per-game taste score: IDF-weighted mean support-damped affinity
+# over ALL the game's tags (unrated tags contribute 0 = neutral), damped by
+# _MATCH_PRIOR. NULL when no tag has an affinity row — the profile can't
+# score the game.
 _MATCH_SCORE_SQL = f"""
 (
     SELECT CASE WHEN COUNT(ta.tag) = 0 THEN NULL
-           ELSE SUM(COALESCE(ta.affinity_score, 0) * gl_ln(1.0 + ls.n * 1.0 / df.df))
+           ELSE SUM(COALESCE({_DAMPED_AFFINITY_SQL}, 0) * gl_ln(1.0 + ls.n * 1.0 / df.df))
                 / (SUM(gl_ln(1.0 + ls.n * 1.0 / df.df)) + {_MATCH_PRIOR})
            END
     FROM json_each(COALESCE(game_rollup.tags, '[]')) je
@@ -295,9 +308,10 @@ async def discover_games(
 async def _load_matched_tags(game_ids: list[int]) -> dict[int, list[dict]]:
     """Top-3 contributing tags per game — the 'why' behind each result.
 
-    Ordered by affinity x IDF (the same weighting the match score uses), not
-    raw affinity — otherwise ubiquitous mildly-liked tags ("indie", storefront
-    keywords) crowd out the rare tags that actually drove the ranking.
+    Ordered by support-damped affinity x IDF (the same weighting the match
+    score uses), not raw affinity — otherwise ubiquitous mildly-liked tags
+    ("indie", storefront keywords) crowd out the rare tags that actually
+    drove the ranking.
     """
     if not game_ids:
         return {}
@@ -325,7 +339,7 @@ async def _load_matched_tags(game_ids: list[int]) -> dict[int, list[dict]]:
                 CROSS JOIN lib_size ls
                 WHERE g.id IN ({placeholders})
                 ORDER BY g.id,
-                         ta.affinity_score * gl_ln(1.0 + ls.n * 1.0 / df.df) DESC""",
+                         {_DAMPED_AFFINITY_SQL} * gl_ln(1.0 + ls.n * 1.0 / df.df) DESC""",
             tuple(game_ids),
         )
     matched: dict[int, list[dict]] = {}

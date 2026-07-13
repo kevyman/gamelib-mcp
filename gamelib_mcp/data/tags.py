@@ -74,12 +74,57 @@ STEAM_FEATURE_FLAGS: frozenset[str] = frozenset(
         "digital distribution",
         "steam",
         "vr",
+        # IGDB keywords about how a game is sold/funded/certified — they say
+        # nothing about what playing it is like, but their rarity gives them
+        # huge IDF weight in match scoring ("previously on - prime gaming"
+        # once outranked every real tag in the taste profile).
+        "abandonware",
+        "controller recommendation",
+        "controller support",
+        "crowdfunded",
+        "crowdfunding",
+        "demo",
+        "free demo",
+        "game pass",
+        "games with gold",
+        "gog preservation program",
+        "humble bundle",
+        "kickstarter",
+        "mouse only",
+        "playstation plus",
+        "single-player only",
+        "steam greenlight",
+        "unofficial",
+        "wii classic controller support",
+        "wii u pro controller support",
+        "xbox controller support for pc",
     }
+)
+
+# IGDB mints one keyword per storefront/subscription/expo/award instance —
+# open-ended families that can't be enumerated one tag at a time.
+FEATURE_FLAG_PREFIXES: tuple[str, ...] = (
+    "available on - ",
+    "previously on - ",
+    "crowdfunding - ",
+    "the game awards",
+    "game critics awards",
+    "game developers choice awards",
+    "pax aus",
+    "pax east ",
+    "pax prime ",
+    "pax south ",
+    "pax west ",
+    "gamescom ",
+    "e3 ",
+    "gdc ",
+    "igf ",
 )
 
 
 def is_feature_flag(tag: str) -> bool:
-    return tag.lower() in STEAM_FEATURE_FLAGS
+    lowered = tag.lower()
+    return lowered in STEAM_FEATURE_FLAGS or lowered.startswith(FEATURE_FLAG_PREFIXES)
 
 
 def split_features(tags: Iterable[str]) -> tuple[list[str], list[str]]:

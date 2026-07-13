@@ -27,12 +27,16 @@ ResponseFormat = Literal["concise", "detailed"]
 # hit a maximal signed affinity from a single high/low rating and crowd out
 # genuinely predictive multi-game tags. Rank by affinity damped toward zero by
 # game_count / (game_count + k) so single-game outliers rank honestly. This is a
-# display-only adjustment — the stored affinity_score (what discover_games uses)
-# is left untouched and still shown verbatim.
+# display-only adjustment — the stored affinity_score is left untouched and
+# still shown verbatim (discover_games applies the same damping in-query).
 _SUPPORT_SHRINKAGE_K = 2.0
 _SUPPORT_ADJUSTED_RANK_SQL = (
     "affinity_score * game_count / (game_count + ?)"
 )
+# A profile entry needs at least this many distinct games behind it — damping
+# alone still let a 2-game 10/10 keyword ("cow") crack the displayed top 20,
+# and half the affinity table sits at game_count <= 2.
+_MIN_PROFILE_SUPPORT = 3
 
 
 async def sync_ratings(ctx=None) -> dict:
@@ -236,14 +240,23 @@ async def get_taste_profile() -> dict:
     """Show tag affinities plus rating stats summary.
 
     top/bottom tags are ranked by support-shrunk affinity (affinity damped by
-    game_count) so a tag seen on a single high/low rating doesn't outrank
-    tags backed by several games. The displayed affinity_score is the raw
-    stored value discover_games uses; only the ordering is adjusted.
+    game_count) and require at least _MIN_PROFILE_SUPPORT distinct games, so
+    a tag seen on one or two high/low ratings doesn't outrank tags backed by
+    several games. A cold-start profile where NO tag reaches the floor falls
+    back to the unfloored list — a couple of ratings should still show
+    something. The displayed affinity_score is the raw stored value; only
+    the ordering and floor are adjusted.
     """
     async with get_db() as db:
+        support_floor = f"game_count >= {_MIN_PROFILE_SUPPORT}"
+        floored = await db.execute_fetchone(
+            f"SELECT COUNT(*) AS c FROM tag_affinity WHERE {support_floor}"
+        )
+        where = support_floor if floored["c"] else "1=1"
         top_tags = await db.execute_fetchall(
             f"""SELECT tag, affinity_score, avg_score, game_count
                FROM tag_affinity
+               WHERE {where}
                ORDER BY {_SUPPORT_ADJUSTED_RANK_SQL} DESC
                LIMIT 20""",
             (_SUPPORT_SHRINKAGE_K,),
@@ -251,6 +264,7 @@ async def get_taste_profile() -> dict:
         bottom_tags = await db.execute_fetchall(
             f"""SELECT tag, affinity_score, avg_score, game_count
                FROM tag_affinity
+               WHERE {where}
                ORDER BY {_SUPPORT_ADJUSTED_RANK_SQL} ASC
                LIMIT 10""",
             (_SUPPORT_SHRINKAGE_K,),
