@@ -24,7 +24,13 @@ _ALLOWED_CLIENT_REDIRECT_URIS = [
     "https://chatgpt.com/connector/oauth/*",
     "https://claude.ai/api/mcp/auth_callback",
 ]
-_ACCESS_TOKEN_LIFETIME_SECONDS = 60 * 60
+# GitHub OAuth Apps issue non-expiring, API-key-style user tokens and return no
+# refresh_token, so FastMCP has none to hand the client: an expired access token
+# can only be replaced by a full interactive re-auth.  Keep the access token's
+# lifetime long enough that this stays rare.
+_ACCESS_TOKEN_LIFETIME_SECONDS = 30 * 24 * 60 * 60
+# Only consulted if the upstream provider returns a refresh_token — inert under an
+# OAuth App, live if this is ever migrated to a GitHub App with expiring tokens.
 _REFRESH_TOKEN_LIFETIME_SECONDS = 30 * 24 * 60 * 60
 
 
