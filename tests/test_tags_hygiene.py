@@ -7,7 +7,45 @@ from conftest import ToolDBTestCase, add_rating, seed_game
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steamspy
 from gamelib_mcp.data.steam_store import _extract_tags
-from gamelib_mcp.data.tags import split_features
+from gamelib_mcp.data.tags import is_feature_flag, split_features
+
+
+class FeatureFlagFamilyTests(unittest.TestCase):
+    def test_igdb_metadata_keyword_families_are_flags(self) -> None:
+        # IGDB mints one keyword per storefront/expo/award instance — the
+        # prefix families must catch members never seen before.
+        for tag in [
+            "previously on - prime gaming",
+            "Previously On - Netflix",
+            "available on - luna plus",
+            "pax west 2017",
+            "pax prime 2013",
+            "gamescom 2014",
+            "e3 2015",
+            "the game awards - best narrative - nominee",
+            "the game awards 2016",
+            "game developers choice awards 2016",
+            "kickstarter",
+            "steam greenlight",
+            "controller recommendation",
+            "xbox controller support for pc",
+            "free demo",
+        ]:
+            self.assertTrue(is_feature_flag(tag), tag)
+
+    def test_real_taste_tags_are_not_flags(self) -> None:
+        # Near-misses of the junk families must survive: "demon" vs "demo",
+        # gameplay modes, and ordinary content keywords.
+        for tag in [
+            "demon",
+            "demons",
+            "single-player",
+            "co-op",
+            "deck-building",
+            "dinosaurs",
+            "e3-adjacent robots",  # does not start with "e3 "
+        ]:
+            self.assertFalse(is_feature_flag(tag), tag)
 
 
 class SplitFeaturesTests(unittest.TestCase):

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 from . import get_db
 from ..tag_synonyms import canonical_tag
-from ..tags import STEAM_FEATURE_FLAGS
+from ..tags import is_feature_flag
 
 # Explicit ratings dominate; a playtime-derived pseudo-rating is a weak
 # implicit signal (the user never said they liked it, they just played it).
@@ -128,7 +128,7 @@ async def recompute_tag_affinity() -> int:
         for tag in tags:
             # Storefront feature flags carry no taste signal; rows written
             # before the tags/features split may still contain them.
-            if tag.lower() in STEAM_FEATURE_FLAGS:
+            if is_feature_flag(tag):
                 continue
             # Key on the canonical form so synonym variants accumulate together and
             # match the discover/library lower(value) joins against canonical tags.
