@@ -33,12 +33,25 @@ logger = logging.getLogger(__name__)
 STORE_CACHE_DAYS = 7
 STORE_API = "https://store.steampowered.com/api/appdetails"
 REVIEWS_API = "https://store.steampowered.com/appreviews/{appid}"
-_STEAM_TARGET_REQUEST_INTERVAL = 1.0
+# Steam meters these endpoints against a ~5-minute quota (roughly 200 requests
+# per window), not a per-second rate. Pacing alone cannot respect a windowed
+# quota: a steady 1 req/s is 300 per window, so every window used to run ~200
+# requests through and then take 429s for the remainder — a 429 burst every
+# five minutes, on the clock. The budget window below is what actually keeps
+# us inside the quota; the per-second interval only smooths bursts within it.
+_STEAM_TARGET_REQUEST_INTERVAL = 1.6
 _STEAM_MAX_REQUESTS_PER_SECOND = 1
 _STEAM_MAX_IN_FLIGHT_REQUESTS = 1
+_STEAM_BUDGET_WINDOW_SECONDS = 300.0
+_STEAM_MAX_REQUESTS_PER_WINDOW = 190
 _STEAM_MAX_RETRIES = 3
 _STEAM_RETRY_BASE_DELAY_SECONDS = 1.0
 _STEAM_RETRY_JITTER_SECONDS = 0.5
+# A 429 means the quota is already gone, so backing off only the request that
+# happened to catch it just lets the next queued request take the next 429 (and
+# each rejection then burns retries, adding load exactly when Steam is asking
+# for less). Park the whole gate instead, for at least this long.
+_STEAM_RATE_LIMIT_COOLDOWN_SECONDS = 10.0
 
 
 class _SteamRequestGate:
@@ -50,10 +63,14 @@ class _SteamRequestGate:
         target_interval: float,
         max_requests_per_second: int,
         max_in_flight: int,
+        budget_window_seconds: float = _STEAM_BUDGET_WINDOW_SECONDS,
+        max_requests_per_window: int = _STEAM_MAX_REQUESTS_PER_WINDOW,
     ) -> None:
         self._target_interval = target_interval
         self._max_requests_per_second = max_requests_per_second
         self._max_in_flight = max_in_flight
+        self._budget_window_seconds = budget_window_seconds
+        self._max_requests_per_window = max_requests_per_window
         self._loop_states: WeakKeyDictionary[asyncio.AbstractEventLoop, _SteamRequestGateState] = WeakKeyDictionary()
         self._lease_stack: ContextVar[tuple["_SteamRequestGateState", ...]] = ContextVar(
             "steam_request_gate_lease_stack",
@@ -92,13 +109,29 @@ class _SteamRequestGate:
                     while state.request_started_at and state.request_started_at[0] <= cutoff:
                         state.request_started_at.popleft()
 
+                    window_cutoff = now - self._budget_window_seconds
+                    while state.window_started_at and state.window_started_at[0] <= window_cutoff:
+                        state.window_started_at.popleft()
+
                     wait_seconds = max(0.0, state.next_slot_at - now)
+                    # A 429 anywhere parks every caller, not just the unlucky one.
+                    wait_seconds = max(wait_seconds, state.cooldown_until - now)
                     if len(state.request_started_at) >= self._max_requests_per_second:
                         oldest = state.request_started_at[0]
                         wait_seconds = max(wait_seconds, (oldest + 1.0) - now)
 
+                    # Quota is spent: wait for the oldest request to age out of
+                    # the window rather than spending the next slot on a 429.
+                    if len(state.window_started_at) >= self._max_requests_per_window:
+                        oldest_in_window = state.window_started_at[0]
+                        wait_seconds = max(
+                            wait_seconds,
+                            (oldest_in_window + self._budget_window_seconds) - now,
+                        )
+
                     if wait_seconds <= 0:
                         state.request_started_at.append(now)
+                        state.window_started_at.append(now)
                         state.next_slot_at = max(state.next_slot_at, now) + self._target_interval
                         lease_stack = self._lease_stack.get()
                         self._lease_stack.set((*lease_stack, state))
@@ -108,6 +141,12 @@ class _SteamRequestGate:
         except BaseException:
             state.semaphore.release()
             raise
+
+    def penalize(self, delay_seconds: float) -> None:
+        """Park every caller on this gate after a rate-limit rejection."""
+        state = self._get_loop_state()
+        cooldown = max(delay_seconds, _STEAM_RATE_LIMIT_COOLDOWN_SECONDS)
+        state.cooldown_until = max(state.cooldown_until, time.monotonic() + cooldown)
 
     def release(self) -> None:
         lease_stack = self._lease_stack.get()
@@ -124,7 +163,9 @@ class _SteamRequestGateState:
     lock: asyncio.Lock
     semaphore: asyncio.Semaphore
     request_started_at: deque[float] = field(default_factory=deque)
+    window_started_at: deque[float] = field(default_factory=deque)
     next_slot_at: float = 0.0
+    cooldown_until: float = 0.0
 
 
 _STEAM_REQUEST_GATE = _SteamRequestGate(
@@ -191,11 +232,17 @@ async def _steam_get_json_with_retry(
             return resp.json()
         except Exception as exc:
             last_error = exc
+            response = exc.response if isinstance(exc, httpx.HTTPStatusError) else None
+            delay_seconds = _retry_delay_seconds(attempt, response)
+            # Park the whole gate on any 429, including the terminal one — an
+            # exhausted call must not hand the next queued request an immediate
+            # slot straight into the same quota outage.
+            if response is not None and response.status_code == 429:
+                _STEAM_REQUEST_GATE.penalize(delay_seconds)
+
             if attempt >= _STEAM_MAX_RETRIES or not _should_retry(exc):
                 raise
 
-            response = exc.response if isinstance(exc, httpx.HTTPStatusError) else None
-            delay_seconds = _retry_delay_seconds(attempt, response)
             logger.warning("Steam request rate-limited or failed for %s; retrying in %.2fs", url, delay_seconds)
             await _sleep_before_retry(delay_seconds)
 
@@ -341,8 +388,8 @@ async def fetch_store_appdetails(
 
     The store half of ``_fetch_all``, exposed on its own for callers that have
     no use for the review summary (e.g. detect_misclassified_dlc's type probe)
-    — every request goes through the shared 1-req/s gate, so a discarded
-    reviews call would halve a probe's effective budget.
+    — every request goes through the shared quota-budgeted gate, so a
+    discarded reviews call would halve a probe's effective budget.
     """
     async def fetch(active_client: httpx.AsyncClient) -> dict | None:
         try:
