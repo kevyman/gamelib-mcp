@@ -221,7 +221,10 @@ def test_dynamic_registration_restricts_client_redirects(
             body=payload,
             headers=[(b"content-type", b"application/json")],
         )
-        assert registration_status == 201
+        # A disallowed redirect URI is now rejected at registration time rather
+        # than being accepted and blocked later at /authorize.
+        if registration_status != 201:
+            return registration_status
         client_id = json.loads(registration_body)["client_id"]
         query = urlencode(
             {
