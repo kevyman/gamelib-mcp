@@ -1886,3 +1886,157 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SteamNPackTests(unittest.TestCase):
+    def test_n_pack_suffix_stripped_in_records(self):
+        # "Terraria 4-Pack" is 4 gift copies of ONE game, not a 4-game bundle:
+        # the record must match (and book its full price against) Terraria.
+        purchases = [
+            {
+                "date": "2015-06-20",
+                "items": ["Terraria 4-Pack"],
+                "total": 29.99,
+                "currency": "USD",
+            }
+        ]
+        records = steam_history._purchase_records(purchases)
+        self.assertEqual(records[0].title, "Terraria")
+        self.assertEqual(records[0].price_paid, 29.99)
+
+    def test_strip_n_pack_variants(self):
+        self.assertEqual(steam_history.strip_n_pack_suffix("Castle Crashers 4-pack"), "Castle Crashers")
+        self.assertEqual(steam_history.strip_n_pack_suffix("Magicka 2 Pack"), "Magicka")
+        self.assertEqual(steam_history.strip_n_pack_suffix("Left 4 Dead"), "Left 4 Dead")
+        self.assertEqual(steam_history.strip_n_pack_suffix("LEGO Star Wars"), "LEGO Star Wars")
+
+
+class ImportBundleDiversionTests(ToolDBTestCase):
+    """Compilation-named purchases that miss every matching tier are diverted
+    to bundles_needing_split — never minted as phantom base games, never
+    buried in unmatched."""
+
+    def _steam_record(self, title: str, price: float = 19.99) -> PurchaseRecord:
+        return PurchaseRecord(
+            title=title,
+            platform="steam",
+            purchase_source="steam",
+            acquired_at="2014-06-20",
+            price_paid=price,
+            price_currency="EUR",
+        )
+
+    async def test_unmatched_compilation_names_divert(self):
+        records = [
+            self._steam_record("Hitman Collection"),
+            self._steam_record("Far Cry Franchise Pack"),
+            self._steam_record("Hexcells Complete"),
+        ]
+        with _patch_fetchers(
+            fetch_steam_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["steam"])
+
+        steam = result["sources"]["steam"]
+        diverted = {b["bundle_name"] for b in steam["bundles_needing_split"]}
+        self.assertEqual(
+            diverted, {"Hitman Collection", "Far Cry Franchise Pack", "Hexcells Complete"}
+        )
+        self.assertEqual(steam["created"], 0)
+        self.assertEqual(steam["unmatched"], [])
+        self.assertEqual(result["totals"]["bundles_needing_split"], 3)
+        # Nothing minted: the phantom "Hitman Collection" base game must not exist.
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
+        self.assertEqual(count["c"], 0)
+
+    async def test_matched_compilation_name_is_not_diverted(self):
+        gid = await seed_game("Halo: The Master Chief Collection")
+        await add_platform(gid, "steam")
+        records = [self._steam_record("Halo: The Master Chief Collection", 39.99)]
+        with _patch_fetchers(
+            fetch_steam_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["steam"])
+
+        steam = result["sources"]["steam"]
+        self.assertEqual(steam["bundles_needing_split"], [])
+        self.assertEqual(steam["filled"], 1)
+
+
+class ImportUnmatchedFreeSplitTests(ToolDBTestCase):
+    async def test_zero_price_promo_misses_land_in_unmatched_free(self):
+        records = [
+            _eshop_record("Kingdom Come HD Pack", price_paid=0.0, purchase_source="free"),
+            _eshop_record("Really Missing Paid Game", price_paid=12.5),
+        ]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(
+                sources=["eshop"], create_missing=False
+            )
+
+        eshop = result["sources"]["eshop"]
+        self.assertEqual(
+            [i["name"] for i in eshop["unmatched"]], ["Really Missing Paid Game"]
+        )
+        self.assertEqual(
+            [i["name"] for i in eshop["unmatched_free"]], ["Kingdom Come HD Pack"]
+        )
+        self.assertEqual(result["totals"]["unmatched"], 1)
+        self.assertEqual(result["totals"]["unmatched_free"], 1)
+
+
+class ImportDryRunParityTests(ToolDBTestCase):
+    async def test_dry_run_reports_same_counters_as_wet_run(self):
+        gid = await seed_game("Hades")
+        await add_platform(gid, "switch2")
+        records = [
+            _eshop_record("Hades"),
+            _eshop_record("Totally Absent Game", price_paid=9.99),
+        ]
+
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            dry = await acquisition.import_purchases(
+                sources=["eshop"], dry_run=True, create_missing=False
+            )
+
+        # Nothing written by the dry run.
+        row = await _acquisition_row(gid, "switch2")
+        self.assertIsNone(row["price_paid"])
+
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            wet = await acquisition.import_purchases(
+                sources=["eshop"], create_missing=False
+            )
+
+        for key in ("filled", "created", "no_change", "applied"):
+            self.assertEqual(
+                dry["sources"]["eshop"][key], wet["sources"]["eshop"][key], key
+            )
+        self.assertEqual(
+            [i["name"] for i in dry["sources"]["eshop"]["unmatched"]],
+            [i["name"] for i in wet["sources"]["eshop"]["unmatched"]],
+        )
+        self.assertEqual(dry["totals"]["unmatched"], wet["totals"]["unmatched"])
+
+    async def test_dry_run_create_missing_previews_created(self):
+        records = [_eshop_record("Brand New Game")]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["eshop"], dry_run=True)
+
+        eshop = result["sources"]["eshop"]
+        self.assertEqual(eshop["created"], 1)
+        self.assertEqual(eshop["would_create"][0]["name"], "Brand New Game")
+        self.assertIsNone(eshop["would_create"][0]["game_id"])
+        # Preview minted nothing.
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
+        self.assertEqual(count["c"], 0)

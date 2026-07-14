@@ -89,6 +89,18 @@ _PACKAGE_SUFFIX_RE = re.compile(
 )
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
+# "Terraria 4-Pack" / "Castle Crashers 4-pack" style SKUs are N gift copies of
+# ONE game, not an N-game bundle — strip the marker so the record matches (and
+# books its full price against) the single game instead of reading as a
+# multi-game compilation or minting a phantom "X 4-Pack" row.
+_N_PACK_RE = re.compile(r"\s+\d+[\s-]?packs?\s*$", re.IGNORECASE)
+
+
+def strip_n_pack_suffix(title: str) -> str:
+    """'Terraria 4-Pack' → 'Terraria'; titles without the marker pass through."""
+    stripped = _N_PACK_RE.sub("", title).strip()
+    return stripped or title
+
 
 def _load_steam_cookies() -> dict[str, str] | None:
     """Load Steam store cookies from STEAM_STORE_COOKIES_FILE (same shape as
@@ -331,7 +343,7 @@ def _purchase_records(purchases: list[dict]) -> list[PurchaseRecord]:
         for title, share in zip(items, shares, strict=True):
             records.append(
                 PurchaseRecord(
-                    title=title,
+                    title=strip_n_pack_suffix(title),
                     platform=PLATFORM,
                     purchase_source=PURCHASE_SOURCE,
                     acquired_at=purchase["date"],

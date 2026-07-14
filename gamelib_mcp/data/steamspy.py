@@ -69,6 +69,30 @@ async def _fetch_steamspy(appid: int) -> dict | None:
         return None
 
 
+async def fetch_steamspy_name(appid: int) -> str | None:
+    """The app's name per SteamSpy, or None when unknown/unreachable.
+
+    SteamSpy retains data for retired/delisted GAMES (it tracked them while
+    live) but generally has nothing for DLC and tools — which makes a non-null
+    name here double as a "this was a real game" signal for apps whose store
+    appdetails no longer exist. Used by the Steam license audit to name owned
+    apps the store API has forgotten.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                STEAMSPY_API, params={"request": "appdetails", "appid": appid}
+            )
+            resp.raise_for_status()
+            name = resp.json().get("name")
+    except Exception as e:
+        logger.warning("SteamSpy name fetch failed for appid %d: %s", appid, e)
+        return None
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return None
+
+
 def _merge_tags(spy_tags: list[str], existing: list[str]) -> list[str]:
     seen = set()
     result = []

@@ -137,3 +137,47 @@ class NormalizePurchaseTitleTests(unittest.TestCase):
             "Blasphemous + Blasphemous 2 Bundle",
         )
         self.assertEqual(normalize_purchase_title("Portal 2"), "Portal 2")
+
+
+class PurchaseSkuSuffixTests(unittest.TestCase):
+    """Purchase-history SKU decorations (region/package/edition markers).
+
+    Real misses from a prod Steam purchase import — every one of these SKU
+    names failed to match its library row until stripped.
+    """
+
+    def test_strips_region_markers(self) -> None:
+        self.assertEqual(
+            normalize_purchase_title("Fallout New Vegas Ultimate ROW"),
+            "Fallout New Vegas",
+        )
+        self.assertEqual(
+            normalize_purchase_title("Sekiro: Shadows Die Twice (Rest of World)"),
+            "Sekiro: Shadows Die Twice",
+        )
+        self.assertEqual(
+            normalize_purchase_title("Deus Ex: Human Revolution - Director's Cut (ROW)"),
+            "Deus Ex: Human Revolution",
+        )
+
+    def test_strips_package_kind_markers(self) -> None:
+        self.assertEqual(normalize_purchase_title("Nidhogg Store"), "Nidhogg")
+        self.assertEqual(normalize_purchase_title("Teleglitch: Base Game"), "Teleglitch")
+
+    def test_strips_bare_edition_words(self) -> None:
+        self.assertEqual(
+            normalize_purchase_title("Oblivion Game of the Year Deluxe"), "Oblivion"
+        )
+        self.assertEqual(
+            normalize_purchase_title("Saints Row IV Game of the Century Edition"),
+            "Saints Row IV",
+        )
+        self.assertEqual(
+            normalize_purchase_title("Morrowind Game of the Year"), "Morrowind"
+        )
+
+    def test_complete_is_never_stripped(self) -> None:
+        # "X Complete" routinely names a multi-game compilation (Hexcells
+        # Complete = three games) — stripping it would book the compilation's
+        # price onto the base game.
+        self.assertEqual(normalize_purchase_title("Hexcells Complete"), "Hexcells Complete")
