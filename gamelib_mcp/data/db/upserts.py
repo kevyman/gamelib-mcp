@@ -363,6 +363,22 @@ async def apply_content_classification(
         if row is None:
             return False
 
+        # Parent guard: a row other rows nest under must stay primary. Nesting it
+        # would hide the parent from the is_primary rollups and strand its
+        # children under an unreachable row, so drop the whole classification
+        # write rather than write half of it. Mirrored in _apply_igdb_metadata.
+        if classification.content_type in NESTED_CONTENT_TYPES:
+            from .queries import has_nested_children
+
+            if await has_nested_children(db, game_id):
+                logger.debug(
+                    "content classification (%s) would nest game %s, which is a "
+                    "parent of nested content; skipped",
+                    source,
+                    game_id,
+                )
+                return False
+
         # Substance guard — a row with a store identifier and real playtime is
         # never demoted under a parent that has neither (the Titanfall 2 shape:
         # the real, played game nested under an empty duplicate, leaving only

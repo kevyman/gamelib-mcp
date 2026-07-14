@@ -13,6 +13,7 @@ from ..data.db import (
     clear_fulfilled_wishlist_entries,
     fts_ready,
     get_db,
+    has_nested_children,
     invalidate_igdb_match_enrichment,
     invalidate_name_derived_enrichment,
     nesting_substance_conflict,
@@ -521,6 +522,21 @@ async def update_game(
         # would orphan it. Clear (and protect) it when promoting to primary.
         if is_primary:
             fields["parent_game_id"] = None
+        else:
+            # The inverse of the "parent must be primary" rule enforced below:
+            # nesting a row that other rows already hang off would hide it from
+            # the rollups AND strand its children under an unreachable parent.
+            # Manual is the highest-precedence writer, so this is the one place
+            # that refuses out loud instead of silently skipping the write.
+            async with get_db() as db:
+                if await has_nested_children(db, resolved_id):
+                    raise ToolError(
+                        f"'{row['name']}' is the parent of nested content, so it "
+                        f"cannot become '{normalized_ct}' — the children would be "
+                        "stranded under a row that is itself hidden from the "
+                        "library. Re-parent them (update_game) or fold them in "
+                        "(merge_games) first."
+                    )
 
     if parent_game_id is not None and parent_name is not None:
         raise ToolError("Provide parent_game_id or parent_name, not both")

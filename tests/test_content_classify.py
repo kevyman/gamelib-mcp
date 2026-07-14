@@ -217,6 +217,30 @@ class ApplyContentClassificationTest(ToolDBTestCase):
         self.assertEqual(row["parent_game_id"], parent_id)
         self.assertEqual(row["is_primary_library_item"], 0)
 
+    async def test_nesting_a_row_with_children_is_refused(self):
+        # The Fallout: New Vegas shape — a store/IGDB pass calls the base game an
+        # "edition". Nesting it would hide it from the rollups AND strand the DLC
+        # hanging off it, so the whole classification write is dropped.
+        from gamelib_mcp.data.content import _nested
+        from gamelib_mcp.data.db import apply_content_classification
+
+        base_id = await seed_game("Fallout: New Vegas")
+        await seed_game(
+            "Fallout New Vegas: Dead Money",
+            content_type=content.CONTENT_DLC,
+            parent_game_id=base_id,
+            is_primary_library_item=0,
+        )
+
+        wrote = await apply_content_classification(
+            base_id, _nested(content.CONTENT_EDITION), source="test"
+        )
+        self.assertFalse(wrote)
+        row = await _get_content_row(base_id)
+        self.assertEqual(row["content_type"], content.CONTENT_BASE_GAME)
+        self.assertEqual(row["is_primary_library_item"], 1)
+        self.assertIsNone(row["parent_game_id"])
+
     async def test_manual_override_on_content_type_blocks_write(self):
         from gamelib_mcp.data.content import _nested
         from gamelib_mcp.data.db import apply_content_classification, apply_manual_game_fields

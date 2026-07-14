@@ -1149,6 +1149,52 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
     def _by_reason(self, result: dict, reason: str) -> list[dict]:
         return [c for c in result["candidates"] if c["reason"] == reason]
 
+    async def test_nested_parent_bucket_and_repair(self):
+        # The Fallout: New Vegas tangle: the base row was demoted to 'edition',
+        # so it fails the is_primary filter while its DLC hangs off it — both
+        # disappear from the library. The bucket surfaces the parent, and its
+        # suggestion promotes it back through the real update_game.
+        from gamelib_mcp.tools import platforms
+
+        base = await seed_game(
+            "Fallout: New Vegas", content_type="edition", is_primary_library_item=0
+        )
+        dlc = await seed_game(
+            "Fallout New Vegas: Dead Money",
+            content_type="dlc",
+            parent_game_id=base,
+            is_primary_library_item=0,
+        )
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+
+        stranded = self._by_reason(result, "nested_parent")
+        self.assertEqual([c["game_id"] for c in stranded], [base])
+        self.assertEqual(stranded[0]["evidence"]["child_count"], 1)
+        self.assertEqual(stranded[0]["evidence"]["content_type"], "edition")
+        self.assertEqual(result["counts"]["nested_parent"], 1)
+        # First matching bucket only: the parent is parentless and nested, so it
+        # would otherwise also qualify for needs_parent.
+        self.assertNotIn(base, [c["game_id"] for c in self._by_reason(result, "needs_parent")])
+        self.assertEqual(result["counts"]["needs_parent"], 0)
+
+        await platforms.update_game(**stranded[0]["suggested_update"])
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT content_type, is_primary_library_item, parent_game_id "
+                "FROM games WHERE id = ?",
+                (base,),
+            )
+            child = await db.execute_fetchone(
+                "SELECT parent_game_id FROM games WHERE id = ?", (dlc,)
+            )
+        self.assertEqual(row["content_type"], "base_game")
+        self.assertEqual(row["is_primary_library_item"], 1)
+        self.assertIsNone(row["parent_game_id"])
+        # The children keep hanging off it — now off a visible row.
+        self.assertEqual(child["parent_game_id"], base)
+
     async def test_needs_parent_with_resolvable_parent(self):
         base = await seed_game("Base Thing")
         child = await seed_game(

@@ -1058,24 +1058,43 @@ async def resolve_and_link_game(
 
 async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
     """Write IGDB fields to games row, skipping columns that are already populated."""
-    from .db import get_db, get_game_by_igdb_id, get_manual_overrides, upsert_game
+    from .db import (
+        get_db,
+        get_game_by_igdb_id,
+        get_manual_overrides,
+        has_nested_children,
+        upsert_game,
+    )
 
     now = datetime.now(timezone.utc).isoformat()
+
+    # Parent guard (mirrors upserts.py::apply_content_classification): never nest a
+    # row other rows already hang off. IGDB happily hands back an edition/version
+    # verdict for a base game's own title, and applying it would hide the parent from
+    # the is_primary rollups AND strand its children. Resolved up front, before parent
+    # resolution: a blocked verdict must not mint a parent row that nothing will point
+    # at. The metadata writes below still land; only the classification is dropped.
+    async with get_db() as db:
+        nesting_blocked = igdb_game.content_type in NESTED_CONTENT_TYPES and (
+            await has_nested_children(db, game_id)
+        )
+
     parent_game_id: int | None = None
-    if igdb_game.parent_igdb_id is not None:
-        parent = await get_game_by_igdb_id(igdb_game.parent_igdb_id)
-        if parent is not None:
-            parent_game_id = parent["id"]
-    if parent_game_id is None and igdb_game.parent_name:
-        async with get_db() as db:
-            parent = await db.execute_fetchone(
-                "SELECT id FROM games WHERE lower(name) = lower(?) ORDER BY id LIMIT 1",
-                (igdb_game.parent_name,),
-            )
-        if parent is not None:
-            parent_game_id = parent["id"]
-        else:
-            parent_game_id = await upsert_game(appid=None, name=igdb_game.parent_name)
+    if not nesting_blocked:
+        if igdb_game.parent_igdb_id is not None:
+            parent = await get_game_by_igdb_id(igdb_game.parent_igdb_id)
+            if parent is not None:
+                parent_game_id = parent["id"]
+        if parent_game_id is None and igdb_game.parent_name:
+            async with get_db() as db:
+                parent = await db.execute_fetchone(
+                    "SELECT id FROM games WHERE lower(name) = lower(?) ORDER BY id LIMIT 1",
+                    (igdb_game.parent_name,),
+                )
+            if parent is not None:
+                parent_game_id = parent["id"]
+            else:
+                parent_game_id = await upsert_game(appid=None, name=igdb_game.parent_name)
 
     # A parent that resolves back to this same row is not a real parent (IGDB
     # occasionally lists an edition/version whose parent is the row itself). Writing
@@ -1176,20 +1195,27 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
             # invisible to both the games and addons views).
             if self_referential_parent and content_type in NESTED_CONTENT_TYPES:
                 content_type = "base_game"
-            if "content_type" not in overrides:
-                updates["content_type"] = content_type
-            if parent_game_id is not None and "parent_game_id" not in overrides:
-                updates["parent_game_id"] = parent_game_id
-            if "is_primary_library_item" not in overrides:
-                # Derive from the content_type that will ACTUALLY be stored:
-                # when the content_type write was skipped (pinned by a manual
-                # override), deriving from the incoming value would desync the
-                # pair (e.g. a pinned 'dlc' row flipped primary by a later
-                # remaster verdict).
-                final_content_type = updates.get("content_type", row["content_type"])
-                updates["is_primary_library_item"] = int(
-                    derive_is_primary(final_content_type)
+            if nesting_blocked:
+                logger.debug(
+                    "IGDB classification would nest game %s, which is a parent of "
+                    "nested content; kept its stored classification",
+                    game_id,
                 )
+            else:
+                if "content_type" not in overrides:
+                    updates["content_type"] = content_type
+                if parent_game_id is not None and "parent_game_id" not in overrides:
+                    updates["parent_game_id"] = parent_game_id
+                if "is_primary_library_item" not in overrides:
+                    # Derive from the content_type that will ACTUALLY be stored:
+                    # when the content_type write was skipped (pinned by a manual
+                    # override), deriving from the incoming value would desync the
+                    # pair (e.g. a pinned 'dlc' row flipped primary by a later
+                    # remaster verdict).
+                    final_content_type = updates.get("content_type", row["content_type"])
+                    updates["is_primary_library_item"] = int(
+                        derive_is_primary(final_content_type)
+                    )
 
         cols_sql = ", ".join(f"{col} = ?" for col in updates)
         await db.execute(

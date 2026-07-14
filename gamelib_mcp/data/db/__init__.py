@@ -2101,6 +2101,7 @@ from .queries import (  # noqa: E402
     get_game_by_appid,
     get_game_by_igdb_id,
     get_game_by_name_exact,
+    has_nested_children,
     get_platform_game_by_normalized_name,
     get_steam_appid_for_game,
     get_steam_platform_row_by_appid,

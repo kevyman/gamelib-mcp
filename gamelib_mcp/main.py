@@ -774,7 +774,11 @@ async def detect_misclassified_dlc(
     parent) — apply one to reclassify the row and record the manual override.
 
     Offline buckets (a row lands in its FIRST matching bucket only — order:
-    needs_parent, purchase_minted_suspect, addon_name_pattern):
+    nested_parent, needs_parent, purchase_minted_suspect, addon_name_pattern):
+    - nested_parent: a nested row (is_primary_library_item=0) that other rows
+      nest under. Both are invisible in this shape — the parent fails the
+      is_primary filter and its children are reachable only through it. Suggests
+      content_type base_game, which promotes it and clears its own parent link.
     - needs_parent: a nested row (is_primary_library_item=0) with no parent link.
       Suggests parent_game_id when a split-title candidate resolves to an existing
       primary game; suggested_update is null when no parent can be guessed.
