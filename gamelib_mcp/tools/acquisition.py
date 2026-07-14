@@ -650,6 +650,40 @@ async def _apply_batch_item(
                 "platforms": [r["platform"] for r in platform_rows],
                 "item": item,
             }
+
+    # Family-conflict guard: a FUZZY match about to create a platform row must
+    # not do so when the row's content family (parent/children/siblings)
+    # already owns that platform — "Fallout New Vegas Ultimate ROW" fuzzy-
+    # matching the edition child would otherwise mint a SECOND steam row right
+    # next to the base game's real one, splitting spend and ownership across
+    # the family. Exact/identifier matches are unaffected.
+    if gp is None and match_type == "fuzzy":
+        async with get_db() as db:
+            family_owner = await db.execute_fetchone(
+                """SELECT g.id, g.name
+                   FROM games g
+                   JOIN game_platforms gp2 ON gp2.game_id = g.id AND gp2.platform = ?
+                   JOIN games matched ON matched.id = ?
+                   WHERE g.id != matched.id
+                     AND (g.id = matched.parent_game_id
+                          OR g.parent_game_id = matched.id
+                          OR (g.parent_game_id IS NOT NULL
+                              AND g.parent_game_id = matched.parent_game_id))
+                   LIMIT 1""",
+                (platform, resolved_id),
+            )
+        if family_owner is not None:
+            return {
+                "status": "family_conflict",
+                "game_id": resolved_id,
+                "matched_name": row["name"],
+                "match_type": match_type,
+                "platform": platform,
+                "conflicting_game_id": family_owner["id"],
+                "conflicting_name": family_owner["name"],
+                "item": item,
+            }
+
     if dry_run:
         # Same status derivation as the wet branches below, computed from the
         # current pre-state instead of a write. A missing platform row means
@@ -813,6 +847,23 @@ async def set_acquisitions_batch(
             if r["status"] == "created"
         ],
         "unmatched": [r["item"] for r in results if r["status"] == "unmatched"],
+        # Fuzzy matches refused because the matched row's content family
+        # already owns the platform — writing would fork a second platform row
+        # inside the family (see _apply_batch_item's guard). Resolve manually:
+        # the conflicting_* fields name the row that already owns it.
+        "family_conflict": _count("family_conflict"),
+        "family_conflict_details": [
+            {
+                "game_id": r["game_id"],
+                "matched_name": r["matched_name"],
+                "platform": r["platform"],
+                "conflicting_game_id": r["conflicting_game_id"],
+                "conflicting_name": r["conflicting_name"],
+                "item": r["item"],
+            }
+            for r in results
+            if r["status"] == "family_conflict"
+        ],
         "no_platform_row": _count("no_platform_row"),
         # Detail for the no_platform_row rows: which game matched but has no
         # platform row to write onto. Mirrors `unmatched` so a caller can triage
@@ -1407,9 +1458,11 @@ async def _import_one_source(
     bundles.extend(suspect_bundles)
 
     applied = filled = no_change = created = no_platform_row = errors = 0
+    family_conflict = 0
     unmatched: list[dict] = []
     created_details: list[dict] = []
     no_platform_row_details: list[dict] = []
+    family_conflict_details: list[dict] = []
     for start in range(0, len(items), _BATCH_ITEM_CAP):
         batch = await set_acquisitions_batch(
             items[start : start + _BATCH_ITEM_CAP],
@@ -1423,10 +1476,12 @@ async def _import_one_source(
         no_change += batch["no_change"]
         created += batch["created"]
         no_platform_row += batch["no_platform_row"]
+        family_conflict += batch["family_conflict"]
         errors += batch["errors"]
         unmatched.extend(batch["unmatched"])
         created_details.extend(batch["created_details"])
         no_platform_row_details.extend(batch["no_platform_row_details"])
+        family_conflict_details.extend(batch["family_conflict_details"])
 
     # Zero-price promo lines (bonus packs, wallpapers, costume sets claimed for
     # free) are expected to miss — reporting them beside real unmatched spend
@@ -1447,6 +1502,8 @@ async def _import_one_source(
         "unmatched_free": unmatched_free,
         "no_platform_row": no_platform_row,
         "no_platform_row_details": no_platform_row_details,
+        "family_conflict": family_conflict,
+        "family_conflict_details": family_conflict_details,
         "bundles_needing_split": bundles,
         "errors": errors,
         "skipped": skipped,

@@ -1669,3 +1669,61 @@ class BatchDryRunTests(ToolDBTestCase):
 
         row = await _acquisition_row(gid, "steam")
         self.assertEqual(row["price_paid"], 9.99)
+
+
+class FamilyConflictGuardTests(ToolDBTestCase):
+    async def _seed_family(self) -> tuple[int, int]:
+        # Base game owns steam (the real appid); the edition child owns epic.
+        base = await seed_game("Fallout: New Vegas")
+        base_gpid = await add_platform(base, "steam", playtime_minutes=2694)
+        await add_identifier(base_gpid, "steam_appid", 22380)
+        child = await seed_game(
+            "Fallout New Vegas Ultimate Edition",
+            content_type="edition",
+            parent_game_id=base,
+            is_primary_library_item=0,
+        )
+        await add_platform(child, "epic")
+        return base, child
+
+    async def test_fuzzy_match_refused_when_family_owns_platform(self):
+        base, child = await self._seed_family()
+
+        # A typo'd SKU that only the fuzzy tier can resolve — onto the CHILD.
+        batch = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Fallout New Vegas Ultimat Edtion",
+                "platform": "steam",
+                "price_paid": 9.99,
+                "purchase_source": "steam",
+            }],
+            create_platform_rows=True,
+        )
+
+        self.assertEqual(batch["family_conflict"], 1)
+        detail = batch["family_conflict_details"][0]
+        self.assertEqual(detail["game_id"], child)
+        self.assertEqual(detail["conflicting_game_id"], base)
+        # No second steam row was forked inside the family.
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone(
+                "SELECT COUNT(*) AS c FROM game_platforms "
+                "WHERE platform = 'steam' AND game_id IN (?, ?)",
+                (base, child),
+            )
+        self.assertEqual(count["c"], 1)
+
+    async def test_fuzzy_match_allowed_when_family_does_not_own_platform(self):
+        base, child = await self._seed_family()
+
+        batch = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Fallout New Vegas Ultimat Edtion",
+                "platform": "gog",
+                "price_paid": 9.99,
+            }],
+            create_platform_rows=True,
+        )
+
+        self.assertEqual(batch["family_conflict"], 0)
+        self.assertEqual(batch["filled"], 1)
