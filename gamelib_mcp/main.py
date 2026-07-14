@@ -711,7 +711,7 @@ async def audit_steam_licenses(
     can name land in unresolved for manual review (add_game_to_platform).
 
     Incremental: each appid is classified once, at most `limit` new appids per
-    call (0 = no cap; store requests are rate-gated at ~1/s), `remaining`
+    call (0 = no cap; store requests share Steam's quota-budgeted gate), `remaining`
     reports what is still queued — call again to continue. Runs automatically
     (capped) after each Steam refresh when a store session is stored.
     retry_unresolved=True re-probes previously unresolved appids.
@@ -792,7 +792,7 @@ async def detect_misclassified_dlc(
 
     Live probe (probe_steam=True, default): walks owned-Steam base_game rows
     oldest-cached first, capped at limit appdetails fetches (limit=0 = no cap,
-    probe everything — rate-gated at ~1 request/second), and flags rows Steam
+    probe everything — paced under Steam's request quota), and flags rows Steam
     itself calls dlc/music/demo (steam_type_mismatch). The tool is read-only so
     the ordering never changes between calls: to walk the whole library, pass
     the returned next_probe_offset back as probe_offset on the next call

@@ -100,6 +100,72 @@ class SteamRequestGateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(clock.sleeps, [0.5])
 
+    async def test_gate_waits_for_window_budget_to_roll(self) -> None:
+        # Steam's quota is windowed, so the gate must stop at the budget even
+        # when the per-second pacing would happily let the next request through.
+        gate = steam_store._SteamRequestGate(
+            target_interval=0.0,
+            max_requests_per_second=1000,
+            max_in_flight=1,
+            budget_window_seconds=10.0,
+            max_requests_per_window=2,
+        )
+        clock = _FakeClock()
+
+        with (
+            patch("gamelib_mcp.data.steam_store.time.monotonic", side_effect=clock.monotonic),
+            patch("gamelib_mcp.data.steam_store.asyncio.sleep", new=clock.sleep),
+        ):
+            for _ in range(3):
+                await gate.acquire()
+                gate.release()
+
+        # The third request waits for the first to age out of the window.
+        self.assertEqual(clock.sleeps, [10.0])
+
+    async def test_rate_limit_penalty_parks_every_caller(self) -> None:
+        # A 429 means the quota is gone for everyone, not just the caller that
+        # caught it — the next request must not walk straight into another one.
+        gate = steam_store._SteamRequestGate(
+            target_interval=0.0,
+            max_requests_per_second=1000,
+            max_in_flight=1,
+        )
+        clock = _FakeClock()
+
+        with (
+            patch("gamelib_mcp.data.steam_store.time.monotonic", side_effect=clock.monotonic),
+            patch("gamelib_mcp.data.steam_store.asyncio.sleep", new=clock.sleep),
+        ):
+            await gate.acquire()
+            gate.release()
+            gate.penalize(2.0)
+            await gate.acquire()
+            gate.release()
+
+        self.assertEqual(clock.sleeps, [steam_store._STEAM_RATE_LIMIT_COOLDOWN_SECONDS])
+
+    async def test_get_json_penalizes_gate_on_rate_limit(self) -> None:
+        client = _DummyAsyncClient(
+            [
+                _DummyResponse(429, {}, headers={"Retry-After": "0"}),
+                _DummyResponse(200, {"ok": True}),
+            ]
+        )
+
+        with (
+            patch("gamelib_mcp.data.steam_store._sleep_before_retry", new=AsyncMock()),
+            patch.object(steam_store._STEAM_REQUEST_GATE, "penalize") as penalize,
+        ):
+            await steam_store._steam_get_json_with_retry(
+                client,
+                steam_store.STORE_API,
+                params={"appids": 10},
+                timeout=15,
+            )
+
+        penalize.assert_called_once()
+
 
 class SteamRetryTests(unittest.IsolatedAsyncioTestCase):
     async def test_get_json_retries_rate_limit_response(self) -> None:

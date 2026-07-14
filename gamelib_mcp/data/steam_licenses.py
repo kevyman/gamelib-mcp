@@ -25,7 +25,7 @@ missing appid so ownership never depends on an app still being purchasable:
 
 Outcomes persist per-appid in the ``steam_license_audit`` meta key, so every
 appid is classified exactly once across runs; each call probes at most
-``limit`` new appids through the shared ~1 req/s store gate and reports how
+``limit`` new appids through the shared, quota-budgeted store gate and reports how
 many remain. Auth reuses the ``steamLoginSecure`` session already stored for
 the purchase importer (``set_steam_store_session``) — no new credential.
 
@@ -67,7 +67,7 @@ AUDIT_META_KEY = "steam_license_audit"
 AUDIT_REMAINING_META_KEY = "steam_license_audit_remaining"
 
 # Default probe cap per call: bounded refresh-time cost on the shared
-# ~1 req/s store gate; the audit is incremental, so steady-state runs probe 0.
+# Quota-budgeted store gate; the audit is incremental, so steady-state runs probe 0.
 DEFAULT_PROBE_LIMIT = 25
 
 _AUTH_ERROR = (

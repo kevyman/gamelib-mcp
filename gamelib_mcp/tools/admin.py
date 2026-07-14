@@ -1537,7 +1537,7 @@ async def _fetch_steam_appdetails(appid: int) -> dict | None:
 
     Store-only (no review half) through steam_store's rate-gated fetch path —
     the probe has no use for reviews and every request costs a slot on the
-    shared 1-req/s gate. Module-level so the DLC probe's only network call
+    shared quota-budgeted gate. Module-level so the DLC probe's only network call
     can be patched in tests (gamelib_mcp.tools.admin._fetch_steam_appdetails).
     """
     from ..data.steam_store import fetch_store_appdetails
@@ -1585,7 +1585,7 @@ async def detect_misclassified_dlc(
 
     Live probe (probe_steam=True, the default): walks owned-Steam base_game rows
     oldest-cached first, capped at ``limit`` appdetails fetches (``limit=0`` =
-    no cap, probe everything — rate-gated at ~1 request/second, so a large
+    no cap, probe everything — paced under Steam's request quota, so a large
     library takes minutes), and flags rows Steam itself reports as
     dlc/music/demo (steam_type_mismatch). The tool is read-only, so the
     ordering never changes between calls — to walk the whole library, pass the
