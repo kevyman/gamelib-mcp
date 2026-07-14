@@ -1588,3 +1588,84 @@ class SpendingByFamilyTests(ToolDBTestCase):
         self.assertNotIn((ids["elden"], "USD"), by_key)
         self.assertIn((ids["elden"], "EUR"), by_key)
         self.assertEqual(by_key[(ids["elden"], "EUR")]["addon_spent"], 10.0)
+
+
+class KeyResellerSourceTests(ToolDBTestCase):
+    async def test_key_reseller_vocabulary_and_aliases(self):
+        gid = await seed_game("The Case of the Golden Idol")
+        await add_platform(gid, "steam")
+
+        result = await acquisition.set_acquisition(
+            game_id=gid, platform="steam", purchase_source="GAMIVO",
+            price_paid=9.38, price_currency="EUR",
+        )
+        self.assertEqual(result["acquisition"]["purchase_source"], "key_reseller")
+
+        for alias in ("kinguin", "g2a", "Green Man Gaming", "indiegala", "key_reseller"):
+            result = await acquisition.set_acquisition(
+                game_id=gid, platform="steam", purchase_source=alias
+            )
+            self.assertEqual(result["acquisition"]["purchase_source"], "key_reseller")
+
+
+class AddonMintParentResolutionTests(ToolDBTestCase):
+    async def test_season_pass_parents_under_most_specific_title(self):
+        # Both franchise entries exist; the suffix-stripped, longest candidate
+        # must win — first-match order parented "Deus Ex: Mankind Divided
+        # Season Pass" under the 2000 original in prod.
+        original = await seed_game("Deus Ex")
+        await add_platform(original, "steam")
+        mankind_divided = await seed_game("Deus Ex: Mankind Divided")
+        await add_platform(mankind_divided, "steam")
+
+        batch = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Deus Ex: Mankind Divided Season Pass",
+                "platform": "steam",
+                "content_type": "dlc",
+                "price_paid": 14.99,
+                "purchase_source": "steam",
+            }],
+            create_missing=True,
+        )
+
+        created = batch["created_details"][0]
+        self.assertEqual(created["parent_game_id"], mankind_divided)
+        self.assertEqual(created["parent_name"], "Deus Ex: Mankind Divided")
+        self.assertNotEqual(created["parent_game_id"], original)
+
+
+class BatchDryRunTests(ToolDBTestCase):
+    async def test_dry_run_statuses_without_writes(self):
+        gid = await seed_game("Hades")
+        await add_platform(gid, "steam")
+
+        batch = await acquisition.set_acquisitions_batch(
+            [
+                {"name": "Hades", "platform": "steam", "price_paid": 19.99},
+                {"name": "Missing Game", "platform": "steam", "price_paid": 5.0},
+            ],
+            create_missing=False,
+            dry_run=True,
+        )
+
+        self.assertTrue(batch["dry_run"])
+        self.assertEqual(batch["filled"], 1)
+        self.assertEqual([i["name"] for i in batch["unmatched"]], ["Missing Game"])
+
+        row = await _acquisition_row(gid, "steam")
+        self.assertIsNone(row["price_paid"])
+
+    async def test_dry_run_no_change_matches_wet_semantics(self):
+        gid = await seed_game("Celeste")
+        await add_platform(gid, "steam")
+        await acquisition.set_acquisition(game_id=gid, platform="steam", price_paid=9.99)
+
+        batch = await acquisition.set_acquisitions_batch(
+            [{"name": "Celeste", "platform": "steam", "price_paid": 4.99}],
+            dry_run=True,
+        )
+        self.assertEqual(batch["no_change"], 1)
+
+        row = await _acquisition_row(gid, "steam")
+        self.assertEqual(row["price_paid"], 9.99)

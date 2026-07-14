@@ -103,7 +103,7 @@ STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
 XBOX_TITLE_ID = "xbox_title_id"
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
 
 
 @dataclass
@@ -258,6 +258,7 @@ from .schema import (
     _V25_SCHEMA_DDL,
     _V29_SCHEMA_DDL,
     _V31_SCHEMA_DDL,
+    _V32_SCHEMA_DDL,
 )
 
 
@@ -1709,6 +1710,23 @@ async def _migrate_v30_to_v31(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v31_to_v32(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add game_platforms.delisted (additive, default 0; see schema.py v32
+    note). No backfill — rows gain the flag only via the Steam license audit
+    (an owned app the public owned-games API no longer returns)."""
+    if progress is not None:
+        progress("Migrating to v32: add game_platforms.delisted column.")
+
+    cols = await _table_columns(db, "game_platforms")
+    if "delisted" not in cols:
+        await db.execute(
+            "ALTER TABLE game_platforms ADD COLUMN delisted INTEGER NOT NULL DEFAULT 0"
+        )
+
+    await _set_user_version(db, 32)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1745,7 +1763,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V31_SCHEMA_DDL)
+    await db.executescript(_V32_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -1870,6 +1888,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (28, _migrate_v28_to_v29),
     (29, _migrate_v29_to_v30),
     (30, _migrate_v30_to_v31),
+    (31, _migrate_v31_to_v32),
 )
 
 
@@ -1887,7 +1906,7 @@ async def _run_migrations(
         _emit(progress, f"Backed up database to {snapshot_path} before migrating.", applied_steps)
 
     if detected_state == "fresh":
-        await db.executescript(_V31_SCHEMA_DDL)
+        await db.executescript(_V32_SCHEMA_DDL)
         fts_enabled = await _sync_fts_index(db)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
@@ -1924,7 +1943,7 @@ async def _run_migrations(
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V31_SCHEMA_DDL)
+    await db.executescript(_V32_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
@@ -2076,6 +2095,8 @@ from .queries import (  # noqa: E402
     get_nintendo_play_totals,
     set_meta,
     set_meta_many,
+    get_game_substance,
+    nesting_substance_conflict,
     get_game_by_identifier,
     get_game_by_appid,
     get_game_by_igdb_id,
@@ -2107,6 +2128,7 @@ from .upserts import (  # noqa: E402
     upsert_game_platform_identifier,
     upsert_steam_platform_data,
     bulk_upsert_steam_library,
+    set_steam_delisted,
     upsert_game_platform_enrichment,
     get_manual_overrides,
     apply_manual_game_fields,

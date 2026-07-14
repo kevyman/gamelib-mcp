@@ -221,6 +221,14 @@ async def upsert_game(
             game_id = row["id"]
 
         updates = {"name": name, "name_normalized": normalize_search_text(name), **fields}
+        # is_primary_library_item is ALWAYS derived from content_type (ADR
+        # 0002). A caller passing content_type without the derived flag would
+        # otherwise write the internally inconsistent "nested type + primary"
+        # shape that hides rows from both the games and addons views.
+        if "content_type" in updates and "is_primary_library_item" not in updates:
+            updates["is_primary_library_item"] = int(
+                derive_is_primary(updates["content_type"])
+            )
         # Never persist a self-referencing parent: it would orphan the row from
         # both search (the is_primary filter) and its parent's editions list. Drop
         # the self-parent and keep the row a primary library item — forcing the
@@ -354,6 +362,30 @@ async def apply_content_classification(
         )
         if row is None:
             return False
+
+        # Substance guard — a row with a store identifier and real playtime is
+        # never demoted under a parent that has neither (the Titanfall 2 shape:
+        # the real, played game nested under an empty duplicate, leaving only
+        # the hollow parent visible). Skip the whole classification write; the
+        # row stays a primary item and detect_misclassified_dlc keeps
+        # surfacing the pair for a human to merge or reparent.
+        # NOTE: the same guard lives in igdb.py::_apply_igdb_metadata — keep
+        # the two in sync (see the mirroring note in the docstring above).
+        if (
+            resolved_parent is not None
+            and classification.content_type in NESTED_CONTENT_TYPES
+        ):
+            from .queries import nesting_substance_conflict
+
+            if await nesting_substance_conflict(db, game_id, resolved_parent):
+                logger.info(
+                    "content classification (%s) for game %s skipped: nesting a "
+                    "row with identifier+playtime under empty parent %s",
+                    source,
+                    game_id,
+                    resolved_parent,
+                )
+                return False
 
         overrides = await get_manual_overrides(db, game_id)
 
@@ -1062,6 +1094,38 @@ async def bulk_upsert_steam_library(
         await db.commit()
 
     return len(rows)
+
+
+async def set_steam_delisted(appids, delisted: bool) -> int:
+    """Set game_platforms.delisted for the Steam rows holding these appids.
+
+    delisted=1 marks ownership sourced from the account license audit for an
+    app the public owned-games API no longer returns (typically retired from
+    the store); delisted=0 clears the flag when the app reappears there —
+    delistings get reversed (GTA IV Complete Edition superseded the retired
+    standalone). Only flips rows whose flag differs, and returns that count.
+    """
+    ids = [str(a) for a in appids]
+    if not ids:
+        return 0
+    flag = int(bool(delisted))
+    changed = 0
+    async with get_db() as db:
+        for start in range(0, len(ids), 500):
+            chunk = ids[start : start + 500]
+            placeholders = ",".join("?" * len(chunk))
+            cursor = await db.execute(
+                f"""UPDATE game_platforms SET delisted = ?
+                    WHERE platform = ? AND delisted != ?
+                      AND id IN (SELECT game_platform_id
+                                 FROM game_platform_identifiers
+                                 WHERE identifier_type = ?
+                                   AND identifier_value IN ({placeholders}))""",
+                (flag, STEAM_PLATFORM, flag, STEAM_APP_ID, *chunk),
+            )
+            changed += cursor.rowcount
+        await db.commit()
+    return changed
 
 
 async def upsert_game_platform_enrichment(game_platform_id: int, **fields) -> None:

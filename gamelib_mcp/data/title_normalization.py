@@ -104,20 +104,65 @@ def normalize_catalog_title(name: str) -> str:
 # "Hollow Knight").
 _UPGRADE_PACK_RE = re.compile(r"[\s:–—-]*upgrade\s*pack\s*$", re.IGNORECASE)
 
+# Purchase-history SKU decorations seen in the wild that no library row (or
+# store catalog page) ever carries: region markers ("Fallout New Vegas Ultimate
+# ROW", "Sekiro: Shadows Die Twice (Rest of World)"), package-kind markers
+# ("Nidhogg Store", "Teleglitch: Base Game"), and bare edition words without
+# the "Edition" tail ("Oblivion Game of the Year Deluxe", "Saints Row IV Game
+# of the Century Edition"). Applied ONLY by normalize_purchase_title — these
+# are far too aggressive for identity matching (a real row can be named
+# "…Complete"), but purchase matching tries the raw title first, so stripping
+# only ever widens the net after the exact form has already missed.
+_PURCHASE_SKU_PATTERNS = (
+    # Parenthesized region/SKU markers anywhere at the tail.
+    re.compile(
+        r"\s*\((?:ROW|NA|EU|WW|RU(?:/CIS)?|LATAM|Rest of (?:the )?World"
+        r"|North America|Worldwide|Global|Asia|Latin America)\)\s*$",
+        re.IGNORECASE,
+    ),
+    # Bare region tails ("… Ultimate ROW", "… Rest of World").
+    re.compile(r"\s+(?:ROW|Rest of (?:the )?World|Worldwide|Global)\s*$"),
+    # Package-kind tails from the licenses/history pages.
+    re.compile(
+        r"[\s:–—-]+(?:Base Game|Store|Steam Store and Retail Key|Retail(?: Key)?|Standard)\s*$",
+        re.IGNORECASE,
+    ),
+    # Edition phrases, with or without the "Edition"/"Deluxe" tail that
+    # _TRAILING_VARIANT_PATTERNS alone would leave behind. "Complete" is
+    # deliberately absent: unlike Ultimate/GOTY/Deluxe (same game, richer SKU),
+    # "X Complete" routinely names a multi-game compilation ("Hexcells
+    # Complete" = three games) — stripping it would exact-match the base game
+    # and book the whole compilation's price onto it.
+    re.compile(
+        r"\s+(?:Game of the (?:Year|Century)|GOTY|Ultimate|Deluxe"
+        r"|Digital Deluxe|Premium|Master|Gold|Platinum|Definitive)"
+        r"(?:\s+(?:Edition|Deluxe))?\s*$",
+        re.IGNORECASE,
+    ),
+)
+
 
 def normalize_purchase_title(name: str) -> str:
-    """Strip storefront edition/platform/upgrade-pack suffixes for match retry.
+    """Strip storefront SKU/edition/platform/upgrade-pack suffixes for match retry.
 
-    A purchase title ("DAVE THE DIVER Nintendo Switch™ 2 Edition") carries
-    marketing suffixes the canonical library row never does; token-AND name
-    matching needs every query token present in the candidate, so those extra
-    tokens sink the match until peeled off. Reuses normalize_catalog_title for
-    the shared edition/™/en-dash handling, adding only the eShop upgrade-pack
-    marker. Used solely as a fallback query — never to alter game identity or
-    what gets written — so over-stripping only ever widens the net after an
-    exact match has already failed.
+    A purchase title ("DAVE THE DIVER Nintendo Switch™ 2 Edition", "Fallout New
+    Vegas Ultimate ROW", "Nidhogg Store") carries marketing/SKU suffixes the
+    canonical library row never does; token-AND name matching needs every query
+    token present in the candidate, so those extra tokens sink the match until
+    peeled off. Reuses normalize_catalog_title for the shared edition/™/en-dash
+    handling and iterates the purchase-only SKU patterns above until stable.
+    Used solely as a fallback query — never to alter game identity or what gets
+    written — so over-stripping only ever widens the net after an exact match
+    has already failed.
     """
-    return normalize_catalog_title(_UPGRADE_PACK_RE.sub("", name))
+    cleaned = _UPGRADE_PACK_RE.sub("", name)
+    previous = None
+    while cleaned != previous:
+        previous = cleaned
+        for pattern in _PURCHASE_SKU_PATTERNS:
+            cleaned = pattern.sub("", cleaned)
+        cleaned = normalize_catalog_title(cleaned)
+    return cleaned
 
 
 def prepare_catalog_title(name: str | None) -> str | None:

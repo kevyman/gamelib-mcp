@@ -945,6 +945,20 @@ _V31_SCHEMA_DDL = _V29_SCHEMA_DDL.replace(
     "        UNIQUE(game_id, platform)",
 )
 
+# v32 adds game_platforms.delisted: ownership confirmed via the account's
+# license list (Steam dynamicstore userdata) for an app the public owned-games
+# API no longer returns — typically a retired/delisted store app (e.g. Burnout
+# Paradise: The Ultimate Box). Rows are minted by the Steam license audit with
+# delisted=1; a later appearance in GetOwnedGames clears the flag (delistings
+# are reversed: GTA IV's Complete Edition superseded the retired standalone).
+# Column is platform-agnostic by design — other stores retire titles too.
+_V32_SCHEMA_DDL = _V31_SCHEMA_DDL.replace(
+    "        manual_overrides TEXT,\n        UNIQUE(game_id, platform)",
+    "        manual_overrides TEXT,\n"
+    "        delisted         INTEGER NOT NULL DEFAULT 0,\n"
+    "        UNIQUE(game_id, platform)",
+)
+
 # Derived search index — NOT part of the versioned schema chain. Created and
 # fully resynced by _run_migrations' _sync_fts_index on every migrate_db run,
 # which self-heals after destructive games-table rebuilds (those drop the

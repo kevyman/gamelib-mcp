@@ -15,6 +15,7 @@ from ..data.db import (
     get_db,
     invalidate_igdb_match_enrichment,
     invalidate_name_derived_enrichment,
+    nesting_substance_conflict,
     recompute_tag_affinity,
     remove_manual_overrides,
     remove_platform_manual_overrides,
@@ -575,6 +576,25 @@ async def update_game(
                 f"'{row['name']}' is not nested content (content_type="
                 f"'{final_content_type}'); pass a nested content_type in this "
                 f"call ({sorted(NESTED_CONTENT_TYPES)}) to set a parent"
+            )
+        # Substance guard (same invariant the sync classifiers enforce): a row
+        # holding a store identifier and real playtime is a real, played
+        # library item — nesting it under a parent with neither hides it
+        # behind an empty shell (the Titanfall 2 shape). Raised, not skipped:
+        # this is the manual path, so the human should see why and pick the
+        # right repair instead.
+        async with get_db() as db:
+            substance_conflict = await nesting_substance_conflict(
+                db, resolved_id, parent_row["id"]
+            )
+        if substance_conflict:
+            raise ToolError(
+                f"Refusing to nest '{row['name']}' (store identifier + recorded "
+                f"playtime) under '{parent_row['name']}', which has neither — "
+                "this would hide the real game behind an empty row. If the "
+                "parent is a duplicate of the same game, consolidate with "
+                "merge_games instead; if the nesting is genuinely intended, "
+                "give the parent an ownership row first (add_game_to_platform)."
             )
         fields["parent_game_id"] = parent_row["id"]
 

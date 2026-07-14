@@ -9,6 +9,7 @@ import httpx
 from .db import (
     bulk_upsert_steam_library,
     set_meta,
+    set_steam_delisted,
 )
 from .title_normalization import prepare_catalog_title
 
@@ -78,6 +79,16 @@ async def fetch_library() -> dict:
     if skipped_rows:
         logger.info("Steam sync skipped %d non-game rows before DB upsert", skipped_rows)
     upserted = await bulk_upsert_steam_library(normalized_rows, synced_at=now)
+
+    # An app the license audit once flagged delisted (absent from this API)
+    # that shows up again has been relisted/reinstated — clear the flag so the
+    # library reflects the reversal (e.g. a retired app superseded by a live
+    # re-release under the same appid).
+    relisted = await set_steam_delisted(
+        [row["appid"] for row in normalized_rows], False
+    )
+    if relisted:
+        logger.info("Steam sync cleared the delisted flag on %d row(s)", relisted)
 
     await set_meta("library_synced_at", now)
     return {"games_upserted": upserted, "synced_at": now}

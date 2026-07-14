@@ -22,7 +22,7 @@ from ..data.content import (
     PRIMARY_CONTENT_TYPES,
     ContentClassification,
     derive_is_primary,
-    split_addon_title,
+    parent_name_candidates,
 )
 from ..data.db import (
     ACQUISITION_FIELDS,
@@ -63,9 +63,14 @@ from .search import (
 # sources: "free" = a no-strings giveaway (e.g. an Epic weekly free game) —
 # yours forever; "subscription" = claimed via a paid membership (Game Pass,
 # PS+ monthly, Humble Choice) — access may lapse with the subscription.
+# "key_reseller" covers third-party key shops (GAMIVO, Kinguin, G2A, Green Man
+# Gaming, IndieGala, CDKeys, …) — a real acquisition channel that would
+# otherwise collapse into the unanalysable "other" bucket; per-vendor aliases
+# below map onto it so provenance survives normalization.
 PURCHASE_SOURCES = frozenset({
     "steam", "gog", "epic", "eshop", "psn", "xbox",
     "humble", "fanatical", "itchio", "ea", "ubisoft",
+    "key_reseller",
     "physical", "gift", "free", "subscription", "other",
 })
 
@@ -99,6 +104,16 @@ SOURCE_ALIASES: dict[str, str] = {
     "retail": "physical",
     "disc": "physical",
     "cartridge": "physical",
+    "gamivo": "key_reseller",
+    "kinguin": "key_reseller",
+    "g2a": "key_reseller",
+    "green man gaming": "key_reseller",
+    "greenmangaming": "key_reseller",
+    "gmg": "key_reseller",
+    "indiegala": "key_reseller",
+    "cdkeys": "key_reseller",
+    "eneba": "key_reseller",
+    "instant gaming": "key_reseller",
 }
 
 # YYYY, YYYY-MM, or YYYY-MM-DD; calendar validity is checked separately below.
@@ -137,9 +152,12 @@ async def _addon_mint_fields(
 
     For a NESTED content_type (dlc/expansion/edition/…) the new row is minted
     nested: content_type set, is_primary_library_item=0, and — when a
-    split_addon_title candidate resolves to an EXISTING PRIMARY games row — its
-    parent_game_id linked. A candidate resolving to a nested row is skipped and
-    the next (shorter) candidate tried: "Game: Expansion: Soundtrack" must
+    parent_name_candidates candidate resolves to an EXISTING PRIMARY games row —
+    its parent_game_id linked. Candidates run longest-first (suffix-stripped
+    forms included), so "Deus Ex: Mankind Divided Season Pass" parents under
+    "Deus Ex: Mankind Divided" rather than the first franchise entry a bare
+    colon-split would reach. A candidate resolving to a nested row is skipped
+    and the next (shorter) candidate tried: "Game: Expansion: Soundtrack" must
     parent under "Game", not under the "Game: Expansion" addon (update_game
     rejects such chains, and nothing walks them). A parent is NEVER minted from
     a title guess (resolve_parent_game(create=False)); an unresolved parent
@@ -153,7 +171,7 @@ async def _addon_mint_fields(
         "content_type": content_type,
         "is_primary_library_item": int(derive_is_primary(content_type)),
     }
-    for candidate in split_addon_title(create_name):
+    for candidate in parent_name_candidates(create_name):
         parent_id = await resolve_parent_game(
             candidate, create=False, exclude_game_id=exclude_game_id
         )
@@ -467,8 +485,18 @@ async def _apply_batch_item(
     overwrite: bool,
     create_platform_rows: bool,
     create_missing: bool,
+    dry_run: bool = False,
 ) -> dict:
-    """Process one batch item into its per-item result dict. Never raises."""
+    """Process one batch item into its per-item result dict. Never raises.
+
+    ``dry_run=True`` runs the SAME validation and matching path but skips every
+    write, returning the status the wet run would produce — so a preview's
+    counters are trustworthy instead of a separate approximation. Two
+    documented divergences: statuses are computed against the CURRENT database
+    (several lines targeting the same row each report "filled", where a wet run
+    would fill once and then report "no_change"), and the reclassify-on-match
+    repair for nested hints is not simulated (it never changes the status).
+    """
     try:
         unknown = set(item) - _BATCH_ITEM_KEYS
         if unknown:
@@ -552,11 +580,28 @@ async def _apply_batch_item(
                 normalize_purchase_title(str(name)).strip() or str(name).strip()
             )
         # A nested content_type mints a nested row (content_type + is_primary=0)
-        # linked to an existing parent when split_addon_title resolves one; a
+        # linked to an existing parent when a parent candidate resolves; a
         # primary/None content_type mints a base_game default (unchanged).
         mint_fields, mint_parent_id, mint_parent_name = await _addon_mint_fields(
             create_name, content_type
         )
+        if mint_fields:
+            mint_content_type = content_type
+        if dry_run:
+            result: dict = {
+                "status": "created",
+                "game_id": None,
+                "matched_name": create_name,
+                "match_type": "created",
+                "platform": platform,
+                "acquisition": fields,
+            }
+            if mint_content_type is not None:
+                result["content_type"] = mint_content_type
+                if mint_parent_id is not None:
+                    result["parent_game_id"] = mint_parent_id
+                    result["parent_name"] = mint_parent_name
+            return result
         new_id = await upsert_game(
             None, create_name, match_existing_by_name=not nested, **mint_fields
         )
@@ -566,12 +611,10 @@ async def _apply_batch_item(
             )
         created = True
         match_type = "created"
-        if mint_fields:
-            mint_content_type = content_type
     resolved_id = row["id"]
 
     reclassified = False
-    if nested and not created:
+    if nested and not created and not dry_run:
         # The exact match can land on a row still classified base_game/primary
         # (a phantom minted before classification existed, or a manual seed) —
         # the importer hint reclassifies it so the spend doesn't land on a row
@@ -607,6 +650,33 @@ async def _apply_batch_item(
                 "platforms": [r["platform"] for r in platform_rows],
                 "item": item,
             }
+    if dry_run:
+        # Same status derivation as the wet branches below, computed from the
+        # current pre-state instead of a write. A missing platform row means
+        # every acquisition column is fresh (a wet run would create the row).
+        if gp is None:
+            newly_written = list(fields)
+        else:
+            async with get_db() as db:
+                pre = await db.execute_fetchone(
+                    f"SELECT {', '.join(ACQUISITION_FIELDS)} FROM game_platforms WHERE id = ?",
+                    (gp["id"],),
+                )
+            newly_written = [col for col in fields if pre[col] is None]
+        acquisition = dict(fields)
+        if overwrite:
+            status = "applied"
+        else:
+            status = "filled" if newly_written else "no_change"
+        return {
+            "status": status,
+            "game_id": resolved_id,
+            "matched_name": row["name"],
+            "match_type": match_type,
+            "platform": platform,
+            "acquisition": acquisition,
+        }
+
     gpid = gp["id"] if gp is not None else await upsert_game_platform(
         resolved_id, platform, owned=1
     )
@@ -660,9 +730,18 @@ async def set_acquisitions_batch(
     overwrite: bool = False,
     create_platform_rows: bool = False,
     create_missing: bool = False,
+    dry_run: bool = False,
 ) -> dict:
     """
     Bulk-import acquisition data; per-item errors never fail the whole call.
+
+    dry_run=True previews without writing: every item runs the SAME validation
+    and matching path and returns the same statuses/counters a wet run would
+    (unmatched, created, filled, no_change, …), so a preview is a faithful
+    audit of what the wet run will do — not a separate approximation. Created
+    games report game_id null. Statuses are computed against the current
+    database, so several lines targeting the same row each report "filled"
+    where a wet run would fill once and then report "no_change".
 
     Each item: {name or game_id, platform, + any of the 5 acquisition fields,
     optionally identifier_type + identifier_value (both or neither) for
@@ -695,7 +774,7 @@ async def set_acquisitions_batch(
     for item in items:
         results.append(
             await _apply_batch_item(
-                item, overwrite, create_platform_rows, create_missing
+                item, overwrite, create_platform_rows, create_missing, dry_run
             )
         )
 
@@ -705,6 +784,7 @@ async def set_acquisitions_batch(
     return {
         "results": results,
         "total": len(items),
+        "dry_run": dry_run,
         "applied": _count("applied"),
         "filled": _count("filled"),
         "no_change": _count("no_change"),
@@ -1222,6 +1302,80 @@ async def _record_to_bundle_entry(record: PurchaseRecord) -> dict:
     }
 
 
+# Multi-game compilation markers in purchase SKU names. Only consulted for
+# items that ALSO missed every matching tier — a real library row named
+# "Halo: The Master Chief Collection" matches first and is never diverted.
+# The tail-anchored "Complete" alternative catches compilation SKUs like
+# "Hexcells Complete" without touching mid-name uses.
+_BUNDLE_SUSPECT_RE = re.compile(
+    r"\b(?:bundle|collection|anthology|trilogy|tetralogy|quadrilogy|saga"
+    r"|franchise\s+pack|complete\s+pack)\b|\bcomplete\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_zero_price_promo(item: dict) -> bool:
+    """Free/gift promo line (zero price) — real spend never looks like this."""
+    price = item.get("price_paid")
+    return (price is not None and float(price) == 0.0) or item.get(
+        "purchase_source"
+    ) in ("free", "gift")
+
+
+async def _divert_unmatched_bundle_suspects(
+    items: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """(importable_items, diverted_bundle_entries) for compilation-named misses.
+
+    A multi-game bundle SKU ("Metro Redux", "Far Cry Franchise Pack") can never
+    attach to a single row: fed to the batch writer it either lands in
+    unmatched or — worse, under create_missing — mints a phantom base game
+    named after the bundle. An item whose title carries a compilation marker
+    AND misses every matching tier is therefore diverted to
+    bundles_needing_split for split_bundle_acquisition. Items that match stay
+    items: the marker alone is not evidence (many single games are named
+    "…Collection").
+    """
+    importable: list[dict] = []
+    diverted: list[dict] = []
+    for item in items:
+        name = item.get("name") or ""
+        if not _BUNDLE_SUSPECT_RE.search(name):
+            importable.append(item)
+            continue
+        content_type = item.get("content_type")
+        nested = content_type is not None and content_type in NESTED_CONTENT_TYPES
+        row, _ = await _match_batch_game(
+            name,
+            item.get("game_id"),
+            item.get("identifier_type"),
+            item.get("identifier_value"),
+            exact_only=nested,
+        )
+        if row is not None:
+            importable.append(item)
+            continue
+        async with get_db() as db:
+            existing = await db.execute_fetchone(
+                """SELECT COUNT(*) AS c FROM game_platforms
+                   WHERE bundle_name = ? AND platform = ?""",
+                (name, item.get("platform")),
+            )
+        diverted.append(
+            {
+                "bundle_name": name,
+                "platform": item.get("platform"),
+                "total_price": item.get("price_paid"),
+                "price_currency": item.get("price_currency"),
+                "acquired_at": item.get("acquired_at"),
+                "purchase_source": item.get("purchase_source"),
+                "already_recorded": existing["c"] > 0,
+                "reason": "compilation-named purchase matched no library row",
+            }
+        )
+    return importable, diverted
+
+
 async def _import_one_source(
     source: str,
     fetch,
@@ -1230,9 +1384,14 @@ async def _import_one_source(
     create_platform_rows: bool,
     create_missing: bool,
 ) -> dict:
-    """Fetch one source and (unless dry_run) push its records through the
-    batch writer. Fetch exceptions propagate — the caller gathers them, and a
-    mid-fetch failure must never partially import."""
+    """Fetch one source and push its records through the batch writer.
+
+    dry_run reuses the batch writer's own dry_run mode, so a preview runs the
+    identical matching path and reports the identical counters — plus a
+    ``proposed`` echo of the converted items (capped at ``_DRY_RUN_ECHO_CAP``
+    with a ``truncated`` flag; the counters themselves are never truncated).
+    Fetch exceptions propagate — the caller gathers them, and a mid-fetch
+    failure must never partially import."""
     records, skipped = await fetch()
     # Multi-game bundles can't attach to a single row — divert them to a
     # dedicated bucket (with price/date) for split_bundle_acquisition instead
@@ -1241,50 +1400,11 @@ async def _import_one_source(
     importable = [r for r in records if not r.is_bundle]
     items = [_record_to_batch_item(r, source) for r in importable]
 
-    if dry_run:
-        # Run the matcher (not the writer) so the preview can name the genuinely
-        # new games create_missing would mint — the "no delete tool" safety net.
-        would_create: list[dict] = []
-        if create_missing:
-            for item in items:
-                content_type = item.get("content_type")
-                nested = (
-                    content_type is not None and content_type in NESTED_CONTENT_TYPES
-                )
-                row, _ = await _match_batch_game(
-                    item.get("name"),
-                    item.get("game_id"),
-                    item.get("identifier_type"),
-                    item.get("identifier_value"),
-                    exact_only=nested,
-                )
-                if row is None and item.get("name"):
-                    # The item already carries content_type; enrich with the
-                    # parent a real mint would link so the preview is faithful.
-                    entry = dict(item)
-                    if nested:
-                        # Mirror the real mint: nested rows keep their RAW title
-                        # (see _apply_batch_item), so the parent preview must
-                        # resolve from the raw title too.
-                        create_name = str(item["name"]).strip()
-                        _, pid, pname = await _addon_mint_fields(
-                            create_name, content_type
-                        )
-                        if pid is not None:
-                            entry["parent_game_id"] = pid
-                            entry["parent_name"] = pname
-                    would_create.append(entry)
-        return {
-            "source": source,
-            "status": "ok",
-            "dry_run": True,
-            "fetched": len(records),
-            "proposed": items[:_DRY_RUN_ECHO_CAP],
-            "truncated": len(items) > _DRY_RUN_ECHO_CAP,
-            "would_create": would_create[:_DRY_RUN_ECHO_CAP],
-            "bundles_needing_split": bundles,
-            "skipped": skipped,
-        }
+    # Second bundle net: sources that can't flag bundles themselves (Steam's
+    # history page is just SKU names) get compilation-named MISSES diverted
+    # here instead of minted/unmatched.
+    items, suspect_bundles = await _divert_unmatched_bundle_suspects(items)
+    bundles.extend(suspect_bundles)
 
     applied = filled = no_change = created = no_platform_row = errors = 0
     unmatched: list[dict] = []
@@ -1296,6 +1416,7 @@ async def _import_one_source(
             overwrite=overwrite,
             create_platform_rows=create_platform_rows,
             create_missing=create_missing,
+            dry_run=dry_run,
         )
         applied += batch["applied"]
         filled += batch["filled"]
@@ -1307,7 +1428,13 @@ async def _import_one_source(
         created_details.extend(batch["created_details"])
         no_platform_row_details.extend(batch["no_platform_row_details"])
 
-    return {
+    # Zero-price promo lines (bonus packs, wallpapers, costume sets claimed for
+    # free) are expected to miss — reporting them beside real unmatched spend
+    # buries the misses that matter. Split, don't drop: they stay auditable.
+    unmatched_free = [i for i in unmatched if _is_zero_price_promo(i)]
+    unmatched = [i for i in unmatched if not _is_zero_price_promo(i)]
+
+    result = {
         "source": source,
         "status": "ok",
         "fetched": len(records),
@@ -1317,12 +1444,22 @@ async def _import_one_source(
         "created": created,
         "created_details": created_details,
         "unmatched": unmatched,
+        "unmatched_free": unmatched_free,
         "no_platform_row": no_platform_row,
         "no_platform_row_details": no_platform_row_details,
         "bundles_needing_split": bundles,
         "errors": errors,
         "skipped": skipped,
     }
+    if dry_run:
+        result["dry_run"] = True
+        result["proposed"] = items[:_DRY_RUN_ECHO_CAP]
+        result["truncated"] = len(items) > _DRY_RUN_ECHO_CAP
+        # Faithful preview of what create_missing would mint (game_id null),
+        # including the parent a nested mint would link — the "no delete tool"
+        # safety net.
+        result["would_create"] = created_details[:_DRY_RUN_ECHO_CAP]
+    return result
 
 
 async def import_purchases(
@@ -1339,8 +1476,15 @@ async def import_purchases(
     sources None = every registered importer. Sources run concurrently; a
     fetch failure yields {status: "error"} for that source (nothing written
     for it — a partial fetch must not partially import) while the others
-    proceed. dry_run previews the converted batch items (and, under
-    create_missing, the would_create list) without writing.
+    proceed. dry_run previews without writing, running the SAME matching path
+    and reporting the SAME counters as a wet run (unmatched, created, filled,
+    no_change, …) plus a proposed echo of the converted items and, under
+    create_missing, a would_create list of what would be minted — so a preview
+    is a faithful audit, not a separate approximation. Zero-price promo lines
+    (free/gift claims) that miss land in unmatched_free rather than unmatched,
+    keeping real spend misses visible. A compilation-named purchase ("Metro
+    Redux", "Far Cry Franchise Pack") that matches no library row is diverted
+    to bundles_needing_split instead of being minted or reported unmatched.
 
     A purchase is a definitive ownership signal, so create_missing defaults
     True: a single-game purchase that matches no existing game is created as an
@@ -1400,6 +1544,9 @@ async def import_purchases(
         "no_change": _total("no_change"),
         "created": _total("created"),
         "unmatched": sum(len(r.get("unmatched", [])) for r in results.values()),
+        "unmatched_free": sum(
+            len(r.get("unmatched_free", [])) for r in results.values()
+        ),
         "bundles_needing_split": sum(
             len(r.get("bundles_needing_split", [])) for r in results.values()
         ),

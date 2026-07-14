@@ -150,6 +150,30 @@ async def run_library_sync(
             except Exception:
                 logger.exception("Farmed-game detection failed after Steam refresh")
 
+            # GetOwnedGames silently omits some retired/delisted apps the
+            # account still holds licenses for — the audit heals those from
+            # the account's own license list. Incremental (per-appid outcomes
+            # persist), capped per refresh, and a no-op without a stored Steam
+            # store session. Never fails the refresh.
+            try:
+                from ..data.steam_licenses import (
+                    audit_steam_licenses as _audit_steam_licenses,
+                    is_license_audit_configured,
+                )
+
+                if is_license_audit_configured():
+                    audit = await _audit_steam_licenses()
+                    if isinstance(steam_result, dict):
+                        steam_result["license_audit"] = {
+                            "minted": len(audit.get("minted", [])),
+                            "minted_delisted": len(audit.get("minted_delisted", [])),
+                            "skipped_non_game": len(audit.get("skipped_non_game", [])),
+                            "unresolved": len(audit.get("unresolved", [])),
+                            "remaining": audit.get("remaining", 0),
+                        }
+            except Exception:
+                logger.exception("Steam license audit failed after Steam refresh")
+
         # A refresh may have just established ownership of a previously-wishlisted
         # game (e.g. bought it on Steam) — clear it the same way storefronts do.
         try:
@@ -1211,10 +1235,27 @@ async def detect_orphan_games() -> dict:
       e.g. a wishlist entry that was later removed upstream
       (``delete_stale_wishlist_entries``) without ever being owned, leaving the
       ``games`` row dangling with nothing pointing at it. These are returned in
-      ``orphans`` for review; no write happens (use ``merge_games`` or a manual
-      DB cleanup — there is no dedicated delete tool since a false positive
-      here would silently destroy a game row and its ratings/series links).
+      ``orphans`` for review; no write happens (use ``delete_game``'s two-step
+      confirm for genuine phantoms, or ``merge_games`` to consolidate — a
+      false positive would silently destroy a game row and its ratings/series
+      links).
+
+    CAUTION — an "orphan" can be a RETIRED STEAM APP THE ACCOUNT STILL OWNS:
+    GetOwnedGames omits some delisted apps, so the game never got a platform
+    row while its games row survived (observed in prod: Burnout Paradise,
+    75 rows). Run ``audit_steam_licenses`` (or a refresh with a Steam store
+    session stored) BEFORE deleting anything here: the audit mints owned rows
+    for retired licenses, and any orphan that is really owned drops out of
+    this list on its own. ``license_audit`` reports whether a store session is
+    stored and, from the last audit run, how many owned licenses were still
+    unclassified — non-zero means this orphan list is not yet trustworthy.
     """
+    from ..data.db import get_meta
+    from ..data.steam_licenses import (
+        AUDIT_REMAINING_META_KEY,
+        is_license_audit_configured,
+    )
+
     async with get_db() as db:
         orphan_rows = await db.execute_fetchall(
             """SELECT g.id AS game_id, g.name, g.igdb_id
@@ -1240,10 +1281,18 @@ async def detect_orphan_games() -> dict:
         }
         for row in orphan_rows
     ]
+    remaining_raw = await get_meta(AUDIT_REMAINING_META_KEY)
     return {
         "orphans": orphans,
         "orphan_count": len(orphans),
         "wishlist_only_count": wishlist_only_row["c"] if wishlist_only_row else 0,
+        "license_audit": {
+            "configured": is_license_audit_configured(),
+            # None = the audit has never run; run audit_steam_licenses first.
+            "unclassified_at_last_run": (
+                int(remaining_raw) if remaining_raw is not None else None
+            ),
+        },
     }
 
 
@@ -1499,9 +1548,17 @@ async def detect_misclassified_dlc(
     Read-only detector powering the human-confirmed repair loop: each candidate
     carries a ``suggested_update`` that is a ready-to-apply set of update_game
     kwargs. It NEVER writes and never mints parent rows. Buckets (a row lands in
-    its first matching bucket only — order: needs_parent, purchase_minted_suspect,
-    addon_name_pattern):
+    its first matching bucket only — order: inconsistent_primary_nested,
+    needs_parent, purchase_minted_suspect, addon_name_pattern):
 
+    * inconsistent_primary_nested — a row whose content_type is a NESTED value
+      (dlc/expansion/edition/…) yet is_primary_library_item is still 1: an
+      internally contradictory shape no current writer produces (is_primary is
+      always derived from content_type), left behind by older writers. A row
+      with real substance (store identifier or playtime) suggests promotion to
+      base_game; an insubstantial row suggests re-applying its nested
+      content_type (update_game re-derives is_primary), plus a parent when one
+      resolves. Rows whose content_type is a manual override are skipped.
     * needs_parent — a nested row (is_primary_library_item=0) with no
       parent_game_id. When a split-title candidate resolves to an existing
       primary game, the suggestion sets parent_game_id; otherwise it is null.
@@ -1529,15 +1586,81 @@ async def detect_misclassified_dlc(
     (probed=0). ``limit``/``probe_offset`` bound only the probe; the offline
     buckets are capped at 200 candidates each.
     """
-    from ..data.content import classify_steam_app_type, split_addon_title
+    from ..data.content import classify_steam_app_type, parent_name_candidates
+    from ..data.db import get_game_substance
 
     candidates: list[dict] = []
     counts = {
+        "inconsistent_primary_nested": 0,
         "needs_parent": 0,
         "purchase_minted_suspect": 0,
         "addon_name_pattern": 0,
         "steam_type_mismatch": 0,
     }
+
+    # --- offline bucket: inconsistent_primary_nested (nested type, primary flag)
+    # No current writer can produce this shape (is_primary is always derived
+    # from content_type), so every hit is legacy damage — and an invisible one:
+    # the row passes the is_primary filter while claiming to be nested, so the
+    # nested-content views skip it too. Ordered first: it is definite (a plain
+    # column contradiction), unlike the heuristic buckets below.
+    async with get_db() as db:
+        nested_placeholders = ", ".join("?" for _ in NESTED_CONTENT_TYPES)
+        inconsistent_rows = await db.execute_fetchall(
+            f"""SELECT id AS game_id, name, content_type, parent_game_id,
+                       manual_overrides
+               FROM games
+               WHERE is_primary_library_item = 1
+                 AND content_type IN ({nested_placeholders})
+               ORDER BY id
+               LIMIT ?""",
+            (*sorted(NESTED_CONTENT_TYPES), _MISCLASSIFIED_BUCKET_CAP),
+        )
+    for row in inconsistent_rows:
+        if "content_type" in _pinned_columns(row["manual_overrides"]):
+            continue
+        async with get_db() as db:
+            substance = await get_game_substance(db, row["game_id"])
+        inc_evidence: dict = {
+            "content_type": row["content_type"],
+            "is_primary_library_item": True,
+            "has_identifier": substance["has_identifier"],
+            "playtime_minutes": substance["playtime_minutes"],
+        }
+        if substance["has_identifier"] or substance["playtime_minutes"] > 0:
+            # A real, played/store-backed game mislabeled nested (the Forza
+            # Horizon 4 shape) — promote it back to a primary base game.
+            inc_suggested: dict = {
+                "game_id": row["game_id"],
+                "content_type": "base_game",
+            }
+        else:
+            # Insubstantial: likely genuinely nested content whose is_primary
+            # flag desynced. Re-applying the stored content_type through
+            # update_game re-derives is_primary=0; link a parent when one
+            # resolves so it doesn't just move to the needs_parent bucket.
+            inc_suggested = {
+                "game_id": row["game_id"],
+                "content_type": row["content_type"],
+            }
+            if row["parent_game_id"] is None:
+                parent = await _resolve_primary_parent(
+                    parent_name_candidates(row["name"] or ""), row["game_id"]
+                )
+                if parent is not None:
+                    inc_evidence["parent_game_id"] = parent[0]
+                    inc_evidence["parent_name"] = parent[1]
+                    inc_suggested["parent_game_id"] = parent[0]
+        candidates.append(
+            {
+                "game_id": row["game_id"],
+                "name": row["name"],
+                "reason": "inconsistent_primary_nested",
+                "evidence": inc_evidence,
+                "suggested_update": inc_suggested,
+            }
+        )
+    counts["inconsistent_primary_nested"] = len(candidates)
 
     # --- offline bucket: needs_parent (nested rows lacking a parent link) ---
     async with get_db() as db:
@@ -1558,7 +1681,7 @@ async def detect_misclassified_dlc(
         )
     for row in nested_rows:
         parent = await _resolve_primary_parent(
-            split_addon_title(row["name"] or ""), row["game_id"]
+            parent_name_candidates(row["name"] or ""), row["game_id"]
         )
         evidence: dict = {"content_type": row["content_type"]}
         if parent is not None:
@@ -1580,7 +1703,7 @@ async def detect_misclassified_dlc(
                 "suggested_update": suggested,
             }
         )
-    counts["needs_parent"] = len(candidates)
+    counts["needs_parent"] = len(candidates) - counts["inconsistent_primary_nested"]
 
     # --- offline buckets over PRIMARY base_game rows ---
     async with get_db() as db:
@@ -1624,7 +1747,7 @@ async def detect_misclassified_dlc(
         )
         if not (may_be_purchase_suspect or may_be_addon_candidate):
             continue
-        parent = await _resolve_primary_parent(split_addon_title(name or ""), gid)
+        parent = await _resolve_primary_parent(parent_name_candidates(name or ""), gid)
 
         # purchase_minted_suspect takes precedence over addon_name_pattern.
         is_purchase_suspect = may_be_purchase_suspect and (
