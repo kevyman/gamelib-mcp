@@ -930,6 +930,21 @@ _V29_SCHEMA_DDL = _V25_SCHEMA_DDL.replace(
     "        UNIQUE(game_id, platform)",
 )
 
+# v31 adds game_platforms.manual_overrides: a JSON array of column names on this
+# ownership row that were set by hand (via set_playtime) and must survive future
+# platform syncs. Mirrors games.manual_overrides but is keyed per game_platforms
+# row. Unlike the acquisition columns above (which no sync writer references),
+# playtime/last_played ARE written by sync, so the sync write paths
+# (upsert_game_platform, bulk_upsert_steam_library) consult this column and skip
+# the protected columns. NULL means "nothing pinned".
+# (v30 was a data-only migration — no DDL constant exists for it.)
+_V31_SCHEMA_DDL = _V29_SCHEMA_DDL.replace(
+    "        bundle_name      TEXT,\n        UNIQUE(game_id, platform)",
+    "        bundle_name      TEXT,\n"
+    "        manual_overrides TEXT,\n"
+    "        UNIQUE(game_id, platform)",
+)
+
 # Derived search index — NOT part of the versioned schema chain. Created and
 # fully resynced by _run_migrations' _sync_fts_index on every migrate_db run,
 # which self-heals after destructive games-table rebuilds (those drop the
