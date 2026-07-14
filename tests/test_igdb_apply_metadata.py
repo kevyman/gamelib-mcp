@@ -103,6 +103,76 @@ class ApplyIgdbMetadataGuardTests(ToolDBTestCase):
         # addons views.
         self.assertEqual(after["content_type"], "base_game")
 
+    async def test_nested_verdict_on_a_parent_row_is_refused(self) -> None:
+        # IGDB hands back an edition verdict (version_parent) for a base game that
+        # other rows already nest under — the shape that hid BOTH Fallout: New
+        # Vegas rows. The classification must be left alone; metadata still lands.
+        base_id = await seed_game("Fallout: New Vegas")
+        await seed_game(
+            "Fallout New Vegas: Dead Money",
+            content_type="dlc",
+            parent_game_id=base_id,
+            is_primary_library_item=0,
+        )
+
+        await igdb._apply_igdb_metadata(
+            base_id,
+            igdb.IGDBGame(
+                igdb_id=5000,
+                name="Fallout New Vegas Ultimate Edition",
+                category=0,
+                first_release_date=None,
+                content_type="edition",
+                is_primary_library_item=False,
+                tags=["rpg"],
+            ),
+        )
+
+        after = await _read_classification(base_id)
+        self.assertEqual(after["content_type"], "base_game")
+        self.assertEqual(after["is_primary_library_item"], 1)
+        self.assertIsNone(after["parent_game_id"])
+        # The guard skips only the classification — the rest of the fetch applies.
+        self.assertEqual(await _read_tags(base_id), ["rpg"])
+
+    async def test_refused_nesting_does_not_mint_the_unused_parent(self) -> None:
+        # Same refusal, but the verdict names a parent that isn't in the library.
+        # Resolving it would upsert_game() a row nothing ends up pointing at, since
+        # the parent_game_id write is about to be dropped — so don't resolve at all.
+        base_id = await seed_game("Fallout: New Vegas")
+        await seed_game(
+            "Fallout New Vegas: Dead Money",
+            content_type="dlc",
+            parent_game_id=base_id,
+            is_primary_library_item=0,
+        )
+
+        await igdb._apply_igdb_metadata(
+            base_id,
+            igdb.IGDBGame(
+                igdb_id=5001,
+                name="Fallout New Vegas Ultimate Edition",
+                category=0,
+                first_release_date=None,
+                content_type="edition",
+                is_primary_library_item=False,
+                parent_name="Fallout: New Vegas Collection",
+                tags=["rpg"],
+            ),
+        )
+
+        async with db_module.get_db() as db:
+            minted = await db.execute_fetchone(
+                "SELECT id FROM games WHERE name = ?", ("Fallout: New Vegas Collection",)
+            )
+        self.assertIsNone(minted)
+
+        after = await _read_classification(base_id)
+        self.assertEqual(after["content_type"], "base_game")
+        self.assertEqual(after["is_primary_library_item"], 1)
+        self.assertIsNone(after["parent_game_id"])
+        self.assertEqual(await _read_tags(base_id), ["rpg"])
+
     async def test_pinned_content_type_keeps_is_primary_derived(self) -> None:
         # A row pinned to 'dlc' whose is_primary override was later cleared
         # (update_game clear_overrides=["is_primary_library_item"]) must NOT be

@@ -355,6 +355,22 @@ async def apply_content_classification(
         if row is None:
             return False
 
+        # Parent guard: a row other rows nest under must stay primary. Nesting it
+        # would hide the parent from the is_primary rollups and strand its
+        # children under an unreachable row, so drop the whole classification
+        # write rather than write half of it. Mirrored in _apply_igdb_metadata.
+        if classification.content_type in NESTED_CONTENT_TYPES:
+            from .queries import has_nested_children
+
+            if await has_nested_children(db, game_id):
+                logger.debug(
+                    "content classification (%s) would nest game %s, which is a "
+                    "parent of nested content; skipped",
+                    source,
+                    game_id,
+                )
+                return False
+
         overrides = await get_manual_overrides(db, game_id)
 
         # Default-clobber guard — mirrors igdb.py's new_is_default/stored_is_default.

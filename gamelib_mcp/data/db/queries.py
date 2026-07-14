@@ -111,6 +111,23 @@ async def get_game_by_igdb_id(igdb_id: int) -> aiosqlite.Row | None:
         )
 
 
+async def has_nested_children(db, game_id: int) -> bool:
+    """True when some other row nests under ``game_id`` (it is a parent).
+
+    A parent must stay a primary library item (ADR 0002): nesting one would hide
+    it from the is_primary rollups AND strand its children under a row that is
+    itself unreachable — the shape that made both Fallout: New Vegas rows
+    invisible. Every classification writer (apply_content_classification,
+    igdb.py::_apply_igdb_metadata, update_game) checks this before demoting a row
+    to a nested content_type. Takes the caller's open connection: all three run
+    the check inside the same read→guard→write block they write from.
+    """
+    row = await db.execute_fetchone(
+        "SELECT 1 FROM games WHERE parent_game_id = ? LIMIT 1", (game_id,)
+    )
+    return row is not None
+
+
 async def get_game_by_name_exact(name: str) -> aiosqlite.Row | None:
     async with get_db() as db:
         return await db.execute_fetchone(

@@ -71,6 +71,22 @@ Status: accepted (2026-07-10)
    Catalogs live in `meta` (KV table, json values). This is a deliberate design choice:
    the minimum new state is declarative content classification, not catalog rows.
 
+9. **A parent must be primary, enforced in both directions** (amended 2026-07-14):
+   Decision 6's rule — a nested row may only hang off a primary library item —
+   was enforced only on the child's side (update_game rejects a nested parent).
+   The inverse was unguarded: any writer could demote a row that other rows
+   already nest under, which hides it from the is_primary rollups AND strands its
+   children behind it, so both rows fall out of the library. Observed in
+   production: the Fallout: New Vegas base row carried content_type='edition'
+   while its DLC and a separate "Ultimate Edition" row named it as parent.
+   MUST: no classification writer nests a row for which `has_nested_children` is
+   true. apply_content_classification and _apply_igdb_metadata skip the
+   classification write (their metadata writes still land); update_game, as the
+   highest-precedence writer, raises instead — directing the user to re-parent
+   (update_game) or fold in (merge_games) the children first.
+   detect_misclassified_dlc's `nested_parent` bucket surfaces rows already in
+   this shape and suggests promoting them back to base_game.
+
 ## Consequences
 ### Positive
 - Content relationships are explicit and auditable; is_primary_library_item is always

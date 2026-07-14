@@ -428,6 +428,32 @@ class UpdateGameParentTests(ToolDBTestCase):
             await self._overrides(gid),
         )
 
+    async def test_nesting_a_row_that_has_children_is_rejected(self):
+        # The inverse of "a parent must be primary": demoting a parent would hide
+        # it from the rollups and strand its children under an unreachable row.
+        # Manual is the highest-precedence writer, so it refuses out loud.
+        base = await seed_game("Fallout: New Vegas")
+        await seed_game(
+            "Fallout New Vegas: Dead Money",
+            content_type="dlc",
+            parent_game_id=base,
+            is_primary_library_item=0,
+        )
+
+        with self.assertRaises(ToolError) as ctx:
+            await platforms.update_game(game_id=base, content_type="edition")
+        self.assertIn("parent of nested content", str(ctx.exception))
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT content_type, is_primary_library_item, manual_overrides "
+                "FROM games WHERE id = ?",
+                (base,),
+            )
+        self.assertEqual(row["content_type"], "base_game")
+        self.assertEqual(row["is_primary_library_item"], 1)
+        self.assertIsNone(row["manual_overrides"])
+
     async def test_parent_by_id(self):
         parent = await seed_game("Parent By Id")
         gid = await seed_game(
