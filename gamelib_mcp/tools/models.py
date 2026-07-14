@@ -244,6 +244,24 @@ class DetectOrphanGamesResponse(FlexibleModel):
     orphans: list[OrphanGameEntry]
     orphan_count: int
     wishlist_only_count: int
+    # {"configured": bool, "unclassified_at_last_run": int|None} — whether the
+    # Steam license audit could still turn some of these "orphans" into owned
+    # (retired) games. None = the audit has never run.
+    license_audit: dict[str, Any] = {}
+
+
+class AuditSteamLicensesResponse(FlexibleModel):
+    status: str
+    owned_licenses: int = 0
+    library_appids: int = 0
+    unclassified: int = 0
+    probed: int = 0
+    minted: list[dict[str, Any]] = []
+    minted_delisted: list[dict[str, Any]] = []
+    skipped_non_game: list[dict[str, Any]] = []
+    unresolved: list[int] = []
+    remaining: int = 0
+    error_summary: str | None = None
 
 
 class DetectStrandedDuplicatesResponse(FlexibleModel):

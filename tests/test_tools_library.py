@@ -312,6 +312,61 @@ class SearchGamesBatchTests(ToolDBTestCase):
         self.assertEqual(game["parent_name"], "Fallout: New Vegas")
 
 
+class SearchExactNestedMatchTests(ToolDBTestCase):
+    """An exact-name match must surface even when the row is nested.
+
+    Prod regression: searching "Mass Effect" returned three primary
+    "Mass Effect *" rows but hid the exact-match "Mass Effect" row (holding
+    the Steam appid) because it was misclassified nested — the nested-content
+    fallback only fires on ZERO primary matches, and the invisible exact match
+    nearly caused create_missing to mint a duplicate.
+    """
+
+    async def _seed_mass_effect_shape(self) -> tuple[int, int]:
+        sequel_id = await make_steam_game("Mass Effect 2", 24980, playtime_minutes=900)
+        exact_id = await seed_game(
+            "Mass Effect",
+            content_type="edition",
+            is_primary_library_item=0,
+        )
+        gpid = await add_platform(exact_id, "steam")
+        await db_module.upsert_game_platform_identifier(gpid, "steam_appid", 17460)
+        return sequel_id, exact_id
+
+    async def test_search_games_surfaces_exact_nested_match_first(self):
+        _, exact_id = await self._seed_mass_effect_shape()
+
+        results = await library.search_games("Mass Effect")
+
+        ids = [g["game_id"] for g in results["results"]]
+        self.assertIn(exact_id, ids)
+        # Exact matches rank 0, so the nested exact row sorts first.
+        self.assertEqual(ids[0], exact_id)
+        self.assertFalse(results["results"][0]["is_primary_library_item"])
+
+    async def test_search_games_batch_surfaces_exact_nested_match(self):
+        _, exact_id = await self._seed_mass_effect_shape()
+
+        results = await library.search_games_batch(["Mass Effect"])
+
+        ids = [g["game_id"] for g in results["Mass Effect"]]
+        self.assertIn(exact_id, ids)
+        self.assertEqual(ids[0], exact_id)
+
+    async def test_non_exact_nested_rows_stay_hidden(self):
+        await self._seed_mass_effect_shape()
+        nested_noise = await seed_game(
+            "Mass Effect 2: Kasumi - Stolen Memory",
+            content_type="dlc",
+            is_primary_library_item=0,
+        )
+
+        results = await library.search_games("Mass Effect")
+
+        ids = [g["game_id"] for g in results["results"]]
+        self.assertNotIn(nested_noise, ids)
+
+
 class LibraryStatsTests(ToolDBTestCase):
     async def test_summary_counts_and_echoes(self):
         await make_steam_game("Played", 1, playtime_minutes=600)

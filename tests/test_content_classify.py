@@ -438,3 +438,121 @@ class ApplyContentClassificationTest(ToolDBTestCase):
         self.assertEqual(row["content_type"], content.CONTENT_DLC)
         self.assertEqual(row["parent_game_id"], parent_id)
         self.assertEqual(row["is_primary_library_item"], 0)
+
+
+# --- parent_name_candidates -----------------------------------------------------
+
+def test_parent_candidates_strip_addon_suffix_longest_first():
+    # "Season Pass" is not separator-delimited, so split_addon_title alone
+    # would offer only "Deus Ex" (the wrong, earliest franchise entry). The
+    # suffix-stripped full title must come first.
+    assert content.parent_name_candidates("Deus Ex: Mankind Divided Season Pass") == [
+        "Deus Ex: Mankind Divided",
+        "Deus Ex",
+    ]
+
+
+def test_parent_candidates_order_all_forms_longest_first():
+    assert content.parent_name_candidates("Saints Row: The Third Season Pass") == [
+        "Saints Row: The Third",
+        "Saints Row",
+    ]
+
+
+def test_parent_candidates_plain_split_still_works():
+    assert content.parent_name_candidates("The Binding of Isaac: Afterbirth") == [
+        "The Binding of Isaac",
+    ]
+
+
+def test_parent_candidates_soundtrack_and_stacked_suffixes():
+    assert content.parent_name_candidates("Two Worlds Soundtrack")[0] == "Two Worlds"
+    # Stacked suffixes peel iteratively.
+    assert (
+        content.parent_name_candidates("Hollow Knight: Silksong Original Soundtrack")[0]
+        == "Hollow Knight: Silksong"
+    )
+
+
+def test_parent_candidates_no_suffix_no_separator_is_empty():
+    assert content.parent_name_candidates("Celeste") == []
+
+
+# --- substance guard (nesting a real game under an empty shell) -----------------
+
+class NestingSubstanceGuardTests(ToolDBTestCase):
+    async def _real_game(self, name: str, appid: int, minutes: int) -> int:
+        from gamelib_mcp.data import db as db_module
+
+        game_id = await seed_game(name)
+        gpid = await db_module.upsert_game_platform(
+            game_id, "steam", playtime_minutes=minutes, owned=1
+        )
+        await db_module.upsert_game_platform_identifier(gpid, "steam_appid", appid)
+        return game_id
+
+    async def test_classifier_refuses_to_nest_real_game_under_empty_parent(self):
+        # The Titanfall 2 shape: the real, played row (store id + playtime)
+        # offered a parent that owns nothing — the demotion must be dropped.
+        from gamelib_mcp.data.content import _nested
+        from gamelib_mcp.data.db import apply_content_classification
+
+        empty_parent = await seed_game("Titanfall II")
+        real_id = await self._real_game("Titanfall 2", 1237970, minutes=1200)
+
+        wrote = await apply_content_classification(
+            real_id, _nested(content.CONTENT_EDITION), source="test",
+            parent_game_id=empty_parent,
+        )
+        self.assertFalse(wrote)
+        row = await _get_content_row(real_id)
+        self.assertEqual(row["content_type"], content.CONTENT_BASE_GAME)
+        self.assertEqual(row["is_primary_library_item"], 1)
+        self.assertIsNone(row["parent_game_id"])
+
+    async def test_nesting_under_substantial_parent_still_works(self):
+        from gamelib_mcp.data.content import _nested
+        from gamelib_mcp.data.db import apply_content_classification
+
+        parent_id = await self._real_game("Fallout: New Vegas", 22380, minutes=2694)
+        child_id = await self._real_game("Fallout New Vegas Ultimate Edition", 22381, minutes=5)
+
+        wrote = await apply_content_classification(
+            child_id, _nested(content.CONTENT_EDITION), source="test",
+            parent_game_id=parent_id,
+        )
+        self.assertTrue(wrote)
+        row = await _get_content_row(child_id)
+        self.assertEqual(row["content_type"], content.CONTENT_EDITION)
+        self.assertEqual(row["parent_game_id"], parent_id)
+
+    async def test_insubstantial_child_may_nest_under_empty_parent(self):
+        # A row with no identifier/playtime (e.g. an importer-minted soundtrack)
+        # is exactly what nesting is for — the guard must not block it.
+        from gamelib_mcp.data.content import _nested
+        from gamelib_mcp.data.db import apply_content_classification
+
+        parent_id = await seed_game("Some Base Game")
+        child_id = await seed_game("Some Base Game Soundtrack")
+
+        wrote = await apply_content_classification(
+            child_id, _nested(content.CONTENT_UNKNOWN_ADDON), source="test",
+            parent_game_id=parent_id,
+        )
+        self.assertTrue(wrote)
+
+
+class UpsertGameDerivesPrimaryTests(ToolDBTestCase):
+    async def test_content_type_without_flag_derives_is_primary(self):
+        # A caller passing content_type alone must never produce the
+        # contradictory "nested type + primary flag" shape.
+        from gamelib_mcp.data.db import upsert_game
+
+        game_id = await upsert_game(None, "Passed Nested", content_type=content.CONTENT_DLC)
+        row = await _get_content_row(game_id)
+        self.assertEqual(row["content_type"], content.CONTENT_DLC)
+        self.assertEqual(row["is_primary_library_item"], 0)
+
+        game_id2 = await upsert_game(None, "Passed Primary", content_type=content.CONTENT_REMAKE)
+        row2 = await _get_content_row(game_id2)
+        self.assertEqual(row2["is_primary_library_item"], 1)

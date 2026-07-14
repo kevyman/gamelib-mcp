@@ -212,6 +212,71 @@ class ApplyIgdbMetadataGuardTests(ToolDBTestCase):
         self.assertEqual(after["is_primary_library_item"], 0)
 
 
+class ApplyIgdbMetadataSubstanceGuardTests(ToolDBTestCase):
+    async def _real_game(self, name: str, appid: int, minutes: int) -> int:
+        game_id = await seed_game(name)
+        gpid = await db_module.upsert_game_platform(
+            game_id, "steam", playtime_minutes=minutes, owned=1
+        )
+        await db_module.upsert_game_platform_identifier(gpid, "steam_appid", appid)
+        return game_id
+
+    async def test_wrong_version_parent_cannot_hide_real_game(self) -> None:
+        # A bad IGDB version_parent match must not demote a played,
+        # identifier-bearing row under an empty shell (the Titanfall 2 shape).
+        empty_parent = await seed_game("Titanfall II")
+        real_id = await self._real_game("Titanfall 2", 1237970, minutes=1200)
+
+        await igdb._apply_igdb_metadata(
+            real_id,
+            igdb.IGDBGame(
+                igdb_id=5000,
+                name="Titanfall 2",
+                category=0,
+                first_release_date=None,
+                content_type="edition",
+                parent_name="Titanfall II",
+                is_primary_library_item=False,
+            ),
+        )
+
+        after = await _read_classification(real_id)
+        self.assertEqual(after["content_type"], "base_game")
+        self.assertEqual(after["is_primary_library_item"], 1)
+        self.assertIsNone(after["parent_game_id"])
+        # Metadata (the igdb link) still lands — only the demotion is dropped.
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT igdb_id FROM games WHERE id = ?", (real_id,)
+            )
+        self.assertEqual(row["igdb_id"], 5000)
+        _ = empty_parent
+
+    async def test_nesting_under_substantial_parent_still_applies(self) -> None:
+        parent_id = await self._real_game("Fallout: New Vegas", 22380, minutes=2694)
+        child_id = await self._real_game(
+            "Fallout New Vegas Ultimate Edition", 22381, minutes=10
+        )
+
+        await igdb._apply_igdb_metadata(
+            child_id,
+            igdb.IGDBGame(
+                igdb_id=6000,
+                name="Fallout New Vegas Ultimate Edition",
+                category=0,
+                first_release_date=None,
+                content_type="edition",
+                parent_name="Fallout: New Vegas",
+                is_primary_library_item=False,
+            ),
+        )
+
+        after = await _read_classification(child_id)
+        self.assertEqual(after["content_type"], "edition")
+        self.assertEqual(after["parent_game_id"], parent_id)
+        self.assertEqual(after["is_primary_library_item"], 0)
+
+
 class UpsertGameSelfParentTests(ToolDBTestCase):
     async def test_upsert_game_drops_self_referencing_parent(self) -> None:
         game_id = await seed_game("Some Edition")

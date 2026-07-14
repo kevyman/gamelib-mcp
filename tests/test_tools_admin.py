@@ -1252,6 +1252,73 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
             {"game_id": pass_id, "content_type": "dlc", "parent_game_id": parent},
         )
 
+    async def test_inconsistent_primary_nested_substantial_row_promotes(self):
+        # The Forza Horizon 4 shape: content_type 'dlc' with is_primary=1 —
+        # internally contradictory. A row with real substance (identifier /
+        # playtime) suggests promotion back to base_game.
+        forza = await seed_game(
+            "Forza Horizon 4", content_type="dlc", is_primary_library_item=1
+        )
+        gpid = await add_platform(forza, "steam", playtime_minutes=600, owned=1)
+        await add_identifier(gpid, "steam_appid", "1293830")
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+
+        bucket = {
+            c["game_id"]: c
+            for c in self._by_reason(result, "inconsistent_primary_nested")
+        }
+        self.assertIn(forza, bucket)
+        self.assertEqual(
+            bucket[forza]["suggested_update"],
+            {"game_id": forza, "content_type": "base_game"},
+        )
+        self.assertEqual(result["counts"]["inconsistent_primary_nested"], 1)
+        # It does NOT also land in a later bucket.
+        matching = [c for c in result["candidates"] if c["game_id"] == forza]
+        self.assertEqual(len(matching), 1)
+
+    async def test_inconsistent_primary_nested_insubstantial_row_renests(self):
+        base = await seed_game("Cool Game")
+        desync = await seed_game(
+            "Cool Game: Season Pass", content_type="dlc", is_primary_library_item=1
+        )
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+
+        bucket = {
+            c["game_id"]: c
+            for c in self._by_reason(result, "inconsistent_primary_nested")
+        }
+        self.assertIn(desync, bucket)
+        # Re-applying the nested content_type re-derives is_primary=0; the
+        # resolvable parent rides along so it doesn't just become needs_parent.
+        self.assertEqual(
+            bucket[desync]["suggested_update"],
+            {"game_id": desync, "content_type": "dlc", "parent_game_id": base},
+        )
+
+    async def test_inconsistent_primary_nested_skips_pinned_content_type(self):
+        pinned = await seed_game(
+            "Pinned Contradiction", content_type="edition", is_primary_library_item=1
+        )
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET manual_overrides = ? WHERE id = ?",
+                ('["content_type"]', pinned),
+            )
+            await db.commit()
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+
+        self.assertNotIn(
+            pinned,
+            [
+                c["game_id"]
+                for c in self._by_reason(result, "inconsistent_primary_nested")
+            ],
+        )
+
     async def test_needs_parent_skips_desync_rows(self):
         # An is_primary=0 row with a PRIMARY content_type is a desync artifact;
         # its parent-only suggested_update would be rejected by update_game, so

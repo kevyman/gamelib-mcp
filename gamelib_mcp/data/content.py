@@ -265,3 +265,52 @@ def split_addon_title(title: str) -> list[str]:
         if candidate not in result:
             result.append(candidate)
     return result
+
+
+# Trailing addon-kind phrases whose removal yields the base game's own name
+# ("Deus Ex: Mankind Divided Season Pass" → "Deus Ex: Mankind Divided").
+# Separator splitting alone can't reach that candidate — the suffix isn't
+# separator-delimited — and its shortest split ("Deus Ex") resolves to the
+# wrong (earliest) franchise entry. Iterated so stacked suffixes peel off.
+_ADDON_SUFFIX_RE = re.compile(
+    r"[\s:–—-]+(?:season pass|expansion pass|original soundtrack|soundtrack"
+    r"|OST|artbook|art book|digital artbook|upgrade pack|costume pack"
+    r"|character pack|map pack|DLC(?:\s+(?:pack|bundle))?|add-?on)\s*$",
+    re.IGNORECASE,
+)
+
+
+def parent_name_candidates(title: str) -> list[str]:
+    """Ordered candidate parent names for a nested item, longest first.
+
+    Combines two derivations and orders ALL candidates by descending length so
+    the most specific name wins ("Deus Ex: Mankind Divided" before "Deus Ex"):
+
+    * addon-suffix stripping — the title minus a trailing addon-kind phrase
+      (Season Pass, Soundtrack, DLC, …), iterated until stable;
+    * separator splitting (split_addon_title) of both the raw and the
+      suffix-stripped title.
+
+    Longest-first matters: candidates feed an exact-match lookup where the
+    FIRST hit wins, and a franchise's earliest entry is usually the shortest
+    name — first-match order was exactly how "Saints Row: The Third Season
+    Pass" ended up parented under "Saints Row". Deduplicated; excludes empties
+    and the raw title itself.
+    """
+    forms = [title]
+    stripped = title
+    previous = None
+    while stripped != previous:
+        previous = stripped
+        stripped = _ADDON_SUFFIX_RE.sub("", stripped).strip()
+    if stripped and stripped != title:
+        forms.append(stripped)
+
+    candidates: list[str] = []
+    for form in forms:
+        if form != title and form not in candidates:
+            candidates.append(form)
+        for candidate in split_addon_title(form):
+            if candidate not in candidates:
+                candidates.append(candidate)
+    return sorted(candidates, key=len, reverse=True)

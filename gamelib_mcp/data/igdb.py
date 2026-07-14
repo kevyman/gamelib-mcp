@@ -1163,7 +1163,30 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
             and bool(row["is_primary_library_item"])
             and row["parent_game_id"] is None
         )
-        if not new_is_default or stored_is_default:
+        # Substance guard — mirrors db/upserts.py::apply_content_classification
+        # (keep the two in sync): a row carrying a store identifier and real
+        # playtime is never demoted under a parent that has neither. A wrong
+        # IGDB version_parent match would otherwise hide the real, played game
+        # behind an empty shell row. Only the classification is dropped; the
+        # metadata writes above still land.
+        apply_classification = not new_is_default or stored_is_default
+        if (
+            apply_classification
+            and parent_game_id is not None
+            and igdb_game.content_type in NESTED_CONTENT_TYPES
+        ):
+            from .db import nesting_substance_conflict
+
+            if await nesting_substance_conflict(db, game_id, parent_game_id):
+                logger.info(
+                    "IGDB classification for game %s skipped: nesting a row "
+                    "with identifier+playtime under empty parent %s",
+                    game_id,
+                    parent_game_id,
+                )
+                apply_classification = False
+
+        if apply_classification:
             content_type = igdb_game.content_type
             # Without a real (distinct) parent a nested item has nowhere to be
             # reached from, so a self-referential parent forces the row to stay

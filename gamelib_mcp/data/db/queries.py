@@ -87,6 +87,59 @@ async def set_meta_many(values: dict[str, str | None]) -> None:
         await db.commit()
 
 
+async def get_game_substance(db, game_id: int) -> dict:
+    """How much observable reality backs a games row.
+
+    Returns ``{"has_identifier": bool, "playtime_minutes": int,
+    "owned_platforms": int}`` aggregated over the row's game_platforms. Used by
+    the nesting guard: a row holding a store identifier AND recorded playtime
+    is a real, played library item, while a row with none of that may be a
+    phantom (a name-collision mint or an importer artifact) — demoting the
+    former under the latter hides a real game behind an empty shell.
+    """
+    row = await db.execute_fetchone(
+        """SELECT
+               EXISTS(SELECT 1 FROM game_platforms gp
+                      JOIN game_platform_identifiers gpi
+                        ON gpi.game_platform_id = gp.id
+                      WHERE gp.game_id = ?) AS has_identifier,
+               COALESCE((SELECT SUM(COALESCE(gp.playtime_minutes, 0))
+                         FROM game_platforms gp
+                         WHERE gp.game_id = ? AND gp.owned = 1), 0) AS playtime_minutes,
+               (SELECT COUNT(*) FROM game_platforms gp
+                WHERE gp.game_id = ? AND gp.owned = 1) AS owned_platforms""",
+        (game_id, game_id, game_id),
+    )
+    return {
+        "has_identifier": bool(row["has_identifier"]),
+        "playtime_minutes": row["playtime_minutes"] or 0,
+        "owned_platforms": row["owned_platforms"] or 0,
+    }
+
+
+async def nesting_substance_conflict(
+    db, child_game_id: int, parent_game_id: int
+) -> bool:
+    """True when nesting ``child`` under ``parent`` would hide a real game.
+
+    The conflict shape (observed in prod: Titanfall 2 — appid + 20h — nested
+    under an empty same-name duplicate row): the CHILD carries a store
+    identifier and recorded playtime, while the proposed PARENT carries
+    neither. Nesting demotes the child out of every primary rollup, leaving
+    the library showing only the hollow parent. Classification writers skip
+    the demotion when this returns True; update_game raises so a human sees
+    why. Deliberately conservative (identifier AND playtime on the child,
+    neither on the parent) so legitimate shapes — a played edition under a
+    played base game, a soundtrack under a wishlist-only parent — stay
+    nestable.
+    """
+    child = await get_game_substance(db, child_game_id)
+    if not (child["has_identifier"] and child["playtime_minutes"] > 0):
+        return False
+    parent = await get_game_substance(db, parent_game_id)
+    return not parent["has_identifier"] and parent["playtime_minutes"] == 0
+
+
 async def get_game_by_identifier(identifier_type: str, identifier_value: str) -> aiosqlite.Row | None:
     async with get_db() as db:
         return await db.execute_fetchone(
@@ -250,6 +303,11 @@ def _platform_dict(row: aiosqlite.Row) -> dict:
         "game_platform_id": row["game_platform_id"],
         "platform": row["platform"],
         "owned": bool(row["owned"]),
+        # Ownership sourced from the store account's license list for an app
+        # the public owned-games API no longer returns (typically retired/
+        # delisted) — see audit_steam_licenses. Tolerates rows selected before
+        # the v32 column existed (tests build these dicts by hand).
+        "delisted": bool(row["delisted"]) if "delisted" in row.keys() else False,
         "playtime_minutes": playtime_minutes,
         "playtime_hours": round((playtime_minutes or 0) / 60, 1),
         "playtime_2weeks_minutes": playtime_2weeks_minutes,
@@ -309,6 +367,7 @@ async def load_platforms_for_games(game_ids: Iterable[int]) -> dict[int, list[di
                        gp.game_id,
                        gp.platform,
                        gp.owned,
+                       gp.delisted,
                        gp.playtime_minutes,
                        gp.playtime_2weeks_minutes,
                        gp.last_played,

@@ -91,6 +91,10 @@ EXPECTED_TOOLS = {
     },
     "detect_collapsed_games": {"params": set(), "required": set()},
     "detect_orphan_games": {"params": set(), "required": set()},
+    "audit_steam_licenses": {
+        "params": {"limit", "retry_unresolved"},
+        "required": set(),
+    },
     "detect_stranded_duplicates": {"params": set(), "required": set()},
     "detect_cross_platform_collapses": {"params": {"limit"}, "required": set()},
     "detect_misclassified_dlc": {
@@ -255,6 +259,11 @@ EXPECTED_ANNOTATIONS = {
     "detect_farmed_games": {"destructiveHint": False, "idempotentHint": True},
     "detect_collapsed_games": {"readOnlyHint": True, "idempotentHint": True},
     "detect_orphan_games": {"readOnlyHint": True, "idempotentHint": True},
+    "audit_steam_licenses": {
+        "readOnlyHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
     "detect_stranded_duplicates": {"readOnlyHint": True, "idempotentHint": True},
     "detect_cross_platform_collapses": {
         "readOnlyHint": False,
@@ -326,9 +335,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_50(self):
+    async def test_tool_count_is_51(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 50)
+        self.assertEqual(len(tools), 51)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()

@@ -34,6 +34,7 @@ from .tools.models import (
     DetectCrossPlatformCollapsesResponse,
     DetectFarmedGamesResponse,
     DetectMisclassifiedDlcResponse,
+    AuditSteamLicensesResponse,
     DetectOrphanGamesResponse,
     DetectStrandedDuplicatesResponse,
     DiagnoseScrapeResponse,
@@ -683,10 +684,46 @@ async def detect_orphan_games() -> DetectOrphanGamesResponse:
     removed upstream without ever being owned). Read-only: only true orphans
     are listed as candidates for review; wishlist_only_count reports the
     (legitimate) other shape without listing them. Returns orphans (id, name,
-    igdb_id) plus orphan_count and wishlist_only_count.
+    igdb_id) plus orphan_count and wishlist_only_count. CAUTION: an "orphan"
+    can be a retired Steam app the account still owns (GetOwnedGames omits
+    some delisted apps) — run audit_steam_licenses before deleting anything
+    here; license_audit in the response says whether that audit has caught up.
     """
     from .tools.admin import detect_orphan_games as _detect_orphans
     return await _detect_orphans()
+
+
+@mcp.tool(annotations=NETWORK_SYNC_TOOL)
+async def audit_steam_licenses(
+    limit: int = 25, retry_unresolved: bool = False
+) -> AuditSteamLicensesResponse:
+    """
+    Heal Steam ownership from the account's license list (retired apps included).
+
+    The owned-games API silently omits some retired/delisted apps the account
+    still holds licenses for, so those games never get an ownership row. This
+    audit reads the full license list via the stored Steam store session
+    (set_steam_store_session), diffs it against the library, and classifies
+    each missing appid: live store apps of type "game" and retired apps
+    SteamSpy can still name become owned Steam rows (flagged delisted=1 —
+    cleared automatically if the app ever reappears in the owned-games API);
+    DLC/tools are recorded but never mint library rows; retired apps nobody
+    can name land in unresolved for manual review (add_game_to_platform).
+
+    Incremental: each appid is classified once, at most `limit` new appids per
+    call (0 = no cap; store requests are rate-gated at ~1/s), `remaining`
+    reports what is still queued — call again to continue. Runs automatically
+    (capped) after each Steam refresh when a store session is stored.
+    retry_unresolved=True re-probes previously unresolved appids.
+    """
+    from fastmcp.exceptions import ToolError
+
+    from .data.steam_licenses import audit_steam_licenses as _audit
+
+    try:
+        return await _audit(limit=limit, retry_unresolved=retry_unresolved)
+    except RuntimeError as exc:
+        raise ToolError(str(exc))
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)

@@ -105,7 +105,17 @@ async def search_games(
     match = build_name_match(query, use_fts=fts_ready(), id_column="game_id")
     conditions = [match.where_sql]
     params: list = list(match.where_params)
-    conditions.append("is_primary_library_item = 1")
+    # An exact normalized match must never be hidden by the primary filter: a
+    # nested row (real edition, or a misclassified base game) whose name IS the
+    # query would otherwise be invisible whenever any primary row also matches,
+    # because the nested-content fallback only fires on zero primary matches —
+    # and an invisible exact match tempts create_missing callers into minting a
+    # duplicate. Exact matches rank 0, so they surface first.
+    if match.fuzzy_eligible:
+        conditions.append("(is_primary_library_item = 1 OR name_normalized = ?)")
+        params.append(normalize_search_text(query))
+    else:
+        conditions.append("is_primary_library_item = 1")
     if platform:
         conditions.append(
             "game_id IN (SELECT game_id FROM game_platforms WHERE platform = ? AND owned = 1)"
@@ -349,16 +359,25 @@ async def search_games_batch(
     async with get_db() as db:
         for query in queries:
             match = build_name_match(query, use_fts=fts_ready(), id_column="game_id")
+            # Same exact-match escape as search_games: a nested row whose name
+            # IS the query must surface (rank 0) instead of hiding behind the
+            # primary filter while broader primary matches exist.
+            if match.fuzzy_eligible:
+                primary_sql = "(is_primary_library_item = 1 OR name_normalized = ?)"
+                primary_params: tuple = (normalize_search_text(query),)
+            else:
+                primary_sql = "is_primary_library_item = 1"
+                primary_params = ()
             rows = await db.execute_fetchall(
                 _GAME_ROLLUP_CTE
                 + f"""
                 SELECT *, {match.rank_sql} AS match_rank
                 FROM game_rollup
-                WHERE {match.where_sql} AND is_primary_library_item = 1
+                WHERE {match.where_sql} AND {primary_sql}
                 ORDER BY match_rank ASC, total_playtime_minutes DESC, name ASC
                 LIMIT ?
                 """,
-                (*match.rank_params, *match.where_params, limit_per_query),
+                (*match.rank_params, *match.where_params, *primary_params, limit_per_query),
             )
             results[query] = await _format_rows(rows)
 

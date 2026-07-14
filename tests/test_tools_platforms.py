@@ -9,6 +9,7 @@ from fastmcp.exceptions import ToolError
 from conftest import (
     ToolDBTestCase,
     add_enrichment,
+    add_identifier,
     add_platform,
     make_steam_game,
     seed_game,
@@ -500,6 +501,43 @@ class UpdateGameParentTests(ToolDBTestCase):
             await platforms.update_game(
                 game_id=gid, parent_game_id=parent, parent_name="Either Parent"
             )
+
+    async def test_nesting_real_game_under_empty_parent_raises(self):
+        # Substance guard: a row holding a store identifier + real playtime
+        # must not be hidden behind a parent that owns nothing (the Titanfall 2
+        # shape) — the manual path raises so the human picks the right repair.
+        empty_parent = await seed_game("Titanfall II")
+        gid = await seed_game("Titanfall 2")
+        gpid = await add_platform(gid, "steam", playtime_minutes=1200)
+        await add_identifier(gpid, "steam_appid", 1237970)
+
+        with self.assertRaisesRegex(ToolError, "hide the real game"):
+            await platforms.update_game(
+                game_id=gid, content_type="edition", parent_game_id=empty_parent
+            )
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT content_type, parent_game_id, is_primary_library_item "
+                "FROM games WHERE id = ?",
+                (gid,),
+            )
+        self.assertEqual(row["content_type"], "base_game")
+        self.assertIsNone(row["parent_game_id"])
+        self.assertEqual(row["is_primary_library_item"], 1)
+
+    async def test_nesting_played_row_under_owned_parent_still_allowed(self):
+        parent = await seed_game("Fallout: New Vegas")
+        parent_gpid = await add_platform(parent, "steam", playtime_minutes=2694)
+        await add_identifier(parent_gpid, "steam_appid", 22380)
+        gid = await seed_game("Fallout New Vegas Ultimate Edition")
+        gpid = await add_platform(gid, "epic", playtime_minutes=30)
+        await add_identifier(gpid, "epic_artifact_id", "fnv-ultimate")
+
+        result = await platforms.update_game(
+            game_id=gid, content_type="edition", parent_game_id=parent
+        )
+        self.assertEqual(result["updated"]["parent_game_id"], parent)
 
     async def test_parent_without_nested_content_type_on_base_game_raises(self):
         parent = await seed_game("Waiting Parent")
