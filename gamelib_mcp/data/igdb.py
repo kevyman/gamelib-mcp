@@ -1067,21 +1067,34 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
     )
 
     now = datetime.now(timezone.utc).isoformat()
+
+    # Parent guard (mirrors upserts.py::apply_content_classification): never nest a
+    # row other rows already hang off. IGDB happily hands back an edition/version
+    # verdict for a base game's own title, and applying it would hide the parent from
+    # the is_primary rollups AND strand its children. Resolved up front, before parent
+    # resolution: a blocked verdict must not mint a parent row that nothing will point
+    # at. The metadata writes below still land; only the classification is dropped.
+    async with get_db() as db:
+        nesting_blocked = igdb_game.content_type in NESTED_CONTENT_TYPES and (
+            await has_nested_children(db, game_id)
+        )
+
     parent_game_id: int | None = None
-    if igdb_game.parent_igdb_id is not None:
-        parent = await get_game_by_igdb_id(igdb_game.parent_igdb_id)
-        if parent is not None:
-            parent_game_id = parent["id"]
-    if parent_game_id is None and igdb_game.parent_name:
-        async with get_db() as db:
-            parent = await db.execute_fetchone(
-                "SELECT id FROM games WHERE lower(name) = lower(?) ORDER BY id LIMIT 1",
-                (igdb_game.parent_name,),
-            )
-        if parent is not None:
-            parent_game_id = parent["id"]
-        else:
-            parent_game_id = await upsert_game(appid=None, name=igdb_game.parent_name)
+    if not nesting_blocked:
+        if igdb_game.parent_igdb_id is not None:
+            parent = await get_game_by_igdb_id(igdb_game.parent_igdb_id)
+            if parent is not None:
+                parent_game_id = parent["id"]
+        if parent_game_id is None and igdb_game.parent_name:
+            async with get_db() as db:
+                parent = await db.execute_fetchone(
+                    "SELECT id FROM games WHERE lower(name) = lower(?) ORDER BY id LIMIT 1",
+                    (igdb_game.parent_name,),
+                )
+            if parent is not None:
+                parent_game_id = parent["id"]
+            else:
+                parent_game_id = await upsert_game(appid=None, name=igdb_game.parent_name)
 
     # A parent that resolves back to this same row is not a real parent (IGDB
     # occasionally lists an edition/version whose parent is the row itself). Writing
@@ -1159,15 +1172,6 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
             # invisible to both the games and addons views).
             if self_referential_parent and content_type in NESTED_CONTENT_TYPES:
                 content_type = "base_game"
-            # Parent guard (mirrors upserts.py::apply_content_classification):
-            # never nest a row other rows already hang off. IGDB happily hands
-            # back an edition/version verdict for a base game's own title, and
-            # applying it would hide the parent from the is_primary rollups AND
-            # strand its children. Leave the stored classification untouched;
-            # the metadata writes above still land.
-            nesting_blocked = content_type in NESTED_CONTENT_TYPES and (
-                await has_nested_children(db, game_id)
-            )
             if nesting_blocked:
                 logger.debug(
                     "IGDB classification would nest game %s, which is a parent of "
