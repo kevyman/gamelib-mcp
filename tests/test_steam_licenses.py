@@ -135,6 +135,33 @@ class AuditSteamLicensesTests(ToolDBTestCase):
         self.assertEqual(result["probed"], 0)
         self.assertEqual(result["unclassified"], 0)
 
+    async def test_appid_on_unowned_stub_is_healed_to_owned(self):
+        # An appid stuck on an owned=0 manual/legacy stub is NOT "already in
+        # the library" — the licence says it's owned, so the audit must
+        # reprocess it and flip the stub owned instead of skipping it.
+        stub_game = await seed_game("Shelved Stub")
+        async with db_module.get_db() as db:
+            cursor = await db.execute(
+                """INSERT INTO game_platforms (game_id, platform, owned)
+                   VALUES (?, 'steam', 0)""",
+                (stub_game,),
+            )
+            stub_gpid = cursor.lastrowid
+            await db.commit()
+        await db_module.upsert_game_platform_identifier(
+            stub_gpid, "steam_appid", 4321
+        )
+
+        result = await self._audit(owned={4321}, steamspy={4321: "Shelved Stub"})
+
+        self.assertEqual(
+            [entry["appid"] for entry in result["minted_delisted"]], [4321]
+        )
+        row = await _steam_row_by_appid(4321)
+        self.assertEqual(row["game_id"], stub_game)
+        self.assertEqual(row["owned"], 1)
+        self.assertEqual(row["delisted"], 1)
+
     async def test_unresolved_is_remembered_and_retriable(self):
         first = await self._audit(owned={999})
         self.assertEqual(first["unresolved"], [999])

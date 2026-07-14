@@ -126,13 +126,21 @@ async def fetch_owned_steam_appids(
 
 
 async def _library_steam_appids() -> set[int]:
-    """Every appid already attached to a Steam platform row."""
+    """Every appid already attached to an OWNED Steam platform row.
+
+    Restricted to owned=1: an appid sitting on an unowned manual/legacy stub
+    still needs healing — the audit is reconciling ownership from licenses, so
+    leaving such appids in the "missing" set lets bulk_upsert's identifier
+    resolution find the stub and flip it owned.
+    """
     async with get_db() as db:
         rows = await db.execute_fetchall(
             """SELECT gpi.identifier_value
                FROM game_platform_identifiers gpi
                JOIN game_platforms gp ON gp.id = gpi.game_platform_id
-               WHERE gpi.identifier_type = ? AND gp.platform = 'steam'""",
+               WHERE gpi.identifier_type = ?
+                 AND gp.platform = 'steam'
+                 AND gp.owned = 1""",
             (STEAM_APP_ID,),
         )
     return {

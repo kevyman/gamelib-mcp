@@ -662,7 +662,8 @@ async def _apply_batch_item(
             family_owner = await db.execute_fetchone(
                 """SELECT g.id, g.name
                    FROM games g
-                   JOIN game_platforms gp2 ON gp2.game_id = g.id AND gp2.platform = ?
+                   JOIN game_platforms gp2 ON gp2.game_id = g.id
+                        AND gp2.platform = ? AND gp2.owned = 1
                    JOIN games matched ON matched.id = ?
                    WHERE g.id != matched.id
                      AND (g.id = matched.parent_game_id

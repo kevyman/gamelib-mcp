@@ -1727,3 +1727,21 @@ class FamilyConflictGuardTests(ToolDBTestCase):
 
         self.assertEqual(batch["family_conflict"], 0)
         self.assertEqual(batch["filled"], 1)
+
+    async def test_unowned_family_stub_does_not_trigger_conflict(self):
+        # An owned=0 manual stub is not real ownership — "already owns that
+        # platform" must mean owned=1, or a valid purchase write gets refused.
+        base, child = await self._seed_family()
+        await add_platform(base, "gog", owned=0)
+
+        batch = await acquisition.set_acquisitions_batch(
+            [{
+                "name": "Fallout New Vegas Ultimat Edtion",
+                "platform": "gog",
+                "price_paid": 9.99,
+            }],
+            create_platform_rows=True,
+        )
+
+        self.assertEqual(batch["family_conflict"], 0)
+        self.assertEqual(batch["filled"], 1)
