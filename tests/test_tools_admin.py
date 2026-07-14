@@ -1507,3 +1507,23 @@ class DeleteGameTests(ToolDBTestCase):
     async def test_not_found(self):
         with self.assertRaisesRegex(ToolError, "not found|not in library"):
             await admin.delete_game(game_id=999999, confirm=True)
+
+    async def test_recomputes_affinity_even_without_ratings(self):
+        # An unrated but played game still contributes a playtime pseudo-rating to
+        # tag_affinity, so deletion must recompute regardless of ratings.
+        gid = await seed_game("Played Unrated", tags=["roguelike"])
+        await add_platform(gid, "steam", playtime_minutes=600)
+        with patch(
+            "gamelib_mcp.data.db.recompute_tag_affinity", AsyncMock()
+        ) as recompute:
+            await admin.delete_game(game_id=gid, confirm=True)
+        recompute.assert_awaited_once()
+
+    async def test_preview_does_not_recompute_affinity(self):
+        gid = await seed_game("Untouched", tags=["roguelike"])
+        await add_platform(gid, "steam", playtime_minutes=600)
+        with patch(
+            "gamelib_mcp.data.db.recompute_tag_affinity", AsyncMock()
+        ) as recompute:
+            await admin.delete_game(game_id=gid)  # confirm=False preview
+        recompute.assert_not_awaited()

@@ -2054,6 +2054,7 @@ from .claims import (  # noqa: E402
     clear_claim,
     clear_all_enrichment_claims,
     invalidate_name_derived_enrichment,
+    invalidate_igdb_match_enrichment,
     release_game_claim,
     claim_game_ids_for_igdb,
     claim_game_ids_for_hltb,

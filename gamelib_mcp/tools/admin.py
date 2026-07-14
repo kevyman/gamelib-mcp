@@ -905,11 +905,14 @@ async def delete_game(
         await db.execute("DELETE FROM games WHERE id = ?", (resolved_id,))
         await db.commit()
 
-    # Removing rated games changes which games feed the taste profile, so
-    # recompute tag affinity (as merge_games does) to avoid stale discovery ranks.
-    if would_delete["ratings"]:
-        from ..data.db import recompute_tag_affinity
-        await recompute_tag_affinity()
+    # A deleted game changes which games feed the taste profile — not only via
+    # its explicit ratings, but also the low-weight playtime pseudo-rating
+    # recompute_tag_affinity folds in for owned/non-farmed/unrated/>=2h games.
+    # So recompute unconditionally after a confirmed delete (deletes are rare
+    # admin ops) rather than gating on ratings, which would leave an unrated but
+    # played game's taste signal skewing discover_games until an unrelated pass.
+    from ..data.db import recompute_tag_affinity
+    await recompute_tag_affinity()
 
     return {
         "deleted": True,

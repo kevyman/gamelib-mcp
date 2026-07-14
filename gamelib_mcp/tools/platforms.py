@@ -13,6 +13,7 @@ from ..data.db import (
     clear_fulfilled_wishlist_entries,
     fts_ready,
     get_db,
+    invalidate_igdb_match_enrichment,
     invalidate_name_derived_enrichment,
     recompute_tag_affinity,
     remove_manual_overrides,
@@ -604,6 +605,16 @@ async def update_game(
         enrichment_invalidated = await invalidate_name_derived_enrichment(
             resolved_id, overrides
         )
+
+    # Repinning igdb_id corrects a wrong match: the stored igdb_cached_at (and any
+    # series/cover/platform metadata from the old match) still describes the wrong
+    # game, and claim_game_ids_for_igdb only revisits rows with igdb_cached_at
+    # NULL — so the corrected id would never re-fetch. Invalidate the IGDB cache so
+    # the backfill re-fetches under the pinned id. A rename already did this via
+    # invalidate_name_derived_enrichment above, so skip the double work.
+    if "igdb_id" in fields and "igdb" not in enrichment_invalidated:
+        await invalidate_igdb_match_enrichment(resolved_id)
+        enrichment_invalidated.append("igdb")
 
     # Tags feed the taste profile; recompute so recommendations reflect the edit.
     if "tags" in fields:

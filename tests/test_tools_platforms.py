@@ -894,6 +894,56 @@ class UpdateGameIgdbOverrideTests(ToolDBTestCase):
         with self.assertRaisesRegex(ToolError, "cover_image_id must not be empty"):
             await platforms.update_game(game_id=gid, cover_image_id="   ")
 
+    async def test_repin_igdb_id_invalidates_igdb_cache(self):
+        gid = await seed_game("Was Mismatched")
+        # Simulate a prior wrong IGDB match: cached + a stale series membership.
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET igdb_id = 10, igdb_cached_at = ?, "
+                "igdb_claimed_at = ? WHERE id = ?",
+                ("2026-01-01", "2026-01-01", gid),
+            )
+            await db.execute(
+                "INSERT INTO game_series (id, name, kind) VALUES (1, 'Old', 'collection')"
+            )
+            await db.execute(
+                "INSERT INTO game_series_membership (game_id, series_id) VALUES (?, 1)",
+                (gid,),
+            )
+            await db.commit()
+
+        result = await platforms.update_game(game_id=gid, igdb_id=999)
+
+        self.assertIn("igdb", result["enrichment_invalidated"])
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT igdb_id, igdb_cached_at, igdb_claimed_at FROM games WHERE id = ?",
+                (gid,),
+            )
+            memberships = await db.execute_fetchone(
+                "SELECT COUNT(*) AS c FROM game_series_membership WHERE game_id = ?",
+                (gid,),
+            )
+        self.assertEqual(row["igdb_id"], 999)  # pin stored
+        self.assertIsNone(row["igdb_cached_at"])  # re-qualifies for backfill
+        self.assertIsNone(row["igdb_claimed_at"])
+        self.assertEqual(memberships["c"], 0)  # stale series dropped
+
+    async def test_cover_only_edit_does_not_invalidate_igdb(self):
+        gid = await seed_game("Cover Fix")
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET igdb_cached_at = '2026-01-01' WHERE id = ?", (gid,)
+            )
+            await db.commit()
+        result = await platforms.update_game(game_id=gid, cover_image_id="co1abc")
+        self.assertNotIn("igdb", result["enrichment_invalidated"])
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT igdb_cached_at FROM games WHERE id = ?", (gid,)
+            )
+        self.assertEqual(row["igdb_cached_at"], "2026-01-01")  # untouched
+
     async def test_pinned_igdb_fields_survive_enrichment(self):
         gid = await seed_game("Wrong Match")
         await platforms.update_game(game_id=gid, igdb_id=1000, igdb_platforms=[6])
