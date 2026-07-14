@@ -12,7 +12,12 @@ from datetime import datetime, timezone
 
 from fastmcp.exceptions import ToolError
 
-from ..data.content import CONTENT_DLC, CONTENT_UNKNOWN_ADDON, NESTED_CONTENT_TYPES
+from ..data.content import (
+    CONTENT_BASE_GAME,
+    CONTENT_DLC,
+    CONTENT_UNKNOWN_ADDON,
+    NESTED_CONTENT_TYPES,
+)
 from ..data.db import (
     ACQUISITION_FIELDS,
     STEAM_APP_ID,
@@ -1499,9 +1504,15 @@ async def detect_misclassified_dlc(
     Read-only detector powering the human-confirmed repair loop: each candidate
     carries a ``suggested_update`` that is a ready-to-apply set of update_game
     kwargs. It NEVER writes and never mints parent rows. Buckets (a row lands in
-    its first matching bucket only — order: needs_parent, purchase_minted_suspect,
-    addon_name_pattern):
+    its first matching bucket only — order: nested_parent, needs_parent,
+    purchase_minted_suspect, addon_name_pattern):
 
+    * nested_parent — a nested row (is_primary_library_item=0) that other rows
+      nest under: the parent is hidden by the is_primary filter and its children
+      are reachable only through it, so both fall out of the library. Suggests
+      content_type base_game (update_game promotes the row and clears its own
+      parent). Checked first — the needs_parent suggestion would deepen the
+      chain rather than repair it.
     * needs_parent — a nested row (is_primary_library_item=0) with no
       parent_game_id. When a split-title candidate resolves to an existing
       primary game, the suggestion sets parent_game_id; otherwise it is null.
@@ -1533,11 +1544,51 @@ async def detect_misclassified_dlc(
 
     candidates: list[dict] = []
     counts = {
+        "nested_parent": 0,
         "needs_parent": 0,
         "purchase_minted_suspect": 0,
         "addon_name_pattern": 0,
         "steam_type_mismatch": 0,
     }
+
+    # --- offline bucket: nested_parent (a nested row other rows hang off) ---
+    # Both rows are invisible in this shape: the parent fails the is_primary
+    # filter, and its children are only reachable through it. Promoting the
+    # parent back to base_game (which also clears its own parent) is the fix, so
+    # this bucket is checked FIRST — giving such a row a parent (needs_parent's
+    # suggestion) would deepen the chain instead of repairing it.
+    async with get_db() as db:
+        stranded_rows = await db.execute_fetchall(
+            """SELECT g.id AS game_id, g.name, g.content_type,
+                      (SELECT COUNT(*) FROM games c WHERE c.parent_game_id = g.id)
+                          AS child_count
+               FROM games g
+               WHERE g.is_primary_library_item = 0
+                 AND EXISTS (SELECT 1 FROM games c WHERE c.parent_game_id = g.id)
+               ORDER BY g.id
+               LIMIT ?""",
+            (_MISCLASSIFIED_BUCKET_CAP,),
+        )
+    stranded_ids = {row["game_id"] for row in stranded_rows}
+    for row in stranded_rows:
+        candidates.append(
+            {
+                "game_id": row["game_id"],
+                "name": row["name"],
+                "reason": "nested_parent",
+                "evidence": {
+                    "content_type": row["content_type"],
+                    "child_count": row["child_count"],
+                    "note": "nested row that other rows nest under — both are "
+                    "hidden from the library until it is promoted",
+                },
+                "suggested_update": {
+                    "game_id": row["game_id"],
+                    "content_type": CONTENT_BASE_GAME,
+                },
+            }
+        )
+    counts["nested_parent"] = len(stranded_rows)
 
     # --- offline bucket: needs_parent (nested rows lacking a parent link) ---
     async with get_db() as db:
@@ -1556,7 +1607,13 @@ async def detect_misclassified_dlc(
                LIMIT ?""",
             (*sorted(NESTED_CONTENT_TYPES), _MISCLASSIFIED_BUCKET_CAP),
         )
+    needs_parent_count = 0
     for row in nested_rows:
+        # A row is reported in its first matching bucket only, and a parent that
+        # is itself nested already landed in nested_parent above.
+        if row["game_id"] in stranded_ids:
+            continue
+        needs_parent_count += 1
         parent = await _resolve_primary_parent(
             split_addon_title(row["name"] or ""), row["game_id"]
         )
@@ -1580,7 +1637,7 @@ async def detect_misclassified_dlc(
                 "suggested_update": suggested,
             }
         )
-    counts["needs_parent"] = len(candidates)
+    counts["needs_parent"] = needs_parent_count
 
     # --- offline buckets over PRIMARY base_game rows ---
     async with get_db() as db:
