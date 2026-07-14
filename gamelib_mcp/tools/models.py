@@ -343,6 +343,19 @@ class SetAcquisitionResponse(FlexibleModel):
     cleared: list[str]
 
 
+class SetPlaytimeResponse(FlexibleModel):
+    game_id: int
+    name: str
+    platform: str
+    game_platform_id: int
+    platform_row_created: bool
+    updated: dict[str, Any]
+    cleared: list[str]
+    playtime_minutes: int | None = None
+    last_played: str | None = None
+    manual_overrides: list[str]
+
+
 class AcquisitionBatchItemResult(FlexibleModel):
     # applied | filled | no_change | created | unmatched | no_platform_row | error
     status: str
@@ -467,6 +480,17 @@ class SplitGameResponse(FlexibleModel):
     identifiers_moved: list[str]
     moved_whole_platform: bool
     identifiers_remaining_on_source: list[str]
+
+
+class DeleteGameResponse(FlexibleModel):
+    deleted: bool
+    game_id: int
+    name: str
+    # Populated on a confirm=False preview.
+    would_delete: dict[str, int] | None = None
+    hint: str | None = None
+    # Populated on an actual delete (confirm=True).
+    deleted_counts: dict[str, int] | None = None
 
 
 class DetectCrossPlatformCollapsesResponse(FlexibleModel):

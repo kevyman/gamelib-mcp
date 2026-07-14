@@ -103,7 +103,7 @@ STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
 XBOX_TITLE_ID = "xbox_title_id"
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 31
 
 
 @dataclass
@@ -257,6 +257,7 @@ from .schema import (
     _V22_SCHEMA_DDL,
     _V25_SCHEMA_DDL,
     _V29_SCHEMA_DDL,
+    _V31_SCHEMA_DDL,
 )
 
 
@@ -1693,6 +1694,21 @@ async def _migrate_v29_to_v30(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v30_to_v31(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add game_platforms.manual_overrides (additive, nullable; see schema.py
+    v31 note). No backfill — no existing row is hand-pinned yet; the column is
+    populated only by set_playtime and consulted by the sync write paths."""
+    if progress is not None:
+        progress("Migrating to v31: add game_platforms.manual_overrides column.")
+
+    cols = await _table_columns(db, "game_platforms")
+    if "manual_overrides" not in cols:
+        await db.execute("ALTER TABLE game_platforms ADD COLUMN manual_overrides TEXT")
+
+    await _set_user_version(db, 31)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1729,7 +1745,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V29_SCHEMA_DDL)
+    await db.executescript(_V31_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -1853,6 +1869,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (27, _migrate_v27_to_v28),
     (28, _migrate_v28_to_v29),
     (29, _migrate_v29_to_v30),
+    (30, _migrate_v30_to_v31),
 )
 
 
@@ -1870,7 +1887,7 @@ async def _run_migrations(
         _emit(progress, f"Backed up database to {snapshot_path} before migrating.", applied_steps)
 
     if detected_state == "fresh":
-        await db.executescript(_V29_SCHEMA_DDL)
+        await db.executescript(_V31_SCHEMA_DDL)
         fts_enabled = await _sync_fts_index(db)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
@@ -1907,7 +1924,7 @@ async def _run_migrations(
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V29_SCHEMA_DDL)
+    await db.executescript(_V31_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
@@ -2037,6 +2054,7 @@ from .claims import (  # noqa: E402
     clear_claim,
     clear_all_enrichment_claims,
     invalidate_name_derived_enrichment,
+    invalidate_igdb_match_enrichment,
     release_game_claim,
     claim_game_ids_for_igdb,
     claim_game_ids_for_hltb,
@@ -2075,6 +2093,7 @@ from .queries import (  # noqa: E402
 from .upserts import (  # noqa: E402
     ACQUISITION_FIELDS,
     GAME_EDITABLE_FIELDS,
+    PLATFORM_EDITABLE_FIELDS,
     adopt_platform_identifier,
     apply_content_classification,
     resolve_parent_game,
@@ -2092,6 +2111,9 @@ from .upserts import (  # noqa: E402
     get_manual_overrides,
     apply_manual_game_fields,
     remove_manual_overrides,
+    get_platform_manual_overrides,
+    apply_manual_platform_fields,
+    remove_platform_manual_overrides,
     upsert_game_series_links,
     upsert_game_alias,
     upsert_nintendo_play_summary,

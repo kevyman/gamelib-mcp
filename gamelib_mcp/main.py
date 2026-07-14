@@ -29,6 +29,7 @@ from .tools.models import (
     ApproveScrapeConfigResponse,
     BacklogStatsResponse,
     CompletionSuggestionsResponse,
+    DeleteGameResponse,
     DetectCollapsedGamesResponse,
     DetectCrossPlatformCollapsesResponse,
     DetectFarmedGamesResponse,
@@ -59,6 +60,7 @@ from .tools.models import (
     SeriesGapsResponse,
     SetAcquisitionResponse,
     SetAcquisitionsBatchResponse,
+    SetPlaytimeResponse,
     SpendingStatsResponse,
     SplitBundleAcquisitionResponse,
     SplitGameResponse,
@@ -989,6 +991,9 @@ async def update_game(
     content_type: str | None = None,
     parent_game_id: int | None = None,
     parent_name: str | None = None,
+    cover_image_id: str | None = None,
+    igdb_id: int | None = None,
+    igdb_platforms: list[int] | None = None,
     clear_overrides: list[str] | None = None,
 ) -> UpdateGameResponse:
     """
@@ -1019,9 +1024,15 @@ async def update_game(
     nested content_type — pass one alongside if it isn't already. Pass
     parent_game_id=0 to detach the parent without changing content_type.
     Setting a parent together with a primary content_type in the same call is
-    rejected as contradictory. Editing tags recomputes the taste
-    profile. Returns the updated fields, any cleared columns, and the full
-    manual-override list.
+    rejected as contradictory. Editing tags recomputes the taste profile.
+
+    cover_image_id, igdb_id, and igdb_platforms fix a wrong IGDB match or cover
+    art: cover_image_id is the IGDB cover slug (e.g. "co1wyy"); igdb_id repins
+    the IGDB link (positive, unique across the library — discover_series_gaps
+    matches on it, so a wrong id hides gaps); igdb_platforms is the IGDB platform
+    id list (ints). All three are protected as manual overrides until cleared.
+    Returns the updated fields, any cleared columns, and the full manual-override
+    list.
     """
     from .tools.platforms import update_game as _update
     return await _update(
@@ -1042,6 +1053,9 @@ async def update_game(
         content_type,
         parent_game_id,
         parent_name,
+        cover_image_id,
+        igdb_id,
+        igdb_platforms,
         clear_overrides,
     )
 
@@ -1097,6 +1111,52 @@ async def set_acquisition(
         price_currency,
         purchase_source,
         bundle_name,
+        clear,
+        create_platform_row,
+    )
+
+
+@mcp.tool(annotations=MUTATION_TOOL)
+async def set_playtime(
+    name: str | None = None,
+    game_id: int | None = None,
+    platform: str | None = None,
+    playtime_minutes: int | None = None,
+    last_played: str | None = None,
+    clear: list[str] | None = None,
+    create_platform_row: bool = True,
+) -> SetPlaytimeResponse:
+    """
+    Manually set a game's playtime on one platform, protected from library syncs.
+
+    Resolve the game with game_id or name (partial/fuzzy match), pass the
+    platform (required), then pin playtime_minutes (the TOTAL minutes played on
+    that platform, not a delta) and/or last_played (YYYY-MM-DD). Each pinned
+    column is recorded as a manual override on the platform row, so future syncs
+    (Steam, PSN, Xbox, Epic, Nintendo) will not overwrite it — unlike
+    add_game_to_platform, whose playtime the next sync clobbers. Use this to fix
+    a wrong or missing playtime, or to record hours for a platform that reports
+    none (GOG, sometimes Xbox).
+
+    clear lists column name(s) — playtime_minutes, last_played — to hand back to
+    automatic sync: it removes the override so the next sync repopulates the
+    column, without changing the stored value (same semantics as update_game's
+    clear_overrides). A column cannot be set and cleared in the same call. If the
+    game has no row on that platform yet, one is created (owned) and
+    platform_row_created=true is returned; pass create_platform_row=False to
+    error instead.
+
+    A pinned playtime feeds get_play_history like any synced value: the next
+    refresh records a snapshot dated that day. Returns the row's resulting
+    playtime_minutes/last_played and the full manual-override list.
+    """
+    from .tools.platforms import set_playtime as _set_playtime
+    return await _set_playtime(
+        name,
+        game_id,
+        platform,
+        playtime_minutes,
+        last_played,
         clear,
         create_platform_row,
     )
@@ -1380,6 +1440,35 @@ async def merge_games(
     """
     from .tools.admin import merge_games as _merge
     return await _merge(source_game_id, target_game_id, dry_run)
+
+
+@mcp.tool(annotations=NON_IDEMPOTENT_MUTATION_TOOL)
+async def delete_game(
+    name: str | None = None,
+    game_id: int | None = None,
+    confirm: bool = False,
+) -> DeleteGameResponse:
+    """
+    Permanently delete one game and ALL of its data. IRREVERSIBLE.
+
+    Resolve the game with game_id or name (partial/fuzzy match; the resolved
+    name is echoed back so you can confirm the right row), then remove it and
+    every dependent record: platform ownership, store identifiers, provider
+    enrichment, ratings, wishlist entries, price cache, play-history snapshots,
+    series memberships, and aliases.
+
+    Two-step by design: with confirm=False (default) nothing is deleted — the
+    call returns deleted=false and a would_delete breakdown of the row counts
+    that WOULD be removed, so you can verify first. Call again with confirm=True
+    to actually delete.
+
+    A game that is the PARENT of nested content (DLC/expansions) is refused (the
+    children are listed) so nothing is silently orphaned — reparent or delete
+    those children first. To consolidate a duplicate rather than erase it, use
+    merge_games instead: it preserves playtime and history on the surviving row.
+    """
+    from .tools.admin import delete_game as _delete
+    return await _delete(name, game_id, confirm)
 
 
 @mcp.tool(annotations=MUTATION_TOOL)

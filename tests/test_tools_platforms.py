@@ -14,7 +14,7 @@ from conftest import (
     seed_game,
 )
 from gamelib_mcp.data import db as db_module
-from gamelib_mcp.data import hltb, steamspy
+from gamelib_mcp.data import hltb, igdb, steamspy
 from gamelib_mcp.tools import platforms
 
 
@@ -734,3 +734,235 @@ class GetWishlistContentTypeTests(ToolDBTestCase):
         by_name = {i["name"]: i["content_type"] for i in result["items"]}
         self.assertEqual(by_name["Wishlisted Base Game"], "base_game")
         self.assertEqual(by_name["Wishlisted DLC"], "dlc")
+
+
+class SetPlaytimeTests(ToolDBTestCase):
+    async def test_requires_platform(self):
+        gid = await seed_game("No Platform Given")
+        with self.assertRaisesRegex(ToolError, "platform is required"):
+            await platforms.set_playtime(game_id=gid, playtime_minutes=10)
+
+    async def test_requires_a_field(self):
+        gid = await seed_game("Nothing To Do")
+        await add_platform(gid, "steam")
+        with self.assertRaisesRegex(ToolError, "Provide playtime"):
+            await platforms.set_playtime(game_id=gid, platform="steam")
+
+    async def test_rejects_negative_playtime(self):
+        gid = await seed_game("Neg")
+        await add_platform(gid, "steam")
+        with self.assertRaisesRegex(ToolError, "must not be negative"):
+            await platforms.set_playtime(game_id=gid, platform="steam", playtime_minutes=-1)
+
+    async def test_rejects_bad_last_played(self):
+        gid = await seed_game("Bad Date")
+        await add_platform(gid, "steam")
+        with self.assertRaisesRegex(ToolError, "last_played"):
+            await platforms.set_playtime(
+                game_id=gid, platform="steam", last_played="2026-13-40"
+            )
+
+    async def test_sets_and_records_override(self):
+        gid = await seed_game("GOG Only")
+        await add_platform(gid, "gog")
+        result = await platforms.set_playtime(
+            game_id=gid, platform="gog", playtime_minutes=6000, last_played="2026-07-01"
+        )
+        self.assertEqual(result["playtime_minutes"], 6000)
+        self.assertEqual(result["last_played"], "2026-07-01")
+        self.assertEqual(
+            set(result["manual_overrides"]), {"playtime_minutes", "last_played"}
+        )
+        self.assertFalse(result["platform_row_created"])
+
+    async def test_creates_platform_row_when_missing(self):
+        gid = await seed_game("New Platform")
+        result = await platforms.set_playtime(
+            game_id=gid, platform="gog", playtime_minutes=120
+        )
+        self.assertTrue(result["platform_row_created"])
+        self.assertEqual(result["playtime_minutes"], 120)
+
+    async def test_create_platform_row_false_errors(self):
+        gid = await seed_game("Strict")
+        with self.assertRaisesRegex(ToolError, "no gog platform row"):
+            await platforms.set_playtime(
+                game_id=gid, platform="gog", playtime_minutes=1, create_platform_row=False
+            )
+
+    async def test_manual_playtime_survives_steam_sync(self):
+        gid = await make_steam_game("Pinned", 900, tags=["x"])
+        await platforms.set_playtime(game_id=gid, platform="steam", playtime_minutes=9999)
+        # A later Steam sync reports a different playtime — the pin must hold.
+        await db_module.bulk_upsert_steam_library(
+            [{"appid": 900, "name": "Pinned", "playtime_minutes": 5}],
+            synced_at=datetime.now(timezone.utc).isoformat(),
+        )
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT playtime_minutes FROM game_platforms "
+                "WHERE game_id = ? AND platform = 'steam'",
+                (gid,),
+            )
+        self.assertEqual(row["playtime_minutes"], 9999)
+
+    async def test_manual_playtime_survives_generic_sync(self):
+        gid = await seed_game("Ps Game")
+        await add_platform(gid, "ps5", playtime_minutes=100)
+        await platforms.set_playtime(game_id=gid, platform="ps5", playtime_minutes=7000)
+        # upsert_game_platform is the shared non-Steam sync path.
+        await db_module.upsert_game_platform(gid, "ps5", playtime_minutes=200, owned=1)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT playtime_minutes FROM game_platforms "
+                "WHERE game_id = ? AND platform = 'ps5'",
+                (gid,),
+            )
+        self.assertEqual(row["playtime_minutes"], 7000)
+
+    async def test_clear_lets_sync_take_over(self):
+        gid = await seed_game("Reclaim Playtime")
+        await add_platform(gid, "ps5", playtime_minutes=100)
+        await platforms.set_playtime(game_id=gid, platform="ps5", playtime_minutes=7000)
+        cleared = await platforms.set_playtime(
+            game_id=gid, platform="ps5", clear=["playtime_minutes"]
+        )
+        self.assertEqual(cleared["cleared"], ["playtime_minutes"])
+        self.assertNotIn("playtime_minutes", cleared["manual_overrides"])
+        # Value unchanged by the clear itself...
+        self.assertEqual(cleared["playtime_minutes"], 7000)
+        # ...but the next sync now overwrites it.
+        await db_module.upsert_game_platform(gid, "ps5", playtime_minutes=250, owned=1)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT playtime_minutes FROM game_platforms "
+                "WHERE game_id = ? AND platform = 'ps5'",
+                (gid,),
+            )
+        self.assertEqual(row["playtime_minutes"], 250)
+
+    async def test_clear_only_on_missing_row_errors(self):
+        gid = await seed_game("No Row Clear")
+        with self.assertRaisesRegex(ToolError, "no gog platform row to clear"):
+            await platforms.set_playtime(
+                game_id=gid, platform="gog", clear=["playtime_minutes"]
+            )
+
+
+class UpdateGameIgdbOverrideTests(ToolDBTestCase):
+    async def test_sets_cover_igdb_id_and_platforms(self):
+        gid = await seed_game("Match Me")
+        result = await platforms.update_game(
+            game_id=gid,
+            cover_image_id="co1abc",
+            igdb_id=4242,
+            igdb_platforms=[130, 6, 6],
+        )
+        self.assertEqual(result["updated"]["cover_image_id"], "co1abc")
+        self.assertEqual(result["updated"]["igdb_id"], 4242)
+        # Deduped + sorted, decoded back to a list for display.
+        self.assertEqual(result["updated"]["igdb_platforms"], [6, 130])
+        self.assertEqual(
+            set(result["manual_overrides"]),
+            {"cover_image_id", "igdb_id", "igdb_platforms"},
+        )
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT igdb_platforms FROM games WHERE id = ?", (gid,)
+            )
+        self.assertEqual(json.loads(row["igdb_platforms"]), [6, 130])
+
+    async def test_rejects_duplicate_igdb_id(self):
+        first = await seed_game("First")
+        await platforms.update_game(game_id=first, igdb_id=555)
+        second = await seed_game("Second")
+        with self.assertRaisesRegex(ToolError, "already used by game id"):
+            await platforms.update_game(game_id=second, igdb_id=555)
+
+    async def test_rejects_non_positive_igdb_id(self):
+        gid = await seed_game("Zero")
+        with self.assertRaisesRegex(ToolError, "positive integer"):
+            await platforms.update_game(game_id=gid, igdb_id=0)
+
+    async def test_rejects_non_int_platforms(self):
+        gid = await seed_game("Bad Platforms")
+        with self.assertRaisesRegex(ToolError, "list of integers"):
+            await platforms.update_game(game_id=gid, igdb_platforms=[6, "x"])
+
+    async def test_empty_cover_rejected(self):
+        gid = await seed_game("Blank Cover")
+        with self.assertRaisesRegex(ToolError, "cover_image_id must not be empty"):
+            await platforms.update_game(game_id=gid, cover_image_id="   ")
+
+    async def test_repin_igdb_id_invalidates_igdb_cache(self):
+        gid = await seed_game("Was Mismatched")
+        # Simulate a prior wrong IGDB match: cached + a stale series membership.
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET igdb_id = 10, igdb_cached_at = ?, "
+                "igdb_claimed_at = ? WHERE id = ?",
+                ("2026-01-01", "2026-01-01", gid),
+            )
+            await db.execute(
+                "INSERT INTO game_series (id, name, kind) VALUES (1, 'Old', 'collection')"
+            )
+            await db.execute(
+                "INSERT INTO game_series_membership (game_id, series_id) VALUES (?, 1)",
+                (gid,),
+            )
+            await db.commit()
+
+        result = await platforms.update_game(game_id=gid, igdb_id=999)
+
+        self.assertIn("igdb", result["enrichment_invalidated"])
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT igdb_id, igdb_cached_at, igdb_claimed_at FROM games WHERE id = ?",
+                (gid,),
+            )
+            memberships = await db.execute_fetchone(
+                "SELECT COUNT(*) AS c FROM game_series_membership WHERE game_id = ?",
+                (gid,),
+            )
+        self.assertEqual(row["igdb_id"], 999)  # pin stored
+        self.assertIsNone(row["igdb_cached_at"])  # re-qualifies for backfill
+        self.assertIsNone(row["igdb_claimed_at"])
+        self.assertEqual(memberships["c"], 0)  # stale series dropped
+
+    async def test_cover_only_edit_does_not_invalidate_igdb(self):
+        gid = await seed_game("Cover Fix")
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET igdb_cached_at = '2026-01-01' WHERE id = ?", (gid,)
+            )
+            await db.commit()
+        result = await platforms.update_game(game_id=gid, cover_image_id="co1abc")
+        self.assertNotIn("igdb", result["enrichment_invalidated"])
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT igdb_cached_at FROM games WHERE id = ?", (gid,)
+            )
+        self.assertEqual(row["igdb_cached_at"], "2026-01-01")  # untouched
+
+    async def test_pinned_igdb_fields_survive_enrichment(self):
+        gid = await seed_game("Wrong Match")
+        await platforms.update_game(game_id=gid, igdb_id=1000, igdb_platforms=[6])
+        # A later IGDB enrichment pass reports a DIFFERENT id/platforms and an
+        # (unpinned) cover — the pins must hold, the cover must apply.
+        fetched = igdb.IGDBGame(
+            igdb_id=2000,
+            name="Wrong Match",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2010-01-01",
+            platforms=[48, 130],
+            cover_image_id="co9zzz",
+        )
+        await igdb._apply_igdb_metadata(gid, fetched)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT igdb_id, igdb_platforms, cover_image_id FROM games WHERE id = ?",
+                (gid,),
+            )
+        self.assertEqual(row["igdb_id"], 1000)  # pin held
+        self.assertEqual(json.loads(row["igdb_platforms"]), [6])  # pin held
+        self.assertEqual(row["cover_image_id"], "co9zzz")  # unpinned, applied

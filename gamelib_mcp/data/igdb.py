@@ -1102,8 +1102,12 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
             return
 
         overrides = await get_manual_overrides(db, game_id)
-        updates: dict = {"igdb_id": igdb_game.igdb_id, "igdb_cached_at": now}
-        if igdb_game.platforms:
+        updates: dict = {"igdb_cached_at": now}
+        # igdb_id can be pinned by hand (update_game) when auto-matching picked
+        # the wrong title; honor that override so a later fetch doesn't relink it.
+        if "igdb_id" not in overrides:
+            updates["igdb_id"] = igdb_game.igdb_id
+        if igdb_game.platforms and "igdb_platforms" not in overrides:
             # NULL means "not fetched yet"; an empty fetch keeps NULL so the
             # deals tool can distinguish unknown from confirmed-single-platform.
             updates["igdb_platforms"] = json.dumps(igdb_game.platforms)

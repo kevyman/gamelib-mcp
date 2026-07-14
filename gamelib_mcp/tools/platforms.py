@@ -1,17 +1,23 @@
 """get_platform_breakdown, add_game_to_platform, update_game, and set_hardware_preference tools."""
 
 import json
+from datetime import date
+
 from fastmcp.exceptions import ToolError
 
 from ..data.db import (
     GAME_EDITABLE_FIELDS,
+    PLATFORM_EDITABLE_FIELDS,
     apply_manual_game_fields,
+    apply_manual_platform_fields,
     clear_fulfilled_wishlist_entries,
     fts_ready,
     get_db,
+    invalidate_igdb_match_enrichment,
     invalidate_name_derived_enrichment,
     recompute_tag_affinity,
     remove_manual_overrides,
+    remove_platform_manual_overrides,
     resolve_parent_game,
     set_meta,
     set_platform_acquisition,
@@ -365,6 +371,9 @@ async def update_game(
     content_type: str | None = None,
     parent_game_id: int | None = None,
     parent_name: str | None = None,
+    cover_image_id: str | None = None,
+    igdb_id: int | None = None,
+    igdb_platforms: list[int] | None = None,
     clear_overrides: list[str] | None = None,
 ) -> dict:
     """
@@ -402,6 +411,16 @@ async def update_game(
     promoting content_type to a primary type in the same call is a
     contradiction and raises an error (a primary item can't have a parent).
 
+    cover_image_id, igdb_id, and igdb_platforms correct a wrong IGDB match or
+    cover art. cover_image_id is the IGDB cover slug (e.g. "co1wyy"; images render
+    from it, falling back to the Steam capsule for Steam games). igdb_id repins
+    the IGDB link (a positive integer, unique across the library — used by
+    discover_series_gaps, which matches on igdb_id only, so a wrong id silently
+    hides series gaps). igdb_platforms is the list of IGDB platform ids (ints,
+    e.g. [6, 130]) feeding cross-platform availability. All three become manual
+    overrides, so IGDB enrichment stops overwriting them; clear them via
+    clear_overrides to let enrichment manage them again.
+
     Returns the updated fields, any cleared columns, the full manual-override
     list, and the providers whose enrichment was invalidated.
     """
@@ -438,6 +457,29 @@ async def update_game(
         fields["features"] = json.dumps(features)
     if short_description is not None:
         fields["short_description"] = short_description
+    if cover_image_id is not None:
+        clean_cover = cover_image_id.strip()
+        if not clean_cover:
+            raise ToolError("cover_image_id must not be empty")
+        fields["cover_image_id"] = clean_cover
+    if igdb_id is not None:
+        if igdb_id <= 0:
+            raise ToolError("igdb_id must be a positive integer")
+        async with get_db() as db:
+            clash = await db.execute_fetchone(
+                "SELECT id FROM games WHERE igdb_id = ? AND id != ?",
+                (igdb_id, resolved_id),
+            )
+        if clash is not None:
+            raise ToolError(
+                f"igdb_id {igdb_id} is already used by game id {clash['id']}"
+            )
+        fields["igdb_id"] = int(igdb_id)
+    if igdb_platforms is not None:
+        if not all(isinstance(p, int) and not isinstance(p, bool) for p in igdb_platforms):
+            raise ToolError("igdb_platforms must be a list of integers")
+        # Store as a sorted, de-duplicated int list to match the IGDB writer.
+        fields["igdb_platforms"] = json.dumps(sorted(set(igdb_platforms)))
     for label, value in (
         ("hltb_main", hltb_main),
         ("hltb_extra", hltb_extra),
@@ -564,12 +606,22 @@ async def update_game(
             resolved_id, overrides
         )
 
+    # Repinning igdb_id corrects a wrong match: the stored igdb_cached_at (and any
+    # series/cover/platform metadata from the old match) still describes the wrong
+    # game, and claim_game_ids_for_igdb only revisits rows with igdb_cached_at
+    # NULL — so the corrected id would never re-fetch. Invalidate the IGDB cache so
+    # the backfill re-fetches under the pinned id. A rename already did this via
+    # invalidate_name_derived_enrichment above, so skip the double work.
+    if "igdb_id" in fields and "igdb" not in enrichment_invalidated:
+        await invalidate_igdb_match_enrichment(resolved_id)
+        enrichment_invalidated.append("igdb")
+
     # Tags feed the taste profile; recompute so recommendations reflect the edit.
     if "tags" in fields:
         await recompute_tag_affinity()
 
     def _display(key: str, value):
-        if key in {"genres", "tags", "features"}:
+        if key in {"genres", "tags", "features", "igdb_platforms"}:
             return json.loads(value)
         if key in {"is_farmed", "is_primary_library_item"}:
             return bool(value)
@@ -585,4 +637,128 @@ async def update_game(
         "cleared": clear,
         "manual_overrides": sorted(overrides),
         "enrichment_invalidated": enrichment_invalidated,
+    }
+
+
+def _validate_last_played(value: str) -> str:
+    """Accept a full ISO calendar date YYYY-MM-DD (how game_platforms stores it)."""
+    cleaned = value.strip()
+    try:
+        date.fromisoformat(cleaned)
+    except ValueError:
+        raise ToolError(f"last_played must be a real YYYY-MM-DD date (got '{value}')")
+    return cleaned
+
+
+async def set_playtime(
+    name: str | None = None,
+    game_id: int | None = None,
+    platform: str | None = None,
+    playtime_minutes: int | None = None,
+    last_played: str | None = None,
+    clear: list[str] | None = None,
+    create_platform_row: bool = True,
+) -> dict:
+    """
+    Manually set playtime for one game on one platform, protected from sync.
+
+    Resolve the game with game_id or name, then pin playtime_minutes (total
+    minutes played, not a delta) and/or last_played (YYYY-MM-DD) on that
+    platform's ownership row. Each pinned column is recorded as a manual override
+    on the game_platforms row, so later platform syncs (Steam, PSN, Xbox, Epic,
+    Nintendo) will NOT overwrite it — unlike add_game_to_platform, whose value
+    the next sync clobbers. clear lists column name(s) (playtime_minutes,
+    last_played) to hand back to automatic sync: it removes the override so the
+    next sync repopulates the column, and does not change the stored value (the
+    same semantics as update_game's clear_overrides). A missing game_platforms
+    row is created (owned=1) unless create_platform_row=False.
+
+    Note: a pinned playtime feeds get_play_history like any other — the next
+    refresh records a snapshot dated that day, so history windows reflect the
+    manual value from then on.
+
+    Returns the resolved game, the pinned/cleared columns, the row's resulting
+    playtime_minutes/last_played, and the full manual-override list.
+    """
+    if platform is None:
+        raise ToolError("platform is required")
+    platform = _validate_platform(platform, LIBRARY_PLATFORMS)
+
+    clear_list = list(dict.fromkeys(clear or []))
+    invalid = [c for c in clear_list if c not in PLATFORM_EDITABLE_FIELDS]
+    if invalid:
+        raise ToolError(
+            f"clear has unknown column(s): {invalid}. "
+            f"Valid: {sorted(PLATFORM_EDITABLE_FIELDS)}"
+        )
+
+    fields: dict = {}
+    if playtime_minutes is not None:
+        if playtime_minutes < 0:
+            raise ToolError("playtime_minutes must not be negative")
+        fields["playtime_minutes"] = int(playtime_minutes)
+    if last_played is not None:
+        fields["last_played"] = _validate_last_played(last_played)
+
+    if not fields and not clear_list:
+        raise ToolError("Provide playtime_minutes/last_played to set, or clear")
+    conflict = set(fields) & set(clear_list)
+    if conflict:
+        raise ToolError(
+            f"Cannot set and clear the same column(s) in one call: {sorted(conflict)}"
+        )
+
+    row = await _resolve_game_row(name, game_id)
+    resolved_id = row["id"]
+
+    async with get_db() as db:
+        gp = await db.execute_fetchone(
+            "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",
+            (resolved_id, platform),
+        )
+
+    platform_row_created = False
+    if gp is None:
+        if not fields:
+            # Nothing to pin and no row to unprotect — a clear-only call on a
+            # platform the game isn't on is a no-op the caller should know about.
+            raise ToolError(
+                f"'{row['name']}' has no {platform} platform row to clear"
+            )
+        if not create_platform_row:
+            raise ToolError(
+                f"'{row['name']}' has no {platform} platform row. Pass "
+                "create_platform_row=True or add it first with add_game_to_platform."
+            )
+        gpid = await upsert_game_platform(resolved_id, platform, owned=1)
+        platform_row_created = True
+    else:
+        gpid = gp["id"]
+
+    # Apply pins first (records their protection), then revoke any requested
+    # protections. fields and clear_list are disjoint, so order only affects the
+    # returned override set, which the clear finalizes.
+    overrides: set[str] = set()
+    if fields:
+        overrides = await apply_manual_platform_fields(gpid, fields)
+    if clear_list:
+        overrides = await remove_platform_manual_overrides(gpid, clear_list)
+
+    async with get_db() as db:
+        final = await db.execute_fetchone(
+            "SELECT playtime_minutes, last_played FROM game_platforms WHERE id = ?",
+            (gpid,),
+        )
+
+    return {
+        "game_id": resolved_id,
+        "name": row["name"],
+        "platform": platform,
+        "game_platform_id": gpid,
+        "platform_row_created": platform_row_created,
+        "updated": dict(fields),
+        "cleared": clear_list,
+        "playtime_minutes": final["playtime_minutes"],
+        "last_played": final["last_played"],
+        "manual_overrides": sorted(overrides),
     }

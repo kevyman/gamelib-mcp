@@ -41,6 +41,9 @@ GAME_EDITABLE_FIELDS = {
     "parent_game_id",
     "is_primary_library_item",
     "completion_status",
+    "cover_image_id",
+    "igdb_id",
+    "igdb_platforms",
 }
 
 
@@ -105,6 +108,73 @@ async def remove_manual_overrides(game_id: int, columns) -> set[str]:
         await db.execute(
             "UPDATE games SET manual_overrides = ? WHERE id = ?",
             (json.dumps(sorted(remaining)) if remaining else None, game_id),
+        )
+        await db.commit()
+        return remaining
+
+
+# game_platforms columns a user may pin by hand via set_playtime. Unlike the
+# ACQUISITION_FIELDS below, these ARE written by platform syncs, so pinning one
+# records it in game_platforms.manual_overrides and the sync write paths
+# (upsert_game_platform, bulk_upsert_steam_library) skip a protected column.
+PLATFORM_EDITABLE_FIELDS = {
+    "playtime_minutes",
+    "last_played",
+}
+
+
+async def get_platform_manual_overrides(db, game_platform_id: int) -> set[str]:
+    """Return the set of game_platforms columns pinned by hand on one row.
+
+    ``db`` is an open connection (the sync write paths consult this inline via
+    json_each; this helper is for the Python-side read used by set_playtime).
+    """
+    row = await db.execute_fetchone(
+        "SELECT manual_overrides FROM game_platforms WHERE id = ?",
+        (game_platform_id,),
+    )
+    return _decode_overrides(row["manual_overrides"]) if row else set()
+
+
+async def apply_manual_platform_fields(game_platform_id: int, fields: dict) -> set[str]:
+    """Write user-supplied game_platforms columns and record them as overrides.
+
+    Merges the written column names into game_platforms.manual_overrides so later
+    platform syncs won't overwrite them. Returns the full override set after the
+    write. Unknown columns (outside PLATFORM_EDITABLE_FIELDS) are rejected.
+    """
+    unknown = set(fields) - PLATFORM_EDITABLE_FIELDS
+    if unknown:
+        raise ValueError(f"not editable game_platforms columns: {sorted(unknown)}")
+    if not fields:
+        async with get_db() as db:
+            return await get_platform_manual_overrides(db, game_platform_id)
+
+    async with get_db() as db:
+        current = await get_platform_manual_overrides(db, game_platform_id)
+        merged = current | set(fields)
+        updates = dict(fields)
+        updates["manual_overrides"] = json.dumps(sorted(merged))
+        cols_sql = ", ".join(f"{column} = ?" for column in updates)
+        await db.execute(
+            f"UPDATE game_platforms SET {cols_sql} WHERE id = ?",
+            (*updates.values(), game_platform_id),
+        )
+        await db.commit()
+        return merged
+
+
+async def remove_platform_manual_overrides(game_platform_id: int, columns) -> set[str]:
+    """Stop protecting the given game_platforms columns so sync may update them.
+
+    Removing protection does not change the current value — it just lets the next
+    platform sync overwrite it. Returns the remaining override set.
+    """
+    async with get_db() as db:
+        remaining = await get_platform_manual_overrides(db, game_platform_id) - set(columns)
+        await db.execute(
+            "UPDATE game_platforms SET manual_overrides = ? WHERE id = ?",
+            (json.dumps(sorted(remaining)) if remaining else None, game_platform_id),
         )
         await db.commit()
         return remaining
@@ -374,12 +444,24 @@ async def upsert_game_platform(
                VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(game_id, platform) DO UPDATE SET
                    owned = excluded.owned,
-                   playtime_minutes = COALESCE(excluded.playtime_minutes, game_platforms.playtime_minutes),
+                   playtime_minutes = CASE
+                       WHEN game_platforms.manual_overrides IS NOT NULL
+                            AND 'playtime_minutes' IN (
+                                SELECT value FROM json_each(game_platforms.manual_overrides))
+                       THEN game_platforms.playtime_minutes
+                       ELSE COALESCE(excluded.playtime_minutes, game_platforms.playtime_minutes)
+                   END,
                    playtime_2weeks_minutes = COALESCE(
                        excluded.playtime_2weeks_minutes,
                        game_platforms.playtime_2weeks_minutes
                    ),
-                   last_played = COALESCE(excluded.last_played, game_platforms.last_played),
+                   last_played = CASE
+                       WHEN game_platforms.manual_overrides IS NOT NULL
+                            AND 'last_played' IN (
+                                SELECT value FROM json_each(game_platforms.manual_overrides))
+                       THEN game_platforms.last_played
+                       ELSE COALESCE(excluded.last_played, game_platforms.last_played)
+                   END,
                    last_synced = excluded.last_synced""",
             (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes,
              last_played, now),
@@ -884,10 +966,16 @@ async def bulk_upsert_steam_library(
                    WHERE t.resolved_game_id IS NOT NULL
                    ON CONFLICT(game_id, platform) DO UPDATE SET
                        owned = excluded.owned,
-                       playtime_minutes = COALESCE(
-                           excluded.playtime_minutes,
-                           game_platforms.playtime_minutes
-                       ),
+                       playtime_minutes = CASE
+                           WHEN game_platforms.manual_overrides IS NOT NULL
+                                AND 'playtime_minutes' IN (
+                                    SELECT value FROM json_each(game_platforms.manual_overrides))
+                           THEN game_platforms.playtime_minutes
+                           ELSE COALESCE(
+                               excluded.playtime_minutes,
+                               game_platforms.playtime_minutes
+                           )
+                       END,
                        playtime_2weeks_minutes = COALESCE(
                            excluded.playtime_2weeks_minutes,
                            game_platforms.playtime_2weeks_minutes

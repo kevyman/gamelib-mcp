@@ -113,6 +113,34 @@ async def invalidate_name_derived_enrichment(
     return invalidated
 
 
+async def invalidate_igdb_match_enrichment(game_id: int) -> None:
+    """Clear IGDB enrichment so the backfill re-fetches under a corrected igdb_id.
+
+    Call this after update_game repins ``igdb_id`` to a different match. Unlike
+    invalidate_name_derived_enrichment (a rename), this touches ONLY the IGDB
+    caches — HLTB and the critic scores are name-matched, not igdb-matched, so an
+    id correction must not re-claim them.
+
+    Nulling igdb_cached_at/igdb_claimed_at re-qualifies the row for
+    claim_game_ids_for_igdb, and the backfill worker fetches the pinned igdb_id
+    directly (it skips name re-resolution when a stored igdb_id exists), so the
+    corrected match's series/platform/cover metadata replaces the stale one. The
+    game_platforms/igdb_platforms/cover_image_id manual overrides are still
+    honored at write time. Series memberships are add-only (upsert_game_series_links),
+    so drop the stale ones here — the worker repopulates the correct set.
+    """
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE games SET igdb_cached_at = NULL, igdb_claimed_at = NULL WHERE id = ?",
+            (game_id,),
+        )
+        await db.execute(
+            "DELETE FROM game_series_membership WHERE game_id = ?",
+            (game_id,),
+        )
+        await db.commit()
+
+
 async def _claim_ids(
     select_sql: str,
     select_params: tuple,
