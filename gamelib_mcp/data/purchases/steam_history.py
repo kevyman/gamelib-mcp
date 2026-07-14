@@ -15,9 +15,14 @@ load-more endpoint wants it).
 Record building:
 - Records come primarily from history "Purchase" rows: title, date, price.
   Multi-item carts split the row total evenly (last share absorbs rounding,
-  humble.py convention). Market Transactions, In-Game Purchases, refunds AND
-  Gift Purchases (bought FOR someone else — not a library acquisition) land
-  in skipped with reasons.
+  humble.py convention). Market Transactions, In-Game Purchases AND Gift
+  Purchases (bought FOR someone else — not a library acquisition) land in
+  skipped with reasons.
+- "Refund" rows are their own history row and Steam leaves the original
+  purchase row in place, so both must be read together or refunded money
+  gets booked as spend. ``apply_refunds`` drops the refunded item from its
+  purchase row *before* the cart split, subtracting the amount the refund row
+  says was actually returned (see its docstring for why the ordering matters).
 - Licenses page rows with a Complimentary or Gift/Guest Pass acquisition type
   add zero-price records (purchase_source "free"/"gift") when their package
   name doesn't already match a history record (normalized-title containment).
@@ -73,6 +78,9 @@ _ISO_CURRENCY_RE = re.compile(r"\b([A-Z]{3})\b")
 _NUMBER_RE = re.compile(r"\d[\d.,\s\xa0]*")
 
 _CURSOR_RE = re.compile(r"g_historyCursor\s*=\s*(\{.*?\})\s*;", re.S)
+
+# Classes Steam renders inside the items cell that are badges, not line items.
+_ITEM_BADGE_CLASSES = frozenset({"wth_item_refunded"})
 
 _PACKAGE_SUFFIX_RE = re.compile(
     r"\s+(steam store and retail key|retail key|retail|beta testing|beta|demo"
@@ -197,21 +205,34 @@ def _row_type(cell: Tag) -> str:
     return _cell_text(div) if div is not None else _cell_text(cell)
 
 
+def _is_item_badge(div: Tag) -> bool:
+    """Decoration div inside the items cell (the "Refund" flag), not an item."""
+    classes: list[str] = div.get("class") or []  # type: ignore[assignment]
+    return any(cls in _ITEM_BADGE_CLASSES for cls in classes)
+
+
 def _row_items(cell: Tag) -> list[str]:
     divs = cell.find_all("div")
     if divs:
-        items = [_cell_text(d) for d in divs]
+        # Steam badges a refunded line with a sibling <div class="wth_item_refunded">
+        # Refund</div> *inside* the items cell. It is decoration, not an item —
+        # left in, it becomes a phantom item that steals a share of the row total.
+        items = [_cell_text(d) for d in divs if not _is_item_badge(d)]
         return [i for i in items if i]
     text = _cell_text(cell)
     return [text] if text else []
 
 
-def _parse_history_rows(soup: BeautifulSoup) -> tuple[list[dict], list[dict]]:
-    """(purchase rows, skipped) from the wallet-history rows in ``soup``.
+def _parse_history_rows(
+    soup: BeautifulSoup,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """(purchase rows, refund rows, skipped) from the wallet-history rows.
 
-    Each purchase row: {date, items, total, currency}.
+    Purchase and refund rows share the shape {date, items, total, currency};
+    refunds are kept apart so ``apply_refunds`` can cancel what they undo.
     """
     purchases: list[dict] = []
+    refunds: list[dict] = []
     skipped: list[dict] = []
     for row in soup.find_all("tr"):
         type_cell = row.find("td", class_="wht_type")
@@ -221,14 +242,15 @@ def _parse_history_rows(soup: BeautifulSoup) -> tuple[list[dict], list[dict]]:
         row_type = _row_type(type_cell)
         items = _row_items(items_cell)
         title = items[0] if items else "(unknown item)"
-        if row_type.strip().lower() != "purchase":
+        kind = row_type.strip().lower()
+        if kind not in ("purchase", "refund"):
             skipped.append({
                 "title": title,
                 "reason": f"history row type '{row_type}' is not a game purchase",
             })
             continue
         if not items:
-            skipped.append({"title": title, "reason": "purchase row has no items"})
+            skipped.append({"title": title, "reason": f"{row_type} row has no items"})
             continue
 
         date_cell = row.find("td", class_="wht_date")
@@ -238,13 +260,14 @@ def _parse_history_rows(soup: BeautifulSoup) -> tuple[list[dict], list[dict]]:
             if total_cell is not None
             else (None, "USD")
         )
-        purchases.append({
+        entry = {
             "date": parse_steam_date(_cell_text(date_cell)) if date_cell is not None else None,
             "items": items,
             "total": total,
             "currency": currency,
-        })
-    return purchases, skipped
+        }
+        (refunds if kind == "refund" else purchases).append(entry)
+    return purchases, refunds, skipped
 
 
 def _extract_cursor(html: str) -> dict | None:
@@ -258,14 +281,16 @@ def _extract_cursor(html: str) -> dict | None:
     return cursor if isinstance(cursor, dict) else None
 
 
-def parse_wallet_history(html: str) -> tuple[list[dict], list[dict], dict | None]:
-    """Full history page → (purchase rows, skipped, load-more cursor)."""
-    purchases, skipped = _parse_history_rows(BeautifulSoup(html, "lxml"))
-    return purchases, skipped, _extract_cursor(html)
+def parse_wallet_history(
+    html: str,
+) -> tuple[list[dict], list[dict], list[dict], dict | None]:
+    """Full history page → (purchase rows, refund rows, skipped, load-more cursor)."""
+    purchases, refunds, skipped = _parse_history_rows(BeautifulSoup(html, "lxml"))
+    return purchases, refunds, skipped, _extract_cursor(html)
 
 
-def parse_history_fragment(html: str) -> tuple[list[dict], list[dict]]:
-    """AJAX load-more fragment (bare <tr> rows) → (purchase rows, skipped)."""
+def parse_history_fragment(html: str) -> tuple[list[dict], list[dict], list[dict]]:
+    """AJAX load-more fragment (bare <tr> rows) → (purchase rows, refund rows, skipped)."""
     # lxml drops orphan <tr> tags without a table context.
     return _parse_history_rows(BeautifulSoup(f"<table>{html}</table>", "lxml"))
 
@@ -317,6 +342,77 @@ def _purchase_records(purchases: list[dict]) -> list[PurchaseRecord]:
     return records
 
 
+def apply_refunds(
+    purchases: list[dict], refunds: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    """Remove refunded items from their purchase rows, *before* the cart split.
+
+    Steam bills a refund as its own history row and leaves the original purchase
+    row untouched, so reading only the purchase rows books money that came back.
+
+    This deliberately runs ahead of ``_purchase_records``. A partial-cart refund
+    has to subtract what Steam actually returned — the refund row's own total —
+    from the cart total. The per-item share ``_purchase_records`` would compute
+    is only an even-split *estimate* of what that item cost, so cancelling a
+    built record would subtract the estimate instead of the real amount (a $30
+    two-item cart with a $5 refund would drop to $15, not $25). Dropping the
+    item here and subtracting the refund total leaves the remaining items to
+    split what is genuinely left.
+
+    Each refunded item is matched to the *latest* purchase row containing it,
+    dated at or before the refund — so a re-purchase after a refund keeps its
+    row, and a title bought twice but refunded once only loses one. A refund
+    with nothing to cancel (its purchase predates the history window) is
+    reported in skipped rather than silently ignored.
+    """
+    rows = [dict(purchase, items=list(purchase["items"])) for purchase in purchases]
+    skipped: list[dict] = []
+    for refund in refunds:
+        refund_date = refund["date"]
+        for title in refund["items"]:
+            normalized = _normalize_title(title)
+            if not normalized:
+                continue
+            candidates = [
+                index
+                for index, row in enumerate(rows)
+                if any(_normalize_title(item) == normalized for item in row["items"])
+                and (
+                    refund_date is None
+                    or row["date"] is None
+                    or row["date"] <= refund_date
+                )
+            ]
+            if not candidates:
+                skipped.append({
+                    "title": title,
+                    "reason": "refund with no matching purchase row in this history window",
+                })
+                continue
+            # Latest purchase at or before the refund; index breaks date ties.
+            row = rows[max(candidates, key=lambda i: (rows[i]["date"] or "", i))]
+            item_count = len(row["items"])
+            for position, item in enumerate(row["items"]):
+                if _normalize_title(item) == normalized:
+                    del row["items"][position]
+                    break
+            if row["total"] is not None:
+                if refund["total"] is not None and refund["currency"] == row["currency"]:
+                    returned = refund["total"]
+                else:
+                    # No comparable refund amount — the even share is all we have.
+                    returned = row["total"] / item_count
+                row["total"] = max(0.0, round(row["total"] - returned, 2))
+            skipped.append({
+                "title": title,
+                "reason": (
+                    f"refunded on {refund_date or 'an unknown date'} — removed from the "
+                    "matching purchase row"
+                ),
+            })
+    return [row for row in rows if row["items"]], skipped
+
+
 def merge_license_records(
     licenses: list[dict], purchase_records: list[PurchaseRecord]
 ) -> list[PurchaseRecord]:
@@ -362,12 +458,12 @@ def _check_page_auth(response: httpx.Response) -> None:
 
 async def _fetch_history_pages(
     client: httpx.AsyncClient, headers: dict[str, str], sessionid: str | None
-) -> tuple[list[dict], list[dict]]:
-    """History page + load-more follow-ups → (purchase rows, skipped)."""
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """History page + load-more follow-ups → (purchase rows, refund rows, skipped)."""
     resp = await client.get(_HISTORY_URL, headers=headers)
     _check_page_auth(resp)
     resp.raise_for_status()
-    purchases, skipped, cursor = parse_wallet_history(resp.text)
+    purchases, refunds, skipped, cursor = parse_wallet_history(resp.text)
 
     calls = 0
     while cursor and calls < _MAX_AJAX_CALLS:
@@ -385,14 +481,15 @@ async def _fetch_history_pages(
             break
         if not isinstance(payload, dict):
             break
-        more_purchases, more_skipped = parse_history_fragment(
+        more_purchases, more_refunds, more_skipped = parse_history_fragment(
             str(payload.get("html") or "")
         )
         purchases.extend(more_purchases)
+        refunds.extend(more_refunds)
         skipped.extend(more_skipped)
         next_cursor = payload.get("cursor")
         cursor = next_cursor if isinstance(next_cursor, dict) else None
-    return purchases, skipped
+    return purchases, refunds, skipped
 
 
 async def fetch_steam_purchases(
@@ -425,15 +522,21 @@ async def fetch_steam_purchases(
         licenses_resp.raise_for_status()
         licenses = parse_licenses(licenses_resp.text)
 
-        purchases, skipped = await _fetch_history_pages(
+        purchases, refunds, skipped = await _fetch_history_pages(
             client, headers, cookies.get("sessionid")
         )
 
+    purchase_count = len(purchases)
+    # Refunds first: they adjust the cart totals the split is computed from.
+    # Also before the license merge — a refunded title is no longer "covered by
+    # history", so a leftover free/gift license for it should still register.
+    purchases, refund_skipped = apply_refunds(purchases, refunds)
+    skipped.extend(refund_skipped)
     records = _purchase_records(purchases)
     records.extend(merge_license_records(licenses, records))
 
     logger.info(
-        "Steam: %d licenses + %d history purchases → %d records, %d skipped",
-        len(licenses), len(purchases), len(records), len(skipped),
+        "Steam: %d licenses + %d history purchases - %d refunds → %d records, %d skipped",
+        len(licenses), purchase_count, len(refunds), len(records), len(skipped),
     )
     return records, skipped

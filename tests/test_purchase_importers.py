@@ -993,11 +993,11 @@ class SteamLicensesParserTests(unittest.TestCase):
 
 class SteamHistoryParserTests(unittest.TestCase):
     def test_parse_wallet_history_fixture(self):
-        purchases, skipped, cursor = steam_history.parse_wallet_history(
+        purchases, refunds, skipped, cursor = steam_history.parse_wallet_history(
             _fixture("steam_history_sample.html")
         )
 
-        self.assertEqual(len(purchases), 2)
+        self.assertEqual(len(purchases), 3)
         single = purchases[0]
         self.assertEqual(single["date"], "2021-03-12")
         self.assertEqual(single["items"], ["Total War: WARHAMMER"])
@@ -1009,15 +1009,59 @@ class SteamHistoryParserTests(unittest.TestCase):
         self.assertEqual(cart["total"], 25.00)
         self.assertEqual(cart["currency"], "EUR")
 
+        # Refunds are their own category, not skipped rows — apply_refunds needs them.
+        self.assertEqual(
+            [(r["date"], r["items"], r["total"]) for r in refunds],
+            [("2021-01-22", ["Dicey Dungeons"], 14.99),
+             ("2021-01-15", ["Cyberpunk 2077"], 59.99)],
+        )
+
         reasons = " | ".join(s["reason"] for s in skipped)
-        self.assertEqual(len(skipped), 4)
-        self.assertIn("Refund", reasons)
+        self.assertEqual(len(skipped), 3)
         self.assertIn("Market Transaction", reasons)
         self.assertIn("In-Game Purchase", reasons)
         self.assertIn("Gift Purchase", reasons)
+        self.assertNotIn("Refund", reasons)
 
         self.assertEqual(cursor["wallet_txnid"], "9990001")
         self.assertEqual(cursor["timestamp_newest"], 1615500000)
+
+    def test_refunded_badge_is_not_parsed_as_an_item(self):
+        # Steam renders <div class="wth_item_refunded">Refund</div> inside the items
+        # cell of a refunded line. It is decoration, not a second purchased item.
+        html = (
+            '<tr><td class="wht_date">22 Jan, 2021</td>'
+            '<td class="wht_items">'
+            '<div style="clear: both">Dicey Dungeons</div>'
+            '<div class="wth_item_refunded">Refund</div>'
+            "</td>"
+            '<td class="wht_type"><div>Refund</div></td>'
+            '<td class="wht_total">$14.99</td></tr>'
+        )
+
+        purchases, refunds, _ = steam_history.parse_history_fragment(html)
+
+        self.assertEqual(purchases, [])
+        self.assertEqual(refunds[0]["items"], ["Dicey Dungeons"])
+
+    def test_refunded_badge_on_a_purchase_row_does_not_steal_a_price_share(self):
+        # Defensive: were the badge ever to render on a purchase row, leaving it in
+        # would split the total across a phantom "Refund" item and halve the real price.
+        html = (
+            '<tr><td class="wht_date">20 Jan, 2021</td>'
+            '<td class="wht_items">'
+            '<div style="clear: both">Dicey Dungeons</div>'
+            '<div class="wth_item_refunded">Refund</div>'
+            "</td>"
+            '<td class="wht_type"><div>Purchase</div></td>'
+            '<td class="wht_total">$14.99</td></tr>'
+        )
+
+        purchases, _, _ = steam_history.parse_history_fragment(html)
+
+        self.assertEqual(purchases[0]["items"], ["Dicey Dungeons"])
+        records = steam_history._purchase_records(purchases)
+        self.assertEqual([(r.title, r.price_paid) for r in records], [("Dicey Dungeons", 14.99)])
 
     def test_price_string_currency_variants(self):
         cases = [
@@ -1074,6 +1118,177 @@ class SteamHistoryParserTests(unittest.TestCase):
         self.assertEqual(
             steam_history.merge_license_records(licenses, purchase_records), []
         )
+
+
+class SteamRefundTests(unittest.TestCase):
+    def _row(self, items, date, total, currency="USD"):
+        return {"date": date, "items": list(items), "total": total, "currency": currency}
+
+    def _priced(self, rows):
+        """Rows → {title: price} the way the importer books them."""
+        return {
+            r.title: r.price_paid for r in steam_history._purchase_records(rows)
+        }
+
+    def test_refund_removes_the_purchase_from_the_spend_totals(self):
+        rows = [
+            self._row(["Dicey Dungeons"], "2021-02-23", 5.55),
+            self._row(["Hades"], "2021-03-01", 24.99),
+        ]
+
+        kept, skipped = steam_history.apply_refunds(
+            rows, [self._row(["Dicey Dungeons"], "2021-03-05", 5.55)]
+        )
+
+        self.assertEqual(self._priced(kept), {"Hades": 24.99})
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("removed from the matching purchase row", skipped[0]["reason"])
+        self.assertIn("2021-03-05", skipped[0]["reason"])
+
+    def test_partial_cart_refund_subtracts_the_real_amount_not_the_even_share(self):
+        # A $30 two-item cart splits to $15/$15, but those shares are only an
+        # estimate. Steam returned $5, so $25 of real spend must remain — dropping
+        # the built record instead would wrongly leave $15.
+        rows = [self._row(["Cheap Game", "Pricey Game"], "2021-02-02", 30.00)]
+
+        kept, _ = steam_history.apply_refunds(
+            rows, [self._row(["Cheap Game"], "2021-02-09", 5.00)]
+        )
+
+        self.assertEqual(self._priced(kept), {"Pricey Game": 25.00})
+
+    def test_refund_of_one_cart_item_leaves_the_others_splitting_the_remainder(self):
+        rows = [self._row(["Hollow Knight", "Celeste", "Dead Cells"], "2021-02-02", 25.00)]
+
+        kept, _ = steam_history.apply_refunds(
+            rows, [self._row(["Celeste"], "2021-02-09", 7.00)]
+        )
+
+        # $25 cart - $7 returned = $18 across the two survivors.
+        self.assertEqual(self._priced(kept), {"Hollow Knight": 9.00, "Dead Cells": 9.00})
+
+    def test_every_item_refunded_drops_the_row_entirely(self):
+        rows = [self._row(["Hollow Knight", "Celeste"], "2021-02-02", 20.00)]
+
+        kept, _ = steam_history.apply_refunds(
+            rows,
+            [
+                self._row(["Hollow Knight"], "2021-02-09", 12.00),
+                self._row(["Celeste"], "2021-02-09", 8.00),
+            ],
+        )
+
+        self.assertEqual(kept, [])
+
+    def test_refund_in_a_different_currency_falls_back_to_the_even_share(self):
+        # Can't subtract EUR from a USD cart total; the even share is all we have.
+        rows = [self._row(["Game A", "Game B"], "2021-02-02", 30.00, currency="USD")]
+
+        kept, _ = steam_history.apply_refunds(
+            rows, [self._row(["Game A"], "2021-02-09", 5.00, currency="EUR")]
+        )
+
+        self.assertEqual(self._priced(kept), {"Game B": 15.00})
+
+    def test_refund_never_drives_a_cart_total_negative(self):
+        rows = [self._row(["Game A", "Game B"], "2021-02-02", 10.00)]
+
+        kept, _ = steam_history.apply_refunds(
+            rows, [self._row(["Game A"], "2021-02-09", 99.00)]
+        )
+
+        self.assertEqual(self._priced(kept), {"Game B": 0.0})
+
+    def test_refund_without_a_matching_purchase_is_reported_not_silent(self):
+        rows = [self._row(["Hades"], "2021-03-01", 24.99)]
+
+        kept, skipped = steam_history.apply_refunds(
+            rows, [self._row(["Cyberpunk 2077"], "2021-01-15", 59.99)]
+        )
+
+        self.assertEqual(self._priced(kept), {"Hades": 24.99})
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("no matching purchase row", skipped[0]["reason"])
+
+    def test_repurchase_after_a_refund_keeps_its_row(self):
+        rows = [
+            self._row(["Dicey Dungeons"], "2021-01-20", 14.99),
+            self._row(["Dicey Dungeons"], "2021-06-01", 9.99),  # bought again later
+        ]
+
+        kept, _ = steam_history.apply_refunds(
+            rows, [self._row(["Dicey Dungeons"], "2021-01-22", 14.99)]
+        )
+
+        # Only the pre-refund purchase goes; the later re-buy survives.
+        self.assertEqual([(r["date"], r["total"]) for r in kept], [("2021-06-01", 9.99)])
+
+    def test_refund_cancels_only_the_latest_purchase_at_or_before_it(self):
+        rows = [
+            self._row(["Hades"], "2021-01-01", 24.99),
+            self._row(["Hades"], "2021-02-01", 19.99),
+        ]
+
+        kept, _ = steam_history.apply_refunds(
+            rows, [self._row(["Hades"], "2021-02-10", 19.99)]
+        )
+
+        # Bought twice, refunded once → the most recent goes, one row remains.
+        self.assertEqual([(r["date"], r["total"]) for r in kept], [("2021-01-01", 24.99)])
+
+    def test_two_refunds_consume_two_separate_rows(self):
+        rows = [
+            self._row(["Hades"], "2021-01-01", 24.99),
+            self._row(["Hades"], "2021-02-01", 19.99),
+        ]
+
+        kept, skipped = steam_history.apply_refunds(
+            rows,
+            [
+                self._row(["Hades"], "2021-02-10", 19.99),
+                self._row(["Hades"], "2021-02-11", 24.99),
+            ],
+        )
+
+        # Each refund consumes a distinct row rather than double-cancelling one.
+        self.assertEqual(kept, [])
+        self.assertEqual(len(skipped), 2)
+
+    def test_refund_matching_ignores_punctuation_and_case(self):
+        rows = [self._row(["Total War: WARHAMMER"], "2021-01-01", 59.99)]
+
+        kept, _ = steam_history.apply_refunds(
+            rows, [self._row(["total war warhammer"], "2021-01-05", 59.99)]
+        )
+
+        self.assertEqual(kept, [])
+
+    def test_refund_does_not_cancel_a_different_game(self):
+        rows = [self._row(["Hades"], "2021-01-01", 24.99)]
+
+        kept, skipped = steam_history.apply_refunds(
+            rows, [self._row(["Hades II"], "2021-01-05", 29.99)]
+        )
+
+        # Substring-ish neighbours must not collide — exact normalized match only.
+        self.assertEqual(self._priced(kept), {"Hades": 24.99})
+        self.assertIn("no matching purchase row", skipped[0]["reason"])
+
+    def test_no_refunds_leaves_rows_untouched(self):
+        rows = [self._row(["Hades"], "2021-03-01", 24.99)]
+
+        kept, skipped = steam_history.apply_refunds(rows, [])
+
+        self.assertEqual(kept, rows)
+        self.assertEqual(skipped, [])
+
+    def test_apply_refunds_does_not_mutate_the_caller_rows(self):
+        rows = [self._row(["Hollow Knight", "Celeste"], "2021-02-02", 20.00)]
+
+        steam_history.apply_refunds(rows, [self._row(["Celeste"], "2021-02-09", 8.00)])
+
+        self.assertEqual(rows[0]["items"], ["Hollow Knight", "Celeste"])
+        self.assertEqual(rows[0]["total"], 20.00)
 
 
 class SteamFetchTests(unittest.IsolatedAsyncioTestCase):
@@ -1147,7 +1362,14 @@ class SteamFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_title["Left 4 Dead 2"].purchase_source, "gift")
         # The "Retail" license is deliberately not imported.
         self.assertNotIn("Counter-Strike: Source", by_title)
-        self.assertEqual(len(skipped), 4)
+        # Bought then refunded end-to-end: its $14.99 must not survive as spend.
+        self.assertNotIn("Dicey Dungeons", by_title)
+
+        reasons = " | ".join(s["reason"] for s in skipped)
+        # 3 non-purchase row types + 2 refunds (one cancelling, one unmatched).
+        self.assertEqual(len(skipped), 5)
+        self.assertIn("removed from the matching purchase row", reasons)
+        self.assertIn("no matching purchase row", reasons)
 
     async def test_login_redirect_raises_session_advice(self):
         def handler(request: httpx.Request) -> httpx.Response:
