@@ -807,6 +807,118 @@ async def merge_games(
     }
 
 
+async def delete_game(
+    name: str | None = None,
+    game_id: int | None = None,
+    confirm: bool = False,
+) -> dict:
+    """
+    Permanently delete one game and all of its data. IRREVERSIBLE.
+
+    Resolve the game with game_id or name (partial/fuzzy match — the resolved
+    name is echoed back so you can confirm the right row), then remove it and
+    every dependent record: platform ownership rows, store identifiers,
+    provider enrichment, ratings, wishlist entries, price cache, play-history
+    snapshots, series memberships, and aliases.
+
+    Two-step by design: with confirm=False (the default) nothing is deleted —
+    the call returns deleted=false plus a would_delete breakdown of the row
+    counts that WOULD be removed, so you can verify before committing. Call
+    again with confirm=True to actually delete.
+
+    A game that is the parent of nested content (DLC/expansions) is refused
+    (children are listed in the error): reparent or delete those children first
+    with update_game/delete_game, so nothing is silently orphaned. To remove a
+    duplicate that should be consolidated rather than erased, use merge_games
+    instead — it preserves playtime and history on the surviving row.
+
+    Returns the resolved game, whether it was deleted, and the per-table counts.
+    """
+    # Lazy import: platforms.py imports admin lazily elsewhere; keep this local
+    # to avoid a top-level cycle, mirroring acquisition.py's usage.
+    from .platforms import _resolve_game_row
+
+    row = await _resolve_game_row(name, game_id)
+    resolved_id = row["id"]
+    resolved_name = row["name"]
+
+    async with get_db() as db:
+        children = await db.execute_fetchall(
+            "SELECT id, name FROM games WHERE parent_game_id = ?", (resolved_id,)
+        )
+        if children:
+            listed = ", ".join(f"{c['name']} (id {c['id']})" for c in children)
+            raise ToolError(
+                f"'{resolved_name}' (id {resolved_id}) is the parent of "
+                f"{len(children)} nested item(s): {listed}. Reparent or delete "
+                "them first (update_game/delete_game) so they are not orphaned."
+            )
+
+        # Count dependents for the preview / summary. game_platform_identifiers,
+        # steam_platform_data, and game_platform_enrichment cascade from
+        # game_platforms; game_wishlist/game_prices/play_history/
+        # game_series_membership/game_aliases cascade from games.
+        async def _count(sql: str) -> int:
+            r = await db.execute_fetchone(sql, (resolved_id,))
+            return r["c"] if r else 0
+
+        would_delete = {
+            "platforms": await _count(
+                "SELECT COUNT(*) AS c FROM game_platforms WHERE game_id = ?"
+            ),
+            "ratings": await _count(
+                "SELECT COUNT(*) AS c FROM ratings WHERE game_id = ?"
+            ),
+            "wishlist_entries": await _count(
+                "SELECT COUNT(*) AS c FROM game_wishlist WHERE game_id = ?"
+            ),
+            "price_rows": await _count(
+                "SELECT COUNT(*) AS c FROM game_prices WHERE game_id = ?"
+            ),
+            "play_history_rows": await _count(
+                "SELECT COUNT(*) AS c FROM play_history WHERE game_id = ?"
+            ),
+            "series_memberships": await _count(
+                "SELECT COUNT(*) AS c FROM game_series_membership WHERE game_id = ?"
+            ),
+            "aliases": await _count(
+                "SELECT COUNT(*) AS c FROM game_aliases WHERE game_id = ?"
+            ),
+        }
+
+        if not confirm:
+            return {
+                "deleted": False,
+                "game_id": resolved_id,
+                "name": resolved_name,
+                "would_delete": would_delete,
+                "hint": "Re-run with confirm=True to permanently delete.",
+            }
+
+        # ratings and game_platforms do NOT cascade from games (no ON DELETE
+        # action on their FKs), so delete them explicitly before the games row —
+        # deleting game_platforms first cascades its identifier/enrichment/
+        # steam_platform_data children. The remaining child tables cascade on
+        # the final games delete, and the games_fts_ad trigger cleans the index.
+        await db.execute("DELETE FROM ratings WHERE game_id = ?", (resolved_id,))
+        await db.execute("DELETE FROM game_platforms WHERE game_id = ?", (resolved_id,))
+        await db.execute("DELETE FROM games WHERE id = ?", (resolved_id,))
+        await db.commit()
+
+    # Removing rated games changes which games feed the taste profile, so
+    # recompute tag affinity (as merge_games does) to avoid stale discovery ranks.
+    if would_delete["ratings"]:
+        from ..data.db import recompute_tag_affinity
+        await recompute_tag_affinity()
+
+    return {
+        "deleted": True,
+        "game_id": resolved_id,
+        "name": resolved_name,
+        "deleted_counts": would_delete,
+    }
+
+
 async def detect_farmed_games(
     dry_run: bool = True,
     threshold_hours: float = 8.0,

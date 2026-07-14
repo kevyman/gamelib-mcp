@@ -1436,3 +1436,74 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
         after = await snapshot()
 
         self.assertEqual(before, after)
+
+
+class DeleteGameTests(ToolDBTestCase):
+    async def test_preview_does_not_delete(self):
+        gid = await seed_game("Preview Me")
+        gpid = await add_platform(gid, "steam", playtime_minutes=100)
+        await add_identifier(gpid, "steam_appid", "111")
+        await add_rating(gid, "manual", 8.0, 8.0)
+
+        result = await admin.delete_game(game_id=gid)
+
+        self.assertFalse(result["deleted"])
+        self.assertEqual(result["would_delete"]["platforms"], 1)
+        self.assertEqual(result["would_delete"]["ratings"], 1)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games WHERE id = ?", (gid,))
+        self.assertEqual(row["c"], 1)  # still present
+
+    async def test_confirm_deletes_and_cascades(self):
+        gid = await seed_game("Erase Me")
+        gpid = await add_platform(gid, "steam", playtime_minutes=100)
+        await add_identifier(gpid, "steam_appid", "222")
+        await add_rating(gid, "manual", 7.0, 7.0)
+        await db_module.upsert_wishlist_entry(gid, "steam", source="manual")
+        await _insert_play_history(gid, "steam", "2026-01-01", 100)
+
+        result = await admin.delete_game(game_id=gid, confirm=True)
+        self.assertTrue(result["deleted"])
+
+        async with db_module.get_db() as db:
+            games = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games WHERE id = ?", (gid,))
+            plats = await db.execute_fetchone(
+                "SELECT COUNT(*) AS c FROM game_platforms WHERE game_id = ?", (gid,)
+            )
+            idents = await db.execute_fetchone(
+                "SELECT COUNT(*) AS c FROM game_platform_identifiers WHERE game_platform_id = ?",
+                (gpid,),
+            )
+            ratings = await db.execute_fetchone(
+                "SELECT COUNT(*) AS c FROM ratings WHERE game_id = ?", (gid,)
+            )
+            wishlist = await db.execute_fetchone(
+                "SELECT COUNT(*) AS c FROM game_wishlist WHERE game_id = ?", (gid,)
+            )
+            history = await db.execute_fetchone(
+                "SELECT COUNT(*) AS c FROM play_history WHERE game_id = ?", (gid,)
+            )
+        self.assertEqual(games["c"], 0)
+        self.assertEqual(plats["c"], 0)
+        self.assertEqual(idents["c"], 0)  # cascaded from game_platforms
+        self.assertEqual(ratings["c"], 0)  # explicitly deleted (no cascade)
+        self.assertEqual(wishlist["c"], 0)  # cascaded from games
+        self.assertEqual(history["c"], 0)  # cascaded from games
+
+    async def test_refuses_parent_with_children(self):
+        parent = await seed_game("Base Game")
+        await seed_game(
+            "Base Game DLC", content_type="dlc", is_primary_library_item=0,
+            parent_game_id=parent,
+        )
+        with self.assertRaisesRegex(ToolError, "nested item"):
+            await admin.delete_game(game_id=parent, confirm=True)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT COUNT(*) AS c FROM games WHERE id = ?", (parent,)
+            )
+        self.assertEqual(row["c"], 1)  # not deleted
+
+    async def test_not_found(self):
+        with self.assertRaisesRegex(ToolError, "not found|not in library"):
+            await admin.delete_game(game_id=999999, confirm=True)

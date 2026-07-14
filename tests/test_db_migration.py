@@ -520,6 +520,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             version = await db_module._get_user_version(db)
             cols = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(game_platform_enrichment)")}
             game_cols = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(games)")}
+            gp_cols = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(game_platforms)")}
             tables = await db_module._table_names(db)
 
         self.assertEqual(version, db_module.SCHEMA_VERSION)
@@ -528,6 +529,35 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("opencritic_num_reviews", cols)
         self.assertIn("name_normalized", game_cols)
         self.assertIn("game_wishlist", tables)
+        self.assertIn("manual_overrides", gp_cols)
+
+    async def test_v30_to_v31_adds_game_platforms_manual_overrides(self) -> None:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db_module._configure_connection(db, enable_wal=True)
+            # Minimal pre-v31 game_platforms table (no manual_overrides column).
+            await db.execute(
+                """CREATE TABLE game_platforms (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    game_id INTEGER NOT NULL,
+                    platform TEXT NOT NULL,
+                    owned INTEGER NOT NULL DEFAULT 1,
+                    playtime_minutes INTEGER,
+                    UNIQUE(game_id, platform)
+                )"""
+            )
+            await db_module._set_user_version(db, 30)
+            await db.commit()
+
+            before = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(game_platforms)")}
+            self.assertNotIn("manual_overrides", before)
+
+            await db_module._migrate_v30_to_v31(db, None)
+
+            after = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(game_platforms)")}
+            version = await db_module._get_user_version(db)
+
+        self.assertIn("manual_overrides", after)
+        self.assertEqual(version, 31)
 
     async def test_v4_database_migrates_opencritic_scrape_columns(self) -> None:
         conn = sqlite3.connect(self.db_path)
@@ -1101,7 +1131,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             async with db_module.get_db() as db:
                 version = await db_module._get_user_version(db)
             self.assertEqual(version, db_module.SCHEMA_VERSION)
-            self.assertEqual(db_module.SCHEMA_VERSION, 30)
+            self.assertEqual(db_module.SCHEMA_VERSION, 31)
 
             unresolved = await seed_game("Still Unresolved Wishlisted Game")
             resolved = await seed_game("Already Resolved Wishlisted Game")
