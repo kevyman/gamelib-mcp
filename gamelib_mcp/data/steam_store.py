@@ -232,13 +232,17 @@ async def _steam_get_json_with_retry(
             return resp.json()
         except Exception as exc:
             last_error = exc
+            response = exc.response if isinstance(exc, httpx.HTTPStatusError) else None
+            delay_seconds = _retry_delay_seconds(attempt, response)
+            # Park the whole gate on any 429, including the terminal one — an
+            # exhausted call must not hand the next queued request an immediate
+            # slot straight into the same quota outage.
+            if response is not None and response.status_code == 429:
+                _STEAM_REQUEST_GATE.penalize(delay_seconds)
+
             if attempt >= _STEAM_MAX_RETRIES or not _should_retry(exc):
                 raise
 
-            response = exc.response if isinstance(exc, httpx.HTTPStatusError) else None
-            delay_seconds = _retry_delay_seconds(attempt, response)
-            if response is not None and response.status_code == 429:
-                _STEAM_REQUEST_GATE.penalize(delay_seconds)
             logger.warning("Steam request rate-limited or failed for %s; retrying in %.2fs", url, delay_seconds)
             await _sleep_before_retry(delay_seconds)
 

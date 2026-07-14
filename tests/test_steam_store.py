@@ -166,6 +166,28 @@ class SteamRequestGateTests(unittest.IsolatedAsyncioTestCase):
 
         penalize.assert_called_once()
 
+    async def test_get_json_penalizes_gate_on_terminal_rate_limit(self) -> None:
+        # Every attempt 429s and retries exhaust: the gate must still be parked,
+        # or the next queued call starts straight into the same quota outage.
+        client = _DummyAsyncClient(
+            [_DummyResponse(429, {}, headers={"Retry-After": "0"})]
+            * (steam_store._STEAM_MAX_RETRIES + 1)
+        )
+
+        with (
+            patch("gamelib_mcp.data.steam_store._sleep_before_retry", new=AsyncMock()),
+            patch.object(steam_store._STEAM_REQUEST_GATE, "penalize") as penalize,
+        ):
+            with self.assertRaises(steam_store.httpx.HTTPStatusError):
+                await steam_store._steam_get_json_with_retry(
+                    client,
+                    steam_store.STORE_API,
+                    params={"appids": 10},
+                    timeout=15,
+                )
+
+        self.assertEqual(penalize.call_count, steam_store._STEAM_MAX_RETRIES + 1)
+
 
 class SteamRetryTests(unittest.IsolatedAsyncioTestCase):
     async def test_get_json_retries_rate_limit_response(self) -> None:
