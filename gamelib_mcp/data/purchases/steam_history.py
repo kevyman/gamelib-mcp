@@ -20,8 +20,9 @@ Record building:
   skipped with reasons.
 - "Refund" rows are their own history row and Steam leaves the original
   purchase row in place, so both must be read together or refunded money
-  gets booked as spend. ``apply_refunds`` cancels the matching purchase
-  record (see its docstring for the matching rule).
+  gets booked as spend. ``apply_refunds`` drops the refunded item from its
+  purchase row *before* the cart split, subtracting the amount the refund row
+  says was actually returned (see its docstring for why the ordering matters).
 - Licenses page rows with a Complimentary or Gift/Guest Pass acquisition type
   add zero-price records (purchase_source "free"/"gift") when their package
   name doesn't already match a history record (normalized-title containment).
@@ -342,20 +343,29 @@ def _purchase_records(purchases: list[dict]) -> list[PurchaseRecord]:
 
 
 def apply_refunds(
-    records: list[PurchaseRecord], refunds: list[dict]
-) -> tuple[list[PurchaseRecord], list[dict]]:
-    """Drop the purchase records that a refund row undid.
+    purchases: list[dict], refunds: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    """Remove refunded items from their purchase rows, *before* the cart split.
 
-    Steam bills a refund as its own history row and leaves the original
-    purchase row untouched, so reading only the purchase rows books money that
-    came back. Each refunded item cancels the *latest* purchase record for the
-    same title dated at or before the refund — so a re-purchase after the
-    refund keeps its record, and a title bought twice only loses one.
+    Steam bills a refund as its own history row and leaves the original purchase
+    row untouched, so reading only the purchase rows books money that came back.
 
-    A refund with nothing to cancel (the purchase predates the history window)
-    is reported in skipped rather than silently ignored.
+    This deliberately runs ahead of ``_purchase_records``. A partial-cart refund
+    has to subtract what Steam actually returned — the refund row's own total —
+    from the cart total. The per-item share ``_purchase_records`` would compute
+    is only an even-split *estimate* of what that item cost, so cancelling a
+    built record would subtract the estimate instead of the real amount (a $30
+    two-item cart with a $5 refund would drop to $15, not $25). Dropping the
+    item here and subtracting the refund total leaves the remaining items to
+    split what is genuinely left.
+
+    Each refunded item is matched to the *latest* purchase row containing it,
+    dated at or before the refund — so a re-purchase after a refund keeps its
+    row, and a title bought twice but refunded once only loses one. A refund
+    with nothing to cancel (its purchase predates the history window) is
+    reported in skipped rather than silently ignored.
     """
-    cancelled: set[int] = set()
+    rows = [dict(purchase, items=list(purchase["items"])) for purchase in purchases]
     skipped: list[dict] = []
     for refund in refunds:
         refund_date = refund["date"]
@@ -365,13 +375,12 @@ def apply_refunds(
                 continue
             candidates = [
                 index
-                for index, record in enumerate(records)
-                if index not in cancelled
-                and _normalize_title(record.title) == normalized
+                for index, row in enumerate(rows)
+                if any(_normalize_title(item) == normalized for item in row["items"])
                 and (
                     refund_date is None
-                    or record.acquired_at is None
-                    or record.acquired_at <= refund_date
+                    or row["date"] is None
+                    or row["date"] <= refund_date
                 )
             ]
             if not candidates:
@@ -381,16 +390,27 @@ def apply_refunds(
                 })
                 continue
             # Latest purchase at or before the refund; index breaks date ties.
-            match = max(candidates, key=lambda i: (records[i].acquired_at or "", i))
-            cancelled.add(match)
+            row = rows[max(candidates, key=lambda i: (rows[i]["date"] or "", i))]
+            item_count = len(row["items"])
+            for position, item in enumerate(row["items"]):
+                if _normalize_title(item) == normalized:
+                    del row["items"][position]
+                    break
+            if row["total"] is not None:
+                if refund["total"] is not None and refund["currency"] == row["currency"]:
+                    returned = refund["total"]
+                else:
+                    # No comparable refund amount — the even share is all we have.
+                    returned = row["total"] / item_count
+                row["total"] = max(0.0, round(row["total"] - returned, 2))
             skipped.append({
                 "title": title,
                 "reason": (
-                    f"refunded on {refund_date or 'an unknown date'} — cancelled the "
-                    "matching purchase record"
+                    f"refunded on {refund_date or 'an unknown date'} — removed from the "
+                    "matching purchase row"
                 ),
             })
-    return [r for i, r in enumerate(records) if i not in cancelled], skipped
+    return [row for row in rows if row["items"]], skipped
 
 
 def merge_license_records(
@@ -506,15 +526,17 @@ async def fetch_steam_purchases(
             client, headers, cookies.get("sessionid")
         )
 
-    records = _purchase_records(purchases)
-    # Before the license merge: a refunded title is no longer "covered by
+    purchase_count = len(purchases)
+    # Refunds first: they adjust the cart totals the split is computed from.
+    # Also before the license merge — a refunded title is no longer "covered by
     # history", so a leftover free/gift license for it should still register.
-    records, refund_skipped = apply_refunds(records, refunds)
+    purchases, refund_skipped = apply_refunds(purchases, refunds)
     skipped.extend(refund_skipped)
+    records = _purchase_records(purchases)
     records.extend(merge_license_records(licenses, records))
 
     logger.info(
         "Steam: %d licenses + %d history purchases - %d refunds → %d records, %d skipped",
-        len(licenses), len(purchases), len(refunds), len(records), len(skipped),
+        len(licenses), purchase_count, len(refunds), len(records), len(skipped),
     )
     return records, skipped
