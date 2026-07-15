@@ -425,9 +425,42 @@ async def set_humble_session(cookies: str) -> dict:
     )
 
 
+async def set_steam_refresh_session(cookies: str) -> dict:
+    """
+    Store the long-lived Steam refresh token for on-demand session minting.
+
+    This is the PREFERRED Steam session path. The ``steamRefresh_steam`` JWT set
+    on ``login.steampowered.com`` (after a "remember me" login) is good for ~200
+    days; ``data/steam_session.py`` replays the browser's silent mint on every run
+    to produce fresh ``steamLoginSecure`` store cookies, so there is no re-pasting
+    when the short-lived cookie lapses. Supersedes set_steam_store_session, which
+    remains as a fallback. Unrelated to STEAM_API_KEY.
+
+    Accepts the same JSON shapes as set_nintendo_session (object or Cookie
+    Editor array). Only the ``steamRefresh_steam`` cookie is needed.
+
+    How to get your token:
+    1. Sign in at https://login.steampowered.com/ (or store/community) with the
+       "remember me" box checked, then open https://login.steampowered.com/
+    2. Install the "Cookie Editor" browser extension
+    3. Click the extension icon → Export → copy the JSON (steamRefresh_steam)
+    4. Pass that JSON string to this tool
+
+    Saved to the path in STEAM_REFRESH_TOKEN_FILE
+    (defaults to steam_refresh_token.json beside the database).
+    """
+    return _save_session_cookies(
+        cookies, "STEAM_REFRESH_TOKEN_FILE", "steam_refresh_token.json", "Steam refresh token"
+    )
+
+
 async def set_steam_store_session(cookies: str) -> dict:
     """
-    Store Steam store session cookies for purchase-history import.
+    Store Steam store session cookies (LEGACY — prefer set_steam_refresh_session).
+
+    The short-lived ``steamLoginSecure`` cookie lapses in ~weeks and must be
+    re-pasted; set_steam_refresh_session mints it on demand from a ~200-day token
+    instead. This path is kept as a fallback for deployments not yet migrated.
 
     Accepts the same JSON shapes as set_nintendo_session (object or Cookie
     Editor array). Only the ``steamLoginSecure`` cookie is strictly required;

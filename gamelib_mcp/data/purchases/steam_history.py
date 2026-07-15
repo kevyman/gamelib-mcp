@@ -513,12 +513,12 @@ async def fetch_steam_purchases(
     the orchestrator catches per source. ``transport`` exists for tests
     (httpx.MockTransport).
     """
-    cookies = _load_steam_cookies()
-    if not cookies:
-        raise RuntimeError(
-            "No Steam store session cookies found (STEAM_STORE_COOKIES_FILE "
-            "not set or missing) — run create_session_ingest_link(provider=\"steam_store\") first."
-        )
+    # Prefer freshly minted cookies from the long-lived refresh token; falls back
+    # to the legacy static steam_store cookie file. Lazy import avoids the cycle
+    # (steam_session reads _load_steam_cookies from this module).
+    from gamelib_mcp.data.steam_session import load_steam_web_cookies
+
+    cookies = await load_steam_web_cookies(transport=transport)
 
     headers = {
         "User-Agent": (

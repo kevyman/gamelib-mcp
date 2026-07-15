@@ -13,7 +13,7 @@ import httpx
 
 from conftest import ToolDBTestCase, make_steam_game, seed_game
 from gamelib_mcp.data import db as db_module
-from gamelib_mcp.data import steam_licenses
+from gamelib_mcp.data import steam_licenses, steam_session
 
 COOKIES = {"steamLoginSecure": "x", "sessionid": "y"}
 
@@ -45,7 +45,9 @@ async def _steam_row_by_appid(appid: int) -> dict | None:
 
 class FetchOwnedAppidsTests(ToolDBTestCase):
     async def test_returns_appid_set(self):
-        with patch.object(steam_licenses, "_load_steam_cookies", return_value=COOKIES):
+        with patch.object(
+            steam_session, "load_steam_web_cookies", AsyncMock(return_value=COOKIES)
+        ):
             owned = await steam_licenses.fetch_owned_steam_appids(
                 transport=_userdata_transport([10, 24740, "220"])
             )
@@ -54,7 +56,9 @@ class FetchOwnedAppidsTests(ToolDBTestCase):
     async def test_empty_owned_apps_is_auth_failure(self):
         # A logged-out userdata request "succeeds" with empty arrays; the
         # configured account always owns games, so empty == expired session.
-        with patch.object(steam_licenses, "_load_steam_cookies", return_value=COOKIES):
+        with patch.object(
+            steam_session, "load_steam_web_cookies", AsyncMock(return_value=COOKIES)
+        ):
             with self.assertRaises(RuntimeError):
                 await steam_licenses.fetch_owned_steam_appids(
                     transport=_userdata_transport([])
@@ -66,7 +70,10 @@ class AuditSteamLicensesTests(ToolDBTestCase):
         appdetails = appdetails or {}
         steamspy = steamspy or {}
         with (
-            patch.object(steam_licenses, "_load_steam_cookies", return_value=COOKIES),
+            patch.object(
+                steam_session, "load_steam_web_cookies", AsyncMock(return_value=COOKIES)
+            ),
+            patch.object(steam_session, "is_steam_session_configured", return_value=True),
             patch.object(
                 steam_licenses,
                 "fetch_store_appdetails",
@@ -83,7 +90,7 @@ class AuditSteamLicensesTests(ToolDBTestCase):
             )
 
     async def test_unconfigured_without_cookies(self):
-        with patch.object(steam_licenses, "_load_steam_cookies", return_value=None):
+        with patch.object(steam_session, "is_steam_session_configured", return_value=False):
             result = await steam_licenses.audit_steam_licenses()
         self.assertEqual(result["status"], "unconfigured")
 
