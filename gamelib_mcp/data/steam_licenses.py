@@ -71,9 +71,13 @@ AUDIT_REMAINING_META_KEY = "steam_license_audit_remaining"
 DEFAULT_PROBE_LIMIT = 25
 
 _AUTH_ERROR = (
-    "Steam dynamicstore userdata returned no owned apps — the steamLoginSecure "
-    "cookie is missing or expired. Run create_session_ingest_link(provider=\"steam_store\") "
-    "and open the link to paste fresh cookies from store.steampowered.com."
+    "Steam dynamicstore userdata returned no owned apps — the Steam store session "
+    "is not authenticating (the cookie is missing, expired, or was exported for the "
+    "wrong Steam domain, e.g. steamcommunity.com instead of the store). Preferred fix: "
+    "create_session_ingest_link(provider=\"steam_refresh\") and paste the long-lived "
+    "steamRefresh_steam token from login.steampowered.com (it mints the correct store "
+    "cookie automatically). Legacy fallback: create_session_ingest_link(provider="
+    "\"steam_store\") with a fresh export from a store.steampowered.com tab."
 )
 
 # Outcomes that are final; appids carrying one are never re-probed (unresolved
@@ -180,8 +184,10 @@ async def audit_steam_licenses(
         return {
             "status": "unconfigured",
             "error_summary": (
-                "No Steam store session cookies found — run "
-                "create_session_ingest_link(provider=\"steam_store\") to enable the license audit."
+                "No Steam store session found — run "
+                "create_session_ingest_link(provider=\"steam_refresh\") (preferred: the "
+                "long-lived steamRefresh_steam token from login.steampowered.com) to "
+                "enable the license audit. Legacy fallback: provider=\"steam_store\"."
             ),
         }
 

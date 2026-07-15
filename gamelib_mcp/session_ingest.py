@@ -37,6 +37,13 @@ class IngestProvider:
     setter_name: str
     export_url: str
     hint: str
+    # Numbered, plain-language instructions rendered as the form's <ol>. Written
+    # for someone who has never done this before — spell out every click.
+    steps: tuple[str, ...]
+    # The single cookie the export MUST contain for this provider to work. Shown
+    # as a prominent "make sure you see this" callout on the form (and enforced
+    # server-side by the matching setter's validator). None = no single gate.
+    required_cookie: str | None = None
 
 
 INGEST_PROVIDERS: dict[str, IngestProvider] = {
@@ -49,6 +56,14 @@ INGEST_PROVIDERS: dict[str, IngestProvider] = {
             "This one accounts.nintendo.com session drives both Switch "
             "ownership sync and eShop purchase import."
         ),
+        steps=(
+            "In your browser, open https://accounts.nintendo.com/portal/vgcs/ and "
+            "make sure you are signed in to your Nintendo account.",
+            "Click the Cookie Editor extension icon (install \"Cookie Editor\" from "
+            "your browser's extension store first if you don't have it).",
+            "Click Export (the export/copy icon) to copy all cookies as JSON.",
+            "Paste what was copied into the box below and click Save.",
+        ),
     ),
     "humble": IngestProvider(
         key="humble",
@@ -56,27 +71,63 @@ INGEST_PROVIDERS: dict[str, IngestProvider] = {
         setter_name="set_humble_session",
         export_url="https://www.humblebundle.com/",
         hint="Only the _simpleauth_sess cookie is strictly needed.",
+        steps=(
+            "In your browser, open https://www.humblebundle.com/ and make sure you "
+            "are signed in.",
+            "Click the Cookie Editor extension icon (install \"Cookie Editor\" first "
+            "if needed). The cookie that matters here is called _simpleauth_sess.",
+            "Click Export to copy all cookies as JSON.",
+            "Paste what was copied into the box below and click Save.",
+        ),
     ),
     "steam_refresh": IngestProvider(
         key="steam_refresh",
-        label="Steam refresh token",
+        label="Steam login (recommended)",
         setter_name="set_steam_refresh_session",
         export_url="https://login.steampowered.com/",
         hint=(
-            "After a 'remember me' login, export the steamRefresh_steam cookie "
-            "from login.steampowered.com — it mints fresh store cookies on demand "
-            "for ~200 days, so no more re-pasting when steamLoginSecure lapses."
+            "This is the recommended way to connect Steam. The token you paste lasts "
+            "about 200 days and refreshes itself, so you should not have to redo this "
+            "for months."
         ),
+        steps=(
+            "First, SIGN OUT of Steam in your browser: go to https://store.steampowered.com/, "
+            "click your account name at the top right, and choose \"Sign out\". This step "
+            "matters — the cookie we need is only created by a fresh sign-in.",
+            "Now go to https://store.steampowered.com/login/ and sign back in. IMPORTANT: "
+            "tick the \"Remember me\" checkbox BEFORE you click Sign in.",
+            "Once you are logged in, open a NEW browser tab and go to this exact address: "
+            "https://login.steampowered.com/  (the \"login\" address — not \"store\", not "
+            "\"steamcommunity\"). The page may look blank or redirect; that's fine.",
+            "Click the Cookie Editor extension icon (install \"Cookie Editor\" first if "
+            "needed). Look through the list for a cookie named steamRefresh_steam. If you "
+            "do NOT see it, you either skipped \"Remember me\" or you're on the wrong "
+            "address — go back to step 1 and try again.",
+            "Click Export to copy all the cookies as JSON, paste that into the box below, "
+            "and click Save.",
+        ),
+        required_cookie="steamRefresh_steam",
     ),
     "steam_store": IngestProvider(
         key="steam_store",
-        label="Steam store (legacy)",
+        label="Steam store cookies (legacy)",
         setter_name="set_steam_store_session",
         export_url="https://store.steampowered.com/account/",
         hint=(
-            "Legacy fallback (short-lived): steamLoginSecure is required, "
-            "sessionid recommended. Prefer provider=\"steam_refresh\"."
+            "Legacy fallback — these cookies expire after about a day and you'll have "
+            "to redo this often. Use the \"steam_refresh\" option instead if you can."
         ),
+        steps=(
+            "In your browser, open https://store.steampowered.com/account/ and make "
+            "sure you are signed in. Check the address bar says store.steampowered.com "
+            "— NOT steamcommunity.com. Steam uses different cookies for each, and only "
+            "the store one works here.",
+            "Click the Cookie Editor extension icon (install \"Cookie Editor\" first if "
+            "needed). Confirm you can see a cookie named steamLoginSecure in the list.",
+            "Click Export to copy all cookies as JSON.",
+            "Paste what was copied into the box below and click Save.",
+        ),
+        required_cookie="steamLoginSecure",
     ),
 }
 
@@ -182,6 +233,10 @@ _PAGE_STYLE = (
     "button{padding:.5rem 1.5rem;font-size:1rem}"
     ".error{color:#b00020}"
     ".note{color:#555;font-size:.9rem}"
+    "li{margin:.4rem 0}"
+    "code{background:#f2f2f2;padding:.1rem .3rem;border-radius:3px}"
+    ".callout{background:#fff8e1;border:1px solid #f0d060;border-radius:6px;"
+    "padding:.75rem 1rem;margin:1rem 0}"
 )
 
 
@@ -208,14 +263,22 @@ def _not_found_response() -> HTMLResponse:
 
 def _render_form_page(nonce: str, spec: IngestProvider, error: str | None = None) -> str:
     error_block = f'<p class="error">{html.escape(error)}</p>' if error else ""
+    steps = "".join(f"<li>{html.escape(step)}</li>" for step in spec.steps)
+    if spec.required_cookie:
+        callout = (
+            '<p class="callout">&#9888;&#65039; <strong>Before you paste:</strong> your export '
+            f"must contain a cookie named <code>{html.escape(spec.required_cookie)}</code>. "
+            "If it isn't in the list, you exported the wrong thing — re-read the steps above. "
+            "Saving without it will fail.</p>"
+        )
+    else:
+        callout = ""
     return (
         f"{error_block}"
-        f"<p>Store your <strong>{html.escape(spec.label)}</strong> session cookies.</p>"
-        "<ol>"
-        f"<li>Open <code>{html.escape(spec.export_url)}</code> in your browser, logged in.</li>"
-        '<li>Use the "Cookie Editor" extension: click its icon &rarr; Export &rarr; copy the JSON.</li>'
-        "<li>Paste the JSON below and submit.</li>"
-        "</ol>"
+        f"<p>Connect your <strong>{html.escape(spec.label)}</strong> session. "
+        "Follow these steps exactly:</p>"
+        f"<ol>{steps}</ol>"
+        f"{callout}"
         f'<p class="note">{html.escape(spec.hint)}</p>'
         f'<form method="post" action="/ingest/{html.escape(nonce)}" autocomplete="off">'
         '<textarea name="cookies" autocomplete="off" spellcheck="false" '

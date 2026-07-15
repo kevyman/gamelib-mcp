@@ -1305,6 +1305,16 @@ def _make_refresh_token(sub: str | None = None, exp: int | None = None) -> str:
     return f"eyJ0eXAiOiJKV1QifQ.{body}.sig"
 
 
+def _make_login_secure(audience: list[str], steamid: str = "76561198000000000") -> str:
+    """A steamLoginSecure cookie value (``steamid||<JWT>``) carrying an ``aud`` claim."""
+    import base64 as _b64
+
+    body = (
+        _b64.urlsafe_b64encode(json.dumps({"aud": audience}).encode()).rstrip(b"=").decode()
+    )
+    return f"{steamid}||eyJ0eXAiOiJKV1QifQ.{body}.sig"
+
+
 class SteamSessionMintTests(unittest.IsolatedAsyncioTestCase):
     def _write_refresh_token(self, tmp: str, token: str) -> str:
         path = os.path.join(tmp, "steam_refresh_token.json")
@@ -2021,6 +2031,53 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result, {"cookie_count": 1, "path": path})
                 # The saved token round-trips through the session module's loader.
                 self.assertEqual(steam_session._load_steam_refresh_token(), token)
+
+    async def test_set_steam_store_session_accepts_store_audience(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "steam.json")
+            value = _make_login_secure(["web:store"])
+            with patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}):
+                result = await admin.set_steam_store_session(
+                    json.dumps({"steamLoginSecure": value, "sessionid": "s1"})
+                )
+            self.assertEqual(result["cookie_count"], 2)
+            self.assertTrue(os.path.exists(path))
+
+    async def test_set_steam_store_session_rejects_wrong_domain_cookie(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "steam.json")
+            value = _make_login_secure(["web:community"])
+            with patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}):
+                with self.assertRaisesRegex(ToolError, "wrong Steam domain"):
+                    await admin.set_steam_store_session(
+                        json.dumps({"steamLoginSecure": value})
+                    )
+            # A known-bad cookie must never be written to disk.
+            self.assertFalse(os.path.exists(path))
+
+    async def test_set_steam_store_session_rejects_missing_login_secure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "steam.json")
+            with patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}):
+                with self.assertRaisesRegex(ToolError, "steamLoginSecure"):
+                    await admin.set_steam_store_session(
+                        json.dumps({"sessionid": "s1", "browserid": "b"})
+                    )
+            self.assertFalse(os.path.exists(path))
+
+    async def test_set_steam_refresh_session_rejects_missing_refresh_cookie(self):
+        # The bug that bit the owner: pasting a store/community export (no
+        # steamRefresh_steam) silently "saved" and then fell back to a dead cookie.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "steam_refresh_token.json")
+            with patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path}):
+                with self.assertRaisesRegex(ToolError, "steamRefresh_steam"):
+                    await admin.set_steam_refresh_session(
+                        json.dumps(
+                            {"steamLoginSecure": _make_login_secure(["web:store"])}
+                        )
+                    )
+            self.assertFalse(os.path.exists(path))
 
     async def test_set_nintendo_session_still_works_after_refactor(self):
         with tempfile.TemporaryDirectory() as tmp:

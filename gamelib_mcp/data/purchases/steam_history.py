@@ -56,9 +56,11 @@ _AJAX_MORE_URL = "https://store.steampowered.com/account/AjaxLoadMoreHistory/"
 _MAX_AJAX_CALLS = 50
 
 _AUTH_ERROR = (
-    "Steam store page request was not authenticated (steamLoginSecure cookie "
-    "missing or expired) — run create_session_ingest_link(provider=\"steam_store\") "
-    "and open the link to paste fresh cookies from store.steampowered.com."
+    "Steam store page request was not authenticated (the store session cookie is "
+    "missing, expired, or exported for the wrong Steam domain) — preferred fix: "
+    "create_session_ingest_link(provider=\"steam_refresh\") and paste the long-lived "
+    "steamRefresh_steam token from login.steampowered.com. Legacy fallback: "
+    "provider=\"steam_store\" with a fresh store.steampowered.com export."
 )
 
 _MONTHS = {

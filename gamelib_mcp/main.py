@@ -703,7 +703,8 @@ async def audit_steam_licenses(
     The owned-games API silently omits some retired/delisted apps the account
     still holds licenses for, so those games never get an ownership row. This
     audit reads the full license list via the stored Steam store session
-    (create_session_ingest_link(provider="steam_store")), diffs it against the
+    (create_session_ingest_link(provider="steam_refresh") — preferred; or the
+    legacy provider="steam_store"), diffs it against the
     library, and classifies
     each missing appid: live store apps of type "game" and retired apps
     SteamSpy can still name become owned Steam rows (flagged delisted=1 —
@@ -1397,7 +1398,8 @@ async def import_purchases(
       Humble Choice items get purchase_source "subscription".
     - "steam": Steam licenses + purchase history (store.steampowered.com)
       → steam. Needs a Steam store session — mint one with
-      create_session_ingest_link(provider="steam_store"). Cart totals are split evenly across the
+      create_session_ingest_link(provider="steam_refresh") (preferred; legacy
+      "steam_store"). Cart totals are split evenly across the
       cart's items; refunds, market/in-game transactions and gift purchases
       (bought for someone else) are skipped; Complimentary and Gift/Guest
       Pass licenses become price-0 records (purchase_source "free"/"gift").
@@ -1528,9 +1530,17 @@ async def create_session_ingest_link(provider: str) -> SessionIngestLinkResponse
     cookie file; verify afterwards with get_integration_status or by running
     the import.
 
-    provider: one of "nintendo" (accounts.nintendo.com — drives Switch
-    ownership AND eShop purchases), "humble", "steam_store". (Parental
-    Controls playtime is not cookie-based — use set_nintendo_pctl_session.)
+    provider: one of
+    - "nintendo" — accounts.nintendo.com; drives Switch ownership AND eShop purchases
+    - "humble" — humblebundle.com purchase history
+    - "steam_refresh" — PREFERRED for Steam. A long-lived (~200-day)
+      steamRefresh_steam token that mints fresh store cookies on demand, so it
+      never needs re-pasting. ALWAYS use this for Steam (license audit + purchase
+      import) unless it has already been tried and failed.
+    - "steam_store" — LEGACY Steam fallback only. Short-lived steamLoginSecure
+      store cookies that lapse in ~a day and must be re-pasted. Do not reach for
+      this first; use "steam_refresh".
+    (Parental Controls playtime is not cookie-based — use set_nintendo_pctl_session.)
 
     The link expires in 15 minutes, works exactly once, and is invalidated
     by a server restart; each call mints a fresh link. Without
