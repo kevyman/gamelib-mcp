@@ -159,9 +159,16 @@ def mint_ingest_link(provider: str) -> dict:
 # Only cookie counts, file paths, provider labels, and _save_session_cookies
 # ToolError messages (which never contain cookie values) may appear in HTML.
 
+# referrer-policy is "same-origin", NOT "no-referrer": the paste form POSTs back
+# to this same server, and the HttpSecurityMiddleware Origin allowlist gates that
+# POST. Under "no-referrer" the browser sends `Origin: null` on a form navigation
+# (Fetch spec), which isn't allowlisted, so the submission would be rejected with
+# "Forbidden". "same-origin" makes the browser send the page's real Origin (which
+# oauth mode auto-allowlists from MCP_PUBLIC_BASE_URL) while still never leaking
+# the nonce-bearing URL as a Referer to any cross-origin destination.
 _INGEST_HEADERS = {
     "cache-control": "no-store",
-    "referrer-policy": "no-referrer",
+    "referrer-policy": "same-origin",
     "x-content-type-options": "nosniff",
     "content-security-policy": (
         "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'"

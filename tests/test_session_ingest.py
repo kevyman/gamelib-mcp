@@ -132,7 +132,10 @@ class IngestRouteTests(SessionIngestTestCase):
         self.assertIn('name="cookies"', body)
         self.assertIn('autocomplete="off"', body)
         self.assertEqual(response.headers["cache-control"], "no-store")
-        self.assertEqual(response.headers["referrer-policy"], "no-referrer")
+        # same-origin (not no-referrer): a no-referrer form page makes the browser
+        # POST with Origin: null, which the security middleware rejects; same-origin
+        # sends the real, allowlisted Origin without leaking the nonce cross-origin.
+        self.assertEqual(response.headers["referrer-policy"], "same-origin")
 
     async def test_get_unknown_nonce_is_generic_404(self) -> None:
         response = await session_ingest.handle_ingest_request(_get_request("nope"))
