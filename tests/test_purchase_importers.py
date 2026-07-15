@@ -2065,6 +2065,41 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
                     )
             self.assertFalse(os.path.exists(path))
 
+    async def test_set_steam_refresh_session_accepts_bare_token_value(self):
+        # The user pastes the raw cookie value from DevTools, no JSON formatting.
+        token = _make_refresh_token(sub="76561198000000000", exp=9999999999)
+        raw = f"76561198000000000||{token}"  # steamRefresh_steam is steamid||JWT
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "steam_refresh_token.json")
+            with patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path}):
+                result = await admin.set_steam_refresh_session(raw)
+                self.assertEqual(result["cookie_count"], 1)
+                with open(path, encoding="utf-8") as f:
+                    self.assertEqual(json.load(f), {"steamRefresh_steam": raw})
+                # The loader hands callers the bare JWT (steamid|| prefix stripped),
+                # which is what finalizelogin's nonce requires.
+                self.assertEqual(steam_session._load_steam_refresh_token(), token)
+
+    async def test_load_steam_refresh_token_strips_steamid_prefix(self):
+        token = _make_refresh_token(sub="76561198000000000", exp=9999999999)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "steam_refresh_token.json")
+            with patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path}):
+                # URL-encoded separator (%7C%7C) and object form both normalize.
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump({"steamRefresh_steam": f"76561198000000000%7C%7C{token}"}, f)
+                self.assertEqual(steam_session._load_steam_refresh_token(), token)
+
+    async def test_set_steam_store_session_accepts_bare_login_secure(self):
+        raw = _make_login_secure(["web:store"])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "steam.json")
+            with patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}):
+                result = await admin.set_steam_store_session(raw)
+                self.assertEqual(result["cookie_count"], 1)
+                with open(path, encoding="utf-8") as f:
+                    self.assertEqual(json.load(f), {"steamLoginSecure": raw})
+
     async def test_set_steam_refresh_session_rejects_missing_refresh_cookie(self):
         # The bug that bit the owner: pasting a store/community export (no
         # steamRefresh_steam) silently "saved" and then fell back to a dead cookie.
