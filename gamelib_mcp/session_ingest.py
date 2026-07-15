@@ -57,12 +57,26 @@ INGEST_PROVIDERS: dict[str, IngestProvider] = {
         export_url="https://www.humblebundle.com/",
         hint="Only the _simpleauth_sess cookie is strictly needed.",
     ),
+    "steam_refresh": IngestProvider(
+        key="steam_refresh",
+        label="Steam refresh token",
+        setter_name="set_steam_refresh_session",
+        export_url="https://login.steampowered.com/",
+        hint=(
+            "After a 'remember me' login, export the steamRefresh_steam cookie "
+            "from login.steampowered.com — it mints fresh store cookies on demand "
+            "for ~200 days, so no more re-pasting when steamLoginSecure lapses."
+        ),
+    ),
     "steam_store": IngestProvider(
         key="steam_store",
-        label="Steam store",
+        label="Steam store (legacy)",
         setter_name="set_steam_store_session",
         export_url="https://store.steampowered.com/account/",
-        hint="steamLoginSecure is required; sessionid is recommended too.",
+        hint=(
+            "Legacy fallback (short-lived): steamLoginSecure is required, "
+            "sessionid recommended. Prefer provider=\"steam_refresh\"."
+        ),
     ),
 }
 
