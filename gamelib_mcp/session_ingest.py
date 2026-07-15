@@ -50,17 +50,6 @@ INGEST_PROVIDERS: dict[str, IngestProvider] = {
             "ownership sync and eShop purchase import."
         ),
     ),
-    "nintendo_ec": IngestProvider(
-        key="nintendo_ec",
-        label="Nintendo eShop (legacy ~1h fallback)",
-        setter_name="set_nintendo_ec_session",
-        export_url="https://ec.nintendo.com/my/transactions/",
-        hint=(
-            "The export must include the __Secure-next-auth.session-token "
-            "cookie. Prefer the 'nintendo' provider — this session expires "
-            "in about an hour."
-        ),
-    ),
     "humble": IngestProvider(
         key="humble",
         label="Humble Bundle",

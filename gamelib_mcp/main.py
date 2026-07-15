@@ -1524,13 +1524,13 @@ async def create_session_ingest_link(provider: str) -> SessionIngestLinkResponse
     Preferred flow when the user doesn't want cookies in the conversation:
     call this with the provider, give the user the returned URL, and have
     them open it in a browser, paste their Cookie Editor JSON export there,
-    and submit. Saves to the same file as the matching set_*_session tool;
-    verify afterwards with get_integration_status or by running the import.
+    and submit. The pasted cookies are saved server-side to the provider's
+    cookie file; verify afterwards with get_integration_status or by running
+    the import.
 
-    provider: one of "nintendo" (accounts.nintendo.com — Switch ownership +
-    eShop purchases), "nintendo_ec" (legacy ~1h eShop fallback), "humble",
-    "steam_store". (Parental Controls playtime is not cookie-based — use
-    set_nintendo_pctl_session.)
+    provider: one of "nintendo" (accounts.nintendo.com — drives Switch
+    ownership AND eShop purchases), "humble", "steam_store". (Parental
+    Controls playtime is not cookie-based — use set_nintendo_pctl_session.)
 
     The link expires in 15 minutes, works exactly once, and is invalidated
     by a server restart; each call mints a fresh link. Without

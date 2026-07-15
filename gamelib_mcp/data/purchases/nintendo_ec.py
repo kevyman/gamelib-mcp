@@ -43,10 +43,7 @@ Then, as before:
 Configure with ``create_session_ingest_link(provider="nintendo")`` (open the
 link and paste your accounts.nintendo.com cookies while logged in) — the same
 session used for Switch ownership, so eShop purchase import needs no extra
-setup. The legacy ``provider="nintendo_ec"`` path (a raw ec.nintendo.com
-session-token, valid ≤1h) still works as a fallback when no account cookies are
-stored, but has to be re-pasted every hour. The longer-lived mobile
-``session_token`` flow used by
+setup. The longer-lived mobile ``session_token`` flow used by
 ``nintendo_pctl.py`` is NOT available for this web OAuth client.
 
 Response schema (``data.account.transactionHistories.transactionHistories[]``):
@@ -95,7 +92,6 @@ _SIGNIN_URL = f"{_BASE_URL}/api/auth/signin/nintendo"
 _CALLBACK_URL = f"{_BASE_URL}/my/transactions/1"
 _GRAPHQL_URL = "https://wb.lp1.savanna.srv.nintendo.net/graphql"
 _SESSION_COOKIE = "__Secure-next-auth.session-token"
-_DEFAULT_COOKIES_FILENAME = "nintendo_ec_cookies.json"
 # The eShop importer shares the one Nintendo Account session that VGCS ownership
 # already stores (data/nintendo.py, create_session_ingest_link provider="nintendo")
 # — same accounts.nintendo.com login cookies, same file. No separate export.
@@ -212,13 +208,6 @@ def _load_account_cookies() -> dict[str, str] | None:
     extra to export.
     """
     return _load_cookies(_ACCOUNT_COOKIES_ENV, _ACCOUNT_COOKIES_FILENAME, "Nintendo Account")
-
-
-def _load_ec_cookies() -> dict[str, str] | None:
-    """Load the legacy ec.nintendo.com session cookies (raw session-token, ≤1h)."""
-    return _load_cookies(
-        "NINTENDO_EC_COOKIES_FILE", _DEFAULT_COOKIES_FILENAME, "Nintendo eShop"
-    )
 
 
 async def _establish_ec_session(
@@ -462,18 +451,16 @@ async def fetch_eshop_purchases(
 ) -> tuple[list[PurchaseRecord], list[dict]]:
     """Fetch the full eShop transaction history as purchase records.
 
-    Auth resolves in one of two ways: preferred is a stored accounts.nintendo.com
-    session, from which :func:`_establish_ec_session` mints a fresh eShop session
-    on the spot; the fallback is a legacy raw ec.nintendo.com session-token used
-    directly (valid ≤1h). Then paginates the Savanna GraphQL API (?limit=50&
-    offset=N) until a page returns fewer than the limit (or the reported total is
-    reached), hard-capped at _MAX_PAGES. Raises RuntimeError on missing/stale
-    auth; the orchestrator catches per source. ``transport`` exists for tests
-    (httpx.MockTransport) — production callers pass nothing.
+    Auth is a stored accounts.nintendo.com session, from which
+    :func:`_establish_ec_session` mints a fresh eShop session on the spot. Then
+    paginates the Savanna GraphQL API (?limit=50&offset=N) until a page returns
+    fewer than the limit (or the reported total is reached), hard-capped at
+    _MAX_PAGES. Raises RuntimeError on missing/stale auth; the orchestrator
+    catches per source. ``transport`` exists for tests (httpx.MockTransport) —
+    production callers pass nothing.
     """
     accounts_cookies = _load_account_cookies()
-    ec_cookies = _load_ec_cookies()
-    if not accounts_cookies and not (ec_cookies and _has_session_cookie(ec_cookies)):
+    if not accounts_cookies:
         raise RuntimeError(
             "No Nintendo Account session found — run "
             'create_session_ingest_link(provider="nintendo") and open the link to '
@@ -494,14 +481,12 @@ async def fetch_eshop_purchases(
     )
 
     raw_transactions: list = []
-    # Legacy path seeds the raw session-token; the accounts path seeds nothing
-    # here and mints the session via the SSO handshake below.
-    seed_cookies = {} if accounts_cookies else (ec_cookies or {})
     async with httpx.AsyncClient(
-        cookies=seed_cookies, follow_redirects=True, timeout=30, transport=transport
+        follow_redirects=True, timeout=30, transport=transport
     ) as client:
-        if accounts_cookies:
-            await _establish_ec_session(client, accounts_cookies)
+        # The accounts session seeds nothing here — _establish_ec_session mints a
+        # fresh eShop session via the silent SSO handshake.
+        await _establish_ec_session(client, accounts_cookies)
         id_token, country, language = await _fetch_id_token(client)
 
         headers = {

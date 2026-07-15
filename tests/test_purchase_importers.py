@@ -309,59 +309,31 @@ _SESSION_OK = {"idToken": "tok-xyz", "country": "BE", "localeInfo": {"language":
 
 class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        # Neutralize the shared Nintendo Account cookie path by default so
-        # legacy-ec tests take the fallback path; account tests override this key.
+        # No ambient Nintendo Account cookie by default — each test points
+        # NINTENDO_COOKIES_FILE at its own temp export.
         env = patch.dict(os.environ, {"NINTENDO_COOKIES_FILE": "/nonexistent/default-acc.json"})
         env.start()
         self.addCleanup(env.stop)
 
-    def _write_cookies(self, tmp: str, cookies: dict | None = None) -> str:
-        path = os.path.join(tmp, "ec_cookies.json")
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(cookies or {"__Secure-next-auth.session-token": "sess"}, f)
-        return path
-
-    async def test_missing_cookie_file_raises_clear_error(self):
-        with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": "/nonexistent/ec.json"}):
-            with self.assertRaisesRegex(RuntimeError, r"create_session_ingest_link\b"):
-                await nintendo_ec.fetch_eshop_purchases()
-
-    async def test_missing_session_token_cookie_raises(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = self._write_cookies(tmp, {"NASID": "abc"})
-            with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
-                # An ec export without the session-token cookie is not a usable
-                # legacy session, and no accounts cookies exist → accounts hint.
-                with self.assertRaisesRegex(RuntimeError, r"create_session_ingest_link\b"):
-                    await nintendo_ec.fetch_eshop_purchases()
-
-    async def test_chunked_session_cookie_is_accepted(self):
-        # NextAuth splits large session cookies into .0/.1 chunks; the export
-        # then carries those instead of the unsuffixed name. The guard must not
-        # reject it — the chunks are forwarded and reassembled server-side.
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/api/auth/session":
-                return httpx.Response(200, json=_SESSION_OK)
-            return httpx.Response(200, json=_ec_envelope([]))
-
-        chunked = {
-            "__Secure-next-auth.session-token.0": "part0",
-            "__Secure-next-auth.session-token.1": "part1",
-        }
-        with tempfile.TemporaryDirectory() as tmp:
-            path = self._write_cookies(tmp, chunked)
-            with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
-                records, _ = await nintendo_ec.fetch_eshop_purchases(
-                    transport=httpx.MockTransport(handler)
-                )
-        self.assertEqual(records, [])
+    def test_has_session_cookie_accepts_unsuffixed_and_chunked(self):
+        # NextAuth splits a large session cookie into .0/.1 chunks; the jar check
+        # in _establish_ec_session must accept either the unsuffixed name or any
+        # chunk (browsers send every chunk; the server reassembles them).
+        self.assertTrue(
+            nintendo_ec._has_session_cookie({nintendo_ec._SESSION_COOKIE: "s"})
+        )
+        self.assertTrue(
+            nintendo_ec._has_session_cookie({
+                f"{nintendo_ec._SESSION_COOKIE}.0": "a",
+                f"{nintendo_ec._SESSION_COOKIE}.1": "b",
+            })
+        )
+        self.assertFalse(nintendo_ec._has_session_cookie({"NASID": "x"}))
 
     async def test_fetches_and_parses_real_response(self):
         captured: dict = {}
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/api/auth/session":
-                return httpx.Response(200, json=_SESSION_OK)
+        def on_graphql(request: httpx.Request) -> httpx.Response:
             captured["request"] = request
             return httpx.Response(
                 200,
@@ -369,12 +341,9 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
                 headers={"content-type": "application/graphql-response+json"},
             )
 
-        with tempfile.TemporaryDirectory() as tmp:
-            path = self._write_cookies(tmp)
-            with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
-                records, skipped = await nintendo_ec.fetch_eshop_purchases(
-                    transport=httpx.MockTransport(handler)
-                )
+        records, skipped = await self._fetch_via_accounts(
+            self._accounts_sso_handler(on_graphql=on_graphql)
+        )
 
         self.assertEqual([r.title for r in records][:1], ["Dead Cells"])
         self.assertEqual(len(records), 4)
@@ -407,88 +376,70 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
 
         offsets: list[int] = []
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/api/auth/session":
-                return httpx.Response(200, json=_SESSION_OK)
+        def on_graphql(request: httpx.Request) -> httpx.Response:
             offset = json.loads(request.url.params["variables"])["offset"]
             offsets.append(offset)
             rows = [_tx(offset + i) for i in range(min(50, 53 - offset))]
             return httpx.Response(200, json=_ec_envelope(rows, total=53))
 
-        with tempfile.TemporaryDirectory() as tmp:
-            path = self._write_cookies(tmp)
-            with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
-                records, skipped = await nintendo_ec.fetch_eshop_purchases(
-                    transport=httpx.MockTransport(handler)
-                )
+        records, skipped = await self._fetch_via_accounts(
+            self._accounts_sso_handler(on_graphql=on_graphql)
+        )
 
         self.assertEqual(offsets, [0, 50])
         self.assertEqual(len(records), 53)
         self.assertEqual(skipped, [])
 
     async def test_expired_session_without_token_raises(self):
-        def handler(request: httpx.Request) -> httpx.Response:
+        def on_session(request: httpx.Request) -> httpx.Response:
             # An expired session returns 200 with an empty user / no idToken.
             return httpx.Response(200, json={"user": {}})
 
-        with tempfile.TemporaryDirectory() as tmp:
-            path = self._write_cookies(tmp)
-            with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(RuntimeError, r"create_session_ingest_link\b"):
-                    await nintendo_ec.fetch_eshop_purchases(
-                        transport=httpx.MockTransport(handler)
-                    )
+        with self.assertRaisesRegex(RuntimeError, r"create_session_ingest_link\b"):
+            await self._fetch_via_accounts(
+                self._accounts_sso_handler(on_session=on_session)
+            )
 
     async def test_session_auth_failure_status_raises(self):
-        def handler(request: httpx.Request) -> httpx.Response:
+        def on_session(request: httpx.Request) -> httpx.Response:
             return httpx.Response(403, json={"error": "forbidden"})
 
-        with tempfile.TemporaryDirectory() as tmp:
-            path = self._write_cookies(tmp)
-            with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(RuntimeError, r"create_session_ingest_link\b"):
-                    await nintendo_ec.fetch_eshop_purchases(
-                        transport=httpx.MockTransport(handler)
-                    )
+        with self.assertRaisesRegex(RuntimeError, r"create_session_ingest_link\b"):
+            await self._fetch_via_accounts(
+                self._accounts_sso_handler(on_session=on_session)
+            )
 
-    async def test_html_login_redirect_raises(self):
-        def handler(request: httpx.Request) -> httpx.Response:
+    async def test_html_login_session_raises(self):
+        def on_session(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
                 200,
                 text="<html><body>Log in to your Nintendo Account</body></html>",
                 headers={"content-type": "text/html; charset=utf-8"},
             )
 
-        with tempfile.TemporaryDirectory() as tmp:
-            path = self._write_cookies(tmp)
-            with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(RuntimeError, r"create_session_ingest_link\b"):
-                    await nintendo_ec.fetch_eshop_purchases(
-                        transport=httpx.MockTransport(handler)
-                    )
+        with self.assertRaisesRegex(RuntimeError, r"create_session_ingest_link\b"):
+            await self._fetch_via_accounts(
+                self._accounts_sso_handler(on_session=on_session)
+            )
 
     async def test_graphql_error_payload_raises(self):
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/api/auth/session":
-                return httpx.Response(200, json=_SESSION_OK)
+        def on_graphql(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"errors": [{"message": "INVALID_PARAM"}]})
 
-        with tempfile.TemporaryDirectory() as tmp:
-            path = self._write_cookies(tmp)
-            with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(RuntimeError, "GraphQL error"):
-                    await nintendo_ec.fetch_eshop_purchases(
-                        transport=httpx.MockTransport(handler)
-                    )
+        with self.assertRaisesRegex(RuntimeError, "GraphQL error"):
+            await self._fetch_via_accounts(
+                self._accounts_sso_handler(on_graphql=on_graphql)
+            )
 
-    # ── Accounts SSO re-auth path (the preferred, long-lived credential) ──
+    # ── Accounts SSO re-auth path (the only, long-lived credential) ──
 
-    def _accounts_sso_handler(self, *, expired: bool = False, on_graphql=None):
+    def _accounts_sso_handler(self, *, expired: bool = False, on_graphql=None, on_session=None):
         """MockTransport handler replaying the browser's silent OAuth handshake.
 
         csrf → signin → authorize (302 → callback or /login) → callback (sets a
         fresh session-token) → transactions → session → graphql. ``expired`` makes
-        authorize bounce to accounts.nintendo.com/login (dead account session).
+        authorize bounce to accounts.nintendo.com/login (dead account session);
+        ``on_session``/``on_graphql`` override the session and GraphQL responses.
         """
         def handler(request: httpx.Request) -> httpx.Response:
             host, path = request.url.host, request.url.path
@@ -520,6 +471,8 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
             if host == "ec.nintendo.com" and path == "/my/transactions/1":
                 return httpx.Response(200, text="<html>ok</html>", headers={"content-type": "text/html"})
             if host == "ec.nintendo.com" and path == "/api/auth/session":
+                if on_session is not None:
+                    return on_session(request)
                 return httpx.Response(200, json=_SESSION_OK)
             if on_graphql is not None:
                 return on_graphql(request)
@@ -533,27 +486,15 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
             json.dump({"NASID": "s", "NATID": "t", "NAID": "id"}, f)
         return path
 
-    async def test_accounts_sso_mints_session_and_fetches(self):
-        captured: dict = {}
-
-        def on_graphql(request: httpx.Request) -> httpx.Response:
-            captured["request"] = request
-            return httpx.Response(200, json=_ec_envelope(_ec_transactions_fixture()))
-
+    async def _fetch_via_accounts(self, handler):
+        """Write an accounts.nintendo.com export, point NINTENDO_COOKIES_FILE at
+        it, and run the eShop importer against ``handler``."""
         with tempfile.TemporaryDirectory() as tmp:
             acc = self._write_accounts_cookies(tmp)
-            with patch.dict(os.environ, {
-                "NINTENDO_COOKIES_FILE": acc,
-                "NINTENDO_EC_COOKIES_FILE": "/nonexistent/ec.json",
-            }):
-                records, skipped = await nintendo_ec.fetch_eshop_purchases(
-                    transport=httpx.MockTransport(self._accounts_sso_handler(on_graphql=on_graphql))
+            with patch.dict(os.environ, {"NINTENDO_COOKIES_FILE": acc}):
+                return await nintendo_ec.fetch_eshop_purchases(
+                    transport=httpx.MockTransport(handler)
                 )
-
-        self.assertEqual(len(records), 4)
-        # The Savanna call carried the idToken the minted session produced.
-        variables = json.loads(captured["request"].url.params["variables"])
-        self.assertEqual(variables["idToken"], "tok-xyz")
 
     async def test_account_session_scoped_off_savanna_and_reaches_authorize(self):
         # The long-lived account cookies must reach the accounts.nintendo.com
@@ -566,59 +507,18 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
             sent[request.url.host] = request.headers.get("cookie", "")
             return base(request)
 
-        with tempfile.TemporaryDirectory() as tmp:
-            acc = self._write_accounts_cookies(tmp)
-            with patch.dict(os.environ, {
-                "NINTENDO_COOKIES_FILE": acc,
-                "NINTENDO_EC_COOKIES_FILE": "/nonexistent/ec.json",
-            }):
-                await nintendo_ec.fetch_eshop_purchases(
-                    transport=httpx.MockTransport(handler)
-                )
+        await self._fetch_via_accounts(handler)
         self.assertIn("NASID", sent.get("accounts.nintendo.com", ""))
         self.assertNotIn("NASID", sent.get("wb.lp1.savanna.srv.nintendo.net", ""))
 
     async def test_accounts_session_expired_raises_reexport(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            acc = self._write_accounts_cookies(tmp)
-            with patch.dict(os.environ, {
-                "NINTENDO_COOKIES_FILE": acc,
-                "NINTENDO_EC_COOKIES_FILE": "/nonexistent/ec.json",
-            }):
-                with self.assertRaisesRegex(RuntimeError, "accounts.nintendo.com"):
-                    await nintendo_ec.fetch_eshop_purchases(
-                        transport=httpx.MockTransport(self._accounts_sso_handler(expired=True))
-                    )
+        with self.assertRaisesRegex(RuntimeError, "accounts.nintendo.com"):
+            await self._fetch_via_accounts(self._accounts_sso_handler(expired=True))
 
     async def test_no_session_configured_raises_accounts_hint(self):
-        with patch.dict(os.environ, {
-            "NINTENDO_COOKIES_FILE": "/nonexistent/acc.json",
-            "NINTENDO_EC_COOKIES_FILE": "/nonexistent/ec.json",
-        }):
+        with patch.dict(os.environ, {"NINTENDO_COOKIES_FILE": "/nonexistent/acc.json"}):
             with self.assertRaisesRegex(RuntimeError, r"create_session_ingest_link\b"):
                 await nintendo_ec.fetch_eshop_purchases()
-
-    async def test_accounts_path_preferred_over_legacy_ec(self):
-        # When both are present, the SSO handshake runs (csrf is hit); the legacy
-        # raw session-token is not used directly.
-        hits: list[str] = []
-        base = self._accounts_sso_handler()
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            hits.append(request.url.path)
-            return base(request)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            acc = self._write_accounts_cookies(tmp)
-            ec = self._write_cookies(tmp)
-            with patch.dict(os.environ, {
-                "NINTENDO_COOKIES_FILE": acc,
-                "NINTENDO_EC_COOKIES_FILE": ec,
-            }):
-                await nintendo_ec.fetch_eshop_purchases(
-                    transport=httpx.MockTransport(handler)
-                )
-        self.assertIn("/api/auth/csrf", hits)
 
 
 class HumbleParserTests(unittest.TestCase):
@@ -1830,18 +1730,6 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_set_humble_session_rejects_invalid_json(self):
         with self.assertRaisesRegex(ToolError, "Invalid JSON"):
             await admin.set_humble_session("{not json")
-
-    async def test_set_nintendo_ec_session_writes_to_ec_path(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "ec.json")
-            with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
-                result = await admin.set_nintendo_ec_session(
-                    json.dumps({"NASID": "token"})
-                )
-            self.assertEqual(result, {"cookie_count": 1, "path": path})
-            # The saved file round-trips through the eShop fetcher's loader.
-            with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
-                self.assertEqual(nintendo_ec._load_ec_cookies(), {"NASID": "token"})
 
     async def test_nintendo_session_shared_between_ownership_and_eshop(self):
         # The one accounts.nintendo.com session set_nintendo_session stores is the
