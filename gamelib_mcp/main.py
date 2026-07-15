@@ -46,7 +46,6 @@ from .tools.models import (
     IntegrationStatusResponse,
     LibraryStatsResponse,
     MergeGamesResponse,
-    NintendoSessionResponse,
     PaginatedGamesResponse,
     PlatformBreakdownResponse,
     PlayHistoryResponse,
@@ -59,6 +58,7 @@ from .tools.models import (
     SearchGamesBatchResponse,
     SeriesBreakdownResponse,
     SeriesGapsResponse,
+    SessionIngestLinkResponse,
     SetAcquisitionResponse,
     SetAcquisitionsBatchResponse,
     SetPlaytimeResponse,
@@ -703,7 +703,8 @@ async def audit_steam_licenses(
     The owned-games API silently omits some retired/delisted apps the account
     still holds licenses for, so those games never get an ownership row. This
     audit reads the full license list via the stored Steam store session
-    (set_steam_store_session), diffs it against the library, and classifies
+    (create_session_ingest_link(provider="steam_store")), diffs it against the
+    library, and classifies
     each missing appid: live store apps of type "game" and retired apps
     SteamSpy can still name become owned Steam rows (flagged delisted=1 —
     cleared automatically if the app ever reappears in the owned-games API);
@@ -1380,7 +1381,8 @@ async def import_purchases(
 
     sources defaults to all registered importers; currently:
     - "eshop": Nintendo eShop transactions (ec.nintendo.com) → switch2.
-      Needs session cookies from set_nintendo_ec_session. Refunds and
+      Needs a stored Nintendo session — mint one with
+      create_session_ingest_link(provider="nintendo"). Refunds and
       consumables are skipped (reported in skipped); free downloads are
       recorded with price 0.
     - "gog": GOG order history (embed.gog.com) → gog. Reuses the
@@ -1388,13 +1390,14 @@ async def import_purchases(
       fallback) — run `lgogdownloader --login` if it errors. Per-product
       prices are preferred; when only an order total exists it is split
       evenly across the order's products. Giveaways get price 0.
-    - "humble": Humble Bundle orders → steam/gog/other by key type. Needs
-      the _simpleauth_sess cookie from set_humble_session. Bundle prices are
+    - "humble": Humble Bundle orders → steam/gog/other by key type. Needs a
+      Humble session — mint one with create_session_ingest_link(provider="humble").
+      Bundle prices are
       split evenly across the bundle's games (bundle_name groups them);
       Humble Choice items get purchase_source "subscription".
     - "steam": Steam licenses + purchase history (store.steampowered.com)
-      → steam. Needs the steamLoginSecure cookie from
-      set_steam_store_session. Cart totals are split evenly across the
+      → steam. Needs a Steam store session — mint one with
+      create_session_ingest_link(provider="steam_store"). Cart totals are split evenly across the
       cart's items; refunds, market/in-game transactions and gift purchases
       (bought for someone else) are skipped; Complimentary and Gift/Guest
       Pass licenses become price-0 records (purchase_source "free"/"gift").
@@ -1512,101 +1515,30 @@ async def delete_game(
     return await _delete(name, game_id, confirm)
 
 
-@mcp.tool(annotations=MUTATION_TOOL)
-async def set_nintendo_session(cookies: str) -> NintendoSessionResponse:
+@mcp.tool(annotations=NON_IDEMPOTENT_MUTATION_TOOL)
+async def create_session_ingest_link(provider: str) -> SessionIngestLinkResponse:
     """
-    Store Nintendo Account session cookies (accounts.nintendo.com).
+    Mint a single-use browser link for entering session cookies WITHOUT
+    pasting them into the chat.
 
-    This one login session drives BOTH Switch ownership sync (the full digital
-    library, via VGCS) AND eShop purchase-history import (import_purchases
-    sources=["eshop"], via a silent OAuth handshake) — no separate export for
-    purchases. No playtime through this source (use set_nintendo_pctl_session for
-    playtime). Returns a session storage status dictionary.
+    Preferred flow when the user doesn't want cookies in the conversation:
+    call this with the provider, give the user the returned URL, and have
+    them open it in a browser, paste their Cookie Editor JSON export there,
+    and submit. The pasted cookies are saved server-side to the provider's
+    cookie file; verify afterwards with get_integration_status or by running
+    the import.
 
-    How to get cookies:
-    1. Open https://accounts.nintendo.com/portal/vgcs/ (stay logged in)
-    2. Install the "Cookie Editor" browser extension
-    3. Click the extension → Export → copy the JSON
-    4. Pass that JSON string here
+    provider: one of "nintendo" (accounts.nintendo.com — drives Switch
+    ownership AND eShop purchases), "humble", "steam_store". (Parental
+    Controls playtime is not cookie-based — use set_nintendo_pctl_session.)
 
-    Cookies are saved to NINTENDO_COOKIES_FILE (defaults to nintendo_cookies.json
-    beside the database).
+    The link expires in 15 minutes, works exactly once, and is invalidated
+    by a server restart; each call mints a fresh link. Without
+    MCP_PUBLIC_BASE_URL set (local disabled-auth mode) the URL falls back to
+    http://localhost:PORT and only works from the server's own machine.
     """
-    from .tools.admin import set_nintendo_session as _set_session
-    return await _set_session(cookies)
-
-
-@mcp.tool(annotations=MUTATION_TOOL)
-async def set_nintendo_ec_session(cookies: str) -> NintendoSessionResponse:
-    """
-    Store a raw ec.nintendo.com session-token (legacy, ~1h) for eShop imports.
-
-    Fallback for import_purchases(sources=["eshop"]) when no Nintendo Account
-    session is stored. The __Secure-next-auth.session-token this captures expires
-    in about an hour, so it must be re-pasted before each import — prefer
-    set_nintendo_session, whose accounts.nintendo.com login lasts weeks-to-months
-    and also drives Switch ownership. The export MUST include
-    __Secure-next-auth.session-token.
-
-    How to get cookies:
-    1. Open https://ec.nintendo.com/my/transactions/ (stay logged in)
-    2. Install the "Cookie Editor" browser extension
-    3. Click the extension → Export → copy the JSON (export everything)
-    4. Pass that JSON string here (object or Cookie Editor array format)
-
-    Cookies are saved to NINTENDO_EC_COOKIES_FILE
-    (defaults to nintendo_ec_cookies.json beside the database).
-    """
-    from .tools.admin import set_nintendo_ec_session as _set_ec_session
-    return await _set_ec_session(cookies)
-
-
-@mcp.tool(annotations=MUTATION_TOOL)
-async def set_humble_session(cookies: str) -> NintendoSessionResponse:
-    """
-    Store Humble Bundle session cookies for purchase-history import.
-
-    Enables import_purchases(sources=["humble"]) to read your Humble order
-    history (bundles, prices, Humble Choice months). Only the
-    _simpleauth_sess cookie is strictly needed, but storing the full
-    humblebundle.com cookie export is fine.
-
-    How to get cookies:
-    1. Open https://www.humblebundle.com/ (stay logged in)
-    2. Install the "Cookie Editor" browser extension
-    3. Click the extension → Export → copy the JSON
-    4. Pass that JSON string here (object or Cookie Editor array format)
-
-    Cookies are saved to HUMBLE_COOKIES_FILE (defaults to humble_cookies.json
-    beside the database).
-    """
-    from .tools.admin import set_humble_session as _set_humble
-    return await _set_humble(cookies)
-
-
-@mcp.tool(annotations=MUTATION_TOOL)
-async def set_steam_store_session(cookies: str) -> NintendoSessionResponse:
-    """
-    Store Steam store session cookies for purchase-history import.
-
-    Enables import_purchases(sources=["steam"]) to read your Steam licenses
-    and purchase history pages (acquisition dates, prices, free/gift
-    licenses). Only the steamLoginSecure cookie is strictly required;
-    sessionid is recommended too (used by the history load-more endpoint).
-    These are browser cookies from store.steampowered.com — unrelated to
-    STEAM_API_KEY.
-
-    How to get cookies:
-    1. Open https://store.steampowered.com/account/ (stay logged in)
-    2. Install the "Cookie Editor" browser extension
-    3. Click the extension → Export → copy the JSON
-    4. Pass that JSON string here (object or Cookie Editor array format)
-
-    Cookies are saved to STEAM_STORE_COOKIES_FILE
-    (defaults to steam_store_cookies.json beside the database).
-    """
-    from .tools.admin import set_steam_store_session as _set_steam_store
-    return await _set_steam_store(cookies)
+    from .tools.admin import create_session_ingest_link as _create_link
+    return await _create_link(provider)
 
 
 @mcp.tool(annotations=MUTATION_TOOL)

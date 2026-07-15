@@ -338,9 +338,10 @@ class GetWishlistResponse(FlexibleModel):
     items: list[WishlistItem]
 
 
-class NintendoSessionResponse(FlexibleModel):
-    cookie_count: int
-    path: str
+class SessionIngestLinkResponse(FlexibleModel):
+    url: str
+    provider: str
+    expires_in_minutes: int
 
 
 class UpdateGameResponse(FlexibleModel):

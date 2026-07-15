@@ -27,7 +27,8 @@ Outcomes persist per-appid in the ``steam_license_audit`` meta key, so every
 appid is classified exactly once across runs; each call probes at most
 ``limit`` new appids through the shared, quota-budgeted store gate and reports how
 many remain. Auth reuses the ``steamLoginSecure`` session already stored for
-the purchase importer (``set_steam_store_session``) — no new credential.
+the purchase importer (``create_session_ingest_link(provider="steam_store")``) —
+no new credential.
 
 The inverse transition is handled by the primary sync: an audited app that
 later reappears in GetOwnedGames gets its ``delisted`` flag cleared there
@@ -72,8 +73,8 @@ DEFAULT_PROBE_LIMIT = 25
 
 _AUTH_ERROR = (
     "Steam dynamicstore userdata returned no owned apps — the steamLoginSecure "
-    "cookie is missing or expired. Re-run set_steam_store_session with fresh "
-    "cookies from store.steampowered.com."
+    "cookie is missing or expired. Run create_session_ingest_link(provider=\"steam_store\") "
+    "and open the link to paste fresh cookies from store.steampowered.com."
 )
 
 # Outcomes that are final; appids carrying one are never re-probed (unresolved
@@ -100,7 +101,7 @@ async def fetch_owned_steam_appids(
     if not cookies:
         raise RuntimeError(
             "No Steam store session cookies found (STEAM_STORE_COOKIES_FILE "
-            "not set or missing) — run set_steam_store_session first."
+            "not set or missing) — run create_session_ingest_link(provider=\"steam_store\") first."
         )
     headers = {
         "User-Agent": (
@@ -180,7 +181,7 @@ async def audit_steam_licenses(
             "status": "unconfigured",
             "error_summary": (
                 "No Steam store session cookies found — run "
-                "set_steam_store_session to enable the license audit."
+                "create_session_ingest_link(provider=\"steam_store\") to enable the license audit."
             ),
         }
 
