@@ -8,6 +8,7 @@ import re
 import statistics
 import sys
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 from fastmcp.exceptions import ToolError
@@ -341,7 +342,85 @@ async def sync_wishlist(
     return results
 
 
-def _save_session_cookies(cookies: str, env_var: str, default_filename: str, label: str) -> dict:
+def _steam_login_secure_audience(cookie_value: str) -> list[str] | None:
+    """Best-effort read of a ``steamLoginSecure`` token's ``aud`` claim.
+
+    Steam issues a *separate* ``steamLoginSecure`` per domain, each a JWT whose
+    ``aud`` names the domain it authenticates (``web:store`` vs ``web:community``
+    vs ``web:help``). The value is ``steamid||<JWT>`` (the ``||`` is often
+    URL-encoded). Returns the audience strings, or ``None`` when it can't be
+    determined — callers must not block on ambiguity, only on a confirmed
+    wrong-domain token. Reuses ``steam_session._decode_jwt_claims`` (no signature
+    check needed — we only read a public claim).
+    """
+    import urllib.parse
+
+    from ..data.steam_session import _decode_jwt_claims
+
+    parts = urllib.parse.unquote(cookie_value).split("||")
+    if len(parts) < 2:
+        return None
+    aud = _decode_jwt_claims(parts[1]).get("aud")
+    if isinstance(aud, str):
+        return [aud]
+    if isinstance(aud, list) and all(isinstance(a, str) for a in aud):
+        return aud
+    return None
+
+
+def _require_cookie(cookie_name: str, hint: str) -> Callable[[dict[str, str]], None]:
+    """Build a validator that rejects an export lacking ``cookie_name``.
+
+    Cookie *names* are not secrets (unlike values), so listing what was found
+    helps the user see they exported the wrong thing. The ToolError text surfaces
+    on the ingest paste page, so it must never contain a cookie value.
+    """
+
+    def _validate(normalized: dict[str, str]) -> None:
+        if cookie_name not in normalized:
+            found = ", ".join(sorted(normalized)) or "(none)"
+            raise ToolError(
+                f"This export is missing the required '{cookie_name}' cookie, so it "
+                f"won't work. {hint} Cookies found in your paste: {found}."
+            )
+
+    return _validate
+
+
+def _validate_steam_store_cookies(normalized: dict[str, str]) -> None:
+    """Reject a steam_store export that can't authenticate the store.
+
+    Two silent-failure traps this catches at paste time (both bit the owner):
+    - ``steamLoginSecure`` absent entirely.
+    - ``steamLoginSecure`` present but issued for the *wrong Steam domain*
+      (e.g. exported from steamcommunity.com → ``aud: web:community``). The store
+      endpoints answer such a request with ``200`` + an empty logged-out payload,
+      not a ``401``, so the failure otherwise looks like "cookie missing/expired".
+    """
+    _require_cookie(
+        "steamLoginSecure",
+        "Export it from a store.steampowered.com tab while logged in — or better, "
+        'use the long-lived refresh token: create_session_ingest_link(provider="steam_refresh").',
+    )(normalized)
+    aud = _steam_login_secure_audience(normalized["steamLoginSecure"])
+    if aud is not None and not any("store" in a for a in aud):
+        raise ToolError(
+            f"That 'steamLoginSecure' cookie is for the wrong Steam domain (audience "
+            f"{aud}, not the store) — Steam issues a different cookie per domain and "
+            "the license audit / purchase import only work with the store one. "
+            "Re-export it from a store.steampowered.com tab (NOT steamcommunity.com) "
+            '— or better, use create_session_ingest_link(provider="steam_refresh"), '
+            "which mints the correct store cookie for you automatically."
+        )
+
+
+def _save_session_cookies(
+    cookies: str,
+    env_var: str,
+    default_filename: str,
+    label: str,
+    validate: Callable[[dict[str, str]], None] | None = None,
+) -> dict:
     """Normalize a pasted cookie-export JSON and save it as {name: value}.
 
     Shared by every cookie-based session setter. Accepts either a JSON object
@@ -351,6 +430,10 @@ def _save_session_cookies(cookies: str, env_var: str, default_filename: str, lab
     DB's writable directory — a mounted ``/data`` volume in production) so a
     relative ``data/`` that the non-root container process can't create never
     triggers ``PermissionError: [Errno 13] Permission denied: 'data'``.
+
+    ``validate`` runs on the normalized {name: value} dict *before* anything is
+    written, so a known-bad paste (missing/wrong-domain cookie) is rejected with
+    a clear ToolError instead of being saved as a silently useless file.
     """
     try:
         raw = json.loads(cookies)
@@ -366,6 +449,9 @@ def _save_session_cookies(cookies: str, env_var: str, default_filename: str, lab
 
     if not normalized:
         raise ToolError("No valid cookies found in input")
+
+    if validate is not None:
+        validate(normalized)
 
     path = os.getenv(env_var) or str(default_data_dir() / default_filename)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -450,7 +536,15 @@ async def set_steam_refresh_session(cookies: str) -> dict:
     (defaults to steam_refresh_token.json beside the database).
     """
     return _save_session_cookies(
-        cookies, "STEAM_REFRESH_TOKEN_FILE", "steam_refresh_token.json", "Steam refresh token"
+        cookies,
+        "STEAM_REFRESH_TOKEN_FILE",
+        "steam_refresh_token.json",
+        "Steam refresh token",
+        validate=_require_cookie(
+            "steamRefresh_steam",
+            "It only appears on login.steampowered.com after you sign in with the "
+            "'Remember me' box checked — a store or community page export won't have it.",
+        ),
     )
 
 
@@ -477,7 +571,11 @@ async def set_steam_store_session(cookies: str) -> dict:
     (defaults to steam_store_cookies.json beside the database).
     """
     return _save_session_cookies(
-        cookies, "STEAM_STORE_COOKIES_FILE", "steam_store_cookies.json", "Steam store"
+        cookies,
+        "STEAM_STORE_COOKIES_FILE",
+        "steam_store_cookies.json",
+        "Steam store",
+        validate=_validate_steam_store_cookies,
     )
 
 
@@ -486,6 +584,9 @@ async def create_session_ingest_link(provider: str) -> dict:
 
     The returned URL serves a paste form that saves through the matching
     set_*_session tool; see gamelib_mcp/session_ingest.py for the flow.
+
+    For Steam, prefer provider="steam_refresh" (long-lived token, no re-pasting);
+    "steam_store" is a short-lived legacy fallback.
     """
     # Lazy import keeps session_ingest a leaf module (it imports this module
     # lazily in turn for setter dispatch).
