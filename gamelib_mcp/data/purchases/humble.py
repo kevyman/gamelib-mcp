@@ -3,8 +3,8 @@
 Reads the order list (``/api/v1/user/order`` → gamekeys) and each order's
 detail (``/api/v1/order/<gamekey>?all_tpkds=true``). Auth is the
 ``_simpleauth_sess`` browser cookie, stored in the same ``{name: value}``
-JSON file shape as the Nintendo cookie files — set it with the
-``set_humble_session`` MCP tool.
+JSON file shape as the Nintendo cookie files — set it with
+``create_session_ingest_link(provider="humble")``.
 
 Record building:
 - Game keys in ``tpkd_dict.all_tpks`` are preferred — they are the actual
@@ -47,8 +47,8 @@ _KEY_TYPE_TO_PLATFORM = {"steam": "steam", "gog": "gog"}
 
 _AUTH_ERROR = (
     "Humble Bundle API request was not authenticated (_simpleauth_sess cookie "
-    "missing or expired) — re-run set_humble_session with fresh cookies from "
-    "humblebundle.com."
+    "missing or expired) — run create_session_ingest_link(provider=\"humble\") and "
+    "open the link to paste fresh cookies from humblebundle.com."
 )
 
 
@@ -178,7 +178,7 @@ async def fetch_humble_purchases(
     if not cookies:
         raise RuntimeError(
             "No Humble Bundle session cookies found (HUMBLE_COOKIES_FILE not "
-            "set or missing) — run set_humble_session first."
+            "set or missing) — run create_session_ingest_link(provider=\"humble\") first."
         )
 
     headers = {

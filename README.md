@@ -32,9 +32,8 @@ gamelib-mcp is single-user by design: one deployment serves one person's library
 | `set_hardware_preference` | Priority order for suggested platforms |
 | `add_game_to_platform` | Manually record ownership |
 | `detect_farmed_games` | Flag games with suspicious achievement patterns |
-| `set_nintendo_session` | Provide Nintendo session cookies for Switch ownership sync |
 | `set_nintendo_pctl_session` | Set up Switch playtime sync via Parental Controls |
-| `create_session_ingest_link` | Mint a single-use browser link to paste session cookies outside the chat |
+| `create_session_ingest_link` | Mint a single-use browser link to paste store session cookies (Nintendo/Humble/Steam-store) outside the chat |
 | `get_integration_status` | Per-platform integration health |
 
 ## Quick Start
@@ -87,7 +86,7 @@ All configuration is via environment variables. Production starts from [.env.exa
 | `PSN_NPSSO` | optional | PSN NPSSO cookie for PlayStation sync |
 | `OPENXBL_API_KEY` | optional | Personal key from [xbl.io/console](https://xbl.io/console) for Xbox sync (ownership via title history, playtime best-effort) |
 | `OPENXBL_XUID` | optional | Xbox account to inspect; defaults to the API key owner's own account |
-| `NINTENDO_COOKIES_FILE` | optional | Switch digital ownership (populate via `set_nintendo_session`) |
+| `NINTENDO_COOKIES_FILE` | optional | Switch digital ownership (populate via `create_session_ingest_link(provider="nintendo")`) |
 | `NINTENDO_PCTL_SESSION_FILE` | optional | Switch playtime via Parental Controls (populate via `set_nintendo_pctl_session`) |
 | `EPIC_LEGENDARY_HOST_PATH` | optional | Legendary config dir for Epic sync |
 | `LGOGDOWNLOADER_HOST_PATH` | optional | lgogdownloader config dir for GOG sync |

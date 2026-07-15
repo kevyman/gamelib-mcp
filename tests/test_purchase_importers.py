@@ -323,7 +323,7 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_cookie_file_raises_clear_error(self):
         with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": "/nonexistent/ec.json"}):
-            with self.assertRaisesRegex(RuntimeError, r"set_nintendo_session\b"):
+            with self.assertRaisesRegex(RuntimeError, r"create_session_ingest_link\b"):
                 await nintendo_ec.fetch_eshop_purchases()
 
     async def test_missing_session_token_cookie_raises(self):
@@ -332,7 +332,7 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
             with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
                 # An ec export without the session-token cookie is not a usable
                 # legacy session, and no accounts cookies exist → accounts hint.
-                with self.assertRaisesRegex(RuntimeError, r"set_nintendo_session\b"):
+                with self.assertRaisesRegex(RuntimeError, r"create_session_ingest_link\b"):
                     await nintendo_ec.fetch_eshop_purchases()
 
     async def test_chunked_session_cookie_is_accepted(self):
@@ -434,7 +434,7 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_cookies(tmp)
             with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(RuntimeError, r"set_nintendo_session\b"):
+                with self.assertRaisesRegex(RuntimeError, r"create_session_ingest_link\b"):
                     await nintendo_ec.fetch_eshop_purchases(
                         transport=httpx.MockTransport(handler)
                     )
@@ -446,7 +446,7 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_cookies(tmp)
             with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(RuntimeError, r"set_nintendo_session\b"):
+                with self.assertRaisesRegex(RuntimeError, r"create_session_ingest_link\b"):
                     await nintendo_ec.fetch_eshop_purchases(
                         transport=httpx.MockTransport(handler)
                     )
@@ -462,7 +462,7 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_cookies(tmp)
             with patch.dict(os.environ, {"NINTENDO_EC_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(RuntimeError, r"set_nintendo_session\b"):
+                with self.assertRaisesRegex(RuntimeError, r"create_session_ingest_link\b"):
                     await nintendo_ec.fetch_eshop_purchases(
                         transport=httpx.MockTransport(handler)
                     )
@@ -595,7 +595,7 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
             "NINTENDO_COOKIES_FILE": "/nonexistent/acc.json",
             "NINTENDO_EC_COOKIES_FILE": "/nonexistent/ec.json",
         }):
-            with self.assertRaisesRegex(RuntimeError, r"set_nintendo_session\b"):
+            with self.assertRaisesRegex(RuntimeError, r"create_session_ingest_link\b"):
                 await nintendo_ec.fetch_eshop_purchases()
 
     async def test_accounts_path_preferred_over_legacy_ec(self):
@@ -729,7 +729,7 @@ class HumbleFetchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_cookie_file_raises_clear_error(self):
         with patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": "/nonexistent/humble.json"}):
-            with self.assertRaisesRegex(RuntimeError, "set_humble_session"):
+            with self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"):
                 await humble_module.fetch_humble_purchases()
 
     async def test_auth_failure_raises(self):
@@ -739,7 +739,7 @@ class HumbleFetchTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_cookies(tmp)
             with patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(RuntimeError, "set_humble_session"):
+                with self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"):
                     await humble_module.fetch_humble_purchases(
                         transport=httpx.MockTransport(handler)
                     )
@@ -1300,7 +1300,7 @@ class SteamFetchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_cookie_file_raises_clear_error(self):
         with patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": "/nonexistent/steam.json"}):
-            with self.assertRaisesRegex(RuntimeError, "set_steam_store_session"):
+            with self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"):
                 await steam_history.fetch_steam_purchases()
 
     async def test_full_fetch_with_ajax_follow_up_and_license_merge(self):
@@ -1385,7 +1385,7 @@ class SteamFetchTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_cookies(tmp)
             with patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(RuntimeError, "set_steam_store_session"):
+                with self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"):
                     await steam_history.fetch_steam_purchases(
                         transport=httpx.MockTransport(handler)
                     )
