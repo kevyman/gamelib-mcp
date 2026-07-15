@@ -107,8 +107,8 @@ INGEST_PROVIDERS: dict[str, IngestProvider] = {
             "Developer Tools already open.)",
             "In the table, find the row named steamRefresh_steam and copy its Value: double-click "
             "the value, then press Ctrl+C (Cmd+C on a Mac). It's a long string.",
-            "Paste it into the box below as JSON, exactly like this — keep the braces and "
-            "quotes: {\"steamRefresh_steam\": \"PASTE_THE_VALUE_HERE\"}  — then click Save.",
+            "Paste that value straight into the box below — just the value on its own, no quotes "
+            "and no JSON formatting needed — then click Save.",
         ),
         required_cookie="steamRefresh_steam",
     ),

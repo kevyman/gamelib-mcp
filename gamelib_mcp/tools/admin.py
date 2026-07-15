@@ -420,6 +420,7 @@ def _save_session_cookies(
     default_filename: str,
     label: str,
     validate: Callable[[dict[str, str]], None] | None = None,
+    bare_value_cookie: str | None = None,
 ) -> dict:
     """Normalize a pasted cookie-export JSON and save it as {name: value}.
 
@@ -431,21 +432,33 @@ def _save_session_cookies(
     relative ``data/`` that the non-root container process can't create never
     triggers ``PermissionError: [Errno 13] Permission denied: 'data'``.
 
+    ``bare_value_cookie`` enables single-value pastes: for providers that hinge on
+    one cookie (the Steam token/login cookie), a paste that isn't JSON (doesn't
+    start with ``{`` or ``[``) is treated as that cookie's raw value, so the user
+    can paste the value straight from DevTools without hand-formatting JSON.
+
     ``validate`` runs on the normalized {name: value} dict *before* anything is
     written, so a known-bad paste (missing/wrong-domain cookie) is rejected with
     a clear ToolError instead of being saved as a silently useless file.
     """
-    try:
-        raw = json.loads(cookies)
-    except json.JSONDecodeError as exc:
-        raise ToolError(f"Invalid JSON: {exc}") from exc
-
-    if isinstance(raw, list):
-        normalized = {c["name"]: c["value"] for c in raw if "name" in c and "value" in c}
-    elif isinstance(raw, dict):
-        normalized = raw
+    text = cookies.strip()
+    if bare_value_cookie and text[:1] not in ("{", "["):
+        # A cookie export is always a JSON object/array; anything else is the
+        # bare cookie value pasted directly (e.g. the raw steamRefresh_steam
+        # token, which may itself be `<steamid>||<jwt>`).
+        normalized: dict = {bare_value_cookie: text}
     else:
-        raise ToolError("Expected a JSON object or array")
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ToolError(f"Invalid JSON: {exc}") from exc
+
+        if isinstance(raw, list):
+            normalized = {c["name"]: c["value"] for c in raw if "name" in c and "value" in c}
+        elif isinstance(raw, dict):
+            normalized = raw
+        else:
+            raise ToolError("Expected a JSON object or array")
 
     if not normalized:
         raise ToolError("No valid cookies found in input")
@@ -545,6 +558,7 @@ async def set_steam_refresh_session(cookies: str) -> dict:
             "It only appears on login.steampowered.com after you sign in with the "
             "'Remember me' box checked — a store or community page export won't have it.",
         ),
+        bare_value_cookie="steamRefresh_steam",
     )
 
 
@@ -576,6 +590,7 @@ async def set_steam_store_session(cookies: str) -> dict:
         "steam_store_cookies.json",
         "Steam store",
         validate=_validate_steam_store_cookies,
+        bare_value_cookie="steamLoginSecure",
     )
 
 

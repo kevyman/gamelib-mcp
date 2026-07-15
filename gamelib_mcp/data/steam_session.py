@@ -41,6 +41,7 @@ import json
 import logging
 import os
 import secrets
+import urllib.parse
 
 import httpx
 
@@ -125,21 +126,39 @@ def _load_cookies(env_var: str, default_filename: str, label: str) -> dict[str, 
     return None
 
 
+def _extract_refresh_nonce(cookie_value: str) -> str:
+    """The bare refresh JWT from a raw ``steamRefresh_steam`` cookie value.
+
+    Steam stores the cookie as ``<steamid>||<JWT>`` (same shape as
+    ``steamLoginSecure``), and the ``||`` separator may arrive URL-encoded
+    (``%7C%7C``) depending on how it was copied. ``finalizelogin``'s ``nonce``
+    wants ONLY the JWT: passing the ``<steamid>||`` prefix makes finalizelogin
+    return EResult 15 (AccessDenied) with no transfer targets — which is
+    indistinguishable from a genuinely expired token unless you strip it first.
+    A bare JWT (no prefix) is returned unchanged.
+    """
+    decoded = urllib.parse.unquote(cookie_value)
+    if "||" in decoded:
+        return decoded.split("||", 1)[1]
+    return decoded
+
+
 def _load_steam_refresh_token() -> str | None:
-    """Return the stored Steam refresh token, or None when not configured.
+    """Return the stored Steam refresh JWT, or None when not configured.
 
     Reads ``STEAM_REFRESH_TOKEN_FILE`` (or ``steam_refresh_token.json`` beside the
     database). The export usually contains the single ``steamRefresh_steam``
-    cookie; a lone-value export under any key is accepted too.
+    cookie; a lone-value export under any key is accepted too. The raw cookie's
+    ``<steamid>||`` prefix is stripped so callers get the bare nonce.
     """
     raw = _load_cookies(_REFRESH_TOKEN_ENV, _REFRESH_TOKEN_FILENAME, "Steam refresh token")
     if not raw:
         return None
     token = raw.get(_REFRESH_COOKIE_NAME)
+    if not token and len(raw) == 1:
+        token = next(iter(raw.values()))
     if token:
-        return token
-    if len(raw) == 1:
-        return next(iter(raw.values()))
+        return _extract_refresh_nonce(token)
     return None
 
 
