@@ -94,19 +94,21 @@ INGEST_PROVIDERS: dict[str, IngestProvider] = {
             "First, SIGN OUT of Steam in your browser: go to https://store.steampowered.com/, "
             "click your account name at the top right, and choose \"Sign out\". This step "
             "matters — the cookie we need is only created by a fresh sign-in.",
-            "Press F12 to open your browser's Developer Tools. Click the \"Application\" tab "
-            "(in Firefox it's called \"Storage\"), then in the left sidebar expand \"Cookies\". "
-            "Leave Developer Tools open for the rest of the steps. (Don't use the Cookie Editor "
-            "extension for this one — it can only show the page you're on, and Steam will "
-            "redirect you away from the page the cookie lives on.)",
+            "Press F12 to open your browser's Developer Tools and click the \"Network\" tab. "
+            "Tick the \"Preserve log\" checkbox (so nothing clears when the page redirects), and "
+            "in the filter box type: login.steampowered.com . Leave Developer Tools open. "
+            "(Don't use the Cookie Editor extension or the Application/Storage tab for this one — "
+            "the cookie lives on a page Steam immediately redirects you away from, so they can't "
+            "show it.)",
             "Now go to https://store.steampowered.com/login/ and sign back in. IMPORTANT: "
             "tick the \"Remember me\" checkbox BEFORE you click Sign in.",
-            "Back in Developer Tools, under \"Cookies\" in the left sidebar, click the entry for "
-            "https://login.steampowered.com — it appears there even though Steam bounced you to "
-            "the store page. (If you don't see it listed, sign out and redo the login with "
-            "Developer Tools already open.)",
-            "In the table, find the row named steamRefresh_steam and copy its Value: double-click "
-            "the value, then press Ctrl+C (Cmd+C on a Mac). It's a long string.",
+            "In the Network list you'll now see requests to login.steampowered.com. Click one of "
+            "them (a row marked 302, or one named \"finalizelogin\", both work), then open its "
+            "\"Cookies\" sub-tab.",
+            "Scroll to find steamRefresh_steam (it appears under \"Request Cookies\" or "
+            "\"Response Cookies\"). Right-click its value and choose \"Copy Value\". It's a long "
+            "string. (If you don't see it, make sure \"Preserve log\" is ticked and redo the "
+            "sign-in with the Network tab already open.)",
             "Paste that value straight into the box below — just the value on its own, no quotes "
             "and no JSON formatting needed — then click Save.",
         ),
@@ -270,10 +272,9 @@ def _render_form_page(nonce: str, spec: IngestProvider, error: str | None = None
     steps = "".join(f"<li>{html.escape(step)}</li>" for step in spec.steps)
     if spec.required_cookie:
         callout = (
-            '<p class="callout">&#9888;&#65039; <strong>Before you paste:</strong> your export '
-            f"must contain a cookie named <code>{html.escape(spec.required_cookie)}</code>. "
-            "If it isn't in the list, you exported the wrong thing — re-read the steps above. "
-            "Saving without it will fail.</p>"
+            '<p class="callout">&#9888;&#65039; <strong>Before you paste:</strong> make sure what '
+            f"you copied is the <code>{html.escape(spec.required_cookie)}</code> cookie. If you "
+            "can't find that name, re-read the steps above — saving anything else will fail.</p>"
         )
     else:
         callout = ""
