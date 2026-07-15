@@ -403,31 +403,6 @@ async def set_nintendo_session(cookies: str) -> dict:
     )
 
 
-async def set_nintendo_ec_session(cookies: str) -> dict:
-    """
-    Store ec.nintendo.com session cookies for eShop purchase-history import.
-
-    Accepts the same JSON shapes as set_nintendo_session (object or Cookie
-    Editor array). These cookies are separate from the VGCS ones — they must
-    come from the ec.nintendo.com domain, and the export MUST include the
-    ``__Secure-next-auth.session-token`` cookie (the importer exchanges it for a
-    short-lived account token; without it the import fails immediately).
-
-    How to get your cookies:
-    1. Open https://ec.nintendo.com/my/transactions/ in your browser (logged in)
-    2. Install the "Cookie Editor" browser extension
-    3. Click the extension icon → Export → copy the JSON (export everything on
-       the page; it will include __Secure-next-auth.session-token)
-    4. Pass that JSON string to this tool
-
-    Cookies are saved to the path in NINTENDO_EC_COOKIES_FILE
-    (defaults to nintendo_ec_cookies.json beside the database).
-    """
-    return _save_session_cookies(
-        cookies, "NINTENDO_EC_COOKIES_FILE", "nintendo_ec_cookies.json", "Nintendo eShop"
-    )
-
-
 async def set_humble_session(cookies: str) -> dict:
     """
     Store Humble Bundle session cookies for purchase-history import.
@@ -471,6 +446,19 @@ async def set_steam_store_session(cookies: str) -> dict:
     return _save_session_cookies(
         cookies, "STEAM_STORE_COOKIES_FILE", "steam_store_cookies.json", "Steam store"
     )
+
+
+async def create_session_ingest_link(provider: str) -> dict:
+    """Mint a single-use browser URL for pasting session cookies outside chat.
+
+    The returned URL serves a paste form that saves through the matching
+    set_*_session tool; see gamelib_mcp/session_ingest.py for the flow.
+    """
+    # Lazy import keeps session_ingest a leaf module (it imports this module
+    # lazily in turn for setter dispatch).
+    from ..session_ingest import mint_ingest_link
+
+    return mint_ingest_link(provider)
 
 
 # Holds the PKCE code_verifier between the two set_nintendo_pctl_session calls.

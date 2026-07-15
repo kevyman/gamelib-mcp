@@ -126,10 +126,7 @@ EXPECTED_TOOLS = {
         },
         "required": {"name", "platform"},
     },
-    "set_nintendo_session": {"params": {"cookies"}, "required": {"cookies"}},
-    "set_nintendo_ec_session": {"params": {"cookies"}, "required": {"cookies"}},
-    "set_humble_session": {"params": {"cookies"}, "required": {"cookies"}},
-    "set_steam_store_session": {"params": {"cookies"}, "required": {"cookies"}},
+    "create_session_ingest_link": {"params": {"provider"}, "required": {"provider"}},
     "set_nintendo_pctl_session": {"params": {"response"}, "required": set()},
     "update_game": {
         "params": {
@@ -291,10 +288,7 @@ EXPECTED_ANNOTATIONS = {
     "get_play_history": {"readOnlyHint": True, "idempotentHint": True},
     "set_hardware_preference": {"readOnlyHint": False, "idempotentHint": True},
     "add_game_to_platform": {"readOnlyHint": False, "idempotentHint": True},
-    "set_nintendo_session": {"readOnlyHint": False, "idempotentHint": True},
-    "set_nintendo_ec_session": {"readOnlyHint": False, "idempotentHint": True},
-    "set_humble_session": {"readOnlyHint": False, "idempotentHint": True},
-    "set_steam_store_session": {"readOnlyHint": False, "idempotentHint": True},
+    "create_session_ingest_link": {"readOnlyHint": False, "idempotentHint": False},
     "set_nintendo_pctl_session": {"readOnlyHint": False, "idempotentHint": True},
     "update_game": {"readOnlyHint": False, "idempotentHint": True},
     "set_playtime": {"readOnlyHint": False, "idempotentHint": True},
@@ -335,9 +329,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_51(self):
+    async def test_tool_count_is_48(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 51)
+        self.assertEqual(len(tools), 48)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()

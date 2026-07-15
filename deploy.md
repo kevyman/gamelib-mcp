@@ -296,7 +296,7 @@ If the control plane reports PSN auth as stale, re-extract `PSN_NPSSO`, update `
 
 Switch sync needs **no extra binaries** in the container — both data sources are HTTP/OAuth and run on Python dependencies already in the image. Two complementary sources combine into the `switch2` platform:
 
-- **Ownership** (your digital library): the Nintendo Account VGCS cookie API. Populate via the `set_nintendo_session` MCP tool (paste a Cookie-Editor JSON export from `accounts.nintendo.com/portal/vgcs/`). Stored at `NINTENDO_COOKIES_FILE` (default `data/nintendo_cookies.json`).
+- **Ownership** (your digital library): the Nintendo Account VGCS cookie API. Populate via `create_session_ingest_link(provider="nintendo")` — open the returned link and paste a Cookie-Editor JSON export from `accounts.nintendo.com/portal/vgcs/`. Stored at `NINTENDO_COOKIES_FILE` (default `data/nintendo_cookies.json`).
 - **Playtime** (per-game minutes — including games played on the console but owned on another account): the Nintendo Switch **Parental Controls** API via `pynintendoparental` — plain OAuth, no Coral `f`-token. Requires the console to be registered to Parental Controls. Set up via the `set_nintendo_pctl_session` MCP tool:
   1. Call it with no argument → it returns a `login_url`.
   2. Open the URL, sign in, right-click "Select this person" → Copy Link.
@@ -306,7 +306,7 @@ Then run `refresh_library(["switch2"])` (or a full refresh) — ownership and pl
 
 **Notes:**
 - Playtime is forward-only: Parental Controls tracks from console registration onward (no retroactive history). Today's in-progress play is captured and refines through the day.
-- If the control plane reports Nintendo as stale, re-run `set_nintendo_session` (ownership) and/or `set_nintendo_pctl_session` (playtime), then retry sync.
+- If the control plane reports Nintendo as stale, refresh ownership via `create_session_ingest_link(provider="nintendo")` and/or playtime via `set_nintendo_pctl_session`, then retry sync.
 
 ---
 

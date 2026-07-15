@@ -1,4 +1,4 @@
-"""HTTP security middleware, /health, and /admin/* routes.
+"""HTTP security middleware, /health, /admin/*, and /ingest/{nonce} routes.
 
 Kept separate from main.py so the entrypoint stays focused on the MCP tool
 surface. Routes are registered through ``register_http_routes(mcp)`` rather than
@@ -343,3 +343,13 @@ def register_http_routes(mcp) -> None:
         if platform not in payload:
             return JSONResponse({"error": f"Unknown integration: {platform}"}, status_code=404)
         return JSONResponse(payload[platform])
+
+    # Deliberately outside /admin/: a browser navigation can't send the
+    # Authorization header the /admin bearer gate requires. The single-use
+    # nonce (minted by the OAuth-gated create_session_ingest_link tool) is
+    # the credential here.
+    @mcp.custom_route("/ingest/{nonce}", methods=["GET", "POST"])
+    async def session_ingest(request: Request) -> HTMLResponse:
+        from .session_ingest import handle_ingest_request
+
+        return await handle_ingest_request(request)

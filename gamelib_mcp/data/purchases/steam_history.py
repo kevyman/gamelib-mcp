@@ -8,9 +8,9 @@ Scrapes two logged-in store pages (there is no Web API for either):
   ``/account/AjaxLoadMoreHistory/``).
 
 Auth is the ``steamLoginSecure`` browser cookie stored as a ``{name: value}``
-JSON file (same shape as the Humble/Nintendo cookie files) — set it with the
-``set_steam_store_session`` MCP tool. ``sessionid`` is recommended too (the
-load-more endpoint wants it).
+JSON file (same shape as the Humble/Nintendo cookie files) — set it with
+``create_session_ingest_link(provider="steam_store")``. ``sessionid`` is
+recommended too (the load-more endpoint wants it).
 
 Record building:
 - Records come primarily from history "Purchase" rows: title, date, price.
@@ -57,8 +57,8 @@ _MAX_AJAX_CALLS = 50
 
 _AUTH_ERROR = (
     "Steam store page request was not authenticated (steamLoginSecure cookie "
-    "missing or expired) — re-run set_steam_store_session with fresh cookies "
-    "from store.steampowered.com."
+    "missing or expired) — run create_session_ingest_link(provider=\"steam_store\") "
+    "and open the link to paste fresh cookies from store.steampowered.com."
 )
 
 _MONTHS = {
@@ -517,7 +517,7 @@ async def fetch_steam_purchases(
     if not cookies:
         raise RuntimeError(
             "No Steam store session cookies found (STEAM_STORE_COOKIES_FILE "
-            "not set or missing) — run set_steam_store_session first."
+            "not set or missing) — run create_session_ingest_link(provider=\"steam_store\") first."
         )
 
     headers = {

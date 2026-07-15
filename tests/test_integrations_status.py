@@ -173,7 +173,7 @@ def test_inspect_nintendo_reports_stale_when_cookies_present_and_auth_failed(tmp
     assert nintendo.active_backend == "vgcs-cookie"
     caps = {c.name: c.status for c in nintendo.capabilities}
     assert caps["ownership"] == "stale"
-    assert any("set_nintendo_session" in step for step in nintendo.remediation_steps)
+    assert any("create_session_ingest_link" in step for step in nintendo.remediation_steps)
 
 
 def test_inspect_nintendo_reports_stale_with_pctl_when_cookies_present_and_auth_failed(tmp_path: Path):

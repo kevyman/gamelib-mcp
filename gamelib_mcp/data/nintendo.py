@@ -4,7 +4,7 @@ OWNERSHIP: Nintendo Account VGCS GraphQL API (requires NINTENDO_COOKIES_FILE)
   - Uses browser session cookies from accounts.nintendo.com
   - Provides full digital library ownership including unplayed titles
   - No playtime data — playtime_minutes stored as None
-  - To set/refresh cookies: use the set_nintendo_session MCP tool
+  - To set/refresh cookies: use create_session_ingest_link(provider="nintendo")
 
 PLAYTIME: Parental Controls API (requires NINTENDO_PCTL_SESSION_FILE via set_nintendo_pctl_session)
   - Handled separately in nintendo_pctl.py

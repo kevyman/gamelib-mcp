@@ -21,7 +21,7 @@ Optional integrations:
 - `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET` for IGDB enrichment
 - `PSN_NPSSO` for PSN sync
 - `BACKLOGGD_USER` for rating sync
-- `NINTENDO_COOKIES_FILE` for Switch ownership and `NINTENDO_PCTL_SESSION_FILE` for Switch playtime (both populated at runtime via the `set_nintendo_session` / `set_nintendo_pctl_session` MCP tools)
+- `NINTENDO_COOKIES_FILE` for Switch ownership and `NINTENDO_PCTL_SESSION_FILE` for Switch playtime (populated at runtime via `create_session_ingest_link(provider="nintendo")` and the `set_nintendo_pctl_session` MCP tool)
 - `EPIC_LEGENDARY_HOST_PATH` and `LGOGDOWNLOADER_HOST_PATH` if you want Epic/GOG sync in Docker
 
 ## Start the app locally
@@ -64,4 +64,4 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml down
 
 - Start only `app` locally. The checked-in Caddy config expects a real domain and is not needed for localhost testing.
 - `caddy` is behind the `prod` Compose profile, so it will not start during local runs unless you explicitly add `--profile prod`.
-- Nintendo needs no extra binaries in the image: Switch **ownership** uses the VGCS cookie HTTP API and Switch **playtime** uses the Parental Controls API via the pure-Python `pynintendoparental` dependency. Populate both with `set_nintendo_session` and `set_nintendo_pctl_session`.
+- Nintendo needs no extra binaries in the image: Switch **ownership** uses the VGCS cookie HTTP API and Switch **playtime** uses the Parental Controls API via the pure-Python `pynintendoparental` dependency. Populate ownership with `create_session_ingest_link(provider="nintendo")` and playtime with `set_nintendo_pctl_session`.
