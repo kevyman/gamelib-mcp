@@ -26,9 +26,9 @@ missing appid so ownership never depends on an app still being purchasable:
 Outcomes persist per-appid in the ``steam_license_audit`` meta key, so every
 appid is classified exactly once across runs; each call probes at most
 ``limit`` new appids through the shared, quota-budgeted store gate and reports how
-many remain. Auth reuses the ``steamLoginSecure`` session already stored for
-the purchase importer (``create_session_ingest_link(provider="steam_store")``) —
-no new credential.
+many remain. Auth reuses the same Steam session the purchase importer uses
+(minted from the ``steam_refresh`` token, or the legacy ``steam_store`` cookies)
+via ``data/steam_session.py`` — no new credential.
 
 The inverse transition is handled by the primary sync: an audited app that
 later reappears in GetOwnedGames gets its ``delisted`` flag cleared there
@@ -50,7 +50,6 @@ from .db import (
     set_meta,
     set_steam_delisted,
 )
-from .purchases.steam_history import _load_steam_cookies
 from .steam_store import fetch_store_appdetails
 from .steamspy import fetch_steamspy_name
 from .title_normalization import prepare_catalog_title
@@ -83,8 +82,10 @@ _FINAL_OUTCOMES = frozenset({"minted", "minted_delisted", "skipped_non_game"})
 
 
 def is_license_audit_configured() -> bool:
-    """True when a Steam store session cookie file is available."""
-    return bool(_load_steam_cookies())
+    """True when a Steam session (refresh token or legacy store cookies) is available."""
+    from .steam_session import is_steam_session_configured
+
+    return is_steam_session_configured()
 
 
 async def fetch_owned_steam_appids(
@@ -97,12 +98,11 @@ async def fetch_owned_steam_appids(
     is not this deployment's account (STEAM_API_KEY/STEAM_ID are required
     config), so empty == expired cookie, never an empty library.
     """
-    cookies = _load_steam_cookies()
-    if not cookies:
-        raise RuntimeError(
-            "No Steam store session cookies found (STEAM_STORE_COOKIES_FILE "
-            "not set or missing) — run create_session_ingest_link(provider=\"steam_store\") first."
-        )
+    # Mint fresh cookies from the refresh token (or fall back to legacy static
+    # cookies). Lazy import mirrors the purchase importer and breaks the cycle.
+    from .steam_session import load_steam_web_cookies
+
+    cookies = await load_steam_web_cookies(transport=transport)
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0"

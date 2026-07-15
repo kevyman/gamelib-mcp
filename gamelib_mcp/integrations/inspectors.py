@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
 
@@ -47,6 +48,71 @@ def inspect_all_integrations_dict(
     }
 
 
+def _steam_purchase_session_check() -> tuple[CheckStatus, CapabilityStatus, str | None]:
+    """Freshness of the Steam purchase session (refresh token or legacy cookies).
+
+    Purchase import and the license audit authenticate with a browser session
+    separate from the Web API key. The preferred credential is the long-lived
+    ``steamRefresh_steam`` token, whose ``exp`` is decodable without a crypto
+    dependency. Returns (check, capability, remediation-or-None). This is
+    informational — it never gates the Web-API ownership readiness gate.
+    """
+    from ..data.steam_session import _decode_jwt_claims, _load_steam_refresh_token
+
+    token = _load_steam_refresh_token()
+    if token:
+        exp = _decode_jwt_claims(token).get("exp")
+        if isinstance(exp, (int, float)):
+            expires = datetime.fromtimestamp(exp, tz=timezone.utc)
+            if expires > datetime.now(timezone.utc):
+                until = expires.date().isoformat()
+                return (
+                    CheckStatus("steam_purchase_session", "pass", f"refresh token valid until {until}"),
+                    CapabilityStatus(
+                        "purchases",
+                        "ready",
+                        f"Purchase import & license audit mint store cookies (token valid until {until}).",
+                    ),
+                    None,
+                )
+            return (
+                CheckStatus("steam_purchase_session", "warn", "refresh token expired"),
+                CapabilityStatus("purchases", "stale", "Steam refresh token expired — re-export it."),
+                'Run create_session_ingest_link(provider="steam_refresh") and paste a fresh '
+                "steamRefresh_steam export from login.steampowered.com.",
+            )
+        return (
+            CheckStatus("steam_purchase_session", "pass", "refresh token stored (expiry not decodable)"),
+            CapabilityStatus("purchases", "ready", "Purchase import & license audit mint store cookies."),
+            None,
+        )
+
+    legacy_path = os.getenv("STEAM_STORE_COOKIES_FILE") or str(
+        default_data_dir() / "steam_store_cookies.json"
+    )
+    if Path(legacy_path).is_file():
+        return (
+            CheckStatus("steam_purchase_session", "warn", "using legacy short-lived store cookies"),
+            CapabilityStatus(
+                "purchases",
+                "degraded",
+                'Legacy steam_store cookies (short-lived) — prefer provider="steam_refresh".',
+            ),
+            'Migrate to the long-lived token: create_session_ingest_link(provider="steam_refresh").',
+        )
+
+    return (
+        CheckStatus("steam_purchase_session", "warn", "no Steam purchase session configured"),
+        CapabilityStatus(
+            "purchases",
+            "unconfigured",
+            'Purchase import & license audit need a Steam session (provider="steam_refresh").',
+        ),
+        'Run create_session_ingest_link(provider="steam_refresh") to enable Steam purchase '
+        "import & license audit.",
+    )
+
+
 def inspect_steam(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
     api_key = bool(os.getenv("STEAM_API_KEY"))
     steam_id = bool(os.getenv("STEAM_ID"))
@@ -54,6 +120,7 @@ def inspect_steam(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
         ("STEAM_API_KEY", api_key),
         ("STEAM_ID", steam_id),
     )
+    purchase_check, purchase_cap, purchase_remediation = _steam_purchase_session_check()
 
     if api_key and steam_id:
         return IntegrationStatus(
@@ -64,14 +131,16 @@ def inspect_steam(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
             capabilities=[
                 CapabilityStatus("ownership", "ready", "Owned games can be fetched from Steam."),
                 CapabilityStatus("playtime", "ready", "Playtime is available from Steam."),
+                purchase_cap,
             ],
             checks=[
                 CheckStatus("steam_api_key", "pass", "STEAM_API_KEY is set"),
                 CheckStatus("steam_id", "pass", "STEAM_ID is set"),
+                purchase_check,
             ],
             required_inputs=["STEAM_API_KEY", "STEAM_ID"],
             detected_inputs=detected_inputs,
-            remediation_steps=[],
+            remediation_steps=[purchase_remediation] if purchase_remediation else [],
             last_sync=last_sync or {},
         )
 
@@ -96,14 +165,17 @@ def inspect_steam(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
         capabilities=[
             CapabilityStatus("ownership", overall_status, "Steam credentials are incomplete."),
             CapabilityStatus("playtime", overall_status, "Steam credentials are incomplete."),
+            purchase_cap,
         ],
         checks=[
             CheckStatus("steam_api_key", "pass" if api_key else "fail", _env_check_summary("STEAM_API_KEY", api_key)),
             CheckStatus("steam_id", "pass" if steam_id else "fail", _env_check_summary("STEAM_ID", steam_id)),
+            purchase_check,
         ],
         required_inputs=["STEAM_API_KEY", "STEAM_ID"],
         detected_inputs=detected_inputs,
-        remediation_steps=[f"Set `{name}`." for name in missing],
+        remediation_steps=[f"Set `{name}`." for name in missing]
+        + ([purchase_remediation] if purchase_remediation else []),
         last_sync=last_sync or {},
     )
 

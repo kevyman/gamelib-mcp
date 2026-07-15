@@ -28,6 +28,7 @@ from gamelib_mcp.data.purchases import gog_orders
 from gamelib_mcp.data.purchases import humble as humble_module
 from gamelib_mcp.data.purchases import nintendo_ec
 from gamelib_mcp.data.purchases import steam_history
+from gamelib_mcp.data import steam_licenses, steam_session
 from gamelib_mcp.data.scrape_validate import FIXTURES_DIR
 from gamelib_mcp.tools import acquisition, admin
 
@@ -1291,6 +1292,204 @@ class SteamFetchTests(unittest.IsolatedAsyncioTestCase):
                     )
 
 
+def _make_refresh_token(sub: str | None = None, exp: int | None = None) -> str:
+    """A minimal unsigned JWT whose claim segment carries sub/exp (no signature)."""
+    import base64 as _b64
+
+    payload: dict = {}
+    if sub is not None:
+        payload["sub"] = sub
+    if exp is not None:
+        payload["exp"] = exp
+    body = _b64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+    return f"eyJ0eXAiOiJKV1QifQ.{body}.sig"
+
+
+class SteamSessionMintTests(unittest.IsolatedAsyncioTestCase):
+    def _write_refresh_token(self, tmp: str, token: str) -> str:
+        path = os.path.join(tmp, "steam_refresh_token.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"steamRefresh_steam": token}, f)
+        return path
+
+    def _mint_handler(self, captured: list, *, echo_steamid: str | None = None):
+        """finalizelogin → per-domain transfer; each transfer sets steamLoginSecure."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.append(request)
+            host, path = request.url.host, request.url.path
+            if host == "login.steampowered.com" and path == "/jwt/finalizelogin":
+                body: dict = {
+                    "transfer_info": [
+                        {"url": "https://steamcommunity.com/login/settoken",
+                         "params": {"nonce": "cnonce", "auth": "cauth"}},
+                        {"url": "https://store.steampowered.com/login/settoken",
+                         "params": {"nonce": "snonce", "auth": "sauth"}},
+                    ],
+                }
+                if echo_steamid is not None:
+                    body["steamID"] = echo_steamid
+                return httpx.Response(200, json=body)
+            if path == "/login/settoken":
+                value = "765-store" if host == "store.steampowered.com" else "765-comm"
+                return httpx.Response(200, headers={"set-cookie": f"steamLoginSecure={value}; Path=/"})
+            raise AssertionError(f"unexpected request: {request.url}")
+        return handler
+
+    async def test_successful_mint_returns_store_cookies(self):
+        captured: list = []
+        token = _make_refresh_token(sub="76561198000000000", exp=9999999999)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_refresh_token(tmp, token)
+            with patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path, "STEAM_ID": "76561198000000000"}):
+                cookies = await steam_session.load_steam_web_cookies(
+                    transport=httpx.MockTransport(self._mint_handler(captured, echo_steamid="76561198000000000"))
+                )
+        # Store-domain steamLoginSecure is preferred over the community one.
+        self.assertEqual(cookies["steamLoginSecure"], "765-store")
+        self.assertRegex(cookies["sessionid"], r"^[0-9a-f]{24}$")
+        # finalizelogin must be multipart and carry the refresh token as the nonce.
+        finalize = next(r for r in captured if r.url.path == "/jwt/finalizelogin")
+        self.assertTrue(finalize.headers.get("content-type", "").startswith("multipart/form-data"))
+        self.assertIn(token.encode(), finalize.content)
+        # Transfer POSTs carry steamID plus the entry's params verbatim.
+        store_transfer = next(r for r in captured if r.url.host == "store.steampowered.com")
+        self.assertIn(b"76561198000000000", store_transfer.content)
+        self.assertIn(b"sauth", store_transfer.content)
+
+    async def test_expired_refresh_token_detected(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/jwt/finalizelogin":
+                return httpx.Response(200, json={"transfer_info": []})
+            raise AssertionError(request.url)
+
+        token = _make_refresh_token(sub="76561198000000000", exp=9999999999)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_refresh_token(tmp, token)
+            with patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path, "STEAM_ID": "76561198000000000"}):
+                with self.assertRaisesRegex(RuntimeError, "refresh token has expired"):
+                    await steam_session.load_steam_web_cookies(transport=httpx.MockTransport(handler))
+
+    async def test_transient_mint_failure_is_distinct(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, text="steam is having a moment")
+
+        token = _make_refresh_token(sub="76561198000000000", exp=9999999999)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_refresh_token(tmp, token)
+            with patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path, "STEAM_ID": "76561198000000000"}):
+                with self.assertRaisesRegex(RuntimeError, "transiently") as ctx:
+                    await steam_session.load_steam_web_cookies(transport=httpx.MockTransport(handler))
+        # The transient message must NOT tell the user to re-paste the token.
+        self.assertNotIn("expired", str(ctx.exception))
+
+    async def test_steamid_falls_back_to_jwt_sub(self):
+        captured: list = []
+        token = _make_refresh_token(sub="76561198000000123", exp=9999999999)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_refresh_token(tmp, token)
+            with patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path}):
+                os.environ.pop("STEAM_ID", None)
+                await steam_session.load_steam_web_cookies(
+                    transport=httpx.MockTransport(self._mint_handler(captured))
+                )
+        # With no STEAM_ID and no echoed steamID, the transfer uses the token's sub.
+        store_transfer = next(r for r in captured if r.url.host == "store.steampowered.com")
+        self.assertIn(b"76561198000000123", store_transfer.content)
+
+    async def test_fallback_to_legacy_static_cookies(self):
+        called: list = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            called.append(request.url)
+            raise AssertionError("legacy path must not hit login.steampowered.com")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            legacy = os.path.join(tmp, "steam_store_cookies.json")
+            with open(legacy, "w", encoding="utf-8") as f:
+                json.dump({"steamLoginSecure": "legacy-abc", "sessionid": "s"}, f)
+            with patch.dict(os.environ, {
+                "STEAM_STORE_COOKIES_FILE": legacy,
+                "STEAM_REFRESH_TOKEN_FILE": os.path.join(tmp, "absent.json"),
+            }):
+                cookies = await steam_session.load_steam_web_cookies(
+                    transport=httpx.MockTransport(handler)
+                )
+        self.assertEqual(cookies["steamLoginSecure"], "legacy-abc")
+        self.assertEqual(called, [])
+
+    async def test_no_session_configured_raises_both_hints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {
+                "STEAM_REFRESH_TOKEN_FILE": os.path.join(tmp, "absent-refresh.json"),
+                "STEAM_STORE_COOKIES_FILE": os.path.join(tmp, "absent-store.json"),
+            }):
+                with self.assertRaisesRegex(RuntimeError, "steam_refresh") as ctx:
+                    await steam_session.load_steam_web_cookies(
+                        transport=httpx.MockTransport(lambda r: httpx.Response(200))
+                    )
+        self.assertIn("create_session_ingest_link", str(ctx.exception))
+
+    async def test_fetch_steam_purchases_mints_from_refresh_token(self):
+        token = _make_refresh_token(sub="76561198000000000", exp=9999999999)
+        cookie_seen: list = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            host, path = request.url.host, request.url.path
+            if host == "login.steampowered.com" and path == "/jwt/finalizelogin":
+                return httpx.Response(200, json={
+                    "steamID": "76561198000000000",
+                    "transfer_info": [{"url": "https://store.steampowered.com/login/settoken",
+                                       "params": {"nonce": "n", "auth": "a"}}],
+                })
+            if path == "/login/settoken":
+                return httpx.Response(200, headers={"set-cookie": "steamLoginSecure=765-minted; Path=/"})
+            if path == "/account/licenses/":
+                cookie_seen.append(request.headers.get("cookie", ""))
+                return httpx.Response(200, text=_fixture("steam_licenses_sample.html"))
+            if path == "/account/history/":
+                return httpx.Response(200, text=_fixture("steam_history_sample.html"))
+            if path == "/account/AjaxLoadMoreHistory/":
+                return httpx.Response(200, json={"html": "", "cursor": None},
+                                      headers={"content-type": "application/json"})
+            raise AssertionError(f"unexpected request: {request.url}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_refresh_token(tmp, token)
+            with patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path, "STEAM_ID": "76561198000000000"}):
+                records, _ = await steam_history.fetch_steam_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
+        self.assertTrue(records)
+        # The scrape authenticated with the freshly minted cookie, not a stored one.
+        self.assertTrue(any("steamLoginSecure=765-minted" in c for c in cookie_seen))
+
+    async def test_fetch_owned_steam_appids_mints_from_refresh_token(self):
+        token = _make_refresh_token(sub="76561198000000000", exp=9999999999)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            host, path = request.url.host, request.url.path
+            if host == "login.steampowered.com" and path == "/jwt/finalizelogin":
+                return httpx.Response(200, json={
+                    "steamID": "76561198000000000",
+                    "transfer_info": [{"url": "https://store.steampowered.com/login/settoken",
+                                       "params": {"nonce": "n", "auth": "a"}}],
+                })
+            if path == "/login/settoken":
+                return httpx.Response(200, headers={"set-cookie": "steamLoginSecure=765-minted; Path=/"})
+            if path == "/dynamicstore/userdata/":
+                return httpx.Response(200, json={"rgOwnedApps": [10, 20, 30]},
+                                      headers={"content-type": "application/json"})
+            raise AssertionError(f"unexpected request: {request.url}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_refresh_token(tmp, token)
+            with patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path, "STEAM_ID": "76561198000000000"}):
+                appids = await steam_licenses.fetch_owned_steam_appids(
+                    transport=httpx.MockTransport(handler)
+                )
+        self.assertEqual(appids, {10, 20, 30})
+
+
 class ImportPurchasesTests(ToolDBTestCase):
     async def test_unknown_source_raises_tool_error(self):
         with self.assertRaisesRegex(ToolError, "Unknown purchase source"):
@@ -1759,6 +1958,18 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
                     steam_history._load_steam_cookies(),
                     {"steamLoginSecure": "765-abc", "sessionid": "s1"},
                 )
+
+    async def test_set_steam_refresh_session_writes_to_refresh_path(self):
+        token = _make_refresh_token(sub="76561198000000000", exp=9999999999)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "steam_refresh_token.json")
+            with patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path}):
+                result = await admin.set_steam_refresh_session(
+                    json.dumps({"steamRefresh_steam": token})
+                )
+                self.assertEqual(result, {"cookie_count": 1, "path": path})
+                # The saved token round-trips through the session module's loader.
+                self.assertEqual(steam_session._load_steam_refresh_token(), token)
 
     async def test_set_nintendo_session_still_works_after_refactor(self):
         with tempfile.TemporaryDirectory() as tmp:
