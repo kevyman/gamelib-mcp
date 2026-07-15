@@ -94,17 +94,21 @@ INGEST_PROVIDERS: dict[str, IngestProvider] = {
             "First, SIGN OUT of Steam in your browser: go to https://store.steampowered.com/, "
             "click your account name at the top right, and choose \"Sign out\". This step "
             "matters — the cookie we need is only created by a fresh sign-in.",
+            "Press F12 to open your browser's Developer Tools. Click the \"Application\" tab "
+            "(in Firefox it's called \"Storage\"), then in the left sidebar expand \"Cookies\". "
+            "Leave Developer Tools open for the rest of the steps. (Don't use the Cookie Editor "
+            "extension for this one — it can only show the page you're on, and Steam will "
+            "redirect you away from the page the cookie lives on.)",
             "Now go to https://store.steampowered.com/login/ and sign back in. IMPORTANT: "
             "tick the \"Remember me\" checkbox BEFORE you click Sign in.",
-            "Once you are logged in, open a NEW browser tab and go to this exact address: "
-            "https://login.steampowered.com/  (the \"login\" address — not \"store\", not "
-            "\"steamcommunity\"). The page may look blank or redirect; that's fine.",
-            "Click the Cookie Editor extension icon (install \"Cookie Editor\" first if "
-            "needed). Look through the list for a cookie named steamRefresh_steam. If you "
-            "do NOT see it, you either skipped \"Remember me\" or you're on the wrong "
-            "address — go back to step 1 and try again.",
-            "Click Export to copy all the cookies as JSON, paste that into the box below, "
-            "and click Save.",
+            "Back in Developer Tools, under \"Cookies\" in the left sidebar, click the entry for "
+            "https://login.steampowered.com — it appears there even though Steam bounced you to "
+            "the store page. (If you don't see it listed, sign out and redo the login with "
+            "Developer Tools already open.)",
+            "In the table, find the row named steamRefresh_steam and copy its Value: double-click "
+            "the value, then press Ctrl+C (Cmd+C on a Mac). It's a long string.",
+            "Paste it into the box below as JSON, exactly like this — keep the braces and "
+            "quotes: {\"steamRefresh_steam\": \"PASTE_THE_VALUE_HERE\"}  — then click Save.",
         ),
         required_cookie="steamRefresh_steam",
     ),
