@@ -188,23 +188,22 @@ def _new_sessionid() -> str:
     return secrets.token_hex(12)
 
 
-def _extract_login_secure(client: httpx.AsyncClient) -> str | None:
-    """The store-domain ``steamLoginSecure`` from the jar after the transfer dance.
+def _extract_store_login_secure(client: httpx.AsyncClient) -> str | None:
+    """The **store-domain** ``steamLoginSecure`` from the jar, or None.
 
     Steam issues a distinct ``steamLoginSecure`` per domain; both consumers scrape
-    ``store.steampowered.com``, so that domain's value is preferred. Falls back to
-    any ``steamLoginSecure`` present.
+    ``store.steampowered.com``, so only that domain's cookie is usable. A cookie
+    from another Steam domain (community/help) must NOT be substituted — it would
+    let the store scrape fail later with a confusing auth error.
     """
-    candidates: dict[str, str] = {}
     for cookie in client.cookies.jar:
-        if cookie.name == "steamLoginSecure" and cookie.value:
-            candidates[cookie.domain or ""] = cookie.value
-    if not candidates:
-        return None
-    for domain, value in candidates.items():
-        if _STORE_HOST in domain:
-            return value
-    return next(iter(candidates.values()))
+        if (
+            cookie.name == "steamLoginSecure"
+            and cookie.value
+            and _STORE_HOST in (cookie.domain or "")
+        ):
+            return cookie.value
+    return None
 
 
 async def mint_steam_web_cookies(
@@ -272,13 +271,20 @@ async def mint_steam_web_cookies(
                 for key, value in params.items():
                     files[str(key)] = (None, "" if value is None else str(value))
             try:
-                await client.post(url, files=files, headers=headers)
+                transfer_resp = await client.post(url, files=files, headers=headers)
             except httpx.HTTPError as exc:
                 raise RuntimeError(_MINT_ERROR) from exc
+            # A transfer hop failing (5xx/4xx) is a transient/store-side problem,
+            # NOT an expired token — finalizelogin already validated the token to
+            # hand back transfer_info. Don't tell the user to re-paste.
+            if transfer_resp.status_code >= 400:
+                raise RuntimeError(_MINT_ERROR)
 
-        login_secure = _extract_login_secure(client)
+        login_secure = _extract_store_login_secure(client)
         if not login_secure:
-            raise RuntimeError(_REFRESH_EXPIRED_ERROR)
+            # finalize succeeded but no store cookie materialized (e.g. a 200 with
+            # no Set-Cookie): a transient anomaly, not an expired token.
+            raise RuntimeError(_MINT_ERROR)
         return {"steamLoginSecure": login_secure, "sessionid": sessionid}
 
 

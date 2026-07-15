@@ -1382,6 +1382,57 @@ class SteamSessionMintTests(unittest.IsolatedAsyncioTestCase):
         # The transient message must NOT tell the user to re-paste the token.
         self.assertNotIn("expired", str(ctx.exception))
 
+    async def test_transfer_hop_5xx_is_transient(self):
+        # finalizelogin validated the token (returned transfer_info), so a failing
+        # transfer hop is transient — it must NOT be reported as an expired token.
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/jwt/finalizelogin":
+                return httpx.Response(200, json={
+                    "steamID": "76561198000000000",
+                    "transfer_info": [{"url": "https://store.steampowered.com/login/settoken",
+                                       "params": {"nonce": "n", "auth": "a"}}],
+                })
+            if request.url.path == "/login/settoken":
+                return httpx.Response(500, text="store is down")
+            raise AssertionError(request.url)
+
+        token = _make_refresh_token(sub="76561198000000000", exp=9999999999)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_refresh_token(tmp, token)
+            with patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path, "STEAM_ID": "76561198000000000"}):
+                with self.assertRaisesRegex(RuntimeError, "transiently") as ctx:
+                    await steam_session.load_steam_web_cookies(transport=httpx.MockTransport(handler))
+        self.assertNotIn("expired", str(ctx.exception))
+
+    async def test_transfer_missing_store_cookie_is_transient(self):
+        # A transfer hop that 200s without Set-Cookie, and only a community cookie
+        # present: the store-domain cookie is required, and its absence is transient.
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/jwt/finalizelogin":
+                return httpx.Response(200, json={
+                    "steamID": "76561198000000000",
+                    "transfer_info": [
+                        {"url": "https://steamcommunity.com/login/settoken",
+                         "params": {"nonce": "n", "auth": "a"}},
+                        {"url": "https://store.steampowered.com/login/settoken",
+                         "params": {"nonce": "n", "auth": "a"}},
+                    ],
+                })
+            if request.url.host == "steamcommunity.com":
+                return httpx.Response(200, headers={"set-cookie": "steamLoginSecure=comm; Path=/"})
+            if request.url.host == "store.steampowered.com":
+                return httpx.Response(200, text="ok, but no cookie for you")
+            raise AssertionError(request.url)
+
+        token = _make_refresh_token(sub="76561198000000000", exp=9999999999)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_refresh_token(tmp, token)
+            with patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path, "STEAM_ID": "76561198000000000"}):
+                with self.assertRaisesRegex(RuntimeError, "transiently") as ctx:
+                    await steam_session.load_steam_web_cookies(transport=httpx.MockTransport(handler))
+        # The community cookie must not be substituted for the store one.
+        self.assertNotIn("expired", str(ctx.exception))
+
     async def test_steamid_falls_back_to_jwt_sub(self):
         captured: list = []
         token = _make_refresh_token(sub="76561198000000123", exp=9999999999)
