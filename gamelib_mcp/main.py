@@ -59,6 +59,7 @@ from .tools.models import (
     SearchGamesBatchResponse,
     SeriesBreakdownResponse,
     SeriesGapsResponse,
+    SessionIngestLinkResponse,
     SetAcquisitionResponse,
     SetAcquisitionsBatchResponse,
     SetPlaytimeResponse,
@@ -1530,7 +1531,9 @@ async def set_nintendo_session(cookies: str) -> NintendoSessionResponse:
     4. Pass that JSON string here
 
     Cookies are saved to NINTENDO_COOKIES_FILE (defaults to nintendo_cookies.json
-    beside the database).
+    beside the database). If the user prefers not to paste cookies into the
+    chat, call create_session_ingest_link(provider="nintendo") and give them
+    the URL instead.
     """
     from .tools.admin import set_nintendo_session as _set_session
     return await _set_session(cookies)
@@ -1555,7 +1558,10 @@ async def set_nintendo_ec_session(cookies: str) -> NintendoSessionResponse:
     4. Pass that JSON string here (object or Cookie Editor array format)
 
     Cookies are saved to NINTENDO_EC_COOKIES_FILE
-    (defaults to nintendo_ec_cookies.json beside the database).
+    (defaults to nintendo_ec_cookies.json beside the database). If the user
+    prefers not to paste cookies into the chat, call
+    create_session_ingest_link(provider="nintendo_ec") and give them the URL
+    instead.
     """
     from .tools.admin import set_nintendo_ec_session as _set_ec_session
     return await _set_ec_session(cookies)
@@ -1578,7 +1584,9 @@ async def set_humble_session(cookies: str) -> NintendoSessionResponse:
     4. Pass that JSON string here (object or Cookie Editor array format)
 
     Cookies are saved to HUMBLE_COOKIES_FILE (defaults to humble_cookies.json
-    beside the database).
+    beside the database). If the user prefers not to paste cookies into the
+    chat, call create_session_ingest_link(provider="humble") and give them
+    the URL instead.
     """
     from .tools.admin import set_humble_session as _set_humble
     return await _set_humble(cookies)
@@ -1603,10 +1611,39 @@ async def set_steam_store_session(cookies: str) -> NintendoSessionResponse:
     4. Pass that JSON string here (object or Cookie Editor array format)
 
     Cookies are saved to STEAM_STORE_COOKIES_FILE
-    (defaults to steam_store_cookies.json beside the database).
+    (defaults to steam_store_cookies.json beside the database). If the user
+    prefers not to paste cookies into the chat, call
+    create_session_ingest_link(provider="steam_store") and give them the URL
+    instead.
     """
     from .tools.admin import set_steam_store_session as _set_steam_store
     return await _set_steam_store(cookies)
+
+
+@mcp.tool(annotations=NON_IDEMPOTENT_MUTATION_TOOL)
+async def create_session_ingest_link(provider: str) -> SessionIngestLinkResponse:
+    """
+    Mint a single-use browser link for entering session cookies WITHOUT
+    pasting them into the chat.
+
+    Preferred flow when the user doesn't want cookies in the conversation:
+    call this with the provider, give the user the returned URL, and have
+    them open it in a browser, paste their Cookie Editor JSON export there,
+    and submit. Saves to the same file as the matching set_*_session tool;
+    verify afterwards with get_integration_status or by running the import.
+
+    provider: one of "nintendo" (accounts.nintendo.com — Switch ownership +
+    eShop purchases), "nintendo_ec" (legacy ~1h eShop fallback), "humble",
+    "steam_store". (Parental Controls playtime is not cookie-based — use
+    set_nintendo_pctl_session.)
+
+    The link expires in 15 minutes, works exactly once, and is invalidated
+    by a server restart; each call mints a fresh link. Without
+    MCP_PUBLIC_BASE_URL set (local disabled-auth mode) the URL falls back to
+    http://localhost:PORT and only works from the server's own machine.
+    """
+    from .tools.admin import create_session_ingest_link as _create_link
+    return await _create_link(provider)
 
 
 @mcp.tool(annotations=MUTATION_TOOL)

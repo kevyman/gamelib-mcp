@@ -343,6 +343,12 @@ class NintendoSessionResponse(FlexibleModel):
     path: str
 
 
+class SessionIngestLinkResponse(FlexibleModel):
+    url: str
+    provider: str
+    expires_in_minutes: int
+
+
 class UpdateGameResponse(FlexibleModel):
     game_id: int
     name: str

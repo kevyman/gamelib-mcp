@@ -34,6 +34,7 @@ gamelib-mcp is single-user by design: one deployment serves one person's library
 | `detect_farmed_games` | Flag games with suspicious achievement patterns |
 | `set_nintendo_session` | Provide Nintendo session cookies for Switch ownership sync |
 | `set_nintendo_pctl_session` | Set up Switch playtime sync via Parental Controls |
+| `create_session_ingest_link` | Mint a single-use browser link to paste session cookies outside the chat |
 | `get_integration_status` | Per-platform integration health |
 
 ## Quick Start

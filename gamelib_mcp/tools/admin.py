@@ -473,6 +473,19 @@ async def set_steam_store_session(cookies: str) -> dict:
     )
 
 
+async def create_session_ingest_link(provider: str) -> dict:
+    """Mint a single-use browser URL for pasting session cookies outside chat.
+
+    The returned URL serves a paste form that saves through the matching
+    set_*_session tool; see gamelib_mcp/session_ingest.py for the flow.
+    """
+    # Lazy import keeps session_ingest a leaf module (it imports this module
+    # lazily in turn for setter dispatch).
+    from ..session_ingest import mint_ingest_link
+
+    return mint_ingest_link(provider)
+
+
 # Holds the PKCE code_verifier between the two set_nintendo_pctl_session calls.
 # The verifier that generated the login URL must be the one used to exchange the
 # pasted code, so it has to survive across the (interactive) gap.
