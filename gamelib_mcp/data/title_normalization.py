@@ -122,6 +122,8 @@ _PURCHASE_SKU_PATTERNS = (
     ),
     # Bare region tails ("… Ultimate ROW", "… Rest of World").
     re.compile(r"\s+(?:ROW|Rest of (?:the )?World|Worldwide|Global)\s*$"),
+    # Store-state markers on old bundle keys ("GRAV (Early Access)").
+    re.compile(r"\s*\(Early Access\)\s*$", re.IGNORECASE),
     # Package-kind tails from the licenses/history pages.
     re.compile(
         r"[\s:–—-]+(?:Base Game|Store|Steam Store and Retail Key|Retail(?: Key)?|Standard)\s*$",
@@ -134,7 +136,7 @@ _PURCHASE_SKU_PATTERNS = (
     # Complete" = three games) — stripping it would exact-match the base game
     # and book the whole compilation's price onto it.
     re.compile(
-        r"\s+(?:Game of the (?:Year|Century)|GOTY|Ultimate|Deluxe"
+        r"\s+(?:Game of the (?:Year|Century)|GOTY|Ultimate|Ultra|Deluxe"
         r"|Digital Deluxe|Premium|Master|Gold|Platinum|Definitive)"
         r"(?:\s+(?:Edition|Deluxe))?\s*$",
         re.IGNORECASE,

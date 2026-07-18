@@ -31,6 +31,17 @@ def test_fallout_new_vegas_ultimate_is_edition_alias():
     assert override.alias_for_parent is True
 
 
+def test_outlast_whistleblower_is_nested_dlc():
+    from gamelib_mcp.data import content
+
+    result = content.classify_title_override("Outlast: Whistleblower")
+
+    assert result is not None
+    assert result.content_type == "dlc"
+    assert result.parent_name == "Outlast"
+    assert result.is_primary_library_item is False
+
+
 def test_fallout_new_vegas_dead_money_is_nested_dlc():
     from gamelib_mcp.data import content
 
