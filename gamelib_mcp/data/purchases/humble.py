@@ -33,6 +33,16 @@ Record building:
 - category "subscriptioncontent"/"subscriptionplan" (Humble Choice) →
   purchase_source "subscription"; everything else → "humble". amount_spent 0
   (freebies) → price 0.0. A missing currency is assumed USD.
+- Subscription plan payments ("Annual Plan", "12-Month Classic Plan",
+  "Month-to-Month Classic Plan") are separate game-less orders — the monthly
+  Choice drops themselves carry amount_spent 0. records_from_orders
+  attributes chronologically via a FIFO credit queue: each plan payment
+  pushes N month-credits (its price split N ways), each zero-priced Choice
+  drop consumes the oldest credit as its month price and splits it across
+  the drop's games. Stacked purchases (two annuals bought close together)
+  simply queue 24 credits. Unconsumed credits and zero-amount plan orders
+  (gifts/promos) are reported in skipped, so no subscription money silently
+  vanishes.
 """
 
 import asyncio
@@ -40,6 +50,7 @@ import json
 import logging
 import os
 import re
+from collections import deque
 
 import httpx
 
@@ -184,8 +195,33 @@ def _order_games(order: dict) -> tuple[list[tuple[str, str]], list[str]]:
     return games, non_game
 
 
-def records_from_order(order: dict) -> tuple[list[PurchaseRecord], list[dict]]:
-    """Convert one order-detail payload into (records, skipped)."""
+def _order_amount(order: dict) -> float:
+    try:
+        return float(order.get("amount_spent") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _plan_month_count(name: str) -> int:
+    """Months of Choice coverage a plan payment buys, from its product name
+    ("12-Month Classic Plan" → 12, "Annual Plan" → 12, month-to-month → 1)."""
+    numbered = re.search(r"(\d+)[-\s]?month", name, re.IGNORECASE)
+    if numbered:
+        count = int(numbered.group(1))
+        return count if count > 0 else 1
+    if re.search(r"annual|year", name, re.IGNORECASE):
+        return 12
+    return 1
+
+
+def records_from_order(
+    order: dict, *, price_override: tuple[float, str] | None = None
+) -> tuple[list[PurchaseRecord], list[dict]]:
+    """Convert one order-detail payload into (records, skipped).
+
+    ``price_override`` = (amount, currency) replaces the order's own
+    amount_spent/currency — how a plan credit funds a zero-priced Choice drop.
+    """
     product = order.get("product") or {}
     order_name = product.get("human_name") or order.get("gamekey") or "(unknown order)"
     category = str(product.get("category") or "").lower()
@@ -210,11 +246,11 @@ def records_from_order(order: dict) -> tuple[list[PurchaseRecord], list[dict]]:
             )
         return [], skipped
 
-    try:
-        amount_spent = float(order.get("amount_spent") or 0.0)
-    except (TypeError, ValueError):
-        amount_spent = 0.0
-    currency = str(order.get("currency") or "USD")
+    if price_override is not None:
+        amount_spent, currency = price_override
+    else:
+        amount_spent = _order_amount(order)
+        currency = str(order.get("currency") or "USD")
     acquired_at = normalize_purchase_date(order.get("created"))
     source = "subscription" if category.startswith("subscription") else PURCHASE_SOURCE
     bundle_name = (
@@ -240,6 +276,108 @@ def records_from_order(order: dict) -> tuple[list[PurchaseRecord], list[dict]]:
                 content_type=addon[0] if addon is not None else None,
             )
         )
+    return records, skipped
+
+
+def records_from_orders(orders: list[dict]) -> tuple[list[PurchaseRecord], list[dict]]:
+    """Convert all order payloads, attributing subscription plan payments to
+    the Choice drops they funded via a FIFO credit queue.
+
+    Two passes over the date-sorted history, deliberately NOT requiring a
+    credit to predate the drop it funds: the bundle is revealed the first
+    Tuesday of a month while subscriber auto-billing runs the last Tuesday
+    (and since the 2022 flat-price change a month can be bought at any point
+    in it), so a drop's content order routinely precedes its charge. Pass 1
+    collects every plan order (subscription category, no games): a paid one
+    pushes N month-credits (its price split N ways). Pass 2 walks the
+    zero-priced subscription drops in the same date order, each consuming
+    the oldest credit as its month price. Stacked plan purchases just queue
+    more credits; a drop left without a credit stays price 0 (trial/free
+    month); leftover credits are months paid for but not (yet) delivered.
+    """
+
+    def order_facts(order: dict) -> tuple[str, str, list[tuple[str, str]], bool]:
+        product = order.get("product") or {}
+        category = str(product.get("category") or "").lower()
+        name = str(
+            product.get("human_name") or order.get("gamekey") or "(unknown order)"
+        )
+        games, _ = _order_games(order)
+        is_plan = category.startswith("subscription") and not games
+        return category, name, games, is_plan
+
+    ordered = sorted(
+        orders, key=lambda o: normalize_purchase_date(o.get("created")) or ""
+    )
+
+    credits: deque[tuple[float, str]] = deque()
+    records: list[PurchaseRecord] = []
+    skipped: list[dict] = []
+    for order in ordered:
+        _, name, _, is_plan = order_facts(order)
+        if not is_plan:
+            continue
+        amount = _order_amount(order)
+        currency = str(order.get("currency") or "USD")
+        when = normalize_purchase_date(order.get("created")) or "undated"
+        if amount > 0:
+            months = _plan_month_count(name)
+            for share in _split_amount(amount, months):
+                credits.append((share, currency))
+            skipped.append(
+                {
+                    "description": name,
+                    "reason": (
+                        f"{when}: subscription plan payment {amount:.2f} {currency} "
+                        f"→ {months} month credit(s) attributed to Choice drops"
+                    ),
+                }
+            )
+        else:
+            skipped.append(
+                {
+                    "description": name,
+                    "reason": (
+                        f"{when}: subscription plan order with no recorded "
+                        "payment (gift or promo?) — funds no drops"
+                    ),
+                }
+            )
+
+    for order in ordered:
+        category, _, games, is_plan = order_facts(order)
+        if is_plan:
+            continue
+        override = None
+        if (
+            category.startswith("subscription")
+            and games
+            and _order_amount(order) == 0
+            and credits
+        ):
+            override = credits.popleft()
+        order_records, order_skipped = records_from_order(
+            order, price_override=override
+        )
+        records.extend(order_records)
+        skipped.extend(order_skipped)
+
+    if credits:
+        by_currency: dict[str, tuple[int, float]] = {}
+        for share, currency in credits:
+            count, total = by_currency.get(currency, (0, 0.0))
+            by_currency[currency] = (count + 1, total + share)
+        for currency, (count, total) in sorted(by_currency.items()):
+            skipped.append(
+                {
+                    "description": "subscription plan credits",
+                    "reason": (
+                        f"{count} unconsumed month credit(s) ({total:.2f} {currency}) "
+                        "— months paid for but not (yet) delivered, e.g. skipped/"
+                        "paused months or the plan's remaining term"
+                    ),
+                }
+            )
     return records, skipped
 
 
@@ -274,8 +412,7 @@ async def fetch_humble_purchases(
         "Accept": "application/json",
     }
 
-    records: list[PurchaseRecord] = []
-    skipped: list[dict] = []
+    orders: list[dict] = []
     async with httpx.AsyncClient(
         cookies=cookies, follow_redirects=True, timeout=30, transport=transport
     ) as client:
@@ -309,10 +446,10 @@ async def fetch_humble_purchases(
                     f"Unexpected Humble order payload for {gamekey}: "
                     f"{type(order).__name__}"
                 )
-            order_records, order_skipped = records_from_order(order)
-            records.extend(order_records)
-            skipped.extend(order_skipped)
+            orders.append(order)
 
+    # Cross-order plan-payment attribution needs the full history in hand.
+    records, skipped = records_from_orders(orders)
     logger.info(
         "Humble: fetched %d orders → %d purchases, %d skipped",
         len(gamekeys), len(records), len(skipped),

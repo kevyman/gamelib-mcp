@@ -702,6 +702,138 @@ class HumbleParserTests(unittest.TestCase):
         self.assertEqual(len(skipped), 1)
         self.assertIn("non-game item(s) excluded", skipped[0]["reason"])
 
+    def test_monthly_plan_payment_funds_next_choice_drop(self):
+        plan = {
+            "product": {
+                "human_name": "Month-to-Month Classic Plan",
+                "category": "subscriptionplan",
+            },
+            "amount_spent": 11.99,
+            "currency": "USD",
+            "created": "2020-03-01T00:00:00",
+        }
+        drop = {
+            "product": {"human_name": "Humble Choice March 2020", "category": "subscriptioncontent"},
+            "amount_spent": 0,
+            "currency": "USD",
+            "created": "2020-03-27T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "Choice Game 1", "key_type": "steam"},
+                    {"human_name": "Choice Game 2", "key_type": "steam"},
+                    {"human_name": "Choice Game 3", "key_type": "steam"},
+                ]
+            },
+        }
+        # Deliberately out of order — attribution must sort chronologically.
+        records, skipped = humble_module.records_from_orders([drop, plan])
+
+        self.assertEqual([r.price_paid for r in records], [4.0, 4.0, 3.99])
+        self.assertEqual({r.purchase_source for r in records}, {"subscription"})
+        plan_notes = [s for s in skipped if "plan payment" in s["reason"]]
+        self.assertEqual(len(plan_notes), 1)
+        self.assertIn("11.99 USD", plan_notes[0]["reason"])
+        self.assertIn("1 month credit", plan_notes[0]["reason"])
+
+    def test_annual_plans_stack_and_leftover_credits_reported(self):
+        def annual(created):
+            return {
+                "product": {"human_name": "Annual Plan", "category": "subscriptionplan"},
+                "amount_spent": 93.00,
+                "currency": "EUR",
+                "created": created,
+            }
+
+        def drop(created, title):
+            return {
+                "product": {"human_name": f"Choice {title}", "category": "subscriptioncontent"},
+                "amount_spent": 0,
+                "currency": "EUR",
+                "created": created,
+                "tpkd_dict": {"all_tpks": [{"human_name": title, "key_type": "steam"}]},
+            }
+
+        # Two annual plans bought three days apart (a gifted deal), then 13
+        # drops: the first 12 consume plan #1's credits, the 13th starts on
+        # plan #2, leaving 11 credits unconsumed.
+        orders = [annual("2024-11-29T00:00:00"), annual("2024-12-02T00:00:00")]
+        orders += [drop(f"2025-{m:02d}-25T00:00:00", f"Month {m}") for m in range(1, 13)]
+        orders += [drop("2026-01-25T00:00:00", "Month 13")]
+
+        records, skipped = humble_module.records_from_orders(orders)
+
+        self.assertEqual(len(records), 13)
+        self.assertEqual({r.price_paid for r in records}, {7.75})  # 93 / 12
+        self.assertEqual({r.price_currency for r in records}, {"EUR"})
+        leftovers = [s for s in skipped if s["description"] == "subscription plan credits"]
+        self.assertEqual(len(leftovers), 1)
+        self.assertIn("11 unconsumed month credit(s) (85.25 EUR)", leftovers[0]["reason"])
+
+    def test_drop_preceding_its_charge_is_still_funded(self):
+        # The bundle is revealed the first Tuesday of the month; subscriber
+        # auto-billing runs the last Tuesday — the drop's content order
+        # routinely PREDATES the charge that pays for it. Attribution must
+        # not require credit-before-drop ordering.
+        drop = {
+            "product": {"human_name": "Humble Choice May 2023", "category": "subscriptioncontent"},
+            "amount_spent": 0,
+            "created": "2023-05-02T00:00:00",
+            "tpkd_dict": {"all_tpks": [{"human_name": "May Game", "key_type": "steam"}]},
+        }
+        late_charge = {
+            "product": {"human_name": "Month-to-Month Classic Plan", "category": "subscriptionplan"},
+            "amount_spent": 11.99,
+            "currency": "USD",
+            "created": "2023-05-30T00:00:00",
+        }
+        records, _ = humble_module.records_from_orders([drop, late_charge])
+        self.assertEqual(records[0].price_paid, 11.99)
+
+    def test_unfunded_drop_stays_zero_and_gift_plan_reported(self):
+        gift_plan = {
+            "product": {"human_name": "Annual Plan", "category": "subscriptionplan"},
+            "amount_spent": 0,
+            "currency": "EUR",
+            "created": "2024-11-29T00:00:00",
+        }
+        trial_drop = {
+            "product": {"human_name": "Trial Month", "category": "subscriptioncontent"},
+            "amount_spent": 0,
+            "created": "2019-12-06T00:00:00",
+            "tpkd_dict": {"all_tpks": [{"human_name": "Trial Game", "key_type": "steam"}]},
+        }
+        records, skipped = humble_module.records_from_orders([gift_plan, trial_drop])
+
+        # A zero-amount plan adds no credits, so the drop stays price 0.
+        self.assertEqual(records[0].price_paid, 0.0)
+        gift_notes = [s for s in skipped if "no recorded payment" in s["reason"]]
+        self.assertEqual(len(gift_notes), 1)
+        self.assertEqual(gift_notes[0]["description"], "Annual Plan")
+        self.assertIn("2024-11-29", gift_notes[0]["reason"])
+
+    def test_pre_choice_monthly_orders_keep_their_own_price(self):
+        # Old Humble Monthly charged the content order itself — a plan credit
+        # must not override a drop that already carries a payment.
+        plan = {
+            "product": {"human_name": "Month-to-Month Classic Plan", "category": "subscriptionplan"},
+            "amount_spent": 12.00,
+            "currency": "USD",
+            "created": "2016-02-01T00:00:00",
+        }
+        paid_drop = {
+            "product": {"human_name": "Humble Monthly March 2016", "category": "subscriptioncontent"},
+            "amount_spent": 12.00,
+            "currency": "USD",
+            "created": "2016-03-04T00:00:00",
+            "tpkd_dict": {"all_tpks": [{"human_name": "Monthly Game", "key_type": "steam"}]},
+        }
+        records, skipped = humble_module.records_from_orders([plan, paid_drop])
+
+        self.assertEqual(records[0].price_paid, 12.00)
+        # The plan credit stays queued and is reported, not silently dropped.
+        leftovers = [s for s in skipped if s["description"] == "subscription plan credits"]
+        self.assertEqual(len(leftovers), 1)
+
     def test_addon_named_keys_carry_content_type_hint(self):
         order = {
             "product": {"human_name": "Board Game Night", "category": "bundle"},
