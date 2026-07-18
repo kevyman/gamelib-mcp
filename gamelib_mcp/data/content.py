@@ -117,6 +117,11 @@ for _dlc in (
 ):
     _TITLE_OVERRIDES[normalize_search_text(_dlc)] = _nested(CONTENT_DLC, "Fallout: New Vegas")
 
+# Well-known DLC whose names carry no addon-ish word for the pattern table.
+_TITLE_OVERRIDES[normalize_search_text("Outlast: Whistleblower")] = _nested(
+    CONTENT_DLC, "Outlast"
+)
+
 
 def classify_title_override(title: str) -> ContentClassification | None:
     return _TITLE_OVERRIDES.get(normalize_search_text(title))
@@ -332,6 +337,12 @@ ADDON_NAME_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
     (re.compile(r"character pass", re.IGNORECASE), CONTENT_DLC, "character pass"),
     (re.compile(r"cosmetic", re.IGNORECASE), CONTENT_DLC, "cosmetic"),
     (re.compile(r"costume pack", re.IGNORECASE), CONTENT_DLC, "costume pack"),
+    # Paradox-style micro-DLC naming ("Crusader Kings II - Norse Unit Pack").
+    (
+        re.compile(r"\b(?:unit|portrait|music|sprite)\s+pack\b", re.IGNORECASE),
+        CONTENT_DLC,
+        "content pack",
+    ),
     (re.compile(r"art\s?book", re.IGNORECASE), CONTENT_UNKNOWN_ADDON, "artbook"),
 )
 

@@ -88,6 +88,25 @@ _KEY_SUFFIX_RE = re.compile(
 # Humble human_names can embed literal HTML ("… DLC<br />(DLC Bundle #1)").
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
+# Marketing/promo tpk names that are not games at all ("Tropico 3 Free Key
+# Expiration", "X-COM: UFO Defense Free Game Redemption Deadline", "Tomb
+# Raider Monthly Outlast Deluxe Edition Cross-Promo", "… 2 Card Packs
+# (Skyrim) …" consumables). Excluded like non-game media so their share of
+# the order price redistributes to the real games.
+_PROMO_NAME_RE = re.compile(
+    r"cross-?promo|redemption deadline|key expiration|\bcard packs?\b"
+    r"|\bevent tickets?\b",
+    re.IGNORECASE,
+)
+
+# An enumerated multi-game SKU ("Peggle Deluxe, Bejeweled 3, Bookworm Deluxe,
+# Escape Rosecliff Island, and Feeding Frenzy 2") names several games in one
+# key — route it to bundles_needing_split instead of minting one giant row.
+# Two ", " separators required: real titles with one comma exist, and numeric
+# commas ("Warhammer 40,000") have no trailing space.
+def _looks_like_enumerated_bundle(title: str) -> bool:
+    return title.count(", ") >= 2
+
 # Subproduct download platforms that signal a real game vs. bundled media.
 # Unknown/future platform values deliberately count as game-ish — only a
 # downloads list that is ENTIRELY known non-game media excludes a subproduct.
@@ -168,6 +187,7 @@ def _order_games(order: dict) -> tuple[list[tuple[str, str]], list[str]]:
     """Extract ([(title, platform)], excluded_non_game_titles) from an order —
     tpks first, subproducts as the fallback."""
     games: list[tuple[str, str]] = []
+    non_game: list[str] = []
     tpks = (order.get("tpkd_dict") or {}).get("all_tpks") or []
     for tpk in tpks:
         if not isinstance(tpk, dict):
@@ -175,19 +195,23 @@ def _order_games(order: dict) -> tuple[list[tuple[str, str]], list[str]]:
         name = tpk.get("human_name")
         if not name or not isinstance(name, str):
             continue
+        if _PROMO_NAME_RE.search(name):
+            non_game.append(name.strip())
+            continue
         key_type = str(tpk.get("key_type") or "").lower()
         games.append((_clean_title(name), _KEY_TYPE_TO_PLATFORM.get(key_type, "other")))
-    if games:
-        return games, []
+    if games or non_game:
+        # tpks are authoritative when they yield anything — never also read
+        # subproducts (they mirror the same items).
+        return games, non_game
 
-    non_game: list[str] = []
     for sub in order.get("subproducts") or []:
         if not isinstance(sub, dict):
             continue
         name = sub.get("human_name")
         if not name or not isinstance(name, str):
             continue
-        if _is_non_game_subproduct(sub):
+        if _is_non_game_subproduct(sub) or _PROMO_NAME_RE.search(name):
             non_game.append(name.strip())
             continue
         # No platform signal on a subproduct — "other" beats a wrong guess.
@@ -234,7 +258,7 @@ def records_from_order(
                 "description": str(order_name),
                 "reason": (
                     f"{len(non_game)} non-game item(s) excluded "
-                    f"(ebook/audio/video downloads): {', '.join(non_game[:5])}"
+                    f"(ebook/audio/video or promo): {', '.join(non_game[:5])}"
                     + (", …" if len(non_game) > 5 else "")
                 ),
             }
@@ -274,6 +298,9 @@ def records_from_order(
                 price_currency=currency,
                 bundle_name=bundle_name,
                 content_type=addon[0] if addon is not None else None,
+                # One key naming several games — divert to
+                # bundles_needing_split rather than minting a giant row.
+                is_bundle=_looks_like_enumerated_bundle(title),
             )
         )
     return records, skipped

@@ -844,13 +844,58 @@ class HumbleParserTests(unittest.TestCase):
                     {"human_name": "Ticket to Ride", "key_type": "steam"},
                     {"human_name": "Ticket to Ride Europe DLC", "key_type": "steam"},
                     {"human_name": "Ticket to Ride Original Soundtrack", "key_type": "steam"},
+                    {"human_name": "Crusader Kings II - Norse Unit Pack", "key_type": "steam"},
                 ]
             },
         }
         records, _ = humble_module.records_from_order(order)
         self.assertEqual(
-            [r.content_type for r in records], [None, "dlc", "unknown_addon"]
+            [r.content_type for r in records], [None, "dlc", "unknown_addon", "dlc"]
         )
+
+    def test_promo_tpks_excluded_and_price_redistributes(self):
+        order = {
+            "product": {"human_name": "Humble Monthly February 2016", "category": "subscriptioncontent"},
+            "amount_spent": 12.00,
+            "created": "2016-02-05T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "Real Game", "key_type": "steam"},
+                    {"human_name": "Tomb Raider Monthly Outlast Deluxe Edition Cross-Promo", "key_type": "steam"},
+                    {"human_name": "Tropico 3 Free Key Expiration", "key_type": "steam"},
+                    {
+                        "human_name": "The Elder Scrolls: Legends: 2 Card Packs (Skyrim) 1 Event Ticket",
+                        "key_type": "steam",
+                    },
+                ]
+            },
+        }
+        records, skipped = humble_module.records_from_order(order)
+        self.assertEqual([r.title for r in records], ["Real Game"])
+        self.assertEqual(records[0].price_paid, 12.00)
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("3 non-game item(s) excluded", skipped[0]["reason"])
+
+    def test_enumerated_multi_game_sku_flagged_as_bundle(self):
+        order = {
+            "product": {"human_name": "THQ Bundle", "category": "bundle"},
+            "amount_spent": 5.00,
+            "created": "2012-12-01T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {
+                        "human_name": (
+                            "Supreme Commander, Supreme Commander: Forged Alliance, "
+                            "The Guild 2, and Red Faction: Armageddon"
+                        ),
+                        "key_type": "steam",
+                    },
+                    {"human_name": "Warhammer 40,000: Dawn of War", "key_type": "steam"},
+                ]
+            },
+        }
+        records, _ = humble_module.records_from_order(order)
+        self.assertEqual([r.is_bundle for r in records], [True, False])
 
 
 class HumbleFetchTests(unittest.IsolatedAsyncioTestCase):

@@ -181,3 +181,9 @@ class PurchaseSkuSuffixTests(unittest.TestCase):
         # Complete = three games) — stripping it would book the compilation's
         # price onto the base game.
         self.assertEqual(normalize_purchase_title("Hexcells Complete"), "Hexcells Complete")
+
+    def test_strips_early_access_marker_and_ultra_tail(self) -> None:
+        # Old Humble bundle keys carry store-state and SKU tails the library
+        # row never does ("GRAV (Early Access)", "Beat Hazard Ultra").
+        self.assertEqual(normalize_purchase_title("GRAV (Early Access)"), "GRAV")
+        self.assertEqual(normalize_purchase_title("Beat Hazard Ultra"), "Beat Hazard")
