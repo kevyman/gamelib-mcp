@@ -314,3 +314,31 @@ def parent_name_candidates(title: str) -> list[str]:
             if candidate not in candidates:
                 candidates.append(candidate)
     return sorted(candidates, key=len, reverse=True)
+
+
+# Name patterns that betray addon content misfiled as a primary base_game.
+# Case-insensitive; "dlc" matches only as a whole word so "Half-Life" and
+# friends never trip it. soundtrack/artbook are noise in game counts with no
+# real parent gameplay, so they map to unknown_addon; the rest map to dlc.
+# Shared by detect_misclassified_dlc (detection buckets) and the Humble
+# purchase importer (a content_type hint for stores with no item typing).
+ADDON_NAME_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
+    (re.compile(r"season pass", re.IGNORECASE), CONTENT_DLC, "season pass"),
+    (re.compile(r"expansion pass", re.IGNORECASE), CONTENT_DLC, "expansion pass"),
+    (re.compile(r"soundtrack", re.IGNORECASE), CONTENT_UNKNOWN_ADDON, "soundtrack"),
+    (re.compile(r"upgrade pack", re.IGNORECASE), CONTENT_DLC, "upgrade pack"),
+    (re.compile(r"\bdlc\b", re.IGNORECASE), CONTENT_DLC, "dlc"),
+    (re.compile(r"bonus content", re.IGNORECASE), CONTENT_DLC, "bonus content"),
+    (re.compile(r"character pass", re.IGNORECASE), CONTENT_DLC, "character pass"),
+    (re.compile(r"cosmetic", re.IGNORECASE), CONTENT_DLC, "cosmetic"),
+    (re.compile(r"costume pack", re.IGNORECASE), CONTENT_DLC, "costume pack"),
+    (re.compile(r"art\s?book", re.IGNORECASE), CONTENT_UNKNOWN_ADDON, "artbook"),
+)
+
+
+def match_addon_name(name: str | None) -> tuple[str, str] | None:
+    """First addon-ish name pattern hit → (suggested content_type, label)."""
+    for pattern, content_type, label in ADDON_NAME_PATTERNS:
+        if pattern.search(name or ""):
+            return content_type, label
+    return None
