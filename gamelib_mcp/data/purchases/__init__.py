@@ -49,7 +49,8 @@ class PurchaseRecord:
     # the constituents and calls split_bundle_acquisition.
     is_bundle: bool = False
     # A nested content-type hint (e.g. "dlc") from the store's own item
-    # typing, when the source exposes one. None = no signal.
+    # typing when the source exposes one (eShop), or from an addon-ish name
+    # (Humble, which has no item typing). None = no signal.
     content_type: str | None = None
 
 

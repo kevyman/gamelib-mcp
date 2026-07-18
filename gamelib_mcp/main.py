@@ -1395,7 +1395,10 @@ async def import_purchases(
       Humble session — mint one with create_session_ingest_link(provider="humble").
       Bundle prices are
       split evenly across the bundle's games (bundle_name groups them);
-      Humble Choice items get purchase_source "subscription".
+      Humble Choice items get purchase_source "subscription". Ebook/audio/
+      video items (Book Bundles) are excluded and reported in skipped;
+      key-delivery title tails ("… Steam Key") are stripped; addon-named
+      keys ("… DLC", "… Soundtrack") carry a nested content_type hint.
     - "steam": Steam licenses + purchase history (store.steampowered.com)
       → steam. Needs a Steam store session — mint one with
       create_session_ingest_link(provider="steam_refresh") (preferred; legacy

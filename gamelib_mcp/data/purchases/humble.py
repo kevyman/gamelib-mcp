@@ -10,10 +10,21 @@ Record building:
 - Game keys in ``tpkd_dict.all_tpks`` are preferred — they are the actual
   redeemable games. ``key_type`` maps to the library platform: "steam" →
   steam, "gog" → gog, anything else (generic keys, origin, …) → "other".
+  Key-delivery suffixes ("… Steam Key", "… Registration Key") are Humble
+  packaging noise, not game identity, and are stripped from the title.
 - Orders without tpks fall back to ``subproducts``; those have no platform
   signal, so they land on "other" (deliberately NOT guessed as steam).
+  A subproduct whose downloads are all non-game media (ebook/audio/video —
+  Humble Book Bundles have subproducts too) is excluded so novels never
+  become library games; a subproduct with no downloads at all is kept
+  (a bare key delivery is indistinguishable from a game there).
 - Orders with neither tpks nor subproducts (soundtrack-only, ebook rewards,
-  …) are skipped with a reason; no deeper non-game detection is attempted.
+  …) are skipped with a reason; excluded non-game subproducts are reported
+  the same way. The order price splits only across the kept games.
+- Humble exposes no per-item content typing, so an addon-ish NAME
+  (match_addon_name: "… DLC", "… Season Pass", "… Soundtrack", …) becomes
+  the record's content_type hint — those match exact-name-only and mint
+  nested instead of as phantom base games.
 - Multi-game orders split ``amount_spent`` evenly, rounded to 2 decimals with
   the last item absorbing the rounding remainder so the parts sum exactly to
   the order total; ``bundle_name`` is set only for category "bundle" orders
@@ -28,10 +39,12 @@ import asyncio
 import json
 import logging
 import os
+import re
 
 import httpx
 
 from . import PurchaseRecord, normalize_purchase_date
+from gamelib_mcp.data.content import match_addon_name
 from gamelib_mcp.data.db import default_data_dir
 
 logger = logging.getLogger(__name__)
@@ -44,6 +57,20 @@ _ORDER_DETAIL_URL = "https://www.humblebundle.com/api/v1/order/{gamekey}"
 _REQUEST_DELAY_SECONDS = 0.2
 
 _KEY_TYPE_TO_PLATFORM = {"steam": "steam", "gog": "gog"}
+
+# Key-delivery tails on tpk/subproduct titles ("Dynamite Jack Steam Key",
+# "Galcon Fusion Registration Key") — packaging noise that defeats library
+# name matching and would mint duplicate rows. Requires the qualifier word so
+# a game legitimately named "… Key" never trips it.
+_KEY_SUFFIX_RE = re.compile(
+    r"\s+(?:steam|gog|origin|uplay|epic|desura|registration)\s+key\s*$",
+    re.IGNORECASE,
+)
+
+# Subproduct download platforms that signal a real game vs. bundled media.
+# Unknown/future platform values deliberately count as game-ish — only a
+# downloads list that is ENTIRELY known non-game media excludes a subproduct.
+_NON_GAME_DOWNLOAD_PLATFORMS = frozenset({"ebook", "audio", "video"})
 
 _AUTH_ERROR = (
     "Humble Bundle API request was not authenticated (_simpleauth_sess cookie "
@@ -93,9 +120,31 @@ def _split_amount(amount: float, count: int) -> list[float]:
     return shares
 
 
-def _order_games(order: dict) -> list[tuple[str, str]]:
-    """Extract [(title, platform)] from an order — tpks first, subproducts as
-    the fallback."""
+def _clean_title(name: str) -> str:
+    """Strip key-delivery tails, iterated so stacked tails peel off."""
+    cleaned = name.strip()
+    previous = None
+    while cleaned != previous:
+        previous = cleaned
+        cleaned = _KEY_SUFFIX_RE.sub("", cleaned).strip()
+    return cleaned or name.strip()
+
+
+def _is_non_game_subproduct(sub: dict) -> bool:
+    """True when every download on the subproduct is known non-game media
+    (ebook/audio/video). No downloads at all = ambiguous = keep."""
+    platforms = {
+        str(d.get("platform") or "").lower()
+        for d in sub.get("downloads") or []
+        if isinstance(d, dict)
+    }
+    platforms.discard("")
+    return bool(platforms) and platforms <= _NON_GAME_DOWNLOAD_PLATFORMS
+
+
+def _order_games(order: dict) -> tuple[list[tuple[str, str]], list[str]]:
+    """Extract ([(title, platform)], excluded_non_game_titles) from an order —
+    tpks first, subproducts as the fallback."""
     games: list[tuple[str, str]] = []
     tpks = (order.get("tpkd_dict") or {}).get("all_tpks") or []
     for tpk in tpks:
@@ -105,19 +154,23 @@ def _order_games(order: dict) -> list[tuple[str, str]]:
         if not name or not isinstance(name, str):
             continue
         key_type = str(tpk.get("key_type") or "").lower()
-        games.append((name.strip(), _KEY_TYPE_TO_PLATFORM.get(key_type, "other")))
+        games.append((_clean_title(name), _KEY_TYPE_TO_PLATFORM.get(key_type, "other")))
     if games:
-        return games
+        return games, []
 
+    non_game: list[str] = []
     for sub in order.get("subproducts") or []:
         if not isinstance(sub, dict):
             continue
         name = sub.get("human_name")
         if not name or not isinstance(name, str):
             continue
+        if _is_non_game_subproduct(sub):
+            non_game.append(name.strip())
+            continue
         # No platform signal on a subproduct — "other" beats a wrong guess.
-        games.append((name.strip(), "other"))
-    return games
+        games.append((_clean_title(name), "other"))
+    return games, non_game
 
 
 def records_from_order(order: dict) -> tuple[list[PurchaseRecord], list[dict]]:
@@ -126,9 +179,25 @@ def records_from_order(order: dict) -> tuple[list[PurchaseRecord], list[dict]]:
     order_name = product.get("human_name") or order.get("gamekey") or "(unknown order)"
     category = str(product.get("category") or "").lower()
 
-    games = _order_games(order)
+    games, non_game = _order_games(order)
+    skipped: list[dict] = []
+    if non_game:
+        skipped.append(
+            {
+                "description": str(order_name),
+                "reason": (
+                    f"{len(non_game)} non-game item(s) excluded "
+                    f"(ebook/audio/video downloads): {', '.join(non_game[:5])}"
+                    + (", …" if len(non_game) > 5 else "")
+                ),
+            }
+        )
     if not games:
-        return [], [{"description": str(order_name), "reason": "no game keys or subproducts"}]
+        if not skipped:
+            skipped.append(
+                {"description": str(order_name), "reason": "no game keys or subproducts"}
+            )
+        return [], skipped
 
     try:
         amount_spent = float(order.get("amount_spent") or 0.0)
@@ -142,19 +211,25 @@ def records_from_order(order: dict) -> tuple[list[PurchaseRecord], list[dict]]:
     )
     shares = _split_amount(amount_spent, len(games))
 
-    records = [
-        PurchaseRecord(
-            title=title,
-            platform=platform,
-            purchase_source=source,
-            acquired_at=acquired_at,
-            price_paid=share,
-            price_currency=currency,
-            bundle_name=bundle_name,
+    records = []
+    for (title, platform), share in zip(games, shares, strict=True):
+        # Humble has no per-item content typing — an addon-ish NAME is the
+        # only nested signal, so DLC/soundtrack keys match exact-name-only
+        # and mint nested instead of as phantom base games.
+        addon = match_addon_name(title)
+        records.append(
+            PurchaseRecord(
+                title=title,
+                platform=platform,
+                purchase_source=source,
+                acquired_at=acquired_at,
+                price_paid=share,
+                price_currency=currency,
+                bundle_name=bundle_name,
+                content_type=addon[0] if addon is not None else None,
+            )
         )
-        for (title, platform), share in zip(games, shares, strict=True)
-    ]
-    return records, []
+    return records, skipped
 
 
 def _check_auth(response: httpx.Response) -> None:

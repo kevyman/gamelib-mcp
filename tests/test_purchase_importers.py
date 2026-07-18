@@ -620,6 +620,89 @@ class HumbleParserTests(unittest.TestCase):
         self.assertEqual(skipped[0]["description"], "Soundtrack Only")
         self.assertIn("no game keys or subproducts", skipped[0]["reason"])
 
+    def test_key_delivery_suffixes_stripped_from_titles(self):
+        order = {
+            "product": {"human_name": "Humble Indie Bundle 3", "category": "bundle"},
+            "amount_spent": 5.00,
+            "created": "2011-07-26T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "Dynamite Jack Steam Key", "key_type": "steam"},
+                    {"human_name": "Organ Trail: Director's Cut Steam key", "key_type": "steam"},
+                    {"human_name": "Galcon Fusion Registration Key", "key_type": "generic"},
+                ]
+            },
+        }
+        records, _ = humble_module.records_from_order(order)
+        self.assertEqual(
+            [r.title for r in records],
+            ["Dynamite Jack", "Organ Trail: Director's Cut", "Galcon Fusion"],
+        )
+
+    def test_ebook_only_order_excluded_not_minted(self):
+        # Humble Book Bundles have subproducts (the old "no tpks → skip"
+        # assumption doesn't hold) — every novel must be excluded, not become
+        # a platform-"other" library game.
+        order = {
+            "product": {"human_name": "Humble Book Bundle: Epic Fantasy", "category": "bundle"},
+            "amount_spent": 16.41,
+            "currency": "EUR",
+            "created": "2020-05-01T00:00:00",
+            "subproducts": [
+                {
+                    "human_name": "Guns of the Dawn",
+                    "downloads": [{"platform": "ebook"}],
+                },
+                {
+                    "human_name": "Empire in Black and Gold",
+                    "downloads": [{"platform": "ebook"}, {"platform": "audio"}],
+                },
+            ],
+        }
+        records, skipped = humble_module.records_from_order(order)
+        self.assertEqual(records, [])
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0]["description"], "Humble Book Bundle: Epic Fantasy")
+        self.assertIn("2 non-game item(s) excluded", skipped[0]["reason"])
+        self.assertIn("Guns of the Dawn", skipped[0]["reason"])
+
+    def test_mixed_subproducts_price_splits_across_games_only(self):
+        order = {
+            "product": {"human_name": "DRM-Free Mixed Bundle", "category": "bundle"},
+            "amount_spent": 10.00,
+            "created": "2021-03-03T00:00:00",
+            "subproducts": [
+                {"human_name": "Actual Game", "downloads": [{"platform": "windows"}]},
+                {"human_name": "The Making Of", "downloads": [{"platform": "video"}]},
+            ],
+        }
+        records, skipped = humble_module.records_from_order(order)
+        self.assertEqual([r.title for r in records], ["Actual Game"])
+        # The excluded video gets no share — the full price lands on the game.
+        self.assertEqual(records[0].price_paid, 10.00)
+        # Single remaining game → not a multi-game bundle.
+        self.assertIsNone(records[0].bundle_name)
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("non-game item(s) excluded", skipped[0]["reason"])
+
+    def test_addon_named_keys_carry_content_type_hint(self):
+        order = {
+            "product": {"human_name": "Board Game Night", "category": "bundle"},
+            "amount_spent": 9.00,
+            "created": "2019-06-01T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "Ticket to Ride", "key_type": "steam"},
+                    {"human_name": "Ticket to Ride Europe DLC", "key_type": "steam"},
+                    {"human_name": "Ticket to Ride Original Soundtrack", "key_type": "steam"},
+                ]
+            },
+        }
+        records, _ = humble_module.records_from_order(order)
+        self.assertEqual(
+            [r.content_type for r in records], [None, "dlc", "unknown_addon"]
+        )
+
 
 class HumbleFetchTests(unittest.IsolatedAsyncioTestCase):
     def _write_cookies(self, tmp: str) -> str:

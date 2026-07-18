@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import statistics
 import sys
 from collections import defaultdict
@@ -16,8 +15,8 @@ from fastmcp.exceptions import ToolError
 from ..data.content import (
     CONTENT_BASE_GAME,
     CONTENT_DLC,
-    CONTENT_UNKNOWN_ADDON,
     NESTED_CONTENT_TYPES,
+    match_addon_name,
 )
 from ..data.db import (
     ACQUISITION_FIELDS,
@@ -1578,32 +1577,9 @@ async def detect_cross_platform_collapses(limit: int = 0) -> dict:
     }
 
 
-# Name patterns that betray addon content misfiled as a primary base_game.
-# Case-insensitive; "dlc" matches only as a whole word so "Half-Life" and
-# friends never trip it. soundtrack/artbook are noise in game counts with no
-# real parent gameplay, so they map to unknown_addon; the rest map to dlc.
-_ADDON_NAME_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
-    (re.compile(r"season pass", re.IGNORECASE), CONTENT_DLC, "season pass"),
-    (re.compile(r"expansion pass", re.IGNORECASE), CONTENT_DLC, "expansion pass"),
-    (re.compile(r"soundtrack", re.IGNORECASE), CONTENT_UNKNOWN_ADDON, "soundtrack"),
-    (re.compile(r"upgrade pack", re.IGNORECASE), CONTENT_DLC, "upgrade pack"),
-    (re.compile(r"\bdlc\b", re.IGNORECASE), CONTENT_DLC, "dlc"),
-    (re.compile(r"bonus content", re.IGNORECASE), CONTENT_DLC, "bonus content"),
-    (re.compile(r"character pass", re.IGNORECASE), CONTENT_DLC, "character pass"),
-    (re.compile(r"cosmetic", re.IGNORECASE), CONTENT_DLC, "cosmetic"),
-    (re.compile(r"costume pack", re.IGNORECASE), CONTENT_DLC, "costume pack"),
-    (re.compile(r"art\s?book", re.IGNORECASE), CONTENT_UNKNOWN_ADDON, "artbook"),
-)
-
+# The addon-name pattern table lives in data/content.py (match_addon_name) —
+# shared with the Humble purchase importer's content_type hint.
 _MISCLASSIFIED_BUCKET_CAP = 200
-
-
-def _match_addon_name(name: str | None) -> tuple[str, str] | None:
-    """First addon-ish name pattern hit → (suggested content_type, label)."""
-    for pattern, content_type, label in _ADDON_NAME_PATTERNS:
-        if pattern.search(name or ""):
-            return content_type, label
-    return None
 
 
 def _pinned_columns(raw) -> set[str]:
@@ -1922,7 +1898,7 @@ async def detect_misclassified_dlc(
     for row in base_rows:
         gid = row["game_id"]
         name = row["name"]
-        addon = _match_addon_name(name)
+        addon = match_addon_name(name)
         # Parent resolution runs unindexed name lookups per split candidate —
         # only pay for it on rows that can actually still become a candidate.
         may_be_purchase_suspect = (
