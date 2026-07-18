@@ -630,13 +630,30 @@ class HumbleParserTests(unittest.TestCase):
                     {"human_name": "Dynamite Jack Steam Key", "key_type": "steam"},
                     {"human_name": "Organ Trail: Director's Cut Steam key", "key_type": "steam"},
                     {"human_name": "Galcon Fusion Registration Key", "key_type": "generic"},
+                    {"human_name": "Multiwinia Multiplayer Key", "key_type": "generic"},
+                    {"human_name": "Frozen Synapse Steam/Multiplayer Key", "key_type": "steam"},
+                    {"human_name": "Hero Academy Gold Pack Content Code", "key_type": "generic"},
+                    {"human_name": "Destiny 2 - Expansion Pass - Blizzard Key", "key_type": "generic"},
+                    {
+                        "human_name": "RPG Maker - Adventurer's Journey DLC<br />(DLC Bundle #1)",
+                        "key_type": "steam",
+                    },
                 ]
             },
         }
         records, _ = humble_module.records_from_order(order)
         self.assertEqual(
             [r.title for r in records],
-            ["Dynamite Jack", "Organ Trail: Director's Cut", "Galcon Fusion"],
+            [
+                "Dynamite Jack",
+                "Organ Trail: Director's Cut",
+                "Galcon Fusion",
+                "Multiwinia",
+                "Frozen Synapse",
+                "Hero Academy Gold Pack",
+                "Destiny 2 - Expansion Pass",
+                "RPG Maker - Adventurer's Journey DLC (DLC Bundle #1)",
+            ],
         )
 
     def test_ebook_only_order_excluded_not_minted(self):
