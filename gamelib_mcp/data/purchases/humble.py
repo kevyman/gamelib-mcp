@@ -102,10 +102,13 @@ _PROMO_NAME_RE = re.compile(
 # An enumerated multi-game SKU ("Peggle Deluxe, Bejeweled 3, Bookworm Deluxe,
 # Escape Rosecliff Island, and Feeding Frenzy 2") names several games in one
 # key — route it to bundles_needing_split instead of minting one giant row.
-# Two ", " separators required: real titles with one comma exist, and numeric
-# commas ("Warhammer 40,000") have no trailing space.
+# Two ", " separators AND an Oxford ", and " required: single games with
+# commas in the NAME exist ("Hack, Slash, Loot", "Cook, Serve, Delicious!",
+# "RIVE: Wreck, Hack, Die, Retry") and must not divert; every real
+# enumerated SKU observed ends its list with ", and ". Numeric commas
+# ("Warhammer 40,000") have no trailing space and never trip this.
 def _looks_like_enumerated_bundle(title: str) -> bool:
-    return title.count(", ") >= 2
+    return title.count(", ") >= 2 and ", and " in title
 
 # Subproduct download platforms that signal a real game vs. bundled media.
 # Unknown/future platform values deliberately count as game-ish — only a
