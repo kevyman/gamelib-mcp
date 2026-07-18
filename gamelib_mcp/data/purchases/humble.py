@@ -55,7 +55,7 @@ from collections import deque
 import httpx
 
 from . import PurchaseRecord, normalize_purchase_date
-from gamelib_mcp.data.content import match_addon_name
+from gamelib_mcp.data.content import classify_title_override, match_addon_name
 from gamelib_mcp.data.db import default_data_dir
 
 logger = logging.getLogger(__name__)
@@ -286,8 +286,14 @@ def records_from_order(
     for (title, platform), share in zip(games, shares, strict=True):
         # Humble has no per-item content typing — an addon-ish NAME is the
         # only nested signal, so DLC/soundtrack keys match exact-name-only
-        # and mint nested instead of as phantom base games.
+        # and mint nested instead of as phantom base games. Known DLC whose
+        # name carries no addon-ish word ("Outlast: Whistleblower") comes
+        # from the title-override table instead.
         addon = match_addon_name(title)
+        if addon is None:
+            override = classify_title_override(title)
+            if override is not None and not override.is_primary_library_item:
+                addon = (override.content_type, "title override")
         records.append(
             PurchaseRecord(
                 title=title,

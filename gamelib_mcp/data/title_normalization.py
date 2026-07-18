@@ -122,8 +122,9 @@ _PURCHASE_SKU_PATTERNS = (
     ),
     # Bare region tails ("… Ultimate ROW", "… Rest of World").
     re.compile(r"\s+(?:ROW|Rest of (?:the )?World|Worldwide|Global)\s*$"),
-    # Store-state markers on old bundle keys ("GRAV (Early Access)").
-    re.compile(r"\s*\(Early Access\)\s*$", re.IGNORECASE),
+    # Store-state markers on old bundle keys ("GRAV (Early Access)",
+    # "Streamline Early Access") — with or without the parentheses.
+    re.compile(r"\s*\(?Early Access\)?\s*$", re.IGNORECASE),
     # Package-kind tails from the licenses/history pages.
     re.compile(
         r"[\s:–—-]+(?:Base Game|Store|Steam Store and Retail Key|Retail(?: Key)?|Standard)\s*$",
