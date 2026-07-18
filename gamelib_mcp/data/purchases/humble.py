@@ -59,13 +59,23 @@ _REQUEST_DELAY_SECONDS = 0.2
 _KEY_TYPE_TO_PLATFORM = {"steam": "steam", "gog": "gog"}
 
 # Key-delivery tails on tpk/subproduct titles ("Dynamite Jack Steam Key",
-# "Galcon Fusion Registration Key") — packaging noise that defeats library
-# name matching and would mint duplicate rows. Requires the qualifier word so
-# a game legitimately named "… Key" never trips it.
+# "Galcon Fusion Registration Key", "Frozen Synapse Steam/Multiplayer Key",
+# "Hero Academy Gold Pack Content Code", "Destiny 2 - Expansion Pass -
+# Blizzard Key") — packaging noise that defeats library name matching and
+# would mint duplicate rows. "Multiplayer Key" is Humble's old giftable
+# second copy of the same game. Requires a qualifier word so a game
+# legitimately named "… Key" never trips it.
+_KEY_QUALIFIER = (
+    r"(?:steam|gog|origin|uplay|epic|desura|registration|multiplayer"
+    r"|blizzard|content)"
+)
 _KEY_SUFFIX_RE = re.compile(
-    r"\s+(?:steam|gog|origin|uplay|epic|desura|registration)\s+key\s*$",
+    rf"[\s:–—-]+{_KEY_QUALIFIER}(?:\s*/\s*{_KEY_QUALIFIER})*\s+(?:key|code)\s*$",
     re.IGNORECASE,
 )
+
+# Humble human_names can embed literal HTML ("… DLC<br />(DLC Bundle #1)").
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 # Subproduct download platforms that signal a real game vs. bundled media.
 # Unknown/future platform values deliberately count as game-ish — only a
@@ -121,8 +131,9 @@ def _split_amount(amount: float, count: int) -> list[float]:
 
 
 def _clean_title(name: str) -> str:
-    """Strip key-delivery tails, iterated so stacked tails peel off."""
-    cleaned = name.strip()
+    """Strip embedded HTML and key-delivery tails (iterated so stacked tails
+    peel off)."""
+    cleaned = " ".join(_HTML_TAG_RE.sub(" ", name).split())
     previous = None
     while cleaned != previous:
         previous = cleaned
