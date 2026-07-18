@@ -853,6 +853,22 @@ class HumbleParserTests(unittest.TestCase):
             [r.content_type for r in records], [None, "dlc", "unknown_addon", "dlc"]
         )
 
+    def test_title_override_dlc_gets_content_hint(self):
+        # "Outlast: Whistleblower" has no addon-ish word — the shared
+        # title-override table supplies the nested hint instead.
+        order = {
+            "product": {"human_name": "Humble Monthly", "category": "subscriptioncontent"},
+            "amount_spent": 12.00,
+            "created": "2016-05-06T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "Outlast: Whistleblower", "key_type": "steam"},
+                ]
+            },
+        }
+        records, _ = humble_module.records_from_order(order)
+        self.assertEqual(records[0].content_type, "dlc")
+
     def test_promo_tpks_excluded_and_price_redistributes(self):
         order = {
             "product": {"human_name": "Humble Monthly February 2016", "category": "subscriptioncontent"},

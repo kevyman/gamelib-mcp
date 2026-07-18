@@ -186,4 +186,5 @@ class PurchaseSkuSuffixTests(unittest.TestCase):
         # Old Humble bundle keys carry store-state and SKU tails the library
         # row never does ("GRAV (Early Access)", "Beat Hazard Ultra").
         self.assertEqual(normalize_purchase_title("GRAV (Early Access)"), "GRAV")
+        self.assertEqual(normalize_purchase_title("Streamline Early Access"), "Streamline")
         self.assertEqual(normalize_purchase_title("Beat Hazard Ultra"), "Beat Hazard")
