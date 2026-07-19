@@ -438,6 +438,43 @@ class GetGameDetailsBatchTests(ToolDBTestCase):
         self.assertIn("item", result["results"][1])
         self.assertIn("bogus_key", result["results"][3]["error"])
 
+    async def test_batch_serves_cached_dlc_ownership_without_fetching(self):
+        # Regression: a warm IGDB children cache must still feed dlc_ownership
+        # in batch mode — only the cache-miss live fetch is skipped.
+        from gamelib_mcp.data import igdb as igdb_module
+
+        warm = await make_steam_game("Warm Cache Game", 111)
+        cold = await make_steam_game("Cold Cache Game", 222)
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = 5001 WHERE id = ?", (warm,))
+            await db.execute("UPDATE games SET igdb_id = 5002 WHERE id = ?", (cold,))
+            await db.commit()
+        await db_module.set_meta(
+            "igdb_children:5001",
+            json.dumps({
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "children": [{"id": 1}, {"id": 2}, {"id": 3}],
+            }),
+        )
+
+        network = AsyncMock(side_effect=AssertionError("network call in batch"))
+        with (
+            patch.object(detail, "enrich_game", network),
+            patch.object(detail, "get_protondb", network),
+            patch.object(detail, "get_hltb", network),
+            patch.object(igdb_module, "fetch_igdb_children", network),
+        ):
+            result = await detail.get_game_details_batch(
+                [{"game_id": warm}, {"game_id": cold}]
+            )
+        network.assert_not_awaited()
+        self.assertEqual([r["status"] for r in result["results"]], ["ok", "ok"])
+        self.assertEqual(
+            result["results"][0]["dlc_ownership"],
+            {"owned": 0, "known": 3, "source": "igdb"},
+        )
+        self.assertNotIn("dlc_ownership", result["results"][1])
+
     async def test_empty_and_cap_raise(self):
         with self.assertRaisesRegex(ToolError, "must not be empty"):
             await detail.get_game_details_batch([])

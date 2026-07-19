@@ -1149,6 +1149,34 @@ class UpdateGamesBatchTests(ToolDBTestCase):
             [r["status"] for r in preview["results"]],
         )
 
+    async def test_non_string_value_is_isolated_and_recompute_still_runs(self):
+        # Regression: a non-string new_name hits .strip() → AttributeError,
+        # which must cost one item (not abort the batch after earlier commits)
+        # and must not skip the deferred affinity recompute.
+        a = await seed_game("Alpha")
+        b = await seed_game("Beta")
+        recompute = AsyncMock(return_value=2)
+        with patch.object(platforms, "recompute_tag_affinity", recompute):
+            result = await platforms.update_games_batch(
+                [
+                    {"game_id": a, "tags": ["roguelike"]},
+                    {"game_id": b, "new_name": 42},
+                    {"game_id": b, "hltb_main": 2.0},
+                ]
+            )
+        self.assertEqual(
+            [r["status"] for r in result["results"]], ["ok", "error", "ok"]
+        )
+        self.assertIn("AttributeError", result["results"][1]["error"])
+        recompute.assert_awaited_once()
+        self.assertEqual(result["tag_affinity_tags_updated"], 2)
+        async with db_module.get_db() as db:
+            row_b = await db.execute_fetchone(
+                "SELECT name, hltb_main FROM games WHERE id = ?", (b,)
+            )
+        self.assertEqual(row_b["name"], "Beta")
+        self.assertEqual(row_b["hltb_main"], 2.0)  # the later item still applied
+
     async def test_empty_and_cap_raise(self):
         with self.assertRaisesRegex(ToolError, "must not be empty"):
             await platforms.update_games_batch([])
@@ -1208,6 +1236,31 @@ class AddGamesToPlatformBatchTests(ToolDBTestCase):
             )
         self.assertIsNone(new_row)
         self.assertIsNone(gp)
+
+    async def test_dry_run_duplicate_new_name_created_matches_wet(self):
+        # Regression: a wet run creates a repeated new name once (the second
+        # item attaches by exact name) — dry_run must predict created the
+        # same way, not count it twice.
+        items = [
+            {"name": "New Game", "platform": "steam"},
+            {"name": "New Game", "platform": "switch2"},
+        ]
+        preview = await platforms.add_games_to_platform_batch(items, dry_run=True)
+        self.assertEqual(preview["created"], 1)
+        self.assertTrue(preview["results"][0]["created"])
+        self.assertFalse(preview["results"][1]["created"])
+
+        wet = await platforms.add_games_to_platform_batch(items)
+        self.assertEqual(wet["created"], preview["created"])
+        self.assertEqual(
+            [r["created"] for r in wet["results"]],
+            [r["created"] for r in preview["results"]],
+        )
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone(
+                "SELECT COUNT(*) AS c FROM games WHERE name = ?", ("New Game",)
+            )
+        self.assertEqual(count["c"], 1)
 
     async def test_owned_add_clears_fulfilled_wishlist_entry(self):
         gid = await seed_game("Wanted Game")

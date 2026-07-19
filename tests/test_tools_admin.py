@@ -1724,12 +1724,88 @@ class DeleteGamesBatchTests(ToolDBTestCase):
         self.assertEqual(
             [r["status"] for r in preview["results"]], ["previewed", "error"]
         )
-        self.assertIn("already deleted", preview["results"][1]["error"])
+        self.assertIn("already slated", preview["results"][1]["error"])
 
         confirmed = await admin.delete_games_batch(items, confirm=True)
         self.assertEqual(
             [r["status"] for r in confirmed["results"]], ["deleted", "error"]
         )
+
+    async def test_same_name_items_never_drift_to_a_sibling_row(self):
+        # Regression: names are pre-resolved BEFORE any deletion. Without that,
+        # confirm-deleting "Dark Souls" made the second identical item
+        # prefix-match "Dark Souls II" — deleting a game preview never showed.
+        ds = await seed_game("Dark Souls")
+        ds2 = await seed_game("Dark Souls II")
+        items = [{"name": "Dark Souls"}, {"name": "Dark Souls"}]
+
+        preview = await admin.delete_games_batch(items)
+        self.assertEqual(
+            [r["status"] for r in preview["results"]], ["previewed", "error"]
+        )
+        self.assertEqual(preview["results"][0]["game_id"], ds)
+        self.assertIn("already slated", preview["results"][1]["error"])
+
+        confirmed = await admin.delete_games_batch(items, confirm=True)
+        self.assertEqual(
+            [r["status"] for r in confirmed["results"]], ["deleted", "error"]
+        )
+        self.assertEqual(confirmed["results"][0]["game_id"], ds)
+        async with db_module.get_db() as db:
+            gone = await db.execute_fetchone("SELECT id FROM games WHERE id = ?", (ds,))
+            kept = await db.execute_fetchone("SELECT id FROM games WHERE id = ?", (ds2,))
+        self.assertIsNone(gone)
+        self.assertIsNotNone(kept)  # the sibling row must survive
+
+    async def test_child_then_parent_preview_matches_confirm(self):
+        # Regression: the children guard runs net of ids earlier in the batch
+        # in BOTH modes — preview must not refuse a parent whose child the
+        # same batch deletes first.
+        parent = await seed_game("Base Game")
+        await add_platform(parent, "steam")
+        child = await seed_game(
+            "Base DLC", content_type="dlc", parent_game_id=parent,
+            is_primary_library_item=0,
+        )
+        await add_platform(child, "steam")
+        items = [{"game_id": child}, {"game_id": parent}]
+
+        preview = await admin.delete_games_batch(items)
+        self.assertEqual(
+            [r["status"] for r in preview["results"]], ["previewed", "previewed"]
+        )
+
+        confirmed = await admin.delete_games_batch(items, confirm=True)
+        self.assertEqual(
+            [r["status"] for r in confirmed["results"]], ["deleted", "deleted"]
+        )
+        self.assertEqual(
+            confirmed["deleted_counts_total"], preview["would_delete_total"]
+        )
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
+        self.assertEqual(count["c"], 0)
+
+    async def test_parent_then_child_order_still_refuses_parent(self):
+        # The guard only ignores EARLIER batch items: [parent, child] refuses
+        # the parent identically in preview and confirm.
+        parent = await seed_game("Base Game")
+        child = await seed_game(
+            "Base DLC", content_type="dlc", parent_game_id=parent,
+            is_primary_library_item=0,
+        )
+        items = [{"game_id": parent}, {"game_id": child}]
+        preview = await admin.delete_games_batch(items)
+        confirmed = await admin.delete_games_batch(items, confirm=True)
+        self.assertEqual(
+            [r["status"] for r in preview["results"]], ["refused", "previewed"]
+        )
+        self.assertEqual(
+            [r["status"] for r in confirmed["results"]], ["refused", "deleted"]
+        )
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone("SELECT id FROM games WHERE id = ?", (parent,))
+        self.assertIsNotNone(row)
 
     async def test_affinity_recomputed_once_after_confirmed_deletes(self):
         a, b = await self._seed_two()

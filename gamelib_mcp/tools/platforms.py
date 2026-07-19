@@ -903,7 +903,10 @@ async def update_games_batch(items: list[dict], dry_run: bool = False) -> dict:
     tag_affinity_tags_updated; 0 when no tags changed or dry_run).
 
     dry_run=True runs the identical validation/guard path per item and writes
-    nothing, returning the statuses a wet run would. Not simulated:
+    nothing, returning the statuses a wet run would. Statuses are computed
+    against the current database, so an item depending on an earlier item's
+    write in the same batch (igdb_id uniqueness, nesting/parent state) may
+    preview ok yet error in the wet run. Also not simulated:
     enrichment_invalidated (always empty) and the affinity recompute.
     """
     check_batch_items(items)
@@ -911,22 +914,25 @@ async def update_games_batch(items: list[dict], dry_run: bool = False) -> dict:
     async def _one(**kwargs):
         return await update_game(**kwargs, dry_run=dry_run, recompute_affinity=False)
 
-    results = [
-        await apply_batch_item(item, _UPDATE_BATCH_ITEM_KEYS, _one) for item in items
-    ]
-
+    results: list[dict] = []
+    tags_touched = False
     tag_count = 0
-    tags_touched = any(
-        r["status"] == "ok" and "tags" in r.get("updated", {}) for r in results
-    )
-    if tags_touched and not dry_run:
-        tag_count = await recompute_tag_affinity()
+    try:
+        for item in items:
+            result = await apply_batch_item(item, _UPDATE_BATCH_ITEM_KEYS, _one)
+            results.append(result)
+            if result["status"] == "ok" and "tags" in result.get("updated", {}):
+                tags_touched = True
+    finally:
+        # Even an unexpected escape mid-loop must not leave committed tag
+        # edits without their deferred recompute.
+        if tags_touched and not dry_run:
+            tag_count = await recompute_tag_affinity()
 
-    ok = count_status(results, "ok")
     return {
         "results": results,
         "total": len(items),
-        "ok": ok,
+        "ok": count_status(results, "ok"),
         "errors": count_status(results, "error"),
         "dry_run": dry_run,
         "tag_affinity_tags_updated": tag_count,
@@ -949,12 +955,26 @@ async def add_games_to_platform_batch(items: list[dict], dry_run: bool = False) 
     ok items that minted a brand-new games row (vs attaching to an existing
     one). dry_run=True runs the identical validation path and writes nothing;
     a to-be-created game reports game_id null, and acquisition previews the
-    validated fields rather than post-write row state.
+    validated fields rather than post-write row state. A repeated new name
+    within one dry-run batch reports created=False (the wet run creates it
+    once, then attaches); other statuses are computed against the current
+    database, so cross-item interactions beyond that aren't simulated.
     """
     check_batch_items(items)
 
+    # A wet run creates each new name once (later items attach to it by exact
+    # name); mirror that in dry_run so the created counter matches.
+    seen_new_names: set[str] = set()
+
     async def _one(**kwargs):
-        return await add_game_to_platform(**kwargs, dry_run=dry_run)
+        result = await add_game_to_platform(**kwargs, dry_run=dry_run)
+        if dry_run and result["created"]:
+            key = result["name"].lower()
+            if key in seen_new_names:
+                result["created"] = False
+            else:
+                seen_new_names.add(key)
+        return result
 
     results = [
         await apply_batch_item(item, _ADD_BATCH_ITEM_KEYS, _one) for item in items

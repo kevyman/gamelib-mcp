@@ -1075,7 +1075,11 @@ async def add_games_to_platform_batch(
     Per-item results carry status "ok" (the single tool's result) or "error"
     (message + original item); one bad item never fails the others, and
     results preserve input order. dry_run=True runs the identical validation
-    without writing: a to-be-created game reports game_id null.
+    without writing: a to-be-created game reports game_id null, and a
+    repeated new name within the batch reports created=False (the wet run
+    creates it once, then attaches). Other preview statuses are computed
+    against the current database, so cross-item interactions beyond that
+    aren't simulated.
     """
     from .tools.platforms import add_games_to_platform_batch as _add_batch
     return await _add_batch(items, dry_run)
@@ -1189,8 +1193,11 @@ async def update_games_batch(
     order, ok items carrying update_game's full result. The tag-affinity
     recompute a tags edit triggers runs ONCE after the loop
     (tag_affinity_tags_updated; 0 when no tags changed). dry_run=True runs the
-    identical validation/guard path per item and writes nothing — statuses
-    match what a wet run would do (enrichment invalidation is not simulated).
+    identical validation/guard path per item and writes nothing. Preview
+    statuses are computed against the current database: an item depending on
+    an earlier item's write in the same batch (igdb_id uniqueness,
+    nesting/parent state) may preview ok yet error in the wet run; enrichment
+    invalidation is not simulated either.
     """
     from .tools.platforms import update_games_batch as _update_batch
     return await _update_batch(items, dry_run)
@@ -1676,17 +1683,19 @@ async def delete_games_batch(
     items). IRREVERSIBLE once confirmed.
 
     Each item is {name or game_id} with delete_game's resolution (resolved
-    names are echoed back so you can verify the right rows). Two-step like the
-    single tool: confirm=False (default) deletes nothing — every item returns
-    status="previewed" with its would_delete row counts, summed top-level in
-    would_delete_total; re-run with confirm=True to delete
-    (status="deleted", totals in deleted_counts_total). The preview runs the
-    identical resolution and guard path, so its totals match what confirm
-    actually deletes. A parent of nested content gets status="refused" (its
-    children listed) and never aborts the rest; duplicate items resolving to
-    the same game report an error after the first. Tag affinity is recomputed
-    ONCE after the loop instead of per delete. To consolidate duplicates
-    rather than erase them, use merge_games_batch instead.
+    names are echoed back so you can verify the right rows). All items are
+    pre-resolved BEFORE anything is deleted, so preview and confirm resolve
+    names against the same library state and duplicate items resolving to the
+    same game report an error after the first — in both modes. Two-step like
+    the single tool: confirm=False (default) deletes nothing — every item
+    returns status="previewed" with its would_delete row counts, summed
+    top-level in would_delete_total; re-run with confirm=True to delete
+    (status="deleted", totals in deleted_counts_total) — matching totals. A
+    parent of nested content gets status="refused" (its children listed) and
+    never aborts the rest; the guard ignores ids earlier in the same batch,
+    so a [child, parent] batch previews and deletes both. Tag affinity is
+    recomputed ONCE after the loop instead of per delete. To consolidate
+    duplicates rather than erase them, use merge_games_batch instead.
     """
     from .tools.admin import delete_games_batch as _delete_batch
     return await _delete_batch(items, confirm)

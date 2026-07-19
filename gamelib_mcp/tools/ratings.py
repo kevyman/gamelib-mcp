@@ -186,19 +186,21 @@ async def rate_games_batch(items: list[dict], dry_run: bool = False) -> dict:
     async def _one(**kwargs):
         return await rate_game(**kwargs, dry_run=dry_run, recompute_affinity=False)
 
-    results = [
-        await apply_batch_item(item, _RATE_BATCH_ITEM_KEYS, _one) for item in items
-    ]
-
-    ok = count_status(results, "ok")
+    results: list[dict] = []
     tag_count = 0
-    if ok and not dry_run:
-        tag_count = await recompute_tag_affinity()
+    try:
+        for item in items:
+            results.append(await apply_batch_item(item, _RATE_BATCH_ITEM_KEYS, _one))
+    finally:
+        # Even an unexpected escape mid-loop must not leave committed ratings
+        # without their deferred recompute.
+        if count_status(results, "ok") and not dry_run:
+            tag_count = await recompute_tag_affinity()
 
     return {
         "results": results,
         "total": len(items),
-        "ok": ok,
+        "ok": count_status(results, "ok"),
         "errors": count_status(results, "error"),
         "dry_run": dry_run,
         "tag_affinity_tags_updated": tag_count,

@@ -46,9 +46,10 @@ async def get_game_detail(
     Accepts game_id, a Steam appid when available, or a partial name.
 
     enrich=False (internal, batch-only) skips every lazy provider fetch (Steam
-    store/reviews, ProtonDB, HLTB, and the IGDB children fallback) and serves
-    whatever is already cached — enrichment fields may be null/absent that a
-    single-item call would have filled.
+    store/reviews, ProtonDB, HLTB, and the IGDB children cache-miss fetch) and
+    serves whatever is already cached — including a warm IGDB children catalog
+    — so enrichment fields may be null/absent that a single-item call would
+    have filled.
 
     Can resolve to a wishlist-only title (wishlisted but not owned anywhere) —
     check owned/wishlisted, not is_primary_library_item, which is a
@@ -177,11 +178,12 @@ async def get_game_detail(
     # ever leave this key absent, never break the response.
     if (
         dlc_ownership is None
-        and enrich  # get_igdb_children_cached may live-fetch on a cache miss
         and bool(row["is_primary_library_item"])
         and row["igdb_id"] is not None
     ):
-        children = await get_igdb_children_cached(row["igdb_id"])
+        # allow_fetch=enrich: batch detail still serves an already-cached IGDB
+        # children catalog, it just never live-fetches on a cache miss.
+        children = await get_igdb_children_cached(row["igdb_id"], allow_fetch=enrich)
         if children:
             owned_children = sum(
                 1

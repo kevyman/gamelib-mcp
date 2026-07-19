@@ -36,9 +36,12 @@ async def apply_batch_item(
     ``apply`` receives the item's keys as keyword arguments. A result that
     already carries a "status" is passed through as-is (tool-specific statuses
     like "refused"/"stale_id"); otherwise it's wrapped as status="ok".
-    TypeError/ValueError are folded in alongside ToolError because item values
-    arrive untyped inside a dict — the wire layer only validates top-level
-    params — and a wrongly-typed value must cost one item, not the batch.
+    The catch is deliberately Exception-wide (never BaseException, so
+    cancellation still propagates): item values arrive untyped inside a dict —
+    the wire layer only validates top-level params — so a wrongly-typed value
+    can surface as AttributeError/sqlite errors deep in an impl, and any such
+    escape mid-loop would abandon a half-applied batch. One bad item must cost
+    one item, never the batch.
     """
     try:
         if not isinstance(item, dict):
@@ -49,9 +52,12 @@ async def apply_batch_item(
                 f"unknown key(s): {sorted(unknown)}. Valid: {sorted(allowed_keys)}"
             )
         result = await apply(**item)
-    except (ToolError, TypeError, ValueError) as exc:
+    except Exception as exc:
         payload = item if isinstance(item, dict) else {"item": item}
-        return {"status": "error", "error": str(exc), "item": payload}
+        # ToolError messages are already user-facing; anything else names its
+        # class so an unexpected failure is diagnosable from the result alone.
+        message = str(exc) if isinstance(exc, ToolError) else f"{type(exc).__name__}: {exc}"
+        return {"status": "error", "error": message, "item": payload}
     if "status" in result:
         return result
     return {"status": "ok", **result}
