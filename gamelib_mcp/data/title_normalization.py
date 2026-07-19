@@ -130,6 +130,12 @@ _PURCHASE_SKU_PATTERNS = (
         r"[\s:–—-]+(?:Base Game|Store|Steam Store and Retail Key|Retail(?: Key)?|Standard)\s*$",
         re.IGNORECASE,
     ),
+    # Capcom store titles carry the Japanese-market alternate name as a
+    # "GAME / BIOHAZARD …" tail ("RESIDENT EVIL 2 / BIOHAZARD RE:2", "RESIDENT
+    # EVIL VILLAGE / BIOHAZARD VILLAGE") that no library row uses. Strip from the
+    # "/ BIOHAZARD" onward, so any edition tail after it ("… Standard Edition")
+    # goes with it.
+    re.compile(r"\s*/\s*BIOHAZARD\b.*$", re.IGNORECASE),
     # Edition phrases, with or without the "Edition"/"Deluxe" tail that
     # _TRAILING_VARIANT_PATTERNS alone would leave behind. "Complete" is
     # deliberately absent: unlike Ultimate/GOTY/Deluxe (same game, richer SKU),
@@ -138,7 +144,7 @@ _PURCHASE_SKU_PATTERNS = (
     # and book the whole compilation's price onto it.
     re.compile(
         r"\s+(?:Game of the (?:Year|Century)|GOTY|Ultimate|Ultra|Deluxe"
-        r"|Digital Deluxe|Premium|Master|Gold|Platinum|Definitive)"
+        r"|Digital Deluxe|Premium|Master|Gold|Platinum|Definitive|Standard)"
         r"(?:\s+(?:Edition|Deluxe))?\s*$",
         re.IGNORECASE,
     ),

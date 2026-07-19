@@ -1257,6 +1257,26 @@ class SteamHistoryParserTests(unittest.TestCase):
         records = steam_history._purchase_records(purchases)
         self.assertEqual([(r.title, r.price_paid) for r in records], [("Dicey Dungeons", 14.99)])
 
+    def test_wallet_credit_topup_is_skipped_not_minted(self):
+        # A "Purchased €50 Wallet Credit" row files as a Purchase but acquires no
+        # game — left in, it mints a phantom game and double-counts the spend.
+        html = (
+            '<tr><td class="wht_date">3 Feb, 2021</td>'
+            '<td class="wht_items"><div>Purchased 50,--&euro; Wallet Credit</div></td>'
+            '<td class="wht_type"><div>Purchase</div></td>'
+            '<td class="wht_total">50,--&euro;</td></tr>'
+            '<tr><td class="wht_date">4 Feb, 2021</td>'
+            '<td class="wht_items"><div>Celeste</div></td>'
+            '<td class="wht_type"><div>Purchase</div></td>'
+            '<td class="wht_total">$14.99</td></tr>'
+        )
+
+        purchases, _, skipped = steam_history.parse_history_fragment(html)
+
+        self.assertEqual([p["items"] for p in purchases], [["Celeste"]])
+        reasons = " | ".join(s["reason"] for s in skipped)
+        self.assertIn("wallet credit top-up", reasons)
+
     def test_price_string_currency_variants(self):
         cases = [
             ("$19.99", 19.99, "USD"),
