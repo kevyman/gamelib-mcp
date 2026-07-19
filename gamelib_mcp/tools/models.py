@@ -375,6 +375,22 @@ class SetPlaytimeResponse(FlexibleModel):
     manual_overrides: list[str]
 
 
+class SetSwitch2PlaytimeBaselineResponse(FlexibleModel):
+    game_id: int
+    name: str
+    platform: str
+    application_id: str
+    identifier_recorded: bool
+    total_hours: float
+    total_minutes: int
+    synced_minutes: int
+    baseline_minutes: int
+    previous_baseline_minutes: int | None = None
+    baseline_removed: bool
+    playtime_minutes: int
+    dry_run: bool
+
+
 class AcquisitionBatchItemResult(FlexibleModel):
     # applied | filled | no_change | created | unmatched | no_platform_row | error
     status: str

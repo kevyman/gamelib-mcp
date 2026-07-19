@@ -1632,6 +1632,44 @@ class DeleteGameTests(ToolDBTestCase):
             await admin.delete_game(game_id=gid, confirm=True)
         recompute.assert_awaited_once()
 
+    async def test_confirm_deletes_manual_baseline_rows_keeps_real_ones(self):
+        # A synthetic manual-baseline row (set_switch2_playtime_baseline) has
+        # no FK to the game; left behind it would resurrect the deleted game
+        # on the next Parental Controls sync. Real daily rows must survive.
+        gid = await seed_game("Baselined")
+        gpid = await add_platform(gid, "switch2")
+        await add_identifier(gpid, "nintendo_title_id", "010067300059A000")
+        await db_module.upsert_nintendo_play_summary([
+            {
+                "device_id": "device-1",
+                "application_id": "010067300059A000",
+                "period_type": "day",
+                "period_key": "2026-07-01",
+                "playtime_minutes": 30,
+                "app_name": "Baselined",
+            },
+            {
+                "device_id": "manual-baseline",
+                "application_id": "010067300059A000",
+                "period_type": "day",
+                "period_key": "1970-01-01",
+                "playtime_minutes": 240,
+                "app_name": "Baselined",
+            },
+        ])
+
+        preview = await admin.delete_game(game_id=gid)
+        self.assertEqual(preview["would_delete"]["nintendo_baseline_rows"], 1)
+
+        result = await admin.delete_game(game_id=gid, confirm=True)
+        self.assertEqual(result["deleted_counts"]["nintendo_baseline_rows"], 1)
+        async with db_module.get_db() as db:
+            rows = await db.execute_fetchall(
+                "SELECT device_id FROM nintendo_play_summary WHERE application_id = ?",
+                ("010067300059A000",),
+            )
+        self.assertEqual([r["device_id"] for r in rows], ["device-1"])
+
     async def test_preview_does_not_recompute_affinity(self):
         gid = await seed_game("Untouched", tags=["roguelike"])
         await add_platform(gid, "steam", playtime_minutes=600)

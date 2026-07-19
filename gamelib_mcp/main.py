@@ -68,6 +68,7 @@ from .tools.models import (
     SetAcquisitionsBatchResponse,
     SetPlaytimeBatchResponse,
     SetPlaytimeResponse,
+    SetSwitch2PlaytimeBaselineResponse,
     SpendingStatsResponse,
     SplitBundleAcquisitionResponse,
     SplitGameResponse,
@@ -1330,6 +1331,43 @@ async def set_playtime_batch(
     """
     from .tools.platforms import set_playtime_batch as _playtime_batch
     return await _playtime_batch(items, dry_run)
+
+
+@mcp.tool(annotations=MUTATION_TOOL)
+async def set_switch2_playtime_baseline(
+    name: str | None = None,
+    game_id: int | None = None,
+    total_hours: float | None = None,
+    application_id: str | None = None,
+    dry_run: bool = False,
+) -> SetSwitch2PlaytimeBaselineResponse:
+    """
+    Backfill switch2 playtime from before Parental Controls tracking began,
+    while future play keeps syncing on top.
+
+    Nintendo's tracking is forward-only, so hours played before it started are
+    missing from the totals. Do NOT fix that with set_playtime — its pin would
+    freeze the total and stop future accumulation. Instead pass total_hours:
+    the game's CURRENT total playtime in hours exactly as Nintendo's summary
+    shows it (not the missing amount). The tool subtracts the minutes already
+    synced and stores the remainder as a pre-tracking baseline that every
+    future sync adds real play on top of. Safe to re-run with an updated total
+    at any time — the baseline is replaced, never double-counted — and an
+    entered total equal to the synced minutes removes the baseline again
+    (total_hours=0 undoes a mistaken baseline on a never-synced game).
+
+    Resolve the game with game_id or name (partial/fuzzy match). application_id
+    (the 16-character hex Nintendo title id, visible in the game's eShop page
+    URL) is only needed for a game Parental Controls has never seen — i.e. not
+    played since tracking began — and is then recorded so future sync and
+    history bridging work. dry_run=True previews the delta math and validation
+    without writing.
+
+    Returns the entered total, the synced minutes, the baseline written, and
+    the resulting playtime_minutes on the switch2 platform row.
+    """
+    from .tools.platforms import set_switch2_playtime_baseline as _set_baseline
+    return await _set_baseline(name, game_id, total_hours, application_id, dry_run)
 
 
 @mcp.tool(annotations=MUTATION_TOOL)

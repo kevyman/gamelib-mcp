@@ -20,6 +20,7 @@ from ..data.content import (
 )
 from ..data.db import (
     ACQUISITION_FIELDS,
+    NINTENDO_BASELINE_DEVICE_ID,
     STEAM_APP_ID,
     clear_fulfilled_wishlist_entries,
     default_data_dir,
@@ -36,7 +37,7 @@ from .batch import apply_batch_item, check_batch_items, count_status
 # this namespace first). F401: referenced via getattr, not by name.
 from ..data.epic import sync_epic  # noqa: F401
 from ..data.gog import sync_gog  # noqa: F401
-from ..data.nintendo import sync_nintendo  # noqa: F401
+from ..data.nintendo import NINTENDO_TITLE_ID, sync_nintendo  # noqa: F401
 from ..data.psn import sync_psn  # noqa: F401
 from ..data.steam_xml import fetch_library  # noqa: F401
 from ..data.xbox import sync_xbox  # noqa: F401
@@ -1142,6 +1143,28 @@ async def delete_game(
                 "SELECT COUNT(*) AS c FROM game_aliases WHERE game_id = ?"
             ),
         }
+        # Synthetic manual-baseline playtime rows (set_switch2_playtime_baseline)
+        # have no FK to the game — they bridge via the nintendo_title_id
+        # identifier. Left behind, the next Parental Controls sync would find
+        # an identifier-less summary total and resurrect the deleted game, so
+        # they die with it. Real device-reported daily summaries are kept:
+        # actual play history is ownership-agnostic by design.
+        _baseline_match_sql = """
+            FROM nintendo_play_summary AS nps
+            WHERE nps.device_id = ?
+              AND EXISTS (
+                  SELECT 1 FROM game_platform_identifiers gpi
+                  JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+                  WHERE gp.game_id = ? AND gpi.identifier_type = ?
+                    AND UPPER(gpi.identifier_value) = UPPER(nps.application_id))
+        """
+        _baseline_params = (NINTENDO_BASELINE_DEVICE_ID, resolved_id, NINTENDO_TITLE_ID)
+        baseline_count_row = await db.execute_fetchone(
+            f"SELECT COUNT(*) AS c {_baseline_match_sql}", _baseline_params
+        )
+        would_delete["nintendo_baseline_rows"] = (
+            baseline_count_row["c"] if baseline_count_row else 0
+        )
 
         if not confirm:
             return {
@@ -1157,6 +1180,9 @@ async def delete_game(
         # deleting game_platforms first cascades its identifier/enrichment/
         # steam_platform_data children. The remaining child tables cascade on
         # the final games delete, and the games_fts_ad trigger cleans the index.
+        # Baseline rows first: the match needs the identifier rows, which
+        # cascade away with game_platforms below.
+        await db.execute(f"DELETE {_baseline_match_sql}", _baseline_params)
         await db.execute("DELETE FROM ratings WHERE game_id = ?", (resolved_id,))
         await db.execute("DELETE FROM game_platforms WHERE game_id = ?", (resolved_id,))
         await db.execute("DELETE FROM games WHERE id = ?", (resolved_id,))
