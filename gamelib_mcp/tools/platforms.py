@@ -1,19 +1,28 @@
 """get_platform_breakdown, add_game_to_platform, update_game, and set_hardware_preference tools."""
 
 import json
+import math
+import re
 from datetime import date
 
 from fastmcp.exceptions import ToolError
 
 from ..data.db import (
     GAME_EDITABLE_FIELDS,
+    NINTENDO_BASELINE_DEVICE_ID,
+    NINTENDO_BASELINE_PERIOD_KEY,
     PLATFORM_EDITABLE_FIELDS,
     apply_manual_game_fields,
     apply_manual_platform_fields,
     clear_fulfilled_wishlist_entries,
+    delete_nintendo_playtime_baseline,
     fts_ready,
     get_db,
+    get_game_by_identifier,
     get_manual_overrides,
+    get_nintendo_baseline_minutes,
+    get_nintendo_summary_key,
+    get_nintendo_synced_minutes,
     get_platform_manual_overrides,
     has_nested_children,
     invalidate_igdb_match_enrichment,
@@ -28,9 +37,11 @@ from ..data.db import (
     upsert_game,
     upsert_game_platform,
     upsert_game_platform_identifier,
+    upsert_nintendo_play_summary,
     upsert_wishlist_entry,
 )
 from ..data.content import NESTED_CONTENT_TYPES, PRIMARY_CONTENT_TYPES, derive_is_primary
+from ..data.nintendo import NINTENDO_TITLE_ID
 from ..data.tag_synonyms import canonical_tag
 # Safe direction: acquisition.py never imports this module at top level (it
 # lazy-imports _resolve_game_row inside functions), so importing its validator
@@ -879,6 +890,179 @@ async def set_playtime(
         "playtime_minutes": final_playtime,
         "last_played": final_last_played,
         "manual_overrides": sorted(overrides),
+    }
+
+
+_NINTENDO_APPLICATION_ID_RE = re.compile(r"^[0-9A-Fa-f]{16}$")
+
+_SWITCH2 = "switch2"
+
+
+async def set_switch2_playtime_baseline(
+    name: str | None = None,
+    game_id: int | None = None,
+    total_hours: float | None = None,
+    application_id: str | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """
+    Record missing pre-tracking switch2 playtime without blocking future sync.
+
+    Parental Controls tracking is forward-only, so play from before it began is
+    invisible. Pinning via set_playtime would freeze the total (the sync
+    recomputes it as SUM of daily summary rows and a pin blocks that write), so
+    this tool instead does the delta math: total_hours is the game's CURRENT
+    total playtime as Nintendo shows it; the synced daily minutes are
+    subtracted and the remainder is stored as a synthetic baseline day
+    (device 'manual-baseline', dated 1970-01-01) that future syncs keep adding
+    real days on top of. Re-running with a fresh total replaces the baseline —
+    never double-counts. An entered total equal to the synced minutes removes
+    any existing baseline (total_hours=0 undoes a mistaken baseline on a
+    never-synced game). application_id (16-hex Nintendo title id) is only
+    needed when the game has no nintendo_title_id identifier yet, i.e. it was
+    never seen by a Parental Controls sync; it is then recorded on the switch2
+    platform row so history/sync bridging works.
+
+    dry_run=True runs the identical validation and math without writing
+    (identifier_recorded/baseline values simulate the post-write state).
+    """
+    if total_hours is None:
+        raise ToolError("total_hours is required (the game's current total, not a delta)")
+    # Zero is allowed: it is the correct current total for a never-synced game
+    # whose only playtime is an erroneous baseline, and entering it removes
+    # that baseline (total == synced ⇒ nothing missing).
+    if not math.isfinite(total_hours) or total_hours < 0:
+        raise ToolError("total_hours must not be negative")
+    target_minutes = round(total_hours * 60)
+
+    if application_id is not None:
+        application_id = application_id.strip().upper()
+        if not _NINTENDO_APPLICATION_ID_RE.match(application_id):
+            raise ToolError(
+                "application_id must be a 16-character hex Nintendo title id "
+                "(e.g. 010067300059A000)"
+            )
+
+    row = await _resolve_game_row(name, game_id)
+    resolved_id = row["id"]
+
+    async with get_db() as db:
+        gp = await db.execute_fetchone(
+            """SELECT id, owned FROM game_platforms
+               WHERE game_id = ? AND platform = ?""",
+            (resolved_id, _SWITCH2),
+        )
+        if gp is None:
+            raise ToolError(
+                f"'{row['name']}' has no {_SWITCH2} platform row. Add it first with "
+                "add_game_to_platform (or run refresh_library if it should be synced)."
+            )
+        overrides = await get_platform_manual_overrides(db, gp["id"])
+        if "playtime_minutes" in overrides:
+            raise ToolError(
+                f"'{row['name']}' has playtime_minutes pinned on {_SWITCH2} — the pin "
+                "blocks the sync writes this baseline relies on. Clear it first with "
+                "set_playtime(clear=['playtime_minutes']), then retry."
+            )
+        identifier_row = await db.execute_fetchone(
+            """SELECT identifier_value FROM game_platform_identifiers
+               WHERE game_platform_id = ? AND identifier_type = ?
+               ORDER BY is_primary DESC, id ASC LIMIT 1""",
+            (gp["id"], NINTENDO_TITLE_ID),
+        )
+
+    identifier_recorded = False
+    if identifier_row is not None:
+        stored = str(identifier_row["identifier_value"])
+        if application_id is not None and application_id != stored.upper():
+            raise ToolError(
+                f"'{row['name']}' already has nintendo_title_id {stored}, which does "
+                f"not match the given application_id {application_id}"
+            )
+        application_id = stored
+    else:
+        if application_id is None:
+            raise ToolError(
+                f"'{row['name']}' has no nintendo_title_id identifier — it is recorded "
+                "automatically once a Parental Controls sync has seen the game. For a "
+                "game never played since tracking began, pass application_id (the "
+                "16-character hex title id, visible in the game's eShop page URL)."
+            )
+        other = await get_game_by_identifier(NINTENDO_TITLE_ID, application_id)
+        if other is not None and other["id"] != resolved_id:
+            raise ToolError(
+                f"application_id {application_id} is already recorded on "
+                f"'{other['name']}' (game_id {other['id']})"
+            )
+        identifier_recorded = True
+
+    # The daily-summary key can differ from the stored identifier in case
+    # (VGCS stores verbatim, the Parental Controls API reports uppercase hex);
+    # the baseline row must use the sync's exact key so the totals SUM groups
+    # them together. All the summary queries match case-insensitively.
+    summary_key = await get_nintendo_summary_key(application_id) or application_id
+    synced_minutes = await get_nintendo_synced_minutes(application_id)
+    previous_baseline = await get_nintendo_baseline_minutes(application_id)
+    baseline_minutes = target_minutes - synced_minutes
+    # All validation happens above this line: a failed call must leave no
+    # trace, including the identifier a never-synced game would gain.
+    if baseline_minutes < 0:
+        raise ToolError(
+            f"Synced {_SWITCH2} playtime for '{row['name']}' is already "
+            f"{synced_minutes} minutes (~{synced_minutes / 60:.1f}h), more than the "
+            f"entered total of {target_minutes} minutes ({total_hours}h). Enter the "
+            "game's current total playtime as Nintendo shows it, not the missing part."
+        )
+
+    if identifier_recorded and not dry_run:
+        await upsert_game_platform_identifier(gp["id"], NINTENDO_TITLE_ID, application_id)
+
+    baseline_removed = False
+    if baseline_minutes == 0:
+        if previous_baseline is not None:
+            if not dry_run:
+                await delete_nintendo_playtime_baseline(application_id)
+            baseline_removed = True
+    elif not dry_run:
+        if previous_baseline is not None:
+            # Delete before upsert so a baseline stored under a different
+            # casing of the key can't survive as a second row.
+            await delete_nintendo_playtime_baseline(application_id)
+        await upsert_nintendo_play_summary([
+            {
+                "device_id": NINTENDO_BASELINE_DEVICE_ID,
+                "application_id": summary_key,
+                "period_type": "day",
+                "period_key": NINTENDO_BASELINE_PERIOD_KEY,
+                "playtime_minutes": baseline_minutes,
+                "app_name": row["name"],
+            }
+        ])
+
+    # Reflect the corrected total immediately instead of waiting for the next
+    # Parental Controls sync (which recomputes the same SUM and agrees).
+    if not dry_run:
+        await upsert_game_platform(
+            resolved_id,
+            _SWITCH2,
+            playtime_minutes=target_minutes,
+            owned=gp["owned"],
+        )
+
+    return {
+        "game_id": resolved_id,
+        "name": row["name"],
+        "platform": _SWITCH2,
+        "application_id": application_id,
+        "identifier_recorded": identifier_recorded,
+        "total_hours": total_hours,
+        "total_minutes": target_minutes,
+        "synced_minutes": synced_minutes,
+        "baseline_minutes": max(baseline_minutes, 0),
+        "previous_baseline_minutes": previous_baseline,
+        "baseline_removed": baseline_removed,
+        "playtime_minutes": target_minutes,
+        "dry_run": dry_run,
     }
 
 
