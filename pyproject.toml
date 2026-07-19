@@ -6,6 +6,10 @@ requires-python = ">=3.11"
 dependencies = [
     "fastmcp>=3.4.4,<4.0",
     "httpx>=0.27",
+    # Epic order-history importer: Cloudflare challenges non-browser TLS
+    # fingerprints on www.epicgames.com, so the real fetch path impersonates
+    # a browser (see data/purchases/epic_orders.py).
+    "curl-cffi>=0.15",
     "howlongtobeatpy>=1.0.22",
     "aiosqlite>=0.22.1,<0.23",
     "pydantic>=2.13.4",

@@ -11,6 +11,7 @@ import json
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -1179,6 +1180,95 @@ class EpicOrderParserTests(unittest.TestCase):
         self.assertIsNone(record.content_type)
         self.assertFalse(record.is_bundle)
 
+    def test_live_v2_minor_units_with_sibling_currency(self):
+        # The live payload: integer ISO-4217 minor units + sibling ISO code,
+        # order total as an {amount, currency} object (719 ≡ €7.19).
+        order = {
+            "orderId": "F-v2",
+            "createdAtMillis": 1784227739149,
+            "orderType": "PURCHASE",
+            "total": {"amount": 719, "currency": "EUR"},
+            "items": [
+                {"description": "Luto", "amount": 719, "currency": "EUR",
+                 "offerId": "offer-x", "quantity": 1},
+            ],
+        }
+
+        records, skipped = epic_orders.parse_order(order)
+
+        self.assertEqual(skipped, [])
+        self.assertEqual(records[0].price_paid, 7.19)
+        self.assertEqual(records[0].price_currency, "EUR")
+        self.assertEqual(records[0].purchase_source, "epic")
+
+    def test_zero_decimal_currency_integer_is_face_value(self):
+        order = {
+            "orderId": "F-jpy",
+            "total": {"amount": 1980, "currency": "JPY"},
+            "items": [{"description": "Ikaruga", "amount": 1980, "currency": "JPY"}],
+        }
+
+        records, _ = epic_orders.parse_order(order)
+
+        self.assertEqual(records[0].price_paid, 1980.0)
+        self.assertEqual(records[0].price_currency, "JPY")
+
+    def test_giveaway_claim_lists_full_price_but_costs_nothing(self):
+        # Weekly-freebie claims carry the full LIST price per item with a 100%
+        # promotions discount and total 0 — they must import as free, not as
+        # €56.76 of phantom spend (the exact real-payload trap, 2026-07-20).
+        order = {
+            "orderId": "F-claim",
+            "createdAtMillis": 1784227739149,
+            "orderType": "PURCHASE",
+            "total": {"amount": 0, "currency": "EUR"},
+            "subtotal": {"amount": 0, "currency": "EUR"},
+            "promotions": [{"amount": 5676, "currency": "EUR"}],
+            "items": [
+                {"description": "The Ouroboros King", "amount": 719, "currency": "EUR"},
+                {"description": "Echo Generation: Midnight Edition", "amount": 2239, "currency": "EUR"},
+                {"description": "Luto", "amount": 1999, "currency": "EUR"},
+                {"description": "Princess Farmer", "amount": 719, "currency": "EUR"},
+            ],
+        }
+
+        records, skipped = epic_orders.parse_order(order)
+
+        self.assertEqual(skipped, [])
+        self.assertEqual(len(records), 4)
+        for record in records:
+            self.assertEqual(record.price_paid, 0.0)
+            self.assertEqual(record.purchase_source, "free")
+
+    def test_coupon_order_allocates_paid_total_by_list_price(self):
+        # €10 + €30 list, €20 paid → €5/€15, cent-preserving.
+        order = {
+            "orderId": "F-coupon",
+            "total": {"amount": 2000, "currency": "EUR"},
+            "items": [
+                {"description": "Small Game", "amount": 1000, "currency": "EUR"},
+                {"description": "Big Game", "amount": 3000, "currency": "EUR"},
+            ],
+        }
+
+        records, _ = epic_orders.parse_order(order)
+
+        self.assertEqual([r.price_paid for r in records], [5.0, 15.0])
+        self.assertEqual([r.purchase_source for r in records], ["epic", "epic"])
+        self.assertEqual([r.price_currency for r in records], ["EUR", "EUR"])
+
+    def test_bare_number_without_sibling_currency_stays_face_value(self):
+        # Legacy defensive behavior: no ISO code anywhere → no minor-unit
+        # reinterpretation.
+        order = {
+            "orderId": "F-bare",
+            "items": [{"description": "Mystery", "amount": 19.99}],
+        }
+
+        records, _ = epic_orders.parse_order(order)
+
+        self.assertEqual(records[0].price_paid, 19.99)
+
     def test_decimal_comma_locale_and_symbol_currency(self):
         order = {
             "orderId": "F2002",
@@ -1369,6 +1459,97 @@ class EpicFetchTests(unittest.IsolatedAsyncioTestCase):
             path = self._write_cookies(tmp)
             with patch.dict(os.environ, {"EPIC_COOKIES_FILE": path}):
                 with self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"):
+                    await epic_orders.fetch_epic_purchases(
+                        transport=httpx.MockTransport(handler)
+                    )
+
+    async def test_real_path_impersonates_and_warms_up(self):
+        # Without a test transport the fetch must go through curl_cffi
+        # impersonation: browser profile, cookies on .epicgames.com, a
+        # transactions-page warm-up GET before the ajax pagination.
+        class FakeResponse:
+            status_code = 200
+            text = ""
+            headers = {"content-type": "application/json"}
+
+            def __init__(self, payload):
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+            def raise_for_status(self):
+                return self
+
+        calls: list[tuple[str, dict]] = []
+        session_kwargs: dict = {}
+
+        class FakeSession:
+            def __init__(self, **kwargs):
+                session_kwargs.update(kwargs)
+                self.cookies = SimpleNamespace(set=lambda *a, **k: None)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get(self, url, **kwargs):
+                calls.append((url, kwargs))
+                if "ajaxGetOrderHistory" not in url:
+                    return FakeResponse({})  # the warm-up page walk
+                return FakeResponse(
+                    {"orders": [EpicFetchTests._order("o-1", "Alan Wake")]}
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp)
+            with patch.dict(os.environ, {"EPIC_COOKIES_FILE": path}):
+                with patch.object(epic_orders, "AsyncSession", FakeSession):
+                    records, skipped = await epic_orders.fetch_epic_purchases()
+
+        self.assertEqual(session_kwargs.get("impersonate"), epic_orders._IMPERSONATE_PROFILE)
+        self.assertEqual(calls[0][0], "https://www.epicgames.com/account/transactions")
+        self.assertIn("ajaxGetOrderHistory", calls[1][0])
+        self.assertEqual(
+            calls[1][1]["headers"]["Accept"], "application/json"
+        )
+        self.assertEqual([r.title for r in records], ["Alan Wake"])
+        self.assertEqual(skipped, [])
+
+    async def test_cloudflare_challenge_does_not_blame_cookies(self):
+        # A challenge 403 never reaches Epic's auth layer, so the error must not
+        # send the user off to re-paste perfectly good cookies.
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                403,
+                text="<html><script src='/cdn-cgi/challenge-platform/x.js'></script></html>",
+                headers={"content-type": "text/html", "cf-mitigated": "challenge"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp)
+            with patch.dict(os.environ, {"EPIC_COOKIES_FILE": path}):
+                with self.assertRaisesRegex(RuntimeError, "Cloudflare bot protection"):
+                    await epic_orders.fetch_epic_purchases(
+                        transport=httpx.MockTransport(handler)
+                    )
+
+    async def test_challenge_detected_without_cf_mitigated_header(self):
+        # Not every challenge variant sets the header; the injected script is
+        # the fallback signal.
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                403,
+                text="<html><script src='/cdn-cgi/challenge-platform/x.js'></script></html>",
+                headers={"content-type": "text/html"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp)
+            with patch.dict(os.environ, {"EPIC_COOKIES_FILE": path}):
+                with self.assertRaisesRegex(RuntimeError, "Cloudflare bot protection"):
                     await epic_orders.fetch_epic_purchases(
                         transport=httpx.MockTransport(handler)
                     )
