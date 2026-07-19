@@ -28,6 +28,7 @@ from ..data.db import (
 )
 from ..data.title_normalization import normalize_search_text
 from ..data.enrich_bg import pause_background_enrichment, resume_background_enrichment
+from .batch import apply_batch_item, check_batch_items, count_status
 
 # The platform sync dicts are built from platforms_registry at call time; the
 # imports below keep the functions bound on this module so existing tests can
@@ -686,6 +687,8 @@ async def merge_games(
     source_game_id: int,
     target_game_id: int,
     dry_run: bool = False,
+    *,
+    recompute_affinity: bool = True,
 ) -> dict:
     """
     Merge one game row into another and delete the source.
@@ -953,7 +956,7 @@ async def merge_games(
     # affinity the same way rate_game/sync_ratings do — otherwise discover_games
     # ranks on stale scores until the next background pass. Outside the db
     # context manager since recompute opens its own connection.
-    if not dry_run and (ratings_moved or ratings_kept_target):
+    if not dry_run and recompute_affinity and (ratings_moved or ratings_kept_target):
         from ..data.db import recompute_tag_affinity
         await recompute_tag_affinity()
 
@@ -972,10 +975,80 @@ async def merge_games(
     }
 
 
+_MERGE_BATCH_ITEM_KEYS = frozenset({"source_game_id", "target_game_id"})
+
+
+async def merge_games_batch(items: list[dict], dry_run: bool = False) -> dict:
+    """
+    Apply merge_games to many source→target pairs; per-item errors never fail
+    the whole call.
+
+    Each item is {source_game_id, target_game_id}. Because a merge deletes its
+    source row, ids consumed by an earlier item in the same batch are tracked:
+    a later item referencing one gets status="stale_id" instead of a confusing
+    not-found error — in dry_run too, so the preview predicts the wet outcome.
+    The tag-affinity recompute a ratings transfer normally triggers is deferred
+    and run ONCE after the loop (tag_affinity_tags_updated; 0 when no ratings
+    moved or dry_run). dry_run forwards to merge_games' own faithful preview.
+    """
+    check_batch_items(items)
+
+    consumed: set[int] = set()
+    ratings_touched = False
+
+    async def _one(source_game_id=None, target_game_id=None):
+        nonlocal ratings_touched
+        if source_game_id is None or target_game_id is None:
+            raise ToolError("each item requires source_game_id and target_game_id")
+        stale = sorted(
+            {gid for gid in (source_game_id, target_game_id) if gid in consumed}
+        )
+        if stale:
+            return {
+                "status": "stale_id",
+                "source_game_id": source_game_id,
+                "target_game_id": target_game_id,
+                "error": (
+                    f"game id(s) {stale} were merged away by an earlier item "
+                    "in this batch"
+                ),
+            }
+        result = await merge_games(
+            source_game_id, target_game_id, dry_run, recompute_affinity=False
+        )
+        # Track in dry_run too: the wet run deletes the source, so a later
+        # item reusing it must preview as stale.
+        consumed.add(source_game_id)
+        if result["ratings_moved"] or result["ratings_kept_target"]:
+            ratings_touched = True
+        return result
+
+    results = [
+        await apply_batch_item(item, _MERGE_BATCH_ITEM_KEYS, _one) for item in items
+    ]
+
+    tag_count = 0
+    if ratings_touched and not dry_run:
+        from ..data.db import recompute_tag_affinity
+        tag_count = await recompute_tag_affinity()
+
+    return {
+        "results": results,
+        "total": len(items),
+        "ok": count_status(results, "ok"),
+        "stale_id": count_status(results, "stale_id"),
+        "errors": count_status(results, "error"),
+        "dry_run": dry_run,
+        "tag_affinity_tags_updated": tag_count,
+    }
+
+
 async def delete_game(
     name: str | None = None,
     game_id: int | None = None,
     confirm: bool = False,
+    *,
+    recompute_affinity: bool = True,
 ) -> dict:
     """
     Permanently delete one game and all of its data. IRREVERSIBLE.
@@ -1076,8 +1149,10 @@ async def delete_game(
     # So recompute unconditionally after a confirmed delete (deletes are rare
     # admin ops) rather than gating on ratings, which would leave an unrated but
     # played game's taste signal skewing discover_games until an unrelated pass.
-    from ..data.db import recompute_tag_affinity
-    await recompute_tag_affinity()
+    # (A batch defers this and recomputes once at the end.)
+    if recompute_affinity:
+        from ..data.db import recompute_tag_affinity
+        await recompute_tag_affinity()
 
     return {
         "deleted": True,
@@ -1085,6 +1160,102 @@ async def delete_game(
         "name": resolved_name,
         "deleted_counts": would_delete,
     }
+
+
+_DELETE_BATCH_ITEM_KEYS = frozenset({"name", "game_id"})
+
+
+async def delete_games_batch(items: list[dict], confirm: bool = False) -> dict:
+    """
+    Apply delete_game to many games, preserving the two-step confirm.
+
+    Each item is {name or game_id}. confirm=False previews every item
+    (status="previewed" with its would_delete counts, summed top-level in
+    would_delete_total); confirm=True deletes (status="deleted", summed in
+    deleted_counts_total). The preview runs the identical resolution and guard
+    path, so its totals match what confirm actually deletes. A parent of
+    nested content is status="refused" (with its children listed) and never
+    aborts the rest; an item resolving to a game already deleted — or
+    previewed for deletion — earlier in the same batch is an error, so a
+    duplicate previews the same failure the confirm run would hit. The
+    per-delete tag-affinity recompute is deferred and run once after the loop.
+    """
+    check_batch_items(items)
+    # Lazy import as in delete_game: avoids a top-level cycle with platforms.py.
+    from .platforms import _resolve_game_row
+
+    consumed: set[int] = set()
+    any_deleted = False
+
+    async def _one(name=None, game_id=None):
+        nonlocal any_deleted
+        row = await _resolve_game_row(name, game_id)
+        resolved_id = row["id"]
+        if resolved_id in consumed:
+            raise ToolError(
+                f"'{row['name']}' (id {resolved_id}) was already deleted "
+                "earlier in this batch"
+            )
+        async with get_db() as db:
+            children = await db.execute_fetchall(
+                "SELECT id, name FROM games WHERE parent_game_id = ?", (resolved_id,)
+            )
+        if children:
+            # Same guard delete_game enforces by raising; surfaced as its own
+            # status so a repair loop can triage refusals apart from errors.
+            return {
+                "status": "refused",
+                "game_id": resolved_id,
+                "name": row["name"],
+                "error": (
+                    f"parent of {len(children)} nested item(s) — reparent or "
+                    "delete them first (update_game/delete_game)"
+                ),
+                "children": [
+                    {"game_id": c["id"], "name": c["name"]} for c in children
+                ],
+            }
+        result = await delete_game(
+            game_id=resolved_id, confirm=confirm, recompute_affinity=False
+        )
+        # Track in preview mode too, so a duplicate item reports the same
+        # error the confirm run would.
+        consumed.add(resolved_id)
+        if result["deleted"]:
+            any_deleted = True
+        result.pop("hint", None)  # one top-level hint instead of one per item
+        return {"status": "deleted" if result["deleted"] else "previewed", **result}
+
+    results = [
+        await apply_batch_item(item, _DELETE_BATCH_ITEM_KEYS, _one) for item in items
+    ]
+
+    if any_deleted:
+        from ..data.db import recompute_tag_affinity
+        await recompute_tag_affinity()
+
+    def _sum_counts(key: str) -> dict[str, int]:
+        totals: dict[str, int] = {}
+        for r in results:
+            for table, count in (r.get(key) or {}).items():
+                totals[table] = totals.get(table, 0) + count
+        return totals
+
+    envelope: dict = {
+        "results": results,
+        "total": len(items),
+        "previewed": count_status(results, "previewed"),
+        "deleted": count_status(results, "deleted"),
+        "refused": count_status(results, "refused"),
+        "errors": count_status(results, "error"),
+        "confirm": confirm,
+    }
+    if confirm:
+        envelope["deleted_counts_total"] = _sum_counts("deleted_counts")
+    else:
+        envelope["would_delete_total"] = _sum_counts("would_delete")
+        envelope["hint"] = "Re-run with confirm=True to permanently delete."
+    return envelope
 
 
 async def detect_farmed_games(

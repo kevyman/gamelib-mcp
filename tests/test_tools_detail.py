@@ -397,3 +397,49 @@ class GetGameDetailTests(ToolDBTestCase):
         self.assertIs(result["wishlisted"], True)
         self.assertEqual(result["platforms"], [])
         self.assertIs(result["is_primary_library_item"], True)
+
+
+class GetGameDetailsBatchTests(ToolDBTestCase):
+    async def test_batch_never_triggers_lazy_enrichment(self):
+        gid = await make_steam_game("Celeste", 504230, playtime_minutes=300)
+        enrich = AsyncMock(return_value=None)
+        protondb = AsyncMock(return_value=None)
+        hltb = AsyncMock(return_value=None)
+        with (
+            patch.object(detail, "enrich_game", enrich),
+            patch.object(detail, "get_protondb", protondb),
+            patch.object(detail, "get_hltb", hltb),
+        ):
+            result = await detail.get_game_details_batch([{"game_id": gid}])
+        enrich.assert_not_awaited()
+        protondb.assert_not_awaited()
+        hltb.assert_not_awaited()
+        self.assertEqual(result["enrichment"], "skipped")
+        self.assertEqual(result["results"][0]["status"], "ok")
+        self.assertEqual(result["results"][0]["name"], "Celeste")
+
+    async def test_mixed_resolution_preserves_order_and_isolates_errors(self):
+        a = await make_steam_game("Celeste", 504230)
+        b = await make_steam_game("Hades", 1145360)
+        result = await detail.get_game_details_batch(
+            [
+                {"name": "celeste"},
+                {"name": "does-not-exist-at-all"},
+                {"appid": 1145360},
+                {"bogus_key": 1},
+            ]
+        )
+        statuses = [r["status"] for r in result["results"]]
+        self.assertEqual(statuses, ["ok", "error", "ok", "error"])
+        self.assertEqual(result["ok"], 2)
+        self.assertEqual(result["errors"], 2)
+        self.assertEqual(result["results"][0]["game_id"], a)
+        self.assertEqual(result["results"][2]["game_id"], b)
+        self.assertIn("item", result["results"][1])
+        self.assertIn("bogus_key", result["results"][3]["error"])
+
+    async def test_empty_and_cap_raise(self):
+        with self.assertRaisesRegex(ToolError, "must not be empty"):
+            await detail.get_game_details_batch([])
+        with self.assertRaisesRegex(ToolError, "capped at 50"):
+            await detail.get_game_details_batch([{"game_id": 1}] * 51)

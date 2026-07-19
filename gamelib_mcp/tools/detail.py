@@ -20,6 +20,12 @@ from ..data.igdb import get_igdb_children_cached
 from ..data.protondb import get_protondb
 from ..data.steam_store import enrich_game
 from ..utils import _parse_json
+from .batch import (
+    DETAIL_BATCH_ITEM_CAP,
+    apply_batch_item,
+    check_batch_items,
+    count_status,
+)
 from .common import cover_url
 from .search import (
     NORMALIZED_NAME_SQL,
@@ -32,10 +38,17 @@ async def get_game_detail(
     name: str | None = None,
     appid: int | None = None,
     game_id: int | None = None,
+    *,
+    enrich: bool = True,
 ) -> dict:
     """
     Return full detail for a game, triggering lazy enrichment.
     Accepts game_id, a Steam appid when available, or a partial name.
+
+    enrich=False (internal, batch-only) skips every lazy provider fetch (Steam
+    store/reviews, ProtonDB, HLTB, and the IGDB children fallback) and serves
+    whatever is already cached — enrichment fields may be null/absent that a
+    single-item call would have filled.
 
     Can resolve to a wishlist-only title (wishlisted but not owned anywhere) —
     check owned/wishlisted, not is_primary_library_item, which is a
@@ -75,10 +88,11 @@ async def get_game_detail(
     game_name = row["name"]
     steam_appid = await get_steam_appid_for_game(game_id)
 
-    if steam_appid is not None:
-        await enrich_game(steam_appid)
-        await get_protondb(steam_appid)
-    await get_hltb(game_id, game_name)
+    if enrich:
+        if steam_appid is not None:
+            await enrich_game(steam_appid)
+            await get_protondb(steam_appid)
+        await get_hltb(game_id, game_name)
 
     async with get_db() as db:
         row = await db.execute_fetchone("SELECT * FROM games WHERE id = ?", (game_id,))
@@ -163,6 +177,7 @@ async def get_game_detail(
     # ever leave this key absent, never break the response.
     if (
         dlc_ownership is None
+        and enrich  # get_igdb_children_cached may live-fetch on a cache miss
         and bool(row["is_primary_library_item"])
         and row["igdb_id"] is not None
     ):
@@ -278,3 +293,34 @@ async def get_game_detail(
         result["dlc_ownership"] = dlc_ownership
 
     return result
+
+
+_DETAIL_BATCH_ITEM_KEYS = frozenset({"name", "appid", "game_id"})
+
+
+async def get_game_details_batch(items: list[dict]) -> dict:
+    """
+    Full detail for many games in one call (max 50 items), enrichment skipped.
+
+    Each item takes exactly get_game_detail's resolution parameters ({name,
+    appid, or game_id}). Unlike the single-item tool, NO lazy provider fetches
+    run (like the other bulk tools) — only already-cached enrichment is served,
+    so enrichment fields a single-item call would fill may be null/absent; the
+    response says so via enrichment="skipped". An unresolvable item is that
+    item's status="error"; it never fails the batch.
+    """
+    check_batch_items(items, cap=DETAIL_BATCH_ITEM_CAP)
+
+    async def _one(**kwargs):
+        return await get_game_detail(**kwargs, enrich=False)
+
+    results = [
+        await apply_batch_item(item, _DETAIL_BATCH_ITEM_KEYS, _one) for item in items
+    ]
+    return {
+        "results": results,
+        "total": len(items),
+        "ok": count_status(results, "ok"),
+        "errors": count_status(results, "error"),
+        "enrichment": "skipped",
+    }

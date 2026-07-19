@@ -1640,3 +1640,213 @@ class DeleteGameTests(ToolDBTestCase):
         ) as recompute:
             await admin.delete_game(game_id=gid)  # confirm=False preview
         recompute.assert_not_awaited()
+
+
+class DeleteGamesBatchTests(ToolDBTestCase):
+    async def _seed_two(self):
+        a = await seed_game("Doomed A")
+        gpid = await add_platform(a, "steam", playtime_minutes=100)
+        await add_identifier(gpid, "steam_appid", "901")
+        await add_rating(a, "manual", 8.0, 8.0)
+        b = await seed_game("Doomed B")
+        await add_platform(b, "gog")
+        return a, b
+
+    async def test_preview_totals_match_confirmed_deletes(self):
+        a, b = await self._seed_two()
+        items = [{"game_id": a}, {"game_id": b}]
+
+        preview = await admin.delete_games_batch(items)
+        self.assertFalse(preview["confirm"])
+        self.assertEqual(
+            [r["status"] for r in preview["results"]], ["previewed", "previewed"]
+        )
+        self.assertEqual(preview["previewed"], 2)
+        self.assertIn("hint", preview)
+        self.assertEqual(preview["would_delete_total"]["platforms"], 2)
+        self.assertEqual(preview["would_delete_total"]["ratings"], 1)
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
+        self.assertEqual(count["c"], 2)  # nothing deleted
+
+    async def test_confirm_deletes_and_counts_equal_preview(self):
+        a, b = await self._seed_two()
+        items = [{"game_id": a}, {"game_id": b}]
+        preview = await admin.delete_games_batch(items)
+
+        confirmed = await admin.delete_games_batch(items, confirm=True)
+        self.assertEqual(
+            [r["status"] for r in confirmed["results"]], ["deleted", "deleted"]
+        )
+        self.assertEqual(confirmed["deleted"], 2)
+        self.assertEqual(
+            confirmed["deleted_counts_total"], preview["would_delete_total"]
+        )
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
+        self.assertEqual(count["c"], 0)
+
+    async def test_refused_parent_never_aborts_the_rest(self):
+        parent = await seed_game("Base Game")
+        await seed_game(
+            "Base DLC", content_type="dlc", parent_game_id=parent,
+            is_primary_library_item=0,
+        )
+        plain = await seed_game("Plain Game")
+
+        result = await admin.delete_games_batch(
+            [{"game_id": parent}, {"game_id": plain}], confirm=True
+        )
+        self.assertEqual(
+            [r["status"] for r in result["results"]], ["refused", "deleted"]
+        )
+        self.assertEqual(result["refused"], 1)
+        self.assertEqual(result["deleted"], 1)
+        self.assertEqual(
+            result["results"][0]["children"],
+            [{"game_id": result["results"][0]["children"][0]["game_id"], "name": "Base DLC"}],
+        )
+        async with db_module.get_db() as db:
+            parent_row = await db.execute_fetchone(
+                "SELECT id FROM games WHERE id = ?", (parent,)
+            )
+            plain_row = await db.execute_fetchone(
+                "SELECT id FROM games WHERE id = ?", (plain,)
+            )
+        self.assertIsNotNone(parent_row)  # refused item untouched
+        self.assertIsNone(plain_row)
+
+    async def test_duplicate_item_errors_in_both_modes(self):
+        gid = await seed_game("Once Only")
+        items = [{"game_id": gid}, {"name": "Once Only"}]
+
+        preview = await admin.delete_games_batch(items)
+        self.assertEqual(
+            [r["status"] for r in preview["results"]], ["previewed", "error"]
+        )
+        self.assertIn("already deleted", preview["results"][1]["error"])
+
+        confirmed = await admin.delete_games_batch(items, confirm=True)
+        self.assertEqual(
+            [r["status"] for r in confirmed["results"]], ["deleted", "error"]
+        )
+
+    async def test_affinity_recomputed_once_after_confirmed_deletes(self):
+        a, b = await self._seed_two()
+        recompute = AsyncMock(return_value=0)
+        with patch.object(db_module, "recompute_tag_affinity", recompute):
+            await admin.delete_games_batch(
+                [{"game_id": a}, {"game_id": b}], confirm=True
+            )
+        recompute.assert_awaited_once()
+
+    async def test_preview_never_recomputes_affinity(self):
+        a, b = await self._seed_two()
+        recompute = AsyncMock(return_value=0)
+        with patch.object(db_module, "recompute_tag_affinity", recompute):
+            await admin.delete_games_batch([{"game_id": a}, {"game_id": b}])
+        recompute.assert_not_awaited()
+
+    async def test_empty_and_cap_raise(self):
+        from fastmcp.exceptions import ToolError
+
+        with self.assertRaisesRegex(ToolError, "must not be empty"):
+            await admin.delete_games_batch([])
+        with self.assertRaisesRegex(ToolError, "capped at 200"):
+            await admin.delete_games_batch([{"game_id": 1}] * 201)
+
+
+class MergeGamesBatchTests(ToolDBTestCase):
+    async def test_merges_and_flags_stale_ids(self):
+        a = await seed_game("Dupe A")
+        await add_platform(a, "steam", playtime_minutes=50)
+        b = await seed_game("Canonical B")
+        c = await seed_game("Other C")
+
+        result = await admin.merge_games_batch(
+            [
+                {"source_game_id": a, "target_game_id": b},
+                # a was merged away above — both directions must flag stale.
+                {"source_game_id": a, "target_game_id": c},
+                {"source_game_id": c, "target_game_id": a},
+            ]
+        )
+        self.assertEqual(
+            [r["status"] for r in result["results"]], ["ok", "stale_id", "stale_id"]
+        )
+        self.assertEqual(result["ok"], 1)
+        self.assertEqual(result["stale_id"], 2)
+        async with db_module.get_db() as db:
+            gone = await db.execute_fetchone("SELECT id FROM games WHERE id = ?", (a,))
+            gp = await db.execute_fetchone(
+                "SELECT platform FROM game_platforms WHERE game_id = ?", (b,)
+            )
+            survivor = await db.execute_fetchone("SELECT id FROM games WHERE id = ?", (c,))
+        self.assertIsNone(gone)
+        self.assertEqual(gp["platform"], "steam")
+        self.assertIsNotNone(survivor)  # stale items touched nothing
+
+    async def test_dry_run_predicts_stale_and_writes_nothing(self):
+        a = await seed_game("Dupe A")
+        b = await seed_game("Canonical B")
+        c = await seed_game("Other C")
+        result = await admin.merge_games_batch(
+            [
+                {"source_game_id": a, "target_game_id": b},
+                {"source_game_id": a, "target_game_id": c},
+            ],
+            dry_run=True,
+        )
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(
+            [r["status"] for r in result["results"]], ["ok", "stale_id"]
+        )
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
+        self.assertEqual(count["c"], 3)
+
+    async def test_error_isolation_and_missing_ids(self):
+        a = await seed_game("Dupe A")
+        b = await seed_game("Canonical B")
+        result = await admin.merge_games_batch(
+            [
+                {"source_game_id": 99999, "target_game_id": b},
+                {"source_game_id": a},  # target missing
+                {"source_game_id": a, "target_game_id": a},  # same id
+                {"source_game_id": a, "target_game_id": b},
+            ]
+        )
+        self.assertEqual(
+            [r["status"] for r in result["results"]],
+            ["error", "error", "error", "ok"],
+        )
+        self.assertEqual(result["errors"], 3)
+        self.assertEqual(result["ok"], 1)
+
+    async def test_affinity_recomputed_once_when_ratings_move(self):
+        a = await seed_game("Dupe A")
+        await add_rating(a, "manual", 9.0, 9.0)
+        b = await seed_game("Canonical B")
+        c = await seed_game("Dupe C")
+        await add_rating(c, "manual", 7.0, 7.0)
+        d = await seed_game("Canonical D")
+        recompute = AsyncMock(return_value=2)
+        with patch.object(db_module, "recompute_tag_affinity", recompute):
+            result = await admin.merge_games_batch(
+                [
+                    {"source_game_id": a, "target_game_id": b},
+                    {"source_game_id": c, "target_game_id": d},
+                ]
+            )
+        recompute.assert_awaited_once()
+        self.assertEqual(result["tag_affinity_tags_updated"], 2)
+
+    async def test_empty_and_cap_raise(self):
+        from fastmcp.exceptions import ToolError
+
+        with self.assertRaisesRegex(ToolError, "must not be empty"):
+            await admin.merge_games_batch([])
+        with self.assertRaisesRegex(ToolError, "capped at 200"):
+            await admin.merge_games_batch(
+                [{"source_game_id": 1, "target_game_id": 2}] * 201
+            )
