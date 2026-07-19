@@ -24,6 +24,7 @@ from gamelib_mcp.data.purchases import (
     PURCHASE_IMPORTERS,
     PurchaseRecord,
 )
+from gamelib_mcp.data.purchases import epic_orders
 from gamelib_mcp.data.purchases import gog_orders
 from gamelib_mcp.data.purchases import humble as humble_module
 from gamelib_mcp.data.purchases import nintendo_ec
@@ -33,6 +34,7 @@ from gamelib_mcp.data.scrape_validate import FIXTURES_DIR
 from gamelib_mcp.tools import acquisition, admin
 
 _FETCHER_ATTRS = (
+    "fetch_epic_purchases",
     "fetch_eshop_purchases",
     "fetch_gog_purchases",
     "fetch_humble_purchases",
@@ -80,7 +82,9 @@ class PurchaseRegistryTests(unittest.TestCase):
     def test_registry_entries_resolve_to_real_callables(self):
         import importlib
 
-        self.assertEqual(set(PURCHASE_IMPORTERS), {"eshop", "gog", "humble", "steam"})
+        self.assertEqual(
+            set(PURCHASE_IMPORTERS), {"epic", "eshop", "gog", "humble", "steam"}
+        )
         for module_path, attr in PURCHASE_IMPORTERS.values():
             fn = getattr(importlib.import_module(module_path), attr)
             self.assertTrue(callable(fn))
@@ -97,6 +101,9 @@ class PurchaseRegistryTests(unittest.TestCase):
         # (the eShop GraphQL API exposes no product id) — deliberately no entry.
         self.assertNotIn("humble", IDENTIFIER_TYPES)
         self.assertNotIn("eshop", IDENTIFIER_TYPES)
+        # Epic order items carry an offerId, but the library stores
+        # epic_artifact_id — different id spaces, so deliberately no entry.
+        self.assertNotIn("epic", IDENTIFIER_TYPES)
 
 
 def _ec_transactions_fixture() -> list:
@@ -1144,6 +1151,269 @@ class GogFetchTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual([r.title for r in records], ["Cookie Game"])
+
+
+class EpicOrderParserTests(unittest.TestCase):
+    def test_completed_order_with_formatted_amount_and_offer_id(self):
+        order = {
+            "orderId": "F2001",
+            "createdAtMillis": 1615464000000,  # 2021-03-11 UTC
+            "orderStatus": "COMPLETED",
+            "orderType": "PURCHASE",
+            "items": [
+                {"description": "Control", "amount": "$19.99", "offerId": "offer-abc"},
+            ],
+        }
+
+        records, skipped = epic_orders.parse_order(order)
+
+        self.assertEqual(skipped, [])
+        record = records[0]
+        self.assertEqual(record.title, "Control")
+        self.assertEqual(record.platform, "epic")
+        self.assertEqual(record.purchase_source, "epic")
+        self.assertEqual(record.acquired_at, "2021-03-11")
+        self.assertEqual(record.price_paid, 19.99)
+        self.assertEqual(record.price_currency, "USD")
+        self.assertEqual(record.store_identifier, "offer-abc")
+        self.assertIsNone(record.content_type)
+        self.assertFalse(record.is_bundle)
+
+    def test_decimal_comma_locale_and_symbol_currency(self):
+        order = {
+            "orderId": "F2002",
+            "createdAtMillis": "1600000000000",  # string millis
+            "items": [{"description": "Alan Wake", "amount": "R$ 29,99"}],
+        }
+
+        records, _ = epic_orders.parse_order(order)
+
+        self.assertEqual(records[0].price_paid, 29.99)
+        self.assertEqual(records[0].price_currency, "BRL")
+        self.assertEqual(records[0].acquired_at, "2020-09-13")
+
+    def test_thousands_separators_both_locales(self):
+        for formatted, expected in (("1.234,56 zł", 1234.56), ("$1,234.56", 1234.56)):
+            records, _ = epic_orders.parse_order(
+                {"orderId": "F-big", "items": [{"description": "Big Cart", "amount": formatted}]}
+            )
+            self.assertEqual(records[0].price_paid, expected)
+
+    def test_explicit_order_currency_outranks_ambiguous_dollar_symbol(self):
+        # "$" formats USD, CAD, AUD, … — the order's ISO field is authoritative.
+        order = {
+            "orderId": "F-cad",
+            "createdAtMillis": 1650000000000,
+            "currency": "CAD",
+            "items": [{"description": "Control", "amount": "$19.99"}],
+        }
+
+        records, _ = epic_orders.parse_order(order)
+
+        self.assertEqual(records[0].price_currency, "CAD")
+
+    def test_multi_character_dollar_symbols_map_without_iso_field(self):
+        for formatted, expected in (
+            ("CA$19.99", "CAD"),
+            ("A$29.99", "AUD"),
+            ("NZ$9.99", "NZD"),
+        ):
+            records, _ = epic_orders.parse_order(
+                {"orderId": "F-sym", "items": [{"description": "Game", "amount": formatted}]}
+            )
+            self.assertEqual(records[0].price_currency, expected)
+
+    def test_in_game_currency_packs_are_skipped_not_minted(self):
+        order = {
+            "orderId": "F-vbucks",
+            "createdAtMillis": 1650000000000,
+            "orderStatus": "COMPLETED",
+            "items": [
+                {"description": "1,000 V-Bucks", "amount": "$7.99"},
+                {"description": "Rocket League® - Credits x1100", "amount": "$9.99"},
+                {"description": "2,800 Apex Coins", "amount": "$19.99"},
+                {"description": "Alan Wake 2", "amount": "$49.99"},
+            ],
+        }
+
+        records, skipped = epic_orders.parse_order(order)
+
+        self.assertEqual([r.title for r in records], ["Alan Wake 2"])
+        self.assertEqual(len(skipped), 3)
+        for entry in skipped:
+            self.assertIn("consumable", entry["reason"])
+
+    def test_currency_noun_without_a_count_is_not_a_consumable(self):
+        # Games legitimately named with currency nouns must not be filtered.
+        order = {
+            "orderId": "F-notcons",
+            "items": [{"description": "Coin Crypt", "amount": "$4.99"}],
+        }
+
+        records, skipped = epic_orders.parse_order(order)
+
+        self.assertEqual([r.title for r in records], ["Coin Crypt"])
+        self.assertEqual(skipped, [])
+
+    def test_zero_amount_is_a_free_giveaway_claim(self):
+        order = {
+            "orderId": "F2003",
+            "createdAtMillis": 1650000000000,
+            "orderStatus": "COMPLETED",
+            "items": [{"description": "Death Stranding", "amount": "$0.00"}],
+        }
+
+        records, _ = epic_orders.parse_order(order)
+
+        self.assertEqual(records[0].purchase_source, "free")
+        self.assertEqual(records[0].price_paid, 0.0)
+
+    def test_refund_and_incomplete_orders_skip_with_reason(self):
+        refund = {
+            "orderId": "R1",
+            "orderType": "REFUND",
+            "items": [{"description": "Control", "amount": "$19.99"}],
+        }
+        pending = {
+            "orderId": "P1",
+            "orderStatus": "PENDING",
+            "items": [{"description": "Control", "amount": "$19.99"}],
+        }
+
+        for order, fragment in ((refund, "refund"), (pending, "PENDING")):
+            records, skipped = epic_orders.parse_order(order)
+            self.assertEqual(records, [])
+            self.assertEqual(skipped[0]["description"], order["orderId"])
+            self.assertIn(fragment, skipped[0]["reason"])
+
+    def test_multi_item_order_keeps_per_item_amounts(self):
+        order = {
+            "orderId": "F2004",
+            "createdAtMillis": 1650000000000,
+            "currency": "EUR",
+            "items": [
+                {"description": "Game A", "amount": "9,99 €"},
+                {"description": "Game B", "amount": "4,99 €"},
+            ],
+        }
+
+        records, skipped = epic_orders.parse_order(order)
+
+        self.assertEqual(skipped, [])
+        self.assertEqual([r.price_paid for r in records], [9.99, 4.99])
+        self.assertEqual({r.price_currency for r in records}, {"EUR"})
+
+    def test_items_without_amounts_split_order_total_evenly(self):
+        order = {
+            "orderId": "F2005",
+            "createdAtMillis": 1650000000000,
+            "total": "$25.00",
+            "items": [
+                {"description": "Game A"},
+                {"description": "Game B"},
+                {"description": "Game C"},
+            ],
+        }
+
+        records, skipped = epic_orders.parse_order(order)
+
+        self.assertEqual(skipped, [])
+        self.assertEqual([r.price_paid for r in records], [8.33, 8.33, 8.34])
+        self.assertAlmostEqual(sum(r.price_paid for r in records), 25.00)
+        self.assertEqual({r.price_currency for r in records}, {"USD"})
+
+    def test_addon_named_item_gets_content_type_hint(self):
+        order = {
+            "orderId": "F2006",
+            "createdAtMillis": 1650000000000,
+            "items": [{"description": "Borderlands 3 Season Pass", "amount": "$49.99"}],
+        }
+
+        records, _ = epic_orders.parse_order(order)
+
+        self.assertEqual(records[0].content_type, "dlc")
+
+    def test_order_without_items_is_skipped_with_reason(self):
+        records, skipped = epic_orders.parse_order({"orderId": "E1"})
+        self.assertEqual(records, [])
+        self.assertEqual(skipped[0]["description"], "E1")
+        self.assertIn("no items", skipped[0]["reason"])
+
+
+class EpicFetchTests(unittest.IsolatedAsyncioTestCase):
+    def _write_cookies(self, tmp: str) -> str:
+        path = os.path.join(tmp, "epic_cookies.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"EPIC_BEARER_TOKEN": "tok", "EPIC_SSO_RM": "rm"}, f)
+        return path
+
+    @staticmethod
+    def _order(order_id: str, title: str) -> dict:
+        return {
+            "orderId": order_id,
+            "createdAtMillis": 1615464000000,
+            "orderStatus": "COMPLETED",
+            "items": [{"description": title, "amount": "$9.99"}],
+        }
+
+    async def test_missing_cookie_file_raises_clear_error(self):
+        with patch.dict(os.environ, {"EPIC_COOKIES_FILE": "/nonexistent/epic.json"}):
+            with self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"):
+                await epic_orders.fetch_epic_purchases()
+
+    async def test_auth_failure_raises(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, json={"error": "unauthorized"})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp)
+            with patch.dict(os.environ, {"EPIC_COOKIES_FILE": path}):
+                with self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"):
+                    await epic_orders.fetch_epic_purchases(
+                        transport=httpx.MockTransport(handler)
+                    )
+
+    async def test_login_page_html_raises_auth_error(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, text="<!doctype html><title>Sign in</title>",
+                headers={"content-type": "text/html"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp)
+            with patch.dict(os.environ, {"EPIC_COOKIES_FILE": path}):
+                with self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"):
+                    await epic_orders.fetch_epic_purchases(
+                        transport=httpx.MockTransport(handler)
+                    )
+
+    async def test_happy_path_paginates_via_next_page_token(self):
+        seen: list[tuple[str | None, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            token = request.url.params.get("nextPageToken")
+            seen.append((token, request.headers.get("Cookie", "")))
+            if token is None:
+                payload = {"orders": [self._order("F1", "Game 1")], "nextPageToken": "tok-2"}
+            else:
+                payload = {"orders": [self._order("F2", "Game 2")]}
+            return httpx.Response(
+                200, json=payload, headers={"content-type": "application/json"}
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp)
+            with patch.dict(os.environ, {"EPIC_COOKIES_FILE": path}):
+                records, skipped = await epic_orders.fetch_epic_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
+
+        self.assertEqual([token for token, _ in seen], [None, "tok-2"])
+        for _, cookie_header in seen:
+            self.assertIn("EPIC_BEARER_TOKEN=tok", cookie_header)
+        self.assertEqual([r.title for r in records], ["Game 1", "Game 2"])
+        self.assertEqual(skipped, [])
 
 
 def _fixture(name: str) -> str:
@@ -2209,7 +2479,7 @@ class ImportPurchasesTests(ToolDBTestCase):
         mocks["fetch_steam_purchases"].assert_not_awaited()
         mocks["fetch_humble_purchases"].assert_awaited_once()
 
-    async def test_all_four_sources_aggregate_totals(self):
+    async def test_all_sources_aggregate_totals(self):
         hades = await seed_game("Hades")
         await add_platform(hades, "switch2")
         hollow = await seed_game("Hollow Knight")
@@ -2218,6 +2488,8 @@ class ImportPurchasesTests(ToolDBTestCase):
         await add_platform(witcher, "gog")
         celeste = await seed_game("Celeste")
         await add_platform(celeste, "steam")
+        alan = await seed_game("Alan Wake")
+        await add_platform(alan, "epic")
 
         def _rec(title, platform, source, **overrides):
             fields = {
@@ -2232,6 +2504,9 @@ class ImportPurchasesTests(ToolDBTestCase):
             return PurchaseRecord(**fields)
 
         with _patch_fetchers(
+            fetch_epic_purchases=AsyncMock(
+                return_value=([_rec("Alan Wake", "epic", "epic")], []),
+            ),
             fetch_eshop_purchases=AsyncMock(
                 return_value=([_rec("Hades", "switch2", "eshop")], []),
             ),
@@ -2256,11 +2531,13 @@ class ImportPurchasesTests(ToolDBTestCase):
         ):
             result = await acquisition.import_purchases(create_missing=False)
 
-        self.assertEqual(set(result["sources"]), {"eshop", "gog", "humble", "steam"})
-        for source in ("eshop", "gog", "humble", "steam"):
+        self.assertEqual(
+            set(result["sources"]), {"epic", "eshop", "gog", "humble", "steam"}
+        )
+        for source in ("epic", "eshop", "gog", "humble", "steam"):
             self.assertEqual(result["sources"][source]["status"], "ok")
-        self.assertEqual(result["totals"]["fetched"], 5)
-        self.assertEqual(result["totals"]["filled"], 4)
+        self.assertEqual(result["totals"]["fetched"], 6)
+        self.assertEqual(result["totals"]["filled"], 5)
         self.assertEqual(result["totals"]["created"], 0)
         self.assertEqual(result["totals"]["unmatched"], 1)
         self.assertEqual(result["totals"]["errors"], 0)
@@ -2270,6 +2547,8 @@ class ImportPurchasesTests(ToolDBTestCase):
         self.assertEqual(row["purchase_source"], "gog")
         row = await _acquisition_row(celeste, "steam")
         self.assertEqual(row["purchase_source"], "steam")
+        row = await _acquisition_row(alan, "epic")
+        self.assertEqual(row["purchase_source"], "epic")
 
 
 class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
@@ -2316,6 +2595,19 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result, {"cookie_count": 2, "path": path})
                 self.assertEqual(
                     nintendo_ec._load_account_cookies(), {"NASID": "s", "NATID": "t"}
+                )
+
+    async def test_set_epic_session_round_trips_through_importer_loader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "epic.json")
+            with patch.dict(os.environ, {"EPIC_COOKIES_FILE": path}):
+                result = await admin.set_epic_session(
+                    json.dumps({"EPIC_BEARER_TOKEN": "tok", "EPIC_SSO_RM": "rm"})
+                )
+                self.assertEqual(result, {"cookie_count": 2, "path": path})
+                self.assertEqual(
+                    epic_orders._load_epic_cookies(),
+                    {"EPIC_BEARER_TOKEN": "tok", "EPIC_SSO_RM": "rm"},
                 )
 
     async def test_set_steam_store_session_writes_to_steam_path(self):
