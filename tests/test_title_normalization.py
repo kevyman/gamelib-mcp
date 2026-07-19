@@ -176,6 +176,32 @@ class PurchaseSkuSuffixTests(unittest.TestCase):
             normalize_purchase_title("Morrowind Game of the Year"), "Morrowind"
         )
 
+    def test_strips_standard_edition_tail(self) -> None:
+        self.assertEqual(
+            normalize_purchase_title("Nioh: Complete Edition Standard"),
+            "Nioh: Complete Edition",
+        )
+        self.assertEqual(
+            normalize_purchase_title("Monster Hunter World Standard Edition"),
+            "Monster Hunter World",
+        )
+
+    def test_strips_capcom_biohazard_alternate_name(self) -> None:
+        # Capcom store titles carry the JP-market name as a "GAME / BIOHAZARD …"
+        # tail that no library row uses; the edition tail rides along after it.
+        self.assertEqual(
+            normalize_purchase_title(
+                "RESIDENT EVIL 2 / BIOHAZARD RE:2 Standard Edition"
+            ),
+            "RESIDENT EVIL 2",
+        )
+        self.assertEqual(
+            normalize_purchase_title(
+                "RESIDENT EVIL VILLAGE / BIOHAZARD VILLAGE"
+            ),
+            "RESIDENT EVIL VILLAGE",
+        )
+
     def test_complete_is_never_stripped(self) -> None:
         # "X Complete" routinely names a multi-game compilation (Hexcells
         # Complete = three games) — stripping it would book the compilation's
