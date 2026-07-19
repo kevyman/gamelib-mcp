@@ -1005,7 +1005,11 @@ async def set_playtime_batch(items: list[dict], dry_run: bool = False) -> dict:
     optional, create_platform_row defaulting True like the single tool).
     dry_run=True runs the identical validation path and writes nothing; a
     to-be-created platform row reports game_platform_id null, and
-    manual_overrides/playtime values simulate the post-write state.
+    manual_overrides/playtime values simulate the post-write state. Preview
+    statuses are computed against the CURRENT database, so an item depending
+    on an earlier item's write (e.g. clearing a column on a platform row an
+    earlier item would create) may preview as error where the wet run
+    succeeds.
     """
     check_batch_items(items)
 

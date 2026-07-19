@@ -989,11 +989,16 @@ async def merge_games_batch(items: list[dict], dry_run: bool = False) -> dict:
     not-found error — in dry_run too, so the preview predicts the wet outcome.
     The tag-affinity recompute a ratings transfer normally triggers is deferred
     and run ONCE after the loop (tag_affinity_tags_updated; 0 when no ratings
-    moved or dry_run). dry_run forwards to merge_games' own faithful preview.
+    moved or dry_run). dry_run forwards to merge_games' own faithful preview,
+    but its counts are computed against the CURRENT database: a chained item
+    whose source or target was an earlier item's target (A→B then B→C) can't
+    see what that earlier merge would have moved into the row, so its counts
+    may understate the wet run — such items carry chained_preview=true.
     """
     check_batch_items(items)
 
     consumed: set[int] = set()
+    targets_seen: set[int] = set()
     ratings_touched = False
 
     async def _one(source_game_id=None, target_game_id=None):
@@ -1016,6 +1021,11 @@ async def merge_games_batch(items: list[dict], dry_run: bool = False) -> dict:
         result = await merge_games(
             source_game_id, target_game_id, dry_run, recompute_affinity=False
         )
+        # A dry-run item touching an earlier item's target reads the pre-batch
+        # DB, so its counts miss whatever that merge would have moved in.
+        if dry_run and (source_game_id in targets_seen or target_game_id in targets_seen):
+            result["chained_preview"] = True
+        targets_seen.add(target_game_id)
         # Track in dry_run too: the wet run deletes the source, so a later
         # item reusing it must preview as stale.
         consumed.add(source_game_id)

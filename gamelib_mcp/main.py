@@ -1323,7 +1323,10 @@ async def set_playtime_batch(
     the others, and results preserve input order. dry_run=True runs the
     identical validation without writing: a to-be-created platform row
     reports game_platform_id null, and manual_overrides/playtime values
-    simulate the post-write state.
+    simulate the post-write state. Preview statuses are computed against the
+    CURRENT database, so an item depending on an earlier item's write (e.g.
+    clearing a column on a platform row an earlier item would create) may
+    preview as error where the wet run succeeds.
     """
     from .tools.platforms import set_playtime_batch as _playtime_batch
     return await _playtime_batch(items, dry_run)
@@ -1638,7 +1641,11 @@ async def merge_games_batch(
     results preserve input order, ok items carrying merge_games' full summary.
     The tag-affinity recompute a ratings transfer triggers runs ONCE after the
     loop (tag_affinity_tags_updated). dry_run=True forwards to merge_games'
-    preview: per-item counts of what would move, nothing written.
+    preview: per-item counts of what would move, nothing written. Preview
+    counts are computed against the CURRENT database, so a chained item whose
+    source or target was an earlier item's target (A→B then B→C) may
+    understate what the wet run would move — such items carry
+    chained_preview=true.
     """
     from .tools.admin import merge_games_batch as _merge_batch
     return await _merge_batch(items, dry_run)

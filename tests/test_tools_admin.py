@@ -1881,6 +1881,39 @@ class MergeGamesBatchTests(ToolDBTestCase):
             count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
         self.assertEqual(count["c"], 3)
 
+    async def test_dry_run_flags_chained_pairs(self):
+        a = await seed_game("Dupe A")
+        await add_platform(a, "steam", playtime_minutes=50)
+        b = await seed_game("Middle B")
+        c = await seed_game("Canonical C")
+
+        chain = [
+            {"source_game_id": a, "target_game_id": b},
+            {"source_game_id": b, "target_game_id": c},
+        ]
+        preview = await admin.merge_games_batch(chain, dry_run=True)
+        self.assertEqual(
+            [r["status"] for r in preview["results"]], ["ok", "ok"]
+        )
+        self.assertNotIn("chained_preview", preview["results"][0])
+        # B→C reads the pre-batch DB (A's rows not yet merged into B), so
+        # its counts may understate the wet run and must say so.
+        self.assertTrue(preview["results"][1]["chained_preview"])
+        # A wet chained run reads real post-merge state — no flag, and the
+        # second merge carries A's platform row through B into C.
+        wet = await admin.merge_games_batch(chain)
+        self.assertEqual([r["status"] for r in wet["results"]], ["ok", "ok"])
+        self.assertNotIn("chained_preview", wet["results"][1])
+        self.assertEqual(wet["results"][1]["platforms_moved"], ["steam"])
+        async with db_module.get_db() as db:
+            gp = await db.execute_fetchone(
+                "SELECT platform, playtime_minutes FROM game_platforms"
+                " WHERE game_id = ?",
+                (c,),
+            )
+        self.assertEqual(gp["platform"], "steam")
+        self.assertEqual(gp["playtime_minutes"], 50)
+
     async def test_error_isolation_and_missing_ids(self):
         a = await seed_game("Dupe A")
         b = await seed_game("Canonical B")
