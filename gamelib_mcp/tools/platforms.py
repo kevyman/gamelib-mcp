@@ -13,6 +13,8 @@ from ..data.db import (
     clear_fulfilled_wishlist_entries,
     fts_ready,
     get_db,
+    get_manual_overrides,
+    get_platform_manual_overrides,
     has_nested_children,
     invalidate_igdb_match_enrichment,
     invalidate_name_derived_enrichment,
@@ -34,6 +36,7 @@ from ..data.tag_synonyms import canonical_tag
 # lazy-imports _resolve_game_row inside functions), so importing its validator
 # helpers here cannot form a cycle.
 from .acquisition import _validated_fields as _validated_acquisition_fields
+from .batch import apply_batch_item, check_batch_items, count_status
 from .common import (
     LIBRARY_PLATFORMS,
     validate_platform as _validate_platform,
@@ -196,6 +199,8 @@ async def add_game_to_platform(
     price_currency: str | None = None,
     purchase_source: str | None = None,
     bundle_name: str | None = None,
+    *,
+    dry_run: bool = False,
 ) -> dict:
     """
     Manually add a game to a platform — useful for games that aren't fetched
@@ -257,6 +262,35 @@ async def add_game_to_platform(
             (name,),
         )
     created = existing is None
+
+    if dry_run:
+        # Same validation path as the wet run, no writes. A to-be-created game
+        # reports game_id null (matching set_acquisitions_batch's convention);
+        # acquisition previews the validated fields rather than post-write state.
+        if owned:
+            identifier = (
+                {"type": identifier_type, "value": identifier_value}
+                if identifier_type and identifier_value
+                else None
+            )
+        else:
+            identifier = (
+                {"type": "steam_appid", "value": identifier_value}
+                if identifier_type == "steam_appid" and identifier_value
+                else None
+            )
+        return {
+            "created": created,
+            "game_id": existing["id"] if existing else None,
+            "game_platform_id": None,
+            "wishlist_id": None,
+            "name": name,
+            "platform": platform,
+            "owned": owned,
+            "playtime_minutes": playtime_minutes if owned else None,
+            "identifier": identifier,
+            "acquisition": acquisition_fields or None,
+        }
 
     game_id = await upsert_game(None, name)
     added_identifier = None
@@ -377,9 +411,18 @@ async def update_game(
     igdb_id: int | None = None,
     igdb_platforms: list[int] | None = None,
     clear_overrides: list[str] | None = None,
+    *,
+    dry_run: bool = False,
+    recompute_affinity: bool = True,
 ) -> dict:
     """
     Manually edit one game's properties, with revocable sync protection.
+
+    dry_run (internal, batch-only) runs the identical validation/guard path and
+    skips every write; the returned manual_overrides simulate the post-write
+    set, while enrichment_invalidated is not simulated (always empty).
+    recompute_affinity=False (internal, batch-only) defers the tag-affinity
+    recompute a tags edit normally triggers, so a batch recomputes once.
 
     Resolve the game with game_id or name, then set any subset of fields. Each
     edited field is recorded as a manual override so later library syncs and
@@ -627,34 +670,42 @@ async def update_game(
     # protections. fields and clear are disjoint, so order only matters for the
     # returned override set, which clearing finalizes.
     overrides: set[str] = set()
-    if fields:
-        overrides = await apply_manual_game_fields(resolved_id, fields)
-    if clear:
-        overrides = await remove_manual_overrides(resolved_id, clear)
-
-    # A rename invalidates name-matched enrichment (IGDB series/metadata, HLTB,
-    # OpenCritic/Metacritic): the cached values describe the old title. Clear those
-    # caches so background workers re-fetch under the new name. Field-level
-    # manual_overrides still protect any user-pinned columns at write time.
     enrichment_invalidated: list[str] = []
-    if "name" in fields and fields["name"] != row["name"]:
-        enrichment_invalidated = await invalidate_name_derived_enrichment(
-            resolved_id, overrides
-        )
+    if dry_run:
+        # Simulate the post-write override set the apply/remove pair below
+        # would return: current ∪ (fields ∩ editable) − clear.
+        async with get_db() as db:
+            current = await get_manual_overrides(db, resolved_id)
+        overrides = (current | (set(fields) & GAME_EDITABLE_FIELDS)) - set(clear)
+    else:
+        if fields:
+            overrides = await apply_manual_game_fields(resolved_id, fields)
+        if clear:
+            overrides = await remove_manual_overrides(resolved_id, clear)
 
-    # Repinning igdb_id corrects a wrong match: the stored igdb_cached_at (and any
-    # series/cover/platform metadata from the old match) still describes the wrong
-    # game, and claim_game_ids_for_igdb only revisits rows with igdb_cached_at
-    # NULL — so the corrected id would never re-fetch. Invalidate the IGDB cache so
-    # the backfill re-fetches under the pinned id. A rename already did this via
-    # invalidate_name_derived_enrichment above, so skip the double work.
-    if "igdb_id" in fields and "igdb" not in enrichment_invalidated:
-        await invalidate_igdb_match_enrichment(resolved_id)
-        enrichment_invalidated.append("igdb")
+        # A rename invalidates name-matched enrichment (IGDB series/metadata, HLTB,
+        # OpenCritic/Metacritic): the cached values describe the old title. Clear those
+        # caches so background workers re-fetch under the new name. Field-level
+        # manual_overrides still protect any user-pinned columns at write time.
+        if "name" in fields and fields["name"] != row["name"]:
+            enrichment_invalidated = await invalidate_name_derived_enrichment(
+                resolved_id, overrides
+            )
 
-    # Tags feed the taste profile; recompute so recommendations reflect the edit.
-    if "tags" in fields:
-        await recompute_tag_affinity()
+        # Repinning igdb_id corrects a wrong match: the stored igdb_cached_at (and any
+        # series/cover/platform metadata from the old match) still describes the wrong
+        # game, and claim_game_ids_for_igdb only revisits rows with igdb_cached_at
+        # NULL — so the corrected id would never re-fetch. Invalidate the IGDB cache so
+        # the backfill re-fetches under the pinned id. A rename already did this via
+        # invalidate_name_derived_enrichment above, so skip the double work.
+        if "igdb_id" in fields and "igdb" not in enrichment_invalidated:
+            await invalidate_igdb_match_enrichment(resolved_id)
+            enrichment_invalidated.append("igdb")
+
+        # Tags feed the taste profile; recompute so recommendations reflect the
+        # edit (a batch defers this and recomputes once at the end).
+        if "tags" in fields and recompute_affinity:
+            await recompute_tag_affinity()
 
     def _display(key: str, value):
         if key in {"genres", "tags", "features", "igdb_platforms"}:
@@ -694,9 +745,15 @@ async def set_playtime(
     last_played: str | None = None,
     clear: list[str] | None = None,
     create_platform_row: bool = True,
+    *,
+    dry_run: bool = False,
 ) -> dict:
     """
     Manually set playtime for one game on one platform, protected from sync.
+
+    dry_run (internal, batch-only) runs the identical validation/guard path and
+    skips every write; a to-be-created platform row reports game_platform_id
+    null, and manual_overrides/playtime values simulate the post-write state.
 
     Resolve the game with game_id or name, then pin playtime_minutes (total
     minutes played, not a delta) and/or last_played (YYYY-MM-DD) on that
@@ -749,11 +806,13 @@ async def set_playtime(
 
     async with get_db() as db:
         gp = await db.execute_fetchone(
-            "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",
+            """SELECT id, playtime_minutes, last_played
+               FROM game_platforms WHERE game_id = ? AND platform = ?""",
             (resolved_id, platform),
         )
 
     platform_row_created = False
+    gpid: int | None
     if gp is None:
         if not fields:
             # Nothing to pin and no row to unprotect — a clear-only call on a
@@ -766,25 +825,48 @@ async def set_playtime(
                 f"'{row['name']}' has no {platform} platform row. Pass "
                 "create_platform_row=True or add it first with add_game_to_platform."
             )
-        gpid = await upsert_game_platform(resolved_id, platform, owned=1)
+        if dry_run:
+            # The wet run would create the row; report game_platform_id null
+            # (matching set_acquisitions_batch's created-game convention).
+            gpid = None
+        else:
+            gpid = await upsert_game_platform(resolved_id, platform, owned=1)
         platform_row_created = True
     else:
         gpid = gp["id"]
 
-    # Apply pins first (records their protection), then revoke any requested
-    # protections. fields and clear_list are disjoint, so order only affects the
-    # returned override set, which the clear finalizes.
-    overrides: set[str] = set()
-    if fields:
-        overrides = await apply_manual_platform_fields(gpid, fields)
-    if clear_list:
-        overrides = await remove_platform_manual_overrides(gpid, clear_list)
-
-    async with get_db() as db:
-        final = await db.execute_fetchone(
-            "SELECT playtime_minutes, last_played FROM game_platforms WHERE id = ?",
-            (gpid,),
+    if dry_run:
+        # Simulate the post-write state: current ∪ fields − clear for the
+        # override set, pinned values overlaid on the row's current ones.
+        current: set[str] = set()
+        if gp is not None:
+            async with get_db() as db:
+                current = await get_platform_manual_overrides(db, gp["id"])
+        overrides = (current | set(fields)) - set(clear_list)
+        final_playtime = fields.get(
+            "playtime_minutes", gp["playtime_minutes"] if gp else None
         )
+        final_last_played = fields.get(
+            "last_played", gp["last_played"] if gp else None
+        )
+    else:
+        assert gpid is not None
+        # Apply pins first (records their protection), then revoke any requested
+        # protections. fields and clear_list are disjoint, so order only affects
+        # the returned override set, which the clear finalizes.
+        overrides = set()
+        if fields:
+            overrides = await apply_manual_platform_fields(gpid, fields)
+        if clear_list:
+            overrides = await remove_platform_manual_overrides(gpid, clear_list)
+
+        async with get_db() as db:
+            final = await db.execute_fetchone(
+                "SELECT playtime_minutes, last_played FROM game_platforms WHERE id = ?",
+                (gpid,),
+            )
+        final_playtime = final["playtime_minutes"]
+        final_last_played = final["last_played"]
 
     return {
         "game_id": resolved_id,
@@ -794,7 +876,153 @@ async def set_playtime(
         "platform_row_created": platform_row_created,
         "updated": dict(fields),
         "cleared": clear_list,
-        "playtime_minutes": final["playtime_minutes"],
-        "last_played": final["last_played"],
+        "playtime_minutes": final_playtime,
+        "last_played": final_last_played,
         "manual_overrides": sorted(overrides),
+    }
+
+
+_UPDATE_BATCH_ITEM_KEYS = frozenset({
+    "name", "game_id", "new_name", "sort_name", "release_date", "genres",
+    "tags", "features", "short_description", "hltb_main", "hltb_extra",
+    "hltb_complete", "is_farmed", "completion_status", "content_type",
+    "parent_game_id", "parent_name", "cover_image_id", "igdb_id",
+    "igdb_platforms", "clear_overrides",
+})
+
+
+async def update_games_batch(items: list[dict], dry_run: bool = False) -> dict:
+    """
+    Apply update_game to many games; per-item errors never fail the whole call.
+
+    Each item takes exactly update_game's parameters ({name or game_id} + any
+    fields/clear_overrides). Every single-item guard (nesting, substance,
+    igdb_id uniqueness, ...) runs identically per item; a guard refusal is that
+    item's status="error", never an abort. The tag-affinity recompute a tags
+    edit triggers is deferred and run ONCE after the loop (reported in
+    tag_affinity_tags_updated; 0 when no tags changed or dry_run).
+
+    dry_run=True runs the identical validation/guard path per item and writes
+    nothing, returning the statuses a wet run would. Statuses are computed
+    against the current database, so an item depending on an earlier item's
+    write in the same batch (igdb_id uniqueness, nesting/parent state) may
+    preview ok yet error in the wet run. Also not simulated:
+    enrichment_invalidated (always empty) and the affinity recompute.
+    """
+    check_batch_items(items)
+
+    async def _one(**kwargs):
+        return await update_game(**kwargs, dry_run=dry_run, recompute_affinity=False)
+
+    results: list[dict] = []
+    tags_touched = False
+    tag_count = 0
+    try:
+        for item in items:
+            result = await apply_batch_item(item, _UPDATE_BATCH_ITEM_KEYS, _one)
+            results.append(result)
+            if result["status"] == "ok" and "tags" in result.get("updated", {}):
+                tags_touched = True
+    finally:
+        # Even an unexpected escape mid-loop must not leave committed tag
+        # edits without their deferred recompute.
+        if tags_touched and not dry_run:
+            tag_count = await recompute_tag_affinity()
+
+    return {
+        "results": results,
+        "total": len(items),
+        "ok": count_status(results, "ok"),
+        "errors": count_status(results, "error"),
+        "dry_run": dry_run,
+        "tag_affinity_tags_updated": tag_count,
+    }
+
+
+_ADD_BATCH_ITEM_KEYS = frozenset({
+    "name", "platform", "identifier_type", "identifier_value",
+    "playtime_minutes", "owned", "acquired_at", "price_paid",
+    "price_currency", "purchase_source", "bundle_name",
+})
+
+
+async def add_games_to_platform_batch(items: list[dict], dry_run: bool = False) -> dict:
+    """
+    Apply add_game_to_platform to many games; per-item errors never fail the call.
+
+    Each item takes exactly add_game_to_platform's parameters (name + platform
+    required, per-item owned/identifier/acquisition optional). created counts
+    ok items that minted a brand-new games row (vs attaching to an existing
+    one). dry_run=True runs the identical validation path and writes nothing;
+    a to-be-created game reports game_id null, and acquisition previews the
+    validated fields rather than post-write row state. A repeated new name
+    within one dry-run batch reports created=False (the wet run creates it
+    once, then attaches); other statuses are computed against the current
+    database, so cross-item interactions beyond that aren't simulated.
+    """
+    check_batch_items(items)
+
+    # A wet run creates each new name once (later items attach to it by exact
+    # name); mirror that in dry_run so the created counter matches.
+    seen_new_names: set[str] = set()
+
+    async def _one(**kwargs):
+        result = await add_game_to_platform(**kwargs, dry_run=dry_run)
+        if dry_run and result["created"]:
+            key = result["name"].lower()
+            if key in seen_new_names:
+                result["created"] = False
+            else:
+                seen_new_names.add(key)
+        return result
+
+    results = [
+        await apply_batch_item(item, _ADD_BATCH_ITEM_KEYS, _one) for item in items
+    ]
+    return {
+        "results": results,
+        "total": len(items),
+        "ok": count_status(results, "ok"),
+        "created": sum(1 for r in results if r["status"] == "ok" and r["created"]),
+        "errors": count_status(results, "error"),
+        "dry_run": dry_run,
+    }
+
+
+_PLAYTIME_BATCH_ITEM_KEYS = frozenset({
+    "name", "game_id", "platform", "playtime_minutes", "last_played",
+    "clear", "create_platform_row",
+})
+
+
+async def set_playtime_batch(items: list[dict], dry_run: bool = False) -> dict:
+    """
+    Apply set_playtime to many game+platform rows; per-item errors never fail
+    the call.
+
+    Each item takes exactly set_playtime's parameters ({name or game_id} +
+    platform required; playtime_minutes/last_played/clear/create_platform_row
+    optional, create_platform_row defaulting True like the single tool).
+    dry_run=True runs the identical validation path and writes nothing; a
+    to-be-created platform row reports game_platform_id null, and
+    manual_overrides/playtime values simulate the post-write state. Preview
+    statuses are computed against the CURRENT database, so an item depending
+    on an earlier item's write (e.g. clearing a column on a platform row an
+    earlier item would create) may preview as error where the wet run
+    succeeds.
+    """
+    check_batch_items(items)
+
+    async def _one(**kwargs):
+        return await set_playtime(**kwargs, dry_run=dry_run)
+
+    results = [
+        await apply_batch_item(item, _PLAYTIME_BATCH_ITEM_KEYS, _one) for item in items
+    ]
+    return {
+        "results": results,
+        "total": len(items),
+        "ok": count_status(results, "ok"),
+        "errors": count_status(results, "error"),
+        "dry_run": dry_run,
     }

@@ -1871,8 +1871,15 @@ def _parse_igdb_children_cache(
     return fetched_at, children, failed
 
 
-async def get_igdb_children_cached(igdb_id: int) -> list[dict] | None:
+async def get_igdb_children_cached(
+    igdb_id: int, *, allow_fetch: bool = True
+) -> list[dict] | None:
     """``fetch_igdb_children`` with a meta-KV cache (7-day TTL, stale-on-failure).
+
+    allow_fetch=False is cache-only (batch detail views): a fresh hit is
+    served normally, an expired non-failure entry is served stale (the same
+    stale-over-nothing philosophy as fetch failure), and a miss returns None
+    without any network call or marker write.
 
     Mirrors ``data/series_gaps.py``'s series-member caching. A cache hit
     within TTL returns without a network call. On fetch failure (
@@ -1898,6 +1905,11 @@ async def get_igdb_children_cached(igdb_id: int) -> list[dict] | None:
             # A live failure marker suppresses refetching; the caller sees "no
             # catalog" (dlc_ownership omitted), never an error.
             return None if failed else children
+
+    if not allow_fetch:
+        if cached is not None and not cached[2]:
+            return cached[1]
+        return None
 
     fetched = await fetch_igdb_children(igdb_id)
     if fetched is None:

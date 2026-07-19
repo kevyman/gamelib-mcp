@@ -36,6 +36,7 @@ EXPECTED_TOOLS = {
         "required": set(),
     },
     "get_game_detail": {"params": {"name", "appid", "game_id"}, "required": set()},
+    "get_game_details_batch": {"params": {"items"}, "required": {"items"}},
     "discover_games": {
         "params": {
             "vibes",
@@ -60,6 +61,7 @@ EXPECTED_TOOLS = {
         "params": {"name", "game_id", "score", "review_text"},
         "required": set(),
     },
+    "rate_games_batch": {"params": {"items", "dry_run"}, "required": {"items"}},
     "get_backlog_stats": {"params": set(), "required": set()},
     "suggest_completion_status": {"params": {"limit"}, "required": set()},
     "get_series_breakdown": {
@@ -126,6 +128,7 @@ EXPECTED_TOOLS = {
         },
         "required": {"name", "platform"},
     },
+    "add_games_to_platform_batch": {"params": {"items", "dry_run"}, "required": {"items"}},
     "create_session_ingest_link": {"params": {"provider"}, "required": {"provider"}},
     "set_nintendo_pctl_session": {"params": {"response"}, "required": set()},
     "update_game": {
@@ -154,6 +157,7 @@ EXPECTED_TOOLS = {
         },
         "required": set(),
     },
+    "update_games_batch": {"params": {"items", "dry_run"}, "required": {"items"}},
     "set_playtime": {
         "params": {
             "name",
@@ -166,6 +170,7 @@ EXPECTED_TOOLS = {
         },
         "required": set(),
     },
+    "set_playtime_batch": {"params": {"items", "dry_run"}, "required": {"items"}},
     "set_acquisition": {
         "params": {
             "name",
@@ -218,10 +223,12 @@ EXPECTED_TOOLS = {
         "params": {"source_game_id", "target_game_id", "dry_run"},
         "required": {"source_game_id", "target_game_id"},
     },
+    "merge_games_batch": {"params": {"items", "dry_run"}, "required": {"items"}},
     "delete_game": {
         "params": {"name", "game_id", "confirm"},
         "required": set(),
     },
+    "delete_games_batch": {"params": {"items", "confirm"}, "required": {"items"}},
     "get_scrape_config": {"params": {"provider"}, "required": {"provider"}},
     "diagnose_scrape": {"params": {"provider"}, "required": {"provider"}},
     "propose_scrape_config": {
@@ -240,6 +247,7 @@ EXPECTED_ANNOTATIONS = {
     "search_games_batch": {"readOnlyHint": True, "idempotentHint": True},
     "get_library_stats": {"readOnlyHint": True, "idempotentHint": True},
     "get_game_detail": {"readOnlyHint": True, "idempotentHint": True},
+    "get_game_details_batch": {"readOnlyHint": True, "idempotentHint": True},
     "discover_games": {"readOnlyHint": True, "idempotentHint": True},
     "get_taste_profile": {"readOnlyHint": True, "idempotentHint": True},
     "get_ratings": {"readOnlyHint": True, "idempotentHint": True},
@@ -280,6 +288,7 @@ EXPECTED_ANNOTATIONS = {
     "split_game": {"readOnlyHint": False, "idempotentHint": False},
     "sync_ratings": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
     "rate_game": {"readOnlyHint": False, "idempotentHint": True},
+    "rate_games_batch": {"readOnlyHint": False, "idempotentHint": True},
     "refresh_library": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
     "get_sync_status": {"readOnlyHint": True, "idempotentHint": True},
     "sync_wishlist": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
@@ -288,10 +297,13 @@ EXPECTED_ANNOTATIONS = {
     "get_play_history": {"readOnlyHint": True, "idempotentHint": True},
     "set_hardware_preference": {"readOnlyHint": False, "idempotentHint": True},
     "add_game_to_platform": {"readOnlyHint": False, "idempotentHint": True},
+    "add_games_to_platform_batch": {"readOnlyHint": False, "idempotentHint": True},
     "create_session_ingest_link": {"readOnlyHint": False, "idempotentHint": False},
     "set_nintendo_pctl_session": {"readOnlyHint": False, "idempotentHint": True},
     "update_game": {"readOnlyHint": False, "idempotentHint": True},
+    "update_games_batch": {"readOnlyHint": False, "idempotentHint": True},
     "set_playtime": {"readOnlyHint": False, "idempotentHint": True},
+    "set_playtime_batch": {"readOnlyHint": False, "idempotentHint": True},
     "set_acquisition": {"readOnlyHint": False, "idempotentHint": True},
     "set_acquisitions_batch": {"readOnlyHint": False, "idempotentHint": True},
     "split_bundle_acquisition": {"readOnlyHint": False, "idempotentHint": True},
@@ -302,7 +314,9 @@ EXPECTED_ANNOTATIONS = {
     },
     "get_spending_stats": {"readOnlyHint": True, "idempotentHint": True},
     "merge_games": {"readOnlyHint": False, "idempotentHint": False},
+    "merge_games_batch": {"readOnlyHint": False, "idempotentHint": False},
     "delete_game": {"readOnlyHint": False, "idempotentHint": False},
+    "delete_games_batch": {"readOnlyHint": False, "idempotentHint": False},
     "get_scrape_config": {"readOnlyHint": True, "idempotentHint": True},
     "diagnose_scrape": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
     "propose_scrape_config": {"readOnlyHint": False, "idempotentHint": True},
@@ -329,9 +343,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_48(self):
+    async def test_tool_count_is_55(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 48)
+        self.assertEqual(len(tools), 55)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()

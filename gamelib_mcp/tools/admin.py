@@ -28,6 +28,7 @@ from ..data.db import (
 )
 from ..data.title_normalization import normalize_search_text
 from ..data.enrich_bg import pause_background_enrichment, resume_background_enrichment
+from .batch import apply_batch_item, check_batch_items, count_status
 
 # The platform sync dicts are built from platforms_registry at call time; the
 # imports below keep the functions bound on this module so existing tests can
@@ -686,6 +687,8 @@ async def merge_games(
     source_game_id: int,
     target_game_id: int,
     dry_run: bool = False,
+    *,
+    recompute_affinity: bool = True,
 ) -> dict:
     """
     Merge one game row into another and delete the source.
@@ -953,7 +956,7 @@ async def merge_games(
     # affinity the same way rate_game/sync_ratings do — otherwise discover_games
     # ranks on stale scores until the next background pass. Outside the db
     # context manager since recompute opens its own connection.
-    if not dry_run and (ratings_moved or ratings_kept_target):
+    if not dry_run and recompute_affinity and (ratings_moved or ratings_kept_target):
         from ..data.db import recompute_tag_affinity
         await recompute_tag_affinity()
 
@@ -972,10 +975,94 @@ async def merge_games(
     }
 
 
+_MERGE_BATCH_ITEM_KEYS = frozenset({"source_game_id", "target_game_id"})
+
+
+async def merge_games_batch(items: list[dict], dry_run: bool = False) -> dict:
+    """
+    Apply merge_games to many source→target pairs; per-item errors never fail
+    the whole call.
+
+    Each item is {source_game_id, target_game_id}. Because a merge deletes its
+    source row, ids consumed by an earlier item in the same batch are tracked:
+    a later item referencing one gets status="stale_id" instead of a confusing
+    not-found error — in dry_run too, so the preview predicts the wet outcome.
+    The tag-affinity recompute a ratings transfer normally triggers is deferred
+    and run ONCE after the loop (tag_affinity_tags_updated; 0 when no ratings
+    moved or dry_run). dry_run forwards to merge_games' own faithful preview,
+    but its counts are computed against the CURRENT database: a chained item
+    whose source or target was an earlier item's target (A→B then B→C) can't
+    see what that earlier merge would have moved into the row, so its counts
+    may understate the wet run — such items carry chained_preview=true.
+    """
+    check_batch_items(items)
+
+    consumed: set[int] = set()
+    targets_seen: set[int] = set()
+    ratings_touched = False
+
+    async def _one(source_game_id=None, target_game_id=None):
+        nonlocal ratings_touched
+        if source_game_id is None or target_game_id is None:
+            raise ToolError("each item requires source_game_id and target_game_id")
+        stale = sorted(
+            {gid for gid in (source_game_id, target_game_id) if gid in consumed}
+        )
+        if stale:
+            return {
+                "status": "stale_id",
+                "source_game_id": source_game_id,
+                "target_game_id": target_game_id,
+                "error": (
+                    f"game id(s) {stale} were merged away by an earlier item "
+                    "in this batch"
+                ),
+            }
+        result = await merge_games(
+            source_game_id, target_game_id, dry_run, recompute_affinity=False
+        )
+        # A dry-run item touching an earlier item's target reads the pre-batch
+        # DB, so its counts miss whatever that merge would have moved in.
+        if dry_run and (source_game_id in targets_seen or target_game_id in targets_seen):
+            result["chained_preview"] = True
+        targets_seen.add(target_game_id)
+        # Track in dry_run too: the wet run deletes the source, so a later
+        # item reusing it must preview as stale.
+        consumed.add(source_game_id)
+        if result["ratings_moved"] or result["ratings_kept_target"]:
+            ratings_touched = True
+        return result
+
+    results: list[dict] = []
+    tag_count = 0
+    try:
+        for item in items:
+            results.append(await apply_batch_item(item, _MERGE_BATCH_ITEM_KEYS, _one))
+    finally:
+        # Committed ratings moves must never be left without their deferred
+        # recompute.
+        if ratings_touched and not dry_run:
+            from ..data.db import recompute_tag_affinity
+            tag_count = await recompute_tag_affinity()
+
+    return {
+        "results": results,
+        "total": len(items),
+        "ok": count_status(results, "ok"),
+        "stale_id": count_status(results, "stale_id"),
+        "errors": count_status(results, "error"),
+        "dry_run": dry_run,
+        "tag_affinity_tags_updated": tag_count,
+    }
+
+
 async def delete_game(
     name: str | None = None,
     game_id: int | None = None,
     confirm: bool = False,
+    *,
+    recompute_affinity: bool = True,
+    ignore_child_ids: frozenset[int] = frozenset(),
 ) -> dict:
     """
     Permanently delete one game and all of its data. IRREVERSIBLE.
@@ -1011,11 +1098,16 @@ async def delete_game(
         children = await db.execute_fetchall(
             "SELECT id, name FROM games WHERE parent_game_id = ?", (resolved_id,)
         )
-        if children:
-            listed = ", ".join(f"{c['name']} (id {c['id']})" for c in children)
+        # ignore_child_ids (internal, batch-only): children already deleted —
+        # or slated for deletion — by earlier items of the same batch don't
+        # block the parent, so a [child, parent] batch previews exactly what
+        # its confirm run does.
+        surviving = [c for c in children if c["id"] not in ignore_child_ids]
+        if surviving:
+            listed = ", ".join(f"{c['name']} (id {c['id']})" for c in surviving)
             raise ToolError(
                 f"'{resolved_name}' (id {resolved_id}) is the parent of "
-                f"{len(children)} nested item(s): {listed}. Reparent or delete "
+                f"{len(surviving)} nested item(s): {listed}. Reparent or delete "
                 "them first (update_game/delete_game) so they are not orphaned."
             )
 
@@ -1076,8 +1168,10 @@ async def delete_game(
     # So recompute unconditionally after a confirmed delete (deletes are rare
     # admin ops) rather than gating on ratings, which would leave an unrated but
     # played game's taste signal skewing discover_games until an unrelated pass.
-    from ..data.db import recompute_tag_affinity
-    await recompute_tag_affinity()
+    # (A batch defers this and recomputes once at the end.)
+    if recompute_affinity:
+        from ..data.db import recompute_tag_affinity
+        await recompute_tag_affinity()
 
     return {
         "deleted": True,
@@ -1085,6 +1179,160 @@ async def delete_game(
         "name": resolved_name,
         "deleted_counts": would_delete,
     }
+
+
+_DELETE_BATCH_ITEM_KEYS = frozenset({"name", "game_id"})
+
+
+async def delete_games_batch(items: list[dict], confirm: bool = False) -> dict:
+    """
+    Apply delete_game to many games, preserving the two-step confirm.
+
+    Each item is {name or game_id}. All items are pre-resolved to ids BEFORE
+    anything is deleted, so preview and confirm resolve names against the same
+    library state (a mid-batch delete can't re-route a later name to a
+    different row); two items resolving to the same game make the second an
+    error in both modes. confirm=False previews every item
+    (status="previewed" with its would_delete counts, summed top-level in
+    would_delete_total); confirm=True deletes (status="deleted", summed in
+    deleted_counts_total) — matching totals. A parent of nested content is
+    status="refused" (with its children listed) and never aborts the rest;
+    the guard runs net of ids earlier in the batch in both modes, so a
+    [child, parent] batch deletes (and previews) both. The per-delete
+    tag-affinity recompute is deferred and run once after the loop.
+    """
+    check_batch_items(items)
+    # Lazy import as in delete_game: avoids a top-level cycle with platforms.py.
+    from .platforms import _resolve_game_row
+
+    # Phase 1: pre-resolve EVERY item before anything is deleted. Names must
+    # resolve against the same library state in preview and confirm — if item
+    # N's delete ran first, item N+1's name could re-route to a different row
+    # (e.g. two "Dark Souls" items: the second must error, not prefix-match
+    # "Dark Souls II" once the exact match is gone). Duplicate resolutions are
+    # caught here for the same reason.
+    resolved: list[dict] = []
+    seen_ids: set[int] = set()
+    for item in items:
+        try:
+            if not isinstance(item, dict):
+                raise ToolError("each item must be an object")
+            unknown = set(item) - _DELETE_BATCH_ITEM_KEYS
+            if unknown:
+                raise ToolError(
+                    f"unknown key(s): {sorted(unknown)}. "
+                    f"Valid: {sorted(_DELETE_BATCH_ITEM_KEYS)}"
+                )
+            row = await _resolve_game_row(item.get("name"), item.get("game_id"))
+            if row["id"] in seen_ids:
+                raise ToolError(
+                    f"'{row['name']}' (id {row['id']}) is already slated for "
+                    "deletion by an earlier item in this batch"
+                )
+            seen_ids.add(row["id"])
+            resolved.append({"row": row})
+        except Exception as exc:  # same per-item isolation as apply_batch_item
+            message = (
+                str(exc) if isinstance(exc, ToolError)
+                else f"{type(exc).__name__}: {exc}"
+            )
+            payload = item if isinstance(item, dict) else {"item": item}
+            resolved.append({"error": message, "item": payload})
+
+    # Phase 2: guard + execute in input order, against pre-resolved ids only.
+    # `consumed` holds ids this batch has deleted (confirm) or successfully
+    # previewed for deletion — the children guard runs net of it in BOTH
+    # modes, so a [child, parent] batch previews exactly what confirm does.
+    consumed: set[int] = set()
+    results: list[dict] = []
+    any_deleted = False
+    try:
+        for entry in resolved:
+            if "error" in entry:
+                results.append(
+                    {"status": "error", "error": entry["error"], "item": entry["item"]}
+                )
+                continue
+            row = entry["row"]
+            resolved_id = row["id"]
+            try:
+                async with get_db() as db:
+                    children = await db.execute_fetchall(
+                        "SELECT id, name FROM games WHERE parent_game_id = ?",
+                        (resolved_id,),
+                    )
+                surviving = [c for c in children if c["id"] not in consumed]
+                if surviving:
+                    # Same guard delete_game enforces by raising; surfaced as
+                    # its own status so a repair loop can triage refusals
+                    # apart from errors.
+                    results.append({
+                        "status": "refused",
+                        "game_id": resolved_id,
+                        "name": row["name"],
+                        "error": (
+                            f"parent of {len(surviving)} nested item(s) — "
+                            "reparent or delete them first "
+                            "(update_game/delete_game)"
+                        ),
+                        "children": [
+                            {"game_id": c["id"], "name": c["name"]}
+                            for c in surviving
+                        ],
+                    })
+                    continue
+                result = await delete_game(
+                    game_id=resolved_id,
+                    confirm=confirm,
+                    recompute_affinity=False,
+                    ignore_child_ids=frozenset(consumed),
+                )
+            except Exception as exc:
+                message = (
+                    str(exc) if isinstance(exc, ToolError)
+                    else f"{type(exc).__name__}: {exc}"
+                )
+                results.append({
+                    "status": "error",
+                    "error": message,
+                    "item": {"game_id": resolved_id, "name": row["name"]},
+                })
+                continue
+            consumed.add(resolved_id)
+            if result["deleted"]:
+                any_deleted = True
+            result.pop("hint", None)  # one top-level hint, not one per item
+            results.append(
+                {"status": "deleted" if result["deleted"] else "previewed", **result}
+            )
+    finally:
+        # Committed deletes must never be left without their deferred recompute.
+        if any_deleted:
+            from ..data.db import recompute_tag_affinity
+            await recompute_tag_affinity()
+
+    def _sum_counts(key: str) -> dict[str, int]:
+        totals: dict[str, int] = {}
+        for r in results:
+            for table, count in (r.get(key) or {}).items():
+                totals[table] = totals.get(table, 0) + count
+        return totals
+
+    envelope: dict = {
+        "results": results,
+        "total": len(items),
+        "previewed": count_status(results, "previewed"),
+        "deleted": count_status(results, "deleted"),
+        "refused": count_status(results, "refused"),
+        "errors": count_status(results, "error"),
+        "confirm": confirm,
+    }
+    if confirm:
+        envelope["deleted_counts_total"] = _sum_counts("deleted_counts")
+    else:
+        envelope["would_delete_total"] = _sum_counts("would_delete")
+        envelope["hint"] = "Re-run with confirm=True to permanently delete."
+    return envelope
 
 
 async def detect_farmed_games(

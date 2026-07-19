@@ -9,6 +9,7 @@ from ..data.backloggd import sync_backloggd
 from ..data.db import fts_ready, get_db, load_platforms_for_games, recompute_tag_affinity, set_meta
 from ..data.steam_reviews import sync_steam_reviews
 from ..utils import _parse_json
+from .batch import apply_batch_item, check_batch_items, count_status
 from .common import (
     STEAM_APPID_SQL as _STEAM_APPID_SQL,
     clamp_limit as _clamp_limit,
@@ -72,12 +73,20 @@ async def rate_game(
     game_id: int | None = None,
     score: float = 0.0,
     review_text: str | None = None,
+    *,
+    dry_run: bool = False,
+    recompute_affinity: bool = True,
 ) -> dict:
     """
     Rate a game (0-10) directly, without an external rating source.
 
     Stored as source='manual' (re-rating overwrites); feeds tag affinity with
     full weight and immediately recomputes the taste profile.
+
+    dry_run (internal, batch-only) validates and resolves without writing;
+    recompute_affinity=False (internal, batch-only) defers the affinity
+    recompute so a batch runs it once. In either case the
+    tag_affinity_tags_updated key is omitted from the result.
     """
     if not 0 <= score <= 10:
         raise ToolError("score must be between 0 and 10")
@@ -120,22 +129,25 @@ async def rate_game(
     if row is None:
         raise ToolError("Game not found in library")
 
-    now = datetime.now(timezone.utc).isoformat()
-    async with get_db() as db:
-        await db.execute(
-            """INSERT INTO ratings
-               (game_id, source, raw_score, normalized_score, review_text, synced_at)
-               VALUES (?, 'manual', ?, ?, ?, ?)
-               ON CONFLICT(game_id, source) DO UPDATE SET
-                   raw_score = excluded.raw_score,
-                   normalized_score = excluded.normalized_score,
-                   review_text = excluded.review_text,
-                   synced_at = excluded.synced_at""",
-            (row["id"], score, score, review_text, now),
-        )
-        await db.commit()
+    if not dry_run:
+        now = datetime.now(timezone.utc).isoformat()
+        async with get_db() as db:
+            await db.execute(
+                """INSERT INTO ratings
+                   (game_id, source, raw_score, normalized_score, review_text, synced_at)
+                   VALUES (?, 'manual', ?, ?, ?, ?)
+                   ON CONFLICT(game_id, source) DO UPDATE SET
+                       raw_score = excluded.raw_score,
+                       normalized_score = excluded.normalized_score,
+                       review_text = excluded.review_text,
+                       synced_at = excluded.synced_at""",
+                (row["id"], score, score, review_text, now),
+            )
+            await db.commit()
 
-    tag_count = await recompute_tag_affinity()
+    tag_count = None
+    if not dry_run and recompute_affinity:
+        tag_count = await recompute_tag_affinity()
 
     result = {
         "game_id": row["id"],
@@ -144,13 +156,55 @@ async def rate_game(
         "score": score,
         "review_text": review_text,
         "tags_affected": _parse_json(row["tags"]) or [],
-        "tag_affinity_tags_updated": tag_count,
         "content_type": row["content_type"],
     }
+    if tag_count is not None:
+        result["tag_affinity_tags_updated"] = tag_count
     if row["parent_name"] is not None:
         result["parent_name"] = row["parent_name"]
 
     return result
+
+
+_RATE_BATCH_ITEM_KEYS = frozenset({"name", "game_id", "score", "review_text"})
+
+
+async def rate_games_batch(items: list[dict], dry_run: bool = False) -> dict:
+    """
+    Rate many games in one call; per-item errors never fail the whole batch.
+
+    Each item takes exactly rate_game's parameters ({name or game_id} + score,
+    optional review_text). All ratings are written first and tag affinity is
+    recomputed ONCE at the end (rate_game recomputes per call — a 30-game batch
+    would otherwise rebuild the full affinity table 30 times); the single
+    recompute's tag count is reported top-level in tag_affinity_tags_updated
+    (0 when nothing was written or dry_run). dry_run=True validates and
+    resolves every item without writing.
+    """
+    check_batch_items(items)
+
+    async def _one(**kwargs):
+        return await rate_game(**kwargs, dry_run=dry_run, recompute_affinity=False)
+
+    results: list[dict] = []
+    tag_count = 0
+    try:
+        for item in items:
+            results.append(await apply_batch_item(item, _RATE_BATCH_ITEM_KEYS, _one))
+    finally:
+        # Even an unexpected escape mid-loop must not leave committed ratings
+        # without their deferred recompute.
+        if count_status(results, "ok") and not dry_run:
+            tag_count = await recompute_tag_affinity()
+
+    return {
+        "results": results,
+        "total": len(items),
+        "ok": count_status(results, "ok"),
+        "errors": count_status(results, "error"),
+        "dry_run": dry_run,
+        "tag_affinity_tags_updated": tag_count,
+    }
 
 
 async def get_ratings(
