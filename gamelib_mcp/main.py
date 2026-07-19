@@ -25,11 +25,13 @@ from .http_admin import HttpSecurityMiddleware, register_http_routes
 from .lifecycle import lifespan
 from .tools.integrations import get_integration_status as _filter_integration_status
 from .tools.models import (
+    AddGamesToPlatformBatchResponse,
     AddGameToPlatformResponse,
     ApproveScrapeConfigResponse,
     BacklogStatsResponse,
     CompletionSuggestionsResponse,
     DeleteGameResponse,
+    DeleteGamesBatchResponse,
     DetectCollapsedGamesResponse,
     DetectCrossPlatformCollapsesResponse,
     DetectFarmedGamesResponse,
@@ -39,18 +41,21 @@ from .tools.models import (
     DetectStrandedDuplicatesResponse,
     DiagnoseScrapeResponse,
     GameDetailResponse,
+    GameDetailsBatchResponse,
     GetScrapeConfigResponse,
     GetWishlistResponse,
     HardwarePreferenceResponse,
     ImportPurchasesResponse,
     IntegrationStatusResponse,
     LibraryStatsResponse,
+    MergeGamesBatchResponse,
     MergeGamesResponse,
     PaginatedGamesResponse,
     PlatformBreakdownResponse,
     PlayHistoryResponse,
     ProposeScrapeConfigResponse,
     RateGameResponse,
+    RateGamesBatchResponse,
     RatingsResponse,
     RefreshLibraryResponse,
     RevalidateIgdbMatchesResponse,
@@ -61,6 +66,7 @@ from .tools.models import (
     SessionIngestLinkResponse,
     SetAcquisitionResponse,
     SetAcquisitionsBatchResponse,
+    SetPlaytimeBatchResponse,
     SetPlaytimeResponse,
     SpendingStatsResponse,
     SplitBundleAcquisitionResponse,
@@ -70,6 +76,7 @@ from .tools.models import (
     SyncWishlistResponse,
     TasteProfileResponse,
     UpdateGameResponse,
+    UpdateGamesBatchResponse,
     WishlistDealsResponse,
 )
 
@@ -245,6 +252,24 @@ async def get_game_detail(
     return await _detail(name, appid, game_id)
 
 
+@mcp.tool(annotations=READ_ONLY_TOOL)
+async def get_game_details_batch(items: list[dict]) -> GameDetailsBatchResponse:
+    """
+    Get full details for many games in one read-only call (max 50 items).
+
+    Each item is {name, appid, or game_id} — the same resolution as
+    get_game_detail. Unlike the single-item tool, lazy provider fetches are
+    SKIPPED (enrichment="skipped" in the response): only already-cached
+    Steam/ProtonDB/HLTB/IGDB enrichment is served, so those fields may be
+    null for never-enriched games — call get_game_detail on one game to force
+    a fetch. Per-item results carry status "ok" (with the full detail keys) or
+    "error" (with the message and original item); one unresolvable item never
+    fails the batch. Results preserve input order.
+    """
+    from .tools.detail import get_game_details_batch as _details_batch
+    return await _details_batch(items)
+
+
 @mcp.tool(annotations=READ_ONLY_TOOL, app=GAME_CARDS_APP)
 async def discover_games(
     vibes: list[str] | None = None,
@@ -360,6 +385,23 @@ async def rate_game(
     """
     from .tools.ratings import rate_game as _rate
     return await _rate(name, game_id, score, review_text)
+
+
+@mcp.tool(annotations=MUTATION_TOOL)
+async def rate_games_batch(items: list[dict], dry_run: bool = False) -> RateGamesBatchResponse:
+    """
+    Rate many games 0-10 in one call (max 200 items).
+
+    Each item is {name or game_id, score, optional review_text} with rate_game's
+    validation; re-rating overwrites the previous manual rating. Tag affinity is
+    recomputed ONCE after all ratings are written (not per game), reported
+    top-level in tag_affinity_tags_updated. Per-item results carry status "ok"
+    (the stored rating) or "error" (message + original item); one bad item never
+    fails or rolls back the others, and results preserve input order.
+    dry_run=True validates and resolves every item without writing anything.
+    """
+    from .tools.ratings import rate_games_batch as _rate_batch
+    return await _rate_batch(items, dry_run)
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)
@@ -1016,6 +1058,34 @@ async def add_game_to_platform(
 
 
 @mcp.tool(annotations=MUTATION_TOOL)
+async def add_games_to_platform_batch(
+    items: list[dict],
+    dry_run: bool = False,
+) -> AddGamesToPlatformBatchResponse:
+    """
+    Manually add many games to platforms in one call (max 200 items).
+
+    Each item takes exactly add_game_to_platform's parameters: name + platform
+    required, plus optional identifier_type/identifier_value, playtime_minutes,
+    owned (False = manual wishlist entry, e.g. PSN), and the acquisition
+    fields (acquired_at/price_paid/price_currency/purchase_source/bundle_name,
+    owned=True only) — same validation and vocabulary as the single tool, and
+    fulfilled wishlist entries are cleared the same way. created counts items
+    that minted a brand-new game (vs matching an existing one by exact name).
+    Per-item results carry status "ok" (the single tool's result) or "error"
+    (message + original item); one bad item never fails the others, and
+    results preserve input order. dry_run=True runs the identical validation
+    without writing: a to-be-created game reports game_id null, and a
+    repeated new name within the batch reports created=False (the wet run
+    creates it once, then attaches). Other preview statuses are computed
+    against the current database, so cross-item interactions beyond that
+    aren't simulated.
+    """
+    from .tools.platforms import add_games_to_platform_batch as _add_batch
+    return await _add_batch(items, dry_run)
+
+
+@mcp.tool(annotations=MUTATION_TOOL)
 async def update_game(
     name: str | None = None,
     game_id: int | None = None,
@@ -1101,6 +1171,36 @@ async def update_game(
         igdb_platforms,
         clear_overrides,
     )
+
+
+@mcp.tool(annotations=MUTATION_TOOL)
+async def update_games_batch(
+    items: list[dict],
+    dry_run: bool = False,
+) -> UpdateGamesBatchResponse:
+    """
+    Edit many games' properties in one call (max 200 items) — the bulk
+    companion to update_game for repair loops (e.g. applying
+    detect_misclassified_dlc's suggested_update args, or bulk
+    completion_status changes from suggest_completion_status).
+
+    Each item takes exactly update_game's parameters: {name or game_id} plus
+    any subset of its editable fields (new_name, tags, completion_status,
+    content_type, parent_game_id/parent_name, igdb_id, ...) and/or
+    clear_overrides — same validation, manual-override protection, and guards
+    (nesting, substance, igdb_id uniqueness) per item. A guard refusal is that
+    item's status="error" and never aborts the rest; results preserve input
+    order, ok items carrying update_game's full result. The tag-affinity
+    recompute a tags edit triggers runs ONCE after the loop
+    (tag_affinity_tags_updated; 0 when no tags changed). dry_run=True runs the
+    identical validation/guard path per item and writes nothing. Preview
+    statuses are computed against the current database: an item depending on
+    an earlier item's write in the same batch (igdb_id uniqueness,
+    nesting/parent state) may preview ok yet error in the wet run; enrichment
+    invalidation is not simulated either.
+    """
+    from .tools.platforms import update_games_batch as _update_batch
+    return await _update_batch(items, dry_run)
 
 
 @mcp.tool(annotations=MUTATION_TOOL)
@@ -1203,6 +1303,33 @@ async def set_playtime(
         clear,
         create_platform_row,
     )
+
+
+@mcp.tool(annotations=MUTATION_TOOL)
+async def set_playtime_batch(
+    items: list[dict],
+    dry_run: bool = False,
+) -> SetPlaytimeBatchResponse:
+    """
+    Pin playtime for many game+platform rows in one call (max 200 items).
+
+    Each item takes exactly set_playtime's parameters: {name or game_id} +
+    platform required, plus playtime_minutes (TOTAL minutes, not a delta),
+    last_played (YYYY-MM-DD), clear (columns to hand back to sync), and
+    create_platform_row (default True, as in the single tool) — same
+    validation and manual-override pinning per item, so future syncs won't
+    clobber the values. Per-item results carry status "ok" (the single tool's
+    result) or "error" (message + original item); one bad item never fails
+    the others, and results preserve input order. dry_run=True runs the
+    identical validation without writing: a to-be-created platform row
+    reports game_platform_id null, and manual_overrides/playtime values
+    simulate the post-write state. Preview statuses are computed against the
+    CURRENT database, so an item depending on an earlier item's write (e.g.
+    clearing a column on a platform row an earlier item would create) may
+    preview as error where the wet run succeeds.
+    """
+    from .tools.platforms import set_playtime_batch as _playtime_batch
+    return await _playtime_batch(items, dry_run)
 
 
 @mcp.tool(annotations=MUTATION_TOOL)
@@ -1497,6 +1624,34 @@ async def merge_games(
 
 
 @mcp.tool(annotations=NON_IDEMPOTENT_MUTATION_TOOL)
+async def merge_games_batch(
+    items: list[dict],
+    dry_run: bool = False,
+) -> MergeGamesBatchResponse:
+    """
+    Merge many duplicate pairs in one call (max 200 items) — the bulk
+    companion to merge_games for duplicate-cluster repair sessions.
+
+    Each item is {source_game_id, target_game_id} with merge_games' semantics
+    (source is merged into target and deleted). Because a merge consumes its
+    source row, an item referencing an id already merged away earlier in the
+    SAME batch gets status="stale_id" instead of proceeding — in dry_run too,
+    so the preview predicts the wet outcome. Other per-item failures are
+    status="error" (message + original item); nothing aborts the rest, and
+    results preserve input order, ok items carrying merge_games' full summary.
+    The tag-affinity recompute a ratings transfer triggers runs ONCE after the
+    loop (tag_affinity_tags_updated). dry_run=True forwards to merge_games'
+    preview: per-item counts of what would move, nothing written. Preview
+    counts are computed against the CURRENT database, so a chained item whose
+    source or target was an earlier item's target (A→B then B→C) may
+    understate what the wet run would move — such items carry
+    chained_preview=true.
+    """
+    from .tools.admin import merge_games_batch as _merge_batch
+    return await _merge_batch(items, dry_run)
+
+
+@mcp.tool(annotations=NON_IDEMPOTENT_MUTATION_TOOL)
 async def delete_game(
     name: str | None = None,
     game_id: int | None = None,
@@ -1523,6 +1678,34 @@ async def delete_game(
     """
     from .tools.admin import delete_game as _delete
     return await _delete(name, game_id, confirm)
+
+
+@mcp.tool(annotations=NON_IDEMPOTENT_MUTATION_TOOL)
+async def delete_games_batch(
+    items: list[dict],
+    confirm: bool = False,
+) -> DeleteGamesBatchResponse:
+    """
+    Permanently delete many games and ALL their data in one call (max 200
+    items). IRREVERSIBLE once confirmed.
+
+    Each item is {name or game_id} with delete_game's resolution (resolved
+    names are echoed back so you can verify the right rows). All items are
+    pre-resolved BEFORE anything is deleted, so preview and confirm resolve
+    names against the same library state and duplicate items resolving to the
+    same game report an error after the first — in both modes. Two-step like
+    the single tool: confirm=False (default) deletes nothing — every item
+    returns status="previewed" with its would_delete row counts, summed
+    top-level in would_delete_total; re-run with confirm=True to delete
+    (status="deleted", totals in deleted_counts_total) — matching totals. A
+    parent of nested content gets status="refused" (its children listed) and
+    never aborts the rest; the guard ignores ids earlier in the same batch,
+    so a [child, parent] batch previews and deletes both. Tag affinity is
+    recomputed ONCE after the loop instead of per delete. To consolidate
+    duplicates rather than erase them, use merge_games_batch instead.
+    """
+    from .tools.admin import delete_games_batch as _delete_batch
+    return await _delete_batch(items, confirm)
 
 
 @mcp.tool(annotations=NON_IDEMPOTENT_MUTATION_TOOL)

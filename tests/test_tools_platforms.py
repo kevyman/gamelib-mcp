@@ -1030,3 +1030,318 @@ class UpdateGameIgdbOverrideTests(ToolDBTestCase):
         self.assertEqual(row["igdb_id"], 1000)  # pin held
         self.assertEqual(json.loads(row["igdb_platforms"]), [6])  # pin held
         self.assertEqual(row["cover_image_id"], "co9zzz")  # unpinned, applied
+
+
+class UpdateGamesBatchTests(ToolDBTestCase):
+    async def test_mixed_ok_error_preserves_order_and_isolation(self):
+        a = await seed_game("Alpha")
+        b = await seed_game("Beta")
+        result = await platforms.update_games_batch(
+            [
+                {"game_id": a, "hltb_main": 12.0},
+                {"game_id": b, "completion_status": "banana"},  # invalid vocab
+                {"game_id": b, "is_farmed": True},
+            ]
+        )
+        self.assertEqual(
+            [r["status"] for r in result["results"]], ["ok", "error", "ok"]
+        )
+        self.assertEqual(result["ok"], 2)
+        self.assertEqual(result["errors"], 1)
+        self.assertIn("completion_status", result["results"][1]["error"])
+        self.assertEqual(
+            result["results"][1]["item"], {"game_id": b, "completion_status": "banana"}
+        )
+        async with db_module.get_db() as db:
+            row_a = await db.execute_fetchone(
+                "SELECT hltb_main, manual_overrides FROM games WHERE id = ?", (a,)
+            )
+            row_b = await db.execute_fetchone(
+                "SELECT is_farmed, completion_status FROM games WHERE id = ?", (b,)
+            )
+        self.assertEqual(row_a["hltb_main"], 12.0)
+        self.assertIn("hltb_main", json.loads(row_a["manual_overrides"]))
+        self.assertEqual(row_b["is_farmed"], 1)
+        self.assertIsNone(row_b["completion_status"])
+
+    async def test_single_item_guards_apply_per_item(self):
+        parent = await seed_game("Base Game")
+        await seed_game(
+            "Base Game DLC", content_type="dlc", parent_game_id=parent,
+            is_primary_library_item=0,
+        )
+        played = await make_steam_game("Real Game", 111, playtime_minutes=600)
+        empty_parent = await seed_game("Empty Shell")
+        other = await seed_game("Other")
+        taken = await seed_game("Taken")
+        await platforms.update_game(game_id=taken, igdb_id=4242)
+
+        result = await platforms.update_games_batch(
+            [
+                # Nesting guard: a parent of nested content can't become nested.
+                {"game_id": parent, "content_type": "dlc"},
+                # Substance guard: identifier+playtime row under an empty shell.
+                {
+                    "game_id": played,
+                    "content_type": "dlc",
+                    "parent_game_id": empty_parent,
+                },
+                # igdb_id uniqueness guard.
+                {"game_id": other, "igdb_id": 4242},
+            ]
+        )
+        self.assertEqual([r["status"] for r in result["results"]], ["error"] * 3)
+        self.assertIn("parent of nested content", result["results"][0]["error"])
+        self.assertIn("Refusing to nest", result["results"][1]["error"])
+        self.assertIn("already used", result["results"][2]["error"])
+
+    async def test_tags_recompute_runs_once_after_loop(self):
+        a = await seed_game("Alpha")
+        b = await seed_game("Beta")
+        recompute = AsyncMock(return_value=4)
+        with patch.object(platforms, "recompute_tag_affinity", recompute):
+            result = await platforms.update_games_batch(
+                [
+                    {"game_id": a, "tags": ["roguelike"]},
+                    {"game_id": b, "tags": ["platformer"]},
+                ]
+            )
+        recompute.assert_awaited_once()
+        self.assertEqual(result["tag_affinity_tags_updated"], 4)
+
+    async def test_no_tags_no_recompute(self):
+        a = await seed_game("Alpha")
+        recompute = AsyncMock(return_value=4)
+        with patch.object(platforms, "recompute_tag_affinity", recompute):
+            result = await platforms.update_games_batch(
+                [{"game_id": a, "hltb_main": 3.0}]
+            )
+        recompute.assert_not_awaited()
+        self.assertEqual(result["tag_affinity_tags_updated"], 0)
+
+    async def test_dry_run_writes_nothing_and_matches_wet_statuses(self):
+        a = await seed_game("Alpha")
+        recompute = AsyncMock(return_value=4)
+        items = [
+            {"game_id": a, "hltb_main": 9.0, "tags": ["indie"]},
+            {"game_id": a, "completion_status": "banana"},
+        ]
+        with patch.object(platforms, "recompute_tag_affinity", recompute):
+            preview = await platforms.update_games_batch(items, dry_run=True)
+        recompute.assert_not_awaited()
+        self.assertTrue(preview["dry_run"])
+        self.assertEqual(
+            [r["status"] for r in preview["results"]], ["ok", "error"]
+        )
+        self.assertEqual(preview["results"][0]["updated"]["hltb_main"], 9.0)
+        self.assertIn("hltb_main", preview["results"][0]["manual_overrides"])
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT hltb_main, tags, manual_overrides FROM games WHERE id = ?", (a,)
+            )
+        self.assertIsNone(row["hltb_main"])
+        self.assertIsNone(row["tags"])
+        self.assertIsNone(row["manual_overrides"])
+        with patch.object(platforms, "recompute_tag_affinity", recompute):
+            wet = await platforms.update_games_batch(items)
+        self.assertEqual(
+            [r["status"] for r in wet["results"]],
+            [r["status"] for r in preview["results"]],
+        )
+
+    async def test_non_string_value_is_isolated_and_recompute_still_runs(self):
+        # Regression: a non-string new_name hits .strip() → AttributeError,
+        # which must cost one item (not abort the batch after earlier commits)
+        # and must not skip the deferred affinity recompute.
+        a = await seed_game("Alpha")
+        b = await seed_game("Beta")
+        recompute = AsyncMock(return_value=2)
+        with patch.object(platforms, "recompute_tag_affinity", recompute):
+            result = await platforms.update_games_batch(
+                [
+                    {"game_id": a, "tags": ["roguelike"]},
+                    {"game_id": b, "new_name": 42},
+                    {"game_id": b, "hltb_main": 2.0},
+                ]
+            )
+        self.assertEqual(
+            [r["status"] for r in result["results"]], ["ok", "error", "ok"]
+        )
+        self.assertIn("AttributeError", result["results"][1]["error"])
+        recompute.assert_awaited_once()
+        self.assertEqual(result["tag_affinity_tags_updated"], 2)
+        async with db_module.get_db() as db:
+            row_b = await db.execute_fetchone(
+                "SELECT name, hltb_main FROM games WHERE id = ?", (b,)
+            )
+        self.assertEqual(row_b["name"], "Beta")
+        self.assertEqual(row_b["hltb_main"], 2.0)  # the later item still applied
+
+    async def test_empty_and_cap_raise(self):
+        with self.assertRaisesRegex(ToolError, "must not be empty"):
+            await platforms.update_games_batch([])
+        with self.assertRaisesRegex(ToolError, "capped at 200"):
+            await platforms.update_games_batch([{"game_id": 1}] * 201)
+
+
+class AddGamesToPlatformBatchTests(ToolDBTestCase):
+    async def test_creates_attaches_and_isolates_errors(self):
+        existing = await seed_game("Existing Game")
+        result = await platforms.add_games_to_platform_batch(
+            [
+                {"name": "Brand New Game", "platform": "switch2"},
+                {"name": "Existing Game", "platform": "steam", "playtime_minutes": 30},
+                {"name": "Bad Platform Game", "platform": "atari"},
+            ]
+        )
+        self.assertEqual(
+            [r["status"] for r in result["results"]], ["ok", "ok", "error"]
+        )
+        self.assertEqual(result["ok"], 2)
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(result["errors"], 1)
+        self.assertTrue(result["results"][0]["created"])
+        self.assertFalse(result["results"][1]["created"])
+        self.assertEqual(result["results"][1]["game_id"], existing)
+        async with db_module.get_db() as db:
+            bad = await db.execute_fetchone(
+                "SELECT id FROM games WHERE name = ?", ("Bad Platform Game",)
+            )
+            gp = await db.execute_fetchone(
+                "SELECT playtime_minutes FROM game_platforms WHERE game_id = ? AND platform = 'steam'",
+                (existing,),
+            )
+        self.assertIsNone(bad)
+        self.assertEqual(gp["playtime_minutes"], 30)
+
+    async def test_dry_run_writes_nothing(self):
+        existing = await seed_game("Existing Game")
+        result = await platforms.add_games_to_platform_batch(
+            [
+                {"name": "Brand New Game", "platform": "steam"},
+                {"name": "Existing Game", "platform": "steam"},
+            ],
+            dry_run=True,
+        )
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(result["created"], 1)
+        self.assertIsNone(result["results"][0]["game_id"])
+        self.assertEqual(result["results"][1]["game_id"], existing)
+        async with db_module.get_db() as db:
+            new_row = await db.execute_fetchone(
+                "SELECT id FROM games WHERE name = ?", ("Brand New Game",)
+            )
+            gp = await db.execute_fetchone(
+                "SELECT id FROM game_platforms WHERE game_id = ?", (existing,)
+            )
+        self.assertIsNone(new_row)
+        self.assertIsNone(gp)
+
+    async def test_dry_run_duplicate_new_name_created_matches_wet(self):
+        # Regression: a wet run creates a repeated new name once (the second
+        # item attaches by exact name) — dry_run must predict created the
+        # same way, not count it twice.
+        items = [
+            {"name": "New Game", "platform": "steam"},
+            {"name": "New Game", "platform": "switch2"},
+        ]
+        preview = await platforms.add_games_to_platform_batch(items, dry_run=True)
+        self.assertEqual(preview["created"], 1)
+        self.assertTrue(preview["results"][0]["created"])
+        self.assertFalse(preview["results"][1]["created"])
+
+        wet = await platforms.add_games_to_platform_batch(items)
+        self.assertEqual(wet["created"], preview["created"])
+        self.assertEqual(
+            [r["created"] for r in wet["results"]],
+            [r["created"] for r in preview["results"]],
+        )
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone(
+                "SELECT COUNT(*) AS c FROM games WHERE name = ?", ("New Game",)
+            )
+        self.assertEqual(count["c"], 1)
+
+    async def test_owned_add_clears_fulfilled_wishlist_entry(self):
+        gid = await seed_game("Wanted Game")
+        await db_module.upsert_wishlist_entry(gid, "steam", source="manual")
+        await platforms.add_games_to_platform_batch(
+            [{"name": "Wanted Game", "platform": "steam"}]
+        )
+        async with db_module.get_db() as db:
+            wl = await db.execute_fetchone(
+                "SELECT id FROM game_wishlist WHERE game_id = ?", (gid,)
+            )
+        self.assertIsNone(wl)
+
+    async def test_empty_and_cap_raise(self):
+        with self.assertRaisesRegex(ToolError, "must not be empty"):
+            await platforms.add_games_to_platform_batch([])
+        with self.assertRaisesRegex(ToolError, "capped at 200"):
+            await platforms.add_games_to_platform_batch(
+                [{"name": "X", "platform": "steam"}] * 201
+            )
+
+
+class SetPlaytimeBatchTests(ToolDBTestCase):
+    async def test_pins_and_isolates_errors_in_order(self):
+        gid = await make_steam_game("Hades", 1, playtime_minutes=100)
+        result = await platforms.set_playtime_batch(
+            [
+                {"game_id": gid, "platform": "steam", "playtime_minutes": 500},
+                {"game_id": gid, "platform": "steam", "playtime_minutes": -5},
+                {"game_id": gid, "playtime_minutes": 10},  # platform missing
+            ]
+        )
+        self.assertEqual(
+            [r["status"] for r in result["results"]], ["ok", "error", "error"]
+        )
+        self.assertEqual(result["ok"], 1)
+        self.assertEqual(result["errors"], 2)
+        self.assertEqual(result["results"][0]["playtime_minutes"], 500)
+        self.assertEqual(result["results"][0]["manual_overrides"], ["playtime_minutes"])
+        async with db_module.get_db() as db:
+            gp = await db.execute_fetchone(
+                "SELECT playtime_minutes, manual_overrides FROM game_platforms WHERE game_id = ?",
+                (gid,),
+            )
+        self.assertEqual(gp["playtime_minutes"], 500)
+        self.assertEqual(json.loads(gp["manual_overrides"]), ["playtime_minutes"])
+
+    async def test_dry_run_simulates_without_writing(self):
+        gid = await make_steam_game("Hades", 1, playtime_minutes=100)
+        other = await seed_game("Switch Only")
+        result = await platforms.set_playtime_batch(
+            [
+                {"game_id": gid, "platform": "steam", "playtime_minutes": 500},
+                {"game_id": other, "platform": "switch2", "playtime_minutes": 60},
+            ],
+            dry_run=True,
+        )
+        self.assertTrue(result["dry_run"])
+        first, second = result["results"]
+        self.assertEqual(first["status"], "ok")
+        self.assertEqual(first["playtime_minutes"], 500)
+        self.assertEqual(first["manual_overrides"], ["playtime_minutes"])
+        self.assertFalse(first["platform_row_created"])
+        self.assertTrue(second["platform_row_created"])
+        self.assertIsNone(second["game_platform_id"])
+        async with db_module.get_db() as db:
+            gp = await db.execute_fetchone(
+                "SELECT playtime_minutes, manual_overrides FROM game_platforms WHERE game_id = ?",
+                (gid,),
+            )
+            new_gp = await db.execute_fetchone(
+                "SELECT id FROM game_platforms WHERE game_id = ?", (other,)
+            )
+        self.assertEqual(gp["playtime_minutes"], 100)
+        self.assertIsNone(gp["manual_overrides"])
+        self.assertIsNone(new_gp)
+
+    async def test_empty_and_cap_raise(self):
+        with self.assertRaisesRegex(ToolError, "must not be empty"):
+            await platforms.set_playtime_batch([])
+        with self.assertRaisesRegex(ToolError, "capped at 200"):
+            await platforms.set_playtime_batch(
+                [{"game_id": 1, "platform": "steam", "playtime_minutes": 1}] * 201
+            )

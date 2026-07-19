@@ -512,6 +512,94 @@ class DeleteGameResponse(FlexibleModel):
     deleted_counts: dict[str, int] | None = None
 
 
+class BatchItemResult(FlexibleModel):
+    """Per-item envelope shared by the *_batch tools.
+
+    status is "ok" or "error" plus tool-specific values (previewed/deleted/
+    refused for delete_games_batch, stale_id for merge_games_batch). ok items
+    additionally spread the single-item tool's full result keys.
+    """
+
+    status: str
+    game_id: int | None = None
+    name: str | None = None
+    error: str | None = None
+    # Original item payload, echoed on error.
+    item: dict[str, Any] | None = None
+
+
+class UpdateGamesBatchResponse(FlexibleModel):
+    results: list[BatchItemResult]
+    total: int
+    ok: int
+    errors: int
+    dry_run: bool
+    # From the single deferred recompute; 0 when no tags changed or dry_run.
+    tag_affinity_tags_updated: int
+
+
+class AddGamesToPlatformBatchResponse(FlexibleModel):
+    results: list[BatchItemResult]
+    total: int
+    ok: int
+    # ok items that minted a brand-new games row.
+    created: int
+    errors: int
+    dry_run: bool
+
+
+class SetPlaytimeBatchResponse(FlexibleModel):
+    results: list[BatchItemResult]
+    total: int
+    ok: int
+    errors: int
+    dry_run: bool
+
+
+class RateGamesBatchResponse(FlexibleModel):
+    results: list[BatchItemResult]
+    total: int
+    ok: int
+    errors: int
+    dry_run: bool
+    # From the single deferred recompute; 0 when nothing was written or dry_run.
+    tag_affinity_tags_updated: int
+
+
+class GameDetailsBatchResponse(FlexibleModel):
+    results: list[BatchItemResult]
+    total: int
+    ok: int
+    errors: int
+    # Always "skipped": batch detail never triggers lazy provider fetches.
+    enrichment: str
+
+
+class DeleteGamesBatchResponse(FlexibleModel):
+    results: list[BatchItemResult]
+    total: int
+    previewed: int
+    deleted: int
+    refused: int
+    errors: int
+    confirm: bool
+    # Summed per-table counts: preview (confirm=False) vs actual (confirm=True).
+    would_delete_total: dict[str, int] | None = None
+    deleted_counts_total: dict[str, int] | None = None
+    hint: str | None = None
+
+
+class MergeGamesBatchResponse(FlexibleModel):
+    results: list[BatchItemResult]
+    total: int
+    ok: int
+    stale_id: int
+    errors: int
+    dry_run: bool
+    # From the single deferred recompute; 0 when no ratings moved or dry_run.
+    tag_affinity_tags_updated: int
+
+
 class DetectCrossPlatformCollapsesResponse(FlexibleModel):
     checked: int
     collapsed_count: int

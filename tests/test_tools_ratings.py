@@ -260,3 +260,73 @@ class RateGameTests(ToolDBTestCase):
         self.assertEqual(result["name"], "Hades")
         self.assertEqual(result["content_type"], "base_game")  # default value from schema
         self.assertNotIn("parent_name", result)  # No parent should mean no parent_name key
+
+
+class RateGamesBatchTests(ToolDBTestCase):
+    async def test_rates_many_with_single_affinity_recompute(self):
+        a = await make_steam_game("Hades", 1, tags=["Roguelike"])
+        await make_steam_game("Celeste", 2, tags=["Platformer"])
+        recompute = AsyncMock(return_value=5)
+        with patch.object(ratings, "recompute_tag_affinity", recompute):
+            result = await ratings.rate_games_batch(
+                [
+                    {"game_id": a, "score": 9.0},
+                    {"name": "celeste", "score": 7.5, "review_text": "tight"},
+                ]
+            )
+        recompute.assert_awaited_once()
+        self.assertEqual([r["status"] for r in result["results"]], ["ok", "ok"])
+        self.assertEqual(result["ok"], 2)
+        self.assertEqual(result["errors"], 0)
+        self.assertEqual(result["tag_affinity_tags_updated"], 5)
+        # Per-item results carry the stored rating but not the (deferred)
+        # per-call recompute count.
+        self.assertNotIn("tag_affinity_tags_updated", result["results"][0])
+        rows = await ratings.get_ratings(source="manual", response_format="detailed")
+        self.assertEqual(rows["total_matches"], 2)
+
+    async def test_per_item_error_isolation_preserves_order(self):
+        gid = await make_steam_game("Hades", 1, tags=["Roguelike"])
+        result = await ratings.rate_games_batch(
+            [
+                {"game_id": gid, "score": 11},          # out of range
+                {"name": "does-not-exist", "score": 5},  # unresolvable
+                {"game_id": gid, "score": 8.0, "bogus": 1},  # unknown key
+                {"game_id": gid, "score": 8.5},          # valid
+            ]
+        )
+        self.assertEqual(
+            [r["status"] for r in result["results"]],
+            ["error", "error", "error", "ok"],
+        )
+        self.assertEqual(result["errors"], 3)
+        self.assertEqual(result["ok"], 1)
+        for bad in result["results"][:3]:
+            self.assertIn("error", bad)
+            self.assertIn("item", bad)
+        self.assertIn("bogus", result["results"][2]["error"])
+        rows = await ratings.get_ratings(source="manual")
+        self.assertEqual(rows["total_matches"], 1)
+        self.assertEqual(rows["results"][0]["normalized_score"], 8.5)
+
+    async def test_dry_run_writes_nothing(self):
+        gid = await make_steam_game("Hades", 1, tags=["Roguelike"])
+        recompute = AsyncMock(return_value=5)
+        with patch.object(ratings, "recompute_tag_affinity", recompute):
+            result = await ratings.rate_games_batch(
+                [{"game_id": gid, "score": 9.0}], dry_run=True
+            )
+        recompute.assert_not_awaited()
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(result["results"][0]["status"], "ok")
+        self.assertEqual(result["tag_affinity_tags_updated"], 0)
+        rows = await ratings.get_ratings(source="manual")
+        self.assertEqual(rows["total_matches"], 0)
+
+    async def test_empty_and_cap_raise(self):
+        from fastmcp.exceptions import ToolError
+
+        with self.assertRaisesRegex(ToolError, "must not be empty"):
+            await ratings.rate_games_batch([])
+        with self.assertRaisesRegex(ToolError, "capped at 200"):
+            await ratings.rate_games_batch([{"game_id": 1, "score": 5}] * 201)
