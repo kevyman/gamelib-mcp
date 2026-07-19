@@ -1353,7 +1353,8 @@ async def set_switch2_playtime_baseline(
     synced and stores the remainder as a pre-tracking baseline that every
     future sync adds real play on top of. Safe to re-run with an updated total
     at any time — the baseline is replaced, never double-counted — and an
-    entered total equal to the synced minutes removes the baseline again.
+    entered total equal to the synced minutes removes the baseline again
+    (total_hours=0 undoes a mistaken baseline on a never-synced game).
 
     Resolve the game with game_id or name (partial/fuzzy match). application_id
     (the 16-character hex Nintendo title id, visible in the game's eShop page

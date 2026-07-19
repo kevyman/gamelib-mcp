@@ -21,6 +21,7 @@ from ..data.db import (
     get_game_by_identifier,
     get_manual_overrides,
     get_nintendo_baseline_minutes,
+    get_nintendo_summary_key,
     get_nintendo_synced_minutes,
     get_platform_manual_overrides,
     has_nested_children,
@@ -916,7 +917,8 @@ async def set_switch2_playtime_baseline(
     (device 'manual-baseline', dated 1970-01-01) that future syncs keep adding
     real days on top of. Re-running with a fresh total replaces the baseline —
     never double-counts. An entered total equal to the synced minutes removes
-    any existing baseline. application_id (16-hex Nintendo title id) is only
+    any existing baseline (total_hours=0 undoes a mistaken baseline on a
+    never-synced game). application_id (16-hex Nintendo title id) is only
     needed when the game has no nintendo_title_id identifier yet, i.e. it was
     never seen by a Parental Controls sync; it is then recorded on the switch2
     platform row so history/sync bridging works.
@@ -926,8 +928,11 @@ async def set_switch2_playtime_baseline(
     """
     if total_hours is None:
         raise ToolError("total_hours is required (the game's current total, not a delta)")
-    if not math.isfinite(total_hours) or total_hours <= 0:
-        raise ToolError("total_hours must be a positive number of hours")
+    # Zero is allowed: it is the correct current total for a never-synced game
+    # whose only playtime is an erroneous baseline, and entering it removes
+    # that baseline (total == synced ⇒ nothing missing).
+    if not math.isfinite(total_hours) or total_hours < 0:
+        raise ToolError("total_hours must not be negative")
     target_minutes = round(total_hours * 60)
 
     if application_id is not None:
@@ -989,13 +994,18 @@ async def set_switch2_playtime_baseline(
                 f"application_id {application_id} is already recorded on "
                 f"'{other['name']}' (game_id {other['id']})"
             )
-        if not dry_run:
-            await upsert_game_platform_identifier(gp["id"], NINTENDO_TITLE_ID, application_id)
         identifier_recorded = True
 
+    # The daily-summary key can differ from the stored identifier in case
+    # (VGCS stores verbatim, the Parental Controls API reports uppercase hex);
+    # the baseline row must use the sync's exact key so the totals SUM groups
+    # them together. All the summary queries match case-insensitively.
+    summary_key = await get_nintendo_summary_key(application_id) or application_id
     synced_minutes = await get_nintendo_synced_minutes(application_id)
     previous_baseline = await get_nintendo_baseline_minutes(application_id)
     baseline_minutes = target_minutes - synced_minutes
+    # All validation happens above this line: a failed call must leave no
+    # trace, including the identifier a never-synced game would gain.
     if baseline_minutes < 0:
         raise ToolError(
             f"Synced {_SWITCH2} playtime for '{row['name']}' is already "
@@ -1004,6 +1014,9 @@ async def set_switch2_playtime_baseline(
             "game's current total playtime as Nintendo shows it, not the missing part."
         )
 
+    if identifier_recorded and not dry_run:
+        await upsert_game_platform_identifier(gp["id"], NINTENDO_TITLE_ID, application_id)
+
     baseline_removed = False
     if baseline_minutes == 0:
         if previous_baseline is not None:
@@ -1011,10 +1024,14 @@ async def set_switch2_playtime_baseline(
                 await delete_nintendo_playtime_baseline(application_id)
             baseline_removed = True
     elif not dry_run:
+        if previous_baseline is not None:
+            # Delete before upsert so a baseline stored under a different
+            # casing of the key can't survive as a second row.
+            await delete_nintendo_playtime_baseline(application_id)
         await upsert_nintendo_play_summary([
             {
                 "device_id": NINTENDO_BASELINE_DEVICE_ID,
-                "application_id": application_id,
+                "application_id": summary_key,
                 "period_type": "day",
                 "period_key": NINTENDO_BASELINE_PERIOD_KEY,
                 "playtime_minutes": baseline_minutes,

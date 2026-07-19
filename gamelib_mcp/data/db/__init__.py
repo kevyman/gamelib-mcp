@@ -2096,6 +2096,7 @@ from .queries import (  # noqa: E402
     get_meta_prefix,
     get_nintendo_baseline_minutes,
     get_nintendo_play_totals,
+    get_nintendo_summary_key,
     get_nintendo_synced_minutes,
     set_meta,
     set_meta_many,

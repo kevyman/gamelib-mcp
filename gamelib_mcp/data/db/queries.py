@@ -79,28 +79,54 @@ async def get_nintendo_play_totals(period_type: str = "day") -> dict[str, dict]:
 
 
 async def get_nintendo_synced_minutes(application_id: str) -> int:
-    """Device-reported daily minutes for one application_id, baseline excluded."""
+    """Device-reported daily minutes for one application_id, baseline excluded.
+
+    Matched case-insensitively: VGCS stores title ids verbatim while the
+    Parental Controls API reports uppercase hex, so the stored identifier and
+    the daily-summary key can disagree in case only.
+    """
     async with get_db() as db:
         row = await db.execute_fetchone(
             """SELECT COALESCE(SUM(playtime_minutes), 0) AS minutes
                FROM nintendo_play_summary
-               WHERE application_id = ? AND period_type = 'day'
+               WHERE UPPER(application_id) = UPPER(?) AND period_type = 'day'
                  AND device_id != ?""",
             (application_id, NINTENDO_BASELINE_DEVICE_ID),
         )
     return int(row["minutes"]) if row else 0
 
 
-async def get_nintendo_baseline_minutes(application_id: str) -> int | None:
-    """The manual pre-tracking baseline minutes for one application_id, if any."""
+async def get_nintendo_summary_key(application_id: str) -> str | None:
+    """The application_id casing real daily-summary rows use, if any exist.
+
+    A baseline row must share the exact key of the sync's rows so
+    get_nintendo_play_totals groups them into one total.
+    """
     async with get_db() as db:
         row = await db.execute_fetchone(
-            """SELECT playtime_minutes FROM nintendo_play_summary
-               WHERE application_id = ? AND period_type = 'day'
+            """SELECT application_id FROM nintendo_play_summary
+               WHERE UPPER(application_id) = UPPER(?) AND period_type = 'day'
+                 AND device_id != ?
+               LIMIT 1""",
+            (application_id, NINTENDO_BASELINE_DEVICE_ID),
+        )
+    return str(row["application_id"]) if row else None
+
+
+async def get_nintendo_baseline_minutes(application_id: str) -> int | None:
+    """The manual pre-tracking baseline minutes for one application_id, if any.
+
+    Case-insensitive like get_nintendo_synced_minutes; summed defensively in
+    case rows under differing casings ever coexist.
+    """
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            """SELECT SUM(playtime_minutes) AS minutes FROM nintendo_play_summary
+               WHERE UPPER(application_id) = UPPER(?) AND period_type = 'day'
                  AND device_id = ? AND period_key = ?""",
             (application_id, NINTENDO_BASELINE_DEVICE_ID, NINTENDO_BASELINE_PERIOD_KEY),
         )
-    return int(row["playtime_minutes"]) if row else None
+    return int(row["minutes"]) if row and row["minutes"] is not None else None
 
 
 async def set_meta(key: str, value: str) -> None:

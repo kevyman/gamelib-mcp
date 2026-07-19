@@ -954,10 +954,10 @@ class SetSwitch2PlaytimeBaselineTests(ToolDBTestCase):
         with self.assertRaisesRegex(ToolError, "total_hours is required"):
             await platforms.set_switch2_playtime_baseline(game_id=gid)
 
-    async def test_rejects_nonpositive_total(self):
+    async def test_rejects_negative_total(self):
         gid, _ = await self._seed_switch2_game()
-        with self.assertRaisesRegex(ToolError, "positive"):
-            await platforms.set_switch2_playtime_baseline(game_id=gid, total_hours=0)
+        with self.assertRaisesRegex(ToolError, "negative"):
+            await platforms.set_switch2_playtime_baseline(game_id=gid, total_hours=-1)
 
     async def test_requires_switch2_row(self):
         gid = await seed_game("Steam Only")
@@ -1109,6 +1109,56 @@ class SetSwitch2PlaytimeBaselineTests(ToolDBTestCase):
         gp = await self._gp_playtime(gid)
         self.assertEqual(gp["owned"], 0)
         self.assertEqual(gp["playtime_minutes"], 120)
+
+    async def test_zero_total_removes_baseline_of_never_synced_game(self):
+        gid, _ = await self._seed_switch2_game("Oops", identifier=False)
+        await platforms.set_switch2_playtime_baseline(
+            game_id=gid, total_hours=8, application_id=self._APP
+        )
+        result = await platforms.set_switch2_playtime_baseline(game_id=gid, total_hours=0)
+        self.assertTrue(result["baseline_removed"])
+        self.assertEqual(await self._baseline_rows(), [])
+        gp = await self._gp_playtime(gid)
+        self.assertEqual(gp["playtime_minutes"], 0)
+
+    async def test_case_mismatched_identifier_still_bridges(self):
+        # VGCS stores title ids verbatim (possibly lowercase); Parental
+        # Controls reports uppercase. The delta math must still see the real
+        # rows, and the baseline must land under the sync's key casing so
+        # the totals SUM groups them into one total.
+        gid = await seed_game("Case Clash")
+        pid = await add_platform(gid, "switch2")
+        await add_identifier(pid, "nintendo_title_id", self._APP.lower())
+        await db_module.upsert_nintendo_play_summary(
+            [_pctl_day(self._APP, "2026-07-01", 300)]
+        )
+        result = await platforms.set_switch2_playtime_baseline(game_id=gid, total_hours=10)
+        self.assertEqual(result["synced_minutes"], 300)
+        self.assertEqual(result["baseline_minutes"], 300)
+        rows = await self._baseline_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["application_id"], self._APP)
+        totals = await db_module.get_nintendo_play_totals("day")
+        self.assertEqual(totals[self._APP]["minutes"], 600)
+        self.assertNotIn(self._APP.lower(), totals)
+
+    async def test_failed_run_records_no_identifier(self):
+        # Unlinked summaries already exceed the entered total: the call must
+        # fail WITHOUT leaving the just-supplied identifier behind.
+        gid, pid = await self._seed_switch2_game("Half Done", identifier=False)
+        await db_module.upsert_nintendo_play_summary(
+            [_pctl_day(self._APP, "2026-07-01", 600)]
+        )
+        with self.assertRaisesRegex(ToolError, "already"):
+            await platforms.set_switch2_playtime_baseline(
+                game_id=gid, total_hours=5, application_id=self._APP
+            )
+        async with db_module.get_db() as db:
+            idrow = await db.execute_fetchone(
+                "SELECT 1 FROM game_platform_identifiers WHERE game_platform_id = ?",
+                (pid,),
+            )
+        self.assertIsNone(idrow)
 
     async def test_play_history_window_excludes_baseline(self):
         from gamelib_mcp.tools import history
