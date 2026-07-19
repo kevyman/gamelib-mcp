@@ -84,6 +84,16 @@ _CURSOR_RE = re.compile(r"g_historyCursor\s*=\s*(\{.*?\})\s*;", re.S)
 # Classes Steam renders inside the items cell that are badges, not line items.
 _ITEM_BADGE_CLASSES = frozenset({"wth_item_refunded"})
 
+# A wallet top-up ("Purchased €50 Wallet Credit") files as a "Purchase" history
+# row like any game, but it acquires no game — it moves money into the Steam
+# balance that later game purchases draw down. Left in, it mints a phantom
+# "Purchased … Wallet Credit" game and double-counts the spend.
+_WALLET_CREDIT_RE = re.compile(r"\bwallet\s+credit\b", re.IGNORECASE)
+
+
+def _is_wallet_credit(item: str) -> bool:
+    return bool(_WALLET_CREDIT_RE.search(item))
+
 _PACKAGE_SUFFIX_RE = re.compile(
     r"\s+(steam store and retail key|retail key|retail|beta testing|beta|demo"
     r"|guest pass|gift|comp)$",
@@ -265,6 +275,12 @@ def _parse_history_rows(
             continue
         if not items:
             skipped.append({"title": title, "reason": f"{row_type} row has no items"})
+            continue
+        if all(_is_wallet_credit(item) for item in items):
+            skipped.append({
+                "title": title,
+                "reason": "wallet credit top-up is not a game purchase",
+            })
             continue
 
         date_cell = row.find("td", class_="wht_date")
