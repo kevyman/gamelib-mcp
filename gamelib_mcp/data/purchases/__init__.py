@@ -56,6 +56,7 @@ class PurchaseRecord:
 
 # source key → (module_path, attr) of the fetch coroutine, resolved lazily.
 PURCHASE_IMPORTERS: dict[str, tuple[str, str]] = {
+    "epic": ("gamelib_mcp.data.purchases.epic_orders", "fetch_epic_purchases"),
     "eshop": ("gamelib_mcp.data.purchases.nintendo_ec", "fetch_eshop_purchases"),
     "gog": ("gamelib_mcp.data.purchases.gog_orders", "fetch_gog_purchases"),
     "humble": ("gamelib_mcp.data.purchases.humble", "fetch_humble_purchases"),
@@ -67,7 +68,9 @@ PURCHASE_IMPORTERS: dict[str, tuple[str, str]] = {
 # match identifier-first (a renamed/localized library title still resolves).
 # No "humble" or "eshop" entry — neither exposes a per-item store identifier
 # (Humble orders carry none; the eShop GraphQL API returns no product id), so
-# both fall back to title matching.
+# both fall back to title matching. No "epic" entry either: order items carry
+# an offerId, which is a different id space from the epic_artifact_id the
+# library sync stores — matching one against the other would never hit.
 IDENTIFIER_TYPES: dict[str, str] = {
     "gog": GOG_PRODUCT_ID,
     "steam": STEAM_APP_ID,

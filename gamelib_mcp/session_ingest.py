@@ -65,6 +65,25 @@ INGEST_PROVIDERS: dict[str, IngestProvider] = {
             "Paste what was copied into the box below and click Save.",
         ),
     ),
+    "epic": IngestProvider(
+        key="epic",
+        label="Epic Games",
+        setter_name="set_epic_session",
+        export_url="https://www.epicgames.com/account/transactions",
+        hint=(
+            "These www.epicgames.com cookies drive purchase-history import "
+            "(prices). They are separate from the Legendary launcher session "
+            "that syncs Epic ownership."
+        ),
+        steps=(
+            "In your browser, open https://www.epicgames.com/account/transactions "
+            "and make sure you are signed in to your Epic Games account.",
+            "Click the Cookie Editor extension icon (install \"Cookie Editor\" from "
+            "your browser's extension store first if you don't have it).",
+            "Click Export (the export/copy icon) to copy all cookies as JSON.",
+            "Paste what was copied into the box below and click Save.",
+        ),
+    ),
     "humble": IngestProvider(
         key="humble",
         label="Humble Bundle",
