@@ -525,6 +525,35 @@ async def set_humble_session(cookies: str) -> dict:
     )
 
 
+async def set_epic_session(cookies: str) -> dict:
+    """
+    Store Epic Games session cookies for purchase-history import.
+
+    Epic's order history lives on the account WEBSITE (www.epicgames.com), not
+    in the launcher API — Legendary's session (data/epic.py) covers ownership
+    and playtime but cannot see orders or prices, so this is a separate,
+    browser-exported session.
+
+    Accepts the same JSON shapes as set_nintendo_session (object or Cookie
+    Editor array). Export ALL cookies from a signed-in www.epicgames.com tab —
+    the site's auth is spread across several cookies (EPIC_BEARER_TOKEN and
+    friends), so no single-cookie paste is supported.
+
+    How to get your cookies:
+    1. Open https://www.epicgames.com/account/transactions in your browser
+       (logged in)
+    2. Install the "Cookie Editor" browser extension
+    3. Click the extension icon → Export → copy the JSON
+    4. Pass that JSON string to this tool
+
+    Cookies are saved to the path in EPIC_COOKIES_FILE
+    (defaults to epic_cookies.json beside the database).
+    """
+    return _save_session_cookies(
+        cookies, "EPIC_COOKIES_FILE", "epic_cookies.json", "Epic Games"
+    )
+
+
 async def set_steam_refresh_session(cookies: str) -> dict:
     """
     Store the long-lived Steam refresh token for on-demand session minting.

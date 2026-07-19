@@ -1546,6 +1546,13 @@ async def import_purchases(
     without writing anything.
 
     sources defaults to all registered importers; currently:
+    - "epic": Epic Games Store order history (www.epicgames.com account
+      site) → epic. Needs an Epic web session — mint one with
+      create_session_ingest_link(provider="epic") (separate from the
+      Legendary launcher session that syncs ownership, which cannot see
+      orders or prices). Refunds and non-completed orders are skipped;
+      weekly-giveaway claims become price-0 records (purchase_source
+      "free").
     - "eshop": Nintendo eShop transactions (ec.nintendo.com) → switch2.
       Needs a stored Nintendo session — mint one with
       create_session_ingest_link(provider="nintendo"). Refunds and
@@ -1761,6 +1768,8 @@ async def create_session_ingest_link(provider: str) -> SessionIngestLinkResponse
 
     provider: one of
     - "nintendo" — accounts.nintendo.com; drives Switch ownership AND eShop purchases
+    - "epic" — www.epicgames.com purchase history (prices; separate from the
+      Legendary launcher session that syncs Epic ownership)
     - "humble" — humblebundle.com purchase history
     - "steam_refresh" — PREFERRED for Steam. A long-lived (~200-day)
       steamRefresh_steam token that mints fresh store cookies on demand, so it

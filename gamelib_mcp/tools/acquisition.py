@@ -45,6 +45,7 @@ from ..data.title_normalization import normalize_purchase_title, normalize_searc
 # gamelib_mcp.tools.acquisition.<fetch_fn> (_resolve_purchase_fetchers checks
 # this namespace first, mirroring platforms_registry.resolve_platform_functions).
 # F401: referenced via getattr, not by name.
+from ..data.purchases.epic_orders import fetch_epic_purchases  # noqa: F401
 from ..data.purchases.gog_orders import fetch_gog_purchases  # noqa: F401
 from ..data.purchases.humble import fetch_humble_purchases  # noqa: F401
 from ..data.purchases.nintendo_ec import fetch_eshop_purchases  # noqa: F401
