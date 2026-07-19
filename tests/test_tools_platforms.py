@@ -913,6 +913,215 @@ class SetPlaytimeTests(ToolDBTestCase):
             )
 
 
+def _pctl_day(app_id, day, minutes, name="Game", device="device-1"):
+    return {
+        "device_id": device,
+        "application_id": app_id,
+        "period_type": "day",
+        "period_key": day,
+        "playtime_minutes": minutes,
+        "app_name": name,
+    }
+
+
+class SetSwitch2PlaytimeBaselineTests(ToolDBTestCase):
+    _APP = "010067300059A000"
+
+    async def _seed_switch2_game(self, name="Mario Kart World", *, identifier=True):
+        gid = await seed_game(name)
+        pid = await add_platform(gid, "switch2")
+        if identifier:
+            await add_identifier(pid, "nintendo_title_id", self._APP)
+        return gid, pid
+
+    async def _gp_playtime(self, gid):
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT playtime_minutes, owned FROM game_platforms "
+                "WHERE game_id = ? AND platform = 'switch2'",
+                (gid,),
+            )
+        return row
+
+    async def _baseline_rows(self):
+        async with db_module.get_db() as db:
+            return await db.execute_fetchall(
+                "SELECT * FROM nintendo_play_summary WHERE device_id = 'manual-baseline'"
+            )
+
+    async def test_requires_total_hours(self):
+        gid, _ = await self._seed_switch2_game()
+        with self.assertRaisesRegex(ToolError, "total_hours is required"):
+            await platforms.set_switch2_playtime_baseline(game_id=gid)
+
+    async def test_rejects_nonpositive_total(self):
+        gid, _ = await self._seed_switch2_game()
+        with self.assertRaisesRegex(ToolError, "positive"):
+            await platforms.set_switch2_playtime_baseline(game_id=gid, total_hours=0)
+
+    async def test_requires_switch2_row(self):
+        gid = await seed_game("Steam Only")
+        await add_platform(gid, "steam")
+        with self.assertRaisesRegex(ToolError, "no switch2 platform row"):
+            await platforms.set_switch2_playtime_baseline(game_id=gid, total_hours=5)
+
+    async def test_refuses_when_playtime_pinned(self):
+        gid, _ = await self._seed_switch2_game()
+        await platforms.set_playtime(game_id=gid, platform="switch2", playtime_minutes=100)
+        with self.assertRaisesRegex(ToolError, "pinned"):
+            await platforms.set_switch2_playtime_baseline(game_id=gid, total_hours=5)
+
+    async def test_requires_identifier_or_application_id(self):
+        gid, _ = await self._seed_switch2_game(identifier=False)
+        with self.assertRaisesRegex(ToolError, "no nintendo_title_id"):
+            await platforms.set_switch2_playtime_baseline(game_id=gid, total_hours=5)
+
+    async def test_rejects_bad_application_id(self):
+        gid, _ = await self._seed_switch2_game(identifier=False)
+        with self.assertRaisesRegex(ToolError, "16-character hex"):
+            await platforms.set_switch2_playtime_baseline(
+                game_id=gid, total_hours=5, application_id="not-a-title-id"
+            )
+
+    async def test_rejects_application_id_of_another_game(self):
+        await self._seed_switch2_game("Owner Of Id")
+        gid, _ = await self._seed_switch2_game("Impostor", identifier=False)
+        with self.assertRaisesRegex(ToolError, "already recorded on 'Owner Of Id'"):
+            await platforms.set_switch2_playtime_baseline(
+                game_id=gid, total_hours=5, application_id=self._APP
+            )
+
+    async def test_rejects_mismatched_application_id(self):
+        gid, _ = await self._seed_switch2_game()
+        with self.assertRaisesRegex(ToolError, "does not match"):
+            await platforms.set_switch2_playtime_baseline(
+                game_id=gid, total_hours=5, application_id="0100000000000000"
+            )
+
+    async def test_delta_math_writes_baseline(self):
+        gid, _ = await self._seed_switch2_game()
+        await db_module.upsert_nintendo_play_summary([
+            _pctl_day(self._APP, "2026-07-01", 120),
+            _pctl_day(self._APP, "2026-07-02", 180),
+        ])
+        result = await platforms.set_switch2_playtime_baseline(
+            game_id=gid, total_hours=12.5
+        )
+        self.assertEqual(result["synced_minutes"], 300)
+        self.assertEqual(result["baseline_minutes"], 450)
+        self.assertEqual(result["playtime_minutes"], 750)
+        rows = await self._baseline_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["period_key"], "1970-01-01")
+        self.assertEqual(rows[0]["playtime_minutes"], 450)
+        gp = await self._gp_playtime(gid)
+        self.assertEqual(gp["playtime_minutes"], 750)
+        # The sync's own totals agree, and last_played is the real day,
+        # not the baseline sentinel date.
+        totals = await db_module.get_nintendo_play_totals("day")
+        self.assertEqual(totals[self._APP]["minutes"], 750)
+        self.assertEqual(totals[self._APP]["last_played"], "2026-07-02")
+
+    async def test_total_below_synced_errors(self):
+        gid, _ = await self._seed_switch2_game()
+        await db_module.upsert_nintendo_play_summary(
+            [_pctl_day(self._APP, "2026-07-01", 600)]
+        )
+        with self.assertRaisesRegex(ToolError, "already"):
+            await platforms.set_switch2_playtime_baseline(game_id=gid, total_hours=5)
+
+    async def test_rerun_replaces_baseline_without_double_count(self):
+        gid, _ = await self._seed_switch2_game()
+        await db_module.upsert_nintendo_play_summary(
+            [_pctl_day(self._APP, "2026-07-01", 300)]
+        )
+        await platforms.set_switch2_playtime_baseline(game_id=gid, total_hours=12.5)
+        # More real play arrives, then the user re-enters a fresh Nintendo total.
+        await db_module.upsert_nintendo_play_summary(
+            [_pctl_day(self._APP, "2026-07-03", 60)]
+        )
+        result = await platforms.set_switch2_playtime_baseline(game_id=gid, total_hours=14)
+        self.assertEqual(result["synced_minutes"], 360)
+        self.assertEqual(result["previous_baseline_minutes"], 450)
+        self.assertEqual(result["baseline_minutes"], 480)
+        rows = await self._baseline_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["playtime_minutes"], 480)
+        totals = await db_module.get_nintendo_play_totals("day")
+        self.assertEqual(totals[self._APP]["minutes"], 840)
+
+    async def test_equal_total_removes_baseline(self):
+        gid, _ = await self._seed_switch2_game()
+        await db_module.upsert_nintendo_play_summary(
+            [_pctl_day(self._APP, "2026-07-01", 300)]
+        )
+        await platforms.set_switch2_playtime_baseline(game_id=gid, total_hours=10)
+        result = await platforms.set_switch2_playtime_baseline(game_id=gid, total_hours=5)
+        self.assertTrue(result["baseline_removed"])
+        self.assertEqual(result["baseline_minutes"], 0)
+        self.assertEqual(await self._baseline_rows(), [])
+        gp = await self._gp_playtime(gid)
+        self.assertEqual(gp["playtime_minutes"], 300)
+
+    async def test_records_identifier_when_application_id_given(self):
+        gid, pid = await self._seed_switch2_game("Never Synced", identifier=False)
+        result = await platforms.set_switch2_playtime_baseline(
+            game_id=gid, total_hours=8, application_id=self._APP.lower()
+        )
+        self.assertTrue(result["identifier_recorded"])
+        self.assertEqual(result["application_id"], self._APP)
+        self.assertEqual(result["synced_minutes"], 0)
+        self.assertEqual(result["baseline_minutes"], 480)
+        async with db_module.get_db() as db:
+            idrow = await db.execute_fetchone(
+                "SELECT identifier_value FROM game_platform_identifiers "
+                "WHERE game_platform_id = ? AND identifier_type = 'nintendo_title_id'",
+                (pid,),
+            )
+        self.assertEqual(idrow["identifier_value"], self._APP)
+        # Baseline-only game: last_played must not report the sentinel date.
+        totals = await db_module.get_nintendo_play_totals("day")
+        self.assertIsNone(totals[self._APP]["last_played"])
+
+    async def test_dry_run_writes_nothing(self):
+        gid, pid = await self._seed_switch2_game("Preview", identifier=False)
+        result = await platforms.set_switch2_playtime_baseline(
+            game_id=gid, total_hours=8, application_id=self._APP, dry_run=True
+        )
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(result["baseline_minutes"], 480)
+        self.assertTrue(result["identifier_recorded"])
+        self.assertEqual(await self._baseline_rows(), [])
+        gp = await self._gp_playtime(gid)
+        self.assertIsNone(gp["playtime_minutes"])
+        async with db_module.get_db() as db:
+            idrow = await db.execute_fetchone(
+                "SELECT 1 FROM game_platform_identifiers WHERE game_platform_id = ?",
+                (pid,),
+            )
+        self.assertIsNone(idrow)
+
+    async def test_preserves_unowned_flag(self):
+        gid = await seed_game("Manual Wishlist Style")
+        pid = await add_platform(gid, "switch2", owned=0)
+        await add_identifier(pid, "nintendo_title_id", self._APP)
+        await platforms.set_switch2_playtime_baseline(game_id=gid, total_hours=2)
+        gp = await self._gp_playtime(gid)
+        self.assertEqual(gp["owned"], 0)
+        self.assertEqual(gp["playtime_minutes"], 120)
+
+    async def test_play_history_window_excludes_baseline(self):
+        from gamelib_mcp.tools import history
+
+        gid, _ = await self._seed_switch2_game()
+        today = datetime.now(timezone.utc).date().isoformat()
+        await db_module.upsert_nintendo_play_summary([_pctl_day(self._APP, today, 45)])
+        await platforms.set_switch2_playtime_baseline(game_id=gid, total_hours=100)
+        result = await history.get_play_history(days=30)
+        self.assertEqual(result["by_platform"].get("switch2"), 45)
+        self.assertEqual(result["switch2_unmatched_minutes"], 0)
+
+
 class UpdateGameIgdbOverrideTests(ToolDBTestCase):
     async def test_sets_cover_igdb_id_and_platforms(self):
         gid = await seed_game("Match Me")

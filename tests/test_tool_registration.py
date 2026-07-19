@@ -171,6 +171,10 @@ EXPECTED_TOOLS = {
         "required": set(),
     },
     "set_playtime_batch": {"params": {"items", "dry_run"}, "required": {"items"}},
+    "set_switch2_playtime_baseline": {
+        "params": {"name", "game_id", "total_hours", "application_id", "dry_run"},
+        "required": set(),
+    },
     "set_acquisition": {
         "params": {
             "name",
@@ -304,6 +308,7 @@ EXPECTED_ANNOTATIONS = {
     "update_games_batch": {"readOnlyHint": False, "idempotentHint": True},
     "set_playtime": {"readOnlyHint": False, "idempotentHint": True},
     "set_playtime_batch": {"readOnlyHint": False, "idempotentHint": True},
+    "set_switch2_playtime_baseline": {"readOnlyHint": False, "idempotentHint": True},
     "set_acquisition": {"readOnlyHint": False, "idempotentHint": True},
     "set_acquisitions_batch": {"readOnlyHint": False, "idempotentHint": True},
     "split_bundle_acquisition": {"readOnlyHint": False, "idempotentHint": True},
@@ -343,9 +348,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_55(self):
+    async def test_tool_count_is_56(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 55)
+        self.assertEqual(len(tools), 56)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()

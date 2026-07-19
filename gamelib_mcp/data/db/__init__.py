@@ -2090,9 +2090,13 @@ from .claims import (  # noqa: E402
     load_metacritic_batch_rows,
 )
 from .queries import (  # noqa: E402
+    NINTENDO_BASELINE_DEVICE_ID,
+    NINTENDO_BASELINE_PERIOD_KEY,
     get_meta,
     get_meta_prefix,
+    get_nintendo_baseline_minutes,
     get_nintendo_play_totals,
+    get_nintendo_synced_minutes,
     set_meta,
     set_meta_many,
     get_game_substance,
@@ -2139,6 +2143,7 @@ from .upserts import (  # noqa: E402
     remove_platform_manual_overrides,
     upsert_game_series_links,
     upsert_game_alias,
+    delete_nintendo_playtime_baseline,
     upsert_nintendo_play_summary,
     upsert_game_prices,
 )

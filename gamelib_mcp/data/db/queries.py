@@ -30,16 +30,28 @@ async def get_meta_prefix(prefix: str) -> dict[str, str]:
     return {row["key"]: row["value"] for row in rows if row["value"] is not None}
 
 
+# Sentinel device_id for user-entered pre-tracking playtime (see
+# set_switch2_playtime_baseline). Real Parental Controls syncs upsert only
+# their own real device ids, so a baseline row is never overwritten by a
+# sync; it participates in the SUM totals but is excluded from last_played
+# (its period_key is a sentinel date, not a day anyone played).
+NINTENDO_BASELINE_DEVICE_ID = "manual-baseline"
+# Dated before any possible real daily summary, so window queries
+# (get_play_history) never pick the baseline up as in-window playtime.
+NINTENDO_BASELINE_PERIOD_KEY = "1970-01-01"
+
+
 async def get_nintendo_play_totals(period_type: str = "day") -> dict[str, dict]:
     """Aggregate Parental Controls playtime per application_id across all devices.
 
     Returns ``{application_id: {"minutes", "minutes_2weeks", "last_played",
     "app_name"}}``. ``minutes`` is the running total since Parental Controls
-    tracking began; ``minutes_2weeks`` sums the trailing 14-day window; and
-    ``last_played`` is the most recent day (ISO ``YYYY-MM-DD``) with recorded
-    playtime — derived the same way Steam exposes its own 2-week / last-played
-    signals, so the switch2 platform can fill those columns too.
-    ``period_type='day'`` is the source of truth (finalized daily summaries).
+    tracking began (plus any manual pre-tracking baseline row);
+    ``minutes_2weeks`` sums the trailing 14-day window; and ``last_played`` is
+    the most recent day (ISO ``YYYY-MM-DD``) with recorded playtime — derived
+    the same way Steam exposes its own 2-week / last-played signals, so the
+    switch2 platform can fill those columns too. ``period_type='day'`` is the
+    source of truth (finalized daily summaries).
     """
     async with get_db() as db:
         rows = await db.execute_fetchall(
@@ -47,12 +59,13 @@ async def get_nintendo_play_totals(period_type: str = "day") -> dict[str, dict]:
                       SUM(playtime_minutes) AS minutes,
                       SUM(CASE WHEN period_key >= date('now', '-13 days')
                                THEN playtime_minutes ELSE 0 END) AS minutes_2weeks,
-                      MAX(CASE WHEN playtime_minutes > 0 THEN period_key END) AS last_played,
+                      MAX(CASE WHEN playtime_minutes > 0 AND device_id != ?
+                               THEN period_key END) AS last_played,
                       MAX(app_name) AS app_name
                FROM nintendo_play_summary
                WHERE period_type = ?
                GROUP BY application_id""",
-            (period_type,),
+            (NINTENDO_BASELINE_DEVICE_ID, period_type),
         )
     return {
         row["application_id"]: {
@@ -63,6 +76,31 @@ async def get_nintendo_play_totals(period_type: str = "day") -> dict[str, dict]:
         }
         for row in rows
     }
+
+
+async def get_nintendo_synced_minutes(application_id: str) -> int:
+    """Device-reported daily minutes for one application_id, baseline excluded."""
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            """SELECT COALESCE(SUM(playtime_minutes), 0) AS minutes
+               FROM nintendo_play_summary
+               WHERE application_id = ? AND period_type = 'day'
+                 AND device_id != ?""",
+            (application_id, NINTENDO_BASELINE_DEVICE_ID),
+        )
+    return int(row["minutes"]) if row else 0
+
+
+async def get_nintendo_baseline_minutes(application_id: str) -> int | None:
+    """The manual pre-tracking baseline minutes for one application_id, if any."""
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            """SELECT playtime_minutes FROM nintendo_play_summary
+               WHERE application_id = ? AND period_type = 'day'
+                 AND device_id = ? AND period_key = ?""",
+            (application_id, NINTENDO_BASELINE_DEVICE_ID, NINTENDO_BASELINE_PERIOD_KEY),
+        )
+    return int(row["playtime_minutes"]) if row else None
 
 
 async def set_meta(key: str, value: str) -> None:

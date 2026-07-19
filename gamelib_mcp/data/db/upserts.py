@@ -1196,6 +1196,25 @@ async def upsert_game_series_links(game_id: int, series_entries) -> None:
         await db.commit()
 
 
+async def delete_nintendo_playtime_baseline(application_id: str) -> bool:
+    """Remove the manual pre-tracking baseline row for one application_id.
+
+    Returns True when a row was deleted. Only the sentinel-device row is
+    touched; real Parental Controls daily summaries are never deleted.
+    """
+    from .queries import NINTENDO_BASELINE_DEVICE_ID, NINTENDO_BASELINE_PERIOD_KEY
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            """DELETE FROM nintendo_play_summary
+               WHERE application_id = ? AND period_type = 'day'
+                 AND device_id = ? AND period_key = ?""",
+            (application_id, NINTENDO_BASELINE_DEVICE_ID, NINTENDO_BASELINE_PERIOD_KEY),
+        )
+        await db.commit()
+    return cursor.rowcount > 0
+
+
 async def upsert_nintendo_play_summary(rows: list[dict]) -> int:
     """Idempotently upsert Parental Controls play-summary rows.
 
