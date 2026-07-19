@@ -1550,9 +1550,10 @@ async def import_purchases(
       site) → epic. Needs an Epic web session — mint one with
       create_session_ingest_link(provider="epic") (separate from the
       Legendary launcher session that syncs ownership, which cannot see
-      orders or prices). Refunds and non-completed orders are skipped;
-      weekly-giveaway claims become price-0 records (purchase_source
-      "free").
+      orders or prices). Refunds, non-completed orders, and in-game
+      currency packs (V-Bucks, credit/point bundles — detected by name)
+      are skipped; weekly-giveaway claims become price-0 records
+      (purchase_source "free").
     - "eshop": Nintendo eShop transactions (ec.nintendo.com) → switch2.
       Needs a stored Nintendo session — mint one with
       create_session_ingest_link(provider="nintendo"). Refunds and

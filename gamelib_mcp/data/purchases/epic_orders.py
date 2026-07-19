@@ -17,9 +17,17 @@ Record building:
   number — ``locale=en-US`` is requested for predictable formatting, and the
   parser handles both decimal-point and decimal-comma shapes plus a symbol →
   ISO-code map. A bare number is taken at face value (decimal units).
+- Currency: the order's explicit ISO field ("currency"/"presentmentCurrency")
+  outranks any symbol inferred from the amount string — "$" is ambiguous
+  (USD/CAD/AUD/NZD all format with it); multi-character dollar symbols
+  (CA$, A$, NZ$, …) are mapped as fallbacks when no ISO field exists.
 - Orders whose ``orderStatus`` is present but not COMPLETED are skipped with
   the status in the reason (visible drift, not silent drops); ``orderType``
   REFUND is skipped likewise — importing a refund would double-count spend.
+- In-game currency packs (V-Bucks, "Credits x1100", "2,800 Apex Coins" …)
+  are detected by NAME — the payload has no item typing — and routed to
+  skipped: fed to the matcher, a paid pack would mint a phantom owned game
+  under create_missing.
 - A zero amount is an Epic giveaway claim (the weekly free game) →
   purchase_source "free" (the vocabulary's designated bucket for exactly
   this); paid items get "epic".
@@ -61,14 +69,38 @@ _MAX_PAGES = 200
 # Politeness delay between sequential page requests (humble.py convention).
 _REQUEST_DELAY_SECONDS = 0.2
 
-# Longest symbols first so "R$" never half-matches "$".
+# Longest symbols first so "CA$"/"R$" never half-match "A$"/"$". Bare "$" is
+# ambiguous (USD/CAD/AUD/NZD all format with it) — the order's explicit ISO
+# currency field outranks every symbol guess in _order_currency.
 _CURRENCY_SYMBOLS = (
+    ("CA$", "CAD"),
+    ("NZ$", "NZD"),
+    ("HK$", "HKD"),
+    ("MX$", "MXN"),
+    ("A$", "AUD"),
     ("R$", "BRL"),
     ("zł", "PLN"),
     ("€", "EUR"),
     ("£", "GBP"),
     ("¥", "JPY"),
     ("$", "USD"),
+)
+
+# In-game currency packs sold through Epic checkout ("1,000 V-Bucks",
+# "Rocket League® - Credits x1100", "2,800 Apex Coins", "EA SPORTS FC 24 -
+# 1050 FC Points"). The order payload carries no item typing, so the NAME is
+# the only signal (steam_history.py's wallet-credit precedent): a count
+# attached to a currency noun — either order — or the unambiguous
+# V-Bucks/Show-Bucks brands. A bare noun with no number never trips it, so
+# games legitimately titled "…Coins"/"…Points" don't get filtered.
+_CURRENCY_NOUN = r"(?:v-?bucks|show-?bucks|credits?|coins?|points|gems|gold\s+bars)"
+# Up to two words may sit between count and noun ("2,800 Apex Coins",
+# "1050 FC Points", "1000 Rocket League Credits").
+_CONSUMABLE_NAME_RE = re.compile(
+    rf"\bv-?bucks\b|\bshow-?bucks\b"
+    rf"|\b\d[\d,.]*\+?\s*(?:[\w'&.®™-]+\s+){{0,2}}{_CURRENCY_NOUN}\b"
+    rf"|\b{_CURRENCY_NOUN}\s*x\s*\d",
+    re.IGNORECASE,
 )
 
 _NUMBER_RE = re.compile(r"\d[\d.,\s ]*")
@@ -193,14 +225,16 @@ def _order_total(order: dict) -> tuple[float | None, str | None]:
 
 
 def _order_currency(order: dict, *candidates: str | None) -> str:
-    """First explicit currency wins, then the order's own key, then USD."""
-    for candidate in candidates:
-        if candidate:
-            return candidate
+    """The order's explicit ISO currency wins — symbol-inferred candidates
+    are ambiguous ("$" formats USD, CAD, AUD, …) — then parsed candidates,
+    then USD."""
     for key in ("currency", "presentmentCurrency"):
         value = order.get(key)
         if isinstance(value, str) and len(value) == 3 and value.isalpha():
             return value.upper()
+    for candidate in candidates:
+        if candidate:
+            return candidate
     return "USD"
 
 
@@ -234,6 +268,16 @@ def parse_order(order: dict) -> tuple[list[PurchaseRecord], list[dict]]:
         title = item.get("description")
         if not title or not isinstance(title, str):
             skipped.append({"description": order_label, "reason": "item missing description"})
+            continue
+        if _CONSUMABLE_NAME_RE.search(title):
+            # A paid currency pack fed to the matcher would mint a phantom
+            # owned game under create_missing — route it to skipped instead.
+            skipped.append(
+                {
+                    "description": title.strip(),
+                    "reason": "in-game currency/consumable, not a game",
+                }
+            )
             continue
         offer_id = item.get("offerId")
         amount, currency = _parse_money(item.get("amount"))

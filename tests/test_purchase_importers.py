@@ -1199,6 +1199,62 @@ class EpicOrderParserTests(unittest.TestCase):
             )
             self.assertEqual(records[0].price_paid, expected)
 
+    def test_explicit_order_currency_outranks_ambiguous_dollar_symbol(self):
+        # "$" formats USD, CAD, AUD, … — the order's ISO field is authoritative.
+        order = {
+            "orderId": "F-cad",
+            "createdAtMillis": 1650000000000,
+            "currency": "CAD",
+            "items": [{"description": "Control", "amount": "$19.99"}],
+        }
+
+        records, _ = epic_orders.parse_order(order)
+
+        self.assertEqual(records[0].price_currency, "CAD")
+
+    def test_multi_character_dollar_symbols_map_without_iso_field(self):
+        for formatted, expected in (
+            ("CA$19.99", "CAD"),
+            ("A$29.99", "AUD"),
+            ("NZ$9.99", "NZD"),
+        ):
+            records, _ = epic_orders.parse_order(
+                {"orderId": "F-sym", "items": [{"description": "Game", "amount": formatted}]}
+            )
+            self.assertEqual(records[0].price_currency, expected)
+
+    def test_in_game_currency_packs_are_skipped_not_minted(self):
+        order = {
+            "orderId": "F-vbucks",
+            "createdAtMillis": 1650000000000,
+            "orderStatus": "COMPLETED",
+            "items": [
+                {"description": "1,000 V-Bucks", "amount": "$7.99"},
+                {"description": "Rocket League® - Credits x1100", "amount": "$9.99"},
+                {"description": "2,800 Apex Coins", "amount": "$19.99"},
+                {"description": "Alan Wake 2", "amount": "$49.99"},
+            ],
+        }
+
+        records, skipped = epic_orders.parse_order(order)
+
+        self.assertEqual([r.title for r in records], ["Alan Wake 2"])
+        self.assertEqual(len(skipped), 3)
+        for entry in skipped:
+            self.assertIn("consumable", entry["reason"])
+
+    def test_currency_noun_without_a_count_is_not_a_consumable(self):
+        # Games legitimately named with currency nouns must not be filtered.
+        order = {
+            "orderId": "F-notcons",
+            "items": [{"description": "Coin Crypt", "amount": "$4.99"}],
+        }
+
+        records, skipped = epic_orders.parse_order(order)
+
+        self.assertEqual([r.title for r in records], ["Coin Crypt"])
+        self.assertEqual(skipped, [])
+
     def test_zero_amount_is_a_free_giveaway_claim(self):
         order = {
             "orderId": "F2003",
