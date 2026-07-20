@@ -54,14 +54,17 @@ WHERE b.end_total - b.start_total > 0
 
 # switch2 deltas come from real daily data instead of snapshot subtraction.
 # nintendo_play_summary.application_id is bridged to a game via the
-# nintendo_title_id identifier recorded on that game's switch2 platform row.
+# nintendo_title_id identifier recorded on that game's switch2 platform row —
+# case-insensitively, because VGCS stores title ids verbatim while the
+# Parental Controls API reports uppercase hex (the same rule as
+# queries.py::get_nintendo_synced_minutes and schema.py's v_game_playtime).
 _SWITCH2_DELTA_SQL = """
 SELECT gp.game_id AS game_id, 'switch2' AS platform, g.name AS name,
        SUM(nps.playtime_minutes) AS minutes_played
 FROM nintendo_play_summary nps
 JOIN game_platform_identifiers gpi
   ON gpi.identifier_type = :identifier_type
- AND gpi.identifier_value = nps.application_id
+ AND UPPER(gpi.identifier_value) = UPPER(nps.application_id)
 JOIN game_platforms gp ON gp.id = gpi.game_platform_id
 JOIN games g ON g.id = gp.game_id
 WHERE nps.period_type = 'day'
@@ -80,7 +83,7 @@ WHERE nps.period_type = 'day'
   AND NOT EXISTS (
       SELECT 1 FROM game_platform_identifiers gpi
       WHERE gpi.identifier_type = :identifier_type
-        AND gpi.identifier_value = nps.application_id
+        AND UPPER(gpi.identifier_value) = UPPER(nps.application_id)
   )
 """
 

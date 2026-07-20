@@ -365,6 +365,7 @@ _AUTH_DENIED_RE = re.compile(
     r"not authorized|readonly database|read-only|statements are allowed", re.IGNORECASE
 )
 _TIMEOUT_RE = re.compile(r"interrupted", re.IGNORECASE)
+_TOO_BIG_RE = re.compile(r"string or blob too big", re.IGNORECASE)
 
 
 def _error_hint(message: str) -> str | None:
@@ -372,6 +373,11 @@ def _error_hint(message: str) -> str | None:
         return "Call get_db_schema() first to see the exact table/column names and views available."
     if _AUTH_DENIED_RE.search(message):
         return "This tool is read-only; only a single SELECT/WITH/EXPLAIN/VALUES statement is allowed — no writes, PRAGMA, or ATTACH."
+    if _TOO_BIG_RE.search(message):
+        return (
+            "The query tried to build a string/blob over the 1 MiB per-value cap. "
+            "Select smaller expressions — cells are truncated to 300 chars in the response anyway."
+        )
     if _TIMEOUT_RE.search(message):
         return (
             f"The query ran longer than the {DEFAULT_QUERY_TIMEOUT_SECONDS:.0f}s limit. "

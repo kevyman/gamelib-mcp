@@ -9,12 +9,13 @@ alongside a WAL writer on the same file.
 
 aiosqlite 0.22.1 (the version this project pins) exposes ``set_authorizer``
 and ``set_progress_handler`` as public ``Connection`` methods that internally
-dispatch to the underlying ``sqlite3.Connection`` on its worker thread — no
-reach-through into the private ``_conn``/``_execute`` API was needed here (see
-``_install_authorizer``/``_install_progress_handler`` below, plus the
-verification script this module's tests exercise). Both calls are still kept
-in their own small helpers so a future aiosqlite version that *drops* the
-public wrapper has exactly one place to patch back to the private path.
+dispatch to the underlying ``sqlite3.Connection`` on its worker thread (see
+``_install_authorizer``/``_install_progress_handler`` below). It has no such
+wrapper for ``setlimit``, so ``_install_limits`` is the one helper that
+reaches through the private ``_conn``/``_execute`` API — still routed onto
+the connection's worker thread, which is the hard constraint all three
+share. Each call is kept in its own small helper so an aiosqlite upgrade
+that changes the API surface has exactly one place per call to patch.
 """
 
 from __future__ import annotations
@@ -40,6 +41,16 @@ DEFAULT_QUERY_TIMEOUT_SECONDS = 5.0
 # enough that a runaway query is caught promptly; large enough not to add
 # meaningful overhead to a normal query.
 _PROGRESS_HANDLER_OPCODE_INTERVAL = 1000
+
+# The progress handler can't interrupt work done inside a single VM opcode, so
+# a memory bomb like length(randomblob(2000000000)) would allocate gigabytes
+# before the handler ever fires. SQLITE_LIMIT_LENGTH caps every string/blob the
+# engine will construct — the oversized call fails immediately with "string or
+# blob too big" instead of allocating. 1 MiB is generous headroom for real
+# intermediate values (query_library truncates cells to 300 chars anyway); the
+# SQL-text cap is a companion belt against absurd statement sizes.
+_MAX_LENGTH_BYTES = 1_048_576
+_MAX_SQL_LENGTH_BYTES = 100_000
 
 # Authorizer allowlist — SQLITE_SELECT/READ/FUNCTION/RECURSIVE are everything a
 # read-only SELECT/WITH RECURSIVE/EXPLAIN needs; everything else (PRAGMA,
@@ -123,6 +134,19 @@ async def _clear_progress_handler(conn: aiosqlite.Connection) -> None:
     await conn.set_progress_handler(None, 0)  # type: ignore[arg-type]
 
 
+async def _install_limits(conn: aiosqlite.Connection) -> None:
+    """Cap string/blob and SQL-text sizes on the ro connection.
+
+    PRIVATE-API NOTE: unlike set_authorizer/set_progress_handler, aiosqlite
+    0.22.1 has no public wrapper for sqlite3.Connection.setlimit, so this is
+    the one place that reaches through to the underlying connection —
+    ``_execute`` routes the call onto the connection's own worker thread,
+    which is the hard constraint setlimit shares with the other two.
+    """
+    await conn._execute(conn._conn.setlimit, sqlite3.SQLITE_LIMIT_LENGTH, _MAX_LENGTH_BYTES)
+    await conn._execute(conn._conn.setlimit, sqlite3.SQLITE_LIMIT_SQL_LENGTH, _MAX_SQL_LENGTH_BYTES)
+
+
 # ── Lazy per-event-loop singleton connection ─────────────────────────────────
 # Mirrors the per-event-loop WeakKeyDictionary lock pattern in lifecycle.py:
 # there's no lifespan hook for this module, so the connection is opened lazily
@@ -151,6 +175,7 @@ async def _open_readonly_connection(db_path: str) -> aiosqlite.Connection:
     # Belt worn under the authorizer's suspenders: even if the authorizer were
     # ever misconfigured, the connection itself refuses to write.
     await conn.execute("PRAGMA query_only=ON")
+    await _install_limits(conn)
     # Installed last: PRAGMA above must run before the authorizer exists, since
     # PRAGMA is not in the allowlist and would otherwise deny itself.
     await _install_authorizer(conn)

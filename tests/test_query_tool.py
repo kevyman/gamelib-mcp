@@ -210,6 +210,22 @@ class QueryLibraryTruncationTests(QueryToolTestCase):
         self.assertEqual(result["truncated_cells"], [])
 
 
+class QueryLibraryResourceLimitTests(QueryToolTestCase):
+    async def test_oversized_blob_refused_fast(self):
+        # The progress handler can't interrupt a single VM opcode, so the
+        # engine-level SQLITE_LIMIT_LENGTH cap must refuse the allocation
+        # outright instead of building a 2 GB blob.
+        result = await query_tool.query_library("SELECT length(randomblob(2000000000))")
+        self.assertIn("error", result)
+        self.assertIn("too big", result["error"])
+        self.assertIn("1 MiB", result.get("hint", ""))
+
+    async def test_small_blob_still_works(self):
+        result = await query_tool.query_library("SELECT length(randomblob(1000)) AS n")
+        self.assertNotIn("error", result)
+        self.assertEqual(result["rows"][0][0], 1000)
+
+
 class QueryLibraryErrorHintTests(QueryToolTestCase):
     async def test_no_such_table_hint(self):
         result = await query_tool.query_library("SELECT * FROM not_a_real_table")
@@ -250,6 +266,23 @@ class ViewTests(QueryToolTestCase):
             )
 
         self.assertEqual(row["playtime_minutes"], 45)
+
+    async def test_v_game_playtime_switch2_matches_title_id_case_insensitively(self):
+        # VGCS stores title ids verbatim while Parental Controls reports
+        # uppercase hex (queries.py::get_nintendo_synced_minutes), so the
+        # view's identifier↔summary bridge must not be case-sensitive.
+        game_id = await seed_game("Case Test Game")
+        pid = await add_platform(game_id, "switch2", playtime_minutes=5, owned=1)
+        await add_identifier(pid, "nintendo_title_id", "0100abcdef")
+        await db_module.upsert_nintendo_play_summary([_nps_row("0100ABCDEF", "2026-07-01", 42)])
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT playtime_minutes FROM v_game_playtime WHERE game_id = ? AND platform = 'switch2'",
+                (game_id,),
+            )
+
+        self.assertEqual(row["playtime_minutes"], 42)
 
     async def test_v_game_playtime_switch2_pinned_keeps_gp_value(self):
         # A set_playtime pin on switch2 outranks the summary SUM everywhere
