@@ -194,7 +194,7 @@ TABLE_ANNOTATIONS: dict[str, dict] = {
             "SUM (it represents real playtime)."
         ),
         "columns": {
-            "application_id": "Nintendo title id — bridge to games via game_platform_identifiers.identifier_type='nintendo_title_id'.",
+            "application_id": "Nintendo title id, normalized uppercase at ingest — bridge to games via game_platform_identifiers.identifier_type='nintendo_title_id' (also normalized uppercase, so the join is plain equality).",
             "period_type": "'day' for daily rows (what v_game_playtime and get_play_history sum over).",
         },
     },

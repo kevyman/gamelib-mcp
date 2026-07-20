@@ -267,21 +267,35 @@ class ViewTests(QueryToolTestCase):
 
         self.assertEqual(row["playtime_minutes"], 45)
 
-    async def test_v_game_playtime_switch2_matches_title_id_case_insensitively(self):
-        # VGCS stores title ids verbatim while Parental Controls reports
-        # uppercase hex (queries.py::get_nintendo_synced_minutes), so the
-        # view's identifier↔summary bridge must not be case-sensitive.
+    async def test_v_game_playtime_switch2_matches_title_id_via_ingest_normalization(self):
+        # VGCS can hand back a title id in a different case than Parental
+        # Controls reports for the same title. Both write chokepoints
+        # (upsert_game_platform_identifier, upsert_nintendo_play_summary)
+        # normalize nintendo_title_id values to uppercase at ingest (see
+        # data/db/__init__.py::normalize_identifier_value), so a lowercase
+        # identifier and an uppercase summary row both land as the same
+        # uppercase string — the view's plain-equality join (no UPPER() at
+        # read time) still bridges them.
         game_id = await seed_game("Case Test Game")
         pid = await add_platform(game_id, "switch2", playtime_minutes=5, owned=1)
         await add_identifier(pid, "nintendo_title_id", "0100abcdef")
         await db_module.upsert_nintendo_play_summary([_nps_row("0100ABCDEF", "2026-07-01", 42)])
 
         async with db_module.get_db() as db:
+            stored_identifier = await db.execute_fetchone(
+                "SELECT identifier_value FROM game_platform_identifiers WHERE game_platform_id = ?",
+                (pid,),
+            )
+            stored_summary = await db.execute_fetchone(
+                "SELECT application_id FROM nintendo_play_summary LIMIT 1"
+            )
             row = await db.execute_fetchone(
                 "SELECT playtime_minutes FROM v_game_playtime WHERE game_id = ? AND platform = 'switch2'",
                 (game_id,),
             )
 
+        self.assertEqual(stored_identifier["identifier_value"], "0100ABCDEF")
+        self.assertEqual(stored_summary["application_id"], "0100ABCDEF")
         self.assertEqual(row["playtime_minutes"], 42)
 
     async def test_v_game_playtime_switch2_pinned_keeps_gp_value(self):

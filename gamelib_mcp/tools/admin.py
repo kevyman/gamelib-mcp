@@ -1177,7 +1177,9 @@ async def delete_game(
         # identifier. Left behind, the next Parental Controls sync would find
         # an identifier-less summary total and resurrect the deleted game, so
         # they die with it. Real device-reported daily summaries are kept:
-        # actual play history is ownership-agnostic by design.
+        # actual play history is ownership-agnostic by design. Plain equality:
+        # both sides are normalized to uppercase at ingest (see
+        # data/db/__init__.py::normalize_identifier_value).
         _baseline_match_sql = """
             FROM nintendo_play_summary AS nps
             WHERE nps.device_id = ?
@@ -1185,7 +1187,7 @@ async def delete_game(
                   SELECT 1 FROM game_platform_identifiers gpi
                   JOIN game_platforms gp ON gp.id = gpi.game_platform_id
                   WHERE gp.game_id = ? AND gpi.identifier_type = ?
-                    AND UPPER(gpi.identifier_value) = UPPER(nps.application_id))
+                    AND gpi.identifier_value = nps.application_id)
         """
         _baseline_params = (NINTENDO_BASELINE_DEVICE_ID, resolved_id, NINTENDO_TITLE_ID)
         baseline_count_row = await db.execute_fetchone(

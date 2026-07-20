@@ -8,9 +8,11 @@ import aiosqlite
 
 from . import (
     GOG_PRODUCT_ID,
+    NINTENDO_TITLE_ID_TYPE,
     STEAM_APP_ID,
     STEAM_PLATFORM,
     get_db,
+    normalize_identifier_value,
 )
 
 
@@ -81,48 +83,35 @@ async def get_nintendo_play_totals(period_type: str = "day") -> dict[str, dict]:
 async def get_nintendo_synced_minutes(application_id: str) -> int:
     """Device-reported daily minutes for one application_id, baseline excluded.
 
-    Matched case-insensitively: VGCS stores title ids verbatim while the
-    Parental Controls API reports uppercase hex, so the stored identifier and
-    the daily-summary key can disagree in case only.
+    application_id is normalized (uppercase) the same way it's stored at
+    ingest (see normalize_identifier_value), so this is a plain equality
+    match — nintendo_play_summary.application_id is never written any other
+    way (upsert_nintendo_play_summary is the only writer).
     """
+    application_id = normalize_identifier_value(NINTENDO_TITLE_ID_TYPE, application_id)
     async with get_db() as db:
         row = await db.execute_fetchone(
             """SELECT COALESCE(SUM(playtime_minutes), 0) AS minutes
                FROM nintendo_play_summary
-               WHERE UPPER(application_id) = UPPER(?) AND period_type = 'day'
+               WHERE application_id = ? AND period_type = 'day'
                  AND device_id != ?""",
             (application_id, NINTENDO_BASELINE_DEVICE_ID),
         )
     return int(row["minutes"]) if row else 0
 
 
-async def get_nintendo_summary_key(application_id: str) -> str | None:
-    """The application_id casing real daily-summary rows use, if any exist.
-
-    A baseline row must share the exact key of the sync's rows so
-    get_nintendo_play_totals groups them into one total.
-    """
-    async with get_db() as db:
-        row = await db.execute_fetchone(
-            """SELECT application_id FROM nintendo_play_summary
-               WHERE UPPER(application_id) = UPPER(?) AND period_type = 'day'
-                 AND device_id != ?
-               LIMIT 1""",
-            (application_id, NINTENDO_BASELINE_DEVICE_ID),
-        )
-    return str(row["application_id"]) if row else None
-
-
 async def get_nintendo_baseline_minutes(application_id: str) -> int | None:
     """The manual pre-tracking baseline minutes for one application_id, if any.
 
-    Case-insensitive like get_nintendo_synced_minutes; summed defensively in
-    case rows under differing casings ever coexist.
+    Normalized like get_nintendo_synced_minutes — plain equality, no UPPER()
+    duct tape, since every row's application_id is already uppercase at write
+    time.
     """
+    application_id = normalize_identifier_value(NINTENDO_TITLE_ID_TYPE, application_id)
     async with get_db() as db:
         row = await db.execute_fetchone(
             """SELECT SUM(playtime_minutes) AS minutes FROM nintendo_play_summary
-               WHERE UPPER(application_id) = UPPER(?) AND period_type = 'day'
+               WHERE application_id = ? AND period_type = 'day'
                  AND device_id = ? AND period_key = ?""",
             (application_id, NINTENDO_BASELINE_DEVICE_ID, NINTENDO_BASELINE_PERIOD_KEY),
         )
@@ -205,6 +194,10 @@ async def nesting_substance_conflict(
 
 
 async def get_game_by_identifier(identifier_type: str, identifier_value: str) -> aiosqlite.Row | None:
+    # Normalized the same way upsert_game_platform_identifier writes it (a
+    # no-op for every identifier_type except nintendo_title_id), so callers
+    # never need to pre-normalize a lookup value themselves.
+    identifier_value = normalize_identifier_value(identifier_type, identifier_value)
     async with get_db() as db:
         return await db.execute_fetchone(
             """SELECT g.*

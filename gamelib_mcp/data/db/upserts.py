@@ -5,11 +5,13 @@ import logging
 from datetime import datetime, timezone
 
 from . import (
+    NINTENDO_TITLE_ID_TYPE,
     STEAM_APP_ID,
     STEAM_PLATFORM,
     _backfill_name_normalized,
     _iter_chunks,
     get_db,
+    normalize_identifier_value,
 )
 from ..content import (
     CONTENT_BASE_GAME,
@@ -801,6 +803,10 @@ async def upsert_game_platform_identifier(
     *,
     is_primary: bool = True,
 ) -> None:
+    # The write chokepoint: normalize once here (e.g. nintendo_title_id ->
+    # uppercase) so every reader can compare with plain equality instead of
+    # re-normalizing at read time. See normalize_identifier_value's docstring.
+    identifier_value = normalize_identifier_value(identifier_type, str(identifier_value))
     now = datetime.now(timezone.utc).isoformat()
     async with get_db() as db:
         await db.execute(
@@ -811,12 +817,12 @@ async def upsert_game_platform_identifier(
                    game_platform_id = excluded.game_platform_id,
                    is_primary = excluded.is_primary,
                    last_seen_at = excluded.last_seen_at""",
-            (game_platform_id, identifier_type, str(identifier_value), int(is_primary), now),
+            (game_platform_id, identifier_type, identifier_value, int(is_primary), now),
         )
         if is_primary:
             row = await db.execute_fetchone(
                 "SELECT id FROM game_platform_identifiers WHERE identifier_type = ? AND identifier_value = ?",
-                (identifier_type, str(identifier_value)),
+                (identifier_type, identifier_value),
             )
             row_id = row["id"]
             await db.execute(
@@ -1200,15 +1206,17 @@ async def delete_nintendo_playtime_baseline(application_id: str) -> bool:
     """Remove the manual pre-tracking baseline row for one application_id.
 
     Returns True when a row was deleted. Only sentinel-device rows are
-    touched; real Parental Controls daily summaries are never deleted. Matched
-    case-insensitively (stored identifiers and API keys can disagree in case).
+    touched; real Parental Controls daily summaries are never deleted.
+    application_id is normalized (uppercase) the same way it's stored — see
+    normalize_identifier_value — so this is a plain equality match.
     """
     from .queries import NINTENDO_BASELINE_DEVICE_ID, NINTENDO_BASELINE_PERIOD_KEY
 
+    application_id = normalize_identifier_value(NINTENDO_TITLE_ID_TYPE, application_id)
     async with get_db() as db:
         cursor = await db.execute(
             """DELETE FROM nintendo_play_summary
-               WHERE UPPER(application_id) = UPPER(?) AND period_type = 'day'
+               WHERE application_id = ? AND period_type = 'day'
                  AND device_id = ? AND period_key = ?""",
             (application_id, NINTENDO_BASELINE_DEVICE_ID, NINTENDO_BASELINE_PERIOD_KEY),
         )
@@ -1223,6 +1231,10 @@ async def upsert_nintendo_play_summary(rows: list[dict]) -> int:
     playtime_minutes, and (optional) app_name. The natural primary key
     (device_id, application_id, period_type, period_key) makes re-syncing a day
     a no-op overwrite rather than a double-count. Returns the row count written.
+    application_id is normalized (uppercased) here — the other write
+    chokepoint alongside upsert_game_platform_identifier — so it always lines
+    up with the nintendo_title_id identifier bridging it to a game; see
+    normalize_identifier_value.
     """
     if not rows:
         return 0
@@ -1241,7 +1253,7 @@ async def upsert_nintendo_play_summary(rows: list[dict]) -> int:
             [
                 (
                     str(r["device_id"]),
-                    str(r["application_id"]),
+                    normalize_identifier_value(NINTENDO_TITLE_ID_TYPE, str(r["application_id"])),
                     r["period_type"],
                     r["period_key"],
                     int(r["playtime_minutes"]),

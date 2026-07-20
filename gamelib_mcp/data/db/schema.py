@@ -988,9 +988,9 @@ _V33_SCHEMA_DDL = (
 # the game's nintendo_title_id identifier (the same join as tools/history.py's
 # _SWITCH2_DELTA_SQL: game_platform_identifiers.identifier_type =
 # 'nintendo_title_id', identifier_value = nintendo_play_summary.application_id
-# compared case-insensitively — VGCS stores title ids verbatim while Parental
-# Controls reports uppercase hex (see queries.py::get_nintendo_synced_minutes),
-# joined back to the game_platforms row via game_platform_id) — including the
+# — plain equality, since both are normalized to uppercase at ingest; see
+# data/db/__init__.py::normalize_identifier_value), joined back to the
+# game_platforms row via game_platform_id) — including the
 # manual-baseline sentinel device row, which represents real pre-tracking
 # playtime and belongs in a pure SUM (see set_switch2_playtime_baseline).
 # Two deliberate exceptions mirror how the PCTL sync itself writes
@@ -1021,7 +1021,7 @@ SELECT
                 FROM nintendo_play_summary nps
                 JOIN game_platform_identifiers gpi
                   ON gpi.identifier_type = 'nintendo_title_id'
-                 AND UPPER(gpi.identifier_value) = UPPER(nps.application_id)
+                 AND gpi.identifier_value = nps.application_id
                 WHERE gpi.game_platform_id = gp.id
             ),
             gp.playtime_minutes
