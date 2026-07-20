@@ -983,15 +983,23 @@ _V33_SCHEMA_DDL = (
 # migrate_db run via _sync_query_views so a view definition change deploys on
 # the next restart without a schema-version bump; views are cheap to rebuild.
 #
-# v_game_playtime unifies per-(game, platform) playtime: switch2 rows do NOT
-# trust game_platforms.playtime_minutes (it can lag — see CLAUDE.md), so it is
-# recomputed as SUM(nintendo_play_summary.playtime_minutes) joined through the
-# game's nintendo_title_id identifier. This replicates tools/history.py's
-# _SWITCH2_DELTA_SQL join exactly (game_platform_identifiers.identifier_type =
+# v_game_playtime unifies per-(game, platform) playtime: switch2 totals are
+# authoritatively SUM(nintendo_play_summary.playtime_minutes) joined through
+# the game's nintendo_title_id identifier (the same join as tools/history.py's
+# _SWITCH2_DELTA_SQL: game_platform_identifiers.identifier_type =
 # 'nintendo_title_id', identifier_value = nintendo_play_summary.application_id,
 # joined back to the game_platforms row via game_platform_id) — including the
 # manual-baseline sentinel device row, which represents real pre-tracking
 # playtime and belongs in a pure SUM (see set_switch2_playtime_baseline).
+# Two deliberate exceptions mirror how the PCTL sync itself writes
+# game_platforms.playtime_minutes (it recomputes the same SUM through
+# upsert_game_platform, which honors set_playtime pins):
+#   * a switch2 row whose playtime_minutes is pinned in gp.manual_overrides
+#     keeps the pinned gp value — the pin outranks the summary SUM everywhere
+#     else in the codebase, so it must here too;
+#   * a switch2 row with NO summary rows (e.g. added manually with a known
+#     playtime, never seen by a PCTL sync) falls back to gp.playtime_minutes
+#     via COALESCE instead of reporting NULL.
 # Every other platform passes through game_platforms.playtime_minutes as-is.
 _QUERY_VIEWS_DDL = """
 DROP VIEW IF EXISTS v_game_playtime;
@@ -1000,13 +1008,21 @@ SELECT
     gp.game_id  AS game_id,
     gp.platform AS platform,
     CASE
-        WHEN gp.platform = 'switch2' THEN (
-            SELECT SUM(nps.playtime_minutes)
-            FROM nintendo_play_summary nps
-            JOIN game_platform_identifiers gpi
-              ON gpi.identifier_type = 'nintendo_title_id'
-             AND gpi.identifier_value = nps.application_id
-            WHERE gpi.game_platform_id = gp.id
+        WHEN gp.platform = 'switch2'
+             AND NOT EXISTS (
+                 SELECT 1 FROM json_each(COALESCE(gp.manual_overrides, '[]'))
+                 WHERE json_each.value = 'playtime_minutes'
+             )
+        THEN COALESCE(
+            (
+                SELECT SUM(nps.playtime_minutes)
+                FROM nintendo_play_summary nps
+                JOIN game_platform_identifiers gpi
+                  ON gpi.identifier_type = 'nintendo_title_id'
+                 AND gpi.identifier_value = nps.application_id
+                WHERE gpi.game_platform_id = gp.id
+            ),
+            gp.playtime_minutes
         )
         ELSE gp.playtime_minutes
     END AS playtime_minutes

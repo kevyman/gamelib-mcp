@@ -249,10 +249,12 @@ TABLE_ANNOTATIONS: dict[str, dict] = {
         "description": (
             "Per-(game_id, platform) unified playtime_minutes: switch2 rows are "
             "SUM(nintendo_play_summary.playtime_minutes) joined through the game's "
-            "nintendo_title_id identifier (replicating tools/history.py's "
-            "get_play_history join exactly); every other platform passes through "
-            "game_platforms.playtime_minutes unchanged. This is the view to join "
-            "against for any total-playtime question that might touch switch2."
+            "nintendo_title_id identifier (the same join get_play_history uses), "
+            "except a set_playtime-pinned row keeps its pinned "
+            "game_platforms.playtime_minutes and a row with no summary data falls "
+            "back to the stored value instead of NULL; every other platform passes "
+            "through game_platforms.playtime_minutes unchanged. This is the view to "
+            "join against for any total-playtime question that might touch switch2."
         ),
         "columns": {},
     },
@@ -353,7 +355,15 @@ GUIDANCE: tuple[str, ...] = (
 # ── query_library ─────────────────────────────────────────────────────────────
 
 _TABLE_NOT_FOUND_RE = re.compile(r"no such (table|column)", re.IGNORECASE)
-_AUTH_DENIED_RE = re.compile(r"not authorized|readonly database|read-only", re.IGNORECASE)
+# Two distinct rejection paths both mean "this tool is read-only": the
+# authorizer denial (a statement that starts with an allowed keyword but
+# attempts a write/PRAGMA/ATTACH inside it) and the first-keyword belt raised
+# by data/db/readonly.execute_readonly_query for statements that don't even
+# start with SELECT/WITH/EXPLAIN/VALUES (DML/DDL/PRAGMA/ATTACH always fail
+# here, since the authorizer never gets a chance to see them).
+_AUTH_DENIED_RE = re.compile(
+    r"not authorized|readonly database|read-only|statements are allowed", re.IGNORECASE
+)
 _TIMEOUT_RE = re.compile(r"interrupted", re.IGNORECASE)
 
 
