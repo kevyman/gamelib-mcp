@@ -959,6 +959,82 @@ _V32_SCHEMA_DDL = _V31_SCHEMA_DDL.replace(
     "        UNIQUE(game_id, platform)",
 )
 
+# v33 adds query_log: an audit trail of every query_library() call (success or
+# error), written by tools/query.py through the normal RW connection path —
+# the read-only query connection itself can never write here. No index beyond
+# the PK; this is a log, not a lookup table.
+_V33_SCHEMA_DDL = (
+    _V32_SCHEMA_DDL
+    + """
+    CREATE TABLE IF NOT EXISTS query_log (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        sql        TEXT NOT NULL,
+        row_count  INTEGER,
+        truncated  INTEGER,
+        elapsed_ms INTEGER,
+        error      TEXT
+    );
+"""
+)
+
+# Semantic views backing query_library()/get_db_schema() — NOT part of the
+# versioned schema chain (like _FTS_DDL below). Dropped and recreated on every
+# migrate_db run via _sync_query_views so a view definition change deploys on
+# the next restart without a schema-version bump; views are cheap to rebuild.
+#
+# v_game_playtime unifies per-(game, platform) playtime: switch2 rows do NOT
+# trust game_platforms.playtime_minutes (it can lag — see CLAUDE.md), so it is
+# recomputed as SUM(nintendo_play_summary.playtime_minutes) joined through the
+# game's nintendo_title_id identifier. This replicates tools/history.py's
+# _SWITCH2_DELTA_SQL join exactly (game_platform_identifiers.identifier_type =
+# 'nintendo_title_id', identifier_value = nintendo_play_summary.application_id,
+# joined back to the game_platforms row via game_platform_id) — including the
+# manual-baseline sentinel device row, which represents real pre-tracking
+# playtime and belongs in a pure SUM (see set_switch2_playtime_baseline).
+# Every other platform passes through game_platforms.playtime_minutes as-is.
+_QUERY_VIEWS_DDL = """
+DROP VIEW IF EXISTS v_game_playtime;
+CREATE VIEW v_game_playtime AS
+SELECT
+    gp.game_id  AS game_id,
+    gp.platform AS platform,
+    CASE
+        WHEN gp.platform = 'switch2' THEN (
+            SELECT SUM(nps.playtime_minutes)
+            FROM nintendo_play_summary nps
+            JOIN game_platform_identifiers gpi
+              ON gpi.identifier_type = 'nintendo_title_id'
+             AND gpi.identifier_value = nps.application_id
+            WHERE gpi.game_platform_id = gp.id
+        )
+        ELSE gp.playtime_minutes
+    END AS playtime_minutes
+FROM game_platforms gp;
+
+DROP VIEW IF EXISTS v_owned_games;
+CREATE VIEW v_owned_games AS
+SELECT
+    g.id                       AS game_id,
+    g.name                     AS name,
+    gp.platform                AS platform,
+    g.content_type             AS content_type,
+    g.is_primary_library_item  AS is_primary_library_item,
+    g.completion_status        AS completion_status,
+    vgp.playtime_minutes       AS playtime_minutes,
+    gp.last_played             AS last_played,
+    gp.acquired_at             AS acquired_at,
+    gp.price_paid              AS price_paid,
+    gp.price_currency          AS price_currency,
+    gp.purchase_source         AS purchase_source,
+    gp.bundle_name             AS bundle_name,
+    gp.delisted                AS delisted
+FROM games g
+JOIN game_platforms gp ON gp.game_id = g.id
+JOIN v_game_playtime vgp ON vgp.game_id = gp.game_id AND vgp.platform = gp.platform
+WHERE gp.owned = 1;
+"""
+
 # Derived search index — NOT part of the versioned schema chain. Created and
 # fully resynced by _run_migrations' _sync_fts_index on every migrate_db run,
 # which self-heals after destructive games-table rebuilds (those drop the

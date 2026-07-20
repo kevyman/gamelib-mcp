@@ -1812,6 +1812,62 @@ async def set_nintendo_pctl_session(response: str = "") -> dict:
     return await _set_pctl(response)
 
 
+@mcp.tool(annotations=READ_ONLY_TOOL)
+async def query_library(sql: str, row_limit: int = 200) -> dict:
+    """
+    Run one read-only SQL query (SELECT/WITH/EXPLAIN/VALUES only) against the
+    library database, for questions no dedicated tool answers.
+
+    Use only when no dedicated tool covers the question — prefer discover_games,
+    get_spending_stats, get_backlog_stats, get_play_history, get_library_stats,
+    get_platform_breakdown, get_series_breakdown, etc. for what they cover; they
+    encode the same semantic traps this tool requires you to know yourself (e.g.
+    switch2 playtime, per-currency spend, is_primary_library_item) and return a
+    cheaper, pre-shaped response. Call get_db_schema() before writing any
+    non-trivial query — it returns live column/type/foreign-key info plus the
+    curated notes and example queries that make the traps below avoidable.
+
+    Single statement only (no ';'-separated batches); results are capped at
+    row_limit (default and max 200) — the response's "truncated" flag tells you
+    when more rows existed. The connection is read-only at the OS/SQLite level
+    (mode=ro + an authorizer allowlisting only SELECT/READ/FUNCTION/RECURSIVE),
+    so INSERT/UPDATE/DELETE/DDL/PRAGMA/ATTACH are refused regardless of what the
+    SQL text says. A query running past ~5s is aborted. Errors never raise —
+    they come back as {"error", "sql", "hint"} with a hint aimed at
+    self-correction (e.g. "no such column" → call get_db_schema()).
+
+    Tables: games, game_platforms, game_platform_identifiers, steam_platform_data,
+    game_platform_enrichment, ratings, tag_affinity, meta, game_series,
+    game_series_membership, game_aliases, nintendo_play_summary, game_wishlist,
+    scrape_config, game_prices, play_history, query_log.
+    Views: v_owned_games, v_game_playtime.
+    """
+    from .tools.query import query_library as _query_library
+    return await _query_library(sql, row_limit)
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL)
+async def get_db_schema() -> dict:
+    """
+    Live database schema for query_library: tables/views, columns, types,
+    foreign keys, low-cardinality enum values, example queries, and guidance.
+
+    Call this before writing any non-trivial query_library SQL — it merges
+    live sqlite_master/PRAGMA introspection (so it can never drift from the
+    real schema) with curated notes on the traps that aren't visible from
+    column names alone: which playtime column is authoritative for switch2,
+    why games.is_primary_library_item must be filtered for "how many games"
+    questions, why money must never be summed across price_currency, why
+    game_wishlist is a separate table from game_platforms, and which columns
+    are JSON (queryable via json_each). The enums block gives live distinct
+    values for a handful of low-cardinality columns (platform, content_type,
+    completion_status, purchase_source, rating/wishlist source) so you don't
+    have to guess spelling/casing (e.g. "switch2", not "switch").
+    """
+    from .tools.query import get_db_schema as _get_db_schema
+    return await _get_db_schema()
+
+
 # ── Health + admin endpoints ─────────────────────────────────────────────────
 
 register_http_routes(mcp)

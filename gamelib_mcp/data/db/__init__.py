@@ -103,7 +103,7 @@ STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
 XBOX_TITLE_ID = "xbox_title_id"
-SCHEMA_VERSION = 32
+SCHEMA_VERSION = 33
 
 
 @dataclass
@@ -259,6 +259,8 @@ from .schema import (
     _V29_SCHEMA_DDL,
     _V31_SCHEMA_DDL,
     _V32_SCHEMA_DDL,
+    _V33_SCHEMA_DDL,
+    _QUERY_VIEWS_DDL,
 )
 
 
@@ -1727,6 +1729,29 @@ async def _migrate_v31_to_v32(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v32_to_v33(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add query_log (additive; see schema.py v33 note)."""
+    if progress is not None:
+        progress("Migrating to v33: add query_log.")
+
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS query_log (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            sql        TEXT NOT NULL,
+            row_count  INTEGER,
+            truncated  INTEGER,
+            elapsed_ms INTEGER,
+            error      TEXT
+        );
+        """
+    )
+
+    await _set_user_version(db, 33)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1763,7 +1788,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V32_SCHEMA_DDL)
+    await db.executescript(_V33_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -1845,6 +1870,18 @@ async def _sync_fts_index(db: aiosqlite.Connection) -> bool:
     return True
 
 
+async def _sync_query_views(db: aiosqlite.Connection) -> None:
+    """(Re)create the query-tool semantic views (data/db/readonly.py + tools/query.py).
+
+    Runs on every migrate_db call, like _sync_fts_index — DROP VIEW IF EXISTS +
+    CREATE VIEW so a view-definition change (schema.py::_QUERY_VIEWS_DDL) takes
+    effect on the next restart without a schema-version bump. Views are cheap;
+    no data migration is ever needed for them.
+    """
+    await db.executescript(_QUERY_VIEWS_DDL)
+    await db.commit()
+
+
 _MigrationStep = Callable[[aiosqlite.Connection, "_Progress | None"], Awaitable[None]]
 
 # Pre-user_version databases are recognized by shape; recording the detected
@@ -1889,6 +1926,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (29, _migrate_v29_to_v30),
     (30, _migrate_v30_to_v31),
     (31, _migrate_v31_to_v32),
+    (32, _migrate_v32_to_v33),
 )
 
 
@@ -1906,8 +1944,9 @@ async def _run_migrations(
         _emit(progress, f"Backed up database to {snapshot_path} before migrating.", applied_steps)
 
     if detected_state == "fresh":
-        await db.executescript(_V32_SCHEMA_DDL)
+        await db.executescript(_V33_SCHEMA_DDL)
         fts_enabled = await _sync_fts_index(db)
+        await _sync_query_views(db)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
         _emit(progress, f"Initialized fresh database at schema v{SCHEMA_VERSION}.", applied_steps)
@@ -1943,12 +1982,13 @@ async def _run_migrations(
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V32_SCHEMA_DDL)
+    await db.executescript(_V33_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
     await db.commit()
     fts_enabled = await _sync_fts_index(db)
+    await _sync_query_views(db)
 
     return MigrationResult(
         initial_version=initial_version,
@@ -1983,12 +2023,22 @@ def _gl_ln(value: float | int | None) -> float | None:
     return math.log(value)
 
 
-async def _configure_connection(conn: aiosqlite.Connection, *, enable_wal: bool) -> None:
-    conn.row_factory = aiosqlite.Row
+async def _register_gl_ln(conn: aiosqlite.Connection) -> None:
+    """Register the gl_ln custom SQL function (natural log for IDF weights).
+
+    Shared by the RW connection setup below and the read-only query connection
+    in data/db/readonly.py, so the two connections never drift on what gl_ln
+    means.
+    """
     # Natural log for SQL scoring (IDF weights in discover_games). SQLite's
     # builtin ln() only exists when compiled with SQLITE_ENABLE_MATH_FUNCTIONS,
     # so ship our own under a distinct name rather than depend on the build.
     await conn.create_function("gl_ln", 1, _gl_ln, deterministic=True)
+
+
+async def _configure_connection(conn: aiosqlite.Connection, *, enable_wal: bool) -> None:
+    conn.row_factory = aiosqlite.Row
+    await _register_gl_ln(conn)
     await conn.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
     await conn.execute("PRAGMA foreign_keys=ON")
     if enable_wal:
