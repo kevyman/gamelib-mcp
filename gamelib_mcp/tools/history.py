@@ -55,6 +55,10 @@ WHERE b.end_total - b.start_total > 0
 # switch2 deltas come from real daily data instead of snapshot subtraction.
 # nintendo_play_summary.application_id is bridged to a game via the
 # nintendo_title_id identifier recorded on that game's switch2 platform row.
+# Plain equality: both sides are normalized to uppercase at ingest (see
+# data/db/__init__.py::normalize_identifier_value, applied by
+# upsert_game_platform_identifier and upsert_nintendo_play_summary) instead of
+# comparing case-insensitively at read time.
 _SWITCH2_DELTA_SQL = """
 SELECT gp.game_id AS game_id, 'switch2' AS platform, g.name AS name,
        SUM(nps.playtime_minutes) AS minutes_played

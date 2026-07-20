@@ -103,7 +103,35 @@ STEAM_APP_ID = "steam_appid"
 EPIC_ARTIFACT_ID = "epic_artifact_id"
 GOG_PRODUCT_ID = "gog_product_id"
 XBOX_TITLE_ID = "xbox_title_id"
-SCHEMA_VERSION = 32
+# Kept as a literal (not imported from data/nintendo.py::NINTENDO_TITLE_ID) to
+# avoid a db -> nintendo import cycle: nintendo.py imports this package at
+# module load time, so this package must never import back from nintendo.py.
+# Must stay in sync with that constant's value.
+NINTENDO_TITLE_ID_TYPE = "nintendo_title_id"
+SCHEMA_VERSION = 33
+
+
+def normalize_identifier_value(identifier_type: str, value: str) -> str:
+    """Canonicalize an identifier value the same way at every write and lookup.
+
+    Nintendo title ids are the one identifier type with a known case mismatch
+    across sources: VGCS (ownership) stores them verbatim from the console's
+    catalog while the Parental Controls API (playtime) reports uppercase hex
+    for the same title — so the same game could accumulate a lowercase
+    game_platform_identifiers row and an uppercase nintendo_play_summary row.
+    Normalizing both to uppercase here, called from every write chokepoint
+    (upsert_game_platform_identifier, upsert_nintendo_play_summary) and lookup
+    chokepoint (get_game_by_identifier, get_nintendo_synced_minutes, ...),
+    means every join/comparison between them can be plain equality — no
+    UPPER(x) = UPPER(y) duct tape at read time. Every other identifier_type
+    (steam_appid, gog_product_id, xbox_title_id, epic_artifact_id, ...) passes
+    through unchanged. Also safe to call directly with NINTENDO_TITLE_ID_TYPE
+    to normalize a nintendo_play_summary.application_id value — it's the same
+    value space as a nintendo_title_id identifier, just a sibling table.
+    """
+    if identifier_type == NINTENDO_TITLE_ID_TYPE and value is not None:
+        return value.strip().upper()
+    return value
 
 
 @dataclass
@@ -259,6 +287,8 @@ from .schema import (
     _V29_SCHEMA_DDL,
     _V31_SCHEMA_DDL,
     _V32_SCHEMA_DDL,
+    _V33_SCHEMA_DDL,
+    _QUERY_VIEWS_DDL,
 )
 
 
@@ -1727,6 +1757,118 @@ async def _migrate_v31_to_v32(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _normalize_nintendo_title_ids(db: aiosqlite.Connection) -> None:
+    """Uppercase every nintendo_title_id identifier + nintendo_play_summary
+    application_id, merging case-only duplicates first.
+
+    Historically VGCS (ownership) stored title ids verbatim while the
+    Parental Controls API (playtime) reported uppercase hex for the same
+    title, so the two tables could disagree in case only. Every write
+    chokepoint now normalizes to uppercase (normalize_identifier_value), so
+    every comparison between them can be plain equality instead of
+    UPPER(x) = UPPER(y) at read time — this one-time data fix backfills
+    existing rows to match. Idempotent: re-running on an already-normalized
+    DB is a no-op (every case-insensitive group already has exactly one
+    member, already in its own uppercase form).
+    """
+    # game_platform_identifiers: UNIQUE(identifier_type, identifier_value) is
+    # an exact-string constraint, so "0100aaa" and "0100AAA" could both exist
+    # as separate rows (typically the same game re-recorded under a different
+    # casing over time — e.g. set_switch2_playtime_baseline's manual entry vs
+    # a later VGCS sync). Keep the newest survivor (by last_seen_at, ties
+    # broken by id) per case-insensitive group and delete the rest BEFORE
+    # uppercasing, so the UNIQUE constraint never sees a collision.
+    await db.executescript(
+        """
+        DROP TABLE IF EXISTS temp._gpi_nintendo_winners;
+        CREATE TEMP TABLE _gpi_nintendo_winners AS
+        SELECT gpi1.id AS id
+        FROM game_platform_identifiers gpi1
+        WHERE gpi1.identifier_type = 'nintendo_title_id'
+          AND gpi1.id = (
+              SELECT gpi2.id
+              FROM game_platform_identifiers gpi2
+              WHERE gpi2.identifier_type = 'nintendo_title_id'
+                AND UPPER(gpi2.identifier_value) = UPPER(gpi1.identifier_value)
+              ORDER BY gpi2.last_seen_at IS NULL, gpi2.last_seen_at DESC, gpi2.id DESC
+              LIMIT 1
+          );
+
+        DELETE FROM game_platform_identifiers
+        WHERE identifier_type = 'nintendo_title_id'
+          AND id NOT IN (SELECT id FROM _gpi_nintendo_winners);
+
+        UPDATE game_platform_identifiers
+        SET identifier_value = UPPER(identifier_value)
+        WHERE identifier_type = 'nintendo_title_id';
+
+        DROP TABLE temp._gpi_nintendo_winners;
+        """
+    )
+
+    # nintendo_play_summary: PK is (device_id, application_id, period_type,
+    # period_key), so a case-only duplicate is a second full PK conflicting
+    # only in application_id's case. MERGE each such group (sum minutes,
+    # coalesce app_name, keep the latest updated_at) rather than picking a
+    # winner — this reproduces exactly what the UPPER()-SUM readers this PR
+    # removes used to report, so totals don't shift under this migration.
+    await db.executescript(
+        """
+        DROP TABLE IF EXISTS temp._nps_nintendo_merged;
+        CREATE TEMP TABLE _nps_nintendo_merged AS
+        SELECT device_id,
+               UPPER(application_id) AS application_id,
+               period_type,
+               period_key,
+               SUM(playtime_minutes) AS playtime_minutes,
+               MAX(app_name) AS app_name,
+               MAX(updated_at) AS updated_at
+        FROM nintendo_play_summary
+        GROUP BY device_id, UPPER(application_id), period_type, period_key;
+
+        DELETE FROM nintendo_play_summary;
+
+        INSERT INTO nintendo_play_summary
+            (device_id, application_id, period_type, period_key,
+             playtime_minutes, app_name, updated_at)
+        SELECT device_id, application_id, period_type, period_key,
+               playtime_minutes, app_name, updated_at
+        FROM _nps_nintendo_merged;
+
+        DROP TABLE temp._nps_nintendo_merged;
+        """
+    )
+    await db.commit()
+
+
+async def _migrate_v32_to_v33(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add query_log (additive; see schema.py v33 note) and normalize every
+    nintendo_title_id/application_id to uppercase (folded into this step
+    rather than a separate v34, since v33 has not shipped anywhere yet)."""
+    if progress is not None:
+        progress("Migrating to v33: add query_log; normalize Nintendo title id casing.")
+
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS query_log (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            sql        TEXT NOT NULL,
+            row_count  INTEGER,
+            truncated  INTEGER,
+            elapsed_ms INTEGER,
+            error      TEXT
+        );
+        """
+    )
+    await db.commit()
+
+    await _normalize_nintendo_title_ids(db)
+
+    await _set_user_version(db, 33)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1763,7 +1905,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V32_SCHEMA_DDL)
+    await db.executescript(_V33_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -1845,6 +1987,18 @@ async def _sync_fts_index(db: aiosqlite.Connection) -> bool:
     return True
 
 
+async def _sync_query_views(db: aiosqlite.Connection) -> None:
+    """(Re)create the query-tool semantic views (data/db/readonly.py + tools/query.py).
+
+    Runs on every migrate_db call, like _sync_fts_index — DROP VIEW IF EXISTS +
+    CREATE VIEW so a view-definition change (schema.py::_QUERY_VIEWS_DDL) takes
+    effect on the next restart without a schema-version bump. Views are cheap;
+    no data migration is ever needed for them.
+    """
+    await db.executescript(_QUERY_VIEWS_DDL)
+    await db.commit()
+
+
 _MigrationStep = Callable[[aiosqlite.Connection, "_Progress | None"], Awaitable[None]]
 
 # Pre-user_version databases are recognized by shape; recording the detected
@@ -1889,6 +2043,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (29, _migrate_v29_to_v30),
     (30, _migrate_v30_to_v31),
     (31, _migrate_v31_to_v32),
+    (32, _migrate_v32_to_v33),
 )
 
 
@@ -1906,8 +2061,9 @@ async def _run_migrations(
         _emit(progress, f"Backed up database to {snapshot_path} before migrating.", applied_steps)
 
     if detected_state == "fresh":
-        await db.executescript(_V32_SCHEMA_DDL)
+        await db.executescript(_V33_SCHEMA_DDL)
         fts_enabled = await _sync_fts_index(db)
+        await _sync_query_views(db)
         await _set_user_version(db, SCHEMA_VERSION)
         await db.commit()
         _emit(progress, f"Initialized fresh database at schema v{SCHEMA_VERSION}.", applied_steps)
@@ -1943,12 +2099,13 @@ async def _run_migrations(
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V32_SCHEMA_DDL)
+    await db.executescript(_V33_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
     await db.commit()
     fts_enabled = await _sync_fts_index(db)
+    await _sync_query_views(db)
 
     return MigrationResult(
         initial_version=initial_version,
@@ -1983,12 +2140,22 @@ def _gl_ln(value: float | int | None) -> float | None:
     return math.log(value)
 
 
-async def _configure_connection(conn: aiosqlite.Connection, *, enable_wal: bool) -> None:
-    conn.row_factory = aiosqlite.Row
+async def _register_gl_ln(conn: aiosqlite.Connection) -> None:
+    """Register the gl_ln custom SQL function (natural log for IDF weights).
+
+    Shared by the RW connection setup below and the read-only query connection
+    in data/db/readonly.py, so the two connections never drift on what gl_ln
+    means.
+    """
     # Natural log for SQL scoring (IDF weights in discover_games). SQLite's
     # builtin ln() only exists when compiled with SQLITE_ENABLE_MATH_FUNCTIONS,
     # so ship our own under a distinct name rather than depend on the build.
     await conn.create_function("gl_ln", 1, _gl_ln, deterministic=True)
+
+
+async def _configure_connection(conn: aiosqlite.Connection, *, enable_wal: bool) -> None:
+    conn.row_factory = aiosqlite.Row
+    await _register_gl_ln(conn)
     await conn.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
     await conn.execute("PRAGMA foreign_keys=ON")
     if enable_wal:
@@ -2096,7 +2263,6 @@ from .queries import (  # noqa: E402
     get_meta_prefix,
     get_nintendo_baseline_minutes,
     get_nintendo_play_totals,
-    get_nintendo_summary_key,
     get_nintendo_synced_minutes,
     set_meta,
     set_meta_many,
