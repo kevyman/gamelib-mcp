@@ -1122,13 +1122,23 @@ class SetSwitch2PlaytimeBaselineTests(ToolDBTestCase):
         self.assertEqual(gp["playtime_minutes"], 0)
 
     async def test_case_mismatched_identifier_still_bridges(self):
-        # VGCS stores title ids verbatim (possibly lowercase); Parental
-        # Controls reports uppercase. The delta math must still see the real
-        # rows, and the baseline must land under the sync's key casing so
-        # the totals SUM groups them into one total.
+        # VGCS can hand back a title id in a different case than the
+        # Parental Controls API reports for the same title. add_identifier
+        # (-> upsert_game_platform_identifier) normalizes it to uppercase at
+        # write time, so the stored identifier already matches
+        # nintendo_play_summary's (also-normalized) application_id — the
+        # delta math and baseline bridge via plain equality, not a
+        # case-insensitive comparison at read time.
         gid = await seed_game("Case Clash")
         pid = await add_platform(gid, "switch2")
         await add_identifier(pid, "nintendo_title_id", self._APP.lower())
+        async with db_module.get_db() as db:
+            stored = await db.execute_fetchone(
+                "SELECT identifier_value FROM game_platform_identifiers "
+                "WHERE game_platform_id = ? AND identifier_type = 'nintendo_title_id'",
+                (pid,),
+            )
+        self.assertEqual(stored["identifier_value"], self._APP)  # normalized on write
         await db_module.upsert_nintendo_play_summary(
             [_pctl_day(self._APP, "2026-07-01", 300)]
         )

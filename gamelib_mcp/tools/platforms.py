@@ -21,13 +21,13 @@ from ..data.db import (
     get_game_by_identifier,
     get_manual_overrides,
     get_nintendo_baseline_minutes,
-    get_nintendo_summary_key,
     get_nintendo_synced_minutes,
     get_platform_manual_overrides,
     has_nested_children,
     invalidate_igdb_match_enrichment,
     invalidate_name_derived_enrichment,
     nesting_substance_conflict,
+    normalize_identifier_value,
     recompute_tag_affinity,
     remove_manual_overrides,
     remove_platform_manual_overrides,
@@ -936,7 +936,7 @@ async def set_switch2_playtime_baseline(
     target_minutes = round(total_hours * 60)
 
     if application_id is not None:
-        application_id = application_id.strip().upper()
+        application_id = normalize_identifier_value(NINTENDO_TITLE_ID, application_id.strip())
         if not _NINTENDO_APPLICATION_ID_RE.match(application_id):
             raise ToolError(
                 "application_id must be a 16-character hex Nintendo title id "
@@ -973,8 +973,11 @@ async def set_switch2_playtime_baseline(
 
     identifier_recorded = False
     if identifier_row is not None:
+        # Already normalized uppercase in storage (write chokepoint +
+        # migration — see normalize_identifier_value), so this is a plain
+        # equality check, not a case-insensitive one.
         stored = str(identifier_row["identifier_value"])
-        if application_id is not None and application_id != stored.upper():
+        if application_id is not None and application_id != stored:
             raise ToolError(
                 f"'{row['name']}' already has nintendo_title_id {stored}, which does "
                 f"not match the given application_id {application_id}"
@@ -996,11 +999,12 @@ async def set_switch2_playtime_baseline(
             )
         identifier_recorded = True
 
-    # The daily-summary key can differ from the stored identifier in case
-    # (VGCS stores verbatim, the Parental Controls API reports uppercase hex);
-    # the baseline row must use the sync's exact key so the totals SUM groups
-    # them together. All the summary queries match case-insensitively.
-    summary_key = await get_nintendo_summary_key(application_id) or application_id
+    # application_id is normalized (uppercase) by this point on every path
+    # above, and nintendo_play_summary.application_id is normalized the same
+    # way at ingest (upsert_nintendo_play_summary), so it IS the daily-summary
+    # key — no separate lookup needed to discover "the casing real rows use"
+    # (that used to be get_nintendo_summary_key, now removed).
+    summary_key = application_id
     synced_minutes = await get_nintendo_synced_minutes(application_id)
     previous_baseline = await get_nintendo_baseline_minutes(application_id)
     baseline_minutes = target_minutes - synced_minutes
@@ -1025,8 +1029,9 @@ async def set_switch2_playtime_baseline(
             baseline_removed = True
     elif not dry_run:
         if previous_baseline is not None:
-            # Delete before upsert so a baseline stored under a different
-            # casing of the key can't survive as a second row.
+            # Delete before re-inserting the corrected baseline row (belt: the
+            # upsert's ON CONFLICT would update it in place regardless, since
+            # application_id is normalized identically on both sides now).
             await delete_nintendo_playtime_baseline(application_id)
         await upsert_nintendo_play_summary([
             {

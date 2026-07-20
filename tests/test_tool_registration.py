@@ -131,6 +131,8 @@ EXPECTED_TOOLS = {
     "add_games_to_platform_batch": {"params": {"items", "dry_run"}, "required": {"items"}},
     "create_session_ingest_link": {"params": {"provider"}, "required": {"provider"}},
     "set_nintendo_pctl_session": {"params": {"response"}, "required": set()},
+    "query_library": {"params": {"sql", "row_limit"}, "required": {"sql"}},
+    "get_db_schema": {"params": set(), "required": set()},
     "update_game": {
         "params": {
             "name",
@@ -304,6 +306,8 @@ EXPECTED_ANNOTATIONS = {
     "add_games_to_platform_batch": {"readOnlyHint": False, "idempotentHint": True},
     "create_session_ingest_link": {"readOnlyHint": False, "idempotentHint": False},
     "set_nintendo_pctl_session": {"readOnlyHint": False, "idempotentHint": True},
+    "query_library": {"readOnlyHint": True, "idempotentHint": True},
+    "get_db_schema": {"readOnlyHint": True, "idempotentHint": True},
     "update_game": {"readOnlyHint": False, "idempotentHint": True},
     "update_games_batch": {"readOnlyHint": False, "idempotentHint": True},
     "set_playtime": {"readOnlyHint": False, "idempotentHint": True},
@@ -348,9 +352,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_56(self):
+    async def test_tool_count_is_58(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 56)
+        self.assertEqual(len(tools), 58)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()
