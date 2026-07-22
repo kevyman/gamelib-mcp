@@ -918,6 +918,20 @@ class RevalidateIgdbMatchesTests(ToolDBTestCase):
 
     _ENV = {"TWITCH_CLIENT_ID": "test-client", "TWITCH_CLIENT_SECRET": "test-secret"}
 
+    @staticmethod
+    def _record(name: str, **overrides) -> dict:
+        record = {
+            "name": name,
+            "category": None,
+            "game_type": None,
+            "parent_igdb_id": None,
+            "parent_name": None,
+            "version_parent_igdb_id": None,
+            "version_parent_name": None,
+        }
+        record.update(overrides)
+        return record
+
     async def _seed(self) -> dict[str, int]:
         good = await seed_game("The Witcher: Enhanced Edition")
         bad_tales = await seed_game("Tales from the Borderlands")
@@ -949,20 +963,22 @@ class RevalidateIgdbMatchesTests(ToolDBTestCase):
             "unenriched": unenriched,
         }
 
-    _IGDB_NAMES = {
-        283715: "The Witcher: Enhanced Edition",  # matches (edition-strip equal anyway)
-        214139: "New Tales from the Borderlands",  # prod mismatch
-        150511: "Payday 2 VR",  # prod mismatch
-        999: "Something Else Entirely",  # mismatch but manual override
-    }
+    @property
+    def _IGDB_RECORDS(self) -> dict:
+        return {
+            283715: self._record("The Witcher: Enhanced Edition"),  # matches (edition-strip equal anyway)
+            214139: self._record("New Tales from the Borderlands"),  # prod mismatch
+            150511: self._record("Payday 2 VR"),  # prod mismatch
+            999: self._record("Something Else Entirely"),  # mismatch but manual override
+        }
 
     async def test_dry_run_reports_mismatches_without_changing_rows(self) -> None:
         ids = await self._seed()
         with (
             patch.dict("os.environ", self._ENV),
             patch(
-                "gamelib_mcp.data.igdb.fetch_igdb_game_names",
-                AsyncMock(return_value=self._IGDB_NAMES),
+                "gamelib_mcp.data.igdb.fetch_igdb_game_records",
+                AsyncMock(return_value=self._IGDB_RECORDS),
             ),
         ):
             result = await admin.revalidate_igdb_matches(dry_run=True)
@@ -1000,8 +1016,8 @@ class RevalidateIgdbMatchesTests(ToolDBTestCase):
         with (
             patch.dict("os.environ", self._ENV),
             patch(
-                "gamelib_mcp.data.igdb.fetch_igdb_game_names",
-                AsyncMock(return_value=self._IGDB_NAMES),
+                "gamelib_mcp.data.igdb.fetch_igdb_game_records",
+                AsyncMock(return_value=self._IGDB_RECORDS),
             ),
         ):
             result = await admin.revalidate_igdb_matches(dry_run=False)
@@ -1035,13 +1051,185 @@ class RevalidateIgdbMatchesTests(ToolDBTestCase):
         self.assertEqual(rows[ids["good"]]["igdb_id"], 283715)
         self.assertEqual(rows[ids["pinned"]]["igdb_id"], 999)
 
+    async def test_wet_run_resets_classification_attributable_to_bad_match(self) -> None:
+        # The "A Hat in Time" shape: a real game fuzzy-matched onto another
+        # game's cosmetic DLC, so it got nested as dlc under a minted parent
+        # row carrying that other game's name. Resetting the link must also
+        # undo that classification.
+        parent = await seed_game("Among Us 3D: VR")
+        child = await seed_game(
+            "A Hat in Time",
+            content_type="dlc",
+            parent_game_id=parent,
+            is_primary_library_item=0,
+        )
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET igdb_id = 111 WHERE id = ?", (child,)
+            )
+            await db.commit()
+
+        records = {
+            111: self._record(
+                "Mini Crewmate Hat Pack",
+                category=1,
+                parent_igdb_id=185254,
+                parent_name="Among Us 3D: VR",
+            )
+        }
+        with (
+            patch.dict("os.environ", self._ENV),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_igdb_game_records",
+                AsyncMock(return_value=records),
+            ),
+        ):
+            result = await admin.revalidate_igdb_matches(dry_run=False)
+
+        self.assertEqual(result["mismatch_count"], 1)
+        self.assertEqual(result["classification_reset_count"], 1)
+        self.assertTrue(result["mismatches"][0]["classification_reset"])
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT igdb_id, content_type, parent_game_id, is_primary_library_item "
+                "FROM games WHERE id = ?",
+                (child,),
+            )
+        self.assertIsNone(row["igdb_id"])
+        self.assertEqual(row["content_type"], "base_game")
+        self.assertIsNone(row["parent_game_id"])
+        self.assertEqual(row["is_primary_library_item"], 1)
+
+    async def test_wet_run_keeps_classification_not_attributable_to_bad_match(self) -> None:
+        # A real Steam DLC whose igdb link is wrong for unrelated reasons: the
+        # stored classification (from Steam's own type/fullgame data) matches
+        # neither the bad record's implied content_type nor its parents, so it
+        # must survive the link reset.
+        parent = await seed_game("Foo Adventures")
+        child = await seed_game(
+            "Foo Adventures: Season Pass",
+            content_type="dlc",
+            parent_game_id=parent,
+            is_primary_library_item=0,
+        )
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET igdb_id = 222 WHERE id = ?", (child,)
+            )
+            await db.commit()
+
+        records = {222: self._record("Totally Different Title")}
+        with (
+            patch.dict("os.environ", self._ENV),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_igdb_game_records",
+                AsyncMock(return_value=records),
+            ),
+        ):
+            result = await admin.revalidate_igdb_matches(dry_run=False)
+
+        self.assertEqual(result["mismatch_count"], 1)
+        self.assertEqual(result["classification_reset_count"], 0)
+        self.assertFalse(result["mismatches"][0]["classification_reset"])
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT igdb_id, content_type, parent_game_id, is_primary_library_item "
+                "FROM games WHERE id = ?",
+                (child,),
+            )
+        self.assertIsNone(row["igdb_id"])
+        self.assertEqual(row["content_type"], "dlc")
+        self.assertEqual(row["parent_game_id"], parent)
+        self.assertEqual(row["is_primary_library_item"], 0)
+
+    async def test_pinned_classification_survives_attributable_reset(self) -> None:
+        # content_type manually pinned: the link resets, the classification
+        # stays exactly as the human left it.
+        parent = await seed_game("Wrong Parent Game")
+        child = await seed_game(
+            "Pinned Child",
+            content_type="dlc",
+            parent_game_id=parent,
+            is_primary_library_item=0,
+        )
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET igdb_id = 333, manual_overrides = ? WHERE id = ?",
+                (json.dumps(["content_type"]), child),
+            )
+            await db.commit()
+
+        records = {
+            333: self._record(
+                "Wrong Parent Game: Some DLC",
+                category=1,
+                parent_name="Wrong Parent Game",
+            )
+        }
+        with (
+            patch.dict("os.environ", self._ENV),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_igdb_game_records",
+                AsyncMock(return_value=records),
+            ),
+        ):
+            result = await admin.revalidate_igdb_matches(dry_run=False)
+
+        self.assertEqual(result["classification_reset_count"], 0)
+        self.assertFalse(result["mismatches"][0]["classification_reset"])
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT igdb_id, content_type, parent_game_id FROM games WHERE id = ?",
+                (child,),
+            )
+        self.assertIsNone(row["igdb_id"])
+        self.assertEqual(row["content_type"], "dlc")
+        self.assertEqual(row["parent_game_id"], parent)
+
+    async def test_dry_run_reports_would_be_classification_reset(self) -> None:
+        parent = await seed_game("Phantom Parent")
+        child = await seed_game(
+            "Nested Victim",
+            content_type="edition",
+            parent_game_id=parent,
+            is_primary_library_item=0,
+        )
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = 444 WHERE id = ?", (child,))
+            await db.commit()
+
+        records = {
+            444: self._record(
+                "Phantom Parent: Deluxe Edition",
+                version_parent_igdb_id=98765,
+                version_parent_name="Phantom Parent",
+            )
+        }
+        with (
+            patch.dict("os.environ", self._ENV),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_igdb_game_records",
+                AsyncMock(return_value=records),
+            ),
+        ):
+            result = await admin.revalidate_igdb_matches(dry_run=True)
+
+        self.assertTrue(result["mismatches"][0]["classification_reset"])
+        self.assertEqual(result["classification_reset_count"], 0)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT igdb_id, content_type FROM games WHERE id = ?", (child,)
+            )
+        self.assertEqual(row["igdb_id"], 444)
+        self.assertEqual(row["content_type"], "edition")
+
     async def test_unresolved_igdb_ids_are_counted_and_left_alone(self) -> None:
         ids = await self._seed()
         # IGDB returns nothing for any id (all deleted/merged upstream).
         with (
             patch.dict("os.environ", self._ENV),
             patch(
-                "gamelib_mcp.data.igdb.fetch_igdb_game_names",
+                "gamelib_mcp.data.igdb.fetch_igdb_game_records",
                 AsyncMock(return_value={}),
             ),
         ):
@@ -1062,8 +1250,8 @@ class RevalidateIgdbMatchesTests(ToolDBTestCase):
         with (
             patch.dict("os.environ", self._ENV),
             patch(
-                "gamelib_mcp.data.igdb.fetch_igdb_game_names",
-                AsyncMock(return_value=self._IGDB_NAMES),
+                "gamelib_mcp.data.igdb.fetch_igdb_game_records",
+                AsyncMock(return_value=self._IGDB_RECORDS),
             ) as fetch_mock,
         ):
             result = await admin.revalidate_igdb_matches(dry_run=True, limit=2)
@@ -1222,6 +1410,126 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
         self.assertEqual([c["game_id"] for c in needs], [child])
         self.assertIsNone(needs[0]["suggested_update"])
         self.assertEqual(needs[0]["evidence"]["note"], "no parent candidate resolved")
+
+    async def test_wrong_parent_substance_conflict_flagged_and_repairable(self):
+        # The "A Hat in Time" shape: a real, played, identifier-bearing game
+        # nested (by legacy fuzzy IGDB matching) under a minted parent row with
+        # no ownership at all. Today's substance guard would refuse this write;
+        # the bucket retro-applies it to stored rows.
+        from gamelib_mcp.tools import platforms
+
+        phantom = await seed_game("Among Us 3D: VR")
+        child = await seed_game(
+            "A Hat in Time",
+            content_type="dlc",
+            parent_game_id=phantom,
+            is_primary_library_item=0,
+        )
+        gpid = await add_platform(child, "steam", playtime_minutes=1198, owned=1)
+        await add_identifier(gpid, "steam_appid", "253230")
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+
+        bucket = {c["game_id"]: c for c in self._by_reason(result, "wrong_parent_suspect")}
+        self.assertIn(child, bucket)
+        cand = bucket[child]
+        self.assertTrue(cand["evidence"]["substance_conflict"])
+        self.assertEqual(cand["evidence"]["parent_name"], "Among Us 3D: VR")
+        self.assertEqual(
+            cand["suggested_update"], {"game_id": child, "content_type": "base_game"}
+        )
+        self.assertEqual(result["counts"]["wrong_parent_suspect"], 1)
+
+        await platforms.update_game(**cand["suggested_update"])
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT content_type, parent_game_id, is_primary_library_item "
+                "FROM games WHERE id = ?",
+                (child,),
+            )
+        self.assertEqual(row["content_type"], "base_game")
+        self.assertIsNone(row["parent_game_id"])
+        self.assertEqual(row["is_primary_library_item"], 1)
+
+    async def test_wrong_parent_sibling_identity_conflict_flagged(self):
+        # The "Mass Effect under Mass Effect 3" shape: base game nested under a
+        # sequel/sibling — the child's name is a proper prefix of the parent's
+        # and the two disagree on sequel identity. The parent here is a real,
+        # owned row, so the substance rule alone would not fire.
+        parent = await seed_game("Mass Effect 3 (2012)")
+        parent_gpid = await add_platform(parent, "steam", playtime_minutes=500, owned=1)
+        await add_identifier(parent_gpid, "steam_appid", "1238020")
+        child = await seed_game(
+            "Mass Effect",
+            content_type="edition",
+            parent_game_id=parent,
+            is_primary_library_item=0,
+        )
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+
+        bucket = {c["game_id"]: c for c in self._by_reason(result, "wrong_parent_suspect")}
+        self.assertIn(child, bucket)
+        self.assertTrue(bucket[child]["evidence"]["sibling_identity_conflict"])
+        self.assertFalse(bucket[child]["evidence"]["substance_conflict"])
+
+    async def test_wrong_parent_not_flagged_for_legit_nesting(self):
+        # Legit DLC shapes must stay out of the bucket: an addon-named child
+        # with an extra number ("Season Pass 2"), and a numbered-suffix child
+        # whose name extends the parent's ("5th Anniversary Bundle") — the
+        # child-is-prefix direction is required precisely because legit DLC is
+        # the parent's name PLUS a suffix.
+        parent = await seed_game("Borderlands 3")
+        parent_gpid = await add_platform(parent, "steam", playtime_minutes=2584, owned=1)
+        await add_identifier(parent_gpid, "steam_appid", "397540")
+        season2 = await seed_game(
+            "Borderlands 3: Season Pass 2",
+            content_type="dlc",
+            parent_game_id=parent,
+            is_primary_library_item=0,
+        )
+        dl = await seed_game("Dying Light")
+        dl_gpid = await add_platform(dl, "steam", playtime_minutes=29, owned=1)
+        await add_identifier(dl_gpid, "steam_appid", "239140")
+        bundle = await seed_game(
+            "Dying Light - 5th Anniversary Bundle",
+            content_type="dlc",
+            parent_game_id=dl,
+            is_primary_library_item=0,
+        )
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+
+        flagged = {c["game_id"] for c in self._by_reason(result, "wrong_parent_suspect")}
+        self.assertNotIn(season2, flagged)
+        self.assertNotIn(bundle, flagged)
+        self.assertEqual(result["counts"]["wrong_parent_suspect"], 0)
+
+    async def test_wrong_parent_skips_pinned_parent(self):
+        # A human already decided this nesting (parent_game_id in
+        # manual_overrides) — the detector must not second-guess it.
+        phantom = await seed_game("Empty Shell")
+        child = await seed_game(
+            "Real Played Game",
+            content_type="dlc",
+            parent_game_id=phantom,
+            is_primary_library_item=0,
+        )
+        gpid = await add_platform(child, "steam", playtime_minutes=100, owned=1)
+        await add_identifier(gpid, "steam_appid", "111222")
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET manual_overrides = ? WHERE id = ?",
+                ('["parent_game_id"]', child),
+            )
+            await db.commit()
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+
+        self.assertNotIn(
+            child,
+            [c["game_id"] for c in self._by_reason(result, "wrong_parent_suspect")],
+        )
 
     async def test_addon_name_pattern_dlc_and_unknown_addon(self):
         season = await seed_game("Elden Ring Season Pass")

@@ -1079,7 +1079,14 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
             await has_nested_children(db, game_id)
         )
 
+    # Parent resolution here is mint-free: an existing row is looked up by igdb
+    # id, then by exact name. Minting a missing parent is deferred until the
+    # guards below have decided the classification will actually be written —
+    # minting up front left an orphan phantom row behind (no platforms, no
+    # children pointing at it) every time the default-clobber or substance
+    # guard then dropped the classification write.
     parent_game_id: int | None = None
+    mint_parent_name: str | None = None
     if not nesting_blocked:
         if igdb_game.parent_igdb_id is not None:
             parent = await get_game_by_igdb_id(igdb_game.parent_igdb_id)
@@ -1094,7 +1101,7 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
             if parent is not None:
                 parent_game_id = parent["id"]
             else:
-                parent_game_id = await upsert_game(appid=None, name=igdb_game.parent_name)
+                mint_parent_name = igdb_game.parent_name
 
     # A parent that resolves back to this same row is not a real parent (IGDB
     # occasionally lists an edition/version whose parent is the row itself). Writing
@@ -1157,6 +1164,7 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
             igdb_game.content_type == "base_game"
             and igdb_game.is_primary_library_item
             and parent_game_id is None
+            and mint_parent_name is None
         )
         stored_is_default = (
             row["content_type"] == "base_game"
@@ -1170,19 +1178,28 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
         # behind an empty shell row. Only the classification is dropped; the
         # metadata writes above still land.
         apply_classification = not new_is_default or stored_is_default
-        if (
-            apply_classification
-            and parent_game_id is not None
-            and igdb_game.content_type in NESTED_CONTENT_TYPES
-        ):
-            from .db import nesting_substance_conflict
+        if apply_classification and igdb_game.content_type in NESTED_CONTENT_TYPES:
+            conflict = False
+            if parent_game_id is not None:
+                from .db import nesting_substance_conflict
 
-            if await nesting_substance_conflict(db, game_id, parent_game_id):
+                conflict = await nesting_substance_conflict(db, game_id, parent_game_id)
+            elif mint_parent_name:
+                # The parent doesn't exist yet: freshly minted it would carry
+                # no identifier and no playtime, so apply the substance rule
+                # against that empty-by-construction shape directly.
+                from .db import get_game_substance
+
+                substance = await get_game_substance(db, game_id)
+                conflict = bool(
+                    substance["has_identifier"] and substance["playtime_minutes"] > 0
+                )
+            if conflict:
                 logger.info(
                     "IGDB classification for game %s skipped: nesting a row "
                     "with identifier+playtime under empty parent %s",
                     game_id,
-                    parent_game_id,
+                    parent_game_id if parent_game_id is not None else mint_parent_name,
                 )
                 apply_classification = False
 
@@ -1202,6 +1219,22 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
                     game_id,
                 )
             else:
+                if (
+                    parent_game_id is None
+                    and mint_parent_name
+                    and "parent_game_id" not in overrides
+                ):
+                    # Every guard passed and the classification is being
+                    # written, so the missing parent row is genuinely needed
+                    # now. upsert_game can still name-match back onto this very
+                    # row (IGDB sometimes lists a parent carrying the row's own
+                    # title) — treat that like the self-referential case above.
+                    minted = await upsert_game(appid=None, name=mint_parent_name)
+                    if minted == game_id:
+                        if content_type in NESTED_CONTENT_TYPES:
+                            content_type = "base_game"
+                    else:
+                        parent_game_id = minted
                 if "content_type" not in overrides:
                     updates["content_type"] = content_type
                 if parent_game_id is not None and "parent_game_id" not in overrides:
@@ -1773,6 +1806,24 @@ async def fetch_version_parent_aliases(member_igdb_ids: list[int]) -> dict[int, 
 
 async def fetch_igdb_game_names(igdb_ids: list[int]) -> dict[int, str]:
     """Return {igdb_game_id: name} for the given IGDB game ids (for display)."""
+    return {
+        igdb_id: record["name"]
+        for igdb_id, record in (await fetch_igdb_game_records(igdb_ids)).items()
+    }
+
+
+async def fetch_igdb_game_records(igdb_ids: list[int]) -> dict[int, dict]:
+    """Return {igdb_game_id: record} with name + classification-relevant fields.
+
+    The superset behind ``fetch_igdb_game_names``, used by
+    revalidate_igdb_matches: ``category``/``game_type`` and the
+    parent/version_parent fields let the caller decide whether a stored
+    content classification is attributable to this (mismatched) IGDB link and
+    should be reset along with it. Each record carries ``name``, ``category``,
+    ``game_type``, ``parent_igdb_id``, ``parent_name``,
+    ``version_parent_igdb_id``, ``version_parent_name`` (absent IGDB fields
+    are None).
+    """
     client_id = os.environ.get("TWITCH_CLIENT_ID")
     ids = [i for i in dict.fromkeys(igdb_ids) if i is not None]
     if not client_id or not igdb_credentials_configured() or not ids:
@@ -1781,15 +1832,34 @@ async def fetch_igdb_game_names(igdb_ids: list[int]) -> dict[int, str]:
     token = await _get_token()
     headers = _igdb_headers(client_id, token)
 
-    names: dict[int, str] = {}
+    records: dict[int, dict] = {}
     for chunk in _chunked(ids, 100):
         id_list = ", ".join(str(i) for i in chunk)
-        query = f"fields id, name; where id = ({id_list}); limit 500;"
+        query = (
+            "fields id, name, category, game_type, parent_game.id, "
+            "parent_game.name, version_parent.id, version_parent.name; "
+            f"where id = ({id_list}); limit 500;"
+        )
         rows = await _post_igdb_games(query, headers)
         for row in rows:
-            if row.get("id") is not None and row.get("name"):
-                names[row["id"]] = row["name"]
-    return names
+            if row.get("id") is None or not row.get("name"):
+                continue
+            raw_parent = row.get("parent_game")
+            parent = raw_parent if isinstance(raw_parent, dict) else {}
+            raw_version_parent = row.get("version_parent")
+            version_parent = (
+                raw_version_parent if isinstance(raw_version_parent, dict) else {}
+            )
+            records[row["id"]] = {
+                "name": row["name"],
+                "category": row.get("category"),
+                "game_type": row.get("game_type"),
+                "parent_igdb_id": parent.get("id"),
+                "parent_name": parent.get("name"),
+                "version_parent_igdb_id": version_parent.get("id"),
+                "version_parent_name": version_parent.get("name"),
+            }
+    return records
 
 
 # On-demand DLC/expansion children catalog, used as a fallback dlc_ownership

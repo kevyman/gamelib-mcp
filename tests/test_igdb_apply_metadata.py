@@ -252,6 +252,68 @@ class ApplyIgdbMetadataSubstanceGuardTests(ToolDBTestCase):
         self.assertEqual(row["igdb_id"], 5000)
         _ = empty_parent
 
+    async def test_substance_refusal_does_not_mint_the_missing_parent(self) -> None:
+        # The "A Hat in Time" shape: a fuzzy match landed on another game's
+        # DLC, whose parent isn't in the library. The substance guard refuses
+        # the demotion (the child has identifier+playtime; a freshly minted
+        # parent would have neither) — and with the write refused, the parent
+        # must not be minted either, or an orphan phantom row is left behind.
+        real_id = await self._real_game("A Hat in Time", 253230, minutes=1198)
+
+        await igdb._apply_igdb_metadata(
+            real_id,
+            igdb.IGDBGame(
+                igdb_id=7000,
+                name="A Hat in Time",
+                category=1,
+                first_release_date=None,
+                content_type="dlc",
+                parent_name="Among Us 3D: VR",
+                is_primary_library_item=False,
+            ),
+        )
+
+        async with db_module.get_db() as db:
+            minted = await db.execute_fetchone(
+                "SELECT id FROM games WHERE name = ?", ("Among Us 3D: VR",)
+            )
+        self.assertIsNone(minted)
+
+        after = await _read_classification(real_id)
+        self.assertEqual(after["content_type"], "base_game")
+        self.assertEqual(after["is_primary_library_item"], 1)
+        self.assertIsNone(after["parent_game_id"])
+
+    async def test_applied_nesting_still_mints_the_missing_parent(self) -> None:
+        # The legitimate mint: an owned, insubstantial DLC row whose base game
+        # isn't in the library needs a parent row to nest under. Deferring the
+        # mint until the guards pass must not lose this behavior.
+        child_id = await seed_game("Cool Game: Season Pass")
+
+        await igdb._apply_igdb_metadata(
+            child_id,
+            igdb.IGDBGame(
+                igdb_id=7001,
+                name="Cool Game: Season Pass",
+                category=1,
+                first_release_date=None,
+                content_type="dlc",
+                parent_name="Cool Game",
+                is_primary_library_item=False,
+            ),
+        )
+
+        async with db_module.get_db() as db:
+            minted = await db.execute_fetchone(
+                "SELECT id FROM games WHERE name = ?", ("Cool Game",)
+            )
+        self.assertIsNotNone(minted)
+
+        after = await _read_classification(child_id)
+        self.assertEqual(after["content_type"], "dlc")
+        self.assertEqual(after["parent_game_id"], minted["id"])
+        self.assertEqual(after["is_primary_library_item"], 0)
+
     async def test_nesting_under_substantial_parent_still_applies(self) -> None:
         parent_id = await self._real_game("Fallout: New Vegas", 22380, minutes=2694)
         child_id = await self._real_game(

@@ -819,7 +819,12 @@ async def detect_misclassified_dlc(
     parent) — apply one to reclassify the row and record the manual override.
 
     Offline buckets (a row lands in its FIRST matching bucket only — order:
-    nested_parent, needs_parent, purchase_minted_suspect, addon_name_pattern):
+    inconsistent_primary_nested, nested_parent, needs_parent,
+    wrong_parent_suspect, purchase_minted_suspect, addon_name_pattern):
+    - inconsistent_primary_nested: a nested content_type with the primary flag
+      still 1 — legacy contradictory shape hidden from BOTH the games and
+      addons views. Substantial rows (identifier/playtime) suggest promotion
+      to base_game; insubstantial ones re-apply their nested type.
     - nested_parent: a nested row (is_primary_library_item=0) that other rows
       nest under. Both are invisible in this shape — the parent fails the
       is_primary filter and its children are reachable only through it. Suggests
@@ -827,6 +832,12 @@ async def detect_misclassified_dlc(
     - needs_parent: a nested row (is_primary_library_item=0) with no parent link.
       Suggests parent_game_id when a split-title candidate resolves to an existing
       primary game; suggested_update is null when no parent can be guessed.
+    - wrong_parent_suspect: a nested row parented under the WRONG game — the
+      child has a store identifier + real playtime while its parent has
+      neither, or the child's name is a proper prefix of the parent's with a
+      sequel-identity conflict ("Mass Effect" under "Mass Effect 3"). Legacy
+      residue of pre-gate IGDB fuzzy matching. Suggests content_type
+      base_game (promotes the child, detaches the parent).
     - purchase_minted_suspect: a primary base_game with no store identifiers, a
       purchase_source on an owned platform, no igdb_id, and either an addon-ish
       name or a resolvable parent — the phantom shape a purchase import mints.
@@ -865,9 +876,16 @@ async def revalidate_igdb_matches(
     whose edition-stripped normalized titles differ — the same strict gate new
     enrichment uses. dry_run=True (default) only reports. dry_run=False resets
     IGDB enrichment on mismatched rows (igdb_id and series memberships cleared)
-    so background enrichment re-resolves them under the strict gate. Rows whose
-    igdb_id is a manual override are never reset. limit caps rows checked
-    (None = all). Returns mismatch list and counts.
+    so background enrichment re-resolves them under the strict gate. When the
+    stored content classification is attributable to the bad match (the parent
+    link matches the bad record's parent/version_parent, or the content_type
+    equals what that record implies), it is reset too — content_type back to
+    base_game, parent detached, primary flag restored — so a wrongly nested
+    row (e.g. a real game demoted to DLC of an unrelated title) resurfaces;
+    each mismatch entry carries classification_reset. Rows whose igdb_id (or,
+    for the classification part, content_type/parent_game_id/
+    is_primary_library_item) is a manual override are never reset. limit caps
+    rows checked (None = all). Returns mismatch list and counts.
     """
     from .tools.admin import revalidate_igdb_matches as _revalidate
     return await _revalidate(dry_run, limit)
