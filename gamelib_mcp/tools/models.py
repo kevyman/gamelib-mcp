@@ -640,8 +640,12 @@ class RevalidateIgdbMatchesResponse(FlexibleModel):
     igdb_configured: bool
     checked: int
     mismatch_count: int
+    # Each mismatch: {game_id, name, igdb_id, igdb_name, classification_reset}
+    # — classification_reset marks rows whose content classification is
+    # attributable to the bad match and is reset alongside the link.
     mismatches: list[dict[str, Any]]
     reset_count: int
+    classification_reset_count: int = 0
     skipped_overridden: int
     unresolved_igdb_ids: int
 

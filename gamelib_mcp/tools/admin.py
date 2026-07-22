@@ -1972,7 +1972,8 @@ async def detect_misclassified_dlc(
     carries a ``suggested_update`` that is a ready-to-apply set of update_game
     kwargs. It NEVER writes and never mints parent rows. Buckets (a row lands in
     its first matching bucket only — order: inconsistent_primary_nested,
-    nested_parent, needs_parent, purchase_minted_suspect, addon_name_pattern):
+    nested_parent, needs_parent, wrong_parent_suspect, purchase_minted_suspect,
+    addon_name_pattern):
 
     * inconsistent_primary_nested — a row whose content_type is a NESTED value
       (dlc/expansion/edition/…) yet is_primary_library_item is still 1: an
@@ -1991,6 +1992,13 @@ async def detect_misclassified_dlc(
     * needs_parent — a nested row (is_primary_library_item=0) with no
       parent_game_id. When a split-title candidate resolves to an existing
       primary game, the suggestion sets parent_game_id; otherwise it is null.
+    * wrong_parent_suspect — a nested row whose parent link looks wrong: the
+      child holds a store identifier + real playtime while the parent holds
+      neither (the shape today's substance guard refuses), or the child's name
+      is a proper prefix of the parent's and the two conflict on sequel
+      identity ("Mass Effect" nested under "Mass Effect 3"). The residue of
+      pre-gate IGDB fuzzy matching. Suggests content_type base_game
+      (update_game promotes the child and detaches the parent).
     * purchase_minted_suspect — a primary base_game with no store identifiers, a
       purchase_source on an owned platform row, no igdb_id, and either an
       addon-ish name or a resolvable parent — the phantom shape a purchase import
@@ -2016,13 +2024,18 @@ async def detect_misclassified_dlc(
     buckets are capped at 200 candidates each.
     """
     from ..data.content import classify_steam_app_type, parent_name_candidates
-    from ..data.db import get_game_substance
+    from ..data.db import (
+        get_game_substance,
+        nesting_substance_conflict,
+        titles_conflict_on_identity,
+    )
 
     candidates: list[dict] = []
     counts = {
         "inconsistent_primary_nested": 0,
         "nested_parent": 0,
         "needs_parent": 0,
+        "wrong_parent_suspect": 0,
         "purchase_minted_suspect": 0,
         "addon_name_pattern": 0,
         "steam_type_mismatch": 0,
@@ -2179,6 +2192,77 @@ async def detect_misclassified_dlc(
             }
         )
     counts["needs_parent"] = needs_parent_count
+
+    # --- offline bucket: wrong_parent_suspect (nested under the wrong game) ---
+    # The residue of pre-gate IGDB fuzzy matching: a real library title matched
+    # onto some OTHER game's DLC/edition record and got nested under that
+    # game's (often freshly minted, ownerless) row — "A Hat in Time" as DLC of
+    # "Among Us 3D: VR", "DiRT Rally" as DLC of "DiRT Rally 2.0". Two
+    # fingerprints, either suffices:
+    #   * retro substance conflict — the child carries a store identifier AND
+    #     real playtime while the parent carries neither (today's
+    #     nesting_substance_conflict guard would refuse this write; stored
+    #     rows predate it);
+    #   * base-under-sibling shape — the child's normalized name is a proper
+    #     PREFIX of the parent's and the two conflict on sequel identity
+    #     ("Mass Effect" under "Mass Effect 3 (2012)"). Restricted to the
+    #     child-is-prefix direction (legit DLC is the parent's name PLUS a
+    #     suffix, never a prefix of it) and to children without an addon-ish
+    #     name, so "Borderlands 3: Season Pass 2" stays unflagged.
+    # Suggests content_type=base_game, which promotes the child and detaches
+    # the wrong parent in one update_game call.
+    async with get_db() as db:
+        parented_rows = await db.execute_fetchall(
+            """SELECT g.id AS game_id, g.name, g.content_type, g.manual_overrides,
+                      g.parent_game_id, p.name AS parent_name
+               FROM games g
+               JOIN games p ON p.id = g.parent_game_id
+               WHERE g.is_primary_library_item = 0
+               ORDER BY g.id
+               LIMIT ?""",
+            (_MISCLASSIFIED_BUCKET_CAP,),
+        )
+    wrong_parent_count = 0
+    for row in parented_rows:
+        if row["game_id"] in stranded_ids:
+            continue
+        if {"content_type", "parent_game_id"} & _pinned_columns(row["manual_overrides"]):
+            continue
+        async with get_db() as db:
+            substance_conflict = await nesting_substance_conflict(
+                db, row["game_id"], row["parent_game_id"]
+            )
+        child_norm = normalize_search_text(row["name"] or "")
+        parent_norm = normalize_search_text(row["parent_name"] or "")
+        sibling_shape = bool(
+            child_norm
+            and child_norm != parent_norm
+            and parent_norm.startswith(child_norm)
+            and titles_conflict_on_identity(row["name"] or "", row["parent_name"] or "")
+            and match_addon_name(row["name"]) is None
+        )
+        if not substance_conflict and not sibling_shape:
+            continue
+        wrong_parent_count += 1
+        candidates.append(
+            {
+                "game_id": row["game_id"],
+                "name": row["name"],
+                "reason": "wrong_parent_suspect",
+                "evidence": {
+                    "content_type": row["content_type"],
+                    "parent_game_id": row["parent_game_id"],
+                    "parent_name": row["parent_name"],
+                    "substance_conflict": substance_conflict,
+                    "sibling_identity_conflict": sibling_shape,
+                },
+                "suggested_update": {
+                    "game_id": row["game_id"],
+                    "content_type": CONTENT_BASE_GAME,
+                },
+            }
+        )
+    counts["wrong_parent_suspect"] = wrong_parent_count
 
     # --- offline buckets over PRIMARY base_game rows ---
     async with get_db() as db:
@@ -2407,16 +2491,36 @@ async def revalidate_igdb_matches(dry_run: bool = True, limit: int | None = None
     background enrichment re-resolves them under the strict gate. Rows whose
     igdb_id is listed in games.manual_overrides are reported separately and
     never reset. limit caps how many rows are checked (None/0 = all).
+
+    A bad match can also have written a content classification: a library
+    title fuzzy-matched onto some other game's DLC/edition record got
+    content_type/parent_game_id/is_primary_library_item set from that record
+    (prod: "A Hat in Time" nested as DLC under a minted "Among Us 3D: VR" row
+    because the match landed on one of that game's cosmetic packs). Resetting
+    only the link would leave the row demoted and invisibly parented under
+    the wrong game. So each mismatch is checked for classification damage
+    ATTRIBUTABLE to the bad record — the stored parent row matches the bad
+    record's parent/version_parent (by igdb id or by the exact name a parent
+    mint would have used), or the stored content_type equals what the bad
+    record's category/version_parent implies (when that isn't plain
+    base_game) — and attributable rows are reset to base_game / primary / no
+    parent so re-enrichment can re-derive the truth. Rows with any of the
+    three classification columns pinned in manual_overrides keep their
+    classification. Each mismatch entry carries ``classification_reset``
+    (would-be in dry_run) and the result ``classification_reset_count``.
     """
+    from ..data.content import content_type_from_igdb_category
     from ..data.db import get_manual_overrides
-    from ..data.igdb import fetch_igdb_game_names, igdb_credentials_configured
+    from ..data.igdb import fetch_igdb_game_records, igdb_credentials_configured
     from ..data.title_normalization import normalize_series_gap_title
 
     igdb_configured = igdb_credentials_configured()
 
     async with get_db() as db:
         rows = await db.execute_fetchall(
-            "SELECT id, name, igdb_id FROM games WHERE igdb_id IS NOT NULL ORDER BY id"
+            """SELECT id, name, igdb_id, content_type, parent_game_id,
+                      is_primary_library_item
+               FROM games WHERE igdb_id IS NOT NULL ORDER BY id"""
         )
     if limit is not None and limit > 0:
         rows = rows[:limit]
@@ -2428,38 +2532,96 @@ async def revalidate_igdb_matches(dry_run: bool = True, limit: int | None = None
         "mismatch_count": 0,
         "mismatches": [],
         "reset_count": 0,
+        "classification_reset_count": 0,
         "skipped_overridden": 0,
         "unresolved_igdb_ids": 0,
     }
     if not igdb_configured or not rows:
         return result
 
-    igdb_names = await fetch_igdb_game_names([row["igdb_id"] for row in rows])
+    igdb_records = await fetch_igdb_game_records([row["igdb_id"] for row in rows])
+
+    def _expected_content_type(record: dict) -> str:
+        """content_type the bad record's classification path would have written."""
+        if record.get("version_parent_igdb_id") or record.get("version_parent_name"):
+            return "edition"
+        category = record.get("category")
+        if category is None:
+            category = record.get("game_type")
+        return content_type_from_igdb_category(category)
+
+    async def _classification_attributable(db, row, record: dict) -> bool:
+        """Whether the stored classification plausibly came from the bad match."""
+        stored_default = (
+            (row["content_type"] or "base_game") == "base_game"
+            and row["parent_game_id"] is None
+            and bool(row["is_primary_library_item"])
+        )
+        if stored_default:
+            return False
+        if row["parent_game_id"] is not None:
+            parent = await db.execute_fetchone(
+                "SELECT igdb_id, name FROM games WHERE id = ?",
+                (row["parent_game_id"],),
+            )
+            if parent is not None:
+                record_parent_ids = {
+                    record.get("parent_igdb_id"),
+                    record.get("version_parent_igdb_id"),
+                } - {None}
+                if parent["igdb_id"] in record_parent_ids:
+                    return True
+                record_parent_names = {
+                    name.casefold()
+                    for name in (
+                        record.get("parent_name"),
+                        record.get("version_parent_name"),
+                    )
+                    if name
+                }
+                if (parent["name"] or "").casefold() in record_parent_names:
+                    return True
+        expected = _expected_content_type(record)
+        return expected != "base_game" and row["content_type"] == expected
 
     mismatches: list[dict] = []
     skipped_overridden = 0
     unresolved = 0
+    classification_resets: list[int] = []
     async with get_db() as db:
         for row in rows:
-            igdb_name = igdb_names.get(row["igdb_id"])
-            if igdb_name is None:
+            record = igdb_records.get(row["igdb_id"])
+            if record is None:
                 # IGDB no longer returns this id (deleted/merged upstream) —
                 # can't validate the name, so don't touch the row.
                 unresolved += 1
                 continue
+            igdb_name = record["name"]
             if normalize_series_gap_title(row["name"]) == normalize_series_gap_title(
                 igdb_name
             ):
                 continue
-            if "igdb_id" in await get_manual_overrides(db, row["id"]):
+            overrides = await get_manual_overrides(db, row["id"])
+            if "igdb_id" in overrides:
                 skipped_overridden += 1
                 continue
+            classification_pinned = bool(
+                {"content_type", "parent_game_id", "is_primary_library_item"}
+                & set(overrides)
+            )
+            reset_classification = (
+                not classification_pinned
+                and await _classification_attributable(db, row, record)
+            )
+            if reset_classification:
+                classification_resets.append(row["id"])
             mismatches.append(
                 {
                     "game_id": row["id"],
                     "name": row["name"],
                     "igdb_id": row["igdb_id"],
                     "igdb_name": igdb_name,
+                    "classification_reset": reset_classification,
                 }
             )
 
@@ -2479,6 +2641,15 @@ async def revalidate_igdb_matches(dry_run: bool = True, limit: int | None = None
                     "DELETE FROM game_series_membership WHERE game_id = ?",
                     (mismatch["game_id"],),
                 )
+                if mismatch["classification_reset"]:
+                    await db.execute(
+                        """UPDATE games
+                           SET content_type = 'base_game',
+                               parent_game_id = NULL,
+                               is_primary_library_item = 1
+                           WHERE id = ?""",
+                        (mismatch["game_id"],),
+                    )
             await db.commit()
             reset_count = len(mismatches)
 
@@ -2488,6 +2659,9 @@ async def revalidate_igdb_matches(dry_run: bool = True, limit: int | None = None
             "mismatch_count": len(mismatches),
             "mismatches": mismatches,
             "reset_count": reset_count,
+            "classification_reset_count": (
+                len(classification_resets) if not dry_run else 0
+            ),
             "skipped_overridden": skipped_overridden,
             "unresolved_igdb_ids": unresolved,
         }
