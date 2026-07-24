@@ -16,6 +16,7 @@ from ..data.db import (
     apply_manual_platform_fields,
     clear_fulfilled_wishlist_entries,
     delete_nintendo_playtime_baseline,
+    edition_hides_owned_game,
     fts_ready,
     get_db,
     get_game_by_identifier,
@@ -666,6 +667,25 @@ async def update_game(
                 "merge_games instead; if the nesting is genuinely intended, "
                 "give the parent an ownership row first (add_game_to_platform)."
             )
+        # Edition-ownership guard (same invariant the classifiers enforce,
+        # ownership-keyed): an owned edition IS the game's ownership record,
+        # so demoting it under an unowned parent hides an owned game. Raised
+        # here so the human sees why and picks merge_games instead.
+        if final_content_type == "edition":
+            async with get_db() as db:
+                edition_conflict = await edition_hides_owned_game(
+                    db, resolved_id, parent_row["id"]
+                )
+            if edition_conflict:
+                raise ToolError(
+                    f"Refusing to nest owned '{row['name']}' as an edition of "
+                    f"'{parent_row['name']}', which is owned nowhere — an owned "
+                    "edition is the game's ownership record, and nesting it "
+                    "would hide the game and leave the parent a false orphan. "
+                    "Consolidate with merge_games "
+                    f"(source_game_id={parent_row['id']}, "
+                    f"target_game_id={resolved_id}) instead."
+                )
         fields["parent_game_id"] = parent_row["id"]
 
     if not fields and not clear:

@@ -725,11 +725,17 @@ async def merge_games(
 
     Transfers all platform ownership rows (re-pointing or merging into an
     existing target platform), platform identifiers, enrichment, ratings, series
-    memberships, and game aliases from source to target in a single atomic
-    transaction. When both games own the same platform, identifiers are
-    re-pointed to the target row, playtime is set to the higher of the two
-    values, and the source platform row is deleted. Ratings for the same source
-    are kept on the target if already present; otherwise they are moved.
+    memberships, game aliases, play history, wishlist entries, and cached price
+    rows from source to target in a single atomic transaction. When both games
+    own the same platform, identifiers are re-pointed to the target row,
+    playtime is set to the higher of the two values, and the source platform
+    row is deleted. Ratings for the same source are kept on the target if
+    already present; otherwise they are moved. A source wishlist entry whose
+    platform the merged target owns is dropped as fulfilled; a price row the
+    target already caches for the same platform+shop is dropped (target wins).
+    Children nested under the source are re-pointed at the target, and a nested
+    target that absorbs its own parent (or inherits children) is promoted to a
+    primary base game — the remediation path for phantom edition parents.
 
     Use this to consolidate PSN/localized duplicate rows that were ingested
     before the English title resolver existed. After merging, the source
@@ -977,6 +983,117 @@ async def merge_games(
                 "DELETE FROM play_history WHERE game_id = ?", (source_game_id,)
             )
 
+        # game_wishlist / game_prices — both FK games(id) ON DELETE CASCADE, so
+        # the source-row DELETE below would silently destroy them (observed in
+        # prod: a merge preview reported every field empty while delete_game's
+        # preview counted 1 wishlist entry + 1 price row on the same id).
+        # Transfer to the target, target's row winning a unique-key collision;
+        # a source wishlist entry whose platform the merged target OWNS is
+        # fulfilled (what clear_fulfilled_wishlist_entries would do after the
+        # next sync) and is dropped rather than transferred.
+        source_wishlist = await db.execute_fetchall(
+            "SELECT id, platform FROM game_wishlist WHERE game_id = ?",
+            (source_game_id,),
+        )
+        wishlist_entries_transferred = 0
+        wishlist_entries_dropped = 0
+        for w in source_wishlist:
+            platform = w["platform"]
+            # In the wet run source platforms were already re-pointed above, so
+            # the SQL check sees them; the source_platforms fallback keeps the
+            # dry-run preview faithful to that outcome.
+            fulfilled = await db.execute_fetchone(
+                """SELECT 1 FROM game_platforms
+                    WHERE game_id = ? AND platform = ? AND owned = 1""",
+                (target_game_id, platform),
+            ) is not None or any(
+                sp["platform"] == platform and sp["owned"] for sp in source_platforms
+            )
+            target_has = await db.execute_fetchone(
+                "SELECT 1 FROM game_wishlist WHERE game_id = ? AND platform = ?",
+                (target_game_id, platform),
+            )
+            if fulfilled or target_has is not None:
+                wishlist_entries_dropped += 1
+                # No explicit DELETE needed: the source-row cascade removes it.
+            else:
+                if not dry_run:
+                    await db.execute(
+                        "UPDATE game_wishlist SET game_id = ? WHERE id = ?",
+                        (target_game_id, w["id"]),
+                    )
+                wishlist_entries_transferred += 1
+
+        source_prices = await db.execute_fetchall(
+            "SELECT id, platform, shop FROM game_prices WHERE game_id = ?",
+            (source_game_id,),
+        )
+        price_rows_transferred = 0
+        price_rows_dropped = 0
+        for p in source_prices:
+            target_has = await db.execute_fetchone(
+                "SELECT 1 FROM game_prices WHERE game_id = ? AND platform = ? AND shop = ?",
+                (target_game_id, p["platform"], p["shop"]),
+            )
+            if target_has is None:
+                if not dry_run:
+                    await db.execute(
+                        "UPDATE game_prices SET game_id = ? WHERE id = ?",
+                        (target_game_id, p["id"]),
+                    )
+                price_rows_transferred += 1
+            else:
+                # Target already caches this platform+shop price; keep it and
+                # let the source's row cascade away (it's a cache, not history).
+                price_rows_dropped += 1
+
+        # Nested children — games.parent_game_id is ON DELETE SET NULL, so the
+        # source DELETE would strand its children parentless (dropping them into
+        # detect_misclassified_dlc's needs_parent bucket). Re-point them at the
+        # target. A target that was itself the source's child (merging a phantom
+        # parent into its owned edition row) gets its parent cleared, and a
+        # nested target that absorbs its parent or inherits children is promoted
+        # to a primary base game — a parent must stay primary (ADR 0002), and a
+        # nested row left with no parent would be invisible to every rollup.
+        child_rows = await db.execute_fetchall(
+            "SELECT id FROM games WHERE parent_game_id = ?", (source_game_id,)
+        )
+        children_reparented = sum(
+            1 for c in child_rows if c["id"] != target_game_id
+        )
+        target_was_child = any(c["id"] == target_game_id for c in child_rows)
+        target_promoted_to_primary = False
+        if children_reparented or target_was_child:
+            target_state = await db.execute_fetchone(
+                "SELECT is_primary_library_item FROM games WHERE id = ?",
+                (target_game_id,),
+            )
+            target_promoted_to_primary = bool(
+                target_state is not None
+                and not target_state["is_primary_library_item"]
+            )
+        if not dry_run:
+            if target_was_child:
+                await db.execute(
+                    "UPDATE games SET parent_game_id = NULL WHERE id = ?",
+                    (target_game_id,),
+                )
+            if children_reparented:
+                await db.execute(
+                    "UPDATE games SET parent_game_id = ? "
+                    "WHERE parent_game_id = ? AND id != ?",
+                    (target_game_id, source_game_id, target_game_id),
+                )
+            if target_promoted_to_primary:
+                await db.execute(
+                    """UPDATE games
+                          SET content_type = 'base_game',
+                              is_primary_library_item = 1,
+                              parent_game_id = NULL
+                        WHERE id = ?""",
+                    (target_game_id,),
+                )
+
         if not dry_run:
             await db.execute("DELETE FROM game_aliases WHERE game_id = ?", (source_game_id,))
             await db.execute("DELETE FROM games WHERE id = ?", (source_game_id,))
@@ -1001,6 +1118,12 @@ async def merge_games(
         "series_memberships_transferred": series_transferred,
         "aliases_transferred": aliases_transferred,
         "play_history_rows_transferred": play_history_rows_transferred,
+        "wishlist_entries_transferred": wishlist_entries_transferred,
+        "wishlist_entries_dropped": wishlist_entries_dropped,
+        "price_rows_transferred": price_rows_transferred,
+        "price_rows_dropped": price_rows_dropped,
+        "children_reparented": children_reparented,
+        "target_promoted_to_primary": target_promoted_to_primary,
         "source_deleted": not dry_run,
     }
 
@@ -1686,6 +1809,17 @@ async def detect_orphan_games() -> dict:
       false positive would silently destroy a game row and its ratings/series
       links).
 
+    A third shape is reported separately, NOT as an orphan: a ``phantom_parent``
+    — zero ownership and zero wishlist, but other rows nest under it (typically
+    the empty base-game shell a wrong edition classification minted while the
+    OWNED edition row sat nested beneath it). These are not deletable
+    (``delete_game`` refuses parents by design) and deleting one would discard
+    a row that represents an owned game. Remediate by merging
+    (``merge_games(source_game_id=<phantom>, target_game_id=<owned child>)``,
+    which re-points siblings and promotes the child) or by reclassifying the
+    child via ``update_game``; ``detect_misclassified_dlc`` surfaces the same
+    pairs with suggested updates.
+
     CAUTION — an "orphan" can be a RETIRED STEAM APP THE ACCOUNT STILL OWNS:
     GetOwnedGames omits some delisted apps, so the game never got a platform
     row while its games row survived (observed in prod: Burnout Paradise,
@@ -1704,7 +1838,14 @@ async def detect_orphan_games() -> dict:
 
     async with get_db() as db:
         orphan_rows = await db.execute_fetchall(
-            """SELECT g.id AS game_id, g.name, g.igdb_id
+            """SELECT g.id AS game_id, g.name, g.igdb_id,
+                      (SELECT COUNT(*) FROM games c WHERE c.parent_game_id = g.id)
+                          AS child_count,
+                      (SELECT COUNT(*) FROM games c
+                        WHERE c.parent_game_id = g.id
+                          AND EXISTS (SELECT 1 FROM game_platforms gp
+                                      WHERE gp.game_id = c.id AND gp.owned = 1))
+                          AS owned_child_count
                FROM games g
                WHERE g.is_primary_library_item = 1
                  AND NOT EXISTS (SELECT 1 FROM game_platforms gp WHERE gp.game_id = g.id)
@@ -1719,18 +1860,38 @@ async def detect_orphan_games() -> dict:
                  AND EXISTS (SELECT 1 FROM game_wishlist w WHERE w.game_id = g.id)"""
         )
 
-    orphans = [
-        {
-            "game_id": row["game_id"],
-            "name": row["name"],
-            "igdb_id": row["igdb_id"],
-        }
-        for row in orphan_rows
-    ]
+    orphans = []
+    phantom_parents = []
+    for row in orphan_rows:
+        if row["child_count"]:
+            phantom_parents.append(
+                {
+                    "game_id": row["game_id"],
+                    "name": row["name"],
+                    "igdb_id": row["igdb_id"],
+                    "child_count": row["child_count"],
+                    "owned_child_count": row["owned_child_count"],
+                    "remediation": (
+                        "not deletable (parent of nested content) — merge into "
+                        "the owned child (merge_games) or reclassify the child "
+                        "(update_game); see detect_misclassified_dlc"
+                    ),
+                }
+            )
+        else:
+            orphans.append(
+                {
+                    "game_id": row["game_id"],
+                    "name": row["name"],
+                    "igdb_id": row["igdb_id"],
+                }
+            )
     remaining_raw = await get_meta(AUDIT_REMAINING_META_KEY)
     return {
         "orphans": orphans,
         "orphan_count": len(orphans),
+        "phantom_parents": phantom_parents,
+        "phantom_parent_count": len(phantom_parents),
         "wishlist_only_count": wishlist_only_row["c"] if wishlist_only_row else 0,
         "license_audit": {
             "configured": is_license_audit_configured(),
@@ -1994,11 +2155,15 @@ async def detect_misclassified_dlc(
       primary game, the suggestion sets parent_game_id; otherwise it is null.
     * wrong_parent_suspect — a nested row whose parent link looks wrong: the
       child holds a store identifier + real playtime while the parent holds
-      neither (the shape today's substance guard refuses), or the child's name
+      neither (the shape today's substance guard refuses), the child's name
       is a proper prefix of the parent's and the two conflict on sequel
-      identity ("Mass Effect" nested under "Mass Effect 3"). The residue of
-      pre-gate IGDB fuzzy matching. Suggests content_type base_game
-      (update_game promotes the child and detaches the parent).
+      identity ("Mass Effect" nested under "Mass Effect 3"), or the child is
+      an OWNED edition row while nothing owns the parent (the shell shape
+      edition_hides_owned_game now refuses — an owned edition is the game's
+      ownership record). The residue of pre-gate IGDB fuzzy matching.
+      Suggests content_type base_game (update_game promotes the child and
+      detaches the parent); for the owned-edition shape merge_games
+      (source=parent, target=child) folds the shell in instead.
     * purchase_minted_suspect — a primary base_game with no store identifiers, a
       purchase_source on an owned platform row, no igdb_id, and either an
       addon-ish name or a resolvable parent — the phantom shape a purchase import
@@ -2025,6 +2190,7 @@ async def detect_misclassified_dlc(
     """
     from ..data.content import classify_steam_app_type, parent_name_candidates
     from ..data.db import (
+        edition_hides_owned_game,
         get_game_substance,
         nesting_substance_conflict,
         titles_conflict_on_identity,
@@ -2209,6 +2375,13 @@ async def detect_misclassified_dlc(
     #     child-is-prefix direction (legit DLC is the parent's name PLUS a
     #     suffix, never a prefix of it) and to children without an addon-ish
     #     name, so "Borderlands 3: Season Pass 2" stays unflagged.
+    #   * owned edition under an unowned parent — the child is an 'edition'
+    #     row with real ownership while nothing owns the parent (the shell
+    #     shape edition_hides_owned_game now refuses to write; stored rows
+    #     predate the guard). The owned edition IS the game — if the parent
+    #     is the same game, merge_games(source=parent, target=child) folds
+    #     the shell in; the suggested promotion works too, leaving the shell
+    #     for detect_orphan_games.
     # Suggests content_type=base_game, which promotes the child and detaches
     # the wrong parent in one update_game call.
     async with get_db() as db:
@@ -2232,6 +2405,11 @@ async def detect_misclassified_dlc(
             substance_conflict = await nesting_substance_conflict(
                 db, row["game_id"], row["parent_game_id"]
             )
+            edition_ownership_conflict = row["content_type"] == "edition" and (
+                await edition_hides_owned_game(
+                    db, row["game_id"], row["parent_game_id"]
+                )
+            )
         child_norm = normalize_search_text(row["name"] or "")
         parent_norm = normalize_search_text(row["parent_name"] or "")
         sibling_shape = bool(
@@ -2241,7 +2419,7 @@ async def detect_misclassified_dlc(
             and titles_conflict_on_identity(row["name"] or "", row["parent_name"] or "")
             and match_addon_name(row["name"]) is None
         )
-        if not substance_conflict and not sibling_shape:
+        if not substance_conflict and not sibling_shape and not edition_ownership_conflict:
             continue
         wrong_parent_count += 1
         candidates.append(
@@ -2255,6 +2433,7 @@ async def detect_misclassified_dlc(
                     "parent_name": row["parent_name"],
                     "substance_conflict": substance_conflict,
                     "sibling_identity_conflict": sibling_shape,
+                    "edition_ownership_conflict": edition_ownership_conflict,
                 },
                 "suggested_update": {
                     "game_id": row["game_id"],

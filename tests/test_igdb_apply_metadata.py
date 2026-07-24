@@ -339,6 +339,221 @@ class ApplyIgdbMetadataSubstanceGuardTests(ToolDBTestCase):
         self.assertEqual(after["is_primary_library_item"], 0)
 
 
+class ApplyIgdbMetadataEditionOwnershipGuardTests(ToolDBTestCase):
+    """An edition of a game the user OWNS is the ownership record itself.
+
+    The substance guard is playtime-keyed, so owned-but-UNPLAYED Steam edition
+    SKUs ("Burnout Paradise: The Ultimate Box", "Crysis 2 Maximum Edition")
+    slipped through it and got demoted under freshly minted, unowned parents —
+    hiding 17 owned games from every rollup and surfacing the shells as false
+    orphans. The edition-ownership guard closes that gap.
+    """
+
+    async def _owned_unplayed(self, name: str, appid: int) -> int:
+        game_id = await seed_game(name)
+        gpid = await db_module.upsert_game_platform(
+            game_id, "steam", playtime_minutes=0, owned=1
+        )
+        await db_module.upsert_game_platform_identifier(gpid, "steam_appid", appid)
+        return game_id
+
+    async def test_owned_unplayed_edition_not_demoted_under_minted_parent(self) -> None:
+        real_id = await self._owned_unplayed("Burnout Paradise: The Ultimate Box", 24740)
+
+        await igdb._apply_igdb_metadata(
+            real_id,
+            igdb.IGDBGame(
+                igdb_id=8000,
+                name="Burnout Paradise: The Ultimate Box",
+                category=0,
+                first_release_date=None,
+                content_type="edition",
+                parent_name="Burnout Paradise",
+                is_primary_library_item=False,
+            ),
+        )
+
+        after = await _read_classification(real_id)
+        self.assertEqual(after["content_type"], "base_game")
+        self.assertEqual(after["is_primary_library_item"], 1)
+        self.assertIsNone(after["parent_game_id"])
+        # The refused write must not mint the phantom parent either.
+        async with db_module.get_db() as db:
+            minted = await db.execute_fetchone(
+                "SELECT id FROM games WHERE name = ?", ("Burnout Paradise",)
+            )
+        self.assertIsNone(minted)
+
+    async def test_owned_unplayed_edition_not_demoted_under_unowned_parent(self) -> None:
+        shell_id = await seed_game("Pathfinder: Wrath of the Righteous")
+        real_id = await self._owned_unplayed(
+            "Pathfinder: WotR - Enhanced Edition", 1184370
+        )
+
+        await igdb._apply_igdb_metadata(
+            real_id,
+            igdb.IGDBGame(
+                igdb_id=8001,
+                name="Pathfinder: WotR - Enhanced Edition",
+                category=0,
+                first_release_date=None,
+                content_type="edition",
+                parent_name="Pathfinder: Wrath of the Righteous",
+                is_primary_library_item=False,
+            ),
+        )
+
+        after = await _read_classification(real_id)
+        self.assertEqual(after["content_type"], "base_game")
+        self.assertEqual(after["is_primary_library_item"], 1)
+        self.assertIsNone(after["parent_game_id"])
+        _ = shell_id
+
+    async def test_owned_edition_still_nests_under_owned_parent(self) -> None:
+        parent_id = await self._owned_unplayed("Fallout: New Vegas", 22380)
+        child_id = await self._owned_unplayed("Fallout New Vegas Ultimate Edition", 22490)
+
+        await igdb._apply_igdb_metadata(
+            child_id,
+            igdb.IGDBGame(
+                igdb_id=8002,
+                name="Fallout New Vegas Ultimate Edition",
+                category=0,
+                first_release_date=None,
+                content_type="edition",
+                parent_name="Fallout: New Vegas",
+                is_primary_library_item=False,
+            ),
+        )
+
+        after = await _read_classification(child_id)
+        self.assertEqual(after["content_type"], "edition")
+        self.assertEqual(after["parent_game_id"], parent_id)
+        self.assertEqual(after["is_primary_library_item"], 0)
+
+    async def test_unowned_edition_row_still_nests(self) -> None:
+        # Guard is ownership-scoped: an unowned edition row (e.g. minted from a
+        # wishlist or catalog source) may still nest under an unowned parent.
+        parent_id = await seed_game("Dying Light 2 Stay Human")
+        child_id = await seed_game("Dying Light 2: Reloaded Edition")
+
+        await igdb._apply_igdb_metadata(
+            child_id,
+            igdb.IGDBGame(
+                igdb_id=8003,
+                name="Dying Light 2: Reloaded Edition",
+                category=0,
+                first_release_date=None,
+                content_type="edition",
+                parent_name="Dying Light 2 Stay Human",
+                is_primary_library_item=False,
+            ),
+        )
+
+        after = await _read_classification(child_id)
+        self.assertEqual(after["content_type"], "edition")
+        self.assertEqual(after["parent_game_id"], parent_id)
+        self.assertEqual(after["is_primary_library_item"], 0)
+
+
+class ApplyIgdbMetadataPrimaryParentTests(ToolDBTestCase):
+    """A primary verdict must neither link nor mint a parent (and clears one).
+
+    IGDB records for remakes/standalone expansions carry a parent_game of the
+    original title. Writing that parent onto a primary row violated the
+    "a primary library item must not keep a parent" invariant and minted an
+    unowned phantom — "Sid Meier's Colonization" (1994) minted above the
+    primary "Sid Meier's Civilization IV: Colonization" (2008).
+    """
+
+    async def test_primary_verdict_does_not_mint_or_link_igdb_parent(self) -> None:
+        game_id = await seed_game("Sid Meier's Civilization IV: Colonization")
+
+        await igdb._apply_igdb_metadata(
+            game_id,
+            igdb.IGDBGame(
+                igdb_id=9000,
+                name="Sid Meier's Civilization IV: Colonization",
+                category=4,
+                first_release_date=None,
+                content_type="standalone_expansion",
+                parent_name="Sid Meier's Colonization",
+                is_primary_library_item=True,
+            ),
+        )
+
+        after = await _read_classification(game_id)
+        self.assertEqual(after["content_type"], "standalone_expansion")
+        self.assertEqual(after["is_primary_library_item"], 1)
+        self.assertIsNone(after["parent_game_id"])
+        async with db_module.get_db() as db:
+            minted = await db.execute_fetchone(
+                "SELECT id FROM games WHERE name = ?", ("Sid Meier's Colonization",)
+            )
+        self.assertIsNone(minted)
+
+    async def test_primary_verdict_clears_wrong_stored_parent(self) -> None:
+        # Retroactive heal: a re-fetch with a primary verdict detaches the
+        # wrong parent an earlier pass wrote, instead of leaving the row
+        # chained to an unrelated game.
+        wrong_parent = await seed_game("Sid Meier's Colonization")
+        game_id = await seed_game(
+            "Sid Meier's Civilization IV: Colonization",
+            content_type="standalone_expansion",
+            parent_game_id=wrong_parent,
+            is_primary_library_item=1,
+        )
+
+        await igdb._apply_igdb_metadata(
+            game_id,
+            igdb.IGDBGame(
+                igdb_id=9001,
+                name="Sid Meier's Civilization IV: Colonization",
+                category=4,
+                first_release_date=None,
+                content_type="standalone_expansion",
+                parent_name="Sid Meier's Colonization",
+                is_primary_library_item=True,
+            ),
+        )
+
+        after = await _read_classification(game_id)
+        self.assertEqual(after["content_type"], "standalone_expansion")
+        self.assertIsNone(after["parent_game_id"])
+        self.assertEqual(after["is_primary_library_item"], 1)
+
+    async def test_pinned_parent_survives_primary_verdict(self) -> None:
+        # A hand-pinned parent link is never cleared by an enrichment pass.
+        parent_id = await seed_game("Some Base Game")
+        game_id = await seed_game(
+            "Some Remaster",
+            content_type="remaster",
+            parent_game_id=parent_id,
+            is_primary_library_item=1,
+        )
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET manual_overrides = ? WHERE id = ?",
+                (json.dumps(["parent_game_id"]), game_id),
+            )
+            await db.commit()
+
+        await igdb._apply_igdb_metadata(
+            game_id,
+            igdb.IGDBGame(
+                igdb_id=9002,
+                name="Some Remaster",
+                category=9,
+                first_release_date=None,
+                content_type="remaster",
+                is_primary_library_item=True,
+            ),
+        )
+
+        after = await _read_classification(game_id)
+        self.assertEqual(after["parent_game_id"], parent_id)
+
+
 class UpsertGameSelfParentTests(ToolDBTestCase):
     async def test_upsert_game_drops_self_referencing_parent(self) -> None:
         game_id = await seed_game("Some Edition")

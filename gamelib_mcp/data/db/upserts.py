@@ -15,6 +15,7 @@ from . import (
 )
 from ..content import (
     CONTENT_BASE_GAME,
+    CONTENT_EDITION,
     NESTED_CONTENT_TYPES,
     ContentClassification,
     derive_is_primary,
@@ -405,6 +406,25 @@ async def apply_content_classification(
                 )
                 return False
 
+        # Edition-ownership guard (mirrors igdb.py::_apply_igdb_metadata — keep
+        # in sync): an OWNED row is never demoted to an edition of a parent
+        # nobody owns; the edition IS the ownership record, and hiding it makes
+        # the empty parent a false orphan. Ownership-keyed, unlike the
+        # playtime-keyed substance guard above, so owned-but-unplayed editions
+        # are protected too.
+        if classification.content_type == CONTENT_EDITION:
+            from .queries import edition_hides_owned_game
+
+            if await edition_hides_owned_game(db, game_id, resolved_parent):
+                logger.info(
+                    "content classification (%s) for game %s skipped: demoting "
+                    "an owned row to an edition of unowned parent %s",
+                    source,
+                    game_id,
+                    resolved_parent,
+                )
+                return False
+
         overrides = await get_manual_overrides(db, game_id)
 
         # Default-clobber guard — mirrors igdb.py's new_is_default/stored_is_default.
@@ -423,15 +443,28 @@ async def apply_content_classification(
         if not new_is_default or stored_is_default:
             if "content_type" not in overrides:
                 updates["content_type"] = classification.content_type
-            if resolved_parent is not None and "parent_game_id" not in overrides:
-                updates["parent_game_id"] = resolved_parent
+            # Derive everything below from the content_type that will ACTUALLY
+            # be stored: when the content_type write was skipped (pinned by a
+            # manual override), deriving from the incoming classification
+            # would desync the pair (e.g. a pinned 'dlc' row flipped primary
+            # by a later remaster verdict).
+            final_content_type = updates.get("content_type", row["content_type"])
+            if "parent_game_id" not in overrides:
+                if (
+                    resolved_parent is not None
+                    and final_content_type in NESTED_CONTENT_TYPES
+                ):
+                    updates["parent_game_id"] = resolved_parent
+                elif (
+                    derive_is_primary(final_content_type)
+                    and row["parent_game_id"] is not None
+                ):
+                    # A primary library item must not keep a parent (the
+                    # update_game promotion invariant): a non-default primary
+                    # verdict clears the leftover link a wrong earlier nested
+                    # classification wrote. Mirrored in _apply_igdb_metadata.
+                    updates["parent_game_id"] = None
             if "is_primary_library_item" not in overrides:
-                # Derive is_primary from the content_type that will ACTUALLY be
-                # stored: when the content_type write was skipped (pinned by a
-                # manual override), deriving from the incoming classification
-                # would desync the pair (e.g. a pinned 'dlc' row flipped primary
-                # by a later remaster verdict).
-                final_content_type = updates.get("content_type", row["content_type"])
                 updates["is_primary_library_item"] = int(
                     derive_is_primary(final_content_type)
                 )

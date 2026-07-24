@@ -726,11 +726,17 @@ async def detect_orphan_games() -> DetectOrphanGamesResponse:
     game_platforms nor a game_wishlist row — e.g. a wishlist entry later
     removed upstream without ever being owned). Read-only: only true orphans
     are listed as candidates for review; wishlist_only_count reports the
-    (legitimate) other shape without listing them. Returns orphans (id, name,
-    igdb_id) plus orphan_count and wishlist_only_count. CAUTION: an "orphan"
-    can be a retired Steam app the account still owns (GetOwnedGames omits
-    some delisted apps) — run audit_steam_licenses before deleting anything
-    here; license_audit in the response says whether that audit has caught up.
+    (legitimate) other shape without listing them. Rows that other rows nest
+    under are reported separately as phantom_parents (with child_count and
+    owned_child_count), NOT as orphans: they are never deletable (delete_game
+    refuses parents) and usually represent an owned game whose ownership sits
+    on a nested edition child — remediate with merge_games or update_game, not
+    delete_game. Returns orphans (id, name, igdb_id), orphan_count,
+    phantom_parents, phantom_parent_count, and wishlist_only_count. CAUTION:
+    an "orphan" can be a retired Steam app the account still owns
+    (GetOwnedGames omits some delisted apps) — run audit_steam_licenses before
+    deleting anything here; license_audit in the response says whether that
+    audit has caught up.
     """
     from .tools.admin import detect_orphan_games as _detect_orphans
     return await _detect_orphans()
@@ -834,10 +840,13 @@ async def detect_misclassified_dlc(
       primary game; suggested_update is null when no parent can be guessed.
     - wrong_parent_suspect: a nested row parented under the WRONG game — the
       child has a store identifier + real playtime while its parent has
-      neither, or the child's name is a proper prefix of the parent's with a
-      sequel-identity conflict ("Mass Effect" under "Mass Effect 3"). Legacy
-      residue of pre-gate IGDB fuzzy matching. Suggests content_type
-      base_game (promotes the child, detaches the parent).
+      neither, the child's name is a proper prefix of the parent's with a
+      sequel-identity conflict ("Mass Effect" under "Mass Effect 3"), or the
+      child is an OWNED edition row while nothing owns the parent (an owned
+      edition IS the game's ownership record — merge_games(source=parent,
+      target=child) folds the shell in). Legacy residue of pre-gate IGDB
+      fuzzy matching. Suggests content_type base_game (promotes the child,
+      detaches the parent).
     - purchase_minted_suspect: a primary base_game with no store identifiers, a
       purchase_source on an owned platform, no igdb_id, and either an addon-ish
       name or a resolvable parent — the phantom shape a purchase import mints.
@@ -1673,15 +1682,22 @@ async def merge_games(
     Use this to consolidate duplicate library entries — for example a PSN
     localized-name row that was ingested before the English title resolver
     existed, alongside the correct English row. All platform ownership,
-    identifiers, enrichment, ratings, series memberships, and aliases are
-    transferred from source to target in one atomic transaction, then the
-    source game row is deleted.
+    identifiers, enrichment, ratings, series memberships, aliases, play
+    history, wishlist entries, and cached price rows are transferred from
+    source to target in one atomic transaction, then the source game row is
+    deleted. Children nested under the source are re-pointed at the target,
+    and a nested target that absorbs its own parent (or inherits children) is
+    promoted to a primary base game — so merging a phantom edition parent into
+    its owned edition row leaves one visible, owned game.
 
     When both games own the same platform the source playtime and last-played
     are preserved if they are greater than the target's; platform identifiers
     are re-pointed to the target row. Ratings that exist on both games keep
-    the target's value. Pass dry_run=True to preview what would change without
-    writing anything. Returns a summary dict with counts for each data type.
+    the target's value. A source wishlist entry is dropped when the merged
+    target owns that platform (fulfilled) or already has the entry; a price
+    row the target already caches for the same platform+shop keeps the
+    target's. Pass dry_run=True to preview what would change without writing
+    anything. Returns a summary dict with counts for each data type.
     """
     from .tools.admin import merge_games as _merge
     return await _merge(source_game_id, target_game_id, dry_run)

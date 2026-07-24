@@ -193,6 +193,34 @@ async def nesting_substance_conflict(
     return not parent["has_identifier"] and parent["playtime_minutes"] == 0
 
 
+async def edition_hides_owned_game(
+    db, child_game_id: int, parent_game_id: int | None
+) -> bool:
+    """True when an *edition* verdict would nest an OWNED row under a parent
+    with no ownership.
+
+    An edition of a game the user owns IS the ownership record ("Burnout
+    Paradise: The Ultimate Box", "Crysis 2 Maximum Edition"): demoting it under
+    a parent nobody owns hides an owned game from every primary rollup and
+    leaves the parent surfacing as a false orphan — the shape that made 17
+    owned Steam games invisible. Unlike nesting_substance_conflict this keys on
+    OWNERSHIP, not playtime, because an owned-but-unplayed edition is exactly
+    as real; it is scoped to edition verdicts so legitimately nested owned
+    content (a DLC owned without its base game, a soundtrack under a
+    wishlist-only parent) stays nestable. ``parent_game_id=None`` means the
+    parent does not exist yet and would be minted empty — always a conflict
+    for an owned child. A played/owned edition under an OWNED base game stays
+    nestable.
+    """
+    child = await get_game_substance(db, child_game_id)
+    if child["owned_platforms"] == 0:
+        return False
+    if parent_game_id is None:
+        return True
+    parent = await get_game_substance(db, parent_game_id)
+    return parent["owned_platforms"] == 0
+
+
 async def get_game_by_identifier(identifier_type: str, identifier_value: str) -> aiosqlite.Row | None:
     # Normalized the same way upsert_game_platform_identifier writes it (a
     # no-op for every identifier_type except nintendo_title_id), so callers
