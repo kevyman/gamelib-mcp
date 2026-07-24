@@ -539,6 +539,41 @@ class UpdateGameParentTests(ToolDBTestCase):
         )
         self.assertEqual(result["updated"]["parent_game_id"], parent)
 
+    async def test_nesting_owned_edition_under_unowned_parent_raises(self):
+        # Edition-ownership guard: an owned (even unplayed) edition IS the
+        # game's ownership record — hiding it behind a parent nobody owns is
+        # refused with a merge_games pointer.
+        shell = await seed_game("Burnout Paradise")
+        gid = await seed_game("Burnout Paradise: The Ultimate Box")
+        gpid = await add_platform(gid, "steam", playtime_minutes=0, owned=1)
+        await add_identifier(gpid, "steam_appid", 24740)
+
+        with self.assertRaisesRegex(ToolError, "owned nowhere"):
+            await platforms.update_game(
+                game_id=gid, content_type="edition", parent_game_id=shell
+            )
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT content_type, parent_game_id FROM games WHERE id = ?",
+                (gid,),
+            )
+        self.assertEqual(row["content_type"], "base_game")
+        self.assertIsNone(row["parent_game_id"])
+
+    async def test_nesting_owned_dlc_under_unowned_parent_still_allowed(self):
+        # The guard is edition-scoped: owning a DLC whose base game is not in
+        # the library (Epic giveaways) is a real shape that must stay nestable.
+        parent = await seed_game("Train Sim World 3")
+        gid = await seed_game("Train Sim World 3: Bakerloo Line")
+        gpid = await add_platform(gid, "epic", playtime_minutes=0, owned=1)
+        await add_identifier(gpid, "epic_artifact_id", "tsw3-bakerloo")
+
+        result = await platforms.update_game(
+            game_id=gid, content_type="dlc", parent_game_id=parent
+        )
+        self.assertEqual(result["updated"]["parent_game_id"], parent)
+
     async def test_parent_without_nested_content_type_on_base_game_raises(self):
         parent = await seed_game("Waiting Parent")
         gid = await seed_game("Still A Base Game")  # defaults to base_game

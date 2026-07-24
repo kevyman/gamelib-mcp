@@ -168,6 +168,14 @@ def classify_igdb_game(
 ) -> ContentClassification:
     override = classify_title_override(title)
     if override is not None:
+        # A primary override declares the title its own game — never inherit
+        # the IGDB record's parent linkage. IGDB hangs a parent on records the
+        # overrides exist to keep primary (e.g. "Sid Meier's Civilization IV:
+        # Colonization" carries the 1994 "Sid Meier's Colonization" as its
+        # parent), and inheriting it minted a phantom parent row and chained
+        # two distinct games together.
+        if override.is_primary_library_item:
+            return override
         return ContentClassification(
             content_type=override.content_type,
             is_primary_library_item=override.is_primary_library_item,

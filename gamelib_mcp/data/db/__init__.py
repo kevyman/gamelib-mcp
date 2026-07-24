@@ -2268,6 +2268,7 @@ from .queries import (  # noqa: E402
     set_meta_many,
     get_game_substance,
     nesting_substance_conflict,
+    edition_hides_owned_game,
     get_game_by_identifier,
     get_game_by_appid,
     get_game_by_igdb_id,

@@ -542,6 +542,181 @@ class NestingSubstanceGuardTests(ToolDBTestCase):
         self.assertTrue(wrote)
 
 
+class EditionOwnershipGuardTests(ToolDBTestCase):
+    """Owned edition rows are never demoted under unowned parents.
+
+    The substance guard above is playtime-keyed; owned-but-UNPLAYED edition
+    SKUs slipped through it and got hidden behind empty shell parents.
+    """
+
+    async def _owned_unplayed(self, name: str, appid: int) -> int:
+        from gamelib_mcp.data import db as db_module
+
+        game_id = await seed_game(name)
+        gpid = await db_module.upsert_game_platform(
+            game_id, "steam", playtime_minutes=0, owned=1
+        )
+        await db_module.upsert_game_platform_identifier(gpid, "steam_appid", appid)
+        return game_id
+
+    async def test_owned_unplayed_edition_refused_under_unowned_parent(self):
+        from gamelib_mcp.data.content import _nested
+        from gamelib_mcp.data.db import apply_content_classification
+
+        shell = await seed_game("Crysis 2")
+        real_id = await self._owned_unplayed("Crysis 2 Maximum Edition", 108800)
+
+        wrote = await apply_content_classification(
+            real_id, _nested(content.CONTENT_EDITION), source="test",
+            parent_game_id=shell,
+        )
+        self.assertFalse(wrote)
+        row = await _get_content_row(real_id)
+        self.assertEqual(row["content_type"], content.CONTENT_BASE_GAME)
+        self.assertEqual(row["is_primary_library_item"], 1)
+        self.assertIsNone(row["parent_game_id"])
+
+    async def test_owned_unplayed_edition_refused_parentless_demotion(self):
+        # No parent resolved at all: demoting the owned row to a parentless
+        # 'edition' would hide it from every view — refuse that too.
+        from gamelib_mcp.data.content import _nested
+        from gamelib_mcp.data.db import apply_content_classification
+
+        real_id = await self._owned_unplayed("Valkyria Chronicles 4 Complete Edition", 1489630)
+
+        wrote = await apply_content_classification(
+            real_id, _nested(content.CONTENT_EDITION), source="test"
+        )
+        self.assertFalse(wrote)
+        row = await _get_content_row(real_id)
+        self.assertEqual(row["content_type"], content.CONTENT_BASE_GAME)
+
+    async def test_owned_edition_nests_under_owned_parent(self):
+        from gamelib_mcp.data.content import _nested
+        from gamelib_mcp.data.db import apply_content_classification
+
+        parent_id = await self._owned_unplayed("Fallout: New Vegas", 22380)
+        child_id = await self._owned_unplayed("Fallout New Vegas Ultimate Edition", 22490)
+
+        wrote = await apply_content_classification(
+            child_id, _nested(content.CONTENT_EDITION), source="test",
+            parent_game_id=parent_id,
+        )
+        self.assertTrue(wrote)
+        row = await _get_content_row(child_id)
+        self.assertEqual(row["content_type"], content.CONTENT_EDITION)
+        self.assertEqual(row["parent_game_id"], parent_id)
+
+    async def test_unowned_edition_row_still_nests_under_unowned_parent(self):
+        from gamelib_mcp.data.content import _nested
+        from gamelib_mcp.data.db import apply_content_classification
+
+        parent_id = await seed_game("Dying Light 2 Stay Human")
+        child_id = await seed_game("Dying Light 2: Reloaded Edition")
+
+        wrote = await apply_content_classification(
+            child_id, _nested(content.CONTENT_EDITION), source="test",
+            parent_game_id=parent_id,
+        )
+        self.assertTrue(wrote)
+        row = await _get_content_row(child_id)
+        self.assertEqual(row["content_type"], content.CONTENT_EDITION)
+        self.assertEqual(row["parent_game_id"], parent_id)
+
+    async def test_owned_dlc_still_nests_under_unowned_parent(self):
+        # Guard is edition-scoped: owning a DLC without its base game is a real
+        # shape (Epic giveaways) and must stay nestable.
+        from gamelib_mcp.data.content import _nested
+        from gamelib_mcp.data.db import apply_content_classification
+
+        parent_id = await seed_game("Train Sim World 3")
+        child_id = await self._owned_unplayed("Train Sim World 3: Bakerloo Line", 999901)
+
+        wrote = await apply_content_classification(
+            child_id, _nested(content.CONTENT_DLC), source="test",
+            parent_game_id=parent_id,
+        )
+        self.assertTrue(wrote)
+        row = await _get_content_row(child_id)
+        self.assertEqual(row["content_type"], content.CONTENT_DLC)
+        self.assertEqual(row["parent_game_id"], parent_id)
+
+
+class PrimaryClassificationParentTests(ToolDBTestCase):
+    async def test_primary_classification_clears_stored_wrong_parent(self):
+        # A primary verdict detaches the parent link a wrong earlier nested
+        # classification wrote — primary items must not keep parents.
+        from gamelib_mcp.data.content import _primary
+        from gamelib_mcp.data.db import apply_content_classification
+
+        wrong_parent = await seed_game("Sid Meier's Colonization")
+        game_id = await seed_game(
+            "Sid Meier's Civilization IV: Colonization",
+            content_type=content.CONTENT_STANDALONE_EXPANSION,
+            parent_game_id=wrong_parent,
+            is_primary_library_item=1,
+        )
+
+        wrote = await apply_content_classification(
+            game_id, _primary(content.CONTENT_STANDALONE_EXPANSION), source="test"
+        )
+        self.assertTrue(wrote)
+        row = await _get_content_row(game_id)
+        self.assertEqual(row["content_type"], content.CONTENT_STANDALONE_EXPANSION)
+        self.assertIsNone(row["parent_game_id"])
+        self.assertEqual(row["is_primary_library_item"], 1)
+
+    async def test_parent_kwarg_ignored_for_primary_classification(self):
+        # A resolved parent handed alongside a primary verdict is dropped: the
+        # write must not produce the "primary row with a parent" contradiction.
+        from gamelib_mcp.data.content import _primary
+        from gamelib_mcp.data.db import apply_content_classification
+
+        other = await seed_game("Original Game")
+        game_id = await seed_game("Original Game Remake")
+
+        wrote = await apply_content_classification(
+            game_id, _primary(content.CONTENT_REMAKE), source="test",
+            parent_game_id=other,
+        )
+        self.assertTrue(wrote)
+        row = await _get_content_row(game_id)
+        self.assertEqual(row["content_type"], content.CONTENT_REMAKE)
+        self.assertIsNone(row["parent_game_id"])
+        self.assertEqual(row["is_primary_library_item"], 1)
+
+
+# --- classify_igdb_game: primary overrides drop inherited parents ---------------
+
+def test_primary_override_drops_igdb_parent_linkage():
+    # IGDB lists Civ IV: Colonization with the 1994 "Sid Meier's Colonization"
+    # as parent; the primary override must not inherit it (it minted a phantom
+    # parent row and chained two distinct games together).
+    result = content.classify_igdb_game(
+        title="Sid Meier's Civilization IV: Colonization",
+        category=4,
+        parent_name="Sid Meier's Colonization",
+        parent_igdb_id=4321,
+    )
+    assert result.content_type == content.CONTENT_STANDALONE_EXPANSION
+    assert result.is_primary_library_item is True
+    assert result.parent_name is None
+    assert result.parent_igdb_id is None
+
+
+def test_nested_override_still_inherits_igdb_parent_when_it_names_none():
+    # The inheritance exists for nested overrides without their own parent —
+    # that behavior must survive the primary-override fix.
+    result = content.classify_igdb_game(
+        title="Outlast: Whistleblower",
+        category=1,
+        parent_igdb_id=5678,
+    )
+    assert result.content_type == content.CONTENT_DLC
+    assert result.parent_name == "Outlast"
+    assert result.parent_igdb_id == 5678
+
+
 class UpsertGameDerivesPrimaryTests(ToolDBTestCase):
     async def test_content_type_without_flag_derives_is_primary(self):
         # A caller passing content_type alone must never produce the

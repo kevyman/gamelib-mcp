@@ -29,6 +29,7 @@ from .db import (
 )
 from .content import (
     CONTENT_DLC,
+    CONTENT_EDITION,
     CONTENT_EXPANSION,
     NESTED_CONTENT_TYPES,
     classify_igdb_game,
@@ -1084,10 +1085,16 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
     # guards below have decided the classification will actually be written —
     # minting up front left an orphan phantom row behind (no platforms, no
     # children pointing at it) every time the default-clobber or substance
-    # guard then dropped the classification write.
+    # guard then dropped the classification write. Gated on a NESTED verdict:
+    # a primary library item must not keep a parent (the update_game
+    # invariant), so a primary verdict that still carries an IGDB parent
+    # (remake/remaster/standalone-expansion records list their original) must
+    # neither resolve nor mint one — resolving it wrote a parent link onto a
+    # primary row and minted an unowned phantom ("Sid Meier's Colonization"
+    # 1994 minted above the primary Civ IV: Colonization).
     parent_game_id: int | None = None
     mint_parent_name: str | None = None
-    if not nesting_blocked:
+    if not nesting_blocked and igdb_game.content_type in NESTED_CONTENT_TYPES:
         if igdb_game.parent_igdb_id is not None:
             parent = await get_game_by_igdb_id(igdb_game.parent_igdb_id)
             if parent is not None:
@@ -1194,10 +1201,22 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
                 conflict = bool(
                     substance["has_identifier"] and substance["playtime_minutes"] > 0
                 )
+            # Edition-ownership guard — an edition of a game the user OWNS is
+            # the ownership record itself; nesting it under a parent nobody
+            # owns (or one about to be minted empty) hides an owned game from
+            # every rollup and leaves the parent as a false orphan. Keyed on
+            # ownership, not playtime — owned-but-unplayed editions were
+            # exactly the rows the substance guard above let through.
+            if not conflict and igdb_game.content_type == CONTENT_EDITION:
+                from .db import edition_hides_owned_game
+
+                conflict = await edition_hides_owned_game(
+                    db, game_id, parent_game_id
+                )
             if conflict:
                 logger.info(
-                    "IGDB classification for game %s skipped: nesting a row "
-                    "with identifier+playtime under empty parent %s",
+                    "IGDB classification for game %s skipped: nesting an "
+                    "owned/played row under unowned parent %s",
                     game_id,
                     parent_game_id if parent_game_id is not None else mint_parent_name,
                 )
@@ -1219,35 +1238,58 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
                     game_id,
                 )
             else:
+                # The content_type that will ACTUALLY be stored — when the
+                # column is pinned by a manual override, the stored value wins
+                # and every derived decision below (minting, parent link,
+                # is_primary) must follow it, not the incoming verdict.
+                effective_content_type = (
+                    row["content_type"] if "content_type" in overrides else content_type
+                )
                 if (
                     parent_game_id is None
                     and mint_parent_name
                     and "parent_game_id" not in overrides
+                    and effective_content_type in NESTED_CONTENT_TYPES
                 ):
-                    # Every guard passed and the classification is being
-                    # written, so the missing parent row is genuinely needed
-                    # now. upsert_game can still name-match back onto this very
-                    # row (IGDB sometimes lists a parent carrying the row's own
-                    # title) — treat that like the self-referential case above.
+                    # Every guard passed and the row will genuinely end up
+                    # nested, so the missing parent row is needed now (a
+                    # pinned-primary content_type must not leave an orphan
+                    # phantom parent behind). upsert_game can still name-match
+                    # back onto this very row (IGDB sometimes lists a parent
+                    # carrying the row's own title) — treat that like the
+                    # self-referential case above.
                     minted = await upsert_game(appid=None, name=mint_parent_name)
                     if minted == game_id:
                         if content_type in NESTED_CONTENT_TYPES:
                             content_type = "base_game"
+                            effective_content_type = (
+                                row["content_type"]
+                                if "content_type" in overrides
+                                else content_type
+                            )
                     else:
                         parent_game_id = minted
                 if "content_type" not in overrides:
                     updates["content_type"] = content_type
-                if parent_game_id is not None and "parent_game_id" not in overrides:
-                    updates["parent_game_id"] = parent_game_id
+                if "parent_game_id" not in overrides:
+                    if (
+                        parent_game_id is not None
+                        and effective_content_type in NESTED_CONTENT_TYPES
+                    ):
+                        updates["parent_game_id"] = parent_game_id
+                    elif (
+                        derive_is_primary(effective_content_type)
+                        and row["parent_game_id"] is not None
+                    ):
+                        # A primary library item must not keep a parent (the
+                        # update_game promotion invariant): clear the leftover
+                        # link a wrong earlier nested classification wrote, so
+                        # a primary verdict fully heals the row instead of
+                        # leaving it chained to an unrelated game.
+                        updates["parent_game_id"] = None
                 if "is_primary_library_item" not in overrides:
-                    # Derive from the content_type that will ACTUALLY be stored:
-                    # when the content_type write was skipped (pinned by a manual
-                    # override), deriving from the incoming value would desync the
-                    # pair (e.g. a pinned 'dlc' row flipped primary by a later
-                    # remaster verdict).
-                    final_content_type = updates.get("content_type", row["content_type"])
                     updates["is_primary_library_item"] = int(
-                        derive_is_primary(final_content_type)
+                        derive_is_primary(effective_content_type)
                     )
 
         cols_sql = ", ".join(f"{col} = ?" for col in updates)
