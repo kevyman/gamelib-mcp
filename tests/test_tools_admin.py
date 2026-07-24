@@ -36,6 +36,26 @@ async def _insert_play_history(game_id: int, platform: str, day: str, minutes: i
         await db.commit()
 
 
+async def _insert_wishlist(game_id: int, platform: str, source: str = "steam") -> None:
+    async with db_module.get_db() as db:
+        await db.execute(
+            """INSERT INTO game_wishlist (game_id, platform, wishlisted_at, source)
+               VALUES (?, ?, ?, ?)""",
+            (game_id, platform, "2026-01-01T00:00:00+00:00", source),
+        )
+        await db.commit()
+
+
+async def _insert_price(game_id: int, platform: str, shop: str, price: float = 9.99) -> None:
+    async with db_module.get_db() as db:
+        await db.execute(
+            """INSERT INTO game_prices (game_id, platform, shop, price, fetched_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (game_id, platform, shop, price, "2026-01-01T00:00:00+00:00"),
+        )
+        await db.commit()
+
+
 class DetectFarmedGamesTests(ToolDBTestCase):
     async def _seed_farming_day(self):
         # Two low-playtime Steam games last played on the same day (2023-11-14).
@@ -180,6 +200,44 @@ class DetectOrphanGamesTests(ToolDBTestCase):
         result = await admin.detect_orphan_games()
         self.assertEqual(result["orphans"], [])
         self.assertEqual(result["orphan_count"], 0)
+
+    async def test_phantom_parent_reported_separately_not_as_orphan(self):
+        # The Bug-1 artifact: an empty base-game shell whose OWNED edition
+        # child holds the actual ownership. Not an orphan (deleting it is
+        # refused by delete_game and would discard an owned game) — it lands
+        # in phantom_parents with a merge/reclassify remediation.
+        shell = await seed_game("Pathfinder: Wrath of the Righteous")
+        edition = await seed_game(
+            "Pathfinder: WotR - Enhanced Edition",
+            content_type="edition",
+            parent_game_id=shell,
+            is_primary_library_item=0,
+        )
+        await add_platform(edition, "steam", owned=1)
+        soundtrack = await seed_game(
+            "Pathfinder Soundtrack",
+            content_type="unknown_addon",
+            parent_game_id=shell,
+            is_primary_library_item=0,
+        )
+        del soundtrack  # unowned child: counted in child_count only
+
+        result = await admin.detect_orphan_games()
+
+        self.assertEqual(result["orphans"], [])
+        self.assertEqual(result["orphan_count"], 0)
+        self.assertEqual(result["phantom_parent_count"], 1)
+        entry = result["phantom_parents"][0]
+        self.assertEqual(entry["game_id"], shell)
+        self.assertEqual(entry["child_count"], 2)
+        self.assertEqual(entry["owned_child_count"], 1)
+        self.assertIn("merge", entry["remediation"])
+
+    async def test_phantom_parent_bucket_empty_on_clean_library(self):
+        await make_steam_game("Owned", 1)
+        result = await admin.detect_orphan_games()
+        self.assertEqual(result["phantom_parents"], [])
+        self.assertEqual(result["phantom_parent_count"], 0)
 
 
 class SetNintendoSessionValidationTests(ToolDBTestCase):
@@ -746,6 +804,9 @@ class MergeGamesTests(ToolDBTestCase):
             "ratings_moved", "ratings_kept_target",
             "series_memberships_transferred", "aliases_transferred",
             "play_history_rows_transferred",
+            "wishlist_entries_transferred", "wishlist_entries_dropped",
+            "price_rows_transferred", "price_rows_dropped",
+            "children_reparented", "target_promoted_to_primary",
             "source_deleted",
         }
         self.assertEqual(set(result.keys()), expected_keys)
@@ -911,6 +972,174 @@ class MergeGamesTests(ToolDBTestCase):
             )
         self.assertEqual(still_on_src["c"], 1)
         self.assertEqual(on_tgt["c"], 0)
+
+    async def test_wishlist_and_prices_transferred_not_cascaded(self):
+        # The prod shape that blocked two merges: the source carried a wishlist
+        # entry and price rows that the ON DELETE CASCADE would silently erase.
+        src = await seed_game("Dying Light 2: Reloaded Edition")
+        tgt = await seed_game("Dying Light 2 Stay Human")
+        await _insert_wishlist(src, "switch2", source="dekudeals")
+        await _insert_price(src, "steam", "steam", 29.99)
+        await _insert_price(src, "steam", "gog", 27.99)
+
+        result = await admin.merge_games(src, tgt)
+
+        self.assertEqual(result["wishlist_entries_transferred"], 1)
+        self.assertEqual(result["wishlist_entries_dropped"], 0)
+        self.assertEqual(result["price_rows_transferred"], 2)
+        self.assertEqual(result["price_rows_dropped"], 0)
+        async with db_module.get_db() as db:
+            wl = await db.execute_fetchone(
+                "SELECT game_id, platform, source FROM game_wishlist WHERE game_id = ?",
+                (tgt,),
+            )
+            prices = await db.execute_fetchall(
+                "SELECT shop FROM game_prices WHERE game_id = ? ORDER BY shop", (tgt,)
+            )
+            dangling = await db.execute_fetchone(
+                """SELECT (SELECT COUNT(*) FROM game_wishlist WHERE game_id = ?)
+                        + (SELECT COUNT(*) FROM game_prices WHERE game_id = ?) AS c""",
+                (src, src),
+            )
+        self.assertEqual(wl["platform"], "switch2")
+        self.assertEqual(wl["source"], "dekudeals")
+        self.assertEqual([p["shop"] for p in prices], ["gog", "steam"])
+        self.assertEqual(dangling["c"], 0)
+
+    async def test_wishlist_dropped_when_fulfilled_or_duplicate(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        # ps5 entry is fulfilled: the target owns ps5. steam entry collides
+        # with the target's own wishlist row. Both drop, neither dangles.
+        await _insert_wishlist(src, "ps5", source="manual")
+        await _insert_wishlist(src, "steam")
+        await add_platform(tgt, "ps5", owned=1)
+        await _insert_wishlist(tgt, "steam")
+
+        result = await admin.merge_games(src, tgt)
+
+        self.assertEqual(result["wishlist_entries_transferred"], 0)
+        self.assertEqual(result["wishlist_entries_dropped"], 2)
+        async with db_module.get_db() as db:
+            rows = await db.execute_fetchall(
+                "SELECT platform FROM game_wishlist WHERE game_id = ?", (tgt,)
+            )
+        self.assertEqual([r["platform"] for r in rows], ["steam"])
+
+    async def test_wishlist_fulfilled_by_platform_arriving_from_source(self):
+        # The ownership that fulfils the entry rides in on the same merge: the
+        # source owns steam while the target only wishlists it.
+        src = await seed_game("Owned Copy")
+        tgt = await seed_game("Wishlisted Copy")
+        await add_platform(src, "steam", owned=1)
+        await _insert_wishlist(src, "steam")
+
+        preview = await admin.merge_games(src, tgt, dry_run=True)
+        result = await admin.merge_games(src, tgt)
+
+        for r in (preview, result):
+            self.assertEqual(r["wishlist_entries_transferred"], 0)
+            self.assertEqual(r["wishlist_entries_dropped"], 1)
+        async with db_module.get_db() as db:
+            wl = await db.execute_fetchone(
+                "SELECT COUNT(*) AS c FROM game_wishlist WHERE game_id = ?", (tgt,)
+            )
+        self.assertEqual(wl["c"], 0)
+
+    async def test_price_rows_kept_on_target_collision(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        await _insert_price(src, "steam", "steam", 5.00)
+        await _insert_price(tgt, "steam", "steam", 7.50)
+
+        result = await admin.merge_games(src, tgt)
+
+        self.assertEqual(result["price_rows_transferred"], 0)
+        self.assertEqual(result["price_rows_dropped"], 1)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT price FROM game_prices WHERE game_id = ? AND shop = 'steam'",
+                (tgt,),
+            )
+        self.assertEqual(row["price"], 7.50)
+
+    async def test_dry_run_previews_wishlist_and_prices_without_moving(self):
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+        await _insert_wishlist(src, "switch2")
+        await _insert_price(src, "steam", "steam")
+
+        result = await admin.merge_games(src, tgt, dry_run=True)
+
+        self.assertEqual(result["wishlist_entries_transferred"], 1)
+        self.assertEqual(result["price_rows_transferred"], 1)
+        async with db_module.get_db() as db:
+            still = await db.execute_fetchone(
+                """SELECT (SELECT COUNT(*) FROM game_wishlist WHERE game_id = ?)
+                        + (SELECT COUNT(*) FROM game_prices WHERE game_id = ?) AS c""",
+                (src, src),
+            )
+        self.assertEqual(still["c"], 2)
+
+    async def test_merging_phantom_parent_into_owned_edition_child(self):
+        # BUG-1 remediation: the phantom base-game parent (no ownership) is
+        # merged into its owned edition child. The child is promoted to a
+        # primary base game and the sibling re-points at it instead of being
+        # stranded by the parent row's ON DELETE SET NULL.
+        parent = await seed_game("Burnout Paradise")
+        child = await seed_game(
+            "Burnout Paradise: The Ultimate Box",
+            content_type="edition",
+            parent_game_id=parent,
+            is_primary_library_item=0,
+        )
+        sibling = await seed_game(
+            "Burnout Paradise Soundtrack",
+            content_type="unknown_addon",
+            parent_game_id=parent,
+            is_primary_library_item=0,
+        )
+        await add_platform(child, "steam", playtime_minutes=0, owned=1)
+
+        preview = await admin.merge_games(parent, child, dry_run=True)
+        result = await admin.merge_games(parent, child)
+
+        for r in (preview, result):
+            self.assertEqual(r["children_reparented"], 1)
+            self.assertTrue(r["target_promoted_to_primary"])
+        async with db_module.get_db() as db:
+            child_row = await db.execute_fetchone(
+                """SELECT content_type, parent_game_id, is_primary_library_item
+                   FROM games WHERE id = ?""",
+                (child,),
+            )
+            sibling_row = await db.execute_fetchone(
+                "SELECT parent_game_id FROM games WHERE id = ?", (sibling,)
+            )
+        self.assertEqual(child_row["content_type"], "base_game")
+        self.assertIsNone(child_row["parent_game_id"])
+        self.assertEqual(child_row["is_primary_library_item"], 1)
+        self.assertEqual(sibling_row["parent_game_id"], child)
+
+    async def test_children_reparented_onto_primary_target_without_promotion(self):
+        old_parent = await seed_game("Duplicate Base Row")
+        new_parent = await seed_game("Canonical Base Row")
+        dlc = await seed_game(
+            "Base DLC",
+            content_type="dlc",
+            parent_game_id=old_parent,
+            is_primary_library_item=0,
+        )
+
+        result = await admin.merge_games(old_parent, new_parent)
+
+        self.assertEqual(result["children_reparented"], 1)
+        self.assertFalse(result["target_promoted_to_primary"])
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT parent_game_id FROM games WHERE id = ?", (dlc,)
+            )
+        self.assertEqual(row["parent_game_id"], new_parent)
 
 
 class RevalidateIgdbMatchesTests(ToolDBTestCase):
@@ -1504,6 +1733,51 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
         self.assertNotIn(season2, flagged)
         self.assertNotIn(bundle, flagged)
         self.assertEqual(result["counts"]["wrong_parent_suspect"], 0)
+
+    async def test_wrong_parent_owned_edition_under_unowned_shell_flagged(self):
+        # The Bug-1 residue: an OWNED but unplayed edition SKU nested under an
+        # empty shell parent. No playtime, so the substance fingerprint stays
+        # quiet — the ownership-keyed edition fingerprint must flag it.
+        shell = await seed_game("Valkyria Chronicles 4")
+        child = await seed_game(
+            "Valkyria Chronicles 4 Complete Edition",
+            content_type="edition",
+            parent_game_id=shell,
+            is_primary_library_item=0,
+        )
+        gpid = await add_platform(child, "steam", playtime_minutes=0, owned=1)
+        await add_identifier(gpid, "steam_appid", "1489630")
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+
+        bucket = {c["game_id"]: c for c in self._by_reason(result, "wrong_parent_suspect")}
+        self.assertIn(child, bucket)
+        cand = bucket[child]
+        self.assertTrue(cand["evidence"]["edition_ownership_conflict"])
+        self.assertFalse(cand["evidence"]["substance_conflict"])
+        self.assertEqual(
+            cand["suggested_update"], {"game_id": child, "content_type": "base_game"}
+        )
+
+    async def test_wrong_parent_owned_edition_under_owned_parent_not_flagged(self):
+        base = await seed_game("Fallout: New Vegas")
+        base_gpid = await add_platform(base, "steam", playtime_minutes=2694, owned=1)
+        await add_identifier(base_gpid, "steam_appid", "22380")
+        edition = await seed_game(
+            "Fallout New Vegas Ultimate Edition",
+            content_type="edition",
+            parent_game_id=base,
+            is_primary_library_item=0,
+        )
+        gpid = await add_platform(edition, "steam", playtime_minutes=0, owned=1)
+        await add_identifier(gpid, "steam_appid", "22490")
+
+        result = await admin.detect_misclassified_dlc(probe_steam=False)
+
+        self.assertNotIn(
+            edition,
+            [c["game_id"] for c in self._by_reason(result, "wrong_parent_suspect")],
+        )
 
     async def test_wrong_parent_skips_pinned_parent(self):
         # A human already decided this nesting (parent_game_id in

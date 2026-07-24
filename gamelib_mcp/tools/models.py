@@ -240,9 +240,23 @@ class OrphanGameEntry(FlexibleModel):
     igdb_id: int | None = None
 
 
+class PhantomParentEntry(FlexibleModel):
+    game_id: int
+    name: str
+    igdb_id: int | None = None
+    child_count: int
+    owned_child_count: int
+    remediation: str
+
+
 class DetectOrphanGamesResponse(FlexibleModel):
     orphans: list[OrphanGameEntry]
     orphan_count: int
+    # Zero-ownership, zero-wishlist rows that other rows nest under — NOT true
+    # orphans (typically the empty shell a wrong edition classification minted
+    # above an owned edition row). Never deletable; merge or reclassify.
+    phantom_parents: list[PhantomParentEntry] = []
+    phantom_parent_count: int = 0
     wishlist_only_count: int
     # {"configured": bool, "unclassified_at_last_run": int|None} — whether the
     # Steam license audit could still turn some of these "orphans" into owned
@@ -502,6 +516,18 @@ class MergeGamesResponse(FlexibleModel):
     ratings_kept_target: list[str]
     series_memberships_transferred: int
     aliases_transferred: int
+    play_history_rows_transferred: int = 0
+    # game_wishlist / game_prices FK-cascade with the source row, so the merge
+    # transfers them explicitly; "dropped" = target already had the row (or the
+    # wishlist entry was fulfilled by a platform the merged target owns).
+    wishlist_entries_transferred: int = 0
+    wishlist_entries_dropped: int = 0
+    price_rows_transferred: int = 0
+    price_rows_dropped: int = 0
+    # Children of the source re-pointed at the target; a nested target that
+    # absorbed its parent or inherited children is promoted to primary.
+    children_reparented: int = 0
+    target_promoted_to_primary: bool = False
     source_deleted: bool
 
 
