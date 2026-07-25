@@ -941,6 +941,28 @@ class ResolveGameZeroResultLadderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
 
+    async def test_article_strip_gate_is_case_insensitive(self) -> None:
+        # "The Masterplan" vs IGDB "MasterPlan": the casing differs too, but
+        # the gate normalizes case on both sides, so what is left is the
+        # article — still an identity difference, still refused.
+        wrong_entity = igdb.IGDBGame(
+            igdb_id=150888,
+            name="MasterPlan",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2012-01-01",
+        )
+
+        async def fake_search_game(name, igdb_platform_id=None, *, suppress_errors=True):
+            return [wrong_entity] if name.casefold() == "masterplan" else []
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(side_effect=fake_search_game)),
+        ):
+            result = await igdb.resolve_game("The Masterplan", None)
+
+        self.assertIsNone(result)
+
     async def test_article_stripped_variant_still_finds_the_real_game(self) -> None:
         # The rung keeps its purpose: searching "Forest" can surface the row's
         # actual game, which passes the gate against "The Forest".

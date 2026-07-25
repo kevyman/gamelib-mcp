@@ -227,7 +227,7 @@ _COMPARISON_QUALIFIER = (
     # "Halo". A real "Master Edition" still lands via the generic rule below.
     r"(?:game of the (?:year|century)|goty|complete|ultimate|deluxe|premium"
     r"|gold|platinum|definitive|standard|enhanced|legendary|anniversary"
-    r"|collector'?s|remastered|redux|classic)"
+    r"|collector'?s|remastered|redux|classic|uncut|uncensored|unrated)"
 )
 _COMPARISON_EDITION_PATTERNS = (
     # Qualifier-anchored tail: a known edition word, up to two words riding
@@ -241,9 +241,15 @@ _COMPARISON_EDITION_PATTERNS = (
         re.IGNORECASE,
     ),
     # Generic tail for SKU words no list can enumerate ("STRAFE: Millennium
-    # Edition"). One filler word only — wider matching here would start eating
-    # subtitles that merely end in "Edition".
-    re.compile(r"[\s:–—-]+(?:the\s+)?(?:[\w'&.]+\s+)?edition\s*$", re.IGNORECASE),
+    # Edition", "DARK SOULS: Prepare To Die Edition"). Runs AFTER the
+    # qualifier-anchored rule, which has already claimed the cases where a
+    # known edition word starts the tail — otherwise leftmost matching here
+    # would cut a title short ("… The Force | Unleashed Ultimate Sith
+    # Edition"). Over-stripping is bounded by how this is used: a suffix is
+    # only ever called an edition when BOTH names collapse to the same title,
+    # so a genuinely different SKU ("Sacred 2 Gold" vs "Sacred 2: Fallen
+    # Angel") still reads as a mismatch.
+    re.compile(r"[\s:–—-]+(?:the\s+)?(?:[\w'&.]+\s+){0,3}edition\s*$", re.IGNORECASE),
     # Trailing release-year marker ("Mass Effect (2007)").
     re.compile(r"\s*\(\s*\d{4}\s*\)\s*$"),
 )

@@ -240,6 +240,13 @@ class EditionComparisonTitleTests(unittest.TestCase):
             ("STRAFE: Millennium Edition", "STRAFE: Gold Edition"),
             ("The Witcher: Enhanced Edition", "The Witcher"),
             ("Pinball FX Classic", "Pinball FX"),
+            # Verification-report 3d: multi-word edition tails with no known
+            # qualifier word, and "Uncut and Uncensored" SKU decoration.
+            ("DARK SOULS: Prepare To Die Edition", "Dark Souls"),
+            (
+                "Leisure Suit Larry - Magna Cum Laude Uncut and Uncensored",
+                "Leisure Suit Larry: Magna Cum Laude",
+            ),
         ]:
             with self.subTest(library_name=library_name):
                 self.assertTrue(is_edition_variant_of(library_name, base_name))
@@ -253,6 +260,17 @@ class EditionComparisonTitleTests(unittest.TestCase):
             ("Deus Ex: Human Revolution", "Deus Ex"),
             ("Halo: The Master Chief Collection", "Halo"),
             ("Sand Patch Grade", "Train Sim World 3"),
+            # A leading article is an identity difference, never an edition
+            # suffix — including when the casing also differs.
+            ("The Masterplan", "MasterPlan"),
+            # Verification-report 3d: the pinned entity is a genuinely
+            # different SKU, so stripping the suffix must not hide the mispin.
+            ("Divinity II: Developer's Cut", "Divinity II: Ego Draconis"),
+            (
+                "Galactic Civilizations II: Ultimate Edition",
+                "Galactic Civilizations II: Dread Lords",
+            ),
+            ("Sacred 2 Gold", "Sacred 2: Fallen Angel"),
         ]:
             with self.subTest(a=a, b=b):
                 self.assertFalse(is_edition_variant_of(a, b))

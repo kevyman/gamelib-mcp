@@ -1002,8 +1002,9 @@ async def set_hardware_preference(platforms: list[str]) -> HardwarePreferenceRes
 
 @mcp.tool(annotations=MUTATION_TOOL)
 async def add_game_to_platform(
-    name: str,
-    platform: str,
+    name: str | None = None,
+    platform: str | None = None,
+    game_id: int | None = None,
     identifier_type: str | None = None,
     identifier_value: str | None = None,
     playtime_minutes: int | None = None,
@@ -1019,9 +1020,13 @@ async def add_game_to_platform(
     Manually add a game to a platform.
 
     Use this for physical copies, unreported digital titles, itch.io purchases,
-    or other games that are not synced automatically. name matches an existing
-    game by exact name or creates a new entry. platform accepts steam, epic, gog,
-    nintendo, switch2, ps5, itchio, xbox, or other. identifier_type and
+    or other games that are not synced automatically — and, via delisted below,
+    to correct a platform row that already exists. Provide exactly one of name
+    or game_id. name matches an existing game by EXACT name or creates a new
+    entry, so a typo mints a phantom row instead of erroring; game_id targets an
+    existing row and never creates anything (unknown id = error), which makes it
+    the safe choice when editing rather than adding. platform accepts steam,
+    epic, gog, nintendo, switch2, ps5, itchio, xbox, or other. identifier_type and
     identifier_value can store an external ID (requires owned=True).
     playtime_minutes is optional. Pass owned=False to record a wishlist entry
     instead of an owned copy — useful for PSN, which has no wishlist API.
@@ -1044,6 +1049,7 @@ async def add_game_to_platform(
     return await _add(
         name,
         platform,
+        game_id,
         identifier_type,
         identifier_value,
         playtime_minutes,
@@ -1065,8 +1071,9 @@ async def add_games_to_platform_batch(
     """
     Manually add many games to platforms in one call (max 200 items).
 
-    Each item takes exactly add_game_to_platform's parameters: name + platform
-    required, plus optional identifier_type/identifier_value, playtime_minutes,
+    Each item takes exactly add_game_to_platform's parameters: platform plus
+    exactly one of name/game_id required (game_id edits an existing row and
+    never creates one), plus optional identifier_type/identifier_value, playtime_minutes,
     owned (False = manual wishlist entry, e.g. PSN), the acquisition
     fields (acquired_at/price_paid/price_currency/purchase_source/bundle_name,
     owned=True only), and delisted (owned=True only) — same validation and
@@ -1145,6 +1152,11 @@ async def update_game(
     the IGDB link (positive, unique across the library — discover_series_gaps
     matches on it, so a wrong id hides gaps); igdb_platforms is the IGDB platform
     id list (ints). All three are protected as manual overrides until cleared.
+
+    This tool edits the GAMES row only. Per-platform columns live on other
+    tools: playtime_minutes/last_played on set_playtime, delisted on
+    add_game_to_platform (released via set_playtime(clear=[...])), and the
+    acquisition columns on set_acquisition.
     Returns the updated fields, any cleared columns, and the full manual-override
     list.
     """
@@ -1282,10 +1294,13 @@ async def set_playtime(
     a wrong or missing playtime, or to record hours for a platform that reports
     none (GOG, sometimes Xbox).
 
-    clear lists column name(s) — playtime_minutes, last_played — to hand back to
-    automatic sync: it removes the override so the next sync repopulates the
-    column, without changing the stored value (same semantics as update_game's
-    clear_overrides). A column cannot be set and cleared in the same call. If the
+    clear lists column name(s) — playtime_minutes, last_played, delisted — to
+    hand back to automatic sync: it removes the override so the next sync
+    repopulates the column, without changing the stored value (same semantics as
+    update_game's clear_overrides). It covers all three pinnable game_platforms
+    columns, including delisted, which is SET by add_game_to_platform rather
+    than here — this is its release path. A column cannot be set and cleared in
+    the same call. If the
     game has no row on that platform yet, one is created (owned) and
     platform_row_created=true is returned; pass create_platform_row=False to
     error instead.
@@ -1316,7 +1331,8 @@ async def set_playtime_batch(
 
     Each item takes exactly set_playtime's parameters: {name or game_id} +
     platform required, plus playtime_minutes (TOTAL minutes, not a delta),
-    last_played (YYYY-MM-DD), clear (columns to hand back to sync), and
+    last_played (YYYY-MM-DD), clear (columns to hand back to sync —
+    playtime_minutes, last_played, delisted), and
     create_platform_row (default True, as in the single tool) — same
     validation and manual-override pinning per item, so future syncs won't
     clobber the values. Per-item results carry status "ok" (the single tool's
