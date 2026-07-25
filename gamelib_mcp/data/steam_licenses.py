@@ -84,6 +84,14 @@ _AUTH_ERROR = (
 # is retriable via retry_unresolved=True).
 _FINAL_OUTCOMES = frozenset({"minted", "minted_delisted", "skipped_non_game"})
 
+# Report-mode classifications: probe facts cached by mint=False runs so the
+# scan advances across report-only calls without re-spending store quota on
+# already-classified appids. Deliberately NOT final — the appid stays in the
+# missing set (and keeps re-appearing as a would_mint finding, served from
+# this cache) until a mint run actually heals it. The cached "name" is the
+# prepared catalog title, ready to mint from directly.
+_REPORT_CLASSIFIED = frozenset({"classified_game", "classified_retired_game"})
+
 
 def is_license_audit_configured() -> bool:
     """True when a Steam session (refresh token or legacy store cookies) is available."""
@@ -182,12 +190,17 @@ async def audit_steam_licenses(
     purchase importers).
 
     ``mint=False`` (report mode, used by check_library's ownership.license_gap)
-    still probes and classifies appids but writes nothing: no games/game_platforms
-    row is minted, and the appid's outcome is NOT recorded in the persisted
-    ``steam_license_audit`` meta map — otherwise a preview run would make an
-    appid look "settled" and vanish from future runs (real or preview) without
-    ever actually healing it. What would have minted lands in ``would_mint``/
-    ``would_mint_delisted`` instead of ``minted``/``minted_delisted``.
+    probes and classifies appids but never touches library data: what would
+    have minted lands in ``would_mint``/``would_mint_delisted`` instead of
+    ``minted``/``minted_delisted``. Classifications ARE persisted so repeated
+    report runs advance the scan instead of re-probing the same first batch:
+    skips and unresolved are recorded exactly as in mint mode (they are facts
+    about the appid, identical either way), while mintable games are cached as
+    non-final ``classified_game``/``classified_retired_game`` entries — still
+    counted in ``unclassified``, re-emitted as would-mint results on every
+    report run (from cache, no re-probe), never consuming probe slots, and
+    healed directly from the cached name by the next mint run. A preview can
+    therefore never make a real gap look "settled" and vanish.
     """
     if not is_license_audit_configured():
         return {
@@ -216,7 +229,15 @@ async def audit_steam_licenses(
         return outcome == "unresolved" and not retry_unresolved
 
     missing = sorted(a for a in owned - library if not _settled(a))
-    to_probe = missing if not limit else missing[:limit]
+    # Split cached report-mode classifications out of the probe queue: they are
+    # served/minted from cache below, so probe slots only go to new appids and
+    # a report-only scan can walk the whole gap list across calls.
+    cached_classified = [
+        a for a in missing if (audit.get(str(a)) or {}).get("outcome") in _REPORT_CLASSIFIED
+    ]
+    cached_set = set(cached_classified)
+    unclassified_queue = [a for a in missing if a not in cached_set]
+    to_probe = unclassified_queue if not limit else unclassified_queue[:limit]
 
     now = datetime.now(timezone.utc).isoformat()
     minted: list[dict] = []
@@ -225,6 +246,28 @@ async def audit_steam_licenses(
     would_mint_delisted: list[dict] = []
     skipped: list[dict] = []
     unresolved: list[int] = []
+    audit_dirty = False
+
+    for appid in cached_classified:
+        entry = audit[str(appid)]
+        prepared = entry.get("name")
+        if not prepared:
+            # Junk cache entry — drop it so the appid re-probes next call.
+            del audit[str(appid)]
+            audit_dirty = True
+            continue
+        retired = entry.get("outcome") == "classified_retired_game"
+        if mint:
+            await bulk_upsert_steam_library([{"appid": appid, "name": prepared}], synced_at=now)
+            await set_steam_delisted([appid], True)
+            outcome = "minted_delisted" if retired else "minted"
+            audit[str(appid)] = {"outcome": outcome, "name": prepared, "at": now}
+            audit_dirty = True
+            (minted_delisted if retired else minted).append({"appid": appid, "name": prepared})
+        else:
+            (would_mint_delisted if retired else would_mint).append(
+                {"appid": appid, "name": prepared}
+            )
 
     for appid in to_probe:
         data = await fetch_store_appdetails(appid)
@@ -241,18 +284,22 @@ async def audit_steam_licenses(
                     # the license audit" — set even with a live store page, and
                     # cleared by the primary sync if the API ever returns the app.
                     await set_steam_delisted([appid], True)
-                    outcome = "minted"
+                    audit[str(appid)] = {"outcome": "minted", "name": raw_name or None, "at": now}
                     minted.append({"appid": appid, "name": prepared})
                 else:
-                    outcome = "would_mint"
+                    audit[str(appid)] = {"outcome": "classified_game", "name": prepared, "at": now}
                     would_mint.append({"appid": appid, "name": prepared})
             else:
                 # DLC/music/demo/tool — or a junk title prepare_catalog_title
-                # rejects. Nested/tool content never mints a games row.
-                outcome = f"skipped_{app_type or 'non_game'}"
+                # rejects. Nested/tool content never mints a games row. The skip
+                # is a mint-independent fact, so report mode records it too.
+                audit[str(appid)] = {
+                    "outcome": f"skipped_{app_type or 'non_game'}",
+                    "name": raw_name or None,
+                    "at": now,
+                }
                 skipped.append({"appid": appid, "type": app_type or None, "name": raw_name or None})
-            if mint:
-                audit[str(appid)] = {"outcome": outcome, "name": raw_name or None, "at": now}
+            audit_dirty = True
             continue
 
         # Retired from the store entirely. SteamSpy still knows real games.
@@ -267,16 +314,25 @@ async def audit_steam_licenses(
                 audit[str(appid)] = {"outcome": "minted_delisted", "name": spy_name, "at": now}
                 minted_delisted.append({"appid": appid, "name": prepared})
             else:
+                audit[str(appid)] = {
+                    "outcome": "classified_retired_game",
+                    "name": prepared,
+                    "at": now,
+                }
                 would_mint_delisted.append({"appid": appid, "name": prepared})
         else:
-            if mint:
-                audit[str(appid)] = {"outcome": "unresolved", "name": None, "at": now}
+            # Mint-independent fact (retriable via retry_unresolved either way).
+            audit[str(appid)] = {"outcome": "unresolved", "name": None, "at": now}
             unresolved.append(appid)
+        audit_dirty = True
 
-    if mint:
-        if to_probe:
-            await set_meta(AUDIT_META_KEY, json.dumps(audit))
-        await set_meta(AUDIT_REMAINING_META_KEY, str(max(0, len(missing) - len(to_probe))))
+    if audit_dirty:
+        await set_meta(AUDIT_META_KEY, json.dumps(audit))
+    # Remaining = appids still needing a PROBE (cached classifications don't —
+    # they only await a mint run). Report mode now advances this too.
+    await set_meta(
+        AUDIT_REMAINING_META_KEY, str(max(0, len(unclassified_queue) - len(to_probe)))
+    )
 
     result = {
         "status": "ok",
@@ -288,7 +344,8 @@ async def audit_steam_licenses(
         "minted_delisted": minted_delisted,
         "skipped_non_game": skipped,
         "unresolved": unresolved,
-        "remaining": max(0, len(missing) - len(to_probe)),
+        "remaining": max(0, len(unclassified_queue) - len(to_probe)),
+        "classified_from_cache": len(cached_classified),
         "mint": mint,
         "would_mint": would_mint,
         "would_mint_delisted": would_mint_delisted,

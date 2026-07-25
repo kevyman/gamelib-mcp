@@ -744,8 +744,12 @@ async def check_library(
       (steam+steamspy) — needs a stored Steam session
       (create_session_ingest_link(provider="steam_refresh")); skipped as
       unconfigured:steam_session without one. APPLY-GATED: mints an owned
-      Steam row per license (delisted=1 for retired ones). options: limit
-      (default 25), retry_unresolved (default false).
+      Steam row per license (delisted=1 for retired ones). Report runs still
+      advance the scan: probe classifications are cached (skips/unresolved as
+      final facts, mintable games as non-final entries re-emitted from cache),
+      so repeated report calls walk the whole license list and the next apply
+      run heals everything already classified without re-probing. options:
+      limit (default 25), retry_unresolved (default false).
     - nesting.superseded_base — a phantom parent (no ownership/wishlist) that
       DOES have an owned child — the edition-supersession shape (e.g. an
       "Ultimate Box" edition nesting under an unowned base-game shell).
@@ -788,9 +792,11 @@ async def check_library(
       enriches lazily per game; refresh_library for bulk). offline, report-only.
     - sync.staleness — a syncable platform whose last sync is older than
       options.stale_days (default 7; suggested_action: refresh_library), or one
-      that synced recently but has written no play_history snapshots in 14
-      days despite owned playtime (silent snapshot-writer failure; switch2
-      exempt — it never writes play_history by design). offline, report-only.
+      that synced recently but has games whose current playtime is ahead of
+      (or missing from) their latest play_history snapshot (silent
+      snapshot-writer failure — snapshots only write on change, so an idle
+      library is NOT flagged; switch2 exempt — it never writes play_history
+      by design). offline, report-only.
 
     Selection: `checks` accepts full ids and/or category prefixes (e.g.
     "identity", "nesting.misclassified") — None (default) selects every

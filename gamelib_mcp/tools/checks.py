@@ -1186,38 +1186,62 @@ async def _run_sync_staleness(*, apply: bool, options: dict[str, Any]) -> CheckO
                 )
             )
 
-    # A recently-synced platform with owned playtime but zero play_history
-    # snapshots in 14 days suggests the snapshot writer is silently failing
-    # (record_play_history_snapshots logs a warning but never fails the sync).
+    # Snapshot-writer health. record_play_history_snapshots writes only when a
+    # game's cumulative playtime CHANGES, so "no recent snapshot rows" is the
+    # normal state of a healthy but idle library — never evidence by itself.
+    # The real failure signal is divergence on a recently-synced platform:
+    # current game_platforms.playtime_minutes ahead of the latest snapshot (or
+    # playtime with no snapshot at all) means the post-sync writer owed a write
+    # it never made (it logs a warning but deliberately never fails the sync).
     gap_platforms: list[str] = []
     async with get_db() as db:
         for row in platform_rows:
             platform = row["platform"]
             if platform in stale_platforms or platform in _SNAPSHOT_EXEMPT_PLATFORMS:
                 continue
-            has_playtime = await db.execute_fetchone(
-                """SELECT 1 FROM game_platforms
-                    WHERE platform = ? AND owned = 1 AND playtime_minutes > 0 LIMIT 1""",
+            divergent = await db.execute_fetchall(
+                """SELECT g.id AS game_id, g.name,
+                          gp.playtime_minutes AS current_minutes,
+                          (SELECT ph.playtime_minutes FROM play_history ph
+                            WHERE ph.game_id = gp.game_id AND ph.platform = gp.platform
+                            ORDER BY ph.snapshot_date DESC LIMIT 1) AS last_snapshot_minutes
+                   FROM game_platforms gp
+                   JOIN games g ON g.id = gp.game_id
+                   WHERE gp.platform = ? AND gp.owned = 1
+                     AND COALESCE(gp.playtime_minutes, 0) > 0
+                     AND COALESCE(gp.playtime_minutes, 0) >
+                         COALESCE((SELECT ph.playtime_minutes FROM play_history ph
+                                    WHERE ph.game_id = gp.game_id
+                                      AND ph.platform = gp.platform
+                                    ORDER BY ph.snapshot_date DESC LIMIT 1), 0)
+                   ORDER BY gp.playtime_minutes DESC""",
                 (platform,),
             )
-            if has_playtime is None:
-                continue
-            recent_snapshot = await db.execute_fetchone(
-                """SELECT 1 FROM play_history
-                    WHERE platform = ? AND snapshot_date >= date('now', '-14 days') LIMIT 1""",
-                (platform,),
-            )
-            if recent_snapshot is not None:
+            if not divergent:
                 continue
             gap_platforms.append(platform)
             findings.append(
                 _finding(
                     "sync.staleness",
                     "notice",
-                    f"{platform} synced recently and has owned playtime, but has written "
-                    "no play_history snapshots in the last 14 days — the snapshot writer "
-                    "may be failing silently",
-                    evidence={"platform": platform, "last_synced": row["last_synced"]},
+                    f"{platform} synced recently, but {len(divergent)} game(s) have "
+                    "current playtime ahead of (or missing from) their latest "
+                    "play_history snapshot — the post-sync snapshot writer may be "
+                    "failing silently",
+                    evidence={
+                        "platform": platform,
+                        "last_synced": row["last_synced"],
+                        "divergent_games": len(divergent),
+                        "examples": [
+                            {
+                                "game_id": d["game_id"],
+                                "name": d["name"],
+                                "current_minutes": d["current_minutes"],
+                                "last_snapshot_minutes": d["last_snapshot_minutes"],
+                            }
+                            for d in divergent[:5]
+                        ],
+                    },
                     suggested_action=None,
                 )
             )
@@ -1449,8 +1473,8 @@ CHECKS: dict[str, CheckSpec] = {
             "sync.staleness",
             description=(
                 "A syncable platform whose last sync is older than stale_days, "
-                "or one that synced recently but stopped writing play_history "
-                "snapshots despite owned playtime"
+                "or one that synced recently but has current playtime ahead of "
+                "its latest play_history snapshots (silent snapshot-writer failure)"
             ),
             network=None,
             writes_on_apply=False,

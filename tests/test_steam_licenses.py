@@ -7,6 +7,7 @@ Network is fully mocked: dynamicstore userdata via httpx.MockTransport, the
 appdetails/SteamSpy probes via patched module bindings.
 """
 
+import json
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -246,29 +247,92 @@ class AuditSteamLicensesReportModeTests(ToolDBTestCase):
         )
         self.assertIsNone(await _steam_row_by_appid(471100))
 
-    async def test_does_not_persist_audit_meta(self):
-        # A report-mode run must not mark appids "settled" — a later call
-        # (report OR real) should re-probe them, unlike a real audit run.
+    async def test_classification_cached_but_not_settled(self):
+        # A report-mode run caches the probe result (classified_game) so later
+        # report runs advance instead of re-probing, but the appid is NOT
+        # settled: it keeps re-appearing in would_mint until a mint run heals it.
         await self._audit(
             owned={4000}, appdetails={4000: {"type": "game", "name": "Garry's Mod"}}
         )
-        raw = await get_meta(steam_licenses.AUDIT_META_KEY)
-        self.assertIsNone(raw)
-        remaining = await get_meta(steam_licenses.AUDIT_REMAINING_META_KEY)
-        self.assertIsNone(remaining)
+        audit_map = json.loads(await get_meta(steam_licenses.AUDIT_META_KEY))
+        self.assertEqual(audit_map["4000"]["outcome"], "classified_game")
+
+        second = await self._audit(owned={4000})  # no appdetails: a re-probe would fail
+        self.assertEqual(second["probed"], 0)
+        self.assertEqual(second["classified_from_cache"], 1)
+        self.assertEqual([e["appid"] for e in second["would_mint"]], [4000])
+        self.assertIsNone(await _steam_row_by_appid(4000))
+
+    async def test_report_scan_advances_past_skipped_batch(self):
+        # The Codex-review scenario: a first batch of DLC must not block the
+        # scan — report mode persists the skips, so the next report call's
+        # probe budget reaches the appids behind them.
+        first = await self._audit(
+            owned={1000, 5000},
+            appdetails={1000: {"type": "dlc", "name": "Some Season Pass"}},
+            limit=1,
+        )
+        self.assertEqual([e["appid"] for e in first["skipped_non_game"]], [1000])
+        self.assertEqual(first["remaining"], 1)
+        self.assertIsNone(await _steam_row_by_appid(1000))
 
         second = await self._audit(
-            owned={4000}, appdetails={4000: {"type": "game", "name": "Garry's Mod"}}
+            owned={1000, 5000},
+            appdetails={5000: {"type": "game", "name": "Cyberdeck"}},
+            limit=1,
         )
         self.assertEqual(second["probed"], 1)
-        self.assertEqual([e["appid"] for e in second["would_mint"]], [4000])
+        self.assertEqual([e["appid"] for e in second["would_mint"]], [5000])
+        self.assertEqual(second["remaining"], 0)
 
-    async def test_dlc_skipped_type_writes_nothing_either(self):
+    async def test_mint_run_heals_cached_classifications_without_reprobe(self):
+        # Report run classifies a live and a retired game; the next MINT run
+        # heals both from the cache without spending store/SteamSpy probes.
+        await self._audit(
+            owned={4000, 471100},
+            appdetails={4000: {"type": "game", "name": "Garry's Mod"}},
+            steamspy={471100: "Crysis 2"},
+        )
+        with (
+            patch.object(
+                steam_session, "load_steam_web_cookies", AsyncMock(return_value=COOKIES)
+            ),
+            patch.object(steam_session, "is_steam_session_configured", return_value=True),
+            patch.object(
+                steam_licenses,
+                "fetch_store_appdetails",
+                AsyncMock(side_effect=AssertionError("cached appids must not re-probe")),
+            ),
+            patch.object(
+                steam_licenses,
+                "fetch_steamspy_name",
+                AsyncMock(side_effect=AssertionError("cached appids must not re-probe")),
+            ),
+        ):
+            result = await steam_licenses.audit_steam_licenses(
+                transport=_userdata_transport([4000, 471100])
+            )
+        self.assertEqual([e["appid"] for e in result["minted"]], [4000])
+        self.assertEqual([e["appid"] for e in result["minted_delisted"]], [471100])
+        row = await _steam_row_by_appid(4000)
+        self.assertIsNotNone(row)
+        retired = await _steam_row_by_appid(471100)
+        self.assertEqual(retired["delisted"], 1)
+        audit_map = json.loads(await get_meta(steam_licenses.AUDIT_META_KEY))
+        self.assertEqual(audit_map["4000"]["outcome"], "minted")
+        self.assertEqual(audit_map["471100"]["outcome"], "minted_delisted")
+
+    async def test_dlc_skip_persists_but_mints_nothing(self):
         result = await self._audit(
             owned={1234}, appdetails={1234: {"type": "dlc", "name": "Some Season Pass"}}
         )
         self.assertEqual([e["appid"] for e in result["skipped_non_game"]], [1234])
         self.assertIsNone(await _steam_row_by_appid(1234))
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
+        self.assertEqual(count["c"], 0)
+        audit_map = json.loads(await get_meta(steam_licenses.AUDIT_META_KEY))
+        self.assertEqual(audit_map["1234"]["outcome"], "skipped_dlc")
 
 
 class SetSteamDelistedTests(ToolDBTestCase):

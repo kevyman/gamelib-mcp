@@ -104,8 +104,10 @@ Status: accepted (2026-07-25)
    matching library game), `spend.duplicate_purchase` and
    `spend.price_anomaly` (import/typo hygiene over acquisition data),
    `enrich.coverage` (library-wide tags/igdb_id/cover/hltb_main gaps), and
-   `sync.staleness` (a platform that stopped syncing, or synced but silently
-   stopped writing playtime snapshots). All ten are offline, permanently
+   `sync.staleness` (a platform that stopped syncing, or synced but has
+   current playtime ahead of its latest snapshot — divergence, not snapshot
+   age, since snapshots only write on change and an idle library is
+   healthy). All ten are offline, permanently
    report-only, and most resolve to `None` suggested_action with the
    reasoning folded into `message`/`evidence` — these are judgment calls
    (which purchase row to clear, whether two rows really are the same game)

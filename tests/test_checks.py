@@ -1033,7 +1033,18 @@ class SyncStalenessTests(ToolDBTestCase):
         )
         self.assertEqual(len(result["findings"]), 1)
 
+    async def _insert_snapshot(self, game_id, platform, date, minutes):
+        async with db_module.get_db() as db:
+            await db.execute(
+                "INSERT INTO play_history (game_id, platform, snapshot_date, playtime_minutes) "
+                "VALUES (?, ?, ?, ?)",
+                (game_id, platform, date, minutes),
+            )
+            await db.commit()
+
     async def test_recently_synced_with_no_snapshots_reports_gap(self):
+        # Playtime with NO snapshot at all: the post-sync writer owed a first
+        # snapshot and never wrote it — flagged.
         gid = await seed_game("Snapshot Gap Game")
         await add_platform(gid, "epic", playtime_minutes=120)
 
@@ -1041,6 +1052,32 @@ class SyncStalenessTests(ToolDBTestCase):
         gap = [f for f in result["findings"] if f["evidence"].get("platform") == "epic"]
         self.assertEqual(len(gap), 1)
         self.assertIsNone(gap[0]["suggested_action"])
+        self.assertEqual(gap[0]["evidence"]["divergent_games"], 1)
+        example = gap[0]["evidence"]["examples"][0]
+        self.assertEqual(example["current_minutes"], 120)
+        self.assertIsNone(example["last_snapshot_minutes"])
+
+    async def test_idle_library_with_old_equal_snapshot_is_healthy(self):
+        # Snapshots write only on CHANGE — an old snapshot matching current
+        # playtime is a healthy idle library, never a snapshot-writer failure.
+        gid = await seed_game("Idle But Healthy Game")
+        await add_platform(gid, "epic", playtime_minutes=120)
+        await self._insert_snapshot(gid, "epic", "2026-01-01", 120)
+
+        result = await checks.run_library_checks(checks=["sync.staleness"])
+        self.assertEqual(result["findings"], [])
+
+    async def test_playtime_ahead_of_latest_snapshot_reports_gap(self):
+        gid = await seed_game("Diverged Snapshot Game")
+        await add_platform(gid, "epic", playtime_minutes=120)
+        await self._insert_snapshot(gid, "epic", "2026-01-01", 100)
+
+        result = await checks.run_library_checks(checks=["sync.staleness"])
+        gap = [f for f in result["findings"] if f["evidence"].get("platform") == "epic"]
+        self.assertEqual(len(gap), 1)
+        example = gap[0]["evidence"]["examples"][0]
+        self.assertEqual(example["current_minutes"], 120)
+        self.assertEqual(example["last_snapshot_minutes"], 100)
 
     async def test_switch2_exempt_from_snapshot_gap(self):
         gid = await seed_game("Switch2 No Snapshots Game")
