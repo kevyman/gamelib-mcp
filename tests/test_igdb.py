@@ -941,6 +941,99 @@ class ResolveGameZeroResultLadderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
 
+    async def test_exact_name_lookup_rescues_a_title_search_cannot_find(self) -> None:
+        # Prod: IGDB's search returns zero for "The Forest" while IGDB holds
+        # that exact name as 7504. The equality lookup finds it; the ladder's
+        # article rung would have offered the unrelated "Forest" (346813).
+        real = igdb.IGDBGame(
+            igdb_id=7504,
+            name="The Forest",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2018-04-30",
+        )
+        stranger = igdb.IGDBGame(
+            igdb_id=346813,
+            name="Forest",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2025-01-01",
+        )
+
+        async def fake_search_game(name, igdb_platform_id=None, *, suppress_errors=True):
+            return [stranger] if name == "Forest" else []
+
+        async def fake_exact(name, igdb_platform_id=None, *, suppress_errors=True):
+            return [real] if name == "The Forest" else []
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(side_effect=fake_search_game)),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_games_by_exact_name",
+                AsyncMock(side_effect=fake_exact),
+            ),
+        ):
+            result = await igdb.resolve_game("The Forest", None)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.igdb_id, 7504)
+
+    async def test_ambiguous_exact_name_is_refused_not_ranked(self) -> None:
+        # Two real games share the exact name "The Bridge" (2013 and 2024);
+        # picking one is the same class of guess as accepting a stranger.
+        candidates = [
+            igdb.IGDBGame(
+                igdb_id=8440,
+                name="The Bridge",
+                category=igdb.CATEGORY_MAIN_GAME,
+                first_release_date="2013-02-22",
+            ),
+            igdb.IGDBGame(
+                igdb_id=352753,
+                name="The Bridge",
+                category=igdb.CATEGORY_MAIN_GAME,
+                first_release_date="2024-01-01",
+            ),
+        ]
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(return_value=[])),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_games_by_exact_name",
+                AsyncMock(return_value=candidates),
+            ),
+        ):
+            result = await igdb.resolve_game("The Bridge", None)
+
+        self.assertIsNone(result)
+
+    async def test_exact_name_duplicate_rows_of_one_game_still_resolve(self) -> None:
+        # Same game returned twice (platform-filtered and not) is not ambiguity.
+        game = igdb.IGDBGame(
+            igdb_id=136000,
+            name="The Gunk",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2021-12-16",
+        )
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(return_value=[])),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_games_by_exact_name",
+                AsyncMock(return_value=[game, game]),
+            ),
+        ):
+            result = await igdb.resolve_game("The Gunk", igdb.IGDB_PLATFORM_SWITCH2)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.igdb_id, 136000)
+
+    async def test_exact_name_query_is_an_equality_filter(self) -> None:
+        query = igdb._build_exact_name_query("The Forest", 6)
+        self.assertIn('where name = "The Forest"', query)
+        self.assertIn("platforms = 6", query)
+        self.assertNotIn("search ", query)
+
     async def test_article_strip_gate_is_case_insensitive(self) -> None:
         # "The Masterplan" vs IGDB "MasterPlan": the casing differs too, but
         # the gate normalizes case on both sides, so what is left is the

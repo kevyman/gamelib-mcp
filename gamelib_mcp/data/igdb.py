@@ -605,6 +605,66 @@ async def search_game(
     return [_parse_igdb_item(item) for item in results]
 
 
+def _build_exact_name_query(
+    name: str, igdb_platform_id: int | tuple[int, ...] | None = None
+) -> str:
+    """An equality lookup on games.name — no search index involved."""
+    escaped_name = _escape_igdb_search_term(name)
+    filters = [f'name = "{escaped_name}"']
+    if igdb_platform_id is not None:
+        ids = igdb_platform_id if isinstance(igdb_platform_id, tuple) else (igdb_platform_id,)
+        if len(ids) == 1:
+            filters.append(f"platforms = {ids[0]}")
+        else:
+            filters.append(f"platforms = ({','.join(str(i) for i in ids)})")
+    return " ".join(
+        [
+            _FETCH_BY_ID_FIELDS,
+            f"where {' & '.join(filters)};",
+            # Ambiguity is resolved by refusing, not by ranking, so a handful
+            # of rows is all we need to detect it.
+            "limit 10;",
+        ]
+    )
+
+
+async def fetch_games_by_exact_name(
+    name: str,
+    igdb_platform_id: int | tuple[int, ...] | None = None,
+    *,
+    suppress_errors: bool = True,
+) -> list[IGDBGame]:
+    """Games whose IGDB name EQUALS ``name`` (case-insensitive on IGDB's side).
+
+    IGDB's ``search`` endpoint is a relevance index and it does fail outright
+    on titles it demonstrably holds: prod searches for "The Forest", "The Gunk"
+    and "The Invincible" all returned zero while IGDB stored those exact names
+    (7504, 136000, 138906). This is the deterministic alternative — an equality
+    filter on the games endpoint — used only after search has come up empty.
+    """
+    client_id = os.environ.get("TWITCH_CLIENT_ID")
+    if not client_id:
+        if not suppress_errors:
+            raise IGDBRequestFailure(
+                f"IGDB credentials not configured; cannot look up {name!r}"
+            )
+        return []
+
+    try:
+        token = await _get_token()
+        results = await _post_igdb_games(
+            _build_exact_name_query(name, igdb_platform_id),
+            headers=_igdb_headers(client_id, token),
+        )
+    except Exception as exc:
+        if not suppress_errors:
+            raise IGDBRequestFailure(f"IGDB exact-name lookup failed for {name!r}") from exc
+        logger.warning("IGDB exact-name lookup failed for %r: %s", name, exc)
+        return []
+
+    return [_parse_igdb_item(item) for item in results]
+
+
 _FETCH_BY_ID_FIELDS = (
     "fields id, name, category, game_type, first_release_date, "
     "genres.name, themes.name, keywords.name, "
@@ -868,6 +928,42 @@ async def _resolve_game_with_status(
         # (the "2026" token survives normalization) — an identity-preserving
         # rung re-queries with the edition stripped and gates against the
         # rung's own query string, which passes.
+
+    # Search is a relevance index and it does miss titles IGDB actually holds
+    # ("The Forest" → zero results, while IGDB stores that exact name as
+    # 7504). Before widening the QUERY — which is what put eight prod rows on
+    # article-stripped strangers — try narrowing it to an exact-name equality
+    # lookup, which cannot match a different title by construction.
+    #
+    # Ambiguity is refused, never ranked: two games can share an exact name
+    # ("The Bridge" 2013 and 2024, both real), and guessing between them is
+    # the same mistake as accepting "Forest" for "The Forest". The platform
+    # filter runs first because it usually resolves the ambiguity on its own
+    # (a stub duplicate carries no platforms).
+    for platform_filter in (igdb_platform_id, None):
+        exact = await fetch_games_by_exact_name(
+            name, platform_filter, suppress_errors=suppress_errors
+        )
+        if not exact:
+            continue
+        saw_candidates = True
+        distinct = {game.igdb_id: game for game in exact}
+        if len(distinct) > 1:
+            logger.info(
+                "IGDB exact-name lookup for %r is ambiguous (%s) — refusing to guess",
+                name,
+                sorted(distinct),
+            )
+            break
+        match = _select_best_match(
+            name, list(distinct.values()), allow_inconclusive_fallback=False
+        )
+        if match is not None:
+            return _ResolveOutcome(game=match, saw_candidates=True)
+        # A single exact-name hit that still fails the identity/name gate is a
+        # genuine no — fall through to the ladder rather than re-asking for the
+        # same title without the platform filter.
+        break
 
     # Zero results even without a platform filter — or nothing accepted from
     # the original query: work through a ladder of alternate query strings
