@@ -1333,3 +1333,106 @@ class LicenseGapAppliedFindingTests(_LicenseGapRunnerMixin, ToolDBTestCase):
                 "AND gpi.identifier_value = '24740'"
             )
         self.assertEqual(row["delisted"], 1)
+
+
+class StoreAuthoritativeDriftTests(ToolDBTestCase):
+    """A link IGDB's own appid mapping produces is not drift (FTL loop)."""
+
+    @staticmethod
+    def _record(name: str) -> dict:
+        return ExtidIgdbDriftTests._record(name)
+
+    async def _seed(self, name: str, appid: int, igdb_id: int) -> int:
+        game_id = await make_steam_game(name, appid)
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = ? WHERE id = ?", (igdb_id, game_id))
+            await db.commit()
+        return game_id
+
+    async def _run(self, external: dict[str, int], records: dict[int, dict], **kwargs):
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_igdb_game_records",
+                AsyncMock(return_value=records),
+            ),
+            patch(
+                "gamelib_mcp.data.igdb.resolve_steam_appids_to_igdb",
+                AsyncMock(return_value=external),
+            ),
+        ):
+            return await checks.run_library_checks(checks=["extid.igdb_drift"], **kwargs)
+
+    async def test_appid_backed_link_is_not_reported_or_reset(self):
+        game_id = await self._seed("FTL: Faster Than Light", 212680, 178437)
+        result = await self._run(
+            {"212680": 178437},
+            {178437: self._record("Faster than light?")},
+            apply=["extid.igdb_drift"],
+        )
+        self.assertEqual(result["findings"], [])
+        summary = result["summary"]["extid.igdb_drift"]
+        self.assertEqual(summary["store_authoritative_count"], 1)
+        self.assertEqual(summary["reset_count"], 0)
+        self.assertEqual(
+            summary["store_authoritative_examples"][0]["drift_kind"],
+            "store_authoritative",
+        )
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT igdb_id FROM games WHERE id = ?", (game_id,)
+            )
+        self.assertEqual(row["igdb_id"], 178437)
+
+    async def test_disagreeing_mapping_still_reports_and_resets(self):
+        game_id = await self._seed("The Forest", 242760, 346813)
+        result = await self._run(
+            {"242760": 7830},
+            {346813: self._record("Forest")},
+            apply=["extid.igdb_drift"],
+        )
+        self.assertEqual([f["game_id"] for f in result["findings"]], [game_id])
+        self.assertEqual(
+            result["findings"][0]["evidence"]["drift_kind"], "wrong_entity"
+        )
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT igdb_id, cover_image_id FROM games WHERE id = ?", (game_id,)
+            )
+        self.assertIsNone(row["igdb_id"])
+
+    async def test_unmapped_appid_still_reports(self):
+        await self._seed("The Hex", 510420, 227064)
+        result = await self._run({}, {227064: self._record("Hex")})
+        self.assertEqual(len(result["findings"]), 1)
+        self.assertEqual(
+            result["summary"]["extid.igdb_drift"]["store_authoritative_count"], 0
+        )
+
+    async def test_apply_clears_the_wrong_entitys_cover_art(self):
+        game_id = await self._seed("The Gunk", 1087760, 404388)
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET cover_image_id = 'cowrong' WHERE id = ?", (game_id,)
+            )
+            await db.commit()
+        await self._run(
+            {}, {404388: self._record("Gunk")}, apply=["extid.igdb_drift"]
+        )
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT igdb_id, cover_image_id FROM games WHERE id = ?", (game_id,)
+            )
+        self.assertIsNone(row["igdb_id"])
+        self.assertIsNone(row["cover_image_id"])
+
+    async def test_applied_findings_say_the_link_was_reset(self):
+        await self._seed("The Operator", 226706001, 226706)
+        result = await self._run(
+            {}, {226706: self._record("Operator")}, apply=["extid.igdb_drift"]
+        )
+        finding = result["findings"][0]
+        self.assertEqual(finding["severity"], "notice")
+        self.assertTrue(finding["evidence"]["reset"])
+        self.assertIn("link reset", finding["message"])
+        self.assertIsNone(finding["suggested_action"])

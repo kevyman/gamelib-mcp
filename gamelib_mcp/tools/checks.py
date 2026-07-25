@@ -423,12 +423,22 @@ async def _run_extid_igdb_drift(*, apply: bool, options: dict[str, Any]) -> Chec
     result = await revalidate_igdb_matches(
         dry_run=not apply, limit=limit, include_edition_suffix=include_edition_suffix
     )
+    # After an apply the link is already gone, so the present tense would
+    # describe a state that no longer exists (the same trap ownership.
+    # license_gap's findings had). Say what happened instead.
     findings = [
         _finding(
             "extid.igdb_drift",
-            "warning",
-            f"'{m['name']}' is linked to IGDB id {m['igdb_id']} "
-            f"('{m['igdb_name']}') — names don't match",
+            "notice" if apply else "warning",
+            (
+                f"'{m['name']}' was linked to IGDB id {m['igdb_id']} "
+                f"('{m['igdb_name']}') — link reset, background enrichment will "
+                "re-resolve it"
+                + (" (classification reset too)" if m["classification_reset"] else "")
+                if apply
+                else f"'{m['name']}' is linked to IGDB id {m['igdb_id']} "
+                f"('{m['igdb_name']}') — names don't match"
+            ),
             game_id=m["game_id"],
             name=m["name"],
             evidence={
@@ -436,6 +446,7 @@ async def _run_extid_igdb_drift(*, apply: bool, options: dict[str, Any]) -> Chec
                 "igdb_name": m["igdb_name"],
                 "classification_reset": m["classification_reset"],
                 "drift_kind": m.get("drift_kind", "wrong_entity"),
+                "reset": apply,
             },
             suggested_action=(
                 None
@@ -464,6 +475,10 @@ async def _run_extid_igdb_drift(*, apply: bool, options: dict[str, Any]) -> Chec
         # options.include_edition_suffix asks for them.
         "edition_suffix_count": result["edition_suffix_count"],
         "edition_suffix_examples": result["edition_suffix_matches"][:10],
+        # Links IGDB's external_games mapping vouches for despite the name
+        # difference — never reset (a reset would just be re-applied).
+        "store_authoritative_count": result["store_authoritative_count"],
+        "store_authoritative_examples": result["store_authoritative_matches"][:10],
     }
     return findings, extras
 
