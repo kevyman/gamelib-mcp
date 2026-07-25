@@ -170,6 +170,7 @@ async def audit_steam_licenses(
     limit: int = DEFAULT_PROBE_LIMIT,
     retry_unresolved: bool = False,
     *,
+    mint: bool = True,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> dict:
     """Diff owned licenses against the library and heal missing ownership.
@@ -179,6 +180,14 @@ async def audit_steam_licenses(
     ``unconfigured`` status dict when no store session is stored; raises
     RuntimeError on an expired session (callers catch per-source, like the
     purchase importers).
+
+    ``mint=False`` (report mode, used by check_library's ownership.license_gap)
+    still probes and classifies appids but writes nothing: no games/game_platforms
+    row is minted, and the appid's outcome is NOT recorded in the persisted
+    ``steam_license_audit`` meta map — otherwise a preview run would make an
+    appid look "settled" and vanish from future runs (real or preview) without
+    ever actually healing it. What would have minted lands in ``would_mint``/
+    ``would_mint_delisted`` instead of ``minted``/``minted_delisted``.
     """
     if not is_license_audit_configured():
         return {
@@ -212,6 +221,8 @@ async def audit_steam_licenses(
     now = datetime.now(timezone.utc).isoformat()
     minted: list[dict] = []
     minted_delisted: list[dict] = []
+    would_mint: list[dict] = []
+    would_mint_delisted: list[dict] = []
     skipped: list[dict] = []
     unresolved: list[int] = []
 
@@ -222,40 +233,50 @@ async def audit_steam_licenses(
             raw_name = data.get("name") or ""
             prepared = prepare_catalog_title(raw_name)
             if app_type == "game" and prepared:
-                await bulk_upsert_steam_library(
-                    [{"appid": appid, "name": prepared}], synced_at=now
-                )
-                # The flag records "absent from GetOwnedGames, ownership from
-                # the license audit" — set even with a live store page, and
-                # cleared by the primary sync if the API ever returns the app.
-                await set_steam_delisted([appid], True)
-                outcome = "minted"
-                minted.append({"appid": appid, "name": prepared})
+                if mint:
+                    await bulk_upsert_steam_library(
+                        [{"appid": appid, "name": prepared}], synced_at=now
+                    )
+                    # The flag records "absent from GetOwnedGames, ownership from
+                    # the license audit" — set even with a live store page, and
+                    # cleared by the primary sync if the API ever returns the app.
+                    await set_steam_delisted([appid], True)
+                    outcome = "minted"
+                    minted.append({"appid": appid, "name": prepared})
+                else:
+                    outcome = "would_mint"
+                    would_mint.append({"appid": appid, "name": prepared})
             else:
                 # DLC/music/demo/tool — or a junk title prepare_catalog_title
                 # rejects. Nested/tool content never mints a games row.
                 outcome = f"skipped_{app_type or 'non_game'}"
                 skipped.append({"appid": appid, "type": app_type or None, "name": raw_name or None})
-            audit[str(appid)] = {"outcome": outcome, "name": raw_name or None, "at": now}
+            if mint:
+                audit[str(appid)] = {"outcome": outcome, "name": raw_name or None, "at": now}
             continue
 
         # Retired from the store entirely. SteamSpy still knows real games.
         spy_name = await fetch_steamspy_name(appid)
         prepared = prepare_catalog_title(spy_name) if spy_name else None
         if prepared:
-            await bulk_upsert_steam_library(
-                [{"appid": appid, "name": prepared}], synced_at=now
-            )
-            await set_steam_delisted([appid], True)
-            audit[str(appid)] = {"outcome": "minted_delisted", "name": spy_name, "at": now}
-            minted_delisted.append({"appid": appid, "name": prepared})
+            if mint:
+                await bulk_upsert_steam_library(
+                    [{"appid": appid, "name": prepared}], synced_at=now
+                )
+                await set_steam_delisted([appid], True)
+                audit[str(appid)] = {"outcome": "minted_delisted", "name": spy_name, "at": now}
+                minted_delisted.append({"appid": appid, "name": prepared})
+            else:
+                would_mint_delisted.append({"appid": appid, "name": prepared})
         else:
-            audit[str(appid)] = {"outcome": "unresolved", "name": None, "at": now}
+            if mint:
+                audit[str(appid)] = {"outcome": "unresolved", "name": None, "at": now}
             unresolved.append(appid)
 
-    if to_probe:
-        await set_meta(AUDIT_META_KEY, json.dumps(audit))
-    await set_meta(AUDIT_REMAINING_META_KEY, str(max(0, len(missing) - len(to_probe))))
+    if mint:
+        if to_probe:
+            await set_meta(AUDIT_META_KEY, json.dumps(audit))
+        await set_meta(AUDIT_REMAINING_META_KEY, str(max(0, len(missing) - len(to_probe))))
 
     result = {
         "status": "ok",
@@ -268,6 +289,9 @@ async def audit_steam_licenses(
         "skipped_non_game": skipped,
         "unresolved": unresolved,
         "remaining": max(0, len(missing) - len(to_probe)),
+        "mint": mint,
+        "would_mint": would_mint,
+        "would_mint_delisted": would_mint_delisted,
     }
     logger.info(
         "Steam license audit: owned=%d library=%d probed=%d minted_delisted=%d "

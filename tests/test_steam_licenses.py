@@ -14,6 +14,7 @@ import httpx
 from conftest import ToolDBTestCase, make_steam_game, seed_game
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steam_licenses, steam_session
+from gamelib_mcp.data.db import get_meta
 
 COOKIES = {"steamLoginSecure": "x", "sessionid": "y"}
 
@@ -196,6 +197,78 @@ class AuditSteamLicensesTests(ToolDBTestCase):
         )
         self.assertEqual(follow_up["probed"], 1)
         self.assertEqual(follow_up["remaining"], 0)
+
+
+class AuditSteamLicensesReportModeTests(ToolDBTestCase):
+    """mint=False (check_library's ownership.license_gap report mode)."""
+
+    async def _audit(self, owned, appdetails=None, steamspy=None, **kwargs):
+        appdetails = appdetails or {}
+        steamspy = steamspy or {}
+        with (
+            patch.object(
+                steam_session, "load_steam_web_cookies", AsyncMock(return_value=COOKIES)
+            ),
+            patch.object(steam_session, "is_steam_session_configured", return_value=True),
+            patch.object(
+                steam_licenses,
+                "fetch_store_appdetails",
+                AsyncMock(side_effect=lambda appid: appdetails.get(appid)),
+            ),
+            patch.object(
+                steam_licenses,
+                "fetch_steamspy_name",
+                AsyncMock(side_effect=lambda appid: steamspy.get(appid)),
+            ),
+        ):
+            return await steam_licenses.audit_steam_licenses(
+                transport=_userdata_transport(sorted(owned)), mint=False, **kwargs
+            )
+
+    async def test_live_game_lands_in_would_mint_not_minted(self):
+        result = await self._audit(
+            owned={4000},
+            appdetails={4000: {"type": "game", "name": "Garry's Mod"}},
+        )
+        self.assertEqual(result["mint"], False)
+        self.assertEqual(result["minted"], [])
+        self.assertEqual([e["appid"] for e in result["would_mint"]], [4000])
+        self.assertIsNone(await _steam_row_by_appid(4000))
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
+        self.assertEqual(count["c"], 0)
+
+    async def test_retired_game_lands_in_would_mint_delisted_not_minted(self):
+        result = await self._audit(owned={471100}, steamspy={471100: "Crysis 2"})
+        self.assertEqual(result["minted_delisted"], [])
+        self.assertEqual(
+            [e["appid"] for e in result["would_mint_delisted"]], [471100]
+        )
+        self.assertIsNone(await _steam_row_by_appid(471100))
+
+    async def test_does_not_persist_audit_meta(self):
+        # A report-mode run must not mark appids "settled" — a later call
+        # (report OR real) should re-probe them, unlike a real audit run.
+        await self._audit(
+            owned={4000}, appdetails={4000: {"type": "game", "name": "Garry's Mod"}}
+        )
+        raw = await get_meta(steam_licenses.AUDIT_META_KEY)
+        self.assertIsNone(raw)
+        remaining = await get_meta(steam_licenses.AUDIT_REMAINING_META_KEY)
+        self.assertIsNone(remaining)
+
+        second = await self._audit(
+            owned={4000}, appdetails={4000: {"type": "game", "name": "Garry's Mod"}}
+        )
+        self.assertEqual(second["probed"], 1)
+        self.assertEqual([e["appid"] for e in second["would_mint"]], [4000])
+
+    async def test_dlc_skipped_type_writes_nothing_either(self):
+        result = await self._audit(
+            owned={1234}, appdetails={1234: {"type": "dlc", "name": "Some Season Pass"}}
+        )
+        self.assertEqual([e["appid"] for e in result["skipped_non_game"]], [1234])
+        self.assertIsNone(await _steam_row_by_appid(1234))
 
 
 class SetSteamDelistedTests(ToolDBTestCase):

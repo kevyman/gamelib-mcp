@@ -29,16 +29,10 @@ from .tools.models import (
     AddGameToPlatformResponse,
     ApproveScrapeConfigResponse,
     BacklogStatsResponse,
+    CheckLibraryResponse,
     CompletionSuggestionsResponse,
     DeleteGameResponse,
     DeleteGamesBatchResponse,
-    DetectCollapsedGamesResponse,
-    DetectCrossPlatformCollapsesResponse,
-    DetectFarmedGamesResponse,
-    DetectMisclassifiedDlcResponse,
-    AuditSteamLicensesResponse,
-    DetectOrphanGamesResponse,
-    DetectStrandedDuplicatesResponse,
     DiagnoseScrapeResponse,
     GameDetailResponse,
     GameDetailsBatchResponse,
@@ -58,7 +52,6 @@ from .tools.models import (
     RateGamesBatchResponse,
     RatingsResponse,
     RefreshLibraryResponse,
-    RevalidateIgdbMatchesResponse,
     RollbackScrapeConfigResponse,
     SearchGamesBatchResponse,
     SeriesBreakdownResponse,
@@ -95,7 +88,6 @@ component_middleware = (
 _display_name = os.getenv("STEAM_PROFILE_ID") or os.getenv("BACKLOGGD_USER") or "the configured user"
 
 READ_ONLY_TOOL = ToolAnnotations(readOnlyHint=True, idempotentHint=True)
-FARM_DETECTION_TOOL = ToolAnnotations(destructiveHint=False, idempotentHint=True)
 NETWORK_SYNC_TOOL = ToolAnnotations(readOnlyHint=False, idempotentHint=True, openWorldHint=True)
 MUTATION_TOOL = ToolAnnotations(readOnlyHint=False, idempotentHint=True)
 # Read-only against local state, but fetches a live page from the open web.
@@ -103,6 +95,10 @@ DIAGNOSTIC_NETWORK_TOOL = ToolAnnotations(readOnlyHint=True, idempotentHint=True
 # merge_games deletes the source row, so a repeat call with the same source
 # errors ("not found") rather than being a no-op — explicitly non-idempotent.
 NON_IDEMPOTENT_MUTATION_TOOL = ToolAnnotations(readOnlyHint=False, idempotentHint=False)
+# check_library is report-only by default but can write (apply/suppressions)
+# and can reach the network (identity.cross_store_collapse, extid.igdb_drift,
+# ownership.license_gap) depending on selection/options.
+VALIDATION_TOOL = ToolAnnotations(readOnlyHint=False, idempotentHint=True, openWorldHint=True)
 
 mcp = FastMCP(
     name="game-library",
@@ -677,227 +673,115 @@ async def rollback_scrape_config(provider: str) -> RollbackScrapeConfigResponse:
     return await _rollback(provider)
 
 
-@mcp.tool(annotations=FARM_DETECTION_TOOL)
-async def detect_farmed_games(
-    dry_run: bool = True,
-    threshold_hours: float = 8.0,
-    min_games_per_day: int = 8,
-) -> DetectFarmedGamesResponse:
+@mcp.tool(annotations=VALIDATION_TOOL)
+async def check_library(
+    checks: list[str] | None = None,
+    include_network: bool = False,
+    limit_per_check: int = 25,
+    apply: list[str] | None = None,
+    options: dict[str, dict] | None = None,
+    list_checks: bool = False,
+    suppress: list[dict] | None = None,
+    unsuppress: list[dict] | None = None,
+) -> CheckLibraryResponse:
     """
-    Detect ArchiSteamFarm card-farming sessions and optionally mark games as farmed.
+    Run data-integrity checks over the library and report findings for repair.
 
-    Use dry_run=True first to preview detected farming days and candidates, then
-    call with dry_run=False only when the candidates should be marked is_farmed.
-    Farmed games are excluded from backlog stats and recommendations.
+    Consolidates the old detect_farmed_games / detect_collapsed_games /
+    detect_orphan_games / detect_stranded_duplicates /
+    detect_cross_platform_collapses / detect_misclassified_dlc /
+    revalidate_igdb_matches / audit_steam_licenses tools into one registry.
+    Report-only philosophy: every finding names a `check` id, a `severity`
+    (notice/warning/error), and — where a repair is known — a
+    `suggested_action` pointing at an existing tool (merge_games / update_game /
+    split_game / delete_game / set_acquisition / check_library itself for the
+    apply-gated checks). Nothing here mutates library data except the three
+    apply-gated checks below, and only when explicitly listed in `apply`.
 
-    Farming sessions appear as many games with the same last-played date and a
-    tight low-playtime cluster. threshold_hours is the max candidate playtime
-    (default 8.0h). min_games_per_day flags days with at least that many games
-    (default 8). Returns candidate counts, detected days, and update counts.
+    Registered checks (id — one-liner):
+    - playtime.farming — ArchiSteamFarm card-farming sessions (many low-playtime
+      Steam games last played the same day). offline. APPLY-GATED: marks
+      is_farmed=1 (manual overrides respected). options: threshold_hours
+      (default 8.0), min_games_per_day (default 8).
+    - identity.same_store_collapse — one platform row carrying more than one
+      distinct store identifier of the same type (an over-merge, e.g. two Steam
+      appids on one "Dead Space" row). offline, report-only.
+    - identity.stranded_duplicate — a same-name/same-platform game pair where
+      one side lacks the store identifier the other carries (pre-dates
+      identifier tracking). offline, report-only.
+    - identity.cross_store_collapse — a multi-platform game whose Steam appid
+      actually resolves (via IGDB) to a DIFFERENT game than the row's stored
+      igdb_id. NETWORK (igdb) — must be named explicitly in `checks` or run via
+      include_network=True; skipped as unconfigured:igdb without IGDB
+      credentials. options: limit (default 0 = no cap). report-only.
+    - ownership.orphan — primary library rows with no ownership and no
+      wishlist entry. offline, report-only. CAUTION: run ownership.license_gap
+      first — an "orphan" can be a retired-but-owned Steam app.
+    - nesting.phantom_parent — zero-ownership, zero-wishlist rows that other
+      rows nest under (never deletable by delete_game; remediate via
+      merge_games or update_game). offline, report-only. Shares its detector
+      with ownership.orphan but reports a distinct shape.
+    - nesting.misclassified — primary rows that are really nested content
+      (DLC/soundtrack/edition/etc.), each with a ready-to-apply update_game
+      suggestion when one resolves. offline BY DEFAULT (flipped from the old
+      tool's default) — options: limit (default 25), probe_steam (default
+      FALSE; set true to also probe Steam appdetails for steam_type_mismatch,
+      which then does reach the network even though this check id needs no
+      explicit selection), probe_offset (default 0, for walking a large
+      library across calls via the response's next_probe_offset extra).
+      report-only.
+    - extid.igdb_drift — a stored igdb_id whose IGDB name no longer matches the
+      library row (wrong enrichment poisons series gaps/deals/series
+      memberships). NETWORK (igdb) — same selection/credential rules as
+      identity.cross_store_collapse. APPLY-GATED: resets igdb_id/igdb_platforms/
+      series memberships (and, when attributable, content_type/parent_game_id)
+      so background enrichment re-resolves the row. options: limit (default
+      none = all rows).
+    - ownership.license_gap — an owned Steam license absent from the library
+      (GetOwnedGames silently omits some retired apps). NETWORK
+      (steam+steamspy) — needs a stored Steam session
+      (create_session_ingest_link(provider="steam_refresh")); skipped as
+      unconfigured:steam_session without one. APPLY-GATED: mints an owned
+      Steam row per license (delisted=1 for retired ones). options: limit
+      (default 25), retry_unresolved (default false).
+
+    Selection: `checks` accepts full ids and/or category prefixes (e.g.
+    "identity", "nesting.misclassified") — None (default) selects every
+    OFFLINE check. A network check only runs when named explicitly in `checks`
+    or when include_network=True; either way, an unconfigured network
+    dependency lands the check in `checks_skipped` (reason "unconfigured:igdb"
+    / "unconfigured:steam_session") rather than raising. `limit_per_check`
+    caps findings returned per check id (0 = uncapped); truncation is flagged
+    in `summary[check_id].truncated`. `apply` is a subset of the writes_on_apply
+    check ids (playtime.farming, extid.igdb_drift, ownership.license_gap) to
+    actually execute writes for — an applied check must also be selected to
+    run, and any other id in `apply` is a ToolError. `options` carries
+    per-check keyword overrides keyed by check id (unknown keys/ids are a
+    ToolError). One check raising never fails the whole call — it lands in
+    `errors` instead.
+
+    Suppressions (persisted tool config, not library data): `suppress`/
+    `unsuppress` each take a list of {"check", "game_id"} to add/remove from a
+    library-wide muted list (stored in `meta`), applied as a post-filter on
+    every future run's findings (count reported in `suppressed_count`;
+    mutation count in `suppressions_changed`).
+
+    `list_checks=True` returns only the check catalog (id, category,
+    description, network, writes_on_apply, default_severity, options) and runs
+    nothing else — use it to discover what's registered without touching data.
     """
-    from .tools.admin import detect_farmed_games as _detect
-    return await _detect(dry_run, threshold_hours, min_games_per_day)
+    from .tools.checks import run_library_checks
 
-
-@mcp.tool(annotations=READ_ONLY_TOOL)
-async def detect_collapsed_games() -> DetectCollapsedGamesResponse:
-    """
-    Find library entries that were over-merged by name into a single game row.
-
-    The fingerprint is one game holding two or more distinct store identifiers of
-    the same type — e.g. a single "Dead Space" carrying both the 2008 and 2023
-    Steam appids. Use this to review duplicates that predate the edition/remake
-    resolution fix. Read-only: it only reports candidates; resolve them by
-    re-syncing or hand-editing. Returns a count and the candidate list.
-    """
-    from .tools.admin import detect_collapsed_games as _detect_collapsed
-    return await _detect_collapsed()
-
-
-@mcp.tool(annotations=READ_ONLY_TOOL)
-async def detect_orphan_games() -> DetectOrphanGamesResponse:
-    """
-    Find primary-library games rows with no ownership and no wishlist entry.
-
-    is_primary_library_item is a content-type flag (real game vs
-    DLC/soundtrack/edition) — NOT ownership. A games row can have zero
-    game_platforms rows in two shapes: wishlist-only (a game_wishlist row
-    exists — normal, e.g. from sync_wishlist) or a true orphan (neither a
-    game_platforms nor a game_wishlist row — e.g. a wishlist entry later
-    removed upstream without ever being owned). Read-only: only true orphans
-    are listed as candidates for review; wishlist_only_count reports the
-    (legitimate) other shape without listing them. Rows that other rows nest
-    under are reported separately as phantom_parents (with child_count and
-    owned_child_count), NOT as orphans: they are never deletable (delete_game
-    refuses parents) and usually represent an owned game whose ownership sits
-    on a nested edition child — remediate with merge_games or update_game, not
-    delete_game. Returns orphans (id, name, igdb_id), orphan_count,
-    phantom_parents, phantom_parent_count, and wishlist_only_count. CAUTION:
-    an "orphan" can be a retired Steam app the account still owns
-    (GetOwnedGames omits some delisted apps) — run audit_steam_licenses before
-    deleting anything here; license_audit in the response says whether that
-    audit has caught up.
-    """
-    from .tools.admin import detect_orphan_games as _detect_orphans
-    return await _detect_orphans()
-
-
-@mcp.tool(annotations=NETWORK_SYNC_TOOL)
-async def audit_steam_licenses(
-    limit: int = 25, retry_unresolved: bool = False
-) -> AuditSteamLicensesResponse:
-    """
-    Heal Steam ownership from the account's license list (retired apps included).
-
-    The owned-games API silently omits some retired/delisted apps the account
-    still holds licenses for, so those games never get an ownership row. This
-    audit reads the full license list via the stored Steam store session
-    (create_session_ingest_link(provider="steam_refresh") — preferred; or the
-    legacy provider="steam_store"), diffs it against the
-    library, and classifies
-    each missing appid: live store apps of type "game" and retired apps
-    SteamSpy can still name become owned Steam rows (flagged delisted=1 —
-    cleared automatically if the app ever reappears in the owned-games API);
-    DLC/tools are recorded but never mint library rows; retired apps nobody
-    can name land in unresolved for manual review (add_game_to_platform).
-
-    Incremental: each appid is classified once, at most `limit` new appids per
-    call (0 = no cap; store requests share Steam's quota-budgeted gate), `remaining`
-    reports what is still queued — call again to continue. Runs automatically
-    (capped) after each Steam refresh when a store session is stored.
-    retry_unresolved=True re-probes previously unresolved appids.
-    """
-    from fastmcp.exceptions import ToolError
-
-    from .data.steam_licenses import audit_steam_licenses as _audit
-
-    try:
-        return await _audit(limit=limit, retry_unresolved=retry_unresolved)
-    except RuntimeError as exc:
-        raise ToolError(str(exc))
-
-
-@mcp.tool(annotations=READ_ONLY_TOOL)
-async def detect_stranded_duplicates() -> DetectStrandedDuplicatesResponse:
-    """
-    Find same-name game pairs where a sync forked a stranded duplicate row.
-
-    The fingerprint is two games sharing a normalized name and an owned
-    platform where exactly one side's platform row carries store identifiers —
-    the identifier-less twin predates identifier tracking and a later sync
-    created a fresh row instead of attaching to it. These are merge_games
-    candidates. Read-only; pairs where both sides carry identifiers are
-    excluded (distinct store entries — see detect_collapsed_games for the
-    inverse over-merge shape). Returns a count and the candidate pair list.
-    """
-    from .tools.admin import detect_stranded_duplicates as _detect_stranded
-    return await _detect_stranded()
-
-
-@mcp.tool(annotations=NETWORK_SYNC_TOOL)
-async def detect_cross_platform_collapses(limit: int = 0) -> DetectCrossPlatformCollapsesResponse:
-    """
-    Find games that merged two *different* editions across platforms by name.
-
-    Unlike detect_collapsed_games (which finds one platform row holding multiple
-    store IDs), this catches the cross-platform case — e.g. a single "Dead Space"
-    whose Steam appid is the 2008 original while its PS5 entry is the 2023 remake.
-    For each multi-platform game that has a Steam appid and a stored IGDB id, it
-    asks IGDB which game that appid really is; when that disagrees with the row's
-    IGDB id, the row is flagged. Read-only (queries IGDB; no writes). Resolve a
-    flagged row with split_game. limit caps how many games are checked (0 = all).
-    Returns checked/collapsed counts and the candidate list.
-    """
-    from .tools.admin import detect_cross_platform_collapses as _detect_xplat
-    return await _detect_xplat(limit)
-
-
-@mcp.tool(annotations=DIAGNOSTIC_NETWORK_TOOL)
-async def detect_misclassified_dlc(
-    limit: int = 25, probe_steam: bool = True, probe_offset: int = 0
-) -> DetectMisclassifiedDlcResponse:
-    """
-    Find primary library rows that are really nested content (DLC/soundtrack/etc).
-
-    Read-only detector that powers a human-confirmed repair loop: never writes,
-    never mints parents. Each candidate carries a suggested_update that is a
-    ready-to-apply set of update_game arguments (game_id + content_type and/or
-    parent) — apply one to reclassify the row and record the manual override.
-
-    Offline buckets (a row lands in its FIRST matching bucket only — order:
-    inconsistent_primary_nested, nested_parent, needs_parent,
-    wrong_parent_suspect, purchase_minted_suspect, addon_name_pattern):
-    - inconsistent_primary_nested: a nested content_type with the primary flag
-      still 1 — legacy contradictory shape hidden from BOTH the games and
-      addons views. Substantial rows (identifier/playtime) suggest promotion
-      to base_game; insubstantial ones re-apply their nested type.
-    - nested_parent: a nested row (is_primary_library_item=0) that other rows
-      nest under. Both are invisible in this shape — the parent fails the
-      is_primary filter and its children are reachable only through it. Suggests
-      content_type base_game, which promotes it and clears its own parent link.
-    - needs_parent: a nested row (is_primary_library_item=0) with no parent link.
-      Suggests parent_game_id when a split-title candidate resolves to an existing
-      primary game; suggested_update is null when no parent can be guessed.
-    - wrong_parent_suspect: a nested row parented under the WRONG game — the
-      child has a store identifier + real playtime while its parent has
-      neither, the child's name is a proper prefix of the parent's with a
-      sequel-identity conflict ("Mass Effect" under "Mass Effect 3"), or the
-      child is an OWNED edition row while nothing owns the parent (an owned
-      edition IS the game's ownership record — merge_games(source=parent,
-      target=child) folds the shell in). Legacy residue of pre-gate IGDB
-      fuzzy matching. Suggests content_type base_game (promotes the child,
-      detaches the parent).
-    - purchase_minted_suspect: a primary base_game with no store identifiers, a
-      purchase_source on an owned platform, no igdb_id, and either an addon-ish
-      name or a resolvable parent — the phantom shape a purchase import mints.
-    - addon_name_pattern: a primary base_game whose NAME reads like addon content
-      (season pass, soundtrack, "DLC", upgrade/costume pack, artbook, …). Rows
-      whose content_type is a manual override are skipped. Suggests content_type
-      dlc (or unknown_addon for soundtrack/artbook), plus parent_name if resolved.
-
-    Live probe (probe_steam=True, default): walks owned-Steam base_game rows
-    oldest-cached first, capped at limit appdetails fetches (limit=0 = no cap,
-    probe everything — paced under Steam's request quota), and flags rows Steam
-    itself calls dlc/music/demo (steam_type_mismatch). The tool is read-only so
-    the ordering never changes between calls: to walk the whole library, pass
-    the returned next_probe_offset back as probe_offset on the next call
-    (next_probe_offset is null once the walk is complete). probed = fetches
-    done this call; probe_remaining = rows left beyond this call's window;
-    per-appid fetch errors land in skipped. probe_steam=False skips the network
-    entirely (probed=0). limit/probe_offset bound only the probe (offline
-    buckets are capped at 200 each). Returns candidates, per-bucket counts, and
-    the probe bookkeeping.
-    """
-    from .tools.admin import detect_misclassified_dlc as _detect_misclassified
-    return await _detect_misclassified(limit, probe_steam, probe_offset)
-
-
-@mcp.tool(annotations=NETWORK_SYNC_TOOL)
-async def revalidate_igdb_matches(
-    dry_run: bool = True, limit: int | None = None
-) -> RevalidateIgdbMatchesResponse:
-    """
-    Audit stored IGDB matches: does each igdb_id's IGDB name match the library row?
-
-    Wrong name-based enrichment poisons series gaps, deals availability, and
-    series memberships (e.g. a "PAYDAY 2" row enriched as "Payday 2 VR"). This
-    batch-fetches the IGDB name for every game with an igdb_id and flags rows
-    whose edition-stripped normalized titles differ — the same strict gate new
-    enrichment uses. dry_run=True (default) only reports. dry_run=False resets
-    IGDB enrichment on mismatched rows (igdb_id and series memberships cleared)
-    so background enrichment re-resolves them under the strict gate. When the
-    stored content classification is attributable to the bad match (the parent
-    link matches the bad record's parent/version_parent, or the content_type
-    equals what that record implies), it is reset too — content_type back to
-    base_game, parent detached, primary flag restored — so a wrongly nested
-    row (e.g. a real game demoted to DLC of an unrelated title) resurfaces;
-    each mismatch entry carries classification_reset. Rows whose igdb_id (or,
-    for the classification part, content_type/parent_game_id/
-    is_primary_library_item) is a manual override are never reset. limit caps
-    rows checked (None = all). Returns mismatch list and counts.
-    """
-    from .tools.admin import revalidate_igdb_matches as _revalidate
-    return await _revalidate(dry_run, limit)
+    return await run_library_checks(
+        checks=checks,
+        include_network=include_network,
+        limit_per_check=limit_per_check,
+        apply=apply,
+        options=options,
+        list_checks=list_checks,
+        suppress=suppress,
+        unsuppress=unsuppress,
+    )
 
 
 @mcp.tool(annotations=NON_IDEMPOTENT_MUTATION_TOOL)
@@ -911,8 +795,9 @@ async def split_game(
     """
     Split store identifiers off an over-merged game into a new game (inverse of merge_games).
 
-    Use after detect_collapsed_games / detect_cross_platform_collapses to undo a
-    bad merge. Peels the given identifier_values (on platform) out of
+    Use after check_library's identity.same_store_collapse /
+    identity.cross_store_collapse findings to undo a bad merge. Peels the given
+    identifier_values (on platform) out of
     source_game_id onto a freshly created game. If the values are all the
     identifiers on that platform row, the whole row is re-pointed (carrying
     enrichment and playtime); otherwise a new platform row is created and only
@@ -1158,8 +1043,8 @@ async def update_game(
     promoting to a primary type.
 
     parent_game_id/parent_name (mutually exclusive) attach this game under a
-    base game — the repair workflow: detect_misclassified_dlc suggests the
-    args, update_game applies them. The target must be an existing PRIMARY
+    base game — the repair workflow: check_library's nesting.misclassified
+    check suggests the args, update_game applies them. The target must be an existing PRIMARY
     library item (not another nested row) and can't be the game itself;
     linking only succeeds once the row is (or is being) classified with a
     nested content_type — pass one alongside if it isn't already. Pass
@@ -1209,7 +1094,7 @@ async def update_games_batch(
     """
     Edit many games' properties in one call (max 200 items) — the bulk
     companion to update_game for repair loops (e.g. applying
-    detect_misclassified_dlc's suggested_update args, or bulk
+    check_library's nesting.misclassified suggested_action args, or bulk
     completion_status changes from suggest_completion_status).
 
     Each item takes exactly update_game's parameters: {name or game_id} plus

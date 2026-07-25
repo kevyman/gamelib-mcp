@@ -220,67 +220,32 @@ class IntegrationStatusResponse(FlexibleModel):
     pass
 
 
-class DetectFarmedGamesResponse(FlexibleModel):
-    farming_days: list[dict[str, Any]]
-    candidates: int
-    steam_appids: list[int]
-    threshold_hours: float
-    dry_run: bool
-    sample_games: list[dict[str, Any]]
+class CheckFinding(FlexibleModel):
+    check: str
+    severity: str
+    game_id: int | None = None
+    name: str | None = None
+    message: str
+    evidence: dict[str, Any] = {}
+    suggested_action: dict[str, Any] | None = None
 
 
-class DetectCollapsedGamesResponse(FlexibleModel):
-    collapsed_count: int
-    candidates: list[dict[str, Any]]
-
-
-class OrphanGameEntry(FlexibleModel):
-    game_id: int
-    name: str
-    igdb_id: int | None = None
-
-
-class PhantomParentEntry(FlexibleModel):
-    game_id: int
-    name: str
-    igdb_id: int | None = None
-    child_count: int
-    owned_child_count: int
-    remediation: str
-
-
-class DetectOrphanGamesResponse(FlexibleModel):
-    orphans: list[OrphanGameEntry]
-    orphan_count: int
-    # Zero-ownership, zero-wishlist rows that other rows nest under — NOT true
-    # orphans (typically the empty shell a wrong edition classification minted
-    # above an owned edition row). Never deletable; merge or reclassify.
-    phantom_parents: list[PhantomParentEntry] = []
-    phantom_parent_count: int = 0
-    wishlist_only_count: int
-    # {"configured": bool, "unclassified_at_last_run": int|None} — whether the
-    # Steam license audit could still turn some of these "orphans" into owned
-    # (retired) games. None = the audit has never run.
-    license_audit: dict[str, Any] = {}
-
-
-class AuditSteamLicensesResponse(FlexibleModel):
-    status: str
-    owned_licenses: int = 0
-    library_appids: int = 0
-    unclassified: int = 0
-    probed: int = 0
-    minted: list[dict[str, Any]] = []
-    minted_delisted: list[dict[str, Any]] = []
-    skipped_non_game: list[dict[str, Any]] = []
-    unresolved: list[int] = []
-    remaining: int = 0
-    error_summary: str | None = None
-
-
-class DetectStrandedDuplicatesResponse(FlexibleModel):
-    stranded_count: int
-    candidates: list[dict[str, Any]]
+class CheckLibraryResponse(FlexibleModel):
+    findings: list[CheckFinding] = []
+    # check_id -> {"findings": n, "max_severity": s|None, "truncated": bool, **extras}
+    summary: dict[str, dict[str, Any]] = {}
+    checks_run: list[str] = []
+    # {"check", "reason"}: "not_selected_network", "unconfigured:igdb", "unconfigured:steam_session"
+    checks_skipped: list[dict[str, Any]] = []
+    # check_id -> apply result; populated only for check ids named in `apply`.
+    applied: dict[str, dict[str, Any]] = {}
+    # {"check", "error"} — per-check isolation: one check raising never kills the run.
+    errors: list[dict[str, Any]] = []
+    suppressed_count: int = 0
+    suppressions_changed: int = 0
+    # id/category/description/network/writes_on_apply/default_severity/options — populated
+    # only when list_checks=True.
+    catalog: list[dict[str, Any]] = []
 
 
 class PlatformBreakdownResponse(FlexibleModel):
@@ -640,40 +605,6 @@ class MergeGamesBatchResponse(FlexibleModel):
     dry_run: bool
     # From the single deferred recompute; 0 when no ratings moved or dry_run.
     tag_affinity_tags_updated: int
-
-
-class DetectCrossPlatformCollapsesResponse(FlexibleModel):
-    checked: int
-    collapsed_count: int
-    candidates: list[dict[str, Any]]
-    igdb_configured: bool
-
-
-class DetectMisclassifiedDlcResponse(FlexibleModel):
-    # Each candidate: {game_id, name, reason (bucket), evidence, suggested_update
-    # (ready-to-apply update_game kwargs, or null)}. counts maps each bucket to
-    # its candidate count; probed/probe_remaining track the live Steam probe;
-    # skipped lists appids whose live fetch errored.
-    candidates: list[dict[str, Any]]
-    counts: dict[str, int]
-    probed: int
-    probe_remaining: int
-    skipped: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class RevalidateIgdbMatchesResponse(FlexibleModel):
-    dry_run: bool
-    igdb_configured: bool
-    checked: int
-    mismatch_count: int
-    # Each mismatch: {game_id, name, igdb_id, igdb_name, classification_reset}
-    # — classification_reset marks rows whose content classification is
-    # attributable to the bad match and is reset alongside the link.
-    mismatches: list[dict[str, Any]]
-    reset_count: int
-    classification_reset_count: int = 0
-    skipped_overridden: int
-    unresolved_igdb_ids: int
 
 
 class ScrapeConfigVersion(FlexibleModel):
