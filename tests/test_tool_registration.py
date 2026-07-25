@@ -87,23 +87,19 @@ EXPECTED_TOOLS = {
         "params": {"platforms", "verbose", "force_refresh"},
         "required": set(),
     },
-    "detect_farmed_games": {
-        "params": {"dry_run", "threshold_hours", "min_games_per_day"},
+    "check_library": {
+        "params": {
+            "checks",
+            "include_network",
+            "limit_per_check",
+            "apply",
+            "options",
+            "list_checks",
+            "suppress",
+            "unsuppress",
+        },
         "required": set(),
     },
-    "detect_collapsed_games": {"params": set(), "required": set()},
-    "detect_orphan_games": {"params": set(), "required": set()},
-    "audit_steam_licenses": {
-        "params": {"limit", "retry_unresolved"},
-        "required": set(),
-    },
-    "detect_stranded_duplicates": {"params": set(), "required": set()},
-    "detect_cross_platform_collapses": {"params": {"limit"}, "required": set()},
-    "detect_misclassified_dlc": {
-        "params": {"limit", "probe_steam", "probe_offset"},
-        "required": set(),
-    },
-    "revalidate_igdb_matches": {"params": {"dry_run", "limit"}, "required": set()},
     "split_game": {
         "params": {"source_game_id", "platform", "identifier_values", "new_name", "dry_run"},
         "required": {"source_game_id", "platform", "identifier_values"},
@@ -267,26 +263,7 @@ EXPECTED_ANNOTATIONS = {
     },
     "get_integration_status": {"readOnlyHint": True, "idempotentHint": True},
     "get_platform_breakdown": {"readOnlyHint": True, "idempotentHint": True},
-    "detect_farmed_games": {"destructiveHint": False, "idempotentHint": True},
-    "detect_collapsed_games": {"readOnlyHint": True, "idempotentHint": True},
-    "detect_orphan_games": {"readOnlyHint": True, "idempotentHint": True},
-    "audit_steam_licenses": {
-        "readOnlyHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    },
-    "detect_stranded_duplicates": {"readOnlyHint": True, "idempotentHint": True},
-    "detect_cross_platform_collapses": {
-        "readOnlyHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    },
-    "detect_misclassified_dlc": {
-        "readOnlyHint": True,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    },
-    "revalidate_igdb_matches": {
+    "check_library": {
         "readOnlyHint": False,
         "idempotentHint": True,
         "openWorldHint": True,
@@ -352,9 +329,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_58(self):
+    async def test_tool_count_is_51(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 58)
+        self.assertEqual(len(tools), 51)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()
@@ -391,13 +368,14 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("total_matches", props)
                 self.assertIn("has_more", props)
 
-    async def test_detect_farmed_games_description_matches_defaults(self):
+    async def test_check_library_description_lists_every_check_id(self):
+        from gamelib_mcp.tools.checks import CHECKS
+
         tools = await self._tools()
-        description = tools["detect_farmed_games"].description
-        self.assertIn("default 8.0h", description)
-        self.assertIn("default 8", description)
-        self.assertNotIn("default 4h", description)
-        self.assertNotIn("default 20", description)
+        description = tools["check_library"].description
+        for check_id in CHECKS:
+            with self.subTest(check_id=check_id):
+                self.assertIn(check_id, description)
 
     def test_server_instructions_include_discovery_workflow(self):
         instructions = main.mcp.instructions
