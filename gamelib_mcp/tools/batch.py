@@ -17,6 +17,34 @@ BATCH_ITEM_CAP = 200
 # Detail payloads are an order of magnitude larger than other batch results.
 DETAIL_BATCH_ITEM_CAP = 50
 
+# Keys that are real fields on ANOTHER tool. A bare "unknown key" error sends a
+# caller hunting for a deploy that failed; these are per-platform columns, and
+# every batch tool that rejects them is a games-table tool. Naming the right
+# tool in the error is the whole fix for "I looked on the update surface first".
+_KEY_HOMES: dict[str, str] = {
+    "delisted": (
+        "a game_platforms column — set it with add_game_to_platform / "
+        "add_games_to_platform_batch, release it with set_playtime(clear=[...])"
+    ),
+    "playtime_minutes": (
+        "a game_platforms column — pin it with set_playtime / set_playtime_batch"
+    ),
+    "last_played": (
+        "a game_platforms column — pin it with set_playtime / set_playtime_batch"
+    ),
+    "platform": "a game_platforms column — see set_playtime / add_game_to_platform",
+}
+
+
+def _unknown_key_message(unknown: set[str], allowed_keys: frozenset[str]) -> str:
+    message = f"unknown key(s): {sorted(unknown)}. Valid: {sorted(allowed_keys)}"
+    misplaced = [
+        f"'{key}' is {_KEY_HOMES[key]}" for key in sorted(unknown) if key in _KEY_HOMES
+    ]
+    if misplaced:
+        message += ". " + "; ".join(misplaced)
+    return message
+
 
 def check_batch_items(items: list, cap: int = BATCH_ITEM_CAP) -> None:
     """Whole-call preconditions — the only errors a batch tool ever raises."""
@@ -48,9 +76,7 @@ async def apply_batch_item(
             raise ToolError("each item must be an object")
         unknown = set(item) - allowed_keys
         if unknown:
-            raise ToolError(
-                f"unknown key(s): {sorted(unknown)}. Valid: {sorted(allowed_keys)}"
-            )
+            raise ToolError(_unknown_key_message(unknown, allowed_keys))
         result = await apply(**item)
     except Exception as exc:
         payload = item if isinstance(item, dict) else {"item": item}

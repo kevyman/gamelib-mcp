@@ -1709,3 +1709,68 @@ class DelistedFlagTests(ToolDBTestCase):
             await platforms.add_game_to_platform(
                 "Wishlisted Game", "steam", owned=False, delisted=True
             )
+
+
+class AddGameToPlatformByIdTests(ToolDBTestCase):
+    """game_id targeting: edit an existing row, never mint on a typo."""
+
+    async def test_game_id_edits_without_creating(self):
+        game_id = await make_steam_game("Rusty's Retirement", 2666510)
+        result = await platforms.add_game_to_platform(
+            game_id=game_id, platform="steam", delisted=False
+        )
+        self.assertFalse(result["created"])
+        self.assertEqual(result["game_id"], game_id)
+        self.assertEqual(result["name"], "Rusty's Retirement")
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
+        self.assertEqual(count["c"], 1)
+
+    async def test_unknown_game_id_errors_instead_of_minting(self):
+        with self.assertRaisesRegex(ToolError, "No game with id 999999"):
+            await platforms.add_game_to_platform(game_id=999999, platform="steam")
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
+        self.assertEqual(count["c"], 0)
+
+    async def test_name_typo_still_mints_a_row(self):
+        # Documented hazard the game_id path exists to avoid — asserted so the
+        # docstring's warning stays true.
+        await make_steam_game("Rusty's Retirement", 2666510)
+        result = await platforms.add_game_to_platform("Rustys Retirment", "steam")
+        self.assertTrue(result["created"])
+
+    async def test_requires_exactly_one_of_name_or_game_id(self):
+        game_id = await seed_game("Ambiguous Target")
+        with self.assertRaisesRegex(ToolError, "exactly one of name or game_id"):
+            await platforms.add_game_to_platform(
+                "Ambiguous Target", "steam", game_id=game_id
+            )
+        with self.assertRaisesRegex(ToolError, "exactly one of name or game_id"):
+            await platforms.add_game_to_platform(platform="steam")
+
+    async def test_batch_accepts_game_id_items(self):
+        first = await make_steam_game("Focus Grove", 111)
+        second = await make_steam_game("Pupple Pop", 222)
+        result = await platforms.add_games_to_platform_batch(
+            [
+                {"game_id": first, "platform": "steam", "delisted": False},
+                {"game_id": second, "platform": "steam", "delisted": False},
+            ],
+            dry_run=True,
+        )
+        self.assertEqual(result["ok"], 2)
+        self.assertEqual([r["game_id"] for r in result["results"]], [first, second])
+        self.assertTrue(all(r["created"] is False for r in result["results"]))
+
+
+class MisplacedBatchKeyTests(ToolDBTestCase):
+    async def test_platform_column_on_a_games_batch_names_the_right_tool(self):
+        game_id = await seed_game("Wrongly Targeted Game")
+        result = await platforms.update_games_batch(
+            [{"game_id": game_id, "delisted": False}], dry_run=True
+        )
+        error = result["results"][0]["error"]
+        self.assertIn("unknown key(s): ['delisted']", error)
+        self.assertIn("add_game_to_platform", error)
+        self.assertIn("set_playtime(clear=[...])", error)

@@ -116,13 +116,16 @@ EXPECTED_TOOLS = {
     },
     "set_hardware_preference": {"params": {"platforms"}, "required": {"platforms"}},
     "add_game_to_platform": {
+        # name and platform are no longer schema-required: platform is checked
+        # at runtime, and exactly one of name/game_id must be given (game_id
+        # targets an existing row and can never mint one).
         "params": {
-            "name", "platform", "identifier_type", "identifier_value",
+            "name", "game_id", "platform", "identifier_type", "identifier_value",
             "playtime_minutes", "owned",
             "acquired_at", "price_paid", "price_currency", "purchase_source",
             "bundle_name", "delisted",
         },
-        "required": {"name", "platform"},
+        "required": set(),
     },
     "add_games_to_platform_batch": {"params": {"items", "dry_run"}, "required": {"items"}},
     "create_session_ingest_link": {"params": {"provider"}, "required": {"provider"}},

@@ -200,8 +200,9 @@ async def set_hardware_preference(platforms: list[str]) -> dict:
 
 
 async def add_game_to_platform(
-    name: str,
-    platform: str,
+    name: str | None = None,
+    platform: str | None = None,
+    game_id: int | None = None,
     identifier_type: str | None = None,
     identifier_value: str | None = None,
     playtime_minutes: int | None = None,
@@ -221,7 +222,13 @@ async def add_game_to_platform(
     record a wishlist item on a platform with no wishlist sync (e.g. PSN, which
     has no public wishlist API — pass owned=False there).
 
-    name: Game name (will match an existing game by exact name or create a new one)
+    name: Game name (matches an existing game by EXACT name, or creates a new
+        one — a typo therefore mints a phantom row rather than erroring; pass
+        game_id instead when correcting an existing row, or dry_run first and
+        assert created=false)
+    game_id: Target an existing game by id instead of by name. Never creates a
+        game (an unknown id is an error), which makes it the safe way to edit a
+        row that already exists. Provide name or game_id, not both.
     platform: steam | epic | gog | nintendo | switch2 | ps5 | itchio | xbox | ea | ubisoft | other (aliases: origin→ea, uplay→ubisoft)
     identifier_type: Optional store identifier type (e.g. 'steam_appid', 'gog_product_id').
         With owned=True, attaches to the new platform-ownership row. With
@@ -249,12 +256,17 @@ async def add_game_to_platform(
         flips it back; hand it back to sync with
         set_playtime(clear=["delisted"]).
     """
+    if platform is None:
+        raise ToolError("platform is required")
     # Resolve aliases (e.g. "nintendo" → "switch2") and validate in one step.
     platform = _validate_platform(platform, LIBRARY_PLATFORMS)
 
-    name = name.strip()
-    if not name:
-        raise ToolError("name must not be empty")
+    if (name is None) == (game_id is None):
+        raise ToolError("Provide exactly one of name or game_id")
+    if name is not None:
+        name = name.strip()
+        if not name:
+            raise ToolError("name must not be empty")
     if playtime_minutes is not None and playtime_minutes < 0:
         raise ToolError("playtime_minutes must not be negative")
     acquisition_params = (
@@ -281,12 +293,21 @@ async def add_game_to_platform(
         if identifier_type == "steam_appid" and platform != "steam":
             raise ToolError("identifier_type='steam_appid' requires platform='steam'")
 
-    # Check whether the game already exists before upserting
+    # Check whether the game already exists before upserting. A game_id target
+    # must already exist — it can only ever edit, never mint.
     async with get_db() as db:
-        existing = await db.execute_fetchone(
-            "SELECT id FROM games WHERE lower(name) = lower(?) ORDER BY id LIMIT 1",
-            (name,),
-        )
+        if game_id is not None:
+            existing = await db.execute_fetchone(
+                "SELECT id, name FROM games WHERE id = ?", (game_id,)
+            )
+            if existing is None:
+                raise ToolError(f"No game with id {game_id}")
+            name = existing["name"]
+        else:
+            existing = await db.execute_fetchone(
+                "SELECT id FROM games WHERE lower(name) = lower(?) ORDER BY id LIMIT 1",
+                (name,),
+            )
     created = existing is None
 
     if dry_run:
@@ -319,7 +340,13 @@ async def add_game_to_platform(
             "delisted": delisted,
         }
 
-    game_id = await upsert_game(None, name)
+    # An id target resolved above; a name target adopts an exact-name row or
+    # mints one. name is non-None on that branch (the XOR check guarantees it).
+    if game_id is not None:
+        game_id = existing["id"]
+    else:
+        assert name is not None
+        game_id = await upsert_game(None, name)
     added_identifier = None
     acquisition = None
     if owned:
@@ -1174,7 +1201,7 @@ async def update_games_batch(items: list[dict], dry_run: bool = False) -> dict:
 
 
 _ADD_BATCH_ITEM_KEYS = frozenset({
-    "name", "platform", "identifier_type", "identifier_value",
+    "name", "game_id", "platform", "identifier_type", "identifier_value",
     "playtime_minutes", "owned", "acquired_at", "price_paid",
     "price_currency", "purchase_source", "bundle_name", "delisted",
 })
@@ -1184,10 +1211,11 @@ async def add_games_to_platform_batch(items: list[dict], dry_run: bool = False) 
     """
     Apply add_game_to_platform to many games; per-item errors never fail the call.
 
-    Each item takes exactly add_game_to_platform's parameters (name + platform
-    required, per-item owned/identifier/acquisition optional). created counts
-    ok items that minted a brand-new games row (vs attaching to an existing
-    one). dry_run=True runs the identical validation path and writes nothing;
+    Each item takes exactly add_game_to_platform's parameters (platform plus
+    exactly one of name/game_id required, per-item owned/identifier/acquisition/
+    delisted optional). created counts ok items that minted a brand-new games
+    row (vs attaching to an existing one) — always 0 for game_id items, which
+    can only edit. dry_run=True runs the identical validation path and writes nothing;
     a to-be-created game reports game_id null, and acquisition previews the
     validated fields rather than post-write row state. A repeated new name
     within one dry-run batch reports created=False (the wet run creates it
