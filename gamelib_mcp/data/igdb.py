@@ -776,6 +776,23 @@ def _generate_resolve_query_variants(name: str) -> list[tuple[str, bool]]:
     return variants
 
 
+def _igdb_name_agrees(library_name: str, igdb_name: str) -> bool:
+    """Whether an IGDB record's name vouches for a library row's identity.
+
+    The same two-step the drift audit uses: edition-stripped equality, then
+    the wider edition-comparison normalization, so "Nioh 2 - The Complete
+    Edition" agrees with "Nioh 2" while "FTL: Faster Than Light" does not
+    agree with "Faster than light?".
+    """
+    from .title_normalization import normalize_edition_comparison_title
+
+    if normalize_series_gap_title(library_name) == normalize_series_gap_title(igdb_name):
+        return True
+    return normalize_edition_comparison_title(
+        library_name
+    ) == normalize_edition_comparison_title(igdb_name)
+
+
 def _select_best_match(
     name: str,
     results: list[IGDBGame],
@@ -1617,6 +1634,37 @@ async def backfill_missing_games(limit: int = 10) -> int:
                 fetched = await fetch_game_by_id(external_igdb_id, suppress_errors=False)
                 if fetched is not None:
                     igdb_game = fetched
+                    if (
+                        existing_igdb_id
+                        and existing_igdb_id != external_igdb_id
+                        and not _igdb_name_agrees(row["name"], fetched.name)
+                    ):
+                        # The mapping is authoritative but not infallible: prod
+                        # Steam appid 212680 maps to 178437 ("Faster than
+                        # light?"), a junk duplicate, and this branch replaced
+                        # the row's correct link to 3075 ("FTL: Faster Than
+                        # Light") with it. Only override a stored link the name
+                        # VOUCHES for when the mapping's own record vouches too;
+                        # the extra fetch costs one call in the rare case where
+                        # the two disagree AND the new name doesn't match.
+                        stored = await fetch_game_by_id(
+                            existing_igdb_id, suppress_errors=False
+                        )
+                        if stored is not None and _igdb_name_agrees(
+                            row["name"], stored.name
+                        ):
+                            logger.info(
+                                "IGDB backfill keeping stored igdb_id=%s for game_id=%s "
+                                "name=%r: external_games maps steam_appid=%s to %s (%r), "
+                                "whose name does not match while the stored link's does",
+                                existing_igdb_id,
+                                game_id,
+                                row["name"],
+                                appid,
+                                external_igdb_id,
+                                fetched.name,
+                            )
+                            igdb_game = stored
 
             if igdb_game is None and existing_igdb_id:
                 # Row already has a matched igdb_id (e.g. from an earlier pass) —
