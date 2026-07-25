@@ -1363,14 +1363,23 @@ class StoreAuthoritativeDriftTests(ToolDBTestCase):
         ):
             return await checks.run_library_checks(checks=["extid.igdb_drift"], **kwargs)
 
-    async def test_appid_backed_link_is_not_reported_or_reset(self):
+    async def test_appid_backed_link_is_reported_as_notice_never_reset(self):
+        # IGDB's mapping can point at a junk duplicate (prod: FTL), so the
+        # finding stays visible — it just must never be reset, because the
+        # next backfill would re-apply the identical link.
         game_id = await self._seed("FTL: Faster Than Light", 212680, 178437)
         result = await self._run(
             {"212680": 178437},
             {178437: self._record("Faster than light?")},
             apply=["extid.igdb_drift"],
         )
-        self.assertEqual(result["findings"], [])
+        self.assertEqual(len(result["findings"]), 1)
+        finding = result["findings"][0]
+        _assert_envelope(self, finding)
+        self.assertEqual(finding["severity"], "notice")
+        self.assertEqual(finding["evidence"]["drift_kind"], "store_authoritative")
+        self.assertFalse(finding["evidence"]["reset"])
+        self.assertEqual(finding["suggested_action"]["tool"], "update_game")
         summary = result["summary"]["extid.igdb_drift"]
         self.assertEqual(summary["store_authoritative_count"], 1)
         self.assertEqual(summary["reset_count"], 0)
@@ -1401,10 +1410,14 @@ class StoreAuthoritativeDriftTests(ToolDBTestCase):
             )
         self.assertIsNone(row["igdb_id"])
 
-    async def test_unmapped_appid_still_reports(self):
+    async def test_unmapped_appid_still_reports_as_wrong_entity(self):
         await self._seed("The Hex", 510420, 227064)
         result = await self._run({}, {227064: self._record("Hex")})
         self.assertEqual(len(result["findings"]), 1)
+        self.assertEqual(result["findings"][0]["severity"], "warning")
+        self.assertEqual(
+            result["findings"][0]["evidence"]["drift_kind"], "wrong_entity"
+        )
         self.assertEqual(
             result["summary"]["extid.igdb_drift"]["store_authoritative_count"], 0
         )
