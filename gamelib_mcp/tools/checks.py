@@ -463,6 +463,39 @@ async def _run_extid_igdb_drift(*, apply: bool, options: dict[str, Any]) -> Chec
         )
         for m in result["mismatches"]
     ]
+    # Store-authoritative links are never reset — but they are not always
+    # RIGHT: IGDB's external_games maps Steam appid 212680 (FTL) to 178437,
+    # a junk duplicate named "Faster than light?", while the real record
+    # exists separately. Silently excluding them would hide that, so they
+    # report as notices whose only repair is a hand pin (which outranks the
+    # mapping in backfill_missing_games, unlike a reset).
+    findings.extend(
+        _finding(
+            "extid.igdb_drift",
+            "notice",
+            f"'{m['name']}' is linked to IGDB id {m['igdb_id']} ('{m['igdb_name']}') "
+            "— IGDB's own store mapping says this appid IS that game, so the link "
+            "is left alone. If IGDB is wrong (a junk duplicate record), pin the "
+            "correct id by hand; a reset would just be re-applied.",
+            game_id=m["game_id"],
+            name=m["name"],
+            evidence={
+                "igdb_id": m["igdb_id"],
+                "igdb_name": m["igdb_name"],
+                "drift_kind": "store_authoritative",
+                "reset": False,
+            },
+            suggested_action={
+                "tool": "update_game",
+                "args": {"game_id": m["game_id"], "igdb_id": m["igdb_id"]},
+                "note": (
+                    "replace igdb_id with the correct one if IGDB's mapping is "
+                    "wrong; pinning it also stops this finding recurring"
+                ),
+            },
+        )
+        for m in result["store_authoritative_matches"]
+    )
     extras = {
         "igdb_configured": result["igdb_configured"],
         "checked": result["checked"],
