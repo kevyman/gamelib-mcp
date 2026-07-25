@@ -2650,6 +2650,24 @@ async def detect_misclassified_dlc(
     }
 
 
+async def _steam_appids_for_games(game_ids: list[int]) -> dict[int, str]:
+    """{game_id: steam_appid} for the given games (one appid per game)."""
+    if not game_ids:
+        return {}
+    placeholders = ",".join("?" * len(game_ids))
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            f"""SELECT gp.game_id AS game_id, MIN(gpi.identifier_value) AS appid
+                FROM game_platform_identifiers gpi
+                JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+                WHERE gpi.identifier_type = ?
+                  AND gp.game_id IN ({placeholders})
+                GROUP BY gp.game_id""",
+            (STEAM_APP_ID, *game_ids),
+        )
+    return {row["game_id"]: str(row["appid"]) for row in rows if row["appid"] is not None}
+
+
 async def revalidate_igdb_matches(
     dry_run: bool = True,
     limit: int | None = None,
@@ -2679,10 +2697,20 @@ async def revalidate_igdb_matches(
     ``mismatches`` (carrying their drift_kind) for a caller that really does
     want them repinned.
 
+    Neither is a link IGDB's own ``external_games`` maps the row's Steam appid
+    to. That mapping is authoritative and ``backfill_missing_games`` applies it
+    ahead of any name check, so resetting such a row only makes the next
+    backfill re-pin the identical id — a permanent loop (prod: "FTL: Faster
+    Than Light" ↔ 178437, whose IGDB record is named "Faster than light?").
+    Those land in ``store_authoritative_matches`` with
+    ``drift_kind="store_authoritative"`` and are never reset; the batched
+    external_games lookup covers only the already-mismatched rows.
+
     dry_run=True (default) only reports mismatches. dry_run=False resets the
     IGDB enrichment on mismatched rows — igdb_id/igdb_platforms/
-    igdb_cached_at/igdb_claimed_at to NULL and that game's
-    game_series_membership rows deleted (they came from the bad match) — so
+    igdb_cached_at/igdb_claimed_at and the (unpinned) cover_image_id to NULL,
+    and that game's game_series_membership rows deleted (all of it came from
+    the bad match; the cover is literally the wrong game's art) — so
     background enrichment re-resolves them under the strict gate. Rows whose
     igdb_id is listed in games.manual_overrides are reported separately and
     never reset. limit caps how many rows are checked (None/0 = all).
@@ -2706,7 +2734,11 @@ async def revalidate_igdb_matches(
     """
     from ..data.content import content_type_from_igdb_category
     from ..data.db import get_manual_overrides
-    from ..data.igdb import fetch_igdb_game_records, igdb_credentials_configured
+    from ..data.igdb import (
+        fetch_igdb_game_records,
+        igdb_credentials_configured,
+        resolve_steam_appids_to_igdb,
+    )
     from ..data.title_normalization import (
         normalize_edition_comparison_title,
         normalize_series_gap_title,
@@ -2735,6 +2767,8 @@ async def revalidate_igdb_matches(
         "unresolved_igdb_ids": 0,
         "edition_suffix_count": 0,
         "edition_suffix_matches": [],
+        "store_authoritative_count": 0,
+        "store_authoritative_matches": [],
     }
     if not igdb_configured or not rows:
         return result
@@ -2847,15 +2881,61 @@ async def revalidate_igdb_matches(
                 }
             )
 
+    # A link IGDB's own external_games maps this Steam appid to is not drift,
+    # whatever the names look like: it is the authoritative store→game mapping,
+    # and backfill_missing_games consults it BEFORE any name check. Resetting
+    # such a row just makes the next backfill re-apply the identical link —
+    # observed in prod as "FTL: Faster Than Light" ↔ IGDB 178437 ("Faster than
+    # light?"), a permanent report/reset/re-pin loop. One batched lookup, over
+    # the mismatched rows only.
+    store_authoritative: list[dict] = []
+    if mismatches:
+        appid_by_game = await _steam_appids_for_games(
+            [mismatch["game_id"] for mismatch in mismatches]
+        )
+        if appid_by_game:
+            try:
+                external = await resolve_steam_appids_to_igdb(
+                    sorted(set(appid_by_game.values()))
+                )
+            except Exception as exc:
+                # Report-only degradation: without the mapping we cannot prove a
+                # link is store-authoritative, so keep every mismatch (a reset
+                # is still recoverable; a silent skip would hide real drift).
+                logger.warning("IGDB external_games check failed during drift audit: %s", exc)
+                external = {}
+            kept: list[dict] = []
+            for mismatch in mismatches:
+                appid = appid_by_game.get(mismatch["game_id"])
+                if appid is not None and external.get(appid) == mismatch["igdb_id"]:
+                    store_authoritative.append({**mismatch, "drift_kind": "store_authoritative"})
+                    if mismatch["classification_reset"]:
+                        classification_resets.remove(mismatch["game_id"])
+                    continue
+                kept.append(mismatch)
+            mismatches = kept
+
+    async with get_db() as db:
         reset_count = 0
         if not dry_run and mismatches:
             for mismatch in mismatches:
+                # cover_image_id goes too (unless hand-pinned): it is the WRONG
+                # game's art. Re-enrichment overwrites it when the row
+                # re-resolves, but a row that never finds a match would
+                # otherwise keep showing the wrong cover forever.
                 await db.execute(
                     """UPDATE games
                        SET igdb_id = NULL,
                            igdb_platforms = NULL,
                            igdb_cached_at = NULL,
-                           igdb_claimed_at = NULL
+                           igdb_claimed_at = NULL,
+                           cover_image_id = CASE
+                               WHEN manual_overrides IS NOT NULL
+                                    AND 'cover_image_id' IN (
+                                        SELECT value FROM json_each(manual_overrides))
+                               THEN cover_image_id
+                               ELSE NULL
+                           END
                        WHERE id = ?""",
                     (mismatch["game_id"],),
                 )
@@ -2888,6 +2968,8 @@ async def revalidate_igdb_matches(
             "unresolved_igdb_ids": unresolved,
             "edition_suffix_count": len(edition_suffix_matches),
             "edition_suffix_matches": edition_suffix_matches,
+            "store_authoritative_count": len(store_authoritative),
+            "store_authoritative_matches": store_authoritative,
         }
     )
     return result
