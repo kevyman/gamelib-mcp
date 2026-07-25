@@ -12,6 +12,7 @@ semantics, apply gating, suppressions, and error isolation.
 
 import os
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 from fastmcp.exceptions import ToolError
@@ -302,9 +303,10 @@ class OwnershipOrphanAndPhantomParentTests(ToolDBTestCase):
         _assert_envelope(self, orphan_findings[0])
         self.assertEqual(orphan_findings[0]["suggested_action"]["tool"], "delete_game")
 
-    async def test_phantom_parent_reported_even_with_owned_children(self):
-        # Phase A: emit ALL phantom parents regardless of owned_child_count
-        # (Phase B's nesting.superseded_base will take owned_child_count > 0).
+    async def test_phantom_parent_with_owned_child_moves_to_superseded_base(self):
+        # Phase B completion: a phantom parent WITH an owned child now reports
+        # ONLY under nesting.superseded_base (with a concrete merge-to-heir
+        # suggestion) — never under nesting.phantom_parent too.
         shell = await seed_game("Pathfinder: Wrath of the Righteous")
         edition = await seed_game(
             "Pathfinder: Wrath of the Righteous - Enhanced Edition",
@@ -314,13 +316,51 @@ class OwnershipOrphanAndPhantomParentTests(ToolDBTestCase):
         )
         await add_platform(edition, "steam", playtime_minutes=500)
 
-        result = await checks.run_library_checks(checks=["nesting.phantom_parent"])
-        findings = {f["game_id"]: f for f in result["findings"]}
-        self.assertIn(shell, findings)
-        finding = findings[shell]
+        result = await checks.run_library_checks(
+            checks=["nesting.phantom_parent", "nesting.superseded_base"]
+        )
+        phantom_findings = [f for f in result["findings"] if f["check"] == "nesting.phantom_parent"]
+        superseded_findings = [
+            f for f in result["findings"] if f["check"] == "nesting.superseded_base"
+        ]
+        self.assertEqual(phantom_findings, [])
+        self.assertEqual(len(superseded_findings), 1)
+        finding = superseded_findings[0]
         _assert_envelope(self, finding)
-        self.assertEqual(finding["evidence"]["owned_child_count"], 1)
-        self.assertIsNone(finding["suggested_action"])
+        self.assertEqual(finding["game_id"], shell)
+        self.assertEqual(finding["evidence"]["heir_game_id"], edition)
+        self.assertEqual(
+            finding["suggested_action"],
+            {
+                "tool": "merge_games",
+                "args": {"source_game_id": shell, "target_game_id": edition},
+                "note": (
+                    "owned edition becomes canonical primary; merge transfers "
+                    "ratings/series/spend/wishlist and re-points siblings"
+                ),
+            },
+        )
+
+    async def test_phantom_parent_without_owned_child_stays_phantom_parent(self):
+        # The vice-versa split: a phantom parent whose only child is UNOWNED
+        # stays reported as nesting.phantom_parent and never appears in
+        # nesting.superseded_base.
+        shell = await seed_game("Shell Game")
+        await seed_game(
+            "Shell Game DLC",
+            content_type="dlc",
+            is_primary_library_item=0,
+            parent_game_id=shell,
+        )
+        result = await checks.run_library_checks(
+            checks=["nesting.phantom_parent", "nesting.superseded_base"]
+        )
+        phantom_findings = [f for f in result["findings"] if f["check"] == "nesting.phantom_parent"]
+        superseded_findings = [
+            f for f in result["findings"] if f["check"] == "nesting.superseded_base"
+        ]
+        self.assertEqual([f["game_id"] for f in phantom_findings], [shell])
+        self.assertEqual(superseded_findings, [])
 
     async def test_selecting_only_one_id_still_runs_but_filters(self):
         await seed_game("Dangling Game")
@@ -594,3 +634,417 @@ class LimitPerCheckTests(ToolDBTestCase):
         result = await checks.run_library_checks(checks=["ownership.orphan"], limit_per_check=0)
         self.assertEqual(len(result["findings"]), 2)
         self.assertFalse(result["summary"]["ownership.orphan"]["truncated"])
+
+
+# --- Phase B: checks 9-18 -----------------------------------------------------
+
+
+def _pctl_day(app_id, day, minutes, name="Game", device="device-1"):
+    return {
+        "device_id": device,
+        "application_id": app_id,
+        "period_type": "day",
+        "period_key": day,
+        "playtime_minutes": minutes,
+        "app_name": name,
+    }
+
+
+class NestingSupersededBaseTests(ToolDBTestCase):
+    async def test_clean_library_reports_nothing(self):
+        await make_steam_game("Ordinary Game", 8001)
+        result = await checks.run_library_checks(checks=["nesting.superseded_base"])
+        self.assertEqual(result["findings"], [])
+
+    async def test_owned_edition_under_unowned_shell_suggests_merge(self):
+        shell = await seed_game("Burnout Paradise")
+        edition = await seed_game(
+            "Burnout Paradise: The Ultimate Box",
+            content_type="edition",
+            is_primary_library_item=0,
+            parent_game_id=shell,
+        )
+        await add_platform(edition, "steam", playtime_minutes=500)
+
+        result = await checks.run_library_checks(checks=["nesting.superseded_base"])
+        self.assertEqual(len(result["findings"]), 1)
+        finding = result["findings"][0]
+        _assert_envelope(self, finding)
+        self.assertEqual(finding["game_id"], shell)
+        self.assertEqual(finding["evidence"]["heir_game_id"], edition)
+        self.assertEqual(len(finding["evidence"]["children"]), 1)
+        self.assertEqual(finding["evidence"]["children"][0]["playtime_minutes"], 500)
+        self.assertEqual(finding["suggested_action"]["tool"], "merge_games")
+        self.assertEqual(
+            finding["suggested_action"]["args"],
+            {"source_game_id": shell, "target_game_id": edition},
+        )
+
+    async def test_heir_picked_by_playtime_then_identifiers_then_id(self):
+        shell = await seed_game("Multi Edition Shell")
+        weak = await seed_game(
+            "Multi Edition Shell: Weak Edition",
+            content_type="edition",
+            is_primary_library_item=0,
+            parent_game_id=shell,
+        )
+        strong = await seed_game(
+            "Multi Edition Shell: Strong Edition",
+            content_type="edition",
+            is_primary_library_item=0,
+            parent_game_id=shell,
+        )
+        await add_platform(weak, "steam", playtime_minutes=10)
+        await add_platform(strong, "steam", playtime_minutes=999)
+
+        result = await checks.run_library_checks(checks=["nesting.superseded_base"])
+        self.assertEqual(len(result["findings"]), 1)
+        self.assertEqual(result["findings"][0]["evidence"]["heir_game_id"], strong)
+
+
+class IdentityUnlinkedEditionTests(ToolDBTestCase):
+    async def test_clean_library_reports_nothing(self):
+        await make_steam_game("Dead Island", 91310)
+        await make_steam_game("Portal", 400)
+        result = await checks.run_library_checks(checks=["identity.unlinked_edition"])
+        self.assertEqual(result["findings"], [])
+
+    async def test_reports_unlinked_edition_sibling(self):
+        base = await make_steam_game("Dead Island", 91310, playtime_minutes=120)
+        edition = await make_steam_game(
+            "Dead Island Definitive Edition", 91311, playtime_minutes=30
+        )
+
+        result = await checks.run_library_checks(checks=["identity.unlinked_edition"])
+        self.assertEqual(len(result["findings"]), 1)
+        finding = result["findings"][0]
+        _assert_envelope(self, finding)
+        self.assertEqual(finding["game_id"], edition)
+        self.assertEqual(finding["evidence"]["base_game_id"], base)
+        self.assertIsNone(finding["suggested_action"])
+
+    async def test_excludes_pairs_already_linked_as_parent_child(self):
+        base = await make_steam_game("Dead Island", 91310)
+        edition = await make_steam_game("Dead Island Definitive Edition", 91311)
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET parent_game_id = ? WHERE id = ?", (base, edition)
+            )
+            await db.commit()
+
+        result = await checks.run_library_checks(checks=["identity.unlinked_edition"])
+        self.assertEqual(result["findings"], [])
+
+
+class NestingDanglingParentTests(ToolDBTestCase):
+    async def test_clean_library_reports_nothing(self):
+        parent = await seed_game("Good Parent")
+        await seed_game(
+            "Good Parent DLC",
+            content_type="dlc",
+            is_primary_library_item=0,
+            parent_game_id=parent,
+        )
+        result = await checks.run_library_checks(checks=["nesting.dangling_parent"])
+        self.assertEqual(result["findings"], [])
+
+    async def test_self_parent_reported(self):
+        gid = await seed_game("Self Parent Game")
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET parent_game_id = ? WHERE id = ?", (gid, gid))
+            await db.commit()
+
+        result = await checks.run_library_checks(checks=["nesting.dangling_parent"])
+        self.assertEqual(len(result["findings"]), 1)
+        finding = result["findings"][0]
+        _assert_envelope(self, finding)
+        self.assertEqual(finding["evidence"]["reason"], "self_parent")
+        self.assertEqual(
+            finding["suggested_action"]["args"], {"game_id": gid, "parent_game_id": 0}
+        )
+
+    async def test_parent_not_primary_reported(self):
+        nested_parent = await seed_game(
+            "Nested Parent", content_type="dlc", is_primary_library_item=0
+        )
+        child = await seed_game(
+            "Child Of Nested",
+            content_type="dlc",
+            is_primary_library_item=0,
+            parent_game_id=nested_parent,
+        )
+
+        result = await checks.run_library_checks(checks=["nesting.dangling_parent"])
+        findings = {f["game_id"]: f for f in result["findings"]}
+        self.assertIn(child, findings)
+        self.assertEqual(findings[child]["evidence"]["reason"], "parent_not_primary")
+
+
+class WishlistAlreadyOwnedTests(ToolDBTestCase):
+    async def test_clean_library_reports_nothing(self):
+        gid = await seed_game("Not Owned Yet")
+        await db_module.upsert_wishlist_entry(gid, "steam", source="steam")
+        result = await checks.run_library_checks(checks=["wishlist.already_owned"])
+        self.assertEqual(result["findings"], [])
+
+    async def test_reports_wishlist_row_already_owned(self):
+        gid = await make_steam_game("Wishlisted But Owned", 5001)
+        await db_module.upsert_wishlist_entry(gid, "steam", source="steam")
+
+        result = await checks.run_library_checks(checks=["wishlist.already_owned"])
+        self.assertEqual(len(result["findings"]), 1)
+        finding = result["findings"][0]
+        _assert_envelope(self, finding)
+        self.assertEqual(finding["game_id"], gid)
+        self.assertEqual(finding["evidence"]["platform"], "steam")
+        self.assertIsNone(finding["suggested_action"])
+
+
+class PlaytimeSnapshotRegressionTests(ToolDBTestCase):
+    async def _insert_snapshot(self, game_id, platform, date, minutes):
+        async with db_module.get_db() as db:
+            await db.execute(
+                "INSERT INTO play_history (game_id, platform, snapshot_date, playtime_minutes) "
+                "VALUES (?, ?, ?, ?)",
+                (game_id, platform, date, minutes),
+            )
+            await db.commit()
+
+    async def test_monotonic_history_reports_nothing(self):
+        gid = await make_steam_game("Growing Game", 6002)
+        await self._insert_snapshot(gid, "steam", "2026-01-01", 60)
+        await self._insert_snapshot(gid, "steam", "2026-01-02", 100)
+        result = await checks.run_library_checks(checks=["playtime.snapshot_regression"])
+        self.assertEqual(result["findings"], [])
+
+    async def test_reports_a_regression(self):
+        gid = await make_steam_game("Regressed Game", 6001)
+        await self._insert_snapshot(gid, "steam", "2026-01-01", 100)
+        await self._insert_snapshot(gid, "steam", "2026-01-02", 60)
+
+        result = await checks.run_library_checks(checks=["playtime.snapshot_regression"])
+        self.assertEqual(len(result["findings"]), 1)
+        finding = result["findings"][0]
+        _assert_envelope(self, finding)
+        self.assertEqual(finding["game_id"], gid)
+        self.assertEqual(finding["evidence"]["prev_minutes"], 100)
+        self.assertEqual(finding["evidence"]["next_minutes"], 60)
+        self.assertIsNone(finding["suggested_action"])
+
+
+class PlaytimeOrphanSwitchSummaryTests(ToolDBTestCase):
+    async def test_clean_library_reports_nothing(self):
+        result = await checks.run_library_checks(checks=["playtime.orphan_switch_summary"])
+        self.assertEqual(result["findings"], [])
+
+    async def test_matched_identifier_reports_nothing(self):
+        gid = await seed_game("Mario Kart World")
+        pid = await add_platform(gid, "switch2")
+        await add_identifier(pid, "nintendo_title_id", "010067300059A000")
+        await db_module.upsert_nintendo_play_summary(
+            [_pctl_day("010067300059A000", "2026-07-01", 120)]
+        )
+        result = await checks.run_library_checks(checks=["playtime.orphan_switch_summary"])
+        self.assertEqual(result["findings"], [])
+
+    async def test_reports_unmatched_application_id(self):
+        await db_module.upsert_nintendo_play_summary(
+            [_pctl_day("010067300059A000", "2026-07-01", 120)]
+        )
+        result = await checks.run_library_checks(checks=["playtime.orphan_switch_summary"])
+        self.assertEqual(len(result["findings"]), 1)
+        finding = result["findings"][0]
+        _assert_envelope(self, finding)
+        self.assertEqual(finding["evidence"]["application_id"], "010067300059A000")
+        self.assertEqual(finding["evidence"]["total_minutes"], 120)
+        self.assertIsNone(finding["suggested_action"])
+
+    async def test_manual_baseline_sentinel_excluded_even_when_unmatched(self):
+        # set_switch2_playtime_baseline writes device_id='manual-baseline' rows
+        # whose application_id already has an identifier by the time they're
+        # written — but the exclusion is on device_id, not on match state, so
+        # verify it holds even for an unmatched application_id.
+        await db_module.upsert_nintendo_play_summary([
+            {
+                "device_id": db_module.NINTENDO_BASELINE_DEVICE_ID,
+                "application_id": "0100000000000000",
+                "period_type": "day",
+                "period_key": db_module.NINTENDO_BASELINE_PERIOD_KEY,
+                "playtime_minutes": 500,
+                "app_name": "Unlinked Baseline",
+            }
+        ])
+        result = await checks.run_library_checks(checks=["playtime.orphan_switch_summary"])
+        self.assertEqual(result["findings"], [])
+
+
+class SpendDuplicatePurchaseTests(ToolDBTestCase):
+    async def _acquire(self, game_id, platform, **fields):
+        pid = await add_platform(game_id, platform, playtime_minutes=0)
+        await db_module.set_platform_acquisition(pid, fields)
+        return pid
+
+    async def test_different_family_and_name_not_flagged(self):
+        a = await seed_game("Hades")
+        b = await seed_game("Portal")
+        await self._acquire(
+            a, "steam", acquired_at="2026-01-01", price_paid=19.99,
+            price_currency="USD", purchase_source="steam", bundle_name=None,
+        )
+        await self._acquire(
+            b, "epic", acquired_at="2026-01-01", price_paid=19.99,
+            price_currency="USD", purchase_source="steam", bundle_name=None,
+        )
+        result = await checks.run_library_checks(checks=["spend.duplicate_purchase"])
+        self.assertEqual(result["findings"], [])
+
+    async def test_reports_same_name_duplicate(self):
+        a = await seed_game("Hades")
+        b = await _insert_duplicate_game("Hades")
+        await self._acquire(
+            a, "steam", acquired_at="2026-01-01", price_paid=19.99,
+            price_currency="USD", purchase_source="steam", bundle_name=None,
+        )
+        await self._acquire(
+            b, "epic", acquired_at="2026-01-01", price_paid=19.99,
+            price_currency="USD", purchase_source="steam", bundle_name=None,
+        )
+
+        result = await checks.run_library_checks(checks=["spend.duplicate_purchase"])
+        self.assertEqual(len(result["findings"]), 1)
+        finding = result["findings"][0]
+        _assert_envelope(self, finding)
+        self.assertIsNone(finding["suggested_action"])
+
+
+class SpendPriceAnomalyTests(ToolDBTestCase):
+    async def test_clean_library_reports_nothing(self):
+        a = await seed_game("Normal Purchase")
+        pid_a = await add_platform(a, "steam")
+        await db_module.set_platform_acquisition(
+            pid_a,
+            {"purchase_source": "steam", "price_paid": 19.99, "price_currency": "USD",
+             "acquired_at": "2026-01-01"},
+        )
+        b = await seed_game("Second Normal Purchase")
+        pid_b = await add_platform(b, "steam")
+        await db_module.set_platform_acquisition(
+            pid_b,
+            {"purchase_source": "steam", "price_paid": 29.99, "price_currency": "USD",
+             "acquired_at": "2026-01-02"},
+        )
+        result = await checks.run_library_checks(checks=["spend.price_anomaly"])
+        self.assertEqual(result["findings"], [])
+
+    async def test_reports_free_with_price_and_singleton_currency(self):
+        a = await seed_game("Free Game With Price")
+        pid_a = await add_platform(a, "steam")
+        await db_module.set_platform_acquisition(
+            pid_a,
+            {"purchase_source": "free", "price_paid": 9.99, "price_currency": "USD",
+             "acquired_at": "2026-01-01"},
+        )
+        b = await seed_game("Odd Currency Game")
+        pid_b = await add_platform(b, "steam")
+        await db_module.set_platform_acquisition(
+            pid_b,
+            {"purchase_source": "steam", "price_paid": 5.0, "price_currency": "XYZ",
+             "acquired_at": "2026-01-01"},
+        )
+
+        result = await checks.run_library_checks(checks=["spend.price_anomaly"])
+        kinds = {f["evidence"]["kind"] for f in result["findings"]}
+        self.assertEqual(kinds, {"free_with_price", "singleton_currency"})
+        for finding in result["findings"]:
+            _assert_envelope(self, finding)
+        free_finding = next(
+            f for f in result["findings"] if f["evidence"]["kind"] == "free_with_price"
+        )
+        self.assertEqual(free_finding["suggested_action"]["tool"], "set_acquisition")
+        currency_finding = next(
+            f for f in result["findings"] if f["evidence"]["kind"] == "singleton_currency"
+        )
+        self.assertIsNone(currency_finding["suggested_action"])
+
+
+class EnrichCoverageTests(ToolDBTestCase):
+    async def test_fully_enriched_game_reports_nothing(self):
+        gid = await make_steam_game("Fully Enriched", 7001, tags=["rpg"], hltb_main=10.0)
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET igdb_id = ?, cover_image_id = ? WHERE id = ?",
+                (912345, "co1abc", gid),
+            )
+            await db.commit()
+        result = await checks.run_library_checks(checks=["enrich.coverage"])
+        self.assertEqual(result["findings"], [])
+
+    async def test_reports_missing_fields(self):
+        gid = await seed_game("Barely Enriched")
+        await add_platform(gid, "gog", playtime_minutes=120)
+
+        result = await checks.run_library_checks(checks=["enrich.coverage"])
+        fields = {f["evidence"]["field"] for f in result["findings"]}
+        self.assertEqual(fields, {"tags", "igdb_id", "cover", "hltb_main"})
+        for finding in result["findings"]:
+            _assert_envelope(self, finding)
+            self.assertEqual(finding["evidence"]["missing"], 1)
+            self.assertEqual(finding["evidence"]["total"], 1)
+            self.assertIsNone(finding["suggested_action"])
+            self.assertEqual(finding["evidence"]["worst_offenders"][0]["game_id"], gid)
+
+
+class SyncStalenessTests(ToolDBTestCase):
+    async def test_recently_synced_no_playtime_reports_nothing(self):
+        gid = await seed_game("Fresh Steam Game")
+        await add_platform(gid, "steam", playtime_minutes=0)
+        result = await checks.run_library_checks(checks=["sync.staleness"])
+        self.assertEqual(result["findings"], [])
+
+    async def test_reports_stale_platform(self):
+        gid = await seed_game("Stale Steam Game")
+        pid = await add_platform(gid, "steam", playtime_minutes=60)
+        old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE game_platforms SET last_synced = ? WHERE id = ?", (old, pid)
+            )
+            await db.commit()
+
+        result = await checks.run_library_checks(checks=["sync.staleness"])
+        self.assertEqual(len(result["findings"]), 1)
+        finding = result["findings"][0]
+        _assert_envelope(self, finding)
+        self.assertEqual(finding["evidence"]["platform"], "steam")
+        self.assertEqual(finding["suggested_action"]["tool"], "refresh_library")
+
+    async def test_custom_stale_days_option(self):
+        gid = await seed_game("Barely Stale Steam Game")
+        pid = await add_platform(gid, "steam", playtime_minutes=0)
+        old = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE game_platforms SET last_synced = ? WHERE id = ?", (old, pid)
+            )
+            await db.commit()
+
+        result = await checks.run_library_checks(
+            checks=["sync.staleness"], options={"sync.staleness": {"stale_days": 1}}
+        )
+        self.assertEqual(len(result["findings"]), 1)
+
+    async def test_recently_synced_with_no_snapshots_reports_gap(self):
+        gid = await seed_game("Snapshot Gap Game")
+        await add_platform(gid, "epic", playtime_minutes=120)
+
+        result = await checks.run_library_checks(checks=["sync.staleness"])
+        gap = [f for f in result["findings"] if f["evidence"].get("platform") == "epic"]
+        self.assertEqual(len(gap), 1)
+        self.assertIsNone(gap[0]["suggested_action"])
+
+    async def test_switch2_exempt_from_snapshot_gap(self):
+        gid = await seed_game("Switch2 No Snapshots Game")
+        await add_platform(gid, "switch2", playtime_minutes=120)
+
+        result = await checks.run_library_checks(checks=["sync.staleness"])
+        self.assertEqual(result["findings"], [])

@@ -15,20 +15,34 @@ Three checks also WRITE, but only when explicitly named in ``apply``:
 Steam rows for retired/missed licenses), and ``extid.igdb_drift`` (resets bad
 IGDB links so background enrichment re-resolves them).
 
-Phase A ships the 8 migrated checks (one runner covers both ``ownership.orphan``
-and ``nesting.phantom_parent``). Phase B appends checks 9-18 from the design doc
-to ``CHECKS`` — the registry, envelope, and selection semantics here are built so
-that is a pure addition.
+Phase A shipped the 8 migrated checks (one runner covers both ``ownership.orphan``
+and ``nesting.phantom_parent``). Phase B adds 10 new offline checks (identity/
+nesting/wishlist/playtime/spend/enrich/sync) as a pure registry addition, and
+completes the phantom-parent/superseded-base split: a phantom parent with at
+least one owned child now reports ONLY under ``nesting.superseded_base`` (with
+a merge-to-heir suggestion), never under ``nesting.phantom_parent`` too.
 """
 
 import json
+from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from fastmcp.exceptions import ToolError
 
-from ..data.db import get_meta, set_meta
+from ..data.db import (
+    NINTENDO_BASELINE_DEVICE_ID,
+    NINTENDO_TITLE_ID_TYPE,
+    STEAM_APP_ID,
+    get_db,
+    get_meta,
+    set_meta,
+    titles_conflict_on_identity,
+)
+from ..data.title_normalization import normalize_purchase_title, normalize_search_text
+from ..platforms_registry import SYNCABLE_PLATFORMS
 from .admin import (
     detect_collapsed_games,
     detect_cross_platform_collapses,
@@ -331,9 +345,11 @@ async def _run_nesting_phantom_parent(*, apply: bool, options: dict[str, Any]) -
     result = await detect_orphan_games()
     findings = []
     for p in result["phantom_parents"]:
-        # Phase B: superseded_base takes owned_child_count > 0 (the edition-
-        # supersession shape gets a concrete merge suggestion there); Phase A
-        # reports every phantom parent here regardless of owned_child_count.
+        if p["owned_child_count"]:
+            # Phase B: a parent with at least one owned child gets the concrete
+            # merge-to-heir suggestion under nesting.superseded_base instead —
+            # never report the same parent under both check ids.
+            continue
         findings.append(
             _finding(
                 "nesting.phantom_parent",
@@ -526,6 +542,694 @@ async def _run_ownership_license_gap(*, apply: bool, options: dict[str, Any]) ->
     return findings, extras
 
 
+# --- adapters: nesting.superseded_base (Phase B, new) ----------------------
+
+
+async def _children_with_substance(parent_id: int) -> list[dict[str, Any]]:
+    """Nested rows under ``parent_id`` with ownership/playtime/identifier counts."""
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            """SELECT c.id AS game_id, c.name, c.content_type,
+                      EXISTS(
+                          SELECT 1 FROM game_platforms gp
+                           WHERE gp.game_id = c.id AND gp.owned = 1
+                      ) AS owned,
+                      COALESCE(
+                          (SELECT SUM(gp.playtime_minutes) FROM game_platforms gp
+                            WHERE gp.game_id = c.id AND gp.owned = 1),
+                          0
+                      ) AS playtime_minutes,
+                      (SELECT COUNT(*) FROM game_platform_identifiers gpi
+                         JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+                        WHERE gp.game_id = c.id) AS identifier_count
+               FROM games c
+               WHERE c.parent_game_id = ?
+               ORDER BY c.id""",
+            (parent_id,),
+        )
+    return [dict(row) for row in rows]
+
+
+async def _run_nesting_superseded_base(*, apply: bool, options: dict[str, Any]) -> CheckOutcome:
+    """Phantom parents that DO have an owned child — the edition-supersession shape.
+
+    Shares detect_orphan_games' phantom_parents detector with nesting.phantom_parent
+    (which takes owned_child_count == 0); this half picks the strongest owned child
+    as the merge heir (most playtime, then most store identifiers, then lowest id)
+    and emits a concrete merge_games suggestion, per the edition-becomes-canonical
+    supersession stance.
+    """
+    result = await detect_orphan_games()
+    findings = []
+    for p in result["phantom_parents"]:
+        if not p["owned_child_count"]:
+            continue
+        parent_id = p["game_id"]
+        children = await _children_with_substance(parent_id)
+        owned_children = [c for c in children if c["owned"]]
+        heir = min(
+            owned_children,
+            key=lambda c: (-(c["playtime_minutes"] or 0), -c["identifier_count"], c["game_id"]),
+        )
+        async with get_db() as db:
+            wishlist_row = await db.execute_fetchone(
+                "SELECT 1 FROM game_wishlist WHERE game_id = ?", (parent_id,)
+            )
+            identifier_row = await db.execute_fetchone(
+                """SELECT COUNT(*) AS c FROM game_platform_identifiers gpi
+                     JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+                    WHERE gp.game_id = ?""",
+                (parent_id,),
+            )
+        findings.append(
+            _finding(
+                "nesting.superseded_base",
+                "warning",
+                f"Owned edition '{heir['name']}' nests under '{p['name']}', which isn't "
+                "owned anywhere — the edition should become the canonical row",
+                game_id=parent_id,
+                name=p["name"],
+                evidence={
+                    "children": [
+                        {
+                            "game_id": c["game_id"],
+                            "name": c["name"],
+                            "content_type": c["content_type"],
+                            "owned": bool(c["owned"]),
+                            "playtime_minutes": c["playtime_minutes"],
+                        }
+                        for c in children
+                    ],
+                    "heir_game_id": heir["game_id"],
+                    "parent_has_wishlist": wishlist_row is not None,
+                    "parent_identifier_count": identifier_row["c"] if identifier_row else 0,
+                },
+                suggested_action={
+                    "tool": "merge_games",
+                    "args": {"source_game_id": parent_id, "target_game_id": heir["game_id"]},
+                    "note": (
+                        "owned edition becomes canonical primary; merge transfers "
+                        "ratings/series/spend/wishlist and re-points siblings"
+                    ),
+                },
+            )
+        )
+    return findings, {}
+
+
+# --- adapters: identity.unlinked_edition (Phase B, new) ---------------------
+
+
+async def _run_identity_unlinked_edition(*, apply: bool, options: dict[str, Any]) -> CheckOutcome:
+    """Owned primary pairs where one name is an edition-suffixed form of the other.
+
+    Reuses normalize_purchase_title (SKU/edition-suffix stripping) + normalize_search_text
+    (the same normalization games.name_normalized is built from) rather than inventing new
+    fuzzy logic; titles_conflict_on_identity guards against a base title colliding with a
+    numbered sequel.
+    """
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            """SELECT g.id AS game_id, g.name, g.name_normalized, g.parent_game_id
+               FROM games g
+               WHERE g.is_primary_library_item = 1
+                 AND EXISTS (
+                     SELECT 1 FROM game_platforms gp WHERE gp.game_id = g.id AND gp.owned = 1
+                 )"""
+        )
+    owned_primary = [dict(row) for row in rows]
+    by_normalized: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in owned_primary:
+        norm = row["name_normalized"] or normalize_search_text(row["name"])
+        by_normalized[norm].append(row)
+
+    findings = []
+    seen_pairs: set[tuple[int, int]] = set()
+    for edition in owned_primary:
+        stripped_norm = normalize_search_text(normalize_purchase_title(edition["name"]))
+        for base in by_normalized.get(stripped_norm, []):
+            if base["game_id"] == edition["game_id"]:
+                continue
+            if base["name"] == edition["name"]:
+                continue
+            if (
+                base["parent_game_id"] == edition["game_id"]
+                or edition["parent_game_id"] == base["game_id"]
+            ):
+                continue
+            if titles_conflict_on_identity(base["name"], edition["name"]):
+                continue
+            pair_key = (min(base["game_id"], edition["game_id"]), max(base["game_id"], edition["game_id"]))
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+            findings.append(
+                _finding(
+                    "identity.unlinked_edition",
+                    "notice",
+                    f"'{edition['name']}' looks like an edition of '{base['name']}' but "
+                    "lives as an unrelated sibling row — human call: merge_games if this "
+                    "is the same purchase, or update_game(parent_game_id=...) if the two "
+                    "are intentionally distinct",
+                    game_id=edition["game_id"],
+                    name=edition["name"],
+                    evidence={
+                        "edition_game_id": edition["game_id"],
+                        "edition_name": edition["name"],
+                        "base_game_id": base["game_id"],
+                        "base_name": base["name"],
+                    },
+                    suggested_action=None,
+                )
+            )
+    return findings, {"checked": len(owned_primary)}
+
+
+# --- adapters: nesting.dangling_parent (Phase B, new) -----------------------
+
+
+async def _run_nesting_dangling_parent(*, apply: bool, options: dict[str, Any]) -> CheckOutcome:
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            """SELECT g.id AS game_id, g.name, g.parent_game_id,
+                      p.id AS parent_id, p.name AS parent_name,
+                      p.is_primary_library_item AS parent_is_primary
+               FROM games g
+               LEFT JOIN games p ON p.id = g.parent_game_id
+               WHERE g.parent_game_id IS NOT NULL
+                 AND (
+                     p.id IS NULL
+                     OR g.parent_game_id = g.id
+                     OR p.is_primary_library_item = 0
+                 )
+               ORDER BY g.id"""
+        )
+    findings = []
+    for row in rows:
+        if row["parent_id"] is None:
+            reason = "missing_parent"
+            detail = f"parent_game_id {row['parent_game_id']} does not exist"
+        elif row["game_id"] == row["parent_game_id"]:
+            reason = "self_parent"
+            detail = "parent_game_id points at itself"
+        else:
+            reason = "parent_not_primary"
+            detail = f"parent '{row['parent_name']}' is itself nested content"
+        findings.append(
+            _finding(
+                "nesting.dangling_parent",
+                "error",
+                f"'{row['name']}' has a broken parent link ({detail})",
+                game_id=row["game_id"],
+                name=row["name"],
+                evidence={
+                    "reason": reason,
+                    "parent_game_id": row["parent_game_id"],
+                    "parent_name": row["parent_name"],
+                },
+                suggested_action={
+                    "tool": "update_game",
+                    "args": {"game_id": row["game_id"], "parent_game_id": 0},
+                    "note": (
+                        "clears the broken link (parent_game_id=0 is update_game's detach "
+                        "sentinel); repoint at the correct primary parent instead via "
+                        "parent_name/parent_game_id if one exists"
+                    ),
+                },
+            )
+        )
+    return findings, {}
+
+
+# --- adapters: wishlist.already_owned (Phase B, new) ------------------------
+
+
+async def _run_wishlist_already_owned(*, apply: bool, options: dict[str, Any]) -> CheckOutcome:
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            """SELECT w.id AS wishlist_id, w.game_id, w.platform, w.wishlisted_at, w.source,
+                      g.name
+               FROM game_wishlist w
+               JOIN games g ON g.id = w.game_id
+               WHERE EXISTS (
+                   SELECT 1 FROM game_platforms gp
+                    WHERE gp.game_id = w.game_id AND gp.platform = w.platform AND gp.owned = 1
+               )
+               ORDER BY w.id"""
+        )
+    findings = [
+        _finding(
+            "wishlist.already_owned",
+            "warning",
+            f"'{row['name']}' is wishlisted on {row['platform']} but already owned there "
+            "— re-run refresh_library (clear_fulfilled_wishlist_entries should have "
+            "cleared this; the sweep missed it, or the row was hand-edited)",
+            game_id=row["game_id"],
+            name=row["name"],
+            evidence={
+                "platform": row["platform"],
+                "source": row["source"],
+                "wishlisted_at": row["wishlisted_at"],
+            },
+            suggested_action=None,
+        )
+        for row in rows
+    ]
+    return findings, {}
+
+
+# --- adapters: playtime.snapshot_regression (Phase B, new) ------------------
+
+
+async def _run_playtime_snapshot_regression(*, apply: bool, options: dict[str, Any]) -> CheckOutcome:
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            """SELECT ph.game_id, ph.platform, ph.snapshot_date, ph.playtime_minutes, g.name
+               FROM play_history ph
+               JOIN games g ON g.id = ph.game_id
+               ORDER BY ph.game_id, ph.platform, ph.snapshot_date"""
+        )
+    worst: dict[tuple[int, str], dict[str, Any]] = {}
+    prev_by_key: dict[tuple[int, str], Any] = {}
+    for row in rows:
+        key = (row["game_id"], row["platform"])
+        prev = prev_by_key.get(key)
+        if prev is not None and row["playtime_minutes"] < prev["playtime_minutes"]:
+            drop = prev["playtime_minutes"] - row["playtime_minutes"]
+            existing = worst.get(key)
+            if existing is None or drop > existing["drop_minutes"]:
+                worst[key] = {
+                    "name": row["name"],
+                    "prev_date": prev["snapshot_date"],
+                    "prev_minutes": prev["playtime_minutes"],
+                    "next_date": row["snapshot_date"],
+                    "next_minutes": row["playtime_minutes"],
+                    "drop_minutes": drop,
+                }
+        prev_by_key[key] = row
+
+    findings = [
+        _finding(
+            "playtime.snapshot_regression",
+            "error",
+            f"'{info['name']}' playtime on {platform} dropped from "
+            f"{info['prev_minutes']}m ({info['prev_date']}) to {info['next_minutes']}m "
+            f"({info['next_date']}) — cumulative totals should never decrease; "
+            "investigate an identity swap or sync bug before deleting rows",
+            game_id=game_id,
+            name=info["name"],
+            evidence={
+                "platform": platform,
+                "prev_date": info["prev_date"],
+                "prev_minutes": info["prev_minutes"],
+                "next_date": info["next_date"],
+                "next_minutes": info["next_minutes"],
+                "drop_minutes": info["drop_minutes"],
+            },
+            suggested_action=None,
+        )
+        for (game_id, platform), info in worst.items()
+    ]
+    return findings, {"snapshot_rows_checked": len(rows)}
+
+
+# --- adapters: playtime.orphan_switch_summary (Phase B, new) ----------------
+
+
+async def _run_playtime_orphan_switch_summary(
+    *, apply: bool, options: dict[str, Any]
+) -> CheckOutcome:
+    # The manual-baseline sentinel device row (see set_switch2_playtime_baseline)
+    # represents user-entered pre-tracking playtime for a game that ALREADY has a
+    # nintendo_title_id identifier by the time it's written — excluded here so a
+    # baseline never masquerades as "real" orphaned Parental Controls playtime.
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            """SELECT nps.application_id,
+                      SUM(nps.playtime_minutes) AS total_minutes,
+                      MIN(nps.period_key) AS first_day,
+                      MAX(nps.period_key) AS last_day,
+                      MAX(nps.app_name) AS app_name
+               FROM nintendo_play_summary nps
+               WHERE nps.period_type = 'day'
+                 AND nps.device_id != ?
+                 AND NOT EXISTS (
+                     SELECT 1 FROM game_platform_identifiers gpi
+                      WHERE gpi.identifier_type = ? AND gpi.identifier_value = nps.application_id
+                 )
+               GROUP BY nps.application_id
+               HAVING SUM(nps.playtime_minutes) > 0
+               ORDER BY total_minutes DESC""",
+            (NINTENDO_BASELINE_DEVICE_ID, NINTENDO_TITLE_ID_TYPE),
+        )
+    findings = [
+        _finding(
+            "playtime.orphan_switch_summary",
+            "notice",
+            (
+                f"Nintendo title {row['application_id']}"
+                + (f" ('{row['app_name']}')" if row["app_name"] else "")
+                + f" has {row['total_minutes']}m of Parental Controls playtime with no "
+                "matching library game — identify the game and use add_game_to_platform, "
+                "or fix its nintendo_title_id identifier"
+            ),
+            evidence={
+                "application_id": row["application_id"],
+                "app_name": row["app_name"],
+                "total_minutes": row["total_minutes"],
+                "first_day": row["first_day"],
+                "last_day": row["last_day"],
+            },
+            suggested_action=None,
+        )
+        for row in rows
+    ]
+    return findings, {}
+
+
+# --- adapters: spend.duplicate_purchase (Phase B, new) ----------------------
+
+
+async def _run_spend_duplicate_purchase(*, apply: bool, options: dict[str, Any]) -> CheckOutcome:
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            """SELECT gp.id AS gp_id, gp.game_id, gp.platform, gp.acquired_at, gp.price_paid,
+                      gp.price_currency, gp.purchase_source, gp.bundle_name,
+                      g.name, g.name_normalized, g.parent_game_id
+               FROM game_platforms gp
+               JOIN games g ON g.id = gp.game_id
+               WHERE gp.price_paid > 0 AND gp.acquired_at IS NOT NULL"""
+        )
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        key = (
+            row["acquired_at"],
+            row["price_paid"],
+            row["price_currency"],
+            row["purchase_source"],
+            row["bundle_name"],
+        )
+        groups[key].append(dict(row))
+
+    findings = []
+    for key, members in groups.items():
+        if len(members) < 2:
+            continue
+        for i in range(len(members)):
+            for j in range(i + 1, len(members)):
+                a, b = members[i], members[j]
+                root_a = a["parent_game_id"] or a["game_id"]
+                root_b = b["parent_game_id"] or b["game_id"]
+                norm_a = a["name_normalized"] or normalize_search_text(a["name"])
+                norm_b = b["name_normalized"] or normalize_search_text(b["name"])
+                if not (root_a == root_b or norm_a == norm_b):
+                    # Cross-family identical rows are legit (bundle splits share
+                    # acquired_at/source/bundle_name but have different prices —
+                    # matching here already means the prices coincided too).
+                    continue
+                findings.append(
+                    _finding(
+                        "spend.duplicate_purchase",
+                        "warning",
+                        f"'{a['name']}' ({a['platform']}) and '{b['name']}' ({b['platform']}) "
+                        "carry an identical acquisition record — possible duplicate import; "
+                        "review before clearing one via set_acquisition",
+                        game_id=a["game_id"],
+                        name=a["name"],
+                        evidence={
+                            "acquired_at": key[0],
+                            "price_paid": key[1],
+                            "price_currency": key[2],
+                            "purchase_source": key[3],
+                            "bundle_name": key[4],
+                            "rows": [
+                                {
+                                    "game_id": a["game_id"],
+                                    "name": a["name"],
+                                    "platform": a["platform"],
+                                },
+                                {
+                                    "game_id": b["game_id"],
+                                    "name": b["name"],
+                                    "platform": b["platform"],
+                                },
+                            ],
+                        },
+                        suggested_action=None,
+                    )
+                )
+    return findings, {"priced_rows_checked": len(rows)}
+
+
+# --- adapters: spend.price_anomaly (Phase B, new) ---------------------------
+
+
+async def _run_spend_price_anomaly(*, apply: bool, options: dict[str, Any]) -> CheckOutcome:
+    async with get_db() as db:
+        free_rows = await db.execute_fetchall(
+            """SELECT gp.game_id, gp.platform, gp.price_paid, gp.price_currency, g.name
+               FROM game_platforms gp JOIN games g ON g.id = gp.game_id
+               WHERE gp.purchase_source = 'free' AND gp.price_paid > 0"""
+        )
+        # (c) price_paid >> P95 of its currency is skipped for v1 per the design
+        # doc — (a)+(b) suffice and avoid a fiddly percentile computation here.
+        currency_rows = await db.execute_fetchall(
+            """SELECT gp.game_id, gp.platform, gp.price_paid, gp.price_currency, g.name
+               FROM game_platforms gp JOIN games g ON g.id = gp.game_id
+               WHERE gp.price_currency IN (
+                   SELECT price_currency FROM game_platforms
+                   WHERE price_currency IS NOT NULL
+                   GROUP BY price_currency HAVING COUNT(*) = 1
+               )"""
+        )
+    findings = []
+    for row in free_rows:
+        findings.append(
+            _finding(
+                "spend.price_anomaly",
+                "notice",
+                f"'{row['name']}' is marked purchase_source='free' but price_paid is "
+                f"{row['price_paid']} {row['price_currency'] or ''}".strip(),
+                game_id=row["game_id"],
+                name=row["name"],
+                evidence={
+                    "kind": "free_with_price",
+                    "platform": row["platform"],
+                    "price_paid": row["price_paid"],
+                    "price_currency": row["price_currency"],
+                },
+                suggested_action={
+                    "tool": "set_acquisition",
+                    "args": {
+                        "game_id": row["game_id"],
+                        "platform": row["platform"],
+                        "clear": ["price_paid"],
+                    },
+                    "note": "or fix purchase_source instead if this wasn't actually free",
+                },
+            )
+        )
+    for row in currency_rows:
+        findings.append(
+            _finding(
+                "spend.price_anomaly",
+                "notice",
+                f"'{row['name']}' is the only acquisition row using currency "
+                f"'{row['price_currency']}' — possible typo",
+                game_id=row["game_id"],
+                name=row["name"],
+                evidence={
+                    "kind": "singleton_currency",
+                    "platform": row["platform"],
+                    "price_currency": row["price_currency"],
+                    "price_paid": row["price_paid"],
+                },
+                suggested_action=None,
+            )
+        )
+    return findings, {
+        "free_with_price_count": len(free_rows),
+        "singleton_currency_count": len(currency_rows),
+    }
+
+
+# --- adapters: enrich.coverage (Phase B, new) -------------------------------
+
+
+def _worst_offenders(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ranked = sorted(rows, key=lambda r: r["playtime_minutes"] or 0, reverse=True)
+    return [
+        {
+            "game_id": r["game_id"],
+            "name": r["name"],
+            "playtime_hours": round((r["playtime_minutes"] or 0) / 60, 1),
+        }
+        for r in ranked[:10]
+    ]
+
+
+async def _run_enrich_coverage(*, apply: bool, options: dict[str, Any]) -> CheckOutcome:
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            """SELECT g.id AS game_id, g.name, g.tags, g.igdb_id, g.cover_image_id, g.hltb_main,
+                      EXISTS(
+                          SELECT 1 FROM game_platform_identifiers gpi
+                            JOIN game_platforms gp2 ON gp2.id = gpi.game_platform_id
+                           WHERE gp2.game_id = g.id AND gpi.identifier_type = ?
+                      ) AS has_steam_appid,
+                      COALESCE(
+                          (SELECT SUM(gp3.playtime_minutes) FROM game_platforms gp3
+                            WHERE gp3.game_id = g.id AND gp3.owned = 1),
+                          0
+                      ) AS playtime_minutes
+               FROM games g
+               WHERE g.is_primary_library_item = 1
+                 AND COALESCE(g.is_farmed, 0) = 0
+                 AND EXISTS (SELECT 1 FROM game_platforms gp WHERE gp.game_id = g.id AND gp.owned = 1)""",
+            (STEAM_APP_ID,),
+        )
+    population = [dict(row) for row in rows]
+    total = len(population)
+
+    fields: list[tuple[str, Callable[[dict[str, Any]], bool]]] = [
+        ("tags", lambda r: not r["tags"] or r["tags"] == "[]"),
+        ("igdb_id", lambda r: r["igdb_id"] is None),
+        ("cover", lambda r: r["cover_image_id"] is None and not r["has_steam_appid"]),
+        ("hltb_main", lambda r: r["hltb_main"] is None),
+    ]
+
+    findings = []
+    for field_name, is_missing in fields:
+        if not total:
+            break
+        missing_rows = [r for r in population if is_missing(r)]
+        if not missing_rows:
+            continue
+        pct = round(100.0 * len(missing_rows) / total, 1)
+        findings.append(
+            _finding(
+                "enrich.coverage",
+                "notice",
+                f"{len(missing_rows)}/{total} owned games ({pct}%) are missing {field_name} "
+                "— get_game_detail triggers lazy enrichment per game; refresh_library "
+                "for bulk background enrichment",
+                evidence={
+                    "field": field_name,
+                    "missing": len(missing_rows),
+                    "total": total,
+                    "pct": pct,
+                    "worst_offenders": _worst_offenders(missing_rows),
+                },
+                suggested_action=None,
+            )
+        )
+    return findings, {"total_games": total}
+
+
+# --- adapters: sync.staleness (Phase B, new) --------------------------------
+
+# switch2 playtime is served from nintendo_play_summary, not play_history (see
+# CLAUDE.md's playtime-history pattern) — it never writes snapshots by design,
+# so it is exempt from the "no recent snapshots" gap check below.
+_SNAPSHOT_EXEMPT_PLATFORMS = frozenset({"switch2"})
+
+
+async def _run_sync_staleness(*, apply: bool, options: dict[str, Any]) -> CheckOutcome:
+    stale_days = options.get("stale_days", 7)
+    now = datetime.now(timezone.utc)
+
+    async with get_db() as db:
+        placeholders = ",".join("?" for _ in SYNCABLE_PLATFORMS)
+        platform_rows = await db.execute_fetchall(
+            f"""SELECT platform, MAX(last_synced) AS last_synced, COUNT(*) AS owned_count
+                FROM game_platforms
+                WHERE owned = 1 AND platform IN ({placeholders})
+                GROUP BY platform""",
+            tuple(SYNCABLE_PLATFORMS),
+        )
+
+    findings = []
+    stale_platforms: list[str] = []
+    for row in platform_rows:
+        last_synced_raw = row["last_synced"]
+        age_days: float | None = None
+        stale = True
+        if last_synced_raw:
+            try:
+                last_synced_dt = datetime.fromisoformat(last_synced_raw)
+            except ValueError:
+                stale = True
+            else:
+                if last_synced_dt.tzinfo is None:
+                    last_synced_dt = last_synced_dt.replace(tzinfo=timezone.utc)
+                age_days = (now - last_synced_dt).total_seconds() / 86400
+                stale = age_days > stale_days
+        if stale:
+            stale_platforms.append(row["platform"])
+            findings.append(
+                _finding(
+                    "sync.staleness",
+                    "notice",
+                    f"{row['platform']} hasn't synced in over {stale_days} day(s) "
+                    f"(last_synced={last_synced_raw or 'never'})",
+                    evidence={
+                        "platform": row["platform"],
+                        "last_synced": last_synced_raw,
+                        "owned_row_count": row["owned_count"],
+                        "age_days": round(age_days, 1) if age_days is not None else None,
+                    },
+                    suggested_action={
+                        "tool": "refresh_library",
+                        "args": {},
+                        "note": "also check get_integration_status for credential/session issues",
+                    },
+                )
+            )
+
+    # A recently-synced platform with owned playtime but zero play_history
+    # snapshots in 14 days suggests the snapshot writer is silently failing
+    # (record_play_history_snapshots logs a warning but never fails the sync).
+    gap_platforms: list[str] = []
+    async with get_db() as db:
+        for row in platform_rows:
+            platform = row["platform"]
+            if platform in stale_platforms or platform in _SNAPSHOT_EXEMPT_PLATFORMS:
+                continue
+            has_playtime = await db.execute_fetchone(
+                """SELECT 1 FROM game_platforms
+                    WHERE platform = ? AND owned = 1 AND playtime_minutes > 0 LIMIT 1""",
+                (platform,),
+            )
+            if has_playtime is None:
+                continue
+            recent_snapshot = await db.execute_fetchone(
+                """SELECT 1 FROM play_history
+                    WHERE platform = ? AND snapshot_date >= date('now', '-14 days') LIMIT 1""",
+                (platform,),
+            )
+            if recent_snapshot is not None:
+                continue
+            gap_platforms.append(platform)
+            findings.append(
+                _finding(
+                    "sync.staleness",
+                    "notice",
+                    f"{platform} synced recently and has owned playtime, but has written "
+                    "no play_history snapshots in the last 14 days — the snapshot writer "
+                    "may be failing silently",
+                    evidence={"platform": platform, "last_synced": row["last_synced"]},
+                    suggested_action=None,
+                )
+            )
+
+    return findings, {
+        "stale_days": stale_days,
+        "platforms_checked": [row["platform"] for row in platform_rows],
+        "stale_platforms": stale_platforms,
+        "snapshot_gap_platforms": gap_platforms,
+    }
+
+
 # --- registry ----------------------------------------------------------------
 
 CHECKS: dict[str, CheckSpec] = {
@@ -637,6 +1341,122 @@ CHECKS: dict[str, CheckSpec] = {
             option_keys=frozenset({"limit", "retry_unresolved"}),
             configured=_steam_session_configured,
             unconfigured_reason="unconfigured:steam_session",
+        ),
+        # --- Phase B: new checks (9-18) --------------------------------------
+        _spec(
+            "nesting.superseded_base",
+            description=(
+                "A phantom parent (no ownership/wishlist) that DOES have an owned "
+                "child — the edition-supersession shape; suggests merging the "
+                "parent into its strongest owned child (the heir)"
+            ),
+            network=None,
+            writes_on_apply=False,
+            default_severity="warning",
+            runner=_run_nesting_superseded_base,
+        ),
+        _spec(
+            "identity.unlinked_edition",
+            description=(
+                "Two owned primary rows where one name is an edition/SKU-suffixed "
+                "form of the other's, but they live as unrelated sibling rows"
+            ),
+            network=None,
+            writes_on_apply=False,
+            default_severity="notice",
+            runner=_run_identity_unlinked_edition,
+        ),
+        _spec(
+            "nesting.dangling_parent",
+            description=(
+                "A parent_game_id pointing at a missing row, itself, or a row "
+                "that is itself nested (broken parent chain)"
+            ),
+            network=None,
+            writes_on_apply=False,
+            default_severity="error",
+            runner=_run_nesting_dangling_parent,
+        ),
+        _spec(
+            "wishlist.already_owned",
+            description=(
+                "A game_wishlist row whose (game, platform) is already owned — "
+                "the fulfillment sweep should have cleared it"
+            ),
+            network=None,
+            writes_on_apply=False,
+            default_severity="warning",
+            runner=_run_wishlist_already_owned,
+        ),
+        _spec(
+            "playtime.snapshot_regression",
+            description=(
+                "A play_history snapshot with LOWER playtime than an earlier "
+                "snapshot for the same game+platform (cumulative totals must "
+                "never decrease)"
+            ),
+            network=None,
+            writes_on_apply=False,
+            default_severity="error",
+            runner=_run_playtime_snapshot_regression,
+        ),
+        _spec(
+            "playtime.orphan_switch_summary",
+            description=(
+                "Nintendo Parental Controls playtime for an application_id with "
+                "no matching nintendo_title_id identifier in the library"
+            ),
+            network=None,
+            writes_on_apply=False,
+            default_severity="notice",
+            runner=_run_playtime_orphan_switch_summary,
+        ),
+        _spec(
+            "spend.duplicate_purchase",
+            description=(
+                "Two same-family/same-name game_platforms rows sharing an "
+                "identical acquisition record — likely the same purchase "
+                "imported twice"
+            ),
+            network=None,
+            writes_on_apply=False,
+            default_severity="warning",
+            runner=_run_spend_duplicate_purchase,
+        ),
+        _spec(
+            "spend.price_anomaly",
+            description=(
+                "A free-source row with a nonzero price, or a price_currency "
+                "that appears on exactly one acquisition row (typo smell)"
+            ),
+            network=None,
+            writes_on_apply=False,
+            default_severity="notice",
+            runner=_run_spend_price_anomaly,
+        ),
+        _spec(
+            "enrich.coverage",
+            description=(
+                "Library-wide coverage gaps (tags/igdb_id/cover/hltb_main) over "
+                "owned, non-farmed primary games, with worst offenders by playtime"
+            ),
+            network=None,
+            writes_on_apply=False,
+            default_severity="notice",
+            runner=_run_enrich_coverage,
+        ),
+        _spec(
+            "sync.staleness",
+            description=(
+                "A syncable platform whose last sync is older than stale_days, "
+                "or one that synced recently but stopped writing play_history "
+                "snapshots despite owned playtime"
+            ),
+            network=None,
+            writes_on_apply=False,
+            default_severity="notice",
+            runner=_run_sync_staleness,
+            option_keys=frozenset({"stale_days"}),
         ),
     ]
 }

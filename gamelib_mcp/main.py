@@ -718,9 +718,11 @@ async def check_library(
       wishlist entry. offline, report-only. CAUTION: run ownership.license_gap
       first — an "orphan" can be a retired-but-owned Steam app.
     - nesting.phantom_parent — zero-ownership, zero-wishlist rows that other
-      rows nest under (never deletable by delete_game; remediate via
-      merge_games or update_game). offline, report-only. Shares its detector
-      with ownership.orphan but reports a distinct shape.
+      rows nest under and have NO owned child (never deletable by delete_game;
+      remediate via merge_games or update_game). offline, report-only. Shares
+      its detector with ownership.orphan but reports a distinct shape; a
+      phantom parent WITH an owned child is reported under
+      nesting.superseded_base instead, never both.
     - nesting.misclassified — primary rows that are really nested content
       (DLC/soundtrack/edition/etc.), each with a ready-to-apply update_game
       suggestion when one resolves. offline BY DEFAULT (flipped from the old
@@ -744,6 +746,51 @@ async def check_library(
       unconfigured:steam_session without one. APPLY-GATED: mints an owned
       Steam row per license (delisted=1 for retired ones). options: limit
       (default 25), retry_unresolved (default false).
+    - nesting.superseded_base — a phantom parent (no ownership/wishlist) that
+      DOES have an owned child — the edition-supersession shape (e.g. an
+      "Ultimate Box" edition nesting under an unowned base-game shell).
+      Suggests merge_games(source=parent, target=heir), heir = the owned
+      child with the most playtime, then most store identifiers, then lowest
+      id. Never overlaps nesting.phantom_parent (that id takes
+      owned_child_count == 0). offline, report-only.
+    - identity.unlinked_edition — two owned primary rows where one name is an
+      edition/SKU-suffixed form of the other's (normalize_purchase_title)
+      but they live as unrelated sibling rows instead of one family. No
+      suggested_action (human call: merge_games or update_game
+      parent_game_id). offline, report-only.
+    - nesting.dangling_parent — a parent_game_id pointing at a missing row,
+      itself, or a row that is itself nested (a broken parent chain).
+      suggested_action clears the link (update_game parent_game_id=0); repoint
+      manually if the correct parent exists. offline, report-only.
+    - wishlist.already_owned — a game_wishlist row whose (game, platform) is
+      already owned — the fulfillment sweep should have cleared it via
+      refresh_library. No suggested_action. offline, report-only.
+    - playtime.snapshot_regression — a play_history snapshot with LOWER
+      playtime than an earlier snapshot for the same game+platform
+      (cumulative totals must never decrease — investigate an identity swap
+      or sync bug). No suggested_action. offline, report-only.
+    - playtime.orphan_switch_summary — Nintendo Parental Controls playtime for
+      an application_id with no matching nintendo_title_id identifier in the
+      library (excludes the manual-baseline sentinel). No suggested_action.
+      offline, report-only.
+    - spend.duplicate_purchase — two same-family/same-name game_platforms rows
+      sharing an identical (acquired_at, price_paid, price_currency,
+      purchase_source, bundle_name) tuple — likely the same purchase imported
+      twice. No suggested_action (too ambiguous which row to clear). offline,
+      report-only.
+    - spend.price_anomaly — a purchase_source='free' row with a nonzero
+      price_paid (suggested_action: set_acquisition clear=["price_paid"]), or
+      a price_currency used on exactly one acquisition row library-wide (typo
+      smell, no suggested_action). offline, report-only.
+    - enrich.coverage — library-wide coverage gaps (tags, igdb_id, cover,
+      hltb_main) over owned/non-farmed primary games, one finding per missing
+      field with worst offenders by playtime. No suggested_action (get_game_detail
+      enriches lazily per game; refresh_library for bulk). offline, report-only.
+    - sync.staleness — a syncable platform whose last sync is older than
+      options.stale_days (default 7; suggested_action: refresh_library), or one
+      that synced recently but has written no play_history snapshots in 14
+      days despite owned playtime (silent snapshot-writer failure; switch2
+      exempt — it never writes play_history by design). offline, report-only.
 
     Selection: `checks` accepts full ids and/or category prefixes (e.g.
     "identity", "nesting.misclassified") — None (default) selects every
