@@ -678,12 +678,20 @@ def _generate_resolve_query_variants(name: str) -> list[tuple[str, bool]]:
 
     ``identity_preserving`` marks variants produced by transformations that
     keep the title's series identity intact (catalog normalization, stripping
-    a trailing edition segment or a leading article). Their results are gated
-    against the *variant* rather than the original name — otherwise a numbered
-    edition like "Sea of Thieves: 2026 Edition" could never match the base
-    game, because the original's "2026" reads as a sequel number in
-    ``titles_conflict_on_identity``. Token-dropping variants change what the
-    query means, so they stay gated against the original.
+    a trailing edition segment). Their results are gated against the *variant*
+    rather than the original name — otherwise a numbered edition like "Sea of
+    Thieves: 2026 Edition" could never match the base game, because the
+    original's "2026" reads as a sequel number in
+    ``titles_conflict_on_identity``. Variants that change what the query means
+    stay gated against the original.
+
+    Dropping a leading article is one of those meaning-changing variants, NOT
+    an identity-preserving one: "The Forest", "The Surge", "The Hex" and "The
+    Gunk" all have unrelated IGDB entries named "Forest"/"Surge"/"Hex"/"Gunk",
+    and gating against the stripped variant bound eight prod rows to the wrong
+    game. It stays in the ladder purely as a query widener — a search for
+    "Forest" can still surface "The Forest" — but its hits must clear the gate
+    against the ORIGINAL title, article included.
     """
     variants: list[tuple[str, bool]] = []
     seen = {name.casefold()}
@@ -697,7 +705,7 @@ def _generate_resolve_query_variants(name: str) -> list[tuple[str, bool]]:
 
     _add(normalize_catalog_title(name), identity_preserving=True)
     _add(_LADDER_TRAILING_EDITION_PATTERN.sub("", name).strip(), identity_preserving=True)
-    _add(_LADDER_LEADING_THE_PATTERN.sub("", name).strip(), identity_preserving=True)
+    _add(_LADDER_LEADING_THE_PATTERN.sub("", name).strip(), identity_preserving=False)
 
     tokens = [t for t in re.findall(r"\S+", name) if t.strip(",:;").casefold() not in _LADDER_STOPWORDS]
     if tokens:

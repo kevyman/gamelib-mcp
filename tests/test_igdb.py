@@ -918,6 +918,51 @@ class ResolveGameZeroResultLadderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
 
+    async def test_article_stripped_variant_must_gate_against_the_original(self) -> None:
+        # "The Forest"/"The Surge"/"The Hex"/"The Gunk" all have unrelated
+        # IGDB entries under the article-less name. The leading-article rung
+        # stays in the ladder as a query WIDENER, but its hits are gated
+        # against the original title, so the bare entry is refused.
+        wrong_entity = igdb.IGDBGame(
+            igdb_id=346813,
+            name="Forest",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2015-01-01",
+        )
+
+        async def fake_search_game(name, igdb_platform_id=None, *, suppress_errors=True):
+            return [wrong_entity] if name == "Forest" else []
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(side_effect=fake_search_game)),
+        ):
+            result = await igdb.resolve_game("The Forest", None)
+
+        self.assertIsNone(result)
+
+    async def test_article_stripped_variant_still_finds_the_real_game(self) -> None:
+        # The rung keeps its purpose: searching "Forest" can surface the row's
+        # actual game, which passes the gate against "The Forest".
+        real = igdb.IGDBGame(
+            igdb_id=7830,
+            name="The Forest",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2018-04-30",
+        )
+
+        async def fake_search_game(name, igdb_platform_id=None, *, suppress_errors=True):
+            return [real] if name == "Forest" else []
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(side_effect=fake_search_game)),
+        ):
+            result = await igdb.resolve_game("The Forest", None)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.igdb_id, 7830)
+
     async def test_ladder_numbered_edition_matches_base_game(self) -> None:
         # "Sea of Thieves: 2026 Edition" case: the edition-strip variant "Sea
         # of Thieves" finds the base game, but gating it against the ORIGINAL

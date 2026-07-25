@@ -732,31 +732,52 @@ async def check_library(
       explicit selection), probe_offset (default 0, for walking a large
       library across calls via the response's next_probe_offset extra).
       report-only.
-    - extid.igdb_drift — a stored igdb_id whose IGDB name no longer matches the
-      library row (wrong enrichment poisons series gaps/deals/series
+    - extid.igdb_drift — a stored igdb_id whose IGDB name is a DIFFERENT game
+      than the library row (wrong enrichment poisons series gaps/deals/series
       memberships). NETWORK (igdb) — same selection/credential rules as
-      identity.cross_store_collapse. APPLY-GATED: resets igdb_id/igdb_platforms/
-      series memberships (and, when attributable, content_type/parent_game_id)
-      so background enrichment re-resolves the row. options: limit (default
-      none = all rows).
+      identity.cross_store_collapse. A row named for an edition SKU ("Nioh 2 -
+      The Complete Edition" → "Nioh 2") is correctly linked, so it is NOT a
+      finding: both names go through the edition-comparison normalization and
+      those rows are counted in the summary's edition_suffix_count (with
+      examples) instead. Every finding carries evidence.drift_kind
+      ("wrong_entity"; "edition_suffix" only when you opt in). APPLY-GATED:
+      resets igdb_id/igdb_platforms/series memberships (and, when attributable,
+      content_type/parent_game_id) so background enrichment re-resolves the
+      row. options: limit (default none = all rows), include_edition_suffix
+      (default false — true folds the edition rows into findings, and therefore
+      into an apply's resets).
     - ownership.license_gap — an owned Steam license absent from the library
       (GetOwnedGames silently omits some retired apps). NETWORK
       (steam+steamspy) — needs a stored Steam session
       (create_session_ingest_link(provider="steam_refresh")); skipped as
       unconfigured:steam_session without one. APPLY-GATED: mints an owned
-      Steam row per license (delisted=1 for retired ones). Report runs still
+      Steam row per license — delisted=1 ONLY for a license whose store page
+      is gone (absence from GetOwnedGames alone means nothing: it also omits
+      never-launched apps, e.g. a bundle redeemed this week). After an apply
+      the healed licenses come back as notice-level findings naming the minted
+      game_id (also in summary.minted_game_ids), not as "still absent".
+      Report runs still
       advance the scan: probe classifications are cached (skips/unresolved as
       final facts, mintable games as non-final entries re-emitted from cache),
       so repeated report calls walk the whole license list and the next apply
       run heals everything already classified without re-probing. options:
       limit (default 25), retry_unresolved (default false).
-    - nesting.superseded_base — a phantom parent (no ownership/wishlist) that
-      DOES have an owned child — the edition-supersession shape (e.g. an
+    - nesting.superseded_base — a phantom parent (no ownership/wishlist) whose
+      owned child is an EDITION of it — the supersession shape (e.g. an
       "Ultimate Box" edition nesting under an unowned base-game shell).
       Suggests merge_games(source=parent, target=heir), heir = the owned
-      child with the most playtime, then most store identifiers, then lowest
-      id. Never overlaps nesting.phantom_parent (that id takes
-      owned_child_count == 0). offline, report-only.
+      edition child with the most playtime, then most store identifiers, then
+      lowest id. A child only counts as an heir when its content_type is
+      "edition" or its name is an edition-suffixed form of the parent's —
+      owned DLC under an unowned base is a real ownership state, not a merge
+      candidate, and reports under ownership.dlc_without_base. Never overlaps
+      nesting.phantom_parent (that id takes owned_child_count == 0). offline,
+      report-only.
+    - ownership.dlc_without_base — a phantom parent whose owned children are
+      DLC/expansions rather than editions: you own add-ons for a base game you
+      don't own (Epic giveaway, a route pack for an unowned Train Sim World).
+      Informational, no suggested_action — merging here would rename a base
+      game to a DLC title and flatten its siblings. offline, report-only.
     - identity.unlinked_edition — two owned primary rows where one name is an
       edition/SKU-suffixed form of the other's (normalize_purchase_title)
       but they live as unrelated sibling rows instead of one family. No
@@ -777,11 +798,13 @@ async def check_library(
       an application_id with no matching nintendo_title_id identifier in the
       library (excludes the manual-baseline sentinel). No suggested_action.
       offline, report-only.
-    - spend.duplicate_purchase — two same-family/same-name game_platforms rows
+    - spend.duplicate_purchase — two same-game/same-name game_platforms rows
       sharing an identical (acquired_at, price_paid, price_currency,
       purchase_source, bundle_name) tuple — likely the same purchase imported
-      twice. No suggested_action (too ambiguous which row to clear). offline,
-      report-only.
+      twice. Rows in one content family (base + its DLC, or two siblings) that
+      share a bundle_name are NOT reported: that is exactly what
+      split_bundle_acquisition writes. No suggested_action (too ambiguous which
+      row to clear). offline, report-only.
     - spend.price_anomaly — a purchase_source='free' row with a nonzero
       price_paid (suggested_action: set_acquisition clear=["price_paid"]), or
       a price_currency used on exactly one acquisition row library-wide (typo
@@ -803,7 +826,10 @@ async def check_library(
     OFFLINE check. A network check only runs when named explicitly in `checks`
     or when include_network=True; either way, an unconfigured network
     dependency lands the check in `checks_skipped` (reason "unconfigured:igdb"
-    / "unconfigured:steam_session") rather than raising. `limit_per_check`
+    / "unconfigured:steam_session") rather than raising. `include_network`
+    widens only the DEFAULT selection: when `checks` is given, the run set is
+    exactly what it names — naming a network check is sufficient, and
+    include_network alongside it adds nothing. `limit_per_check`
     caps findings returned per check id (0 = uncapped); truncation is flagged
     in `summary[check_id].truncated`. `apply` is a subset of the writes_on_apply
     check ids (playtime.farming, extid.igdb_drift, ownership.license_gap) to
@@ -987,6 +1013,7 @@ async def add_game_to_platform(
     price_currency: str | None = None,
     purchase_source: str | None = None,
     bundle_name: str | None = None,
+    delisted: bool | None = None,
 ) -> AddGameToPlatformResponse:
     """
     Manually add a game to a platform.
@@ -1003,9 +1030,15 @@ async def add_game_to_platform(
     record the acquisition on the new ownership row in the same call — same
     validation and vocabulary as set_acquisition; they require owned=True (a
     wishlist entry has nowhere to store them) and are echoed back in the
-    acquisition field. Returns game_platform_id when owned, wishlist_id when
-    not (the other is null); either call also clears a matching wishlist
-    entry that's now fulfilled.
+    acquisition field. delisted (owned=True only) corrects the ownership row's
+    delisted flag — True when the store page is gone and ownership comes from
+    the account license list, False when the game is still listed. It is the
+    only write path for that column (check_library's ownership.license_gap
+    otherwise sets it), and it pins the value as a manual override so neither
+    the Steam sync nor a later license audit flips it back; hand it back with
+    set_playtime(clear=["delisted"]). Returns game_platform_id when owned,
+    wishlist_id when not (the other is null); either call also clears a
+    matching wishlist entry that's now fulfilled.
     """
     from .tools.platforms import add_game_to_platform as _add
     return await _add(
@@ -1020,6 +1053,7 @@ async def add_game_to_platform(
         price_currency,
         purchase_source,
         bundle_name,
+        delisted,
     )
 
 
@@ -1033,9 +1067,10 @@ async def add_games_to_platform_batch(
 
     Each item takes exactly add_game_to_platform's parameters: name + platform
     required, plus optional identifier_type/identifier_value, playtime_minutes,
-    owned (False = manual wishlist entry, e.g. PSN), and the acquisition
+    owned (False = manual wishlist entry, e.g. PSN), the acquisition
     fields (acquired_at/price_paid/price_currency/purchase_source/bundle_name,
-    owned=True only) — same validation and vocabulary as the single tool, and
+    owned=True only), and delisted (owned=True only) — same validation and
+    vocabulary as the single tool, and
     fulfilled wishlist entries are cleared the same way. created counts items
     that minted a brand-new game (vs matching an existing one by exact name).
     Per-item results carry status "ok" (the single tool's result) or "error"
@@ -1504,11 +1539,16 @@ async def import_purchases(
     only and, when minted, is created nested (is_primary_library_item=0) linked
     to a resolved parent — so a DLC never becomes a phantom base game nor
     attaches its spend onto the base row; created_details/would_create carry its
-    content_type and parent link. Set create_missing=False to route those to
-    unmatched instead. Pass dry_run=True to preview the converted items (capped
-    at 200 per source, with a truncated flag) plus a would_create list naming
-    the new games — created rows have no delete tool, so preview when in doubt —
-    without writing anything.
+    content_type and parent link. Because created rows have no delete tool, two
+    classes of mint are refused outright and reported per source in
+    create_refused_details (counted as unmatched): a nested record that resolves
+    no parent, and a title that is only an edition/alias variant of a row
+    already in the library ("STRAFE: Millennium Edition" beside "STRAFE: Gold
+    Edition") — the colliding row's id/name comes back with the refusal. Set
+    create_missing=False to route every miss to unmatched instead. Pass
+    dry_run=True to preview the converted items (capped at 200 per source, with
+    a truncated flag) plus a would_create list naming the new games — preview
+    when in doubt — without writing anything.
 
     sources defaults to all registered importers; currently:
     - "epic": Epic Games Store order history (www.epicgames.com account
@@ -1553,11 +1593,14 @@ async def import_purchases(
     Multi-game bundles (e.g. "BioShock: The Collection") can't attach to a
     single library row, so instead of landing in unmatched they're diverted to
     each source's bundles_needing_split list — {bundle_name, platform,
-    total_price, price_currency, acquired_at, purchase_source,
+    platforms, total_price, price_currency, acquired_at, purchase_source,
     already_recorded}. Look up each bundle's constituent games and pass it to
     split_bundle_acquisition (its keys line up with that tool's parameters);
-    nothing is written for a bundle here. already_recorded=True means a
-    previous split already wrote this bundle_name on this platform — skip it
+    nothing is written for a bundle here. One order often carries a key per
+    platform (a Steam key and an Android key), so entries sharing a name, date,
+    price and source are collapsed into ONE: `platform` holds the most
+    actionable one and `platforms` lists them all. already_recorded=True means
+    a previous split already wrote this bundle_name (on any platform) — skip it
     (every import re-surfaces every bundle; the fetch can't know it was
     handled). DLC bundles for one game land here too — split them onto the
     base game, not invented per-DLC rows.

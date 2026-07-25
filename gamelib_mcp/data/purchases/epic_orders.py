@@ -83,7 +83,7 @@ from typing import Any, Protocol
 import httpx
 from curl_cffi.requests import AsyncSession, BrowserTypeLiteral
 
-from . import PurchaseRecord, normalize_purchase_date
+from . import PurchaseRecord, is_consumable_title, normalize_purchase_date
 from gamelib_mcp.data.content import classify_title_override, match_addon_name
 from gamelib_mcp.data.db import default_data_dir
 
@@ -130,23 +130,6 @@ _CURRENCY_SYMBOLS = (
     ("£", "GBP"),
     ("¥", "JPY"),
     ("$", "USD"),
-)
-
-# In-game currency packs sold through Epic checkout ("1,000 V-Bucks",
-# "Rocket League® - Credits x1100", "2,800 Apex Coins", "EA SPORTS FC 24 -
-# 1050 FC Points"). The order payload carries no item typing, so the NAME is
-# the only signal (steam_history.py's wallet-credit precedent): a count
-# attached to a currency noun — either order — or the unambiguous
-# V-Bucks/Show-Bucks brands. A bare noun with no number never trips it, so
-# games legitimately titled "…Coins"/"…Points" don't get filtered.
-_CURRENCY_NOUN = r"(?:v-?bucks|show-?bucks|credits?|coins?|points|gems|gold\s+bars)"
-# Up to two words may sit between count and noun ("2,800 Apex Coins",
-# "1050 FC Points", "1000 Rocket League Credits").
-_CONSUMABLE_NAME_RE = re.compile(
-    rf"\bv-?bucks\b|\bshow-?bucks\b"
-    rf"|\b\d[\d,.]*\+?\s*(?:[\w'&.®™-]+\s+){{0,2}}{_CURRENCY_NOUN}\b"
-    rf"|\b{_CURRENCY_NOUN}\s*x\s*\d",
-    re.IGNORECASE,
 )
 
 _NUMBER_RE = re.compile(r"\d[\d.,\s ]*")
@@ -384,7 +367,7 @@ def parse_order(order: dict) -> tuple[list[PurchaseRecord], list[dict]]:
         if not title or not isinstance(title, str):
             skipped.append({"description": order_label, "reason": "item missing description"})
             continue
-        if _CONSUMABLE_NAME_RE.search(title):
+        if is_consumable_title(title):
             # A paid currency pack fed to the matcher would mint a phantom
             # owned game under create_missing — route it to skipped instead.
             skipped.append(

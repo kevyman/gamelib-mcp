@@ -110,6 +110,7 @@ class AddGameToPlatformTests(ToolDBTestCase):
                 "playtime_minutes",
                 "identifier",
                 "acquisition",
+                "delisted",
             },
         )
         self.assertTrue(result["created"])
@@ -1648,4 +1649,63 @@ class SetPlaytimeBatchTests(ToolDBTestCase):
         with self.assertRaisesRegex(ToolError, "capped at 200"):
             await platforms.set_playtime_batch(
                 [{"game_id": 1, "platform": "steam", "playtime_minutes": 1}] * 201
+            )
+
+
+class DelistedFlagTests(ToolDBTestCase):
+    """The manual write path for game_platforms.delisted (BUG-2)."""
+
+    async def _row(self, appid: str) -> dict:
+        async with db_module.get_db() as db:
+            return await db.execute_fetchone(
+                """SELECT gp.delisted, gp.manual_overrides
+                   FROM game_platform_identifiers gpi
+                   JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+                   WHERE gpi.identifier_type = 'steam_appid'
+                     AND gpi.identifier_value = ?""",
+                (appid,),
+            )
+
+    async def test_sets_and_pins_the_flag(self):
+        game_id = await make_steam_game("Retired Game", 24740)
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE game_platforms SET delisted = 1 WHERE game_id = ?", (game_id,))
+            await db.commit()
+
+        result = await platforms.add_game_to_platform(
+            "Retired Game", "steam", delisted=False
+        )
+        self.assertFalse(result["delisted"])
+        row = await self._row("24740")
+        self.assertEqual(row["delisted"], 0)
+        self.assertEqual(json.loads(row["manual_overrides"]), ["delisted"])
+
+    async def test_pin_survives_the_license_audit_write(self):
+        await make_steam_game("Still Listed", 24740)
+        await platforms.add_game_to_platform("Still Listed", "steam", delisted=False)
+
+        changed = await db_module.set_steam_delisted([24740], True)
+        self.assertEqual(changed, 0)
+        row = await self._row("24740")
+        self.assertEqual(row["delisted"], 0)
+
+    async def test_unpinned_rows_are_still_flipped_by_sync(self):
+        await make_steam_game("Ordinary Game", 620)
+        changed = await db_module.set_steam_delisted([620], True)
+        self.assertEqual(changed, 1)
+        self.assertEqual((await self._row("620"))["delisted"], 1)
+
+    async def test_clear_hands_the_column_back_to_sync(self):
+        game_id = await make_steam_game("Handed Back", 24740)
+        await platforms.add_game_to_platform("Handed Back", "steam", delisted=False)
+        await platforms.set_playtime(game_id=game_id, platform="steam", clear=["delisted"])
+
+        changed = await db_module.set_steam_delisted([24740], True)
+        self.assertEqual(changed, 1)
+        self.assertEqual((await self._row("24740"))["delisted"], 1)
+
+    async def test_wishlist_entry_rejects_the_flag(self):
+        with self.assertRaisesRegex(ToolError, "delisted requires owned=True"):
+            await platforms.add_game_to_platform(
+                "Wishlisted Game", "steam", owned=False, delisted=True
             )

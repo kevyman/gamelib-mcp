@@ -212,6 +212,82 @@ _SERIES_GAP_EDITION_PATTERNS = (
 )
 
 
+# Comparison-only edition/SKU tails. Broader than every list above: the
+# generic "<up to 3 words> Edition" tail catches SKU names no curated list can
+# enumerate ("Millennium Edition", "Ultimate Sith Edition"), and the bare
+# qualifiers include "Complete" — which normalize_purchase_title deliberately
+# keeps (there, stripping it would book a compilation's price onto the base
+# game). Safe here because these patterns NEVER alter identity, matching, or
+# anything written: they only answer "are these two names the same game, one
+# of them wearing an edition suffix?" for report/dedup decisions
+# (check_library's extid.igdb_drift and nesting.superseded_base, the
+# purchase-import create guard).
+_COMPARISON_QUALIFIER = (
+    # No "master": "Halo: The Master Chief Collection" is not an edition of
+    # "Halo". A real "Master Edition" still lands via the generic rule below.
+    r"(?:game of the (?:year|century)|goty|complete|ultimate|deluxe|premium"
+    r"|gold|platinum|definitive|standard|enhanced|legendary|anniversary"
+    r"|collector'?s|remastered|redux|classic)"
+)
+_COMPARISON_EDITION_PATTERNS = (
+    # Qualifier-anchored tail: a known edition word, up to two words riding
+    # along, and an optional "Edition" ("… Ultimate Sith Edition", "…: The
+    # Complete Edition", "… Ultimate Box", "Cities XL Platinum"). Anchoring on
+    # the qualifier is what stops the generic rule below from eating real
+    # subtitle words ("The Force Unleashed" is not an edition of "Star Wars").
+    re.compile(
+        rf"[\s:–—-]+(?:the\s+)?{_COMPARISON_QUALIFIER}(?:\s+[\w'&.]+){{0,2}}"
+        r"(?:\s+edition)?\s*$",
+        re.IGNORECASE,
+    ),
+    # Generic tail for SKU words no list can enumerate ("STRAFE: Millennium
+    # Edition"). One filler word only — wider matching here would start eating
+    # subtitles that merely end in "Edition".
+    re.compile(r"[\s:–—-]+(?:the\s+)?(?:[\w'&.]+\s+)?edition\s*$", re.IGNORECASE),
+    # Trailing release-year marker ("Mass Effect (2007)").
+    re.compile(r"\s*\(\s*\d{4}\s*\)\s*$"),
+)
+
+
+def normalize_edition_comparison_title(name: str) -> str:
+    """Normalize a title for "same game, different edition?" comparisons.
+
+    Loops normalize_catalog_title together with the comparison-only edition
+    patterns above until stable, then hands off to normalize_search_text. Run
+    BOTH sides through it: "Nioh 2 - The Complete Edition" and "Nioh 2" both
+    collapse to "nioh 2", and "Sid Meier's Civilization III: Complete" meets
+    "Sid Meier's Civilization III: Game of the Year Edition" in the middle.
+
+    Deliberately over-eager compared with normalize_purchase_title — a title
+    that IS just an edition phrase would strip to nothing, so the original's
+    normalization is returned in that case rather than an empty string that
+    would compare equal to every other fully-stripped name.
+    """
+    cleaned = name
+    previous = None
+    while cleaned != previous:
+        previous = cleaned
+        cleaned = normalize_catalog_title(cleaned)
+        for pattern in _COMPARISON_EDITION_PATTERNS:
+            cleaned = pattern.sub("", cleaned)
+    normalized = normalize_search_text(cleaned)
+    return normalized or normalize_search_text(name)
+
+
+def is_edition_variant_of(name: str, other: str) -> bool:
+    """True when two DIFFERENT titles are the same game modulo an edition suffix.
+
+    Identical names return False — the question is only interesting when the
+    raw titles differ (otherwise every equal pair would report as an edition
+    relationship).
+    """
+    if normalize_search_text(name) == normalize_search_text(other):
+        return False
+    return normalize_edition_comparison_title(name) == normalize_edition_comparison_title(
+        other
+    )
+
+
 def normalize_series_gap_title(name: str) -> str:
     """Normalize a title for discover_series_gaps have/gap exclusion matching.
 

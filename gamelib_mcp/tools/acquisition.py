@@ -38,7 +38,11 @@ from ..data.db import (
     upsert_game_platform_identifier,
 )
 from ..data.purchases import IDENTIFIER_TYPES, PURCHASE_IMPORTERS, PurchaseRecord
-from ..data.title_normalization import normalize_purchase_title, normalize_search_text
+from ..data.title_normalization import (
+    normalize_edition_comparison_title,
+    normalize_purchase_title,
+    normalize_search_text,
+)
 
 # The importer dict is resolved at call time; the imports below keep the
 # fetchers bound on this module so tests can patch
@@ -448,6 +452,17 @@ async def _match_batch_game(
         and normalize_search_text(stripped) != normalize_search_text(raw)
     ):
         queries.append(stripped)
+    # Last resort for a storefront title carrying a marketing tagline ("RIVE:
+    # Wreck, Hack, Die, Retry"): the enumeration guard in
+    # _strip_marketing_tagline keeps real subtitles (and therefore DLC titles)
+    # out of this tier, and it runs after the raw/edition-stripped queries, so
+    # it only ever rescues a purchase that would otherwise miss entirely.
+    if not exact_only:
+        tagline_stripped = _strip_marketing_tagline(raw)
+        if tagline_stripped and normalize_search_text(
+            tagline_stripped
+        ) not in {normalize_search_text(q) for q in queries}:
+            queries.append(tagline_stripped)
 
     for query in queries:
         match = build_name_match(query, column=NORMALIZED_NAME_SQL, use_fts=fts_ready())
@@ -479,6 +494,63 @@ async def _match_batch_game(
             if row is not None:
                 return row, "fuzzy"
     return None, None
+
+
+# A marketing tagline bolted onto a title after a colon ("RIVE: Wreck, Hack,
+# Die, Retry"). Requires an enumeration — two or more ", " separators in the
+# tail — so real subtitles ("Half-Life 2: Episode One", "Deus Ex: Human
+# Revolution") never trip it and a DLC's spend can't collapse onto its base.
+def _strip_marketing_tagline(name: str) -> str | None:
+    """The title without its trailing tagline, or None when there isn't one."""
+    # rpartition, not partition: with more than one colon, only the LAST
+    # segment is a candidate tagline — keep as much of the title as possible.
+    head, separator, tail = (name or "").rpartition(":")
+    if not separator or tail.count(", ") < 2:
+        return None
+    head = head.strip()
+    return head or None
+
+
+async def _existing_edition_sibling(create_name: str) -> dict | None:
+    """An existing row `create_name` is only an edition/alias variant of.
+
+    The matcher has already missed by name — but "STRAFE: Millennium Edition"
+    missing "STRAFE: Gold Edition", or a purchase titled with the IGDB full
+    name ("Orwell: Keeping an Eye On You") missing the row called "Orwell",
+    is a near-duplicate, not a gap. Minting it would add a second row for a
+    game already in the library, and created rows have no delete tool.
+
+    Two probes, both cheap: names that could differ only by an edition suffix
+    (one normalized name is a prefix of the other, then confirmed with
+    normalize_edition_comparison_title), and an exact alias hit.
+    """
+    target = normalize_edition_comparison_title(create_name)
+    search_name = normalize_search_text(create_name)
+    if not target:
+        return None
+    async with get_db() as db:
+        candidates = await db.execute_fetchall(
+            """SELECT id, name FROM games
+               WHERE name_normalized = ?
+                  OR name_normalized LIKE ? || ' %'
+                  OR ? LIKE name_normalized || ' %'
+               ORDER BY id""",
+            (target, target, target),
+        )
+        for candidate in candidates:
+            if normalize_edition_comparison_title(candidate["name"]) == target:
+                return {"game_id": candidate["id"], "name": candidate["name"],
+                        "reason": "edition_variant"}
+        alias = await db.execute_fetchone(
+            """SELECT a.game_id AS game_id, g.name AS name
+               FROM game_aliases a JOIN games g ON g.id = a.game_id
+               WHERE a.alias_normalized IN (?, ?)
+               ORDER BY a.game_id LIMIT 1""",
+            (search_name, target),
+        )
+    if alias is not None:
+        return {"game_id": alias["game_id"], "name": alias["name"], "reason": "alias"}
+    return None
 
 
 async def _apply_batch_item(
@@ -580,12 +652,45 @@ async def _apply_batch_item(
             create_name = (
                 normalize_purchase_title(str(name)).strip() or str(name).strip()
             )
+            # Drop a marketing tagline the storefront baked into the title
+            # ("RIVE: Wreck, Hack, Die, Retry") so the minted row is named
+            # after the game. Only for primary content: a nested row's identity
+            # is its full title.
+            tagline_stripped = _strip_marketing_tagline(create_name)
+            if tagline_stripped:
+                create_name = tagline_stripped
         # A nested content_type mints a nested row (content_type + is_primary=0)
         # linked to an existing parent when a parent candidate resolves; a
         # primary/None content_type mints a base_game default (unchanged).
         mint_fields, mint_parent_id, mint_parent_name = await _addon_mint_fields(
             create_name, content_type
         )
+        if nested and mint_parent_id is None:
+            # A parentless nested mint is a row nothing can find and nothing
+            # rolls up — it lands straight in check_library's needs_parent
+            # bucket. Report the purchase instead of minting the problem.
+            return {
+                "status": "unmatched",
+                "platform": platform,
+                "item": item,
+                "create_refused": "nested_without_parent",
+            }
+        # Only for a PRIMARY mint. A nested mint is deliberately allowed to
+        # sit beside the row it is an edition of — "Hades: Deluxe Edition"
+        # minted as an edition child of "Hades" is the designed outcome, and
+        # the parent guard above already proved that parent exists.
+        collision = None if nested else await _existing_edition_sibling(create_name)
+        if collision is not None:
+            # Near-duplicate of a row already in the library — record the spend
+            # by hand (set_acquisition on the named game) if it belongs there.
+            return {
+                "status": "unmatched",
+                "platform": platform,
+                "item": item,
+                "create_refused": collision["reason"],
+                "existing_game_id": collision["game_id"],
+                "existing_name": collision["name"],
+            }
         if mint_fields:
             mint_content_type = content_type
         if dry_run:
@@ -795,8 +900,15 @@ async def set_acquisitions_batch(
     required) that matches no existing game is created as an owned library game
     (status "created", store identifier attached); a nested content_type mints
     it nested (is_primary_library_item=0) linked to an existing parent resolved
-    from the title when possible (created_details then carries content_type and
-    parent_game_id/parent_name). Missing platform rows on an already-existing
+    from the title, and is REFUSED when no parent resolves (a parentless nested
+    row helps nobody). A create is also refused when the name is only an
+    edition/alias variant of a row that already exists ("STRAFE: Millennium
+    Edition" next to "STRAFE: Gold Edition") — created rows have no delete
+    tool, so a near-duplicate is reported rather than minted. The
+    near-duplicate guard covers PRIMARY mints only: a nested edition minted
+    under the base game it names is the designed shape, not a duplicate. Both refusals
+    count as unmatched and are itemized, with the colliding row, in
+    create_refused_details. Missing platform rows on an already-existing
     game land in no_platform_row unless create_platform_rows=True.
     """
     if not items:
@@ -849,6 +961,27 @@ async def set_acquisitions_batch(
             if r["status"] == "created"
         ],
         "unmatched": [r["item"] for r in results if r["status"] == "unmatched"],
+        # Items create_missing declined to mint (a near-duplicate of an
+        # existing row, or nested content with no parent to hang off). They are
+        # counted in unmatched like any other miss; this list says WHY, and
+        # names the existing row when there is one.
+        "create_refused_details": [
+            {
+                "name": r["item"].get("name"),
+                "platform": r["platform"],
+                "reason": r["create_refused"],
+                **(
+                    {
+                        "existing_game_id": r["existing_game_id"],
+                        "existing_name": r["existing_name"],
+                    }
+                    if r.get("existing_game_id")
+                    else {}
+                ),
+            }
+            for r in results
+            if r.get("create_refused")
+        ],
         # Fuzzy matches refused because the matched row's content family
         # already owns the platform — writing would fork a second platform row
         # inside the family (see _apply_batch_item's guard). Resolve manually:
@@ -1329,6 +1462,56 @@ def _record_to_batch_item(record: PurchaseRecord, source: str) -> dict:
     return item
 
 
+async def _bundle_already_recorded(bundle_name: str) -> bool:
+    """Whether any split for this bundle name has already been recorded.
+
+    Deliberately platform-agnostic. One order routinely yields a key per
+    platform (a Humble order with a Steam key and an Android key), and nobody
+    is going to split the "other" half separately — scoping the lookup to the
+    entry's own platform left that half permanently already_recorded=false, so
+    it re-surfaced on every import forever.
+    """
+    async with get_db() as db:
+        existing = await db.execute_fetchone(
+            "SELECT COUNT(*) AS c FROM game_platforms WHERE bundle_name = ?",
+            (bundle_name,),
+        )
+    return bool(existing["c"] > 0)
+
+
+def _dedupe_bundle_entries(entries: list[dict]) -> list[dict]:
+    """Collapse one bundle purchase reported once per platform into one entry.
+
+    Same name, date, price and source = one order. The surviving entry keeps
+    the most actionable platform (anything beats "other", which is where a
+    platform-less key lands) and lists every platform the order covered under
+    ``platforms``; already_recorded is true if it holds for any of them.
+    """
+    merged: dict[tuple, dict] = {}
+    for entry in entries:
+        key = (
+            entry.get("bundle_name"),
+            entry.get("acquired_at"),
+            entry.get("total_price"),
+            entry.get("price_currency"),
+            entry.get("purchase_source"),
+        )
+        current = merged.get(key)
+        if current is None:
+            merged[key] = {**entry, "platforms": [entry.get("platform")]}
+            continue
+        if entry.get("platform") not in current["platforms"]:
+            current["platforms"].append(entry.get("platform"))
+        if current.get("platform") == "other" and entry.get("platform") != "other":
+            current["platform"] = entry.get("platform")
+        current["already_recorded"] = bool(
+            current.get("already_recorded") or entry.get("already_recorded")
+        )
+    for entry in merged.values():
+        entry["platforms"] = sorted(p for p in entry["platforms"] if p)
+    return list(merged.values())
+
+
 async def _record_to_bundle_entry(record: PurchaseRecord) -> dict:
     """One bundle PurchaseRecord → a split_bundle_acquisition-shaped hand-off.
 
@@ -1338,12 +1521,6 @@ async def _record_to_bundle_entry(record: PurchaseRecord) -> dict:
     can't know — it re-surfaces every bundle on every import forever), so a
     repeat import doesn't re-ask for the same lookup.
     """
-    async with get_db() as db:
-        existing = await db.execute_fetchone(
-            """SELECT COUNT(*) AS c FROM game_platforms
-               WHERE bundle_name = ? AND platform = ?""",
-            (record.title, record.platform),
-        )
     return {
         "bundle_name": record.title,
         "platform": record.platform,
@@ -1351,7 +1528,7 @@ async def _record_to_bundle_entry(record: PurchaseRecord) -> dict:
         "price_currency": record.price_currency,
         "acquired_at": record.acquired_at,
         "purchase_source": record.purchase_source,
-        "already_recorded": existing["c"] > 0,
+        "already_recorded": await _bundle_already_recorded(record.title),
     }
 
 
@@ -1408,12 +1585,6 @@ async def _divert_unmatched_bundle_suspects(
         if row is not None:
             importable.append(item)
             continue
-        async with get_db() as db:
-            existing = await db.execute_fetchone(
-                """SELECT COUNT(*) AS c FROM game_platforms
-                   WHERE bundle_name = ? AND platform = ?""",
-                (name, item.get("platform")),
-            )
         diverted.append(
             {
                 "bundle_name": name,
@@ -1422,7 +1593,7 @@ async def _divert_unmatched_bundle_suspects(
                 "price_currency": item.get("price_currency"),
                 "acquired_at": item.get("acquired_at"),
                 "purchase_source": item.get("purchase_source"),
-                "already_recorded": existing["c"] > 0,
+                "already_recorded": await _bundle_already_recorded(name),
                 "reason": "compilation-named purchase matched no library row",
             }
         )
@@ -1458,6 +1629,8 @@ async def _import_one_source(
     # here instead of minted/unmatched.
     items, suspect_bundles = await _divert_unmatched_bundle_suspects(items)
     bundles.extend(suspect_bundles)
+    # One order can emit the same bundle once per key platform — split it once.
+    bundles = _dedupe_bundle_entries(bundles)
 
     applied = filled = no_change = created = no_platform_row = errors = 0
     family_conflict = 0
@@ -1465,6 +1638,7 @@ async def _import_one_source(
     created_details: list[dict] = []
     no_platform_row_details: list[dict] = []
     family_conflict_details: list[dict] = []
+    create_refused_details: list[dict] = []
     for start in range(0, len(items), _BATCH_ITEM_CAP):
         batch = await set_acquisitions_batch(
             items[start : start + _BATCH_ITEM_CAP],
@@ -1484,6 +1658,7 @@ async def _import_one_source(
         created_details.extend(batch["created_details"])
         no_platform_row_details.extend(batch["no_platform_row_details"])
         family_conflict_details.extend(batch["family_conflict_details"])
+        create_refused_details.extend(batch["create_refused_details"])
 
     # Zero-price promo lines (bonus packs, wallpapers, costume sets claimed for
     # free) are expected to miss — reporting them beside real unmatched spend
@@ -1506,6 +1681,7 @@ async def _import_one_source(
         "no_platform_row_details": no_platform_row_details,
         "family_conflict": family_conflict,
         "family_conflict_details": family_conflict_details,
+        "create_refused_details": create_refused_details,
         "bundles_needing_split": bundles,
         "errors": errors,
         "skipped": skipped,
@@ -1551,11 +1727,17 @@ async def import_purchases(
     A record whose content_type is nested (e.g. an eShop DLC purchase) matches
     by exact name only and, when minted, is created nested (is_primary=0) linked
     to a resolved parent — so a DLC never becomes a phantom base game nor
-    attaches its spend onto the base row. Set create_missing False to route
-    unmatched purchases to unmatched instead. Multi-game bundles are
-    always diverted to each source's bundles_needing_split list (name, platform,
-    total_price, date) rather than the single-game matcher — feed each to
-    split_bundle_acquisition with its looked-up games.
+    attaches its spend onto the base row. Minting is refused (item reported in
+    unmatched + create_refused_details) when a nested record resolves no parent,
+    or when the title is only an edition/alias variant of an existing row. Set
+    create_missing False to route every unmatched purchase to unmatched
+    instead. Multi-game bundles are always diverted to each source's
+    bundles_needing_split list (name, platform, total_price, date) rather than
+    the single-game matcher — feed each to split_bundle_acquisition with its
+    looked-up games. One order can carry a key per platform, so bundle entries
+    are deduplicated per (name, date, price, source): the surviving entry lists
+    every platform under `platforms`, and already_recorded is true once ANY
+    platform's split has been written.
     """
     if sources is None:
         selected = sorted(PURCHASE_IMPORTERS)

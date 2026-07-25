@@ -120,7 +120,7 @@ EXPECTED_TOOLS = {
             "name", "platform", "identifier_type", "identifier_value",
             "playtime_minutes", "owned",
             "acquired_at", "price_paid", "price_currency", "purchase_source",
-            "bundle_name",
+            "bundle_name", "delisted",
         },
         "required": {"name", "platform"},
     },
