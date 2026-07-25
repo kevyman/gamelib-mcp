@@ -2650,7 +2650,11 @@ async def detect_misclassified_dlc(
     }
 
 
-async def revalidate_igdb_matches(dry_run: bool = True, limit: int | None = None) -> dict:
+async def revalidate_igdb_matches(
+    dry_run: bool = True,
+    limit: int | None = None,
+    include_edition_suffix: bool = False,
+) -> dict:
     """Audit every stored igdb_id against IGDB's actual name for that id.
 
     Wrong name-based enrichment is worse than none: prod carried rows like
@@ -2662,6 +2666,18 @@ async def revalidate_igdb_matches(dry_run: bool = True, limit: int | None = None
     fetch_igdb_game_names) and applies the same strict gate new enrichment
     uses (edition-stripped normalized titles must be equal,
     normalize_series_gap_title).
+
+    A name difference is not automatically a WRONG match: a library row named
+    for an edition SKU ("Nioh 2 - The Complete Edition", "Cities XL Platinum",
+    "Mass Effect (2007)") is correctly linked to the base game's IGDB record,
+    and resetting it would throw away good enrichment for nothing. Both names
+    therefore also go through normalize_edition_comparison_title; when they
+    agree there, the row is classified ``drift_kind="edition_suffix"`` and
+    reported separately in ``edition_suffix_matches`` — never reset. Only
+    ``drift_kind="wrong_entity"`` rows land in ``mismatches``.
+    ``include_edition_suffix=True`` folds the edition rows back into
+    ``mismatches`` (carrying their drift_kind) for a caller that really does
+    want them repinned.
 
     dry_run=True (default) only reports mismatches. dry_run=False resets the
     IGDB enrichment on mismatched rows — igdb_id/igdb_platforms/
@@ -2691,7 +2707,10 @@ async def revalidate_igdb_matches(dry_run: bool = True, limit: int | None = None
     from ..data.content import content_type_from_igdb_category
     from ..data.db import get_manual_overrides
     from ..data.igdb import fetch_igdb_game_records, igdb_credentials_configured
-    from ..data.title_normalization import normalize_series_gap_title
+    from ..data.title_normalization import (
+        normalize_edition_comparison_title,
+        normalize_series_gap_title,
+    )
 
     igdb_configured = igdb_credentials_configured()
 
@@ -2714,6 +2733,8 @@ async def revalidate_igdb_matches(dry_run: bool = True, limit: int | None = None
         "classification_reset_count": 0,
         "skipped_overridden": 0,
         "unresolved_igdb_ids": 0,
+        "edition_suffix_count": 0,
+        "edition_suffix_matches": [],
     }
     if not igdb_configured or not rows:
         return result
@@ -2764,6 +2785,7 @@ async def revalidate_igdb_matches(dry_run: bool = True, limit: int | None = None
         return expected != "base_game" and row["content_type"] == expected
 
     mismatches: list[dict] = []
+    edition_suffix_matches: list[dict] = []
     skipped_overridden = 0
     unresolved = 0
     classification_resets: list[int] = []
@@ -2779,6 +2801,26 @@ async def revalidate_igdb_matches(dry_run: bool = True, limit: int | None = None
             if normalize_series_gap_title(row["name"]) == normalize_series_gap_title(
                 igdb_name
             ):
+                continue
+            # The library name is the IGDB name wearing an edition/SKU suffix —
+            # a correct link, not drift. Reported, never reset (unless the
+            # caller explicitly asks for those too).
+            drift_kind = (
+                "edition_suffix"
+                if normalize_edition_comparison_title(row["name"])
+                == normalize_edition_comparison_title(igdb_name)
+                else "wrong_entity"
+            )
+            if drift_kind == "edition_suffix" and not include_edition_suffix:
+                edition_suffix_matches.append(
+                    {
+                        "game_id": row["id"],
+                        "name": row["name"],
+                        "igdb_id": row["igdb_id"],
+                        "igdb_name": igdb_name,
+                        "drift_kind": drift_kind,
+                    }
+                )
                 continue
             overrides = await get_manual_overrides(db, row["id"])
             if "igdb_id" in overrides:
@@ -2801,6 +2843,7 @@ async def revalidate_igdb_matches(dry_run: bool = True, limit: int | None = None
                     "igdb_id": row["igdb_id"],
                     "igdb_name": igdb_name,
                     "classification_reset": reset_classification,
+                    "drift_kind": drift_kind,
                 }
             )
 
@@ -2843,6 +2886,8 @@ async def revalidate_igdb_matches(dry_run: bool = True, limit: int | None = None
             ),
             "skipped_overridden": skipped_overridden,
             "unresolved_igdb_ids": unresolved,
+            "edition_suffix_count": len(edition_suffix_matches),
+            "edition_suffix_matches": edition_suffix_matches,
         }
     )
     return result

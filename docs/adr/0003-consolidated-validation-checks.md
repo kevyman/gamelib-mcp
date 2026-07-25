@@ -160,3 +160,58 @@ Status: accepted (2026-07-25)
   at three forever, but each addition should be deliberate (a new ADR
   amendment, not a silent flag flip), since report-only-by-default is the
   property that makes `check_library()` safe to run with no arguments at all.
+
+## Amendment (2026-07-25): first-sweep corrections
+
+The first full production sweep (~3,092 owned games) found the registry
+sound but four of its decisions too coarse. All four are refinements, not
+reversals; the report-only stance and the three apply-gated ids are unchanged.
+
+1. **The phantom-parent split is three-way, not two-way.** Decision 4 assumed
+   an owned child of an unowned parent means "the edition superseded the base
+   game." Production says otherwise: owning DLC *without* its base game is a
+   legitimate state (an Epic giveaway, a route pack for an unowned Train Sim
+   World), and merging there renames a base-game row to a DLC title and
+   flattens its siblings underneath it. `nesting.superseded_base` now requires
+   an EDITION heir — `content_type = "edition"`, or a name that is an
+   edition-suffixed form of the parent's under
+   `normalize_edition_comparison_title`. The DLC shape moves to a new
+   report-only id, `ownership.dlc_without_base`, so the three ids still
+   partition every phantom parent exactly once (`owned_child_count == 0` →
+   `nesting.phantom_parent`; an edition heir → `nesting.superseded_base`;
+   otherwise → `ownership.dlc_without_base`).
+
+2. **A name difference is not automatically a wrong IGDB link.**
+   `extid.igdb_drift` compared library and IGDB names under
+   `normalize_series_gap_title` only, so correct edition→base links ("Nioh 2 -
+   The Complete Edition" → "Nioh 2", "Mass Effect (2007)" → "Mass Effect")
+   reported as drift — and an `apply` would have thrown away good enrichment
+   for nothing. Both names now also go through
+   `normalize_edition_comparison_title`; agreement there classifies the row
+   `drift_kind="edition_suffix"`, which is counted in the summary and excluded
+   from findings (and therefore from resets) unless
+   `options.include_edition_suffix` asks for it.
+
+3. **`include_network` widens only the default selection.** It used to union
+   every network check into an explicit `checks` list, so asking for
+   `ownership.license_gap` also ran `extid.igdb_drift` and
+   `identity.cross_store_collapse`. Naming a network check in `checks` was
+   always sufficient to run it; `include_network` is now inert when `checks`
+   is given.
+
+4. **A bundle split is not a duplicate purchase.** `spend.duplicate_purchase`
+   grouped on the acquisition tuple and then accepted any same-FAMILY pair,
+   which is precisely the shape `split_bundle_acquisition` writes (a base game
+   and its DLC each carrying the bundle's per-item share). Family pairs whose
+   rows share a `bundle_name` are no longer reported; same-game and same-name
+   pairs — the real signal — still are.
+
+Two related fixes outside the registry, both surfaced by the same sweep:
+`ownership.license_gap`'s mint path no longer flags `delisted=1` when the
+store lookup SUCCEEDED (absence from `GetOwnedGames` also covers
+never-launched apps), and after an apply the healed licenses come back as
+notice-level findings naming the minted `game_id` instead of repeating "is
+absent from the library". The `delisted` column also gained its first manual
+write path (`add_game_to_platform(delisted=...)`, pinned via
+`game_platforms.manual_overrides`), because a report-only registry needs the
+column it writes to be correctable by hand.

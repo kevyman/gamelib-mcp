@@ -211,6 +211,7 @@ async def add_game_to_platform(
     price_currency: str | None = None,
     purchase_source: str | None = None,
     bundle_name: str | None = None,
+    delisted: bool | None = None,
     *,
     dry_run: bool = False,
 ) -> dict:
@@ -239,6 +240,14 @@ async def add_game_to_platform(
         the same validation and vocabulary as set_acquisition. They require
         owned=True — a wishlist entry has no platform-ownership row to record
         them on.
+    delisted: correct the ownership row's delisted flag (True = the store page
+        is gone and ownership comes from the account license list; False = the
+        game is still listed). Requires owned=True and is the only write path
+        for this column, which check_library's ownership.license_gap otherwise
+        sets on its own. Setting it records a manual override on the
+        game_platforms row, so neither the Steam sync nor the license audit
+        flips it back; hand it back to sync with
+        set_playtime(clear=["delisted"]).
     """
     # Resolve aliases (e.g. "nintendo" → "switch2") and validate in one step.
     platform = _validate_platform(platform, LIBRARY_PLATFORMS)
@@ -255,6 +264,11 @@ async def add_game_to_platform(
         raise ToolError(
             "Acquisition fields require owned=True — a wishlist entry "
             "(owned=False) has no platform-ownership row to record them on"
+        )
+    if not owned and delisted is not None:
+        raise ToolError(
+            "delisted requires owned=True — it describes a platform-ownership "
+            "row, which a wishlist entry (owned=False) has none of"
         )
     # Validate before any write so a bad price/source/date leaves no partial row.
     acquisition_fields = _validated_acquisition_fields(*acquisition_params)
@@ -302,6 +316,7 @@ async def add_game_to_platform(
             "playtime_minutes": playtime_minutes if owned else None,
             "identifier": identifier,
             "acquisition": acquisition_fields or None,
+            "delisted": delisted,
         }
 
     game_id = await upsert_game(None, name)
@@ -317,6 +332,13 @@ async def add_game_to_platform(
         if acquisition_fields:
             acquisition = await set_platform_acquisition(
                 game_platform_id, acquisition_fields
+            )
+        if delisted is not None:
+            # Pinned, not just written: the Steam sync clears this flag when an
+            # app reappears in GetOwnedGames and the license audit sets it when
+            # it doesn't — a hand correction has to outrank both.
+            await apply_manual_platform_fields(
+                game_platform_id, {"delisted": int(bool(delisted))}
             )
         wishlist_id = None
         if identifier_type and identifier_value:
@@ -352,6 +374,7 @@ async def add_game_to_platform(
         "playtime_minutes": playtime_minutes if owned else None,
         "identifier": added_identifier,
         "acquisition": acquisition,
+        "delisted": delisted,
     }
 
 
@@ -792,10 +815,12 @@ async def set_playtime(
     on the game_platforms row, so later platform syncs (Steam, PSN, Xbox, Epic,
     Nintendo) will NOT overwrite it — unlike add_game_to_platform, whose value
     the next sync clobbers. clear lists column name(s) (playtime_minutes,
-    last_played) to hand back to automatic sync: it removes the override so the
-    next sync repopulates the column, and does not change the stored value (the
-    same semantics as update_game's clear_overrides). A missing game_platforms
-    row is created (owned=1) unless create_platform_row=False.
+    last_played, delisted) to hand back to automatic sync: it removes the
+    override so the next sync repopulates the column, and does not change the
+    stored value (the same semantics as update_game's clear_overrides).
+    "delisted" is pinned by add_game_to_platform(delisted=...) rather than here,
+    but this is its un-pin path. A missing game_platforms row is created
+    (owned=1) unless create_platform_row=False.
 
     Note: a pinned playtime feeds get_play_history like any other — the next
     refresh records a snapshot dated that day, so history windows reflect the
@@ -1151,7 +1176,7 @@ async def update_games_batch(items: list[dict], dry_run: bool = False) -> dict:
 _ADD_BATCH_ITEM_KEYS = frozenset({
     "name", "platform", "identifier_type", "identifier_value",
     "playtime_minutes", "owned", "acquired_at", "price_paid",
-    "price_currency", "purchase_source", "bundle_name",
+    "price_currency", "purchase_source", "bundle_name", "delisted",
 })
 
 

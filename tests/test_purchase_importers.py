@@ -2488,6 +2488,7 @@ class ImportPurchasesTests(ToolDBTestCase):
                 "acquired_at": "2024-03-01",
                 "purchase_source": "eshop",
                 "already_recorded": False,
+                "platforms": ["switch2"],
             }],
         )
         self.assertEqual(result["totals"]["bundles_needing_split"], 1)
@@ -3068,3 +3069,177 @@ class ImportDryRunParityTests(ToolDBTestCase):
         async with db_module.get_db() as db:
             count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
         self.assertEqual(count["c"], 0)
+
+
+class CreateMissingQualityTests(ToolDBTestCase):
+    """Refusals that keep create_missing from minting junk rows (BUG-9)."""
+
+    async def test_edition_sibling_is_not_minted(self):
+        await seed_game("STRAFE: Gold Edition")
+        records = [_eshop_record("STRAFE: Millennium Edition", price_paid=4.99)]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["eshop"])
+
+        eshop = result["sources"]["eshop"]
+        self.assertEqual(eshop["created"], 0)
+        self.assertEqual([i["name"] for i in eshop["unmatched"]],
+                         ["STRAFE: Millennium Edition"])
+        refusal = eshop["create_refused_details"][0]
+        self.assertEqual(refusal["reason"], "edition_variant")
+        self.assertEqual(refusal["existing_name"], "STRAFE: Gold Edition")
+
+    async def test_alias_of_an_existing_row_is_not_minted(self):
+        existing = await seed_game("Orwell")
+        await db_module.upsert_game_alias(
+            existing, "Orwell: Keeping an Eye On You", alias_type="igdb"
+        )
+        records = [_eshop_record("Orwell: Keeping an Eye On You", price_paid=2.99)]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["eshop"])
+
+        eshop = result["sources"]["eshop"]
+        self.assertEqual(eshop["created"], 0)
+        refusal = eshop["create_refused_details"][0]
+        self.assertEqual(refusal["reason"], "alias")
+        self.assertEqual(refusal["existing_game_id"], existing)
+
+    async def test_parentless_nested_purchase_is_not_minted(self):
+        records = [
+            _eshop_record(
+                "The Binding of Isaac + Wrath of the Lamb DLC",
+                price_paid=3.99,
+                content_type="dlc",
+            )
+        ]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["eshop"])
+
+        eshop = result["sources"]["eshop"]
+        self.assertEqual(eshop["created"], 0)
+        self.assertEqual(
+            eshop["create_refused_details"][0]["reason"], "nested_without_parent"
+        )
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
+        self.assertEqual(count["c"], 0)
+
+    async def test_nested_purchase_with_a_parent_still_mints(self):
+        base = await seed_game("Hollow Knight")
+        await add_platform(base, "switch2")
+        records = [
+            _eshop_record(
+                "Hollow Knight: Silksong Season Pass",
+                price_paid=3.99,
+                content_type="dlc",
+            )
+        ]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["eshop"])
+
+        eshop = result["sources"]["eshop"]
+        self.assertEqual(eshop["created"], 1)
+        self.assertEqual(eshop["create_refused_details"], [])
+        self.assertEqual(eshop["created_details"][0]["parent_game_id"], base)
+
+    async def test_marketing_tagline_matches_the_existing_game(self):
+        rive = await seed_game("RIVE")
+        await add_platform(rive, "switch2")
+        records = [_eshop_record("RIVE: Wreck, Hack, Die, Retry", price_paid=1.99)]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["eshop"])
+
+        eshop = result["sources"]["eshop"]
+        self.assertEqual(eshop["created"], 0)
+        self.assertEqual(eshop["unmatched"], [])
+        self.assertEqual(eshop["filled"], 1)
+        row = await _acquisition_row(rive, "switch2")
+        self.assertEqual(row["price_paid"], 1.99)
+
+    async def test_subtitled_dlc_is_not_treated_as_a_tagline(self):
+        # The tagline rule needs an enumeration in the tail — a real subtitle
+        # must never collapse a DLC's spend onto the base game.
+        base = await seed_game("Half-Life 2")
+        await add_platform(base, "switch2")
+        records = [_eshop_record("Half-Life 2: Episode One", price_paid=4.99)]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(
+                sources=["eshop"], create_missing=False
+            )
+
+        self.assertEqual(
+            [i["name"] for i in result["sources"]["eshop"]["unmatched"]],
+            ["Half-Life 2: Episode One"],
+        )
+        self.assertEqual(await _acquisition_row(base, "switch2"), {
+            **await _acquisition_row(base, "switch2")
+        })
+        self.assertIsNone((await _acquisition_row(base, "switch2"))["price_paid"])
+
+
+class BundleDeduplicationTests(ToolDBTestCase):
+    async def test_same_bundle_on_two_platforms_collapses_to_one_entry(self):
+        # BUG-10: a Humble order with a Steam key and an Android ("other") key
+        # surfaced the same bundle twice, and the "other" half could never
+        # become already_recorded.
+        records = [
+            PurchaseRecord(
+                title="Humble Indie Bundle #3",
+                platform=platform,
+                purchase_source="humble",
+                acquired_at="2011-08-04",
+                price_paid=1.13,
+                price_currency="USD",
+                is_bundle=True,
+            )
+            for platform in ("steam", "other")
+        ]
+        with _patch_fetchers(
+            fetch_humble_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["humble"])
+
+        bundles = result["sources"]["humble"]["bundles_needing_split"]
+        self.assertEqual(len(bundles), 1)
+        self.assertEqual(bundles[0]["platform"], "steam")
+        self.assertEqual(bundles[0]["platforms"], ["other", "steam"])
+        self.assertEqual(result["totals"]["bundles_needing_split"], 1)
+
+    async def test_already_recorded_is_platform_agnostic(self):
+        gid = await seed_game("Trine")
+        await add_platform(gid, "steam")
+        await acquisition.split_bundle_acquisition(
+            bundle_name="Humble Frozenbyte Bundle",
+            platform="steam",
+            games=[{"game_id": gid}],
+            total_price=1.00,
+        )
+        records = [
+            PurchaseRecord(
+                title="Humble Frozenbyte Bundle",
+                platform="other",
+                purchase_source="humble",
+                acquired_at="2011-09-30",
+                price_paid=1.00,
+                price_currency="USD",
+                is_bundle=True,
+            )
+        ]
+        with _patch_fetchers(
+            fetch_humble_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["humble"])
+
+        bundle = result["sources"]["humble"]["bundles_needing_split"][0]
+        self.assertTrue(bundle["already_recorded"])

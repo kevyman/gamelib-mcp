@@ -121,9 +121,10 @@ class AuditSteamLicensesTests(ToolDBTestCase):
         self.assertEqual([entry["appid"] for entry in result["minted"]], [4000])
         row = await _steam_row_by_appid(4000)
         self.assertEqual(row["name"], "Garry's Mod")
-        # Still flagged: the flag means "absent from GetOwnedGames", and the
-        # primary sync clears it if the API ever returns the app.
-        self.assertEqual(row["delisted"], 1)
+        # NOT flagged: appdetails served a live store page, so the app is
+        # listed. GetOwnedGames also omits never-launched apps (a bundle
+        # redeemed this week), so absence there is not evidence of a delisting.
+        self.assertEqual(row["delisted"], 0)
 
     async def test_dlc_never_mints_a_games_row(self):
         result = await self._audit(

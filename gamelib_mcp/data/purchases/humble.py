@@ -18,6 +18,10 @@ Record building:
   Humble Book Bundles have subproducts too) is excluded so novels never
   become library games; a subproduct with no downloads at all is kept
   (a bare key delivery is indistinguishable from a game there).
+- In-game currency/consumable SKUs are excluded the same way (shared
+  ``is_consumable_title``), including the tails Humble bolts onto a real game
+  name ("Quake Champions Early Access plus 50 Shards, 100 Platinum, 2000
+  Favor") — under create_missing those would mint a phantom owned game.
 - Orders with neither tpks nor subproducts (soundtrack-only, ebook rewards,
   …) are skipped with a reason; excluded non-game subproducts are reported
   the same way. The order price splits only across the kept games.
@@ -54,7 +58,7 @@ from collections import deque
 
 import httpx
 
-from . import PurchaseRecord, normalize_purchase_date
+from . import PurchaseRecord, is_consumable_title, normalize_purchase_date
 from gamelib_mcp.data.content import classify_title_override, match_addon_name
 from gamelib_mcp.data.db import default_data_dir
 
@@ -198,7 +202,7 @@ def _order_games(order: dict) -> tuple[list[tuple[str, str]], list[str]]:
         name = tpk.get("human_name")
         if not name or not isinstance(name, str):
             continue
-        if _PROMO_NAME_RE.search(name):
+        if _PROMO_NAME_RE.search(name) or is_consumable_title(name):
             non_game.append(name.strip())
             continue
         key_type = str(tpk.get("key_type") or "").lower()
@@ -214,7 +218,11 @@ def _order_games(order: dict) -> tuple[list[tuple[str, str]], list[str]]:
         name = sub.get("human_name")
         if not name or not isinstance(name, str):
             continue
-        if _is_non_game_subproduct(sub) or _PROMO_NAME_RE.search(name):
+        if (
+            _is_non_game_subproduct(sub)
+            or _PROMO_NAME_RE.search(name)
+            or is_consumable_title(name)
+        ):
             non_game.append(name.strip())
             continue
         # No platform signal on a subproduct — "other" beats a wrong guess.

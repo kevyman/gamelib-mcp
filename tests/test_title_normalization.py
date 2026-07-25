@@ -1,6 +1,8 @@
 import unittest
 
 from gamelib_mcp.data.title_normalization import (
+    is_edition_variant_of,
+    normalize_edition_comparison_title,
     normalize_purchase_title,
     normalize_search_text,
     prepare_catalog_title,
@@ -214,3 +216,50 @@ class PurchaseSkuSuffixTests(unittest.TestCase):
         self.assertEqual(normalize_purchase_title("GRAV (Early Access)"), "GRAV")
         self.assertEqual(normalize_purchase_title("Streamline Early Access"), "Streamline")
         self.assertEqual(normalize_purchase_title("Beat Hazard Ultra"), "Beat Hazard")
+
+
+class EditionComparisonTitleTests(unittest.TestCase):
+    """The comparison-only normalizer behind the edition/drift/dedup checks."""
+
+    def test_edition_skus_collapse_onto_the_base_title(self) -> None:
+        for library_name, base_name in [
+            ("Mass Effect (2007)", "Mass Effect"),
+            ("SimCity 4 Deluxe", "SimCity 4"),
+            ("Nioh 2 - The Complete Edition", "Nioh 2"),
+            ("Burnout Paradise: The Ultimate Box", "Burnout Paradise"),
+            ("Grand Theft Auto IV: The Complete Edition", "Grand Theft Auto IV"),
+            (
+                "STAR WARS: The Force Unleashed Ultimate Sith Edition",
+                "Star Wars: The Force Unleashed",
+            ),
+            ("Cities XL Platinum", "Cities XL"),
+            (
+                "Sid Meier's Civilization III: Complete",
+                "Sid Meier's Civilization III: Game of the Year Edition",
+            ),
+            ("STRAFE: Millennium Edition", "STRAFE: Gold Edition"),
+            ("The Witcher: Enhanced Edition", "The Witcher"),
+            ("Pinball FX Classic", "Pinball FX"),
+        ]:
+            with self.subTest(library_name=library_name):
+                self.assertTrue(is_edition_variant_of(library_name, base_name))
+
+    def test_distinct_games_never_collapse(self) -> None:
+        for a, b in [
+            ("Half-Life 2: Episode One", "Half-Life 2"),
+            ("BioShock 2", "BioShock"),
+            ("The Forest", "Forest"),
+            ("FTL: Faster Than Light", "Faster than light?"),
+            ("Deus Ex: Human Revolution", "Deus Ex"),
+            ("Halo: The Master Chief Collection", "Halo"),
+            ("Sand Patch Grade", "Train Sim World 3"),
+        ]:
+            with self.subTest(a=a, b=b):
+                self.assertFalse(is_edition_variant_of(a, b))
+
+    def test_identical_names_are_not_an_edition_relationship(self) -> None:
+        self.assertFalse(is_edition_variant_of("Hades", "Hades"))
+
+    def test_fully_stripped_title_falls_back_to_the_original(self) -> None:
+        # Returning "" would make every fully-stripped title compare equal.
+        self.assertEqual(normalize_edition_comparison_title("(2007)"), "2007")

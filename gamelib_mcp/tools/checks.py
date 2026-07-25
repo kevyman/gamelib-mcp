@@ -41,7 +41,11 @@ from ..data.db import (
     set_meta,
     titles_conflict_on_identity,
 )
-from ..data.title_normalization import normalize_purchase_title, normalize_search_text
+from ..data.title_normalization import (
+    is_edition_variant_of,
+    normalize_purchase_title,
+    normalize_search_text,
+)
 from ..platforms_registry import SYNCABLE_PLATFORMS
 from .admin import (
     detect_collapsed_games,
@@ -415,7 +419,10 @@ async def _run_nesting_misclassified(*, apply: bool, options: dict[str, Any]) ->
 
 async def _run_extid_igdb_drift(*, apply: bool, options: dict[str, Any]) -> CheckOutcome:
     limit = options.get("limit")
-    result = await revalidate_igdb_matches(dry_run=not apply, limit=limit)
+    include_edition_suffix = options.get("include_edition_suffix", False)
+    result = await revalidate_igdb_matches(
+        dry_run=not apply, limit=limit, include_edition_suffix=include_edition_suffix
+    )
     findings = [
         _finding(
             "extid.igdb_drift",
@@ -428,6 +435,7 @@ async def _run_extid_igdb_drift(*, apply: bool, options: dict[str, Any]) -> Chec
                 "igdb_id": m["igdb_id"],
                 "igdb_name": m["igdb_name"],
                 "classification_reset": m["classification_reset"],
+                "drift_kind": m.get("drift_kind", "wrong_entity"),
             },
             suggested_action=(
                 None
@@ -451,6 +459,11 @@ async def _run_extid_igdb_drift(*, apply: bool, options: dict[str, Any]) -> Chec
         "classification_reset_count": result["classification_reset_count"],
         "skipped_overridden": result["skipped_overridden"],
         "unresolved_igdb_ids": result["unresolved_igdb_ids"],
+        # Correct edition→base links the name comparison alone would have
+        # called drift; excluded from findings (and from any reset) unless
+        # options.include_edition_suffix asks for them.
+        "edition_suffix_count": result["edition_suffix_count"],
+        "edition_suffix_examples": result["edition_suffix_matches"][:10],
     }
     return findings, extras
 
@@ -475,70 +488,73 @@ async def _run_ownership_license_gap(*, apply: bool, options: dict[str, Any]) ->
     delisted_key = "minted_delisted" if apply else "would_mint_delisted"
     apply_suggestion_note = "mints an owned Steam row for this license"
     delisted_suggestion_note = "mints a delisted=1 owned Steam row for this retired license"
+    apply_suggestion = {
+        "tool": "check_library",
+        "args": {
+            "checks": ["ownership.license_gap"],
+            "apply": ["ownership.license_gap"],
+        },
+    }
 
-    findings = []
-    for entry in result.get(mint_key, []):
-        findings.append(
-            _finding(
-                "ownership.license_gap",
-                "warning",
-                f"Owned Steam license {entry['appid']} ('{entry.get('name')}') "
-                "is absent from the library",
-                name=entry.get("name"),
-                evidence={
-                    "appid": entry["appid"],
-                    "name": entry.get("name"),
-                    "classified_type": "game",
-                    "would_mint": not apply,
-                },
-                suggested_action=(
-                    None
-                    if apply
-                    else {
-                        "tool": "check_library",
-                        "args": {
-                            "checks": ["ownership.license_gap"],
-                            "apply": ["ownership.license_gap"],
-                        },
-                        "note": apply_suggestion_note,
-                    }
-                ),
+    def _gap_finding(entry: dict[str, Any], *, retired: bool) -> dict[str, Any]:
+        """One license-gap finding, phrased for the run that produced it.
+
+        After an apply the license is no longer absent — saying so (with the
+        minted game_id) is the difference between "healed" and "declined to
+        mint", which `would_mint: false` alone could not express.
+        """
+        label = "Retired Steam license" if retired else "Owned Steam license"
+        note = delisted_suggestion_note if retired else apply_suggestion_note
+        evidence: dict[str, Any] = {
+            "appid": entry["appid"],
+            "name": entry.get("name"),
+            "classified_type": "retired_game" if retired else "game",
+            "would_mint": not apply,
+            "minted": apply,
+        }
+        if apply:
+            evidence["delisted"] = retired
+            evidence["game_id"] = entry.get("game_id")
+            message = (
+                f"{label} {entry['appid']} ('{entry.get('name')}') was missing and "
+                f"has been minted as game_id {entry.get('game_id')}"
+                + (" (delisted=1)" if retired else "")
             )
-        )
-    for entry in result.get(delisted_key, []):
-        findings.append(
-            _finding(
+            return _finding(
                 "ownership.license_gap",
-                "warning",
-                f"Retired Steam license {entry['appid']} ('{entry.get('name')}') "
-                "is absent from the library",
+                "notice",
+                message,
+                game_id=entry.get("game_id"),
                 name=entry.get("name"),
-                evidence={
-                    "appid": entry["appid"],
-                    "name": entry.get("name"),
-                    "classified_type": "retired_game",
-                    "would_mint": not apply,
-                },
-                suggested_action=(
-                    None
-                    if apply
-                    else {
-                        "tool": "check_library",
-                        "args": {
-                            "checks": ["ownership.license_gap"],
-                            "apply": ["ownership.license_gap"],
-                        },
-                        "note": delisted_suggestion_note,
-                    }
-                ),
+                evidence=evidence,
+                suggested_action=None,
             )
+        return _finding(
+            "ownership.license_gap",
+            "warning",
+            f"{label} {entry['appid']} ('{entry.get('name')}') is absent from the library",
+            name=entry.get("name"),
+            evidence=evidence,
+            suggested_action={**apply_suggestion, "note": note},
         )
+
+    findings = [
+        _gap_finding(entry, retired=False) for entry in result.get(mint_key, [])
+    ]
+    findings.extend(
+        _gap_finding(entry, retired=True) for entry in result.get(delisted_key, [])
+    )
 
     extras = {
         k: v
         for k, v in result.items()
         if k not in ("minted", "minted_delisted", "would_mint", "would_mint_delisted")
     }
+    if apply:
+        extras["minted_game_ids"] = [
+            entry.get("game_id")
+            for entry in (*result.get("minted", []), *result.get("minted_delisted", []))
+        ]
     return findings, extras
 
 
@@ -570,14 +586,32 @@ async def _children_with_substance(parent_id: int) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def _is_edition_heir(child: dict[str, Any], parent_name: str) -> bool:
+    """Whether an owned child is an EDITION of its parent (a supersession heir).
+
+    Owning DLC/expansions without the base game is a legitimate ownership state
+    (Epic giveaways, Humble keys, a route pack for Train Sim World), not a data
+    error — merging such a child into the parent would rename a base-game row
+    to a DLC title and flatten its siblings underneath it. So the heir has to
+    actually BE the game: either typed as an ``edition``, or named as an
+    edition-suffixed form of the parent ("Pinball FX Classic" under "Pinball
+    FX"). Everything else is reported under ownership.dlc_without_base instead.
+    """
+    if (child.get("content_type") or "") == "edition":
+        return True
+    return is_edition_variant_of(child.get("name") or "", parent_name)
+
+
 async def _run_nesting_superseded_base(*, apply: bool, options: dict[str, Any]) -> CheckOutcome:
-    """Phantom parents that DO have an owned child — the edition-supersession shape.
+    """Phantom parents whose owned child is an EDITION — the supersession shape.
 
     Shares detect_orphan_games' phantom_parents detector with nesting.phantom_parent
-    (which takes owned_child_count == 0); this half picks the strongest owned child
-    as the merge heir (most playtime, then most store identifiers, then lowest id)
-    and emits a concrete merge_games suggestion, per the edition-becomes-canonical
-    supersession stance.
+    (which takes owned_child_count == 0); this half picks the strongest owned
+    EDITION child as the merge heir (most playtime, then most store identifiers,
+    then lowest id) and emits a concrete merge_games suggestion, per the
+    edition-becomes-canonical supersession stance. A phantom parent whose only
+    owned children are DLC/expansions is not a supersession at all — it reports
+    under ownership.dlc_without_base.
     """
     result = await detect_orphan_games()
     findings = []
@@ -586,7 +620,11 @@ async def _run_nesting_superseded_base(*, apply: bool, options: dict[str, Any]) 
             continue
         parent_id = p["game_id"]
         children = await _children_with_substance(parent_id)
-        owned_children = [c for c in children if c["owned"]]
+        owned_children = [
+            c for c in children if c["owned"] and _is_edition_heir(c, p["name"])
+        ]
+        if not owned_children:
+            continue
         heir = min(
             owned_children,
             key=lambda c: (-(c["playtime_minutes"] or 0), -c["identifier_count"], c["game_id"]),
@@ -632,6 +670,62 @@ async def _run_nesting_superseded_base(*, apply: bool, options: dict[str, Any]) 
                         "ratings/series/spend/wishlist and re-points siblings"
                     ),
                 },
+            )
+        )
+    return findings, {}
+
+
+# --- adapters: ownership.dlc_without_base -----------------------------------
+
+
+async def _run_ownership_dlc_without_base(
+    *, apply: bool, options: dict[str, Any]
+) -> CheckOutcome:
+    """Owned DLC/expansions whose base game is owned nowhere.
+
+    The other half of the phantom-parent-with-an-owned-child split: where
+    nesting.superseded_base takes the edition shape (the child IS the game and
+    should become canonical), this takes the DLC shape, which is a legitimate
+    ownership state and NOT a merge candidate — a route pack bought without
+    Train Sim World, an Epic giveaway DLC. Informational, no suggested_action:
+    the only "repairs" are buying the base game or, if the parent row is pure
+    noise, deleting it once its children are re-pointed.
+    """
+    result = await detect_orphan_games()
+    findings = []
+    for p in result["phantom_parents"]:
+        if not p["owned_child_count"]:
+            continue
+        parent_id = p["game_id"]
+        children = await _children_with_substance(parent_id)
+        owned_children = [c for c in children if c["owned"]]
+        if any(_is_edition_heir(c, p["name"]) for c in owned_children):
+            # An edition heir exists — nesting.superseded_base owns this row.
+            continue
+        names = ", ".join(f"'{c['name']}'" for c in owned_children[:3])
+        findings.append(
+            _finding(
+                "ownership.dlc_without_base",
+                "notice",
+                f"{len(owned_children)} owned nested item(s) ({names}"
+                + (", …" if len(owned_children) > 3 else "")
+                + f") hang off '{p['name']}', which isn't owned anywhere — normal "
+                "when DLC was bought (or gifted) without its base game",
+                game_id=parent_id,
+                name=p["name"],
+                evidence={
+                    "owned_children": [
+                        {
+                            "game_id": c["game_id"],
+                            "name": c["name"],
+                            "content_type": c["content_type"],
+                            "playtime_minutes": c["playtime_minutes"],
+                        }
+                        for c in owned_children
+                    ],
+                    "child_count": p["child_count"],
+                },
+                suggested_action=None,
             )
         )
     return findings, {}
@@ -942,10 +1036,17 @@ async def _run_spend_duplicate_purchase(*, apply: bool, options: dict[str, Any])
                 root_b = b["parent_game_id"] or b["game_id"]
                 norm_a = a["name_normalized"] or normalize_search_text(a["name"])
                 norm_b = b["name_normalized"] or normalize_search_text(b["name"])
-                if not (root_a == root_b or norm_a == norm_b):
+                same_row_identity = a["game_id"] == b["game_id"] or norm_a == norm_b
+                if not (root_a == root_b or same_row_identity):
                     # Cross-family identical rows are legit (bundle splits share
                     # acquired_at/source/bundle_name but have different prices —
                     # matching here already means the prices coincided too).
+                    continue
+                if not same_row_identity and key[4] is not None:
+                    # Same family (parent+child, or two children of one parent)
+                    # under one bundle_name: that is exactly what
+                    # split_bundle_acquisition writes — a base game and its DLC
+                    # each carrying the bundle's per-item share. Not a duplicate.
                     continue
                 findings.append(
                     _finding(
@@ -1348,7 +1449,7 @@ CHECKS: dict[str, CheckSpec] = {
             writes_on_apply=True,
             default_severity="warning",
             runner=_run_extid_igdb_drift,
-            option_keys=frozenset({"limit"}),
+            option_keys=frozenset({"limit", "include_edition_suffix"}),
             configured=_igdb_configured,
             unconfigured_reason="unconfigured:igdb",
         ),
@@ -1378,6 +1479,18 @@ CHECKS: dict[str, CheckSpec] = {
             writes_on_apply=False,
             default_severity="warning",
             runner=_run_nesting_superseded_base,
+        ),
+        _spec(
+            "ownership.dlc_without_base",
+            description=(
+                "Owned DLC/expansion rows whose base game is owned nowhere — a "
+                "legitimate ownership state, reported so it stops looking like "
+                "an edition supersession"
+            ),
+            network=None,
+            writes_on_apply=False,
+            default_severity="notice",
+            runner=_run_ownership_dlc_without_base,
         ),
         _spec(
             "identity.unlinked_edition",
@@ -1504,12 +1617,20 @@ def _resolve_selector(selector: str) -> set[str]:
 
 
 def _resolve_run_set(checks: list[str] | None, include_network: bool) -> set[str]:
-    if checks is None:
-        run_set = {check_id for check_id, spec in CHECKS.items() if spec.network is None}
-    else:
-        run_set = set()
+    """The set of check ids to run.
+
+    ``include_network`` only widens the DEFAULT selection. With an explicit
+    ``checks`` list the selection is exactly that list: naming a network check
+    is itself sufficient to run it, and include_network must not smuggle the
+    other network checks in (asking for ownership.license_gap used to also run
+    extid.igdb_drift and identity.cross_store_collapse).
+    """
+    if checks is not None:
+        run_set: set[str] = set()
         for selector in checks:
             run_set |= _resolve_selector(selector)
+        return run_set
+    run_set = {check_id for check_id, spec in CHECKS.items() if spec.network is None}
     if include_network:
         run_set |= {check_id for check_id, spec in CHECKS.items() if spec.network is not None}
     return run_set

@@ -496,7 +496,9 @@ class ExtidIgdbDriftTests(ToolDBTestCase):
             self.assertIsNone(finding["suggested_action"])
 
 
-class OwnershipLicenseGapTests(ToolDBTestCase):
+class _LicenseGapRunnerMixin:
+    """Shared license-audit patching for the license_gap check tests."""
+
     async def _run(self, owned, appdetails=None, steamspy=None, **kwargs):
         appdetails = appdetails or {}
         steamspy = steamspy or {}
@@ -518,6 +520,8 @@ class OwnershipLicenseGapTests(ToolDBTestCase):
         ):
             return await checks.run_library_checks(**kwargs)
 
+
+class OwnershipLicenseGapTests(_LicenseGapRunnerMixin, ToolDBTestCase):
     async def test_unconfigured_lands_in_checks_skipped(self):
         result = await checks.run_library_checks(checks=["ownership.license_gap"])
         self.assertIn(
@@ -1085,3 +1089,247 @@ class SyncStalenessTests(ToolDBTestCase):
 
         result = await checks.run_library_checks(checks=["sync.staleness"])
         self.assertEqual(result["findings"], [])
+
+
+class BugfixRegressionTests(ToolDBTestCase):
+    """Regressions from the 2026-07-25 check_library sweep report."""
+
+    async def test_explicit_checks_are_not_widened_by_include_network(self):
+        # BUG-7: naming one network check plus include_network used to run
+        # every network check (and return 25 unwanted igdb_drift findings).
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch("gamelib_mcp.data.igdb.fetch_igdb_game_records", AsyncMock(return_value={})),
+        ):
+            result = await checks.run_library_checks(
+                checks=["extid.igdb_drift"], include_network=True
+            )
+        self.assertEqual(result["checks_run"], ["extid.igdb_drift"])
+
+    async def test_include_network_still_widens_the_default_run(self):
+        result = await checks.run_library_checks(include_network=True)
+        selected = set(result["checks_run"]) | {s["check"] for s in result["checks_skipped"]}
+        self.assertEqual(selected, set(checks.CHECKS))
+
+    async def test_dlc_child_does_not_make_the_parent_a_supersession(self):
+        # BUG-5: owning a route DLC without Train Sim World is an ownership
+        # state, not an edition supersession — merging would rename the base
+        # row to the DLC's title and flatten its siblings.
+        shell = await seed_game("Train Sim World 3")
+        route = await seed_game(
+            "Sand Patch Grade",
+            content_type="dlc",
+            is_primary_library_item=0,
+            parent_game_id=shell,
+        )
+        await add_platform(route, "steam", playtime_minutes=300)
+        await seed_game(
+            "Bakerloo Line",
+            content_type="dlc",
+            is_primary_library_item=0,
+            parent_game_id=shell,
+        )
+
+        result = await checks.run_library_checks(
+            checks=["nesting.superseded_base", "ownership.dlc_without_base"]
+        )
+        superseded = [f for f in result["findings"] if f["check"] == "nesting.superseded_base"]
+        dlc_only = [f for f in result["findings"] if f["check"] == "ownership.dlc_without_base"]
+        self.assertEqual(superseded, [])
+        self.assertEqual([f["game_id"] for f in dlc_only], [shell])
+        _assert_envelope(self, dlc_only[0])
+        self.assertIsNone(dlc_only[0]["suggested_action"])
+        self.assertEqual(
+            [c["game_id"] for c in dlc_only[0]["evidence"]["owned_children"]], [route]
+        )
+
+    async def test_edition_named_child_still_supersedes(self):
+        # The heir test is content_type OR an edition-suffixed name: "Pinball
+        # FX Classic" under "Pinball FX" is the same game, typed base_game.
+        shell = await seed_game("Pinball FX")
+        classic = await seed_game(
+            "Pinball FX Classic",
+            content_type="base_game",
+            is_primary_library_item=0,
+            parent_game_id=shell,
+        )
+        await add_platform(classic, "steam", playtime_minutes=45)
+
+        result = await checks.run_library_checks(
+            checks=["nesting.superseded_base", "ownership.dlc_without_base"]
+        )
+        superseded = [f for f in result["findings"] if f["check"] == "nesting.superseded_base"]
+        dlc_only = [f for f in result["findings"] if f["check"] == "ownership.dlc_without_base"]
+        self.assertEqual([f["evidence"]["heir_game_id"] for f in superseded], [classic])
+        self.assertEqual(dlc_only, [])
+
+    async def test_bundle_split_across_a_family_is_not_a_duplicate_purchase(self):
+        # BUG-6: split_bundle_acquisition writes exactly this shape — a base
+        # game and its DLC sharing one bundle line's per-item price.
+        base = await seed_game("Killing Floor")
+        dlc = await seed_game(
+            "Killing Floor - Community Weapon Pack",
+            content_type="dlc",
+            is_primary_library_item=0,
+            parent_game_id=base,
+        )
+        for game_id in (base, dlc):
+            pid = await add_platform(game_id, "steam")
+            await db_module.set_platform_acquisition(
+                pid,
+                {
+                    "acquired_at": "2013-12-30",
+                    "price_paid": 0.12,
+                    "price_currency": "USD",
+                    "purchase_source": "humble",
+                    "bundle_name": "Humble Unreal Engine Bundle",
+                },
+            )
+
+        result = await checks.run_library_checks(checks=["spend.duplicate_purchase"])
+        self.assertEqual(result["findings"], [])
+
+    async def test_family_rows_without_a_bundle_name_still_report(self):
+        base = await seed_game("Magicka")
+        dlc = await seed_game(
+            "Magicka - Item Pack",
+            content_type="dlc",
+            is_primary_library_item=0,
+            parent_game_id=base,
+        )
+        for game_id in (base, dlc):
+            pid = await add_platform(game_id, "steam")
+            await db_module.set_platform_acquisition(
+                pid,
+                {
+                    "acquired_at": "2013-12-30",
+                    "price_paid": 0.30,
+                    "price_currency": "USD",
+                    "purchase_source": "humble",
+                },
+            )
+
+        result = await checks.run_library_checks(checks=["spend.duplicate_purchase"])
+        self.assertEqual(len(result["findings"]), 1)
+
+    async def test_edition_suffix_link_is_not_reported_as_drift(self):
+        # BUG-4: "Nioh 2 - The Complete Edition" → IGDB "Nioh 2" is correct.
+        good = await seed_game("Nioh 2 - The Complete Edition")
+        bad = await seed_game("A Hat in Time")
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = 111 WHERE id = ?", (good,))
+            await db.execute("UPDATE games SET igdb_id = 222 WHERE id = ?", (bad,))
+            await db.commit()
+
+        records = {
+            111: ExtidIgdbDriftTests._record("Nioh 2"),
+            222: ExtidIgdbDriftTests._record("Among Us 3D: VR"),
+        }
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_igdb_game_records",
+                AsyncMock(return_value=records),
+            ),
+        ):
+            result = await checks.run_library_checks(
+                checks=["extid.igdb_drift"], apply=["extid.igdb_drift"]
+            )
+
+        self.assertEqual([f["game_id"] for f in result["findings"]], [bad])
+        self.assertEqual(
+            result["findings"][0]["evidence"]["drift_kind"], "wrong_entity"
+        )
+        summary = result["summary"]["extid.igdb_drift"]
+        self.assertEqual(summary["edition_suffix_count"], 1)
+        self.assertEqual(summary["edition_suffix_examples"][0]["game_id"], good)
+        async with db_module.get_db() as db:
+            kept = await db.execute_fetchone(
+                "SELECT igdb_id FROM games WHERE id = ?", (good,)
+            )
+            reset = await db.execute_fetchone(
+                "SELECT igdb_id FROM games WHERE id = ?", (bad,)
+            )
+        self.assertEqual(kept["igdb_id"], 111)  # good enrichment kept
+        self.assertIsNone(reset["igdb_id"])
+
+    async def test_include_edition_suffix_option_folds_them_back_in(self):
+        good = await seed_game("Cities XL Platinum")
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = 333 WHERE id = ?", (good,))
+            await db.commit()
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_igdb_game_records",
+                AsyncMock(return_value={333: ExtidIgdbDriftTests._record("Cities XL")}),
+            ),
+        ):
+            result = await checks.run_library_checks(
+                checks=["extid.igdb_drift"],
+                options={"extid.igdb_drift": {"include_edition_suffix": True}},
+            )
+        self.assertEqual(len(result["findings"]), 1)
+        self.assertEqual(
+            result["findings"][0]["evidence"]["drift_kind"], "edition_suffix"
+        )
+
+
+class LicenseGapAppliedFindingTests(_LicenseGapRunnerMixin, ToolDBTestCase):
+    async def test_applied_findings_report_the_minted_game_id(self):
+        # BUG-8: after an apply the finding used to still read "is absent from
+        # the library" with would_mint=false — indistinguishable from a refusal.
+        result = await self._run(
+            owned={4000},
+            appdetails={4000: {"type": "game", "name": "Garry's Mod"}},
+            checks=["ownership.license_gap"],
+            apply=["ownership.license_gap"],
+        )
+        self.assertEqual(len(result["findings"]), 1)
+        finding = result["findings"][0]
+        _assert_envelope(self, finding)
+        self.assertEqual(finding["severity"], "notice")
+        self.assertTrue(finding["evidence"]["minted"])
+        self.assertFalse(finding["evidence"]["would_mint"])
+        self.assertFalse(finding["evidence"]["delisted"])
+        self.assertIsNotNone(finding["game_id"])
+        self.assertIn("has been minted", finding["message"])
+        self.assertEqual(
+            result["summary"]["ownership.license_gap"]["minted_game_ids"],
+            [finding["game_id"]],
+        )
+
+    async def test_live_store_page_is_not_flagged_delisted(self):
+        # BUG-1: absence from GetOwnedGames is not evidence of a delisting.
+        await self._run(
+            owned={4000},
+            appdetails={4000: {"type": "game", "name": "Garry's Mod"}},
+            checks=["ownership.license_gap"],
+            apply=["ownership.license_gap"],
+        )
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT gp.delisted FROM game_platform_identifiers gpi "
+                "JOIN game_platforms gp ON gp.id = gpi.game_platform_id "
+                "WHERE gpi.identifier_type = 'steam_appid' "
+                "AND gpi.identifier_value = '4000'"
+            )
+        self.assertEqual(row["delisted"], 0)
+
+    async def test_retired_app_is_still_flagged_delisted(self):
+        result = await self._run(
+            owned={24740},
+            appdetails={},
+            steamspy={24740: "Burnout Paradise: The Ultimate Box"},
+            checks=["ownership.license_gap"],
+            apply=["ownership.license_gap"],
+        )
+        self.assertTrue(result["findings"][0]["evidence"]["delisted"])
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT gp.delisted FROM game_platform_identifiers gpi "
+                "JOIN game_platforms gp ON gp.id = gpi.game_platform_id "
+                "WHERE gpi.identifier_type = 'steam_appid' "
+                "AND gpi.identifier_value = '24740'"
+            )
+        self.assertEqual(row["delisted"], 1)

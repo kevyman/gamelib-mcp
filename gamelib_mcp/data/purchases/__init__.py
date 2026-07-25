@@ -77,6 +77,43 @@ IDENTIFIER_TYPES: dict[str, str] = {
 }
 
 
+# In-game currency / consumable packs sold as storefront line items ("1,000
+# V-Bucks", "Rocket League® - Credits x1100", "2,800 Apex Coins", "EA SPORTS FC
+# 24 - 1050 FC Points", "Quake Champions Early Access plus 50 Shards, 100
+# Platinum, 2000 Favor"). No storefront types these, so the NAME is the only
+# signal: a count attached to a currency noun — either order — or an
+# unambiguous brand. A bare noun with no number never trips it, so a game
+# legitimately titled "…Coins"/"…Platinum" is safe.
+_CURRENCY_NOUN = (
+    r"(?:v-?bucks|show-?bucks|credits?|coins?|points|gems|gold\s+bars|shards?"
+    r"|crowns?|tokens?|favor)"
+)
+# Only reachable through the "plus <count> <noun>" join below: "Platinum" alone
+# names editions far more often than currency ("Cities XL Platinum").
+_JOINED_CURRENCY_NOUN = rf"(?:{_CURRENCY_NOUN}|platinum|gold)"
+_CONSUMABLE_NAME_RE = re.compile(
+    rf"\bv-?bucks\b|\bshow-?bucks\b"
+    # Count then noun, with up to two words riding between ("2,800 Apex Coins").
+    rf"|\b\d[\d,.]*\+?\s*(?:[\w'&.®™-]+\s+){{0,2}}{_CURRENCY_NOUN}\b"
+    # Noun then count ("Credits x1100").
+    rf"|\b{_CURRENCY_NOUN}\s*x\s*\d"
+    # "<game> plus 50 Shards, 100 Platinum, 2000 Favor" — the currency tail is
+    # bolted onto a real game name, so the pack must be recognized by the
+    # "plus <count> <noun>" join rather than by the leading title.
+    rf"|\bplus\s+\d[\d,.]*\s*(?:[\w'&.®™-]+\s+){{0,2}}{_JOINED_CURRENCY_NOUN}\b",
+    re.IGNORECASE,
+)
+
+
+def is_consumable_title(title: str) -> bool:
+    """True for an in-game currency/consumable line item, not a game.
+
+    Shared by the importers: fed to the matcher such a line either lands in
+    unmatched or, under create_missing, mints a phantom owned "game".
+    """
+    return bool(_CONSUMABLE_NAME_RE.search(title or ""))
+
+
 _DATE_PREFIX_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
 
 

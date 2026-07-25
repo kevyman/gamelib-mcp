@@ -294,6 +294,9 @@ class AddGameToPlatformResponse(FlexibleModel):
     identifier: dict[str, str] | None = None
     # Populated when acquisition params were passed (owned=True only).
     acquisition: AcquisitionInfo | None = None
+    # Echoes the delisted flag when one was passed (owned=True only); null
+    # means the column was left to sync/the license audit.
+    delisted: bool | None = None
 
 
 class SyncWishlistResponse(FlexibleModel):
@@ -396,6 +399,9 @@ class SetAcquisitionsBatchResponse(FlexibleModel):
     # created row has no delete tool, so callers eyeball this list.
     created_details: list[dict[str, Any]]
     unmatched: list[dict[str, Any]]
+    # Items create_missing declined to mint (near-duplicate of an existing row,
+    # or nested content with no parent). Counted in unmatched; this says why.
+    create_refused_details: list[dict[str, Any]] = []
     no_platform_row: int
     # Detail for the no_platform_row rows (game_id, matched_name, platforms),
     # so a caller can triage by name instead of an opaque count.

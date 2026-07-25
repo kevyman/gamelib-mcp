@@ -116,13 +116,16 @@ async def remove_manual_overrides(game_id: int, columns) -> set[str]:
         return remaining
 
 
-# game_platforms columns a user may pin by hand via set_playtime. Unlike the
-# ACQUISITION_FIELDS below, these ARE written by platform syncs, so pinning one
-# records it in game_platforms.manual_overrides and the sync write paths
-# (upsert_game_platform, bulk_upsert_steam_library) skip a protected column.
+# game_platforms columns a user may pin by hand (set_playtime for the playtime
+# pair, add_game_to_platform for delisted). Unlike the ACQUISITION_FIELDS below,
+# these ARE written by platform syncs, so pinning one records it in
+# game_platforms.manual_overrides and the sync write paths
+# (upsert_game_platform, bulk_upsert_steam_library, set_steam_delisted) skip a
+# protected column. set_playtime(clear=[...]) hands any of them back to sync.
 PLATFORM_EDITABLE_FIELDS = {
     "playtime_minutes",
     "last_played",
+    "delisted",
 }
 
 
@@ -1155,10 +1158,12 @@ async def set_steam_delisted(appids, delisted: bool) -> int:
     """Set game_platforms.delisted for the Steam rows holding these appids.
 
     delisted=1 marks ownership sourced from the account license audit for an
-    app the public owned-games API no longer returns (typically retired from
-    the store); delisted=0 clears the flag when the app reappears there —
-    delistings get reversed (GTA IV Complete Edition superseded the retired
-    standalone). Only flips rows whose flag differs, and returns that count.
+    app the public owned-games API no longer returns AND whose store page is
+    gone (typically retired); delisted=0 clears the flag when the app reappears
+    there — delistings get reversed (GTA IV Complete Edition superseded the
+    retired standalone). Only flips rows whose flag differs, and returns that
+    count. A row whose ``delisted`` is pinned in manual_overrides (see
+    add_game_to_platform) is never touched, like every other protected column.
     """
     ids = [str(a) for a in appids]
     if not ids:
@@ -1172,6 +1177,9 @@ async def set_steam_delisted(appids, delisted: bool) -> int:
             cursor = await db.execute(
                 f"""UPDATE game_platforms SET delisted = ?
                     WHERE platform = ? AND delisted != ?
+                      AND NOT (manual_overrides IS NOT NULL
+                               AND 'delisted' IN (
+                                   SELECT value FROM json_each(manual_overrides)))
                       AND id IN (SELECT game_platform_id
                                  FROM game_platform_identifiers
                                  WHERE identifier_type = ?

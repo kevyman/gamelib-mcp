@@ -15,7 +15,10 @@ missing appid so ownership never depends on an app still being purchasable:
 
 * store appdetails says type "game"  → mint an owned Steam row (through
   bulk_upsert_steam_library, so identifier/name resolution and every
-  anti-collapse guard apply);
+  anti-collapse guard apply). The row is NOT flagged ``delisted``: a live
+  store page proves the app is still listed, and GetOwnedGames also omits
+  apps that are simply never-launched (the normal state of a bundle redeemed
+  this week);
 * appdetails says any other type (dlc/music/demo/tool/…) → recorded, no games
   row — nested/tool content is catalog data, not a library item (ADR 0002);
 * appdetails has nothing (the retired case) → SteamSpy name lookup. SteamSpy
@@ -163,6 +166,35 @@ async def _library_steam_appids() -> set[int]:
     }
 
 
+async def _game_ids_for_appids(appids: list[int]) -> dict[int, int]:
+    """{appid: games.id} for freshly minted Steam rows.
+
+    A mint run reports the row it created, so a caller (check_library's
+    ownership.license_gap) can say "minted as game_id N" instead of leaving the
+    finding indistinguishable from "still absent".
+    """
+    if not appids:
+        return {}
+    resolved: dict[int, int] = {}
+    async with get_db() as db:
+        for start in range(0, len(appids), 500):
+            chunk = [str(a) for a in appids[start : start + 500]]
+            placeholders = ",".join("?" * len(chunk))
+            rows = await db.execute_fetchall(
+                f"""SELECT gpi.identifier_value AS appid, gp.game_id AS game_id
+                    FROM game_platform_identifiers gpi
+                    JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+                    WHERE gpi.identifier_type = ?
+                      AND gp.platform = 'steam'
+                      AND gpi.identifier_value IN ({placeholders})""",
+                (STEAM_APP_ID, *chunk),
+            )
+            for row in rows:
+                if str(row["appid"]).isdigit():
+                    resolved[int(row["appid"])] = row["game_id"]
+    return resolved
+
+
 async def _load_audit_map() -> dict[str, dict]:
     raw = await get_meta(AUDIT_META_KEY)
     if not raw:
@@ -259,7 +291,10 @@ async def audit_steam_licenses(
         retired = entry.get("outcome") == "classified_retired_game"
         if mint:
             await bulk_upsert_steam_library([{"appid": appid, "name": prepared}], synced_at=now)
-            await set_steam_delisted([appid], True)
+            if retired:
+                # Only the store-lookup-failed classification means "retired";
+                # a live store page (classified_game) must not be flagged.
+                await set_steam_delisted([appid], True)
             outcome = "minted_delisted" if retired else "minted"
             audit[str(appid)] = {"outcome": outcome, "name": prepared, "at": now}
             audit_dirty = True
@@ -280,10 +315,12 @@ async def audit_steam_licenses(
                     await bulk_upsert_steam_library(
                         [{"appid": appid, "name": prepared}], synced_at=now
                     )
-                    # The flag records "absent from GetOwnedGames, ownership from
-                    # the license audit" — set even with a live store page, and
-                    # cleared by the primary sync if the API ever returns the app.
-                    await set_steam_delisted([appid], True)
+                    # NO delisted flag here: appdetails just served a live store
+                    # page for this appid, so it is not retired. GetOwnedGames
+                    # omits never-launched apps too (a freshly redeemed bundle
+                    # is the common case) — absence there is not evidence of a
+                    # delisting, and flagging it made every delisted-filtered
+                    # view under-report.
                     audit[str(appid)] = {"outcome": "minted", "name": raw_name or None, "at": now}
                     minted.append({"appid": appid, "name": prepared})
                 else:
@@ -325,6 +362,15 @@ async def audit_steam_licenses(
             audit[str(appid)] = {"outcome": "unresolved", "name": None, "at": now}
             unresolved.append(appid)
         audit_dirty = True
+
+    if mint and (minted or minted_delisted):
+        # Report the rows this run actually created, so a healed license is
+        # visibly healed rather than re-reading as "absent from the library".
+        game_ids = await _game_ids_for_appids(
+            [entry["appid"] for entry in (*minted, *minted_delisted)]
+        )
+        for entry in (*minted, *minted_delisted):
+            entry["game_id"] = game_ids.get(entry["appid"])
 
     if audit_dirty:
         await set_meta(AUDIT_META_KEY, json.dumps(audit))
