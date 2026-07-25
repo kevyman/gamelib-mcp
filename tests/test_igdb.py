@@ -1824,6 +1824,88 @@ class IGDBBackfillExternalGamesTests(unittest.IsolatedAsyncioTestCase):
         apply_metadata.assert_awaited_once_with(7, fetched)
         self.assertTrue(any("re-linking" in line for line in logs.output))
 
+    async def test_external_disagreement_keeps_a_name_matching_stored_link(self) -> None:
+        # FTL case: steam appid 212680 maps to 178437 ("Faster than light?"),
+        # a junk duplicate, while the row's stored 3075 ("FTL: Faster Than
+        # Light") is correct. The mapping must not override a link the name
+        # vouches for with one it doesn't.
+        row = {
+            "id": 7,
+            "name": "FTL: Faster Than Light",
+            "igdb_id": 3075,
+            "manual_overrides": None,
+            "steam_appid": "212680",
+        }
+        junk = self._game(178437, "Faster than light?")
+        stored = self._game(3075, "FTL: Faster Than Light")
+
+        async def fake_fetch_by_id(igdb_id, *, suppress_errors=True):
+            return {178437: junk, 3075: stored}[igdb_id]
+
+        with (
+            self._creds_env(),
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[row])),
+            patch(
+                "gamelib_mcp.data.igdb.resolve_steam_appids_to_igdb",
+                AsyncMock(return_value={"212680": 178437}),
+            ),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_game_by_id",
+                AsyncMock(side_effect=fake_fetch_by_id),
+            ),
+            patch("gamelib_mcp.data.igdb._resolve_game_with_status", AsyncMock()) as resolve_game,
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock()),
+            patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
+            patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
+            self.assertLogs("gamelib_mcp.data.igdb", level="INFO") as logs,
+        ):
+            count = await igdb.backfill_missing_games(limit=1)
+
+        self.assertEqual(count, 1)
+        resolve_game.assert_not_awaited()
+        apply_metadata.assert_awaited_once_with(7, stored)
+        self.assertTrue(any("keeping stored igdb_id" in line for line in logs.output))
+
+    async def test_external_disagreement_wins_when_stored_name_matches_no_better(self) -> None:
+        # Neither name matches the row: the authoritative mapping still wins,
+        # exactly as before — the guard only protects a VOUCHED-FOR link.
+        row = {
+            "id": 7,
+            "name": "Some Renamed Row",
+            "igdb_id": 555,
+            "manual_overrides": None,
+            "steam_appid": "391720",
+        }
+        external = self._game(111, "Layers of Fear")
+        stored = self._game(555, "Something Else Entirely")
+
+        async def fake_fetch_by_id(igdb_id, *, suppress_errors=True):
+            return {111: external, 555: stored}[igdb_id]
+
+        with (
+            self._creds_env(),
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[row])),
+            patch(
+                "gamelib_mcp.data.igdb.resolve_steam_appids_to_igdb",
+                AsyncMock(return_value={"391720": 111}),
+            ),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_game_by_id",
+                AsyncMock(side_effect=fake_fetch_by_id),
+            ),
+            patch("gamelib_mcp.data.igdb._resolve_game_with_status", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock()),
+            patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
+            patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
+        ):
+            await igdb.backfill_missing_games(limit=1)
+
+        apply_metadata.assert_awaited_once_with(7, external)
+
     async def test_manual_igdb_override_pins_stored_link(self) -> None:
         row = {
             "id": 7,
