@@ -269,3 +269,45 @@ it: `update_game` (23), `add_game_to_platform` (15), `set_acquisition` (14),
 shapes; collapsing them into a `fields: dict` would trade away the top-level
 wire validation that is the entire reason decision 1 kept scalar params. Left
 as a conscious deviation.
+
+## Amendment (2026-07-27): the dual-encoding question, answered empirically
+
+Amendment §4 left the largest available win — 48% of all response bytes being
+the same payload sent twice — undone, because whether a host feeds the model
+`content[0].text` or `structuredContent` could not be verified from the repo.
+It has now been tested against the real deployment.
+
+**Method.** One read-only tool (`get_sync_status`) was changed on the
+production server to `ToolResult(content=[], structured_content=await _status())`,
+rebuilt, and called through the live claude.ai connector. The edit was verified
+present *inside the running container* before the call, and the server was
+reverted to a clean tree and rebuilt immediately after.
+
+**Result.** The call returned the complete payload with **zero content
+blocks** on the wire. A local wire-level check (`_call_tool_mcp`) confirms
+FastMCP does not re-add the text block: `normal` → 1 block / 93 text chars +
+102 structured; `suppressed` → 0 blocks / 0 text chars + 102 structured.
+
+**Conclusion: claude.ai's MCP client reads `structuredContent`.** For that
+client the duplicate text block is pure overhead, and suppressing it would cut
+response bytes roughly in half.
+
+**Still not adopted, for a new reason.** The server's OAuth proxy has two
+registered clients: `claude_ai` **and `chatgpt_com`**. The experiment proves
+nothing about the second one, and the spec's "SHOULD return the serialized
+JSON in a TextContent block" exists precisely for clients that need it.
+Suppressing the block server-wide would be a coin-flip on the ChatGPT
+connector. The options, in order of preference:
+1. Repeat this same experiment against the ChatGPT connector; if it also reads
+   `structuredContent`, suppress unconditionally.
+2. Make it opt-in per deployment (env flag, default off) if only one client is
+   confirmed.
+3. Leave as is.
+
+**Correction to operational lore:** the deployment notes claimed container
+restarts expire claude.ai connector OAuth sessions. They do not, and have not
+since `FASTMCP_HOME` moved onto a host bind mount. Stored tokens dated
+2026-07-20 survived restarts on 2026-07-26 and two more during this
+experiment, with tool calls working throughout and no re-auth. Schema caching
+was not exercised (the experiment deliberately changed only the response
+encoding, not any tool signature).
