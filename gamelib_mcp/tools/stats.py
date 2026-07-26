@@ -1,4 +1,4 @@
-"""get_backlog_stats tool."""
+"""Backlog rollup behind get_stats(report="backlog")."""
 
 from ..data.db import get_db
 from .common import (

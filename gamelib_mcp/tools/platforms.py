@@ -1,4 +1,4 @@
-"""get_platform_breakdown, add_game_to_platform, update_game, and set_hardware_preference tools."""
+"""Platform-row implementations: breakdown, ownership, game edits, playtime pins."""
 
 import json
 import math
@@ -1027,7 +1027,7 @@ async def set_switch2_playtime_baseline(
         if gp is None:
             raise ToolError(
                 f"'{row['name']}' has no {_SWITCH2} platform row. Add it first with "
-                "add_game_to_platform (or run refresh_library if it should be synced)."
+                "add_game_to_platform (or run sync(targets=[\"library\"]) if it should be synced)."
             )
         overrides = await get_platform_manual_overrides(db, gp["id"])
         if "playtime_minutes" in overrides:

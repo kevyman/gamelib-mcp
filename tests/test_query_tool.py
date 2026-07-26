@@ -1,4 +1,4 @@
-"""Tests for gamelib_mcp.tools.query (query_library/get_db_schema) and the
+"""Tests for gamelib_mcp.tools.query (query_library + its schema mode) and the
 backing gamelib_mcp.data.db.readonly connection + schema.py views/query_log.
 """
 
@@ -230,7 +230,7 @@ class QueryLibraryErrorHintTests(QueryToolTestCase):
     async def test_no_such_table_hint(self):
         result = await query_tool.query_library("SELECT * FROM not_a_real_table")
         self.assertIn("error", result)
-        self.assertIn("get_db_schema", result.get("hint", ""))
+        self.assertIn("query_library() with no arguments", result.get("hint", ""))
 
     async def test_denied_statement_hint(self):
         result = await query_tool.query_library("DELETE FROM games")

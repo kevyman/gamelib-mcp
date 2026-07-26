@@ -1,4 +1,5 @@
-"""get_wishlist_deals — merges ITAD (steam) and DekuDeals (switch2) current
+"""Wishlist pricing (get_wishlist with_prices=True) — merges ITAD (steam) and
+DekuDeals (switch2) current
 prices onto wishlist games and recommends a platform per game, honoring
 hardware_preference.
 

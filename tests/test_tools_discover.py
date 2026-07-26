@@ -220,7 +220,7 @@ class MatchSortTests(ToolDBTestCase):
         await make_steam_game("Anything", 1, playtime_minutes=0, tags=["roguelike"])
         results = await discover.discover_games()
         self.assertEqual(results["results"], [])
-        self.assertIn("sync_ratings", results["note"])
+        self.assertIn('sync(targets=["ratings"])', results["note"])
 
     async def test_populated_affinity_has_no_note(self):
         await make_steam_game("LikedGame", 1, playtime_minutes=0, tags=["roguelike"])

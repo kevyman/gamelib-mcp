@@ -1,4 +1,4 @@
-"""set_acquisition, set_acquisitions_batch, and get_spending_stats tools.
+"""set_acquisition (single + bulk) and spending-stats implementations.
 
 Acquisition data (when/where/for-how-much a game was obtained) lives on
 game_platforms and is written exclusively through

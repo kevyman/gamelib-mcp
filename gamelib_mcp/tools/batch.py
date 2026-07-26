@@ -1,4 +1,4 @@
-"""Shared plumbing for *_batch tool variants.
+"""Shared plumbing for the bulk (items=) mode of the merged tools.
 
 Conventions (mirroring set_acquisitions_batch): items arrive as plain dicts and
 are validated at runtime against a frozen per-tool key set; the only whole-call
@@ -23,15 +23,11 @@ DETAIL_BATCH_ITEM_CAP = 50
 # tool in the error is the whole fix for "I looked on the update surface first".
 _KEY_HOMES: dict[str, str] = {
     "delisted": (
-        "a game_platforms column — set it with add_game_to_platform / "
-        "add_games_to_platform_batch, release it with set_playtime(clear=[...])"
+        "a game_platforms column — set it with add_game_to_platform, "
+        "release it with set_playtime(clear=[...])"
     ),
-    "playtime_minutes": (
-        "a game_platforms column — pin it with set_playtime / set_playtime_batch"
-    ),
-    "last_played": (
-        "a game_platforms column — pin it with set_playtime / set_playtime_batch"
-    ),
+    "playtime_minutes": "a game_platforms column — pin it with set_playtime",
+    "last_played": "a game_platforms column — pin it with set_playtime",
     "platform": "a game_platforms column — see set_playtime / add_game_to_platform",
 }
 

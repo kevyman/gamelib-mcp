@@ -1,4 +1,4 @@
-"""get_ratings, sync_ratings, rate_game, get_taste_profile tools."""
+"""Ratings implementations: read, sync, manual rate, and the taste profile."""
 
 from datetime import datetime, timezone
 from typing import Literal

@@ -1,0 +1,172 @@
+# ADR 0004: consolidated MCP tool surface
+
+Status: accepted (2026-07-26)
+
+## Context
+- The tool surface had grown to 51 registrations, and ~54% of `main.py`'s 1925
+  lines were docstring — which *is* the wire schema every client loads on
+  connect. Three kinds of redundancy had accumulated:
+  1. **Nine `*_batch` twins.** Six were literal loops over their single-item
+     impl (`update_games_batch` → `update_game(**kwargs, dry_run=…,
+     recompute_affinity=False)`), adding only a deferred
+     `recompute_tag_affinity` and per-item error isolation. A caller had to
+     learn two names, two docstrings, and two response shapes for one
+     operation.
+  2. **Verb-per-tool families.** Five scrape-config tools over one entity and
+     one `provider` key (`get`/`diagnose`/`propose`/`approve`/`rollback`);
+     three sync tools with near-identical signatures and a verbatim-duplicated
+     `_resolve` closure (`tools/admin.py`); five zero-to-few-argument read
+     reports.
+  3. **Split pairs that are always called together.** `get_db_schema` existed
+     solely to be called before `query_library` (its own docstring said so);
+     `get_wishlist_deals` priced exactly the rows `get_wishlist` listed.
+- ADR 0003 had already established the pattern and proved it: 8 `detect_*`
+  tools collapsed into one `check_library` registry (58 → 51) by keeping every
+  impl function byte-for-byte and consolidating only the *wire* surface.
+- Nothing about the batch split was load-bearing. Every functional test calls
+  the implementation in `gamelib_mcp/tools/*` **directly**; zero tests invoked
+  `main.py`'s registered wrappers. The redundancy was purely in what clients
+  had to read.
+
+## Decision
+
+1. **One tool per operation; `items=[...]` is the bulk mode.** The nine
+   `*_batch` tools are removed as MCP tools. Each single-item tool gains an
+   `items` parameter (`queries` on `search_games`), and its `@mcp.tool` wrapper
+   dispatches to whichever impl applies. Both impls stay in `tools/*` under
+   their existing names and signatures — this is a registration-layer change
+   only. Names stay singular and unchanged, which keeps ~46 cross-references in
+   impl docstrings, `checks.py` `suggested_action` payloads, and `apps.py`'s
+   hardcoded `"get_game_detail"` widget call valid.
+
+   The convention, uniform across all nine: scalar params act on one game and
+   raise `ToolError` on failure; `items` returns `{results, total, ok, errors}`
+   and isolates failures per item; `items` wins if both are given.
+
+2. **A mode-dependent default is legitimate when the two modes genuinely
+   differ, and must be stated in the docstring.** Three parameters take
+   `None` meaning "one thing for a single call, another for `items`":
+   - `get_game_detail(enrich=None)` — True single, False bulk. A single call
+     fetches and caches missing provider enrichment; 50 items would mean 50
+     rounds of provider HTTP, so bulk serves cache only and says
+     `enrichment: "skipped"`. `enrich=True` with `items` is a `ToolError`
+     rather than a silent fan-out.
+   - `set_acquisition(overwrite=None)` — True single, False bulk. Naming a
+     field in a single call is a deliberate correction; an `items` import must
+     never clobber a value set by hand.
+   - `set_acquisition(create_platform_row=None)` — True single, False bulk.
+     Recording one purchase implies ownership; a bulk import reports
+     `no_platform_row` instead of silently minting rows.
+
+   These preserve the exact behavior of the tools they replaced. Where the two
+   modes could not be reconciled honestly, the merge was not done (see
+   "Rejected" below).
+
+3. **Verb families collapse to an `action`/`report` parameter, but never
+   across the read/write boundary.** The five scrape-config tools become two,
+   split on that boundary rather than one tool with five actions: merging
+   `get_scrape_config` into a tool that can also roll back would advertise the
+   read path as a non-idempotent mutation. A merged tool takes the STRICTEST
+   annotation of everything it absorbs — `manage_scrape_config` is
+   `NON_IDEMPOTENT_MUTATION_TOOL` because rollback walks back one version per
+   call, and `get_wishlist`/`get_scrape_config` became open-world because their
+   opt-in modes fetch live.
+
+4. **Aggregate reports are one tool with a `report` selector.** `get_stats`
+   replaces `get_backlog_stats`, `get_platform_breakdown`, `get_taste_profile`,
+   `get_spending_stats`, and `get_series_breakdown`. The five impls stay
+   exactly where they live (`tools/stats.py`, `platforms.py`, `ratings.py`,
+   `acquisition.py`, `series.py`) — in particular the three deliberately
+   divergent `_GAME_ROLLUP_CTE` variants are untouched, per their in-code
+   "Kept separate on purpose; do not merge" comments. `get_library_stats` stays
+   standalone: it is the paginated game *list*, not a rollup.
+
+5. **The three syncs become `sync(targets=[...])`.** Default `None` →
+   `["library"]`, preserving the old `refresh_library()` ergonomics. `library`
+   keeps its fire-and-forget ack polled via `get_sync_status` (which stays
+   standalone as the read side); `wishlist` and `ratings` stay blocking and
+   return inline. Results are keyed by target.
+
+6. **A report-only heuristic whose remedy is another tool call is a check, not
+   a tool.** `suggest_completion_status` is removed and re-registered as
+   `completion.unclassified` in the `CHECKS` registry — offline, permanently
+   report-only, `suggested_action` = `update_game(game_id, completion_status)`.
+   It always fit ADR 0003's finding contract; it just predated the registry.
+   The heuristic itself stays unchanged in `tools/completion.py` with its own
+   unit tests, adapted the same way the migrated detectors are.
+
+7. **Merged tools declare one all-optional response model.** A union return
+   annotation (`A | B`) renders as `{"properties": {"result": {"anyOf": …}}}` —
+   it wraps the payload and loses the flat top-level schema, which also breaks
+   the paginated-output assertions. So each merged tool has a single
+   `FlexibleModel` whose fields span both modes, all optional, with comments
+   marking which mode fills what. Two keys carry `bool | int` because the
+   single and bulk shapes genuinely disagree (`add_game_to_platform.created`,
+   `delete_game.deleted`: a flag in single mode, a count in bulk).
+
+8. **The bulk convention is advertised in `mcp.instructions`**, drift-guarded
+   by `tests/test_tool_registration.py`. A merged tool is only a win if clients
+   reach for `items=[...]` instead of looping; the tool list alone does not
+   teach that.
+
+## Rejected (and why)
+- **`import_purchases` into `set_acquisition`** — 92 docstring lines, five own
+  parameters, and a distinct failure model (per-source isolation,
+  `bundles_needing_split`, `create_missing` defaulting True).
+- **`split_bundle_acquisition` into `set_acquisition`** — price splitting
+  across constituents is its own operation, not a bulk write.
+- **`split_game`/`merge_games`/`delete_game` behind one `action`** — that puts
+  irreversible deletion behind the same schema as a merge.
+- **`create_session_ingest_link` + `set_nintendo_pctl_session`** — the pctl
+  flow is a two-step login round-trip, not a cookie paste; one parameter would
+  mean two unrelated things.
+- **`get_sync_status` into `get_integration_status`** — last-sync state from
+  `meta` vs cached credential readiness.
+- **`set_switch2_playtime_baseline` into `set_playtime`** — it deliberately is
+  *not* a playtime pin (it writes `nintendo_play_summary` so future syncs keep
+  accumulating). Merging would invite the exact confusion its docstring exists
+  to prevent.
+
+## Consequences
+
+### Positive
+- Tool surface shrinks 51 → 30 with no capability removed and no behavior
+  change. Every operation that existed still exists.
+- **The win is choice, not bytes.** Measured wire payload barely moved —
+  137,847 → 137,030 chars (descriptions 65,514 → 62,370; input schemas
+  18,243 → 17,218; output schemas 54,090 → 57,442). Merged docstrings have to
+  document both modes, and an all-optional merged response model declares the
+  union of both modes' fields, so output schemas actually grew. Anyone
+  proposing a future merge should expect the same: consolidation buys a
+  smaller decision space for the caller (one obvious tool per operation
+  instead of picking between near-identical twins), not a cheaper connect.
+  If context size is the goal, trimming the five docstrings that hold ~37% of
+  all description text (`check_library`, `import_purchases`,
+  `split_bundle_acquisition`, `set_acquisition`, `update_game`) is the lever.
+- One calling convention to learn (`items` for bulk, `report`/`action` for verb
+  families, `dry_run`/`confirm` for previews) instead of per-tool conventions
+  discoverable only by reading each docstring.
+- The single-item ergonomics survive: `rate_game(name="Hades", score=9)` is
+  still a typed, wire-validated call. Dropping the singles in favor of
+  plural-only tools would have pushed every one-game call into an untyped dict
+  inside a list, since the wire layer only validates top-level params
+  (`tools/batch.py` documents this).
+- Impl churn was near zero: no function in `tools/*` changed name or signature,
+  so all 1700+ functional tests kept passing untouched. Only
+  `test_tool_registration.py` and three string assertions needed updating.
+
+### Negative / revisit triggers
+- **Merged output schemas are looser.** A tool with two modes cannot declare
+  either mode's fields as required, so the schema anchors what keys *may*
+  appear, not what will. Mitigated by per-field comments naming the mode. If a
+  client ever needs strictness, the fix is a discriminated union, not a split.
+- **Mode-dependent defaults are a real footgun** and only survive because they
+  preserve existing behavior exactly. A fourth one should be treated as a
+  signal that the merge is wrong, not as precedent.
+- **`get_stats` unions ten parameters** for five reports, most applying to only
+  one. A sixth report with its own parameters would make the case for splitting
+  the paginated `series` report back out.
+- **`bool | int` on `created`/`deleted`** is honest but ugly. The alternative
+  was renaming the bulk counters, which would have changed impl return shapes
+  and broken their unit tests. Worth revisiting if those keys ever confuse a
+  caller in practice.

@@ -1,4 +1,4 @@
-"""suggest_completion_status: read-only heuristic for un-classified games."""
+"""Read-only completion heuristic behind check_library's completion.unclassified."""
 
 from datetime import datetime, timezone
 

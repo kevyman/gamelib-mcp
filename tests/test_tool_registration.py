@@ -11,68 +11,52 @@ from gamelib_mcp import main
 
 
 EXPECTED_TOOLS = {
+    # --- reads ---------------------------------------------------------------
     "search_games": {
-        "params": {"query", "limit", "offset", "platform", "series", "response_format"},
-        "required": {"query"},
+        "params": {
+            "query", "queries", "limit", "offset", "platform", "series",
+            "response_format", "limit_per_query",
+        },
+        "required": set(),
     },
-    "search_games_batch": {"params": {"queries", "limit_per_query"}, "required": {"queries"}},
     "get_library_stats": {
         "params": {
-            "filter",
-            "max_hltb_hours",
-            "min_metacritic",
-            "min_opencritic",
-            "protondb_tier",
-            "sort_by",
-            "limit",
-            "offset",
-            "platform",
-            "response_format",
-            "tags",
-            "genres",
-            "series",
-            "content",
+            "filter", "max_hltb_hours", "min_metacritic", "min_opencritic",
+            "protondb_tier", "sort_by", "limit", "offset", "platform",
+            "response_format", "tags", "genres", "series", "content",
         },
         "required": set(),
     },
-    "get_game_detail": {"params": {"name", "appid", "game_id"}, "required": set()},
-    "get_game_details_batch": {"params": {"items"}, "required": {"items"}},
+    "get_game_detail": {
+        "params": {"name", "appid", "game_id", "items", "enrich"},
+        "required": set(),
+    },
     "discover_games": {
         "params": {
-            "vibes",
-            "sort_by",
-            "max_hltb_hours",
-            "min_score",
-            "unplayed_only",
-            "protondb_min_tier",
-            "limit",
-            "offset",
-            "response_format",
+            "vibes", "sort_by", "max_hltb_hours", "min_score", "unplayed_only",
+            "protondb_min_tier", "limit", "offset", "response_format",
         },
         "required": set(),
     },
-    "get_taste_profile": {"params": set(), "required": set()},
     "get_ratings": {
         "params": {"source", "min_score", "sort_by", "limit", "offset", "response_format"},
         "required": set(),
     },
-    "sync_ratings": {"params": set(), "required": set()},
-    "rate_game": {
-        "params": {"name", "game_id", "score", "review_text"},
+    "get_stats": {
+        "params": {
+            "report", "platform", "year", "purchase_source", "counting_mode",
+            "kind", "min_games", "include_games", "limit", "offset",
+        },
+        "required": {"report"},
+    },
+    "get_play_history": {
+        "params": {"days", "start_date", "end_date", "platform", "limit"},
         "required": set(),
     },
-    "rate_games_batch": {"params": {"items", "dry_run"}, "required": {"items"}},
-    "get_backlog_stats": {"params": set(), "required": set()},
-    "suggest_completion_status": {"params": {"limit"}, "required": set()},
-    "get_series_breakdown": {
+    "get_wishlist": {
         "params": {
-            "counting_mode",
-            "kind",
-            "min_games",
-            "platform",
-            "include_games",
-            "limit",
-            "offset",
+            "platform", "with_prices", "max_price", "min_cut_pct", "refresh",
+            "preference_override_ratio",
         },
         "required": set(),
     },
@@ -80,23 +64,62 @@ EXPECTED_TOOLS = {
         "params": {"kind", "min_owned", "limit", "include_unreleased", "refresh_cache"},
         "required": set(),
     },
-    "refresh_library": {"params": {"platforms"}, "required": set()},
+    "query_library": {"params": {"sql", "row_limit"}, "required": set()},
     "get_sync_status": {"params": set(), "required": set()},
-    "sync_wishlist": {"params": {"platforms"}, "required": set()},
     "get_integration_status": {
         "params": {"platforms", "verbose", "force_refresh"},
         "required": set(),
     },
+    # --- writes: single + bulk (items=) --------------------------------------
+    "rate_game": {
+        "params": {"name", "game_id", "score", "review_text", "items", "dry_run"},
+        "required": set(),
+    },
+    "add_game_to_platform": {
+        "params": {
+            "name", "platform", "game_id", "identifier_type", "identifier_value",
+            "playtime_minutes", "owned", "acquired_at", "price_paid",
+            "price_currency", "purchase_source", "bundle_name", "delisted",
+            "items", "dry_run",
+        },
+        "required": set(),
+    },
+    "update_game": {
+        "params": {
+            "name", "game_id", "new_name", "sort_name", "release_date", "genres",
+            "tags", "features", "short_description", "hltb_main", "hltb_extra",
+            "hltb_complete", "is_farmed", "completion_status", "content_type",
+            "parent_game_id", "parent_name", "cover_image_id", "igdb_id",
+            "igdb_platforms", "clear_overrides", "items", "dry_run",
+        },
+        "required": set(),
+    },
+    "set_playtime": {
+        "params": {
+            "name", "game_id", "platform", "playtime_minutes", "last_played",
+            "clear", "create_platform_row", "items", "dry_run",
+        },
+        "required": set(),
+    },
+    "set_acquisition": {
+        "params": {
+            "name", "game_id", "platform", "acquired_at", "price_paid",
+            "price_currency", "purchase_source", "bundle_name", "clear",
+            "create_platform_row", "items", "overwrite", "create_missing", "dry_run",
+        },
+        "required": set(),
+    },
+    "merge_games": {
+        "params": {"source_game_id", "target_game_id", "items", "dry_run"},
+        "required": set(),
+    },
+    "delete_game": {"params": {"name", "game_id", "confirm", "items"}, "required": set()},
+    # --- writes: single-purpose ----------------------------------------------
+    "sync": {"params": {"targets", "platforms"}, "required": set()},
     "check_library": {
         "params": {
-            "checks",
-            "include_network",
-            "limit_per_check",
-            "apply",
-            "options",
-            "list_checks",
-            "suppress",
-            "unsuppress",
+            "checks", "include_network", "limit_per_check", "apply", "options",
+            "list_checks", "suppress", "unsuppress",
         },
         "required": set(),
     },
@@ -104,222 +127,93 @@ EXPECTED_TOOLS = {
         "params": {"source_game_id", "platform", "identifier_values", "new_name", "dry_run"},
         "required": {"source_game_id", "platform", "identifier_values"},
     },
-    "get_platform_breakdown": {"params": set(), "required": set()},
-    "get_wishlist": {"params": {"platform"}, "required": set()},
-    "get_wishlist_deals": {
-        "params": {"platform", "max_price", "min_cut_pct", "refresh", "preference_override_ratio"},
-        "required": set(),
-    },
-    "get_play_history": {
-        "params": {"days", "start_date", "end_date", "platform", "limit"},
-        "required": set(),
-    },
     "set_hardware_preference": {"params": {"platforms"}, "required": {"platforms"}},
-    "add_game_to_platform": {
-        # name and platform are no longer schema-required: platform is checked
-        # at runtime, and exactly one of name/game_id must be given (game_id
-        # targets an existing row and can never mint one).
-        "params": {
-            "name", "game_id", "platform", "identifier_type", "identifier_value",
-            "playtime_minutes", "owned",
-            "acquired_at", "price_paid", "price_currency", "purchase_source",
-            "bundle_name", "delisted",
-        },
-        "required": set(),
-    },
-    "add_games_to_platform_batch": {"params": {"items", "dry_run"}, "required": {"items"}},
-    "create_session_ingest_link": {"params": {"provider"}, "required": {"provider"}},
-    "set_nintendo_pctl_session": {"params": {"response"}, "required": set()},
-    "query_library": {"params": {"sql", "row_limit"}, "required": {"sql"}},
-    "get_db_schema": {"params": set(), "required": set()},
-    "update_game": {
-        "params": {
-            "name",
-            "game_id",
-            "new_name",
-            "sort_name",
-            "release_date",
-            "genres",
-            "tags",
-            "features",
-            "short_description",
-            "hltb_main",
-            "hltb_extra",
-            "hltb_complete",
-            "is_farmed",
-            "completion_status",
-            "content_type",
-            "parent_game_id",
-            "parent_name",
-            "cover_image_id",
-            "igdb_id",
-            "igdb_platforms",
-            "clear_overrides",
-        },
-        "required": set(),
-    },
-    "update_games_batch": {"params": {"items", "dry_run"}, "required": {"items"}},
-    "set_playtime": {
-        "params": {
-            "name",
-            "game_id",
-            "platform",
-            "playtime_minutes",
-            "last_played",
-            "clear",
-            "create_platform_row",
-        },
-        "required": set(),
-    },
-    "set_playtime_batch": {"params": {"items", "dry_run"}, "required": {"items"}},
     "set_switch2_playtime_baseline": {
         "params": {"name", "game_id", "total_hours", "application_id", "dry_run"},
         "required": set(),
     },
-    "set_acquisition": {
-        "params": {
-            "name",
-            "game_id",
-            "platform",
-            "acquired_at",
-            "price_paid",
-            "price_currency",
-            "purchase_source",
-            "bundle_name",
-            "clear",
-            "create_platform_row",
-        },
-        "required": set(),
-    },
-    "set_acquisitions_batch": {
-        "params": {"items", "overwrite", "create_platform_rows", "create_missing"},
-        "required": {"items"},
-    },
     "split_bundle_acquisition": {
         "params": {
-            "bundle_name",
-            "platform",
-            "games",
-            "total_price",
-            "price_currency",
-            "acquired_at",
-            "purchase_source",
-            "create_missing",
-            "overwrite",
-            "dry_run",
+            "bundle_name", "platform", "games", "total_price", "price_currency",
+            "acquired_at", "purchase_source", "create_missing", "overwrite", "dry_run",
         },
         "required": {"bundle_name", "platform", "games"},
     },
     "import_purchases": {
         "params": {
-            "sources",
-            "dry_run",
-            "overwrite",
-            "create_platform_rows",
-            "create_missing",
+            "sources", "dry_run", "overwrite", "create_platform_rows", "create_missing",
         },
         "required": set(),
     },
-    "get_spending_stats": {
-        "params": {"year", "platform", "purchase_source"},
-        "required": set(),
+    "create_session_ingest_link": {"params": {"provider"}, "required": {"provider"}},
+    "set_nintendo_pctl_session": {"params": {"response"}, "required": set()},
+    # --- scrape-config admin --------------------------------------------------
+    "get_scrape_config": {"params": {"provider", "diagnose"}, "required": {"provider"}},
+    "manage_scrape_config": {
+        "params": {"provider", "action", "config", "note", "version"},
+        "required": {"provider", "action"},
     },
-    "merge_games": {
-        "params": {"source_game_id", "target_game_id", "dry_run"},
-        "required": {"source_game_id", "target_game_id"},
-    },
-    "merge_games_batch": {"params": {"items", "dry_run"}, "required": {"items"}},
-    "delete_game": {
-        "params": {"name", "game_id", "confirm"},
-        "required": set(),
-    },
-    "delete_games_batch": {"params": {"items", "confirm"}, "required": {"items"}},
-    "get_scrape_config": {"params": {"provider"}, "required": {"provider"}},
-    "diagnose_scrape": {"params": {"provider"}, "required": {"provider"}},
-    "propose_scrape_config": {
-        "params": {"provider", "config", "note"},
-        "required": {"provider", "config"},
-    },
-    "approve_scrape_config": {
-        "params": {"provider", "version"},
-        "required": {"provider", "version"},
-    },
-    "rollback_scrape_config": {"params": {"provider"}, "required": {"provider"}},
 }
 
 EXPECTED_ANNOTATIONS = {
     "search_games": {"readOnlyHint": True, "idempotentHint": True},
-    "search_games_batch": {"readOnlyHint": True, "idempotentHint": True},
     "get_library_stats": {"readOnlyHint": True, "idempotentHint": True},
     "get_game_detail": {"readOnlyHint": True, "idempotentHint": True},
-    "get_game_details_batch": {"readOnlyHint": True, "idempotentHint": True},
     "discover_games": {"readOnlyHint": True, "idempotentHint": True},
-    "get_taste_profile": {"readOnlyHint": True, "idempotentHint": True},
     "get_ratings": {"readOnlyHint": True, "idempotentHint": True},
-    "get_backlog_stats": {"readOnlyHint": True, "idempotentHint": True},
-    "suggest_completion_status": {"readOnlyHint": True, "idempotentHint": True},
-    "get_series_breakdown": {"readOnlyHint": True, "idempotentHint": True},
+    "get_stats": {"readOnlyHint": True, "idempotentHint": True},
+    "get_play_history": {"readOnlyHint": True, "idempotentHint": True},
+    # Absorbing get_wishlist_deals made this open-world: with_prices=True
+    # live-fetches ITAD/DekuDeals. Still read-only.
+    "get_wishlist": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
     "discover_series_gaps": {
         "readOnlyHint": True,
         "idempotentHint": True,
         "openWorldHint": True,
     },
+    "query_library": {"readOnlyHint": True, "idempotentHint": True},
+    "get_sync_status": {"readOnlyHint": True, "idempotentHint": True},
     "get_integration_status": {"readOnlyHint": True, "idempotentHint": True},
-    "get_platform_breakdown": {"readOnlyHint": True, "idempotentHint": True},
+    "rate_game": {"readOnlyHint": False, "idempotentHint": True},
+    "add_game_to_platform": {"readOnlyHint": False, "idempotentHint": True},
+    "update_game": {"readOnlyHint": False, "idempotentHint": True},
+    "set_playtime": {"readOnlyHint": False, "idempotentHint": True},
+    "set_acquisition": {"readOnlyHint": False, "idempotentHint": True},
+    "merge_games": {"readOnlyHint": False, "idempotentHint": False},
+    "delete_game": {"readOnlyHint": False, "idempotentHint": False},
+    "sync": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
     "check_library": {
         "readOnlyHint": False,
         "idempotentHint": True,
         "openWorldHint": True,
     },
     "split_game": {"readOnlyHint": False, "idempotentHint": False},
-    "sync_ratings": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
-    "rate_game": {"readOnlyHint": False, "idempotentHint": True},
-    "rate_games_batch": {"readOnlyHint": False, "idempotentHint": True},
-    "refresh_library": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
-    "get_sync_status": {"readOnlyHint": True, "idempotentHint": True},
-    "sync_wishlist": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
-    "get_wishlist": {"readOnlyHint": True, "idempotentHint": True},
-    "get_wishlist_deals": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
-    "get_play_history": {"readOnlyHint": True, "idempotentHint": True},
     "set_hardware_preference": {"readOnlyHint": False, "idempotentHint": True},
-    "add_game_to_platform": {"readOnlyHint": False, "idempotentHint": True},
-    "add_games_to_platform_batch": {"readOnlyHint": False, "idempotentHint": True},
-    "create_session_ingest_link": {"readOnlyHint": False, "idempotentHint": False},
-    "set_nintendo_pctl_session": {"readOnlyHint": False, "idempotentHint": True},
-    "query_library": {"readOnlyHint": True, "idempotentHint": True},
-    "get_db_schema": {"readOnlyHint": True, "idempotentHint": True},
-    "update_game": {"readOnlyHint": False, "idempotentHint": True},
-    "update_games_batch": {"readOnlyHint": False, "idempotentHint": True},
-    "set_playtime": {"readOnlyHint": False, "idempotentHint": True},
-    "set_playtime_batch": {"readOnlyHint": False, "idempotentHint": True},
     "set_switch2_playtime_baseline": {"readOnlyHint": False, "idempotentHint": True},
-    "set_acquisition": {"readOnlyHint": False, "idempotentHint": True},
-    "set_acquisitions_batch": {"readOnlyHint": False, "idempotentHint": True},
     "split_bundle_acquisition": {"readOnlyHint": False, "idempotentHint": True},
     "import_purchases": {
         "readOnlyHint": False,
         "idempotentHint": True,
         "openWorldHint": True,
     },
-    "get_spending_stats": {"readOnlyHint": True, "idempotentHint": True},
-    "merge_games": {"readOnlyHint": False, "idempotentHint": False},
-    "merge_games_batch": {"readOnlyHint": False, "idempotentHint": False},
-    "delete_game": {"readOnlyHint": False, "idempotentHint": False},
-    "delete_games_batch": {"readOnlyHint": False, "idempotentHint": False},
-    "get_scrape_config": {"readOnlyHint": True, "idempotentHint": True},
-    "diagnose_scrape": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
-    "propose_scrape_config": {"readOnlyHint": False, "idempotentHint": True},
-    "approve_scrape_config": {"readOnlyHint": False, "idempotentHint": True},
-    # Each call walks back one more version — a retry is not a no-op.
-    "rollback_scrape_config": {"readOnlyHint": False, "idempotentHint": False},
+    "create_session_ingest_link": {"readOnlyHint": False, "idempotentHint": False},
+    "set_nintendo_pctl_session": {"readOnlyHint": False, "idempotentHint": True},
+    # diagnose=True live-fetches the provider page, so the merged read tool is
+    # open-world; it stays read-only because neither mode writes.
+    "get_scrape_config": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
+    # Takes the strictest of the three actions it absorbs: each rollback walks
+    # back one more version, so a retry is not a no-op.
+    "manage_scrape_config": {"readOnlyHint": False, "idempotentHint": False},
 }
 
+# search_games keeps the paginated envelope in `query` mode (its `queries` mode
+# answers under results_by_query); get_stats carries it for report="series".
 PAGINATED_OUTPUTS = {
     "search_games",
     "get_library_stats",
     "discover_games",
     "get_ratings",
-    "get_series_breakdown",
+    "get_stats",
 }
 
 
@@ -332,9 +226,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_51(self):
+    async def test_tool_count_is_30(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 51)
+        self.assertEqual(len(tools), 30)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()
@@ -382,11 +276,16 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
 
     def test_server_instructions_include_discovery_workflow(self):
         instructions = main.mcp.instructions
-        self.assertIn("sync_ratings", instructions)
+        self.assertIn('sync(targets=["ratings"])', instructions)
         self.assertIn("rate_game", instructions)
         self.assertIn("discover_games", instructions)
         self.assertIn("concise", instructions)
         self.assertIn("offset", instructions)
+
+    def test_server_instructions_advertise_the_bulk_items_convention(self):
+        # The merged tools are only a win if a client knows to reach for
+        # items=[...] instead of looping single calls (ADR 0004).
+        self.assertIn("items=[...]", main.mcp.instructions)
 
 
 if __name__ == "__main__":

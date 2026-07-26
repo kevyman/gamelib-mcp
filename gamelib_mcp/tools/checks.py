@@ -924,7 +924,7 @@ async def _run_wishlist_already_owned(*, apply: bool, options: dict[str, Any]) -
             "wishlist.already_owned",
             "warning",
             f"'{row['name']}' is wishlisted on {row['platform']} but already owned there "
-            "— re-run refresh_library (clear_fulfilled_wishlist_entries should have "
+            "— re-run sync(targets=[\"library\"]) (clear_fulfilled_wishlist_entries should have "
             "cleared this; the sweep missed it, or the row was hand-edited)",
             game_id=row["game_id"],
             name=row["name"],
@@ -1260,7 +1260,7 @@ async def _run_enrich_coverage(*, apply: bool, options: dict[str, Any]) -> Check
                 "enrich.coverage",
                 "notice",
                 f"{len(missing_rows)}/{total} owned games ({pct}%) are missing {field_name} "
-                "— get_game_detail triggers lazy enrichment per game; refresh_library "
+                "— get_game_detail triggers lazy enrichment per game; sync(targets=[\"library\"]) "
                 "for bulk background enrichment",
                 evidence={
                     "field": field_name,
@@ -1328,8 +1328,8 @@ async def _run_sync_staleness(*, apply: bool, options: dict[str, Any]) -> CheckO
                         "age_days": round(age_days, 1) if age_days is not None else None,
                     },
                     suggested_action={
-                        "tool": "refresh_library",
-                        "args": {},
+                        "tool": "sync",
+                        "args": {"targets": ["library"]},
                         "note": "also check get_integration_status for credential/session issues",
                     },
                 )
@@ -1401,6 +1401,52 @@ async def _run_sync_staleness(*, apply: bool, options: dict[str, Any]) -> CheckO
         "stale_platforms": stale_platforms,
         "snapshot_gap_platforms": gap_platforms,
     }
+
+
+# --- adapter: completion.unclassified ---------------------------------------
+
+# The heuristic itself stays in tools/completion.py (unchanged, with its own
+# unit tests) — this only adapts its suggestions into the finding envelope, the
+# same way the migrated detectors in tools/admin.py are adapted. It was its own
+# MCP tool (suggest_completion_status) until ADR 0004; it always was a
+# report-only heuristic whose remedy is an update_game call, which is exactly
+# what a check is.
+_COMPLETION_DEFAULT_LIMIT = 25
+
+
+async def _run_completion_unclassified(*, apply: bool, options: dict[str, Any]) -> CheckOutcome:
+    from .completion import suggest_completion_status
+
+    limit = options.get("limit", _COMPLETION_DEFAULT_LIMIT)
+    result = await suggest_completion_status(limit)
+    suggestions = result.get("suggestions", [])
+    findings = [
+        _finding(
+            "completion.unclassified",
+            "notice",
+            f"'{item['name']}' looks {item['suggested_status']} but has no "
+            f"completion_status set — {item['reason']}",
+            game_id=item["game_id"],
+            name=item["name"],
+            evidence={
+                "suggested_status": item["suggested_status"],
+                "playtime_hours": item.get("playtime_hours"),
+                "hltb_main": item.get("hltb_main"),
+                "last_played": item.get("last_played"),
+            },
+            suggested_action={
+                "tool": "update_game",
+                "args": {
+                    "game_id": item["game_id"],
+                    "completion_status": item["suggested_status"],
+                },
+            },
+        )
+        for item in suggestions
+    ]
+    # Ordering is the heuristic's own confidence order (completed, then
+    # evergreen, then abandoned); preserve it rather than re-sorting.
+    return findings, {"limit": limit, "suggested": len(suggestions)}
 
 
 # --- registry ----------------------------------------------------------------
@@ -1642,6 +1688,19 @@ CHECKS: dict[str, CheckSpec] = {
             default_severity="notice",
             runner=_run_sync_staleness,
             option_keys=frozenset({"stale_days"}),
+        ),
+        _spec(
+            "completion.unclassified",
+            description=(
+                "An owned, played game with no completion_status that the "
+                "playtime-vs-HowLongToBeat heuristic reads as completed, "
+                "evergreen, or abandoned"
+            ),
+            network=None,
+            writes_on_apply=False,
+            default_severity="notice",
+            runner=_run_completion_unclassified,
+            option_keys=frozenset({"limit"}),
         ),
     ]
 }

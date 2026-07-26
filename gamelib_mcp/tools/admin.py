@@ -1,4 +1,4 @@
-"""refresh_library, detect_farmed_games, and set_nintendo_session admin tools."""
+"""Library sync, merge/split/delete, and session-setup admin implementations."""
 
 import asyncio
 import json

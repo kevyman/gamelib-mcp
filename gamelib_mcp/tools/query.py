@@ -1,4 +1,4 @@
-"""query_library / get_db_schema: free-form read-only SQL for the AI client.
+"""query_library: free-form read-only SQL, plus the schema it is written against.
 
 query_library runs a single SELECT/WITH/EXPLAIN statement against a dedicated
 read-only connection (data/db/readonly.py) — never the RW connection every
@@ -370,7 +370,7 @@ _TOO_BIG_RE = re.compile(r"string or blob too big", re.IGNORECASE)
 
 def _error_hint(message: str) -> str | None:
     if _TABLE_NOT_FOUND_RE.search(message):
-        return "Call get_db_schema() first to see the exact table/column names and views available."
+        return "Call query_library() with no arguments first to see the exact table/column names and views available."
     if _AUTH_DENIED_RE.search(message):
         return "This tool is read-only; only a single SELECT/WITH/EXPLAIN/VALUES statement is allowed — no writes, PRAGMA, or ATTACH."
     if _TOO_BIG_RE.search(message):
@@ -423,7 +423,7 @@ async def query_library(sql: str, row_limit: int = DEFAULT_ROW_LIMIT) -> dict:
     if not sql.strip():
         error = "sql must be a non-empty SELECT/WITH/EXPLAIN/VALUES statement"
         await _log_query(sql, row_count=None, truncated=None, elapsed_ms=0, error=error)
-        return {"error": error, "sql": sql, "hint": "Call get_db_schema() first to see what's queryable."}
+        return {"error": error, "sql": sql, "hint": "Call query_library() with no arguments first to see what's queryable."}
 
     try:
         columns, rows, truncated = await execute_readonly_query(sql, row_limit=clamped_limit)
@@ -474,7 +474,7 @@ _INTROSPECTION_EXCLUDE_SQL = (
 
 
 async def get_db_schema() -> dict:
-    """See main.py's get_db_schema docstring for the MCP-facing contract."""
+    """See main.py's query_library docstring for the MCP-facing contract."""
     async with get_db() as db:
         table_rows = await db.execute_fetchall(
             f"""SELECT name, type FROM sqlite_master
