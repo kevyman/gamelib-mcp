@@ -1831,8 +1831,24 @@ class UnboundedResponseGuardTests(ToolDBTestCase):
             gid = await seed_game(f"Wanted {i}")
             await db_module.upsert_wishlist_entry(gid, "steam", source="steam")
 
+        # Keyed on (game_id, platform), which is game_wishlist's actual UNIQUE
+        # constraint — a game wishlisted on two platforms is two legitimate
+        # rows, so a game_id-only check reports false duplicates (5 of them on
+        # the real library).
         seen = []
         for off in (0, 2, 4):
-            seen += [i["game_id"] for i in (await platforms.get_wishlist(limit=2, offset=off))["items"]]
+            page = await platforms.get_wishlist(limit=2, offset=off)
+            seen += [(i["game_id"], i["platform"]) for i in page["items"]]
         self.assertEqual(len(seen), 6)
         self.assertEqual(len(set(seen)), 6)
+
+    async def test_same_game_on_two_platforms_is_two_wishlist_rows(self):
+        gid = await seed_game("Wanted Everywhere")
+        await db_module.upsert_wishlist_entry(gid, "steam", source="steam")
+        await db_module.upsert_wishlist_entry(gid, "switch2", source="dekudeals")
+
+        result = await platforms.get_wishlist()
+        self.assertEqual(result["total_matches"], 2)
+        self.assertEqual(
+            sorted(i["platform"] for i in result["items"]), ["steam", "switch2"]
+        )

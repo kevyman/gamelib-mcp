@@ -344,6 +344,9 @@ class ResponseSizeGuardTests(ToolDBTestCase):
         ("get_library_stats", {"limit": 7}, {"results": 7}),
         ("get_ratings", {"limit": 4}, {"results": 4}),
         ("get_play_history", {"limit": 6}, {"games": 6}),
+        # by_bundle only showed up as unbounded once a DB with real purchase
+        # history was used — the dev copy had zero priced rows.
+        ("get_stats", {"report": "spending"}, {"by_bundle": 25}),
     ]
 
     async def _seed_bulk(self, n=40):

@@ -357,3 +357,38 @@ failure mode (a client seeing empty results) is severe:
   `call_next` rather than returning a `ToolResult`, so an error message can
   never be stripped from a model that needs it to self-correct. The test
   asserts this rather than assuming it.
+
+## Amendment (2026-07-27, third): re-audited against a real prod snapshot
+
+The response audit that produced the caps above ran against the dev database,
+which has zero ratings, zero wishlist rows, and **zero priced rows**. Re-running
+it against a nightly prod backup (3,819 games / 4,211 owned rows / 190 wishlist
+/ 2,859 priced rows) found one more unbounded field the dev data could not have
+surfaced:
+
+**`get_spending_stats`'s `by_bundle` had no `LIMIT`** — 139 entries and 47% of
+that response, gaining a row for every distinct bundle ever bought. Its
+siblings (`by_year`, `by_source`, `by_platform`) are bounded by a fixed
+vocabulary; `bundle_name` is not. Now capped at `BUNDLE_BREAKDOWN_CAP` (25,
+biggest spend first) with `by_bundle_count` / `by_bundle_truncated`, the same
+shape as `overlap_games`. The spending report went 29,187 → 17,879 chars (−39%).
+
+Everything else held: the caps behave correctly at scale
+(`overlap_games` 25 of a true 474, `by_bundle` 25 of 139, wishlist 25 of 190),
+caller-supplied limits are clamped to 200 by `clamp_limit` (which also guards
+SQLite's negative-limit-means-unbounded behaviour), the full offline
+`check_library` sweep runs 18 checks over 3,819 games with zero errors, and
+every response came back with zero content blocks.
+
+**A test was wrong, not the code.** Paging the real 190-row wishlist returned
+185 distinct `game_id`s, which looked like a pagination defect. It is not:
+`game_wishlist` is `UNIQUE(game_id, platform)` and five games are wishlisted on
+both steam and switch2. `test_wishlist_pages_do_not_overlap_or_skip` asserted
+uniqueness on `game_id` alone and would have failed spuriously the moment a
+test seeded that shape; it now keys on `(game_id, platform)`, and a companion
+test documents the two-rows-one-game invariant.
+
+**Lesson for the next audit:** a response-size audit is only as good as the
+data behind it. Three of the four unbounded fields found across this work were
+invisible on the dev database — run the audit against a prod snapshot, not the
+checked-in fixture.

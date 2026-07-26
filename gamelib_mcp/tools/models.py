@@ -263,6 +263,9 @@ class GetStatsResponse(FlexibleModel):
     by_year: list[dict[str, Any]] | None = None
     by_source: list[dict[str, Any]] | None = None
     by_bundle: list[dict[str, Any]] | None = None
+    # by_bundle is capped; these carry the true total and the flag.
+    by_bundle_count: int | None = None
+    by_bundle_truncated: bool | None = None
     by_family: list[dict[str, Any]] | None = None
     top_expensive: list[dict[str, Any]] | None = None
     cost_per_hour: dict[str, Any] | None = None
