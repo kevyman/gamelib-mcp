@@ -17,13 +17,16 @@ load_project_dotenv()
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
-from fastmcp.server.middleware import AuthMiddleware
+# Aliased: starlette.middleware.Middleware is imported locally further down for
+# the HTTP routes, and the two must not shadow each other.
+from fastmcp.server.middleware import AuthMiddleware, Middleware as FastMCPMiddleware
 from mcp.types import ToolAnnotations
 
 from .apps import GAME_CARDS_APP, register_apps
 from .auth import load_security_config
 from .http_admin import HttpSecurityMiddleware, register_http_routes
 from .lifecycle import lifespan
+from .response_encoding import StructuredOnlyMiddleware, duplicate_text_content_enabled
 from .tools.integrations import get_integration_status as _filter_integration_status
 from .tools.models import (
     AddGameToPlatformResponse,
@@ -61,11 +64,17 @@ logger = logging.getLogger(__name__)
 
 security_config = load_security_config()
 auth_provider = security_config.build_auth_provider()
-component_middleware = (
+component_middleware: list[FastMCPMiddleware] = (
     [AuthMiddleware(auth=security_config.owner_authorization_check())]
     if auth_provider is not None
     else []
 )
+# Both clients registered against this deployment read structuredContent and
+# ignore the duplicate text block (measured 2026-07-27; ADR 0004). Dropping it
+# halves response bytes. MCP_DUPLICATE_TEXT_CONTENT=1 restores spec-default
+# behavior for a client that needs it.
+if not duplicate_text_content_enabled():
+    component_middleware.append(StructuredOnlyMiddleware())
 
 _display_name = os.getenv("STEAM_PROFILE_ID") or os.getenv("BACKLOGGD_USER") or "the configured user"
 

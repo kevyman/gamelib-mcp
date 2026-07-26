@@ -311,3 +311,49 @@ since `FASTMCP_HOME` moved onto a host bind mount. Stored tokens dated
 experiment, with tool calls working throughout and no re-auth. Schema caching
 was not exercised (the experiment deliberately changed only the response
 encoding, not any tool signature).
+
+## Amendment (2026-07-27, second): duplicate text block removed
+
+The previous amendment proved claude.ai reads `structuredContent` but withheld
+the change because the OAuth proxy also has a `chatgpt_com` client that the
+experiment said nothing about. That gap is now closed.
+
+**Method.** A *differential* probe — strictly better than the first
+suppress-and-see test, because it identifies the channel positively instead of
+inferring it from absence-of-breakage. `get_sync_status` returned the real
+payload in BOTH channels, differing only by a `_channel` marker
+(`CONTENT_BLOCK` vs `STRUCTURED_CONTENT`), so whichever a client surfaced named
+what it consumed, and neither client could see a broken-looking result.
+
+**Result.** claude.ai and chatgpt.com both reported `STRUCTURED_CONTENT`.
+Neither reads the duplicate text block.
+
+**Decision: strip it, via middleware, on by default.**
+`gamelib_mcp/response_encoding.py::StructuredOnlyMiddleware` drops text blocks
+from any tool result that already carries structured content. Middleware rather
+than 30 edited wrappers: one implementation, one place to reason about, and it
+covers tools added later without anyone remembering to.
+
+Measured across the same 21 representative calls: **325,668 → 168,985 chars
+(−48.1%)**, zero duplication remaining. Combined with the response caps in the
+previous amendment, the total is down from 386,312 — a 56% reduction in what
+this server sends back.
+
+**Why it stays reversible.** This is a per-deployment optimization, not a
+general one — the spec's SHOULD exists for clients that need the text block.
+`MCP_DUPLICATE_TEXT_CONTENT=1` restores spec-default behavior with no code
+change, for a third client that ever needs it. Re-run the differential probe
+before assuming a new client is safe.
+
+**Three edge cases pinned by `tests/test_response_encoding.py`,** because the
+failure mode (a client seeing empty results) is severe:
+- A result with no structured content is left alone. FastMCP populates
+  structured content even for a scalar return (wrapping it `{"result": ...}`),
+  so this guard fires rarely — but it is what keeps a deliberately
+  raw-content tool working.
+- Non-text blocks (image/audio/resource links/embedded resources) always
+  survive; they are not duplicates of the structured payload.
+- Errors are safe *by construction*: a failing tool raises through
+  `call_next` rather than returning a `ToolResult`, so an error message can
+  never be stripped from a model that needs it to self-correct. The test
+  asserts this rather than assuming it.
