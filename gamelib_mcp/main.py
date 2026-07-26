@@ -104,7 +104,7 @@ register_apps(mcp)
 
 # ── Tools ──────────────────────────────────────────────────────────────────────
 
-@mcp.tool(annotations=READ_ONLY_TOOL)
+@mcp.tool(title="Search Games", annotations=READ_ONLY_TOOL)
 async def search_games(
     query: str | None = None,
     queries: list[str] | None = None,
@@ -149,7 +149,7 @@ async def search_games(
     return await _search(query, limit, offset, platform, series, response_format)
 
 
-@mcp.tool(annotations=READ_ONLY_TOOL)
+@mcp.tool(title="Library Stats & Filtered List", annotations=READ_ONLY_TOOL)
 async def get_library_stats(
     filter: str = "all",
     max_hltb_hours: float | None = None,
@@ -210,7 +210,7 @@ async def get_library_stats(
     )
 
 
-@mcp.tool(annotations=READ_ONLY_TOOL, app=GAME_CARDS_APP)
+@mcp.tool(title="Game Detail", annotations=READ_ONLY_TOOL, app=GAME_CARDS_APP)
 async def get_game_detail(
     name: str | None = None,
     appid: int | None = None,
@@ -256,7 +256,7 @@ async def get_game_detail(
     return await _detail(name, appid, game_id, enrich=True if enrich is None else enrich)
 
 
-@mcp.tool(annotations=READ_ONLY_TOOL, app=GAME_CARDS_APP)
+@mcp.tool(title="Discover Games to Play", annotations=READ_ONLY_TOOL, app=GAME_CARDS_APP)
 async def discover_games(
     vibes: list[str] | None = None,
     sort_by: Literal["match", "critic", "value"] = "match",
@@ -302,7 +302,7 @@ async def discover_games(
     )
 
 
-@mcp.tool(annotations=READ_ONLY_TOOL)
+@mcp.tool(title="Library Reports", annotations=READ_ONLY_TOOL)
 async def get_stats(
     report: Literal["backlog", "platforms", "taste", "spending", "series"],
     platform: str | None = None,
@@ -328,10 +328,13 @@ async def get_stats(
     highlights, and unplayed_spend (money recorded on owned games never
     played — per-currency totals plus the top 5 offenders).
 
-    report="platforms" (no parameters) — ownership per platform: by_platform
-    entries with owned_games (primary items) and owned_addons (owned DLC/
-    expansions/editions), total_unique_games, total_unique_addons, and the
-    cross-platform overlap count and list.
+    report="platforms" (limit) — ownership per platform: by_platform entries
+    with owned_games (primary items) and owned_addons (owned DLC/expansions/
+    editions), total_unique_games, and total_unique_addons. overlap_games
+    lists games owned on 2+ platforms, CAPPED at limit (default 25, max 200;
+    widest ownership first, then most-played) because it is the only field
+    here that grows with the library — overlap_count is always the true
+    total and overlap_truncated says whether the list was cut.
 
     report="taste" (no parameters) — the current tag affinity profile, to
     explain why recommendations rank certain genres or tags highly. Run
@@ -379,7 +382,7 @@ async def get_stats(
     # returns a confident, wrong-looking answer.
     _REPORT_PARAMS = {
         "backlog": set(),
-        "platforms": set(),
+        "platforms": {"limit"},
         "taste": set(),
         "spending": {"platform", "year", "purchase_source"},
         "series": {
@@ -411,7 +414,7 @@ async def get_stats(
         return {"report": report, **await _backlog()}
     if report == "platforms":
         from .tools.platforms import get_platform_breakdown as _platforms
-        return {"report": report, **await _platforms()}
+        return {"report": report, **await _platforms(overlap_limit=limit)}
     if report == "taste":
         from .tools.ratings import get_taste_profile as _taste
         return {"report": report, **await _taste()}
@@ -425,7 +428,7 @@ async def get_stats(
     }
 
 
-@mcp.tool(annotations=READ_ONLY_TOOL)
+@mcp.tool(title="My Ratings", annotations=READ_ONLY_TOOL)
 async def get_ratings(
     source: str | None = None,
     min_score: float | None = None,
@@ -446,7 +449,7 @@ async def get_ratings(
     return await _ratings(source, min_score, sort_by, limit, offset, response_format)
 
 
-@mcp.tool(annotations=MUTATION_TOOL)
+@mcp.tool(title="Rate Game", annotations=MUTATION_TOOL)
 async def rate_game(
     name: str | None = None,
     game_id: int | None = None,
@@ -482,7 +485,7 @@ async def rate_game(
     return await _rate(name, game_id, score, review_text, dry_run=dry_run)
 
 
-@mcp.tool(annotations=DIAGNOSTIC_NETWORK_TOOL)
+@mcp.tool(title="Missing Series Entries", annotations=DIAGNOSTIC_NETWORK_TOOL)
 async def discover_series_gaps(
     kind: Literal["collection", "franchise"] | None = None,
     min_owned: int = 2,
@@ -514,7 +517,7 @@ async def discover_series_gaps(
     return await _series_gaps(kind, min_owned, limit, include_unreleased, refresh_cache)
 
 
-@mcp.tool(annotations=NETWORK_SYNC_TOOL)
+@mcp.tool(title="Sync Library, Wishlist & Ratings", annotations=NETWORK_SYNC_TOOL)
 async def sync(
     ctx: Context,
     targets: list[str] | None = None,
@@ -571,7 +574,7 @@ async def sync(
     return result
 
 
-@mcp.tool(annotations=READ_ONLY_TOOL)
+@mcp.tool(title="Sync Status", annotations=READ_ONLY_TOOL)
 async def get_sync_status() -> SyncStatusResponse:
     """
     Report the status of the library sync started by sync(targets=["library"]).
@@ -586,7 +589,7 @@ async def get_sync_status() -> SyncStatusResponse:
     return await _status()
 
 
-@mcp.tool(annotations=READ_ONLY_TOOL)
+@mcp.tool(title="Integration Health", annotations=READ_ONLY_TOOL)
 async def get_integration_status(
     platforms: list[str] | None = None,
     verbose: bool = True,
@@ -606,7 +609,7 @@ async def get_integration_status(
     )
 
 
-@mcp.tool(annotations=DIAGNOSTIC_NETWORK_TOOL)
+@mcp.tool(title="Inspect Scrape Config", annotations=DIAGNOSTIC_NETWORK_TOOL)
 async def get_scrape_config(provider: str, diagnose: bool = False) -> GetScrapeConfigResponse:
     """
     Inspect a scrape provider's config, or diagnose it against the live page.
@@ -641,7 +644,7 @@ async def get_scrape_config(provider: str, diagnose: bool = False) -> GetScrapeC
 # propose/approve are idempotent, but each rollback call walks back one more
 # version, so a blind retry after a timeout would undo an extra step — the
 # merged tool takes the strictest of the three annotations.
-@mcp.tool(annotations=NON_IDEMPOTENT_MUTATION_TOOL)
+@mcp.tool(title="Change Scrape Config", annotations=NON_IDEMPOTENT_MUTATION_TOOL)
 async def manage_scrape_config(
     provider: str,
     action: Literal["propose", "approve", "rollback"],
@@ -696,7 +699,7 @@ async def manage_scrape_config(
     return await _rollback(provider)
 
 
-@mcp.tool(annotations=VALIDATION_TOOL)
+@mcp.tool(title="Check Library Integrity", annotations=VALIDATION_TOOL)
 async def check_library(
     checks: list[str] | None = None,
     include_network: bool = False,
@@ -721,138 +724,37 @@ async def check_library(
     apply-gated checks). Nothing here mutates library data except the three
     apply-gated checks below, and only when explicitly listed in `apply`.
 
-    Registered checks (id — one-liner):
-    - playtime.farming — ArchiSteamFarm card-farming sessions (many low-playtime
-      Steam games last played the same day). offline. APPLY-GATED: marks
-      is_farmed=1 (manual overrides respected). options: threshold_hours
-      (default 8.0), min_games_per_day (default 8).
-    - identity.same_store_collapse — one platform row carrying more than one
-      distinct store identifier of the same type (an over-merge, e.g. two Steam
-      appids on one "Dead Space" row). offline, report-only.
-    - identity.stranded_duplicate — a same-name/same-platform game pair where
-      one side lacks the store identifier the other carries (pre-dates
-      identifier tracking). offline, report-only.
-    - identity.cross_store_collapse — a multi-platform game whose Steam appid
-      actually resolves (via IGDB) to a DIFFERENT game than the row's stored
-      igdb_id. NETWORK (igdb) — must be named explicitly in `checks` or run via
-      include_network=True; skipped as unconfigured:igdb without IGDB
-      credentials. options: limit (default 0 = no cap). report-only.
-    - ownership.orphan — primary library rows with no ownership and no
-      wishlist entry. offline, report-only. CAUTION: run ownership.license_gap
-      first — an "orphan" can be a retired-but-owned Steam app.
-    - nesting.phantom_parent — zero-ownership, zero-wishlist rows that other
-      rows nest under and have NO owned child (never deletable by delete_game;
-      remediate via merge_games or update_game). offline, report-only. Shares
-      its detector with ownership.orphan but reports a distinct shape; a
-      phantom parent WITH an owned child is reported under
-      nesting.superseded_base instead, never both.
-    - nesting.misclassified — primary rows that are really nested content
-      (DLC/soundtrack/edition/etc.), each with a ready-to-apply update_game
-      suggestion when one resolves. offline BY DEFAULT (flipped from the old
-      tool's default) — options: limit (default 25), probe_steam (default
-      FALSE; set true to also probe Steam appdetails for steam_type_mismatch,
-      which then does reach the network even though this check id needs no
-      explicit selection), probe_offset (default 0, for walking a large
-      library across calls via the response's next_probe_offset extra).
-      report-only.
-    - extid.igdb_drift — a stored igdb_id whose IGDB name is a DIFFERENT game
-      than the library row (wrong enrichment poisons series gaps/deals/series
-      memberships). NETWORK (igdb) — same selection/credential rules as
-      identity.cross_store_collapse. A row named for an edition SKU ("Nioh 2 -
-      The Complete Edition" → "Nioh 2") is correctly linked, so it is NOT a
-      finding: both names go through the edition-comparison normalization and
-      those rows are counted in the summary's edition_suffix_count (with
-      examples) instead. Every finding carries evidence.drift_kind
-      ("wrong_entity"; "edition_suffix" only when you opt in). APPLY-GATED:
-      resets igdb_id/igdb_platforms/series memberships (and, when attributable,
-      content_type/parent_game_id) so background enrichment re-resolves the
-      row. options: limit (default none = all rows), include_edition_suffix
-      (default false — true folds the edition rows into findings, and therefore
-      into an apply's resets).
-    - ownership.license_gap — an owned Steam license absent from the library
-      (GetOwnedGames silently omits some retired apps). NETWORK
-      (steam+steamspy) — needs a stored Steam session
-      (create_session_ingest_link(provider="steam_refresh")); skipped as
-      unconfigured:steam_session without one. APPLY-GATED: mints an owned
-      Steam row per license — delisted=1 ONLY for a license whose store page
-      is gone (absence from GetOwnedGames alone means nothing: it also omits
-      never-launched apps, e.g. a bundle redeemed this week). After an apply
-      the healed licenses come back as notice-level findings naming the minted
-      game_id (also in summary.minted_game_ids), not as "still absent".
-      Report runs still
-      advance the scan: probe classifications are cached (skips/unresolved as
-      final facts, mintable games as non-final entries re-emitted from cache),
-      so repeated report calls walk the whole license list and the next apply
-      run heals everything already classified without re-probing. options:
-      limit (default 25), retry_unresolved (default false).
-    - nesting.superseded_base — a phantom parent (no ownership/wishlist) whose
-      owned child is an EDITION of it — the supersession shape (e.g. an
-      "Ultimate Box" edition nesting under an unowned base-game shell).
-      Suggests merge_games(source=parent, target=heir), heir = the owned
-      edition child with the most playtime, then most store identifiers, then
-      lowest id. A child only counts as an heir when its content_type is
-      "edition" or its name is an edition-suffixed form of the parent's —
-      owned DLC under an unowned base is a real ownership state, not a merge
-      candidate, and reports under ownership.dlc_without_base. Never overlaps
-      nesting.phantom_parent (that id takes owned_child_count == 0). offline,
-      report-only.
-    - ownership.dlc_without_base — a phantom parent whose owned children are
-      DLC/expansions rather than editions: you own add-ons for a base game you
-      don't own (Epic giveaway, a route pack for an unowned Train Sim World).
-      Informational, no suggested_action — merging here would rename a base
-      game to a DLC title and flatten its siblings. offline, report-only.
-    - identity.unlinked_edition — two owned primary rows where one name is an
-      edition/SKU-suffixed form of the other's (normalize_purchase_title)
-      but they live as unrelated sibling rows instead of one family. No
-      suggested_action (human call: merge_games or update_game
-      parent_game_id). offline, report-only.
-    - nesting.dangling_parent — a parent_game_id pointing at a missing row,
-      itself, or a row that is itself nested (a broken parent chain).
-      suggested_action clears the link (update_game parent_game_id=0); repoint
-      manually if the correct parent exists. offline, report-only.
-    - wishlist.already_owned — a game_wishlist row whose (game, platform) is
-      already owned — the fulfillment sweep should have cleared it via
-      refresh_library. No suggested_action. offline, report-only.
-    - playtime.snapshot_regression — a play_history snapshot with LOWER
-      playtime than an earlier snapshot for the same game+platform
-      (cumulative totals must never decrease — investigate an identity swap
-      or sync bug). No suggested_action. offline, report-only.
-    - playtime.orphan_switch_summary — Nintendo Parental Controls playtime for
-      an application_id with no matching nintendo_title_id identifier in the
-      library (excludes the manual-baseline sentinel). No suggested_action.
-      offline, report-only.
-    - spend.duplicate_purchase — two same-game/same-name game_platforms rows
-      sharing an identical (acquired_at, price_paid, price_currency,
-      purchase_source, bundle_name) tuple — likely the same purchase imported
-      twice. Rows in one content family (base + its DLC, or two siblings) that
-      share a bundle_name are NOT reported: that is exactly what
-      split_bundle_acquisition writes. No suggested_action (too ambiguous which
-      row to clear). offline, report-only.
-    - spend.price_anomaly — a purchase_source='free' row with a nonzero
-      price_paid (suggested_action: set_acquisition clear=["price_paid"]), or
-      a price_currency used on exactly one acquisition row library-wide (typo
-      smell, no suggested_action). offline, report-only.
-    - enrich.coverage — library-wide coverage gaps (tags, igdb_id, cover,
-      hltb_main) over owned/non-farmed primary games, one finding per missing
-      field with worst offenders by playtime. No suggested_action (get_game_detail
-      enriches lazily per game; refresh_library for bulk). offline, report-only.
-    - sync.staleness — a syncable platform whose last sync is older than
-      options.stale_days (default 7; suggested_action: refresh_library), or one
-      that synced recently but has games whose current playtime is ahead of
-      (or missing from) their latest play_history snapshot (silent
-      snapshot-writer failure — snapshots only write on change, so an idle
-      library is NOT flagged; switch2 exempt — it never writes play_history
-      by design). offline, report-only.
-    - completion.unclassified — an owned, played, non-farmed primary game with
-      no completion_status that the playtime-vs-HowLongToBeat heuristic reads
-      as completed (playtime >= HLTB main), evergreen (3x+ HLTB main, or 40h+
-      with no usable HLTB signal — endless/sandbox games like Rocket League or
-      Tabletop Simulator), or abandoned (2h+ played, under half of HLTB main,
-      no activity for 12+ months). suggested_action confirms it via
-      update_game(game_id, completion_status); options.limit caps how many are
-      considered (default 25). Findings are ordered by the heuristic's own
-      confidence — completed first, then evergreen, then abandoned. Nothing is
-      ever written: completion_status is user-set only. offline, report-only.
+    Registered check ids, by category — call list_checks=True for the full
+    catalog (each check's description, network needs, option keys, severity)
+    rather than growing this list into prose:
+    - completion: completion.unclassified
+    - enrich: enrich.coverage
+    - extid: extid.igdb_drift
+    - identity: identity.cross_store_collapse, identity.same_store_collapse,
+      identity.stranded_duplicate, identity.unlinked_edition
+    - nesting: nesting.dangling_parent, nesting.misclassified,
+      nesting.phantom_parent, nesting.superseded_base
+    - ownership: ownership.dlc_without_base, ownership.license_gap,
+      ownership.orphan
+    - playtime: playtime.farming, playtime.orphan_switch_summary,
+      playtime.snapshot_regression
+    - spend: spend.duplicate_purchase, spend.price_anomaly
+    - sync: sync.staleness
+    - wishlist: wishlist.already_owned
+
+    Three facts you need before calling, which the catalog also carries:
+    - WRITES (only when its id is listed in `apply`, and only these three):
+      playtime.farming sets is_farmed=1; extid.igdb_drift clears a wrong
+      igdb_id + its cover; ownership.license_gap mints owned rows from the
+      Steam license list. Every other check is permanently report-only.
+    - NETWORK (skipped unless named in `checks` or include_network=True, and
+      reported in checks_skipped when unconfigured): extid.igdb_drift and
+      identity.cross_store_collapse need IGDB; ownership.license_gap needs a
+      stored Steam session.
+    - OPTIONS (per-check, via options={"<id>": {...}}): playtime.farming takes
+      threshold_hours/min_games_per_day; sync.staleness takes stale_days;
+      extid.igdb_drift takes include_edition_suffix; nesting.misclassified
+      takes probe_steam/probe_offset; several take limit.
 
     Selection: `checks` accepts full ids and/or category prefixes (e.g.
     "identity", "nesting.misclassified") — None (default) selects every
@@ -896,7 +798,7 @@ async def check_library(
     )
 
 
-@mcp.tool(annotations=NON_IDEMPOTENT_MUTATION_TOOL)
+@mcp.tool(title="Split Over-Merged Game", annotations=NON_IDEMPOTENT_MUTATION_TOOL)
 async def split_game(
     source_game_id: int,
     platform: str,
@@ -924,7 +826,7 @@ async def split_game(
     return await _split(source_game_id, platform, identifier_values, new_name, dry_run)
 
 
-@mcp.tool(annotations=DIAGNOSTIC_NETWORK_TOOL)
+@mcp.tool(title="Wishlist & Deals", annotations=DIAGNOSTIC_NETWORK_TOOL)
 async def get_wishlist(
     platform: str | None = None,
     with_prices: bool = False,
@@ -932,6 +834,8 @@ async def get_wishlist(
     min_cut_pct: int | None = None,
     refresh: bool = False,
     preference_override_ratio: float = 0.5,
+    limit: int = 100,
+    offset: int = 0,
 ) -> GetWishlistResponse:
     """
     List wishlist items — games wanted but not necessarily owned, optionally priced.
@@ -941,9 +845,11 @@ async def get_wishlist(
     populated by sync(targets=["wishlist"]) (Steam, DekuDeals→switch2) or by
     add_game_to_platform(owned=False) for manual entries (e.g. PSN).
 
-    By default this reads stored rows only (no network): count plus items, with
+    By default this reads stored rows only (no network): items with
     content_type labeling each one (base_game normally; dlc/expansion/edition/…
-    when the wishlisted item is itself nested content rather than a base game).
+    when the wishlisted item is itself nested content rather than a base game),
+    newest first and paged by limit (default 100, max 500) / offset — count is
+    the page size, total_matches the true total, has_more whether more remain.
 
     with_prices=True instead returns current deals — one entry per game,
     cheapest-recommended first, honoring the set_hardware_preference platform
@@ -962,7 +868,8 @@ async def get_wishlist(
     filters together, not just the recommended one; they never change which
     option is recommended. Prices are NOT currency-converted (Steam follows
     ITAD_COUNTRY; switch2 follows the DekuDeals region); the ratio and
-    max_price compare raw numbers.
+    max_price compare raw numbers. limit/offset apply to the default listing
+    only — the priced view returns one entry per wishlisted game.
     """
     if with_prices:
         from .tools.deals import get_wishlist_deals as _deals
@@ -970,10 +877,10 @@ async def get_wishlist(
             platform, max_price, min_cut_pct, refresh, preference_override_ratio
         )
     from .tools.platforms import get_wishlist as _get_wishlist
-    return await _get_wishlist(platform)
+    return await _get_wishlist(platform, limit, offset)
 
 
-@mcp.tool(annotations=READ_ONLY_TOOL)
+@mcp.tool(title="Play History", annotations=READ_ONLY_TOOL)
 async def get_play_history(
     days: int = 30,
     start_date: str | None = None,
@@ -1000,7 +907,7 @@ async def get_play_history(
     return await _get_play_history(days, start_date, end_date, platform, limit)
 
 
-@mcp.tool(annotations=MUTATION_TOOL)
+@mcp.tool(title="Set Hardware Preference", annotations=MUTATION_TOOL)
 async def set_hardware_preference(platforms: list[str]) -> HardwarePreferenceResponse:
     """
     Set the hardware preference order used for recommendations.
@@ -1013,7 +920,7 @@ async def set_hardware_preference(platforms: list[str]) -> HardwarePreferenceRes
     return await _set_hw(platforms)
 
 
-@mcp.tool(annotations=MUTATION_TOOL)
+@mcp.tool(title="Add Game to Platform", annotations=MUTATION_TOOL)
 async def add_game_to_platform(
     name: str | None = None,
     platform: str | None = None,
@@ -1096,7 +1003,7 @@ async def add_game_to_platform(
     )
 
 
-@mcp.tool(annotations=MUTATION_TOOL)
+@mcp.tool(title="Edit Game Metadata", annotations=MUTATION_TOOL)
 async def update_game(
     name: str | None = None,
     game_id: int | None = None,
@@ -1209,7 +1116,7 @@ async def update_game(
     )
 
 
-@mcp.tool(annotations=MUTATION_TOOL)
+@mcp.tool(title="Record Acquisition", annotations=MUTATION_TOOL)
 async def set_acquisition(
     name: str | None = None,
     game_id: int | None = None,
@@ -1323,7 +1230,7 @@ async def set_acquisition(
     )
 
 
-@mcp.tool(annotations=MUTATION_TOOL)
+@mcp.tool(title="Pin Playtime", annotations=MUTATION_TOOL)
 async def set_playtime(
     name: str | None = None,
     game_id: int | None = None,
@@ -1390,7 +1297,7 @@ async def set_playtime(
     )
 
 
-@mcp.tool(annotations=MUTATION_TOOL)
+@mcp.tool(title="Set Switch 2 Playtime Baseline", annotations=MUTATION_TOOL)
 async def set_switch2_playtime_baseline(
     name: str | None = None,
     game_id: int | None = None,
@@ -1427,7 +1334,7 @@ async def set_switch2_playtime_baseline(
     return await _set_baseline(name, game_id, total_hours, application_id, dry_run)
 
 
-@mcp.tool(annotations=MUTATION_TOOL)
+@mcp.tool(title="Split Bundle Purchase", annotations=MUTATION_TOOL)
 async def split_bundle_acquisition(
     bundle_name: str,
     platform: str,
@@ -1510,7 +1417,7 @@ async def split_bundle_acquisition(
     )
 
 
-@mcp.tool(annotations=NETWORK_SYNC_TOOL)
+@mcp.tool(title="Import Purchase History", annotations=NETWORK_SYNC_TOOL)
 async def import_purchases(
     sources: list[str] | None = None,
     dry_run: bool = False,
@@ -1618,7 +1525,7 @@ async def import_purchases(
     )
 
 
-@mcp.tool(annotations=NON_IDEMPOTENT_MUTATION_TOOL)
+@mcp.tool(title="Merge Duplicate Games", annotations=NON_IDEMPOTENT_MUTATION_TOOL)
 async def merge_games(
     source_game_id: int | None = None,
     target_game_id: int | None = None,
@@ -1670,7 +1577,7 @@ async def merge_games(
     return await _merge(source_game_id, target_game_id, dry_run)
 
 
-@mcp.tool(annotations=NON_IDEMPOTENT_MUTATION_TOOL)
+@mcp.tool(title="Delete Game", annotations=NON_IDEMPOTENT_MUTATION_TOOL)
 async def delete_game(
     name: str | None = None,
     game_id: int | None = None,
@@ -1714,7 +1621,7 @@ async def delete_game(
     return await _delete(name, game_id, confirm)
 
 
-@mcp.tool(annotations=NON_IDEMPOTENT_MUTATION_TOOL)
+@mcp.tool(title="Create Session Cookie Link", annotations=NON_IDEMPOTENT_MUTATION_TOOL)
 async def create_session_ingest_link(provider: str) -> SessionIngestLinkResponse:
     """
     Mint a single-use browser link for entering session cookies WITHOUT
@@ -1750,7 +1657,7 @@ async def create_session_ingest_link(provider: str) -> SessionIngestLinkResponse
     return await _create_link(provider)
 
 
-@mcp.tool(annotations=MUTATION_TOOL)
+@mcp.tool(title="Set Nintendo Parental Controls Session", annotations=MUTATION_TOOL)
 async def set_nintendo_pctl_session(response: str = "") -> dict:
     """
     Set up Nintendo Switch Parental Controls playtime sync (no f-token needed).
@@ -1772,7 +1679,7 @@ async def set_nintendo_pctl_session(response: str = "") -> dict:
     return await _set_pctl(response)
 
 
-@mcp.tool(annotations=READ_ONLY_TOOL)
+@mcp.tool(title="SQL Query & Schema", annotations=READ_ONLY_TOOL)
 async def query_library(sql: str | None = None, row_limit: int = 200) -> dict:
     """
     Run one read-only SQL query against the library database — or, with no sql,

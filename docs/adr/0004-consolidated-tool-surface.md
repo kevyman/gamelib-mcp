@@ -170,3 +170,102 @@ Status: accepted (2026-07-26)
   was renaming the bulk counters, which would have changed impl return shapes
   and broken their unit tests. Worth revisiting if those keys ever confuse a
   caller in practice.
+
+## Amendment (2026-07-26): measured, not assumed
+
+The original decision was argued from tool count and reasoned about payload
+size without measuring it. Everything below is measured — schema against the
+live server, responses against a copy of the 2,726-game dev database.
+
+### 1. The `$defs` hypothesis was wrong
+
+Consequence-section reasoning suggested FastMCP inlining `$defs` was wasting a
+lot of output-schema space. It is not. `FastMCP(dereference_schemas=False)`:
+
+| | inlined (default) | `$defs` kept |
+|---|---|---|
+| `search_games` output schema | 6,604 | 3,764 (−43%) |
+| **all 30 tools** | **57,442** | **55,756 (−1.2%)** |
+
+Only a model referenced more than once wins (`GameSummary` appears twice in
+`search_games`). For single-use models the `$ref` indirection costs about what
+it saves. Not worth the client-compatibility risk of shipping `$ref`s, even
+though 2026-07-28 permits them. Left at the default.
+
+### 2. The real waste was an unbounded response, not the schema
+
+`get_platform_breakdown`'s `overlap_games` had no `LIMIT`. On a ~3k-owned-row
+library it returned 428 entries — **33,972 of the report's 34,414 chars (98%)**,
+growing linearly with the library forever. `get_wishlist` had the same shape
+(no `LIMIT` at all), hidden only because the dev wishlist is empty.
+
+Both are now capped (`overlap_limit`, default 25 / max 200; `limit`+`offset`,
+default 100 / max 500) with the true total still reported (`overlap_count`,
+`total_matches`) and an explicit truncation flag. `get_stats(report="platforms")`
+went 65,713 → 4,995 chars on the wire (−92%).
+
+**Rule this establishes:** every response field whose length scales with
+library size needs a cap, a true total, and a truncation flag. An audit script
+that walks responses and flags any list over ~1,500 chars is the cheap way to
+catch the next one — the two found here were the only offenders across the 13
+read paths, but neither was obvious from reading the code.
+
+### 3. Descriptions: progressive disclosure beat prose
+
+`check_library`'s description was 11,290 chars — 8.2% of the entire tool
+surface — enumerating all 21 check ids in paragraphs. `list_checks=True`
+already returned exactly that as structured data. The description now keeps the
+bare id list (they are the selection vocabulary, and the drift-guard test still
+enforces every id appears) plus the three facts a caller needs *before* calling
+that are unsafe to discover late: which checks write, which need network, which
+take options. Prose moved to the catalog. −7,595 chars.
+
+Total tool surface: 137,030 → 130,753 chars (−4.6%).
+
+### 4. Responses cost more than schema, and half of every response is duplicated
+
+Schema is paid once per connect; responses are paid per call. Across 21
+representative calls the response total was **325,668 chars after the caps**
+(386,312 before) — 2.5× the entire schema, in one short session.
+
+**156,683 of those 325,668 chars (48%) are the same payload sent twice.**
+FastMCP populates both `content[0].text` (serialized JSON) and
+`structuredContent`, which the spec endorses: "For backwards compatibility, a
+tool that returns structured content SHOULD also return the serialized JSON in
+a TextContent block." `ToolResult(content=[], structured_content=…)` suppresses
+it and is a one-line change per tool.
+
+**Deliberately not done.** It is a SHOULD, not a MAY, and which of the two a
+given host feeds to the model is not something this repo can verify — our own
+game-cards widget reads `structuredContent` *with a fallback to content text*
+(`apps.py`), which is evidence that hosts differ. Halving response bytes is the
+single largest remaining win available, and it is gated on testing against the
+actual client, not on code. Revisit if a host is confirmed to prefer
+`structuredContent`.
+
+### 5. Spec conformance for 2026-07-28
+
+Audited against the revision going final 2026-07-28: no `-32002` literals to
+migrate; all tool names within the charset/length rules; every tool carries
+annotations and a non-empty output schema; the one no-parameter tool already
+emits `additionalProperties: false` as recommended. All 30 tools previously
+omitted the spec's optional `title`, which clients use for display — now set,
+at no measured cost to the description or schema fields.
+
+Not adopted, deliberately: `execution.taskSupport` (the Tasks extension) would
+suit `sync(targets=["ratings"])` and `import_purchases`, both of which run for
+minutes, but it changes client interaction semantics and cannot be validated
+here. `oneOf`/conditional input schemas could now express the
+scalar-vs-`items` exclusivity that decision 1 enforces at runtime — worth
+doing once SDK and client support is real, not on the strength of the spec
+alone.
+
+### 6. Known deviations from published guidance
+
+AWS prescriptive guidance recommends ≤8 parameters per tool. Eight tools exceed
+it: `update_game` (23), `add_game_to_platform` (15), `set_acquisition` (14),
+`get_library_stats` (14), `get_stats`/`split_bundle_acquisition` (10),
+`discover_games`/`set_playtime` (9). These are "set any subset of these fields"
+shapes; collapsing them into a `fields: dict` would trade away the top-level
+wire validation that is the entire reason decision 1 kept scalar params. Left
+as a conscious deviation.

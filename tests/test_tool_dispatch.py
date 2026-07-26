@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 from conftest import ToolDBTestCase, add_platform, seed_game
 from gamelib_mcp import main
+from gamelib_mcp.data import db as db_module
 
 
 class SyncTargetDispatchTests(unittest.IsolatedAsyncioTestCase):
@@ -322,3 +323,66 @@ class SetAcquisitionSingleModeGuardTests(ToolDBTestCase):
         with self.assertRaises(Exception) as ctx:
             await main.set_acquisition(game_id=1, platform="steam", dry_run=True)
         self.assertIn("only supported with items", str(ctx.exception))
+
+
+class ResponseSizeGuardTests(ToolDBTestCase):
+    """No read response may contain a list that grows without bound.
+
+    ADR 0004's amendment: `overlap_games` reached 428 entries / 98% of its
+    response on a 3k-row library before anyone noticed, and `get_wishlist` had
+    the same shape hidden behind an empty table. This walks real responses and
+    fails if any list exceeds what its documented cap allows, so the next
+    uncapped field is caught here rather than in production.
+    """
+
+    # tool -> (args, {list path: max entries the contract allows})
+    CONTRACTS = [
+        ("get_stats", {"report": "platforms"}, {"overlap_games": 25}),
+        ("get_stats", {"report": "platforms", "limit": 5}, {"overlap_games": 5}),
+        ("get_wishlist", {}, {"items": 100}),
+        ("get_wishlist", {"limit": 3}, {"items": 3}),
+        ("get_library_stats", {"limit": 7}, {"results": 7}),
+        ("get_ratings", {"limit": 4}, {"results": 4}),
+        ("get_play_history", {"limit": 6}, {"games": 6}),
+    ]
+
+    async def _seed_bulk(self, n=40):
+        for i in range(n):
+            gid = await seed_game(f"Bulk {i}", hltb_main=5.0)
+            # owned on two platforms so it lands in the overlap list
+            await add_platform(gid, "steam", playtime_minutes=100 + i)
+            await add_platform(gid, "gog", playtime_minutes=50)
+            await db_module.upsert_wishlist_entry(gid, "ps5", source="manual")
+
+    async def test_no_response_list_exceeds_its_documented_cap(self):
+        await self._seed_bulk()
+        for tool, args, caps in self.CONTRACTS:
+            with self.subTest(tool=tool, args=args):
+                result = await getattr(main, tool)(**args)
+                for path, cap in caps.items():
+                    # A renamed key must fail here, not silently skip — that is
+                    # how a guard like this rots into a no-op.
+                    self.assertIn(
+                        path, result,
+                        f"{tool}{args} has no '{path}' key; the contract above is "
+                        f"stale (keys: {sorted(result)})",
+                    )
+                    got = result[path]
+                    self.assertLessEqual(
+                        len(got), cap,
+                        f"{tool}{args} returned {len(got)} entries at '{path}' "
+                        f"but the contract caps it at {cap}",
+                    )
+
+    async def test_capped_lists_still_report_the_true_total(self):
+        await self._seed_bulk()
+
+        platforms_report = await main.get_stats(report="platforms", limit=5)
+        self.assertEqual(len(platforms_report["overlap_games"]), 5)
+        self.assertEqual(platforms_report["overlap_count"], 40)
+        self.assertTrue(platforms_report["overlap_truncated"])
+
+        wishlist = await main.get_wishlist(limit=5)
+        self.assertEqual(wishlist["count"], 5)
+        self.assertEqual(wishlist["total_matches"], 40)
+        self.assertTrue(wishlist["has_more"])

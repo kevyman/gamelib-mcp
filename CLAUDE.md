@@ -66,6 +66,7 @@ Auto-migrated on startup in `db.init_db()`:
 
 ## Key Design Patterns
 
+- **Bounded responses**: every response field whose length scales with library size must carry a cap, the true total, and a truncation flag (`get_stats(report="platforms")`'s `overlap_games`/`overlap_count`/`overlap_truncated`; `get_wishlist`'s `limit`/`total_matches`/`has_more`). Schema is paid once per connect; responses are paid per call and were measured at 2.5x the whole tool surface across one short session. `tests/test_tool_dispatch.py::ResponseSizeGuardTests` walks real responses and fails on any list over its documented cap — add new read paths there.
 - **One tool per operation, not per arity** (ADR 0004): `main.py` registers 30 MCP tools over ~50 implementation functions in `tools/`. A `@mcp.tool` wrapper is a thin mode-dispatcher; impls keep their own names, signatures, and unit tests, which is why consolidating the wire surface touched almost no test. Conventions a new tool must follow: bulk is `items=[...]` on the single-item tool (never a second `*_batch` tool), verb families take an `action`/`report` selector, a merged tool inherits the STRICTEST annotation it absorbs, and merged response models declare every field optional with comments naming which mode fills what. Read docs/adr/0004-consolidated-tool-surface.md — especially its "Rejected" list — before merging or adding a tool.
 
 - **Lazy enrichment**: `get_game_detail` fetches provider enrichment on demand and caches; bulk calls skip unenriched fields.

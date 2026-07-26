@@ -56,7 +56,7 @@ EXPECTED_TOOLS = {
     "get_wishlist": {
         "params": {
             "platform", "with_prices", "max_price", "min_cut_pct", "refresh",
-            "preference_override_ratio",
+            "preference_override_ratio", "limit", "offset",
         },
         "required": set(),
     },

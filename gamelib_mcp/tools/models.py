@@ -245,7 +245,10 @@ class GetStatsResponse(FlexibleModel):
     by_platform: list[dict[str, Any]] | None = None
     total_unique_games: int | None = None
     total_unique_addons: int | None = None
+    # overlap_count is the true total; overlap_games is capped at overlap_limit.
     overlap_count: int | None = None
+    overlap_truncated: bool | None = None
+    overlap_limit: int | None = None
     overlap_games: list[dict[str, Any]] | None = None
     # report="taste"
     summary: dict[str, Any] | None = None
@@ -409,6 +412,8 @@ class GetWishlistResponse(FlexibleModel):
     """
 
     count: int | None = None
+    total_matches: int | None = None
+    has_more: bool | None = None
     items: list[WishlistItem] | None = None
     # with_prices=True
     deals: list["WishlistDealEntry"] | None = None
