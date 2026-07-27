@@ -144,11 +144,14 @@ The database is SQLite (WAL mode, foreign keys on), auto-migrated on startup. Co
 ## Development
 
 ```bash
-# Run the test suite
+# Run the test suite (parallel across all cores by default)
 .venv/bin/python -m pytest
 
 # Run a focused test file
 .venv/bin/python -m pytest tests/test_igdb.py -q
+
+# Run serially, for readable output while debugging
+.venv/bin/python -m pytest -n0
 ```
 
 DB-backed tests use temporary SQLite files and do not require a checked-in database. See [CLAUDE.md](CLAUDE.md) for additional contributor notes, including sandbox caveats for `aiosqlite` tests.

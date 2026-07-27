@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
+from conftest import virtual_clock
 from gamelib_mcp.data import igdb
 
 
@@ -373,6 +374,7 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
         sleep_mock = AsyncMock()
 
         with (
+            virtual_clock("gamelib_mcp.data.igdb") as clock,
             patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
             patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
             patch("gamelib_mcp.data.igdb.httpx.AsyncClient", return_value=client),
@@ -383,6 +385,9 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(results, [])
         sleep_mock.assert_awaited_once_with(7.0)
+        # Retry-After is also pushed onto the shared gate, so the retry waits
+        # the full 7s there rather than walking into the same rate limit.
+        self.assertEqual(clock.sleeps, [7.0])
 
     async def test_search_game_does_not_retry_bad_request(self) -> None:
         client = _DummyAsyncClient([_DummyResponse(400, {"message": "bad request"})])
@@ -412,6 +417,7 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
         sleep_mock = AsyncMock()
 
         with (
+            virtual_clock("gamelib_mcp.data.igdb"),
             patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
             patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
             patch("gamelib_mcp.data.igdb.httpx.AsyncClient", return_value=client),
@@ -434,9 +440,11 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with (
+            virtual_clock("gamelib_mcp.data.igdb"),
             patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
             patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
             patch("gamelib_mcp.data.igdb.httpx.AsyncClient", return_value=client),
+            patch("gamelib_mcp.data.igdb._sleep_before_retry", new=AsyncMock()),
             self.assertLogs("gamelib_mcp.data.igdb", level="WARNING") as logs,
         ):
             with self.assertRaises(igdb.IGDBRequestFailure):

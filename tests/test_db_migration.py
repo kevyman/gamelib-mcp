@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import aiosqlite
 
-from conftest import add_platform, seed_game
+from conftest import DEADLOCK_TIMEOUT, add_platform, seed_game
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steam_store
 
@@ -1949,9 +1949,9 @@ class BackgroundEnrichmentRegressionTests(unittest.IsolatedAsyncioTestCase):
             patch.object(enrich_bg, "_STORE_START_INTERVAL", 0.0),
         ):
             task = asyncio.create_task(enrich_bg._run_store_batch())
-            await asyncio.wait_for(both_started.wait(), timeout=1.0)
+            await asyncio.wait_for(both_started.wait(), timeout=DEADLOCK_TIMEOUT)
             release.set()
-            count = await asyncio.wait_for(task, timeout=1.0)
+            count = await asyncio.wait_for(task, timeout=DEADLOCK_TIMEOUT)
 
         self.assertEqual(count, 2)
         self.assertGreaterEqual(peak_in_flight, 2)
