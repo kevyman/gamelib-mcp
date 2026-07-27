@@ -1645,15 +1645,16 @@ async def delete_game(
 @mcp.tool(title="Create Session Cookie Link", annotations=NON_IDEMPOTENT_MUTATION_TOOL)
 async def create_session_ingest_link(provider: str) -> SessionIngestLinkResponse:
     """
-    Mint a single-use browser link for entering session cookies WITHOUT
-    pasting them into the chat.
+    Mint a single-use browser link for connecting a store/account session
+    WITHOUT pasting any credential into the chat.
 
-    Preferred flow when the user doesn't want cookies in the conversation:
-    call this with the provider, give the user the returned URL, and have
-    them open it in a browser, paste their Cookie Editor JSON export there,
-    and submit. The pasted cookies are saved server-side to the provider's
-    cookie file; verify afterwards with get_integration_status or by running
-    the import.
+    This is the ONLY way to connect a session. Call it with the provider, give
+    the user the returned URL, and have them open it in a browser and follow
+    the on-page steps (paste a Cookie Editor JSON export, or for
+    "nintendo_pctl" sign in through the button the page shows and paste the
+    link back). Whatever they submit is saved server-side to that provider's
+    file; verify afterwards with get_integration_status or by running the
+    import.
 
     provider: one of
     - "nintendo" — accounts.nintendo.com; drives Switch ownership AND eShop purchases
@@ -1667,7 +1668,10 @@ async def create_session_ingest_link(provider: str) -> SessionIngestLinkResponse
     - "steam_store" — LEGACY Steam fallback only. Short-lived steamLoginSecure
       store cookies that lapse in ~a day and must be re-pasted. Do not reach for
       this first; use "steam_refresh".
-    (Parental Controls playtime is not cookie-based — use set_nintendo_pctl_session.)
+    - "nintendo_pctl" — Switch PLAYTIME via the Parental Controls API (per-game
+      minutes, including games played on the console under another account).
+      Not cookies: the page walks the user through Nintendo's sign-in and takes
+      the npf:// link back. Complements "nintendo", which is ownership.
 
     The link expires in 15 minutes, works exactly once, and is invalidated
     by a server restart; each call mints a fresh link. Without
@@ -1676,28 +1680,6 @@ async def create_session_ingest_link(provider: str) -> SessionIngestLinkResponse
     """
     from .tools.admin import create_session_ingest_link as _create_link
     return await _create_link(provider)
-
-
-@mcp.tool(title="Set Nintendo Parental Controls Session", annotations=MUTATION_TOOL)
-async def set_nintendo_pctl_session(response: str = "") -> dict:
-    """
-    Set up Nintendo Switch Parental Controls playtime sync (no f-token needed).
-
-    The Parental Controls API reports per-game playtime for any console registered
-    to Parental Controls, regardless of which account owns each game — so titles
-    played on your console under another account appear too. This is the playtime
-    source for switch2 (VGCS provides ownership; together they fill in the library).
-
-    Two-step flow (the server can't open a browser):
-    1. Call with no argument → returns a login_url. Open it, sign in to your
-       Nintendo account, right-click "Select this person" and copy the link.
-    2. Call again with that npf://auth link (or a bare session token) → stored.
-
-    Saved to NINTENDO_PCTL_SESSION_FILE (defaults to nintendo_pctl_session.json
-    beside the database).
-    """
-    from .tools.admin import set_nintendo_pctl_session as _set_pctl
-    return await _set_pctl(response)
 
 
 @mcp.tool(title="SQL Query & Schema", annotations=READ_ONLY_TOOL)

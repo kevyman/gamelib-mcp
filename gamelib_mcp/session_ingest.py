@@ -1,12 +1,17 @@
-"""Single-use browser links for pasting session cookies outside the chat.
+"""Single-use browser links for handing the server a secret outside the chat.
 
 ``create_session_ingest_link`` mints a nonce URL (``/ingest/{nonce}``); the
-user opens it in a browser, pastes their Cookie Editor JSON export into the
-form, and the POST handler saves it through the exact same
-``tools.admin.set_*_session`` path the chat tools use. The nonce is the only
-credential: minting already happens behind the MCP OAuth owner check, the
-link expires after ``_INGEST_TTL_SECONDS`` and is consumed on first
-successful save.
+user opens it in a browser, pastes what the provider's steps asked for, and
+the POST handler saves it through the matching ``tools.admin.set_*_session``
+function. The nonce is the only credential: minting already happens behind the
+MCP OAuth owner check, the link expires after ``_INGEST_TTL_SECONDS`` and is
+consumed on first successful save.
+
+Most providers are a plain cookie paste. ``nintendo_pctl`` is an interactive
+login: a ``prepare_name`` hook mints Nintendo's PKCE sign-in URL when the form
+first renders, the page offers it as a button, and the user pastes back the
+``npf://`` link — which carries a one-time code, hence the same
+keep-it-out-of-the-chat treatment as a cookie.
 
 The nonce store is a module-level dict by design: one deployment is one
 owner running a single-process server (docs/adr/0001-single-user.md), so
@@ -21,7 +26,7 @@ import html
 import os
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from fastmcp.exceptions import ToolError
 from starlette.requests import Request
@@ -44,6 +49,20 @@ class IngestProvider:
     # as a prominent "make sure you see this" callout on the form (and enforced
     # server-side by the matching setter's validator). None = no single gate.
     required_cookie: str | None = None
+
+    # --- interactive-login flows ------------------------------------------
+    # Attribute on gamelib_mcp.tools.admin: an async () -> dict run ONCE per
+    # link, before the form first renders, whose result is stored on the link
+    # and handed back to the setter as `state`. Nintendo's Parental Controls
+    # login needs it — the URL the user signs in through embeds a PKCE
+    # challenge, and only the matching verifier can redeem the code they paste
+    # back. None (every cookie provider) = nothing to prepare.
+    prepare_name: str | None = None
+    # Rendered as a link when prepare_name is set; the prepared state must then
+    # carry "login_url".
+    login_link_label: str = "Sign in"
+    placeholder: str = "Paste the cookie export JSON here"
+    submit_label: str = "Save cookies"
 
 
 INGEST_PROVIDERS: dict[str, IngestProvider] = {
@@ -154,6 +173,32 @@ INGEST_PROVIDERS: dict[str, IngestProvider] = {
         ),
         required_cookie="steamLoginSecure",
     ),
+    "nintendo_pctl": IngestProvider(
+        key="nintendo_pctl",
+        label="Nintendo Parental Controls",
+        setter_name="set_nintendo_pctl_session",
+        export_url="https://accounts.nintendo.com/",
+        hint=(
+            "This is the Switch PLAYTIME source — per-game minutes, including "
+            "games played on your console under another account. Ownership is "
+            "separate: that's the \"nintendo\" option."
+        ),
+        steps=(
+            "Click the \"Sign in to Nintendo\" button below. It opens Nintendo's "
+            "own login page in a new tab.",
+            "Sign in with the Nintendo account your console is registered to for "
+            "Parental Controls.",
+            "You'll land on a \"Select this person\" screen. Do NOT left-click that "
+            "button — RIGHT-click it and choose \"Copy link address\" (Chrome/Edge) "
+            "or \"Copy Link\" (Firefox/Safari).",
+            "Come back to this tab and paste the copied link — it starts with npf — "
+            "into the box below, then click Save.",
+        ),
+        prepare_name="prepare_nintendo_pctl_login",
+        login_link_label="Sign in to Nintendo",
+        placeholder="Paste the npf:// link you copied here",
+        submit_label="Save session",
+    ),
 }
 
 _INGEST_TTL_SECONDS = 15 * 60
@@ -168,6 +213,10 @@ _MAX_BODY_BYTES = 1_000_000
 class _IngestLink:
     provider: str
     expires_at: float  # time.monotonic() deadline
+    # Result of the provider's prepare hook, if it has one: opaque per-link
+    # state (the PKCE verifier and the sign-in URL built from it) that the
+    # setter needs to complete the flow. Dies with the link, like the nonce.
+    state: dict[str, str] = field(default_factory=dict)
 
 
 _ingest_links: dict[str, _IngestLink] = {}
@@ -211,11 +260,7 @@ def mint_ingest_link(provider: str) -> dict:
     spec = INGEST_PROVIDERS.get(provider)
     if spec is None:
         valid = ", ".join(sorted(INGEST_PROVIDERS))
-        raise ToolError(
-            f"Unknown provider '{provider}'. Valid providers: {valid}. "
-            "(Parental Controls playtime is not cookie-based — use "
-            "set_nintendo_pctl_session.)"
-        )
+        raise ToolError(f"Unknown provider '{provider}'. Valid providers: {valid}.")
     _prune()
     while len(_ingest_links) >= _MAX_PENDING_LINKS:
         oldest = min(_ingest_links, key=lambda n: _ingest_links[n].expires_at)
@@ -231,9 +276,10 @@ def mint_ingest_link(provider: str) -> dict:
     }
 
 
-# SECURITY: no response page may ever echo the submitted cookie text back.
-# Only cookie counts, file paths, provider labels, and _save_session_cookies
-# ToolError messages (which never contain cookie values) may appear in HTML.
+# SECURITY: no response page may ever echo the submitted text back — cookie
+# export, refresh token, or npf:// login link alike. Only counts, file paths,
+# provider labels, the prepared sign-in URL, and setter ToolError messages
+# (which never quote what was submitted) may appear in HTML.
 
 # referrer-policy is "same-origin", NOT "no-referrer": the paste form POSTs back
 # to this same server, and the HttpSecurityMiddleware Origin allowlist gates that
@@ -262,6 +308,8 @@ _PAGE_STYLE = (
     "code{background:#f2f2f2;padding:.1rem .3rem;border-radius:3px}"
     ".callout{background:#fff8e1;border:1px solid #f0d060;border-radius:6px;"
     "padding:.75rem 1rem;margin:1rem 0}"
+    "a.button{display:inline-block;padding:.5rem 1.5rem;background:#e60012;"
+    "color:#fff;text-decoration:none;border-radius:4px;font-size:1rem}"
 )
 
 
@@ -286,9 +334,21 @@ def _not_found_response() -> HTMLResponse:
     )
 
 
-def _render_form_page(nonce: str, spec: IngestProvider, error: str | None = None) -> str:
+def _render_form_page(
+    nonce: str,
+    spec: IngestProvider,
+    error: str | None = None,
+    state: dict[str, str] | None = None,
+) -> str:
     error_block = f'<p class="error">{html.escape(error)}</p>' if error else ""
     steps = "".join(f"<li>{html.escape(step)}</li>" for step in spec.steps)
+    login_url = (state or {}).get("login_url")
+    login_block = (
+        f'<p><a class="button" href="{html.escape(login_url)}" target="_blank" '
+        f'rel="noopener noreferrer">{html.escape(spec.login_link_label)}</a></p>'
+        if login_url
+        else ""
+    )
     if spec.required_cookie:
         callout = (
             '<p class="callout">&#9888;&#65039; <strong>Before you paste:</strong> make sure what '
@@ -302,24 +362,42 @@ def _render_form_page(nonce: str, spec: IngestProvider, error: str | None = None
         f"<p>Connect your <strong>{html.escape(spec.label)}</strong> session. "
         "Follow these steps exactly:</p>"
         f"<ol>{steps}</ol>"
+        f"{login_block}"
         f"{callout}"
         f'<p class="note">{html.escape(spec.hint)}</p>'
         f'<form method="post" action="/ingest/{html.escape(nonce)}" autocomplete="off">'
-        '<textarea name="cookies" autocomplete="off" spellcheck="false" '
-        'placeholder="Paste the cookie export JSON here"></textarea>'
-        "<p><button type=\"submit\">Save cookies</button></p>"
+        '<textarea name="payload" autocomplete="off" spellcheck="false" '
+        f'placeholder="{html.escape(spec.placeholder)}"></textarea>'
+        f'<p><button type="submit">{html.escape(spec.submit_label)}</button></p>'
         "</form>"
         '<p class="note">This link is single-use and expires 15 minutes after it was created. '
-        "Cookies are sent only to this server and are never shown back on this page.</p>"
+        "What you paste is sent only to this server and is never shown back on this page.</p>"
     )
 
 
-def _handle_get(nonce: str) -> HTMLResponse:
+async def _ensure_prepared(link: _IngestLink, spec: IngestProvider) -> None:
+    """Run the provider's prepare hook once, on the link's first render.
+
+    Re-preparing on reload would be a bug, not a refresh: the sign-in URL the
+    user already opened embeds the challenge for THIS verifier, so replacing it
+    would make the code they paste unredeemable.
+    """
+    if spec.prepare_name is None or link.state:
+        return
+    from .tools import admin as admin_tools
+
+    link.state = await getattr(admin_tools, spec.prepare_name)()
+
+
+async def _handle_get(nonce: str) -> HTMLResponse:
     link = _lookup(nonce)
     if link is None:
         return _not_found_response()
     spec = INGEST_PROVIDERS[link.provider]
-    return _page(f"{spec.label} session", _render_form_page(nonce, spec), 200)
+    await _ensure_prepared(link, spec)
+    return _page(
+        f"{spec.label} session", _render_form_page(nonce, spec, state=link.state), 200
+    )
 
 
 async def _handle_post(request: Request, nonce: str) -> HTMLResponse:
@@ -332,13 +410,13 @@ async def _handle_post(request: Request, nonce: str) -> HTMLResponse:
     if not content_length.isdigit() or int(content_length) > _MAX_BODY_BYTES:
         return _page(
             "Submission too large",
-            "<p>That doesn't look like a cookie export. "
-            "Go back and paste the JSON from Cookie Editor.</p>",
+            "<p>That is far bigger than anything this form expects. "
+            "Go back and paste just what the steps asked for.</p>",
             413,
         )
 
     form = await request.form()
-    cookies = str(form.get("cookies", "")).strip()
+    payload = str(form.get("payload", "")).strip()
 
     # Re-check after the await: the nonce could have been consumed while the
     # body was being read. From here to the pop everything is synchronous, so
@@ -346,31 +424,40 @@ async def _handle_post(request: Request, nonce: str) -> HTMLResponse:
     if _lookup(nonce) is None:
         return _not_found_response()
 
-    if not cookies:
+    if not payload:
         return _page(
             f"{spec.label} session",
-            _render_form_page(nonce, spec, error="Paste your cookie export JSON."),
+            _render_form_page(
+                nonce, spec, error="Nothing pasted — follow the steps above.",
+                state=link.state,
+            ),
             400,
         )
 
     from .tools import admin as admin_tools
 
+    setter = getattr(admin_tools, spec.setter_name)
     try:
-        result = await getattr(admin_tools, spec.setter_name)(cookies)
+        # A prepare-hook provider's setter needs the state that hook produced;
+        # the cookie setters take the paste and nothing else.
+        result = await (
+            setter(payload, state=link.state) if spec.prepare_name else setter(payload)
+        )
     except ToolError as exc:
         # Validation failed — leave the nonce live so the user can fix the
-        # paste and resubmit. ToolError text never contains cookie values.
+        # paste and resubmit. ToolError text never contains submitted values.
         return _page(
             f"{spec.label} session",
-            _render_form_page(nonce, spec, error=str(exc)),
+            _render_form_page(nonce, spec, error=str(exc), state=link.state),
             400,
         )
 
     _ingest_links.pop(nonce, None)
+    count = result.get("cookie_count")
+    saved = f"saved {count} cookies to" if count is not None else "saved your session to"
     return _page(
-        "Cookies saved",
-        f"<p><strong>{html.escape(spec.label)}</strong>: saved "
-        f"{result['cookie_count']} cookies to "
+        "Session saved",
+        f"<p><strong>{html.escape(spec.label)}</strong>: {saved} "
         f"<code>{html.escape(str(result['path']))}</code>.</p>"
         "<p>You can close this page. This link no longer works.</p>",
         200,
@@ -382,4 +469,4 @@ async def handle_ingest_request(request: Request) -> HTMLResponse:
     nonce = request.path_params["nonce"]
     if request.method == "POST":
         return await _handle_post(request, nonce)
-    return _handle_get(nonce)
+    return await _handle_get(nonce)

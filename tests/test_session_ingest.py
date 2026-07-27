@@ -55,7 +55,12 @@ def _post_request(nonce: str, body: bytes, content_length: str | None = None) ->
 
 
 def _form_body(cookies: object) -> bytes:
-    return urlencode({"cookies": json.dumps(cookies)}).encode()
+    return urlencode({"payload": json.dumps(cookies)}).encode()
+
+
+def _raw_body(text: str) -> bytes:
+    """A submission that is not a cookie export (the nintendo_pctl flow)."""
+    return urlencode({"payload": text}).encode()
 
 
 class _FakeClock:
@@ -102,8 +107,6 @@ class MintIngestLinkTests(SessionIngestTestCase):
     def test_unknown_provider_rejected(self) -> None:
         with self.assertRaisesRegex(ToolError, "Unknown provider 'psn'"):
             session_ingest.mint_ingest_link("psn")
-        with self.assertRaisesRegex(ToolError, "set_nintendo_pctl_session"):
-            session_ingest.mint_ingest_link("nintendo_pctl")
 
     def test_pending_links_capped(self) -> None:
         for _ in range(session_ingest._MAX_PENDING_LINKS + 3):
@@ -129,7 +132,7 @@ class IngestRouteTests(SessionIngestTestCase):
         self.assertEqual(response.status_code, 200)
         body = response.body.decode()
         self.assertIn("Humble Bundle", body)
-        self.assertIn('name="cookies"', body)
+        self.assertIn('name="payload"', body)
         self.assertIn('autocomplete="off"', body)
         self.assertEqual(response.headers["cache-control"], "no-store")
         # same-origin (not no-referrer): a no-referrer form page makes the browser
@@ -186,7 +189,7 @@ class IngestRouteTests(SessionIngestTestCase):
         cookies_path = os.path.join(self._tmp_dir(), "humble.json")
         with patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": cookies_path}):
             bad = await session_ingest.handle_ingest_request(
-                _post_request(nonce, urlencode({"cookies": "not json"}).encode())
+                _post_request(nonce, urlencode({"payload": "not json"}).encode())
             )
             self.assertEqual(bad.status_code, 400)
             self.assertIn("Invalid JSON", bad.body.decode())
@@ -201,7 +204,7 @@ class IngestRouteTests(SessionIngestTestCase):
     async def test_post_empty_cookies_field_is_400(self) -> None:
         nonce = self._mint()
         response = await session_ingest.handle_ingest_request(
-            _post_request(nonce, urlencode({"cookies": "   "}).encode())
+            _post_request(nonce, urlencode({"payload": "   "}).encode())
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn(nonce, session_ingest._ingest_links)
@@ -236,6 +239,144 @@ class IngestRouteTests(SessionIngestTestCase):
         tmp = tempfile.mkdtemp(prefix="ingest-test-")
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         return tmp
+
+
+class _FakeAuthenticator:
+    """Stands in for pynintendoparental's Authenticator (no network, no PKCE)."""
+
+    instances: list["_FakeAuthenticator"] = []
+    fail_with: Exception | None = None
+
+    def __init__(self, client_session=None) -> None:
+        self._auth_code_verifier = f"verifier-{len(self.instances)}"
+        self.login_url = f"https://accounts.nintendo.com/authorize?state=s{len(self.instances)}"
+        self._session_token: str | None = None
+        self.completed_with: str | None = None
+        type(self).instances.append(self)
+
+    async def async_complete_login(self, response_token: str) -> None:
+        if type(self).fail_with is not None:
+            raise type(self).fail_with
+        self.completed_with = response_token
+        self._session_token = "pctl-session-token"
+
+
+class NintendoPctlIngestTests(SessionIngestTestCase):
+    """The Parental Controls login runs through the same single-use link.
+
+    It is not a cookie paste — the npf:// link the user copies carries a
+    one-time code redeemable for a long-lived token, so it gets the same
+    never-in-the-chat treatment (ADR 0004's fourth amendment).
+    """
+
+    NPF_LINK = "npf54789befb391a838://auth#session_token_code=SECRET-CODE&state=s0"
+
+    def setUp(self) -> None:
+        super().setUp()
+        _FakeAuthenticator.instances = []
+        _FakeAuthenticator.fail_with = None
+        patcher = patch(
+            "pynintendoparental.authenticator.Authenticator", _FakeAuthenticator
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.token_path = os.path.join(self._tmp_dir(), "pctl.json")
+        env = patch.dict(os.environ, {"NINTENDO_PCTL_SESSION_FILE": self.token_path})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def _tmp_dir(self) -> str:
+        tmp = tempfile.mkdtemp(prefix="pctl-test-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return tmp
+
+    def _mint(self) -> str:
+        with patch.dict(os.environ, {"MCP_PUBLIC_BASE_URL": "https://gamelib.example"}):
+            return session_ingest.mint_ingest_link("nintendo_pctl")["url"].rsplit("/", 1)[1]
+
+    async def test_form_offers_the_sign_in_link(self) -> None:
+        nonce = self._mint()
+        response = await session_ingest.handle_ingest_request(_get_request(nonce))
+        body = response.body.decode()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Sign in to Nintendo", body)
+        self.assertIn("accounts.nintendo.com/authorize", body)
+        self.assertIn('name="payload"', body)
+
+    async def test_reload_keeps_the_same_verifier(self) -> None:
+        # Re-preparing on reload would silently break the flow: the code the
+        # user is about to paste can only be redeemed by the verifier that
+        # built the URL they already opened.
+        nonce = self._mint()
+        first = await session_ingest.handle_ingest_request(_get_request(nonce))
+        second = await session_ingest.handle_ingest_request(_get_request(nonce))
+        self.assertEqual(first.body, second.body)
+        self.assertEqual(len(_FakeAuthenticator.instances), 1)
+        self.assertEqual(
+            session_ingest._ingest_links[nonce].state["verifier"], "verifier-0"
+        )
+
+    async def test_pasted_link_is_redeemed_with_the_prepared_verifier(self) -> None:
+        nonce = self._mint()
+        await session_ingest.handle_ingest_request(_get_request(nonce))
+        response = await session_ingest.handle_ingest_request(
+            _post_request(nonce, _raw_body(self.NPF_LINK))
+        )
+        body = response.body.decode()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("saved your session to", body)
+        # Never echo the submitted link — it carries the one-time code.
+        self.assertNotIn("SECRET-CODE", body)
+        with open(self.token_path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"session_token": "pctl-session-token"})
+        # The exchange used the verifier minted for THIS link, not a fresh one.
+        exchanging = _FakeAuthenticator.instances[-1]
+        self.assertEqual(exchanging._auth_code_verifier, "verifier-0")
+        self.assertEqual(exchanging.completed_with, self.NPF_LINK)
+        # Single-use, like every other provider.
+        self.assertNotIn(nonce, session_ingest._ingest_links)
+
+    async def test_rejected_link_keeps_the_link_alive_and_hides_the_code(self) -> None:
+        nonce = self._mint()
+        await session_ingest.handle_ingest_request(_get_request(nonce))
+        _FakeAuthenticator.fail_with = ValueError(
+            f"invalid_grant for session_token_code=SECRET-CODE in {self.NPF_LINK}"
+        )
+        response = await session_ingest.handle_ingest_request(
+            _post_request(nonce, _raw_body(self.NPF_LINK))
+        )
+        body = response.body.decode()
+        self.assertEqual(response.status_code, 400)
+        # The upstream error text quotes the submitted token, so it must not be
+        # interpolated into the page — a generic retry message goes out instead.
+        self.assertNotIn("SECRET-CODE", body)
+        self.assertIn("sign in again", body)
+        self.assertIn(nonce, session_ingest._ingest_links)
+        self.assertIn("Sign in to Nintendo", body)  # retry link still rendered
+        self.assertFalse(os.path.exists(self.token_path))
+
+    async def test_bare_session_token_is_stored_as_is(self) -> None:
+        nonce = self._mint()
+        await session_ingest.handle_ingest_request(_get_request(nonce))
+        response = await session_ingest.handle_ingest_request(
+            _post_request(nonce, _raw_body("eyJhbGciOi.already-a-token"))
+        )
+        self.assertEqual(response.status_code, 200)
+        with open(self.token_path, encoding="utf-8") as f:
+            self.assertEqual(
+                json.load(f), {"session_token": "eyJhbGciOi.already-a-token"}
+            )
+
+    async def test_link_without_a_prepared_verifier_is_refused(self) -> None:
+        # POSTing straight to a link whose form was never rendered (so no
+        # verifier exists) must fail loudly rather than redeem with a fresh one.
+        nonce = self._mint()
+        response = await session_ingest.handle_ingest_request(
+            _post_request(nonce, _raw_body(self.NPF_LINK))
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("expired", response.body.decode())
+        self.assertFalse(os.path.exists(self.token_path))
 
 
 class IngestMiddlewareTests(unittest.IsolatedAsyncioTestCase):

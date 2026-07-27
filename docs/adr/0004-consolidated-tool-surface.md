@@ -117,9 +117,9 @@ Status: accepted (2026-07-26)
   across constituents is its own operation, not a bulk write.
 - **`split_game`/`merge_games`/`delete_game` behind one `action`** — that puts
   irreversible deletion behind the same schema as a merge.
-- **`create_session_ingest_link` + `set_nintendo_pctl_session`** — the pctl
-  flow is a two-step login round-trip, not a cookie paste; one parameter would
-  mean two unrelated things.
+- ~~**`create_session_ingest_link` + `set_nintendo_pctl_session`**~~ — *reversed
+  2026-07-27, see the fifth amendment. The stated reason (a login round-trip is
+  not a cookie paste) argued against the wrong version of the merge.*
 - **`get_sync_status` into `get_integration_status`** — last-sync state from
   `meta` vs cached credential readiness.
 - **`set_switch2_playtime_baseline` into `set_playtime`** — it deliberately is
@@ -409,3 +409,45 @@ compose into an incorrect tool the moment one of them has a side effect the
 other's rejection cannot undo. `admin.validate_sync_platforms` does this
 up front, so a rejected `sync` is a no-op; the impls keep their own guards,
 since they are still called directly and unit-tested that way.
+
+## Amendment (2026-07-27, fifth): the pctl rejection was wrong, 30 → 29
+
+The "Rejected" list above kept `set_nintendo_pctl_session` out of
+`create_session_ingest_link` because "the pctl flow is a two-step login
+round-trip, not a cookie paste; one parameter would mean two unrelated
+things." That reasoning only holds for the weak version of the merge, where
+the **tool** keeps both steps and `provider`/`response` collide in one
+signature. It says nothing about the version that matters: put both steps in
+the browser form, and the tool signature stays exactly
+`create_session_ingest_link(provider="nintendo_pctl")` — nothing overloaded.
+
+Worse, the rejection preserved the very thing the ingest form exists to
+prevent. Step 2 of the chat flow asked the user to paste an
+`npf…://auth#session_token_code=…` link (or a bare session token) into the
+conversation. That code redeems for a long-lived Parental Controls token — the
+same class of secret as the cookies whose five `set_*_session` chat tools were
+deleted for exactly this reason. It was the last credential-in-chat path on the
+surface, and the taxonomy argument hid it.
+
+**What the merge needed**, which is why the shape is worth recording:
+
+- `IngestProvider` gains an optional `prepare_name` hook —
+  `admin.prepare_nintendo_pctl_login`, run once when the form first renders —
+  plus wording fields (`placeholder`, `submit_label`, `login_link_label`), since
+  a form that says "Paste the cookie export JSON" is wrong for this provider.
+- `_IngestLink` gains `state`. Nintendo's sign-in URL embeds a PKCE challenge
+  and only the matching verifier can redeem the code pasted back, so that
+  verifier must live for exactly the lifetime of the link. It replaces a
+  module-level `_PENDING_PCTL_LOGIN` dict that held one verifier for the whole
+  process — strictly narrower, and it expires with the nonce.
+- Preparing is **once per link, not per render**: re-preparing on reload would
+  swap the verifier out from under the URL the user already opened.
+- The failure message no longer interpolates the upstream exception. That text
+  can quote the submitted token, and no ingest page may echo back what was
+  pasted — a rule the cookie providers got for free and this one had to be
+  given (pinned by a test that puts the secret in the exception).
+
+Net surface: **30 → 29 tools**. The lesson for the next rejection is that
+"these are different shapes" is an argument about the tool's signature, and the
+question worth asking first is what the merge is *for* — here, that no
+credential reaches the chat.

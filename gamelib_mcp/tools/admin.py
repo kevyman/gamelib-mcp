@@ -687,26 +687,42 @@ async def create_session_ingest_link(provider: str) -> dict:
     return mint_ingest_link(provider)
 
 
-# Holds the PKCE code_verifier between the two set_nintendo_pctl_session calls.
-# The verifier that generated the login URL must be the one used to exchange the
-# pasted code, so it has to survive across the (interactive) gap.
-_PENDING_PCTL_LOGIN: dict[str, str] = {}
+async def prepare_nintendo_pctl_login() -> dict[str, str]:
+    """Mint a Parental Controls sign-in URL and the PKCE verifier that redeems it.
 
-
-async def set_nintendo_pctl_session(response: str = "") -> dict:
+    Step 1 of the `nintendo_pctl` ingest flow, run once per link when the form
+    is first rendered. Nintendo's login URL embeds a challenge derived from a
+    per-login verifier, and only that verifier can exchange the code the user
+    pastes back — so it is stored on the ingest link and handed to
+    set_nintendo_pctl_session below. Builds the URL locally (PKCE), no network.
     """
-    Set up Nintendo Switch Parental Controls playtime sync (no `f` token needed).
+    import aiohttp
+    from pynintendoparental.authenticator import Authenticator
 
-    The Parental Controls API reports per-game playtime for any console registered
-    to Parental Controls, regardless of which account owns the game — so games
-    played on your console under another account show up too. This is the playtime
-    source for switch2 (VGCS provides ownership).
+    async with aiohttp.ClientSession() as session:
+        auth = Authenticator(client_session=session)
+        return {"login_url": auth.login_url, "verifier": auth._auth_code_verifier}
 
-    Two-step flow (the server can't open a browser):
-    1. Call with no argument → returns a `login_url`. Open it, sign in to your
-       Nintendo account, right-click "Select this person" and copy the link.
-    2. Call again with that `npf…://auth` link (or a bare session token) → the
-       session token is stored for playtime sync.
+
+async def set_nintendo_pctl_session(
+    response: str,
+    *,
+    state: dict[str, str] | None = None,
+) -> dict:
+    """
+    Store the Parental Controls session token for Switch playtime sync.
+
+    Step 2 of the `nintendo_pctl` ingest flow: `response` is the `npf…://auth`
+    link copied off Nintendo's "Select this person" button (or a bare session
+    token), and `state` carries the verifier from prepare_nintendo_pctl_login.
+    Not an MCP tool — that link contains a one-time code redeemable for a
+    long-lived token, exactly the kind of secret create_session_ingest_link
+    exists to keep out of the chat.
+
+    The Parental Controls API reports per-game playtime for any console
+    registered to Parental Controls, whichever account owns each game — so
+    titles played on your console under another account show up too. This is
+    the playtime source for switch2 (VGCS provides ownership).
 
     Saved to NINTENDO_PCTL_SESSION_FILE (defaults to nintendo_pctl_session.json
     beside the database).
@@ -717,36 +733,34 @@ async def set_nintendo_pctl_session(response: str = "") -> dict:
     from ..data.nintendo_pctl import _token_file_path
 
     text = (response or "").strip()
-    async with aiohttp.ClientSession() as session:
-        if not text:
-            auth = Authenticator(client_session=session)
-            _PENDING_PCTL_LOGIN["verifier"] = auth._auth_code_verifier
-            return {
-                "status": "awaiting_login",
-                "login_url": auth.login_url,
-                "instructions": (
-                    "Open login_url, sign in, right-click 'Select this person' and copy "
-                    "the link, then call set_nintendo_pctl_session again with that "
-                    "npf://auth link."
-                ),
-            }
+    if not text:
+        raise ToolError("Nothing pasted — copy the npf:// link and try again.")
 
-        if "session_token_code" in text or text.startswith("npf"):
+    if "session_token_code" in text or text.startswith("npf"):
+        verifier = (state or {}).get("verifier")
+        if not verifier:
+            raise ToolError(
+                "This login link expired. Ask your assistant for a fresh "
+                "create_session_ingest_link(provider=\"nintendo_pctl\") link."
+            )
+        async with aiohttp.ClientSession() as session:
             auth = Authenticator(client_session=session)
-            verifier = _PENDING_PCTL_LOGIN.get("verifier")
-            if verifier:
-                auth._auth_code_verifier = verifier
+            auth._auth_code_verifier = verifier
             try:
                 await auth.async_complete_login(response_token=text)
-            except Exception as exc:
+            except Exception:
+                # Deliberately NOT interpolated into the message: the failure
+                # text can quote the token that was submitted, and no ingest
+                # page may echo a submitted secret back (see session_ingest).
+                logger.exception("Parental Controls login exchange failed")
                 raise ToolError(
-                    f"Parental Controls login failed: {exc}. Re-run with no argument "
-                    "to get a fresh login URL, then paste the link promptly."
-                ) from exc
+                    "Nintendo rejected that link. Codes are single-use and "
+                    "expire quickly — sign in again with the button above and "
+                    "paste the fresh link."
+                ) from None
             token = auth._session_token
-            _PENDING_PCTL_LOGIN.pop("verifier", None)
-        else:
-            token = text  # treat as a bare session token
+    else:
+        token = text  # treat as a bare session token
 
     if not token:
         raise ToolError("No session token obtained")

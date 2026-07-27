@@ -16,7 +16,7 @@ playtime total is ``SUM`` of those days, so re-syncing never double-counts.
 
 Auth: a Nintendo Account session token (Parental Controls OAuth client) stored in
 ``NINTENDO_PCTL_SESSION_FILE`` (defaults beside the database), populated
-via the ``set_nintendo_pctl_session`` MCP tool.
+via ``create_session_ingest_link(provider="nintendo_pctl")``.
 """
 
 import json
@@ -183,7 +183,7 @@ async def sync_nintendo_pctl() -> dict:
             "sync_status": "unconfigured",
             "error_summary": (
                 "Parental Controls not configured: set a session token via "
-                "set_nintendo_pctl_session"
+                'create_session_ingest_link(provider="nintendo_pctl")'
             ),
             "error_classification": "missing_configuration",
         }
