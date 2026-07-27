@@ -56,7 +56,7 @@ def _setup_switch() -> None:
         "2. Open the URL, sign in, right-click 'Select this person' → Copy Link.\n"
         "3. Call set_nintendo_pctl_session() again with that npf://auth link.\n"
         "\n"
-        'Then run refresh_library(["switch2"]) to sync.'
+        'Then run sync(targets=["library"], platforms=["switch2"]) to sync.'
     )
 
 

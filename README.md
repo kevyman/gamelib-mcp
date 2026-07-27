@@ -16,25 +16,31 @@ gamelib-mcp is single-user by design: one deployment serves one person's library
 
 ## MCP Tools
 
+30 tools. Any tool that acts on one game also takes `items=[...]` to do the same
+thing in bulk in a single call — see [ADR 0004](docs/adr/0004-consolidated-tool-surface.md).
+
 | Tool | Description |
 |---|---|
-| `search_games` / `search_games_batch` | Punctuation-insensitive, relevance-ranked title search with fuzzy fallback |
-| `get_game_detail` | Full detail for one game; triggers lazy enrichment on demand |
+| `search_games` | Punctuation-insensitive, relevance-ranked title search with fuzzy fallback; `queries=[...]` resolves several names at once |
+| `get_game_detail` | Full detail for a game; triggers lazy enrichment on demand (`items` skips it) |
 | `get_library_stats` | Library-wide aggregates with tag/genre/score/playtime filters |
 | `discover_games` | Unified discovery: vibe filters, taste-match ranking (with matched-tag explanations), critic-score ranking, and backlog value picks |
-| `get_taste_profile` | Your computed tag preferences |
-| `sync_ratings` / `get_ratings` | Pull ratings from Backloggd and Steam reviews |
-| `rate_game` | Rate a game 0–10 directly; feeds the taste profile immediately |
-| `get_backlog_stats` | Backlog size, completion estimates |
-| `get_platform_breakdown` | Ownership counts per platform |
-| `get_wishlist_deals` | Current prices and deals for wishlist games (Steam/GOG/Epic via IsThereAnyDeal, Switch via DekuDeals) |
-| `refresh_library` | Re-sync all platforms, or a subset (e.g. just `["gog"]`) |
+| `get_stats` | One rollup per call: `backlog`, `platforms`, `taste`, `spending`, or `series` |
+| `get_ratings` / `rate_game` | Read synced ratings; rate a game 0–10 directly, feeding the taste profile immediately |
+| `get_wishlist` | Wishlist contents, or with `with_prices=True` current deals (Steam/GOG/Epic via IsThereAnyDeal, Switch via DekuDeals) |
+| `get_play_history` | What you actually played in a time window, per game |
+| `sync` | Re-sync `library`, `wishlist`, and/or `ratings`; `platforms` scopes the first two |
+| `get_sync_status` | Poll a running library sync |
+| `check_library` | One registry of data-integrity checks (identity, nesting, ownership, spend, completion…) with machine-readable repair pointers |
+| `query_library` | Read-only SQL escape hatch; call with no arguments for the live schema |
 | `set_hardware_preference` | Priority order for suggested platforms |
-| `add_game_to_platform` | Manually record ownership |
-| `detect_farmed_games` | Flag games with suspicious achievement patterns |
+| `add_game_to_platform` / `update_game` / `set_playtime` / `set_acquisition` | Manual ownership, metadata, playtime pins, and purchase records |
+| `merge_games` / `split_game` / `delete_game` | Identity repair |
+| `import_purchases` / `split_bundle_acquisition` | Storefront purchase history and bundle price splits |
 | `set_nintendo_pctl_session` | Set up Switch playtime sync via Parental Controls |
-| `create_session_ingest_link` | Mint a single-use browser link to paste store session cookies (Nintendo/Humble/Steam-store) outside the chat |
+| `create_session_ingest_link` | Mint a single-use browser link to paste store session cookies (Nintendo/Epic/Humble/Steam) outside the chat |
 | `get_integration_status` | Per-platform integration health |
+| `get_scrape_config` / `manage_scrape_config` | Inspect or heal the declarative scrape config |
 
 ## Quick Start
 

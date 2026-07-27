@@ -14,6 +14,8 @@ import asyncio
 import json
 import os
 import shutil
+import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +31,7 @@ os.environ.setdefault("MCP_ADMIN_AUTH_TOKEN", "test-admin-token-at-least-32-char
 os.environ.setdefault("FASTMCP_HOME", "/tmp/gamelib-mcp-fastmcp-tests")
 
 from gamelib_mcp.data import db as db_module
+from gamelib_mcp.data.db import readonly
 from gamelib_mcp.data.title_normalization import normalize_search_text
 
 
@@ -56,6 +59,35 @@ def _throwaway_default_database():
                 os.environ["DATABASE_URL"] = prev
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _no_leaked_sqlite_worker_threads():
+    """Fail the run if an aiosqlite worker thread outlives the test session.
+
+    aiosqlite runs each connection on a non-daemon thread, so one unclosed
+    connection means threading._shutdown blocks forever and pytest never exits
+    — after reporting every test as passed. CI has no way to tell that apart
+    from a slow job, and it burned a full six-hour job timeout before anyone
+    looked. Checking here turns a silent hang into a named failure.
+    """
+    yield
+    # A connection closed at the very end of the last test can still be winding
+    # its thread down; only a thread that survives the grace period is a leak.
+    deadline = time.monotonic() + 5.0
+    while True:
+        leaked = [
+            t.name for t in threading.enumerate()
+            if "_connection_worker_thread" in t.name and not t.daemon
+        ]
+        if not leaked or time.monotonic() > deadline:
+            break
+        time.sleep(0.1)
+    assert not leaked, (
+        f"aiosqlite worker thread(s) still alive after the session: {leaked}. "
+        "Some connection was never closed; the interpreter will hang at exit. "
+        "Close it in the owning test's teardown (see ToolDBTestCase)."
+    )
+
+
 class ToolDBTestCase(unittest.IsolatedAsyncioTestCase):
     """Base case giving each test an isolated, migrated SQLite database."""
 
@@ -68,6 +100,15 @@ class ToolDBTestCase(unittest.IsolatedAsyncioTestCase):
         await db_module.init_db()
 
     async def asyncTearDown(self) -> None:
+        # The read-only connection is a per-event-loop singleton, and
+        # IsolatedAsyncioTestCase gives every test its own loop. Left open, the
+        # aiosqlite worker thread behind it is NOT a daemon thread: it outlives
+        # the loop, and threading._shutdown joins it forever at interpreter
+        # exit. That is what wedged CI for six hours after a green run — the
+        # tests all passed, then pytest never exited. Closing it here rather
+        # than in the one test module that first hit it keeps the next test
+        # that touches query_library from re-introducing the hang.
+        await readonly.close_readonly_connection()
         db_module._DB_READY_PATH = None
         if self._prev_database_url is None:
             os.environ.pop("DATABASE_URL", None)

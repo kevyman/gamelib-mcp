@@ -299,7 +299,7 @@ async def discover_games(
         )
     elif vibes is None and sort_by == "match" and affinity_row["c"] == 0:
         envelope["note"] = (
-            "No taste profile yet — run sync_ratings (or rate games with "
+            "No taste profile yet — run sync(targets=[\"ratings\"]) (or rate games with "
             "rate_game) to compute tag affinity before match ranking works."
         )
     return envelope

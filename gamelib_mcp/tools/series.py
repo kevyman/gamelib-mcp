@@ -1,4 +1,4 @@
-"""get_series_breakdown / discover_series_gaps: series/franchise tools.
+"""Series/franchise implementations: the "series" stats report and gap discovery.
 
 get_series_breakdown ranks owned series by how many games are owned in each.
 discover_series_gaps answers a different question — "which entries am I
