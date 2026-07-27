@@ -556,12 +556,20 @@ async def sync(
     sync_status="unconfigured" rather than erroring. Read results back with
     get_wishlist.
 
+    platforms must be syncable for EVERY selected target: combining "wishlist"
+    with a library-only platform (e.g. platforms=["gog"]) is rejected without
+    syncing anything — use one call per target instead.
+
     "ratings" runs synchronously and can take 1-2 minutes: it scrapes Backloggd
     and Steam community reviews, upserts ratings, and recomputes tag affinity.
     Run it before discover_games or get_stats(report="taste") when external
     ratings may have changed. It ignores the platforms filter.
     """
-    from .tools.admin import refresh_library as _refresh, sync_wishlist as _sync_wishlist
+    from .tools.admin import (
+        refresh_library as _refresh,
+        sync_wishlist as _sync_wishlist,
+        validate_sync_platforms as _validate_platforms,
+    )
     from .tools.ratings import sync_ratings as _sync_ratings
 
     selected = ["library"] if targets is None else targets
@@ -570,6 +578,10 @@ async def sync(
         raise ToolError(
             f"unknown target(s): {sorted(unknown)}. Valid: ['library', 'ratings', 'wishlist']"
         )
+    # Every target's filter is checked before the first one runs: "library" is
+    # fire-and-forget, so a later target's rejection would otherwise report an
+    # error for a sync already in flight.
+    _validate_platforms(selected, platforms)
 
     result: dict = {"targets": selected}
     # Library first: it is fire-and-forget, so kicking it off before the two

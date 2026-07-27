@@ -48,11 +48,13 @@ class SyncTargetDispatchTests(unittest.IsolatedAsyncioTestCase):
         m_rate.assert_awaited_once()
 
     async def test_platforms_filter_reaches_library_and_wishlist_only(self):
+        # steam, because the filter must be syncable for EVERY selected target
+        # (see test_platform_unsupported_by_a_later_target_syncs_nothing).
         lib, wish, rate = self._patches()
         with lib as m_lib, wish as m_wish, rate as m_rate:
-            await main.sync(ctx=None, targets=["library", "wishlist", "ratings"], platforms=["gog"])
-        self.assertEqual(m_lib.await_args.args[0], ["gog"])
-        self.assertEqual(m_wish.await_args.args[0], ["gog"])
+            await main.sync(ctx=None, targets=["library", "wishlist", "ratings"], platforms=["steam"])
+        self.assertEqual(m_lib.await_args.args[0], ["steam"])
+        self.assertEqual(m_wish.await_args.args[0], ["steam"])
         self.assertEqual(m_rate.await_args.args, ())  # ratings ignores platforms
 
     async def test_unknown_target_raises_and_syncs_nothing(self):
@@ -64,6 +66,41 @@ class SyncTargetDispatchTests(unittest.IsolatedAsyncioTestCase):
         m_lib.assert_not_awaited()
         m_wish.assert_not_awaited()
         m_rate.assert_not_awaited()
+
+    async def test_platform_unsupported_by_a_later_target_syncs_nothing(self):
+        # GOG has a library sync but no wishlist sync. Library runs FIRST and is
+        # fire-and-forget, so validating only inside sync_wishlist would have
+        # launched the background sync and then errored — reporting a failure for
+        # a sync that is actually running, with the retry saying already_running.
+        lib, wish, rate = self._patches()
+        with lib as m_lib, wish as m_wish, rate as m_rate:
+            with self.assertRaises(Exception) as ctx:
+                await main.sync(ctx=None, targets=["library", "wishlist"], platforms=["gog"])
+        message = str(ctx.exception)
+        self.assertIn("gog", message)
+        self.assertIn("wishlist", message)
+        m_lib.assert_not_awaited()
+        m_wish.assert_not_awaited()
+        m_rate.assert_not_awaited()
+
+    async def test_platform_valid_for_every_target_still_dispatches(self):
+        # Steam syncs both, and an alias must resolve before the check rejects it.
+        lib, wish, _ = self._patches()
+        for platforms in (["steam"], ["nintendo"]):
+            with self.subTest(platforms=platforms):
+                lib, wish, rate = self._patches()
+                with lib as m_lib, wish as m_wish, rate:
+                    await main.sync(ctx=None, targets=["library", "wishlist"], platforms=platforms)
+                m_lib.assert_awaited_once()
+                m_wish.assert_awaited_once()
+
+    async def test_ratings_ignores_an_unwishlistable_platform(self):
+        # ratings takes no platform filter, so it must not be what rejects one.
+        lib, wish, rate = self._patches()
+        with lib as m_lib, wish, rate as m_rate:
+            await main.sync(ctx=None, targets=["library", "ratings"], platforms=["gog"])
+        m_lib.assert_awaited_once()
+        m_rate.assert_awaited_once()
 
 
 class GetStatsReportDispatchTests(ToolDBTestCase):

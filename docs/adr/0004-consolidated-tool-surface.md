@@ -392,3 +392,20 @@ test documents the two-rows-one-game invariant.
 data behind it. Three of the four unbounded fields found across this work were
 invisible on the dev database — run the audit against a prod snapshot, not the
 checked-in fixture.
+
+## Amendment (2026-07-27, fourth): a multi-mode tool validates before it acts
+
+Review found a defect the single-tool surface could not have had. `sync` runs
+its targets in sequence and starts `library` first *because* that one is
+fire-and-forget — but each impl validated its own `platforms` filter, so
+`sync(targets=["library", "wishlist"], platforms=["gog"])` launched the
+background library sync and only then hit `sync_wishlist`'s rejection of GOG
+(no wishlist API). The caller got an error for a sync that was in fact running,
+and the retry reported `already_running` while still failing.
+
+**Convention this adds, for every merged tool:** validate the inputs of *all*
+selected modes before running the first one. Two independently-correct impls
+compose into an incorrect tool the moment one of them has a side effect the
+other's rejection cannot undo. `admin.validate_sync_platforms` does this
+up front, so a rejected `sync` is a no-op; the impls keep their own guards,
+since they are still called directly and unit-tested that way.
