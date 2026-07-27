@@ -1,4 +1,4 @@
-"""refresh_library, detect_farmed_games, and set_nintendo_session admin tools."""
+"""Library sync, merge/split/delete, and session-setup admin implementations."""
 
 import asyncio
 import json
@@ -201,6 +201,53 @@ async def run_library_sync(
         "library_sync_finished_at": datetime.now(timezone.utc).isoformat(),
     })
     return results
+
+
+# The platform filter a sync target honors, by target name. "ratings" is absent
+# because it ignores the filter entirely.
+_PLATFORM_SCOPED_SYNC_TARGETS: dict[str, frozenset[str]] = {
+    "library": SYNCABLE_PLATFORMS,
+    "wishlist": WISHLIST_SYNCABLE_PLATFORMS,
+}
+
+
+def validate_sync_platforms(targets: list[str], platforms: list[str] | None) -> None:
+    """
+    Reject a platform filter a selected target cannot honor, before ANY of them
+    starts work.
+
+    refresh_library and sync_wishlist each validate their own filter, but a
+    combined sync() runs them in sequence and the library one is
+    fire-and-forget: sync(targets=["library", "wishlist"], platforms=["gog"])
+    would launch the background library sync and only then hit sync_wishlist's
+    rejection, so the caller sees an error for a sync that is in fact running —
+    and the retry reports already_running while still failing. Validating every
+    selected target up front keeps a rejected call a no-op.
+    """
+    if not platforms:
+        return
+
+    problems: list[str] = []
+    for target in targets:
+        supported = _PLATFORM_SCOPED_SYNC_TARGETS.get(target)
+        if supported is None:
+            continue
+        unsupported = sorted(
+            {p for p in platforms if PLATFORM_ALIASES.get(p.lower(), p.lower()) not in supported}
+        )
+        if unsupported:
+            problems.append(
+                f"target '{target}' does not sync {unsupported} "
+                f"(valid: {sorted(supported | {a for a, n in PLATFORM_ALIASES.items() if n in supported})})"
+            )
+
+    if problems:
+        hint = (
+            " PSN has no wishlist API — use add_game_to_platform(owned=False)."
+            if any(p.startswith("target 'wishlist'") for p in problems)
+            else ""
+        )
+        raise ToolError(f"Nothing was synced: {'; '.join(problems)}.{hint}")
 
 
 async def refresh_library(

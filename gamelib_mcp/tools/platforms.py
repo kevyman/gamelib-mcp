@@ -1,4 +1,4 @@
-"""get_platform_breakdown, add_game_to_platform, update_game, and set_hardware_preference tools."""
+"""Platform-row implementations: breakdown, ownership, game edits, playtime pins."""
 
 import json
 import math
@@ -63,7 +63,7 @@ COMPLETION_STATUSES = {"playing", "completed", "abandoned", "evergreen"}
 CONTENT_TYPES = PRIMARY_CONTENT_TYPES | NESTED_CONTENT_TYPES
 
 
-async def get_platform_breakdown() -> dict:
+async def get_platform_breakdown(overlap_limit: int = 25) -> dict:
     """
     Return per-platform game counts, total unique games, and overlap list
     (games owned on 2+ platforms).
@@ -73,7 +73,15 @@ async def get_platform_breakdown() -> dict:
     owned_games/total_unique_games/overlap_games; it's reported separately
     via owned_addons/total_unique_addons so DLC ownership stays visible
     without corrupting the "how many games do I own" numbers.
+
+    overlap_games is CAPPED at overlap_limit (most-platforms first, then most
+    playtime). It is the only field here that grows with library size — at
+    ~3k owned rows it was 428 entries and 98% of this response — so the full
+    list is deliberately not returned. overlap_count always reports the true
+    total and overlap_truncated says whether the list was cut; page through
+    the rest with get_library_stats or query_library.
     """
+    overlap_limit = max(0, min(int(overlap_limit), 200))
     async with get_db() as db:
         platform_rows = await db.execute_fetchall(
             """SELECT gp.platform AS platform,
@@ -98,6 +106,18 @@ async def get_platform_breakdown() -> dict:
                WHERE gp.owned = 1"""
         )
 
+        overlap_total = await db.execute_fetchone(
+            """SELECT COUNT(*) AS c FROM (
+                   SELECT g.id
+                   FROM games g
+                   JOIN game_platforms gp ON gp.game_id = g.id AND gp.owned = 1
+                   WHERE g.is_primary_library_item = 1
+                   GROUP BY g.id
+                   HAVING COUNT(gp.platform) >= 2
+               )"""
+        )
+        # Ordered so a truncated page is the most interesting slice, not an
+        # arbitrary one: widest ownership first, then most-played.
         overlap_rows = await db.execute_fetchall(
             """SELECT g.name, g.id AS game_id,
                       COUNT(gp.platform) AS platform_count,
@@ -107,7 +127,11 @@ async def get_platform_breakdown() -> dict:
                WHERE g.is_primary_library_item = 1
                GROUP BY g.id
                HAVING platform_count >= 2
-               ORDER BY platform_count DESC"""
+               ORDER BY platform_count DESC,
+                        COALESCE(SUM(gp.playtime_minutes), 0) DESC,
+                        g.name ASC
+               LIMIT ?""",
+            (overlap_limit,),
         )
 
     return {
@@ -121,7 +145,10 @@ async def get_platform_breakdown() -> dict:
         ],
         "total_unique_games": total["games"],
         "total_unique_addons": total["addons"],
-        "overlap_count": len(overlap_rows),
+        # The true total, independent of the cap below.
+        "overlap_count": overlap_total["c"],
+        "overlap_truncated": overlap_total["c"] > len(overlap_rows),
+        "overlap_limit": overlap_limit,
         "overlap_games": [
             {
                 "game_id": r["game_id"],
@@ -133,7 +160,11 @@ async def get_platform_breakdown() -> dict:
     }
 
 
-async def get_wishlist(platform: str | None = None) -> dict:
+async def get_wishlist(
+    platform: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
     """
     List wishlist items — games marked wanted but not necessarily owned.
 
@@ -144,8 +175,14 @@ async def get_wishlist(platform: str | None = None) -> dict:
     and add_game_to_platform both clear an entry once it's actually owned;
     True here is a transient diagnostic (ownership was just established and
     the next cleanup pass hasn't run yet), not a common case.
+
+    Paginated: the wishlist grows without bound, so results are capped at
+    `limit` (newest first). count is the page size, total_matches the true
+    total, has_more whether another page exists.
     """
     resolved_platform = _validate_platform(platform, LIBRARY_PLATFORMS) if platform else None
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
 
     where = "WHERE 1=1"
     params: list = []
@@ -154,6 +191,10 @@ async def get_wishlist(platform: str | None = None) -> dict:
         params.append(resolved_platform)
 
     async with get_db() as db:
+        total = await db.execute_fetchone(
+            f"SELECT COUNT(*) AS c FROM game_wishlist w JOIN games g ON g.id = w.game_id {where}",
+            params,
+        )
         rows = await db.execute_fetchall(
             f"""SELECT g.id AS game_id, g.name, g.content_type, w.platform,
                        w.wishlisted_at, w.source,
@@ -164,12 +205,15 @@ async def get_wishlist(platform: str | None = None) -> dict:
                 FROM game_wishlist w
                 JOIN games g ON g.id = w.game_id
                 {where}
-                ORDER BY w.wishlisted_at DESC""",
-            params,
+                ORDER BY w.wishlisted_at DESC, w.id DESC
+                LIMIT ? OFFSET ?""",
+            [*params, limit, offset],
         )
 
     return {
         "count": len(rows),
+        "total_matches": total["c"],
+        "has_more": offset + len(rows) < total["c"],
         "items": [
             {
                 "game_id": r["game_id"],
@@ -1027,7 +1071,7 @@ async def set_switch2_playtime_baseline(
         if gp is None:
             raise ToolError(
                 f"'{row['name']}' has no {_SWITCH2} platform row. Add it first with "
-                "add_game_to_platform (or run refresh_library if it should be synced)."
+                "add_game_to_platform (or run sync(targets=[\"library\"]) if it should be synced)."
             )
         overrides = await get_platform_manual_overrides(db, gp["id"])
         if "playtime_minutes" in overrides:

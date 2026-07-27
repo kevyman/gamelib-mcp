@@ -13,6 +13,10 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    # The suite runs in ~2.5 minutes. Without a cap, a process that passes every
+    # test and then hangs at interpreter exit (a leaked non-daemon aiosqlite
+    # thread does exactly that) burns the 6-hour default before failing.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 

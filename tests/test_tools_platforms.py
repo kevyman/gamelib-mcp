@@ -34,6 +34,8 @@ class PlatformBreakdownTests(ToolDBTestCase):
                 "total_unique_games",
                 "total_unique_addons",
                 "overlap_count",
+                "overlap_truncated",
+                "overlap_limit",
                 "overlap_games",
             },
         )
@@ -1774,3 +1776,79 @@ class MisplacedBatchKeyTests(ToolDBTestCase):
         self.assertIn("unknown key(s): ['delisted']", error)
         self.assertIn("add_game_to_platform", error)
         self.assertIn("set_playtime(clear=[...])", error)
+
+
+class UnboundedResponseGuardTests(ToolDBTestCase):
+    """Response fields that grow with the library must be capped.
+
+    overlap_games was 428 entries and 98% of get_stats(report="platforms") on a
+    ~3k-row library before the cap; get_wishlist had no LIMIT at all.
+    """
+
+    async def _own_on(self, name, platforms):
+        gid = await seed_game(name)
+        for p in platforms:
+            await add_platform(gid, p, playtime_minutes=10)
+        return gid
+
+    async def test_overlap_games_is_capped_but_count_is_true_total(self):
+        for i in range(8):
+            await self._own_on(f"Multi {i}", ["steam", "gog"])
+
+        result = await platforms.get_platform_breakdown(overlap_limit=3)
+        self.assertEqual(len(result["overlap_games"]), 3)
+        self.assertEqual(result["overlap_count"], 8)
+        self.assertTrue(result["overlap_truncated"])
+        self.assertEqual(result["overlap_limit"], 3)
+
+    async def test_untruncated_overlap_reports_not_truncated(self):
+        await self._own_on("Just One", ["steam", "gog"])
+        result = await platforms.get_platform_breakdown()
+        self.assertEqual(result["overlap_count"], 1)
+        self.assertFalse(result["overlap_truncated"])
+
+    async def test_overlap_limit_is_bounded(self):
+        await self._own_on("Just One", ["steam", "gog"])
+        result = await platforms.get_platform_breakdown(overlap_limit=10_000)
+        self.assertEqual(result["overlap_limit"], 200)
+
+    async def test_wishlist_paginates_and_reports_total(self):
+        for i in range(5):
+            gid = await seed_game(f"Wanted {i}")
+            await db_module.upsert_wishlist_entry(gid, "steam", source="steam")
+
+        page = await platforms.get_wishlist(limit=2)
+        self.assertEqual(page["count"], 2)
+        self.assertEqual(page["total_matches"], 5)
+        self.assertTrue(page["has_more"])
+
+        last = await platforms.get_wishlist(limit=2, offset=4)
+        self.assertEqual(last["count"], 1)
+        self.assertFalse(last["has_more"])
+
+    async def test_wishlist_pages_do_not_overlap_or_skip(self):
+        for i in range(6):
+            gid = await seed_game(f"Wanted {i}")
+            await db_module.upsert_wishlist_entry(gid, "steam", source="steam")
+
+        # Keyed on (game_id, platform), which is game_wishlist's actual UNIQUE
+        # constraint — a game wishlisted on two platforms is two legitimate
+        # rows, so a game_id-only check reports false duplicates (5 of them on
+        # the real library).
+        seen = []
+        for off in (0, 2, 4):
+            page = await platforms.get_wishlist(limit=2, offset=off)
+            seen += [(i["game_id"], i["platform"]) for i in page["items"]]
+        self.assertEqual(len(seen), 6)
+        self.assertEqual(len(set(seen)), 6)
+
+    async def test_same_game_on_two_platforms_is_two_wishlist_rows(self):
+        gid = await seed_game("Wanted Everywhere")
+        await db_module.upsert_wishlist_entry(gid, "steam", source="steam")
+        await db_module.upsert_wishlist_entry(gid, "switch2", source="dekudeals")
+
+        result = await platforms.get_wishlist()
+        self.assertEqual(result["total_matches"], 2)
+        self.assertEqual(
+            sorted(i["platform"] for i in result["items"]), ["steam", "switch2"]
+        )

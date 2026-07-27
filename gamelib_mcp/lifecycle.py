@@ -457,6 +457,7 @@ async def lifespan(app):
         get_meta,
         set_meta,
     )
+    from .data.db.readonly import close_readonly_connection
     from .data.steam_xml import STALE_HOURS
 
     enable_db_pooling()
@@ -528,4 +529,9 @@ async def lifespan(app):
         await _cancel_task(_RATINGS_SYNC_TASK)
         await _cancel_task(_STARTUP_RATINGS_SYNC_TASK)
         await close_db_pool()
+        # query_library's read-only connection is a separate per-loop singleton
+        # the pool never sees. Its aiosqlite worker is a non-daemon thread, so
+        # leaving it open makes the interpreter hang at exit waiting to join it
+        # (docker stop then has to fall back to SIGKILL).
+        await close_readonly_connection()
         logger.info("Shutdown")

@@ -1,4 +1,4 @@
-"""Tests for gamelib_mcp.tools.query (query_library/get_db_schema) and the
+"""Tests for gamelib_mcp.tools.query (query_library + its schema mode) and the
 backing gamelib_mcp.data.db.readonly connection + schema.py views/query_log.
 """
 
@@ -26,17 +26,8 @@ def _nps_row(app_id: str, day: str, minutes: int) -> dict:
 
 
 class QueryToolTestCase(ToolDBTestCase):
-    """Base case that also drops the per-loop read-only connection on teardown.
-
-    Each test gets a fresh temp DB (ToolDBTestCase) and a fresh event loop
-    (IsolatedAsyncioTestCase); without this the read-only singleton connection
-    for a prior test's loop would only ever be garbage-collected, which trips
-    aiosqlite's "deleted before being closed" ResourceWarning.
-    """
-
-    async def asyncTearDown(self) -> None:
-        await readonly.close_readonly_connection()
-        await super().asyncTearDown()
+    """Alias kept for readability: the read-only connection cleanup this class
+    used to add now lives in ToolDBTestCase, so every test module gets it."""
 
 
 class QueryLibrarySelectTests(QueryToolTestCase):
@@ -230,7 +221,7 @@ class QueryLibraryErrorHintTests(QueryToolTestCase):
     async def test_no_such_table_hint(self):
         result = await query_tool.query_library("SELECT * FROM not_a_real_table")
         self.assertIn("error", result)
-        self.assertIn("get_db_schema", result.get("hint", ""))
+        self.assertIn("query_library() with no arguments", result.get("hint", ""))
 
     async def test_denied_statement_hint(self):
         result = await query_tool.query_library("DELETE FROM games")

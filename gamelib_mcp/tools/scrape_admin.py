@@ -118,7 +118,7 @@ async def propose_scrape_config(
     config may be partial — only the fields being changed. On validation
     failure nothing is persisted and the report explains why. On success the
     override becomes active immediately, unless SCRAPE_HEAL_REQUIRE_APPROVAL
-    is set, in which case it lands as 'pending' for approve_scrape_config.
+    is set, in which case it lands as 'pending' for action='approve'.
     """
     provider = _validate_provider(provider)
     if not isinstance(config, dict):

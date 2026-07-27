@@ -1020,7 +1020,7 @@ class SyncStalenessTests(ToolDBTestCase):
         finding = result["findings"][0]
         _assert_envelope(self, finding)
         self.assertEqual(finding["evidence"]["platform"], "steam")
-        self.assertEqual(finding["suggested_action"]["tool"], "refresh_library")
+        self.assertEqual(finding["suggested_action"]["tool"], "sync")
 
     async def test_custom_stale_days_option(self):
         gid = await seed_game("Barely Stale Steam Game")
@@ -1449,3 +1449,79 @@ class StoreAuthoritativeDriftTests(ToolDBTestCase):
         self.assertTrue(finding["evidence"]["reset"])
         self.assertIn("link reset", finding["message"])
         self.assertIsNone(finding["suggested_action"])
+
+
+class CompletionUnclassifiedTests(ToolDBTestCase):
+    """completion.unclassified — the check that replaced suggest_completion_status.
+
+    The heuristic itself is covered by tests/test_tools_completion.py; these
+    guard the ADAPTER, which is the second place that has to stay in sync with
+    the heuristic's return shape (the ADR 0003 risk that ADR 0004 inherits).
+    """
+
+    async def test_classified_library_reports_nothing(self):
+        gid = await seed_game("Already Judged", hltb_main=10.0)
+        await add_platform(gid, "steam", playtime_minutes=1200)
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET completion_status = 'completed' WHERE id = ?", (gid,)
+            )
+            await db.commit()
+
+        result = await checks.run_library_checks(checks=["completion.unclassified"])
+        self.assertEqual(result["findings"], [])
+
+    async def test_reports_completed_candidate_with_update_game_action(self):
+        gid = await seed_game("Beaten Not Marked", hltb_main=10.0)
+        await add_platform(gid, "steam", playtime_minutes=12 * 60)
+
+        result = await checks.run_library_checks(checks=["completion.unclassified"])
+        self.assertEqual(len(result["findings"]), 1)
+        finding = result["findings"][0]
+        _assert_envelope(self, finding)
+        self.assertEqual(finding["check"], "completion.unclassified")
+        self.assertEqual(finding["game_id"], gid)
+        self.assertEqual(finding["severity"], "notice")
+        self.assertEqual(finding["evidence"]["suggested_status"], "completed")
+        self.assertEqual(finding["suggested_action"]["tool"], "update_game")
+        self.assertEqual(
+            finding["suggested_action"]["args"],
+            {"game_id": gid, "completion_status": "completed"},
+        )
+
+    async def test_evergreen_candidate_keeps_its_status_in_the_action(self):
+        gid = await seed_game("Endless Sandbox", hltb_main=10.0)
+        await add_platform(gid, "steam", playtime_minutes=60 * 60)
+
+        result = await checks.run_library_checks(checks=["completion.unclassified"])
+        finding = result["findings"][0]
+        self.assertEqual(finding["evidence"]["suggested_status"], "evergreen")
+        self.assertEqual(finding["suggested_action"]["args"]["completion_status"], "evergreen")
+
+    async def test_limit_option_caps_the_findings(self):
+        for i in range(3):
+            gid = await seed_game(f"Beaten {i}", hltb_main=10.0)
+            await add_platform(gid, "steam", playtime_minutes=12 * 60)
+
+        result = await checks.run_library_checks(
+            checks=["completion.unclassified"], options={"completion.unclassified": {"limit": 2}}
+        )
+        self.assertEqual(len(result["findings"]), 2)
+        self.assertEqual(result["summary"]["completion.unclassified"]["limit"], 2)
+        self.assertEqual(result["summary"]["completion.unclassified"]["suggested"], 2)
+
+    async def test_check_never_writes_even_when_applied(self):
+        gid = await seed_game("Beaten Not Marked", hltb_main=10.0)
+        await add_platform(gid, "steam", playtime_minutes=12 * 60)
+
+        # completion_status is user-set only: the check is permanently
+        # report-only, so naming it in `apply` must be rejected outright.
+        with self.assertRaises(Exception):
+            await checks.run_library_checks(
+                checks=["completion.unclassified"], apply=["completion.unclassified"]
+            )
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT completion_status FROM games WHERE id = ?", (gid,)
+            )
+        self.assertIsNone(row["completion_status"])

@@ -1745,3 +1745,47 @@ class FamilyConflictGuardTests(ToolDBTestCase):
 
         self.assertEqual(batch["family_conflict"], 0)
         self.assertEqual(batch["filled"], 1)
+
+
+class BundleBreakdownCapTests(ToolDBTestCase):
+    """by_bundle grows with purchase history, unlike the other breakdowns.
+
+    by_year/by_source/by_platform are bounded by a fixed vocabulary;
+    bundle_name gains a row for every bundle ever bought (139 distinct on the
+    real library, 47% of the whole spending response before the cap).
+    """
+
+    async def _buy(self, name, bundle, price):
+        gid = await seed_game(name)
+        await add_platform(gid, "steam")
+        await acquisition.set_acquisition(
+            game_id=gid, platform="steam", price_paid=price,
+            price_currency="USD", bundle_name=bundle,
+        )
+
+    async def test_by_bundle_is_capped_but_count_is_the_true_total(self):
+        cap = acquisition.BUNDLE_BREAKDOWN_CAP
+        for i in range(cap + 7):
+            await self._buy(f"Game {i}", f"Bundle {i}", float(i + 1))
+
+        stats = await acquisition.get_spending_stats()
+        self.assertEqual(len(stats["by_bundle"]), cap)
+        self.assertEqual(stats["by_bundle_count"], cap + 7)
+        self.assertTrue(stats["by_bundle_truncated"])
+
+    async def test_capped_page_is_the_biggest_spends(self):
+        cap = acquisition.BUNDLE_BREAKDOWN_CAP
+        for i in range(cap + 5):
+            await self._buy(f"Game {i}", f"Bundle {i}", float(i + 1))
+
+        stats = await acquisition.get_spending_stats()
+        spends = [row["spent"] for row in stats["by_bundle"]]
+        self.assertEqual(spends, sorted(spends, reverse=True))
+        # the cheapest bundles are the ones dropped
+        self.assertGreater(min(spends), 5.0)
+
+    async def test_untruncated_breakdown_reports_not_truncated(self):
+        await self._buy("Solo", "Only Bundle", 10.0)
+        stats = await acquisition.get_spending_stats()
+        self.assertEqual(stats["by_bundle_count"], 1)
+        self.assertFalse(stats["by_bundle_truncated"])

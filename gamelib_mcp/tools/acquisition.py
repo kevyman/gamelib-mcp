@@ -1,4 +1,4 @@
-"""set_acquisition, set_acquisitions_batch, and get_spending_stats tools.
+"""set_acquisition (single + bulk) and spending-stats implementations.
 
 Acquisition data (when/where/for-how-much a game was obtained) lives on
 game_platforms and is written exclusively through
@@ -1019,6 +1019,9 @@ async def set_acquisitions_batch(
 
 
 _BUNDLE_GAME_CAP = 50
+# get_spending_stats' by_bundle grows by one row per distinct bundle ever
+# bought (139 on prod), unlike the vocabulary-bounded by_source/by_platform.
+BUNDLE_BREAKDOWN_CAP = 25
 _BUNDLE_GAME_KEYS = frozenset(
     {"name", "game_id", "identifier_type", "identifier_value", "price_paid",
      "content_type"}
@@ -1817,6 +1820,11 @@ async def get_spending_stats(
     COALESCE(parent_game_id, id)) — surfaced only for families with a real
     nested contributor, top 10 per currency — as a content-grouped counterpart
     to by_bundle's purchase grouping.
+
+    by_bundle is capped at BUNDLE_BREAKDOWN_CAP (biggest spend first);
+    by_bundle_count is the true total and by_bundle_truncated the flag. It is
+    the one breakdown here whose cardinality grows with purchase history rather
+    than with a fixed vocabulary.
     """
     where = ["gp.owned = 1"]
     params: list = []
@@ -1887,14 +1895,26 @@ async def get_spending_stats(
             params,
         )
 
+        # Unlike by_year/by_source/by_platform, whose cardinality is bounded by
+        # a fixed vocabulary, bundle_name grows by one for every bundle ever
+        # bought (139 distinct on prod, 47% of this whole response). Capped
+        # biggest-spend-first, with the true total reported below.
+        by_bundle_total = await db.execute_fetchone(
+            f"""SELECT COUNT(*) AS c FROM (
+                    SELECT 1 {priced} AND gp.bundle_name IS NOT NULL
+                    GROUP BY gp.bundle_name, gp.price_currency
+                )""",
+            params,
+        )
         by_bundle = await db.execute_fetchall(
             f"""SELECT gp.bundle_name, gp.price_currency AS currency,
                        ROUND(SUM(gp.price_paid), 2) AS spent,
                        COUNT(*) AS count
                 {priced} AND gp.bundle_name IS NOT NULL
                 GROUP BY gp.bundle_name, gp.price_currency
-                ORDER BY spent DESC""",
-            params,
+                ORDER BY spent DESC
+                LIMIT ?""",
+            (*params, BUNDLE_BREAKDOWN_CAP),
         )
 
         top_expensive = await db.execute_fetchall(
@@ -2052,6 +2072,9 @@ async def get_spending_stats(
         "by_source": [dict(r) for r in by_source],
         "by_platform": [dict(r) for r in by_platform],
         "by_bundle": [dict(r) for r in by_bundle],
+        # True total, independent of the cap on by_bundle above.
+        "by_bundle_count": by_bundle_total["c"],
+        "by_bundle_truncated": by_bundle_total["c"] > len(by_bundle),
         # Content-grouped spend (base game + its DLC/expansions), distinct from
         # by_bundle's purchase grouping. Per currency, top 10 families by total.
         "by_family": by_family,

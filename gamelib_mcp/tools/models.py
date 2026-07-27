@@ -2,13 +2,44 @@
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class FlexibleModel(BaseModel):
     """Allow provider-specific keys while still exposing useful schema anchors."""
 
     model_config = ConfigDict(extra="allow")
+
+
+class BatchItemResult(FlexibleModel):
+    """Per-item envelope for a tool's bulk (``items=``) mode.
+
+    status is "ok" or "error" plus tool-specific values (previewed/deleted/
+    refused for delete_game, stale_id for merge_games). ok items additionally
+    spread the single-item result's full keys.
+    """
+
+    status: str
+    game_id: int | None = None
+    name: str | None = None
+    error: str | None = None
+    # Original item payload, echoed on error.
+    item: dict[str, Any] | None = None
+
+
+class BatchEnvelope(FlexibleModel):
+    """Top-level keys every bulk-mode response carries.
+
+    Merged single/bulk tools declare every field optional: a single-item call
+    returns the flat result keys and none of these, an ``items=`` call returns
+    these and none of the flat keys. See ADR 0004.
+    """
+
+    results: list[BatchItemResult] | None = None
+    total: int | None = None
+    ok: int | None = None
+    errors: int | None = None
+    dry_run: bool | None = None
 
 
 class PlatformEntry(FlexibleModel):
@@ -67,8 +98,17 @@ class PaginatedGamesResponse(FlexibleModel):
     offset: int | None = None
 
 
-class SearchGamesBatchResponse(RootModel[dict[str, list[GameSummary]]]):
-    pass
+class SearchGamesResponse(FlexibleModel):
+    """search_games in either mode.
+
+    ``query`` mode fills results/total_matches/has_more (the paginated
+    envelope); ``queries`` mode fills results_by_query instead.
+    """
+
+    results: list[GameSummary] | None = None
+    total_matches: int | None = None
+    has_more: bool | None = None
+    results_by_query: dict[str, list[GameSummary]] | None = None
 
 
 class SeriesBreakdownEntry(FlexibleModel):
@@ -83,12 +123,6 @@ class SeriesBreakdownEntry(FlexibleModel):
     included_games: list[str] | None = None
     collapsed_entries: list[Any] | None = None
 
-
-class SeriesBreakdownResponse(FlexibleModel):
-    results: list[SeriesBreakdownEntry]
-    counting_mode: str
-    total_matches: int
-    has_more: bool
 
 
 class SeriesGapMember(FlexibleModel):
@@ -178,29 +212,82 @@ class GameDetailResponse(GameSummary):
     my_rating: dict[str, Any] | None = None
     manual_overrides: list[str] | None = None
     related_content: dict[str, list[dict[str, Any]]] | None = None
+    # Bulk (items=) mode: GameSummary's game_id/name move inside each result.
+    game_id: int | None = None  # type: ignore[assignment]
+    name: str | None = None  # type: ignore[assignment]
+    results: list[BatchItemResult] | None = None
+    total: int | None = None
+    ok: int | None = None
+    errors: int | None = None
+    # "skipped" whenever lazy provider fetches were not run (always in bulk).
+    enrichment: str | None = None
 
 
-class TasteProfileResponse(FlexibleModel):
-    summary: dict[str, Any]
-    top_tags: list[dict[str, Any]]
-    bottom_tags: list[dict[str, Any]]
 
 
-class SyncRatingsResponse(FlexibleModel):
-    backloggd: dict[str, Any]
-    steam_reviews: dict[str, Any]
-    tag_affinity_tags_updated: int
-    status: str
+
+class GetStatsResponse(FlexibleModel):
+    """One aggregate report, selected by `report`.
+
+    Only the selected report's keys are present; `report` echoes which one ran.
+    The per-report payloads are produced unchanged by the same functions that
+    backed the five separate tools this replaced (see ADR 0004).
+    """
+
+    report: str
+    # report="backlog"
+    playing: int | None = None
+    completed: int | None = None
+    abandoned: int | None = None
+    evergreen: int | None = None
+    unplayed_spend: dict[str, Any] | None = None
+    # report="platforms"
+    by_platform: list[dict[str, Any]] | None = None
+    total_unique_games: int | None = None
+    total_unique_addons: int | None = None
+    # overlap_count is the true total; overlap_games is capped at overlap_limit.
+    overlap_count: int | None = None
+    overlap_truncated: bool | None = None
+    overlap_limit: int | None = None
+    overlap_games: list[dict[str, Any]] | None = None
+    # report="taste"
+    summary: dict[str, Any] | None = None
+    top_tags: list[dict[str, Any]] | None = None
+    bottom_tags: list[dict[str, Any]] | None = None
+    # report="spending"
+    owned_rows: int | None = None
+    priced_rows: int | None = None
+    coverage_pct: float | None = None
+    zero_cost_rows: int | None = None
+    totals: list[dict[str, Any]] | None = None
+    by_year: list[dict[str, Any]] | None = None
+    by_source: list[dict[str, Any]] | None = None
+    by_bundle: list[dict[str, Any]] | None = None
+    # by_bundle is capped; these carry the true total and the flag.
+    by_bundle_count: int | None = None
+    by_bundle_truncated: bool | None = None
+    by_family: list[dict[str, Any]] | None = None
+    top_expensive: list[dict[str, Any]] | None = None
+    cost_per_hour: dict[str, Any] | None = None
+    # report="series" (the only paginated report)
+    results: list[SeriesBreakdownEntry] | None = None
+    counting_mode: str | None = None
+    total_matches: int | None = None
+    has_more: bool | None = None
 
 
-class BacklogStatsResponse(FlexibleModel):
-    playing: int
-    completed: int
-    abandoned: int
-    evergreen: int
-    # Money recorded on owned, effectively-unplayed games:
-    # {"totals": [{currency, spent, count}], "top": [up to 5 priced games]}.
-    unplayed_spend: dict[str, Any]
+class SyncResponse(FlexibleModel):
+    """One entry per requested target; absent targets are omitted.
+
+    `library` is a fire-and-forget ack ({status, platforms, already_running})
+    polled via get_sync_status; `wishlist` and `ratings` are blocking and
+    carry their results inline.
+    """
+
+    library: dict[str, Any] | None = None
+    wishlist: dict[str, Any] | None = None
+    ratings: dict[str, Any] | None = None
+    targets: list[str]
 
 
 class RefreshLibraryResponse(FlexibleModel):
@@ -248,26 +335,17 @@ class CheckLibraryResponse(FlexibleModel):
     catalog: list[dict[str, Any]] = []
 
 
-class PlatformBreakdownResponse(FlexibleModel):
-    # Each by_platform entry: {platform, owned_games (primary items only),
-    # owned_addons (owned DLC/expansions/editions on that platform)}.
-    by_platform: list[dict[str, Any]]
-    total_unique_games: int
-    # Owned nested-content rows (DLC/expansions/editions/bundles), counted
-    # separately from total_unique_games so addon ownership doesn't inflate it.
-    total_unique_addons: int
-    overlap_count: int
-    overlap_games: list[dict[str, Any]]
 
-
-class RateGameResponse(FlexibleModel):
-    game_id: int
-    name: str
-    source: str
-    score: float
+class RateGameResponse(BatchEnvelope):
+    game_id: int | None = None
+    name: str | None = None
+    source: str | None = None
+    score: float | None = None
     review_text: str | None = None
-    tags_affected: list[str]
-    tag_affinity_tags_updated: int
+    tags_affected: list[str] | None = None
+    # Single mode: this call's recompute. Bulk mode: the one deferred recompute
+    # run after every item was written (0 when nothing was written or dry_run).
+    tag_affinity_tags_updated: int | None = None
 
 
 class HardwarePreferenceResponse(FlexibleModel):
@@ -280,97 +358,6 @@ class AcquisitionInfo(FlexibleModel):
     price_currency: str | None = None
     purchase_source: str | None = None
     bundle_name: str | None = None
-
-
-class AddGameToPlatformResponse(FlexibleModel):
-    created: bool
-    game_id: int
-    game_platform_id: int | None = None
-    wishlist_id: int | None = None
-    name: str
-    platform: str
-    owned: bool = True
-    playtime_minutes: int | None = None
-    identifier: dict[str, str] | None = None
-    # Populated when acquisition params were passed (owned=True only).
-    acquisition: AcquisitionInfo | None = None
-    # Echoes the delisted flag when one was passed (owned=True only); null
-    # means the column was left to sync/the license audit.
-    delisted: bool | None = None
-
-
-class SyncWishlistResponse(FlexibleModel):
-    pass
-
-
-class WishlistItem(FlexibleModel):
-    game_id: int
-    name: str
-    platform: str
-    wishlisted_at: str | None = None
-    source: str | None = None
-    owned: bool
-    # base_game (the common case) or a nested type (dlc/expansion/edition/…)
-    # when the wishlisted item is itself DLC/an edition rather than a base game.
-    content_type: str | None = None
-
-
-class GetWishlistResponse(FlexibleModel):
-    count: int
-    items: list[WishlistItem]
-
-
-class SessionIngestLinkResponse(FlexibleModel):
-    url: str
-    provider: str
-    expires_in_minutes: int
-
-
-class UpdateGameResponse(FlexibleModel):
-    game_id: int
-    name: str
-    updated: dict[str, Any]
-    cleared: list[str]
-    manual_overrides: list[str]
-
-
-class SetAcquisitionResponse(FlexibleModel):
-    game_id: int
-    name: str
-    platform: str
-    game_platform_id: int
-    platform_row_created: bool
-    acquisition: AcquisitionInfo
-    cleared: list[str]
-
-
-class SetPlaytimeResponse(FlexibleModel):
-    game_id: int
-    name: str
-    platform: str
-    game_platform_id: int
-    platform_row_created: bool
-    updated: dict[str, Any]
-    cleared: list[str]
-    playtime_minutes: int | None = None
-    last_played: str | None = None
-    manual_overrides: list[str]
-
-
-class SetSwitch2PlaytimeBaselineResponse(FlexibleModel):
-    game_id: int
-    name: str
-    platform: str
-    application_id: str
-    identifier_recorded: bool
-    total_hours: float
-    total_minutes: int
-    synced_minutes: int
-    baseline_minutes: int
-    previous_baseline_minutes: int | None = None
-    baseline_removed: bool
-    playtime_minutes: int
-    dry_run: bool
 
 
 class AcquisitionBatchItemResult(FlexibleModel):
@@ -388,25 +375,141 @@ class AcquisitionBatchItemResult(FlexibleModel):
     item: dict[str, Any] | None = None
 
 
-class SetAcquisitionsBatchResponse(FlexibleModel):
-    results: list[AcquisitionBatchItemResult]
-    total: int
-    applied: int
-    filled: int
-    no_change: int
-    created: int
+class AddGameToPlatformResponse(BatchEnvelope):
+    # Single mode: did this call mint a new games row. Bulk mode: how many
+    # items did (the batch reports a count under the same key).
+    created: bool | int | None = None
+    game_id: int | None = None
+    game_platform_id: int | None = None
+    wishlist_id: int | None = None
+    name: str | None = None
+    platform: str | None = None
+    owned: bool | None = None
+    playtime_minutes: int | None = None
+    identifier: dict[str, str] | None = None
+    # Populated when acquisition params were passed (owned=True only).
+    acquisition: AcquisitionInfo | None = None
+    # Echoes the delisted flag when one was passed (owned=True only); null
+    # means the column was left to sync/the license audit.
+    delisted: bool | None = None
+
+
+
+class WishlistItem(FlexibleModel):
+    game_id: int
+    name: str
+    platform: str
+    wishlisted_at: str | None = None
+    source: str | None = None
+    owned: bool
+    # base_game (the common case) or a nested type (dlc/expansion/edition/…)
+    # when the wishlisted item is itself DLC/an edition rather than a base game.
+    content_type: str | None = None
+
+
+class GetWishlistResponse(FlexibleModel):
+    """get_wishlist in either mode.
+
+    Default mode fills count/items. with_prices=True fills the deal keys
+    instead (live ITAD/DekuDeals lookup).
+    """
+
+    count: int | None = None
+    total_matches: int | None = None
+    has_more: bool | None = None
+    items: list[WishlistItem] | None = None
+    # with_prices=True
+    deals: list["WishlistDealEntry"] | None = None
+    unpriced: list[str] | None = None
+    fetched_at: str | None = None
+    price_refresh_errors: list[str] | None = None
+    itad: str | None = None
+    currency_note: str | None = None
+    switch2_lookups_deferred: int | None = None
+    availability_pending: int | None = None
+
+
+class SessionIngestLinkResponse(FlexibleModel):
+    url: str
+    provider: str
+    expires_in_minutes: int
+
+
+class UpdateGameResponse(BatchEnvelope):
+    game_id: int | None = None
+    name: str | None = None
+    updated: dict[str, Any] | None = None
+    cleared: list[str] | None = None
+    manual_overrides: list[str] | None = None
+    # Bulk mode: the single deferred recompute; 0 when no tags changed.
+    tag_affinity_tags_updated: int | None = None
+
+
+class SetAcquisitionResponse(FlexibleModel):
+    """set_acquisition in either mode.
+
+    Bulk mode carries its own richer per-item status vocabulary (applied/
+    filled/no_change/created/unmatched/no_platform_row/error) rather than the
+    plain ok/error of BatchEnvelope, so it declares `results` itself.
+    """
+
+    # Single mode.
+    game_id: int | None = None
+    name: str | None = None
+    platform: str | None = None
+    game_platform_id: int | None = None
+    platform_row_created: bool | None = None
+    acquisition: AcquisitionInfo | None = None
+    cleared: list[str] | None = None
+    # Bulk (items=) mode.
+    results: list[AcquisitionBatchItemResult] | None = None
+    total: int | None = None
+    applied: int | None = None
+    filled: int | None = None
+    no_change: int | None = None
+    created: int | None = None
     # New owned games minted by create_missing (game_id, name, platform) — a
     # created row has no delete tool, so callers eyeball this list.
-    created_details: list[dict[str, Any]]
-    unmatched: list[dict[str, Any]]
+    created_details: list[dict[str, Any]] | None = None
+    unmatched: list[dict[str, Any]] | None = None
     # Items create_missing declined to mint (near-duplicate of an existing row,
     # or nested content with no parent). Counted in unmatched; this says why.
-    create_refused_details: list[dict[str, Any]] = []
-    no_platform_row: int
+    create_refused_details: list[dict[str, Any]] | None = None
+    no_platform_row: int | None = None
     # Detail for the no_platform_row rows (game_id, matched_name, platforms),
     # so a caller can triage by name instead of an opaque count.
-    no_platform_row_details: list[dict[str, Any]]
-    errors: int
+    no_platform_row_details: list[dict[str, Any]] | None = None
+    errors: int | None = None
+    dry_run: bool | None = None
+
+
+class SetPlaytimeResponse(BatchEnvelope):
+    game_id: int | None = None
+    name: str | None = None
+    platform: str | None = None
+    game_platform_id: int | None = None
+    platform_row_created: bool | None = None
+    updated: dict[str, Any] | None = None
+    cleared: list[str] | None = None
+    playtime_minutes: int | None = None
+    last_played: str | None = None
+    manual_overrides: list[str] | None = None
+
+
+class SetSwitch2PlaytimeBaselineResponse(FlexibleModel):
+    game_id: int
+    name: str
+    platform: str
+    application_id: str
+    identifier_recorded: bool
+    total_hours: float
+    total_minutes: int
+    synced_minutes: int
+    baseline_minutes: int
+    previous_baseline_minutes: int | None = None
+    baseline_removed: bool
+    playtime_minutes: int
+    dry_run: bool
 
 
 class BundleGameResult(FlexibleModel):
@@ -455,38 +558,20 @@ class ImportPurchasesResponse(FlexibleModel):
     totals: dict[str, Any]
 
 
-class SpendingStatsResponse(FlexibleModel):
-    owned_rows: int
-    priced_rows: int
-    coverage_pct: float
-    zero_cost_rows: int
-    # Monetary aggregates are grouped by currency, never summed across them.
-    totals: list[dict[str, Any]]
-    by_year: list[dict[str, Any]]
-    by_source: list[dict[str, Any]]
-    by_platform: list[dict[str, Any]]
-    by_bundle: list[dict[str, Any]]
-    # Content-grouped spend: base game + its owned DLC/expansions rolled up per
-    # content family (root COALESCE(parent_game_id, id)), only for families with
-    # a real nested addon, top 10 per currency. Each: {family_game_id,
-    # family_name, currency, base_spent, addon_spent, total_spent, addon_count,
-    # family_playtime_hours, family_cost_per_hour}. Distinct from by_bundle,
-    # which groups by a purchase's bundle_name.
-    by_family: list[dict[str, Any]]
-    top_expensive: list[dict[str, Any]]
-    cost_per_hour: dict[str, Any]
 
-
-class MergeGamesResponse(FlexibleModel):
-    dry_run: bool
-    source: dict[str, Any]
-    target: dict[str, Any]
-    platforms_moved: list[str]
-    platforms_merged: list[str]
-    ratings_moved: list[str]
-    ratings_kept_target: list[str]
-    series_memberships_transferred: int
-    aliases_transferred: int
+class MergeGamesResponse(BatchEnvelope):
+    source: dict[str, Any] | None = None
+    target: dict[str, Any] | None = None
+    platforms_moved: list[str] | None = None
+    platforms_merged: list[str] | None = None
+    ratings_moved: list[str] | None = None
+    ratings_kept_target: list[str] | None = None
+    series_memberships_transferred: int | None = None
+    aliases_transferred: int | None = None
+    # Bulk mode: items whose source/target id was consumed by an earlier merge.
+    stale_id: int | None = None
+    # Bulk mode: the single deferred recompute; 0 when no ratings moved.
+    tag_affinity_tags_updated: int | None = None
     play_history_rows_transferred: int = 0
     # game_wishlist / game_prices FK-cascade with the source row, so the merge
     # transfers them explicitly; "dropped" = target already had the row (or the
@@ -515,102 +600,25 @@ class SplitGameResponse(FlexibleModel):
 
 
 class DeleteGameResponse(FlexibleModel):
-    deleted: bool
-    game_id: int
-    name: str
+    # Single mode: was this game deleted. Bulk mode: how many were.
+    deleted: bool | int | None = None
+    game_id: int | None = None
+    name: str | None = None
     # Populated on a confirm=False preview.
     would_delete: dict[str, int] | None = None
     hint: str | None = None
     # Populated on an actual delete (confirm=True).
     deleted_counts: dict[str, int] | None = None
-
-
-class BatchItemResult(FlexibleModel):
-    """Per-item envelope shared by the *_batch tools.
-
-    status is "ok" or "error" plus tool-specific values (previewed/deleted/
-    refused for delete_games_batch, stale_id for merge_games_batch). ok items
-    additionally spread the single-item tool's full result keys.
-    """
-
-    status: str
-    game_id: int | None = None
-    name: str | None = None
-    error: str | None = None
-    # Original item payload, echoed on error.
-    item: dict[str, Any] | None = None
-
-
-class UpdateGamesBatchResponse(FlexibleModel):
-    results: list[BatchItemResult]
-    total: int
-    ok: int
-    errors: int
-    dry_run: bool
-    # From the single deferred recompute; 0 when no tags changed or dry_run.
-    tag_affinity_tags_updated: int
-
-
-class AddGamesToPlatformBatchResponse(FlexibleModel):
-    results: list[BatchItemResult]
-    total: int
-    ok: int
-    # ok items that minted a brand-new games row.
-    created: int
-    errors: int
-    dry_run: bool
-
-
-class SetPlaytimeBatchResponse(FlexibleModel):
-    results: list[BatchItemResult]
-    total: int
-    ok: int
-    errors: int
-    dry_run: bool
-
-
-class RateGamesBatchResponse(FlexibleModel):
-    results: list[BatchItemResult]
-    total: int
-    ok: int
-    errors: int
-    dry_run: bool
-    # From the single deferred recompute; 0 when nothing was written or dry_run.
-    tag_affinity_tags_updated: int
-
-
-class GameDetailsBatchResponse(FlexibleModel):
-    results: list[BatchItemResult]
-    total: int
-    ok: int
-    errors: int
-    # Always "skipped": batch detail never triggers lazy provider fetches.
-    enrichment: str
-
-
-class DeleteGamesBatchResponse(FlexibleModel):
-    results: list[BatchItemResult]
-    total: int
-    previewed: int
-    deleted: int
-    refused: int
-    errors: int
-    confirm: bool
+    # Bulk (items=) mode.
+    results: list[BatchItemResult] | None = None
+    total: int | None = None
+    previewed: int | None = None
+    refused: int | None = None
+    errors: int | None = None
+    confirm: bool | None = None
     # Summed per-table counts: preview (confirm=False) vs actual (confirm=True).
     would_delete_total: dict[str, int] | None = None
     deleted_counts_total: dict[str, int] | None = None
-    hint: str | None = None
-
-
-class MergeGamesBatchResponse(FlexibleModel):
-    results: list[BatchItemResult]
-    total: int
-    ok: int
-    stale_id: int
-    errors: int
-    dry_run: bool
-    # From the single deferred recompute; 0 when no ratings moved or dry_run.
-    tag_affinity_tags_updated: int
 
 
 class ScrapeConfigVersion(FlexibleModel):
@@ -622,45 +630,40 @@ class ScrapeConfigVersion(FlexibleModel):
 
 
 class GetScrapeConfigResponse(FlexibleModel):
+    """get_scrape_config in either mode: stored config, or a live diagnose."""
+
     provider: str
-    on_defaults: bool
-    defaults: dict[str, Any]
+    # diagnose=False
+    on_defaults: bool | None = None
+    defaults: dict[str, Any] | None = None
     active_override: dict[str, Any] | None = None
-    effective_config: dict[str, Any]
-    pending_versions: list[ScrapeConfigVersion]
-    history: list[ScrapeConfigVersion]
-    require_approval: bool
-
-
-class DiagnoseScrapeResponse(FlexibleModel):
-    provider: str
-    status: str
+    effective_config: dict[str, Any] | None = None
+    pending_versions: list[ScrapeConfigVersion] | None = None
+    history: list[ScrapeConfigVersion] | None = None
+    require_approval: bool | None = None
+    # diagnose=True
+    status: str | None = None
     active_config: dict[str, Any] | None = None
     parsed_rows: int | None = None
     selector_matches: dict[str, int] | None = None
     untrusted_page_excerpt: str | None = None
 
 
-class ProposeScrapeConfigResponse(FlexibleModel):
+class ManageScrapeConfigResponse(FlexibleModel):
+    """propose / approve / rollback — the union of their three result shapes."""
+
     provider: str
-    applied: bool
-    status: str
+    status: str | None = None
+    # action="propose"
+    applied: bool | None = None
+    validation: dict[str, Any] | None = None
+    # action="propose" | "approve"
     version: int | None = None
-    validation: dict[str, Any]
-
-
-class ApproveScrapeConfigResponse(FlexibleModel):
-    provider: str
-    status: str
-    version: int
-    effective_config: dict[str, Any]
-
-
-class RollbackScrapeConfigResponse(FlexibleModel):
-    provider: str
+    # action="approve" | "rollback"
+    effective_config: dict[str, Any] | None = None
+    # action="rollback"
     restored_version: int | None = None
-    on_defaults: bool
-    effective_config: dict[str, Any]
+    on_defaults: bool | None = None
 
 
 class WishlistDealAlternative(FlexibleModel):
@@ -705,17 +708,6 @@ class CompletionSuggestionsResponse(FlexibleModel):
     suggestions: list[CompletionSuggestion]
     count: int
 
-
-class WishlistDealsResponse(FlexibleModel):
-    deals: list[WishlistDealEntry]
-    unpriced: list[str]
-    fetched_at: str
-    count: int
-    price_refresh_errors: list[str] | None = None
-    itad: str | None = None
-    currency_note: str | None = None
-    switch2_lookups_deferred: int | None = None
-    availability_pending: int | None = None
 
 
 class PlayHistoryWindow(FlexibleModel):
