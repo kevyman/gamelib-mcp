@@ -26,17 +26,8 @@ def _nps_row(app_id: str, day: str, minutes: int) -> dict:
 
 
 class QueryToolTestCase(ToolDBTestCase):
-    """Base case that also drops the per-loop read-only connection on teardown.
-
-    Each test gets a fresh temp DB (ToolDBTestCase) and a fresh event loop
-    (IsolatedAsyncioTestCase); without this the read-only singleton connection
-    for a prior test's loop would only ever be garbage-collected, which trips
-    aiosqlite's "deleted before being closed" ResourceWarning.
-    """
-
-    async def asyncTearDown(self) -> None:
-        await readonly.close_readonly_connection()
-        await super().asyncTearDown()
+    """Alias kept for readability: the read-only connection cleanup this class
+    used to add now lives in ToolDBTestCase, so every test module gets it."""
 
 
 class QueryLibrarySelectTests(QueryToolTestCase):
