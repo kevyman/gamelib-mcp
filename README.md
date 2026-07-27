@@ -16,7 +16,7 @@ gamelib-mcp is single-user by design: one deployment serves one person's library
 
 ## MCP Tools
 
-30 tools. Any tool that acts on one game also takes `items=[...]` to do the same
+29 tools. Any tool that acts on one game also takes `items=[...]` to do the same
 thing in bulk in a single call — see [ADR 0004](docs/adr/0004-consolidated-tool-surface.md).
 
 | Tool | Description |
@@ -37,8 +37,7 @@ thing in bulk in a single call — see [ADR 0004](docs/adr/0004-consolidated-too
 | `add_game_to_platform` / `update_game` / `set_playtime` / `set_acquisition` | Manual ownership, metadata, playtime pins, and purchase records |
 | `merge_games` / `split_game` / `delete_game` | Identity repair |
 | `import_purchases` / `split_bundle_acquisition` | Storefront purchase history and bundle price splits |
-| `set_nintendo_pctl_session` | Set up Switch playtime sync via Parental Controls |
-| `create_session_ingest_link` | Mint a single-use browser link to paste store session cookies (Nintendo/Epic/Humble/Steam) outside the chat |
+| `create_session_ingest_link` | Mint a single-use browser link for connecting a store/account session outside the chat — cookie pastes (Nintendo/Epic/Humble/Steam) and the Nintendo Parental Controls sign-in that enables Switch playtime |
 | `get_integration_status` | Per-platform integration health |
 | `get_scrape_config` / `manage_scrape_config` | Inspect or heal the declarative scrape config |
 
@@ -93,7 +92,7 @@ All configuration is via environment variables. Production starts from [.env.exa
 | `OPENXBL_API_KEY` | optional | Personal key from [xbl.io/console](https://xbl.io/console) for Xbox sync (ownership via title history, playtime best-effort) |
 | `OPENXBL_XUID` | optional | Xbox account to inspect; defaults to the API key owner's own account |
 | `NINTENDO_COOKIES_FILE` | optional | Switch digital ownership (populate via `create_session_ingest_link(provider="nintendo")`) |
-| `NINTENDO_PCTL_SESSION_FILE` | optional | Switch playtime via Parental Controls (populate via `set_nintendo_pctl_session`) |
+| `NINTENDO_PCTL_SESSION_FILE` | optional | Switch playtime via Parental Controls (populate via `create_session_ingest_link(provider="nintendo_pctl")`) |
 | `EPIC_LEGENDARY_HOST_PATH` | optional | Legendary config dir for Epic sync |
 | `LGOGDOWNLOADER_HOST_PATH` | optional | lgogdownloader config dir for GOG sync |
 | `HARDWARE_PREFERENCE` | optional | Platform priority for recommendations, e.g. `switch2,steam_deck,ps5` |

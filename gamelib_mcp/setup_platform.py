@@ -52,9 +52,9 @@ def _setup_switch() -> None:
         "4. Paste the Cookie Editor JSON export into the form and submit.\n"
         "\n"
         "Playtime (Parental Controls API):\n"
-        "1. Call set_nintendo_pctl_session() with no argument → returns a login_url.\n"
-        "2. Open the URL, sign in, right-click 'Select this person' → Copy Link.\n"
-        "3. Call set_nintendo_pctl_session() again with that npf://auth link.\n"
+        "1. Call create_session_ingest_link(provider='nintendo_pctl') and open the link.\n"
+        "2. Click 'Sign in to Nintendo', sign in, right-click 'Select this person' → Copy Link.\n"
+        "3. Paste that npf://auth link into the form and submit.\n"
         "\n"
         'Then run sync(targets=["library"], platforms=["switch2"]) to sync.'
     )

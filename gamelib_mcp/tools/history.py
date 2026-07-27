@@ -115,7 +115,7 @@ async def get_play_history(
     window only counts growth after that snapshot, since its prior total is
     unattributable. switch2 uses real per-day Parental Controls data
     (nintendo_play_summary) instead, which is forward-only for the same
-    reason (see set_nintendo_pctl_session). Returns per-game minutes,
+    reason (see the nintendo_pctl session link). Returns per-game minutes,
     per-platform totals, and the window used.
     """
     end = _parse_iso_date(end_date, "end_date") if end_date else datetime.now(timezone.utc).date()

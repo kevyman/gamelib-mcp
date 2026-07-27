@@ -6,7 +6,7 @@ OWNERSHIP: Nintendo Account VGCS GraphQL API (requires NINTENDO_COOKIES_FILE)
   - No playtime data — playtime_minutes stored as None
   - To set/refresh cookies: use create_session_ingest_link(provider="nintendo")
 
-PLAYTIME: Parental Controls API (requires NINTENDO_PCTL_SESSION_FILE via set_nintendo_pctl_session)
+PLAYTIME: Parental Controls API (NINTENDO_PCTL_SESSION_FILE, via create_session_ingest_link(provider="nintendo_pctl"))
   - Handled separately in nintendo_pctl.py
 
 Platform: all titles stored as "switch2" (NX and OUNCE both map to switch2).

@@ -146,7 +146,6 @@ EXPECTED_TOOLS = {
         "required": set(),
     },
     "create_session_ingest_link": {"params": {"provider"}, "required": {"provider"}},
-    "set_nintendo_pctl_session": {"params": {"response"}, "required": set()},
     # --- scrape-config admin --------------------------------------------------
     "get_scrape_config": {"params": {"provider", "diagnose"}, "required": {"provider"}},
     "manage_scrape_config": {
@@ -197,7 +196,6 @@ EXPECTED_ANNOTATIONS = {
         "openWorldHint": True,
     },
     "create_session_ingest_link": {"readOnlyHint": False, "idempotentHint": False},
-    "set_nintendo_pctl_session": {"readOnlyHint": False, "idempotentHint": True},
     # diagnose=True live-fetches the provider page, so the merged read tool is
     # open-world; it stays read-only because neither mode writes.
     "get_scrape_config": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
@@ -226,9 +224,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_30(self):
+    async def test_tool_count_is_29(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 30)
+        self.assertEqual(len(tools), 29)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()

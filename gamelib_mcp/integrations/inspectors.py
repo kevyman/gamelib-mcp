@@ -424,14 +424,14 @@ def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus
             remediation_steps: list[str] = ["Run create_session_ingest_link(provider=\"nintendo\") and open the link to paste fresh VGCS session cookies."]
             if has_pctl:
                 capabilities.append(
-                    CapabilityStatus("playtime", "stale", "Parental Controls auth may be stale; re-run set_nintendo_pctl_session.")
+                    CapabilityStatus("playtime", "stale", "Parental Controls auth may be stale; re-run create_session_ingest_link(provider=\"nintendo_pctl\").")
                 )
                 checks.append(
                     CheckStatus("nintendo_pctl_session", "warn", "Parental Controls token present but recent auth failed")
                 )
                 detected_inputs.append(str(pctl_path))
-                summary = "Nintendo auth is stale; refresh it with create_session_ingest_link(provider=\"nintendo\") and/or set_nintendo_pctl_session."
-                remediation_steps.append("Re-run set_nintendo_pctl_session to refresh the Parental Controls token.")
+                summary = "Nintendo auth is stale; refresh it with create_session_ingest_link(provider=\"nintendo\") and/or create_session_ingest_link(provider=\"nintendo_pctl\")."
+                remediation_steps.append("Re-run create_session_ingest_link(provider=\"nintendo_pctl\") to refresh the Parental Controls token.")
             return IntegrationStatus(
                 platform="nintendo",
                 overall_status="stale",
@@ -497,7 +497,7 @@ def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus
                 CapabilityStatus(
                     "playtime",
                     playtime_status,
-                    "Parental Controls auth is stale; re-run set_nintendo_pctl_session."
+                    "Parental Controls auth is stale; re-run create_session_ingest_link(provider=\"nintendo_pctl\")."
                     if stale
                     else "Parental Controls playtime is configured.",
                 ),
@@ -517,7 +517,7 @@ def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus
             ],
             detected_inputs=[str(pctl_path)],
             remediation_steps=[
-                "Re-run set_nintendo_pctl_session to refresh the Parental Controls token."
+                "Re-run create_session_ingest_link(provider=\"nintendo_pctl\") to refresh the Parental Controls token."
                 if stale
                 else "Run create_session_ingest_link(provider=\"nintendo\") to add Switch digital ownership.",
             ],
@@ -540,7 +540,8 @@ def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus
         detected_inputs=[],
         remediation_steps=[
             "Mount a NINTENDO_COOKIES_FILE for ownership sync (create_session_ingest_link(provider=\"nintendo\")), "
-            "and/or set NINTENDO_PCTL_SESSION_FILE for playtime (set_nintendo_pctl_session).",
+            "and/or set NINTENDO_PCTL_SESSION_FILE for playtime "
+            "(create_session_ingest_link(provider=\"nintendo_pctl\")).",
         ],
         last_sync=last_sync or {},
     )
