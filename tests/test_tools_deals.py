@@ -7,6 +7,7 @@ not their origin modules (data.itad / data.dekudeals).
 
 import json
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 from conftest import ToolDBTestCase, add_platform, seed_game, make_steam_game
@@ -32,7 +33,7 @@ async def _seed_price(
     game_id: int,
     platform: str,
     shop: str,
-    price: float,
+    price: float | None,
     *,
     regular_price: float | None = None,
     cut_pct: int | None = None,
@@ -410,6 +411,13 @@ async def _set_hw_pref(platforms: list[str]) -> None:
     await db_module.set_meta("hardware_preference", json.dumps(platforms))
 
 
+async def _miss_every_requested_title(titles: list[str]) -> dict[str, None]:
+    """fetch_search_prices stub reporting a CONFIRMED miss for every requested
+    title (searched cleanly, no card) — the negatively-cacheable outcome, as
+    opposed to an empty dict, which means the searches never loaded."""
+    return dict.fromkeys(titles)
+
+
 async def _price_every_requested_title(titles: list[str]) -> dict[str, dict]:
     """fetch_search_prices stub that hits on every title it is asked about —
     keyed off the request, since which candidates survive the per-call cap
@@ -556,12 +564,15 @@ class PreferenceAwareDealsTests(ToolDBTestCase):
             result = await deals.get_wishlist_deals()
 
         self.assertEqual(len(search.await_args.args[0]), deals._MAX_SWITCH2_SEARCH_LOOKUPS)
-        # Every candidate is still unpriced — the capped lookups all missed —
-        # so the whole backlog is deferred, not just the over-cap remainder.
+        # An empty result dict means every attempt was inconclusive (see
+        # fetch_search_prices' contract), so nothing resolved and nothing was
+        # negatively cached — the whole backlog is deferred, not just the
+        # over-cap remainder.
         self.assertEqual(
             result["switch2_lookups_deferred"], deals._MAX_SWITCH2_SEARCH_LOOKUPS + 3
         )
         self.assertNotIn("switch2_lookups_performed", result)
+        self.assertNotIn("switch2_lookups_not_found", result)
 
     async def test_deferred_counter_excludes_lookups_resolved_this_call(self):
         ids = await self._seed_search_candidates(deals._MAX_SWITCH2_SEARCH_LOOKUPS + 3)
@@ -623,6 +634,139 @@ class PreferenceAwareDealsTests(ToolDBTestCase):
             result = await deals.get_wishlist_deals()
         search.assert_not_awaited()
         self.assertEqual(result["availability_pending"], 1)
+
+    async def test_confirmed_miss_is_cached_and_stops_reconsuming_the_cap(self):
+        await self._seed_search_candidates(deals._MAX_SWITCH2_SEARCH_LOOKUPS + 3)
+
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices",
+                   AsyncMock(side_effect=_miss_every_requested_title)) as first_search, \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            first = await deals.get_wishlist_deals()
+
+        first_titles = set(first_search.await_args.args[0])
+        self.assertEqual(
+            first["switch2_lookups_not_found"], deals._MAX_SWITCH2_SEARCH_LOOKUPS
+        )
+        # The misses are settled, so only the untried over-cap remainder is backlog.
+        self.assertEqual(first["switch2_lookups_deferred"], 3)
+
+        # Second call: the recorded misses must not take a lookup slot again —
+        # the whole point of the negative cache. refresh=True does not override it.
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices",
+                   AsyncMock(side_effect=_miss_every_requested_title)) as search, \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            second = await deals.get_wishlist_deals(refresh=True)
+
+        second_titles = set(search.await_args.args[0])
+        self.assertEqual(len(second_titles), 3)  # only the untried three
+        self.assertEqual(second_titles & first_titles, set())
+        self.assertEqual(
+            second["switch2_lookups_not_found"], deals._MAX_SWITCH2_SEARCH_LOOKUPS + 3
+        )
+        self.assertNotIn("switch2_lookups_deferred", second)  # queue fully settled
+
+    async def test_inconclusive_fetch_is_not_negatively_cached(self):
+        # An empty result dict = the searches never loaded. Caching that as a
+        # miss would suppress retries for a game DekuDeals may well sell, so
+        # the candidate must stay queued and no marker row may be written.
+        ids = await self._seed_search_candidates(2)
+
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            first = await deals.get_wishlist_deals()
+
+        self.assertEqual(first["switch2_lookups_deferred"], 2)
+        self.assertNotIn("switch2_lookups_not_found", first)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT COUNT(*) AS n FROM game_prices WHERE platform = 'switch2'"
+            )
+        self.assertEqual(row["n"], 0)
+
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices",
+                   AsyncMock(side_effect=_price_every_requested_title)) as search, \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            second = await deals.get_wishlist_deals()
+
+        self.assertEqual(len(search.await_args.args[0]), len(ids))  # retried, not skipped
+        self.assertEqual(second["switch2_lookups_performed"], 2)
+
+    async def test_miss_never_blanks_an_existing_cached_price(self):
+        # upsert_game_prices' invariant: a failed/partial fetch must never
+        # blank a previously cached price. A refresh whose search misses a
+        # game we already have a price for must leave that price intact.
+        gid = (await self._seed_search_candidates(1))[0]
+        await _seed_price(gid, "switch2", "dekudeals", 21.0)
+
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices",
+                   AsyncMock(side_effect=_miss_every_requested_title)), \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            result = await deals.get_wishlist_deals(refresh=True)
+
+        entry = next(d for d in result["deals"] if d["game_id"] == gid)
+        self.assertEqual(entry["price"], 21.0)
+        self.assertNotIn("switch2_lookups_not_found", result)
+
+    async def test_stale_miss_marker_is_retried(self):
+        gid = (await self._seed_search_candidates(1))[0]
+        stale = (
+            datetime.now(timezone.utc)
+            - timedelta(hours=deals._SWITCH2_MISS_RETRY_HOURS + 1)
+        ).isoformat()
+        await _seed_price(gid, "switch2", "dekudeals", None, fetched_at=stale)
+
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices",
+                   AsyncMock(side_effect=_price_every_requested_title)) as search, \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            result = await deals.get_wishlist_deals()
+
+        self.assertEqual(len(search.await_args.args[0]), 1)  # backoff expired
+        self.assertEqual(result["switch2_lookups_performed"], 1)
+
+    async def test_availability_unknown_counts_games_with_no_igdb_platform_list(self):
+        await _set_hw_pref(["switch2"])
+        unknown = await seed_game("No Platform Data")
+        await _seed_wishlist(unknown, "steam", store_identifier="200")
+        # igdb_platforms stays NULL — Switch availability is undecidable.
+        confirmed_no = await seed_game("PC Only")
+        await _seed_wishlist(confirmed_no, "steam", store_identifier="201")
+        await _set_igdb_platforms(confirmed_no, [6])  # a real "no Switch release"
+
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()) as search, \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            result = await deals.get_wishlist_deals()
+
+        search.assert_not_awaited()
+        self.assertEqual(result["switch2_availability_unknown"], 1)
+
+    async def test_availability_unknown_silent_when_switch2_not_preferred(self):
+        await _set_hw_pref(["steam"])
+        gid = await seed_game("No Platform Data")
+        await _seed_wishlist(gid, "steam", store_identifier="200")
+
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()), \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            result = await deals.get_wishlist_deals()
+
+        # No switch2 preference means no per-title search path at all — the
+        # counter would be noise, not a gap.
+        self.assertNotIn("switch2_availability_unknown", result)
 
 
 class DealsPureHelperTests(unittest.TestCase):
