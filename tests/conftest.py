@@ -11,6 +11,7 @@ pytest's default ``prepend`` import mode puts ``tests/`` on ``sys.path`` (no
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -20,6 +21,8 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import NamedTuple
+from unittest.mock import patch
 
 import pytest
 
@@ -28,7 +31,16 @@ import pytest
 # explicitly so production cannot become unauthenticated through omission.
 os.environ.setdefault("MCP_AUTH_MODE", "disabled")
 os.environ.setdefault("MCP_ADMIN_AUTH_TOKEN", "test-admin-token-at-least-32-characters")
-os.environ.setdefault("FASTMCP_HOME", "/tmp/gamelib-mcp-fastmcp-tests")
+# FastMCP writes into this directory, so every xdist worker needs its own or
+# they race each other over it. Assigned rather than setdefault: an inherited
+# FASTMCP_HOME is a single shared directory too, so honor where the developer
+# pointed it but still give each worker a subdirectory of its own.
+os.environ.update(
+    FASTMCP_HOME=os.path.join(
+        os.environ.get("FASTMCP_HOME") or "/tmp/gamelib-mcp-fastmcp-tests",
+        os.environ.get("PYTEST_XDIST_WORKER", "main"),
+    )
+)
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.db import readonly
@@ -57,6 +69,53 @@ def _throwaway_default_database():
                 os.environ.pop("DATABASE_URL", None)
             else:
                 os.environ["DATABASE_URL"] = prev
+
+
+class _MigratedTemplate(NamedTuple):
+    path: Path
+    fts_enabled: bool
+
+
+# The session's pre-migrated database, adopted by every ToolDBTestCase.
+_DB_TEMPLATE: _MigratedTemplate | None = None
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _migrated_db_template():
+    """Run the migration chain once per session; every test copies the result.
+
+    Replaying it per test cost ~0.11s, and most of the suite is DB-backed — over
+    a minute of a local run spent producing bytes that are identical every time.
+    A finished database is ~230KB, so copying it is ~1ms.
+
+    Built through the production ``migrate_db``, which is all ``init_db`` does
+    here: its follow-up affinity recompute only fires for two specific migration
+    steps and has nothing to work with on an empty database. So tests still run
+    against exactly what the real migrations produce, and
+    ``test_db_migration.py`` drives ``migrate_db`` itself, unaffected by this.
+    """
+    global _DB_TEMPLATE
+    with TemporaryDirectory() as tmpdir:
+        template = Path(tmpdir) / "migrated-template.sqlite"
+        prev = os.environ.get("DATABASE_URL")
+        os.environ["DATABASE_URL"] = f"file:{template}"
+        db_module._DB_READY_PATH = None
+        try:
+            # asyncio.run gives this its own loop, so the aiosqlite worker
+            # thread behind the migration is closed out before any test starts.
+            result = asyncio.run(db_module.migrate_db())
+        finally:
+            db_module._DB_READY_PATH = None
+            db_module._FTS_READY_PATH = None
+            if prev is None:
+                os.environ.pop("DATABASE_URL", None)
+            else:
+                os.environ["DATABASE_URL"] = prev
+        _DB_TEMPLATE = _MigratedTemplate(template, result.fts_enabled)
+        try:
+            yield _DB_TEMPLATE
+        finally:
+            _DB_TEMPLATE = None
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -97,7 +156,18 @@ class ToolDBTestCase(unittest.IsolatedAsyncioTestCase):
         self._prev_database_url = os.environ.get("DATABASE_URL")
         os.environ["DATABASE_URL"] = f"file:{self._db_path}"
         db_module._DB_READY_PATH = None
-        await db_module.init_db()
+        if _DB_TEMPLATE is None:
+            await db_module.init_db()
+            return
+        # Copy the session's already-migrated database instead of replaying the
+        # chain, and record it as ready — which is the only thing init_db would
+        # have concluded about a byte-identical copy of its own output. Both
+        # flags have to be set together: get_db() checks _DB_READY_PATH before
+        # migrating, and the FTS-backed search paths check _FTS_READY_PATH.
+        shutil.copyfile(_DB_TEMPLATE.path, self._db_path)
+        db_path = db_module._db_path()
+        db_module._DB_READY_PATH = db_path
+        db_module._FTS_READY_PATH = db_path if _DB_TEMPLATE.fts_enabled else None
 
     async def asyncTearDown(self) -> None:
         # The read-only connection is a per-event-loop singleton, and
@@ -110,6 +180,7 @@ class ToolDBTestCase(unittest.IsolatedAsyncioTestCase):
         # that touches query_library from re-introducing the hang.
         await readonly.close_readonly_connection()
         db_module._DB_READY_PATH = None
+        db_module._FTS_READY_PATH = None
         if self._prev_database_url is None:
             os.environ.pop("DATABASE_URL", None)
         else:
@@ -127,6 +198,64 @@ class ToolDBTestCase(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.05)
         shutil.rmtree(self._tmpdir.name, ignore_errors=True)
 
+
+
+# --- timing ------------------------------------------------------------------
+
+# Budget for the asyncio.wait_for() calls that guard against a hang in the async
+# orchestration tests. Those waits are deadlock guards, not latency assertions:
+# every event they wait on is set by the code under test with no real I/O in
+# between, so the only thing a tight budget measures is how busy the machine is.
+# At 0.1s they were the suite's most frequent false failure — a background game
+# pinning the CPU was enough to "fail" test_startup_sync. Generous here costs
+# nothing on a passing run and still reports a real deadlock well inside CI's
+# ten-minute job cap.
+DEADLOCK_TIMEOUT = 10.0
+
+
+# --- virtual clock ------------------------------------------------------------
+
+_real_asyncio_sleep = asyncio.sleep
+
+
+class VirtualClock:
+    """A monotonic clock and asyncio.sleep stand-in that advances instantly."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, delay: float) -> None:
+        self.sleeps.append(delay)
+        self.now += delay
+        # Suspend anyway. A coroutine parking here is usually racing another
+        # one, and a "sleep" that never yields would let it run straight
+        # through while the loop never gets a chance to schedule anyone else.
+        await _real_asyncio_sleep(0)
+
+
+@contextlib.contextmanager
+def virtual_clock(module_path: str):
+    """Serve ``module_path``'s time.monotonic and asyncio.sleep from a fake clock.
+
+    The Steam and IGDB request gates pace real traffic with real sleeps: 1.5s
+    between Steam calls, a 10s park after a 429, and IGDB's Retry-After pushed
+    onto the next slot. Retry tests care *which* delay the gate picks, not that
+    the process sits through it — waiting them out cost ~45s of every run, and
+    made those tests the ones most likely to trip a CI job timeout.
+
+    Yields the clock, so a test can assert on ``sleeps`` and state the delay it
+    expects instead of merely being slow when the gate is working.
+    """
+    clock = VirtualClock()
+    with (
+        patch(f"{module_path}.time.monotonic", side_effect=clock.monotonic),
+        patch(f"{module_path}.asyncio.sleep", new=clock.sleep),
+    ):
+        yield clock
 
 
 # --- seed helpers (write through production paths) ---------------------------

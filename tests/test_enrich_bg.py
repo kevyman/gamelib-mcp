@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from conftest import DEADLOCK_TIMEOUT
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import enrich_bg
 
@@ -47,30 +48,59 @@ class EnrichmentClaimTests(unittest.IsolatedAsyncioTestCase):
         conn.commit()
         conn.close()
 
-        original_connect = db_module.aiosqlite.connect
-
-        def fast_connect(*args, **kwargs):
-            kwargs.setdefault("timeout", 0.1)
-            return original_connect(*args, **kwargs)
-
         lock_conn = sqlite3.connect(self.db_path, timeout=5)
         lock_conn.execute("BEGIN IMMEDIATE")
         lock_conn.execute("UPDATE games SET name = ? WHERE id = ?", ("Portal Locked", 1))
 
+        # Fires the instant clear_claim's UPDATE is handed to sqlite, which is
+        # the instant it starts contending for the held write lock. Waiting on
+        # this instead of a fixed sleep is what makes the test mean something:
+        # release the lock too early and clear_claim never meets it, so a
+        # regressed clear_claim that no longer waits would pass unnoticed.
+        write_attempted = asyncio.Event()
+        original_execute = db_module.aiosqlite.Connection.execute
+
+        # Not `async def`: aiosqlite.execute returns a Result, which callers use
+        # as an async context manager as well as awaiting it. Wrapping it in a
+        # coroutine would quietly break `async with db.execute(...)`.
+        def signal_then_execute(self, sql, *args, **kwargs):
+            if sql.lstrip().upper().startswith("UPDATE GAMES SET HLTB_CLAIMED_AT"):
+                write_attempted.set()
+            return original_execute(self, sql, *args, **kwargs)
+
+        # Budgets are sized generously on purpose. A clear_claim that does NOT
+        # wait raises "database is locked" immediately whatever they are set to,
+        # so a tight budget bought nothing and cost correctness: at 0.3s the
+        # lock had to be released within 300ms of the attempt, and a loaded
+        # machine overshooting failed a perfectly good clear_claim.
         with (
             patch.dict(
                 "os.environ",
                 {"DATABASE_URL": f"file:{self.db_path}"},
                 clear=False,
             ),
-            patch.object(db_module.aiosqlite, "connect", side_effect=fast_connect),
-            patch.object(db_module, "_SQLITE_CONNECT_TIMEOUT_SECONDS", 0.3, create=True),
-            patch.object(db_module, "_SQLITE_BUSY_TIMEOUT_MS", 300, create=True),
+            patch.object(db_module.aiosqlite.Connection, "execute", signal_then_execute),
+            patch.object(db_module, "_SQLITE_CONNECT_TIMEOUT_SECONDS", 5.0, create=True),
+            patch.object(db_module, "_SQLITE_BUSY_TIMEOUT_MS", 5000, create=True),
         ):
             clear_task = asyncio.create_task(db_module.clear_claim("games", "hltb_claimed_at", 1))
-            await asyncio.sleep(0.15)
+            await asyncio.wait_for(write_attempted.wait(), timeout=DEADLOCK_TIMEOUT)
+
+            # Hold the lock a while longer and require the task to stay parked.
+            # This is the assertion the test exists for, and the direction of
+            # the timing matters: a clear_claim that does NOT wait raises
+            # "database is locked" as soon as sqlite reaches the held lock, so
+            # anything still pending at the end of this window is genuinely
+            # blocked on it. A slow machine only makes that conclusion safer —
+            # unlike releasing the lock after a fixed sleep, which on a slow
+            # machine can let the write through before it ever meets the lock.
+            finished, _ = await asyncio.wait({clear_task}, timeout=0.2)
+            self.assertFalse(
+                finished, "clear_claim gave up on the locked database instead of waiting"
+            )
+
             lock_conn.rollback()
-            await asyncio.wait_for(clear_task, timeout=1.0)
+            await asyncio.wait_for(clear_task, timeout=DEADLOCK_TIMEOUT)
 
             async with db_module.get_db() as db:
                 row = await db.execute_fetchone("SELECT hltb_claimed_at FROM games WHERE id = ?", (1,))
@@ -281,10 +311,10 @@ class BackgroundEnrichmentSupervisorTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.data.enrich_bg.recompute_tag_affinity", AsyncMock()),
         ):
             task = asyncio.create_task(enrich_bg.background_enrich())
-            await asyncio.wait_for(started["store"].wait(), timeout=0.1)
-            await asyncio.wait_for(started["igdb"].wait(), timeout=0.1)
+            await asyncio.wait_for(started["store"].wait(), timeout=DEADLOCK_TIMEOUT)
+            await asyncio.wait_for(started["igdb"].wait(), timeout=DEADLOCK_TIMEOUT)
             release.set()
-            await asyncio.wait_for(task, timeout=0.1)
+            await asyncio.wait_for(task, timeout=DEADLOCK_TIMEOUT)
 
     async def test_background_enrich_logs_family_exceptions(self) -> None:
         with (

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from conftest import ToolDBTestCase, make_steam_game
+from conftest import ToolDBTestCase, make_steam_game, virtual_clock
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steam_store
 
@@ -67,19 +67,6 @@ class _DummyAsyncClient:
         return outcome
 
 
-class _FakeClock:
-    def __init__(self) -> None:
-        self.now = 0.0
-        self.sleeps: list[float] = []
-
-    def monotonic(self) -> float:
-        return self.now
-
-    async def sleep(self, delay: float) -> None:
-        self.sleeps.append(delay)
-        self.now += delay
-
-
 class SteamRequestGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_gate_enforces_target_interval_without_wall_clock_sleep(self) -> None:
         gate = steam_store._SteamRequestGate(
@@ -87,12 +74,7 @@ class SteamRequestGateTests(unittest.IsolatedAsyncioTestCase):
             max_requests_per_second=2,
             max_in_flight=1,
         )
-        clock = _FakeClock()
-
-        with (
-            patch("gamelib_mcp.data.steam_store.time.monotonic", side_effect=clock.monotonic),
-            patch("gamelib_mcp.data.steam_store.asyncio.sleep", new=clock.sleep),
-        ):
+        with virtual_clock("gamelib_mcp.data.steam_store") as clock:
             await gate.acquire()
             gate.release()
             await gate.acquire()
@@ -110,12 +92,7 @@ class SteamRequestGateTests(unittest.IsolatedAsyncioTestCase):
             budget_window_seconds=10.0,
             max_requests_per_window=2,
         )
-        clock = _FakeClock()
-
-        with (
-            patch("gamelib_mcp.data.steam_store.time.monotonic", side_effect=clock.monotonic),
-            patch("gamelib_mcp.data.steam_store.asyncio.sleep", new=clock.sleep),
-        ):
+        with virtual_clock("gamelib_mcp.data.steam_store") as clock:
             for _ in range(3):
                 await gate.acquire()
                 gate.release()
@@ -131,12 +108,7 @@ class SteamRequestGateTests(unittest.IsolatedAsyncioTestCase):
             max_requests_per_second=1000,
             max_in_flight=1,
         )
-        clock = _FakeClock()
-
-        with (
-            patch("gamelib_mcp.data.steam_store.time.monotonic", side_effect=clock.monotonic),
-            patch("gamelib_mcp.data.steam_store.asyncio.sleep", new=clock.sleep),
-        ):
+        with virtual_clock("gamelib_mcp.data.steam_store") as clock:
             await gate.acquire()
             gate.release()
             gate.penalize(2.0)
@@ -154,6 +126,7 @@ class SteamRequestGateTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with (
+            virtual_clock("gamelib_mcp.data.steam_store"),
             patch("gamelib_mcp.data.steam_store._sleep_before_retry", new=AsyncMock()),
             patch.object(steam_store._STEAM_REQUEST_GATE, "penalize") as penalize,
         ):
@@ -175,6 +148,7 @@ class SteamRequestGateTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with (
+            virtual_clock("gamelib_mcp.data.steam_store"),
             patch("gamelib_mcp.data.steam_store._sleep_before_retry", new=AsyncMock()),
             patch.object(steam_store._STEAM_REQUEST_GATE, "penalize") as penalize,
         ):
@@ -199,7 +173,10 @@ class SteamRetryTests(unittest.IsolatedAsyncioTestCase):
         )
         sleep_mock = AsyncMock()
 
-        with patch("gamelib_mcp.data.steam_store._sleep_before_retry", new=sleep_mock):
+        with (
+            virtual_clock("gamelib_mcp.data.steam_store") as clock,
+            patch("gamelib_mcp.data.steam_store._sleep_before_retry", new=sleep_mock),
+        ):
             payload = await steam_store._steam_get_json_with_retry(
                 client,
                 steam_store.STORE_API,
@@ -210,6 +187,9 @@ class SteamRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload, {"ok": True})
         self.assertEqual(client.calls, 2)
         sleep_mock.assert_awaited()
+        # The 429 also parks the shared gate, so the retry waits out the
+        # cooldown on top of _sleep_before_retry's own backoff.
+        self.assertEqual(clock.sleeps, [steam_store._STEAM_RATE_LIMIT_COOLDOWN_SECONDS])
 
     async def test_get_json_uses_retry_after_before_backoff_jitter(self) -> None:
         client = _DummyAsyncClient(
@@ -221,6 +201,7 @@ class SteamRetryTests(unittest.IsolatedAsyncioTestCase):
         sleep_mock = AsyncMock()
 
         with (
+            virtual_clock("gamelib_mcp.data.steam_store") as clock,
             patch("gamelib_mcp.data.steam_store._sleep_before_retry", new=sleep_mock),
             patch("gamelib_mcp.data.steam_store.random.uniform", side_effect=AssertionError("unexpected jitter")),
         ):
@@ -233,6 +214,9 @@ class SteamRetryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(payload, {"ok": True})
         sleep_mock.assert_awaited_once_with(7.0)
+        # Retry-After 7 is shorter than the cooldown floor, so the gate holds
+        # every caller for the full 10s rather than the header's 7.
+        self.assertEqual(clock.sleeps, [steam_store._STEAM_RATE_LIMIT_COOLDOWN_SECONDS])
 
 
 class EnrichGameTagSeedTests(ToolDBTestCase):

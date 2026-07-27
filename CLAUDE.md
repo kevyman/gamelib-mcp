@@ -9,12 +9,20 @@ uv sync                                           # install deps (uv package man
 uv run python -m gamelib_mcp.main                 # run locally (Streamable HTTP :8000)
 .venv/bin/python -m pytest                        # tests — the local venv is the reliable runner here
 .venv/bin/python -m pytest tests/test_igdb.py -q  # focused test file
+.venv/bin/python -m pytest -n0                    # serial (readable output, live logs) when debugging
 .venv/bin/ruff check gamelib_mcp tests scripts    # lint (gates CI)
 .venv/bin/mypy gamelib_mcp                        # types (gates CI; covers gamelib_mcp only, not tests/)
 docker compose --profile prod up -d --build       # production (Caddy reverse proxy)
 ```
 
 Test gotcha: in Codex sandboxing, aiosqlite tests can hang at `aiosqlite.connect()` or early migration setup (the thread-safe event-loop callback never resumes the awaiting coroutine). Re-run outside the sandbox before changing test fixtures or DB paths. DB tests use temp SQLite files; no checked-in `data/gamelib.db` needed.
+
+Three conventions keep the suite fast and honest about time, all in `tests/conftest.py`:
+- **Migrate once, copy per test.** A session fixture runs the real migration chain into a template database; `ToolDBTestCase` copies the finished file and marks it ready. Never re-add a per-test `init_db()` — that alone was ~40% of a serial run.
+- **`DEADLOCK_TIMEOUT` for every `wait_for`.** The async orchestration tests wait on events set by the code under test, with no real I/O in between, so a wall-clock budget measures machine load and nothing else. Tight budgets (0.1s) were the suite's main source of false failures. Never assert liveness with a timed `asyncio.sleep` either — use an event that is never set.
+- **`virtual_clock(module)` for anything that backs off.** The Steam and IGDB request gates sleep for real (up to 10s after a 429). Serve them a fake clock and assert `clock.sleeps` instead of sitting through the delay.
+
+`pytest-xdist` runs the suite across all cores by default (`addopts` in `pyproject.toml`). It only works because tests share no mutable state — each gets its own temp DB, and module-level globals are per-process.
 
 ## Environment
 
