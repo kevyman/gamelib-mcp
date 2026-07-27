@@ -48,28 +48,33 @@ class EnrichmentClaimTests(unittest.IsolatedAsyncioTestCase):
         conn.commit()
         conn.close()
 
-        original_connect = db_module.aiosqlite.connect
-
-        def fast_connect(*args, **kwargs):
-            kwargs.setdefault("timeout", 0.1)
-            return original_connect(*args, **kwargs)
-
         lock_conn = sqlite3.connect(self.db_path, timeout=5)
         lock_conn.execute("BEGIN IMMEDIATE")
         lock_conn.execute("UPDATE games SET name = ? WHERE id = ?", ("Portal Locked", 1))
 
+        # Sized generously on purpose. A clear_claim that does NOT wait raises
+        # "database is locked" immediately whatever these are set to, so a tight
+        # budget bought nothing and cost correctness: at 0.3s the lock had to be
+        # released within 300ms of the attempt, and a loaded machine
+        # overshooting the sleep below failed a perfectly good clear_claim.
         with (
             patch.dict(
                 "os.environ",
                 {"DATABASE_URL": f"file:{self.db_path}"},
                 clear=False,
             ),
-            patch.object(db_module.aiosqlite, "connect", side_effect=fast_connect),
-            patch.object(db_module, "_SQLITE_CONNECT_TIMEOUT_SECONDS", 0.3, create=True),
-            patch.object(db_module, "_SQLITE_BUSY_TIMEOUT_MS", 300, create=True),
+            patch.object(db_module, "_SQLITE_CONNECT_TIMEOUT_SECONDS", 5.0, create=True),
+            patch.object(db_module, "_SQLITE_BUSY_TIMEOUT_MS", 5000, create=True),
         ):
             clear_task = asyncio.create_task(db_module.clear_claim("games", "hltb_claimed_at", 1))
-            await asyncio.sleep(0.15)
+            # Long enough for the task to reach the write and block on it;
+            # overshooting is harmless now, it just parks there a bit longer.
+            await asyncio.sleep(0.05)
+            # The property under test, asserted rather than implied by the call
+            # eventually succeeding: it is still waiting. A clear_claim that
+            # gave up on the lock would already be done, with "database is
+            # locked" — which is what this fails on if the waiting regresses.
+            self.assertFalse(clear_task.done())
             lock_conn.rollback()
             await asyncio.wait_for(clear_task, timeout=DEADLOCK_TIMEOUT)
 
