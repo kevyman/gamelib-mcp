@@ -12,7 +12,10 @@ connected client can read/@-mention them on demand even without the skill
 installed locally.
 
 Skills live under ``skills/<skill-name>/`` at the repo root (a sibling of
-this package), each with a ``SKILL.md`` carrying YAML frontmatter (``name``,
+this package; wheel builds force-include a copy at ``gamelib_mcp/skills``
+and the Docker image COPYs the directory, so deployed artifacts serve the
+same resources — see ``_resolve_skills_dir``), each with a ``SKILL.md``
+carrying YAML frontmatter (``name``,
 ``description``, ``version``) plus any supporting files a skill chooses to
 ship. Every file under a skill directory that has a ``SKILL.md`` gets its own
 resource; ``skills/README.md`` itself (install instructions, not a skill) is
@@ -36,8 +39,23 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# gamelib_mcp/skill_resources.py -> gamelib_mcp/ -> repo root -> skills/
-SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
+def _resolve_skills_dir(package_dir: Path | None = None) -> Path:
+    """Find the skills/ directory across the deployment shapes.
+
+    A wheel install carries skills/ INSIDE the package (the pyproject
+    force-include maps it to gamelib_mcp/skills), so that copy wins when
+    present; source checkouts, editable installs, and the Docker image keep
+    it at the repo root as a sibling of the package. Returns the sibling
+    path even when neither exists so the fail-soft warning names a real
+    location.
+    """
+    if package_dir is None:
+        package_dir = Path(__file__).resolve().parent
+    packaged = package_dir / "skills"
+    return packaged if packaged.is_dir() else package_dir.parent / "skills"
+
+
+SKILLS_DIR = _resolve_skills_dir()
 
 
 def _parse_frontmatter(text: str) -> dict[str, str]:

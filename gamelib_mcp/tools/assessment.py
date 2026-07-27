@@ -183,6 +183,15 @@ def compute_fit(candidate_tags: list[str], profile: dict) -> dict[str, Any]:
 
     top = {_fit_key(t["tag"]): t for t in profile.get("top_tags", [])}
     bottom = {_fit_key(t["tag"]): t for t in profile.get("bottom_tags", [])}
+    # Cold-start profiles (fewer eligible affinity rows than the top-20 +
+    # bottom-10 window) return overlapping lists; membership alone can't
+    # classify those tags, so the affinity's sign decides which side keeps
+    # them — a negative tag must never pass as a top match.
+    for key in top.keys() & bottom.keys():
+        if (top[key].get("affinity_score") or 0) < 0:
+            del top[key]
+        else:
+            del bottom[key]
 
     matched_top: list[dict[str, Any]] = []
     matched_bottom: list[dict[str, Any]] = []

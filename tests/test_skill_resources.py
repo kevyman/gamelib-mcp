@@ -165,6 +165,39 @@ class SkillResourcesMissingDirTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resources, [])
 
 
+class ResolveSkillsDirTests(unittest.TestCase):
+    def test_packaged_copy_wins_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = Path(tmp) / "site-packages" / "gamelib_mcp"
+            (pkg / "skills").mkdir(parents=True)
+            self.assertEqual(skill_resources._resolve_skills_dir(pkg), pkg / "skills")
+
+    def test_repo_sibling_used_without_packaged_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = Path(tmp) / "repo" / "gamelib_mcp"
+            pkg.mkdir(parents=True)
+            self.assertEqual(
+                skill_resources._resolve_skills_dir(pkg), pkg.parent / "skills"
+            )
+
+
+class SkillPackagingDriftTests(unittest.TestCase):
+    """Deployed artifacts must carry skills/ — without these, Docker and
+    wheel installs take the fail-soft path and serve zero skill:// resources
+    while the server instructions still advertise skill://index.json."""
+
+    REPO_ROOT = Path(__file__).resolve().parent.parent
+
+    def test_wheel_force_includes_skills(self) -> None:
+        pyproject = (self.REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn("[tool.hatch.build.targets.wheel.force-include]", pyproject)
+        self.assertIn('"skills" = "gamelib_mcp/skills"', pyproject)
+
+    def test_docker_image_copies_skills(self) -> None:
+        dockerfile = (self.REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("COPY skills/ skills/", dockerfile)
+
+
 class ParseFrontmatterTests(unittest.TestCase):
     def test_parses_name_description_version(self) -> None:
         text = (

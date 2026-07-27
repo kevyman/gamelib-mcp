@@ -132,6 +132,27 @@ class FitCheckTests(unittest.TestCase):
         self.assertEqual(out["suggested_call"], "probable miss")
         self.assertEqual(len(out["matched_bottom_tags"]), 1)
 
+    def test_cold_start_overlap_resolves_by_affinity_sign(self):
+        # A cold-start profile (fewer eligible rows than the top-20 +
+        # bottom-10 window) returns the same rows in both lists; a negative
+        # tag present in both must classify as a bottom match, never ride
+        # the top-first branch into a top match.
+        overlap = self.TOP + [_tag("sports", -1.8, 3, avg_score=4.0)]
+        out = compute_fit(["Sports", "Football"], _profile(overlap, overlap))
+        self.assertEqual(out["matched_top_tags"], [])
+        self.assertEqual(len(out["matched_bottom_tags"]), 1)
+        self.assertEqual(out["suggested_call"], "probable miss")
+
+    def test_cold_start_overlap_keeps_positive_tags_on_top(self):
+        overlap = self.TOP + [_tag("sports", -1.8, 3, avg_score=4.0)]
+        out = compute_fit(
+            ["Roguelike", "Deckbuilder", "Indie", "Pixel Graphics"],
+            _profile(overlap, overlap),
+        )
+        self.assertEqual(out["suggested_call"], "strong fit")
+        self.assertEqual(len(out["matched_top_tags"]), 4)
+        self.assertEqual(out["matched_bottom_tags"], [])
+
     def test_coin_flip_on_single_weak_match(self):
         out = compute_fit(
             ["Pixel Graphics", "Farming", "Fishing"],
