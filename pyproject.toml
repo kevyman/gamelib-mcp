@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Cross-platform game library MCP server"
 requires-python = ">=3.11"
 dependencies = [
-    "fastmcp>=3.4.4,<4.0",
+    "fastmcp>=3.4.5,<4.0",
     "httpx>=0.27",
     # Epic order-history importer: Cloudflare challenges non-browser TLS
     # fingerprints on www.epicgames.com, so the real fetch path impersonates
@@ -18,7 +18,7 @@ dependencies = [
     "beautifulsoup4>=4.15.0",
     "rapidfuzz>=3.14.5",
     "psnawp>=2.1,<4.0",
-    "pynintendoparental>=2.4",
+    "pynintendoparental>=2.5.0",
 ]
 
 [build-system]
@@ -39,7 +39,7 @@ dev = [
     "pillow>=12.3.0",
     "pytest>=9.1.1",
     "pytest-xdist>=3.8.0",
-    "ruff>=0.15.22",
+    "ruff>=0.16.0",
 ]
 
 [tool.pytest.ini_options]
