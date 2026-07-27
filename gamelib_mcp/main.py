@@ -926,8 +926,9 @@ async def get_wishlist(
     order. Prices come from IsThereAnyDeal (Steam wishlist items) and DekuDeals
     (switch2 — the shared wishlist page, plus per-title search lookups for games
     wishlisted elsewhere that IGDB says also have a Switch release; those
-    lookups are capped per call, overflow reported in switch2_lookups_deferred
-    and picked up on later calls). Cached 12h; refresh=True forces a live fetch.
+    lookups are capped per call — switch2_lookups_performed is how many priced
+    this call, switch2_lookups_deferred the backlog still unpriced after it,
+    picked up on later calls). Cached 12h; refresh=True forces a live fetch.
     Each deal's flat fields are the RECOMMENDED purchase (preferred platform
     unless another platform's price is below preference_override_ratio × the
     preferred price — "the deal is too good"); other platforms appear in
