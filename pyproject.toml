@@ -33,8 +33,16 @@ dev = [
     "mypy>=2.3.0",
     "pillow>=12.3.0",
     "pytest>=9.1.1",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.15.22",
 ]
+
+[tool.pytest.ini_options]
+# The suite is ~1800 mostly-independent tests over per-test temp databases, so
+# it parallelizes cleanly: ~4 minutes serial, ~45s across 8 cores. loadfile
+# keeps each file on one worker, which keeps output readable and any file-level
+# state a file's own business. Pass -n0 to run serially when debugging.
+addopts = "-n auto --dist loadfile"
 
 [tool.ruff]
 target-version = "py311"

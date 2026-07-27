@@ -5,6 +5,7 @@ import os
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from conftest import DEADLOCK_TIMEOUT
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import admin as admin_tools
 from gamelib_mcp import lifecycle
@@ -19,14 +20,42 @@ from gamelib_mcp.lifecycle import (
 )
 
 
+async def _never_finishes() -> None:
+    """Stand-in for a refresh task that is still running.
+
+    The duplicate-task guards under test only care that the stored task is not
+    done. A timed sleep would have to outlast everything the test does after
+    creating it, which on a loaded machine it does not — so the task quietly
+    completes and the guard sees no running refresh to skip. Never finishing is
+    the property being asserted; the caller cancels it.
+    """
+    await asyncio.Event().wait()
+
+
 @contextlib.contextmanager
-def _stub_sync_meta_writes():
-    """Neutralize run_library_sync's meta writes so worker-behavior tests stay
-    DB-free and fast (these tests run without a configured temp DB)."""
+def _stub_sync_side_effects():
+    """Neutralize everything run_library_sync does besides the platform syncs.
+
+    These tests are about worker behavior and run without a configured temp DB,
+    so the sync's bookkeeping has to be stubbed. Stubbing only the meta writes
+    left three real side effects running against the session-default database:
+    the play-history snapshot, the wishlist fulfillment sweep, and — the one
+    that bites — a genuine background-enrichment task, created on the test's own
+    event loop and still running when that loop closes. Its aiosqlite worker
+    then tries to hand a result back to a closed loop and dies with
+    "Event loop is closed"; the sync swallows every one of those failures, so
+    the test passes and only an unhandled-thread-exception warning shows it
+    happened at all. That is the same leaked-worker shape that hung CI.
+    """
     with (
         patch("gamelib_mcp.tools.admin._mark_sync_started", AsyncMock()),
         patch("gamelib_mcp.tools.admin._mark_platform_state", AsyncMock()),
         patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()),
+        # Returns 0 so results still carry the play_history_rows the real call
+        # would have added for a platform with nothing new to snapshot.
+        patch("gamelib_mcp.tools.admin.record_play_history_snapshots", AsyncMock(return_value=0)),
+        patch("gamelib_mcp.tools.admin.clear_fulfilled_wishlist_entries", AsyncMock()),
+        patch("gamelib_mcp.tools.admin._schedule_background_enrich", AsyncMock()),
     ):
         yield
 
@@ -254,7 +283,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.lifecycle._drain_background_enrich_reruns", AsyncMock()) as mock_drain,
         ):
             task = asyncio.create_task(_run_startup_refresh())
-            await asyncio.wait_for(started.wait(), timeout=0.1)
+            await asyncio.wait_for(started.wait(), timeout=DEADLOCK_TIMEOUT)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task
@@ -267,7 +296,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_ensure_startup_refresh_skips_duplicate_running_task(self) -> None:
         import gamelib_mcp.lifecycle as main_module
 
-        running_task = asyncio.create_task(asyncio.sleep(0.2))
+        running_task = asyncio.create_task(_never_finishes())
         main_module._LIBRARY_REFRESH_TASK = running_task
 
         with patch("gamelib_mcp.lifecycle.asyncio.create_task", AsyncMock()) as mock_create_task:
@@ -290,7 +319,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("gamelib_mcp.lifecycle._ensure_startup_refresh", AsyncMock(side_effect=fake_refresh)) as mock_refresh:
             task = asyncio.create_task(_run_periodic_refresh_loop(0.01))
-            await asyncio.wait_for(started.wait(), timeout=0.1)
+            await asyncio.wait_for(started.wait(), timeout=DEADLOCK_TIMEOUT)
             self.assertEqual(mock_refresh.await_count, 1)
 
             release.set()
@@ -301,7 +330,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_ensure_periodic_refresh_loop_skips_duplicate_running_task(self) -> None:
         import gamelib_mcp.lifecycle as main_module
 
-        running_task = asyncio.create_task(asyncio.sleep(0.2))
+        running_task = asyncio.create_task(_never_finishes())
         main_module._PERIODIC_REFRESH_TASK = running_task
 
         with patch("gamelib_mcp.lifecycle.asyncio.create_task", AsyncMock()) as mock_create_task:
@@ -331,9 +360,9 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.lifecycle._run_background_enrich", AsyncMock()),
         ):
             cm = lifespan(object())
-            await asyncio.wait_for(cm.__aenter__(), timeout=0.1)
+            await asyncio.wait_for(cm.__aenter__(), timeout=DEADLOCK_TIMEOUT)
 
-            await asyncio.wait_for(started.wait(), timeout=0.1)
+            await asyncio.wait_for(started.wait(), timeout=DEADLOCK_TIMEOUT)
             self.assertFalse(release.is_set())
 
             release.set()
@@ -363,12 +392,12 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.lifecycle._run_background_enrich", AsyncMock(side_effect=fake_enrich)),
         ):
             cm = lifespan(object())
-            await asyncio.wait_for(cm.__aenter__(), timeout=0.1)
-            await asyncio.wait_for(refresh_started.wait(), timeout=0.1)
-            await asyncio.wait_for(enrich_started.wait(), timeout=0.1)
+            await asyncio.wait_for(cm.__aenter__(), timeout=DEADLOCK_TIMEOUT)
+            await asyncio.wait_for(refresh_started.wait(), timeout=DEADLOCK_TIMEOUT)
+            await asyncio.wait_for(enrich_started.wait(), timeout=DEADLOCK_TIMEOUT)
             self.assertFalse(refresh_release.is_set())
             refresh_release.set()
-            await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=0.1)
+            await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=DEADLOCK_TIMEOUT)
 
     async def test_stale_startup_requeues_enrichment_after_refresh_finishes(self) -> None:
         stale_at = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
@@ -401,13 +430,13 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.lifecycle._run_background_enrich", AsyncMock(side_effect=fake_enrich)),
         ):
             cm = lifespan(object())
-            await asyncio.wait_for(cm.__aenter__(), timeout=0.1)
-            await asyncio.wait_for(refresh_started.wait(), timeout=0.1)
-            await asyncio.wait_for(first_enrich_started.wait(), timeout=0.1)
+            await asyncio.wait_for(cm.__aenter__(), timeout=DEADLOCK_TIMEOUT)
+            await asyncio.wait_for(refresh_started.wait(), timeout=DEADLOCK_TIMEOUT)
+            await asyncio.wait_for(first_enrich_started.wait(), timeout=DEADLOCK_TIMEOUT)
 
             refresh_release.set()
-            await asyncio.wait_for(second_enrich_started.wait(), timeout=0.1)
-            await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=0.1)
+            await asyncio.wait_for(second_enrich_started.wait(), timeout=DEADLOCK_TIMEOUT)
+            await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=DEADLOCK_TIMEOUT)
 
         self.assertEqual(enrich_calls, 2)
 
@@ -425,14 +454,14 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("gamelib_mcp.lifecycle._run_background_enrich", AsyncMock(side_effect=fake_enrich)):
             first_task = await _schedule_background_enrich()
-            await asyncio.wait_for(started.wait(), timeout=0.1)
+            await asyncio.wait_for(started.wait(), timeout=DEADLOCK_TIMEOUT)
             second_task = await _schedule_background_enrich()
 
             self.assertIs(first_task, second_task)
 
             drain_task = asyncio.create_task(_drain_background_enrich_reruns())
             release.set()
-            await asyncio.wait_for(drain_task, timeout=0.1)
+            await asyncio.wait_for(drain_task, timeout=DEADLOCK_TIMEOUT)
 
         self.assertEqual(enrich_calls, 2)
 
@@ -467,7 +496,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             patch.dict(os.environ, {"LIBRARY_REFRESH_INTERVAL_HOURS": "24"}, clear=False),
         ):
             cm = lifespan(object())
-            await asyncio.wait_for(cm.__aenter__(), timeout=0.1)
+            await asyncio.wait_for(cm.__aenter__(), timeout=DEADLOCK_TIMEOUT)
 
             import gamelib_mcp.lifecycle as main_module
 
@@ -476,9 +505,9 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
                 with contextlib.suppress(asyncio.CancelledError):
                     await main_module._PERIODIC_REFRESH_TASK
             main_module._PERIODIC_REFRESH_TASK = asyncio.create_task(idle_forever())
-            await asyncio.wait_for(started.wait(), timeout=0.1)
+            await asyncio.wait_for(started.wait(), timeout=DEADLOCK_TIMEOUT)
 
-            await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=0.1)
+            await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=DEADLOCK_TIMEOUT)
             self.assertTrue(main_module._PERIODIC_REFRESH_TASK.done())
 
     async def test_startup_clears_abandoned_hltb_claims_before_background_enrich(self) -> None:
@@ -501,7 +530,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.lifecycle._run_background_enrich", AsyncMock(side_effect=fake_enrich)),
         ):
             async with lifespan(object()):
-                await asyncio.wait_for(enrich_started.wait(), timeout=0.1)
+                await asyncio.wait_for(enrich_started.wait(), timeout=DEADLOCK_TIMEOUT)
 
         self.assertEqual(call_order[:2], ["clear_claims", "background_enrich"])
 
@@ -542,7 +571,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             return await make_sync("xbox", {"platform": "xbox", "synced": True})
 
         with (
-            _stub_sync_meta_writes(),
+            _stub_sync_side_effects(),
             patch("gamelib_mcp.tools.admin.is_steam_configured", return_value=True, create=True),
             patch("gamelib_mcp.tools.admin.is_epic_configured", return_value=True, create=True),
             patch("gamelib_mcp.tools.admin.is_gog_configured", return_value=True, create=True),
@@ -560,11 +589,11 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             refresh_task = asyncio.create_task(admin_tools.run_library_sync())
             await asyncio.wait_for(
                 asyncio.gather(*(event.wait() for event in started.values())),
-                timeout=0.1,
+                timeout=DEADLOCK_TIMEOUT,
             )
 
             release.set()
-            result = await asyncio.wait_for(refresh_task, timeout=0.1)
+            result = await asyncio.wait_for(refresh_task, timeout=DEADLOCK_TIMEOUT)
 
         self.assertEqual(
             result,
@@ -590,7 +619,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             raise PlatformAborted("epic cancelled")
 
         with (
-            _stub_sync_meta_writes(),
+            _stub_sync_side_effects(),
             patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(side_effect=steam_sync)),
             patch("gamelib_mcp.tools.admin.sync_epic", AsyncMock(side_effect=epic_sync)),
             patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(return_value={"candidates": 0})) as mock_detect,
@@ -610,7 +639,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         refresh_result = {"platform": "steam", "synced": True}
 
         with (
-            _stub_sync_meta_writes(),
+            _stub_sync_side_effects(),
             patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(return_value=refresh_result)),
             patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(return_value={"candidates": 3})) as mock_detect,
         ):
@@ -629,7 +658,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             return {"platform": "steam", "synced": True}
 
         with (
-            _stub_sync_meta_writes(),
+            _stub_sync_side_effects(),
             patch("gamelib_mcp.tools.admin.pause_background_enrichment", pause_enrichment),
             patch("gamelib_mcp.tools.admin.resume_background_enrichment", resume_enrichment),
             patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(side_effect=steam_sync)),
@@ -647,7 +676,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_refresh_library_skips_farm_detection_without_steam(self) -> None:
         with (
-            _stub_sync_meta_writes(),
+            _stub_sync_side_effects(),
             patch("gamelib_mcp.tools.admin.sync_epic", AsyncMock(return_value={"platform": "epic", "synced": True})),
             patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock()) as mock_detect,
         ):
@@ -662,7 +691,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         switch_result = {"platform": "switch2", "synced": True}
 
         with (
-            _stub_sync_meta_writes(),
+            _stub_sync_side_effects(),
             patch("gamelib_mcp.tools.admin.sync_nintendo", AsyncMock(return_value=switch_result)) as mock_sync,
             patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock()) as mock_detect,
         ):
@@ -676,7 +705,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         refresh_result = {"platform": "steam", "synced": True}
 
         with (
-            _stub_sync_meta_writes(),
+            _stub_sync_side_effects(),
             patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(return_value=refresh_result)),
             patch("gamelib_mcp.tools.admin.detect_farmed_games", AsyncMock(side_effect=RuntimeError("detector boom"))) as mock_detect,
         ):

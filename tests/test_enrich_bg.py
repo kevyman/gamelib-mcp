@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from conftest import DEADLOCK_TIMEOUT
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import enrich_bg
 
@@ -70,7 +71,7 @@ class EnrichmentClaimTests(unittest.IsolatedAsyncioTestCase):
             clear_task = asyncio.create_task(db_module.clear_claim("games", "hltb_claimed_at", 1))
             await asyncio.sleep(0.15)
             lock_conn.rollback()
-            await asyncio.wait_for(clear_task, timeout=1.0)
+            await asyncio.wait_for(clear_task, timeout=DEADLOCK_TIMEOUT)
 
             async with db_module.get_db() as db:
                 row = await db.execute_fetchone("SELECT hltb_claimed_at FROM games WHERE id = ?", (1,))
@@ -281,10 +282,10 @@ class BackgroundEnrichmentSupervisorTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.data.enrich_bg.recompute_tag_affinity", AsyncMock()),
         ):
             task = asyncio.create_task(enrich_bg.background_enrich())
-            await asyncio.wait_for(started["store"].wait(), timeout=0.1)
-            await asyncio.wait_for(started["igdb"].wait(), timeout=0.1)
+            await asyncio.wait_for(started["store"].wait(), timeout=DEADLOCK_TIMEOUT)
+            await asyncio.wait_for(started["igdb"].wait(), timeout=DEADLOCK_TIMEOUT)
             release.set()
-            await asyncio.wait_for(task, timeout=0.1)
+            await asyncio.wait_for(task, timeout=DEADLOCK_TIMEOUT)
 
     async def test_background_enrich_logs_family_exceptions(self) -> None:
         with (
