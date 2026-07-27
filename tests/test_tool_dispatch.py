@@ -384,11 +384,14 @@ class ResponseSizeGuardTests(ToolDBTestCase):
         # by_bundle only showed up as unbounded once a DB with real purchase
         # history was used — the dev copy had zero priced rows.
         ("get_stats", {"report": "spending"}, {"by_bundle": 25}),
+        # anchors scales with how many owned games share the candidate's core
+        # tags — capped at ANCHOR_CAP (8) with anchor_count/anchors_truncated.
+        ("get_assessment_context", {"tags": ["bulk tag"]}, {"anchors": 8}),
     ]
 
     async def _seed_bulk(self, n=40):
         for i in range(n):
-            gid = await seed_game(f"Bulk {i}", hltb_main=5.0)
+            gid = await seed_game(f"Bulk {i}", hltb_main=5.0, tags=["bulk tag"])
             # owned on two platforms so it lands in the overlap list
             await add_platform(gid, "steam", playtime_minutes=100 + i)
             await add_platform(gid, "gog", playtime_minutes=50)
@@ -426,3 +429,8 @@ class ResponseSizeGuardTests(ToolDBTestCase):
         self.assertEqual(wishlist["count"], 5)
         self.assertEqual(wishlist["total_matches"], 40)
         self.assertTrue(wishlist["has_more"])
+
+        assessment = await main.get_assessment_context(tags=["bulk tag"])
+        self.assertEqual(len(assessment["anchors"]), 8)
+        self.assertEqual(assessment["anchor_count"], 40)
+        self.assertTrue(assessment["anchors_truncated"])

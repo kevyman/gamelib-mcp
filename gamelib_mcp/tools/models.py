@@ -710,6 +710,46 @@ class CompletionSuggestionsResponse(FlexibleModel):
 
 
 
+class AssessmentAnchor(FlexibleModel):
+    """One owned library game sharing the candidate's core tags."""
+
+    game_id: int
+    name: str
+    # Which of the candidate's core tags this game carries.
+    matched_core_tags: list[str] = Field(default_factory=list)
+    # {source, score} from the highest-weight explicit rating; None if unrated.
+    rating: dict[str, Any] | None = None
+    playtime_hours: float | None = None
+    completion_status: str | None = None
+    play_state: str | None = None
+
+
+class AssessmentContextResponse(FlexibleModel):
+    """get_assessment_context: every block optional — presence depends on inputs.
+
+    craft — when caller review numbers were passed (source="caller", full
+    sample-adjusted formula) or the resolved game has cached Steam review
+    data (source="server_cache": review enum/description only, no counts,
+    with as_of + limitations). Absent when neither exists.
+    fit / anchors / anchor_count / anchors_truncated — whenever candidate
+    tags exist (caller-supplied `tags`, else the resolved game's stored
+    tags). anchors is CAPPED at 8; anchor_count is the true total.
+    game / game_resolution — when identity (name/appid/game_id) was given;
+    game only when it resolved (game_resolution="resolved").
+    pace — always (last-30-day play summary).
+    """
+
+    craft: dict[str, Any] | None = None
+    fit: dict[str, Any] | None = None
+    game: dict[str, Any] | None = None
+    # "resolved" | "not_found"; absent when no identity was passed.
+    game_resolution: str | None = None
+    anchors: list[AssessmentAnchor] | None = None
+    anchor_count: int | None = None
+    anchors_truncated: bool | None = None
+    pace: dict[str, Any] | None = None
+
+
 class PlayHistoryWindow(FlexibleModel):
     start: str
     end: str

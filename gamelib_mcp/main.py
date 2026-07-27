@@ -29,9 +29,11 @@ from .auth import load_security_config
 from .http_admin import HttpSecurityMiddleware, register_http_routes
 from .lifecycle import lifespan
 from .response_encoding import StructuredOnlyMiddleware, duplicate_text_content_enabled
+from .skill_resources import register_skill_resources
 from .tools.integrations import get_integration_status as _filter_integration_status
 from .tools.models import (
     AddGameToPlatformResponse,
+    AssessmentContextResponse,
     CheckLibraryResponse,
     DeleteGameResponse,
     GameDetailResponse,
@@ -146,7 +148,8 @@ mcp = FastMCP(
         "prefer concise list responses with offset pagination when available for larger result sets. "
         "Tools that act on one game (rate_game, update_game, set_playtime, set_acquisition, "
         "add_game_to_platform, merge_games, delete_game, get_game_detail) also take items=[...] "
-        "to do the same thing in bulk in a single call — prefer that over looping."
+        "to do the same thing in bulk in a single call — prefer that over looping. "
+        "For evaluation and backlog-triage methodology, read skill://index.json."
     ),
     auth=auth_provider,
     middleware=component_middleware,
@@ -154,6 +157,7 @@ mcp = FastMCP(
 )
 
 register_apps(mcp)
+register_skill_resources(mcp)
 
 
 # ── Tools ──────────────────────────────────────────────────────────────────────
@@ -971,6 +975,87 @@ async def get_play_history(
     """
     from .tools.history import get_play_history as _get_play_history
     return await _get_play_history(days, start_date, end_date, platform, limit)
+
+
+@mcp.tool(title="Game Assessment Context", annotations=READ_ONLY_TOOL)
+async def get_assessment_context(
+    name: str | None = None,
+    appid: int | None = None,
+    game_id: int | None = None,
+    tags: list[str] | None = None,
+    steam_positive_pct: float | None = None,
+    steam_total_reviews: int | None = None,
+    steam_recent_positive_pct: float | None = None,
+    steam_recent_total_reviews: int | None = None,
+    early_access: bool = False,
+) -> AssessmentContextResponse:
+    """
+    Gather everything needed to assess ONE named game candidate — owned or
+    not — in a single pure-DB call: craft score, taste fit, anchor games,
+    play pace, and ownership context. This is the mechanical layer of a
+    quality/purchase assessment; apply judgment (genre calibration, anchor
+    reasoning, the verdict) on top of the blocks it returns. No network.
+
+    Identity (game_id, Steam appid, or name — partial/fuzzy, like
+    get_game_detail) is optional: omit it for an unowned or unreleased
+    candidate and pass `tags` instead. `tags` are the candidate's Steam tags
+    IN STEAM'S DISPLAY ORDER (the first 4 are treated as the core loop);
+    when omitted, the resolved library row's stored tags are used. At least
+    one of identity or tags is required.
+
+    Steam review numbers come from the caller (web-search SteamDB or the
+    store page) because the server stores no review counts: pass
+    steam_positive_pct + steam_total_reviews (all-time, both together) and
+    optionally steam_recent_positive_pct + steam_recent_total_reviews (both
+    together, all-time pair required), plus early_access=True to discount
+    the craft band one step. Percentages accept 88 or 0.88.
+
+    Response blocks (each absent when its inputs are missing):
+    - craft: sample-adjusted sentiment p − (p − 0.5)·2^(−log10(n+1)), with
+      band (elite ≥0.92 / excellent ≥0.85 / very_good ≥0.78 / divisive
+      ≥0.70 / caution), recent-vs-all-time trajectory (improving ≥ +5pp,
+      REGRESSING ≤ −7pp — investigate before trusting the all-time number),
+      insufficient_data below 50 reviews, and a ready formatted_line.
+      source="caller" when computed from numbers you passed;
+      source="server_cache" when only the library's cached Steam review
+      summary exists — that cache holds ONLY the 1-9 review-score enum and
+      description (no counts), so no adjusted score is computed and
+      `limitations` says so; as_of dates the cache.
+    - fit: candidate tags crossed against the taste profile:
+      matched_top_tags/matched_bottom_tags with affinities, top_coverage,
+      core_gap (first 4 tags mostly absent from taste data), and
+      suggested_call (strong fit / probable fit / coin flip / probable
+      miss) — a starting point that anchors override, never the answer.
+      tag_affinities lists the raw per-tag affinity rows for every
+      candidate tag, including ones outside the profile's top/bottom lists.
+    - anchors: up to 8 owned, primary, non-farmed games sharing the
+      candidate's core tags (most shared core tags first, then rated, then
+      most played), each with rating, playtime, and completion_status —
+      the anchor evidence for the fit call. anchor_count is the true total
+      and anchors_truncated flags the cap.
+    - pace: last-30-day play summary (total minutes/hours, per-platform
+      split, most_played game) for grounding time-budget judgments.
+    - game: when identity resolves (game_resolution="resolved"), a compact
+      ownership subset — owned_platforms with playtime and acquisition
+      (price_paid/bundle_name/purchase_source), wishlisted,
+      completion_status, play_state, my_rating, HLTB hours. Check that
+      game.name is actually the candidate: a fuzzy match can land on a
+      sibling title. game_resolution="not_found" (no game block) simply
+      means the library doesn't know the game — normal for unowned
+      candidates; the other blocks still come back.
+    """
+    from .tools.assessment import get_assessment_context as _assess
+    return await _assess(
+        name,
+        appid,
+        game_id,
+        tags,
+        steam_positive_pct,
+        steam_total_reviews,
+        steam_recent_positive_pct,
+        steam_recent_total_reviews,
+        early_access,
+    )
 
 
 @mcp.tool(title="Set Hardware Preference", annotations=MUTATION_TOOL)
