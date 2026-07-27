@@ -831,7 +831,10 @@ class FetchSearchPricesTests(unittest.IsolatedAsyncioTestCase):
         # Politeness pacing applies before the fallback request too.
         sleep_mock.assert_awaited_once()
 
-    async def test_neither_filter_matches_title_absent_no_exception(self):
+    async def test_neither_filter_matches_reports_confirmed_miss(self):
+        # Both filtered searches loaded and neither held a card: an answer, not
+        # an absence of one. Reported as an explicit None so the caller can
+        # negatively cache it.
         html = (FIXTURES_DIR / "dekudeals_search_page_switch2_filter_no_match.html").read_text(
             encoding="utf-8"
         )
@@ -840,10 +843,13 @@ class FetchSearchPricesTests(unittest.IsolatedAsyncioTestCase):
             client.get = AsyncMock(return_value=_response(html))
             with patch("gamelib_mcp.data.dekudeals.asyncio.sleep", new=AsyncMock()):
                 results = await dekudeals.fetch_search_prices(["Completely Unrelated Title XYZ"])
-        self.assertEqual(results, {})
+        self.assertEqual(results, {"Completely Unrelated Title XYZ": None})
         self.assertEqual(client.get.call_count, 2)
 
     async def test_fetch_error_skips_title_without_raising(self):
+        # The counterpart to the test above: a title whose searches never loaded
+        # must stay ABSENT, never a None. A None would be negatively cached and
+        # suppress retries for a game DekuDeals may well sell.
         with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
             client = client_cls.return_value.__aenter__.return_value
             client.get = AsyncMock(side_effect=httpx.ConnectError("boom"))
@@ -851,14 +857,29 @@ class FetchSearchPricesTests(unittest.IsolatedAsyncioTestCase):
                 results = await dekudeals.fetch_search_prices(["Hades"])
         self.assertEqual(results, {})
 
-    async def test_no_fuzzy_match_yields_no_entry(self):
+    async def test_partial_fetch_failure_is_not_a_confirmed_miss(self):
+        # switch_2 loaded with no match, the switch fallback errored — the
+        # fallback might have matched, so the outcome is unknown, not a miss.
+        html = (FIXTURES_DIR / "dekudeals_search_page_switch2_filter_no_match.html").read_text(
+            encoding="utf-8"
+        )
+        with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
+            client = client_cls.return_value.__aenter__.return_value
+            client.get = AsyncMock(
+                side_effect=[_response(html), httpx.ConnectError("boom")]
+            )
+            with patch("gamelib_mcp.data.dekudeals.asyncio.sleep", new=AsyncMock()):
+                results = await dekudeals.fetch_search_prices(["Hades"])
+        self.assertEqual(results, {})
+
+    async def test_no_fuzzy_match_yields_confirmed_miss(self):
         html = (FIXTURES_DIR / "dekudeals_search_page.html").read_text(encoding="utf-8")
         with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
             client = client_cls.return_value.__aenter__.return_value
             client.get = AsyncMock(return_value=_response(html))
             with patch("gamelib_mcp.data.dekudeals.asyncio.sleep", new=AsyncMock()):
                 results = await dekudeals.fetch_search_prices(["Completely Unrelated Title XYZ"])
-        self.assertEqual(results, {})
+        self.assertEqual(results, {"Completely Unrelated Title XYZ": None})
 
     async def test_empty_titles_returns_empty_without_fetching(self):
         with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:

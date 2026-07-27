@@ -371,7 +371,7 @@ def _match_search_title(title: str, prices: dict[str, dict], cutoff: int) -> str
     return by_lower[match] if match else None
 
 
-async def fetch_search_prices(titles: list[str]) -> dict[str, dict]:
+async def fetch_search_prices(titles: list[str]) -> dict[str, dict | None]:
     """Current switch2 prices for arbitrary titles via the public DekuDeals
     search page — used for games NOT on the shared wishlist (e.g. a
     Steam-wishlisted game that also has a Switch release).
@@ -383,20 +383,30 @@ async def fetch_search_prices(titles: list[str]) -> dict[str, dict]:
     switch) in order, stopping at the first one that yields a matched card —
     so most titles cost one GET, and only a switch_2-miss costs a second. One
     GET per (title, filter) attempt; results parse with the same selector
-    config as the wishlist page (identical card markup). Returns
-    {requested_title: price_dict}. Per-attempt failures and non-matches are
-    skipped rather than raised: unlike the wishlist scrape there is no
-    removal reconciliation downstream, so a miss just leaves that item
-    unpriced.
+    config as the wishlist page (identical card markup).
+
+    Three outcomes per requested title, which the caller MUST keep apart —
+    it negatively caches a confirmed miss, and caching a network blip that
+    way would suppress retries for a game DekuDeals really does sell:
+      - title -> price_dict: matched.
+      - title -> None: every attempted search page loaded and parsed cleanly
+        and none held a matching card. A confirmed "not sold on Switch under
+        this title", safe to remember.
+      - title absent: at least one attempt failed (HTTP/host error), so the
+        answer is unknown and the title must simply be retried.
+    Per-attempt failures are logged and skipped rather than raised: unlike
+    the wishlist scrape there is no removal reconciliation downstream, so a
+    miss just leaves that item unpriced.
     """
     if not titles:
         return {}
     config = await load_scrape_config("dekudeals")
-    results: dict[str, dict] = {}
+    results: dict[str, dict | None] = {}
     request_count = 0
     async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "gamelib-mcp/1.0"}) as client:
         for title in titles:
             base_url = config.search_url_template.format(query=quote_plus(title))
+            all_attempts_loaded = True
             for platform_filter in _SEARCH_PLATFORM_FILTERS:
                 if request_count:
                     await asyncio.sleep(_SEARCH_REQUEST_DELAY_SECONDS)
@@ -409,10 +419,17 @@ async def fetch_search_prices(titles: list[str]) -> dict[str, dict]:
                     logger.warning(
                         "DekuDeals search failed for %r (filter=%s): %s", title, platform_filter, exc
                     )
+                    all_attempts_loaded = False
                     continue
                 prices = _parse_wishlist_prices(resp.text, config)
                 matched = _match_search_title(title, prices, cutoff=config.fuzzy_cutoff)
                 if matched is not None:
                     results[title] = prices[matched]
                     break
+            else:
+                # No filter matched. Only a clean sweep — every attempt loaded —
+                # proves the title isn't there; one failed attempt leaves it
+                # unknown, so the title stays out of the result dict entirely.
+                if all_attempts_loaded:
+                    results[title] = None
     return results

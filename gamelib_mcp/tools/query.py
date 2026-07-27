@@ -212,7 +212,16 @@ TABLE_ANNOTATIONS: dict[str, dict] = {
     },
     "game_prices": {
         "description": "CURRENT price cache (ITAD), overwritten in place on refresh — NOT history. UNIQUE(game_id, platform, shop).",
-        "columns": {"price": "Current price in `currency`; NULL if unpriced (e.g. no ITAD key configured)."},
+        "columns": {
+            "price": (
+                "Current price in `currency`; NULL if unpriced (e.g. no ITAD key "
+                "configured). A NULL-price switch2/dekudeals row is also the "
+                "negative cache get_wishlist(with_prices=True) writes when a "
+                "per-title DekuDeals search finds no card — fetched_at is when "
+                "that miss was confirmed, and it is re-tried after 72h. Filter "
+                "`price IS NOT NULL` for real prices."
+            )
+        },
     },
     "play_history": {
         "description": (
