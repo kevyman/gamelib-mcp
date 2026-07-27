@@ -28,6 +28,11 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["gamelib_mcp"]
 
+# skills/ is the canonical home of the gaming skills (ADR 0006); wheel
+# installs carry a copy inside the package so skill:// resources work there.
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "gamelib_mcp/skills"
+
 [dependency-groups]
 dev = [
     "mypy>=2.3.0",

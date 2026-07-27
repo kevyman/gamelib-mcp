@@ -53,6 +53,14 @@ EXPECTED_TOOLS = {
         "params": {"days", "start_date", "end_date", "platform", "limit"},
         "required": set(),
     },
+    "get_assessment_context": {
+        "params": {
+            "name", "appid", "game_id", "tags", "steam_positive_pct",
+            "steam_total_reviews", "steam_recent_positive_pct",
+            "steam_recent_total_reviews", "early_access",
+        },
+        "required": set(),
+    },
     "get_wishlist": {
         "params": {
             "platform", "with_prices", "max_price", "min_cut_pct", "refresh",
@@ -162,6 +170,9 @@ EXPECTED_ANNOTATIONS = {
     "get_ratings": {"readOnlyHint": True, "idempotentHint": True},
     "get_stats": {"readOnlyHint": True, "idempotentHint": True},
     "get_play_history": {"readOnlyHint": True, "idempotentHint": True},
+    # Pure DB read — craft/fit inputs the caller can't compute locally come in
+    # as parameters (web-searched review counts), never fetched here.
+    "get_assessment_context": {"readOnlyHint": True, "idempotentHint": True},
     # Absorbing get_wishlist_deals made this open-world: with_prices=True
     # live-fetches ITAD/DekuDeals. Still read-only.
     "get_wishlist": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
@@ -234,9 +245,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_29(self):
+    async def test_tool_count_is_30(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 29)
+        self.assertEqual(len(tools), 30)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()

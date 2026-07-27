@@ -11,6 +11,7 @@ RUN apt-get update \
     && pip install --no-cache-dir uv==0.11.20
 COPY pyproject.toml uv.lock ./
 COPY gamelib_mcp/ gamelib_mcp/
+COPY skills/ skills/
 RUN uv sync --frozen --no-dev --no-cache
 # Run as a fixed non-root UID; the host data dir mounted at /data must be
 # chowned to this UID (see deploy.md "Running as non-root").
