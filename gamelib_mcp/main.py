@@ -7,6 +7,8 @@ decorators (whose signatures and docstrings are the MCP wire schema), and the
 ASGI entry point.
 """
 
+import base64
+import importlib.metadata
 import logging
 import os
 from typing import Literal
@@ -20,7 +22,7 @@ from fastmcp.exceptions import ToolError
 # Aliased: starlette.middleware.Middleware is imported locally further down for
 # the HTTP routes, and the two must not shadow each other.
 from fastmcp.server.middleware import AuthMiddleware, Middleware as FastMCPMiddleware
-from mcp.types import ToolAnnotations
+from mcp.types import Icon, ToolAnnotations
 
 from .apps import GAME_CARDS_APP, register_apps
 from .auth import load_security_config
@@ -78,6 +80,28 @@ if not duplicate_text_content_enabled():
 
 _display_name = os.getenv("STEAM_PROFILE_ID") or os.getenv("BACKLOGGD_USER") or "the configured user"
 
+# Server identity metadata (Implementation fields, spec 2025-11-25): version,
+# homepage, and icon ride the initialize result so hosts can label the
+# connector without an extra fetch. The icon is a data: URI by the same rule
+# that keeps the apps.py widget dependency-free — nothing external to fetch,
+# no new CSP host — drawn in the widget's toybox palette.
+_SERVER_ICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+    '<rect x="2.5" y="2.5" width="59" height="59" rx="14" fill="#f5efe2" stroke="#17140e" stroke-width="5"/>'
+    '<rect x="11" y="23" width="42" height="19" rx="9.5" fill="#cfe6ff" stroke="#17140e" stroke-width="4"/>'
+    '<path d="M21 28v8M17 32h8" stroke="#17140e" stroke-width="4" stroke-linecap="round"/>'
+    '<circle cx="41" cy="30" r="3" fill="#17140e"/>'
+    '<circle cx="47" cy="35" r="3" fill="#17140e"/>'
+    "</svg>"
+)
+
+
+def _package_version() -> str:
+    try:
+        return importlib.metadata.version("gamelib-mcp")
+    except importlib.metadata.PackageNotFoundError:  # bare checkout, not installed
+        return "0.0.0"
+
 READ_ONLY_TOOL = ToolAnnotations(readOnlyHint=True, idempotentHint=True)
 NETWORK_SYNC_TOOL = ToolAnnotations(readOnlyHint=False, idempotentHint=True, openWorldHint=True)
 MUTATION_TOOL = ToolAnnotations(readOnlyHint=False, idempotentHint=True)
@@ -85,7 +109,18 @@ MUTATION_TOOL = ToolAnnotations(readOnlyHint=False, idempotentHint=True)
 DIAGNOSTIC_NETWORK_TOOL = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=True)
 # merge_games deletes the source row, so a repeat call with the same source
 # errors ("not found") rather than being a no-op — explicitly non-idempotent.
-NON_IDEMPOTENT_MUTATION_TOOL = ToolAnnotations(readOnlyHint=False, idempotentHint=False)
+# destructiveHint=True is the spec default for writes; stated explicitly so it
+# isn't "cleaned up": every tool on this annotation destroys prior state
+# (merge consumes its source, delete erases, scrape rollback retires the
+# active override).
+NON_IDEMPOTENT_MUTATION_TOOL = ToolAnnotations(
+    readOnlyHint=False, idempotentHint=False, destructiveHint=True
+)
+# create_session_ingest_link: non-idempotent (each call mints a fresh
+# single-use nonce URL) but destroys nothing — outstanding links die by TTL,
+# never by a later mint. destructiveHint=False spares it the destructive-write
+# confirmation UX hosts may attach to the default.
+MINT_TOOL = ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=False)
 # check_library is report-only by default but can write (apply/suppressions)
 # and can reach the network (identity.cross_store_collapse, extid.igdb_drift,
 # ownership.license_gap) depending on selection/options.
@@ -93,6 +128,16 @@ VALIDATION_TOOL = ToolAnnotations(readOnlyHint=False, idempotentHint=True, openW
 
 mcp = FastMCP(
     name="game-library",
+    version=_package_version(),
+    website_url="https://github.com/kevyman/gamelib-mcp",
+    icons=[
+        Icon(
+            src="data:image/svg+xml;base64,"
+            + base64.b64encode(_SERVER_ICON_SVG.encode()).decode(),
+            mimeType="image/svg+xml",
+            sizes=["any"],
+        )
+    ],
     instructions=(
         f"You have access to {_display_name}'s game library across synced platforms and stores. "
         "Use sync(targets=[\"ratings\"]) (or rate_game for one-off ratings) when discovery should "
@@ -1642,7 +1687,7 @@ async def delete_game(
     return await _delete(name, game_id, confirm)
 
 
-@mcp.tool(title="Create Session Cookie Link", annotations=NON_IDEMPOTENT_MUTATION_TOOL)
+@mcp.tool(title="Create Session Cookie Link", annotations=MINT_TOOL)
 async def create_session_ingest_link(provider: str) -> SessionIngestLinkResponse:
     """
     Mint a single-use browser link for connecting a store/account session
