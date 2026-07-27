@@ -425,6 +425,10 @@ class GetWishlistResponse(FlexibleModel):
     price_refresh_errors: list[str] | None = None
     itad: str | None = None
     currency_note: str | None = None
+    # Per-title DekuDeals lookups: how many priced this call, and how many
+    # candidates are STILL unpriced after it (the remaining backlog, omitted
+    # once it drains to zero) — not a static candidates-minus-cap figure.
+    switch2_lookups_performed: int | None = None
     switch2_lookups_deferred: int | None = None
     availability_pending: int | None = None
 

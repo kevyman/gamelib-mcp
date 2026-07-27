@@ -105,6 +105,15 @@ def _platform_needs_refresh(price_rows: dict, refresh: bool) -> bool:
     return _fetched_at_is_stale(max(r["fetched_at"] for r in priced))
 
 
+def _has_cached_price(state: dict | None, platform: str) -> bool:
+    """True if this game carries at least one usable (non-NULL) cached price on
+    `platform` — i.e. its per-title lookup is resolved and need not be redone
+    to make the game priceable."""
+    if state is None:
+        return False
+    return any(r["price"] is not None for r in state["prices"].get(platform, {}).values())
+
+
 def _match_wishlist_game_id(
     title: str, candidate_names: dict[str, str], name_to_id: dict[str, int], cutoff: int
 ) -> int | None:
@@ -229,8 +238,12 @@ async def get_wishlist_deals(
     RECOMMENDED option (preferred platform unless another platform's price is
     below preference_override_ratio × the preferred price); other platforms'
     cheapest options appear in alternatives with the reasoning in
-    recommendation_reason. platform filters by where the game is WISHLISTED,
-    not where the recommendation lands. max_price/min_cut_pct keep a game if
+    recommendation_reason. switch2_lookups_performed counts the per-title
+    lookups that produced a price THIS call; switch2_lookups_deferred is the
+    backlog LEFT AFTER it — candidates still carrying no switch2 price, which
+    later calls pick up — so the pair shows the queue draining rather than a
+    fixed candidates-minus-cap figure. platform filters by where the game is
+    WISHLISTED, not where the recommendation lands. max_price/min_cut_pct keep a game if
     ANY of its priced options — recommended or alternative — satisfies both
     given filters together; they never re-point the recommended fields, they
     only decide whether the entry is kept. Prices are never currency-converted.
@@ -270,13 +283,17 @@ async def get_wishlist_deals(
                 else:
                     switch2_search_needs[game_id] = state["name"]
 
-    switch2_lookups_deferred = max(0, len(switch2_search_needs) - _MAX_SWITCH2_SEARCH_LOOKUPS)
-    if switch2_lookups_deferred:
+    # Whole per-title backlog for this call, kept before the cap truncates the
+    # set actually looked up — the deferred counter is recomputed against it
+    # AFTER the fetch, from what is still unpriced (see below).
+    switch2_search_candidates = list(switch2_search_needs)
+    if len(switch2_search_needs) > _MAX_SWITCH2_SEARCH_LOOKUPS:
         switch2_search_needs = dict(list(switch2_search_needs.items())[:_MAX_SWITCH2_SEARCH_LOOKUPS])
 
     price_refresh_errors: list[str] = []
     notes: dict[str, Any] = {}
     cache_updated = False
+    switch2_lookups_performed = 0
 
     if steam_needs_refresh:
         if not is_itad_configured():
@@ -341,6 +358,9 @@ async def get_wishlist_deals(
                 for title, info in by_title.items()
                 if title in name_to_id
             ]
+            # Only usable prices count as performed — a hit that came back
+            # without a price leaves the candidate in the backlog below.
+            switch2_lookups_performed = len([r for r in upsert_rows if r["price"] is not None])
             if upsert_rows:
                 await upsert_game_prices(upsert_rows)
                 cache_updated = True
@@ -348,6 +368,15 @@ async def get_wishlist_deals(
     if cache_updated:
         rows = await load_wishlist_with_prices(resolved_platform)
         games = _group_rows_by_game(rows)
+
+    # Post-call backlog, not a static "candidates minus cap" expression: a
+    # candidate counts as deferred only while it still has NO usable switch2
+    # price. Anything the capped lookups (this call or an earlier one) already
+    # resolved drops out, so the counter drains to zero as the queue empties
+    # instead of reporting the same number forever.
+    switch2_lookups_deferred = sum(
+        1 for gid in switch2_search_candidates if not _has_cached_price(games.get(gid), "switch2")
+    )
 
     deals: list[dict[str, Any]] = []
     unpriced: list[str] = []
@@ -407,6 +436,8 @@ async def get_wishlist_deals(
     }
     if price_refresh_errors:
         response["price_refresh_errors"] = price_refresh_errors
+    if switch2_lookups_performed:
+        response["switch2_lookups_performed"] = switch2_lookups_performed
     if switch2_lookups_deferred:
         response["switch2_lookups_deferred"] = switch2_lookups_deferred
     if availability_pending:

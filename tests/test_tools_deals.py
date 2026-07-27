@@ -410,6 +410,22 @@ async def _set_hw_pref(platforms: list[str]) -> None:
     await db_module.set_meta("hardware_preference", json.dumps(platforms))
 
 
+async def _price_every_requested_title(titles: list[str]) -> dict[str, dict]:
+    """fetch_search_prices stub that hits on every title it is asked about —
+    keyed off the request, since which candidates survive the per-call cap
+    depends on the loader's row order, not on seed order."""
+    return {
+        title: {
+            "price": 5.0,
+            "regular_price": 10.0,
+            "cut_pct": 50,
+            "currency": "USD",
+            "deal_url": "https://dekudeals.com/x",
+        }
+        for title in titles
+    }
+
+
 class PreferenceAwareDealsTests(ToolDBTestCase):
     async def test_steam_item_with_switch_release_gets_search_priced_and_preferred(self):
         game_id = await seed_game("Crossplay Game")
@@ -518,12 +534,20 @@ class PreferenceAwareDealsTests(ToolDBTestCase):
         self.assertNotIn(game_id, [d["game_id"] for d in result["deals"]])
         self.assertIn("Only Owned Priced", result["unpriced"])
 
-    async def test_search_lookup_cap_defers_overflow(self):
+    async def _seed_search_candidates(self, count: int) -> list[int]:
+        """`count` steam-wishlisted games with a Switch release and no price —
+        i.e. per-title DekuDeals search candidates."""
         await _set_hw_pref(["switch2"])
-        for i in range(deals._MAX_SWITCH2_SEARCH_LOOKUPS + 3):
+        ids = []
+        for i in range(count):
             gid = await seed_game(f"Cap Game {i}")
             await _seed_wishlist(gid, "steam", store_identifier=str(100 + i))
             await _set_igdb_platforms(gid, [6, 508])
+            ids.append(gid)
+        return ids
+
+    async def test_search_lookup_cap_defers_overflow(self):
+        await self._seed_search_candidates(deals._MAX_SWITCH2_SEARCH_LOOKUPS + 3)
 
         with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock(return_value={})), \
              patch("gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock(return_value={})) as search, \
@@ -532,7 +556,61 @@ class PreferenceAwareDealsTests(ToolDBTestCase):
             result = await deals.get_wishlist_deals()
 
         self.assertEqual(len(search.await_args.args[0]), deals._MAX_SWITCH2_SEARCH_LOOKUPS)
+        # Every candidate is still unpriced — the capped lookups all missed —
+        # so the whole backlog is deferred, not just the over-cap remainder.
+        self.assertEqual(
+            result["switch2_lookups_deferred"], deals._MAX_SWITCH2_SEARCH_LOOKUPS + 3
+        )
+        self.assertNotIn("switch2_lookups_performed", result)
+
+    async def test_deferred_counter_excludes_lookups_resolved_this_call(self):
+        ids = await self._seed_search_candidates(deals._MAX_SWITCH2_SEARCH_LOOKUPS + 3)
+
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices",
+                   AsyncMock(side_effect=_price_every_requested_title)), \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            result = await deals.get_wishlist_deals()
+
+        self.assertEqual(
+            result["switch2_lookups_performed"], deals._MAX_SWITCH2_SEARCH_LOOKUPS
+        )
         self.assertEqual(result["switch2_lookups_deferred"], 3)
+        self.assertEqual(
+            len([d for d in result["deals"] if d["game_id"] in ids]),
+            deals._MAX_SWITCH2_SEARCH_LOOKUPS,
+        )
+
+    async def test_deferred_counter_excludes_candidates_priced_on_an_earlier_call(self):
+        # The reported bug: the counter was `len(candidates) - cap`, a static
+        # expression blind to the price cache, so it reported the same number on
+        # every call while the queue was in fact draining. refresh=True re-queues
+        # every candidate, but the three already priced are NOT still backlog.
+        ids = await self._seed_search_candidates(deals._MAX_SWITCH2_SEARCH_LOOKUPS + 3)
+        for gid in ids[:3]:
+            await _seed_price(gid, "switch2", "dekudeals", 12.0)
+
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            result = await deals.get_wishlist_deals(refresh=True)
+
+        self.assertEqual(result["switch2_lookups_deferred"], deals._MAX_SWITCH2_SEARCH_LOOKUPS)
+
+    async def test_deferred_counter_omitted_once_backlog_drains(self):
+        await self._seed_search_candidates(2)
+
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices",
+                   AsyncMock(side_effect=_price_every_requested_title)), \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            result = await deals.get_wishlist_deals()
+
+        self.assertEqual(result["switch2_lookups_performed"], 2)
+        self.assertNotIn("switch2_lookups_deferred", result)
 
     async def test_availability_pending_counts_unfetched_games(self):
         gid = await seed_game("IGDB Pending")
