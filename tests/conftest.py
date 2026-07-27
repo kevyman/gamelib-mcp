@@ -31,11 +31,15 @@ import pytest
 # explicitly so production cannot become unauthenticated through omission.
 os.environ.setdefault("MCP_AUTH_MODE", "disabled")
 os.environ.setdefault("MCP_ADMIN_AUTH_TOKEN", "test-admin-token-at-least-32-characters")
-# Per-worker under xdist: FastMCP writes into this directory, and parallel
-# workers sharing one would race each other over it.
-os.environ.setdefault(
-    "FASTMCP_HOME",
-    "/tmp/gamelib-mcp-fastmcp-tests-" + os.environ.get("PYTEST_XDIST_WORKER", "main"),
+# FastMCP writes into this directory, so every xdist worker needs its own or
+# they race each other over it. Assigned rather than setdefault: an inherited
+# FASTMCP_HOME is a single shared directory too, so honor where the developer
+# pointed it but still give each worker a subdirectory of its own.
+os.environ.update(
+    FASTMCP_HOME=os.path.join(
+        os.environ.get("FASTMCP_HOME") or "/tmp/gamelib-mcp-fastmcp-tests",
+        os.environ.get("PYTEST_XDIST_WORKER", "main"),
+    )
 )
 
 from gamelib_mcp.data import db as db_module

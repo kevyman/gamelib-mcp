@@ -52,29 +52,53 @@ class EnrichmentClaimTests(unittest.IsolatedAsyncioTestCase):
         lock_conn.execute("BEGIN IMMEDIATE")
         lock_conn.execute("UPDATE games SET name = ? WHERE id = ?", ("Portal Locked", 1))
 
-        # Sized generously on purpose. A clear_claim that does NOT wait raises
-        # "database is locked" immediately whatever these are set to, so a tight
-        # budget bought nothing and cost correctness: at 0.3s the lock had to be
-        # released within 300ms of the attempt, and a loaded machine
-        # overshooting the sleep below failed a perfectly good clear_claim.
+        # Fires the instant clear_claim's UPDATE is handed to sqlite, which is
+        # the instant it starts contending for the held write lock. Waiting on
+        # this instead of a fixed sleep is what makes the test mean something:
+        # release the lock too early and clear_claim never meets it, so a
+        # regressed clear_claim that no longer waits would pass unnoticed.
+        write_attempted = asyncio.Event()
+        original_execute = db_module.aiosqlite.Connection.execute
+
+        # Not `async def`: aiosqlite.execute returns a Result, which callers use
+        # as an async context manager as well as awaiting it. Wrapping it in a
+        # coroutine would quietly break `async with db.execute(...)`.
+        def signal_then_execute(self, sql, *args, **kwargs):
+            if sql.lstrip().upper().startswith("UPDATE GAMES SET HLTB_CLAIMED_AT"):
+                write_attempted.set()
+            return original_execute(self, sql, *args, **kwargs)
+
+        # Budgets are sized generously on purpose. A clear_claim that does NOT
+        # wait raises "database is locked" immediately whatever they are set to,
+        # so a tight budget bought nothing and cost correctness: at 0.3s the
+        # lock had to be released within 300ms of the attempt, and a loaded
+        # machine overshooting failed a perfectly good clear_claim.
         with (
             patch.dict(
                 "os.environ",
                 {"DATABASE_URL": f"file:{self.db_path}"},
                 clear=False,
             ),
+            patch.object(db_module.aiosqlite.Connection, "execute", signal_then_execute),
             patch.object(db_module, "_SQLITE_CONNECT_TIMEOUT_SECONDS", 5.0, create=True),
             patch.object(db_module, "_SQLITE_BUSY_TIMEOUT_MS", 5000, create=True),
         ):
             clear_task = asyncio.create_task(db_module.clear_claim("games", "hltb_claimed_at", 1))
-            # Long enough for the task to reach the write and block on it;
-            # overshooting is harmless now, it just parks there a bit longer.
-            await asyncio.sleep(0.05)
-            # The property under test, asserted rather than implied by the call
-            # eventually succeeding: it is still waiting. A clear_claim that
-            # gave up on the lock would already be done, with "database is
-            # locked" — which is what this fails on if the waiting regresses.
-            self.assertFalse(clear_task.done())
+            await asyncio.wait_for(write_attempted.wait(), timeout=DEADLOCK_TIMEOUT)
+
+            # Hold the lock a while longer and require the task to stay parked.
+            # This is the assertion the test exists for, and the direction of
+            # the timing matters: a clear_claim that does NOT wait raises
+            # "database is locked" as soon as sqlite reaches the held lock, so
+            # anything still pending at the end of this window is genuinely
+            # blocked on it. A slow machine only makes that conclusion safer —
+            # unlike releasing the lock after a fixed sleep, which on a slow
+            # machine can let the write through before it ever meets the lock.
+            finished, _ = await asyncio.wait({clear_task}, timeout=0.2)
+            self.assertFalse(
+                finished, "clear_claim gave up on the locked database instead of waiting"
+            )
+
             lock_conn.rollback()
             await asyncio.wait_for(clear_task, timeout=DEADLOCK_TIMEOUT)
 
