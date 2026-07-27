@@ -178,15 +178,15 @@ EXPECTED_ANNOTATIONS = {
     "update_game": {"readOnlyHint": False, "idempotentHint": True},
     "set_playtime": {"readOnlyHint": False, "idempotentHint": True},
     "set_acquisition": {"readOnlyHint": False, "idempotentHint": True},
-    "merge_games": {"readOnlyHint": False, "idempotentHint": False},
-    "delete_game": {"readOnlyHint": False, "idempotentHint": False},
+    "merge_games": {"readOnlyHint": False, "idempotentHint": False, "destructiveHint": True},
+    "delete_game": {"readOnlyHint": False, "idempotentHint": False, "destructiveHint": True},
     "sync": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
     "check_library": {
         "readOnlyHint": False,
         "idempotentHint": True,
         "openWorldHint": True,
     },
-    "split_game": {"readOnlyHint": False, "idempotentHint": False},
+    "split_game": {"readOnlyHint": False, "idempotentHint": False, "destructiveHint": True},
     "set_hardware_preference": {"readOnlyHint": False, "idempotentHint": True},
     "set_switch2_playtime_baseline": {"readOnlyHint": False, "idempotentHint": True},
     "split_bundle_acquisition": {"readOnlyHint": False, "idempotentHint": True},
@@ -195,13 +195,23 @@ EXPECTED_ANNOTATIONS = {
         "idempotentHint": True,
         "openWorldHint": True,
     },
-    "create_session_ingest_link": {"readOnlyHint": False, "idempotentHint": False},
+    # Non-idempotent (every call mints a fresh nonce) but destroys nothing:
+    # outstanding links die by TTL, never by a later mint.
+    "create_session_ingest_link": {
+        "readOnlyHint": False,
+        "idempotentHint": False,
+        "destructiveHint": False,
+    },
     # diagnose=True live-fetches the provider page, so the merged read tool is
     # open-world; it stays read-only because neither mode writes.
     "get_scrape_config": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
     # Takes the strictest of the three actions it absorbs: each rollback walks
     # back one more version, so a retry is not a no-op.
-    "manage_scrape_config": {"readOnlyHint": False, "idempotentHint": False},
+    "manage_scrape_config": {
+        "readOnlyHint": False,
+        "idempotentHint": False,
+        "destructiveHint": True,
+    },
 }
 
 # search_games keeps the paginated envelope in `query` mode (its `queries` mode
@@ -246,6 +256,18 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(annotations)
                 for field, value in expected.items():
                     self.assertEqual(getattr(annotations, field), value)
+
+    async def test_server_identity_metadata(self):
+        # Implementation metadata (spec 2025-11-25): hosts label the connector
+        # from version/website_url/icons in the initialize result. The icon
+        # must stay a self-contained data: URI — the same no-external-fetch
+        # rule as the apps.py widget.
+        self.assertTrue(main.mcp.version)
+        self.assertEqual(str(main.mcp.website_url), "https://github.com/kevyman/gamelib-mcp")
+        icons = main.mcp.icons
+        self.assertEqual(len(icons), 1)
+        self.assertTrue(icons[0].src.startswith("data:image/svg+xml;base64,"))
+        self.assertEqual(icons[0].mimeType, "image/svg+xml")
 
     async def test_all_tools_have_output_schema(self):
         tools = await self._tools()
