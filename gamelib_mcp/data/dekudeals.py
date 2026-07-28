@@ -406,7 +406,8 @@ async def fetch_search_prices(titles: list[str]) -> dict[str, dict | None]:
     async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "gamelib-mcp/1.0"}) as client:
         for title in titles:
             base_url = config.search_url_template.format(query=quote_plus(title))
-            all_attempts_loaded = True
+            pages_loaded = 0
+            attempts_failed = 0
             for platform_filter in _SEARCH_PLATFORM_FILTERS:
                 if request_count:
                     await asyncio.sleep(_SEARCH_REQUEST_DELAY_SECONDS)
@@ -419,17 +420,21 @@ async def fetch_search_prices(titles: list[str]) -> dict[str, dict | None]:
                     logger.warning(
                         "DekuDeals search failed for %r (filter=%s): %s", title, platform_filter, exc
                     )
-                    all_attempts_loaded = False
+                    attempts_failed += 1
                     continue
+                pages_loaded += 1
                 prices = _parse_wishlist_prices(resp.text, config)
                 matched = _match_search_title(title, prices, cutoff=config.fuzzy_cutoff)
                 if matched is not None:
                     results[title] = prices[matched]
                     break
             else:
-                # No filter matched. Only a clean sweep — every attempt loaded —
-                # proves the title isn't there; one failed attempt leaves it
-                # unknown, so the title stays out of the result dict entirely.
-                if all_attempts_loaded:
+                # No filter matched. A confirmed miss needs positive evidence:
+                # at least one search page actually loaded AND nothing failed.
+                # Counting loads rather than just tracking "nothing failed"
+                # keeps an empty _SEARCH_PLATFORM_FILTERS from vacuously
+                # reporting every title as absent from DekuDeals — a
+                # negatively-cached answer nothing ever looked for.
+                if pages_loaded and not attempts_failed:
                     results[title] = None
     return results

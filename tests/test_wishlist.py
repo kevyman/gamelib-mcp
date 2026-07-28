@@ -872,6 +872,18 @@ class FetchSearchPricesTests(unittest.IsolatedAsyncioTestCase):
                 results = await dekudeals.fetch_search_prices(["Hades"])
         self.assertEqual(results, {})
 
+    async def test_no_platform_filters_reports_nothing_rather_than_a_miss(self):
+        # A confirmed miss must rest on a page that actually loaded. With no
+        # filters to try, no request is made — reporting the title as absent
+        # from DekuDeals would negatively cache an answer nothing looked for.
+        with patch("gamelib_mcp.data.dekudeals._SEARCH_PLATFORM_FILTERS", ()), \
+             patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
+            client = client_cls.return_value.__aenter__.return_value
+            client.get = AsyncMock()
+            results = await dekudeals.fetch_search_prices(["Hades"])
+        self.assertEqual(results, {})
+        client.get.assert_not_awaited()
+
     async def test_no_fuzzy_match_yields_confirmed_miss(self):
         html = (FIXTURES_DIR / "dekudeals_search_page.html").read_text(encoding="utf-8")
         with patch("gamelib_mcp.data.dekudeals.httpx.AsyncClient") as client_cls:
