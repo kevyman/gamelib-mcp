@@ -48,6 +48,21 @@ dev = [
 # keeps each file on one worker, which keeps output readable and any file-level
 # state a file's own business. Pass -n0 to run serially when debugging.
 addopts = "-n auto --dist loadfile"
+# A background thread that outlives its event loop is this suite's one
+# historically expensive failure: a non-daemon aiosqlite worker thread left
+# running past its loop once let the whole run pass and then hang pytest at
+# interpreter exit, burning the CI job's six-hour default before failing. It
+# announces itself first as a warning, so treat these two as errors rather than
+# scrollback — both are raised by pytest itself at test teardown and mean a
+# thread or a finalizer blew up somewhere no assertion could see it.
+#
+# Deliberately scoped to those two categories: a blanket `error` would turn
+# every third-party DeprecationWarning into a CI failure on someone else's
+# release schedule, which is a different (and much noisier) policy.
+filterwarnings = [
+    "error::pytest.PytestUnhandledThreadExceptionWarning",
+    "error::pytest.PytestUnraisableExceptionWarning",
+]
 
 [tool.ruff]
 target-version = "py311"
