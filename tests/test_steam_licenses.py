@@ -11,8 +11,8 @@ import json
 from unittest.mock import AsyncMock, patch
 
 import httpx
-
 from conftest import ToolDBTestCase, make_steam_game, seed_game
+
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steam_licenses, steam_session
 from gamelib_mcp.data.db import get_meta
@@ -60,11 +60,10 @@ class FetchOwnedAppidsTests(ToolDBTestCase):
         # configured account always owns games, so empty == expired session.
         with patch.object(
             steam_session, "load_steam_web_cookies", AsyncMock(return_value=COOKIES)
-        ):
-            with self.assertRaises(RuntimeError):
-                await steam_licenses.fetch_owned_steam_appids(
-                    transport=_userdata_transport([])
-                )
+        ), self.assertRaises(RuntimeError):
+            await steam_licenses.fetch_owned_steam_appids(
+                transport=_userdata_transport([])
+            )
 
 
 class AuditSteamLicensesTests(ToolDBTestCase):

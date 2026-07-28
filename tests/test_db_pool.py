@@ -110,10 +110,9 @@ class TestLifespanStartupFailureDisablesPooling(PoolTestBase):
         with patch(
             "gamelib_mcp.data.db.init_db",
             AsyncMock(side_effect=RuntimeError("boom")),
-        ):
-            with self.assertRaises(RuntimeError):
-                async with lifespan(object()):
-                    pass  # pragma: no cover - should never reach the yield
+        ), self.assertRaises(RuntimeError):
+            async with lifespan(object()):
+                pass  # pragma: no cover - should never reach the yield
 
         # Pooling must be disabled: two subsequent get_db() calls each get a
         # fresh connection instead of reusing one from a leaked pool.

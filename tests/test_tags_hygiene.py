@@ -4,6 +4,7 @@ import json
 import unittest
 
 from conftest import ToolDBTestCase, add_rating, seed_game
+
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steamspy
 from gamelib_mcp.data.steam_store import _extract_tags

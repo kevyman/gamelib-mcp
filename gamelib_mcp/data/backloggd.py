@@ -10,7 +10,7 @@ not a single selector, and stays out of the healable vocabulary.
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 from bs4 import BeautifulSoup, Tag
@@ -40,7 +40,7 @@ async def sync_backloggd() -> dict:
     reviews = await _scrape_all_pages(config)
     synced = 0
     skipped = 0
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     async with get_db() as db:
         for review in reviews:
@@ -156,16 +156,15 @@ def _find_preceding_title(card: Tag, config: BackloggdScrapeConfig) -> str | Non
         if node is None:
             break
         prev = node.find_previous_sibling()
-        if prev:
-            # Check if this sibling (or something inside it) has .game-name
-            if isinstance(prev, Tag):
-                if config.title_container_class in (prev.get("class") or []):
-                    h3 = prev.select_one(config.title_inner_selector)
-                    if h3:
-                        return h3.get_text(strip=True)
-                gn = prev.select_one(config.title_selector)
-                if gn:
-                    return gn.get_text(strip=True)
+        # Check if this sibling (or something inside it) has .game-name
+        if prev and isinstance(prev, Tag):
+            if config.title_container_class in (prev.get("class") or []):
+                h3 = prev.select_one(config.title_inner_selector)
+                if h3:
+                    return h3.get_text(strip=True)
+            gn = prev.select_one(config.title_selector)
+            if gn:
+                return gn.get_text(strip=True)
         # Move up to parent and try again
         node = node.parent
 

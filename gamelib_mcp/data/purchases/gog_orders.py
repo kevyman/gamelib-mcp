@@ -25,7 +25,7 @@ Record building:
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 
@@ -222,7 +222,7 @@ def _order_date(order: dict) -> str | None:
         value = int(value.strip())
     if isinstance(value, (int, float)):
         try:
-            return datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y-%m-%d")
+            return datetime.fromtimestamp(value, tz=UTC).strftime("%Y-%m-%d")
         except (OverflowError, OSError, ValueError):
             return None
     return normalize_purchase_date(value)

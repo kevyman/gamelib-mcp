@@ -52,12 +52,43 @@ addopts = "-n auto --dist loadfile"
 [tool.ruff]
 target-version = "py311"
 
+[tool.ruff.lint]
+# Ruff 0.16 replaced its 59-rule default with a 413-rule one, and this project
+# now runs on those defaults. It also *dropped* 18 pycodestyle/pyflakes rules
+# from the default set, E402 among them — and the per-file-ignores below only
+# exist because E402 was being enforced. Re-select the old default families so
+# nothing this codebase already satisfied silently stops being checked.
+extend-select = ["E4", "E7", "F"]
+
 [tool.ruff.lint.per-file-ignores]
 # Package façade: deliberate late imports (bottom layer must be defined before
 # the leaf submodules import from it) and re-exports that ARE the public API.
 "gamelib_mcp/data/db/__init__.py" = ["E402", "F401"]
 # load_project_dotenv() must run before the app modules read env at import time.
 "gamelib_mcp/main.py" = ["E402"]
+
+# The provider layer. Every module here talks to a third-party API or scrapes a
+# page someone else controls, and two of the new default rules fight that job:
+#
+#   BLE001 — a provider fetch degrades to a logged warning and never propagates,
+#            so one dead scraper can't abort a whole sync (the "best-effort"
+#            contract in gamelib_mcp/data/CLAUDE.md). Narrowing these catches
+#            would let an unforeseen parse error take the sync down instead.
+#   TRY004 — the isinstance guards here validate untrusted *remote payloads*,
+#            not caller arguments. RuntimeError is this layer's established
+#            signal for "this provider response is unusable"; TypeError would
+#            wrongly imply a bug on our side of the call.
+#
+# Scoped to the fetchers themselves — data/db/ stays under both rules, where a
+# blind except really would be a smell. Isolation boundaries elsewhere in the
+# tree (per-item batch handlers, per-check runners) carry an explaining
+# `# noqa: BLE001` instead, since those are individual cases in normal modules.
+"gamelib_mcp/data/*.py" = ["BLE001", "TRY004"]
+"gamelib_mcp/data/purchases/*.py" = ["BLE001", "TRY004"]
+
+# Tests read and write their own temp fixture files inside async test methods.
+# There is no event loop to starve there — the blocking read IS the test setup.
+"tests/*.py" = ["ASYNC230"]
 
 [tool.mypy]
 python_version = "3.11"

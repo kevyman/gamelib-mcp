@@ -3,12 +3,12 @@
 import asyncio
 import base64
 import html
-import logging
 import json
-import re
-from datetime import datetime, timezone
+import logging
 import random
+import re
 import unicodedata
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
 import httpx
@@ -63,11 +63,11 @@ def _is_opencritic_fresh(cached_at: str | None, release_date: str | None, now: d
         return False
     try:
         fetched_at = datetime.fromisoformat(cached_at)
-        released = datetime.fromisoformat(release_date).replace(tzinfo=timezone.utc)
+        released = datetime.fromisoformat(release_date).replace(tzinfo=UTC)
     except ValueError:
         return False
     if fetched_at.tzinfo is None:
-        fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+        fetched_at = fetched_at.replace(tzinfo=UTC)
     if (now - released).days > _RECENT_RELEASE_WINDOW_DAYS:
         return True
     return (now - fetched_at).total_seconds() < _RECENT_SUCCESS_TTL_DAYS * 86400
@@ -132,7 +132,7 @@ def _candidate_to_export_url(candidate: dict) -> str:
 
 
 def _parse_opencritic_record(html: str, source_url: str) -> dict | None:
-    state_match = re.search(r"window\.__STATE__\s*=\s*(\{.*?\})\s*;", html, re.S)
+    state_match = re.search(r"window\.__STATE__\s*=\s*(\{.*?\})\s*;", html, re.DOTALL)
     if state_match is not None:
         try:
             inline_state = json.loads(state_match.group(1))
@@ -146,7 +146,7 @@ def _parse_opencritic_record(html: str, source_url: str) -> dict | None:
     script_match = re.search(
         r'<script id="serverApp-state" type="application/json">\s*(.*?)\s*</script>',
         html,
-        re.S,
+        re.DOTALL,
     )
     if script_match is None:
         return None
@@ -206,7 +206,7 @@ def _state_to_opencritic_record(state: dict, source_url: str) -> dict | None:
     return {
         "opencritic_id": int(state["id"]),
         "opencritic_url": canonical if canonical else source_url.removesuffix("/export"),
-        "opencritic_score": int(round(score)) if score >= 0 else None,
+        "opencritic_score": round(score) if score >= 0 else None,
         "opencritic_tier": state["tier"] or None,
         "opencritic_percent_rec": percent if percent >= 0 else None,
         "opencritic_num_reviews": int(state["numReviews"]),
@@ -476,7 +476,7 @@ async def _write_opencritic_status_marker(game_platform_id: int, status: str, no
 
 async def enrich_opencritic(game_platform_id: int, game_name: str) -> dict:
     context = await _load_opencritic_context(game_platform_id)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if _is_opencritic_fresh(context["opencritic_cached_at"], context["release_date"], now):
         logger.info("OpenCritic enrich cached: game_platform_id=%s name=%r", game_platform_id, game_name)
         return {"status": "cached"}

@@ -3,9 +3,9 @@ import json
 import os
 from unittest.mock import AsyncMock, patch
 
+from conftest import add_platform, seed_game
 from starlette.requests import Request
 
-from conftest import add_platform, seed_game
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.http_admin import HttpSecurityMiddleware
 from gamelib_mcp.main import mcp

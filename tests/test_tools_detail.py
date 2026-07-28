@@ -5,12 +5,18 @@ test characterizes lookup + formatting only, without network.
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
+from conftest import (
+    ToolDBTestCase,
+    add_platform,
+    add_rating,
+    make_steam_game,
+    seed_game,
+)
 from fastmcp.exceptions import ToolError
 
-from conftest import ToolDBTestCase, make_steam_game, seed_game, add_rating, add_platform
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import detail
 from gamelib_mcp.tools.platforms import update_game
@@ -314,7 +320,7 @@ class GetGameDetailTests(ToolDBTestCase):
         async with db_module.get_db() as db:
             await db.execute("UPDATE games SET igdb_id = ? WHERE id = ?", (777, gid))
             await db.commit()
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await db_module.set_meta(
             "igdb_children:777",
             json.dumps(
@@ -358,7 +364,7 @@ class GetGameDetailTests(ToolDBTestCase):
             "steam_dlc_catalog:4000",
             json.dumps({"appids": [10], "fetched_at": "2024-01-01T00:00:00+00:00"}),
         )
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await db_module.set_meta(
             "igdb_children:888",
             json.dumps(
@@ -452,7 +458,7 @@ class GetGameDetailsBatchTests(ToolDBTestCase):
         await db_module.set_meta(
             "igdb_children:5001",
             json.dumps({
-                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "fetched_at": datetime.now(UTC).isoformat(),
                 "children": [{"id": 1}, {"id": 2}, {"id": 3}],
             }),
         )

@@ -1,15 +1,16 @@
 """Characterization tests for gamelib_mcp.tools.completion (suggest_completion_status)."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from conftest import ToolDBTestCase, make_steam_game, seed_game, add_platform
+from conftest import ToolDBTestCase, add_platform, make_steam_game, seed_game
+
 from gamelib_mcp.tools import completion
 from gamelib_mcp.tools.models import CompletionSuggestionsResponse
 from gamelib_mcp.tools.platforms import update_game
 
 
 def _epoch(year: int, month: int, day: int) -> int:
-    return int(datetime(year, month, day, tzinfo=timezone.utc).timestamp())
+    return int(datetime(year, month, day, tzinfo=UTC).timestamp())
 
 
 class SuggestCompletionStatusTests(ToolDBTestCase):
@@ -53,7 +54,7 @@ class SuggestCompletionStatusTests(ToolDBTestCase):
         self.assertEqual(entry["last_played"], "2020-01-01")
 
     async def test_recently_played_underplayed_game_is_not_suggested(self):
-        recent_epoch = int(datetime.now(timezone.utc).timestamp())
+        recent_epoch = int(datetime.now(UTC).timestamp())
         await make_steam_game(
             "Still Playing",
             1,

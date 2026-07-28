@@ -9,7 +9,7 @@ quarantined into ``games.features``; gameplay-mode categories stay in
 ``games.tags`` on purpose.
 """
 
-from typing import Iterable
+from collections.abc import Iterable
 
 STEAM_FEATURE_FLAGS: frozenset[str] = frozenset(
     {

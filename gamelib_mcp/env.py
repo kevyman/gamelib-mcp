@@ -4,7 +4,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-
 _PROJECT_DOTENV = Path(__file__).resolve().parents[1] / ".env"
 
 

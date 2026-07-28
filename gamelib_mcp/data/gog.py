@@ -27,7 +27,7 @@ from gamelib_mcp.data.db import (
     upsert_game_platform,
     upsert_game_platform_enrichment,
 )
-from gamelib_mcp.data.igdb import resolve_and_link_game, PLATFORM_TO_IGDB
+from gamelib_mcp.data.igdb import PLATFORM_TO_IGDB, resolve_and_link_game
 from gamelib_mcp.data.title_normalization import prepare_catalog_title
 
 _ROMAN_RE = re.compile(r"\b([IiVvXx]{2,})\b")

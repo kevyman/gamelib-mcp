@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, patch
 
 from conftest import ToolDBTestCase, make_steam_game
+
 from gamelib_mcp.data import steam_reviews
 
 

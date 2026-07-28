@@ -7,8 +7,7 @@ successful file-write path (writes to a temp NINTENDO_COOKIES_FILE).
 import asyncio
 import json
 import os
-
-from fastmcp.exceptions import ToolError
+from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
 from conftest import (
@@ -20,10 +19,12 @@ from conftest import (
     make_steam_game,
     seed_game,
 )
+from fastmcp.exceptions import ToolError
+
+from gamelib_mcp import lifecycle
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.db import get_meta, set_meta_many
 from gamelib_mcp.tools import admin
-from gamelib_mcp import lifecycle
 
 
 async def _insert_play_history(game_id: int, platform: str, day: str, minutes: int) -> None:
@@ -1145,7 +1146,10 @@ class MergeGamesTests(ToolDBTestCase):
 class RevalidateIgdbMatchesTests(ToolDBTestCase):
     """revalidate_igdb_matches: audit stored igdb_ids against IGDB's names."""
 
-    _ENV = {"TWITCH_CLIENT_ID": "test-client", "TWITCH_CLIENT_SECRET": "test-secret"}
+    _ENV: ClassVar[dict[str, str]] = {
+        "TWITCH_CLIENT_ID": "test-client",
+        "TWITCH_CLIENT_SECRET": "test-secret",
+    }
 
     @staticmethod
     def _record(name: str, **overrides) -> dict:

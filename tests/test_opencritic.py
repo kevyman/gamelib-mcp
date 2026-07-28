@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -332,21 +332,21 @@ class OpenCriticRefreshPolicyTests(unittest.TestCase):
     def test_recent_release_is_stale_after_seven_days(self) -> None:
         fetched_at = "2026-04-01T00:00:00+00:00"
         release_date = "2026-03-20"
-        now = datetime(2026, 4, 10, tzinfo=timezone.utc)
+        now = datetime(2026, 4, 10, tzinfo=UTC)
         self.assertFalse(opencritic._is_opencritic_fresh(fetched_at, release_date, now))
 
     def test_old_release_never_refreshes_after_success(self) -> None:
         fetched_at = "2025-01-01T00:00:00+00:00"
         release_date = "2023-05-01"
-        now = datetime(2026, 4, 10, tzinfo=timezone.utc)
+        now = datetime(2026, 4, 10, tzinfo=UTC)
         self.assertTrue(opencritic._is_opencritic_fresh(fetched_at, release_date, now))
 
     def test_invalid_cached_timestamp_is_not_fresh(self) -> None:
-        now = datetime(2026, 4, 10, tzinfo=timezone.utc)
+        now = datetime(2026, 4, 10, tzinfo=UTC)
         self.assertFalse(opencritic._is_opencritic_fresh("FAILED", "2026-03-20", now))
 
     def test_naive_cached_timestamp_is_treated_as_utc(self) -> None:
-        now = datetime(2026, 4, 5, tzinfo=timezone.utc)
+        now = datetime(2026, 4, 5, tzinfo=UTC)
         self.assertTrue(opencritic._is_opencritic_fresh("2026-04-01T00:00:00", "2026-03-20", now))
 
 

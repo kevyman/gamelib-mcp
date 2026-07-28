@@ -333,23 +333,37 @@ EXAMPLE_QUERIES: tuple[dict[str, str], ...] = (
 )
 
 GUIDANCE: tuple[str, ...] = (
-    "Filter games.is_primary_library_item = 1 (or use v_owned_games) for any "
-    "'how many games' question — otherwise DLC/editions/soundtracks inflate the count.",
-    "Never trust game_platforms.playtime_minutes for platform='switch2' — join "
-    "v_game_playtime (or select from v_owned_games) instead; it sums the real "
-    "per-day nintendo_play_summary data through the nintendo_title_id identifier.",
-    "game_wishlist and game_platforms are separate tables by design — a "
-    "game_platforms row never means wishlisted, and vice versa.",
-    "Never SUM game_platforms.price_paid across rows with different "
-    "price_currency — group by currency first.",
-    "games.tags and games.manual_overrides (and game_platforms.manual_overrides) "
-    "are JSON arrays — use json_each(column) to query into them.",
-    "game_prices is a current-price CACHE (overwritten in place), not a price "
-    "history table; play_history is the opposite — cumulative snapshots, never "
-    "overwritten, at most one row per game/platform/day.",
-    "Canonical platform values come from platforms_registry.py: steam, epic, "
-    "gog, switch2, ps5, xbox, itchio, ea, ubisoft, other — note it's 'switch2', "
-    "never 'switch'.",
+    (
+        "Filter games.is_primary_library_item = 1 (or use v_owned_games) for any "
+        "'how many games' question — otherwise DLC/editions/soundtracks inflate the count."
+    ),
+    (
+        "Never trust game_platforms.playtime_minutes for platform='switch2' — join "
+        "v_game_playtime (or select from v_owned_games) instead; it sums the real "
+        "per-day nintendo_play_summary data through the nintendo_title_id identifier."
+    ),
+    (
+        "game_wishlist and game_platforms are separate tables by design — a "
+        "game_platforms row never means wishlisted, and vice versa."
+    ),
+    (
+        "Never SUM game_platforms.price_paid across rows with different "
+        "price_currency — group by currency first."
+    ),
+    (
+        "games.tags and games.manual_overrides (and game_platforms.manual_overrides) "
+        "are JSON arrays — use json_each(column) to query into them."
+    ),
+    (
+        "game_prices is a current-price CACHE (overwritten in place), not a price "
+        "history table; play_history is the opposite — cumulative snapshots, never "
+        "overwritten, at most one row per game/platform/day."
+    ),
+    (
+        "Canonical platform values come from platforms_registry.py: steam, epic, "
+        "gog, switch2, ps5, xbox, itchio, ea, ubisoft, other — note it's 'switch2', "
+        "never 'switch'."
+    ),
 )
 
 # ── query_library ─────────────────────────────────────────────────────────────

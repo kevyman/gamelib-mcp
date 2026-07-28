@@ -6,12 +6,13 @@ helpers (upsert + fulfillment cleanup), the manual add_game_to_platform
 import asyncio
 import json
 import unittest
+from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
 import httpx
-
 from conftest import ToolDBTestCase, add_identifier, add_platform, seed_game
 from fastmcp.exceptions import ToolError
+
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import dekudeals, steam_wishlist
 from gamelib_mcp.data.scrape_validate import FIXTURES_DIR
@@ -694,9 +695,9 @@ class DekuDealsWishlistTests(ToolDBTestCase):
         with (
             patch.object(dekudeals, "DEKUDEALS_WISHLIST_URL", "https://www.dekudeals.com/wishlist/abc"),
             patch.object(dekudeals.httpx, "AsyncClient", return_value=_Client()),
+            self.assertRaises(httpx.ConnectError),
         ):
-            with self.assertRaises(httpx.ConnectError):
-                await dekudeals.sync_dekudeals_wishlist()
+            await dekudeals.sync_dekudeals_wishlist()
 
         async with db_module.get_db() as db:
             row = await db.execute_fetchone(
@@ -725,7 +726,7 @@ class DekuDealsWishlistTests(ToolDBTestCase):
         }
 
         class _Resp:
-            headers: dict[str, str] = {}
+            headers: ClassVar[dict[str, str]] = {}
             is_redirect = False
 
             def raise_for_status(self):
@@ -761,7 +762,7 @@ class DekuDealsWishlistTests(ToolDBTestCase):
 
 def _response(html: str):
     class _Resp:
-        headers: dict[str, str] = {}
+        headers: ClassVar[dict[str, str]] = {}
         is_redirect = False
 
         def raise_for_status(self):

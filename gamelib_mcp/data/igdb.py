@@ -11,22 +11,13 @@ import time
 from collections import deque
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
+from typing import Self
 from weakref import WeakKeyDictionary
 
 import httpx
 
-from .db import (
-    _claim_cutoff_iso,
-    claim_game_ids_for_igdb,
-    get_meta,
-    load_games_for_igdb_backfill,
-    load_platforms_for_games,
-    release_game_claim,
-    set_meta,
-    upsert_game_platform_enrichment,
-)
 from .content import (
     CONTENT_DLC,
     CONTENT_EDITION,
@@ -36,6 +27,16 @@ from .content import (
     classify_title_override,
     content_type_from_igdb_category,
     derive_is_primary,
+)
+from .db import (
+    _claim_cutoff_iso,
+    claim_game_ids_for_igdb,
+    get_meta,
+    load_games_for_igdb_backfill,
+    load_platforms_for_games,
+    release_game_claim,
+    set_meta,
+    upsert_game_platform_enrichment,
 )
 from .tag_synonyms import canonical_tag
 from .tags import is_feature_flag
@@ -150,7 +151,7 @@ CATEGORY_PORT = 11
 
 # Cached token
 _token: str | None = None
-_token_expires_at: datetime = datetime.min.replace(tzinfo=timezone.utc)
+_token_expires_at: datetime = datetime.min.replace(tzinfo=UTC)
 
 _IGDB_TARGET_REQUEST_INTERVAL = 1 / 3
 _IGDB_MAX_REQUESTS_PER_SECOND = 4
@@ -175,7 +176,7 @@ class _IGDBRequestGate:
         self._max_requests_per_second = max_requests_per_second
         self._max_in_flight = max_in_flight
         self._loop_states: WeakKeyDictionary[asyncio.AbstractEventLoop, _IGDBRequestGateState] = WeakKeyDictionary()
-        self._lease_stack: ContextVar[tuple["_IGDBRequestGateState", ...]] = ContextVar(
+        self._lease_stack: ContextVar[tuple[_IGDBRequestGateState, ...]] = ContextVar(
             "igdb_request_gate_lease_stack",
             default=(),
         )
@@ -191,7 +192,7 @@ class _IGDBRequestGate:
             self._loop_states[loop] = state
         return state
 
-    async def __aenter__(self) -> "_IGDBRequestGate":
+    async def __aenter__(self) -> Self:
         await self.acquire()
         return self
 
@@ -327,14 +328,14 @@ async def _get_token() -> str:
     """Return a valid Twitch OAuth2 access token, refreshing if needed."""
     global _token, _token_expires_at
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if _token and now < _token_expires_at - timedelta(minutes=10):
         return _token
 
     client_id = os.environ.get("TWITCH_CLIENT_ID")
     client_secret = os.environ.get("TWITCH_CLIENT_SECRET")
     if not client_id or not client_secret:
-        raise EnvironmentError("TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET must be set for IGDB enrichment")
+        raise OSError("TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET must be set for IGDB enrichment")
 
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
@@ -358,7 +359,7 @@ def _unix_to_iso(ts: int | None) -> str | None:
     if ts is None:
         return None
     try:
-        return datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
+        return datetime.fromtimestamp(ts, tz=UTC).date().isoformat()
     except (OSError, OverflowError, ValueError):
         return None
 
@@ -378,9 +379,9 @@ def _parse_retry_after(retry_after: str | None) -> float | None:
         return None
 
     if retry_at.tzinfo is None:
-        retry_at = retry_at.replace(tzinfo=timezone.utc)
+        retry_at = retry_at.replace(tzinfo=UTC)
 
-    return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+    return max(0.0, (retry_at - datetime.now(UTC)).total_seconds())
 
 
 def _retry_delay_seconds(attempt: int, response: httpx.Response | None = None) -> float:
@@ -410,13 +411,15 @@ async def _post_igdb_games(
 
     for attempt in range(_IGDB_MAX_RETRIES + 1):
         try:
-            async with _IGDB_REQUEST_GATE:
-                async with httpx.AsyncClient(timeout=_IGDB_REQUEST_TIMEOUT_SECONDS) as client:
-                    resp = await client.post(
-                        url,
-                        content=query,
-                        headers=headers,
-                    )
+            async with (
+                _IGDB_REQUEST_GATE,
+                httpx.AsyncClient(timeout=_IGDB_REQUEST_TIMEOUT_SECONDS) as client,
+            ):
+                resp = await client.post(
+                    url,
+                    content=query,
+                    headers=headers,
+                )
             resp.raise_for_status()
             return resp.json()
         except Exception as exc:
@@ -458,12 +461,14 @@ def _build_search_game_query(
             # Apicalypse: (a,b) = "contains at least one of".
             filters.append(f"platforms = ({','.join(str(i) for i in ids)})")
     clauses = [
-        "fields id, name, category, game_type, first_release_date, "
-        "genres.name, themes.name, keywords.name, "
-        "collections.id, collections.name, franchises.id, franchises.name, "
-        "parent_game.id, parent_game.name, "
-        "version_parent.id, version_parent.name, version_title, cover.image_id, "
-        "platforms, release_dates.platform, release_dates.date;",
+        (
+            "fields id, name, category, game_type, first_release_date, "
+            "genres.name, themes.name, keywords.name, "
+            "collections.id, collections.name, franchises.id, franchises.name, "
+            "parent_game.id, parent_game.name, "
+            "version_parent.id, version_parent.name, version_title, cover.image_id, "
+            "platforms, release_dates.platform, release_dates.date;"
+        ),
         f'search "{escaped_name}";',
     ]
     if filters:
@@ -928,10 +933,9 @@ async def _resolve_game_with_status(
 
     saw_candidates = False
     results = await search_game(name, igdb_platform_id, suppress_errors=suppress_errors)
-    if not results:
-        # Try without platform filter as fallback
-        if igdb_platform_id is not None:
-            results = await search_game(name, igdb_platform_id=None, suppress_errors=suppress_errors)
+    # Try without platform filter as fallback
+    if not results and igdb_platform_id is not None:
+        results = await search_game(name, igdb_platform_id=None, suppress_errors=suppress_errors)
 
     if results:
         saw_candidates = True
@@ -1055,7 +1059,7 @@ async def resolve_and_link_game(
     already owns that platform, so two distinct same-platform store entries with the
     same name stay separate instead of collapsing.
     """
-    from .db import find_game_by_name_fuzzy, get_game_by_igdb_id, get_db
+    from .db import find_game_by_name_fuzzy, get_db, get_game_by_igdb_id
 
     igdb_game = await resolve_game(name, igdb_platform_id)
     if igdb_game is not None:
@@ -1188,7 +1192,7 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
         upsert_game,
     )
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     # Parent guard (mirrors upserts.py::apply_content_classification): never nest a
     # row other rows already hang off. IGDB happily hands back an edition/version
@@ -1470,7 +1474,7 @@ async def upsert_backfill_platform_release_dates(game_id: int, igdb_game: IGDBGa
 async def mark_igdb_checked(game_id: int) -> None:
     from .db import get_db
 
-    checked_at = datetime.now(timezone.utc).isoformat()
+    checked_at = datetime.now(UTC).isoformat()
     async with get_db() as db:
         await db.execute(
             "UPDATE games SET igdb_cached_at = ? WHERE id = ?",
@@ -2161,7 +2165,7 @@ async def get_igdb_children_cached(
 
     if cached is not None:
         fetched_at, children, failed = cached
-        age = datetime.now(timezone.utc) - fetched_at
+        age = datetime.now(UTC) - fetched_at
         ttl = timedelta(
             hours=_IGDB_CHILDREN_FAILURE_TTL_HOURS
         ) if failed else timedelta(days=_IGDB_CHILDREN_CACHE_TTL_DAYS)
@@ -2183,12 +2187,12 @@ async def get_igdb_children_cached(
                 igdb_id,
             )
             return cached[1]
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await set_meta(
             key, json.dumps({"fetched_at": now, "children": [], "failed": True})
         )
         return None
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     await set_meta(key, json.dumps({"fetched_at": now, "children": fetched}))
     return fetched

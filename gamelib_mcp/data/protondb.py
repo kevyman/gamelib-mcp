@@ -1,7 +1,7 @@
 """Lazy ProtonDB tier fetch."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 
@@ -27,7 +27,7 @@ async def get_protondb(appid: int) -> str | None:
 
 
 async def _fetch_and_cache(appid: int, game_platform_id: int) -> str | None:
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     tier = None
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -74,7 +74,7 @@ def _is_fresh(cached_at: str | None, days: int) -> bool:
         return False
     try:
         dt = datetime.fromisoformat(cached_at)
-        age = datetime.now(timezone.utc) - dt
+        age = datetime.now(UTC) - dt
         return age.total_seconds() < days * 86400
     except ValueError:
         return False

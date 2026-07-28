@@ -10,7 +10,7 @@ Metascores, and must not be healable away.
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 from bs4 import BeautifulSoup
@@ -38,7 +38,7 @@ def _is_fresh(cached_at: str | None, cache_days: int = METACRITIC_CACHE_DAYS) ->
         return True  # don't retry; background job skips FAILED entries
     try:
         dt = datetime.fromisoformat(cached_at)
-        return (datetime.now(timezone.utc) - dt).total_seconds() < cache_days * 86400
+        return (datetime.now(UTC) - dt).total_seconds() < cache_days * 86400
     except ValueError:
         return False
 
@@ -82,7 +82,10 @@ def _extract_score(html: str, config: MetacriticScrapeConfig | None = None) -> i
     for script in soup.find_all("script", type="application/ld+json"):
         try:
             data = json.loads(script.string or "")
-        except Exception:
+        except ValueError as exc:
+            # A page can carry several ld+json blocks; one unparseable block is
+            # not a reason to abandon the others.
+            logger.debug("Metacritic JSON-LD block unparseable: %s", exc)
             continue
         for entry in data if isinstance(data, list) else [data]:
             if not isinstance(entry, dict):
@@ -161,7 +164,7 @@ async def enrich_metacritic(
     if _is_fresh(cached_at, config.cache_days):
         return None
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     slug = _to_slug(game_name)
     score = None
     final_url = config.game_url_template.format(slug=slug)

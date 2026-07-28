@@ -9,7 +9,7 @@ import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from conftest import ToolDBTestCase, add_platform, seed_game, make_steam_game
+from conftest import ToolDBTestCase, add_platform, make_steam_game, seed_game
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.itad import PriceInfo

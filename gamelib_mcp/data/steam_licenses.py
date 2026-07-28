@@ -41,7 +41,7 @@ standalone GTA IV).
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 
@@ -271,7 +271,7 @@ async def audit_steam_licenses(
     unclassified_queue = [a for a in missing if a not in cached_set]
     to_probe = unclassified_queue if not limit else unclassified_queue[:limit]
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     minted: list[dict] = []
     minted_delisted: list[dict] = []
     would_mint: list[dict] = []

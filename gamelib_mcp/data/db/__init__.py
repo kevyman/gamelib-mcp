@@ -17,12 +17,13 @@ import os
 import re
 import sqlite3
 from collections import defaultdict
+from collections.abc import Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Awaitable, Callable, Iterable, TypeVar
+from typing import TypeVar
 from weakref import WeakKeyDictionary
 
 import aiosqlite
@@ -264,6 +265,7 @@ def extract_best_fuzzy_key(
 
 from .schema import (
     _FTS_DDL,
+    _QUERY_VIEWS_DDL,
     _V1_SCHEMA_DDL,
     _V2_SCHEMA_DDL,
     _V3_SCHEMA_DDL,
@@ -288,7 +290,6 @@ from .schema import (
     _V31_SCHEMA_DDL,
     _V32_SCHEMA_DDL,
     _V33_SCHEMA_DDL,
-    _QUERY_VIEWS_DDL,
 )
 
 
@@ -538,7 +539,7 @@ async def _migrate_v1_to_v2(db: aiosqlite.Connection, progress: _Progress | None
 
     await db.execute("PRAGMA foreign_keys=OFF")
     db.row_factory = aiosqlite.Row
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     game_platform_rows = await db.execute_fetchall(
         """SELECT id, game_id, platform, owned, playtime_minutes,
                   playtime_2weeks_minutes, last_synced
@@ -2134,7 +2135,7 @@ async def _ensure_db_initialized(db: aiosqlite.Connection) -> None:
         _FTS_READY_PATH = db_path if result.fts_enabled else None
 
 
-def _gl_ln(value: float | int | None) -> float | None:
+def _gl_ln(value: float | None) -> float | None:
     if value is None or value <= 0:
         return None
     return math.log(value)
@@ -2231,93 +2232,93 @@ async def init_db() -> None:
 
 # ── Domain submodules (re-exported; imported last so the bottom layer above is
 # fully defined before each leaf does `from . import get_db, ...`). ───────────
-from .affinity import recompute_tag_affinity  # noqa: E402
-from .history import record_play_history_snapshots  # noqa: E402
-from .claims import (  # noqa: E402
+from .affinity import recompute_tag_affinity
+from .claims import (
     HLTB_NOT_FOUND_RETRY_DAYS,
     _claim_cutoff_iso,
     _claim_ids,
-    clear_claim,
-    clear_all_enrichment_claims,
-    invalidate_name_derived_enrichment,
-    invalidate_igdb_match_enrichment,
-    release_game_claim,
-    claim_game_ids_for_igdb,
     claim_game_ids_for_hltb,
-    claim_steam_platform_ids_for_store,
+    claim_game_ids_for_igdb,
+    claim_game_platform_ids_for_metacritic,
+    claim_game_platform_ids_for_opencritic,
     claim_steam_platform_ids_for_protondb,
     claim_steam_platform_ids_for_steamspy,
-    claim_game_platform_ids_for_opencritic,
-    claim_game_platform_ids_for_metacritic,
+    claim_steam_platform_ids_for_store,
+    clear_all_enrichment_claims,
+    clear_claim,
+    invalidate_igdb_match_enrichment,
+    invalidate_name_derived_enrichment,
     load_games_for_igdb_backfill,
-    load_store_batch_rows,
     load_hltb_batch_rows,
-    load_steam_platform_batch_rows,
-    load_opencritic_batch_rows,
     load_metacritic_batch_rows,
+    load_opencritic_batch_rows,
+    load_steam_platform_batch_rows,
+    load_store_batch_rows,
+    release_game_claim,
 )
-from .queries import (  # noqa: E402
+from .fuzzy import (
+    find_conflicting_fuzzy_key,
+    find_game_by_name_fuzzy,
+    load_fuzzy_candidates,
+    titles_conflict_on_identity,
+)
+from .history import record_play_history_snapshots
+from .queries import (
     NINTENDO_BASELINE_DEVICE_ID,
     NINTENDO_BASELINE_PERIOD_KEY,
+    _coerce_identifier_value,
+    _platform_dict,
+    edition_hides_owned_game,
+    get_game_by_appid,
+    get_game_by_identifier,
+    get_game_by_igdb_id,
+    get_game_by_name_exact,
+    get_game_substance,
     get_meta,
     get_meta_prefix,
     get_nintendo_baseline_minutes,
     get_nintendo_play_totals,
     get_nintendo_synced_minutes,
-    set_meta,
-    set_meta_many,
-    get_game_substance,
-    nesting_substance_conflict,
-    edition_hides_owned_game,
-    get_game_by_identifier,
-    get_game_by_appid,
-    get_game_by_igdb_id,
-    get_game_by_name_exact,
-    has_nested_children,
     get_platform_game_by_normalized_name,
     get_steam_appid_for_game,
     get_steam_platform_row_by_appid,
-    _coerce_identifier_value,
-    _platform_dict,
+    has_nested_children,
     load_platforms_for_games,
-    load_series_for_games,
     load_related_content_for_games,
+    load_series_for_games,
     load_wishlist_with_prices,
+    nesting_substance_conflict,
+    set_meta,
+    set_meta_many,
 )
-from .upserts import (  # noqa: E402
+from .upserts import (
     ACQUISITION_FIELDS,
     GAME_EDITABLE_FIELDS,
     PLATFORM_EDITABLE_FIELDS,
     adopt_platform_identifier,
     apply_content_classification,
+    apply_manual_game_fields,
+    apply_manual_platform_fields,
+    bulk_upsert_steam_library,
+    clear_fulfilled_wishlist_entries,
+    delete_nintendo_playtime_baseline,
+    delete_stale_wishlist_entries,
+    get_manual_overrides,
+    get_platform_manual_overrides,
+    remove_manual_overrides,
+    remove_platform_manual_overrides,
+    repair_misclassified_platform_row,
     resolve_parent_game,
     set_platform_acquisition,
-    upsert_game,
-    upsert_game_platform,
-    upsert_wishlist_entry,
-    clear_fulfilled_wishlist_entries,
-    delete_stale_wishlist_entries,
-    repair_misclassified_platform_row,
-    upsert_game_platform_identifier,
-    upsert_steam_platform_data,
-    bulk_upsert_steam_library,
     set_steam_delisted,
-    upsert_game_platform_enrichment,
-    get_manual_overrides,
-    apply_manual_game_fields,
-    remove_manual_overrides,
-    get_platform_manual_overrides,
-    apply_manual_platform_fields,
-    remove_platform_manual_overrides,
-    upsert_game_series_links,
+    upsert_game,
     upsert_game_alias,
-    delete_nintendo_playtime_baseline,
-    upsert_nintendo_play_summary,
+    upsert_game_platform,
+    upsert_game_platform_enrichment,
+    upsert_game_platform_identifier,
     upsert_game_prices,
-)
-from .fuzzy import (  # noqa: E402
-    load_fuzzy_candidates,
-    find_game_by_name_fuzzy,
-    find_conflicting_fuzzy_key,
-    titles_conflict_on_identity,
+    upsert_game_series_links,
+    upsert_nintendo_play_summary,
+    upsert_steam_platform_data,
+    upsert_wishlist_entry,
 )

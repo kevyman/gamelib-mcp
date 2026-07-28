@@ -3,8 +3,8 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 import httpx
-
 from conftest import ToolDBTestCase, make_steam_game, virtual_clock
+
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steam_store
 
@@ -151,14 +151,14 @@ class SteamRequestGateTests(unittest.IsolatedAsyncioTestCase):
             virtual_clock("gamelib_mcp.data.steam_store"),
             patch("gamelib_mcp.data.steam_store._sleep_before_retry", new=AsyncMock()),
             patch.object(steam_store._STEAM_REQUEST_GATE, "penalize") as penalize,
+            self.assertRaises(steam_store.httpx.HTTPStatusError),
         ):
-            with self.assertRaises(steam_store.httpx.HTTPStatusError):
-                await steam_store._steam_get_json_with_retry(
-                    client,
-                    steam_store.STORE_API,
-                    params={"appids": 10},
-                    timeout=15,
-                )
+            await steam_store._steam_get_json_with_retry(
+                client,
+                steam_store.STORE_API,
+                params={"appids": 10},
+                timeout=15,
+            )
 
         self.assertEqual(penalize.call_count, steam_store._STEAM_MAX_RETRIES + 1)
 
