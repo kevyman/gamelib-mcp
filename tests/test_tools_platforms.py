@@ -1544,6 +1544,27 @@ class AddGamesToPlatformBatchTests(ToolDBTestCase):
         self.assertIsNone(new_row)
         self.assertIsNone(gp)
 
+    async def test_dry_run_writes_no_wishlist_entry(self):
+        # owned=False takes the other write path — game_wishlist, not
+        # game_platforms — and the batch test above never covered it. A stray
+        # "__DRY_RUN_TEST__" wishlist row in prod put the question to the code;
+        # the answer must stay no.
+        result = await platforms.add_game_to_platform(
+            name="__DRY_RUN_TEST__", platform="epic", owned=False, dry_run=True
+        )
+        self.assertTrue(result["created"])
+        self.assertIsNone(result["game_id"])
+        self.assertIsNone(result["wishlist_id"])
+        async with db_module.get_db() as db:
+            game = await db.execute_fetchone(
+                "SELECT id FROM games WHERE name = ?", ("__DRY_RUN_TEST__",)
+            )
+            wishlist_rows = await db.execute_fetchone(
+                "SELECT COUNT(*) AS c FROM game_wishlist"
+            )
+        self.assertIsNone(game)
+        self.assertEqual(wishlist_rows["c"], 0)
+
     async def test_dry_run_duplicate_new_name_created_matches_wet(self):
         # Regression: a wet run creates a repeated new name once (the second
         # item attaches by exact name) — dry_run must predict created the

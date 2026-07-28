@@ -51,11 +51,21 @@ _PRICEABLE_PLATFORMS = frozenset({"steam", "switch2"})
 # cross-platform candidates per call and defers the rest (12h TTL staggers
 # the remainder across subsequent calls).
 _MAX_SWITCH2_SEARCH_LOOKUPS = 12
+# Backoff for a CONFIRMED per-title search miss (DekuDeals loaded the search
+# page and had no card for the title). Without it a permanent miss — a game
+# with no Switch release under that name — is re-searched on every call and
+# occupies a cap slot forever, throttling the drain rate for candidates that
+# would actually resolve. Longer than the price TTL on purpose: "this game
+# isn't sold there" changes far more slowly than its price does. Recorded as
+# a NULL-price game_prices row (same (game, platform, shop) key a real price
+# would take), so a later hit simply overwrites the marker.
+_SWITCH2_MISS_RETRY_HOURS = 72
 _DEFAULT_OVERRIDE_RATIO = 0.5
 
 
-def _fetched_at_is_stale(fetched_at: str | None) -> bool:
-    """True if fetched_at is missing, unparseable, or older than the TTL."""
+def _fetched_at_is_stale(fetched_at: str | None, hours: int = _PRICE_TTL_HOURS) -> bool:
+    """True if fetched_at is missing, unparseable, or older than `hours`
+    (the price TTL by default; miss markers get their own longer window)."""
     if fetched_at is None:
         return True
     try:
@@ -64,7 +74,7 @@ def _fetched_at_is_stale(fetched_at: str | None) -> bool:
         return True
     if fetched.tzinfo is None:
         fetched = fetched.replace(tzinfo=UTC)
-    return datetime.now(UTC) - fetched > timedelta(hours=_PRICE_TTL_HOURS)
+    return datetime.now(UTC) - fetched > timedelta(hours=hours)
 
 
 def _group_rows_by_game(rows: list[aiosqlite.Row]) -> dict[int, dict]:
@@ -103,6 +113,51 @@ def _platform_needs_refresh(price_rows: dict, refresh: bool) -> bool:
     if not priced:
         return True
     return _fetched_at_is_stale(max(r["fetched_at"] for r in priced))
+
+
+def _has_cached_price(state: dict | None, platform: str) -> bool:
+    """True if this game carries at least one usable (non-NULL) cached price on
+    `platform` — i.e. its per-title lookup is resolved and need not be redone
+    to make the game priceable."""
+    if state is None:
+        return False
+    return any(r["price"] is not None for r in state["prices"].get(platform, {}).values())
+
+
+def _miss_marker_is_fresh(price_rows: dict) -> bool:
+    """True if a NULL-price row (a recorded search miss) is still inside the
+    backoff window — the title was looked up, wasn't there, and should not
+    burn another capped lookup slot yet."""
+    return any(
+        r["price"] is None
+        and not _fetched_at_is_stale(r["fetched_at"], hours=_SWITCH2_MISS_RETRY_HOURS)
+        for r in price_rows.values()
+    )
+
+
+def _switch2_lookup_pending(state: dict | None) -> bool:
+    """True if this game's per-title switch2 lookup is still outstanding work:
+    no usable price, and no in-window miss marker either."""
+    rows = state["prices"].get("switch2", {}) if state is not None else {}
+    if any(r["price"] is not None for r in rows.values()):
+        return False
+    return not _miss_marker_is_fresh(rows)
+
+
+def _availability_is_known(igdb_platforms_json: str | None) -> bool:
+    """True if games.igdb_platforms holds a usable release-platform list.
+
+    Distinguishes "IGDB says this has no Switch release" (a non-empty list
+    without 130/508 — a real answer) from "we have no platform list at all",
+    which _available_platforms flattens into the same empty set and which
+    would otherwise silently drop the game from the candidate count."""
+    if not igdb_platforms_json:
+        return False
+    try:
+        ids = json.loads(igdb_platforms_json)
+    except ValueError:
+        return False
+    return isinstance(ids, list) and bool(ids)
 
 
 def _match_wishlist_game_id(
@@ -227,8 +282,21 @@ async def get_wishlist_deals(
     RECOMMENDED option (preferred platform unless another platform's price is
     below preference_override_ratio × the preferred price); other platforms'
     cheapest options appear in alternatives with the reasoning in
-    recommendation_reason. platform filters by where the game is WISHLISTED,
-    not where the recommendation lands. max_price/min_cut_pct keep a game if
+    recommendation_reason.
+
+    Four counters describe the capped per-title switch2 lookup queue:
+    switch2_lookups_performed (priced THIS call), switch2_lookups_deferred
+    (the backlog LEFT AFTER it — still no price and no recorded miss, picked
+    up by later calls), switch2_lookups_not_found (DekuDeals has no card for
+    the title; negatively cached for _SWITCH2_MISS_RETRY_HOURS so a permanent
+    miss stops consuming a lookup slot every call, which refresh=True does NOT
+    override) and switch2_availability_unknown (wishlist games with no IGDB
+    platform list at all, so their Switch availability is undecidable and they
+    never become candidates — an enrichment gap, not a "no Switch release").
+    Each is omitted when zero.
+
+    platform filters by where the game is WISHLISTED, not where the
+    recommendation lands. max_price/min_cut_pct keep a game if
     ANY of its priced options — recommended or alternative — satisfies both
     given filters together; they never re-point the recommended fields, they
     only decide whether the entry is kept. Prices are never currency-converted.
@@ -246,10 +314,23 @@ async def get_wishlist_deals(
     switch2_wishlist_needs: dict[int, str] = {}   # game_id -> name (on the deku wishlist page)
     switch2_search_needs: dict[int, str] = {}     # game_id -> name (search lookup)
     availability_pending = 0
+    switch2_availability_unknown = 0
+    switch2_lookups_not_found = 0
+    switch2_search_wanted = "switch2" in hw_pref
 
     for game_id, state in games.items():
         if state["igdb_cached_at"] is None:
             availability_pending += 1
+        if (
+            switch2_search_wanted
+            and "switch2" not in state["wishlisted_on"]
+            and "switch2" not in state["owned_platforms"]
+            and not _availability_is_known(state["igdb_platforms"])
+        ):
+            # Not a candidate, but for want of data rather than because IGDB
+            # said "no Switch release" — counted so the gap is attributable
+            # instead of just missing from every number below.
+            switch2_availability_unknown += 1
         candidates = _candidate_platforms(
             set(state["wishlisted_on"]),
             _available_platforms(state["igdb_platforms"]),
@@ -265,16 +346,26 @@ async def get_wishlist_deals(
             elif cand == "switch2":
                 if "switch2" in state["wishlisted_on"]:
                     switch2_wishlist_needs[game_id] = state["name"]
+                elif _miss_marker_is_fresh(state["prices"].get("switch2", {})):
+                    # Confirmed miss inside the backoff window — deliberately
+                    # NOT re-queued even under refresh=True, which is the whole
+                    # point of the marker: a permanent miss must stop eating a
+                    # capped lookup slot on every call.
+                    switch2_lookups_not_found += 1
                 else:
                     switch2_search_needs[game_id] = state["name"]
 
-    switch2_lookups_deferred = max(0, len(switch2_search_needs) - _MAX_SWITCH2_SEARCH_LOOKUPS)
-    if switch2_lookups_deferred:
+    # Whole per-title backlog for this call, kept before the cap truncates the
+    # set actually looked up — the deferred counter is recomputed against it
+    # AFTER the fetch, from what is still unpriced (see below).
+    switch2_search_candidates = list(switch2_search_needs)
+    if len(switch2_search_needs) > _MAX_SWITCH2_SEARCH_LOOKUPS:
         switch2_search_needs = dict(list(switch2_search_needs.items())[:_MAX_SWITCH2_SEARCH_LOOKUPS])
 
     price_refresh_errors: list[str] = []
     notes: dict[str, Any] = {}
     cache_updated = False
+    switch2_lookups_performed = 0
 
     if steam_needs_refresh:
         if not is_itad_configured():
@@ -334,11 +425,22 @@ async def get_wishlist_deals(
             price_refresh_errors.append(f"dekudeals search refresh failed: {exc}")
         else:
             name_to_id = {name: gid for gid, name in switch2_search_needs.items()}
-            upsert_rows = [
-                _switch2_price_row(name_to_id[title], info)
-                for title, info in by_title.items()
-                if title in name_to_id
-            ]
+            upsert_rows = []
+            for title, search_info in by_title.items():
+                if title not in name_to_id:
+                    continue
+                candidate_id = name_to_id[title]
+                if search_info is not None:
+                    upsert_rows.append(_switch2_price_row(candidate_id, search_info))
+                    switch2_lookups_performed += 1
+                elif not _has_cached_price(games.get(candidate_id), "switch2"):
+                    # Confirmed miss (None, not "title absent" = fetch failed).
+                    # Remembered as a NULL-price row so the next calls spend
+                    # their capped lookups on candidates that can still
+                    # resolve. Never written over a real cached price — that
+                    # would blank a good price on a one-off search miss.
+                    upsert_rows.append(_switch2_miss_row(candidate_id))
+                    switch2_lookups_not_found += 1
             if upsert_rows:
                 await upsert_game_prices(upsert_rows)
                 cache_updated = True
@@ -346,6 +448,16 @@ async def get_wishlist_deals(
     if cache_updated:
         rows = await load_wishlist_with_prices(resolved_platform)
         games = _group_rows_by_game(rows)
+
+    # Post-call backlog, not a static "candidates minus cap" expression: a
+    # candidate counts as deferred only while its lookup is still outstanding —
+    # no usable price and no in-window miss marker. Anything the capped lookups
+    # (this call or an earlier one) settled either way drops out, so the counter
+    # drains to zero as the queue empties instead of reporting the same number
+    # forever.
+    switch2_lookups_deferred = sum(
+        1 for gid in switch2_search_candidates if _switch2_lookup_pending(games.get(gid))
+    )
 
     deals: list[dict[str, Any]] = []
     unpriced: list[str] = []
@@ -405,8 +517,14 @@ async def get_wishlist_deals(
     }
     if price_refresh_errors:
         response["price_refresh_errors"] = price_refresh_errors
+    if switch2_lookups_performed:
+        response["switch2_lookups_performed"] = switch2_lookups_performed
     if switch2_lookups_deferred:
         response["switch2_lookups_deferred"] = switch2_lookups_deferred
+    if switch2_lookups_not_found:
+        response["switch2_lookups_not_found"] = switch2_lookups_not_found
+    if switch2_availability_unknown:
+        response["switch2_availability_unknown"] = switch2_availability_unknown
     if availability_pending:
         response["availability_pending"] = availability_pending
     if len(currencies) > 1:
@@ -416,6 +534,23 @@ async def get_wishlist_deals(
         )
     response.update(notes)
     return response
+
+
+def _switch2_miss_row(game_id: int) -> dict:
+    """A negative-cache row: same key a real DekuDeals price would occupy, with
+    every price field NULL. Read back by `_miss_marker_is_fresh`; a later hit
+    overwrites it in place (UNIQUE(game_id, platform, shop)), and every price
+    reader already skips NULL-price rows."""
+    return {
+        "game_id": game_id,
+        "platform": "switch2",
+        "shop": "dekudeals",
+        "price": None,
+        "regular_price": None,
+        "cut_pct": None,
+        "currency": None,
+        "deal_url": None,
+    }
 
 
 def _switch2_price_row(game_id: int, info: dict) -> dict:

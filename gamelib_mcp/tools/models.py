@@ -425,7 +425,15 @@ class GetWishlistResponse(FlexibleModel):
     price_refresh_errors: list[str] | None = None
     itad: str | None = None
     currency_note: str | None = None
+    # The capped per-title DekuDeals lookup queue, each omitted when zero:
+    # priced this call / still outstanding after it (the real remaining
+    # backlog, not a static candidates-minus-cap figure) / confirmed absent
+    # from DekuDeals and negatively cached / excluded because no IGDB platform
+    # list says whether a Switch release exists at all.
+    switch2_lookups_performed: int | None = None
     switch2_lookups_deferred: int | None = None
+    switch2_lookups_not_found: int | None = None
+    switch2_availability_unknown: int | None = None
     availability_pending: int | None = None
 
 
