@@ -297,8 +297,8 @@ async def get_wishlist_deals(
     never become candidates — an enrichment gap, not a "no Switch release").
     Each is omitted when zero.
 
-    platform filters by where the game is
-    WISHLISTED, not where the recommendation lands. max_price/min_cut_pct keep a game if
+    platform filters by where the game is WISHLISTED, not where the
+    recommendation lands. max_price/min_cut_pct keep a game if
     ANY of its priced options — recommended or alternative — satisfies both
     given filters together; they never re-point the recommended fields, they
     only decide whether the entry is kept. Prices are never currency-converted.
