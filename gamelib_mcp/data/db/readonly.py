@@ -28,7 +28,12 @@ from weakref import WeakKeyDictionary
 
 import aiosqlite
 
-from . import _SQLITE_BUSY_TIMEOUT_MS, _SQLITE_CONNECT_TIMEOUT_SECONDS, _db_path, _register_gl_ln
+from . import (
+    _SQLITE_BUSY_TIMEOUT_MS,
+    _SQLITE_CONNECT_TIMEOUT_SECONDS,
+    _db_path,
+    _register_gl_ln,
+)
 
 # Runaway-query protection: a query is aborted once it's been running longer
 # than this many seconds (see _install_progress_handler). query_library()
@@ -152,9 +157,9 @@ async def _install_limits(conn: aiosqlite.Connection) -> None:
 # there's no lifespan hook for this module, so the connection is opened lazily
 # on first use per running loop (each test's IsolatedAsyncioTestCase gets its
 # own loop, so this also keeps tests isolated from each other for free).
-_RO_CONNECTIONS: "WeakKeyDictionary[asyncio.AbstractEventLoop, aiosqlite.Connection]" = WeakKeyDictionary()
-_RO_CONNECTION_PATHS: "WeakKeyDictionary[asyncio.AbstractEventLoop, str]" = WeakKeyDictionary()
-_RO_LOCKS: "WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = WeakKeyDictionary()
+_RO_CONNECTIONS: WeakKeyDictionary[asyncio.AbstractEventLoop, aiosqlite.Connection] = WeakKeyDictionary()
+_RO_CONNECTION_PATHS: WeakKeyDictionary[asyncio.AbstractEventLoop, str] = WeakKeyDictionary()
+_RO_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
 
 
 def _get_lock() -> asyncio.Lock:

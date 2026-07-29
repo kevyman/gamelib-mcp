@@ -3,10 +3,11 @@ and discover_series_gaps.
 """
 
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 from conftest import ToolDBTestCase, add_platform, add_rating, seed_game
+from fastmcp.exceptions import ToolError
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.igdb import IGDBRequestFailure, SeriesMember
@@ -31,7 +32,7 @@ async def set_igdb_id(game_id: int, igdb_id: int) -> None:
 
 
 async def add_wishlist(game_id: int, platform: str, *, source: str = "manual") -> None:
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     async with db_module.get_db() as db:
         await db.execute(
             """INSERT INTO game_wishlist (game_id, platform, wishlisted_at, source)
@@ -195,7 +196,7 @@ class SeriesBreakdownTests(ToolDBTestCase):
         self.assertFalse(page2["has_more"])
 
     async def test_invalid_counting_mode_raises(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(ToolError):
             await series.get_series_breakdown(counting_mode="bogus")
 
     async def test_wishlist_only_member_does_not_count_or_list(self):
@@ -486,7 +487,7 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
         self.assertEqual(result["results"][0]["total_playtime_hours"], 1.0)
 
     async def test_invalid_kind_raises(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(ToolError):
             await series.discover_series_gaps(kind="saga")
 
     async def test_name_fallback_excludes_owned_game_with_no_igdb_id(self):

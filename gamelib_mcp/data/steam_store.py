@@ -9,8 +9,9 @@ import time
 from collections import deque
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from typing import Self
 from weakref import WeakKeyDictionary
 
 import httpx
@@ -72,7 +73,7 @@ class _SteamRequestGate:
         self._budget_window_seconds = budget_window_seconds
         self._max_requests_per_window = max_requests_per_window
         self._loop_states: WeakKeyDictionary[asyncio.AbstractEventLoop, _SteamRequestGateState] = WeakKeyDictionary()
-        self._lease_stack: ContextVar[tuple["_SteamRequestGateState", ...]] = ContextVar(
+        self._lease_stack: ContextVar[tuple[_SteamRequestGateState, ...]] = ContextVar(
             "steam_request_gate_lease_stack",
             default=(),
         )
@@ -88,7 +89,7 @@ class _SteamRequestGate:
             self._loop_states[loop] = state
         return state
 
-    async def __aenter__(self) -> "_SteamRequestGate":
+    async def __aenter__(self) -> Self:
         await self.acquire()
         return self
 
@@ -190,9 +191,9 @@ def _parse_retry_after(retry_after: str | None) -> float | None:
         return None
 
     if retry_at.tzinfo is None:
-        retry_at = retry_at.replace(tzinfo=timezone.utc)
+        retry_at = retry_at.replace(tzinfo=UTC)
 
-    return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+    return max(0.0, (retry_at - datetime.now(UTC)).total_seconds())
 
 
 def _retry_delay_seconds(attempt: int, response: httpx.Response | None = None) -> float:
@@ -294,7 +295,7 @@ async def enrich_game(appid: int, client: httpx.AsyncClient | None = None) -> di
         return dict(row)
 
     store_data, review_summary = await _fetch_all(appid, client=client)
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     async with get_db() as db:
         if store_data is not None:
@@ -552,6 +553,6 @@ def _is_fresh(cached_at: str | None, days: int) -> bool:
         return False
     try:
         dt = datetime.fromisoformat(cached_at)
-        return (datetime.now(timezone.utc) - dt).total_seconds() < days * 86400
+        return (datetime.now(UTC) - dt).total_seconds() < days * 86400
     except ValueError:
         return False

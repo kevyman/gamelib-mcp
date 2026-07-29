@@ -1,19 +1,31 @@
 """Ratings implementations: read, sync, manual rate, and the taste profile."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Literal
 
 from fastmcp.exceptions import ToolError
 
 from ..data.backloggd import sync_backloggd
-from ..data.db import fts_ready, get_db, load_platforms_for_games, recompute_tag_affinity, set_meta
+from ..data.db import (
+    fts_ready,
+    get_db,
+    load_platforms_for_games,
+    recompute_tag_affinity,
+    set_meta,
+)
 from ..data.steam_reviews import sync_steam_reviews
 from ..utils import _parse_json
 from .batch import apply_batch_item, check_batch_items, count_status
 from .common import (
     STEAM_APPID_SQL as _STEAM_APPID_SQL,
+)
+from .common import (
     clamp_limit as _clamp_limit,
+)
+from .common import (
     info as _info,
+)
+from .common import (
     report_progress,
 )
 from .search import (
@@ -57,8 +69,8 @@ async def sync_ratings(ctx=None) -> dict:
     await report_progress(ctx, 3, 3)
     await _info(ctx, "Finished rating sync")
 
-    from datetime import datetime, timezone
-    await set_meta("ratings_synced_at", datetime.now(timezone.utc).isoformat())
+    from datetime import datetime
+    await set_meta("ratings_synced_at", datetime.now(UTC).isoformat())
 
     return {
         "backloggd": bl_result,
@@ -130,7 +142,7 @@ async def rate_game(
         raise ToolError("Game not found in library")
 
     if not dry_run:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         async with get_db() as db:
             await db.execute(
                 """INSERT INTO ratings

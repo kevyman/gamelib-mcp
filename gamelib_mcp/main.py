@@ -19,9 +19,11 @@ load_project_dotenv()
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+
 # Aliased: starlette.middleware.Middleware is imported locally further down for
 # the HTTP routes, and the two must not shadow each other.
-from fastmcp.server.middleware import AuthMiddleware, Middleware as FastMCPMiddleware
+from fastmcp.server.middleware import AuthMiddleware
+from fastmcp.server.middleware import Middleware as FastMCPMiddleware
 from mcp.types import Icon, ToolAnnotations
 
 from .apps import GAME_CARDS_APP, register_apps
@@ -199,7 +201,8 @@ async def search_games(
     results_by_query keyed by the original query string. The offset/platform/
     series/response_format filters apply to `query` mode only.
     """
-    from .tools.library import search_games as _search, search_games_batch as _many
+    from .tools.library import search_games as _search
+    from .tools.library import search_games_batch as _many
     if queries is not None:
         return {"results_by_query": await _many(queries, limit_per_query)}
     if query is None:
@@ -302,7 +305,8 @@ async def get_game_detail(
     fields may be null for a never-enriched game — call this on that one game
     to force the fetch. Set enrich explicitly to override either default.
     """
-    from .tools.detail import get_game_detail as _detail, get_game_details_batch as _many
+    from .tools.detail import get_game_detail as _detail
+    from .tools.detail import get_game_details_batch as _many
     if items is not None:
         if enrich:
             raise ToolError(
@@ -537,7 +541,8 @@ async def rate_game(
 
     dry_run=True validates and resolves without writing, in either mode.
     """
-    from .tools.ratings import rate_game as _rate, rate_games_batch as _many
+    from .tools.ratings import rate_game as _rate
+    from .tools.ratings import rate_games_batch as _many
     if items is not None:
         return await _many(items, dry_run)
     return await _rate(name, game_id, score, review_text, dry_run=dry_run)
@@ -616,7 +621,11 @@ async def sync(
     """
     from .tools.admin import (
         refresh_library as _refresh,
+    )
+    from .tools.admin import (
         sync_wishlist as _sync_wishlist,
+    )
+    from .tools.admin import (
         validate_sync_platforms as _validate_platforms,
     )
     from .tools.ratings import sync_ratings as _sync_ratings
@@ -704,6 +713,8 @@ async def get_scrape_config(provider: str, diagnose: bool = False) -> GetScrapeC
     """
     from .tools.scrape_admin import (
         diagnose_scrape as _diagnose,
+    )
+    from .tools.scrape_admin import (
         get_scrape_config as _get_scrape_config,
     )
     if diagnose:
@@ -753,7 +764,11 @@ async def manage_scrape_config(
     """
     from .tools.scrape_admin import (
         approve_scrape_config as _approve,
+    )
+    from .tools.scrape_admin import (
         propose_scrape_config as _propose,
+    )
+    from .tools.scrape_admin import (
         rollback_scrape_config as _rollback,
     )
     if action == "propose":
@@ -1139,6 +1154,8 @@ async def add_game_to_platform(
     """
     from .tools.platforms import (
         add_game_to_platform as _add,
+    )
+    from .tools.platforms import (
         add_games_to_platform_batch as _many,
     )
     if items is not None:
@@ -1245,7 +1262,8 @@ async def update_game(
     parent state) may preview ok yet error in the wet run, and enrichment
     invalidation is not simulated.
     """
-    from .tools.platforms import update_game as _update, update_games_batch as _many
+    from .tools.platforms import update_game as _update
+    from .tools.platforms import update_games_batch as _many
     if items is not None:
         return await _many(items, dry_run)
     return await _update(
@@ -1350,6 +1368,8 @@ async def set_acquisition(
     """
     from .tools.acquisition import (
         set_acquisition as _set_acquisition,
+    )
+    from .tools.acquisition import (
         set_acquisitions_batch as _many,
     )
     if items is not None:
@@ -1440,7 +1460,8 @@ async def set_playtime(
     item's write (e.g. clearing a column on a platform row an earlier item
     would create) may preview as error where the wet run succeeds.
     """
-    from .tools.platforms import set_playtime as _set_playtime, set_playtime_batch as _many
+    from .tools.platforms import set_playtime as _set_playtime
+    from .tools.platforms import set_playtime_batch as _many
     if items is not None:
         return await _many(items, dry_run)
     return await _set_playtime(
@@ -1725,7 +1746,8 @@ async def merge_games(
     source or target was an earlier item's target (A→B then B→C) may understate
     what the wet run would move — those items carry chained_preview=true.
     """
-    from .tools.admin import merge_games as _merge, merge_games_batch as _many
+    from .tools.admin import merge_games as _merge
+    from .tools.admin import merge_games_batch as _many
     if items is not None:
         return await _many(items, dry_run)
     if source_game_id is None or target_game_id is None:
@@ -1773,7 +1795,8 @@ async def delete_game(
     so a [child, parent] list previews and deletes both. Tag affinity is
     recomputed ONCE after the loop instead of per delete.
     """
-    from .tools.admin import delete_game as _delete, delete_games_batch as _many
+    from .tools.admin import delete_game as _delete
+    from .tools.admin import delete_games_batch as _many
     if items is not None:
         return await _many(items, confirm)
     return await _delete(name, game_id, confirm)

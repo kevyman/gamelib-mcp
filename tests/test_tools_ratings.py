@@ -2,7 +2,14 @@
 
 from unittest.mock import AsyncMock, patch
 
-from conftest import ToolDBTestCase, make_steam_game, seed_game, add_rating, set_tag_affinity
+from conftest import (
+    ToolDBTestCase,
+    add_rating,
+    make_steam_game,
+    seed_game,
+    set_tag_affinity,
+)
+
 from gamelib_mcp.tools import ratings
 
 

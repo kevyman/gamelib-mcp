@@ -1,6 +1,13 @@
 """Characterization tests for gamelib_mcp.tools.stats."""
 
-from conftest import ToolDBTestCase, make_steam_game, seed_game, add_platform, add_rating
+from conftest import (
+    ToolDBTestCase,
+    add_platform,
+    add_rating,
+    make_steam_game,
+    seed_game,
+)
+
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import stats
 from gamelib_mcp.tools.platforms import update_game

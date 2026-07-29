@@ -9,13 +9,17 @@ and the appid→game_id DB join stay in code.
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 from bs4 import BeautifulSoup
 
 from .db import STEAM_APP_ID, get_db
-from .scrape_config import SteamReviewsScrapeConfig, fetch_allowlisted, load_scrape_config
+from .scrape_config import (
+    SteamReviewsScrapeConfig,
+    fetch_allowlisted,
+    load_scrape_config,
+)
 
 _STEAM_PROFILE_ID = os.getenv("STEAM_PROFILE_ID", "")
 BASE_URL = f"https://steamcommunity.com/id/{_STEAM_PROFILE_ID}/recommended/"
@@ -44,7 +48,7 @@ async def sync_steam_reviews() -> dict:
     config = await load_scrape_config("steam_reviews")
     reviews = await _scrape_all_pages(config)
     synced = 0
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     # Pre-fetch game ids and community review scores for all reviewed games
     game_info: dict[int, dict] = {}  # appid -> {id, steam_review_score}

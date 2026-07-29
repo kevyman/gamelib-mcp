@@ -7,7 +7,7 @@ tables with live IGDB series-member lookups (data/series_gaps.py).
 """
 
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from fastmcp.exceptions import ToolError
@@ -265,7 +265,11 @@ async def discover_series_gaps(
     include_unreleased keeps unreleased/undated entries. Requires IGDB
     credentials (TWITCH_CLIENT_ID/SECRET).
     """
-    from ..data.igdb import IGDB_TO_PLATFORM, IGDBRequestFailure, igdb_credentials_configured
+    from ..data.igdb import (
+        IGDB_TO_PLATFORM,
+        IGDBRequestFailure,
+        igdb_credentials_configured,
+    )
     from ..data.series_gaps import get_series_members_cached
     from ..data.title_normalization import normalize_series_gap_title
 
@@ -378,7 +382,7 @@ async def discover_series_gaps(
     wishlist_norm_names = {
         normalize_series_gap_title(row["name"]) for row in wishlist_rows if row["name"]
     }
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = datetime.now(UTC).date().isoformat()
 
     with_gaps: list[dict] = []
     without_gaps: list[dict] = []
@@ -439,7 +443,7 @@ async def discover_series_gaps(
         # _pick_name_suppression_target. Deterministic exact match on
         # edition-stripped normalized names only — no fuzzy scoring.
         members_by_norm: dict[str, list] = defaultdict(list)
-        member_by_id: dict[int, "SeriesMember"] = {}
+        member_by_id: dict[int, SeriesMember] = {}
         for m in members:
             members_by_norm[normalize_series_gap_title(m.name)].append(m)
             member_by_id[m.igdb_id] = m

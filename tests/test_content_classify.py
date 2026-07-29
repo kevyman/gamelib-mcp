@@ -11,7 +11,6 @@ from conftest import ToolDBTestCase, seed_game
 
 from gamelib_mcp.data import content
 
-
 # --- category 5/6/7 mappings --------------------------------------------------
 
 def test_category_5_mod_is_primary_base_game():
@@ -136,6 +135,7 @@ def test_derive_is_primary_matches_primary_set():
 class ResolveParentGameTest(ToolDBTestCase):
     async def test_resolves_by_steam_appid(self):
         from conftest import add_platform, add_steam_appid
+
         from gamelib_mcp.data.db import resolve_parent_game
 
         parent_id = await seed_game("Parent Game")
@@ -243,7 +243,10 @@ class ApplyContentClassificationTest(ToolDBTestCase):
 
     async def test_manual_override_on_content_type_blocks_write(self):
         from gamelib_mcp.data.content import _nested
-        from gamelib_mcp.data.db import apply_content_classification, apply_manual_game_fields
+        from gamelib_mcp.data.db import (
+            apply_content_classification,
+            apply_manual_game_fields,
+        )
 
         game_id = await seed_game("Pinned Game")
         # update_game pins content_type together with its derived

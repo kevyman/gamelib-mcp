@@ -10,12 +10,26 @@ from ..data.title_normalization import normalize_search_text
 from ..utils import _parse_json
 from .common import (
     OWNED_SQL as _OWNED_SQL,
-    SERIES_NAMES_SQL as _SERIES_NAMES_SQL,
-    STEAM_APPID_SQL as _STEAM_APPID_SQL,
+)
+from .common import (
     PLAY_STATE_SQL as _PLAY_STATE_SQL,
+)
+from .common import (
     PLAYTIME_SUM_SQL as _PLAYTIME_SUM_SQL,
+)
+from .common import (
+    SERIES_NAMES_SQL as _SERIES_NAMES_SQL,
+)
+from .common import (
+    STEAM_APPID_SQL as _STEAM_APPID_SQL,
+)
+from .common import (
     WISHLISTED_SQL as _WISHLISTED_SQL,
+)
+from .common import (
     clamp_limit as _clamp_limit,
+)
+from .common import (
     resolve_platform as _resolve_platform,
 )
 from .search import build_name_match, fuzzy_fallback_game_ids

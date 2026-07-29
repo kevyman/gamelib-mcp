@@ -3,7 +3,6 @@
 import re
 import unicodedata
 
-
 _NON_GAME_PATTERNS = (
     re.compile(r"\b(soundtrack|wallpaper|art book|artbook)\b$", re.IGNORECASE),
     re.compile(
@@ -54,10 +53,7 @@ def is_non_game_title(name: str) -> bool:
         return True
 
     words = re.findall(r"[a-z0-9]+", folded.casefold())
-    if words and words[-1] == "demo" and len(words) <= 3:
-        return True
-
-    return False
+    return bool(words and words[-1] == "demo" and len(words) <= 3)
 
 
 def normalize_search_text(value: str) -> str:

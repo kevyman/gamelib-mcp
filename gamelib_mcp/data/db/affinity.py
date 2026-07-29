@@ -10,11 +10,11 @@ not shift how primary games rank in recommendations.
 
 import json
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from . import get_db
 from ..tag_synonyms import canonical_tag
 from ..tags import is_feature_flag
+from . import get_db
 
 # Explicit ratings dominate; a playtime-derived pseudo-rating is a weak
 # implicit signal (the user never said they liked it, they just played it).
@@ -145,7 +145,7 @@ async def recompute_tag_affinity() -> int:
             tag_data[tag_key]["weight_sum"] += weight
             tag_data[tag_key]["game_ids"].add(game_id)
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     async with get_db() as db:
         await db.execute("DELETE FROM tag_affinity")

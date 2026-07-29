@@ -16,7 +16,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from weakref import WeakKeyDictionary
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,10 @@ logger = logging.getLogger(__name__)
 # registry so the sync result keys (e.g. "switch2", never "nintendo") and
 # get_sync_status stay in lockstep with run_library_sync's platform set.
 # (INSPECTOR_PLATFORM_ALIASES is re-exported for http_admin.)
-from .platforms_registry import INSPECTOR_PLATFORM_ALIASES, SYNC_METADATA_PLATFORMS  # noqa: E402, F401
+from .platforms_registry import (  # noqa: E402, F401
+    INSPECTOR_PLATFORM_ALIASES,
+    SYNC_METADATA_PLATFORMS,
+)
 
 # Lazily bound to tools.admin.run_library_sync (the worker) on first startup
 # refresh. Kept as a module-level name so tests can patch it directly.
@@ -184,6 +187,7 @@ def _clear_startup_ratings_sync_task(task: asyncio.Task) -> None:
 
 async def _run_startup_ratings_sync() -> None:
     import time
+
     from .data.db import get_meta
     from .tools.ratings import sync_ratings
 
@@ -325,7 +329,7 @@ async def reconcile_stale_sync_status() -> None:
 
     updates: dict[str, str | None] = {
         "library_sync_status": "idle",
-        "library_sync_finished_at": datetime.now(timezone.utc).isoformat(),
+        "library_sync_finished_at": datetime.now(UTC).isoformat(),
         "library_sync_error": "Previous sync interrupted before completion",
     }
     for key, value in (await get_meta_prefix("sync_platform_state_")).items():
@@ -343,7 +347,7 @@ async def _run_startup_refresh(platforms: list[str] | None = None) -> dict:
         from .tools.admin import run_library_sync
         _admin_refresh_library = run_library_sync
 
-    started_at = datetime.now(timezone.utc).isoformat()
+    started_at = datetime.now(UTC).isoformat()
     await set_meta_many(
         {
             "library_sync_status": "in_progress",
@@ -369,7 +373,7 @@ async def _run_startup_refresh(platforms: list[str] | None = None) -> dict:
         logger.exception("Startup library refresh failed")
         final_error = str(exc)
     finally:
-        finished_at = datetime.now(timezone.utc).isoformat()
+        finished_at = datetime.now(UTC).isoformat()
         finished_meta = {
             "library_sync_status": "idle",
             "library_sync_finished_at": finished_at,
@@ -453,8 +457,8 @@ async def lifespan(app):
         clear_all_enrichment_claims,
         close_db_pool,
         enable_db_pooling,
-        init_db,
         get_meta,
+        init_db,
         set_meta,
     )
     from .data.db.readonly import close_readonly_connection
@@ -480,7 +484,7 @@ async def lifespan(app):
         if last_sync:
             try:
                 dt = datetime.fromisoformat(last_sync)
-                age_hours = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
+                age_hours = (datetime.now(UTC) - dt).total_seconds() / 3600
                 needs_refresh = age_hours > STALE_HOURS
             except ValueError:
                 pass
@@ -504,7 +508,7 @@ async def lifespan(app):
         if last_ratings_sync:
             try:
                 dt = datetime.fromisoformat(last_ratings_sync)
-                age_seconds = (datetime.now(timezone.utc) - dt).total_seconds()
+                age_seconds = (datetime.now(UTC) - dt).total_seconds()
                 ratings_stale = age_seconds > RATINGS_SYNC_INTERVAL_SECONDS
             except ValueError:
                 pass

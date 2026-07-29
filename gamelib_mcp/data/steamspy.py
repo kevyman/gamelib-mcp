@@ -1,7 +1,7 @@
 """Lazy SteamSpy user-curated tag fetch."""
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 
@@ -29,7 +29,7 @@ async def enrich_steamspy(appid: int) -> list[str] | None:
     if row and _is_fresh(row["steamspy_cached_at"], CACHE_DAYS):
         return json.loads(row["tags"]) if row["tags"] else None
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     existing = json.loads(row["tags"]) if row and row["tags"] else []
 
     spy_tags = await _fetch_steamspy(appid)
@@ -114,6 +114,6 @@ def _is_fresh(cached_at: str | None, days: int) -> bool:
         return False
     try:
         dt = datetime.fromisoformat(cached_at)
-        return (datetime.now(timezone.utc) - dt).total_seconds() < days * 86400
+        return (datetime.now(UTC) - dt).total_seconds() < days * 86400
     except ValueError:
         return False

@@ -2,7 +2,12 @@ import os
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-from gamelib_mcp.data.itad import PriceInfo, _best_deal, fetch_steam_prices, is_itad_configured
+from gamelib_mcp.data.itad import (
+    PriceInfo,
+    _best_deal,
+    fetch_steam_prices,
+    is_itad_configured,
+)
 
 _SAMPLE_DEALS = [
     {

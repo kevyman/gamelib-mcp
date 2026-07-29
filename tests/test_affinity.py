@@ -2,7 +2,14 @@
 
 import unittest
 
-from conftest import ToolDBTestCase, add_rating, add_platform, make_steam_game, seed_game
+from conftest import (
+    ToolDBTestCase,
+    add_platform,
+    add_rating,
+    make_steam_game,
+    seed_game,
+)
+
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.db.affinity import (
     MIN_PLAYTIME_SIGNAL_MINUTES,

@@ -37,7 +37,7 @@ import logging
 import re
 import string
 from dataclasses import dataclass, field, fields
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -494,7 +494,7 @@ async def insert_scrape_config_version(
     """Append a new config version; if it activates, supersede the previous active."""
     from .db import get_db
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     async with get_db() as db:
         if status == "active":
             await db.execute(

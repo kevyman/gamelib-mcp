@@ -2,8 +2,16 @@
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
+from ..content import (
+    CONTENT_BASE_GAME,
+    CONTENT_EDITION,
+    NESTED_CONTENT_TYPES,
+    ContentClassification,
+    derive_is_primary,
+)
+from ..title_normalization import normalize_search_text
 from . import (
     NINTENDO_TITLE_ID_TYPE,
     STEAM_APP_ID,
@@ -13,14 +21,6 @@ from . import (
     get_db,
     normalize_identifier_value,
 )
-from ..content import (
-    CONTENT_BASE_GAME,
-    CONTENT_EDITION,
-    NESTED_CONTENT_TYPES,
-    ContentClassification,
-    derive_is_primary,
-)
-from ..title_normalization import normalize_search_text
 
 logger = logging.getLogger(__name__)
 
@@ -521,7 +521,7 @@ async def upsert_game_platform(
     PSN write it here). Like the playtime columns it only advances when a non-NULL
     value is supplied, so an ownership-only sync never clears it.
     """
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     async with get_db() as db:
         await db.execute(
             """INSERT INTO game_platforms
@@ -627,7 +627,7 @@ async def upsert_wishlist_entry(
     where the entry came from (e.g. "steam", "dekudeals", "manual").
     store_identifier captures the store's own ID (e.g. Steam appid) at sync time.
     """
-    now = wishlisted_at or datetime.now(timezone.utc).isoformat()
+    now = wishlisted_at or datetime.now(UTC).isoformat()
     async with get_db() as db:
         await db.execute(
             """INSERT INTO game_wishlist (game_id, platform, wishlisted_at, source, store_identifier)
@@ -660,9 +660,13 @@ async def clear_fulfilled_wishlist_entries(
     single game_id/platform for an immediate, targeted check. Returns the
     number of rows deleted.
     """
-    where = ["EXISTS (SELECT 1 FROM game_platforms gp "
-             "WHERE gp.game_id = game_wishlist.game_id "
-             "AND gp.platform = game_wishlist.platform AND gp.owned = 1)"]
+    where = [
+        (
+            "EXISTS (SELECT 1 FROM game_platforms gp "
+            "WHERE gp.game_id = game_wishlist.game_id "
+            "AND gp.platform = game_wishlist.platform AND gp.owned = 1)"
+        )
+    ]
     params: list = []
     if game_id is not None:
         where.append("game_wishlist.game_id = ?")
@@ -843,7 +847,7 @@ async def upsert_game_platform_identifier(
     # uppercase) so every reader can compare with plain equality instead of
     # re-normalizing at read time. See normalize_identifier_value's docstring.
     identifier_value = normalize_identifier_value(identifier_type, str(identifier_value))
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     async with get_db() as db:
         await db.execute(
             """INSERT INTO game_platform_identifiers
@@ -1279,7 +1283,7 @@ async def upsert_nintendo_play_summary(rows: list[dict]) -> int:
     """
     if not rows:
         return 0
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     async with get_db() as db:
         await db.executemany(
             """INSERT INTO nintendo_play_summary
@@ -1332,7 +1336,7 @@ async def upsert_game_prices(rows: list[dict]) -> int:
     """
     if not rows:
         return 0
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     async with get_db() as db:
         await db.executemany(
             """INSERT INTO game_prices

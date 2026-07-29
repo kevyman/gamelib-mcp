@@ -1,8 +1,8 @@
+import asyncio
 import sys
 import types
-import asyncio
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -127,7 +127,7 @@ class FetchPsnLibraryFilterTests(unittest.TestCase):
         entries = [
             _make_entry(
                 "Elden Ring",
-                last_played=datetime(2026, 6, 20, 14, 30, tzinfo=timezone.utc),
+                last_played=datetime(2026, 6, 20, 14, 30, tzinfo=UTC),
             )
         ]
         result = self._run_fetch(entries)

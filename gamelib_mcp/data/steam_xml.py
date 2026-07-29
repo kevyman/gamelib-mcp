@@ -2,7 +2,7 @@
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 
@@ -57,7 +57,7 @@ async def fetch_library() -> dict:
             "game library visibility is set to Public in Steam privacy settings"
         )
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     normalized_rows = []
     skipped_rows = 0
     for game in games:

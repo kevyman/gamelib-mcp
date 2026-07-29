@@ -96,19 +96,21 @@ class SkillResourcesRegisteredTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_edited_file_is_served_fresh_without_reregistration(self) -> None:
         # Content is read lazily at request time, not captured at registration.
-        with tempfile_skill_layout() as skills_dir:
-            with patch.object(skill_resources, "SKILLS_DIR", skills_dir):
-                mcp = FastMCP("test")
-                skill_resources.register_skill_resources(mcp)
+        with (
+            tempfile_skill_layout() as skills_dir,
+            patch.object(skill_resources, "SKILLS_DIR", skills_dir),
+        ):
+            mcp = FastMCP("test")
+            skill_resources.register_skill_resources(mcp)
 
-                skill_md = skills_dir / "demo-skill" / "SKILL.md"
-                skill_md.write_text(
-                    skill_md.read_text(encoding="utf-8") + "\nEdited after registration.\n",
-                    encoding="utf-8",
-                )
+            skill_md = skills_dir / "demo-skill" / "SKILL.md"
+            skill_md.write_text(
+                skill_md.read_text(encoding="utf-8") + "\nEdited after registration.\n",
+                encoding="utf-8",
+            )
 
-                async with Client(mcp) as client:
-                    content = await client.read_resource("skill://demo-skill/SKILL.md")
+            async with Client(mcp) as client:
+                content = await client.read_resource("skill://demo-skill/SKILL.md")
 
         self.assertIn("Edited after registration.", content[0].text)
 
@@ -151,16 +153,18 @@ class SkillResourcesMissingDirTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resources, [])
 
     async def test_skills_dir_with_no_valid_skill_folders_registers_nothing(self) -> None:
-        with tempfile_empty_dir() as empty_dir:
-            with patch.object(skill_resources, "SKILLS_DIR", empty_dir):
-                mcp = FastMCP("test")
-                with self.assertLogs(skill_resources.logger, level="WARNING") as log_ctx:
-                    skill_resources.register_skill_resources(mcp)
+        with (
+            tempfile_empty_dir() as empty_dir,
+            patch.object(skill_resources, "SKILLS_DIR", empty_dir),
+        ):
+            mcp = FastMCP("test")
+            with self.assertLogs(skill_resources.logger, level="WARNING") as log_ctx:
+                skill_resources.register_skill_resources(mcp)
 
-                self.assertTrue(any("No skill files found" in msg for msg in log_ctx.output))
+            self.assertTrue(any("No skill files found" in msg for msg in log_ctx.output))
 
-                async with Client(mcp) as client:
-                    resources = await client.list_resources()
+            async with Client(mcp) as client:
+                resources = await client.list_resources()
 
         self.assertEqual(resources, [])
 

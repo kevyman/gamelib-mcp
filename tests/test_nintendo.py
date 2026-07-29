@@ -1,9 +1,9 @@
-import sys
-import types
 import asyncio
 import json
 import os
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -137,7 +137,7 @@ class SyncNintendoTests(unittest.TestCase):
             platform_release_dates={508: "2026-01-15", 130: "2022-03-25"},
         )
 
-        _, _, mock_upsert_platform, _, mock_enrichment = self._run_sync(
+        _, _, _mock_upsert_platform, _, mock_enrichment = self._run_sync(
             entries, resolve_result=(42, igdb_game)
         )
 
@@ -162,7 +162,7 @@ class SyncNintendoTests(unittest.TestCase):
             platform_release_dates={130: "2022-03-25"},
         )
 
-        _, _, mock_upsert_platform, _, mock_enrichment = self._run_sync(
+        _, _, _mock_upsert_platform, _, mock_enrichment = self._run_sync(
             entries, resolve_result=(42, igdb_game)
         )
 

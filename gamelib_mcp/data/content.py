@@ -5,7 +5,6 @@ from dataclasses import dataclass
 
 from .title_normalization import normalize_search_text
 
-
 # "A + B" compilation titles (e.g. Nintendo's "Super Mario 3D World + Bowser's
 # Fury") ship as a single owned SKU with their own store identifier and
 # playtime — they are primary library items, not IGDB bundles. IGDB tags such

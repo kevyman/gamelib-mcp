@@ -7,10 +7,10 @@ not their origin modules (data.itad / data.dekudeals).
 
 import json
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
-from conftest import ToolDBTestCase, add_platform, seed_game, make_steam_game
+from conftest import ToolDBTestCase, add_platform, make_steam_game, seed_game
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.itad import PriceInfo
@@ -720,7 +720,7 @@ class PreferenceAwareDealsTests(ToolDBTestCase):
     async def test_stale_miss_marker_is_retried(self):
         gid = (await self._seed_search_candidates(1))[0]
         stale = (
-            datetime.now(timezone.utc)
+            datetime.now(UTC)
             - timedelta(hours=deals._SWITCH2_MISS_RETRY_HOURS + 1)
         ).isoformat()
         await _seed_price(gid, "switch2", "dekudeals", None, fetched_at=stale)

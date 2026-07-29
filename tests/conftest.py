@@ -18,7 +18,7 @@ import shutil
 import threading
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import NamedTuple
@@ -376,7 +376,7 @@ async def add_rating(
     normalized_score: float,
     review_text: str | None = None,
 ) -> None:
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     async with db_module.get_db() as db:
         await db.execute(
             """INSERT INTO ratings
@@ -393,7 +393,7 @@ async def set_tag_affinity(
     avg_score: float,
     game_count: int,
 ) -> None:
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     async with db_module.get_db() as db:
         await db.execute(
             """INSERT INTO tag_affinity (tag, affinity_score, avg_score, game_count, updated_at)

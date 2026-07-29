@@ -28,8 +28,8 @@ import sys
 from pathlib import Path
 
 import httpx
-from rapidfuzz import fuzz
 from PIL import Image, ImageDraw, ImageFont
+from rapidfuzz import fuzz
 
 from gamelib_mcp.data.tag_synonyms import canonical_tag
 from gamelib_mcp.data.tags import split_features
@@ -184,8 +184,7 @@ def spherical_kmeans(
         centers.append(dict(vecs[far]))
         for idx, v in enumerate(vecs):
             s = _dot(v, centers[-1])
-            if s > best[idx]:
-                best[idx] = s
+            best[idx] = max(best[idx], s)
     assign = [-1] * n
     for _ in range(iters):
         changed = False

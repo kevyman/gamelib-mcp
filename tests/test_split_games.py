@@ -3,8 +3,6 @@
 import os
 from unittest.mock import AsyncMock, patch
 
-from fastmcp.exceptions import ToolError
-
 from conftest import (
     ToolDBTestCase,
     add_identifier,
@@ -12,6 +10,8 @@ from conftest import (
     make_steam_game,
     seed_game,
 )
+from fastmcp.exceptions import ToolError
+
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import admin
 
