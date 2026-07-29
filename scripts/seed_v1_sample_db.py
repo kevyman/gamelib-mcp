@@ -1,8 +1,10 @@
-from datetime import datetime, timezone
 import os
 import sqlite3
+from datetime import UTC, datetime
+
 import httpx
 from dotenv import load_dotenv
+
 from gamelib_mcp.data.db import _V1_SCHEMA_DDL
 
 load_dotenv()
@@ -33,7 +35,7 @@ conn.executescript(
 conn.executescript(_V1_SCHEMA_DDL)
 conn.execute("PRAGMA user_version = 1")
 
-now = datetime.now(timezone.utc).isoformat()
+now = datetime.now(UTC).isoformat()
 
 for game in games:
     cur = conn.execute(

@@ -1,7 +1,7 @@
 """Enrichment row-claiming and batch loaders for background workers."""
 
-from datetime import datetime, timedelta, timezone
-from typing import Callable, Iterable
+from collections.abc import Callable, Iterable
+from datetime import UTC, datetime, timedelta
 
 import aiosqlite
 
@@ -12,7 +12,7 @@ from . import (
 
 
 def _claim_cutoff_iso(minutes: int = 15) -> str:
-    return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    return (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
 
 
 # How long an HLTB "NOT_FOUND:<iso>" marker suppresses re-fetching. NOT_FOUND
@@ -25,7 +25,7 @@ HLTB_NOT_FOUND_RETRY_DAYS = 30
 
 def _hltb_not_found_cutoff_iso() -> str:
     return (
-        datetime.now(timezone.utc) - timedelta(days=HLTB_NOT_FOUND_RETRY_DAYS)
+        datetime.now(UTC) - timedelta(days=HLTB_NOT_FOUND_RETRY_DAYS)
     ).isoformat()
 
 
@@ -153,7 +153,7 @@ async def _claim_ids(
         if not ids:
             return []
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         claimed: list[int] = []
         for row_id in ids:
             cursor = await db.execute(update_sql, update_params_for_id(now, row_id))

@@ -1,6 +1,6 @@
 """play_history writes: cumulative snapshots deduped against the latest row."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from . import get_db
 
@@ -15,7 +15,7 @@ async def record_play_history_snapshots(
     run after every sync: unchanged games match the NOT-different guard and
     produce no writes.
     """
-    day = snapshot_date or datetime.now(timezone.utc).date().isoformat()
+    day = snapshot_date or datetime.now(UTC).date().isoformat()
     async with get_db() as db:
         cursor = await db.execute(
             """

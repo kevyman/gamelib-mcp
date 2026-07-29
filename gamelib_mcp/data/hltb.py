@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from howlongtobeatpy import HowLongToBeat
 
@@ -58,12 +58,12 @@ def _search_name_variants(name: str) -> list[str]:
     _add(normalize_catalog_title(name))
 
     # HLTB's search matcher chokes on ALL-CAPS queries; retry in title case.
-    for base in list(variants):
+    for base in variants:
         if base.isupper():
             _add(base.title())
 
     # Edition-suffix fallbacks, applied to every variant gathered so far.
-    for base in list(variants):
+    for base in variants:
         stripped = base
         previous = None
         while stripped != previous:
@@ -115,7 +115,7 @@ async def _fetch_and_cache(game_id: int, name: str) -> dict | None:
                 if results:
                     break
 
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(UTC).isoformat()
 
             if not results:
                 # Authoritative not-found across every variant — mark it with a
@@ -225,7 +225,7 @@ def _is_fresh(cached_at: str | None, days: int) -> bool:
         return False
     try:
         dt = datetime.fromisoformat(cached_at)
-        age = datetime.now(timezone.utc) - dt
+        age = datetime.now(UTC) - dt
         return age.total_seconds() < days * 86400
     except ValueError:
         return False

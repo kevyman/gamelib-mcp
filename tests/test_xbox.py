@@ -1,7 +1,7 @@
-import sys
-import types
 import asyncio
 import os
+import sys
+import types
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -55,9 +55,8 @@ except ModuleNotFoundError:
     httpx.AsyncClient = AsyncClient
     sys.modules["httpx"] = httpx
 
-from gamelib_mcp.data import xbox, igdb
+from gamelib_mcp.data import igdb, xbox
 from gamelib_mcp.data.xbox import _extract_title
-
 
 _SAMPLE_TITLE_HISTORY = {
     "titles": [
@@ -160,9 +159,11 @@ class FetchXboxTitlesTests(unittest.TestCase):
             async def get(self, *_args, **_kwargs):
                 return mock_response
 
-        with patch("gamelib_mcp.data.xbox.httpx.AsyncClient", return_value=_FakeClient()):
-            with self.assertRaises(RuntimeError):
-                asyncio.run(xbox.fetch_xbox_titles())
+        with (
+            patch("gamelib_mcp.data.xbox.httpx.AsyncClient", return_value=_FakeClient()),
+            self.assertRaises(RuntimeError),
+        ):
+            asyncio.run(xbox.fetch_xbox_titles())
 
 
 class FetchXboxPlaytimeTests(unittest.TestCase):
@@ -379,7 +380,7 @@ class SyncXboxTests(unittest.TestCase):
     def test_sync_xbox_skips_titleless_entries(self):
         titles = [{"titleId": "1", "name": None}, {"name": ""}]
 
-        result, mock_resolve, mock_upsert_platform, mock_enrichment, _ = self._run_sync(titles)
+        result, mock_resolve, mock_upsert_platform, _mock_enrichment, _ = self._run_sync(titles)
 
         self.assertEqual(result, {"added": 0, "matched": 0, "skipped": 2})
         mock_resolve.assert_not_awaited()
@@ -388,7 +389,7 @@ class SyncXboxTests(unittest.TestCase):
     def test_sync_xbox_playtime_failure_still_syncs_ownership(self):
         titles = [{"titleId": "1030027286", "name": "Halo Infinite"}]
 
-        result, mock_resolve, mock_upsert_platform, mock_enrichment, _ = self._run_sync(
+        result, _mock_resolve, mock_upsert_platform, _mock_enrichment, _ = self._run_sync(
             titles,
             playtime_by_title={},  # fetch_xbox_playtime is best-effort and never raises
             resolve_result=(42, None),
@@ -450,7 +451,7 @@ class SyncXboxTests(unittest.TestCase):
             platform_release_dates={igdb.PLATFORM_TO_IGDB["xbox"]: "2020-09-17"},
         )
 
-        result, mock_resolve, mock_upsert_platform, mock_enrichment, _ = self._run_sync(
+        result, _mock_resolve, _mock_upsert_platform, mock_enrichment, _ = self._run_sync(
             titles,
             playtime_by_title={"99": 60},
             resolve_result=(7, mock_game),

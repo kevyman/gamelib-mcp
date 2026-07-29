@@ -77,8 +77,9 @@ import re
 
 import httpx
 
-from . import PurchaseRecord, normalize_purchase_date
 from gamelib_mcp.data.db import default_data_dir
+
+from . import PurchaseRecord, normalize_purchase_date
 
 logger = logging.getLogger(__name__)
 

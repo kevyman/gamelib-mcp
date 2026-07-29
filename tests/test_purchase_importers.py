@@ -12,25 +12,25 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
 import httpx
+from conftest import ToolDBTestCase, add_identifier, add_platform, seed_game
 from fastmcp.exceptions import ToolError
 
-from conftest import ToolDBTestCase, add_identifier, add_platform, seed_game
-
 from gamelib_mcp.data import db as db_module
+from gamelib_mcp.data import steam_licenses, steam_session
 from gamelib_mcp.data.purchases import (
     IDENTIFIER_TYPES,
     PURCHASE_IMPORTERS,
     PurchaseRecord,
+    epic_orders,
+    gog_orders,
+    nintendo_ec,
+    steam_history,
 )
-from gamelib_mcp.data.purchases import epic_orders
-from gamelib_mcp.data.purchases import gog_orders
 from gamelib_mcp.data.purchases import humble as humble_module
-from gamelib_mcp.data.purchases import nintendo_ec
-from gamelib_mcp.data.purchases import steam_history
-from gamelib_mcp.data import steam_licenses, steam_session
 from gamelib_mcp.data.scrape_validate import FIXTURES_DIR
 from gamelib_mcp.tools import acquisition, admin
 
@@ -525,9 +525,11 @@ class NintendoEcFetchTests(unittest.IsolatedAsyncioTestCase):
             await self._fetch_via_accounts(self._accounts_sso_handler(expired=True))
 
     async def test_no_session_configured_raises_accounts_hint(self):
-        with patch.dict(os.environ, {"NINTENDO_COOKIES_FILE": "/nonexistent/acc.json"}):
-            with self.assertRaisesRegex(RuntimeError, r"create_session_ingest_link\b"):
-                await nintendo_ec.fetch_eshop_purchases()
+        with (
+            patch.dict(os.environ, {"NINTENDO_COOKIES_FILE": "/nonexistent/acc.json"}),
+            self.assertRaisesRegex(RuntimeError, r"create_session_ingest_link\b"),
+        ):
+            await nintendo_ec.fetch_eshop_purchases()
 
 
 class HumbleParserTests(unittest.TestCase):
@@ -930,9 +932,11 @@ class HumbleFetchTests(unittest.IsolatedAsyncioTestCase):
         return path
 
     async def test_missing_cookie_file_raises_clear_error(self):
-        with patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": "/nonexistent/humble.json"}):
-            with self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"):
-                await humble_module.fetch_humble_purchases()
+        with (
+            patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": "/nonexistent/humble.json"}),
+            self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"),
+        ):
+            await humble_module.fetch_humble_purchases()
 
     async def test_auth_failure_raises(self):
         def handler(request: httpx.Request) -> httpx.Response:
@@ -940,11 +944,13 @@ class HumbleFetchTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_cookies(tmp)
-            with patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"):
-                    await humble_module.fetch_humble_purchases(
-                        transport=httpx.MockTransport(handler)
-                    )
+            with (
+                patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": path}),
+                self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"),
+            ):
+                await humble_module.fetch_humble_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
 
     async def test_orders_fetched_per_gamekey(self):
         order_detail = {
@@ -1080,10 +1086,12 @@ class GogFetchTests(unittest.IsolatedAsyncioTestCase):
         }
 
     async def test_missing_session_files_raise_lgogdownloader_advice(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with patch.dict(os.environ, {"LGOGDOWNLOADER_CONFIG_PATH": tmp}):
-                with self.assertRaisesRegex(RuntimeError, "lgogdownloader --login"):
-                    await gog_orders.fetch_gog_purchases()
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"LGOGDOWNLOADER_CONFIG_PATH": tmp}),
+            self.assertRaisesRegex(RuntimeError, "lgogdownloader --login"),
+        ):
+            await gog_orders.fetch_gog_purchases()
 
     async def test_bearer_token_happy_path_paginates(self):
         seen: list[tuple[int, str | None]] = []
@@ -1116,11 +1124,13 @@ class GogFetchTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             self._write_config(tmp, tokens={"access_token": "stale"})
-            with patch.dict(os.environ, {"LGOGDOWNLOADER_CONFIG_PATH": tmp}):
-                with self.assertRaisesRegex(RuntimeError, "lgogdownloader --login"):
-                    await gog_orders.fetch_gog_purchases(
-                        transport=httpx.MockTransport(handler)
-                    )
+            with (
+                patch.dict(os.environ, {"LGOGDOWNLOADER_CONFIG_PATH": tmp}),
+                self.assertRaisesRegex(RuntimeError, "lgogdownloader --login"),
+            ):
+                await gog_orders.fetch_gog_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
 
     async def test_401_with_token_retries_once_with_cookie_jar(self):
         cookies_txt = (
@@ -1447,9 +1457,11 @@ class EpicFetchTests(unittest.IsolatedAsyncioTestCase):
         }
 
     async def test_missing_cookie_file_raises_clear_error(self):
-        with patch.dict(os.environ, {"EPIC_COOKIES_FILE": "/nonexistent/epic.json"}):
-            with self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"):
-                await epic_orders.fetch_epic_purchases()
+        with (
+            patch.dict(os.environ, {"EPIC_COOKIES_FILE": "/nonexistent/epic.json"}),
+            self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"),
+        ):
+            await epic_orders.fetch_epic_purchases()
 
     async def test_auth_failure_raises(self):
         def handler(request: httpx.Request) -> httpx.Response:
@@ -1457,11 +1469,13 @@ class EpicFetchTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_cookies(tmp)
-            with patch.dict(os.environ, {"EPIC_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"):
-                    await epic_orders.fetch_epic_purchases(
-                        transport=httpx.MockTransport(handler)
-                    )
+            with (
+                patch.dict(os.environ, {"EPIC_COOKIES_FILE": path}),
+                self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"),
+            ):
+                await epic_orders.fetch_epic_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
 
     async def test_real_path_impersonates_and_warms_up(self):
         # Without a test transport the fetch must go through curl_cffi
@@ -1470,7 +1484,7 @@ class EpicFetchTests(unittest.IsolatedAsyncioTestCase):
         class FakeResponse:
             status_code = 200
             text = ""
-            headers = {"content-type": "application/json"}
+            headers: ClassVar[dict[str, str]] = {"content-type": "application/json"}
 
             def __init__(self, payload):
                 self._payload = payload
@@ -1505,9 +1519,11 @@ class EpicFetchTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_cookies(tmp)
-            with patch.dict(os.environ, {"EPIC_COOKIES_FILE": path}):
-                with patch.object(epic_orders, "AsyncSession", FakeSession):
-                    records, skipped = await epic_orders.fetch_epic_purchases()
+            with (
+                patch.dict(os.environ, {"EPIC_COOKIES_FILE": path}),
+                patch.object(epic_orders, "AsyncSession", FakeSession),
+            ):
+                records, skipped = await epic_orders.fetch_epic_purchases()
 
         self.assertEqual(session_kwargs.get("impersonate"), epic_orders._IMPERSONATE_PROFILE)
         self.assertEqual(calls[0][0], "https://www.epicgames.com/account/transactions")
@@ -1530,11 +1546,13 @@ class EpicFetchTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_cookies(tmp)
-            with patch.dict(os.environ, {"EPIC_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(RuntimeError, "Cloudflare bot protection"):
-                    await epic_orders.fetch_epic_purchases(
-                        transport=httpx.MockTransport(handler)
-                    )
+            with (
+                patch.dict(os.environ, {"EPIC_COOKIES_FILE": path}),
+                self.assertRaisesRegex(RuntimeError, "Cloudflare bot protection"),
+            ):
+                await epic_orders.fetch_epic_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
 
     async def test_challenge_detected_without_cf_mitigated_header(self):
         # Not every challenge variant sets the header; the injected script is
@@ -1548,11 +1566,13 @@ class EpicFetchTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_cookies(tmp)
-            with patch.dict(os.environ, {"EPIC_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(RuntimeError, "Cloudflare bot protection"):
-                    await epic_orders.fetch_epic_purchases(
-                        transport=httpx.MockTransport(handler)
-                    )
+            with (
+                patch.dict(os.environ, {"EPIC_COOKIES_FILE": path}),
+                self.assertRaisesRegex(RuntimeError, "Cloudflare bot protection"),
+            ):
+                await epic_orders.fetch_epic_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
 
     async def test_login_page_html_raises_auth_error(self):
         def handler(request: httpx.Request) -> httpx.Response:
@@ -1563,11 +1583,13 @@ class EpicFetchTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_cookies(tmp)
-            with patch.dict(os.environ, {"EPIC_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"):
-                    await epic_orders.fetch_epic_purchases(
-                        transport=httpx.MockTransport(handler)
-                    )
+            with (
+                patch.dict(os.environ, {"EPIC_COOKIES_FILE": path}),
+                self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"),
+            ):
+                await epic_orders.fetch_epic_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
 
     async def test_happy_path_paginates_via_next_page_token(self):
         seen: list[tuple[str | None, str]] = []
@@ -1964,9 +1986,11 @@ class SteamFetchTests(unittest.IsolatedAsyncioTestCase):
         return path
 
     async def test_missing_cookie_file_raises_clear_error(self):
-        with patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": "/nonexistent/steam.json"}):
-            with self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"):
-                await steam_history.fetch_steam_purchases()
+        with (
+            patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": "/nonexistent/steam.json"}),
+            self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"),
+        ):
+            await steam_history.fetch_steam_purchases()
 
     async def test_full_fetch_with_ajax_follow_up_and_license_merge(self):
         from urllib.parse import parse_qs
@@ -2049,11 +2073,13 @@ class SteamFetchTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_cookies(tmp)
-            with patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"):
-                    await steam_history.fetch_steam_purchases(
-                        transport=httpx.MockTransport(handler)
-                    )
+            with (
+                patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}),
+                self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"),
+            ):
+                await steam_history.fetch_steam_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
 
 
 def _make_refresh_token(sub: str | None = None, exp: int | None = None) -> str:
@@ -2139,9 +2165,11 @@ class SteamSessionMintTests(unittest.IsolatedAsyncioTestCase):
         token = _make_refresh_token(sub="76561198000000000", exp=9999999999)
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_refresh_token(tmp, token)
-            with patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path, "STEAM_ID": "76561198000000000"}):
-                with self.assertRaisesRegex(RuntimeError, "refresh token has expired"):
-                    await steam_session.load_steam_web_cookies(transport=httpx.MockTransport(handler))
+            with (
+                patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path, "STEAM_ID": "76561198000000000"}),
+                self.assertRaisesRegex(RuntimeError, "refresh token has expired"),
+            ):
+                await steam_session.load_steam_web_cookies(transport=httpx.MockTransport(handler))
 
     async def test_transient_mint_failure_is_distinct(self):
         def handler(request: httpx.Request) -> httpx.Response:
@@ -2150,9 +2178,11 @@ class SteamSessionMintTests(unittest.IsolatedAsyncioTestCase):
         token = _make_refresh_token(sub="76561198000000000", exp=9999999999)
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_refresh_token(tmp, token)
-            with patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path, "STEAM_ID": "76561198000000000"}):
-                with self.assertRaisesRegex(RuntimeError, "transiently") as ctx:
-                    await steam_session.load_steam_web_cookies(transport=httpx.MockTransport(handler))
+            with (
+                patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path, "STEAM_ID": "76561198000000000"}),
+                self.assertRaisesRegex(RuntimeError, "transiently") as ctx,
+            ):
+                await steam_session.load_steam_web_cookies(transport=httpx.MockTransport(handler))
         # The transient message must NOT tell the user to re-paste the token.
         self.assertNotIn("expired", str(ctx.exception))
 
@@ -2173,9 +2203,11 @@ class SteamSessionMintTests(unittest.IsolatedAsyncioTestCase):
         token = _make_refresh_token(sub="76561198000000000", exp=9999999999)
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_refresh_token(tmp, token)
-            with patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path, "STEAM_ID": "76561198000000000"}):
-                with self.assertRaisesRegex(RuntimeError, "transiently") as ctx:
-                    await steam_session.load_steam_web_cookies(transport=httpx.MockTransport(handler))
+            with (
+                patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path, "STEAM_ID": "76561198000000000"}),
+                self.assertRaisesRegex(RuntimeError, "transiently") as ctx,
+            ):
+                await steam_session.load_steam_web_cookies(transport=httpx.MockTransport(handler))
         self.assertNotIn("expired", str(ctx.exception))
 
     async def test_transfer_missing_store_cookie_is_transient(self):
@@ -2201,9 +2233,11 @@ class SteamSessionMintTests(unittest.IsolatedAsyncioTestCase):
         token = _make_refresh_token(sub="76561198000000000", exp=9999999999)
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_refresh_token(tmp, token)
-            with patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path, "STEAM_ID": "76561198000000000"}):
-                with self.assertRaisesRegex(RuntimeError, "transiently") as ctx:
-                    await steam_session.load_steam_web_cookies(transport=httpx.MockTransport(handler))
+            with (
+                patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path, "STEAM_ID": "76561198000000000"}),
+                self.assertRaisesRegex(RuntimeError, "transiently") as ctx,
+            ):
+                await steam_session.load_steam_web_cookies(transport=httpx.MockTransport(handler))
         # The community cookie must not be substituted for the store one.
         self.assertNotIn("expired", str(ctx.exception))
 
@@ -2243,15 +2277,13 @@ class SteamSessionMintTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(called, [])
 
     async def test_no_session_configured_raises_both_hints(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with patch.dict(os.environ, {
-                "STEAM_REFRESH_TOKEN_FILE": os.path.join(tmp, "absent-refresh.json"),
-                "STEAM_STORE_COOKIES_FILE": os.path.join(tmp, "absent-store.json"),
-            }):
-                with self.assertRaisesRegex(RuntimeError, "steam_refresh") as ctx:
-                    await steam_session.load_steam_web_cookies(
-                        transport=httpx.MockTransport(lambda r: httpx.Response(200))
-                    )
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "STEAM_REFRESH_TOKEN_FILE": os.path.join(tmp, "absent-refresh.json"),
+            "STEAM_STORE_COOKIES_FILE": os.path.join(tmp, "absent-store.json"),
+        }), self.assertRaisesRegex(RuntimeError, "steam_refresh") as ctx:
+            await steam_session.load_steam_web_cookies(
+                transport=httpx.MockTransport(lambda r: httpx.Response(200))
+            )
         self.assertIn("create_session_ingest_link", str(ctx.exception))
 
     async def test_fetch_steam_purchases_mints_from_refresh_token(self):
@@ -2834,22 +2866,26 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "steam.json")
             value = _make_login_secure(["web:community"])
-            with patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(ToolError, "wrong Steam domain"):
-                    await admin.set_steam_store_session(
-                        json.dumps({"steamLoginSecure": value})
-                    )
+            with (
+                patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}),
+                self.assertRaisesRegex(ToolError, "wrong Steam domain"),
+            ):
+                await admin.set_steam_store_session(
+                    json.dumps({"steamLoginSecure": value})
+                )
             # A known-bad cookie must never be written to disk.
             self.assertFalse(os.path.exists(path))
 
     async def test_set_steam_store_session_rejects_missing_login_secure(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "steam.json")
-            with patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}):
-                with self.assertRaisesRegex(ToolError, "steamLoginSecure"):
-                    await admin.set_steam_store_session(
-                        json.dumps({"sessionid": "s1", "browserid": "b"})
-                    )
+            with (
+                patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}),
+                self.assertRaisesRegex(ToolError, "steamLoginSecure"),
+            ):
+                await admin.set_steam_store_session(
+                    json.dumps({"sessionid": "s1", "browserid": "b"})
+                )
             self.assertFalse(os.path.exists(path))
 
     async def test_set_steam_refresh_session_accepts_bare_token_value(self):
@@ -2892,13 +2928,15 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
         # steamRefresh_steam) silently "saved" and then fell back to a dead cookie.
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "steam_refresh_token.json")
-            with patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path}):
-                with self.assertRaisesRegex(ToolError, "steamRefresh_steam"):
-                    await admin.set_steam_refresh_session(
-                        json.dumps(
-                            {"steamLoginSecure": _make_login_secure(["web:store"])}
-                        )
+            with (
+                patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path}),
+                self.assertRaisesRegex(ToolError, "steamRefresh_steam"),
+            ):
+                await admin.set_steam_refresh_session(
+                    json.dumps(
+                        {"steamLoginSecure": _make_login_secure(["web:store"])}
                     )
+                )
             self.assertFalse(os.path.exists(path))
 
     async def test_set_nintendo_session_still_works_after_refactor(self):

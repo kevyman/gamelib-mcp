@@ -7,11 +7,11 @@ successful file-write path (writes to a temp NINTENDO_COOKIES_FILE).
 import asyncio
 import json
 import os
-
-from fastmcp.exceptions import ToolError
+from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
 from conftest import (
+    DEADLOCK_TIMEOUT,
     ToolDBTestCase,
     add_game_alias,
     add_identifier,
@@ -20,10 +20,12 @@ from conftest import (
     make_steam_game,
     seed_game,
 )
+from fastmcp.exceptions import ToolError
+
+from gamelib_mcp import lifecycle
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.db import get_meta, set_meta_many
 from gamelib_mcp.tools import admin
-from gamelib_mcp import lifecycle
 
 
 async def _insert_play_history(game_id: int, platform: str, day: str, minutes: int) -> None:
@@ -411,6 +413,22 @@ class RefreshLibraryAckTests(ToolDBTestCase):
         lifecycle._LIBRARY_REFRESH_TASK = None
         await super().asyncTearDown()
 
+    async def _drain_refresh_task(self) -> None:
+        """Let the fire-and-forget refresh finish before this test's loop closes.
+
+        Releasing the worker and returning leaves the task's post-worker DB
+        writes racing teardown, which then cancels it mid-flight. Cancelling
+        abandons the in-flight aiosqlite operation, and its (non-daemon) worker
+        thread later resolves the future against a loop that IsolatedAsyncio-
+        TestCase has already closed -- surfacing much later as a
+        PytestUnhandledThreadExceptionWarning attributed to whichever test
+        happened to be running. Draining the task here keeps the cancel path in
+        asyncTearDown as the backstop it was meant to be.
+        """
+        task = lifecycle._LIBRARY_REFRESH_TASK
+        if task is not None:
+            await asyncio.wait_for(task, DEADLOCK_TIMEOUT)
+
     async def test_returns_started_without_blocking(self):
         release = asyncio.Event()
 
@@ -425,6 +443,7 @@ class RefreshLibraryAckTests(ToolDBTestCase):
             self.assertEqual(ack["platforms"], ["steam"])
             self.assertEqual(await get_meta("library_sync_status"), "in_progress")
             release.set()
+            await self._drain_refresh_task()
 
     async def test_returns_already_running_when_in_flight(self):
         release = asyncio.Event()
@@ -440,6 +459,7 @@ class RefreshLibraryAckTests(ToolDBTestCase):
             self.assertEqual(second["status"], "already_running")
             self.assertTrue(second["already_running"])
             release.set()
+            await self._drain_refresh_task()
 
     async def test_rejects_unknown_platform(self):
         with self.assertRaises(ToolError):
@@ -1145,7 +1165,10 @@ class MergeGamesTests(ToolDBTestCase):
 class RevalidateIgdbMatchesTests(ToolDBTestCase):
     """revalidate_igdb_matches: audit stored igdb_ids against IGDB's names."""
 
-    _ENV = {"TWITCH_CLIENT_ID": "test-client", "TWITCH_CLIENT_SECRET": "test-secret"}
+    _ENV: ClassVar[dict[str, str]] = {
+        "TWITCH_CLIENT_ID": "test-client",
+        "TWITCH_CLIENT_SECRET": "test-secret",
+    }
 
     @staticmethod
     def _record(name: str, **overrides) -> dict:

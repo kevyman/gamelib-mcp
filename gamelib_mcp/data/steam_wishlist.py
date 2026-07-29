@@ -27,7 +27,7 @@ simply failed to re-confirm.
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 
@@ -61,7 +61,7 @@ def _parse_steam_added_at(value) -> str | None:
         return None
     if isinstance(value, (int, float)):
         try:
-            return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+            return datetime.fromtimestamp(value, tz=UTC).isoformat()
         except (ValueError, OSError, OverflowError):
             return None
     if isinstance(value, str):
@@ -105,7 +105,7 @@ async def fetch_wishlist() -> dict:
         items = resp.json().get("response", {}).get("items", [])
 
         added = matched = skipped = 0
-        fallback_now = datetime.now(timezone.utc).isoformat()
+        fallback_now = datetime.now(UTC).isoformat()
         resolved_game_ids: set[int] = set()
         all_resolved = True
 

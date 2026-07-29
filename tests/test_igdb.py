@@ -3,12 +3,12 @@ import json
 import os
 import sqlite3
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import httpx
-
 from conftest import virtual_clock
+
 from gamelib_mcp.data import igdb
 
 
@@ -82,9 +82,11 @@ class IGDBRequestGateTests(unittest.IsolatedAsyncioTestCase):
         async def cancel_sleep(_delay: float) -> None:
             raise asyncio.CancelledError()
 
-        with patch("gamelib_mcp.data.igdb.asyncio.sleep", new=cancel_sleep):
-            with self.assertRaises(asyncio.CancelledError):
-                await gate.acquire()
+        with (
+            patch("gamelib_mcp.data.igdb.asyncio.sleep", new=cancel_sleep),
+            self.assertRaises(asyncio.CancelledError),
+        ):
+            await gate.acquire()
 
         state = gate._get_loop_state()
         self.assertEqual(state.semaphore._value, 1)
@@ -446,9 +448,9 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.data.igdb.httpx.AsyncClient", return_value=client),
             patch("gamelib_mcp.data.igdb._sleep_before_retry", new=AsyncMock()),
             self.assertLogs("gamelib_mcp.data.igdb", level="WARNING") as logs,
+            self.assertRaises(igdb.IGDBRequestFailure),
         ):
-            with self.assertRaises(igdb.IGDBRequestFailure):
-                await igdb.search_game("Portal 2", suppress_errors=False)
+            await igdb.search_game("Portal 2", suppress_errors=False)
 
         self.assertTrue(any("IGDB search exhausted retries" in line for line in logs.output))
 
@@ -1305,9 +1307,11 @@ class FetchSeriesMembersTests(unittest.IsolatedAsyncioTestCase):
             await igdb.fetch_series_members("saga", 1)
 
     async def test_raises_igdb_request_failure_without_credentials(self) -> None:
-        with patch.dict("os.environ", {}, clear=True):
-            with self.assertRaises(igdb.IGDBRequestFailure):
-                await igdb.fetch_series_members("collection", 1)
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            self.assertRaises(igdb.IGDBRequestFailure),
+        ):
+            await igdb.fetch_series_members("collection", 1)
 
     async def test_wraps_post_failure_as_igdb_request_failure(self) -> None:
         with (
@@ -1316,10 +1320,9 @@ class FetchSeriesMembersTests(unittest.IsolatedAsyncioTestCase):
             patch(
                 "gamelib_mcp.data.igdb._post_igdb_games",
                 AsyncMock(side_effect=RuntimeError("boom")),
-            ),
+            ),self.assertRaises(igdb.IGDBRequestFailure)
         ):
-            with self.assertRaises(igdb.IGDBRequestFailure):
-                await igdb.fetch_series_members("collection", 1)
+            await igdb.fetch_series_members("collection", 1)
 
 
 class FetchVersionParentAliasesTests(unittest.IsolatedAsyncioTestCase):
@@ -1456,10 +1459,9 @@ class FetchVersionParentAliasesTests(unittest.IsolatedAsyncioTestCase):
             patch(
                 "gamelib_mcp.data.igdb._post_igdb_games",
                 AsyncMock(side_effect=RuntimeError("boom")),
-            ),
+            ),self.assertRaises(igdb.IGDBRequestFailure)
         ):
-            with self.assertRaises(igdb.IGDBRequestFailure):
-                await igdb.fetch_version_parent_aliases([80])
+            await igdb.fetch_version_parent_aliases([80])
 
 
 class IGDBCredentialHygieneTests(unittest.IsolatedAsyncioTestCase):
@@ -1475,27 +1477,24 @@ class IGDBCredentialHygieneTests(unittest.IsolatedAsyncioTestCase):
         return patch.dict("os.environ", env, clear=True)
 
     async def test_search_game_raises_without_credentials_when_unsuppressed(self) -> None:
-        with self._no_creds_env():
-            with self.assertRaises(igdb.IGDBRequestFailure):
-                await igdb.search_game("Portal 2", suppress_errors=False)
+        with self._no_creds_env(), self.assertRaises(igdb.IGDBRequestFailure):
+            await igdb.search_game("Portal 2", suppress_errors=False)
 
     async def test_search_game_returns_empty_without_credentials_when_suppressed(self) -> None:
         with self._no_creds_env():
             self.assertEqual(await igdb.search_game("Portal 2"), [])
 
     async def test_fetch_game_by_id_raises_without_credentials_when_unsuppressed(self) -> None:
-        with self._no_creds_env():
-            with self.assertRaises(igdb.IGDBRequestFailure):
-                await igdb.fetch_game_by_id(620, suppress_errors=False)
+        with self._no_creds_env(), self.assertRaises(igdb.IGDBRequestFailure):
+            await igdb.fetch_game_by_id(620, suppress_errors=False)
 
     async def test_fetch_game_by_id_returns_none_without_credentials_when_suppressed(self) -> None:
         with self._no_creds_env():
             self.assertIsNone(await igdb.fetch_game_by_id(620))
 
     async def test_resolve_game_raises_without_credentials_when_unsuppressed(self) -> None:
-        with self._no_creds_env():
-            with self.assertRaises(igdb.IGDBRequestFailure):
-                await igdb.resolve_game("Portal 2", None, suppress_errors=False)
+        with self._no_creds_env(), self.assertRaises(igdb.IGDBRequestFailure):
+            await igdb.resolve_game("Portal 2", None, suppress_errors=False)
 
     async def test_resolve_game_returns_none_without_credentials_when_suppressed(self) -> None:
         with self._no_creds_env():
@@ -2216,7 +2215,7 @@ class GetIgdbChildrenCachedTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("fetched_at", payload)
 
     async def test_cache_hit_within_ttl_skips_network(self) -> None:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         cached_children = [{"igdb_id": 5, "name": "Old DLC", "kind": "dlc"}]
         raw = json.dumps({"fetched_at": now, "children": cached_children})
         fetch_mock = AsyncMock(side_effect=AssertionError("should not fetch"))
@@ -2231,7 +2230,7 @@ class GetIgdbChildrenCachedTests(unittest.IsolatedAsyncioTestCase):
         fetch_mock.assert_not_called()
 
     async def test_expired_cache_with_fetch_failure_serves_stale(self) -> None:
-        old = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+        old = (datetime.now(UTC) - timedelta(days=8)).isoformat()
         stale_children = [{"igdb_id": 9, "name": "Stale DLC", "kind": "dlc"}]
         raw = json.dumps({"fetched_at": old, "children": stale_children})
 
@@ -2279,7 +2278,7 @@ class GetIgdbChildrenCachedTests(unittest.IsolatedAsyncioTestCase):
         fetch_mock.assert_not_called()
 
     async def test_expired_failure_marker_retries_and_success_overwrites(self) -> None:
-        old = (datetime.now(timezone.utc) - timedelta(hours=7)).isoformat()
+        old = (datetime.now(UTC) - timedelta(hours=7)).isoformat()
         marker = json.dumps({"fetched_at": old, "children": [], "failed": True})
         children = [{"igdb_id": 3, "name": "Fresh DLC", "kind": "dlc"}]
         stored: dict[str, str] = {}

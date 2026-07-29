@@ -23,7 +23,7 @@ whatever is already cached (possibly nothing).
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import aiosqlite
@@ -73,8 +73,8 @@ def _fetched_at_is_stale(fetched_at: str | None, hours: int = _PRICE_TTL_HOURS) 
     except ValueError:
         return True
     if fetched.tzinfo is None:
-        fetched = fetched.replace(tzinfo=timezone.utc)
-    return datetime.now(timezone.utc) - fetched > timedelta(hours=hours)
+        fetched = fetched.replace(tzinfo=UTC)
+    return datetime.now(UTC) - fetched > timedelta(hours=hours)
 
 
 def _group_rows_by_game(rows: list[aiosqlite.Row]) -> dict[int, dict]:
@@ -214,11 +214,9 @@ def _option_passes_filters(
     (whichever of max_price/min_cut_pct are not None)."""
     if max_price is not None and option["price"] > max_price:
         return False
-    if min_cut_pct is not None and (
-        option["cut_pct"] is None or option["cut_pct"] < min_cut_pct
-    ):
-        return False
-    return True
+    if min_cut_pct is None:
+        return True
+    return option["cut_pct"] is not None and option["cut_pct"] >= min_cut_pct
 
 
 def _deal_has_qualifying_option(
@@ -375,7 +373,7 @@ async def get_wishlist_deals(
         else:
             try:
                 prices = await fetch_steam_prices(list(steam_needs_refresh.keys()))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - isolation boundary: any failure becomes an error record
                 logger.warning("ITAD price refresh failed: %s", exc)
                 price_refresh_errors.append(f"itad refresh failed: {exc}")
             else:
@@ -400,7 +398,7 @@ async def get_wishlist_deals(
     if switch2_wishlist_needs:
         try:
             prices_by_title = await fetch_wishlist_prices()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - isolation boundary: any failure becomes an error record
             logger.warning("DekuDeals price refresh failed: %s", exc)
             price_refresh_errors.append(f"dekudeals refresh failed: {exc}")
         else:
@@ -422,7 +420,7 @@ async def get_wishlist_deals(
     if switch2_search_needs:
         try:
             by_title = await fetch_search_prices(list(switch2_search_needs.values()))
-        except Exception as exc:  # fetch_search_prices is fail-soft; this is belt-and-braces
+        except Exception as exc:  # noqa: BLE001 - fetch_search_prices is fail-soft; this is belt-and-braces
             logger.warning("DekuDeals search price refresh failed: %s", exc)
             price_refresh_errors.append(f"dekudeals search refresh failed: {exc}")
         else:
@@ -514,7 +512,7 @@ async def get_wishlist_deals(
     response: dict[str, Any] = {
         "deals": deals,
         "unpriced": unpriced,
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "fetched_at": datetime.now(UTC).isoformat(),
         "count": len(deals),
     }
     if price_refresh_errors:

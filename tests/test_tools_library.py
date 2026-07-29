@@ -1,8 +1,14 @@
 """Characterization tests for gamelib_mcp.tools.library."""
 
+from conftest import (
+    ToolDBTestCase,
+    add_game_alias,
+    add_platform,
+    make_steam_game,
+    seed_game,
+)
 from fastmcp.exceptions import ToolError
 
-from conftest import ToolDBTestCase, make_steam_game, seed_game, add_platform, add_game_alias
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import library
 from gamelib_mcp.tools.common import MAX_RESULT_LIMIT

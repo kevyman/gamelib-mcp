@@ -8,7 +8,7 @@ import statistics
 import sys
 from collections import defaultdict
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastmcp.exceptions import ToolError
 
@@ -27,9 +27,7 @@ from ..data.db import (
     get_db,
     record_play_history_snapshots,
 )
-from ..data.title_normalization import normalize_search_text
 from ..data.enrich_bg import pause_background_enrichment, resume_background_enrichment
-from .batch import apply_batch_item, check_batch_items, count_status
 
 # The platform sync dicts are built from platforms_registry at call time; the
 # imports below keep the functions bound on this module so existing tests can
@@ -40,10 +38,13 @@ from ..data.gog import sync_gog  # noqa: F401
 from ..data.nintendo import NINTENDO_TITLE_ID, sync_nintendo  # noqa: F401
 from ..data.psn import sync_psn  # noqa: F401
 from ..data.steam_xml import fetch_library  # noqa: F401
+from ..data.title_normalization import normalize_search_text
 from ..data.xbox import sync_xbox  # noqa: F401
 from ..lifecycle import _schedule_background_enrich, get_startup_refresh_task
 from ..platforms_registry import WISHLIST_SYNCABLE_PLATFORMS, resolve_platform_functions
-from .common import PLATFORM_ALIASES, SYNCABLE_PLATFORMS, info as _info, report_progress
+from .batch import apply_batch_item, check_batch_items, count_status
+from .common import PLATFORM_ALIASES, SYNCABLE_PLATFORMS, report_progress
+from .common import info as _info
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ async def _mark_sync_started(targets: set[str]) -> None:
 
     updates: dict[str, str | None] = {
         "library_sync_status": "in_progress",
-        "library_sync_started_at": datetime.now(timezone.utc).isoformat(),
+        "library_sync_started_at": datetime.now(UTC).isoformat(),
         "library_sync_finished_at": None,
     }
     for name in targets:
@@ -165,6 +166,8 @@ async def run_library_sync(
             try:
                 from ..data.steam_licenses import (
                     audit_steam_licenses as _audit_steam_licenses,
+                )
+                from ..data.steam_licenses import (
                     is_license_audit_configured,
                 )
 
@@ -198,7 +201,7 @@ async def run_library_sync(
     from ..data.db import set_meta_many
     await set_meta_many({
         "library_sync_status": "idle",
-        "library_sync_finished_at": datetime.now(timezone.utc).isoformat(),
+        "library_sync_finished_at": datetime.now(UTC).isoformat(),
     })
     return results
 
@@ -766,9 +769,15 @@ async def set_nintendo_pctl_session(
         raise ToolError("No session token obtained")
 
     path = _token_file_path()
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"session_token": token}, f, indent=2)
+
+    def _write_token_file() -> None:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"session_token": token}, f, indent=2)
+
+    # Small write, but it runs on the event loop that is also serving the ingest
+    # form request; keep the blocking filesystem calls off it.
+    await asyncio.to_thread(_write_token_file)
 
     logger.info("Nintendo Parental Controls session token saved to %s", path)
     return {"status": "stored", "path": path}
@@ -1472,7 +1481,7 @@ async def delete_games_batch(items: list[dict], confirm: bool = False) -> dict:
                 )
             seen_ids.add(row["id"])
             resolved.append({"row": row})
-        except Exception as exc:  # same per-item isolation as apply_batch_item
+        except Exception as exc:  # noqa: BLE001 - same per-item isolation as apply_batch_item
             message = (
                 str(exc) if isinstance(exc, ToolError)
                 else f"{type(exc).__name__}: {exc}"
@@ -1528,7 +1537,7 @@ async def delete_games_batch(items: list[dict], confirm: bool = False) -> dict:
                     recompute_affinity=False,
                     ignore_child_ids=frozenset(consumed),
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - isolation boundary: any failure becomes an error record
                 message = (
                     str(exc) if isinstance(exc, ToolError)
                     else f"{type(exc).__name__}: {exc}"
@@ -1820,7 +1829,7 @@ async def split_game(
             )
             play_history_rows_moved = cursor.rowcount
         else:
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(UTC).isoformat()
             cursor = await db.execute(
                 """INSERT INTO game_platforms (game_id, platform, owned, last_synced)
                    VALUES (?, ?, 1, ?)""",
@@ -2648,7 +2657,7 @@ async def detect_misclassified_dlc(
                 continue
             try:
                 store_data = await _fetch_steam_appdetails(appid)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - isolation boundary: any failure becomes an error record
                 skipped.append(
                     {
                         "game_id": row["game_id"],
@@ -2959,7 +2968,7 @@ async def revalidate_igdb_matches(
                 external = await resolve_steam_appids_to_igdb(
                     sorted(set(appid_by_game.values()))
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - isolation boundary: any failure becomes an error record
                 # Report-only degradation: without the mapping we cannot prove a
                 # link is store-authoritative, so keep every mismatch (a reset
                 # is still recoverable; a silent skip would hide real drift).

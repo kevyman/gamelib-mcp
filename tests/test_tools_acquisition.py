@@ -1,10 +1,8 @@
 """Tests for the acquisition tools (set/batch/spending stats)."""
 
 import contextlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
-
-from fastmcp.exceptions import ToolError
 
 from conftest import (
     ToolDBTestCase,
@@ -13,6 +11,8 @@ from conftest import (
     make_steam_game,
     seed_game,
 )
+from fastmcp.exceptions import ToolError
+
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.purchases import PurchaseRecord
 from gamelib_mcp.tools import acquisition
@@ -825,7 +825,7 @@ class SyncNoClobberTests(ToolDBTestCase):
         # Bulk Steam library sync path for the same appid.
         await db_module.bulk_upsert_steam_library(
             [{"appid": 4242, "name": "Clobber Bait", "playtime_minutes": 120}],
-            synced_at=datetime.now(timezone.utc).isoformat(),
+            synced_at=datetime.now(UTC).isoformat(),
         )
 
         row = await _acquisition_row(gid, "steam")
@@ -1714,7 +1714,7 @@ class FamilyConflictGuardTests(ToolDBTestCase):
         self.assertEqual(count["c"], 1)
 
     async def test_fuzzy_match_allowed_when_family_does_not_own_platform(self):
-        base, child = await self._seed_family()
+        _base, _child = await self._seed_family()
 
         batch = await acquisition.set_acquisitions_batch(
             [{
@@ -1731,7 +1731,7 @@ class FamilyConflictGuardTests(ToolDBTestCase):
     async def test_unowned_family_stub_does_not_trigger_conflict(self):
         # An owned=0 manual stub is not real ownership — "already owns that
         # platform" must mean owned=1, or a valid purchase write gets refused.
-        base, child = await self._seed_family()
+        base, _child = await self._seed_family()
         await add_platform(base, "gog", owned=0)
 
         batch = await acquisition.set_acquisitions_batch(

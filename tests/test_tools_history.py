@@ -1,8 +1,14 @@
 """Tests for gamelib_mcp.tools.history.get_play_history."""
 
+from conftest import (
+    ToolDBTestCase,
+    add_identifier,
+    add_platform,
+    make_steam_game,
+    seed_game,
+)
 from fastmcp.exceptions import ToolError
 
-from conftest import ToolDBTestCase, add_identifier, add_platform, seed_game, make_steam_game
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import history
 

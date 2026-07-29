@@ -7,6 +7,11 @@ from datetime import date
 
 from fastmcp.exceptions import ToolError
 
+from ..data.content import (
+    NESTED_CONTENT_TYPES,
+    PRIMARY_CONTENT_TYPES,
+    derive_is_primary,
+)
 from ..data.db import (
     GAME_EDITABLE_FIELDS,
     NINTENDO_BASELINE_DEVICE_ID,
@@ -41,9 +46,9 @@ from ..data.db import (
     upsert_nintendo_play_summary,
     upsert_wishlist_entry,
 )
-from ..data.content import NESTED_CONTENT_TYPES, PRIMARY_CONTENT_TYPES, derive_is_primary
 from ..data.nintendo import NINTENDO_TITLE_ID
 from ..data.tag_synonyms import canonical_tag
+
 # Safe direction: acquisition.py never imports this module at top level (it
 # lazy-imports _resolve_game_row inside functions), so importing its validator
 # helpers here cannot form a cycle.
@@ -51,6 +56,8 @@ from .acquisition import _validated_fields as _validated_acquisition_fields
 from .batch import apply_batch_item, check_batch_items, count_status
 from .common import (
     LIBRARY_PLATFORMS,
+)
+from .common import (
     validate_platform as _validate_platform,
 )
 from .search import (

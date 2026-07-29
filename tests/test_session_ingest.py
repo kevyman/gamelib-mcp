@@ -5,8 +5,9 @@ import os
 import shutil
 import tempfile
 import unittest
-from urllib.parse import urlencode
+from typing import ClassVar
 from unittest.mock import patch
+from urllib.parse import urlencode
 
 from fastmcp.exceptions import ToolError
 from starlette.requests import Request
@@ -244,7 +245,7 @@ class IngestRouteTests(SessionIngestTestCase):
 class _FakeAuthenticator:
     """Stands in for pynintendoparental's Authenticator (no network, no PKCE)."""
 
-    instances: list["_FakeAuthenticator"] = []
+    instances: ClassVar[list["_FakeAuthenticator"]] = []
     fail_with: Exception | None = None
 
     def __init__(self, client_session=None) -> None:

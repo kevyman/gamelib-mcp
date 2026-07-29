@@ -1,9 +1,9 @@
+import os
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
-import os
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steam_xml
@@ -35,7 +35,7 @@ class _DummyClient:
 class _FixedDatetime:
     @staticmethod
     def now(_tz):
-        return datetime(2026, 4, 7, 12, 0, tzinfo=timezone.utc)
+        return datetime(2026, 4, 7, 12, 0, tzinfo=UTC)
 
 
 class SteamXmlFetchLibraryTests(unittest.IsolatedAsyncioTestCase):

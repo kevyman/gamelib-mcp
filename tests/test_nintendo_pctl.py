@@ -19,7 +19,7 @@ from gamelib_mcp.data import nintendo_pctl
 
 async def _no_igdb(name, platform_id):
     """Force resolve_and_link_game down its offline create-by-name path."""
-    return None
+    return
 
 
 def _row(app_id, date, minutes, name="Game"):

@@ -1,5 +1,6 @@
 """Tests for gamelib_mcp.data.series_gaps: meta-KV-cached IGDB series members."""
 
+from datetime import UTC
 from unittest.mock import AsyncMock, patch
 
 from conftest import ToolDBTestCase
@@ -80,9 +81,11 @@ class GetSeriesMembersCachedTests(ToolDBTestCase):
 
     async def test_fetch_failure_with_no_cache_raises(self) -> None:
         failing_mock = AsyncMock(side_effect=IGDBRequestFailure("boom"))
-        with patch("gamelib_mcp.data.series_gaps.fetch_series_members", failing_mock):
-            with self.assertRaises(IGDBRequestFailure):
-                await series_gaps.get_series_members_cached("collection", 999)
+        with (
+            patch("gamelib_mcp.data.series_gaps.fetch_series_members", failing_mock),
+            self.assertRaises(IGDBRequestFailure),
+        ):
+            await series_gaps.get_series_members_cached("collection", 999)
 
     async def test_malformed_cache_entry_treated_as_absent(self) -> None:
         from gamelib_mcp.data.db import set_meta
@@ -100,14 +103,14 @@ class GetSeriesMembersCachedTests(ToolDBTestCase):
         # pre-fix code, or — since the key was also namespaced — a stray write
         # under the new key missing the "aliases" field). _parse_cache must
         # treat it as absent rather than silently serving alias-less data.
-        from datetime import datetime, timezone
+        import json
+        from datetime import datetime
 
         from gamelib_mcp.data.db import get_meta, set_meta
-        import json
 
         old_payload = json.dumps(
             {
-                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "fetched_at": datetime.now(UTC).isoformat(),
                 "members": [
                     {
                         "igdb_id": 1,

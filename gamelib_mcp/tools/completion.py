@@ -1,9 +1,10 @@
 """Read-only completion heuristic behind check_library's completion.unclassified."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from ..data.db import get_db
-from .common import PLAYTIME_SUM_SQL as _PLAYTIME_SUM_SQL, clamp_limit as _clamp_limit
+from .common import PLAYTIME_SUM_SQL as _PLAYTIME_SUM_SQL
+from .common import clamp_limit as _clamp_limit
 
 # Abandoned candidates need enough playtime to rule out "hasn't started yet"
 # and enough staleness to rule out "still actively playing, just slowly".
@@ -64,10 +65,10 @@ def _freshest_activity(
             moment = None
         if moment is not None:
             if moment.tzinfo is None:
-                moment = moment.replace(tzinfo=timezone.utc)
+                moment = moment.replace(tzinfo=UTC)
             candidates.append((moment, last_played))
     if rtime_last_played:
-        moment = datetime.fromtimestamp(rtime_last_played, tz=timezone.utc)
+        moment = datetime.fromtimestamp(rtime_last_played, tz=UTC)
         candidates.append((moment, moment.date().isoformat()))
     if not candidates:
         return None, None
@@ -187,7 +188,7 @@ async def suggest_completion_status(limit: int = 25) -> dict:
         )
         if moment is None:
             continue
-        age_days = (datetime.now(timezone.utc) - moment).days
+        age_days = (datetime.now(UTC) - moment).days
         if age_days < _ABANDONED_MIN_STALE_DAYS:
             continue
         abandoned.append(

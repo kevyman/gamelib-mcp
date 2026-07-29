@@ -42,7 +42,7 @@ removal reconciliation downstream for this path.
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote_plus, urlsplit
 
@@ -135,7 +135,7 @@ async def sync_dekudeals_wishlist() -> dict:
     candidate_names = {name: name for name in name_to_id}
 
     added = matched = skipped = 0
-    fallback_now = datetime.now(timezone.utc).isoformat()
+    fallback_now = datetime.now(UTC).isoformat()
     resolved_game_ids: set[int] = set()
 
     for item in items:
@@ -331,8 +331,7 @@ async def fetch_wishlist_prices() -> dict[str, dict]:
     """
     wishlist_url = os.getenv("DEKUDEALS_WISHLIST_URL", DEKUDEALS_WISHLIST_URL)
     url = wishlist_url.rstrip("/")
-    if url.endswith(".json"):
-        url = url[: -len(".json")]
+    url = url.removesuffix(".json")
 
     config = await load_scrape_config("dekudeals")
 

@@ -28,8 +28,11 @@ from gamelib_mcp.data.db import (
     upsert_game_platform_enrichment,
     upsert_game_platform_identifier,
 )
-from gamelib_mcp.data.igdb import resolve_and_link_game, PLATFORM_TO_IGDB
-from gamelib_mcp.data.title_normalization import normalize_search_text, prepare_catalog_title
+from gamelib_mcp.data.igdb import PLATFORM_TO_IGDB, resolve_and_link_game
+from gamelib_mcp.data.title_normalization import (
+    normalize_search_text,
+    prepare_catalog_title,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +100,7 @@ def _get_psnawp():
     from psnawp_api import PSNAWP  # lazy import — optional dependency
     npsso = os.environ.get("PSN_NPSSO")
     if not npsso:
-        raise EnvironmentError("PSN_NPSSO not set")
+        raise OSError("PSN_NPSSO not set")
     return PSNAWP(npsso)
 
 

@@ -41,8 +41,9 @@ from datetime import date as _date
 import httpx
 from bs4 import BeautifulSoup, Tag
 
-from . import PurchaseRecord
 from gamelib_mcp.data.db import default_data_dir
+
+from . import PurchaseRecord
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +80,7 @@ _CURRENCY_TOKENS = (
 _ISO_CURRENCY_RE = re.compile(r"\b([A-Z]{3})\b")
 _NUMBER_RE = re.compile(r"\d[\d.,\s\xa0]*")
 
-_CURSOR_RE = re.compile(r"g_historyCursor\s*=\s*(\{.*?\})\s*;", re.S)
+_CURSOR_RE = re.compile(r"g_historyCursor\s*=\s*(\{.*?\})\s*;", re.DOTALL)
 
 # Classes Steam renders inside the items cell that are badges, not line items.
 _ITEM_BADGE_CLASSES = frozenset({"wth_item_refunded"})

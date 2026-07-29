@@ -61,7 +61,7 @@ class IGDBRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_search_game_treats_token_failures_as_no_result(self) -> None:
         with (
             patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
-            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(side_effect=EnvironmentError("missing"))),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(side_effect=OSError("missing"))),
         ):
             results = await igdb.search_game("Portal")
 

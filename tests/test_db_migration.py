@@ -6,8 +6,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import aiosqlite
-
 from conftest import DEADLOCK_TIMEOUT, add_platform, seed_game
+
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steam_store
 
@@ -1267,7 +1267,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
             await db_module.init_db()
             async with db_module.get_db() as db:
-                with self.assertRaises(Exception):
+                with self.assertRaises(sqlite3.IntegrityError):
                     await db.execute(
                         "INSERT INTO games (name, completion_status) VALUES ('x', 'finished')"
                     )
@@ -1579,7 +1579,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                 row = await db.execute_fetchone(
                     "SELECT completion_status FROM games WHERE name = 'Rocket League'"
                 )
-                with self.assertRaises(Exception):
+                with self.assertRaises(sqlite3.IntegrityError):
                     await db.execute(
                         "INSERT INTO games (name, completion_status) VALUES ('x', 'finished')"
                     )

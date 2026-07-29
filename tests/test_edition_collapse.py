@@ -5,7 +5,9 @@ remake) must resolve to separate ``games`` rows. These tests exercise the real
 SQLite paths through the conftest harness.
 """
 
-from datetime import datetime, timezone
+import functools
+import operator
+from datetime import UTC, datetime
 
 from conftest import (
     ToolDBTestCase,
@@ -13,12 +15,13 @@ from conftest import (
     make_steam_game,
     seed_game,
 )
+
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import admin
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 async def _game_count() -> int:
@@ -58,7 +61,7 @@ class SteamBulkCollapseTests(ToolDBTestCase):
         by_game = await _steam_appids_by_game()
         # Two games, each owning exactly one (distinct) appid.
         self.assertEqual(len(by_game), 2)
-        self.assertEqual(sorted(sum(by_game.values(), [])), ["1693980", "17470"])
+        self.assertEqual(sorted(functools.reduce(operator.iadd, by_game.values(), [])), ["1693980", "17470"])
         for appids in by_game.values():
             self.assertEqual(len(appids), 1)
 
@@ -75,7 +78,7 @@ class SteamBulkCollapseTests(ToolDBTestCase):
         self.assertEqual(await _game_count(), 2)
         by_game = await _steam_appids_by_game()
         self.assertEqual(len(by_game), 2)
-        self.assertEqual(sorted(sum(by_game.values(), [])), ["1693980", "17470"])
+        self.assertEqual(sorted(functools.reduce(operator.iadd, by_game.values(), [])), ["1693980", "17470"])
 
     async def test_cross_platform_same_name_attaches_to_existing_row(self):
         # An Epic-only "Portal" (no Steam row yet) should gain a Steam row rather
@@ -113,7 +116,7 @@ class SteamBulkCollapseTests(ToolDBTestCase):
         self.assertEqual(len(by_game), 2)
         # The lowest row_order appid (400) claims the Epic row; 401 forks a new game.
         self.assertEqual(by_game[epic_game_id], ["400"])
-        self.assertEqual(sorted(sum(by_game.values(), [])), ["400", "401"])
+        self.assertEqual(sorted(functools.reduce(operator.iadd, by_game.values(), [])), ["400", "401"])
 
     async def test_resync_is_idempotent(self):
         rows = [{"appid": 17470, "name": "Dead Space", "playtime_minutes": 30}]

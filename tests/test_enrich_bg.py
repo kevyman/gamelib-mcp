@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from conftest import DEADLOCK_TIMEOUT
+
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import enrich_bg
 

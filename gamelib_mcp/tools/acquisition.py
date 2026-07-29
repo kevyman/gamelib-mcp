@@ -38,11 +38,6 @@ from ..data.db import (
     upsert_game_platform_identifier,
 )
 from ..data.purchases import IDENTIFIER_TYPES, PURCHASE_IMPORTERS, PurchaseRecord
-from ..data.title_normalization import (
-    normalize_edition_comparison_title,
-    normalize_purchase_title,
-    normalize_search_text,
-)
 
 # The importer dict is resolved at call time; the imports below keep the
 # fetchers bound on this module so tests can patch
@@ -54,8 +49,15 @@ from ..data.purchases.gog_orders import fetch_gog_purchases  # noqa: F401
 from ..data.purchases.humble import fetch_humble_purchases  # noqa: F401
 from ..data.purchases.nintendo_ec import fetch_eshop_purchases  # noqa: F401
 from ..data.purchases.steam_history import fetch_steam_purchases  # noqa: F401
+from ..data.title_normalization import (
+    normalize_edition_comparison_title,
+    normalize_purchase_title,
+    normalize_search_text,
+)
 from .common import (
     LIBRARY_PLATFORMS,
+)
+from .common import (
     validate_platform as _validate_platform,
 )
 from .search import (

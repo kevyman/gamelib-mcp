@@ -17,7 +17,7 @@ than being silently served with missing/narrower alias data.
 import json
 import logging
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from .db import get_meta, set_meta
 from .igdb import (
@@ -98,7 +98,7 @@ async def get_series_members_cached(
 
     if not refresh and cached is not None:
         fetched_at, result = cached
-        age = datetime.now(timezone.utc) - fetched_at
+        age = datetime.now(UTC) - fetched_at
         if age < timedelta(days=SERIES_CACHE_TTL_DAYS):
             return result
 
@@ -118,7 +118,7 @@ async def get_series_members_cached(
     aliases = await _fetch_aliases(members)
     result = SeriesMembersResult(members=members, aliases=aliases)
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     await set_meta(
         key,
         json.dumps(

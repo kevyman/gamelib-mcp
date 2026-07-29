@@ -9,9 +9,11 @@ offline; behavior against real data lives in the per-tool test modules.
 """
 
 import unittest
+from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
 from conftest import ToolDBTestCase, add_platform, seed_game
+
 from gamelib_mcp import main
 from gamelib_mcp.data import db as db_module
 
@@ -59,9 +61,13 @@ class SyncTargetDispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unknown_target_raises_and_syncs_nothing(self):
         lib, wish, rate = self._patches()
-        with lib as m_lib, wish as m_wish, rate as m_rate:
-            with self.assertRaises(Exception) as ctx:
-                await main.sync(ctx=None, targets=["library", "achievements"])
+        with (
+            lib as m_lib,
+            wish as m_wish,
+            rate as m_rate,
+            self.assertRaises(Exception) as ctx,
+        ):
+            await main.sync(ctx=None, targets=["library", "achievements"])
         self.assertIn("achievements", str(ctx.exception))
         m_lib.assert_not_awaited()
         m_wish.assert_not_awaited()
@@ -73,9 +79,13 @@ class SyncTargetDispatchTests(unittest.IsolatedAsyncioTestCase):
         # launched the background sync and then errored — reporting a failure for
         # a sync that is actually running, with the retry saying already_running.
         lib, wish, rate = self._patches()
-        with lib as m_lib, wish as m_wish, rate as m_rate:
-            with self.assertRaises(Exception) as ctx:
-                await main.sync(ctx=None, targets=["library", "wishlist"], platforms=["gog"])
+        with (
+            lib as m_lib,
+            wish as m_wish,
+            rate as m_rate,
+            self.assertRaises(Exception) as ctx,
+        ):
+            await main.sync(ctx=None, targets=["library", "wishlist"], platforms=["gog"])
         message = str(ctx.exception)
         self.assertIn("gog", message)
         self.assertIn("wishlist", message)
@@ -373,7 +383,7 @@ class ResponseSizeGuardTests(ToolDBTestCase):
     """
 
     # tool -> (args, {list path: max entries the contract allows})
-    CONTRACTS = [
+    CONTRACTS: ClassVar[list[tuple]] = [
         ("get_stats", {"report": "platforms"}, {"overlap_games": 25}),
         ("get_stats", {"report": "platforms", "limit": 5}, {"overlap_games": 5}),
         ("get_wishlist", {}, {"items": 100}),

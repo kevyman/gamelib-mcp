@@ -3,8 +3,6 @@
 import json
 import math
 
-from fastmcp.exceptions import ToolError
-
 from conftest import (
     ToolDBTestCase,
     add_platform,
@@ -12,6 +10,8 @@ from conftest import (
     seed_game,
     set_tag_affinity,
 )
+from fastmcp.exceptions import ToolError
+
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import discover
 from gamelib_mcp.tools.platforms import update_game

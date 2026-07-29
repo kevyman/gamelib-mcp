@@ -74,7 +74,7 @@ async def apply_batch_item(
         if unknown:
             raise ToolError(_unknown_key_message(unknown, allowed_keys))
         result = await apply(**item)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - isolation boundary: any failure becomes an error record
         payload = item if isinstance(item, dict) else {"item": item}
         # ToolError messages are already user-facing; anything else names its
         # class so an unexpected failure is diagnosable from the result alone.

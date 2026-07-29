@@ -6,6 +6,7 @@ itself is exercised end-to-end over a real temp DB via the conftest harness.
 """
 
 import unittest
+from typing import ClassVar
 
 from conftest import (
     ToolDBTestCase,
@@ -16,6 +17,8 @@ from conftest import (
     seed_game,
     set_tag_affinity,
 )
+from fastmcp.exceptions import ToolError
+
 from gamelib_mcp import main
 from gamelib_mcp.tools import assessment
 from gamelib_mcp.tools.assessment import compute_craft_score, compute_fit
@@ -107,13 +110,13 @@ def _tag(tag, affinity, game_count=5, avg_score=8.0):
 class FitCheckTests(unittest.TestCase):
     """Ports fit_check.py's ladder, rescaled 'strong' threshold aside."""
 
-    TOP = [
+    TOP: ClassVar[list[dict]] = [
         _tag("roguelike", 2.1, 6),
         _tag("deckbuilder", 1.5, 4),
         _tag("indie", 1.2, 12),
         _tag("pixel graphics", 0.4, 8),
     ]
-    BOTTOM = [_tag("sports", -1.8, 3, avg_score=4.0)]
+    BOTTOM: ClassVar[list[dict]] = [_tag("sports", -1.8, 3, avg_score=4.0)]
 
     def test_strong_fit(self):
         out = compute_fit(
@@ -190,21 +193,21 @@ class FitCheckTests(unittest.TestCase):
 
 class AssessmentInputValidationTests(ToolDBTestCase):
     async def test_requires_identity_or_tags(self):
-        with self.assertRaises(Exception) as ctx:
+        with self.assertRaises(ToolError) as ctx:
             await main.get_assessment_context()
         self.assertIn("identity", str(ctx.exception))
 
     async def test_positive_pct_requires_the_count(self):
-        with self.assertRaises(Exception) as ctx:
+        with self.assertRaises(ToolError) as ctx:
             await main.get_assessment_context(tags=["indie"], steam_positive_pct=90)
         self.assertIn("steam_total_reviews", str(ctx.exception))
 
     async def test_count_requires_the_pct(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(ToolError):
             await main.get_assessment_context(tags=["indie"], steam_total_reviews=100)
 
     async def test_recent_requires_all_time(self):
-        with self.assertRaises(Exception) as ctx:
+        with self.assertRaises(ToolError) as ctx:
             await main.get_assessment_context(
                 tags=["indie"],
                 steam_recent_positive_pct=90,
@@ -213,7 +216,7 @@ class AssessmentInputValidationTests(ToolDBTestCase):
         self.assertIn("all-time", str(ctx.exception))
 
     async def test_recent_pair_must_be_complete(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(ToolError):
             await main.get_assessment_context(
                 tags=["indie"],
                 steam_positive_pct=90,
@@ -222,19 +225,19 @@ class AssessmentInputValidationTests(ToolDBTestCase):
             )
 
     async def test_pct_out_of_range(self):
-        with self.assertRaises(Exception) as ctx:
+        with self.assertRaises(ToolError) as ctx:
             await main.get_assessment_context(
                 tags=["indie"], steam_positive_pct=101, steam_total_reviews=100
             )
         self.assertIn("between 0 and 100", str(ctx.exception))
 
     async def test_blank_tags_rejected(self):
-        with self.assertRaises(Exception) as ctx:
+        with self.assertRaises(ToolError) as ctx:
             await main.get_assessment_context(tags=["", "   "])
         self.assertIn("non-empty", str(ctx.exception))
 
     async def test_too_many_tags_rejected(self):
-        with self.assertRaises(Exception) as ctx:
+        with self.assertRaises(ToolError) as ctx:
             await main.get_assessment_context(tags=[f"tag {i}" for i in range(41)])
         self.assertIn("at most", str(ctx.exception))
 
@@ -243,7 +246,7 @@ class AssessmentInputValidationTests(ToolDBTestCase):
         # resolve — every mode's inputs are validated before any work.
         gid = await seed_game("Validated First")
         await add_platform(gid, "steam", playtime_minutes=100)
-        with self.assertRaises(Exception):
+        with self.assertRaises(ToolError):
             await main.get_assessment_context(game_id=gid, steam_positive_pct=90)
 
 
@@ -508,13 +511,15 @@ class GameBlockAndPaceTests(ToolDBTestCase):
         self.assertIn("window", pace)
 
     async def test_pace_reports_window_activity(self):
-        from datetime import date, timedelta
+        from datetime import UTC, datetime, timedelta
 
         from gamelib_mcp.data import db as db_module
 
         gid = await seed_game("Active Game")
         await add_platform(gid, "steam", playtime_minutes=500)
-        today = date.today()
+        # The pace window the code under test computes is UTC-based, so anchor
+        # the seeded snapshots to UTC too rather than the runner's local date.
+        today = datetime.now(UTC).date()
         async with db_module.get_db() as db:
             for day, minutes in (
                 (today - timedelta(days=40), 100),

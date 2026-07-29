@@ -12,12 +12,18 @@ semantics, apply gating, suppressions, and error isolation.
 
 import os
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
+from conftest import (
+    ToolDBTestCase,
+    add_identifier,
+    add_platform,
+    make_steam_game,
+    seed_game,
+)
 from fastmcp.exceptions import ToolError
 
-from conftest import ToolDBTestCase, add_identifier, add_platform, make_steam_game, seed_game
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steam_licenses, steam_session
 from gamelib_mcp.tools import admin, checks
@@ -1008,7 +1014,7 @@ class SyncStalenessTests(ToolDBTestCase):
     async def test_reports_stale_platform(self):
         gid = await seed_game("Stale Steam Game")
         pid = await add_platform(gid, "steam", playtime_minutes=60)
-        old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        old = (datetime.now(UTC) - timedelta(days=30)).isoformat()
         async with db_module.get_db() as db:
             await db.execute(
                 "UPDATE game_platforms SET last_synced = ? WHERE id = ?", (old, pid)
@@ -1025,7 +1031,7 @@ class SyncStalenessTests(ToolDBTestCase):
     async def test_custom_stale_days_option(self):
         gid = await seed_game("Barely Stale Steam Game")
         pid = await add_platform(gid, "steam", playtime_minutes=0)
-        old = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        old = (datetime.now(UTC) - timedelta(days=2)).isoformat()
         async with db_module.get_db() as db:
             await db.execute(
                 "UPDATE game_platforms SET last_synced = ? WHERE id = ?", (old, pid)
@@ -1516,7 +1522,7 @@ class CompletionUnclassifiedTests(ToolDBTestCase):
 
         # completion_status is user-set only: the check is permanently
         # report-only, so naming it in `apply` must be rejected outright.
-        with self.assertRaises(Exception):
+        with self.assertRaises(ToolError):
             await checks.run_library_checks(
                 checks=["completion.unclassified"], apply=["completion.unclassified"]
             )

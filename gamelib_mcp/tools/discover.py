@@ -11,11 +11,23 @@ from ..data.tag_synonyms import canonical_tag
 from ..utils import _parse_json
 from .common import (
     OWNED_SQL as _OWNED_SQL,
-    STEAM_APPID_SQL as _STEAM_APPID_SQL,
+)
+from .common import (
     PLAY_STATE_SQL as _PLAY_STATE_SQL,
+)
+from .common import (
     PLAYTIME_SUM_SQL as _PLAYTIME_SUM_SQL,
+)
+from .common import (
+    STEAM_APPID_SQL as _STEAM_APPID_SQL,
+)
+from .common import (
     WISHLISTED_SQL as _WISHLISTED_SQL,
+)
+from .common import (
     clamp_limit as _clamp_limit,
+)
+from .common import (
     cover_url as _cover_url,
 )
 

@@ -1,8 +1,8 @@
 """Meta KV store, game lookups, and platform assembly for read paths."""
 
 from collections import defaultdict
-from datetime import datetime, timezone
-from typing import Iterable
+from collections.abc import Iterable
+from datetime import UTC, datetime
 
 import aiosqlite
 
@@ -24,11 +24,10 @@ async def get_meta(key: str) -> str | None:
 
 async def get_meta_prefix(prefix: str) -> dict[str, str]:
     """Return all meta rows whose key starts with prefix as {key: value}."""
-    async with get_db() as db:
-        async with db.execute(
-            "SELECT key, value FROM meta WHERE key LIKE ?", (f"{prefix}%",)
-        ) as cursor:
-            rows = await cursor.fetchall()
+    async with get_db() as db, db.execute(
+        "SELECT key, value FROM meta WHERE key LIKE ?", (f"{prefix}%",)
+    ) as cursor:
+        rows = await cursor.fetchall()
     return {row["key"]: row["value"] for row in rows if row["value"] is not None}
 
 
@@ -392,7 +391,7 @@ def _platform_dict(row: aiosqlite.Row) -> dict:
         # the public owned-games API no longer returns (typically retired/
         # delisted) — see audit_steam_licenses. Tolerates rows selected before
         # the v32 column existed (tests build these dicts by hand).
-        "delisted": bool(row["delisted"]) if "delisted" in row.keys() else False,
+        "delisted": bool(row["delisted"]) if "delisted" in row else False,
         "playtime_minutes": playtime_minutes,
         "playtime_hours": round((playtime_minutes or 0) / 60, 1),
         "playtime_2weeks_minutes": playtime_2weeks_minutes,
@@ -419,7 +418,7 @@ def _platform_dict(row: aiosqlite.Row) -> dict:
     if row["platform"] == STEAM_PLATFORM:
         last_played = row["rtime_last_played"]
         steam_last_played_date = (
-            datetime.fromtimestamp(last_played, tz=timezone.utc).date().isoformat()
+            datetime.fromtimestamp(last_played, tz=UTC).date().isoformat()
             if last_played
             else None
         )

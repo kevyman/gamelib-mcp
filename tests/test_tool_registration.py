@@ -9,7 +9,6 @@ import unittest
 
 from gamelib_mcp import main
 
-
 EXPECTED_TOOLS = {
     # --- reads ---------------------------------------------------------------
     "search_games": {

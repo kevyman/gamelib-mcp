@@ -77,15 +77,16 @@ import logging
 import os
 import re
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import httpx
 from curl_cffi.requests import AsyncSession, BrowserTypeLiteral
 
-from . import PurchaseRecord, is_consumable_title, normalize_purchase_date
 from gamelib_mcp.data.content import classify_title_override, match_addon_name
 from gamelib_mcp.data.db import default_data_dir
+
+from . import PurchaseRecord, is_consumable_title, normalize_purchase_date
 
 logger = logging.getLogger(__name__)
 
@@ -278,7 +279,7 @@ def _order_date(order: dict) -> str | None:
         value = int(value.strip())
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         try:
-            return datetime.fromtimestamp(value / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+            return datetime.fromtimestamp(value / 1000, tz=UTC).strftime("%Y-%m-%d")
         except (OverflowError, OSError, ValueError):
             return None
     return normalize_purchase_date(order.get("createdAt") or order.get("created"))

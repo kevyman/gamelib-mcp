@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from gamelib_mcp.apps import GAME_CARDS_HTML  # noqa: E402
+from gamelib_mcp.apps import GAME_CARDS_HTML
 
 
 async def _build_data(args: argparse.Namespace) -> dict:

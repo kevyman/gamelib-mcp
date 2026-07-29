@@ -1,7 +1,7 @@
 import asyncio
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -327,7 +327,7 @@ class HLTBVariantLadderTests(unittest.IsolatedAsyncioTestCase):
     async def test_expired_not_found_marker_is_retried(self) -> None:
         game_id = await db_module.upsert_game(appid=None, name="HELLDIVERS 2")
         stale = (
-            datetime.now(timezone.utc)
+            datetime.now(UTC)
             - timedelta(days=db_module.HLTB_NOT_FOUND_RETRY_DAYS + 10)
         ).isoformat()
         async with db_module.get_db() as db:
@@ -348,7 +348,7 @@ class HLTBVariantLadderTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_fresh_not_found_marker_suppresses_search(self) -> None:
         game_id = await db_module.upsert_game(appid=None, name="HELLDIVERS 2")
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         async with db_module.get_db() as db:
             await db.execute(
                 "UPDATE games SET hltb_cached_at = ? WHERE id = ?",
@@ -371,7 +371,7 @@ class HLTBVariantLadderTests(unittest.IsolatedAsyncioTestCase):
         legacy = await db_module.upsert_game(appid=None, name="Legacy Not Found")
         cached = await db_module.upsert_game(appid=None, name="Recently Cached")
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         stale = (now - timedelta(days=db_module.HLTB_NOT_FOUND_RETRY_DAYS + 10)).isoformat()
         async with db_module.get_db() as db:
             await db.execute(

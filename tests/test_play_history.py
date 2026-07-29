@@ -1,6 +1,7 @@
 """Tests for gamelib_mcp.data.db.history.record_play_history_snapshots."""
 
 from conftest import ToolDBTestCase, add_platform, seed_game
+
 from gamelib_mcp.data import db as db_module
 
 

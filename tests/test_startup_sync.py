@@ -1,23 +1,24 @@
 import asyncio
 import contextlib
-from datetime import datetime, timedelta, timezone
 import os
 import unittest
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, Mock, patch
 
 from conftest import DEADLOCK_TIMEOUT
-from gamelib_mcp.data import db as db_module
-from gamelib_mcp.tools import admin as admin_tools
+
 from gamelib_mcp import lifecycle
+from gamelib_mcp.data import db as db_module
 from gamelib_mcp.lifecycle import (
     _drain_background_enrich_reruns,
     _ensure_periodic_refresh_loop,
-    _schedule_background_enrich,
     _ensure_startup_refresh,
     _run_periodic_refresh_loop,
     _run_startup_refresh,
+    _schedule_background_enrich,
     lifespan,
 )
+from gamelib_mcp.tools import admin as admin_tools
 
 
 async def _never_finishes() -> None:
@@ -86,7 +87,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         main_module._ENRICHMENT_RERUN_REQUESTED = False
 
     async def test_stale_startup_schedules_background_refresh(self) -> None:
-        stale_at = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+        stale_at = (datetime.now(UTC) - timedelta(hours=12)).isoformat()
 
         with (
             patch("gamelib_mcp.data.db.init_db", AsyncMock()),
@@ -343,7 +344,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             await running_task
 
     async def test_startup_is_non_blocking_while_refresh_runs(self) -> None:
-        stale_at = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+        stale_at = (datetime.now(UTC) - timedelta(hours=12)).isoformat()
         started = asyncio.Event()
         release = asyncio.Event()
 
@@ -369,7 +370,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             await cm.__aexit__(None, None, None)
 
     async def test_stale_startup_starts_enrichment_without_waiting_for_refresh(self) -> None:
-        stale_at = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+        stale_at = (datetime.now(UTC) - timedelta(hours=12)).isoformat()
         refresh_started = asyncio.Event()
         refresh_release = asyncio.Event()
         enrich_started = asyncio.Event()
@@ -400,7 +401,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=DEADLOCK_TIMEOUT)
 
     async def test_stale_startup_requeues_enrichment_after_refresh_finishes(self) -> None:
-        stale_at = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+        stale_at = (datetime.now(UTC) - timedelta(hours=12)).isoformat()
         refresh_started = asyncio.Event()
         refresh_release = asyncio.Event()
         first_enrich_started = asyncio.Event()
@@ -466,7 +467,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enrich_calls, 2)
 
     async def test_lifespan_starts_periodic_refresh_loop(self) -> None:
-        fresh_at = datetime.now(timezone.utc).isoformat()
+        fresh_at = datetime.now(UTC).isoformat()
 
         with (
             patch("gamelib_mcp.data.db.init_db", AsyncMock()),
@@ -481,7 +482,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         mock_periodic.assert_awaited_once()
 
     async def test_lifespan_cancels_periodic_refresh_loop_on_shutdown(self) -> None:
-        fresh_at = datetime.now(timezone.utc).isoformat()
+        fresh_at = datetime.now(UTC).isoformat()
         started = asyncio.Event()
 
         async def idle_forever() -> None:
@@ -511,7 +512,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(main_module._PERIODIC_REFRESH_TASK.done())
 
     async def test_startup_clears_abandoned_hltb_claims_before_background_enrich(self) -> None:
-        fresh_at = datetime.now(timezone.utc).isoformat()
+        fresh_at = datetime.now(UTC).isoformat()
         enrich_started = asyncio.Event()
         call_order: list[str] = []
 
@@ -753,9 +754,9 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
                 clear=True,
             ),
             patch("gamelib_mcp.data.db.load_project_dotenv", return_value=False),
+            self.assertRaisesRegex(RuntimeError, "absolute"),
         ):
-            with self.assertRaisesRegex(RuntimeError, "absolute"):
-                db_module._db_path()
+            db_module._db_path()
 
     def test_db_path_loads_database_url_from_dotenv(self) -> None:
         db_module._ENV_LOADED = False
@@ -796,8 +797,8 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen["platforms"], ["gog"])
 
     async def test_reconcile_resets_stale_in_progress(self) -> None:
+        from gamelib_mcp.data.db import get_meta, init_db, set_meta_many
         from gamelib_mcp.lifecycle import reconcile_stale_sync_status
-        from gamelib_mcp.data.db import set_meta_many, get_meta, init_db
 
         await init_db()
         await set_meta_many(
@@ -816,8 +817,8 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(await get_meta("library_sync_error"))
 
     async def test_reconcile_noop_when_idle(self) -> None:
+        from gamelib_mcp.data.db import get_meta, init_db, set_meta
         from gamelib_mcp.lifecycle import reconcile_stale_sync_status
-        from gamelib_mcp.data.db import set_meta, get_meta, init_db
 
         await init_db()
         await set_meta("library_sync_status", "idle")

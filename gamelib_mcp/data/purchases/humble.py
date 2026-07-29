@@ -58,9 +58,10 @@ from collections import deque
 
 import httpx
 
-from . import PurchaseRecord, is_consumable_title, normalize_purchase_date
 from gamelib_mcp.data.content import classify_title_override, match_addon_name
 from gamelib_mcp.data.db import default_data_dir
+
+from . import PurchaseRecord, is_consumable_title, normalize_purchase_date
 
 logger = logging.getLogger(__name__)
 

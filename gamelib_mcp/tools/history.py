@@ -7,7 +7,7 @@ nintendo_play_summary's real per-day Parental Controls data, which is
 strictly more accurate than a snapshot delta would be.
 """
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from fastmcp.exceptions import ToolError
 
@@ -118,7 +118,7 @@ async def get_play_history(
     reason (see the nintendo_pctl session link). Returns per-game minutes,
     per-platform totals, and the window used.
     """
-    end = _parse_iso_date(end_date, "end_date") if end_date else datetime.now(timezone.utc).date()
+    end = _parse_iso_date(end_date, "end_date") if end_date else datetime.now(UTC).date()
     start = _parse_iso_date(start_date, "start_date") if start_date else end - timedelta(days=days)
     if start > end:
         raise ToolError(

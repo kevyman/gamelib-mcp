@@ -12,7 +12,7 @@ at the mount path.
 import json
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -23,12 +23,12 @@ from gamelib_mcp.data.db import (
     adopt_platform_identifier,
     get_game_by_identifier,
     load_fuzzy_candidates,
-    upsert_game_platform,
     upsert_game_alias,
+    upsert_game_platform,
     upsert_game_platform_enrichment,
     upsert_game_platform_identifier,
 )
-from gamelib_mcp.data.igdb import resolve_and_link_game, PLATFORM_TO_IGDB
+from gamelib_mcp.data.igdb import PLATFORM_TO_IGDB, resolve_and_link_game
 from gamelib_mcp.data.title_normalization import prepare_catalog_title
 
 logger = logging.getLogger(__name__)
@@ -66,11 +66,11 @@ def _token_expiring_soon(expires_at: str | None) -> bool:
         return True
 
     try:
-        expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        expiry = datetime.fromisoformat(expires_at)
     except ValueError:
         return True
 
-    return expiry <= datetime.now(timezone.utc) + _TOKEN_REFRESH_SKEW
+    return expiry <= datetime.now(UTC) + _TOKEN_REFRESH_SKEW
 
 
 async def _read_json_file(path: Path) -> Any:

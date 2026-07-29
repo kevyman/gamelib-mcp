@@ -1,10 +1,8 @@
 """Characterization tests for gamelib_mcp.tools.platforms."""
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
-
-from fastmcp.exceptions import ToolError
 
 from conftest import (
     ToolDBTestCase,
@@ -14,6 +12,8 @@ from conftest import (
     make_steam_game,
     seed_game,
 )
+from fastmcp.exceptions import ToolError
+
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import hltb, igdb, steamspy
 from gamelib_mcp.tools import platforms
@@ -675,7 +675,7 @@ class UpdateGameProtectionTests(ToolDBTestCase):
         await platforms.update_game(game_id=gid, new_name="My Title")
         await db_module.bulk_upsert_steam_library(
             [{"appid": 700, "name": "Steam Renamed", "playtime_minutes": 5}],
-            synced_at=datetime.now(timezone.utc).isoformat(),
+            synced_at=datetime.now(UTC).isoformat(),
         )
         async with db_module.get_db() as db:
             row = await db.execute_fetchone("SELECT name FROM games WHERE id = ?", (gid,))
@@ -685,7 +685,7 @@ class UpdateGameProtectionTests(ToolDBTestCase):
         gid = await make_steam_game("Original", 701)
         await db_module.bulk_upsert_steam_library(
             [{"appid": 701, "name": "Steam Renamed", "playtime_minutes": 5}],
-            synced_at=datetime.now(timezone.utc).isoformat(),
+            synced_at=datetime.now(UTC).isoformat(),
         )
         async with db_module.get_db() as db:
             row = await db.execute_fetchone("SELECT name FROM games WHERE id = ?", (gid,))
@@ -898,7 +898,7 @@ class SetPlaytimeTests(ToolDBTestCase):
         # A later Steam sync reports a different playtime — the pin must hold.
         await db_module.bulk_upsert_steam_library(
             [{"appid": 900, "name": "Pinned", "playtime_minutes": 5}],
-            synced_at=datetime.now(timezone.utc).isoformat(),
+            synced_at=datetime.now(UTC).isoformat(),
         )
         async with db_module.get_db() as db:
             row = await db.execute_fetchone(
@@ -1212,7 +1212,7 @@ class SetSwitch2PlaytimeBaselineTests(ToolDBTestCase):
         from gamelib_mcp.tools import history
 
         gid, _ = await self._seed_switch2_game()
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = datetime.now(UTC).date().isoformat()
         await db_module.upsert_nintendo_play_summary([_pctl_day(self._APP, today, 45)])
         await platforms.set_switch2_playtime_baseline(game_id=gid, total_hours=100)
         result = await history.get_play_history(days=30)

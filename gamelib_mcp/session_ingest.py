@@ -76,10 +76,14 @@ INGEST_PROVIDERS: dict[str, IngestProvider] = {
             "ownership sync and eShop purchase import."
         ),
         steps=(
-            "In your browser, open https://accounts.nintendo.com/portal/vgcs/ and "
-            "make sure you are signed in to your Nintendo account.",
-            "Click the Cookie Editor extension icon (install \"Cookie Editor\" from "
-            "your browser's extension store first if you don't have it).",
+            (
+                "In your browser, open https://accounts.nintendo.com/portal/vgcs/ and "
+                "make sure you are signed in to your Nintendo account."
+            ),
+            (
+                "Click the Cookie Editor extension icon (install \"Cookie Editor\" from "
+                "your browser's extension store first if you don't have it)."
+            ),
             "Click Export (the export/copy icon) to copy all cookies as JSON.",
             "Paste what was copied into the box below and click Save.",
         ),
@@ -95,10 +99,14 @@ INGEST_PROVIDERS: dict[str, IngestProvider] = {
             "that syncs Epic ownership."
         ),
         steps=(
-            "In your browser, open https://www.epicgames.com/account/transactions "
-            "and make sure you are signed in to your Epic Games account.",
-            "Click the Cookie Editor extension icon (install \"Cookie Editor\" from "
-            "your browser's extension store first if you don't have it).",
+            (
+                "In your browser, open https://www.epicgames.com/account/transactions "
+                "and make sure you are signed in to your Epic Games account."
+            ),
+            (
+                "Click the Cookie Editor extension icon (install \"Cookie Editor\" from "
+                "your browser's extension store first if you don't have it)."
+            ),
             "Click Export (the export/copy icon) to copy all cookies as JSON.",
             "Paste what was copied into the box below and click Save.",
         ),
@@ -110,10 +118,14 @@ INGEST_PROVIDERS: dict[str, IngestProvider] = {
         export_url="https://www.humblebundle.com/",
         hint="Only the _simpleauth_sess cookie is strictly needed.",
         steps=(
-            "In your browser, open https://www.humblebundle.com/ and make sure you "
-            "are signed in.",
-            "Click the Cookie Editor extension icon (install \"Cookie Editor\" first "
-            "if needed). The cookie that matters here is called _simpleauth_sess.",
+            (
+                "In your browser, open https://www.humblebundle.com/ and make sure you "
+                "are signed in."
+            ),
+            (
+                "Click the Cookie Editor extension icon (install \"Cookie Editor\" first "
+                "if needed). The cookie that matters here is called _simpleauth_sess."
+            ),
             "Click Export to copy all cookies as JSON.",
             "Paste what was copied into the box below and click Save.",
         ),
@@ -129,26 +141,38 @@ INGEST_PROVIDERS: dict[str, IngestProvider] = {
             "for months."
         ),
         steps=(
-            "First, SIGN OUT of Steam in your browser: go to https://store.steampowered.com/, "
-            "click your account name at the top right, and choose \"Sign out\". This step "
-            "matters — the cookie we need is only created by a fresh sign-in.",
-            "Press F12 to open your browser's Developer Tools and click the \"Network\" tab. "
-            "Tick the \"Preserve log\" checkbox (so nothing clears when the page redirects), and "
-            "in the filter box type: login.steampowered.com . Leave Developer Tools open. "
-            "(Don't use the Cookie Editor extension or the Application/Storage tab for this one — "
-            "the cookie lives on a page Steam immediately redirects you away from, so they can't "
-            "show it.)",
-            "Now go to https://store.steampowered.com/login/ and sign back in. IMPORTANT: "
-            "tick the \"Remember me\" checkbox BEFORE you click Sign in.",
-            "In the Network list you'll now see requests to login.steampowered.com. Click one of "
-            "them (a row marked 302, or one named \"finalizelogin\", both work), then open its "
-            "\"Cookies\" sub-tab.",
-            "Scroll to find steamRefresh_steam (it appears under \"Request Cookies\" or "
-            "\"Response Cookies\"). Right-click its value and choose \"Copy Value\". It's a long "
-            "string. (If you don't see it, make sure \"Preserve log\" is ticked and redo the "
-            "sign-in with the Network tab already open.)",
-            "Paste that value straight into the box below — just the value on its own, no quotes "
-            "and no JSON formatting needed — then click Save.",
+            (
+                "First, SIGN OUT of Steam in your browser: go to https://store.steampowered.com/, "
+                "click your account name at the top right, and choose \"Sign out\". This step "
+                "matters — the cookie we need is only created by a fresh sign-in."
+            ),
+            (
+                "Press F12 to open your browser's Developer Tools and click the \"Network\" tab. "
+                "Tick the \"Preserve log\" checkbox (so nothing clears when the page redirects), and "
+                "in the filter box type: login.steampowered.com . Leave Developer Tools open. "
+                "(Don't use the Cookie Editor extension or the Application/Storage tab for this one — "
+                "the cookie lives on a page Steam immediately redirects you away from, so they can't "
+                "show it.)"
+            ),
+            (
+                "Now go to https://store.steampowered.com/login/ and sign back in. IMPORTANT: "
+                "tick the \"Remember me\" checkbox BEFORE you click Sign in."
+            ),
+            (
+                "In the Network list you'll now see requests to login.steampowered.com. Click one of "
+                "them (a row marked 302, or one named \"finalizelogin\", both work), then open its "
+                "\"Cookies\" sub-tab."
+            ),
+            (
+                "Scroll to find steamRefresh_steam (it appears under \"Request Cookies\" or "
+                "\"Response Cookies\"). Right-click its value and choose \"Copy Value\". It's a long "
+                "string. (If you don't see it, make sure \"Preserve log\" is ticked and redo the "
+                "sign-in with the Network tab already open.)"
+            ),
+            (
+                "Paste that value straight into the box below — just the value on its own, no quotes "
+                "and no JSON formatting needed — then click Save."
+            ),
         ),
         required_cookie="steamRefresh_steam",
     ),
@@ -162,12 +186,16 @@ INGEST_PROVIDERS: dict[str, IngestProvider] = {
             "to redo this often. Use the \"steam_refresh\" option instead if you can."
         ),
         steps=(
-            "In your browser, open https://store.steampowered.com/account/ and make "
-            "sure you are signed in. Check the address bar says store.steampowered.com "
-            "— NOT steamcommunity.com. Steam uses different cookies for each, and only "
-            "the store one works here.",
-            "Click the Cookie Editor extension icon (install \"Cookie Editor\" first if "
-            "needed). Confirm you can see a cookie named steamLoginSecure in the list.",
+            (
+                "In your browser, open https://store.steampowered.com/account/ and make "
+                "sure you are signed in. Check the address bar says store.steampowered.com "
+                "— NOT steamcommunity.com. Steam uses different cookies for each, and only "
+                "the store one works here."
+            ),
+            (
+                "Click the Cookie Editor extension icon (install \"Cookie Editor\" first if "
+                "needed). Confirm you can see a cookie named steamLoginSecure in the list."
+            ),
             "Click Export to copy all cookies as JSON.",
             "Paste what was copied into the box below and click Save.",
         ),
@@ -184,15 +212,23 @@ INGEST_PROVIDERS: dict[str, IngestProvider] = {
             "separate: that's the \"nintendo\" option."
         ),
         steps=(
-            "Click the \"Sign in to Nintendo\" button below. It opens Nintendo's "
-            "own login page in a new tab.",
-            "Sign in with the Nintendo account your console is registered to for "
-            "Parental Controls.",
-            "You'll land on a \"Select this person\" screen. Do NOT left-click that "
-            "button — RIGHT-click it and choose \"Copy link address\" (Chrome/Edge) "
-            "or \"Copy Link\" (Firefox/Safari).",
-            "Come back to this tab and paste the copied link — it starts with npf — "
-            "into the box below, then click Save.",
+            (
+                "Click the \"Sign in to Nintendo\" button below. It opens Nintendo's "
+                "own login page in a new tab."
+            ),
+            (
+                "Sign in with the Nintendo account your console is registered to for "
+                "Parental Controls."
+            ),
+            (
+                "You'll land on a \"Select this person\" screen. Do NOT left-click that "
+                "button — RIGHT-click it and choose \"Copy link address\" (Chrome/Edge) "
+                "or \"Copy Link\" (Firefox/Safari)."
+            ),
+            (
+                "Come back to this tab and paste the copied link — it starts with npf — "
+                "into the box below, then click Save."
+            ),
         ),
         prepare_name="prepare_nintendo_pctl_login",
         login_link_label="Sign in to Nintendo",

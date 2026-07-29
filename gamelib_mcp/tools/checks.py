@@ -27,7 +27,7 @@ import json
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastmcp.exceptions import ToolError
@@ -1285,7 +1285,7 @@ _SNAPSHOT_EXEMPT_PLATFORMS = frozenset({"switch2"})
 
 async def _run_sync_staleness(*, apply: bool, options: dict[str, Any]) -> CheckOutcome:
     stale_days = options.get("stale_days", 7)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     async with get_db() as db:
         placeholders = ",".join("?" for _ in SYNCABLE_PLATFORMS)
@@ -1310,7 +1310,7 @@ async def _run_sync_staleness(*, apply: bool, options: dict[str, Any]) -> CheckO
                 stale = True
             else:
                 if last_synced_dt.tzinfo is None:
-                    last_synced_dt = last_synced_dt.replace(tzinfo=timezone.utc)
+                    last_synced_dt = last_synced_dt.replace(tzinfo=UTC)
                 age_days = (now - last_synced_dt).total_seconds() / 86400
                 stale = age_days > stale_days
         if stale:
@@ -1918,7 +1918,7 @@ async def run_library_checks(
             check_findings, extras = await spec.runner(
                 apply=check_id in apply_ids, options=check_options.get(check_id, {})
             )
-        except Exception as exc:  # per-check isolation: one bad check never kills the run
+        except Exception as exc:  # noqa: BLE001 - per-check isolation: one bad check never kills the run
             errors.append({"check": check_id, "error": str(exc)})
             continue
 

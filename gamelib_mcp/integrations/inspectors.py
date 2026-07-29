@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict
 
@@ -63,8 +63,8 @@ def _steam_purchase_session_check() -> tuple[CheckStatus, CapabilityStatus, str 
     if token:
         exp = _decode_jwt_claims(token).get("exp")
         if isinstance(exp, (int, float)):
-            expires = datetime.fromtimestamp(exp, tz=timezone.utc)
-            if expires > datetime.now(timezone.utc):
+            expires = datetime.fromtimestamp(exp, tz=UTC)
+            if expires > datetime.now(UTC):
                 until = expires.date().isoformat()
                 return (
                     CheckStatus("steam_purchase_session", "pass", f"refresh token valid until {until}"),
@@ -78,8 +78,10 @@ def _steam_purchase_session_check() -> tuple[CheckStatus, CapabilityStatus, str 
             return (
                 CheckStatus("steam_purchase_session", "warn", "refresh token expired"),
                 CapabilityStatus("purchases", "stale", "Steam refresh token expired — re-export it."),
-                'Run create_session_ingest_link(provider="steam_refresh") and paste a fresh '
-                "steamRefresh_steam export from login.steampowered.com.",
+                (
+                    'Run create_session_ingest_link(provider="steam_refresh") and paste a fresh '
+                    "steamRefresh_steam export from login.steampowered.com."
+                ),
             )
         return (
             CheckStatus("steam_purchase_session", "pass", "refresh token stored (expiry not decodable)"),
@@ -108,8 +110,10 @@ def _steam_purchase_session_check() -> tuple[CheckStatus, CapabilityStatus, str 
             "unconfigured",
             'Purchase import & license audit need a Steam session (provider="steam_refresh").',
         ),
-        'Run create_session_ingest_link(provider="steam_refresh") to enable Steam purchase '
-        "import & license audit.",
+        (
+            'Run create_session_ingest_link(provider="steam_refresh") to enable Steam purchase '
+            "import & license audit."
+        ),
     )
 
 
@@ -539,9 +543,11 @@ def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus
         required_inputs=["NINTENDO_COOKIES_FILE"],
         detected_inputs=[],
         remediation_steps=[
-            "Mount a NINTENDO_COOKIES_FILE for ownership sync (create_session_ingest_link(provider=\"nintendo\")), "
-            "and/or set NINTENDO_PCTL_SESSION_FILE for playtime "
-            "(create_session_ingest_link(provider=\"nintendo_pctl\")).",
+            (
+                "Mount a NINTENDO_COOKIES_FILE for ownership sync (create_session_ingest_link(provider=\"nintendo\")), "
+                "and/or set NINTENDO_PCTL_SESSION_FILE for playtime "
+                "(create_session_ingest_link(provider=\"nintendo_pctl\"))."
+            ),
         ],
         last_sync=last_sync or {},
     )
@@ -669,7 +675,7 @@ def _safe_inspect(
 ) -> IntegrationStatus:
     try:
         return inspector(last_sync)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - isolation boundary: any failure becomes an error record
         return IntegrationStatus(
             platform=platform,
             overall_status="error",
