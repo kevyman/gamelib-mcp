@@ -820,11 +820,11 @@ async def check_library(
     - nesting: nesting.dangling_parent, nesting.misclassified,
       nesting.phantom_parent, nesting.superseded_base
     - ownership: ownership.dlc_without_base, ownership.license_gap,
-      ownership.orphan
+      ownership.orphan, ownership.unseen_in_source
     - playtime: playtime.farming, playtime.orphan_switch_summary,
       playtime.snapshot_regression
     - spend: spend.duplicate_purchase, spend.price_anomaly
-    - sync: sync.staleness
+    - sync: sync.platform_error, sync.staleness
     - wishlist: wishlist.already_owned
 
     Three facts you need before calling, which the catalog also carries:
@@ -838,8 +838,9 @@ async def check_library(
       stored Steam session.
     - OPTIONS (per-check, via options={"<id>": {...}}): playtime.farming takes
       threshold_hours/min_games_per_day; sync.staleness takes stale_days;
-      extid.igdb_drift takes include_edition_suffix; nesting.misclassified
-      takes probe_steam/probe_offset; several take limit.
+      sync.platform_error takes stale_hours; ownership.unseen_in_source takes
+      min_missed_syncs; extid.igdb_drift takes include_edition_suffix;
+      nesting.misclassified takes probe_steam/probe_offset; several take limit.
 
     Selection: `checks` accepts full ids and/or category prefixes (e.g.
     "identity", "nesting.misclassified") — None (default) selects every
@@ -1108,6 +1109,7 @@ async def add_game_to_platform(
     purchase_source: str | None = None,
     bundle_name: str | None = None,
     delisted: bool | None = None,
+    unowned_at: str | None = None,
     items: list[dict] | None = None,
     dry_run: bool = False,
 ) -> AddGameToPlatformResponse:
@@ -1139,6 +1141,19 @@ async def add_game_to_platform(
     set_playtime(clear=["delisted"]). Returns game_platform_id when owned,
     wishlist_id when not (the other is null); either call also clears a
     matching wishlist entry that's now fulfilled.
+
+    unowned_at (owned=True only) records that ownership ENDED — a refund, a
+    revoked key, a lapsed subscription title (Game Pass / PS+ / Humble Choice).
+    Pass the date it ended (YYYY / YYYY-MM / YYYY-MM-DD): the EXISTING
+    ownership row flips to owned=0 and keeps its acquisition history,
+    identifiers, and playtime, so it drops out of spending, duplication, and
+    platform counts (every aggregate filters owned=1) without the collateral
+    damage of delete_game, which cascades every other platform's playtime away
+    with it. It requires a platform row that already exists — this never mints
+    one — and it is NOT owned=False, which records a wishlist entry. The flag
+    is pinned as a manual override so a source that keeps listing the title
+    (Xbox ownership is title history) can't re-own it; pass unowned_at="none"
+    to undo the whole thing when you buy the game again.
 
     Pass `items` (max 200) — a list taking exactly the parameters above — to
     add many at once. created then counts items that minted a brand-new game
@@ -1174,6 +1189,7 @@ async def add_game_to_platform(
         purchase_source,
         bundle_name,
         delisted,
+        unowned_at,
         dry_run=dry_run,
     )
 
@@ -1331,15 +1347,18 @@ async def set_acquisition(
 
     clear lists acquisition columns to reset to NULL (acquired_at, price_paid,
     price_currency, purchase_source, bundle_name); a column cannot be set and
-    cleared in the same call. If the game has no row on that platform yet, one
+    cleared in the same call. It is also valid as a per-item key in `items`
+    mode, which is the only way to PREVIEW a clear (dry_run is items-only) and
+    the way to undo a bad import in bulk — a clear always writes, in fill-only
+    mode too, and an item may carry nothing but clear. If the game has no row on that platform yet, one
     is created (owned) and platform_row_created=true is returned; pass
     create_platform_row=False to report it instead. Acquisition columns are only
     ever written by these tools — library syncs never touch them. Returns the
     row's full post-write acquisition state.
 
     Pass `items` (max 200) for bulk import of a purchase history. Each item is
-    {name or game_id, platform, plus any of the fields above} with the same
-    validation and vocabulary. An item may also carry identifier_type +
+    {name or game_id, platform, plus any of the fields above, optionally
+    clear=[...]} with the same validation and vocabulary. An item may also carry identifier_type +
     identifier_value (both or neither — e.g. steam_appid, gog_product_id): the
     store identifier resolves exactly even when the item's name differs from
     the library title, falling back to game_id/name. An item may also carry
@@ -1432,13 +1451,15 @@ async def set_playtime(
     a wrong or missing playtime, or to record hours for a platform that reports
     none (GOG, sometimes Xbox).
 
-    clear lists column name(s) — playtime_minutes, last_played, delisted — to
-    hand back to automatic sync: it removes the override so the next sync
+    clear lists column name(s) — playtime_minutes, last_played, delisted, owned
+    — to hand back to automatic sync: it removes the override so the next sync
     repopulates the column, without changing the stored value (same semantics as
-    update_game's clear_overrides). It covers all three pinnable game_platforms
-    columns, including delisted, which is SET by add_game_to_platform rather
-    than here — this is its release path. A column cannot be set and cleared in
-    the same call. If the
+    update_game's clear_overrides). It covers all four pinnable game_platforms
+    columns, including delisted and owned, which are SET by add_game_to_platform
+    (delisted=… / unowned_at=…) rather than here — this is their release path.
+    Clearing "owned" leaves the row unowned until a sync re-owns it; to restore
+    ownership right away use add_game_to_platform(unowned_at="none"). A column
+    cannot be set and cleared in the same call. If the
     game has no row on that platform yet, one is created (owned) and
     platform_row_created=true is returned; pass create_platform_row=False to
     error instead.

@@ -40,7 +40,11 @@ from ..data.psn import sync_psn  # noqa: F401
 from ..data.steam_xml import fetch_library  # noqa: F401
 from ..data.title_normalization import normalize_search_text
 from ..data.xbox import sync_xbox  # noqa: F401
-from ..lifecycle import _schedule_background_enrich, get_startup_refresh_task
+from ..lifecycle import (
+    _schedule_background_enrich,
+    get_startup_refresh_task,
+    record_platform_sync_outcome,
+)
 from ..platforms_registry import WISHLIST_SYNCABLE_PLATFORMS, resolve_platform_functions
 from .batch import apply_batch_item, check_batch_items, count_status
 from .common import PLATFORM_ALIASES, SYNCABLE_PLATFORMS, report_progress
@@ -50,22 +54,27 @@ logger = logging.getLogger(__name__)
 
 
 async def _mark_sync_started(targets: set[str]) -> None:
-    """Mark the overall sync in-progress and each selected platform running."""
+    """Mark the overall sync in-progress and each selected platform running.
+
+    Clearing each target's recorded error is part of entering "running": the
+    error field describes the run the state names, and a platform that is
+    running has no outcome yet. Leaving the last run's message in place is how
+    a successful retry could still be read as a failure mid-run.
+    """
     from ..data.db import set_meta_many
 
+    started_at = datetime.now(UTC).isoformat()
     updates: dict[str, str | None] = {
         "library_sync_status": "in_progress",
-        "library_sync_started_at": datetime.now(UTC).isoformat(),
+        "library_sync_started_at": started_at,
         "library_sync_finished_at": None,
     }
     for name in targets:
         updates[f"sync_platform_state_{name}"] = "running"
+        updates[f"integration_sync_{name}_last_attempt_at"] = started_at
+        updates[f"integration_sync_{name}_last_error_summary"] = None
+        updates[f"integration_sync_{name}_last_error_classification"] = None
     await set_meta_many(updates)
-
-
-async def _mark_platform_state(name: str, state: str) -> None:
-    from ..data.db import set_meta
-    await set_meta(f"sync_platform_state_{name}", state)
 
 
 async def run_library_sync(
@@ -127,13 +136,20 @@ async def run_library_sync(
         results: dict = {}
         for index, ((name, _), outcome) in enumerate(zip(selected, outcomes, strict=True), start=1):
             result_name = result_names.get(name, name)
+            finished_at = datetime.now(UTC).isoformat()
             if isinstance(outcome, BaseException):
-                results[result_name] = {"error": str(outcome)}
-                await _mark_platform_state(name, "error")
+                payload = {"error": str(outcome)}
+                results[result_name] = payload
+                # Record this platform's own outcome (state + error + success
+                # time) now rather than after the whole run, so a poll between
+                # platforms never pairs a fresh state with a stale error.
+                await record_platform_sync_outcome(name, payload, finished_at)
                 await _info(ctx, f"Failed {result_name} refresh: {outcome}")
             else:
                 results[result_name] = outcome
-                await _mark_platform_state(name, "done")
+                await record_platform_sync_outcome(
+                    name, outcome if isinstance(outcome, dict) else {}, finished_at
+                )
                 try:
                     history_rows = await record_play_history_snapshots(name)
                 except Exception:
@@ -299,8 +315,17 @@ async def get_sync_status() -> dict:
     Report the current/last library sync: overall state plus per-platform state.
 
     status is "in_progress" while a sync runs, else "idle". Each syncable
-    platform reports state (pending/running/done/error), its last success time,
-    and the last error summary if any. Poll this after calling refresh_library.
+    platform reports state (pending/running/done/error/unconfigured), its last
+    success time, and the last error summary if any. Poll this after calling
+    refresh_library.
+
+    Each platform's state and error always describe the SAME run: entering
+    "running" clears the previous error, and the outcome is recorded when that
+    platform finishes rather than when the whole run does. "done" therefore
+    means this platform is finished even while the overall status is still
+    in_progress (other platforms, the license audit, and background enrichment
+    can outlast it). "unconfigured" means the integration has never been set up
+    — the error names what is missing, and last_success_at is null.
     """
     from ..data.db import get_meta, get_meta_prefix
 
@@ -313,10 +338,21 @@ async def get_sync_status() -> dict:
 
     platforms: dict[str, dict] = {}
     for name in sorted(SYNCABLE_PLATFORMS):
+        state = state_keys.get(f"sync_platform_state_{name}", "pending")
+        error = integ.get(f"integration_sync_{name}_last_error_summary")
+        # Heals rows recorded before "unconfigured" existed: a platform whose
+        # last failure was a missing-credential one is not "done".
+        if (
+            state == "done"
+            and error
+            and integ.get(f"integration_sync_{name}_last_error_classification")
+            == "missing_configuration"
+        ):
+            state = "unconfigured"
         platforms[name] = {
-            "state": state_keys.get(f"sync_platform_state_{name}", "pending"),
+            "state": state,
             "last_success_at": integ.get(f"integration_sync_{name}_last_success_at"),
-            "error": integ.get(f"integration_sync_{name}_last_error_summary"),
+            "error": error,
         }
 
     return {

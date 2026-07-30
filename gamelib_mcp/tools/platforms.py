@@ -40,6 +40,7 @@ from ..data.db import (
     resolve_parent_game,
     set_meta,
     set_platform_acquisition,
+    set_platform_ownership,
     upsert_game,
     upsert_game_platform,
     upsert_game_platform_identifier,
@@ -52,6 +53,7 @@ from ..data.tag_synonyms import canonical_tag
 # Safe direction: acquisition.py never imports this module at top level (it
 # lazy-imports _resolve_game_row inside functions), so importing its validator
 # helpers here cannot form a cycle.
+from .acquisition import _validate_acquired_at
 from .acquisition import _validated_fields as _validated_acquisition_fields
 from .batch import apply_batch_item, check_batch_items, count_status
 from .common import (
@@ -264,6 +266,7 @@ async def add_game_to_platform(
     purchase_source: str | None = None,
     bundle_name: str | None = None,
     delisted: bool | None = None,
+    unowned_at: str | None = None,
     *,
     dry_run: bool = False,
 ) -> dict:
@@ -306,6 +309,18 @@ async def add_game_to_platform(
         game_platforms row, so neither the Steam sync nor the license audit
         flips it back; hand it back to sync with
         set_playtime(clear=["delisted"]).
+    unowned_at: record that ownership on this platform ENDED — a refund, a
+        revoked key, or a lapsed subscription title. Takes the date it ended
+        (YYYY / YYYY-MM / YYYY-MM-DD) and flips the EXISTING ownership row to
+        owned=0, keeping its acquisition history, identifiers, and playtime
+        (delete_game would cascade every other platform away). Every aggregate
+        already filters owned=1, so the row stops counting toward spending,
+        duplication, and platform counts the moment it is stamped. Requires
+        owned=True and an existing platform row — this never mints one, and it
+        is not a wishlist entry (owned=False is). It pins `owned` as a manual
+        override so a source that keeps listing the title can't re-own it; pass
+        unowned_at="none" to undo (clears the stamp, restores owned=1, releases
+        the pin) when you buy it again.
     """
     if platform is None:
         raise ToolError("platform is required")
@@ -333,6 +348,18 @@ async def add_game_to_platform(
             "delisted requires owned=True — it describes a platform-ownership "
             "row, which a wishlist entry (owned=False) has none of"
         )
+    if not owned and unowned_at is not None:
+        raise ToolError(
+            "unowned_at requires owned=True — it retires an EXISTING ownership "
+            "row (refund/revoked key/lapsed subscription). owned=False records "
+            "a wishlist entry instead, which is a different thing entirely"
+        )
+    # "none" is the release sentinel (as on update_game's completion_status),
+    # so it has to be recognized before the date validator sees it.
+    restore_ownership = isinstance(unowned_at, str) and unowned_at.strip().lower() == "none"
+    unowned_stamp: str | None = None
+    if unowned_at is not None and not restore_ownership:
+        unowned_stamp = _validate_acquired_at(str(unowned_at), "unowned_at")
     # Validate before any write so a bad price/source/date leaves no partial row.
     acquisition_fields = _validated_acquisition_fields(*acquisition_params)
     if not owned:
@@ -361,6 +388,29 @@ async def add_game_to_platform(
             )
     created = existing is None
 
+    # unowned_at edits an ownership row that must already exist. Minting a game
+    # (or a platform row) only to immediately mark it un-owned would record a
+    # purchase that never happened — a typo'd name has to be an error here, not
+    # a phantom row, which is the one place this tool's mint-on-miss behavior
+    # would actively corrupt the spend/duplication picture it is fixing.
+    existing_platform_row = None
+    if unowned_at is not None:
+        if existing is not None:
+            async with get_db() as db:
+                existing_platform_row = await db.execute_fetchone(
+                    "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",
+                    (existing["id"], platform),
+                )
+        if existing_platform_row is None:
+            raise ToolError(
+                f"unowned_at needs an existing {platform} ownership row to retire"
+                + (
+                    f" — no game matches '{name}'"
+                    if existing is None
+                    else f" — '{name}' has no {platform} row"
+                )
+            )
+
     if dry_run:
         # Same validation path as the wet run, no writes. A to-be-created game
         # reports game_id null (matching set_acquisitions_batch's convention);
@@ -384,11 +434,14 @@ async def add_game_to_platform(
             "wishlist_id": None,
             "name": name,
             "platform": platform,
-            "owned": owned,
+            "owned": owned and (unowned_at is None or restore_ownership),
             "playtime_minutes": playtime_minutes if owned else None,
             "identifier": identifier,
             "acquisition": acquisition_fields or None,
             "delisted": delisted,
+            # Previewed post-write ownership: a restore ("none") reports null,
+            # a retirement reports the stamp the wet run would write.
+            "unowned_at": None if restore_ownership else unowned_stamp,
         }
 
     # An id target resolved above; a name target adopts an exact-name row or
@@ -400,6 +453,7 @@ async def add_game_to_platform(
         game_id = await upsert_game(None, name)
     added_identifier = None
     acquisition = None
+    resulting_unowned_at: str | None = None
     if owned:
         game_platform_id = await upsert_game_platform(
             game_id,
@@ -418,6 +472,15 @@ async def add_game_to_platform(
             await apply_manual_platform_fields(
                 game_platform_id, {"delisted": int(bool(delisted))}
             )
+        if unowned_at is not None:
+            # Runs AFTER the upsert above (which re-asserts owned=1 on an
+            # unpinned row): retire last so the row ends the call unowned.
+            ownership = await set_platform_ownership(
+                game_platform_id,
+                owned=restore_ownership,
+                unowned_at=unowned_stamp,
+            )
+            resulting_unowned_at = ownership["unowned_at"]
         wishlist_id = None
         if identifier_type and identifier_value:
             await upsert_game_platform_identifier(
@@ -447,12 +510,16 @@ async def add_game_to_platform(
         "game_platform_id": game_platform_id,
         "wishlist_id": wishlist_id,
         "name": name,
+        # The row's resulting ownership, not the parameter: an unowned_at
+        # retirement ends the call with owned=0 even though owned=True was
+        # required to get here.
+        "owned": owned and resulting_unowned_at is None,
         "platform": platform,
-        "owned": owned,
         "playtime_minutes": playtime_minutes if owned else None,
         "identifier": added_identifier,
         "acquisition": acquisition,
         "delisted": delisted,
+        "unowned_at": resulting_unowned_at,
     }
 
 
@@ -893,11 +960,14 @@ async def set_playtime(
     on the game_platforms row, so later platform syncs (Steam, PSN, Xbox, Epic,
     Nintendo) will NOT overwrite it — unlike add_game_to_platform, whose value
     the next sync clobbers. clear lists column name(s) (playtime_minutes,
-    last_played, delisted) to hand back to automatic sync: it removes the
+    last_played, delisted, owned) to hand back to automatic sync: it removes the
     override so the next sync repopulates the column, and does not change the
     stored value (the same semantics as update_game's clear_overrides).
-    "delisted" is pinned by add_game_to_platform(delisted=...) rather than here,
-    but this is its un-pin path. A missing game_platforms row is created
+    "delisted" and "owned" are pinned by add_game_to_platform(delisted=...) and
+    add_game_to_platform(unowned_at=...) rather than here, but this is their
+    un-pin path — note that clearing "owned" leaves the row unowned until some
+    sync re-owns it, whereas add_game_to_platform(unowned_at="none") restores
+    ownership immediately. A missing game_platforms row is created
     (owned=1) unless create_platform_row=False.
 
     Note: a pinned playtime feeds get_play_history like any other — the next
@@ -1255,6 +1325,7 @@ _ADD_BATCH_ITEM_KEYS = frozenset({
     "name", "game_id", "platform", "identifier_type", "identifier_value",
     "playtime_minutes", "owned", "acquired_at", "price_paid",
     "price_currency", "purchase_source", "bundle_name", "delisted",
+    "unowned_at",
 })
 
 

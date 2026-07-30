@@ -392,6 +392,19 @@ def _platform_dict(row: aiosqlite.Row) -> dict:
         # delisted) — see audit_steam_licenses. Tolerates rows selected before
         # the v32 column existed (tests build these dicts by hand).
         "delisted": bool(row["delisted"]) if "delisted" in row else False,
+        # Ownership that ENDED (refund / revoked key / lapsed subscription) —
+        # the row survives for its acquisition history but owned is 0, so every
+        # aggregate drops it. NULL on a normally-owned row. last_seen_in_source
+        # is the last sync the platform's own source actually returned this row
+        # (NULL = never, e.g. hand-added); see schema.py's v34 note. Both
+        # tolerate rows selected before the v34 columns existed.
+        # The SIM401 suppressions below: sqlite3.Row has no .get(), so the
+        # membership test IS the only way to write this — ruff's suggested
+        # rewrite would crash at runtime.
+        "unowned_at": row["unowned_at"] if "unowned_at" in row else None,  # noqa: SIM401
+        "last_seen_in_source": (
+            row["last_seen_in_source"] if "last_seen_in_source" in row else None  # noqa: SIM401
+        ),
         "playtime_minutes": playtime_minutes,
         "playtime_hours": round((playtime_minutes or 0) / 60, 1),
         "playtime_2weeks_minutes": playtime_2weeks_minutes,
@@ -452,6 +465,8 @@ async def load_platforms_for_games(game_ids: Iterable[int]) -> dict[int, list[di
                        gp.platform,
                        gp.owned,
                        gp.delisted,
+                       gp.unowned_at,
+                       gp.last_seen_in_source,
                        gp.playtime_minutes,
                        gp.playtime_2weeks_minutes,
                        gp.last_played,

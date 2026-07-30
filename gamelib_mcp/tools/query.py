@@ -87,7 +87,26 @@ TABLE_ANNOTATIONS: dict[str, dict] = {
             "game_wishlist, a separate table by design)."
         ),
         "columns": {
-            "owned": "1 = actually owned on this platform. A row can exist with owned=0 (a manual stub) — filter owned=1 for real ownership.",
+            "owned": (
+                "1 = actually owned on this platform. A row can exist with "
+                "owned=0 (a manual stub, or ownership that ENDED — see "
+                "unowned_at) — filter owned=1 for real ownership."
+            ),
+            "unowned_at": (
+                "Set when ownership ended: a refund, a revoked key, or a lapsed "
+                "subscription title. The row survives (with owned=0) so its "
+                "acquisition history does too, which is why every spend/count "
+                "query must filter owned=1 rather than assume a row means "
+                "ownership. Written only by add_game_to_platform(unowned_at=…)."
+            ),
+            "last_seen_in_source": (
+                "Last sync in which the platform's OWN source returned this row "
+                "— not last_synced, which any write touches. NULL = never seen "
+                "in a source (hand-added, or predating the column). A row the "
+                "source stopped returning is a refund/delisting CANDIDATE, "
+                "never a conclusion: check_library's ownership.unseen_in_source "
+                "reports it."
+            ),
             "platform": (
                 "Canonical values (see platforms_registry.py): steam, epic, gog, "
                 "switch2, ps5, xbox, itchio, ea, ubisoft, other. NOTE: it's "
@@ -116,8 +135,9 @@ TABLE_ANNOTATIONS: dict[str, dict] = {
             "bundle_name": "Set when acquired as part of a multi-game bundle (split_bundle_acquisition).",
             "acquired_at": "ISO date/timestamp the copy was acquired, where known.",
             "manual_overrides": (
-                "JSON array of column names pinned via set_playtime (playtime_minutes, "
-                "last_played) — the sync write paths skip these. "
+                "JSON array of column names pinned by hand (playtime_minutes/"
+                "last_played via set_playtime; delisted and owned via "
+                "add_game_to_platform) — the sync write paths skip these. "
                 "e.g. json_each(gp.manual_overrides)."
             ),
             "last_played": "Cross-platform per-platform ISO date (YYYY-MM-DD), best-effort.",

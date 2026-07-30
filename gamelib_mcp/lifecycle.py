@@ -13,6 +13,7 @@ one-way edge ``tools.admin -> lifecycle`` with no import cycle.
 """
 
 import asyncio
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -115,6 +116,82 @@ def build_platform_sync_metadata(refresh_result: dict, finished_at: str) -> dict
             metadata[f"{prefix}_last_success_at"] = finished_at
 
     return metadata
+
+
+# Per-platform sync states reported by get_sync_status. "unconfigured" exists so
+# a platform that has never been set up (no OPENXBL_API_KEY, no GOG session)
+# stops reporting "done" beside an error and a null last_success_at — that shape
+# read as a failure of a working integration.
+SYNC_STATE_DONE = "done"
+SYNC_STATE_ERROR = "error"
+SYNC_STATE_UNCONFIGURED = "unconfigured"
+
+# How many successful sync timestamps to remember per platform. Read by
+# check_library's ownership.unseen_in_source, which needs "the Nth most recent
+# SUCCESSFUL sync" to tell a row the source has stopped returning apart from one
+# that simply hasn't been synced since — a failed run must never count.
+SYNC_SUCCESS_HISTORY_KEY = "sync_success_history_"
+SYNC_SUCCESS_HISTORY_LIMIT = 10
+
+
+def platform_sync_state(payload: dict) -> str:
+    """Classify one platform's sync payload into a get_sync_status state."""
+    error = _platform_sync_error_summary(payload)
+    if not error:
+        return SYNC_STATE_DONE
+    if _platform_sync_error_classification(payload, error) == "missing_configuration":
+        return SYNC_STATE_UNCONFIGURED
+    return SYNC_STATE_ERROR
+
+
+async def record_platform_sync_outcome(
+    platform: str, payload: dict, finished_at: str
+) -> str:
+    """Persist one platform's outcome the moment ITS sync finishes; return its state.
+
+    Previously every platform's integration_sync_* keys were written in one
+    batch after the whole run (including the license audit, farmed detection and
+    the enrichment drain), so a caller polling in between saw a platform already
+    marked "done" next to the PREVIOUS run's error and last_success_at — which
+    reads as "the retry failed again". Writing per platform closes that window:
+    error and state always describe the same run.
+    """
+    from .data.db import get_meta, set_meta_many
+
+    updates: dict[str, str | None] = dict(
+        build_platform_sync_metadata({platform: payload}, finished_at)
+    )
+    state = platform_sync_state(payload)
+    updates[f"sync_platform_state_{platform}"] = state
+
+    if state == SYNC_STATE_DONE:
+        key = f"{SYNC_SUCCESS_HISTORY_KEY}{platform}"
+        try:
+            history = json.loads(await get_meta(key) or "[]")
+        except ValueError:
+            history = []
+        if not isinstance(history, list):
+            history = []
+        # Newest first, capped — a rolling window, not an audit log.
+        history = [finished_at, *history][:SYNC_SUCCESS_HISTORY_LIMIT]
+        updates[key] = json.dumps(history)
+
+    await set_meta_many(updates)
+    return state
+
+
+async def successful_sync_history(platform: str) -> list[str]:
+    """Recent successful-sync timestamps for one platform, newest first."""
+    from .data.db import get_meta
+
+    raw = await get_meta(f"{SYNC_SUCCESS_HISTORY_KEY}{platform}")
+    try:
+        history = json.loads(raw or "[]")
+    except ValueError:
+        return []
+    if not isinstance(history, list):
+        return []
+    return [entry for entry in history if isinstance(entry, str)]
 
 
 # ── Per-event-loop locks ─────────────────────────────────────────────────────
@@ -474,7 +551,6 @@ async def lifespan(app):
         # Seed hardware preference from env if not yet set
         hw_pref_env = os.getenv("HARDWARE_PREFERENCE")
         if hw_pref_env and not await get_meta("hardware_preference"):
-            import json
             await set_meta("hardware_preference", json.dumps(hw_pref_env.split(",")))
             logger.info("Seeded hardware_preference from HARDWARE_PREFERENCE env var")
 

@@ -247,6 +247,7 @@ async def sync_gog() -> dict:
             platform="gog",
             playtime_minutes=None,
             owned=1,
+            from_source=True,
         )
 
         if igdb_game is not None and igdb_platform_id in igdb_game.platform_release_dates:

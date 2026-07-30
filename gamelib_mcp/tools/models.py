@@ -392,6 +392,10 @@ class AddGameToPlatformResponse(BatchEnvelope):
     # Echoes the delisted flag when one was passed (owned=True only); null
     # means the column was left to sync/the license audit.
     delisted: bool | None = None
+    # The row's ownership-ended stamp after the call (refund/revoked key/lapsed
+    # subscription). Null on every ordinary add, and after unowned_at="none"
+    # restores ownership.
+    unowned_at: str | None = None
 
 
 

@@ -386,6 +386,7 @@ async def _sync_nintendo_ownership() -> dict:
             platform=PLATFORM,
             playtime_minutes=entry["playtime_minutes"],
             owned=1,
+            from_source=True,
         )
 
         if igdb_game is not None and igdb_platform_id:

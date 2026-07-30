@@ -345,6 +345,7 @@ class SyncXboxTests(unittest.TestCase):
             platform="xbox",
             playtime_minutes=300,
             owned=1,
+            from_source=True,
         )
         mock_enrichment.assert_not_called()
 
@@ -375,6 +376,7 @@ class SyncXboxTests(unittest.TestCase):
             platform="xbox",
             playtime_minutes=300,
             owned=1,
+            from_source=True,
         )
 
     def test_sync_xbox_skips_titleless_entries(self):
@@ -401,6 +403,7 @@ class SyncXboxTests(unittest.TestCase):
             platform="xbox",
             playtime_minutes=None,
             owned=1,
+            from_source=True,
         )
 
     def _run_sync_capturing_fetch_args(self, env):

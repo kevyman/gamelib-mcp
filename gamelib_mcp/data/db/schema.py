@@ -978,6 +978,36 @@ _V33_SCHEMA_DDL = (
 """
 )
 
+# v34 adds the two ownership-lifecycle columns on game_platforms:
+#
+#   unowned_at — ownership on this platform ENDED (a refund, a revoked key, a
+#   lapsed subscription title). The row is kept, with owned=0, so the spend /
+#   duplication / platform-count aggregates (all of which already filter
+#   owned=1) drop it while its acquisition history survives. Deleting the game
+#   was the only prior remedy and it cascades every OTHER platform's playtime
+#   away with it. Written only by add_game_to_platform(unowned_at=…), which
+#   also pins `owned` in manual_overrides so a source that keeps listing the
+#   title (Xbox ownership is title HISTORY, which never forgets) can't silently
+#   re-own it.
+#
+#   last_seen_in_source — the last sync that actually RETURNED this row from
+#   the platform's own source, as opposed to last_synced, which any write to
+#   the row touches. The two answer different questions: a row not returned
+#   this run is not evidence of a refund (a dropped page in the source's
+#   pagination looks identical), so nothing acts on this column automatically —
+#   check_library's ownership.unseen_in_source reports rows the source has
+#   stopped returning across N consecutive SUCCESSFUL syncs and leaves the call
+#   to a human. NULL = never seen in a source: a hand-added row, or any row
+#   predating this column (deliberately not backfilled — stamping every
+#   existing row would assert evidence no sync ever produced).
+_V34_SCHEMA_DDL = _V33_SCHEMA_DDL.replace(
+    "        delisted         INTEGER NOT NULL DEFAULT 0,\n        UNIQUE(game_id, platform)",
+    "        delisted         INTEGER NOT NULL DEFAULT 0,\n"
+    "        unowned_at       TEXT,\n"
+    "        last_seen_in_source TEXT,\n"
+    "        UNIQUE(game_id, platform)",
+)
+
 # Semantic views backing query_library()/get_db_schema() — NOT part of the
 # versioned schema chain (like _FTS_DDL below). Dropped and recreated on every
 # migrate_db run via _sync_query_views so a view definition change deploys on

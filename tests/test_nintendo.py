@@ -117,6 +117,7 @@ class SyncNintendoTests(unittest.TestCase):
             platform="switch2",
             playtime_minutes=None,
             owned=1,
+            from_source=True,
         )
         mock_upsert_identifier.assert_awaited_once_with(99, nintendo.NINTENDO_TITLE_ID, "0100a5c00d9a2000")
         mock_enrichment.assert_not_called()
@@ -248,6 +249,7 @@ class SyncNintendoTests(unittest.TestCase):
             platform="switch2",
             playtime_minutes=None,
             owned=1,
+            from_source=True,
         )
         mock_upsert_identifier.assert_awaited_once_with(99, nintendo.NINTENDO_TITLE_ID, "0101")
 

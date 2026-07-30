@@ -20,6 +20,7 @@ from . import (
     _iter_chunks,
     get_db,
     normalize_identifier_value,
+    retry_on_write_contention,
 )
 
 logger = logging.getLogger(__name__)
@@ -117,15 +118,20 @@ async def remove_manual_overrides(game_id: int, columns) -> set[str]:
 
 
 # game_platforms columns a user may pin by hand (set_playtime for the playtime
-# pair, add_game_to_platform for delisted). Unlike the ACQUISITION_FIELDS below,
-# these ARE written by platform syncs, so pinning one records it in
-# game_platforms.manual_overrides and the sync write paths
+# pair, add_game_to_platform for delisted and owned). Unlike the
+# ACQUISITION_FIELDS below, these ARE written by platform syncs, so pinning one
+# records it in game_platforms.manual_overrides and the sync write paths
 # (upsert_game_platform, bulk_upsert_steam_library, set_steam_delisted) skip a
 # protected column. set_playtime(clear=[...]) hands any of them back to sync.
 PLATFORM_EDITABLE_FIELDS = {
     "playtime_minutes",
     "last_played",
     "delisted",
+    # Pinned by add_game_to_platform(unowned_at=…) — see schema.py's v34 note.
+    # A source that keeps listing a title you no longer own (Xbox ownership is
+    # title HISTORY; it never forgets a game you once launched) would otherwise
+    # re-own the row on the next sync and quietly undo the correction.
+    "owned",
 }
 
 
@@ -506,6 +512,7 @@ async def apply_content_classification(
     return True
 
 
+@retry_on_write_contention
 async def upsert_game_platform(
     game_id: int,
     platform: str,
@@ -513,6 +520,8 @@ async def upsert_game_platform(
     playtime_2weeks_minutes: int | None = None,
     last_played: str | None = None,
     owned: int = 1,
+    *,
+    from_source: bool = False,
 ) -> int:
     """Insert or update a game_platforms row and return its id.
 
@@ -520,16 +529,45 @@ async def upsert_game_platform(
     last-played signal (Steam stores its own in steam_platform_data; Nintendo and
     PSN write it here). Like the playtime columns it only advances when a non-NULL
     value is supplied, so an ownership-only sync never clears it.
+
+    ``from_source=True`` means the platform's own source returned this row on
+    this run — every platform sync passes it, no manual tool does. It stamps
+    last_seen_in_source (see schema.py's v34 note) and, when the row is
+    genuinely re-owned, clears unowned_at: the source listing a title you had
+    marked refunded/revoked is positive evidence you own it again. A row whose
+    ``owned`` is pinned in manual_overrides keeps both its flag and its
+    unowned_at, like every other protected column — but still gets the
+    last_seen_in_source stamp, which records what the source SAID rather than
+    what the row concluded.
     """
     now = datetime.now(UTC).isoformat()
+    seen_at = now if from_source else None
     async with get_db() as db:
         await db.execute(
             """INSERT INTO game_platforms
                (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes,
-                last_played, last_synced)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
+                last_played, last_synced, last_seen_in_source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(game_id, platform) DO UPDATE SET
-                   owned = excluded.owned,
+                   owned = CASE
+                       WHEN game_platforms.manual_overrides IS NOT NULL
+                            AND 'owned' IN (
+                                SELECT value FROM json_each(game_platforms.manual_overrides))
+                       THEN game_platforms.owned
+                       ELSE excluded.owned
+                   END,
+                   unowned_at = CASE
+                       WHEN game_platforms.manual_overrides IS NOT NULL
+                            AND 'owned' IN (
+                                SELECT value FROM json_each(game_platforms.manual_overrides))
+                       THEN game_platforms.unowned_at
+                       WHEN excluded.owned = 1 THEN NULL
+                       ELSE game_platforms.unowned_at
+                   END,
+                   last_seen_in_source = COALESCE(
+                       excluded.last_seen_in_source,
+                       game_platforms.last_seen_in_source
+                   ),
                    playtime_minutes = CASE
                        WHEN game_platforms.manual_overrides IS NOT NULL
                             AND 'playtime_minutes' IN (
@@ -550,7 +588,7 @@ async def upsert_game_platform(
                    END,
                    last_synced = excluded.last_synced""",
             (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes,
-             last_played, now),
+             last_played, now, seen_at),
         )
         row = await db.execute_fetchone(
             "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",
@@ -558,6 +596,61 @@ async def upsert_game_platform(
         )
         await db.commit()
         return row["id"]
+
+
+async def set_platform_ownership(
+    game_platform_id: int,
+    *,
+    owned: bool,
+    unowned_at: str | None = None,
+) -> dict:
+    """Flip one existing ownership row's ``owned`` flag and its unowned_at stamp.
+
+    The write path for a refund, a revoked key, or a lapsed subscription title
+    — states that were previously indistinguishable from permanent ownership
+    (see docs/adr/0007-ownership-lifecycle.md). Deliberately NOT deletion: the
+    row keeps its acquisition history, its identifiers, and its playtime, and
+    every aggregate already filters ``owned = 1``, so it simply stops counting.
+
+    ``owned=False`` stamps unowned_at and PINS ``owned`` in manual_overrides so
+    no sync re-owns it; ``owned=True`` clears both the stamp and the pin,
+    handing the column back to sync. Returns the row's resulting ownership
+    state.
+    """
+    stamp = unowned_at or datetime.now(UTC).isoformat()
+    if owned:
+        async with get_db() as db:
+            await db.execute(
+                "UPDATE game_platforms SET owned = 1, unowned_at = NULL WHERE id = ?",
+                (game_platform_id,),
+            )
+            await db.commit()
+        overrides = await remove_platform_manual_overrides(game_platform_id, ["owned"])
+    else:
+        # apply_manual_platform_fields writes the flag and records the pin in
+        # one statement; unowned_at rides along as an ordinary column (no sync
+        # writer sets it, so it needs no protection of its own).
+        overrides = await apply_manual_platform_fields(game_platform_id, {"owned": 0})
+        async with get_db() as db:
+            await db.execute(
+                "UPDATE game_platforms SET unowned_at = ? WHERE id = ?",
+                (stamp, game_platform_id),
+            )
+            await db.commit()
+
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            "SELECT owned, unowned_at, last_seen_in_source FROM game_platforms WHERE id = ?",
+            (game_platform_id,),
+        )
+    if row is None:
+        raise ValueError(f"game_platforms row {game_platform_id} not found")
+    return {
+        "owned": bool(row["owned"]),
+        "unowned_at": row["unowned_at"],
+        "last_seen_in_source": row["last_seen_in_source"],
+        "manual_overrides": sorted(overrides),
+    }
 
 
 # game_platforms columns holding user/importer-supplied acquisition data. No
@@ -836,6 +929,7 @@ async def adopt_platform_identifier(
     return row["game_id"]
 
 
+@retry_on_write_contention
 async def upsert_game_platform_identifier(
     game_platform_id: int,
     identifier_type: str,
@@ -876,6 +970,7 @@ async def upsert_game_platform_identifier(
         await db.commit()
 
 
+@retry_on_write_contention
 async def upsert_game_alias(
     game_id: int,
     alias: str,
@@ -916,6 +1011,7 @@ async def upsert_game_alias(
         await db.commit()
 
 
+@retry_on_write_contention
 async def upsert_steam_platform_data(game_platform_id: int, **fields) -> None:
     if not fields:
         return
@@ -933,6 +1029,7 @@ async def upsert_steam_platform_data(game_platform_id: int, **fields) -> None:
         await db.commit()
 
 
+@retry_on_write_contention
 async def bulk_upsert_steam_library(
     rows: list[dict],
     synced_at: str,
@@ -1049,17 +1146,37 @@ async def bulk_upsert_steam_library(
                         OR 'name' NOT IN (SELECT value FROM json_each(manual_overrides)))"""
             )
 
+            # GetOwnedGames returning an appid IS the source seeing the row, so
+            # every row written here is stamped last_seen_in_source (v34) — the
+            # signal check_library's ownership.unseen_in_source reads. owned and
+            # unowned_at follow upsert_game_platform's rules exactly: the pin
+            # wins, otherwise a listed app is owned and its unowned_at clears.
             await db.execute(
                 """INSERT INTO game_platforms
-                   (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes, last_synced)
+                   (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes,
+                    last_synced, last_seen_in_source)
                    SELECT t.resolved_game_id, ?, 1,
                           t.playtime_minutes,
                           t.playtime_2weeks_minutes,
-                          ?
+                          ?, ?
                    FROM temp_steam_library_sync t
                    WHERE t.resolved_game_id IS NOT NULL
                    ON CONFLICT(game_id, platform) DO UPDATE SET
-                       owned = excluded.owned,
+                       owned = CASE
+                           WHEN game_platforms.manual_overrides IS NOT NULL
+                                AND 'owned' IN (
+                                    SELECT value FROM json_each(game_platforms.manual_overrides))
+                           THEN game_platforms.owned
+                           ELSE excluded.owned
+                       END,
+                       unowned_at = CASE
+                           WHEN game_platforms.manual_overrides IS NOT NULL
+                                AND 'owned' IN (
+                                    SELECT value FROM json_each(game_platforms.manual_overrides))
+                           THEN game_platforms.unowned_at
+                           ELSE NULL
+                       END,
+                       last_seen_in_source = excluded.last_seen_in_source,
                        playtime_minutes = CASE
                            WHEN game_platforms.manual_overrides IS NOT NULL
                                 AND 'playtime_minutes' IN (
@@ -1075,7 +1192,7 @@ async def bulk_upsert_steam_library(
                            game_platforms.playtime_2weeks_minutes
                        ),
                        last_synced = excluded.last_synced""",
-                (STEAM_PLATFORM, synced_at),
+                (STEAM_PLATFORM, synced_at, synced_at),
             )
 
             await db.execute(
@@ -1127,10 +1244,10 @@ async def bulk_upsert_steam_library(
                 cursor = await db.execute(
                     """INSERT INTO game_platforms
                        (game_id, platform, owned, playtime_minutes,
-                        playtime_2weeks_minutes, last_synced)
-                       VALUES (?, ?, 1, ?, ?, ?)""",
+                        playtime_2weeks_minutes, last_synced, last_seen_in_source)
+                       VALUES (?, ?, 1, ?, ?, ?, ?)""",
                     (new_game_id, STEAM_PLATFORM, new["playtime_minutes"],
-                     new["playtime_2weeks_minutes"], synced_at),
+                     new["playtime_2weeks_minutes"], synced_at, synced_at),
                 )
                 new_platform_id = cursor.lastrowid
                 await db.execute(
@@ -1158,6 +1275,7 @@ async def bulk_upsert_steam_library(
     return len(rows)
 
 
+@retry_on_write_contention
 async def set_steam_delisted(appids, delisted: bool) -> int:
     """Set game_platforms.delisted for the Steam rows holding these appids.
 
@@ -1195,6 +1313,7 @@ async def set_steam_delisted(appids, delisted: bool) -> int:
     return changed
 
 
+@retry_on_write_contention
 async def upsert_game_platform_enrichment(game_platform_id: int, **fields) -> None:
     if not fields:
         return
@@ -1269,6 +1388,7 @@ async def delete_nintendo_playtime_baseline(application_id: str) -> bool:
     return cursor.rowcount > 0
 
 
+@retry_on_write_contention
 async def upsert_nintendo_play_summary(rows: list[dict]) -> int:
     """Idempotently upsert Parental Controls play-summary rows.
 
@@ -1312,6 +1432,7 @@ async def upsert_nintendo_play_summary(rows: list[dict]) -> int:
     return len(rows)
 
 
+@retry_on_write_contention
 async def upsert_game_prices(rows: list[dict]) -> int:
     """Upsert current-price rows into game_prices, overwriting stale prices.
 

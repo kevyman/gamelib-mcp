@@ -539,6 +539,73 @@ class GetSyncStatusTests(ToolDBTestCase):
         self.assertEqual(status["platforms"]["ps5"]["state"], "error")
         self.assertEqual(status["platforms"]["ps5"]["error"], "refresh token rejected")
 
+    async def test_entering_running_clears_the_previous_runs_error(self):
+        # The reported failure mode: a platform polled mid-retry showed a fresh
+        # state next to the PREVIOUS run's error, which reads as "it failed
+        # again". State and error must always describe the same run.
+        await set_meta_many(
+            {
+                "sync_platform_state_steam": "error",
+                "integration_sync_steam_last_error_summary": "database is locked",
+                "integration_sync_steam_last_error_classification": "unexpected",
+                "integration_sync_steam_last_success_at": "2026-07-27T11:58:07+00:00",
+            }
+        )
+
+        await admin._mark_sync_started({"steam"})
+
+        status = await admin.get_sync_status()
+        self.assertEqual(status["platforms"]["steam"]["state"], "running")
+        self.assertIsNone(status["platforms"]["steam"]["error"])
+        # The last SUCCESS is history, not this run's outcome — it stays.
+        self.assertEqual(
+            status["platforms"]["steam"]["last_success_at"], "2026-07-27T11:58:07+00:00"
+        )
+
+    async def test_platform_outcome_is_recorded_when_that_platform_finishes(self):
+        from gamelib_mcp.lifecycle import record_platform_sync_outcome
+
+        await admin._mark_sync_started({"steam"})
+        await record_platform_sync_outcome("steam", {}, "2026-07-30T12:53:40+00:00")
+
+        status = await admin.get_sync_status()
+        self.assertEqual(status["platforms"]["steam"]["state"], "done")
+        self.assertIsNone(status["platforms"]["steam"]["error"])
+        self.assertEqual(
+            status["platforms"]["steam"]["last_success_at"], "2026-07-30T12:53:40+00:00"
+        )
+
+    async def test_an_unconfigured_platform_does_not_report_done(self):
+        from gamelib_mcp.lifecycle import record_platform_sync_outcome
+
+        await record_platform_sync_outcome(
+            "xbox",
+            {
+                "sync_status": "unconfigured",
+                "error_summary": "OPENXBL_API_KEY is not set",
+            },
+            "2026-07-30T12:53:40+00:00",
+        )
+
+        status = await admin.get_sync_status()
+        self.assertEqual(status["platforms"]["xbox"]["state"], "unconfigured")
+        self.assertEqual(
+            status["platforms"]["xbox"]["error"], "OPENXBL_API_KEY is not set"
+        )
+        self.assertIsNone(status["platforms"]["xbox"]["last_success_at"])
+
+    async def test_a_legacy_done_row_with_a_config_error_reads_as_unconfigured(self):
+        await set_meta_many(
+            {
+                "sync_platform_state_xbox": "done",
+                "integration_sync_xbox_last_error_summary": "OPENXBL_API_KEY is not set",
+                "integration_sync_xbox_last_error_classification": "missing_configuration",
+            }
+        )
+
+        status = await admin.get_sync_status()
+        self.assertEqual(status["platforms"]["xbox"]["state"], "unconfigured")
+
 
 class MergeGamesTests(ToolDBTestCase):
     async def test_same_id_raises_tool_error(self):

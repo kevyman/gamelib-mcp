@@ -11,7 +11,9 @@ before each leaf does ``from . import get_db, ...``.
 """
 
 import asyncio
+import functools
 import json
+import logging
 import math
 import os
 import re
@@ -40,6 +42,8 @@ async def _execute_fetchone(self, sql, parameters=()):
 if not hasattr(aiosqlite.Connection, "execute_fetchone"):
     aiosqlite.Connection.execute_fetchone = _execute_fetchone  # type: ignore[attr-defined]
 
+
+logger = logging.getLogger(__name__)
 
 _DB_READY_PATH: str | None = None
 _FTS_READY_PATH: str | None = None
@@ -109,7 +113,7 @@ XBOX_TITLE_ID = "xbox_title_id"
 # module load time, so this package must never import back from nintendo.py.
 # Must stay in sync with that constant's value.
 NINTENDO_TITLE_ID_TYPE = "nintendo_title_id"
-SCHEMA_VERSION = 33
+SCHEMA_VERSION = 34
 
 
 def normalize_identifier_value(identifier_type: str, value: str) -> str:
@@ -289,7 +293,7 @@ from .schema import (
     _V29_SCHEMA_DDL,
     _V31_SCHEMA_DDL,
     _V32_SCHEMA_DDL,
-    _V33_SCHEMA_DDL,
+    _V34_SCHEMA_DDL,
 )
 
 
@@ -1870,6 +1874,34 @@ async def _migrate_v32_to_v33(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v33_to_v34(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add game_platforms.unowned_at + last_seen_in_source (additive, nullable;
+    see schema.py's v34 note).
+
+    Deliberately no backfill on either column. No row has been hand-marked
+    unowned yet, and stamping every existing row's last_seen_in_source with
+    "now" would assert source evidence that no sync ever produced — the whole
+    point of the column is telling "the source returned this row" apart from
+    "something wrote this row". NULL means unknown, and every reader treats it
+    that way.
+    """
+    if progress is not None:
+        progress(
+            "Migrating to v34: add game_platforms.unowned_at + last_seen_in_source."
+        )
+
+    cols = await _table_columns(db, "game_platforms")
+    if "unowned_at" not in cols:
+        await db.execute("ALTER TABLE game_platforms ADD COLUMN unowned_at TEXT")
+    if "last_seen_in_source" not in cols:
+        await db.execute(
+            "ALTER TABLE game_platforms ADD COLUMN last_seen_in_source TEXT"
+        )
+
+    await _set_user_version(db, 34)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1906,7 +1938,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V33_SCHEMA_DDL)
+    await db.executescript(_V34_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -2045,6 +2077,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (30, _migrate_v30_to_v31),
     (31, _migrate_v31_to_v32),
     (32, _migrate_v32_to_v33),
+    (33, _migrate_v33_to_v34),
 )
 
 
@@ -2062,7 +2095,7 @@ async def _run_migrations(
         _emit(progress, f"Backed up database to {snapshot_path} before migrating.", applied_steps)
 
     if detected_state == "fresh":
-        await db.executescript(_V33_SCHEMA_DDL)
+        await db.executescript(_V34_SCHEMA_DDL)
         fts_enabled = await _sync_fts_index(db)
         await _sync_query_views(db)
         await _set_user_version(db, SCHEMA_VERSION)
@@ -2100,7 +2133,7 @@ async def _run_migrations(
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V33_SCHEMA_DDL)
+    await db.executescript(_V34_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
@@ -2161,6 +2194,69 @@ async def _configure_connection(conn: aiosqlite.Connection, *, enable_wal: bool)
     await conn.execute("PRAGMA foreign_keys=ON")
     if enable_wal:
         await conn.execute("PRAGMA journal_mode=WAL")
+
+
+# ── Write-contention retry ───────────────────────────────────────────────────
+# WAL + a 30s busy_timeout (above) handle the ordinary case: a writer waiting
+# on another writer's lock. They do NOT cover the one this codebase actually
+# hits. A transaction that has already READ the main database and then tries to
+# WRITE it, after some other connection committed in between, fails with
+# SQLITE_BUSY_SNAPSHOT — the read snapshot it holds can no longer be extended
+# into a write. SQLite reports that as "database is locked" and returns it
+# IMMEDIATELY: the busy handler is deliberately not consulted, because no
+# amount of waiting can fix a stale snapshot. Only restarting the transaction
+# can, which is what these retries do.
+#
+# That shape is exactly the platform-sync write path — read-then-write inside
+# one transaction (bulk_upsert_steam_library resolves appids against the live
+# tables, then writes) while background enrichment commits alongside it. It is
+# how a Steam sync failed silently for three days in production while every
+# other platform in the same run succeeded.
+#
+# Only wrap operations that are safe to run twice: an idempotent upsert whose
+# failed attempt committed nothing. Never wrap something that mints rows from a
+# partially-committed state.
+_WRITE_RETRY_ATTEMPTS = 5
+_WRITE_RETRY_BASE_DELAY_SECONDS = 0.1
+
+
+def _is_write_contention_error(exc: BaseException) -> bool:
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    message = str(exc).lower()
+    return "database is locked" in message or "database is busy" in message
+
+
+def retry_on_write_contention(func):
+    """Retry an idempotent DB write on SQLITE_BUSY/BUSY_SNAPSHOT, backing off.
+
+    Delays are 0.1s, 0.2s, 0.4s, 0.8s — under a second in total, since the
+    contending writer is another coroutine on this same process's loop and the
+    lock it holds is measured in milliseconds. The final attempt re-raises, so
+    a genuinely stuck database still surfaces as an error rather than a hang.
+    """
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        for attempt in range(_WRITE_RETRY_ATTEMPTS):
+            try:
+                return await func(*args, **kwargs)
+            except sqlite3.OperationalError as exc:
+                if not _is_write_contention_error(exc) or attempt == _WRITE_RETRY_ATTEMPTS - 1:
+                    raise
+                delay = _WRITE_RETRY_BASE_DELAY_SECONDS * (2**attempt)
+                logger.warning(
+                    "%s hit SQLite write contention (%s); retrying in %.1fs "
+                    "(attempt %d/%d)",
+                    func.__name__,
+                    exc,
+                    delay,
+                    attempt + 1,
+                    _WRITE_RETRY_ATTEMPTS,
+                )
+                await asyncio.sleep(delay)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    return wrapper
 
 
 @asynccontextmanager
@@ -2310,6 +2406,7 @@ from .upserts import (
     repair_misclassified_platform_row,
     resolve_parent_game,
     set_platform_acquisition,
+    set_platform_ownership,
     set_steam_delisted,
     upsert_game,
     upsert_game_alias,

@@ -383,6 +383,7 @@ async def sync_epic() -> dict:
             # Epic reports raw playtime in seconds; normalize to canonical minutes.
             playtime_minutes=playtime_by_artifact.get(artifact_id) if artifact_id else None,
             owned=1,
+            from_source=True,
         )
 
         if igdb_game is not None and igdb_platform_id in igdb_game.platform_release_dates:

@@ -201,6 +201,7 @@ class SyncGogSyncTests(unittest.TestCase):
             platform="gog",
             playtime_minutes=None,
             owned=1,
+            from_source=True,
         )
 
     def test_unmatched_game_increments_added(self) -> None:
@@ -216,6 +217,7 @@ class SyncGogSyncTests(unittest.TestCase):
             platform="gog",
             playtime_minutes=None,
             owned=1,
+            from_source=True,
         )
 
     def test_upsert_game_platform_called_with_none_playtime(self) -> None:
@@ -290,6 +292,7 @@ class SyncGogSyncTests(unittest.TestCase):
             platform="gog",
             playtime_minutes=None,
             owned=1,
+            from_source=True,
         )
 
     def test_non_game_rows_are_skipped_before_resolving(self) -> None:

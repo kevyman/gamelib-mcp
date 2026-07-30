@@ -1671,6 +1671,110 @@ class BatchDryRunTests(ToolDBTestCase):
         self.assertEqual(row["price_paid"], 9.99)
 
 
+class BatchClearTests(ToolDBTestCase):
+    """`clear` in items mode — the only way to PREVIEW a clear.
+
+    Single-game set_acquisition has no dry_run and items mode used to reject the
+    key, so undoing a mis-imported price (a refund, a bad bulk import) could
+    only ever be an unpreviewable write against live data.
+    """
+
+    async def _priced(self, name: str, **fields) -> int:
+        gid = await seed_game(name)
+        await add_platform(gid, "steam")
+        await acquisition.set_acquisition(game_id=gid, platform="steam", **fields)
+        return gid
+
+    async def test_dry_run_previews_a_clear_without_writing(self):
+        gid = await self._priced("Refunded", price_paid=30.19, price_currency="EUR")
+
+        batch = await acquisition.set_acquisitions_batch(
+            [
+                {
+                    "game_id": gid,
+                    "platform": "steam",
+                    "clear": ["price_paid", "price_currency"],
+                }
+            ],
+            dry_run=True,
+        )
+
+        self.assertTrue(batch["dry_run"])
+        self.assertEqual(batch["applied"], 1)
+        result = batch["results"][0]
+        self.assertEqual(result["cleared"], ["price_paid", "price_currency"])
+        self.assertIsNone(result["acquisition"]["price_paid"])
+        row = await _acquisition_row(gid, "steam")
+        self.assertEqual(row["price_paid"], 30.19)
+
+    async def test_wet_run_clears_in_fill_only_mode(self):
+        gid = await self._priced(
+            "Refunded", price_paid=30.19, price_currency="EUR", purchase_source="epic"
+        )
+
+        # overwrite defaults False for items — a clear is an instruction, not a
+        # fill, so it must still write.
+        batch = await acquisition.set_acquisitions_batch(
+            [{"game_id": gid, "platform": "steam", "clear": ["price_paid"]}]
+        )
+
+        self.assertEqual(batch["applied"], 1)
+        row = await _acquisition_row(gid, "steam")
+        self.assertIsNone(row["price_paid"])
+        self.assertEqual(row["purchase_source"], "epic")
+
+    async def test_clearing_an_already_null_column_is_no_change(self):
+        gid = await self._priced("Unpriced", purchase_source="epic")
+
+        batch = await acquisition.set_acquisitions_batch(
+            [{"game_id": gid, "platform": "steam", "clear": ["price_paid"]}]
+        )
+
+        self.assertEqual(batch["no_change"], 1)
+
+    async def test_set_and_clear_can_be_combined_but_not_on_one_column(self):
+        gid = await self._priced("Mixed", price_paid=5.0, purchase_source="epic")
+
+        batch = await acquisition.set_acquisitions_batch(
+            [
+                {
+                    "game_id": gid,
+                    "platform": "steam",
+                    "purchase_source": "humble",
+                    "clear": ["price_paid", "price_currency"],
+                }
+            ],
+            overwrite=True,
+        )
+        row = await _acquisition_row(gid, "steam")
+        self.assertEqual(batch["applied"], 1)
+        self.assertEqual(row["purchase_source"], "humble")
+        self.assertIsNone(row["price_paid"])
+
+        conflicted = await acquisition.set_acquisitions_batch(
+            [
+                {
+                    "game_id": gid,
+                    "platform": "steam",
+                    "price_paid": 1.0,
+                    "clear": ["price_paid"],
+                }
+            ]
+        )
+        self.assertEqual(conflicted["results"][0]["status"], "error")
+        self.assertIn("set and clear", conflicted["results"][0]["error"])
+
+    async def test_rejects_an_unknown_clear_column(self):
+        gid = await self._priced("Bad Clear", price_paid=5.0)
+
+        batch = await acquisition.set_acquisitions_batch(
+            [{"game_id": gid, "platform": "steam", "clear": ["delisted"]}]
+        )
+
+        self.assertEqual(batch["results"][0]["status"], "error")
+        self.assertIn("unknown column", batch["results"][0]["error"])
+
+
 class FamilyConflictGuardTests(ToolDBTestCase):
     async def _seed_family(self) -> tuple[int, int]:
         # Base game owns steam (the real appid); the edition child owns epic.
