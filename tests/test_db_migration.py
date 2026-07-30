@@ -559,6 +559,46 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("manual_overrides", after)
         self.assertEqual(version, 31)
 
+    async def test_v33_to_v34_adds_ownership_lifecycle_columns(self) -> None:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db_module._configure_connection(db, enable_wal=True)
+            # Minimal pre-v34 game_platforms table (neither v34 column).
+            await db.execute(
+                """CREATE TABLE game_platforms (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    game_id INTEGER NOT NULL,
+                    platform TEXT NOT NULL,
+                    owned INTEGER NOT NULL DEFAULT 1,
+                    playtime_minutes INTEGER,
+                    last_synced TEXT,
+                    UNIQUE(game_id, platform)
+                )"""
+            )
+            await db.execute(
+                "INSERT INTO game_platforms (game_id, platform, owned, last_synced)"
+                " VALUES (1, 'steam', 1, '2026-07-01T00:00:00+00:00')"
+            )
+            await db_module._set_user_version(db, 33)
+            await db.commit()
+
+            await db_module._migrate_v33_to_v34(db, None)
+
+            after = {
+                row[1] for row in await db.execute_fetchall("PRAGMA table_info(game_platforms)")
+            }
+            version = await db_module._get_user_version(db)
+            row = await db.execute_fetchone(
+                "SELECT unowned_at, last_seen_in_source FROM game_platforms WHERE game_id = 1"
+            )
+
+        self.assertIn("unowned_at", after)
+        self.assertIn("last_seen_in_source", after)
+        self.assertEqual(version, 34)
+        # No backfill on either column: an existing row has never been marked
+        # unowned, and claiming a source "saw" it would be evidence we invented.
+        self.assertIsNone(row["unowned_at"])
+        self.assertIsNone(row["last_seen_in_source"])
+
     async def test_v4_database_migrates_opencritic_scrape_columns(self) -> None:
         conn = sqlite3.connect(self.db_path)
         old_v4_schema = """
@@ -1131,7 +1171,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             async with db_module.get_db() as db:
                 version = await db_module._get_user_version(db)
             self.assertEqual(version, db_module.SCHEMA_VERSION)
-            self.assertEqual(db_module.SCHEMA_VERSION, 33)
+            self.assertEqual(db_module.SCHEMA_VERSION, 34)
 
             unresolved = await seed_game("Still Unresolved Wishlisted Game")
             resolved = await seed_game("Already Resolved Wishlisted Game")

@@ -197,6 +197,7 @@ class SyncPsnSyncTests(unittest.TestCase):
             playtime_minutes=120,
             last_played=None,
             owned=1,
+            from_source=True,
         )
 
     def test_unmatched_game_increments_added(self) -> None:
@@ -214,6 +215,7 @@ class SyncPsnSyncTests(unittest.TestCase):
             playtime_minutes=60,
             last_played=None,
             owned=1,
+            from_source=True,
         )
 
     def test_upsert_platform_called_with_playtime(self) -> None:
@@ -268,6 +270,7 @@ class SyncPsnSyncTests(unittest.TestCase):
             playtime_minutes=30,
             last_played=None,
             owned=1,
+            from_source=True,
         )
 
     def test_repairs_stale_conflicting_platform_row(self) -> None:

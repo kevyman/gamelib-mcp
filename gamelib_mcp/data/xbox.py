@@ -291,6 +291,7 @@ async def sync_xbox() -> dict:
             platform="xbox",
             playtime_minutes=playtime_by_title.get(title_id) if title_id else None,
             owned=1,
+            from_source=True,
         )
 
         if igdb_game is not None and igdb_platform_id in igdb_game.platform_release_dates:

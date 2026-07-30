@@ -131,6 +131,11 @@ _BATCH_ITEM_CAP = 200
 _BATCH_ITEM_KEYS = frozenset({
     "name", "game_id", "platform", "identifier_type", "identifier_value",
     "content_type",
+    # Same vocabulary as the single-game call's clear=[...]. It lives here so a
+    # clear can be previewed at all: single-game mode has no dry_run, so before
+    # this the only way to null a mis-imported price was an unpreviewable write
+    # against live data. It also makes bulk cleanup of a bad import possible.
+    "clear",
     *ACQUISITION_FIELDS,
 })
 
@@ -246,20 +251,25 @@ def _normalize_source(value: str) -> str:
     return normalized
 
 
-def _validate_acquired_at(value: str) -> str:
-    """Accept YYYY, YYYY-MM, or YYYY-MM-DD; stored exactly as given."""
+def _validate_acquired_at(value: str, field: str = "acquired_at") -> str:
+    """Accept YYYY, YYYY-MM, or YYYY-MM-DD; stored exactly as given.
+
+    ``field`` only names the parameter in the error message — add_game_to_platform
+    reuses this for unowned_at, which takes the same partial-date vocabulary
+    ("I refunded it in March 2021" is as precise as anyone remembers).
+    """
     cleaned = value.strip()
     if not _ACQUIRED_AT_RE.match(cleaned):
         raise ToolError(
-            f"acquired_at must be YYYY, YYYY-MM, or YYYY-MM-DD (got '{value}')"
+            f"{field} must be YYYY, YYYY-MM, or YYYY-MM-DD (got '{value}')"
         )
     if len(cleaned) == 7 and not 1 <= int(cleaned[5:7]) <= 12:
-        raise ToolError(f"acquired_at month out of range in '{value}'")
+        raise ToolError(f"{field} month out of range in '{value}'")
     if len(cleaned) == 10:
         try:
             date.fromisoformat(cleaned)
         except ValueError:
-            raise ToolError(f"acquired_at is not a real calendar date: '{value}'")
+            raise ToolError(f"{field} is not a real calendar date: '{value}'")
     return cleaned
 
 
@@ -306,6 +316,23 @@ def _validated_fields(
     return fields
 
 
+def _validate_clear_list(clear) -> list[str]:
+    """Validate a clear=[...] list of acquisition columns (order-preserving)."""
+    if clear is None:
+        return []
+    if isinstance(clear, str) or not isinstance(clear, (list, tuple)):
+        raise ToolError(
+            f"clear must be a list of column names. Valid: {sorted(ACQUISITION_FIELDS)}"
+        )
+    clear_list = list(dict.fromkeys(clear))
+    invalid = [c for c in clear_list if c not in ACQUISITION_FIELDS]
+    if invalid:
+        raise ToolError(
+            f"clear has unknown column(s): {invalid}. Valid: {sorted(ACQUISITION_FIELDS)}"
+        )
+    return clear_list
+
+
 async def set_acquisition(
     name: str | None = None,
     game_id: int | None = None,
@@ -335,12 +362,7 @@ async def set_acquisition(
         raise ToolError("platform is required")
     platform = _validate_platform(platform, LIBRARY_PLATFORMS)
 
-    clear_list = list(dict.fromkeys(clear or []))
-    invalid = [c for c in clear_list if c not in ACQUISITION_FIELDS]
-    if invalid:
-        raise ToolError(
-            f"clear has unknown column(s): {invalid}. Valid: {sorted(ACQUISITION_FIELDS)}"
-        )
+    clear_list = _validate_clear_list(clear)
 
     fields = _validated_fields(
         acquired_at, price_paid, price_currency, purchase_source, bundle_name
@@ -597,8 +619,14 @@ async def _apply_batch_item(
             item.get("purchase_source"),
             item.get("bundle_name"),
         )
-        if not fields:
-            raise ToolError("Provide at least one acquisition field")
+        clear_list = _validate_clear_list(item.get("clear"))
+        if not fields and not clear_list:
+            raise ToolError("Provide at least one acquisition field, or clear")
+        conflict = set(fields) & set(clear_list)
+        if conflict:
+            raise ToolError(
+                f"Cannot set and clear the same column(s) in one call: {sorted(conflict)}"
+            )
         content_type = _validate_content_type(item.get("content_type"))
     except ToolError as exc:
         return {
@@ -704,6 +732,10 @@ async def _apply_batch_item(
                 "platform": platform,
                 "acquisition": fields,
             }
+            if clear_list:
+                # A clear on a row that doesn't exist yet nulls nothing; echoed
+                # so the preview matches the wet run's result shape.
+                result["cleared"] = clear_list
             if mint_content_type is not None:
                 result["content_type"] = mint_content_type
                 if mint_parent_id is not None:
@@ -799,6 +831,7 @@ async def _apply_batch_item(
         # every acquisition column is fresh (a wet run would create the row).
         if gp is None:
             newly_written = list(fields)
+            cleared_effective = []
         else:
             async with get_db() as db:
                 pre = await db.execute_fetchone(
@@ -806,12 +839,19 @@ async def _apply_batch_item(
                     (gp["id"],),
                 )
             newly_written = [col for col in fields if pre[col] is None]
+            cleared_effective = [col for col in clear_list if pre[col] is not None]
         acquisition = dict(fields)
+        acquisition.update({col: None for col in clear_list})
         if overwrite:
+            status = "applied"
+        elif cleared_effective:
+            # A clear that actually nulls something is a change, in either
+            # mode — fill-only semantics govern what gets WRITTEN, not whether
+            # an explicit reset counts as one.
             status = "applied"
         else:
             status = "filled" if newly_written else "no_change"
-        return {
+        result = {
             "status": status,
             "game_id": resolved_id,
             "matched_name": row["name"],
@@ -819,6 +859,9 @@ async def _apply_batch_item(
             "platform": platform,
             "acquisition": acquisition,
         }
+        if clear_list:
+            result["cleared"] = clear_list
+        return result
 
     gpid = gp["id"] if gp is not None else await upsert_game_platform(
         resolved_id, platform, owned=1
@@ -831,21 +874,38 @@ async def _apply_batch_item(
             gpid, identifier_type, str(identifier_value)
         )
 
-    if overwrite:
-        acquisition = await set_platform_acquisition(gpid, fields)
-        status = "created" if created else "applied"
-    else:
-        # Pre-state read: only_if_null COALESCE writes can't tell us which
-        # fields were actually filled, and "filled vs no_change" is the whole
-        # point of importer mode.
+    # Pre-state read: only_if_null COALESCE writes can't tell us which fields
+    # were actually filled, and "filled vs no_change" is the whole point of
+    # importer mode. A clear needs the same read to report whether it nulled
+    # anything, so both modes take it when there is something to clear.
+    pre = None
+    if not overwrite or clear_list:
         async with get_db() as db:
             pre = await db.execute_fetchone(
                 f"SELECT {', '.join(ACQUISITION_FIELDS)} FROM game_platforms WHERE id = ?",
                 (gpid,),
             )
+
+    # An empty `fields` (a clear-only item) writes nothing and simply reads the
+    # row's current acquisition state back — set_platform_acquisition's own
+    # no-fields path.
+    if overwrite:
+        acquisition = await set_platform_acquisition(gpid, fields)
+        status = "created" if created else "applied"
+    else:
         acquisition = await set_platform_acquisition(gpid, fields, only_if_null=True)
         newly_written = [col for col in fields if pre[col] is None]
         status = "created" if created else ("filled" if newly_written else "no_change")
+
+    if clear_list:
+        # Always an overwrite write — "reset this column" is an instruction, not
+        # a fill — and it runs after the sets, which are validated to be
+        # disjoint from it.
+        acquisition = await set_platform_acquisition(
+            gpid, {col: None for col in clear_list}
+        )
+        if not created and any(pre[col] is not None for col in clear_list):
+            status = "applied"
 
     result = {
         "status": status,
@@ -855,6 +915,8 @@ async def _apply_batch_item(
         "platform": platform,
         "acquisition": acquisition,
     }
+    if clear_list:
+        result["cleared"] = clear_list
     # A DLC/expansion/edition minted OR reclassified here carries its
     # content_type (and parent, when linked) so the import surfaces what was
     # created/repaired and its family tie.
@@ -889,7 +951,12 @@ async def set_acquisitions_batch(
     Each item: {name or game_id, platform, + any of the 5 acquisition fields,
     optionally identifier_type + identifier_value (both or neither) for
     identifier-first matching, optionally content_type (a primary or nested
-    vocabulary value, e.g. "dlc")}.
+    vocabulary value, e.g. "dlc"), optionally clear=[columns] to reset to NULL}.
+    An item may carry only `clear`; a clear always writes (fill-only mode
+    governs what is filled, not whether an explicit reset happens) and reports
+    status "applied" when it actually nulled something, with the cleared column
+    names echoed back. dry_run previews it like any other write — which is why
+    clear lives here at all, the single-game call having no dry_run.
     Default (overwrite=False) fills only NULL columns so a re-import never
     clobbers manual edits. An item carrying a NESTED content_type (dlc/
     expansion/edition/…) matches by identifier, game_id, or EXACT name only —

@@ -1060,7 +1060,12 @@ async def _run_spend_duplicate_purchase(*, apply: bool, options: dict[str, Any])
                       g.name, g.name_normalized, g.parent_game_id
                FROM game_platforms gp
                JOIN games g ON g.id = gp.game_id
-               WHERE gp.price_paid > 0 AND gp.acquired_at IS NOT NULL"""
+               -- owned = 1: a retired row (refund/revoked key/lapsed
+               -- subscription, see add_game_to_platform's unowned_at) keeps its
+               -- acquisition record for history, and "bought it twice, refunded
+               -- one" is the shape this check must NOT call a duplicate.
+               WHERE gp.owned = 1
+                 AND gp.price_paid > 0 AND gp.acquired_at IS NOT NULL"""
         )
     groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -1403,6 +1408,241 @@ async def _run_sync_staleness(*, apply: bool, options: dict[str, Any]) -> CheckO
     }
 
 
+# --- adapters: sync.platform_error (new) ------------------------------------
+
+# How long a platform may go without a SUCCESSFUL sync before it is reported,
+# even when nothing errored (a sync that never runs raises no error at all).
+_SYNC_SUCCESS_STALE_HOURS = 48
+
+
+async def _run_sync_platform_error(*, apply: bool, options: dict[str, Any]) -> CheckOutcome:
+    """Report platforms whose last sync FAILED, or that haven't succeeded lately.
+
+    Distinct from sync.staleness, which measures how old the library DATA is
+    (game_platforms.last_synced). This one reads the sync run's own outcome from
+    meta, and it is the check that would have caught the three-day silent Steam
+    failure: the rows kept their old last_synced, every other platform in the
+    same scheduled run succeeded, and nothing surfaced the error unless someone
+    called get_sync_status by hand.
+    """
+    from ..data.db import get_meta_prefix
+
+    stale_hours = options.get("stale_hours", _SYNC_SUCCESS_STALE_HOURS)
+    now = datetime.now(UTC)
+
+    states = await get_meta_prefix("sync_platform_state_")
+    integ = await get_meta_prefix("integration_sync_")
+
+    findings: list[dict[str, Any]] = []
+    failing: list[str] = []
+    unconfigured: list[str] = []
+    never_synced: list[str] = []
+    for platform in sorted(SYNCABLE_PLATFORMS):
+        state = states.get(f"sync_platform_state_{platform}")
+        error = integ.get(f"integration_sync_{platform}_last_error_summary")
+        classification = integ.get(f"integration_sync_{platform}_last_error_classification")
+        last_success_raw = integ.get(f"integration_sync_{platform}_last_success_at")
+
+        if state == "unconfigured" or classification == "missing_configuration":
+            # A platform the owner never set up is a choice, not a defect —
+            # counted in the summary, never a finding on every run.
+            unconfigured.append(platform)
+            continue
+
+        age_hours: float | None = None
+        if last_success_raw:
+            try:
+                last_success = datetime.fromisoformat(last_success_raw)
+            except ValueError:
+                last_success = None
+            if last_success is not None:
+                if last_success.tzinfo is None:
+                    last_success = last_success.replace(tzinfo=UTC)
+                age_hours = (now - last_success).total_seconds() / 3600
+        elif state is not None:
+            never_synced.append(platform)
+
+        stale = age_hours is not None and age_hours > stale_hours
+        if not error and not stale:
+            continue
+
+        failing.append(platform)
+        age_days = round(age_hours / 24, 1) if age_hours is not None else None
+        if error:
+            message = (
+                f"{platform}'s last sync failed: {error}"
+                + (
+                    f" — last success {last_success_raw} ({age_days} day(s) ago)"
+                    if age_days is not None
+                    else " — it has never synced successfully"
+                )
+            )
+        else:
+            message = (
+                f"{platform} has not synced successfully in "
+                f"{age_days} day(s) (last success {last_success_raw}), "
+                f"past the {stale_hours}h threshold"
+            )
+        findings.append(
+            _finding(
+                "sync.platform_error",
+                # A failed sync is a warning, not a notice: everything derived
+                # from that platform is silently frozen until it is fixed.
+                "warning",
+                message,
+                evidence={
+                    "platform": platform,
+                    "state": state,
+                    "error": error,
+                    "error_classification": classification,
+                    "last_success_at": last_success_raw,
+                    "hours_since_success": round(age_hours, 1) if age_hours is not None else None,
+                },
+                suggested_action={
+                    "tool": "sync",
+                    "args": {"targets": ["library"], "platforms": [platform]},
+                    "note": (
+                        "re-auth first — see get_integration_status"
+                        if classification == "auth_stale"
+                        else "retry this platform on its own; check "
+                        "get_integration_status if it fails again"
+                    ),
+                },
+            )
+        )
+
+    return findings, {
+        "stale_hours": stale_hours,
+        "failing_platforms": failing,
+        "unconfigured_platforms": unconfigured,
+        "never_synced_platforms": never_synced,
+    }
+
+
+# --- adapters: ownership.unseen_in_source (new) -----------------------------
+
+# Successful syncs a row must be absent from before it is worth reporting. Three
+# is deliberately conservative: one source page dropping out of a single run is
+# routine (26 Epic giveaway rows went stale on one date in production, all of
+# them permanent entitlements that cannot be lost), so a single miss is noise.
+_UNSEEN_MIN_MISSED_SYNCS = 3
+_UNSEEN_ROW_LIMIT = 50
+
+
+async def _run_ownership_unseen_in_source(
+    *, apply: bool, options: dict[str, Any]
+) -> CheckOutcome:
+    """Owned rows the platform's own source has stopped returning.
+
+    Reads game_platforms.last_seen_in_source (v34) against the platform's recent
+    SUCCESSFUL sync timestamps — a failed run must never make a row look
+    abandoned, which is what made the pre-v34 signal useless: "not seen this
+    run" and "no longer owned" produced identical rows.
+
+    Report-only, and deliberately so. A source omitting a row is not proof of a
+    refund; it is equally a dropped page, a store retirement, or a provider
+    quirk. The finding hands the judgement call to a human, whose remedies are
+    add_game_to_platform(unowned_at=…) if ownership really ended and
+    add_game_to_platform(delisted=True) if the store page is simply gone.
+    """
+    from ..lifecycle import successful_sync_history
+
+    min_missed = max(1, int(options.get("min_missed_syncs", _UNSEEN_MIN_MISSED_SYNCS)))
+    limit = max(1, int(options.get("limit", _UNSEEN_ROW_LIMIT)))
+
+    findings: list[dict[str, Any]] = []
+    cutoffs: dict[str, str] = {}
+    insufficient: list[str] = []
+    for platform in sorted(SYNCABLE_PLATFORMS):
+        history = await successful_sync_history(platform)
+        # min_missed + 1 entries, cutoff one run OLDER than the missed window:
+        # a stamp is written DURING a sync run, before that run's finished_at
+        # lands in the history, so a row seen during the Nth-most-recent run
+        # sorts before that run's own history entry. Comparing against
+        # history[min_missed - 1] would therefore report a row after only
+        # min_missed - 1 full misses; anything older than the run BEFORE the
+        # window provably went unstamped through all min_missed runs in it.
+        if len(history) <= min_missed:
+            insufficient.append(platform)
+            continue
+        cutoffs[platform] = history[min_missed]
+
+    if not cutoffs:
+        return findings, {
+            "min_missed_syncs": min_missed,
+            "platforms_checked": [],
+            "platforms_insufficient_history": insufficient,
+            "unseen_rows": 0,
+        }
+
+    rows: list[dict[str, Any]] = []
+    async with get_db() as db:
+        for platform, cutoff in cutoffs.items():
+            platform_rows = await db.execute_fetchall(
+                """SELECT gp.game_id, gp.platform, gp.last_seen_in_source,
+                          gp.playtime_minutes, gp.acquired_at, gp.price_paid,
+                          gp.price_currency, g.name
+                     FROM game_platforms gp
+                     JOIN games g ON g.id = gp.game_id
+                    WHERE gp.platform = ?
+                      AND gp.owned = 1
+                      AND COALESCE(gp.delisted, 0) = 0
+                      -- NULL means the row was never stamped at all: hand-added,
+                      -- or older than the column. Absence of evidence, not
+                      -- evidence of absence — those rows are not judged here.
+                      AND gp.last_seen_in_source IS NOT NULL
+                      AND gp.last_seen_in_source < ?
+                 ORDER BY gp.last_seen_in_source ASC
+                    LIMIT ?""",
+                (platform, cutoff, limit),
+            )
+            rows.extend(dict(row) for row in platform_rows)
+
+    for row in rows:
+        platform = row["platform"]
+        findings.append(
+            _finding(
+                "ownership.unseen_in_source",
+                "notice",
+                f"'{row['name']}' is still marked owned on {platform} but the "
+                f"{platform} source has not returned it in the last {min_missed} "
+                f"successful sync(s) (last seen {row['last_seen_in_source']}) — "
+                "confirm whether it was refunded/revoked or just delisted",
+                game_id=row["game_id"],
+                name=row["name"],
+                evidence={
+                    "platform": platform,
+                    "last_seen_in_source": row["last_seen_in_source"],
+                    "missed_since": cutoffs[platform],
+                    "playtime_minutes": row["playtime_minutes"],
+                    "acquired_at": row["acquired_at"],
+                    "price_paid": row["price_paid"],
+                    "price_currency": row["price_currency"],
+                },
+                suggested_action={
+                    "tool": "add_game_to_platform",
+                    "args": {
+                        "game_id": row["game_id"],
+                        "platform": platform,
+                        "unowned_at": datetime.now(UTC).date().isoformat(),
+                    },
+                    "note": (
+                        "ONLY if ownership really ended (refund, revoked key, "
+                        "lapsed subscription). If the store page is simply gone "
+                        "but you still own it, use delisted=True instead"
+                    ),
+                },
+            )
+        )
+
+    return findings, {
+        "min_missed_syncs": min_missed,
+        "platforms_checked": sorted(cutoffs),
+        "platforms_insufficient_history": insufficient,
+        "unseen_rows": len(rows),
+    }
+
+
 # --- adapter: completion.unclassified ---------------------------------------
 
 # The heuristic itself stays in tools/completion.py (unchanged, with its own
@@ -1688,6 +1928,33 @@ CHECKS: dict[str, CheckSpec] = {
             default_severity="notice",
             runner=_run_sync_staleness,
             option_keys=frozenset({"stale_days"}),
+        ),
+        _spec(
+            "sync.platform_error",
+            description=(
+                "A platform whose last sync FAILED, or that has not succeeded "
+                "within stale_hours — the run's own outcome, as opposed to "
+                "sync.staleness's age of the synced data"
+            ),
+            network=None,
+            writes_on_apply=False,
+            default_severity="warning",
+            runner=_run_sync_platform_error,
+            option_keys=frozenset({"stale_hours"}),
+        ),
+        _spec(
+            "ownership.unseen_in_source",
+            description=(
+                "An owned row the platform's own source has stopped returning "
+                "across min_missed_syncs consecutive SUCCESSFUL syncs — a "
+                "refund/revoked key/lapsed subscription candidate, never an "
+                "automatic conclusion"
+            ),
+            network=None,
+            writes_on_apply=False,
+            default_severity="notice",
+            runner=_run_ownership_unseen_in_source,
+            option_keys=frozenset({"min_missed_syncs", "limit"}),
         ),
         _spec(
             "completion.unclassified",

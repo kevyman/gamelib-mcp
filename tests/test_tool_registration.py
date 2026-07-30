@@ -87,7 +87,7 @@ EXPECTED_TOOLS = {
             "name", "platform", "game_id", "identifier_type", "identifier_value",
             "playtime_minutes", "owned", "acquired_at", "price_paid",
             "price_currency", "purchase_source", "bundle_name", "delisted",
-            "items", "dry_run",
+            "unowned_at", "items", "dry_run",
         },
         "required": set(),
     },
