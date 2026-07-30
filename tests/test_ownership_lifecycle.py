@@ -283,6 +283,7 @@ class UnseenInSourceCheckTests(ToolDBTestCase):
         await self._record_successful_syncs(
             "epic",
             [
+                "2026-07-09T00:00:00+00:00",
                 "2026-07-10T00:00:00+00:00",
                 "2026-07-11T00:00:00+00:00",
                 "2026-07-12T00:00:00+00:00",
@@ -322,11 +323,55 @@ class UnseenInSourceCheckTests(ToolDBTestCase):
         self.assertEqual(findings, [])
         self.assertIn("epic", extras["platforms_insufficient_history"])
 
+    async def test_a_row_seen_during_the_boundary_run_is_not_reported(self):
+        # Stamped DURING the 3rd-most-recent successful run (stamps land before
+        # that run's finished_at reaches the history), so it missed only the
+        # last two runs — under the 3-miss threshold. This is the boundary the
+        # cutoff must get right: comparing against the 3rd-most-recent entry
+        # itself would count this row as a third miss it never had.
+        await self._seed_unseen_row(last_seen="2026-07-09T18:00:00+00:00")
+        await self._record_successful_syncs(
+            "epic",
+            [
+                "2026-07-09T00:00:00+00:00",
+                "2026-07-10T00:00:00+00:00",
+                "2026-07-11T00:00:00+00:00",
+                "2026-07-12T00:00:00+00:00",
+            ],
+        )
+
+        findings, _ = await checks._run_ownership_unseen_in_source(
+            apply=False, options={}
+        )
+
+        self.assertEqual(findings, [])
+
+    async def test_three_successes_are_not_yet_enough_history(self):
+        # The window needs min_missed + 1 recorded successes: the run BEFORE
+        # the missed window is the anchor that proves the three misses are
+        # real. With only three, the platform reports insufficient history
+        # instead of guessing.
+        await self._seed_unseen_row(last_seen="2026-07-01T00:00:00+00:00")
+        for stamp in (
+            "2026-07-10T00:00:00+00:00",
+            "2026-07-11T00:00:00+00:00",
+            "2026-07-12T00:00:00+00:00",
+        ):
+            await lifecycle.record_platform_sync_outcome("epic", {}, stamp)
+
+        findings, extras = await checks._run_ownership_unseen_in_source(
+            apply=False, options={}
+        )
+
+        self.assertEqual(findings, [])
+        self.assertIn("epic", extras["platforms_insufficient_history"])
+
     async def test_one_missed_sync_is_not_enough(self):
         await self._seed_unseen_row(last_seen="2026-07-11T12:00:00+00:00")
         await self._record_successful_syncs(
             "epic",
             [
+                "2026-07-09T00:00:00+00:00",
                 "2026-07-10T00:00:00+00:00",
                 "2026-07-11T00:00:00+00:00",
                 "2026-07-12T00:00:00+00:00",
@@ -353,6 +398,7 @@ class UnseenInSourceCheckTests(ToolDBTestCase):
         await self._record_successful_syncs(
             "epic",
             [
+                "2026-07-09T00:00:00+00:00",
                 "2026-07-10T00:00:00+00:00",
                 "2026-07-11T00:00:00+00:00",
                 "2026-07-12T00:00:00+00:00",
@@ -371,6 +417,7 @@ class UnseenInSourceCheckTests(ToolDBTestCase):
         await self._record_successful_syncs(
             "epic",
             [
+                "2026-07-09T00:00:00+00:00",
                 "2026-07-10T00:00:00+00:00",
                 "2026-07-11T00:00:00+00:00",
                 "2026-07-12T00:00:00+00:00",

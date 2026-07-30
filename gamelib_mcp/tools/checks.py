@@ -1555,10 +1555,17 @@ async def _run_ownership_unseen_in_source(
     insufficient: list[str] = []
     for platform in sorted(SYNCABLE_PLATFORMS):
         history = await successful_sync_history(platform)
-        if len(history) < min_missed:
+        # min_missed + 1 entries, cutoff one run OLDER than the missed window:
+        # a stamp is written DURING a sync run, before that run's finished_at
+        # lands in the history, so a row seen during the Nth-most-recent run
+        # sorts before that run's own history entry. Comparing against
+        # history[min_missed - 1] would therefore report a row after only
+        # min_missed - 1 full misses; anything older than the run BEFORE the
+        # window provably went unstamped through all min_missed runs in it.
+        if len(history) <= min_missed:
             insufficient.append(platform)
             continue
-        cutoffs[platform] = history[min_missed - 1]
+        cutoffs[platform] = history[min_missed]
 
     if not cutoffs:
         return findings, {

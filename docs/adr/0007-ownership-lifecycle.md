@@ -121,6 +121,15 @@ recent successful-sync timestamps are kept as a rolling 10-entry list in `meta`
 (`sync_success_history_<platform>`), written where a platform's outcome is
 recorded.
 
+One boundary subtlety, because it is easy to reintroduce: a row's
+`last_seen_in_source` is stamped *during* a sync run, before that run's
+finish time lands in the history. Comparing a stamp against the
+3rd-most-recent history entry would therefore count a row seen during that
+very run as a third miss it never had. The cutoff is the entry one run
+*older* than the missed window (`history[min_missed]`), which means the check
+needs `min_missed + 1` recorded successes before it will judge a platform at
+all — with fewer, it reports insufficient history rather than guessing.
+
 ## Consequences
 
 ### Positive
