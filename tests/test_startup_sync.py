@@ -50,7 +50,7 @@ def _stub_sync_side_effects():
     """
     with (
         patch("gamelib_mcp.tools.admin._mark_sync_started", AsyncMock()),
-        patch("gamelib_mcp.tools.admin._mark_platform_state", AsyncMock()),
+        patch("gamelib_mcp.tools.admin.record_platform_sync_outcome", AsyncMock()),
         patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()),
         # Returns 0 so results still carry the play_history_rows the real call
         # would have added for a platform with nothing new to snapshot.

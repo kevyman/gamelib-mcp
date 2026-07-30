@@ -223,6 +223,7 @@ async def sync_nintendo_pctl() -> dict:
                 playtime_2weeks_minutes=minutes_2weeks,
                 last_played=last_played,
                 owned=1,
+                from_source=True,
             )
             matched += 1
             continue
@@ -250,6 +251,7 @@ async def sync_nintendo_pctl() -> dict:
                 playtime_2weeks_minutes=minutes_2weeks,
                 last_played=last_played,
                 owned=1,
+                from_source=True,
             )
             matched += 1
             continue
@@ -264,6 +266,7 @@ async def sync_nintendo_pctl() -> dict:
             playtime_2weeks_minutes=minutes_2weeks,
             last_played=last_played,
             owned=1,
+            from_source=True,
         )
         await upsert_game_platform_identifier(platform_id, NINTENDO_TITLE_ID, application_id)
         added += 1

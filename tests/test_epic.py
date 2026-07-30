@@ -261,6 +261,7 @@ class SyncEpicTests(unittest.TestCase):
             platform="epic",
             playtime_minutes=None,
             owned=1,
+            from_source=True,
         )
 
     def test_unmatched_game_still_syncs_when_igdb_returns_no_result(self) -> None:
@@ -288,6 +289,7 @@ class SyncEpicTests(unittest.TestCase):
             platform="epic",
             playtime_minutes=45,
             owned=1,
+            from_source=True,
         )
         mock_enrichment.assert_not_called()
 
@@ -324,6 +326,7 @@ class SyncEpicTests(unittest.TestCase):
             platform="epic",
             playtime_minutes=60,
             owned=1,
+            from_source=True,
         )
         mock_enrichment.assert_awaited_once_with(99, platform_release_date="2020-09-17")
 
@@ -350,4 +353,5 @@ class SyncEpicTests(unittest.TestCase):
             platform="epic",
             playtime_minutes=5,
             owned=1,
+            from_source=True,
         )

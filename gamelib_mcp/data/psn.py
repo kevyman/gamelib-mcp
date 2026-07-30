@@ -247,6 +247,7 @@ async def sync_psn() -> dict:
             playtime_minutes=entry["playtime_minutes"],
             last_played=entry.get("last_played"),
             owned=1,
+            from_source=True,
         )
 
         # Record the stable id so future syncs match by it (idempotent).

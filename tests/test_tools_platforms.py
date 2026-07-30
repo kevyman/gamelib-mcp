@@ -113,6 +113,7 @@ class AddGameToPlatformTests(ToolDBTestCase):
                 "identifier",
                 "acquisition",
                 "delisted",
+                "unowned_at",
             },
         )
         self.assertTrue(result["created"])
