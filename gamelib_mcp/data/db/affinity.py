@@ -149,11 +149,22 @@ def estimate_shrinkage_weight(tag_data: dict[str, dict]) -> dict[str, Any]:
     estimate["sigma2_within"] = round(sigma2_within, 6)
     estimate["sigma2_between"] = round(sigma2_between, 6)
 
-    if sigma2_within <= 0 or sigma2_between <= 0:
+    # The two degenerate ends point in OPPOSITE directions, so they cannot
+    # share a branch. Between-tag first: when neither component is measurable
+    # there is no information at all, and "trust nothing" is the safe read.
+    if sigma2_between <= 0:
         # Tag means are indistinguishable from sampling noise. Shrink as hard
         # as the guard rail allows rather than pretending k is infinite.
         estimate["shrinkage_weight"] = MAX_SHRINKAGE_WEIGHT
         estimate["reason"] = "no_measurable_between_tag_variance"
+        return estimate
+    if sigma2_within <= 0:
+        # Every tag's own observations agree exactly, so each tag mean is
+        # measured without noise: k = 0/σ²_between = 0, i.e. nothing to shrink.
+        # Shrinking hardest here would erase the strongest evidence the
+        # estimator can ever see.
+        estimate["shrinkage_weight"] = MIN_SHRINKAGE_WEIGHT
+        estimate["reason"] = "no_within_tag_variance"
         return estimate
 
     raw = sigma2_within / sigma2_between

@@ -16,6 +16,7 @@ from gamelib_mcp.data.db.affinity import (
     DEFAULT_SHRINKAGE_WEIGHT,
     MAX_SHRINKAGE_WEIGHT,
     MIN_PLAYTIME_SIGNAL_MINUTES,
+    MIN_SHRINKAGE_WEIGHT,
     estimate_shrinkage_weight,
     playtime_pseudo_score,
 )
@@ -103,6 +104,29 @@ class ShrinkageWeightEstimateTests(unittest.TestCase):
         observations = {
             f"tag{i}": [(1.0, 4.0), (1.0, 10.0)] for i in range(60)
         }
+        estimate = estimate_shrinkage_weight(_tag_data(observations))
+        self.assertEqual(estimate["shrinkage_weight"], MAX_SHRINKAGE_WEIGHT)
+        self.assertEqual(estimate["reason"], "no_measurable_between_tag_variance")
+
+    def test_perfectly_consistent_tags_are_barely_shrunk(self):
+        # Zero within-tag variance with separated means is the OPPOSITE of the
+        # no-signal case: every tag mean is measured exactly, so k = 0. Sharing
+        # a branch with sigma2_between <= 0 would pin these to the ceiling and
+        # erase the strongest evidence the estimator can see.
+        observations = {}
+        for i in range(60):
+            centre = 3.0 if i % 2 else 9.0
+            observations[f"tag{i}"] = [(1.0, centre), (1.0, centre)]
+        estimate = estimate_shrinkage_weight(_tag_data(observations))
+        self.assertEqual(estimate["sigma2_within"], 0.0)
+        self.assertGreater(estimate["sigma2_between"], 0)
+        self.assertEqual(estimate["shrinkage_weight"], MIN_SHRINKAGE_WEIGHT)
+        self.assertEqual(estimate["reason"], "no_within_tag_variance")
+
+    def test_no_variance_at_all_still_shrinks_hard(self):
+        # Identical scores everywhere: neither component is measurable, so
+        # there is no information and the safe read stays "trust nothing".
+        observations = {f"tag{i}": [(1.0, 7.0), (1.0, 7.0)] for i in range(60)}
         estimate = estimate_shrinkage_weight(_tag_data(observations))
         self.assertEqual(estimate["shrinkage_weight"], MAX_SHRINKAGE_WEIGHT)
         self.assertEqual(estimate["reason"], "no_measurable_between_tag_variance")
