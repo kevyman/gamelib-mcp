@@ -95,7 +95,9 @@ class GetTasteProfileTests(ToolDBTestCase):
         await set_tag_affinity("roguelike", affinity_score=2.123456, avg_score=8.987, game_count=5)
         await set_tag_affinity("sports", affinity_score=0.111111, avg_score=3.4, game_count=2)
         profile = await ratings.get_taste_profile()
-        self.assertEqual(set(profile), {"summary", "top_tags", "bottom_tags"})
+        self.assertEqual(
+            set(profile), {"summary", "top_tags", "bottom_tags", "shrinkage"}
+        )
         summary = profile["summary"]
         self.assertEqual(summary["total_rated"], 2)
         self.assertEqual(summary["avg_score"], round((9.0 + 4.0) / 2, 2))
@@ -107,35 +109,41 @@ class GetTasteProfileTests(ToolDBTestCase):
         self.assertEqual(top["affinity_score"], round(2.123456, 3))
         self.assertEqual(top["avg_score"], round(8.987, 2))
 
-    async def test_low_support_tag_excluded_from_top(self):
-        # A lone high rating produces a maximal affinity for its rare tags;
-        # below _MIN_PROFILE_SUPPORT distinct games they don't belong in the
-        # displayed profile at all ("cow" was topping the real one).
-        await set_tag_affinity("go-kart", affinity_score=1.396, avg_score=10.0, game_count=1)
-        await set_tag_affinity("cow", affinity_score=1.65, avg_score=10.0, game_count=2)
-        await set_tag_affinity("deck-building", affinity_score=1.37, avg_score=8.5, game_count=6)
-        profile = await ratings.get_taste_profile()
-        tags = [t["tag"] for t in profile["top_tags"]]
-        self.assertEqual(tags, ["deck-building"])
-        # Raw stored affinity is still surfaced verbatim.
-        deck = profile["top_tags"][0]
-        self.assertEqual(deck["affinity_score"], 1.37)
-
-    async def test_support_shrinkage_still_ranks_within_included_tags(self):
-        # Above the floor, a small-sample outlier must still rank below a tag
-        # backed by more games at a similar affinity.
-        await set_tag_affinity("princess", affinity_score=1.5, avg_score=9.5, game_count=3)
+    async def test_ranks_on_stored_affinity_without_redamping(self):
+        # affinity_score is already the shrunk posterior deviation, so the
+        # profile ranks on it directly — no second game_count damping, which
+        # would shrink the same evidence twice.
         await set_tag_affinity("emotional", affinity_score=1.08, avg_score=8.7, game_count=12)
+        await set_tag_affinity("princess", affinity_score=0.21, avg_score=9.5, game_count=3)
         profile = await ratings.get_taste_profile()
         tags = [t["tag"] for t in profile["top_tags"]]
-        self.assertLess(tags.index("emotional"), tags.index("princess"))
+        self.assertEqual(tags, ["emotional", "princess"])
+        self.assertEqual(profile["top_tags"][0]["affinity_score"], 1.08)
 
-    async def test_low_support_negative_tag_excluded_from_bottom(self):
-        await set_tag_affinity("penguin", affinity_score=-1.4, avg_score=1.0, game_count=1)
-        await set_tag_affinity("walking-sim", affinity_score=-1.3, avg_score=2.0, game_count=5)
+    async def test_strong_affinity_cut_needs_a_deep_enough_profile(self):
+        # Fewer than STRONG_AFFINITY_RANK supported tags: no bar is invented.
+        await set_tag_affinity("deck-building", affinity_score=0.4, avg_score=8.5, game_count=6)
         profile = await ratings.get_taste_profile()
-        tags = [t["tag"] for t in profile["bottom_tags"]]
-        self.assertEqual(tags, ["walking-sim"])
+        self.assertIsNone(profile["shrinkage"]["strong_affinity"])
+
+        for i in range(12):
+            await set_tag_affinity(f"tag{i}", affinity_score=0.5 - i * 0.02, avg_score=8.0, game_count=4)
+        profile = await ratings.get_taste_profile()
+        # 10th best supported affinity: deck-building (0.4) sits between
+        # tag4 (0.42) and tag5 (0.40)... ranked list is 0.5, 0.48, 0.46, 0.44,
+        # 0.42, 0.4 (deck-building ties tag5), so the 10th is 0.34.
+        self.assertAlmostEqual(profile["shrinkage"]["strong_affinity"], 0.34, places=6)
+
+    async def test_low_support_tag_no_longer_needs_a_display_floor(self):
+        # The old floor existed because a 2-game 10/10 keyword ("cow") could
+        # out-score a well-evidenced tag. With shrinkage applied at the source
+        # those tags arrive near zero and sort themselves to the bottom.
+        await set_tag_affinity("go-kart", affinity_score=0.04, avg_score=10.0, game_count=1)
+        await set_tag_affinity("cow", affinity_score=0.09, avg_score=10.0, game_count=2)
+        await set_tag_affinity("deck-building", affinity_score=0.21, avg_score=8.5, game_count=6)
+        profile = await ratings.get_taste_profile()
+        tags = [t["tag"] for t in profile["top_tags"]]
+        self.assertEqual(tags, ["deck-building", "cow", "go-kart"])
 
     async def test_empty_ratings_summary(self):
         profile = await ratings.get_taste_profile()

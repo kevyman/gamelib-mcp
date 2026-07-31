@@ -2320,15 +2320,26 @@ async def init_db() -> None:
     # the old avg*log(count) scale would be misread as signed centered values.
     # Rebuild affinity once so discover/taste scoring is correct immediately,
     # without waiting for the next sync_ratings/rate_game/enrichment pass.
-    if any(
-        "v12 -> v13" in step or "v26 -> v27" in step for step in result.applied_steps
+    # Any later change to the affinity formula or its scale bumps
+    # AFFINITY_FORMULA_VERSION instead of minting a schema migration — the
+    # stored scale record says which formula produced the current rows, so a
+    # stale-scale table heals on the next startup by the same reasoning.
+    if (
+        any("v12 -> v13" in step or "v26 -> v27" in step for step in result.applied_steps)
+        or not await affinity_scale_is_current()
     ):
         await recompute_tag_affinity()
 
 
 # ── Domain submodules (re-exported; imported last so the bottom layer above is
 # fully defined before each leaf does `from . import get_db, ...`). ───────────
-from .affinity import recompute_tag_affinity
+from .affinity import (
+    affinity_scale_is_current,
+    estimate_shrinkage_weight,
+    get_affinity_scale,
+    recompute_tag_affinity,
+    strong_affinity_cut,
+)
 from .claims import (
     HLTB_NOT_FOUND_RETRY_DAYS,
     _claim_cutoff_iso,

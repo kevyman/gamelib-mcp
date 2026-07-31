@@ -254,6 +254,9 @@ class GetStatsResponse(FlexibleModel):
     summary: dict[str, Any] | None = None
     top_tags: list[dict[str, Any]] | None = None
     bottom_tags: list[dict[str, Any]] | None = None
+    # The estimated affinity scale (prior weight + variance components) the
+    # tags above are expressed on — affinity_score has no fixed scale.
+    shrinkage: dict[str, Any] | None = None
     # report="spending"
     owned_rows: int | None = None
     priced_rows: int | None = None

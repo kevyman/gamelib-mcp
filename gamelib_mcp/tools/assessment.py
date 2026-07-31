@@ -126,11 +126,14 @@ def compute_craft_score(
 # ── Fit check (ported from fit_check.py, rescaled to the server's affinity) ──
 
 # fit_check.py called a tag "strong" at affinity >= 20 on the legacy MySteam
-# profile scale. The server's affinity_score is mean-centered and shrunk
-# (Σw·(score − μ) / (Σw + 2), data/db/affinity.py), realistically spanning
-# about ±3 — 1.0 marks a tag consistently rated well above the user's own
-# mean across several games, the same rung of the ladder the old 20 marked.
-_STRONG_AFFINITY = 1.0
+# profile scale, and this module long carried 1.0 as its equivalent. There is
+# no such constant any more: affinity_score is a shrunk posterior deviation
+# whose spread depends on the prior weight k estimated per recompute
+# (data/db/affinity.py), so a hardcoded threshold silently falls out of
+# calibration whenever the library grows. "Strong" now comes from the profile's
+# own recorded scale (`shrinkage.strong_affinity` — the affinity of his 10th
+# best-supported tag); a profile too thin to rank ten has NO strong tags, and
+# the fit call degrades to coverage rather than inventing a bar.
 # Steam orders tags by relevance: the first 4 describe the core loop.
 _CORE_TAG_COUNT = 4
 _CORE_GAP_MISSES = 3
@@ -176,9 +179,12 @@ def _dedupe_candidate_tags(tags: list[str]) -> list[tuple[str, str]]:
 def compute_fit(candidate_tags: list[str], profile: dict) -> dict[str, Any]:
     """Cross candidate tags against a taste profile (get_taste_profile shape).
 
-    Same thresholds the retired fit_check.py applied, with "strong" rescaled
-    to the server's affinity scale (_STRONG_AFFINITY above).
+    Same thresholds the retired fit_check.py applied, with "strong" read from
+    the profile's recorded affinity scale (see the note above).
     """
+    strong_cut = (profile.get("shrinkage") or {}).get("strong_affinity")
+    if not isinstance(strong_cut, (int, float)) or isinstance(strong_cut, bool):
+        strong_cut = None
     cand = {key: display for display, key in _dedupe_candidate_tags(candidate_tags)}
 
     top = {_fit_key(t["tag"]): t for t in profile.get("top_tags", [])}
@@ -221,7 +227,11 @@ def compute_fit(candidate_tags: list[str], profile: dict) -> dict[str, Any]:
             unmatched.append(original)
 
     matched_top.sort(key=lambda m: -(m["affinity"] or 0))
-    strong_top = [m for m in matched_top if (m["affinity"] or 0) >= _STRONG_AFFINITY]
+    strong_top = (
+        []
+        if strong_cut is None
+        else [m for m in matched_top if (m["affinity"] or 0) >= strong_cut]
+    )
     coverage = len(matched_top) / max(1, len(cand))
 
     core_keys = list(cand.keys())[:_CORE_TAG_COUNT]
