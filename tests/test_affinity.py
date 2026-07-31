@@ -12,7 +12,11 @@ from conftest import (
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.db.affinity import (
+    AFFINITY_FORMULA_VERSION,
+    DEFAULT_SHRINKAGE_WEIGHT,
+    MAX_SHRINKAGE_WEIGHT,
     MIN_PLAYTIME_SIGNAL_MINUTES,
+    estimate_shrinkage_weight,
     playtime_pseudo_score,
 )
 
@@ -61,6 +65,128 @@ class MeanCenteringTests(ToolDBTestCase):
         rows = await _affinity_rows()
         self.assertAlmostEqual(rows["action"]["affinity_score"], 0.0, places=6)
         self.assertGreater(rows["roguelike"]["affinity_score"], 0)
+
+
+def _tag_data(observations: dict[str, list[tuple[float, float]]]) -> dict[str, dict]:
+    """Build estimate_shrinkage_weight input from {tag: [(weight, score), ...]}."""
+    data: dict[str, dict] = {}
+    for tag, signals in observations.items():
+        entry = {
+            "weighted_sum": 0.0,
+            "centered_sum": 0.0,
+            "square_sum": 0.0,
+            "weight_sum": 0.0,
+            "weight_square_sum": 0.0,
+            "game_ids": set(),
+        }
+        for i, (weight, score) in enumerate(signals):
+            entry["weighted_sum"] += weight * score
+            entry["square_sum"] += weight * score * score
+            entry["weight_sum"] += weight
+            entry["weight_square_sum"] += weight * weight
+            entry["game_ids"].add(f"{tag}-{i}")
+        data[tag] = entry
+    return data
+
+
+class ShrinkageWeightEstimateTests(unittest.TestCase):
+    """The prior weight k is measured, not hand-picked."""
+
+    def test_too_few_tags_falls_back_to_the_default(self):
+        estimate = estimate_shrinkage_weight(_tag_data({"a": [(1.0, 9.0)]}))
+        self.assertEqual(estimate["shrinkage_weight"], DEFAULT_SHRINKAGE_WEIGHT)
+        self.assertEqual(estimate["reason"], "insufficient_data")
+
+    def test_tags_that_only_differ_by_noise_shrink_hard(self):
+        # Every tag drawn from the same distribution: sigma2_between is zero
+        # or negative, so there is nothing to trust and k pins to the ceiling.
+        observations = {
+            f"tag{i}": [(1.0, 4.0), (1.0, 10.0)] for i in range(60)
+        }
+        estimate = estimate_shrinkage_weight(_tag_data(observations))
+        self.assertEqual(estimate["shrinkage_weight"], MAX_SHRINKAGE_WEIGHT)
+        self.assertEqual(estimate["reason"], "no_measurable_between_tag_variance")
+
+    def test_separated_tags_yield_a_small_prior_weight(self):
+        # Tight clusters far apart: within-tag variance is tiny next to the
+        # between-tag spread, so k is small and tags keep their deviations.
+        observations = {}
+        for i in range(60):
+            centre = 3.0 if i % 2 else 9.0
+            observations[f"tag{i}"] = [(1.0, centre - 0.1), (1.0, centre + 0.1)]
+        estimate = estimate_shrinkage_weight(_tag_data(observations))
+        self.assertGreater(estimate["sigma2_between"], estimate["sigma2_within"])
+        self.assertLess(estimate["shrinkage_weight"], 1.0 + 1e-9)
+
+    def test_within_variance_drives_the_weight_up(self):
+        # Same tag centres, but each tag's own observations now spread widely:
+        # the marginal evidence per tag is weaker, so k must rise.
+        tight, loose = {}, {}
+        for i in range(60):
+            centre = 3.0 if i % 2 else 9.0
+            tight[f"tag{i}"] = [(1.0, centre - 0.5), (1.0, centre + 0.5)]
+            loose[f"tag{i}"] = [(1.0, centre - 3.0), (1.0, centre + 3.0)]
+        self.assertLess(
+            estimate_shrinkage_weight(_tag_data(tight))["shrinkage_weight"],
+            estimate_shrinkage_weight(_tag_data(loose))["shrinkage_weight"],
+        )
+
+
+class RarityBiasTests(ToolDBTestCase):
+    """Regression: affinity used to be inversely correlated with evidence."""
+
+    async def _seed_library(self):
+        # 40 games spread across the rating range so the estimator has a
+        # population to measure, all sharing a well-supported tag on the good
+        # half. Plus the reported failure shape: two 10/10 games carrying an
+        # incidental keyword nothing else has.
+        for i in range(20):
+            gid = await make_steam_game(f"Good{i}", 1000 + i, tags=["3d platformer", "action"])
+            await add_rating(gid, "backloggd", raw_score=8.6, normalized_score=8.6)
+        for i in range(20):
+            gid = await make_steam_game(f"Mixed{i}", 2000 + i, tags=["action", f"filler{i}"])
+            await add_rating(gid, "backloggd", raw_score=5.0 + (i % 5), normalized_score=5.0 + (i % 5))
+        for i in range(2):
+            gid = await make_steam_game(f"Cow{i}", 3000 + i, tags=["cow", "action"])
+            await add_rating(gid, "manual", raw_score=10.0, normalized_score=10.0)
+
+    async def test_two_game_keyword_does_not_outrank_a_twenty_game_tag(self):
+        await self._seed_library()
+        await db_module.recompute_tag_affinity()
+
+        rows = await _affinity_rows()
+        self.assertEqual(rows["cow"]["game_count"], 2)
+        self.assertEqual(rows["3d platformer"]["game_count"], 20)
+        # "cow" has the higher raw average (10.0 vs 8.6) and used to win on it.
+        self.assertGreater(rows["cow"]["avg_score"], rows["3d platformer"]["avg_score"])
+        self.assertGreater(
+            rows["3d platformer"]["affinity_score"], rows["cow"]["affinity_score"]
+        )
+
+    async def test_affinity_no_longer_declines_with_support(self):
+        await self._seed_library()
+        await db_module.recompute_tag_affinity()
+
+        rows = await _affinity_rows()
+        # Same underlying deviation, different evidence: the single-game filler
+        # tags must not average out above the well-supported tags.
+        singles = [r["affinity_score"] for r in rows.values() if r["game_count"] == 1]
+        supported = [r["affinity_score"] for r in rows.values() if r["game_count"] >= 20]
+        self.assertTrue(singles and supported)
+        self.assertGreater(
+            max(supported), max(abs(a) for a in singles)
+        )
+
+    async def test_scale_record_is_written_for_auditability(self):
+        await self._seed_library()
+        await db_module.recompute_tag_affinity()
+
+        scale = await db_module.get_affinity_scale()
+        self.assertEqual(scale["formula_version"], AFFINITY_FORMULA_VERSION)
+        self.assertGreater(scale["shrinkage_weight"], 0)
+        self.assertIn("sigma2_within", scale)
+        self.assertIn("sigma2_between", scale)
+        self.assertTrue(await db_module.affinity_scale_is_current())
 
 
 class ShrinkageTests(ToolDBTestCase):

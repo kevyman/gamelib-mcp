@@ -184,8 +184,8 @@ TABLE_ANNOTATIONS: dict[str, dict] = {
             "avoided, near zero = neutral. Not a raw popularity count."
         ),
         "columns": {
-            "affinity_score": "Signed, mean-centered, shrinkage-damped taste score for this tag.",
-            "game_count": "How many rated/played games contributed to this tag's score — low counts are noisy (see game_count/(game_count+2) damping used by discover_games).",
+            "affinity_score": "Signed, mean-centered, shrunk taste score: Sum(w*(score-mean))/(Sum(w)+k), where k is the prior weight estimated per recompute (meta key 'tag_affinity_scale'). Already accounts for how much evidence backs the tag, so do NOT damp it again by game_count. It has no fixed scale — compare tags to each other, or to the recorded strong_affinity cut, never to a constant.",
+            "game_count": "How many rated/played games contributed to this tag's score. Low counts are already shrunk toward zero in affinity_score; the column is for display and filtering, not for re-weighting.",
         },
     },
     "meta": {

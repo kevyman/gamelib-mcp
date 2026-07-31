@@ -94,8 +94,15 @@ class CraftScoreMathTests(unittest.TestCase):
         self.assertNotIn("trajectory", out)
 
 
-def _profile(top=None, bottom=None):
-    return {"top_tags": top or [], "bottom_tags": bottom or []}
+def _profile(top=None, bottom=None, strong_affinity=1.0):
+    # "strong" is read from the profile's own recorded scale — affinity_score
+    # has no fixed meaning across libraries (data/db/affinity.py). Pass
+    # strong_affinity=None for a profile too thin to nominate strong tags.
+    return {
+        "top_tags": top or [],
+        "bottom_tags": bottom or [],
+        "shrinkage": {"strong_affinity": strong_affinity},
+    }
 
 
 def _tag(tag, affinity, game_count=5, avg_score=8.0):
@@ -403,6 +410,11 @@ class FitThroughToolTests(ToolDBTestCase):
         await set_tag_affinity("deckbuilder", 1.5, 8.5, 4)
         await set_tag_affinity("indie", 1.2, 8.2, 12)
         await set_tag_affinity("sports", -1.8, 4.0, 3)
+        # "strong" is the affinity of the 10th best-supported tag, so the
+        # profile needs enough depth to have a 10th — filler below the three
+        # candidates, which must therefore all clear the bar.
+        for i in range(9):
+            await set_tag_affinity(f"filler{i}", 0.5 - i * 0.01, 7.5, 4)
         result = await main.get_assessment_context(
             tags=["Roguelike", "Deckbuilder", "Indie"]
         )
