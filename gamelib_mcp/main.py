@@ -402,8 +402,12 @@ async def get_stats(
     explain why recommendations rank certain genres or tags highly. Run
     sync(targets=["ratings"]) first if it may be stale. Scores are signed and
     mean-centered: positive = rated/played above your own average, near zero =
-    neutral, negative = actively avoided. Returns loved and avoided tags plus
-    rating source and score summaries.
+    neutral, negative = actively avoided. They are also shrunk by an evidence
+    prior estimated from the library, so they have NO absolute scale — read
+    them against each other, or against shrinkage.strong_affinity, never
+    against a fixed number, and do not re-weight them by game_count. Returns
+    loved and avoided tags, the shrinkage block, plus rating source and score
+    summaries.
 
     report="spending" (year, platform, purchase_source) — spending from
     recorded acquisition data (see set_acquisition), over owned platform rows

@@ -135,19 +135,39 @@ class MatchSortTests(ToolDBTestCase):
         await set_tag_affinity("sports", affinity_score=0.2, avg_score=3.0, game_count=2)
         results = await discover.discover_games()
         self.assertEqual([g["name"] for g in results["results"]], ["LikedGame", "MehGame"])
-        # IDF-weighted damped mean: N=2 games, each tag on 1 game, so
-        # idf = ln(1 + 2/1) and score = affinity·support·idf / (idf + prior)
-        # where support = game_count / (game_count + _SUPPORT_K).
-        idf = math.log(3.0)
+        # IDF-weighted mean of the stored (already shrunk) affinities: N=2
+        # games and each tag sits on 1, below _IDF_DF_FLOOR, so df is floored
+        # and idf = ln(1 + 2/floor); score = affinity·idf / (idf + prior).
+        idf = math.log(1.0 + 2.0 / discover._IDF_DF_FLOOR)
         self.assertEqual(
             results["results"][0]["match_score"],
-            round(2.5 * (4 / (4 + discover._SUPPORT_K)) * idf / (idf + discover._MATCH_PRIOR), 3),
+            round(2.5 * idf / (idf + discover._MATCH_PRIOR), 3),
         )
         self.assertEqual(
             results["results"][1]["match_score"],
-            round(0.2 * (2 / (2 + discover._SUPPORT_K)) * idf / (idf + discover._MATCH_PRIOR), 3),
+            round(0.2 * idf / (idf + discover._MATCH_PRIOR), 3),
         )
         self.assertEqual(results["total_matches"], 2)
+
+    async def test_rare_tag_idf_is_floored(self):
+        # A tag on one library game is not maximally informative, it is
+        # unmeasured. Without the floor its idf ceiling (ln(1+N)) dwarfs every
+        # measured tag's — the rarity half of the double-counting bug.
+        for i in range(30):
+            await make_steam_game(f"Filler{i}", 100 + i, playtime_minutes=600, tags=["common"])
+        await make_steam_game("RareTag", 1, playtime_minutes=0, tags=["unique"])
+        await set_tag_affinity("unique", affinity_score=1.0, avg_score=9.0, game_count=1)
+
+        results = await discover.discover_games(unplayed_only=False)
+
+        rare = next(g for g in results["results"] if g["name"] == "RareTag")
+        n = 31.0
+        idf = math.log(1.0 + n / discover._IDF_DF_FLOOR)
+        self.assertEqual(
+            rare["match_score"], round(1.0 * idf / (idf + discover._MATCH_PRIOR), 3)
+        )
+        # Unfloored it would have been ln(1 + 31/1) — materially higher.
+        self.assertLess(idf, math.log(1.0 + n))
 
     async def test_single_ubiquitous_tag_cannot_dominate(self):
         # The "100% match on a single 'action' tag" failure mode: a game whose
@@ -170,10 +190,12 @@ class MatchSortTests(ToolDBTestCase):
 
     async def test_single_rare_low_support_tag_cannot_dominate(self):
         # The "Down in Bermuda" failure mode: a game whose ONLY tag is a rare
-        # IGDB keyword ("dinosaurs") loved via 2 ratings gets both a huge IDF
-        # and a near-ceiling affinity, and used to top every match ranking.
-        # Support damping plus the larger prior must rank the rich, consistent
-        # profile above it.
+        # IGDB keyword ("dinosaurs") loved via 2 ratings used to get both a
+        # huge IDF and a near-ceiling affinity, and topped every match ranking.
+        # Affinity shrinkage (which now lands such a tag near zero upstream),
+        # the IDF floor, and the prior must rank the rich profile above it.
+        # The affinities below are still deliberately generous to the rare tag:
+        # even un-shrunk, it must not win.
         for i in range(20):
             await make_steam_game(f"Filler{i}", 100 + i, playtime_minutes=600, tags=["action"])
         await make_steam_game("RareKeywordOnly", 1, playtime_minutes=0, tags=["dinosaurs"])

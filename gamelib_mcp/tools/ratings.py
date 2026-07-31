@@ -8,10 +8,12 @@ from fastmcp.exceptions import ToolError
 from ..data.backloggd import sync_backloggd
 from ..data.db import (
     fts_ready,
+    get_affinity_scale,
     get_db,
     load_platforms_for_games,
     recompute_tag_affinity,
     set_meta,
+    strong_affinity_cut,
 )
 from ..data.steam_reviews import sync_steam_reviews
 from ..utils import _parse_json
@@ -36,20 +38,6 @@ from .search import (
 
 ResponseFormat = Literal["concise", "detailed"]
 
-# Support shrinkage for taste-profile ranking: a tag seen on only one game can
-# hit a maximal signed affinity from a single high/low rating and crowd out
-# genuinely predictive multi-game tags. Rank by affinity damped toward zero by
-# game_count / (game_count + k) so single-game outliers rank honestly. This is a
-# display-only adjustment — the stored affinity_score is left untouched and
-# still shown verbatim (discover_games applies the same damping in-query).
-_SUPPORT_SHRINKAGE_K = 2.0
-_SUPPORT_ADJUSTED_RANK_SQL = (
-    "affinity_score * game_count / (game_count + ?)"
-)
-# A profile entry needs at least this many distinct games behind it — damping
-# alone still let a 2-game 10/10 keyword ("cow") crack the displayed top 20,
-# and half the affinity table sits at game_count <= 2.
-_MIN_PROFILE_SUPPORT = 3
 
 
 async def sync_ratings(ctx=None) -> dict:
@@ -305,35 +293,27 @@ async def get_ratings(
 async def get_taste_profile() -> dict:
     """Show tag affinities plus rating stats summary.
 
-    top/bottom tags are ranked by support-shrunk affinity (affinity damped by
-    game_count) and require at least _MIN_PROFILE_SUPPORT distinct games, so
-    a tag seen on one or two high/low ratings doesn't outrank tags backed by
-    several games. A cold-start profile where NO tag reaches the floor falls
-    back to the unfloored list — a couple of ratings should still show
-    something. The displayed affinity_score is the raw stored value; only
-    the ordering and floor are adjusted.
+    top/bottom tags rank on affinity_score directly. No display-time damping or
+    support floor: affinity_score is already the shrunk posterior deviation
+    (data/db/affinity.py), so a tag seen on one high rating sorts near zero on
+    its own merits rather than needing to be filtered out afterwards.
+
+    `shrinkage` reports the estimated scale behind those numbers — the prior
+    weight k, the variance components it came from, and the `strong_affinity`
+    rank cut consumers should threshold against instead of a constant.
     """
     async with get_db() as db:
-        support_floor = f"game_count >= {_MIN_PROFILE_SUPPORT}"
-        floored = await db.execute_fetchone(
-            f"SELECT COUNT(*) AS c FROM tag_affinity WHERE {support_floor}"
-        )
-        where = support_floor if floored["c"] else "1=1"
         top_tags = await db.execute_fetchall(
-            f"""SELECT tag, affinity_score, avg_score, game_count
+            """SELECT tag, affinity_score, avg_score, game_count
                FROM tag_affinity
-               WHERE {where}
-               ORDER BY {_SUPPORT_ADJUSTED_RANK_SQL} DESC
-               LIMIT 20""",
-            (_SUPPORT_SHRINKAGE_K,),
+               ORDER BY affinity_score DESC
+               LIMIT 20"""
         )
         bottom_tags = await db.execute_fetchall(
-            f"""SELECT tag, affinity_score, avg_score, game_count
+            """SELECT tag, affinity_score, avg_score, game_count
                FROM tag_affinity
-               WHERE {where}
-               ORDER BY {_SUPPORT_ADJUSTED_RANK_SQL} ASC
-               LIMIT 10""",
-            (_SUPPORT_SHRINKAGE_K,),
+               ORDER BY affinity_score ASC
+               LIMIT 10"""
         )
         rating_stats = await db.execute_fetchone(
             """SELECT
@@ -347,7 +327,22 @@ async def get_taste_profile() -> dict:
                FROM ratings"""
         )
 
+    scale = await get_affinity_scale()
+    strong_cut = await strong_affinity_cut()
+
     return {
+        "shrinkage": {
+            "prior_weight": scale.get("shrinkage_weight"),
+            "sigma2_within": scale.get("sigma2_within"),
+            "sigma2_between": scale.get("sigma2_between"),
+            "strong_affinity": strong_cut,
+            "note": (
+                "affinity = Σw(score − mean) / (Σw + prior_weight); prior_weight "
+                "is estimated per recompute as σ²_within/σ²_between, so scores "
+                "are comparable to each other and to strong_affinity, not to a "
+                "fixed threshold."
+            ),
+        },
         "summary": {
             "total_rated": rating_stats["total_rated"],
             "avg_score": round(rating_stats["avg_score"], 2) if rating_stats["avg_score"] else None,
