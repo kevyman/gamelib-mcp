@@ -24,12 +24,14 @@ from gamelib_mcp.data.db import (
     get_game_by_identifier,
     load_fuzzy_candidates,
     repair_misclassified_platform_row,
+    upsert_game,
     upsert_game_platform,
     upsert_game_platform_enrichment,
     upsert_game_platform_identifier,
 )
 from gamelib_mcp.data.igdb import PLATFORM_TO_IGDB, resolve_and_link_game
 from gamelib_mcp.data.title_normalization import (
+    normalize_edition_comparison_title,
     normalize_search_text,
     prepare_catalog_title,
 )
@@ -89,6 +91,76 @@ _MEDIA_APP_NAMES = {
     "Disney+", "Spotify", "Netflix", "YouTube", "Prime Video",
     "Plex", "Crunchyroll", "Apple TV", "Twitch", "SONY PICTURES CORE",
 }
+
+
+class _SkuAggregate:
+    """The PSN SKUs of one game, folded into a single ``game_platforms`` row.
+
+    PSN's gamelist is per-SKU, not per-game: a cross-generation title comes back
+    as two or three entries (``CUSA…`` for PS4, ``PPSA…`` for PS5, sometimes one
+    PPSA per region) each carrying its OWN play_duration. They all resolve to the
+    same games row, and ``game_platforms`` is UNIQUE(game_id, platform), so they
+    contend for a single row — and ``upsert_game_platform`` resolves playtime with
+    COALESCE(excluded, existing), i.e. last writer wins. Since PSN sorts the
+    gamelist by last-played descending, the STALEST SKU is written last and
+    silently overwrote the newer one (observed in prod: Assassin's Creed Valhalla
+    and Ghost of Tsushima kept their PS4 minutes and lost their PS5 ones, and
+    last_played regressed to the PS4 date along with it).
+
+    So the SKUs are accumulated here and written once: playtime is the SUM across
+    SKUs (the hours are real and were played on the same console), last_played is
+    the MAX (a newer session must never be walked backwards).
+    """
+
+    __slots__ = ("igdb_game", "last_played", "playtime_minutes", "skus", "title")
+
+    def __init__(self, title: str) -> None:
+        self.title = title
+        self.playtime_minutes: int | None = None
+        self.last_played: str | None = None
+        # (title_id, playtime_minutes) per SKU, in the order PSN returned them.
+        self.skus: list[tuple[str, int]] = []
+        self.igdb_game = None
+
+    def add(self, entry: dict, igdb_game=None) -> None:
+        minutes = entry.get("playtime_minutes")
+        if minutes is not None:
+            self.playtime_minutes = (self.playtime_minutes or 0) + minutes
+        last_played = entry.get("last_played")
+        # ISO YYYY-MM-DD sorts lexicographically, so plain > is a date compare.
+        if last_played and (self.last_played is None or last_played > self.last_played):
+            self.last_played = last_played
+        title_id = entry.get("title_id")
+        if title_id and all(title_id != known for known, _ in self.skus):
+            self.skus.append((title_id, minutes or 0))
+        if self.igdb_game is None and igdb_game is not None:
+            self.igdb_game = igdb_game
+
+    def accepts(self, title: str) -> bool:
+        """True when ``title`` is the same game as this aggregate's, edition aside.
+
+        The gate on folding a second SKU into an existing row. Two SKUs of one
+        game carry the same name modulo an edition suffix ("Ghost of Tsushima" /
+        "Ghost of Tsushima DIRECTOR'S CUT"), which
+        ``normalize_edition_comparison_title`` collapses. A genuinely different
+        game does not ("Ratchet & Clank" is not an edition of "Ratchet & Clank:
+        Rift Apart") — and without this check its playtime would be summed onto
+        the wrong game. Compares SKU name against SKU name, never against the
+        stored library name, so a hand-renamed library row cannot fork a sync.
+        """
+        return normalize_edition_comparison_title(
+            self.title
+        ) == normalize_edition_comparison_title(title)
+
+    def primary_sku(self) -> str | None:
+        """The title id to mark is_primary — the SKU with the most playtime.
+
+        Ties keep the first PSN returned. The alternative (whichever happened to
+        be written last) made the least-recently-played SKU primary.
+        """
+        if not self.skus:
+            return None
+        return max(self.skus, key=lambda sku: sku[1])[0]
 
 
 def is_psn_configured() -> bool:
@@ -190,8 +262,12 @@ async def sync_psn() -> dict:
     current_titles = {normalize_search_text(name) for _entry, name in prepared_entries}
     candidates = await load_fuzzy_candidates()
 
+    # Pass 1 — resolve every SKU to its games row, accumulating per game rather
+    # than writing per SKU (see _SkuAggregate: one row, N SKUs, last writer won).
+    aggregates: dict[int, _SkuAggregate] = {}
+    igdb_platform_id = PLATFORM_TO_IGDB.get("ps5")
+
     for entry, name in prepared_entries:
-        igdb_platform_id = PLATFORM_TO_IGDB.get("ps5")
         title_id = entry.get("title_id")
 
         # Prefer the stable PSN title id: if we've ingested this title before,
@@ -213,24 +289,25 @@ async def sync_psn() -> dict:
             if existing is None and title_id
             else None
         )
+        # added/matched count GAMES, not SKUs — the tally is applied below, once
+        # per distinct games row, so a cross-gen title's second entry does not
+        # report as a second game.
         if existing is not None:
             game_id = existing["id"]
             igdb_game = None
-            matched += 1
+            is_new_game = False
         elif adopted_game_id is not None:
             game_id = adopted_game_id
             igdb_game = None
-            matched += 1
+            is_new_game = False
         else:
             conflicting_game_id = find_conflicting_fuzzy_key(name, candidates)
             game_id, igdb_game = await resolve_and_link_game(
                 name, igdb_platform_id, candidates, platform="ps5"
             )
-            if game_id in candidates:
-                matched += 1
-            else:
+            is_new_game = game_id not in candidates
+            if is_new_game:
                 candidates[game_id] = name
-                added += 1
 
             if conflicting_game_id is not None and conflicting_game_id != game_id:
                 conflicting_title = candidates.get(conflicting_game_id)
@@ -241,24 +318,73 @@ async def sync_psn() -> dict:
                         platform="ps5",
                     )
 
+        # A second SKU may only join an existing aggregate when it names the same
+        # game. When it does not, resolution collapsed two distinct games onto one
+        # row (prod: the 2016 "Ratchet & Clank" sitting on "Ratchet & Clank: Rift
+        # Apart"), and summing their playtime would compound the error — so the
+        # SKU gets its own games row instead. Safe to do automatically, unlike a
+        # general over-merge split: PSN reports playtime per SKU, so there is
+        # nothing to re-attribute.
+        aggregate = aggregates.get(game_id)
+        if aggregate is not None and not aggregate.accepts(name):
+            logger.info(
+                "PSN: %r (%s) does not name the same game as %r — keeping it separate",
+                name, title_id, aggregate.title,
+            )
+            game_id = await upsert_game(appid=None, name=name, match_existing_by_name=False)
+            candidates[game_id] = name
+            igdb_game = None
+            is_new_game = True
+            aggregate = aggregates.get(game_id)
+
+        if aggregate is None:
+            aggregate = aggregates[game_id] = _SkuAggregate(name)
+            if is_new_game:
+                added += 1
+            else:
+                matched += 1
+        aggregate.add(entry, igdb_game)
+
+    # Pass 2 — one platform write per game, carrying every SKU's playtime.
+    for game_id, aggregate in aggregates.items():
         platform_id = await upsert_game_platform(
             game_id=game_id,
             platform="ps5",
-            playtime_minutes=entry["playtime_minutes"],
-            last_played=entry.get("last_played"),
+            playtime_minutes=aggregate.playtime_minutes,
+            last_played=aggregate.last_played,
             owned=1,
             from_source=True,
         )
 
-        # Record the stable id so future syncs match by it (idempotent).
-        if title_id:
-            await upsert_game_platform_identifier(platform_id, PSN_TITLE_ID, title_id)
+        # Record the stable ids so future syncs match by them (idempotent). The
+        # most-played SKU is written last so it ends up is_primary (the write
+        # demotes this row's other ids of the same type).
+        primary_sku = aggregate.primary_sku()
+        for sku, _minutes in aggregate.skus:
+            if sku != primary_sku:
+                await upsert_game_platform_identifier(
+                    platform_id, PSN_TITLE_ID, sku, is_primary=False
+                )
+        if primary_sku is not None:
+            await upsert_game_platform_identifier(platform_id, PSN_TITLE_ID, primary_sku)
 
+        igdb_game = aggregate.igdb_game
         if igdb_game is not None and igdb_platform_id in igdb_game.platform_release_dates:
             await upsert_game_platform_enrichment(
                 platform_id,
                 platform_release_date=igdb_game.platform_release_dates[igdb_platform_id],
             )
 
-    logger.info("PSN sync: added=%d matched=%d skipped=%d", added, matched, skipped)
-    return {"added": added, "matched": matched, "skipped": skipped}
+    merged_skus = len(prepared_entries) - len(aggregates)
+    logger.info(
+        "PSN sync: added=%d matched=%d skipped=%d merged_skus=%d",
+        added, matched, skipped, merged_skus,
+    )
+    return {
+        "added": added,
+        "matched": matched,
+        "skipped": skipped,
+        # Extra SKUs folded into a game already counted above — the PS4/PS5
+        # entries of a cross-gen title. Not games; not double-counted in matched.
+        "merged_skus": merged_skus,
+    }
