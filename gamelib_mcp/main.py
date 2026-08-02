@@ -151,7 +151,8 @@ mcp = FastMCP(
         "Tools that act on one game (rate_game, update_game, set_playtime, set_acquisition, "
         "add_game_to_platform, merge_games, delete_game, get_game_detail) also take items=[...] "
         "to do the same thing in bulk in a single call — prefer that over looping. "
-        "For evaluation and backlog-triage methodology, read skill://index.json."
+        "For game-evaluation, bundle-evaluation, and backlog-triage methodology, "
+        "read skill://index.json."
     ),
     auth=auth_provider,
     middleware=component_middleware,
