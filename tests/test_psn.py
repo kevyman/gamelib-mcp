@@ -409,14 +409,17 @@ class PsnCrossGenSkuTests(unittest.TestCase):
     their PS4 entries this way.
     """
 
-    def _run_sync(self, entries, *, resolve_game_id=42, existing_by_id=None):
-        mock_upsert_platform = AsyncMock(return_value=77)
+    def _run_sync(self, entries, *, resolve_game_id=42, existing_by_id=None, candidates=None):
+        mock_upsert_platform = AsyncMock(side_effect=lambda **kw: 700 + kw["game_id"])
         mock_upsert_id = AsyncMock()
         mock_upsert_game = AsyncMock(side_effect=lambda **kw: 900 + len(kw))
         with (
             patch.dict("os.environ", {"PSN_NPSSO": "fake"}, clear=False),
             patch("gamelib_mcp.data.psn.fetch_psn_library", AsyncMock(return_value=entries)),
-            patch("gamelib_mcp.data.psn.load_fuzzy_candidates", AsyncMock(return_value={})),
+            patch(
+                "gamelib_mcp.data.psn.load_fuzzy_candidates",
+                AsyncMock(return_value=dict(candidates or {})),
+            ),
             patch(
                 "gamelib_mcp.data.psn.get_game_by_identifier",
                 AsyncMock(side_effect=existing_by_id or (lambda *_a: None)),
@@ -480,9 +483,9 @@ class PsnCrossGenSkuTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         # Lesser SKU written first and explicitly non-primary; the most-played
         # one last, so the write's demotion pass leaves it is_primary.
-        self.assertEqual(calls[0].args, (77, psn.PSN_TITLE_ID, "CUSA18522_00"))
+        self.assertEqual(calls[0].args, (742, psn.PSN_TITLE_ID, "CUSA18522_00"))
         self.assertFalse(calls[0].kwargs["is_primary"])
-        self.assertEqual(calls[1].args, (77, psn.PSN_TITLE_ID, "PPSA01490_00"))
+        self.assertEqual(calls[1].args, (742, psn.PSN_TITLE_ID, "PPSA01490_00"))
         self.assertEqual(calls[1].kwargs, {})
 
     def test_different_game_is_not_folded_in(self) -> None:
@@ -497,17 +500,59 @@ class PsnCrossGenSkuTests(unittest.TestCase):
             {"name": "Ratchet & Clank", "title_id": "CUSA01047_00",
              "playtime_minutes": 65},
         ]
-        result, mock_upsert_platform, _ids, mock_upsert_game = self._run_sync(entries)
+        result, mock_upsert_platform, _ids, mock_upsert_game = self._run_sync(
+            entries, candidates={42: "Ratchet & Clank: Rift Apart"}
+        )
 
-        # Two platform writes — the second SKU got its own games row.
+        # Two platform writes — the intruding SKU got its own games row.
         self.assertEqual(mock_upsert_platform.await_count, 2)
-        written = [c.kwargs["playtime_minutes"] for c in mock_upsert_platform.await_args_list]
-        self.assertEqual(sorted(written), [65, 600])
+        by_game = {
+            c.kwargs["game_id"]: c.kwargs["playtime_minutes"]
+            for c in mock_upsert_platform.await_args_list
+        }
+        # Rift Apart keeps the canonical row (42) with only its own playtime.
+        self.assertEqual(by_game[42], 600)
+        self.assertEqual(sorted(by_game.values()), [65, 600])
         self.assertEqual(result["merged_skus"], 0)
         mock_upsert_game.assert_awaited_once()
         self.assertEqual(mock_upsert_game.await_args.kwargs["name"], "Ratchet & Clank")
         # Never re-collapse onto the row the gate just rejected.
         self.assertIs(mock_upsert_game.await_args.kwargs["match_existing_by_name"], False)
+
+    def test_canonical_row_survives_reversed_sku_order(self) -> None:
+        """The split must not depend on PSN's last-played ordering.
+
+        Same collapse as above, but the user played the 2016 game most recently
+        so its SKU comes FIRST. Naively forking the newcomer would hand the
+        canonical Rift Apart row (name, cover, IGDB link, ratings) to the 2016
+        game and shunt Rift Apart onto a bare minted row.
+        """
+        entries = [
+            {"name": "Ratchet & Clank", "title_id": "CUSA01047_00",
+             "playtime_minutes": 65},
+            {"name": "Ratchet & Clank: Rift Apart", "title_id": "PPSA01473_00",
+             "playtime_minutes": 600},
+        ]
+        result, mock_upsert_platform, _ids, mock_upsert_game = self._run_sync(
+            entries, candidates={42: "Ratchet & Clank: Rift Apart"}
+        )
+
+        self.assertEqual(mock_upsert_platform.await_count, 2)
+        by_game = {
+            c.kwargs["game_id"]: c.kwargs["playtime_minutes"]
+            for c in mock_upsert_platform.await_args_list
+        }
+        # Rift Apart still keeps row 42, despite arriving second.
+        self.assertEqual(by_game[42], 600)
+        self.assertEqual(sorted(by_game.values()), [65, 600])
+        # The 2016 game is the one evicted onto a fresh row.
+        mock_upsert_game.assert_awaited_once()
+        self.assertEqual(mock_upsert_game.await_args.kwargs["name"], "Ratchet & Clank")
+        # Two games either way — the evicted one owns a minted row, so it counts
+        # as added rather than staying tallied against the row it lost.
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(result["matched"], 1)
+        self.assertEqual(result["merged_skus"], 0)
 
     def test_single_sku_write_is_unchanged(self) -> None:
         entries = [{"name": "Elden Ring", "title_id": "PPSA02", "playtime_minutes": 150,
@@ -518,7 +563,7 @@ class PsnCrossGenSkuTests(unittest.TestCase):
             game_id=42, platform="ps5", playtime_minutes=150,
             last_played="2024-03-02", owned=1, from_source=True,
         )
-        mock_upsert_id.assert_awaited_once_with(77, psn.PSN_TITLE_ID, "PPSA02")
+        mock_upsert_id.assert_awaited_once_with(742, psn.PSN_TITLE_ID, "PPSA02")
         mock_upsert_game.assert_not_awaited()
         self.assertEqual(result["merged_skus"], 0)
 

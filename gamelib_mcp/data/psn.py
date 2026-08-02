@@ -93,6 +93,11 @@ _MEDIA_APP_NAMES = {
 }
 
 
+def _titles_agree(a: str, b: str) -> bool:
+    """True when two titles name the same game, an edition suffix aside."""
+    return normalize_edition_comparison_title(a) == normalize_edition_comparison_title(b)
+
+
 class _SkuAggregate:
     """The PSN SKUs of one game, folded into a single ``game_platforms`` row.
 
@@ -112,7 +117,9 @@ class _SkuAggregate:
     the MAX (a newer session must never be walked backwards).
     """
 
-    __slots__ = ("igdb_game", "last_played", "playtime_minutes", "skus", "title")
+    __slots__ = (
+        "counted_as", "igdb_game", "last_played", "playtime_minutes", "skus", "title",
+    )
 
     def __init__(self, title: str) -> None:
         self.title = title
@@ -121,6 +128,9 @@ class _SkuAggregate:
         # (title_id, playtime_minutes) per SKU, in the order PSN returned them.
         self.skus: list[tuple[str, int]] = []
         self.igdb_game = None
+        # Which of added/matched this aggregate was tallied under, so an
+        # aggregate evicted onto a freshly minted row can be re-tallied.
+        self.counted_as: str | None = None
 
     def add(self, entry: dict, igdb_game=None) -> None:
         minutes = entry.get("playtime_minutes")
@@ -145,12 +155,10 @@ class _SkuAggregate:
         ``normalize_edition_comparison_title`` collapses. A genuinely different
         game does not ("Ratchet & Clank" is not an edition of "Ratchet & Clank:
         Rift Apart") — and without this check its playtime would be summed onto
-        the wrong game. Compares SKU name against SKU name, never against the
-        stored library name, so a hand-renamed library row cannot fork a sync.
+        the wrong game. Detection compares SKU name against SKU name, so a
+        hand-renamed library row cannot by itself fork a sync.
         """
-        return normalize_edition_comparison_title(
-            self.title
-        ) == normalize_edition_comparison_title(title)
+        return _titles_agree(self.title, title)
 
     def primary_sku(self) -> str | None:
         """The title id to mark is_primary — the SKU with the most playtime.
@@ -321,24 +329,57 @@ async def sync_psn() -> dict:
         # A second SKU may only join an existing aggregate when it names the same
         # game. When it does not, resolution collapsed two distinct games onto one
         # row (prod: the 2016 "Ratchet & Clank" sitting on "Ratchet & Clank: Rift
-        # Apart"), and summing their playtime would compound the error — so the
-        # SKU gets its own games row instead. Safe to do automatically, unlike a
+        # Apart"), and summing their playtime would compound the error — so one of
+        # them gets its own games row instead. Safe to do automatically, unlike a
         # general over-merge split: PSN reports playtime per SKU, so there is
-        # nothing to re-attribute.
+        # nothing to re-attribute. Nothing is persisted until pass 2, so an
+        # aggregate can still be moved off a row here.
         aggregate = aggregates.get(game_id)
         if aggregate is not None and not aggregate.accepts(name):
-            logger.info(
-                "PSN: %r (%s) does not name the same game as %r — keeping it separate",
-                name, title_id, aggregate.title,
-            )
-            game_id = await upsert_game(appid=None, name=name, match_existing_by_name=False)
-            candidates[game_id] = name
-            igdb_game = None
-            is_new_game = True
-            aggregate = aggregates.get(game_id)
+            # WHICH SKU keeps the canonical row (its name, cover, IGDB link,
+            # ratings, acquisition) must not depend on PSN's ordering — that is
+            # last-played order, so it flips as soon as the user plays the other
+            # SKU. The row's own stored name decides: the SKU that agrees with it
+            # stays, the intruder moves out.
+            row_name = candidates.get(game_id)
+            incumbent_fits = row_name is not None and _titles_agree(row_name, aggregate.title)
+            newcomer_fits = row_name is not None and _titles_agree(row_name, name)
+
+            if newcomer_fits and not incumbent_fits:
+                # This SKU owns the row; the one already holding it is the
+                # intruder. Evict that one onto a fresh row and take its place.
+                logger.info(
+                    "PSN: %r does not name the library row %r — moving it off, %r (%s) keeps it",
+                    aggregate.title, row_name, name, title_id,
+                )
+                displaced = aggregates.pop(game_id)
+                displaced_id = await upsert_game(
+                    appid=None, name=displaced.title, match_existing_by_name=False
+                )
+                candidates[displaced_id] = displaced.title
+                aggregates[displaced_id] = displaced
+                # It now owns a minted row, so it counts as added, not matched.
+                if displaced.counted_as == "matched":
+                    matched -= 1
+                    added += 1
+                    displaced.counted_as = "added"
+                aggregate = None
+            else:
+                logger.info(
+                    "PSN: %r (%s) does not name the same game as %r — keeping it separate",
+                    name, title_id, aggregate.title,
+                )
+                game_id = await upsert_game(
+                    appid=None, name=name, match_existing_by_name=False
+                )
+                candidates[game_id] = name
+                igdb_game = None
+                is_new_game = True
+                aggregate = aggregates.get(game_id)
 
         if aggregate is None:
             aggregate = aggregates[game_id] = _SkuAggregate(name)
+            aggregate.counted_as = "added" if is_new_game else "matched"
             if is_new_game:
                 added += 1
             else:
