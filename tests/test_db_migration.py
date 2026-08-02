@@ -1235,6 +1235,66 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         # An existing value is never overwritten.
         self.assertEqual(by_name["Pinned"], "2020-01-01")
 
+    async def test_v36_backfills_snapshot_last_played_from_platform_row(self) -> None:
+        # The gate reads the snapshot's frozen last_played, so existing rows
+        # need the current platform value copied onto them — right today, and
+        # frozen from here on, which is the point.
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+
+            async with db_module.get_db() as db:
+                cursor = await db.execute("INSERT INTO games (name) VALUES ('Ghost of Tsushima')")
+                game_id = cursor.lastrowid
+                await db.execute(
+                    "INSERT INTO game_platforms (game_id, platform, owned, last_played)"
+                    " VALUES (?, 'ps5', 1, '2022-09-21')",
+                    (game_id,),
+                )
+                for day, minutes in (("2026-07-04", 46), ("2026-08-02", 4933)):
+                    await db.execute(
+                        "INSERT INTO play_history"
+                        " (game_id, platform, snapshot_date, playtime_minutes)"
+                        " VALUES (?, 'ps5', ?, ?)",
+                        (game_id, day, minutes),
+                    )
+
+                # A platform that reports no last-played at all stays NULL.
+                cursor = await db.execute("INSERT INTO games (name) VALUES ('Some GOG Game')")
+                gog_id = cursor.lastrowid
+                await db.execute(
+                    "INSERT INTO game_platforms (game_id, platform, owned) VALUES (?, 'gog', 1)",
+                    (gog_id,),
+                )
+                await db.execute(
+                    "INSERT INTO play_history"
+                    " (game_id, platform, snapshot_date, playtime_minutes)"
+                    " VALUES (?, 'gog', '2026-07-04', 120)",
+                    (gog_id,),
+                )
+
+                await db.execute("PRAGMA user_version = 35")
+                await db.commit()
+
+            db_module._DB_READY_PATH = None
+            await db_module.init_db()
+
+            async with db_module.get_db() as db:
+                rows = await db.execute_fetchall(
+                    "SELECT game_id, snapshot_date, last_played FROM play_history"
+                    " ORDER BY game_id, snapshot_date"
+                )
+            values = [(r["game_id"], r["snapshot_date"], r["last_played"]) for r in rows]
+
+        self.assertEqual(
+            values,
+            [
+                (game_id, "2026-07-04", "2022-09-21"),
+                (game_id, "2026-08-02", "2022-09-21"),
+                (gog_id, "2026-07-04", None),
+            ],
+        )
+
     async def test_v20_reclaims_only_still_unresolved_wishlisted_games(self) -> None:
         # Handover doc: the v19 re-claim ran, but 9 of 187 wishlisted games
         # never got igdb_platforms populated (resolution gaps this branch
@@ -1249,7 +1309,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             async with db_module.get_db() as db:
                 version = await db_module._get_user_version(db)
             self.assertEqual(version, db_module.SCHEMA_VERSION)
-            self.assertEqual(db_module.SCHEMA_VERSION, 35)
+            self.assertEqual(db_module.SCHEMA_VERSION, 36)
 
             unresolved = await seed_game("Still Unresolved Wishlisted Game")
             resolved = await seed_game("Already Resolved Wishlisted Game")
@@ -1407,7 +1467,10 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                 }
 
         self.assertEqual(result.final_version, db_module.SCHEMA_VERSION)
-        self.assertEqual(cols, {"game_id", "platform", "snapshot_date", "playtime_minutes"})
+        self.assertEqual(
+            cols,
+            {"game_id", "platform", "snapshot_date", "playtime_minutes", "last_played"},
+        )
 
     async def test_v26_to_v27_quarantines_widened_feature_vocabulary(self) -> None:
         # v26 -> v27 is data-only (schema identical), so a fresh current-schema

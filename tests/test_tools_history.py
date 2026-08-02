@@ -13,19 +13,29 @@ from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import history
 
 
-async def _snapshot(game_id: int, platform: str, day: str, minutes: int) -> None:
+async def _snapshot(
+    game_id: int, platform: str, day: str, minutes: int, last_played: str | None = None
+) -> None:
+    """Write a snapshot, optionally with the last_played frozen onto it.
+
+    ``last_played`` is what the platform reported AS OF this snapshot — that is
+    what the history gate reads, not the live game_platforms column.
+    """
     async with db_module.get_db() as db:
         await db.execute(
-            """INSERT INTO play_history (game_id, platform, snapshot_date, playtime_minutes)
-               VALUES (?, ?, ?, ?)
+            """INSERT INTO play_history
+                   (game_id, platform, snapshot_date, playtime_minutes, last_played)
+               VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(game_id, platform, snapshot_date)
-                   DO UPDATE SET playtime_minutes = excluded.playtime_minutes""",
-            (game_id, platform, day, minutes),
+                   DO UPDATE SET playtime_minutes = excluded.playtime_minutes,
+                                 last_played = excluded.last_played""",
+            (game_id, platform, day, minutes, last_played),
         )
         await db.commit()
 
 
 async def _set_last_played(game_id: int, platform: str, day: str | None) -> None:
+    """Set the LIVE platform last_played (what a sync would advance)."""
     async with db_module.get_db() as db:
         await db.execute(
             "UPDATE game_platforms SET last_played = ? WHERE game_id = ? AND platform = ?",
@@ -240,16 +250,16 @@ class LastPlayedGateTests(ToolDBTestCase):
     window the LATER snapshot fell in — regardless of when the game was actually
     played. The PSN cross-gen SKU fix stepped seven totals up at once and Ghost
     of Tsushima reported 81 hours "played" in a month it was never launched.
-    game_platforms.last_played is the source's own statement of when play
-    stopped, so it settles the question the totals cannot.
+    The last_played frozen onto each snapshot settles what the totals cannot.
     """
 
     async def test_correction_after_last_played_is_suppressed(self):
         game_id = await seed_game("Ghost of Tsushima")
         await add_platform(game_id, "ps5", playtime_minutes=4933)
         await _set_last_played(game_id, "ps5", "2022-09-21")
-        await _snapshot(game_id, "ps5", "2026-07-04", 46)
-        await _snapshot(game_id, "ps5", "2026-08-02", 4933)  # the SKU-sum fix
+        await _snapshot(game_id, "ps5", "2026-07-04", 46, last_played="2022-09-21")
+        # The SKU-sum fix: total steps up, last_played does not move.
+        await _snapshot(game_id, "ps5", "2026-08-02", 4933, last_played="2022-09-21")
 
         result = await history.get_play_history(
             start_date="2026-07-03", end_date="2026-08-02"
@@ -261,12 +271,51 @@ class LastPlayedGateTests(ToolDBTestCase):
         self.assertEqual(result["excluded_stale_games"], 1)
         self.assertEqual(result["excluded_stale_minutes"], 4887)
 
+    async def test_later_play_does_not_resurrect_a_past_correction(self):
+        """The gate must answer a historical window the same way forever.
+
+        Regression: the gate used to read the LIVE game_platforms.last_played,
+        so once the game was launched again the column advanced past the old
+        window's start and the suppressed correction reappeared as playtime in
+        a month it was never played. Snapshots freeze the value instead.
+        """
+        game_id = await seed_game("Ghost of Tsushima")
+        await add_platform(game_id, "ps5", playtime_minutes=4933)
+        # Live column and snapshots agree at first, so this baseline holds
+        # either way — isolating the regression to the second half.
+        await _set_last_played(game_id, "ps5", "2022-09-21")
+        await _snapshot(game_id, "ps5", "2026-07-04", 46, last_played="2022-09-21")
+        await _snapshot(game_id, "ps5", "2026-08-02", 4933, last_played="2022-09-21")
+
+        july = await history.get_play_history(
+            start_date="2026-07-03", end_date="2026-08-02"
+        )
+        self.assertEqual(july["total_minutes"], 0)
+
+        # The user picks the game back up months later: a sync advances the
+        # live column and writes a NEW snapshot carrying the new date.
+        await _set_last_played(game_id, "ps5", "2026-09-15")
+        await _snapshot(game_id, "ps5", "2026-09-16", 5100, last_played="2026-09-15")
+
+        # The July window's answer is unchanged...
+        july_again = await history.get_play_history(
+            start_date="2026-07-03", end_date="2026-08-02"
+        )
+        self.assertEqual(july_again["total_minutes"], 0)
+        self.assertEqual(july_again["excluded_stale_games"], 1)
+
+        # ...and September correctly reports only the real 167 minutes.
+        september = await history.get_play_history(
+            start_date="2026-09-01", end_date="2026-09-30"
+        )
+        self.assertEqual(september["total_minutes"], 167)
+        self.assertEqual(september["excluded_stale_games"], 0)
+
     async def test_real_play_inside_window_is_kept(self):
         game_id = await seed_game("Blue Prince")
         await add_platform(game_id, "ps5", playtime_minutes=200)
-        await _set_last_played(game_id, "ps5", "2026-07-20")
-        await _snapshot(game_id, "ps5", "2026-07-04", 120)
-        await _snapshot(game_id, "ps5", "2026-08-02", 200)
+        await _snapshot(game_id, "ps5", "2026-07-04", 120, last_played="2026-07-04")
+        await _snapshot(game_id, "ps5", "2026-08-02", 200, last_played="2026-07-20")
 
         result = await history.get_play_history(
             start_date="2026-07-03", end_date="2026-08-02"
@@ -280,9 +329,8 @@ class LastPlayedGateTests(ToolDBTestCase):
         # The boundary is inclusive: played ON the first day of the window.
         game_id = await seed_game("Split Fiction")
         await add_platform(game_id, "ps5", playtime_minutes=200)
-        await _set_last_played(game_id, "ps5", "2026-07-03")
-        await _snapshot(game_id, "ps5", "2026-07-04", 120)
-        await _snapshot(game_id, "ps5", "2026-08-02", 200)
+        await _snapshot(game_id, "ps5", "2026-07-04", 120, last_played="2026-07-03")
+        await _snapshot(game_id, "ps5", "2026-08-02", 200, last_played="2026-07-03")
 
         result = await history.get_play_history(
             start_date="2026-07-03", end_date="2026-08-02"
@@ -297,7 +345,6 @@ class LastPlayedGateTests(ToolDBTestCase):
         # that would silently zero most of the library's history.
         game_id = await seed_game("Hades II")
         await add_platform(game_id, "steam", playtime_minutes=400)
-        await _set_last_played(game_id, "steam", None)
         await _snapshot(game_id, "steam", "2026-07-04", 85)
         await _snapshot(game_id, "steam", "2026-08-02", 400)
 
@@ -311,15 +358,13 @@ class LastPlayedGateTests(ToolDBTestCase):
     async def test_gate_is_per_row_not_all_or_nothing(self):
         stale = await seed_game("Assassin's Creed Valhalla")
         await add_platform(stale, "ps5", playtime_minutes=149)
-        await _set_last_played(stale, "ps5", "2023-03-19")
-        await _snapshot(stale, "ps5", "2026-07-04", 21)
-        await _snapshot(stale, "ps5", "2026-08-02", 149)
+        await _snapshot(stale, "ps5", "2026-07-04", 21, last_played="2023-03-19")
+        await _snapshot(stale, "ps5", "2026-08-02", 149, last_played="2023-03-19")
 
         live = await seed_game("Rusty's Retirement")
         await add_platform(live, "steam", playtime_minutes=600)
-        await _set_last_played(live, "steam", "2026-07-30")
-        await _snapshot(live, "steam", "2026-07-04", 92)
-        await _snapshot(live, "steam", "2026-08-02", 600)
+        await _snapshot(live, "steam", "2026-07-04", 92, last_played="2026-07-04")
+        await _snapshot(live, "steam", "2026-08-02", 600, last_played="2026-07-30")
 
         result = await history.get_play_history(
             start_date="2026-07-03", end_date="2026-08-02"
@@ -336,10 +381,9 @@ class LastPlayedGateTests(ToolDBTestCase):
         # the gate must not retroactively suppress the real growth it contains.
         game_id = await seed_game("Horizon Zero Dawn")
         await add_platform(game_id, "ps5", playtime_minutes=449)
-        await _set_last_played(game_id, "ps5", "2026-06-04")
-        await _snapshot(game_id, "ps5", "2026-05-01", 300)
-        await _snapshot(game_id, "ps5", "2026-06-04", 395)
-        await _snapshot(game_id, "ps5", "2026-08-02", 449)
+        await _snapshot(game_id, "ps5", "2026-05-01", 300, last_played="2026-04-28")
+        await _snapshot(game_id, "ps5", "2026-06-04", 395, last_played="2026-06-04")
+        await _snapshot(game_id, "ps5", "2026-08-02", 449, last_played="2026-06-04")
 
         result = await history.get_play_history(
             start_date="2026-05-01", end_date="2026-06-30"
@@ -351,15 +395,13 @@ class LastPlayedGateTests(ToolDBTestCase):
     async def test_platform_filter_scopes_the_excluded_counters(self):
         stale = await seed_game("Dreams")
         await add_platform(stale, "ps5", playtime_minutes=86)
-        await _set_last_played(stale, "ps5", "2022-05-22")
-        await _snapshot(stale, "ps5", "2026-07-04", 1)
-        await _snapshot(stale, "ps5", "2026-08-02", 86)
+        await _snapshot(stale, "ps5", "2026-07-04", 1, last_played="2022-05-22")
+        await _snapshot(stale, "ps5", "2026-08-02", 86, last_played="2022-05-22")
 
         live = await seed_game("Slay the Spire 2")
         await add_platform(live, "steam", playtime_minutes=400)
-        await _set_last_played(live, "steam", "2026-07-28")
-        await _snapshot(live, "steam", "2026-07-04", 84)
-        await _snapshot(live, "steam", "2026-08-02", 400)
+        await _snapshot(live, "steam", "2026-07-04", 84, last_played="2026-07-04")
+        await _snapshot(live, "steam", "2026-08-02", 400, last_played="2026-07-28")
 
         steam_only = await history.get_play_history(
             start_date="2026-07-03", end_date="2026-08-02", platform="steam"

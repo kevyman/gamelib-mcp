@@ -35,14 +35,22 @@ _SWITCH2 = "switch2"
 #   * a source that accounts playtime late books an old session into whichever
 #     window the next sync falls in.
 #
-# `game_platforms.last_played` is the source's own statement of when you last
-# played, so a row whose last_played predates the window cannot have been played
-# during it, whatever the totals do — those minutes are a correction, not a
-# session. Such rows are reported separately (see _STALE_* below) rather than
-# silently dropped. NULL last_played means "this source doesn't say", which is
-# not evidence of staleness, so those rows pass through unchanged.
+# `last_played` is the source's own statement of when you last played, so a row
+# last played before the window cannot have been played during it, whatever the
+# totals do — those minutes are a correction, not a session. Such rows are
+# reported separately (see _STALE_* below) rather than silently dropped. NULL
+# means "this source doesn't say", which is not evidence of staleness, so those
+# rows pass through unchanged.
+#
+# The value comes from the END SNAPSHOT, not from game_platforms: the snapshot
+# froze it at observation time (v36), while the live column moves. Reading the
+# live column made a past window's answer change the next time the game was
+# launched — a correction correctly suppressed while the game sat unplayed since
+# 2022 would start counting as playtime again once last_played advanced past
+# that old window's start. A snapshot is an immutable observation, so the window
+# it belongs to must be decided by what was true when it was taken.
 _STALE_PREDICATE = """
-    gp.last_played IS NOT NULL AND gp.last_played < :start
+    b.end_last_played IS NOT NULL AND b.end_last_played < :start
 """
 
 _GENERIC_DELTA_SQL = """
@@ -61,7 +69,11 @@ WITH bounds AS (
                 WHERE ph4.game_id = ph.game_id AND ph4.platform = ph.platform
                   AND ph4.snapshot_date >= :start AND ph4.snapshot_date <= :end
                 ORDER BY ph4.snapshot_date ASC LIMIT 1)
-           ) AS start_total
+           ) AS start_total,
+           (SELECT ph5.last_played FROM play_history ph5
+            WHERE ph5.game_id = ph.game_id AND ph5.platform = ph.platform
+              AND ph5.snapshot_date <= :end
+            ORDER BY ph5.snapshot_date DESC LIMIT 1) AS end_last_played
     FROM play_history ph
     WHERE ph.snapshot_date >= :start AND ph.snapshot_date <= :end
       AND ph.platform != 'switch2'
@@ -72,8 +84,6 @@ SELECT b.game_id AS game_id, b.platform AS platform, g.name AS name,
        MAX(0, b.end_total - b.start_total) AS minutes_played
 FROM bounds b
 JOIN games g ON g.id = b.game_id
-LEFT JOIN game_platforms gp
-  ON gp.game_id = b.game_id AND gp.platform = b.platform
 WHERE b.end_total - b.start_total > 0
   AND NOT ({stale_predicate})
 """
@@ -96,7 +106,11 @@ WITH bounds AS (
                 WHERE ph4.game_id = ph.game_id AND ph4.platform = ph.platform
                   AND ph4.snapshot_date >= :start AND ph4.snapshot_date <= :end
                 ORDER BY ph4.snapshot_date ASC LIMIT 1)
-           ) AS start_total
+           ) AS start_total,
+           (SELECT ph5.last_played FROM play_history ph5
+            WHERE ph5.game_id = ph.game_id AND ph5.platform = ph.platform
+              AND ph5.snapshot_date <= :end
+            ORDER BY ph5.snapshot_date DESC LIMIT 1) AS end_last_played
     FROM play_history ph
     WHERE ph.snapshot_date >= :start AND ph.snapshot_date <= :end
       AND ph.platform != 'switch2'
@@ -107,8 +121,6 @@ SELECT COUNT(*) AS games,
        COALESCE(SUM(b.end_total - b.start_total), 0) AS minutes
 FROM bounds b
 JOIN games g ON g.id = b.game_id
-JOIN game_platforms gp
-  ON gp.game_id = b.game_id AND gp.platform = b.platform
 WHERE b.end_total - b.start_total > 0
   AND ({stale_predicate})
 """

@@ -61,15 +61,13 @@ _CORRECTIONS_SQL = """
 SELECT ph.game_id            AS game_id,
        ph.platform           AS platform,
        g.name                AS name,
-       gp.last_played        AS last_played,
+       ph.last_played        AS last_played,
        prev.snapshot_date    AS baseline_date,
        prev.playtime_minutes AS baseline_total,
        ph.snapshot_date      AS correction_date,
        ph.playtime_minutes   AS corrected_total
 FROM play_history ph
 JOIN games g ON g.id = ph.game_id
-JOIN game_platforms gp
-  ON gp.game_id = ph.game_id AND gp.platform = ph.platform
 JOIN play_history prev
   ON prev.game_id = ph.game_id
  AND prev.platform = ph.platform
@@ -78,9 +76,9 @@ JOIN play_history prev
      WHERE p2.game_id = ph.game_id AND p2.platform = ph.platform
        AND p2.snapshot_date < ph.snapshot_date
  )
-WHERE gp.last_played IS NOT NULL
+WHERE ph.last_played IS NOT NULL
   AND ph.playtime_minutes > prev.playtime_minutes
-  AND gp.last_played < prev.snapshot_date
+  AND ph.last_played < prev.snapshot_date
   {platform_clause}
 ORDER BY (ph.playtime_minutes - prev.playtime_minutes) DESC
 """

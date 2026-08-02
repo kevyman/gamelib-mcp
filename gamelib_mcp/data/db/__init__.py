@@ -113,7 +113,7 @@ XBOX_TITLE_ID = "xbox_title_id"
 # module load time, so this package must never import back from nintendo.py.
 # Must stay in sync with that constant's value.
 NINTENDO_TITLE_ID_TYPE = "nintendo_title_id"
-SCHEMA_VERSION = 35
+SCHEMA_VERSION = 36
 
 
 def normalize_identifier_value(identifier_type: str, value: str) -> str:
@@ -294,6 +294,7 @@ from .schema import (
     _V31_SCHEMA_DDL,
     _V32_SCHEMA_DDL,
     _V34_SCHEMA_DDL,
+    _V36_SCHEMA_DDL,
 )
 
 
@@ -1942,6 +1943,53 @@ async def _migrate_v34_to_v35(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v35_to_v36(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Freeze the platform's last-played date into each play_history snapshot.
+
+    The history gate asks "was this game played during the window?", and answers
+    it from last_played. Reading ``game_platforms.last_played`` — a mutable
+    column the next sync advances — made that answer unstable for any window in
+    the past: a correction correctly suppressed while the game sat unplayed
+    since 2022 would start counting as playtime again the moment the game was
+    next launched, because last_played would then be newer than the old
+    window's start. A snapshot is an immutable observation, so the date it was
+    taken with belongs on the snapshot.
+
+    Existing rows are backfilled from the current game_platforms value. That is
+    the best available estimate — it is exactly right today (nothing has moved
+    since) and it freezes there, which is the whole point.
+    """
+    if progress is not None:
+        progress("Migrating to v36: record last_played on play_history snapshots.")
+
+    cols = await _table_columns(db, "play_history")
+    if not cols:
+        # play_history arrived in v21->v22; a database recorded at a later
+        # version without it (an upgrade path that never ran that step) gets it
+        # from the fresh-schema pass at the end of migrate_db, already carrying
+        # last_played. Nothing to alter or backfill here.
+        await _set_user_version(db, 36)
+        await db.commit()
+        return
+    if "last_played" not in cols:
+        await db.execute("ALTER TABLE play_history ADD COLUMN last_played TEXT")
+
+    await db.execute(
+        """
+        UPDATE play_history
+        SET last_played = (
+            SELECT gp.last_played FROM game_platforms gp
+            WHERE gp.game_id = play_history.game_id
+              AND gp.platform = play_history.platform
+        )
+        WHERE last_played IS NULL
+        """
+    )
+
+    await _set_user_version(db, 36)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1978,7 +2026,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V34_SCHEMA_DDL)
+    await db.executescript(_V36_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -2119,6 +2167,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (32, _migrate_v32_to_v33),
     (33, _migrate_v33_to_v34),
     (34, _migrate_v34_to_v35),
+    (35, _migrate_v35_to_v36),
 )
 
 
@@ -2136,7 +2185,7 @@ async def _run_migrations(
         _emit(progress, f"Backed up database to {snapshot_path} before migrating.", applied_steps)
 
     if detected_state == "fresh":
-        await db.executescript(_V34_SCHEMA_DDL)
+        await db.executescript(_V36_SCHEMA_DDL)
         fts_enabled = await _sync_fts_index(db)
         await _sync_query_views(db)
         await _set_user_version(db, SCHEMA_VERSION)
@@ -2174,7 +2223,7 @@ async def _run_migrations(
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V34_SCHEMA_DDL)
+    await db.executescript(_V36_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
