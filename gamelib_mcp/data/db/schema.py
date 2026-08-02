@@ -1008,6 +1008,20 @@ _V34_SCHEMA_DDL = _V33_SCHEMA_DDL.replace(
     "        UNIQUE(game_id, platform)",
 )
 
+# v36 freezes the platform's last-played date INTO each snapshot. The history
+# gate (tools/history.py) needs to know when the game was last played *as of
+# that snapshot*, and game_platforms.last_played is mutable: reading it would
+# make a historical window's answer change the next time the game is launched,
+# un-suppressing a correction that was correctly suppressed before. A snapshot
+# is an immutable observation, so the date it was observed with belongs on it.
+# (v35 was data-only — the Steam last_played backfill — so it reuses v34's shape.)
+_V36_SCHEMA_DDL = _V34_SCHEMA_DDL.replace(
+    "        playtime_minutes INTEGER NOT NULL,\n        PRIMARY KEY (game_id, platform, snapshot_date)",
+    "        playtime_minutes INTEGER NOT NULL,\n"
+    "        last_played      TEXT,\n"
+    "        PRIMARY KEY (game_id, platform, snapshot_date)",
+)
+
 # Semantic views backing query_library()/get_db_schema() — NOT part of the
 # versioned schema chain (like _FTS_DDL below). Dropped and recreated on every
 # migrate_db run via _sync_query_views so a view definition change deploys on

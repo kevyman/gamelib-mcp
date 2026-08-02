@@ -785,3 +785,7 @@ class PlayHistoryResponse(FlexibleModel):
     by_platform: dict[str, int]
     games: list[PlayHistoryEntry]
     switch2_unmatched_minutes: int
+    # Growth suppressed by the last-played gate: a stored-total correction
+    # (sync fix, set_playtime pin) landing in this window rather than play.
+    excluded_stale_games: int = 0
+    excluded_stale_minutes: int = 0
