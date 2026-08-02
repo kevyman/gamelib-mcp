@@ -225,6 +225,16 @@ class SkillToolReferenceDriftTests(unittest.IsolatedAsyncioTestCase):
 
     # snake_case identifier immediately followed by an open paren.
     CALL_RE = re.compile(r"\b([a-z][a-z0-9_]{3,})\(")
+    # A backticked identifier with no call syntax — `get_game_detail`. Skills
+    # name tools this way constantly, and a call-syntax-only scan misses them
+    # entirely, so a rename would leave this suite green and drift right back.
+    # Matched on the tool surface's verb prefixes so that response fields and
+    # columns (`bundle_name`, `price_paid`, `last_seen_in_source`) — which are
+    # backticked just as often — are not mistaken for tools.
+    BACKTICK_RE = re.compile(
+        r"`((?:get|set|add|split|merge|delete|update|check|search|discover|import"
+        r"|rate|query|manage|create)_[a-z0-9_]+)`"
+    )
     # `foo=` that is not part of `==`, `!=`, `<=`, `>=`.
     KWARG_RE = re.compile(r"(?<![=!<>])\b([a-z][a-z0-9_]*)\s*=(?!=)")
     STRING_KWARG_RE = re.compile(r'\b([a-z][a-z0-9_]*)\s*=\s*"([^"]*)"')
@@ -293,6 +303,22 @@ class SkillToolReferenceDriftTests(unittest.IsolatedAsyncioTestCase):
             offenders,
             {},
             f"SKILL.md references tools that are not registered: {offenders}",
+        )
+
+    async def test_standalone_backticked_tool_names_are_registered(self) -> None:
+        schemas = await self._tool_schemas()
+        offenders: dict[str, set[str]] = {}
+
+        for skill_name, text in self._skill_texts().items():
+            named = set(self.BACKTICK_RE.findall(text))
+            unknown = named - schemas.keys()
+            if unknown:
+                offenders[skill_name] = unknown
+
+        self.assertEqual(
+            offenders,
+            {},
+            f"SKILL.md names tools (without call syntax) that are not registered: {offenders}",
         )
 
     async def test_referenced_tool_parameters_exist_on_their_schemas(self) -> None:
