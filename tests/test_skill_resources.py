@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -208,6 +209,149 @@ class SkillPackagingDriftTests(unittest.TestCase):
     def test_docker_image_copies_skills(self) -> None:
         dockerfile = (self.REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("COPY skills/ skills/", dockerfile)
+
+
+class SkillToolReferenceDriftTests(unittest.IsolatedAsyncioTestCase):
+    """Every tool call written in a SKILL.md must exist on the wire surface.
+
+    ADR 0006's motivating failure: the installed skills kept referencing
+    get_taste_profile, get_backlog_stats, get_spending_stats,
+    get_series_breakdown, get_wishlist_deals and search_games_batch for
+    months after ADR 0004 consolidated them into get_stats(report=...),
+    get_wishlist and search_games. Nothing failed loudly — clients just
+    guessed at the replacement on every run. Now that the skill text is
+    canonical here, that drift class is a red test instead of a review item.
+    """
+
+    # snake_case identifier immediately followed by an open paren.
+    CALL_RE = re.compile(r"\b([a-z][a-z0-9_]{3,})\(")
+    # `foo=` that is not part of `==`, `!=`, `<=`, `>=`.
+    KWARG_RE = re.compile(r"(?<![=!<>])\b([a-z][a-z0-9_]*)\s*=(?!=)")
+    STRING_KWARG_RE = re.compile(r'\b([a-z][a-z0-9_]*)\s*=\s*"([^"]*)"')
+
+    # Tool names that were consolidated away by ADR 0004. A skill naming one
+    # of these is drift even in prose, where the call-form scan can't see it.
+    RETIRED_TOOL_NAMES = (
+        "get_taste_profile",
+        "get_backlog_stats",
+        "get_spending_stats",
+        "get_series_breakdown",
+        "get_wishlist_deals",
+        "search_games_batch",
+    )
+
+    async def _tool_schemas(self) -> dict[str, dict]:
+        from gamelib_mcp.main import mcp
+
+        async with Client(mcp) as client:
+            tools = await client.list_tools()
+        return {tool.name: (tool.inputSchema or {}) for tool in tools}
+
+    def _skill_texts(self) -> dict[str, str]:
+        return {
+            path.parent.name: path.read_text(encoding="utf-8")
+            for path in sorted(skill_resources.SKILLS_DIR.glob("*/SKILL.md"))
+        }
+
+    @classmethod
+    def _calls(cls, text: str) -> list[tuple[str, str]]:
+        """Yield (name, argument-span) for every `name(...)` in the text.
+
+        Scans forward with paren matching so multi-line call examples and
+        nested brackets (`tags=["a", "b"]`) come back whole.
+        """
+        calls = []
+        for match in cls.CALL_RE.finditer(text):
+            depth, index = 0, match.end() - 1
+            while index < len(text):
+                if text[index] == "(":
+                    depth += 1
+                elif text[index] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                index += 1
+            calls.append((match.group(1), text[match.end() : index]))
+        return calls
+
+    async def test_referenced_tools_are_all_registered(self) -> None:
+        schemas = await self._tool_schemas()
+        offenders: dict[str, set[str]] = {}
+
+        for skill_name, text in self._skill_texts().items():
+            referenced = {name for name, _ in self._calls(text)}
+            # A snake_case call form in a skill is a tool reference; keep the
+            # underscore-free ones out so ordinary prose like "score(n)" or a
+            # formula never registers as drift. Crucially this filter does NOT
+            # consult the registered set, so a RETIRED name still gets caught.
+            candidates = {name for name in referenced if "_" in name or name in schemas}
+            unknown = candidates - schemas.keys()
+            if unknown:
+                offenders[skill_name] = unknown
+
+        self.assertEqual(
+            offenders,
+            {},
+            f"SKILL.md references tools that are not registered: {offenders}",
+        )
+
+    async def test_referenced_tool_parameters_exist_on_their_schemas(self) -> None:
+        schemas = await self._tool_schemas()
+        offenders: dict[str, set[str]] = {}
+
+        for skill_name, text in self._skill_texts().items():
+            for tool_name, args in self._calls(text):
+                schema = schemas.get(tool_name)
+                if schema is None:
+                    continue  # covered by the registration test above
+                allowed = set(schema.get("properties", {}))
+                used = set(self.KWARG_RE.findall(args))
+                unknown = used - allowed
+                if unknown:
+                    offenders[f"{skill_name}:{tool_name}"] = unknown
+
+        self.assertEqual(
+            offenders,
+            {},
+            f"SKILL.md passes parameters no tool accepts: {offenders}",
+        )
+
+    async def test_referenced_enum_values_are_valid(self) -> None:
+        schemas = await self._tool_schemas()
+        offenders: dict[str, str] = {}
+
+        for skill_name, text in self._skill_texts().items():
+            for tool_name, args in self._calls(text):
+                schema = schemas.get(tool_name)
+                if schema is None:
+                    continue
+                properties = schema.get("properties", {})
+                for param, value in self.STRING_KWARG_RE.findall(args):
+                    choices = properties.get(param, {}).get("enum")
+                    # Skip placeholder values in illustrative call examples.
+                    if not choices or "..." in value:
+                        continue
+                    if value not in choices:
+                        offenders[f"{skill_name}:{tool_name}({param})"] = value
+
+        self.assertEqual(
+            offenders,
+            {},
+            f"SKILL.md uses values outside a tool's enum: {offenders}",
+        )
+
+    def test_no_skill_names_a_retired_tool(self) -> None:
+        offenders: dict[str, list[str]] = {}
+        for skill_name, text in self._skill_texts().items():
+            named = [old for old in self.RETIRED_TOOL_NAMES if old in text]
+            if named:
+                offenders[skill_name] = named
+
+        self.assertEqual(
+            offenders,
+            {},
+            f"SKILL.md names pre-ADR-0004 tools that no longer exist: {offenders}",
+        )
 
 
 class ParseFrontmatterTests(unittest.TestCase):
