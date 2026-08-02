@@ -135,7 +135,7 @@ class EpicHelpersTests(unittest.TestCase):
             ),
             patch("gamelib_mcp.data.epic.httpx.AsyncClient", return_value=_FakeClient()),
         ):
-            playtime = asyncio.run(epic.fetch_epic_playtime())
+            playtime, _last_played = asyncio.run(epic.fetch_epic_playtime())
 
         self.assertEqual(playtime, {"artifact-1": 2, "artifact-2": 7, "artifact-3": 60})
 
@@ -151,14 +151,15 @@ class EpicHelpersTests(unittest.TestCase):
             ),
             self.assertLogs("gamelib_mcp.data.epic", level="INFO") as logs,
         ):
-            playtime = asyncio.run(epic.fetch_epic_playtime())
+            playtime, _last_played = asyncio.run(epic.fetch_epic_playtime())
 
         self.assertEqual(playtime, {})
         self.assertIn("INFO:gamelib_mcp.data.epic:Epic playtime unavailable", logs.output[0])
 
 
 class SyncEpicTests(unittest.TestCase):
-    def _run_sync(self, games, playtime_by_artifact=None, resolve_result=(42, None), candidates=None):
+    def _run_sync(self, games, playtime_by_artifact=None, resolve_result=(42, None),
+                  candidates=None, last_played_by_artifact=None):
         mock_resolve = AsyncMock(return_value=resolve_result)
         mock_upsert_platform = AsyncMock(return_value=99)
         mock_enrichment = AsyncMock()
@@ -168,7 +169,7 @@ class SyncEpicTests(unittest.TestCase):
         with (
             patch("pathlib.Path.exists", return_value=True),
             patch("gamelib_mcp.data.epic.fetch_epic_library", AsyncMock(return_value=games)),
-            patch("gamelib_mcp.data.epic.fetch_epic_playtime", AsyncMock(return_value=playtime_by_artifact or {})),
+            patch("gamelib_mcp.data.epic.fetch_epic_playtime", AsyncMock(return_value=(playtime_by_artifact or {}, last_played_by_artifact or {}))),
             patch("gamelib_mcp.data.epic.load_fuzzy_candidates", AsyncMock(return_value=candidates or {})),
             patch("gamelib_mcp.data.epic.resolve_and_link_game", mock_resolve),
             patch("gamelib_mcp.data.epic.upsert_game_platform", mock_upsert_platform),
@@ -196,7 +197,7 @@ class SyncEpicTests(unittest.TestCase):
         with (
             patch("pathlib.Path.exists", return_value=True),
             patch("gamelib_mcp.data.epic.fetch_epic_library", AsyncMock(return_value=[])),
-            patch("gamelib_mcp.data.epic.fetch_epic_playtime", AsyncMock(return_value={})),
+            patch("gamelib_mcp.data.epic.fetch_epic_playtime", AsyncMock(return_value=({}, {}))),
         ):
             result = asyncio.run(epic.sync_epic())
 
@@ -208,7 +209,7 @@ class SyncEpicTests(unittest.TestCase):
         with (
             patch("pathlib.Path.exists", return_value=True),
             patch("gamelib_mcp.data.epic.fetch_epic_library", AsyncMock(side_effect=RuntimeError("boom"))),
-            patch("gamelib_mcp.data.epic.fetch_epic_playtime", AsyncMock(return_value={})),
+            patch("gamelib_mcp.data.epic.fetch_epic_playtime", AsyncMock(return_value=({}, {}))),
         ):
             result = asyncio.run(epic.sync_epic())
 
@@ -260,6 +261,7 @@ class SyncEpicTests(unittest.TestCase):
             game_id=42,
             platform="epic",
             playtime_minutes=None,
+            last_played=None,
             owned=1,
             from_source=True,
         )
@@ -288,6 +290,7 @@ class SyncEpicTests(unittest.TestCase):
             game_id=42,
             platform="epic",
             playtime_minutes=45,
+            last_played=None,
             owned=1,
             from_source=True,
         )
@@ -325,6 +328,7 @@ class SyncEpicTests(unittest.TestCase):
             game_id=7,
             platform="epic",
             playtime_minutes=60,
+            last_played=None,
             owned=1,
             from_source=True,
         )
@@ -352,6 +356,7 @@ class SyncEpicTests(unittest.TestCase):
             game_id=42,
             platform="epic",
             playtime_minutes=5,
+            last_played=None,
             owned=1,
             from_source=True,
         )

@@ -113,7 +113,7 @@ XBOX_TITLE_ID = "xbox_title_id"
 # module load time, so this package must never import back from nintendo.py.
 # Must stay in sync with that constant's value.
 NINTENDO_TITLE_ID_TYPE = "nintendo_title_id"
-SCHEMA_VERSION = 34
+SCHEMA_VERSION = 35
 
 
 def normalize_identifier_value(identifier_type: str, value: str) -> str:
@@ -1902,6 +1902,46 @@ async def _migrate_v33_to_v34(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v34_to_v35(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Backfill game_platforms.last_played for Steam from rtime_last_played.
+
+    v14 added the generic last_played column but only the Nintendo and PSN syncs
+    ever wrote it — Steam kept its own epoch copy in
+    steam_platform_data.rtime_last_played and the generic column stayed NULL for
+    every Steam row. Now that last_played gates play-history window deltas (a
+    game last played in 2022 cannot contribute to a 2026 window), Steam needs to
+    populate it, and the rows already synced need the value they always had.
+
+    Additive: only fills rows that are NULL, so a set_playtime pin (or any value
+    written since) is never overwritten. rtime_last_played = 0 means "never
+    played" in GetOwnedGames and stays NULL rather than becoming 1970-01-01.
+    """
+    if progress is not None:
+        progress("Migrating to v35: backfill Steam last_played from rtime_last_played.")
+
+    await db.execute(
+        """
+        UPDATE game_platforms
+        SET last_played = (
+            SELECT date(spd.rtime_last_played, 'unixepoch')
+            FROM steam_platform_data spd
+            WHERE spd.game_platform_id = game_platforms.id
+              AND COALESCE(spd.rtime_last_played, 0) > 0
+        )
+        WHERE platform = 'steam'
+          AND last_played IS NULL
+          AND EXISTS (
+              SELECT 1 FROM steam_platform_data spd
+              WHERE spd.game_platform_id = game_platforms.id
+                AND COALESCE(spd.rtime_last_played, 0) > 0
+          )
+        """
+    )
+
+    await _set_user_version(db, 35)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -2078,6 +2118,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (31, _migrate_v31_to_v32),
     (32, _migrate_v32_to_v33),
     (33, _migrate_v33_to_v34),
+    (34, _migrate_v34_to_v35),
 )
 
 

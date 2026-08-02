@@ -1157,6 +1157,84 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                        "purchase_source", "bundle_name"):
             self.assertIsNone(row[column])
 
+    async def test_v35_backfills_steam_last_played_from_rtime(self) -> None:
+        # v14 added game_platforms.last_played but only PSN/Nintendo ever wrote
+        # it; Steam kept its epoch copy in steam_platform_data. Now that
+        # last_played gates play-history window deltas, the rows already synced
+        # need the value they always had.
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+
+            async with db_module.get_db() as db:
+                cursor = await db.execute("INSERT INTO games (name) VALUES ('Hades')")
+                game_id = cursor.lastrowid
+                await db.execute(
+                    "INSERT INTO game_platforms (game_id, platform, owned) VALUES (?, 'steam', 1)",
+                    (game_id,),
+                )
+                row = await db.execute_fetchone(
+                    "SELECT id FROM game_platforms WHERE game_id = ?", (game_id,)
+                )
+                platform_id = row["id"]
+                # 1709424000 = 2024-03-03; a second row with 0 = "never played".
+                await db.execute(
+                    "INSERT INTO steam_platform_data (game_platform_id, rtime_last_played)"
+                    " VALUES (?, 1709424000)",
+                    (platform_id,),
+                )
+
+                cursor = await db.execute("INSERT INTO games (name) VALUES ('Unplayed')")
+                never_id = cursor.lastrowid
+                await db.execute(
+                    "INSERT INTO game_platforms (game_id, platform, owned) VALUES (?, 'steam', 1)",
+                    (never_id,),
+                )
+                never_row = await db.execute_fetchone(
+                    "SELECT id FROM game_platforms WHERE game_id = ?", (never_id,)
+                )
+                await db.execute(
+                    "INSERT INTO steam_platform_data (game_platform_id, rtime_last_played)"
+                    " VALUES (?, 0)",
+                    (never_row["id"],),
+                )
+
+                # A row that already carries a hand-pinned last_played.
+                cursor = await db.execute("INSERT INTO games (name) VALUES ('Pinned')")
+                pinned_id = cursor.lastrowid
+                await db.execute(
+                    "INSERT INTO game_platforms (game_id, platform, owned, last_played)"
+                    " VALUES (?, 'steam', 1, '2020-01-01')",
+                    (pinned_id,),
+                )
+                pinned_row = await db.execute_fetchone(
+                    "SELECT id FROM game_platforms WHERE game_id = ?", (pinned_id,)
+                )
+                await db.execute(
+                    "INSERT INTO steam_platform_data (game_platform_id, rtime_last_played)"
+                    " VALUES (?, 1709424000)",
+                    (pinned_row["id"],),
+                )
+
+                await db.execute("PRAGMA user_version = 34")
+                await db.commit()
+
+            db_module._DB_READY_PATH = None
+            await db_module.init_db()
+
+            async with db_module.get_db() as db:
+                rows = await db.execute_fetchall(
+                    "SELECT g.name, gp.last_played FROM game_platforms gp"
+                    " JOIN games g ON g.id = gp.game_id ORDER BY g.name"
+                )
+            by_name = {r["name"]: r["last_played"] for r in rows}
+
+        self.assertEqual(by_name["Hades"], "2024-03-03")
+        # 0 means never played, not 1970-01-01.
+        self.assertIsNone(by_name["Unplayed"])
+        # An existing value is never overwritten.
+        self.assertEqual(by_name["Pinned"], "2020-01-01")
+
     async def test_v20_reclaims_only_still_unresolved_wishlisted_games(self) -> None:
         # Handover doc: the v19 re-claim ran, but 9 of 187 wishlisted games
         # never got igdb_platforms populated (resolution gaps this branch
@@ -1171,7 +1249,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             async with db_module.get_db() as db:
                 version = await db_module._get_user_version(db)
             self.assertEqual(version, db_module.SCHEMA_VERSION)
-            self.assertEqual(db_module.SCHEMA_VERSION, 34)
+            self.assertEqual(db_module.SCHEMA_VERSION, 35)
 
             unresolved = await seed_game("Still Unresolved Wishlisted Game")
             resolved = await seed_game("Already Resolved Wishlisted Game")

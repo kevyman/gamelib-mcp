@@ -28,6 +28,7 @@ from gamelib_mcp.data.db import (
     upsert_game_platform_identifier,
 )
 from gamelib_mcp.data.igdb import PLATFORM_TO_IGDB, resolve_and_link_game
+from gamelib_mcp.data.last_played import XBOX_LAST_PLAYED_KEYS, extract_last_played
 from gamelib_mcp.data.title_normalization import prepare_catalog_title
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,22 @@ def _extract_title(entry: Any) -> tuple[str | None, str | None]:
     title_id = entry.get("titleId")
     name = entry.get("name")
     return (str(title_id) if title_id else None, str(name) if name else None)
+
+
+def _extract_last_played(entry: Any) -> str | None:
+    """Best-effort last-played date from an OpenXBL titleHistory entry.
+
+    The value normally sits under the entry's own ``titleHistory`` object
+    (``{"titleHistory": {"lastTimePlayed": "2024-03-02T…Z"}}``), but the flat
+    form is accepted too. Ownership must never depend on it, so an absent or
+    unparseable value is simply None — like playtime, this is best-effort.
+    """
+    if not isinstance(entry, dict):
+        return None
+    history = entry.get("titleHistory")
+    return extract_last_played(history, XBOX_LAST_PLAYED_KEYS) or extract_last_played(
+        entry, XBOX_LAST_PLAYED_KEYS
+    )
 
 
 async def fetch_xbox_titles(xuid: str | None = None) -> list[dict]:
@@ -290,6 +307,7 @@ async def sync_xbox() -> dict:
             game_id=game_id,
             platform="xbox",
             playtime_minutes=playtime_by_title.get(title_id) if title_id else None,
+            last_played=_extract_last_played(entry),
             owned=1,
             from_source=True,
         )

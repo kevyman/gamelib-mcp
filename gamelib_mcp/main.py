@@ -999,6 +999,12 @@ async def get_play_history(
     "steam", "switch2"); omit for all. Returns per-game minutes,
     per-platform totals, and the window used; switch2_unmatched_minutes
     covers Parental Controls playtime that never resolved to a library game.
+
+    A game whose platform reports a last_played BEFORE the window is
+    excluded and counted in excluded_stale_games/excluded_stale_minutes:
+    snapshots are cumulative, so a correction to a stored total would
+    otherwise read as a play session in whichever window the correcting
+    sync landed in. Platforms reporting no last_played are unaffected.
     """
     from .tools.history import get_play_history as _get_play_history
     return await _get_play_history(days, start_date, end_date, platform, limit)

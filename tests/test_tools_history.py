@@ -25,6 +25,15 @@ async def _snapshot(game_id: int, platform: str, day: str, minutes: int) -> None
         await db.commit()
 
 
+async def _set_last_played(game_id: int, platform: str, day: str | None) -> None:
+    async with db_module.get_db() as db:
+        await db.execute(
+            "UPDATE game_platforms SET last_played = ? WHERE game_id = ? AND platform = ?",
+            (day, game_id, platform),
+        )
+        await db.commit()
+
+
 def _nps_row(app_id: str, day: str, minutes: int) -> dict:
     return {
         "device_id": "device-1",
@@ -222,3 +231,145 @@ class GetPlayHistoryTests(ToolDBTestCase):
         self.assertEqual(result["games"][0]["game_id"], dlc_id)
         self.assertEqual(result["games"][0]["name"], "Portal 2: Peer Review")
         self.assertEqual(result["games"][0]["minutes_played"], 30)
+
+
+class LastPlayedGateTests(ToolDBTestCase):
+    """A stored-total correction must not read as play.
+
+    Snapshots are cumulative, so a delta between two of them lands in whichever
+    window the LATER snapshot fell in — regardless of when the game was actually
+    played. The PSN cross-gen SKU fix stepped seven totals up at once and Ghost
+    of Tsushima reported 81 hours "played" in a month it was never launched.
+    game_platforms.last_played is the source's own statement of when play
+    stopped, so it settles the question the totals cannot.
+    """
+
+    async def test_correction_after_last_played_is_suppressed(self):
+        game_id = await seed_game("Ghost of Tsushima")
+        await add_platform(game_id, "ps5", playtime_minutes=4933)
+        await _set_last_played(game_id, "ps5", "2022-09-21")
+        await _snapshot(game_id, "ps5", "2026-07-04", 46)
+        await _snapshot(game_id, "ps5", "2026-08-02", 4933)  # the SKU-sum fix
+
+        result = await history.get_play_history(
+            start_date="2026-07-03", end_date="2026-08-02"
+        )
+
+        self.assertEqual(result["total_minutes"], 0)
+        self.assertEqual(result["games"], [])
+        # Suppressed, not silently dropped.
+        self.assertEqual(result["excluded_stale_games"], 1)
+        self.assertEqual(result["excluded_stale_minutes"], 4887)
+
+    async def test_real_play_inside_window_is_kept(self):
+        game_id = await seed_game("Blue Prince")
+        await add_platform(game_id, "ps5", playtime_minutes=200)
+        await _set_last_played(game_id, "ps5", "2026-07-20")
+        await _snapshot(game_id, "ps5", "2026-07-04", 120)
+        await _snapshot(game_id, "ps5", "2026-08-02", 200)
+
+        result = await history.get_play_history(
+            start_date="2026-07-03", end_date="2026-08-02"
+        )
+
+        self.assertEqual(result["total_minutes"], 80)
+        self.assertEqual(result["excluded_stale_games"], 0)
+        self.assertEqual(result["excluded_stale_minutes"], 0)
+
+    async def test_last_played_on_the_window_start_still_counts(self):
+        # The boundary is inclusive: played ON the first day of the window.
+        game_id = await seed_game("Split Fiction")
+        await add_platform(game_id, "ps5", playtime_minutes=200)
+        await _set_last_played(game_id, "ps5", "2026-07-03")
+        await _snapshot(game_id, "ps5", "2026-07-04", 120)
+        await _snapshot(game_id, "ps5", "2026-08-02", 200)
+
+        result = await history.get_play_history(
+            start_date="2026-07-03", end_date="2026-08-02"
+        )
+
+        self.assertEqual(result["total_minutes"], 80)
+        self.assertEqual(result["excluded_stale_games"], 0)
+
+    async def test_null_last_played_is_unknown_not_stale(self):
+        # GOG reports no last-played at all, and Steam rows predating the
+        # backfill have none either. Unknown must never mean "suppress" —
+        # that would silently zero most of the library's history.
+        game_id = await seed_game("Hades II")
+        await add_platform(game_id, "steam", playtime_minutes=400)
+        await _set_last_played(game_id, "steam", None)
+        await _snapshot(game_id, "steam", "2026-07-04", 85)
+        await _snapshot(game_id, "steam", "2026-08-02", 400)
+
+        result = await history.get_play_history(
+            start_date="2026-07-03", end_date="2026-08-02"
+        )
+
+        self.assertEqual(result["total_minutes"], 315)
+        self.assertEqual(result["excluded_stale_games"], 0)
+
+    async def test_gate_is_per_row_not_all_or_nothing(self):
+        stale = await seed_game("Assassin's Creed Valhalla")
+        await add_platform(stale, "ps5", playtime_minutes=149)
+        await _set_last_played(stale, "ps5", "2023-03-19")
+        await _snapshot(stale, "ps5", "2026-07-04", 21)
+        await _snapshot(stale, "ps5", "2026-08-02", 149)
+
+        live = await seed_game("Rusty's Retirement")
+        await add_platform(live, "steam", playtime_minutes=600)
+        await _set_last_played(live, "steam", "2026-07-30")
+        await _snapshot(live, "steam", "2026-07-04", 92)
+        await _snapshot(live, "steam", "2026-08-02", 600)
+
+        result = await history.get_play_history(
+            start_date="2026-07-03", end_date="2026-08-02"
+        )
+
+        self.assertEqual([g["name"] for g in result["games"]], ["Rusty's Retirement"])
+        self.assertEqual(result["total_minutes"], 508)
+        self.assertEqual(result["by_platform"], {"steam": 508})
+        self.assertEqual(result["excluded_stale_games"], 1)
+        self.assertEqual(result["excluded_stale_minutes"], 128)
+
+    async def test_historical_window_before_the_correction_is_unaffected(self):
+        # A window that ends before the correcting sync never saw the step, and
+        # the gate must not retroactively suppress the real growth it contains.
+        game_id = await seed_game("Horizon Zero Dawn")
+        await add_platform(game_id, "ps5", playtime_minutes=449)
+        await _set_last_played(game_id, "ps5", "2026-06-04")
+        await _snapshot(game_id, "ps5", "2026-05-01", 300)
+        await _snapshot(game_id, "ps5", "2026-06-04", 395)
+        await _snapshot(game_id, "ps5", "2026-08-02", 449)
+
+        result = await history.get_play_history(
+            start_date="2026-05-01", end_date="2026-06-30"
+        )
+
+        self.assertEqual(result["total_minutes"], 95)
+        self.assertEqual(result["excluded_stale_games"], 0)
+
+    async def test_platform_filter_scopes_the_excluded_counters(self):
+        stale = await seed_game("Dreams")
+        await add_platform(stale, "ps5", playtime_minutes=86)
+        await _set_last_played(stale, "ps5", "2022-05-22")
+        await _snapshot(stale, "ps5", "2026-07-04", 1)
+        await _snapshot(stale, "ps5", "2026-08-02", 86)
+
+        live = await seed_game("Slay the Spire 2")
+        await add_platform(live, "steam", playtime_minutes=400)
+        await _set_last_played(live, "steam", "2026-07-28")
+        await _snapshot(live, "steam", "2026-07-04", 84)
+        await _snapshot(live, "steam", "2026-08-02", 400)
+
+        steam_only = await history.get_play_history(
+            start_date="2026-07-03", end_date="2026-08-02", platform="steam"
+        )
+        self.assertEqual(steam_only["total_minutes"], 316)
+        self.assertEqual(steam_only["excluded_stale_games"], 0)
+
+        ps5_only = await history.get_play_history(
+            start_date="2026-07-03", end_date="2026-08-02", platform="ps5"
+        )
+        self.assertEqual(ps5_only["total_minutes"], 0)
+        self.assertEqual(ps5_only["excluded_stale_games"], 1)
+        self.assertEqual(ps5_only["excluded_stale_minutes"], 85)
