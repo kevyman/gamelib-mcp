@@ -26,6 +26,7 @@ class SkillResourcesRegisteredTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("skill://index.json", uris)
         self.assertIn("skill://backlog-triage/SKILL.md", uris)
         self.assertIn("skill://game-quality/SKILL.md", uris)
+        self.assertIn("skill://bundle-evaluation/SKILL.md", uris)
         # ADR 0006 stage 4: the craft/fit scripts moved server-side
         # (get_assessment_context) and skills/game-quality/scripts/ was
         # removed — game-quality is SKILL.md-only now, like backlog-triage.
@@ -74,6 +75,7 @@ class SkillResourcesRegisteredTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("backlog-triage", by_name)
         self.assertIn("game-quality", by_name)
+        self.assertIn("bundle-evaluation", by_name)
 
         backlog_entry = by_name["backlog-triage"]
         self.assertEqual(backlog_entry["version"], "2.1.0")
@@ -83,6 +85,11 @@ class SkillResourcesRegisteredTests(unittest.IsolatedAsyncioTestCase):
         quality_entry = by_name["game-quality"]
         self.assertEqual(quality_entry["version"], "2.1.0")
         self.assertEqual(quality_entry["files"], ["skill://game-quality/SKILL.md"])
+
+        bundle_entry = by_name["bundle-evaluation"]
+        self.assertEqual(bundle_entry["version"], "1.0.0")
+        self.assertIn("bundle", bundle_entry["description"].lower())
+        self.assertEqual(bundle_entry["files"], ["skill://bundle-evaluation/SKILL.md"])
 
     async def test_index_resource_reports_json_mime_type(self) -> None:
         mcp = FastMCP("test")
@@ -131,6 +138,7 @@ class SkillResourcesRealAppTests(unittest.IsolatedAsyncioTestCase):
             names = {entry["name"] for entry in payload}
             self.assertIn("backlog-triage", names)
             self.assertIn("game-quality", names)
+            self.assertIn("bundle-evaluation", names)
 
         self.assertIn("skill://index.json", mcp.instructions)
 

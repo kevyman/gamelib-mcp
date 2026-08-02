@@ -1,8 +1,8 @@
 # Gaming skills
 
 This directory is the **canonical home** of gamelib-mcp's client-side gaming
-skills (`game-quality`, `backlog-triage`, and any future ones such as the
-planned bundle-evaluation skill), per
+skills (`game-quality`, `backlog-triage`, `bundle-evaluation`, and any future
+ones), per
 [ADR 0006](../docs/adr/0006-skills-stay-client-side-server-absorbs-mechanics.md).
 
 Skills stay client-side — MCP has no mechanism today that both auto-triggers
@@ -19,9 +19,11 @@ Copy or symlink the skill folder into your client's skills directory, e.g.:
 ```bash
 cp -r skills/game-quality ~/.claude/skills/
 cp -r skills/backlog-triage ~/.claude/skills/
+cp -r skills/bundle-evaluation ~/.claude/skills/
 # or, to track repo updates automatically:
 ln -s "$(pwd)/skills/game-quality" ~/.claude/skills/game-quality
 ln -s "$(pwd)/skills/backlog-triage" ~/.claude/skills/backlog-triage
+ln -s "$(pwd)/skills/bundle-evaluation" ~/.claude/skills/bundle-evaluation
 ```
 
 Each `SKILL.md` carries a `version` in its frontmatter; bump it when the
