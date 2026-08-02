@@ -29,6 +29,7 @@ from gamelib_mcp.data.db import (
     upsert_game_platform_identifier,
 )
 from gamelib_mcp.data.igdb import PLATFORM_TO_IGDB, resolve_and_link_game
+from gamelib_mcp.data.last_played import EPIC_LAST_PLAYED_KEYS, extract_last_played
 from gamelib_mcp.data.title_normalization import prepare_catalog_title
 
 logger = logging.getLogger(__name__)
@@ -187,25 +188,33 @@ def _extract_epic_artifact_id(game: dict[str, Any]) -> str | None:
     return str(app_name) if app_name else None
 
 
-async def fetch_epic_playtime(suppress_configuration_errors: bool = True) -> dict[str, int]:
-    """Return a mapping of Epic artifact id to total playtime minutes."""
+async def fetch_epic_playtime(
+    suppress_configuration_errors: bool = True,
+) -> tuple[dict[str, int], dict[str, str]]:
+    """Return (playtime minutes, last-played dates) keyed by Epic artifact id.
+
+    The last-played map is best-effort and usually sparser than the playtime
+    map: Epic's playtime payload is undocumented, so the field is probed
+    across EPIC_LAST_PLAYED_KEYS and simply omitted when absent. An artifact
+    with playtime but no parseable date is present in the first map only.
+    """
     try:
         session = await _get_epic_session()
     except EpicConfigurationError as exc:
         if not suppress_configuration_errors:
             raise
         logger.info("Epic playtime unavailable: %s", exc)
-        return {}
+        return {}, {}
     except Exception as exc:
         logger.warning("Epic playtime unavailable: %s", exc)
-        return {}
+        return {}, {}
 
     account_id = session.get("account_id")
     access_token = session.get("access_token")
     refresh_token = session.get("refresh_token")
     if not account_id or not access_token:
         logger.info("Epic playtime unavailable: missing account_id or access_token")
-        return {}
+        return {}, {}
 
     async with httpx.AsyncClient(
         timeout=_EPIC_TIMEOUT,
@@ -223,10 +232,10 @@ async def fetch_epic_playtime(suppress_configuration_errors: bool = True) -> dic
                 if not suppress_configuration_errors:
                     raise
                 logger.info("Epic playtime unavailable: %s", exc)
-                return {}
+                return {}, {}
             except Exception as exc:
                 logger.warning("Epic playtime refresh failed after 401: %s", exc)
-                return {}
+                return {}, {}
             response = await client.get(
                 _EPIC_PLAYTIME_URL.format(account_id=session["account_id"]),
                 headers={
@@ -243,6 +252,7 @@ async def fetch_epic_playtime(suppress_configuration_errors: bool = True) -> dic
         raise RuntimeError("unexpected Epic playtime payload")
 
     playtime: dict[str, int] = {}
+    last_played: dict[str, str] = {}
     for entry in payload:
         if not isinstance(entry, dict):
             continue
@@ -254,8 +264,12 @@ async def fetch_epic_playtime(suppress_configuration_errors: bool = True) -> dic
             playtime[str(artifact_id)] = int(total_time) // 60
         except (TypeError, ValueError):
             logger.debug("Skipping Epic playtime row with invalid totalTime: %r", entry)
+            continue
+        seen_at = extract_last_played(entry, EPIC_LAST_PLAYED_KEYS)
+        if seen_at is not None:
+            last_played[str(artifact_id)] = seen_at
 
-    return playtime
+    return playtime, last_played
 
 
 def is_epic_configured() -> bool:
@@ -295,14 +309,18 @@ async def sync_epic() -> dict:
 
     playtime_error: EpicConfigurationError | None = None
     try:
-        playtime_by_artifact = await fetch_epic_playtime(suppress_configuration_errors=False)
+        playtime_by_artifact, last_played_by_artifact = await fetch_epic_playtime(
+            suppress_configuration_errors=False
+        )
     except EpicConfigurationError as exc:
         logger.info("Epic playtime stale; syncing ownership only: %s", exc)
         playtime_error = exc
         playtime_by_artifact = {}
+        last_played_by_artifact = {}
     except Exception as exc:
         logger.warning("Epic playtime unavailable (non-fatal): %s", exc)
         playtime_by_artifact = {}
+        last_played_by_artifact = {}
 
     if not games:
         logger.info("Epic metadata cache is empty at %s — skipping Epic sync", config_path / "metadata")
@@ -382,6 +400,7 @@ async def sync_epic() -> dict:
             platform="epic",
             # Epic reports raw playtime in seconds; normalize to canonical minutes.
             playtime_minutes=playtime_by_artifact.get(artifact_id) if artifact_id else None,
+            last_played=last_played_by_artifact.get(artifact_id) if artifact_id else None,
             owned=1,
             from_source=True,
         )

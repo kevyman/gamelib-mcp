@@ -344,6 +344,7 @@ class SyncXboxTests(unittest.TestCase):
             game_id=42,
             platform="xbox",
             playtime_minutes=300,
+            last_played=None,
             owned=1,
             from_source=True,
         )
@@ -375,6 +376,7 @@ class SyncXboxTests(unittest.TestCase):
             game_id=42,
             platform="xbox",
             playtime_minutes=300,
+            last_played=None,
             owned=1,
             from_source=True,
         )
@@ -402,6 +404,7 @@ class SyncXboxTests(unittest.TestCase):
             game_id=42,
             platform="xbox",
             playtime_minutes=None,
+            last_played=None,
             owned=1,
             from_source=True,
         )

@@ -1151,13 +1151,19 @@ async def bulk_upsert_steam_library(
             # signal check_library's ownership.unseen_in_source reads. owned and
             # unowned_at follow upsert_game_platform's rules exactly: the pin
             # wins, otherwise a listed app is owned and its unowned_at clears.
+            # last_played mirrors steam_platform_data.rtime_last_played (a unix
+            # epoch) into the cross-platform ISO column, so Steam contributes to
+            # the same last-played signal PSN and Nintendo write. 0 means "never
+            # played" in GetOwnedGames, which is NULL here, not 1970-01-01.
             await db.execute(
                 """INSERT INTO game_platforms
                    (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes,
-                    last_synced, last_seen_in_source)
+                    last_played, last_synced, last_seen_in_source)
                    SELECT t.resolved_game_id, ?, 1,
                           t.playtime_minutes,
                           t.playtime_2weeks_minutes,
+                          CASE WHEN COALESCE(t.rtime_last_played, 0) > 0
+                               THEN date(t.rtime_last_played, 'unixepoch') END,
                           ?, ?
                    FROM temp_steam_library_sync t
                    WHERE t.resolved_game_id IS NOT NULL
@@ -1191,6 +1197,13 @@ async def bulk_upsert_steam_library(
                            excluded.playtime_2weeks_minutes,
                            game_platforms.playtime_2weeks_minutes
                        ),
+                       last_played = CASE
+                           WHEN game_platforms.manual_overrides IS NOT NULL
+                                AND 'last_played' IN (
+                                    SELECT value FROM json_each(game_platforms.manual_overrides))
+                           THEN game_platforms.last_played
+                           ELSE COALESCE(excluded.last_played, game_platforms.last_played)
+                       END,
                        last_synced = excluded.last_synced""",
                 (STEAM_PLATFORM, synced_at, synced_at),
             )
