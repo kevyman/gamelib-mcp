@@ -1053,6 +1053,19 @@ async def bulk_upsert_steam_library(
 
         row_offset = 0
         for chunk in _iter_chunks(rows, chunk_size):
+            # Take the write lock BEFORE reading. Each chunk is a read-then-write
+            # transaction (appid/name resolution against the live tables, then
+            # platform writes), and a deferred transaction that reads first can
+            # only fail when another writer commits in between: upgrading its
+            # read snapshot raises SQLITE_BUSY_SNAPSHOT immediately, busy_timeout
+            # deliberately not consulted. During a full library refresh the other
+            # platform syncs commit continuously for the whole run, so the
+            # retry_on_write_contention backstop (~1.5s of budget) lost that race
+            # every time — Steam failed 100% of full refreshes while succeeding
+            # alone. BEGIN IMMEDIATE makes this a writer from the start: it
+            # QUEUES behind other writers under busy_timeout, and every read
+            # below happens under a snapshot no one else can invalidate.
+            await db.execute("BEGIN IMMEDIATE")
             await db.execute("DELETE FROM temp_steam_library_sync")
             await db.executemany(
                 """INSERT INTO temp_steam_library_sync
