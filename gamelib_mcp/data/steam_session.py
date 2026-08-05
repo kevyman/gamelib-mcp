@@ -126,6 +126,23 @@ def _load_cookies(env_var: str, default_filename: str, label: str) -> dict[str, 
     return None
 
 
+def extract_web_access_token(login_secure_value: str) -> str:
+    """The bare JWT segment from a raw ``<steamid>||<JWT>`` cookie value.
+
+    Both ``steamRefresh_steam`` and ``steamLoginSecure`` share this shape, and
+    the ``||`` separator may arrive URL-encoded (``%7C%7C``) depending on how
+    it was copied. For ``steamLoginSecure`` specifically, the JWT segment IS a
+    Steam web access token: ``api.steampowered.com`` service endpoints (e.g.
+    ``IWishlistService``) accept it as the ``access_token`` query param, same
+    as a token minted through the official OAuth device/mobile flows. A bare
+    JWT (no prefix) is returned unchanged.
+    """
+    decoded = urllib.parse.unquote(login_secure_value)
+    if "||" in decoded:
+        return decoded.split("||", 1)[1]
+    return decoded
+
+
 def _extract_refresh_nonce(cookie_value: str) -> str:
     """The bare refresh JWT from a raw ``steamRefresh_steam`` cookie value.
 
@@ -135,12 +152,11 @@ def _extract_refresh_nonce(cookie_value: str) -> str:
     wants ONLY the JWT: passing the ``<steamid>||`` prefix makes finalizelogin
     return EResult 15 (AccessDenied) with no transfer targets — which is
     indistinguishable from a genuinely expired token unless you strip it first.
-    A bare JWT (no prefix) is returned unchanged.
+    A bare JWT (no prefix) is returned unchanged. Delegates to
+    :func:`extract_web_access_token`, which does the identical parsing for
+    ``steamLoginSecure``.
     """
-    decoded = urllib.parse.unquote(cookie_value)
-    if "||" in decoded:
-        return decoded.split("||", 1)[1]
-    return decoded
+    return extract_web_access_token(cookie_value)
 
 
 def _load_steam_refresh_token() -> str | None:
@@ -205,6 +221,16 @@ def _resolve_steamid(refresh_token: str) -> str:
 def _new_sessionid() -> str:
     """A fresh sessionid in Steam's format (24 hex chars)."""
     return secrets.token_hex(12)
+
+
+def new_sessionid() -> str:
+    """Public alias of :func:`_new_sessionid` for callers outside this module.
+
+    The storefront AJAX wishlist push (``steam_wishlist.py``) needs to mint a
+    client-side ``sessionid`` when a cookie export lacks one; this avoids
+    duplicating the hex-generation logic in a second module.
+    """
+    return _new_sessionid()
 
 
 def _extract_store_login_secure(client: httpx.AsyncClient) -> str | None:

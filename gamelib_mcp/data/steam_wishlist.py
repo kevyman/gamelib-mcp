@@ -1,4 +1,6 @@
-"""Fetch Steam wishlist via IWishlistService/GetWishlist.
+"""Fetch and push the Steam wishlist.
+
+Pull: IWishlistService/GetWishlist.
 
 Auth reuses STEAM_API_KEY/STEAM_ID (same as steam_xml.py's owned-games fetch).
 Unlike GetOwnedGames, this endpoint returns only appid/priority/date_added —
@@ -23,10 +25,31 @@ unowned item — the Steam Store lookup shares a rate-limited gate, so this is a
 real possibility, not just a theoretical one), the removal pass is skipped
 entirely rather than risk deleting a wishlist entry that's still there and we
 simply failed to re-confirm.
+
+Push: push_to_steam_wishlist (issue #110 phase 2) adds one appid to the real
+account wishlist, so a game wishlisted in-app also shows up on Steam itself.
+Two write routes exist; neither had been exercised authenticated as of the
+2026-08-06 investigation that shaped this implementation, so both are wired
+with the official Web API preferred and the storefront AJAX endpoint as
+fallback:
+
+- Route B (preferred): IWishlistService/AddToWishlist, the same service
+  family as the GetWishlist pull above. Auth is a Steam web access token —
+  the JWT segment embedded in the steamLoginSecure cookie
+  (steam_session.extract_web_access_token) — passed as the access_token query
+  param.
+- Route A (fallback): store.steampowered.com/api/addtowishlist, the same
+  cookie-authenticated AJAX endpoint the logged-in store page itself calls.
+  Needs steamLoginSecure + a matching sessionid (CSRF double-submit between
+  cookie and form field).
+
+Removal (taking an item off the real Steam wishlist) is deliberately out of
+scope for phase 2 — this module only ever adds.
 """
 
 import logging
 import os
+import time
 from datetime import UTC, datetime
 
 import httpx
@@ -38,6 +61,13 @@ from .db import (
     upsert_game,
     upsert_wishlist_entry,
 )
+from .steam_session import _USER_AGENT as _STEAM_USER_AGENT
+from .steam_session import (
+    _decode_jwt_claims,
+    extract_web_access_token,
+    load_steam_web_cookies,
+    new_sessionid,
+)
 from .steam_store import fetch_app_name
 from .steam_xml import STEAM_API_KEY, STEAM_ID
 from .title_normalization import prepare_catalog_title
@@ -45,6 +75,242 @@ from .title_normalization import prepare_catalog_title
 logger = logging.getLogger(__name__)
 
 WISHLIST_URL = "https://api.steampowered.com/IWishlistService/GetWishlist/v1/"
+_ADD_WEBAPI_URL = "https://api.steampowered.com/IWishlistService/AddToWishlist/v1/"
+_ADD_STOREFRONT_URL = "https://store.steampowered.com/api/addtowishlist"
+
+# Both push failures look like auth rejection, not a dead network: route B
+# returning 401/403, or route A's 200-with-success:false shape (the endpoint
+# answers HTTP 200 even when the session is invalid/missing). Either means the
+# stored Steam web session is no longer good and needs re-minting.
+_AUTH_REJECTED_ERROR = (
+    "Steam rejected the wishlist push (session no longer valid) — run "
+    "create_session_ingest_link(provider=\"steam_refresh\") to re-store the "
+    "Steam session token."
+)
+_TRANSIENT_PUSH_ERROR = (
+    "Steam wishlist push failed transiently (network error on both the web API "
+    "and storefront routes) — retry shortly."
+)
+
+
+class SteamWishlistPushError(RuntimeError):
+    """A push to the real Steam wishlist failed; the message is user-facing."""
+
+
+# One minted Steam web session is reused across pushes: with the preferred
+# refresh-token configuration, every load_steam_web_cookies() call replays the
+# full finalizelogin mint (finalize + per-domain transfer requests), so a
+# 200-item batch push would fire hundreds of authentication requests before
+# any actual push. Expiry comes from the steamLoginSecure JWT's exp claim
+# (minus a safety margin); a token without a readable exp gets a conservative
+# fallback TTL. An auth-shaped push failure drops the cache so the next call
+# re-mints instead of replaying a session Steam already rejected.
+_SESSION_TTL_FALLBACK_SECONDS = 600.0
+_SESSION_EXPIRY_MARGIN_SECONDS = 60.0
+_session_cache: dict[str, str] | None = None
+_session_cache_expires_at = 0.0
+
+
+def _invalidate_session_cache() -> None:
+    global _session_cache, _session_cache_expires_at
+    _session_cache = None
+    _session_cache_expires_at = 0.0
+
+
+def _session_expiry(cookies: dict[str, str]) -> float:
+    """Wall-clock expiry for a minted session, from the access token's ``exp``.
+
+    A near-expiry token yields a timestamp in the past, which simply means "no
+    reuse" — the next push re-mints rather than pushing with a token about to
+    lapse mid-request.
+    """
+    claims = _decode_jwt_claims(
+        extract_web_access_token(cookies.get("steamLoginSecure", ""))
+    )
+    exp = claims.get("exp")
+    now = time.time()
+    if isinstance(exp, (int, float)) and not isinstance(exp, bool) and exp > now:
+        return min(float(exp) - _SESSION_EXPIRY_MARGIN_SECONDS, now + 86400.0)
+    return now + _SESSION_TTL_FALLBACK_SECONDS
+
+
+class _RouteAttemptError(Exception):
+    """Internal: one write route failed. Never raised past push_to_steam_wishlist.
+
+    ``auth_shaped`` distinguishes "the session looks rejected" (route B 401/403,
+    or route A's HTTP-200-success:false shape) from a plain network failure, so
+    the caller can pick which guidance to give once both routes are exhausted.
+    """
+
+    def __init__(self, detail: str, *, auth_shaped: bool) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.auth_shaped = auth_shaped
+
+
+def _safe_json(response: httpx.Response) -> object:
+    """``response.json()``, or None on a non-JSON/malformed body."""
+    try:
+        return response.json()
+    except ValueError:
+        return None
+
+
+def _extract_wishlist_count(payload: object, *keys: str) -> int | None:
+    """Best-effort wishlist count from a push response body.
+
+    Neither write route's exact response shape has been confirmed against a
+    live authenticated account (see module docstring), so this probes a few
+    plausible key names rather than asserting one.
+    """
+    if not isinstance(payload, dict):
+        return None
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+async def _push_via_webapi(client: httpx.AsyncClient, appid: int, access_token: str) -> dict:
+    """Route B: IWishlistService/AddToWishlist, authenticated via access_token.
+
+    Raises :class:`_RouteAttemptError` on any non-2xx response or transport
+    error; 401/403 are treated as auth-shaped.
+    """
+    try:
+        resp = await client.post(
+            _ADD_WEBAPI_URL,
+            params={"access_token": access_token},
+            data={"appid": str(appid)},
+        )
+    except httpx.HTTPError as exc:
+        raise _RouteAttemptError(
+            f"webapi network error ({exc.__class__.__name__})", auth_shaped=False
+        ) from exc
+
+    if not (200 <= resp.status_code < 300):
+        raise _RouteAttemptError(
+            f"webapi HTTP {resp.status_code}", auth_shaped=resp.status_code in (401, 403)
+        )
+
+    payload = _safe_json(resp)
+    response_body = payload.get("response") if isinstance(payload, dict) else None
+    wishlist_count = _extract_wishlist_count(response_body, "wishlist_count", "wishlistCount")
+    return {"appid": appid, "via": "webapi", "wishlist_count": wishlist_count}
+
+
+async def _push_via_storefront(
+    client: httpx.AsyncClient, appid: int, cookies: dict[str, str]
+) -> dict:
+    """Route A: storefront AJAX addtowishlist, authenticated via cookies.
+
+    ``sessionid`` is a CSRF double-submit — the form field must equal the
+    cookie — so a cookie export missing it (a legacy static export can lack
+    one) gets a freshly minted one used for both. Raises
+    :class:`_RouteAttemptError` on a non-200 response, a network error, or the
+    endpoint's HTTP-200-``success: false`` shape (the latter is auth-shaped:
+    that is exactly how the unauthenticated probe on 2026-08-06 responded).
+    """
+    sessionid = cookies.get("sessionid") or new_sessionid()
+    # Set the Cookie header directly rather than httpx's per-request `cookies=`
+    # kwarg (deprecated: persistence across requests on a shared client is
+    # ambiguous there, and this request needs exactly these two, no more).
+    cookie_header = f"steamLoginSecure={cookies['steamLoginSecure']}; sessionid={sessionid}"
+    try:
+        resp = await client.post(
+            _ADD_STOREFRONT_URL,
+            headers={"Cookie": cookie_header},
+            data={"appid": str(appid), "sessionid": sessionid},
+        )
+    except httpx.HTTPError as exc:
+        raise _RouteAttemptError(
+            f"storefront network error ({exc.__class__.__name__})", auth_shaped=False
+        ) from exc
+
+    if resp.status_code != 200:
+        raise _RouteAttemptError(f"storefront HTTP {resp.status_code}", auth_shaped=False)
+
+    payload = _safe_json(resp)
+    if not (isinstance(payload, dict) and payload.get("success")):
+        raise _RouteAttemptError("storefront HTTP 200 success:false", auth_shaped=True)
+
+    wishlist_count = _extract_wishlist_count(payload, "wishlistCount", "wishlist_count")
+    return {"appid": appid, "via": "storefront", "wishlist_count": wishlist_count}
+
+
+async def push_to_steam_wishlist(
+    appid: int, *, transport: httpx.AsyncBaseTransport | None = None
+) -> dict:
+    """Add ``appid`` to the account's real Steam wishlist (issue #110 phase 2).
+
+    Contract: returns ``{"appid": int, "via": "webapi" | "storefront",
+    "wishlist_count": int | None}`` on success; raises
+    :class:`SteamWishlistPushError` with an actionable message on any failure
+    (no session configured, expired session, endpoint rejection, network).
+    Removal (taking an item off the real wishlist) is out of scope.
+
+    Tries route B (IWishlistService/AddToWishlist) first — the same service
+    family ``fetch_wishlist`` above already pulls from — then falls back to
+    route A (the storefront AJAX endpoint) on any route B failure, reusing the
+    same session cookies for both. Both routes were verified to exist (status
+    codes / response shape on an unauthenticated request) on 2026-08-06, but
+    neither has been exercised with a real logged-in session yet, hence the
+    fallback rather than trusting route B alone. The minted session is cached
+    in-process and reused across pushes (see ``_session_cache`` above) so a
+    batch of pushes authenticates once, not once per item; an auth-shaped
+    failure drops the cache.
+
+    Raises ``SteamWishlistPushError`` (preserving the message verbatim) when
+    no Steam session is configured or the stored refresh token has expired —
+    both surface as a ``RuntimeError`` from ``load_steam_web_cookies``. When
+    both write routes fail, the error names both failures briefly and, if
+    either failure looks like a rejected session (route B 401/403, or route
+    A's 200/success:false), points at re-running
+    ``create_session_ingest_link(provider="steam_refresh")``; a failure that
+    is pure network error on both routes instead says to retry.
+    """
+    global _session_cache, _session_cache_expires_at
+    if _session_cache is not None and time.time() < _session_cache_expires_at:
+        cookies = _session_cache
+    else:
+        try:
+            cookies = await load_steam_web_cookies(transport=transport)
+        except RuntimeError as exc:
+            raise SteamWishlistPushError(str(exc)) from exc
+        if not cookies.get("steamLoginSecure"):
+            # A minted session always carries it; only a malformed legacy static
+            # export can get here. Fail with guidance, not a KeyError.
+            raise SteamWishlistPushError(
+                "Stored Steam session has no steamLoginSecure cookie — re-store "
+                "it via create_session_ingest_link(provider=\"steam_refresh\")."
+            )
+        _session_cache = cookies
+        _session_cache_expires_at = _session_expiry(cookies)
+
+    async with httpx.AsyncClient(
+        timeout=30, transport=transport, headers={"User-Agent": _STEAM_USER_AGENT}
+    ) as client:
+        try:
+            access_token = extract_web_access_token(cookies["steamLoginSecure"])
+            return await _push_via_webapi(client, appid, access_token)
+        except _RouteAttemptError as webapi_failure:
+            try:
+                return await _push_via_storefront(client, appid, cookies)
+            except _RouteAttemptError as storefront_failure:
+                logger.warning(
+                    "Steam wishlist push failed for appid %s: webapi=%s storefront=%s",
+                    appid,
+                    webapi_failure.detail,
+                    storefront_failure.detail,
+                )
+                detail = f"webapi: {webapi_failure.detail}; storefront: {storefront_failure.detail}"
+                if webapi_failure.auth_shaped or storefront_failure.auth_shaped:
+                    # Don't replay a session Steam just rejected — the next
+                    # push should re-mint from the refresh token.
+                    _invalidate_session_cache()
+                    raise SteamWishlistPushError(f"{_AUTH_REJECTED_ERROR} ({detail})") from storefront_failure
+                raise SteamWishlistPushError(f"{_TRANSIENT_PUSH_ERROR} ({detail})") from storefront_failure
 
 
 def _parse_steam_added_at(value) -> str | None:

@@ -1,8 +1,10 @@
 """Platform-row implementations: breakdown, ownership, game edits, playtime pins."""
 
 import json
+import logging
 import math
 import re
+import urllib.parse
 from datetime import date
 
 from fastmcp.exceptions import ToolError
@@ -29,6 +31,7 @@ from ..data.db import (
     get_nintendo_baseline_minutes,
     get_nintendo_synced_minutes,
     get_platform_manual_overrides,
+    get_steam_appid_for_game,
     has_nested_children,
     invalidate_igdb_match_enrichment,
     invalidate_name_derived_enrichment,
@@ -48,6 +51,7 @@ from ..data.db import (
     upsert_wishlist_entry,
 )
 from ..data.nintendo import NINTENDO_TITLE_ID
+from ..data.steam_wishlist import SteamWishlistPushError, push_to_steam_wishlist
 from ..data.tag_synonyms import canonical_tag
 
 # Safe direction: acquisition.py never imports this module at top level (it
@@ -67,6 +71,8 @@ from .search import (
     build_name_match,
     fuzzy_fallback_game_ids,
 )
+
+logger = logging.getLogger(__name__)
 
 COMPLETION_STATUSES = {"playing", "completed", "abandoned", "evergreen"}
 CONTENT_TYPES = PRIMARY_CONTENT_TYPES | NESTED_CONTENT_TYPES
@@ -269,6 +275,7 @@ async def add_game_to_platform(
     unowned_at: str | None = None,
     *,
     dry_run: bool = False,
+    push_to_store: bool = False,
 ) -> dict:
     """
     Manually add a game to a platform — useful for games that aren't fetched
@@ -321,6 +328,24 @@ async def add_game_to_platform(
         override so a source that keeps listing the title can't re-own it; pass
         unowned_at="none" to undo (clears the stamp, restores owned=1, releases
         the pin) when you buy it again.
+    push_to_store: opt-in only (default False never pushes anything implicitly),
+        wishlist-only (requires owned=False — combining it with owned=True
+        raises before any write). The local wishlist row is always written
+        first and always survives, even if the push fails — a push failure
+        lands in the response's store_push field, never raises, never rolls
+        back the local write. On steam, resolves a Steam appid (identifier_type
+        ='steam_appid'/identifier_value, else an existing steam_appid on file
+        for this game, even from an owned=0 row — a refunded copy still knows
+        the appid) and pushes it to the REAL Steam wishlist via the stored web
+        session (create_session_ingest_link(provider="steam_refresh")); no
+        resolvable appid means the push is not attempted at all. On switch2,
+        DekuDeals has no wishlist write API, so store_push instead returns a
+        DekuDeals search link to add it there by hand. Other platforms report
+        no push available. dry_run never pushes — store_push is always None on
+        a dry run. A successful push still leaves the local row source="manual"
+        until the next sync(targets=["wishlist"]) re-observes it store-side and
+        converges it to source="steam" (game_wishlist is UNIQUE(game_id,
+        platform), so it's the same row either way).
     """
     if platform is None:
         raise ToolError("platform is required")
@@ -353,6 +378,11 @@ async def add_game_to_platform(
             "unowned_at requires owned=True — it retires an EXISTING ownership "
             "row (refund/revoked key/lapsed subscription). owned=False records "
             "a wishlist entry instead, which is a different thing entirely"
+        )
+    if push_to_store and owned:
+        raise ToolError(
+            "push_to_store pushes a wishlist add to the store — it requires "
+            "owned=False"
         )
     # "none" is the release sentinel (as on update_game's completion_status),
     # so it has to be recognized before the date validator sees it.
@@ -442,6 +472,8 @@ async def add_game_to_platform(
             # Previewed post-write ownership: a restore ("none") reports null,
             # a retirement reports the stamp the wet run would write.
             "unowned_at": None if restore_ownership else unowned_stamp,
+            # dry_run never pushes, regardless of push_to_store.
+            "store_push": None,
         }
 
     # An id target resolved above; a name target adopts an exact-name row or
@@ -493,6 +525,36 @@ async def add_game_to_platform(
     else:
         game_platform_id = None
         store_identifier = identifier_value if identifier_type == "steam_appid" else None
+        # Resolved BEFORE the wishlist upsert (push_to_store, steam only) so the
+        # appid can be handed to store_identifier below — the upsert only fills
+        # that column (COALESCE), so an already-provided identifier_value wins.
+        push_appid: int | None = None
+        if push_to_store and platform == "steam":
+            if store_identifier is not None:
+                try:
+                    push_appid = int(store_identifier)
+                except (TypeError, ValueError):
+                    push_appid = None
+            else:
+                push_appid = await get_steam_appid_for_game(game_id)
+                if push_appid is None:
+                    # Wishlist-only games deliberately have no game_platforms
+                    # row (so no game_platform_identifiers either), but an
+                    # earlier local add may have stored the appid on the
+                    # existing wishlist entry — reuse it.
+                    async with get_db() as db:
+                        wl_row = await db.execute_fetchone(
+                            """SELECT store_identifier FROM game_wishlist
+                               WHERE game_id = ? AND platform = 'steam'""",
+                            (game_id,),
+                        )
+                    if wl_row is not None and wl_row["store_identifier"]:
+                        try:
+                            push_appid = int(wl_row["store_identifier"])
+                        except (TypeError, ValueError):
+                            push_appid = None
+            if push_appid is not None and store_identifier is None:
+                store_identifier = str(push_appid)
         wishlist_id = await upsert_wishlist_entry(
             game_id, platform, source="manual", store_identifier=store_identifier
         )
@@ -503,6 +565,77 @@ async def add_game_to_platform(
     # fulfills it directly; owned=False on an already-owned game reconciles it
     # right away instead of leaving a stale row for the next sync to notice).
     await clear_fulfilled_wishlist_entries(game_id=game_id, platform=platform)
+
+    # Runs AFTER the local write, which always survives a push failure: a
+    # push is entirely best-effort on top of the wishlist row this call
+    # already recorded. dry_run never reaches here (it returns above).
+    store_push: dict | None = None
+    if push_to_store:
+        if platform == "steam":
+            if push_appid is None:
+                store_push = {
+                    "attempted": False,
+                    "pushed": False,
+                    "error": (
+                        "No Steam appid known for this game — pass "
+                        "identifier_type='steam_appid', identifier_value=<appid>"
+                    ),
+                }
+            else:
+                try:
+                    push_result = await push_to_steam_wishlist(push_appid)
+                except SteamWishlistPushError as exc:
+                    store_push = {
+                        "attempted": True,
+                        "pushed": False,
+                        "appid": str(push_appid),
+                        "error": str(exc),
+                    }
+                except Exception:
+                    logger.exception(
+                        "Unexpected error pushing appid %s to the Steam wishlist",
+                        push_appid,
+                    )
+                    store_push = {
+                        "attempted": True,
+                        "pushed": False,
+                        "appid": str(push_appid),
+                        "error": (
+                            "Unexpected error pushing to the Steam wishlist — "
+                            "see server logs"
+                        ),
+                    }
+                else:
+                    store_push = {
+                        "attempted": True,
+                        "pushed": True,
+                        "via": push_result.get("via"),
+                        "appid": str(push_appid),
+                        "wishlist_count": push_result.get("wishlist_count"),
+                    }
+        elif platform == "switch2":
+            # name is always resolved to a str by this point (from game_id, or
+            # the validated/stripped input name) — see the XOR check above.
+            assert name is not None
+            store_push = {
+                "attempted": False,
+                "pushed": False,
+                "manual_url": (
+                    "https://www.dekudeals.com/search?q="
+                    + urllib.parse.quote(name)
+                ),
+                "note": (
+                    "DekuDeals has no wishlist write API — add it there "
+                    "manually; the next wishlist sync picks it up from the "
+                    "shared-wishlist export."
+                ),
+            }
+        else:
+            store_push = {
+                "attempted": False,
+                "pushed": False,
+                "error": f"No store wishlist push available for {platform}",
+            }
 
     return {
         "created": created,
@@ -520,6 +653,7 @@ async def add_game_to_platform(
         "acquisition": acquisition,
         "delisted": delisted,
         "unowned_at": resulting_unowned_at,
+        "store_push": store_push,
     }
 
 
@@ -1325,7 +1459,7 @@ _ADD_BATCH_ITEM_KEYS = frozenset({
     "name", "game_id", "platform", "identifier_type", "identifier_value",
     "playtime_minutes", "owned", "acquired_at", "price_paid",
     "price_currency", "purchase_source", "bundle_name", "delisted",
-    "unowned_at",
+    "unowned_at", "push_to_store",
 })
 
 
