@@ -7,8 +7,8 @@ following the same style as SteamSessionMintTests in test_purchase_importers.py
 """
 
 import unittest
-from urllib.parse import parse_qs
 from unittest.mock import AsyncMock, patch
+from urllib.parse import parse_qs
 
 import httpx
 
@@ -103,11 +103,13 @@ class PushToSteamWishlistTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(200, json={"success": False, "wishlistCount": 0})
             raise AssertionError(f"unexpected request: {request.url}")
 
-        with self._patched_cookies():
-            with self.assertRaises(steam_wishlist.SteamWishlistPushError) as ctx:
-                await steam_wishlist.push_to_steam_wishlist(
-                    730, transport=httpx.MockTransport(handler)
-                )
+        with (
+            self._patched_cookies(),
+            self.assertRaises(steam_wishlist.SteamWishlistPushError) as ctx,
+        ):
+            await steam_wishlist.push_to_steam_wishlist(
+                730, transport=httpx.MockTransport(handler)
+            )
 
         self.assertIn("steam_refresh", str(ctx.exception))
 
@@ -117,9 +119,8 @@ class PushToSteamWishlistTests(unittest.IsolatedAsyncioTestCase):
             steam_wishlist,
             "load_steam_web_cookies",
             AsyncMock(side_effect=RuntimeError(message)),
-        ):
-            with self.assertRaises(steam_wishlist.SteamWishlistPushError) as ctx:
-                await steam_wishlist.push_to_steam_wishlist(730)
+        ), self.assertRaises(steam_wishlist.SteamWishlistPushError) as ctx:
+            await steam_wishlist.push_to_steam_wishlist(730)
 
         self.assertEqual(str(ctx.exception), message)
 
@@ -127,11 +128,13 @@ class PushToSteamWishlistTests(unittest.IsolatedAsyncioTestCase):
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("connection refused", request=request)
 
-        with self._patched_cookies():
-            with self.assertRaises(steam_wishlist.SteamWishlistPushError) as ctx:
-                await steam_wishlist.push_to_steam_wishlist(
-                    730, transport=httpx.MockTransport(handler)
-                )
+        with (
+            self._patched_cookies(),
+            self.assertRaises(steam_wishlist.SteamWishlistPushError) as ctx,
+        ):
+            await steam_wishlist.push_to_steam_wishlist(
+                730, transport=httpx.MockTransport(handler)
+            )
 
         message = str(ctx.exception)
         self.assertIn("retry", message.lower())

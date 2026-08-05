@@ -60,8 +60,12 @@ from .db import (
     upsert_game,
     upsert_wishlist_entry,
 )
-from .steam_session import extract_web_access_token, load_steam_web_cookies, new_sessionid
 from .steam_session import _USER_AGENT as _STEAM_USER_AGENT
+from .steam_session import (
+    extract_web_access_token,
+    load_steam_web_cookies,
+    new_sessionid,
+)
 from .steam_store import fetch_app_name
 from .steam_xml import STEAM_API_KEY, STEAM_ID
 from .title_normalization import prepare_catalog_title
