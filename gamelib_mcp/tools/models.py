@@ -384,6 +384,25 @@ class AcquisitionBatchItemResult(FlexibleModel):
     item: dict[str, Any] | None = None
 
 
+class StorePushResult(FlexibleModel):
+    """The outcome of add_game_to_platform(push_to_store=True) for one item."""
+
+    # attempted: the push function was actually invoked (steam with a resolved
+    # appid); False for switch2/manual-path, unsupported platforms, and
+    # missing-appid errors.
+    attempted: bool
+    pushed: bool
+    # Steam success: which route landed it ("webapi" | "storefront") + the appid.
+    via: str | None = None
+    appid: str | None = None
+    wishlist_count: int | None = None
+    # Failure / unsupported-platform / missing-appid explanation.
+    error: str | None = None
+    # switch2 only: DekuDeals has no write API — manual add link + why.
+    manual_url: str | None = None
+    note: str | None = None
+
+
 class AddGameToPlatformResponse(BatchEnvelope):
     # Single mode: did this call mint a new games row. Bulk mode: how many
     # items did (the batch reports a count under the same key).
@@ -405,6 +424,9 @@ class AddGameToPlatformResponse(BatchEnvelope):
     # subscription). Null on every ordinary add, and after unowned_at="none"
     # restores ownership.
     unowned_at: str | None = None
+    # Single mode: push_to_store=True on a wet (non-dry-run) call only — null
+    # otherwise (push_to_store=False, or dry_run even with push_to_store=True).
+    store_push: StorePushResult | None = None
 
 
 

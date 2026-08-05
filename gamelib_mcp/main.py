@@ -1132,6 +1132,7 @@ async def add_game_to_platform(
     bundle_name: str | None = None,
     delisted: bool | None = None,
     unowned_at: str | None = None,
+    push_to_store: bool = False,
     items: list[dict] | None = None,
     dry_run: bool = False,
 ) -> AddGameToPlatformResponse:
@@ -1177,6 +1178,20 @@ async def add_game_to_platform(
     (Xbox ownership is title history) can't re-own it; pass unowned_at="none"
     to undo the whole thing when you buy the game again.
 
+    push_to_store=True (owned=False only) additionally pushes the wishlist add
+    to the REAL store wishlist using the stored web session
+    (create_session_ingest_link(provider="steam_refresh")) — currently steam
+    only, and it needs a Steam appid, either passed via identifier_type=
+    'steam_appid' or already on file for the game. The result lands in
+    store_push; a failed push still records the local wishlist entry, with
+    the error in store_push.error — nothing here ever rolls back the local
+    write. The next sync(targets=["wishlist"]) converges the row to
+    source="steam". switch2 has no wishlist write API, so store_push instead
+    returns a DekuDeals search link to add it there by hand. Other platforms
+    report no push available in store_push.error. Never pushes anything unless
+    explicitly asked (default False); dry_run never pushes (store_push is
+    always null on a dry run).
+
     Pass `items` (max 200) — a list taking exactly the parameters above — to
     add many at once. created then counts items that minted a brand-new game
     (vs matching an existing one by exact name). Per-item results carry status
@@ -1213,6 +1228,7 @@ async def add_game_to_platform(
         delisted,
         unowned_at,
         dry_run=dry_run,
+        push_to_store=push_to_store,
     )
 
 
