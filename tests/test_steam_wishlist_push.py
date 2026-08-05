@@ -48,6 +48,12 @@ def _form(request: httpx.Request) -> dict[str, str]:
 
 
 class PushToSteamWishlistTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # The minted-session cache is module-level state; without a reset, one
+        # test's cookies would leak into the next and bypass its patched loader.
+        steam_wishlist._invalidate_session_cache()
+        self.addCleanup(steam_wishlist._invalidate_session_cache)
+
     def _patched_cookies(self, cookies: dict[str, str] = COOKIES):
         return patch.object(
             steam_wishlist, "load_steam_web_cookies", AsyncMock(return_value=cookies)
@@ -159,6 +165,67 @@ class PushToSteamWishlistTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result["via"], "storefront")
+
+    async def test_session_cache_reuses_one_mint_across_pushes(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == _WEBAPI_PATH:
+                return httpx.Response(200, json={"response": {}})
+            raise AssertionError(f"unexpected request: {request.url}")
+
+        with self._patched_cookies() as mock_load:
+            transport = httpx.MockTransport(handler)
+            await steam_wishlist.push_to_steam_wishlist(730, transport=transport)
+            await steam_wishlist.push_to_steam_wishlist(440, transport=transport)
+
+        # The whole point of the cache: a batch of pushes authenticates once.
+        self.assertEqual(mock_load.await_count, 1)
+
+    async def test_auth_rejected_drops_session_cache(self):
+        fail_auth = False
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == _WEBAPI_PATH:
+                if fail_auth:
+                    return httpx.Response(401)
+                return httpx.Response(200, json={"response": {}})
+            if request.url.path == _STOREFRONT_PATH:
+                return httpx.Response(200, json={"success": False})
+            raise AssertionError(f"unexpected request: {request.url}")
+
+        with self._patched_cookies() as mock_load:
+            transport = httpx.MockTransport(handler)
+            await steam_wishlist.push_to_steam_wishlist(730, transport=transport)  # mints
+            fail_auth = True
+            with self.assertRaises(steam_wishlist.SteamWishlistPushError):
+                await steam_wishlist.push_to_steam_wishlist(440, transport=transport)
+            fail_auth = False
+            await steam_wishlist.push_to_steam_wishlist(570, transport=transport)  # re-mints
+
+        # Mint 1 served pushes 1-2; the auth rejection dropped the cache, so
+        # push 3 minted again. A transient failure would NOT have (see below).
+        self.assertEqual(mock_load.await_count, 2)
+
+    async def test_transient_failure_keeps_session_cache(self):
+        fail_network = False
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if fail_network:
+                raise httpx.ConnectError("connection refused", request=request)
+            if request.url.path == _WEBAPI_PATH:
+                return httpx.Response(200, json={"response": {}})
+            raise AssertionError(f"unexpected request: {request.url}")
+
+        with self._patched_cookies() as mock_load:
+            transport = httpx.MockTransport(handler)
+            await steam_wishlist.push_to_steam_wishlist(730, transport=transport)
+            fail_network = True
+            with self.assertRaises(steam_wishlist.SteamWishlistPushError):
+                await steam_wishlist.push_to_steam_wishlist(440, transport=transport)
+            fail_network = False
+            await steam_wishlist.push_to_steam_wishlist(570, transport=transport)
+
+        # A network blip says nothing about the session — no re-mint.
+        self.assertEqual(mock_load.await_count, 1)
 
 
 if __name__ == "__main__":

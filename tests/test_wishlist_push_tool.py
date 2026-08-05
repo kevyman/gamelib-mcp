@@ -183,6 +183,29 @@ class PushToStoreSteamTests(ToolDBTestCase):
         row = await _wishlist_row(gid, "steam")
         self.assertEqual(row["store_identifier"], "999")
 
+    async def test_appid_resolved_from_existing_wishlist_store_identifier(self):
+        # A wishlist-only game has no game_platforms row (so no identifier
+        # rows either) — but an earlier local add stored the appid on the
+        # wishlist entry itself. A later push without repeating the identifier
+        # must find it there.
+        gid = await seed_game("Wishlist Only Game")
+        await db_module.upsert_wishlist_entry(
+            gid, "steam", source="manual", store_identifier="777"
+        )
+        with patch.object(
+            platforms,
+            "push_to_steam_wishlist",
+            new=AsyncMock(return_value={"appid": 777, "via": "webapi", "wishlist_count": 1}),
+        ) as mock_push:
+            result = await platforms.add_game_to_platform(
+                game_id=gid, platform="steam", owned=False, push_to_store=True
+            )
+        mock_push.assert_awaited_once_with(777)
+        self.assertTrue(result["store_push"]["pushed"])
+        self.assertEqual(result["store_push"]["appid"], "777")
+        row = await _wishlist_row(gid, "steam")
+        self.assertEqual(row["store_identifier"], "777")
+
 
 class PushToStoreOtherPlatformsTests(ToolDBTestCase):
     async def test_switch2_returns_manual_dekudeals_link_without_calling_push(self):

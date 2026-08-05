@@ -49,6 +49,7 @@ scope for phase 2 — this module only ever adds.
 
 import logging
 import os
+import time
 from datetime import UTC, datetime
 
 import httpx
@@ -62,6 +63,7 @@ from .db import (
 )
 from .steam_session import _USER_AGENT as _STEAM_USER_AGENT
 from .steam_session import (
+    _decode_jwt_claims,
     extract_web_access_token,
     load_steam_web_cookies,
     new_sessionid,
@@ -93,6 +95,43 @@ _TRANSIENT_PUSH_ERROR = (
 
 class SteamWishlistPushError(RuntimeError):
     """A push to the real Steam wishlist failed; the message is user-facing."""
+
+
+# One minted Steam web session is reused across pushes: with the preferred
+# refresh-token configuration, every load_steam_web_cookies() call replays the
+# full finalizelogin mint (finalize + per-domain transfer requests), so a
+# 200-item batch push would fire hundreds of authentication requests before
+# any actual push. Expiry comes from the steamLoginSecure JWT's exp claim
+# (minus a safety margin); a token without a readable exp gets a conservative
+# fallback TTL. An auth-shaped push failure drops the cache so the next call
+# re-mints instead of replaying a session Steam already rejected.
+_SESSION_TTL_FALLBACK_SECONDS = 600.0
+_SESSION_EXPIRY_MARGIN_SECONDS = 60.0
+_session_cache: dict[str, str] | None = None
+_session_cache_expires_at = 0.0
+
+
+def _invalidate_session_cache() -> None:
+    global _session_cache, _session_cache_expires_at
+    _session_cache = None
+    _session_cache_expires_at = 0.0
+
+
+def _session_expiry(cookies: dict[str, str]) -> float:
+    """Wall-clock expiry for a minted session, from the access token's ``exp``.
+
+    A near-expiry token yields a timestamp in the past, which simply means "no
+    reuse" — the next push re-mints rather than pushing with a token about to
+    lapse mid-request.
+    """
+    claims = _decode_jwt_claims(
+        extract_web_access_token(cookies.get("steamLoginSecure", ""))
+    )
+    exp = claims.get("exp")
+    now = time.time()
+    if isinstance(exp, (int, float)) and not isinstance(exp, bool) and exp > now:
+        return min(float(exp) - _SESSION_EXPIRY_MARGIN_SECONDS, now + 86400.0)
+    return now + _SESSION_TTL_FALLBACK_SECONDS
 
 
 class _RouteAttemptError(Exception):
@@ -217,7 +256,10 @@ async def push_to_steam_wishlist(
     same session cookies for both. Both routes were verified to exist (status
     codes / response shape on an unauthenticated request) on 2026-08-06, but
     neither has been exercised with a real logged-in session yet, hence the
-    fallback rather than trusting route B alone.
+    fallback rather than trusting route B alone. The minted session is cached
+    in-process and reused across pushes (see ``_session_cache`` above) so a
+    batch of pushes authenticates once, not once per item; an auth-shaped
+    failure drops the cache.
 
     Raises ``SteamWishlistPushError`` (preserving the message verbatim) when
     no Steam session is configured or the stored refresh token has expired —
@@ -228,17 +270,23 @@ async def push_to_steam_wishlist(
     ``create_session_ingest_link(provider="steam_refresh")``; a failure that
     is pure network error on both routes instead says to retry.
     """
-    try:
-        cookies = await load_steam_web_cookies(transport=transport)
-    except RuntimeError as exc:
-        raise SteamWishlistPushError(str(exc)) from exc
-    if not cookies.get("steamLoginSecure"):
-        # A minted session always carries it; only a malformed legacy static
-        # export can get here. Fail with guidance, not a KeyError.
-        raise SteamWishlistPushError(
-            "Stored Steam session has no steamLoginSecure cookie — re-store it "
-            "via create_session_ingest_link(provider=\"steam_refresh\")."
-        )
+    global _session_cache, _session_cache_expires_at
+    if _session_cache is not None and time.time() < _session_cache_expires_at:
+        cookies = _session_cache
+    else:
+        try:
+            cookies = await load_steam_web_cookies(transport=transport)
+        except RuntimeError as exc:
+            raise SteamWishlistPushError(str(exc)) from exc
+        if not cookies.get("steamLoginSecure"):
+            # A minted session always carries it; only a malformed legacy static
+            # export can get here. Fail with guidance, not a KeyError.
+            raise SteamWishlistPushError(
+                "Stored Steam session has no steamLoginSecure cookie — re-store "
+                "it via create_session_ingest_link(provider=\"steam_refresh\")."
+            )
+        _session_cache = cookies
+        _session_cache_expires_at = _session_expiry(cookies)
 
     async with httpx.AsyncClient(
         timeout=30, transport=transport, headers={"User-Agent": _STEAM_USER_AGENT}
@@ -258,6 +306,9 @@ async def push_to_steam_wishlist(
                 )
                 detail = f"webapi: {webapi_failure.detail}; storefront: {storefront_failure.detail}"
                 if webapi_failure.auth_shaped or storefront_failure.auth_shaped:
+                    # Don't replay a session Steam just rejected — the next
+                    # push should re-mint from the refresh token.
+                    _invalidate_session_cache()
                     raise SteamWishlistPushError(f"{_AUTH_REJECTED_ERROR} ({detail})") from storefront_failure
                 raise SteamWishlistPushError(f"{_TRANSIENT_PUSH_ERROR} ({detail})") from storefront_failure
 

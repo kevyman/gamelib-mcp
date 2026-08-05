@@ -537,6 +537,22 @@ async def add_game_to_platform(
                     push_appid = None
             else:
                 push_appid = await get_steam_appid_for_game(game_id)
+                if push_appid is None:
+                    # Wishlist-only games deliberately have no game_platforms
+                    # row (so no game_platform_identifiers either), but an
+                    # earlier local add may have stored the appid on the
+                    # existing wishlist entry — reuse it.
+                    async with get_db() as db:
+                        wl_row = await db.execute_fetchone(
+                            """SELECT store_identifier FROM game_wishlist
+                               WHERE game_id = ? AND platform = 'steam'""",
+                            (game_id,),
+                        )
+                    if wl_row is not None and wl_row["store_identifier"]:
+                        try:
+                            push_appid = int(wl_row["store_identifier"])
+                        except (TypeError, ValueError):
+                            push_appid = None
             if push_appid is not None and store_identifier is None:
                 store_identifier = str(push_appid)
         wishlist_id = await upsert_wishlist_entry(
