@@ -298,6 +298,22 @@ class SearchGamesBatchTests(ToolDBTestCase):
         self.assertEqual(results["portal"][0]["name"], "Portal")
         self.assertEqual(results["missing"], [])
 
+    async def test_batch_resolves_aliases_via_fallback(self):
+        # Bug-report §4 (TMNT): the batch path skipped the alias fallback the
+        # single-query path has, so an ownership screen over an abbreviated
+        # title returned a wrong "not owned".
+        gid = await seed_game("Teenage Mutant Ninja Turtles: Shredder's Revenge")
+        await add_platform(gid, "steam")
+        await add_game_alias(gid, "TMNT: Shredder's Revenge", alias_type="provider_name")
+
+        results = await library.search_games_batch(["TMNT: Shredder's Revenge"])
+
+        hits = results["TMNT: Shredder's Revenge"]
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["game_id"], gid)
+        self.assertEqual(hits[0]["match_type"], "alias")
+        self.assertEqual(hits[0]["matched_alias"], "TMNT: Shredder's Revenge")
+
     async def test_batch_resolves_nested_content_via_fallback(self):
         parent_id = await seed_game("Fallout: New Vegas")
         await add_platform(parent_id, "steam")

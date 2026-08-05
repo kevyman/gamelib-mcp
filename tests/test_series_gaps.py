@@ -35,7 +35,7 @@ class GetSeriesMembersCachedTests(ToolDBTestCase):
 
         from gamelib_mcp.data.db import get_meta
 
-        raw = await get_meta("series_members_v3:collection:555")
+        raw = await get_meta("series_members_v4:collection:555")
         self.assertIsNotNone(raw)
 
     async def test_second_call_within_ttl_does_not_refetch(self) -> None:
@@ -90,7 +90,7 @@ class GetSeriesMembersCachedTests(ToolDBTestCase):
     async def test_malformed_cache_entry_treated_as_absent(self) -> None:
         from gamelib_mcp.data.db import set_meta
 
-        await set_meta("series_members_v3:collection:1", "not json")
+        await set_meta("series_members_v4:collection:1", "not json")
         fetch_mock = AsyncMock(return_value=[_member(igdb_id=2)])
         with patch("gamelib_mcp.data.series_gaps.fetch_series_members", fetch_mock):
             result = await series_gaps.get_series_members_cached("collection", 1)
@@ -99,10 +99,10 @@ class GetSeriesMembersCachedTests(ToolDBTestCase):
         fetch_mock.assert_awaited_once()
 
     async def test_old_format_cache_without_aliases_triggers_refetch(self) -> None:
-        # Simulates a cache entry written before aliases existed (either the
-        # pre-fix code, or — since the key was also namespaced — a stray write
-        # under the new key missing the "aliases" field). _parse_cache must
-        # treat it as absent rather than silently serving alias-less data.
+        # Simulates a cache entry written before aliases/steam appids existed
+        # (either pre-fix code, or — since the key was also namespaced — a
+        # stray write under the new key missing those fields). _parse_cache
+        # must treat it as absent rather than silently serving partial data.
         import json
         from datetime import datetime
 
@@ -123,7 +123,7 @@ class GetSeriesMembersCachedTests(ToolDBTestCase):
                 # deliberately no "aliases" key
             }
         )
-        await set_meta("series_members_v3:collection:1", old_payload)
+        await set_meta("series_members_v4:collection:1", old_payload)
 
         fetch_mock = AsyncMock(return_value=[_member(igdb_id=2, name="Pikmin 2")])
         with patch("gamelib_mcp.data.series_gaps.fetch_series_members", fetch_mock):
@@ -133,7 +133,9 @@ class GetSeriesMembersCachedTests(ToolDBTestCase):
         self.assertEqual(result.members, [_member(igdb_id=2, name="Pikmin 2")])
         self.assertEqual(result.aliases, {})
 
-        # And the cache was rewritten in the new (with-aliases) format.
-        raw = await get_meta("series_members_v3:collection:1")
+        # And the cache was rewritten in the new (full-payload) format.
+        raw = await get_meta("series_members_v4:collection:1")
         assert raw is not None
-        self.assertIn("aliases", json.loads(raw))
+        rewritten = json.loads(raw)
+        self.assertIn("aliases", rewritten)
+        self.assertIn("steam_appids", rewritten)

@@ -151,3 +151,52 @@ class ClaimRoundTripTests(ToolDBTestCase):
         await db_module.release_game_claim(gid, "igdb_claimed_at")
         third = await db_module.claim_game_ids_for_igdb(limit=5, stale_before=past)
         self.assertIn(gid, third)
+
+
+class SeedPlatformProviderAliasTests(ToolDBTestCase):
+    """seed_platform_provider_alias — enrichment-time alias seeding (bug-report §4)."""
+
+    async def _aliases(self, game_id: int) -> list[dict]:
+        async with db_module.get_db() as db:
+            rows = await db.execute_fetchall(
+                "SELECT alias, alias_type, source, source_key FROM game_aliases "
+                "WHERE game_id = ? ORDER BY id",
+                (game_id,),
+            )
+        return [dict(r) for r in rows]
+
+    async def test_differing_provider_name_is_recorded(self):
+        gid = await seed_game("Orwell")
+        gpid = await add_platform(gid, "steam")
+
+        await db_module.seed_platform_provider_alias(
+            gpid,
+            "orwell keeping an eye on you",
+            source="metacritic",
+            source_key="orwell-keeping-an-eye-on-you",
+        )
+
+        aliases = await self._aliases(gid)
+        self.assertEqual(len(aliases), 1)
+        self.assertEqual(aliases[0]["alias"], "orwell keeping an eye on you")
+        self.assertEqual(aliases[0]["alias_type"], "provider_name")
+        self.assertEqual(aliases[0]["source"], "metacritic")
+
+    async def test_equivalent_name_is_skipped(self):
+        gid = await seed_game("Sekiro: Shadows Die Twice")
+        gpid = await add_platform(gid, "steam")
+
+        # Same title modulo punctuation/case — adds no information.
+        await db_module.seed_platform_provider_alias(
+            gpid, "sekiro shadows die twice", source="metacritic"
+        )
+
+        self.assertEqual(await self._aliases(gid), [])
+
+    async def test_unknown_platform_row_is_a_no_op(self):
+        await db_module.seed_platform_provider_alias(
+            999999, "some title", source="opencritic"
+        )
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM game_aliases")
+        self.assertEqual(count["c"], 0)

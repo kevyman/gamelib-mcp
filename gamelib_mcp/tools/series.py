@@ -250,6 +250,7 @@ async def discover_series_gaps(
     limit: int = 10,
     include_unreleased: bool = False,
     refresh_cache: bool = False,
+    include_unavailable: bool = False,
 ) -> dict:
     """
     Unowned entries in series you own and rate highly.
@@ -262,8 +263,10 @@ async def discover_series_gaps(
     "you already want this" instead of it silently disappearing. kind filters
     to collection|franchise; min_owned skips series where you own fewer games
     (ranking is owned-only — wishlist-only games never count toward it either);
-    include_unreleased keeps unreleased/undated entries. Requires IGDB
-    credentials (TWITCH_CLIENT_ID/SECRET).
+    include_unreleased keeps unreleased/undated entries; include_unavailable
+    keeps entries IGDB lists on NO platform this library tracks (dead-platform
+    or region-locked releases, dropped by default and counted per series in
+    unavailable_excluded). Requires IGDB credentials (TWITCH_CLIENT_ID/SECRET).
     """
     from ..data.igdb import (
         IGDB_TO_PLATFORM,
@@ -363,7 +366,23 @@ async def discover_series_gaps(
             """
         )
 
+        # Owned Steam appids, for the appid identity layer: IGDB splits
+        # remasters from originals into separate records, and ownership can sit
+        # on either side under a name matching neither — the rows "Yakuza 3"/
+        # "Yakuza 4" carry the appids of the *remastered* Steam releases, so
+        # id/name matching reported "Yakuza 3 Remastered" as a gap the user
+        # already owns. A member's own Steam appid settles it exactly.
+        owned_appid_rows = await db.execute_fetchall(
+            """
+            SELECT DISTINCT gpi.identifier_value AS appid
+            FROM game_platform_identifiers gpi
+            JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+            WHERE gpi.identifier_type = 'steam_appid' AND gp.owned = 1
+            """
+        )
+
     have_igdb_ids = {row["igdb_id"] for row in have_rows if row["igdb_id"] is not None}
+    owned_steam_appids = {str(row["appid"]) for row in owned_appid_rows}
     # Library rows as (igdb_id, normalized name, release year), in stable
     # games.id order so name-based suppression below is deterministic.
     # release_date is NOT trusted as the original release year — for many
@@ -411,6 +430,15 @@ async def discover_series_gaps(
             aliases[hid]
             for hid in have_igdb_ids
             if hid in aliases and aliases[hid] in member_ids
+        }
+        # Appid layer: a member whose own Steam appid is an owned identifier
+        # IS owned, whatever either side is named (remaster-vs-original
+        # splits, renamed rows). Strongest identity signal after igdb_id.
+        member_appids = series_result.steam_appids
+        excluded |= {
+            m.igdb_id
+            for m in members
+            if any(uid in owned_steam_appids for uid in member_appids.get(m.igdb_id, ()))
         }
 
         # on_wishlist annotation (never suppresses): a member is flagged when a
@@ -469,7 +497,8 @@ async def discover_series_gaps(
             if candidates:
                 excluded.add(_pick_name_suppression_target(row_year, candidates).igdb_id)
 
-        gaps = []
+        survivors: list[tuple[SeriesMember, list[str]]] = []
+        unavailable_excluded = 0
         for member in members:
             if member.igdb_id in excluded:
                 continue
@@ -480,16 +509,48 @@ async def discover_series_gaps(
             available_on = sorted(
                 {IGDB_TO_PLATFORM[p] for p in member.platforms if p in IGDB_TO_PLATFORM}
             )
-            gaps.append(
-                {
-                    "igdb_id": member.igdb_id,
-                    "name": member.name,
-                    "release_date": member.first_release_date,
-                    "game_type": member.game_type,
-                    "available_on": available_on,
-                    "on_wishlist": member.igdb_id in wishlisted_member_ids,
-                }
-            )
+            # IGDB knows the member's platforms and none is one this library
+            # tracks: a dead-platform or region-locked release ("Yakuza: Dead
+            # Souls" on PS3, JP-only PSP entries) is not an acquirable gap.
+            # An EMPTY platform list is unknown, not unavailable — those pass.
+            if (
+                not available_on
+                and member.platforms
+                and not include_unavailable
+            ):
+                unavailable_excluded += 1
+                continue
+            survivors.append((member, available_on))
+
+        # Re-release collapse: when a member and its edition/re-release alias
+        # target BOTH survive as gaps (IGDB lists the 2018 "Judgment" and its
+        # 2021 re-release as separate members), one missing game must not
+        # count twice — the canonical entry absorbs the other, which is kept
+        # visible as a name under `variants`.
+        survivor_ids = {member.igdb_id for member, _ in survivors}
+        variant_names: dict[int, list[str]] = defaultdict(list)
+        collapsed_ids: set[int] = set()
+        for member, _ in survivors:
+            target = aliases.get(member.igdb_id)
+            if target is not None and target != member.igdb_id and target in survivor_ids:
+                variant_names[target].append(member.name)
+                collapsed_ids.add(member.igdb_id)
+
+        gaps = []
+        for member, available_on in survivors:
+            if member.igdb_id in collapsed_ids:
+                continue
+            gap = {
+                "igdb_id": member.igdb_id,
+                "name": member.name,
+                "release_date": member.first_release_date,
+                "game_type": member.game_type,
+                "available_on": available_on,
+                "on_wishlist": member.igdb_id in wishlisted_member_ids,
+            }
+            if variant_names.get(member.igdb_id):
+                gap["variants"] = variant_names[member.igdb_id]
+            gaps.append(gap)
 
         entry = {
             "series_id": row["series_id"],
@@ -501,6 +562,7 @@ async def discover_series_gaps(
             ),
             "total_playtime_hours": round((row["total_playtime_minutes"] or 0) / 60, 1),
             "gaps": gaps,
+            "unavailable_excluded": unavailable_excluded,
         }
         (with_gaps if gaps else without_gaps).append(entry)
 

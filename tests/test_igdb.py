@@ -1278,6 +1278,29 @@ class FetchSeriesMembersTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(members[0].game_type, 0)
         self.assertIsNone(members[0].first_release_date)
 
+    async def test_filters_demo_and_trial_members(self) -> None:
+        # Bug-report §5c: IGDB files trial builds into series under a
+        # main-game game_type, so the enum filter alone let them through.
+        async def fake_post(query: str, headers: dict[str, str]) -> list[dict]:
+            return [
+                {"id": 1, "name": "Like a Dragon: Infinite Wealth", "game_type": 0},
+                {
+                    "id": 2,
+                    "name": "Infinity Wealth Special Trial Version",
+                    "game_type": 0,
+                },
+                {"id": 3, "name": "Yakuza 6 Demo", "game_type": 0},
+            ]
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "client"}, clear=True),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", side_effect=fake_post),
+        ):
+            members = await igdb.fetch_series_members("collection", 1)
+
+        self.assertEqual([m.igdb_id for m in members], [1])
+
     async def test_paginates_when_a_full_page_is_returned(self) -> None:
         call_count = 0
 
@@ -1462,6 +1485,65 @@ class FetchVersionParentAliasesTests(unittest.IsolatedAsyncioTestCase):
             ),self.assertRaises(igdb.IGDBRequestFailure)
         ):
             await igdb.fetch_version_parent_aliases([80])
+
+
+class FetchMemberSteamAppidsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_builds_external_games_query_and_groups_uids(self) -> None:
+        captured = {}
+
+        async def fake_post(
+            query: str, headers: dict[str, str], url: str | None = None
+        ) -> list[dict]:
+            captured["query"] = query
+            captured["url"] = url
+            return [
+                {"game": 3001, "uid": "1088710"},
+                {"game": 3002, "uid": "1105500"},
+                {"game": 3002, "uid": "999999"},
+                {"game": 3003},  # no uid -> skipped
+            ]
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"TWITCH_CLIENT_ID": "client", "TWITCH_CLIENT_SECRET": "secret"},
+                clear=True,
+            ),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", side_effect=fake_post),
+        ):
+            appids = await igdb.fetch_member_steam_appids([3001, 3002, 3003])
+
+        self.assertIn("where category = 1 & game = (3001, 3002, 3003)", captured["query"])
+        self.assertEqual(captured["url"], igdb._IGDB_EXTERNAL_GAMES_URL)
+        self.assertEqual(appids, {3001: ["1088710"], 3002: ["1105500", "999999"]})
+
+    async def test_empty_input_short_circuits_without_request(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"TWITCH_CLIENT_ID": "client", "TWITCH_CLIENT_SECRET": "secret"},
+            clear=True,
+        ):
+            self.assertEqual(await igdb.fetch_member_steam_appids([]), {})
+
+    async def test_unconfigured_returns_empty(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(await igdb.fetch_member_steam_appids([3001]), {})
+
+    async def test_wraps_post_failure_as_igdb_request_failure(self) -> None:
+        with (
+            patch.dict(
+                "os.environ",
+                {"TWITCH_CLIENT_ID": "client", "TWITCH_CLIENT_SECRET": "secret"},
+                clear=True,
+            ),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch(
+                "gamelib_mcp.data.igdb._post_igdb_games",
+                AsyncMock(side_effect=RuntimeError("boom")),
+            ),self.assertRaises(igdb.IGDBRequestFailure)
+        ):
+            await igdb.fetch_member_steam_appids([3001])
 
 
 class IGDBCredentialHygieneTests(unittest.IsolatedAsyncioTestCase):

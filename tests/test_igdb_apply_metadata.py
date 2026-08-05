@@ -580,6 +580,73 @@ class UpsertGameSelfParentTests(ToolDBTestCase):
         self.assertEqual(row["content_type"], "base_game")
 
 
+class ApplyIgdbMetadataAliasSeedTests(ToolDBTestCase):
+    async def _read_aliases(self, game_id: int) -> list[dict]:
+        async with db_module.get_db() as db:
+            rows = await db.execute_fetchall(
+                "SELECT alias, alias_type, source, source_key FROM game_aliases "
+                "WHERE game_id = ? ORDER BY id",
+                (game_id,),
+            )
+        return [dict(r) for r in rows]
+
+    async def test_differing_igdb_name_is_seeded_as_alias(self) -> None:
+        # Bug-report §4 (Orwell): the provider's full title is what storefront
+        # purchase records arrive with; seeding it at enrich time is what lets
+        # the alias matching tiers bridge it to the short library name.
+        game_id = await seed_game("Orwell")
+
+        await igdb._apply_igdb_metadata(
+            game_id,
+            igdb.IGDBGame(
+                igdb_id=27216,
+                name="Orwell: Keeping an Eye On You",
+                category=0,
+                first_release_date=None,
+            ),
+        )
+
+        aliases = await self._read_aliases(game_id)
+        self.assertEqual(len(aliases), 1)
+        self.assertEqual(aliases[0]["alias"], "Orwell: Keeping an Eye On You")
+        self.assertEqual(aliases[0]["alias_type"], "provider_name")
+        self.assertEqual(aliases[0]["source"], "igdb")
+        self.assertEqual(aliases[0]["source_key"], "27216")
+
+    async def test_matching_igdb_name_is_not_seeded(self) -> None:
+        game_id = await seed_game("Hades")
+
+        await igdb._apply_igdb_metadata(
+            game_id,
+            igdb.IGDBGame(igdb_id=113112, name="Hades", category=0, first_release_date=None),
+        )
+
+        self.assertEqual(await self._read_aliases(game_id), [])
+
+    async def test_pinned_igdb_id_does_not_seed_alias(self) -> None:
+        # A pinned link means auto-matching picked wrong before; a record that
+        # isn't the one being stored must not leave its name behind as an alias.
+        game_id = await seed_game("FTL: Faster Than Light")
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET manual_overrides = ? WHERE id = ?",
+                (json.dumps(["igdb_id"]), game_id),
+            )
+            await db.commit()
+
+        await igdb._apply_igdb_metadata(
+            game_id,
+            igdb.IGDBGame(
+                igdb_id=178437,
+                name="Faster than light?",
+                category=0,
+                first_release_date=None,
+            ),
+        )
+
+        self.assertEqual(await self._read_aliases(game_id), [])
+
+
 class ApplyIgdbMetadataTagUnionTests(ToolDBTestCase):
     async def test_igdb_tags_union_into_existing_steam_tags(self) -> None:
         # Existing (SteamSpy) tags must be kept, IGDB tags appended canonicalized,

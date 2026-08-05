@@ -68,7 +68,10 @@ EXPECTED_TOOLS = {
         "required": set(),
     },
     "discover_series_gaps": {
-        "params": {"kind", "min_owned", "limit", "include_unreleased", "refresh_cache"},
+        "params": {
+            "kind", "min_owned", "limit", "include_unreleased", "refresh_cache",
+            "include_unavailable",
+        },
         "required": set(),
     },
     "query_library": {"params": {"sql", "row_limit"}, "required": set()},

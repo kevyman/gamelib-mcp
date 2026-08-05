@@ -307,6 +307,63 @@ class MetacriticRegressionTests(unittest.IsolatedAsyncioTestCase):
             score, _ = await metacritic._fetch_score_from_url(url)
         self.assertEqual(score, 93)
 
+    async def test_enrich_metacritic_seeds_alias_from_final_url_slug(self) -> None:
+        # Bug-report §4: the matched page's slug can spell out a fuller title
+        # than the library row — it must be seeded as an alias.
+        final_url = "https://www.metacritic.com/game/orwell-keeping-an-eye-on-you/?platform=pc"
+
+        with (
+            patch("gamelib_mcp.data.db.get_db", return_value=_DummyContext(None)),
+            patch(
+                "gamelib_mcp.data.metacritic._fetch_score_from_url",
+                AsyncMock(return_value=(80, final_url)),
+            ),
+            patch("gamelib_mcp.data.metacritic.upsert_game_platform_enrichment", AsyncMock()),
+            patch(
+                "gamelib_mcp.data.metacritic.seed_platform_provider_alias", AsyncMock()
+            ) as seed,
+        ):
+            await metacritic.enrich_metacritic(3, "Orwell", "steam")
+
+        seed.assert_awaited_once_with(
+            3,
+            "orwell keeping an eye on you",
+            source="metacritic",
+            source_key="orwell-keeping-an-eye-on-you",
+        )
+
+    async def test_enrich_metacritic_alias_seed_failure_never_fails_enrichment(self) -> None:
+        final_url = "https://www.metacritic.com/game/orwell-keeping-an-eye-on-you/"
+        with (
+            patch("gamelib_mcp.data.db.get_db", return_value=_DummyContext(None)),
+            patch(
+                "gamelib_mcp.data.metacritic._fetch_score_from_url",
+                AsyncMock(return_value=(80, final_url)),
+            ),
+            patch("gamelib_mcp.data.metacritic.upsert_game_platform_enrichment", AsyncMock()),
+            patch(
+                "gamelib_mcp.data.metacritic.seed_platform_provider_alias",
+                AsyncMock(side_effect=RuntimeError("db locked")),
+            ),
+        ):
+            fields = await metacritic.enrich_metacritic(3, "Orwell", "steam")
+
+        self.assertEqual(fields["metacritic_score"], 80)
+
+    def test_title_slug_from_url_handles_both_url_shapes(self) -> None:
+        self.assertEqual(
+            metacritic._title_slug_from_url(
+                "https://www.metacritic.com/game/orwell-keeping-an-eye-on-you/?platform=pc"
+            ),
+            ("orwell keeping an eye on you", "orwell-keeping-an-eye-on-you"),
+        )
+        self.assertEqual(
+            metacritic._title_slug_from_url("https://www.metacritic.com/game/pc/orwell"),
+            ("orwell", "orwell"),
+        )
+        self.assertIsNone(metacritic._title_slug_from_url("https://www.metacritic.com/game/"))
+        self.assertIsNone(metacritic._title_slug_from_url("https://www.metacritic.com/"))
+
     def test_candidate_urls_fall_back_to_generic_slug(self) -> None:
         slug = "metal-slug-tactics"
 

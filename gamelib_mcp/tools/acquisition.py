@@ -508,6 +508,28 @@ async def _match_batch_game(
                 continue
             return row, "name"
 
+    # Alias tier: a storefront can use a title the library row never carried —
+    # the IGDB/provider full name ("Orwell: Keeping an Eye On You") against a
+    # row named "Orwell" — which no name tier above bridges because the extra
+    # tokens sink token-AND matching. Aliases are seeded by syncs and by
+    # enrichment (IGDB name, Metacritic/OpenCritic URL slugs), and matching is
+    # EXACT normalized equality only, so it is safe under exact_only too: a
+    # DLC title can no more collide with an alias than with a row name.
+    for query in queries:
+        normalized = normalize_search_text(query)
+        if not normalized:
+            continue
+        async with get_db() as db:
+            row = await db.execute_fetchone(
+                """SELECT g.id, g.name FROM game_aliases a
+                   JOIN games g ON g.id = a.game_id
+                   WHERE a.alias_normalized = ?
+                   ORDER BY a.game_id LIMIT 1""",
+                (normalized,),
+            )
+        if row is not None:
+            return row, "alias"
+
     for query in queries if (fuzzy and not exact_only) else []:
         fuzzy_ids = await fuzzy_fallback_game_ids(query)
         if fuzzy_ids:
@@ -542,7 +564,8 @@ async def _existing_edition_sibling(create_name: str) -> dict | None:
     missing "STRAFE: Gold Edition", or a purchase titled with the IGDB full
     name ("Orwell: Keeping an Eye On You") missing the row called "Orwell",
     is a near-duplicate, not a gap. Minting it would add a second row for a
-    game already in the library, and created rows have no delete tool.
+    game already in the library — a duplicate nothing flags automatically,
+    needing a manual merge_games/delete_game to undo.
 
     Two probes, both cheap: names that could differ only by an edition suffix
     (one normalized name is a prefix of the other, then confirmed with
@@ -1007,8 +1030,9 @@ async def set_acquisitions_batch(
         "no_change": _count("no_change"),
         "created": _count("created"),
         # New owned games minted from purchases that matched nothing. Surfaced
-        # by name so the caller can eyeball what was added — created games rows
-        # have no delete tool, so a bad create wants to be visible.
+        # by name so the caller can eyeball what was added — nothing flags a
+        # bad create after the fact (undoing one is a manual delete_game), so
+        # it wants to be visible here.
         "created_details": [
             {
                 "game_id": r["game_id"],
@@ -1195,8 +1219,8 @@ async def split_bundle_acquisition(
 
     dry_run=True resolves matches and computes the price split but writes
     nothing — statuses/prices show exactly what a real run would do. Constituent
-    lists come from AI lookup and created games rows have no delete tool, so
-    preview before any call that uses create_missing.
+    lists come from AI lookup and a wrong mint lingers until a human notices
+    it and runs delete_game, so preview before any call that uses create_missing.
     """
     cleaned_bundle = bundle_name.strip()
     if not cleaned_bundle:
@@ -1763,8 +1787,8 @@ async def _import_one_source(
         result["proposed"] = items[:_DRY_RUN_ECHO_CAP]
         result["truncated"] = len(items) > _DRY_RUN_ECHO_CAP
         # Faithful preview of what create_missing would mint (game_id null),
-        # including the parent a nested mint would link — the "no delete tool"
-        # safety net.
+        # including the parent a nested mint would link — the review step that
+        # catches a bad mint before it needs a manual delete_game.
         result["would_create"] = created_details[:_DRY_RUN_ECHO_CAP]
     return result
 

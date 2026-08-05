@@ -2506,6 +2506,7 @@ from .upserts import (
     remove_platform_manual_overrides,
     repair_misclassified_platform_row,
     resolve_parent_game,
+    seed_platform_provider_alias,
     set_platform_acquisition,
     set_platform_ownership,
     set_steam_delisted,

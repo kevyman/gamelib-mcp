@@ -279,6 +279,37 @@ class OpenCriticEnrichTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsInstance(result["fields"]["opencritic_cached_at"], str)
 
+    async def test_enrich_opencritic_seeds_alias_from_url_slug(self) -> None:
+        # Bug-report §4: the matched page's URL slug can spell out a fuller
+        # title than the library row — it must be seeded as an alias.
+        url = "https://opencritic.com/game/3575/orwell-keeping-an-eye-on-you"
+        with (
+            patch("gamelib_mcp.data.opencritic._load_opencritic_context", AsyncMock(return_value={"release_date": "2016-10-27", "opencritic_cached_at": None})),
+            patch("gamelib_mcp.data.opencritic.discover_candidates", AsyncMock(return_value=[{"title": "Orwell: Keeping an Eye On You", "url": url, "opencritic_id": 3575}])),
+            patch("gamelib_mcp.data.opencritic._choose_match", return_value={"title": "Orwell: Keeping an Eye On You", "url": url, "opencritic_id": 3575}),
+            patch("gamelib_mcp.data.opencritic._fetch_via_client", AsyncMock(return_value={"status": "matched", "fields": {"opencritic_id": 3575, "opencritic_url": url, "opencritic_score": 77, "opencritic_tier": "Strong", "opencritic_percent_rec": 80.0, "opencritic_num_reviews": 30}})),
+            patch("gamelib_mcp.data.opencritic.upsert_game_platform_enrichment", AsyncMock()),
+            patch("gamelib_mcp.data.opencritic.seed_platform_provider_alias", AsyncMock()) as seed,
+        ):
+            result = await opencritic.enrich_opencritic(7, "Orwell")
+
+        self.assertEqual(result["status"], "matched")
+        seed.assert_awaited_once_with(
+            7,
+            "orwell keeping an eye on you",
+            source="opencritic",
+            source_key="orwell-keeping-an-eye-on-you",
+        )
+
+    def test_title_slug_from_url_skips_numeric_and_missing_slugs(self) -> None:
+        self.assertEqual(
+            opencritic._title_slug_from_url("https://opencritic.com/game/120/portal-2"),
+            ("portal 2", "portal-2"),
+        )
+        self.assertIsNone(opencritic._title_slug_from_url("https://opencritic.com/game/120"))
+        self.assertIsNone(opencritic._title_slug_from_url("https://opencritic.com/"))
+        self.assertIsNone(opencritic._title_slug_from_url(None))
+
     async def test_enrich_opencritic_returns_ambiguous_without_writing_success_fields(self) -> None:
         with (
             patch("gamelib_mcp.data.opencritic._load_opencritic_context", AsyncMock(return_value={"release_date": "2026-03-01", "opencritic_cached_at": None})),

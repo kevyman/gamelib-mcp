@@ -115,7 +115,7 @@ If he buys it, the evaluation's constituent list becomes the acquisition record 
 - **Humble Choice is the exception, and it's the most common case here.** A Choice month is imported as `subscriptioncontent`: the importer splits the month's price across the games itself and writes them with `purchase_source: "subscription"` and **no** `bundle_name`, so nothing lands in `bundles_needing_split` and there is no split left to run. `import_purchases` alone *is* the completed handoff — don't go hunting for a missing entry or hand-build one. You can confirm it worked straight from Step 1: the month's games come back owned, with a per-game share as `price_paid` and `purchase_source: "subscription"`. That same signature is how you spot an already-claimed month before evaluating one.
 - **Anything else**: `split_bundle_acquisition(bundle_name=..., platform=..., total_price=..., games=[...the evaluated constituents...], dry_run=True)` directly. Raw store SKU titles are safe here — the acquisition matcher strips edition/SKU suffixes itself and never fuzzy-matches.
 - Price allocation is an **even split** unless per-game `price_paid` is passed explicitly; if the evaluation's per-game values matter for spending stats, pass them.
-- Always `dry_run=True` first, and doubly so with `create_missing=True` — created rows have no delete tool. Review `unmatched` before applying.
+- Always `dry_run=True` first, and doubly so with `create_missing=True` — a wrong mint sits in the library as a duplicate until someone notices and `delete_game`s it. Review `unmatched` before applying.
 - Wishlist entries for now-owned constituents clear automatically on the next sync/refresh; no manual cleanup.
 
 ## Anti-patterns (never do these)

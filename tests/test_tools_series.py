@@ -17,8 +17,16 @@ from gamelib_mcp.tools import series
 _IGDB_ENV = {"TWITCH_CLIENT_ID": "test-client", "TWITCH_CLIENT_SECRET": "test-secret"}
 
 
-def _members_result(members: list[SeriesMember], aliases: dict[int, int] | None = None) -> SeriesMembersResult:
-    return SeriesMembersResult(members=list(members), aliases=dict(aliases or {}))
+def _members_result(
+    members: list[SeriesMember],
+    aliases: dict[int, int] | None = None,
+    steam_appids: dict[int, list[str]] | None = None,
+) -> SeriesMembersResult:
+    return SeriesMembersResult(
+        members=list(members),
+        aliases=dict(aliases or {}),
+        steam_appids=dict(steam_appids or {}),
+    )
 
 
 async def link_series(game_id: int, kind: str, igdb_id: int, name: str) -> None:
@@ -849,3 +857,163 @@ class DiscoverSeriesGapsTests(ToolDBTestCase):
 
         gap_ids = {g["igdb_id"] for g in result["results"][0]["gaps"]}
         self.assertEqual(gap_ids, {2000})
+
+
+class DiscoverSeriesGapsBugReportTests(ToolDBTestCase):
+    """The 2026-08-05 bug-report §5 false-positive classes (Yakuza run)."""
+
+    async def _seed_yakuza_pair(self, series_igdb_id: int = 950) -> tuple[int, int]:
+        a = await seed_owned_game("Yakuza 0")
+        b = await seed_owned_game("Yakuza Kiwami 2")
+        for gid in (a, b):
+            await link_series(gid, "collection", series_igdb_id, "Yakuza")
+        return a, b
+
+    async def test_owned_steam_appid_suppresses_renamed_remaster_member(self):
+        # §5b: the library row "Yakuza 3" carries appid 1088710 — which IS the
+        # "Yakuza 3 Remastered" Steam release. Neither id nor name bridges the
+        # two; the member's own appid must.
+        await self._seed_yakuza_pair()
+        y3 = await seed_game("Yakuza 3")
+        gpid = await add_platform(y3, "steam", owned=1)
+        await db_module.upsert_game_platform_identifier(gpid, "steam_appid", 1088710)
+        await link_series(y3, "collection", 950, "Yakuza")
+
+        members = [
+            SeriesMember(3001, "Yakuza 3 Remastered", "2019-08-20", 9, []),
+            SeriesMember(3002, "Yakuza 5 Remastered", "2020-02-11", 9, []),
+        ]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(
+                    return_value=_members_result(
+                        members, steam_appids={3001: ["1088710"]}
+                    )
+                ),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        gap_ids = {g["igdb_id"] for g in result["results"][0]["gaps"]}
+        self.assertEqual(gap_ids, {3002})
+
+    async def test_legacy_suffixed_row_suppresses_member_by_name(self):
+        # §5a: "Yakuza Kiwami (Legacy)" is the same underlying game as the
+        # "Yakuza Kiwami" member; the (Legacy) dual-listing marker must not
+        # break the name fallback.
+        await self._seed_yakuza_pair()
+        legacy = await seed_owned_game("Yakuza Kiwami (Legacy)")
+        await link_series(legacy, "collection", 950, "Yakuza")
+
+        members = [
+            SeriesMember(3101, "Yakuza Kiwami", "2016-01-21", 8, []),
+            SeriesMember(3102, "Yakuza 6: The Song of Life", "2016-12-08", 0, []),
+        ]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=_members_result(members)),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        gap_ids = {g["igdb_id"] for g in result["results"][0]["gaps"]}
+        self.assertEqual(gap_ids, {3102})
+
+    async def test_unavailable_members_filtered_and_counted(self):
+        # §5c: entries IGDB lists only on platforms this library doesn't track
+        # (PS3, JP-only PSP) are not acquirable gaps. Members with NO platform
+        # data pass through — unknown is not unavailable.
+        await self._seed_yakuza_pair()
+
+        members = [
+            # PS3-only (IGDB platform 9) and PSP-only (38): unavailable.
+            SeriesMember(3201, "Yakuza: Dead Souls", "2011-03-17", 0, [9]),
+            SeriesMember(3202, "Kurohyou: Ryu ga Gotoku Shinshou", "2010-09-22", 0, [38]),
+            # Steam release: available.
+            SeriesMember(3203, "Yakuza 6: The Song of Life", "2016-12-08", 0, [6]),
+            # No platform data: kept.
+            SeriesMember(3204, "Like a Dragon: Unknown Platforms", "2024-01-01", 0, []),
+        ]
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=_members_result(members)),
+            ),
+        ):
+            default_result = await series.discover_series_gaps(min_owned=2)
+            kept_result = await series.discover_series_gaps(
+                min_owned=2, include_unavailable=True
+            )
+
+        entry = default_result["results"][0]
+        self.assertEqual({g["igdb_id"] for g in entry["gaps"]}, {3203, 3204})
+        self.assertEqual(entry["unavailable_excluded"], 2)
+
+        kept_entry = kept_result["results"][0]
+        self.assertEqual(
+            {g["igdb_id"] for g in kept_entry["gaps"]}, {3201, 3202, 3203, 3204}
+        )
+        self.assertEqual(kept_entry["unavailable_excluded"], 0)
+
+    async def test_re_release_pair_collapses_to_one_gap_with_variants(self):
+        # §5c (Judgment twice): when a member and its re-release both survive
+        # as gaps, the canonical entry absorbs the other into `variants`.
+        await self._seed_yakuza_pair()
+
+        members = [
+            SeriesMember(3301, "Judgment", "2018-12-13", 0, []),
+            SeriesMember(3302, "Judgment (Remastered)", "2021-04-23", 9, []),
+        ]
+        aliases = {3302: 3301}
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=_members_result(members, aliases)),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        gaps = result["results"][0]["gaps"]
+        self.assertEqual(len(gaps), 1)
+        self.assertEqual(gaps[0]["igdb_id"], 3301)
+        self.assertEqual(gaps[0]["variants"], ["Judgment (Remastered)"])
+
+    async def test_re_release_stays_a_gap_when_canonical_is_owned_elsewhere(self):
+        # The collapse only folds a variant into a SURVIVING gap: when the
+        # canonical member is excluded as owned, the re-release stands on its
+        # own (hiding it would be reverse-alias suppression, which is too
+        # aggressive for remakes — Kiwami 3 must stay visible even though
+        # Yakuza 3 is owned).
+        await self._seed_yakuza_pair()
+        owned = await seed_owned_game("Yakuza 3")
+        await set_igdb_id(owned, 3401)
+        await link_series(owned, "collection", 950, "Yakuza")
+
+        members = [
+            SeriesMember(3401, "Yakuza 3", "2009-02-26", 0, []),
+            SeriesMember(3402, "Yakuza Kiwami 3", "2026-02-12", 8, []),
+        ]
+        aliases = {3402: 3401}
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.series_gaps.get_series_members_cached",
+                AsyncMock(return_value=_members_result(members, aliases)),
+            ),
+        ):
+            result = await series.discover_series_gaps(min_owned=2)
+
+        gaps = result["results"][0]["gaps"]
+        self.assertEqual([g["igdb_id"] for g in gaps], [3402])
+        self.assertNotIn("variants", gaps[0])

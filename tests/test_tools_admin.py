@@ -881,6 +881,20 @@ class MergeGamesTests(ToolDBTestCase):
         self.assertIsNotNone(src_row)
         self.assertIsNotNone(src_plat)
 
+    async def test_single_mode_responses_validate_against_output_model(self):
+        from gamelib_mcp.tools.models import MergeGamesResponse
+
+        src = await seed_game("Source")
+        tgt = await seed_game("Target")
+
+        preview = await admin.merge_games(src, tgt, dry_run=True)
+        MergeGamesResponse.model_validate(preview)
+        self.assertFalse(preview["source_deleted"])
+
+        wet = await admin.merge_games(src, tgt)
+        MergeGamesResponse.model_validate(wet)
+        self.assertTrue(wet["source_deleted"])
+
     async def test_response_shape(self):
         src = await seed_game("PSN Dup")
         tgt = await seed_game("English")
@@ -2590,6 +2604,33 @@ class MergeGamesBatchTests(ToolDBTestCase):
         async with db_module.get_db() as db:
             count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
         self.assertEqual(count["c"], 3)
+
+    async def test_batch_responses_validate_against_output_model(self):
+        # Regression: source_deleted was a REQUIRED model field, but the batch
+        # envelope never carries it at top level, so every items= call —
+        # including the dry-run preview that exists to be run before a wet
+        # merge — died in output validation ("'source_deleted' is a required
+        # property") after doing the work.
+        from gamelib_mcp.tools.models import MergeGamesResponse
+
+        a = await seed_game("Dupe A")
+        b = await seed_game("Canonical B")
+        c = await seed_game("Dupe C")
+        d = await seed_game("Canonical D")
+        items = [
+            {"source_game_id": a, "target_game_id": b},
+            {"source_game_id": c, "target_game_id": d},
+        ]
+
+        preview = await admin.merge_games_batch(items, dry_run=True)
+        MergeGamesResponse.model_validate(preview)
+        for item in preview["results"]:
+            self.assertFalse(item["source_deleted"])
+
+        wet = await admin.merge_games_batch(items)
+        MergeGamesResponse.model_validate(wet)
+        for item in wet["results"]:
+            self.assertTrue(item["source_deleted"])
 
     async def test_dry_run_flags_chained_pairs(self):
         a = await seed_game("Dupe A")

@@ -395,8 +395,16 @@ async def search_games_batch(
             )
             results[query] = await _format_rows(rows)
 
+    # Same fallback chain as single-query search_games (alias > fuzzy >
+    # nested). The alias tier matters most here: batch mode backs ownership
+    # screens over storefront/abbreviated titles ("TMNT: Shredder's Revenge"
+    # vs the stored full name), and skipping it returned a wrong "not owned".
     for query, games in results.items():
         if games or not normalize_search_text(query):
+            continue
+        alias = await _alias_search(query, None, limit_per_query, 0, "detailed")
+        if alias is not None:
+            results[query] = alias["results"]
             continue
         fuzzy = await _fuzzy_search(query, None, limit_per_query, 0, "detailed")
         if fuzzy is not None:
