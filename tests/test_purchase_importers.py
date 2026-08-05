@@ -3128,7 +3128,59 @@ class CreateMissingQualityTests(ToolDBTestCase):
         self.assertEqual(refusal["reason"], "edition_variant")
         self.assertEqual(refusal["existing_name"], "STRAFE: Gold Edition")
 
-    async def test_alias_of_an_existing_row_is_not_minted(self):
+    async def test_plus_decorated_edition_suffix_is_not_minted(self):
+        # Bug-report §3: "Digital+ Edition" wasn't a recognized suffix shape,
+        # so the guard that refused "STRAFE: Millennium Edition" minted
+        # "Marvel's Midnight Suns Digital+ Edition" beside the base row.
+        existing = await seed_game("Marvel's Midnight Suns")
+        records = [
+            _eshop_record("Marvel's Midnight Suns Digital+ Edition", price_paid=19.99)
+        ]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["eshop"])
+
+        eshop = result["sources"]["eshop"]
+        self.assertEqual(eshop["created"], 0)
+        refusal = eshop["create_refused_details"][0]
+        self.assertEqual(refusal["reason"], "edition_variant")
+        self.assertEqual(refusal["existing_game_id"], existing)
+
+    async def test_alias_of_an_existing_row_matches_instead_of_minting(self):
+        # Bug-report §4 (Orwell): the storefront's full title is an alias of an
+        # existing row. The matcher's alias tier must ATTACH the purchase to
+        # that row — not mint a duplicate, and not merely refuse the mint and
+        # strand the spend in unmatched.
+        existing = await seed_game("Orwell")
+        await add_platform(existing, "switch2")
+        await db_module.upsert_game_alias(
+            existing, "Orwell: Keeping an Eye On You", alias_type="igdb"
+        )
+        records = [_eshop_record("Orwell: Keeping an Eye On You", price_paid=2.99)]
+        with _patch_fetchers(
+            fetch_eshop_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["eshop"])
+
+        eshop = result["sources"]["eshop"]
+        self.assertEqual(eshop["created"], 0)
+        self.assertEqual(eshop["unmatched"], [])
+        self.assertEqual(eshop["filled"], 1)
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
+            acq = await db.execute_fetchone(
+                """SELECT gp.price_paid FROM game_platforms gp
+                   WHERE gp.game_id = ? AND gp.platform = 'switch2'""",
+                (existing,),
+            )
+        self.assertEqual(count["c"], 1)
+        self.assertEqual(acq["price_paid"], 2.99)
+
+    async def test_alias_of_a_platformless_row_is_still_not_minted(self):
+        # Same alias shape, but the matched row has no platform row and
+        # create_platform_rows is off: the item must land in no_platform_row —
+        # visible for triage — and still never mint a duplicate.
         existing = await seed_game("Orwell")
         await db_module.upsert_game_alias(
             existing, "Orwell: Keeping an Eye On You", alias_type="igdb"
@@ -3141,9 +3193,13 @@ class CreateMissingQualityTests(ToolDBTestCase):
 
         eshop = result["sources"]["eshop"]
         self.assertEqual(eshop["created"], 0)
-        refusal = eshop["create_refused_details"][0]
-        self.assertEqual(refusal["reason"], "alias")
-        self.assertEqual(refusal["existing_game_id"], existing)
+        self.assertEqual(eshop["no_platform_row"], 1)
+        self.assertEqual(
+            eshop["no_platform_row_details"][0]["game_id"], existing
+        )
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
+        self.assertEqual(count["c"], 1)
 
     async def test_parentless_nested_purchase_is_not_minted(self):
         records = [

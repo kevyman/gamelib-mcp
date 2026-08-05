@@ -247,6 +247,12 @@ class EditionComparisonTitleTests(unittest.TestCase):
                 "Leisure Suit Larry - Magna Cum Laude Uncut and Uncensored",
                 "Leisure Suit Larry: Magna Cum Laude",
             ),
+            # Bug-report §3: "+"-decorated qualifiers ("Digital+ Edition")
+            # never matched the qualifier alternation, so the import guard
+            # missed this pair and minted a duplicate row.
+            ("Marvel's Midnight Suns Digital+ Edition", "Marvel's Midnight Suns"),
+            ("Hades: Deluxe+ Edition", "Hades"),
+            ("Deus Ex: Mankind Divided - Digital Deluxe Edition", "Deus Ex: Mankind Divided"),
         ]:
             with self.subTest(library_name=library_name):
                 self.assertTrue(is_edition_variant_of(library_name, base_name))
@@ -271,6 +277,10 @@ class EditionComparisonTitleTests(unittest.TestCase):
                 "Galactic Civilizations II: Dread Lords",
             ),
             ("Sacred 2 Gold", "Sacred 2: Fallen Angel"),
+            # A real subtitle after a shared base name is a different game, not
+            # an edition — a strict prefix alone must never collapse.
+            ("Orwell: Ignorance is Strength", "Orwell"),
+            ("Fallout: New Vegas Ultimate Edition", "Fallout"),
         ]:
             with self.subTest(a=a, b=b):
                 self.assertFalse(is_edition_variant_of(a, b))

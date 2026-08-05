@@ -17,6 +17,11 @@ _NON_GAME_PATTERNS = (
     re.compile(r"\b(dlc|expansion pack)(?:\s+no\.?\s*\d+)?\b$", re.IGNORECASE),
     re.compile(r"\bcontent\b$", re.IGNORECASE),
     re.compile(r"\bbeta(?:\s+demo)?\b\W*$", re.IGNORECASE),
+    # Trial builds listed as their own catalog entries ("Infinity Wealth
+    # Special Trial Version") — a demo by another name; never a real gap or a
+    # library row. Anchored on the pairing so the Trials series ("Trials
+    # Fusion") can never trip it.
+    re.compile(r"\btrial (?:version|edition)\b\W*$", re.IGNORECASE),
 )
 _TRAILING_VARIANT_PATTERNS = (
     re.compile(r"\s*\((?:PlayStation ?5|PS5)\)\s*$", re.IGNORECASE),
@@ -205,6 +210,10 @@ _SERIES_GAP_EDITION_PATTERNS = (
     # Bare "edition" leftover, once a more specific pattern above has already
     # peeled off its qualifier (or for a qualifier not otherwise listed).
     re.compile(r"\s+edition\s*$", re.IGNORECASE),
+    # Storefront dual-listing marker for a superseded SKU kept alongside its
+    # re-release ("Yakuza Kiwami (Legacy)") — the owned legacy row is the same
+    # underlying game as the member, so it must suppress the gap.
+    re.compile(r"\s*\(legacy\)\s*$", re.IGNORECASE),
 )
 
 
@@ -221,9 +230,14 @@ _SERIES_GAP_EDITION_PATTERNS = (
 _COMPARISON_QUALIFIER = (
     # No "master": "Halo: The Master Chief Collection" is not an edition of
     # "Halo". A real "Master Edition" still lands via the generic rule below.
+    # The optional trailing "+" covers SKU decorations ("Digital+ Edition",
+    # "Deluxe+") — without it the qualifier never matched the decorated word,
+    # and "Marvel's Midnight Suns Digital+ Edition" minted a duplicate beside
+    # "Marvel's Midnight Suns".
     r"(?:game of the (?:year|century)|goty|complete|ultimate|deluxe|premium"
     r"|gold|platinum|definitive|standard|enhanced|legendary|anniversary"
-    r"|collector'?s|remastered|redux|classic|uncut|uncensored|unrated)"
+    r"|collector'?s|remastered|redux|classic|uncut|uncensored|unrated"
+    r"|digital)\+?"
 )
 _COMPARISON_EDITION_PATTERNS = (
     # Qualifier-anchored tail: a known edition word, up to two words riding

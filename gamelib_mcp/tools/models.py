@@ -134,6 +134,9 @@ class SeriesGapMember(FlexibleModel):
     # True when a wishlisted (but unowned) library game resolves to this
     # member by igdb_id, edition alias, or normalized name.
     on_wishlist: bool = False
+    # Names of edition/re-release members collapsed into this canonical entry
+    # (one missing game must not count as two gaps). Absent when none.
+    variants: list[str] | None = None
 
 
 class SeriesGapEntry(FlexibleModel):
@@ -144,6 +147,9 @@ class SeriesGapEntry(FlexibleModel):
     avg_rating: float | None = None
     total_playtime_hours: float
     gaps: list[SeriesGapMember] = Field(default_factory=list)
+    # Members dropped because IGDB lists them on no platform this library
+    # tracks (dead-platform / region-locked); include_unavailable=True keeps them.
+    unavailable_excluded: int = 0
 
 
 class SeriesGapsError(FlexibleModel):
@@ -369,7 +375,7 @@ class AcquisitionBatchItemResult(FlexibleModel):
     platform: str | None = None
     game_id: int | None = None
     matched_name: str | None = None
-    match_type: str | None = None  # identifier | id | name | fuzzy | created
+    match_type: str | None = None  # identifier | id | name | alias | fuzzy | created
     acquisition: AcquisitionInfo | None = None
     # Present on no_platform_row: the platforms the game IS owned/recorded on.
     platforms: list[str] | None = None
@@ -483,8 +489,9 @@ class SetAcquisitionResponse(FlexibleModel):
     filled: int | None = None
     no_change: int | None = None
     created: int | None = None
-    # New owned games minted by create_missing (game_id, name, platform) — a
-    # created row has no delete tool, so callers eyeball this list.
+    # New owned games minted by create_missing (game_id, name, platform) —
+    # nothing flags a bad mint after the fact (cleanup is a manual
+    # delete_game), so callers eyeball this list.
     created_details: list[dict[str, Any]] | None = None
     unmatched: list[dict[str, Any]] | None = None
     # Items create_missing declined to mint (near-duplicate of an existing row,
@@ -533,7 +540,7 @@ class BundleGameResult(FlexibleModel):
     game_id: int | None = None
     name: str | None = None  # input name, present on unmatched
     matched_name: str | None = None
-    match_type: str | None = None  # identifier | id | name | fuzzy | created
+    match_type: str | None = None  # identifier | id | name | alias | fuzzy | created
     price_paid: float | None = None  # the proposed split share for this game
     # What actually persisted on the row (fill-only can preserve an older price,
     # so this may differ from price_paid); drives allocated_price/reconciled.
@@ -599,7 +606,11 @@ class MergeGamesResponse(BatchEnvelope):
     # absorbed its parent or inherited children is promoted to primary.
     children_reparented: int = 0
     target_promoted_to_primary: bool = False
-    source_deleted: bool
+    # Single mode only: True after a wet merge deleted the source row, False on
+    # dry_run (bulk mode carries it per item instead). Optional like every other
+    # mode-dependent field (ADR 0004) — declaring it required made the bulk
+    # (items=) envelope fail output validation, which blocked dry-run previews.
+    source_deleted: bool | None = None
 
 
 class SplitGameResponse(FlexibleModel):

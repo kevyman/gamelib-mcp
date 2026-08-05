@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 import httpx
 from bs4 import BeautifulSoup
 
-from .db import upsert_game_platform_enrichment
+from .db import seed_platform_provider_alias, upsert_game_platform_enrichment
 from .scrape_config import MetacriticScrapeConfig, fetch_allowlisted, load_scrape_config
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,25 @@ def _to_slug(name: str) -> str:
     slug = re.sub(r"\s+", "-", slug.strip())
     slug = re.sub(r"-+", "-", slug)
     return slug
+
+
+def _title_slug_from_url(url: str) -> tuple[str, str] | None:
+    """(display title, slug) parsed from a Metacritic game URL, or None.
+
+    Handles both URL shapes: /game/<slug>/ (current) and /game/<platform>/
+    <slug> (legacy) — the slug is the last path segment either way. Query
+    strings ("?platform=pc") are ignored.
+    """
+    from urllib.parse import urlsplit
+
+    segments = [s for s in urlsplit(url).path.split("/") if s]
+    if "game" not in segments or segments[-1] == "game":
+        return None
+    slug = segments[-1]
+    words = [w for w in slug.split("-") if w]
+    if not words:
+        return None
+    return " ".join(words), slug
 
 
 def _candidate_urls(slug: str, platform: str, config: MetacriticScrapeConfig | None = None) -> list[str]:
@@ -185,4 +204,23 @@ async def enrich_metacritic(
         "metacritic_cached_at": now,
     }
     await upsert_game_platform_enrichment(game_platform_id, **fields)
+
+    # The matched page's slug often spells out a fuller title than the library
+    # row ("orwell-keeping-an-eye-on-you" for a row named "Orwell") — seed it
+    # as an alias so name-based matching (purchase import, ownership screens)
+    # can bridge the two. Best-effort: alias seeding must never fail the
+    # enrichment that just succeeded.
+    title_slug = _title_slug_from_url(final_url)
+    if title_slug is not None:
+        try:
+            await seed_platform_provider_alias(
+                game_platform_id,
+                title_slug[0],
+                source="metacritic",
+                source_key=title_slug[1],
+            )
+        except Exception:
+            logger.debug(
+                "Metacritic alias seeding failed for %s", final_url, exc_info=True
+            )
     return fields

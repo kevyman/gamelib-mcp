@@ -197,7 +197,7 @@ async def search_games(
     and has_more.
 
     Pass `queries` instead to resolve several titles at once (comparing or
-    disambiguating a list) — each gets the same tiered/fuzzy/nested-content
+    disambiguating a list) — each gets the same tiered/alias/fuzzy/nested-content
     matching, capped at limit_per_query, and results come back under
     results_by_query keyed by the original query string. The offset/platform/
     series/response_format filters apply to `query` mode only.
@@ -560,6 +560,7 @@ async def discover_series_gaps(
     limit: int = 10,
     include_unreleased: bool = False,
     refresh_cache: bool = False,
+    include_unavailable: bool = False,
 ) -> SeriesGapsResponse:
     """
     Unowned entries in series you own and rate highly.
@@ -568,21 +569,31 @@ async def discover_series_gaps(
     your series by taste (average personal rating of its games, then total
     playtime), taking the top `limit`, fetching each one's full member list
     live from IGDB (cached 7 days), and subtracting what you actually OWN.
-    A wishlisted-but-unowned title is NOT subtracted — it still appears as a
-    gap, annotated on_wishlist=true, rather than silently disappearing. kind
-    filters to collection|franchise; min_owned skips series where you own
-    fewer games (ranking is owned-only); include_unreleased keeps
-    unreleased/undated entries (default: dropped); refresh_cache forces a live
-    re-fetch of series membership instead of using the cache. Requires IGDB
-    credentials (TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET) — returns a structured
-    status="unconfigured" response rather than erroring when absent. A
-    per-series IGDB fetch failure is recorded under errors without failing the
-    whole call; series_checked reports how many series were ranked and
-    attempted this call. Each gap carries on_wishlist: true when a
-    wishlisted-but-unowned library title already resolves to it.
+    Ownership is matched by igdb_id, edition/re-release alias, the member's
+    own Steam appid against owned store identifiers (so a remaster split from
+    its original in IGDB is recognized when the owned appid IS the remaster),
+    and edition-stripped name. A wishlisted-but-unowned title is NOT
+    subtracted — it still appears as a gap, annotated on_wishlist=true,
+    rather than silently disappearing. kind filters to collection|franchise;
+    min_owned skips series where you own fewer games (ranking is owned-only);
+    include_unreleased keeps unreleased/undated entries (default: dropped);
+    include_unavailable keeps entries IGDB lists on no platform this library
+    tracks — dead-platform or region-locked releases (default: dropped,
+    counted per series in unavailable_excluded); refresh_cache forces a live
+    re-fetch of series membership instead of using the cache. When a member
+    and its re-release are both missing, the canonical entry absorbs the
+    other and lists its name under variants — one missing game, one gap.
+    Requires IGDB credentials (TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET) —
+    returns a structured status="unconfigured" response rather than erroring
+    when absent. A per-series IGDB fetch failure is recorded under errors
+    without failing the whole call; series_checked reports how many series
+    were ranked and attempted this call. Each gap carries on_wishlist: true
+    when a wishlisted-but-unowned library title already resolves to it.
     """
     from .tools.series import discover_series_gaps as _series_gaps
-    return await _series_gaps(kind, min_owned, limit, include_unreleased, refresh_cache)
+    return await _series_gaps(
+        kind, min_owned, limit, include_unreleased, refresh_cache, include_unavailable
+    )
 
 
 @mcp.tool(title="Sync Library, Wishlist & Ratings", annotations=NETWORK_SYNC_TOOL)
@@ -1599,8 +1610,9 @@ async def split_bundle_acquisition(
     dry_run: True previews — resolves matches and computes the price split,
         returning the exact statuses/prices a real run would produce, without
         writing. ALWAYS preview first when using create_missing: constituent
-        lists come from lookup and can be wrong, and created games rows have no
-        delete tool.
+        lists come from lookup and can be wrong, and a wrongly minted row sits
+        in the library until someone notices and removes it (delete_game is
+        cheap for a fresh mint, but nothing flags the mistake for you).
 
     Games resolve by identifier, then game_id, then name (edition-suffix
     stripping included; deliberately no fuzzy fallback — "BioShock 2" must not
@@ -1658,8 +1670,10 @@ async def import_purchases(
     only and, when minted, is created nested (is_primary_library_item=0) linked
     to a resolved parent — so a DLC never becomes a phantom base game nor
     attaches its spend onto the base row; created_details/would_create carry its
-    content_type and parent link. Because created rows have no delete tool, two
-    classes of mint are refused outright and reported per source in
+    content_type and parent link. Because a bad mint is a duplicate row a human
+    must notice and clean up afterwards (delete_game, or merge_games when the
+    row picked up data), two classes of mint are refused outright and reported
+    per source in
     create_refused_details (counted as unmatched): a nested record that resolves
     no parent, and a title that is only an edition/alias variant of a row
     already in the library ("STRAFE: Millennium Edition" beside "STRAFE: Gold

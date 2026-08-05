@@ -1011,6 +1011,46 @@ async def upsert_game_alias(
         await db.commit()
 
 
+async def seed_platform_provider_alias(
+    game_platform_id: int,
+    alias: str,
+    *,
+    source: str,
+    source_key: str | None = None,
+) -> None:
+    """Record a provider-known display name for the game owning a platform row.
+
+    Enrichment providers routinely know a fuller title than the library row
+    carries — a Metacritic/OpenCritic URL slug spells out
+    "orwell-keeping-an-eye-on-you" while the row is named "Orwell" — and that
+    fuller title is exactly what storefront purchase records and ownership
+    screens later search for. Seeding it as an alias at enrich time lets the
+    alias tiers (search_games, the acquisition matcher, the purchase-import
+    near-duplicate guard) bridge the gap without any fuzzy heuristics that
+    could collapse genuinely different games. A name that normalizes
+    identically to the stored one adds no information and is skipped.
+    """
+    alias_normalized = normalize_search_text(alias)
+    if not alias_normalized:
+        return
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            """SELECT g.id AS game_id, g.name AS name
+               FROM game_platforms gp JOIN games g ON g.id = gp.game_id
+               WHERE gp.id = ?""",
+            (game_platform_id,),
+        )
+    if row is None or normalize_search_text(row["name"]) == alias_normalized:
+        return
+    await upsert_game_alias(
+        row["game_id"],
+        alias,
+        alias_type="provider_name",
+        source=source,
+        source_key=source_key,
+    )
+
+
 @retry_on_write_contention
 async def upsert_steam_platform_data(game_platform_id: int, **fields) -> None:
     if not fields:

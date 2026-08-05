@@ -41,6 +41,7 @@ from .db import (
 from .tag_synonyms import canonical_tag
 from .tags import is_feature_flag
 from .title_normalization import (
+    is_non_game_title,
     normalize_catalog_title,
     normalize_search_text,
     normalize_series_gap_title,
@@ -1246,7 +1247,8 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
 
     async with get_db() as db:
         row = await db.execute_fetchone(
-            """SELECT tags,
+            """SELECT name,
+                      tags,
                       genres,
                       release_date,
                       content_type,
@@ -1423,6 +1425,27 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
             (*updates.values(), game_id),
         )
         await db.commit()
+
+    # Seed the IGDB display name as an alias whenever it differs from the
+    # stored row name — the provider full title ("Orwell: Keeping an Eye On
+    # You" for a row named "Orwell") is what storefront purchase records and
+    # ownership screens arrive with, and without the alias no name tier
+    # bridges the two (the extra tokens sink token-AND matching, and minting
+    # a duplicate row was the observed failure).
+    if (
+        igdb_game.name
+        and "igdb_id" not in overrides
+        and normalize_search_text(igdb_game.name) != normalize_search_text(row["name"])
+    ):
+        from .db import upsert_game_alias
+
+        await upsert_game_alias(
+            game_id,
+            igdb_game.name,
+            alias_type="provider_name",
+            source="igdb",
+            source_key=str(igdb_game.igdb_id),
+        )
 
     if igdb_game.series:
         from .db import upsert_game_series_links
@@ -1890,6 +1913,11 @@ async def fetch_series_members(kind: str, series_igdb_id: int) -> list["SeriesMe
                     game_type = 0
                 if game_type not in SERIES_MEMBER_GAME_TYPES:
                     continue
+                # IGDB files demos/trial builds into series under a main-game
+                # game_type ("Infinity Wealth Special Trial Version"), so the
+                # enum filter alone lets them through as phantom gaps.
+                if is_non_game_title(row.get("name", "")):
+                    continue
                 members.append(
                     SeriesMember(
                         igdb_id=row["id"],
@@ -1999,6 +2027,54 @@ async def fetch_version_parent_aliases(member_igdb_ids: list[int]) -> dict[int, 
     except Exception as exc:
         raise IGDBRequestFailure(
             f"IGDB version-parent alias fetch failed for {len(ids)} member ids"
+        ) from exc
+
+
+async def fetch_member_steam_appids(member_igdb_ids: list[int]) -> dict[int, list[str]]:
+    """Map series-member IGDB ids onto their Steam appids via external_games.
+
+    IGDB frequently splits a remaster from its original into separate records,
+    and ownership can sit on either side under a name that matches neither —
+    the library rows "Yakuza 3"/"Yakuza 4" carry the appids of the *remastered*
+    Steam releases, so name/id matching reported the "Yakuza 3 Remastered"
+    member as a gap the user already owns. A member's own Steam appid is the
+    exact bridge: when an owned identifier matches it, the member is owned,
+    whatever either side is called.
+
+    Returns {member_igdb_id: [steam appid strings]} — only members with at
+    least one Steam listing appear. Raises IGDBRequestFailure on API failure;
+    returns {} for an empty input or when IGDB is unconfigured.
+    """
+    client_id = os.environ.get("TWITCH_CLIENT_ID")
+    ids = [i for i in dict.fromkeys(member_igdb_ids) if i is not None]
+    if not client_id or not igdb_credentials_configured() or not ids:
+        return {}
+
+    try:
+        token = await _get_token()
+        headers = _igdb_headers(client_id, token)
+
+        appids: dict[int, list[str]] = {}
+        for chunk in _chunked(ids, 100):
+            id_list = ", ".join(str(i) for i in chunk)
+            query = (
+                f"fields game, uid; "
+                f"where category = {IGDB_EXTERNAL_CATEGORY_STEAM} & game = ({id_list}); "
+                f"limit 500;"
+            )
+            rows = await _post_igdb_games(query, headers, url=_IGDB_EXTERNAL_GAMES_URL)
+            for row in rows:
+                game = row.get("game")
+                uid = row.get("uid")
+                if game is None or uid is None:
+                    continue
+                appids.setdefault(game, []).append(str(uid))
+        return appids
+    except IGDBRequestFailure:
+        raise
+    except Exception as exc:
+        raise IGDBRequestFailure(
+            f"IGDB member Steam-appid fetch failed for {len(ids)} member ids"
         ) from exc
 
 

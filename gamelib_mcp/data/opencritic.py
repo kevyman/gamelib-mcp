@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
-from .db import get_db, upsert_game_platform_enrichment
+from .db import get_db, seed_platform_provider_alias, upsert_game_platform_enrichment
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +211,29 @@ def _state_to_opencritic_record(state: dict, source_url: str) -> dict | None:
         "opencritic_percent_rec": percent if percent >= 0 else None,
         "opencritic_num_reviews": int(state["numReviews"]),
     }
+
+
+def _title_slug_from_url(url: str | None) -> tuple[str, str] | None:
+    """(display title, slug) parsed from an OpenCritic game URL, or None.
+
+    URLs look like https://opencritic.com/game/3575/orwell-keeping-an-eye-on-you
+    — the slug is the last path segment; a purely numeric tail (a URL without
+    its slug) carries no title and is skipped.
+    """
+    if not url:
+        return None
+    from urllib.parse import urlsplit
+
+    segments = [s for s in urlsplit(url).path.split("/") if s]
+    if "game" not in segments:
+        return None
+    slug = segments[-1]
+    if slug == "game" or slug.isdigit():
+        return None
+    words = [w for w in slug.split("-") if w]
+    if not words:
+        return None
+    return " ".join(words), slug
 
 
 async def _sleep_with_jitter(base_seconds: float) -> None:
@@ -523,6 +546,27 @@ async def enrich_opencritic(game_platform_id: int, game_name: str) -> dict:
         "opencritic_cached_at": now.isoformat(),
     }
     await upsert_game_platform_enrichment(game_platform_id, **fields)
+
+    # The matched page's URL slug often spells out a fuller title than the
+    # library row ("/game/3575/orwell-keeping-an-eye-on-you" for a row named
+    # "Orwell") — seed it as an alias so name-based matching (purchase import,
+    # ownership screens) can bridge the two. Best-effort: alias seeding must
+    # never fail the enrichment that just succeeded.
+    title_slug = _title_slug_from_url(fields.get("opencritic_url"))
+    if title_slug is not None:
+        try:
+            await seed_platform_provider_alias(
+                game_platform_id,
+                title_slug[0],
+                source="opencritic",
+                source_key=title_slug[1],
+            )
+        except Exception:
+            logger.debug(
+                "OpenCritic alias seeding failed for %s",
+                fields.get("opencritic_url"),
+                exc_info=True,
+            )
     logger.info(
         "OpenCritic enrich matched: game_platform_id=%s name=%r opencritic_id=%s score=%s reviews=%s",
         game_platform_id,
