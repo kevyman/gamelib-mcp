@@ -40,6 +40,7 @@ from .tools.models import (
     DeleteGameResponse,
     GameDetailResponse,
     GetScrapeConfigResponse,
+    GetSkillResponse,
     GetStatsResponse,
     GetWishlistResponse,
     HardwarePreferenceResponse,
@@ -58,6 +59,7 @@ from .tools.models import (
     SetAcquisitionResponse,
     SetPlaytimeResponse,
     SetSwitch2PlaytimeBaselineResponse,
+    SkillIndexEntry,
     SplitBundleAcquisitionResponse,
     SplitGameResponse,
     SyncResponse,
@@ -151,8 +153,9 @@ mcp = FastMCP(
         "Tools that act on one game (rate_game, update_game, set_playtime, set_acquisition, "
         "add_game_to_platform, merge_games, delete_game, get_game_detail) also take items=[...] "
         "to do the same thing in bulk in a single call — prefer that over looping. "
-        "For game-evaluation, bundle-evaluation, and backlog-triage methodology, "
-        "read skill://index.json."
+        "For game-evaluation, bundle-evaluation, and backlog-triage methodology, call "
+        "get_skill() to list the gaming skills and get_skill(skill=...) to load one — or, "
+        "if your client exposes MCP resources, read skill://index.json (same content)."
     ),
     auth=auth_provider,
     middleware=component_middleware,
@@ -1101,6 +1104,40 @@ async def get_assessment_context(
         steam_recent_total_reviews,
         early_access,
     )
+
+
+@mcp.tool(title="Gaming Skill Methodology", annotations=READ_ONLY_TOOL)
+async def get_skill(skill: str | None = None, path: str = "SKILL.md") -> GetSkillResponse:
+    """
+    Read the gaming-skills methodology this server is the canonical home of
+    (game-quality, backlog-triage, bundle-evaluation).
+
+    With no arguments, returns the discovery index: each skill's name,
+    description (including when to use it), version, and files. With
+    skill=..., returns that skill's SKILL.md text in `content` — load it
+    into context and follow it for the current conversation; `path` selects
+    another of the skill's files when the index lists more than one.
+
+    Call this before a game-evaluation, bundle-evaluation, or backlog-triage
+    task unless a locally installed copy of the same skill already covers it
+    — and when an installed copy IS present but this server's index reports
+    a newer version, prefer the fetched text. Clients that can read MCP
+    resources may read skill://<name>/<path> and skill://index.json instead;
+    both surfaces serve identical bytes.
+    """
+    from .skill_resources import SKILLS_DIR, read_skill_file, skill_index_payload
+
+    if skill is None:
+        if path != "SKILL.md":
+            raise ToolError("path= selects a file within a skill; pass skill= as well")
+        index = [SkillIndexEntry(**entry) for entry in skill_index_payload()]
+        note = (
+            None
+            if SKILLS_DIR.is_dir()
+            else "skills directory missing from this deployment; no skills to serve"
+        )
+        return GetSkillResponse(skills=index, note=note)
+    return GetSkillResponse(**read_skill_file(skill, path))
 
 
 @mcp.tool(title="Set Hardware Preference", annotations=MUTATION_TOOL)
