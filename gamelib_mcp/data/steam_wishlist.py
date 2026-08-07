@@ -9,9 +9,18 @@ follow-up Steam Store lookup (steam_store.fetch_app_name) to name it.
 
 A wishlist item that isn't owned anywhere yet gets a games row but no
 game_platforms row (see game_wishlist's schema note) — so unlike an owned sync,
-there's no steam_appid identifier to attach it to. Re-syncs before purchase
-fall back to upsert_game's exact-name matching to avoid duplicating the game
-row, the same fallback GOG already relies on for lacking a stable store id.
+there's no steam_appid identifier to attach it to. Resolution order per item:
+(1) an existing game_platforms/identifier row for the appid (owned, unchanged
+from before); (2) the wishlist's OWN store_identifier — a re-synced item
+resolves this way with ZERO network calls, since a prior sync already recorded
+which game_id it belongs to (`get_wishlist_game_id_by_store_identifier`), so
+name resolution (and the ~160-per-run rate-gated store lookups it used to cost
+every single sync) is now first-sync-only; (3) only when both miss, a name
+lookup (steam_store.fetch_app_name, falling back to steamspy.fetch_steamspy_name
+for delisted apps appdetails no longer serves), guarded against attaching onto
+a row that already owns steam under a DIFFERENT appid (see the collision guard
+in fetch_wishlist below) before falling back to upsert_game's exact-name
+matching — the same fallback GOG already relies on for lacking a stable store id.
 
 date_added is read defensively (_parse_steam_added_at accepts epoch or ISO,
 else falls back to sync time) — unlike the DekuDeals export, this endpoint's
@@ -20,11 +29,15 @@ exact response shape hasn't been confirmed against a live account yet.
 Removal reconciliation: a game taken off your Steam wishlist (without being
 bought) is deleted from game_wishlist too, via delete_stale_wishlist_entries —
 but only when every fetched item resolved to a game_id this round. If any
-item couldn't be resolved (a malformed entry, or fetch_app_name failing for an
-unowned item — the Steam Store lookup shares a rate-limited gate, so this is a
-real possibility, not just a theoretical one), the removal pass is skipped
-entirely rather than risk deleting a wishlist entry that's still there and we
-simply failed to re-confirm.
+item couldn't be resolved (a malformed entry, or both fetch_app_name AND the
+SteamSpy fallback failing to name an unowned/delisted item), the removal pass
+is skipped entirely rather than risk deleting a wishlist entry that's still
+there and we simply failed to re-confirm. Before 2026-08, a single permanently
+unnameable appid (a fully delisted app with no SteamSpy record either) meant
+removal reconciliation never ran again for Steam; the SteamSpy fallback fixes
+the two prod skips that caused this (2026-08-07 diagnosis), so the next sync
+after this change may legitimately delete stale rows reconciliation had been
+unable to reach for a while.
 
 Push: push_to_steam_wishlist (issue #110 phase 2) adds one appid to the real
 account wishlist, so a game wishlisted in-app also shows up on Steam itself.
@@ -49,6 +62,7 @@ scope for phase 2 — this module only ever adds.
 
 import logging
 import os
+import re
 import time
 from datetime import UTC, datetime
 
@@ -57,7 +71,9 @@ import httpx
 from .db import (
     STEAM_APP_ID,
     delete_stale_wishlist_entries,
+    exact_name_owns_steam,
     get_game_by_identifier,
+    get_wishlist_game_id_by_store_identifier,
     upsert_game,
     upsert_wishlist_entry,
 )
@@ -70,6 +86,7 @@ from .steam_session import (
 )
 from .steam_store import fetch_app_name
 from .steam_xml import STEAM_API_KEY, STEAM_ID
+from .steamspy import fetch_steamspy_name
 from .title_normalization import prepare_catalog_title
 
 logger = logging.getLogger(__name__)
@@ -313,6 +330,20 @@ async def push_to_steam_wishlist(
                 raise SteamWishlistPushError(f"{_TRANSIENT_PUSH_ERROR} ({detail})") from storefront_failure
 
 
+def _basic_whitespace_clean(name: str) -> str:
+    """Collapse/trim whitespace only — no trademark or suffix stripping.
+
+    Used for the raw store/SteamSpy name in the collision-guard fallback
+    below: normalize_catalog_title bundles trademark-glyph removal together
+    with the trailing-variant (edition/suffix) stripping in one non-separable
+    pass, and the raw name is deliberately kept UN-suffix-stripped there (that
+    stripping is what caused the collision in the first place), so this
+    reimplements only the cheap, uncontroversial whitespace part rather than
+    picking apart normalize_catalog_title's internals.
+    """
+    return re.sub(r"\s+", " ", name).strip()
+
+
 def _parse_steam_added_at(value) -> str | None:
     """Best-effort parse of a wishlist item's date_added into an ISO string.
 
@@ -353,10 +384,14 @@ async def fetch_wishlist() -> dict:
     game_wishlist row was minted this run, matched = the row already existed
     and was updated in place. They deliberately do NOT report how the game
     row was resolved — wishlist-only games have no game_platforms/identifier
-    rows, so every unowned item resolves by name on every sync, and counting
-    that as "added" made a routine no-op re-sync read as 171 additions
-    (2026-08-06 prod test) and left added useless for spotting genuinely new
-    items.
+    rows, so before this fixed an unowned item resolved by name on EVERY sync,
+    and counting that as "added" made a routine no-op re-sync read as 171
+    additions (2026-08-06 prod test) and left added useless for spotting
+    genuinely new items. As of 2026-08-07, a wishlist-only item resolves via
+    its own stored ``game_wishlist.store_identifier`` on every sync after the
+    first — no name lookup, no network call — so a name lookup (and the
+    collision guard around it, see the per-item loop below) only runs the
+    first time an appid is ever seen.
     """
     steam_api_key = os.getenv("STEAM_API_KEY", STEAM_API_KEY)
     steam_id = os.getenv("STEAM_ID", STEAM_ID)
@@ -395,20 +430,65 @@ async def fetch_wishlist() -> dict:
                 continue
             item_added_at = _parse_steam_added_at(item.get("date_added")) or fallback_now
 
-            # Resolve the game row: stable store identifier first (only games
-            # with a platform row have one), then the name fallback wishlist-only
-            # games always take.
+            # Resolve the game row, in order:
+            #   1. an owned game_platforms/identifier row for this appid.
+            #   2. this wishlist's OWN store_identifier from a prior sync —
+            #      zero network calls, and the reason a re-sync no longer
+            #      re-fetches ~160 store names every run.
+            #   3. a name lookup (store, then SteamSpy for delisted apps),
+            #      guarded against attaching onto a row that already owns
+            #      steam under a DIFFERENT appid (see below).
             existing = await get_game_by_identifier(STEAM_APP_ID, str(appid))
             if existing is not None:
                 game_id = existing["id"]
             else:
-                name = await fetch_app_name(appid, client=client)
-                prepared_title = prepare_catalog_title(name) if name else None
-                if prepared_title is None:
+                game_id = await get_wishlist_game_id_by_store_identifier("steam", str(appid))
+
+            if game_id is None:
+                raw_name = await fetch_app_name(appid, client=client)
+                if raw_name is None:
+                    # appdetails says the app doesn't exist at all (fully
+                    # delisted, e.g. appid 654050 "JYDGE") — SteamSpy retains
+                    # names for retired games the store has forgotten, the
+                    # same fallback the license audit already uses.
+                    raw_name = await fetch_steamspy_name(appid)
+                prepared_title = prepare_catalog_title(raw_name) if raw_name else None
+                if prepared_title is None or raw_name is None:
                     skipped += 1
                     all_resolved = False
                     continue
-                game_id = await upsert_game(appid, prepared_title)
+
+                # Anti-collapse collision guard: Steam never returns a game
+                # you already own on Steam in your wishlist (root CLAUDE.md,
+                # "Game identity (anti-collapse)" — name is a cross-platform
+                # reconciliation key, never within-platform), so an exact-name
+                # match onto a row that owns steam under a DIFFERENT appid is
+                # always wrong. Left unguarded, this attached the wishlisted
+                # Dead Space 2023 remake (appid 1693980) onto the owned 2008
+                # original, and TES IV: Oblivion Remastered (2623190) onto the
+                # owned 2006 original once prepare_catalog_title's suffix
+                # stripping erased the "Remastered"/"Oblivion Remastered" tail
+                # — clear_fulfilled_wishlist_entries then deleted both,
+                # silently, on every sync (2026-08-07 diagnosis).
+                if await exact_name_owns_steam(prepared_title):
+                    raw_cleaned = _basic_whitespace_clean(raw_name)
+                    if raw_cleaned != prepared_title and not await exact_name_owns_steam(
+                        raw_cleaned
+                    ):
+                        # The stripped suffix caused the collision (Oblivion
+                        # Remastered case) — the raw, unstripped name is the
+                        # honest identity and doesn't collide itself.
+                        game_id = await upsert_game(appid, raw_cleaned)
+                    else:
+                        # Same name even unstripped (Dead Space case): mint a
+                        # SEPARATE games row rather than collapsing two
+                        # different games that happen to share a title within
+                        # one platform.
+                        game_id = await upsert_game(
+                            appid, prepared_title, match_existing_by_name=False
+                        )
+                else:
+                    game_id = await upsert_game(appid, prepared_title)
 
             # Count by what happened to the wishlist row, not by how the game
             # resolved (see docstring). The upsert reports created atomically,

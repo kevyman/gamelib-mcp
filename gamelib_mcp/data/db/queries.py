@@ -241,6 +241,29 @@ async def get_game_by_appid(appid: int) -> aiosqlite.Row | None:
     return await get_game_by_identifier(STEAM_APP_ID, str(appid))
 
 
+async def get_wishlist_game_id_by_store_identifier(
+    platform: str, store_identifier: str
+) -> int | None:
+    """The game_id already wishlisted under this (platform, store_identifier).
+
+    Lets a re-synced wishlist-only item resolve without any name lookup: the
+    wishlist row itself already carries the store's id
+    (``game_wishlist.store_identifier``, captured on first sync), even though
+    the item has no ``game_platforms``/identifier row to key off of (it isn't
+    owned). ``ORDER BY id LIMIT 1`` guards against the rare duplicate-identifier
+    rows this table can carry (e.g. two wishlist entries minted onto separate
+    games rows for the same appid before this resolution path existed).
+    """
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            """SELECT game_id FROM game_wishlist
+               WHERE platform = ? AND store_identifier = ?
+               ORDER BY id ASC LIMIT 1""",
+            (platform, store_identifier),
+        )
+        return row["game_id"] if row else None
+
+
 async def get_game_by_igdb_id(igdb_id: int) -> aiosqlite.Row | None:
     async with get_db() as db:
         return await db.execute_fetchone(
@@ -271,6 +294,28 @@ async def get_game_by_name_exact(name: str) -> aiosqlite.Row | None:
             "SELECT * FROM games WHERE lower(name) = lower(?) ORDER BY id LIMIT 1",
             (name,),
         )
+
+
+async def exact_name_owns_steam(name: str) -> bool:
+    """True when some games row named exactly ``name`` already owns steam.
+
+    Guards the wishlist name fallback (see ``fetch_wishlist``): Steam never
+    returns a game you already own on Steam in your wishlist, so an
+    exact-name match onto a row that owns steam under a DIFFERENT appid is
+    never the same game — it's the anti-collapse identity rule
+    ("name is a cross-platform key, never within-platform") being violated
+    within a single platform. Case-insensitive to match the exact-name
+    fallback it guards.
+    """
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            """SELECT 1 FROM games g
+               JOIN game_platforms gp ON gp.game_id = g.id
+               WHERE lower(g.name) = lower(?) AND gp.platform = ? AND gp.owned = 1
+               LIMIT 1""",
+            (name, STEAM_PLATFORM),
+        )
+        return row is not None
 
 
 async def get_platform_game_by_normalized_name(
