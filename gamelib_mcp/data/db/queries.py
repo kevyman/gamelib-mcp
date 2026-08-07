@@ -696,3 +696,4 @@ async def load_wishlist_with_prices(platform: str | None) -> list[aiosqlite.Row]
             params,
         )
     return rows
+

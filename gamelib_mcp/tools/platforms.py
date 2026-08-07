@@ -555,9 +555,11 @@ async def add_game_to_platform(
                             push_appid = None
             if push_appid is not None and store_identifier is None:
                 store_identifier = str(push_appid)
-        wishlist_id = await upsert_wishlist_entry(
-            game_id, platform, source="manual", store_identifier=store_identifier
-        )
+        wishlist_id = (
+            await upsert_wishlist_entry(
+                game_id, platform, source="manual", store_identifier=store_identifier
+            )
+        )["id"]
         if store_identifier:
             added_identifier = {"type": "steam_appid", "value": store_identifier}
 

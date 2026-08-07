@@ -1147,7 +1147,11 @@ async def add_game_to_platform(
     existing row and never creates anything (unknown id = error), which makes it
     the safe choice when editing rather than adding. platform accepts steam,
     epic, gog, nintendo, switch2, ps5, itchio, xbox, or other. identifier_type and
-    identifier_value can store an external ID (requires owned=True).
+    identifier_value can store an external ID — with owned=True on the new
+    ownership row; with owned=False only identifier_type='steam_appid' (and
+    platform='steam') is accepted, landing on the wishlist entry's
+    store_identifier so prices resolve immediately and push_to_store below
+    knows which appid to push.
     playtime_minutes is optional. Pass owned=False to record a wishlist entry
     instead of an owned copy — useful for PSN, which has no wishlist API.
     acquired_at (YYYY / YYYY-MM / YYYY-MM-DD), price_paid (currency defaults
