@@ -71,7 +71,7 @@ import httpx
 from .db import (
     STEAM_APP_ID,
     delete_stale_wishlist_entries,
-    exact_name_owns_steam,
+    exact_name_steam_conflict,
     get_game_by_identifier,
     get_wishlist_game_id_by_store_identifier,
     upsert_game,
@@ -469,11 +469,15 @@ async def fetch_wishlist() -> dict:
                 # owned 2006 original once prepare_catalog_title's suffix
                 # stripping erased the "Remastered"/"Oblivion Remastered" tail
                 # — clear_fulfilled_wishlist_entries then deleted both,
-                # silently, on every sync (2026-08-07 diagnosis).
-                if await exact_name_owns_steam(prepared_title):
+                # silently, on every sync (2026-08-07 diagnosis). The guard
+                # also fires on a row whose steam appid identifier differs
+                # from this item's, owned or NOT — a refunded copy (ADR 0007)
+                # keeps its identifiers, and identity doesn't lapse with
+                # ownership.
+                if await exact_name_steam_conflict(prepared_title, appid):
                     raw_cleaned = _basic_whitespace_clean(raw_name)
-                    if raw_cleaned != prepared_title and not await exact_name_owns_steam(
-                        raw_cleaned
+                    if raw_cleaned != prepared_title and not await exact_name_steam_conflict(
+                        raw_cleaned, appid
                     ):
                         # The stripped suffix caused the collision (Oblivion
                         # Remastered case) — the raw, unstripped name is the

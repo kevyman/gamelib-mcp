@@ -556,6 +556,110 @@ class FetchSteamWishlistTests(ToolDBTestCase):
             )
         self.assertIsNotNone(still_there)
 
+    async def test_collision_guard_fires_on_refunded_row_with_different_appid(self):
+        # Identity doesn't lapse with ownership (ADR 0007): a REFUNDED copy
+        # (owned=0) keeps its steam appid identifier, and a wishlist item with
+        # a different appid attaching onto it by name is the same collapse as
+        # the owned case. The owned=1-only guard missed exactly this.
+        refunded_id = await seed_game("Dead Space")
+        platform_id = await add_platform(refunded_id, "steam", owned=0)
+        await add_identifier(platform_id, db_module.STEAM_APP_ID, "17470", is_primary=True)
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"response": {"items": [{"appid": 1693980}]}}
+
+        class _Client:
+            def __init__(self):
+                self.get = AsyncMock(return_value=_Resp())
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        with (
+            patch.object(steam_wishlist, "STEAM_API_KEY", "key"),
+            patch.object(steam_wishlist, "STEAM_ID", "id"),
+            patch.object(steam_wishlist.httpx, "AsyncClient", return_value=_Client()),
+            patch.object(steam_wishlist, "fetch_app_name", AsyncMock(return_value="Dead Space")),
+        ):
+            result = await steam_wishlist.fetch_wishlist()
+
+        self.assertEqual(result["added"], 1)
+        async with db_module.get_db() as db:
+            rows = await db.execute_fetchall("SELECT id FROM games WHERE name = 'Dead Space'")
+            wishlist_row = await db.execute_fetchone(
+                "SELECT game_id FROM game_wishlist WHERE store_identifier = ?", ("1693980",)
+            )
+        self.assertEqual(len(rows), 2)
+        self.assertNotEqual(wishlist_row["game_id"], refunded_id)
+
+    async def test_name_fallback_attaches_to_refunded_row_without_identifier(self):
+        # The allow case the guard must NOT block: a refunded steam row with
+        # NO stored appid is plausibly the same game (identifier never
+        # captured), and re-wishlisting it should keep history on one row.
+        refunded_id = await seed_game("Forgotten Refund")
+        await add_platform(refunded_id, "steam", owned=0)
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"response": {"items": [{"appid": 777001}]}}
+
+        class _Client:
+            def __init__(self):
+                self.get = AsyncMock(return_value=_Resp())
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        with (
+            patch.object(steam_wishlist, "STEAM_API_KEY", "key"),
+            patch.object(steam_wishlist, "STEAM_ID", "id"),
+            patch.object(steam_wishlist.httpx, "AsyncClient", return_value=_Client()),
+            patch.object(
+                steam_wishlist, "fetch_app_name", AsyncMock(return_value="Forgotten Refund")
+            ),
+        ):
+            result = await steam_wishlist.fetch_wishlist()
+
+        self.assertEqual(result["added"], 1)
+        async with db_module.get_db() as db:
+            rows = await db.execute_fetchall(
+                "SELECT id FROM games WHERE name = 'Forgotten Refund'"
+            )
+            wishlist_row = await db.execute_fetchone(
+                "SELECT game_id FROM game_wishlist WHERE store_identifier = ?", ("777001",)
+            )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(wishlist_row["game_id"], refunded_id)
+
+    async def test_duplicate_store_identifier_resolves_to_oldest_row(self):
+        # Prod holds duplicate (platform, store_identifier) pairs (the DL2 /
+        # D2R edition splits). The tie-break is the OLDEST wishlist row — the
+        # original entry, not a later minted artifact — pinned here so a
+        # future change is a decision, not an accident.
+        first = await seed_game("Edition Split A")
+        second = await seed_game("Edition Split B")
+        await db_module.upsert_wishlist_entry(
+            first, "steam", source="steam", store_identifier="888001"
+        )
+        await db_module.upsert_wishlist_entry(
+            second, "steam", source="steam", store_identifier="888001"
+        )
+        resolved = await db_module.get_wishlist_game_id_by_store_identifier("steam", "888001")
+        self.assertEqual(resolved, first)
+
     async def test_collision_guard_uses_raw_name_when_suffix_stripping_caused_it(self):
         # Issue #139 fix 1, Oblivion Remastered case: prepare_catalog_title
         # strips "Remastered", which would otherwise collide the 2026 remaster

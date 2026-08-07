@@ -296,24 +296,40 @@ async def get_game_by_name_exact(name: str) -> aiosqlite.Row | None:
         )
 
 
-async def exact_name_owns_steam(name: str) -> bool:
-    """True when some games row named exactly ``name`` already owns steam.
+async def exact_name_steam_conflict(name: str, appid: int | str) -> bool:
+    """True when attaching a steam item with ``appid`` onto the exact-name row
+    would collapse two different games.
 
-    Guards the wishlist name fallback (see ``fetch_wishlist``): Steam never
-    returns a game you already own on Steam in your wishlist, so an
-    exact-name match onto a row that owns steam under a DIFFERENT appid is
-    never the same game — it's the anti-collapse identity rule
-    ("name is a cross-platform key, never within-platform") being violated
-    within a single platform. Case-insensitive to match the exact-name
-    fallback it guards.
+    Guards the wishlist name fallback (see ``fetch_wishlist``). Two conflict
+    shapes, per the anti-collapse identity rule ("name is a cross-platform
+    key, never within-platform"):
+
+    - The exact-name row OWNS steam (owned=1): Steam never returns a game you
+      already own on Steam in your wishlist, so the wishlisted item cannot be
+      that game, whatever identifiers it carries.
+    - The exact-name row has a steam platform row carrying a steam_appid
+      identifier DIFFERENT from ``appid`` — owned or not. Ownership status is
+      irrelevant to identity: a refunded copy (owned=0, ADR 0007) keeps its
+      identifiers, and attaching a different appid onto it is the same
+      Dead-Space-style collapse with extra steps.
+
+    A steam row that is owned=0 with NO stored appid does NOT conflict: it is
+    plausibly the same game (previously refunded, identifier never captured),
+    and re-wishlisting it should keep its history on one row. Case-insensitive
+    to match the exact-name fallback it guards.
     """
     async with get_db() as db:
         row = await db.execute_fetchone(
             """SELECT 1 FROM games g
-               JOIN game_platforms gp ON gp.game_id = g.id
-               WHERE lower(g.name) = lower(?) AND gp.platform = ? AND gp.owned = 1
+               JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = ?
+               LEFT JOIN game_platform_identifiers gpi
+                 ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
+               WHERE lower(g.name) = lower(?)
+                 AND (gp.owned = 1
+                      OR (gpi.identifier_value IS NOT NULL
+                          AND gpi.identifier_value != ?))
                LIMIT 1""",
-            (name, STEAM_PLATFORM),
+            (STEAM_PLATFORM, STEAM_APP_ID, name, str(appid)),
         )
         return row is not None
 

@@ -2466,7 +2466,7 @@ from .queries import (
     _coerce_identifier_value,
     _platform_dict,
     edition_hides_owned_game,
-    exact_name_owns_steam,
+    exact_name_steam_conflict,
     get_game_by_appid,
     get_game_by_identifier,
     get_game_by_igdb_id,
