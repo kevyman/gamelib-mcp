@@ -60,6 +60,7 @@ from .db import (
     get_game_by_identifier,
     upsert_game,
     upsert_wishlist_entry,
+    wishlist_entry_exists,
 )
 from .steam_session import _USER_AGENT as _STEAM_USER_AGENT
 from .steam_session import (
@@ -348,6 +349,15 @@ async def fetch_wishlist() -> dict:
     an "unconfigured" status dict (matching sync_dekudeals_wishlist's shape)
     if STEAM_API_KEY/STEAM_ID aren't set. removed is 0 whenever the removal
     reconciliation didn't run (see module docstring).
+
+    added/matched report what happened to the WISHLIST row: added = a
+    game_wishlist row was minted this run, matched = the row already existed
+    and was updated in place. They deliberately do NOT report how the game
+    row was resolved — wishlist-only games have no game_platforms/identifier
+    rows, so every unowned item resolves by name on every sync, and counting
+    that as "added" made a routine no-op re-sync read as 171 additions
+    (2026-08-06 prod test) and left added useless for spotting genuinely new
+    items.
     """
     steam_api_key = os.getenv("STEAM_API_KEY", STEAM_API_KEY)
     steam_id = os.getenv("STEAM_ID", STEAM_ID)
@@ -371,7 +381,10 @@ async def fetch_wishlist() -> dict:
         items = resp.json().get("response", {}).get("items", [])
 
         added = matched = skipped = 0
-        fallback_now = datetime.now(UTC).isoformat()
+        # Second precision to match what the Steam sync writes from date_added
+        # (epoch seconds) — a manual add and a synced row shouldn't be
+        # distinguishable by timestamp format.
+        fallback_now = datetime.now(UTC).isoformat(timespec="seconds")
         resolved_game_ids: set[int] = set()
         all_resolved = True
 
@@ -383,25 +396,30 @@ async def fetch_wishlist() -> dict:
                 continue
             item_added_at = _parse_steam_added_at(item.get("date_added")) or fallback_now
 
+            # Resolve the game row: stable store identifier first (only games
+            # with a platform row have one), then the name fallback wishlist-only
+            # games always take.
             existing = await get_game_by_identifier(STEAM_APP_ID, str(appid))
             if existing is not None:
-                await upsert_wishlist_entry(
-                    existing["id"], "steam", wishlisted_at=item_added_at, source="steam", store_identifier=str(appid)
-                )
+                game_id = existing["id"]
+            else:
+                name = await fetch_app_name(appid, client=client)
+                prepared_title = prepare_catalog_title(name) if name else None
+                if prepared_title is None:
+                    skipped += 1
+                    all_resolved = False
+                    continue
+                game_id = await upsert_game(appid, prepared_title)
+
+            # Count by what happens to the wishlist row, not by how the game
+            # resolved (see docstring).
+            if await wishlist_entry_exists(game_id, "steam"):
                 matched += 1
-                resolved_game_ids.add(existing["id"])
-                continue
-
-            name = await fetch_app_name(appid, client=client)
-            prepared_title = prepare_catalog_title(name) if name else None
-            if prepared_title is None:
-                skipped += 1
-                all_resolved = False
-                continue
-
-            game_id = await upsert_game(appid, prepared_title)
-            await upsert_wishlist_entry(game_id, "steam", wishlisted_at=item_added_at, source="steam", store_identifier=str(appid))
-            added += 1
+            else:
+                added += 1
+            await upsert_wishlist_entry(
+                game_id, "steam", wishlisted_at=item_added_at, source="steam", store_identifier=str(appid)
+            )
             resolved_game_ids.add(game_id)
 
     removed = 0

@@ -719,8 +719,12 @@ async def upsert_wishlist_entry(
     platform relationship exists" (owned, or a manual stub). source records
     where the entry came from (e.g. "steam", "dekudeals", "manual").
     store_identifier captures the store's own ID (e.g. Steam appid) at sync time.
+
+    The default wishlisted_at uses second precision to match what the syncs
+    write (Steam date_added is epoch seconds) — a manual add shouldn't be
+    distinguishable from a synced row by timestamp format.
     """
-    now = wishlisted_at or datetime.now(UTC).isoformat()
+    now = wishlisted_at or datetime.now(UTC).isoformat(timespec="seconds")
     async with get_db() as db:
         await db.execute(
             """INSERT INTO game_wishlist (game_id, platform, wishlisted_at, source, store_identifier)

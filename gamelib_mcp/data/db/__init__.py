@@ -2487,6 +2487,7 @@ from .queries import (
     nesting_substance_conflict,
     set_meta,
     set_meta_many,
+    wishlist_entry_exists,
 )
 from .upserts import (
     ACQUISITION_FIELDS,
