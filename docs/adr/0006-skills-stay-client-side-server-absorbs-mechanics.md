@@ -1,6 +1,7 @@
 # ADR 0006: Gaming skills stay client-side; the server absorbs their mechanics
 
-Status: accepted (2026-07-27)
+Status: accepted (2026-07-27); amended 2026-08-07 (decision 4b: `get_skill`
+tool + trigger stubs — see addendum at the end)
 
 Answers issue #114 (spike: should skills be served from the MCP server
 itself?). The bundle-evaluation skill issue should cite this ADR for where
@@ -173,3 +174,42 @@ hosts honor.
   budget discipline applies to the additions).
 - The skills become useless without the server reachable — accepted; every
   step of these workflows already depends on the MCP.
+
+## Addendum 2026-08-07: decision 4b — `get_skill` tool + trigger stubs
+
+Two facts have hardened since acceptance:
+
+1. **claude.ai's connector surface never hands the model `resources/read`.**
+   The "supports resources" in the host-support probe above means
+   *user-attachable* — the model itself sees only tools, so decision 4's
+   resources (and the server-instructions pointer at `skill://index.json`)
+   were unreachable from one of the two registered clients. Confirmed in a
+   live claude.ai session, 2026-08-07.
+2. **SEP-2640 was formally submitted** (modelcontextprotocol PR #2640,
+   2026-04-23, Extensions Track, still draft) and the Skills Over MCP
+   working group's own survey records the two ecosystem answers for
+   tools-only hosts: a tool shim over the same bytes (skillsovermcp.com
+   ships one per skill and calls it "a temporary shim"; the group's
+   approaches doc lists a `list_skills`/`read_skills` pair), and an
+   explicit rejection of archive packaging ("keep skills text-based").
+
+**Decision 4b.** The same bytes decision 4 serves as resources are also
+reachable through one read-only tool, `get_skill`: no arguments → the
+discovery index; `skill=` (+ optional `path=`) → one file's text. One
+mode-dispatch tool per ADR 0004 (not skillsovermcp's tool-per-skill shape:
+that pays entire skill bodies into `tools/list` on every connect and cannot
+reach supporting files), backed by the same lazy per-request disk scan in
+`skill_resources.py` so the two surfaces cannot drift. The server
+instructions point at both. The tool retires when a registered client
+speaks the ratified extension (ADR 0005 bar, unchanged).
+
+**Installed copies become trigger stubs.** `scripts/package_skills.py`
+generates, per skill, a stub SKILL.md — canonical frontmatter verbatim
+(the description is the auto-trigger surface) with a body that just says
+"call `get_skill(skill=...)` and follow the returned methodology" — plus a
+zip in claude.ai's Skills-upload format. Installed copies keep the
+client-side triggering magic (asymmetry 1) while the methodology they
+execute is always the canonical, current text; the "repo and installed
+copies can still diverge" consequence above now applies only to trigger
+text, which is the slow-moving part. Re-packaging and re-uploading remains
+a human act — no model on any host can install a skill.

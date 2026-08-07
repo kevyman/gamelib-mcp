@@ -484,6 +484,30 @@ class SessionIngestLinkResponse(FlexibleModel):
     expires_in_minutes: int
 
 
+class SkillIndexEntry(FlexibleModel):
+    name: str
+    description: str
+    version: str
+    # Relative paths accepted by get_skill(skill=..., path=...); the same
+    # files are served as skill://<name>/<path> resources.
+    files: list[str]
+
+
+class GetSkillResponse(FlexibleModel):
+    """get_skill in either mode (ADR 0006 decision 4b)."""
+
+    # Index mode (no arguments): every skill this server carries.
+    skills: list[SkillIndexEntry] | None = None
+    # Set only in index mode when the server has no skills directory at all —
+    # a deployment packaging bug worth surfacing over an empty list.
+    note: str | None = None
+    # File mode (skill= given): one file's text, to load into context.
+    skill: str | None = None
+    path: str | None = None
+    version: str | None = None
+    content: str | None = None
+
+
 class UpdateGameResponse(BatchEnvelope):
     game_id: int | None = None
     name: str | None = None

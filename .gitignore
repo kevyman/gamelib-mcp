@@ -20,3 +20,6 @@ gamelib.db
 # The Stacks build artifacts
 stacks/assets/
 stacks/.cover_cache/
+
+# scripts/package_skills.py output (generated skill stubs + upload zips)
+/dist/
