@@ -1,14 +1,18 @@
-"""Tests for the skill:// MCP resources (ADR 0006 decision 4)."""
+"""Tests for the skill:// MCP resources (ADR 0006 decision 4) and their
+tool twin, get_skill (decision 4b)."""
 
 import contextlib
+import importlib.util
 import json
 import re
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
 from fastmcp import Client, FastMCP
+from fastmcp.exceptions import ToolError
 
 from gamelib_mcp import skill_resources
 
@@ -378,6 +382,177 @@ class SkillToolReferenceDriftTests(unittest.IsolatedAsyncioTestCase):
             {},
             f"SKILL.md names pre-ADR-0004 tools that no longer exist: {offenders}",
         )
+
+
+class GetSkillToolTests(unittest.IsolatedAsyncioTestCase):
+    """get_skill (ADR 0006 decision 4b): the resources' tool twin, for hosts
+    whose model cannot call resources/read (claude.ai custom connectors)."""
+
+    async def test_index_mode_matches_resource_index(self) -> None:
+        from gamelib_mcp import main
+
+        response = await main.get_skill()
+        by_name = {entry.name: entry for entry in response.skills}
+
+        async with Client(main.mcp) as client:
+            content = await client.read_resource("skill://index.json")
+        resource_index = {entry["name"]: entry for entry in json.loads(content[0].text)}
+
+        self.assertEqual(set(by_name), set(resource_index))
+        for name, entry in by_name.items():
+            resource_entry = resource_index[name]
+            self.assertEqual(entry.description, resource_entry["description"])
+            self.assertEqual(entry.version, resource_entry["version"])
+            # The tool lists relative paths; the resource lists the same
+            # files as skill:// URIs.
+            self.assertEqual(
+                [f"skill://{name}/{rel}" for rel in entry.files],
+                resource_entry["files"],
+            )
+        self.assertIsNone(response.note)
+
+    async def test_file_mode_returns_exact_disk_bytes(self) -> None:
+        from gamelib_mcp import main
+
+        response = await main.get_skill(skill="game-quality")
+        on_disk = (
+            skill_resources.SKILLS_DIR / "game-quality" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(response.content, on_disk)
+        self.assertEqual(response.skill, "game-quality")
+        self.assertEqual(response.path, "SKILL.md")
+        self.assertEqual(response.version, "2.2.0")
+
+    async def test_wire_call_returns_structured_content(self) -> None:
+        from gamelib_mcp import main
+
+        async with Client(main.mcp) as client:
+            result = await client.call_tool("get_skill", {"skill": "backlog-triage"})
+        self.assertIn("name: backlog-triage", result.data.content)
+
+    async def test_skill_added_after_startup_is_served_without_restart(self) -> None:
+        # The tool re-scans the skills directory per call, unlike the
+        # resources (enumerated once at registration).
+        from gamelib_mcp import main
+
+        with (
+            tempfile_skill_layout() as skills_dir,
+            patch.object(skill_resources, "SKILLS_DIR", skills_dir),
+        ):
+            names = {entry.name for entry in (await main.get_skill()).skills}
+            self.assertEqual(names, {"demo-skill"})
+
+            late_dir = skills_dir / "late-skill"
+            late_dir.mkdir()
+            (late_dir / "SKILL.md").write_text(
+                '---\nname: late-skill\ndescription: Arrived late.\nversion: "0.1.0"\n---\n\nBody.\n',
+                encoding="utf-8",
+            )
+            names = {entry.name for entry in (await main.get_skill()).skills}
+            self.assertEqual(names, {"demo-skill", "late-skill"})
+            self.assertIn("Body.", (await main.get_skill(skill="late-skill")).content)
+
+    async def test_unknown_skill_is_a_tool_error_naming_available(self) -> None:
+        from gamelib_mcp import main
+
+        with self.assertRaises(ToolError) as ctx:
+            await main.get_skill(skill="no-such-skill")
+        self.assertIn("game-quality", str(ctx.exception))
+
+    async def test_unknown_path_is_a_tool_error_naming_files(self) -> None:
+        from gamelib_mcp import main
+
+        with self.assertRaises(ToolError) as ctx:
+            await main.get_skill(skill="game-quality", path="scripts/craft_score.py")
+        self.assertIn("SKILL.md", str(ctx.exception))
+
+    async def test_traversal_path_is_rejected(self) -> None:
+        # skills/README.md exists on disk one level above the skill dir; a
+        # free-form path must not be able to reach it (or anything else
+        # outside the scanned file list).
+        from gamelib_mcp import main
+
+        for attempt in ("../README.md", "/etc/hostname", "..\\README.md"):
+            with self.subTest(path=attempt), self.assertRaises(ToolError):
+                await main.get_skill(skill="game-quality", path=attempt)
+
+    async def test_path_without_skill_is_a_tool_error(self) -> None:
+        from gamelib_mcp import main
+
+        with self.assertRaises(ToolError):
+            await main.get_skill(path="README.md")
+
+    async def test_missing_skills_dir_returns_empty_index_with_note(self) -> None:
+        from gamelib_mcp import main
+
+        missing = Path("/nonexistent/definitely-not-here/skills")
+        with patch.object(skill_resources, "SKILLS_DIR", missing):
+            response = await main.get_skill()
+            self.assertEqual(response.skills, [])
+            self.assertIn("missing", response.note)
+
+            with self.assertRaises(ToolError) as ctx:
+                await main.get_skill(skill="game-quality")
+        self.assertIn("none", str(ctx.exception))
+
+    async def test_instructions_point_at_both_surfaces(self) -> None:
+        from gamelib_mcp.main import mcp
+
+        self.assertIn("get_skill", mcp.instructions)
+        self.assertIn("skill://index.json", mcp.instructions)
+
+
+class PackageSkillsScriptTests(unittest.TestCase):
+    """scripts/package_skills.py — the trigger-stub build for tools-only
+    hosts (claude.ai Skills zip upload, ~/.claude/skills copies)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        script = Path(__file__).resolve().parent.parent / "scripts" / "package_skills.py"
+        spec = importlib.util.spec_from_file_location("package_skills", script)
+        cls.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.module)
+
+    def test_stub_preserves_frontmatter_and_points_at_get_skill(self) -> None:
+        with (
+            tempfile_skill_layout() as skills_dir,
+            patch.object(skill_resources, "SKILLS_DIR", skills_dir),
+            tempfile.TemporaryDirectory() as out,
+        ):
+            zips = self.module.package_skills(Path(out))
+
+            stub = (Path(out) / "demo-skill" / "SKILL.md").read_text(encoding="utf-8")
+            fields = skill_resources._parse_frontmatter(stub)
+            self.assertEqual(fields["name"], "demo-skill")
+            self.assertEqual(fields["description"], "A demo skill.")
+            self.assertEqual(fields["version"], "1.0.0")
+            # The body is a pointer, not the methodology.
+            self.assertIn('get_skill(skill="demo-skill")', stub)
+            self.assertNotIn("Body.", stub)
+
+            self.assertEqual([z.name for z in zips], ["demo-skill.zip"])
+            with zipfile.ZipFile(zips[0]) as zf:
+                self.assertEqual(zf.namelist(), ["demo-skill/SKILL.md"])
+                self.assertEqual(zf.read("demo-skill/SKILL.md").decode("utf-8"), stub)
+
+    def test_real_skills_all_package_with_canonical_descriptions(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            self.module.package_skills(Path(out))
+            for skill_dir in sorted(skill_resources.SKILLS_DIR.glob("*/")):
+                if not (skill_dir / "SKILL.md").is_file():
+                    continue
+                canonical = skill_resources._parse_frontmatter(
+                    (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+                )
+                stub_path = Path(out) / canonical["name"] / "SKILL.md"
+                self.assertTrue(stub_path.is_file(), stub_path)
+                stub = skill_resources._parse_frontmatter(
+                    stub_path.read_text(encoding="utf-8")
+                )
+                # The description is the trigger surface — it must survive
+                # stub generation verbatim or auto-triggering degrades.
+                self.assertEqual(stub["description"], canonical["description"])
+                self.assertEqual(stub["version"], canonical["version"])
 
 
 class ParseFrontmatterTests(unittest.TestCase):

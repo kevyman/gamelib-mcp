@@ -60,6 +60,10 @@ EXPECTED_TOOLS = {
         },
         "required": set(),
     },
+    "get_skill": {
+        "params": {"skill", "path"},
+        "required": set(),
+    },
     "get_wishlist": {
         "params": {
             "platform", "with_prices", "max_price", "min_cut_pct", "refresh",
@@ -175,6 +179,9 @@ EXPECTED_ANNOTATIONS = {
     # Pure DB read — craft/fit inputs the caller can't compute locally come in
     # as parameters (web-searched review counts), never fetched here.
     "get_assessment_context": {"readOnlyHint": True, "idempotentHint": True},
+    # Serves the skills/ text from disk — the tool twin of the skill://
+    # resources for hosts whose model can't call resources/read (claude.ai).
+    "get_skill": {"readOnlyHint": True, "idempotentHint": True},
     # Absorbing get_wishlist_deals made this open-world: with_prices=True
     # live-fetches ITAD/DekuDeals. Still read-only.
     "get_wishlist": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
@@ -247,9 +254,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_30(self):
+    async def test_tool_count_is_31(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 30)
+        self.assertEqual(len(tools), 31)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()

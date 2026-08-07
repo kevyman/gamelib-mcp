@@ -1,4 +1,4 @@
-"""MCP resources serving the canonical text of the client-side gaming skills.
+"""MCP resources + tool backend serving the canonical gaming-skill text.
 
 ADR 0006 (docs/adr/0006-skills-stay-client-side-server-absorbs-mechanics.md)
 keeps the gaming skills' triggering and judgment layer client-side — no host
@@ -10,6 +10,15 @@ resources in the SEP-2640 ("Skills Extension", draft) URI shape:
 2025-11-25 protocol revision — no new methods, no ADR 0005 conflict — so any
 connected client can read/@-mention them on demand even without the skill
 installed locally.
+
+Decision 4b (2026-08-07 addendum): claude.ai's connector surface never hands
+the model ``resources/read`` — resources are user-attachable only — so the
+same bytes are also reachable through the ``get_skill`` tool (registered in
+``main.py``, backed by :func:`skill_index_payload` / :func:`read_skill_file`
+here). Both surfaces share :func:`_scan_skills`, so they cannot drift. The
+tool is the bridge for tools-only hosts, in the shape the Skills Over MCP
+working group records for exactly this gap; it retires when a registered
+client speaks the ratified extension.
 
 Skills live under ``skills/<skill-name>/`` at the repo root (a sibling of
 this package; wheel builds force-include a copy at ``gamelib_mcp/skills``
@@ -34,8 +43,11 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from fastmcp.exceptions import ToolError
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +110,61 @@ def _mime_type_for(path: Path) -> str:
     return guessed or "text/plain"
 
 
+@dataclass(frozen=True)
+class _SkillScan:
+    """One skill directory as found on disk right now."""
+
+    name: str
+    description: str
+    version: str
+    directory: Path
+    files: tuple[str, ...]  # relative POSIX paths, sorted
+
+
+def _scan_skills() -> list[_SkillScan]:
+    """Enumerate valid skill directories (has SKILL.md) under SKILLS_DIR.
+
+    The single source of truth for both the ``skill://`` resources (scanned
+    once at registration) and the ``get_skill`` tool (scanned fresh per call,
+    so a skill added after startup is discoverable without a restart).
+    Unreadable directories are skipped with a warning, mirroring the
+    fail-soft registration behavior.
+    """
+    if not SKILLS_DIR.is_dir():
+        return []
+
+    scans: list[_SkillScan] = []
+    for skill_dir in sorted(p for p in SKILLS_DIR.iterdir() if p.is_dir()):
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.is_file():
+            continue
+
+        try:
+            frontmatter = _parse_frontmatter(skill_md.read_text(encoding="utf-8"))
+        except OSError as exc:
+            logger.warning("Failed to read %s: %s", skill_md, exc)
+            continue
+
+        try:
+            files = sorted(p for p in skill_dir.rglob("*") if p.is_file())
+        except OSError as exc:
+            logger.warning("Failed to list files under %s: %s", skill_dir, exc)
+            continue
+        if not files:
+            continue
+
+        scans.append(
+            _SkillScan(
+                name=frontmatter.get("name") or skill_dir.name,
+                description=frontmatter.get("description", ""),
+                version=frontmatter.get("version", ""),
+                directory=skill_dir,
+                files=tuple(p.relative_to(skill_dir).as_posix() for p in files),
+            )
+        )
+    return scans
+
+
 def _register_skill_file_resource(
     mcp: Any, uri: str, skill_name: str, rel_path: str, file_path: Path
 ) -> None:
@@ -139,40 +206,18 @@ def register_skill_resources(mcp: Any) -> None:
 
     index: list[dict[str, Any]] = []
 
-    for skill_dir in sorted(p for p in SKILLS_DIR.iterdir() if p.is_dir()):
-        skill_md = skill_dir / "SKILL.md"
-        if not skill_md.is_file():
-            continue
-
-        try:
-            frontmatter = _parse_frontmatter(skill_md.read_text(encoding="utf-8"))
-        except OSError as exc:
-            logger.warning("Failed to read %s: %s", skill_md, exc)
-            continue
-
-        skill_name = frontmatter.get("name") or skill_dir.name
-
-        try:
-            files = sorted(p for p in skill_dir.rglob("*") if p.is_file())
-        except OSError as exc:
-            logger.warning("Failed to list files under %s: %s", skill_dir, exc)
-            continue
-
+    for scan in _scan_skills():
         file_uris: list[str] = []
-        for file_path in files:
-            rel_path = file_path.relative_to(skill_dir).as_posix()
-            uri = f"skill://{skill_name}/{rel_path}"
-            _register_skill_file_resource(mcp, uri, skill_name, rel_path, file_path)
+        for rel_path in scan.files:
+            uri = f"skill://{scan.name}/{rel_path}"
+            _register_skill_file_resource(mcp, uri, scan.name, rel_path, scan.directory / rel_path)
             file_uris.append(uri)
-
-        if not file_uris:
-            continue
 
         index.append(
             {
-                "name": skill_name,
-                "description": frontmatter.get("description", ""),
-                "version": frontmatter.get("version", ""),
+                "name": scan.name,
+                "description": scan.description,
+                "version": scan.version,
                 "files": file_uris,
             }
         )
@@ -182,3 +227,53 @@ def register_skill_resources(mcp: Any) -> None:
         return
 
     _register_index_resource(mcp, index)
+
+
+# ── get_skill tool backends (decision 4b) ─────────────────────────────────────
+
+
+def skill_index_payload() -> list[dict[str, Any]]:
+    """The ``get_skill()`` index: name, description, version, files per skill.
+
+    ``files`` are the relative paths ``get_skill(skill=..., path=...)``
+    accepts — the same files the resources serve as
+    ``skill://<name>/<path>``.
+    """
+    return [
+        {
+            "name": scan.name,
+            "description": scan.description,
+            "version": scan.version,
+            "files": list(scan.files),
+        }
+        for scan in _scan_skills()
+    ]
+
+
+def read_skill_file(skill: str, path: str = "SKILL.md") -> dict[str, Any]:
+    """Read one skill file for ``get_skill(skill=..., path=...)``.
+
+    Lookup is by the skill's frontmatter name (falling back to its directory
+    name), matching how the resources are keyed. ``path`` must be one of the
+    scanned relative paths — membership in that list is the whole
+    traversal guard, since the scan only ever yields paths inside the skill
+    directory (the resources never needed one because their URIs are
+    pre-enumerated, but a tool takes free-form input).
+    """
+    scans = _scan_skills()
+    scan = next((s for s in scans if s.name == skill), None)
+    if scan is None:
+        available = ", ".join(s.name for s in scans) or "none (no skills directory on server)"
+        raise ToolError(f"Unknown skill {skill!r}. Available skills: {available}")
+
+    if path not in scan.files:
+        raise ToolError(
+            f"Skill {skill!r} has no file {path!r}. Available files: {', '.join(scan.files)}"
+        )
+
+    return {
+        "skill": scan.name,
+        "path": path,
+        "version": scan.version,
+        "content": (scan.directory / path).read_text(encoding="utf-8"),
+    }
