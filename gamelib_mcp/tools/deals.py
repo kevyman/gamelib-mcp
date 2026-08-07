@@ -287,7 +287,9 @@ async def get_wishlist_deals(
     Four counters describe the capped per-title switch2 lookup queue:
     switch2_lookups_performed (priced THIS call), switch2_lookups_deferred
     (the backlog LEFT AFTER it — still no price and no recorded miss, picked
-    up by later calls), switch2_lookups_not_found (DekuDeals has no card for
+    up by later calls; never-priced candidates take the capped slots before
+    stale re-prices, so successive calls drain this instead of re-pricing the
+    same newest-wishlisted titles), switch2_lookups_not_found (DekuDeals has no card for
     the title; negatively cached for _SWITCH2_MISS_RETRY_HOURS so a permanent
     miss stops consuming a lookup slot every call, which refresh=True does NOT
     override) and switch2_availability_unknown (wishlist games with no IGDB
@@ -312,7 +314,8 @@ async def get_wishlist_deals(
     # Partition stale (game, platform) pricing needs by provider.
     steam_needs_refresh: dict[int, int] = {}      # appid -> game_id
     switch2_wishlist_needs: dict[int, str] = {}   # game_id -> name (on the deku wishlist page)
-    switch2_search_needs: dict[int, str] = {}     # game_id -> name (search lookup)
+    switch2_search_pending: dict[int, str] = {}   # game_id -> name (never priced)
+    switch2_search_stale: dict[int, str] = {}     # game_id -> name (stale re-price)
     availability_pending = 0
     switch2_availability_unknown = 0
     switch2_lookups_not_found = 0
@@ -352,8 +355,18 @@ async def get_wishlist_deals(
                     # point of the marker: a permanent miss must stop eating a
                     # capped lookup slot on every call.
                     switch2_lookups_not_found += 1
+                elif _has_cached_price(state, "switch2"):
+                    switch2_search_stale[game_id] = state["name"]
                 else:
-                    switch2_search_needs[game_id] = state["name"]
+                    switch2_search_pending[game_id] = state["name"]
+
+    # Never-priced candidates get first claim on the capped lookup slots;
+    # stale re-prices queue behind them (each sub-queue keeps the loader's
+    # newest-wishlisted-first order). As one wishlisted_at-DESC queue, the
+    # newest candidates went stale and re-took every slot on each call spaced
+    # past the price TTL, so the never-priced tail starved indefinitely — a
+    # stale price still serves from cache, but an unpriced game serves nothing.
+    switch2_search_needs = {**switch2_search_pending, **switch2_search_stale}
 
     # Whole per-title backlog for this call, kept before the cap truncates the
     # set actually looked up — the deferred counter is recomputed against it
