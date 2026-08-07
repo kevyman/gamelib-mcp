@@ -77,6 +77,14 @@ logger = logging.getLogger(__name__)
 COMPLETION_STATUSES = {"playing", "completed", "abandoned", "evergreen"}
 CONTENT_TYPES = PRIMARY_CONTENT_TYPES | NESTED_CONTENT_TYPES
 
+# ADR 0006 / issue #110 phase 1: hand-writable wishlist sources for
+# add_game_to_platform(owned=False). Deliberately excludes the sync-reserved
+# sources ("steam", "dekudeals") — a hand-written row claiming one of those
+# would become deletable by that sync's source-scoped removal reconciliation
+# (delete_stale_wishlist_entries), which assumes every row it didn't just see
+# is genuinely gone from the upstream list.
+WISHLIST_SOURCES = {"manual", "assessment"}
+
 
 async def get_platform_breakdown(overlap_limit: int = 25) -> dict:
     """
@@ -276,6 +284,7 @@ async def add_game_to_platform(
     *,
     dry_run: bool = False,
     push_to_store: bool = False,
+    wishlist_source: str | None = None,
 ) -> dict:
     """
     Manually add a game to a platform — useful for games that aren't fetched
@@ -303,6 +312,13 @@ async def add_game_to_platform(
         instead (playtime_minutes is ignored in that case). Either way, any
         existing wishlist entry for this game+platform that's now fulfilled is
         cleared.
+    wishlist_source: owned=False only. Labels the wishlist row's origin —
+        "manual" (default when omitted) for a hand-curated entry, "assessment"
+        for a promotion out of a game-quality verdict ("wishlist for sale" →
+        a price-watched row) so it stays distinct from hand-curated entries and
+        is bulk-removable later by source. Any other value is rejected,
+        including the sync-reserved sources ("steam", "dekudeals") — see
+        WISHLIST_SOURCES above for why.
     acquired_at / price_paid / price_currency / purchase_source / bundle_name:
         optional acquisition details recorded on the new ownership row, with
         the same validation and vocabulary as set_acquisition. They require
@@ -342,10 +358,13 @@ async def add_game_to_platform(
         DekuDeals has no wishlist write API, so store_push instead returns a
         DekuDeals search link to add it there by hand. Other platforms report
         no push available. dry_run never pushes — store_push is always None on
-        a dry run. A successful push still leaves the local row source="manual"
-        until the next sync(targets=["wishlist"]) re-observes it store-side and
-        converges it to source="steam" (game_wishlist is UNIQUE(game_id,
-        platform), so it's the same row either way).
+        a dry run. Composes orthogonally with wishlist_source — an
+        assessment-sourced row may also push — with no special-casing. A
+        successful push still leaves the local row's source whatever
+        wishlist_source resolved to (default "manual") until the next
+        sync(targets=["wishlist"]) re-observes it store-side and converges it
+        to source="steam" (game_wishlist is UNIQUE(game_id, platform), so it's
+        the same row either way).
     """
     if platform is None:
         raise ToolError("platform is required")
@@ -384,6 +403,19 @@ async def add_game_to_platform(
             "push_to_store pushes a wishlist add to the store — it requires "
             "owned=False"
         )
+    if wishlist_source is not None and owned:
+        raise ToolError(
+            "wishlist_source describes a wishlist entry — it requires owned=False"
+        )
+    resolved_wishlist_source = "manual"
+    if wishlist_source is not None:
+        normalized_wishlist_source = wishlist_source.strip().lower()
+        if normalized_wishlist_source not in WISHLIST_SOURCES:
+            raise ToolError(
+                f"Unknown wishlist_source '{wishlist_source}'. "
+                f"Valid: {sorted(WISHLIST_SOURCES)}"
+            )
+        resolved_wishlist_source = normalized_wishlist_source
     # "none" is the release sentinel (as on update_game's completion_status),
     # so it has to be recognized before the date validator sees it.
     restore_ownership = isinstance(unowned_at, str) and unowned_at.strip().lower() == "none"
@@ -474,6 +506,8 @@ async def add_game_to_platform(
             "unowned_at": None if restore_ownership else unowned_stamp,
             # dry_run never pushes, regardless of push_to_store.
             "store_push": None,
+            # Resolved value (defaults to "manual"); null when owned=True.
+            "wishlist_source": resolved_wishlist_source if not owned else None,
         }
 
     # An id target resolved above; a name target adopts an exact-name row or
@@ -557,7 +591,10 @@ async def add_game_to_platform(
                 store_identifier = str(push_appid)
         wishlist_id = (
             await upsert_wishlist_entry(
-                game_id, platform, source="manual", store_identifier=store_identifier
+                game_id,
+                platform,
+                source=resolved_wishlist_source,
+                store_identifier=store_identifier,
             )
         )["id"]
         if store_identifier:
@@ -656,6 +693,8 @@ async def add_game_to_platform(
         "delisted": delisted,
         "unowned_at": resulting_unowned_at,
         "store_push": store_push,
+        # Resolved value (defaults to "manual"); null when owned=True.
+        "wishlist_source": resolved_wishlist_source if not owned else None,
     }
 
 
@@ -1461,7 +1500,7 @@ _ADD_BATCH_ITEM_KEYS = frozenset({
     "name", "game_id", "platform", "identifier_type", "identifier_value",
     "playtime_minutes", "owned", "acquired_at", "price_paid",
     "price_currency", "purchase_source", "bundle_name", "delisted",
-    "unowned_at", "push_to_store",
+    "unowned_at", "push_to_store", "wishlist_source",
 })
 
 

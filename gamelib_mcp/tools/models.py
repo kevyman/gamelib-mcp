@@ -427,6 +427,10 @@ class AddGameToPlatformResponse(BatchEnvelope):
     # Single mode: push_to_store=True on a wet (non-dry-run) call only — null
     # otherwise (push_to_store=False, or dry_run even with push_to_store=True).
     store_push: StorePushResult | None = None
+    # Filled on owned=False results (single or per-item): the resolved
+    # game_wishlist.source value, "manual" when wishlist_source wasn't passed.
+    # Null when owned=True.
+    wishlist_source: str | None = None
 
 
 

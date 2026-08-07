@@ -115,6 +115,7 @@ class AddGameToPlatformTests(ToolDBTestCase):
                 "delisted",
                 "unowned_at",
                 "store_push",
+                "wishlist_source",
             },
         )
         self.assertTrue(result["created"])
