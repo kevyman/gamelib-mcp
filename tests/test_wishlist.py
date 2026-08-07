@@ -23,7 +23,15 @@ class UpsertWishlistEntryTests(ToolDBTestCase):
     async def test_lives_in_its_own_table_not_game_platforms(self):
         game_id = await seed_game("Wanted Game")
 
-        wishlist_id = await db_module.upsert_wishlist_entry(game_id, "switch2", source="manual")
+        upserted = await db_module.upsert_wishlist_entry(game_id, "switch2", source="manual")
+        self.assertTrue(upserted["created"])
+        wishlist_id = upserted["id"]
+        # A second upsert updates in place and says so — the sync counters
+        # read this flag, so it must be reported from the same transaction
+        # as the write (not a separate exists-check racing other writers).
+        self.assertFalse(
+            (await db_module.upsert_wishlist_entry(game_id, "switch2", source="manual"))["created"]
+        )
 
         async with db_module.get_db() as db:
             wishlist_row = await db.execute_fetchone(
@@ -346,8 +354,14 @@ class FetchSteamWishlistTests(ToolDBTestCase):
             patch.object(steam_wishlist.httpx, "AsyncClient", return_value=_Client()),
         ):
             result = await steam_wishlist.fetch_wishlist()
+            # added/matched count the WISHLIST row, not game resolution: the
+            # first sync mints the row (added), a re-sync updates it in place
+            # (matched). Before this split, a routine re-sync of a whole
+            # wishlist reported every unchanged row as "added".
+            resync = await steam_wishlist.fetch_wishlist()
 
-        self.assertEqual(result, {"added": 0, "matched": 1, "skipped": 0, "removed": 0})
+        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 0, "removed": 0})
+        self.assertEqual(resync, {"added": 0, "matched": 1, "skipped": 0, "removed": 0})
         async with db_module.get_db() as db:
             gp_row = await db.execute_fetchone(
                 "SELECT owned, playtime_minutes FROM game_platforms WHERE game_id = ?", (game_id,)
@@ -398,6 +412,61 @@ class FetchSteamWishlistTests(ToolDBTestCase):
         # A wishlist-only game has no game_platforms row at all.
         self.assertIsNone(gp_row)
         self.assertEqual(wishlist_row["source"], "steam")
+
+    async def test_resync_of_wishlist_only_game_counts_matched_not_added(self):
+        # The 2026-08-06 prod finding: a wishlist-only game (no game_platforms
+        # row, so no identifier row) resolves by NAME on every sync, and the
+        # old counters reported that as "added" forever — a full re-sync of a
+        # 171-row wishlist read as 171 additions / 0 matches.
+        game_id = await seed_game("Wishlist Only Resync")
+        await db_module.upsert_wishlist_entry(
+            game_id, "steam", source="steam", store_identifier="444"
+        )
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"response": {"items": [{"appid": 444}]}}
+
+        class _Client:
+            def __init__(self):
+                self.get = AsyncMock(return_value=_Resp())
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        with (
+            patch.object(steam_wishlist, "STEAM_API_KEY", "key"),
+            patch.object(steam_wishlist, "STEAM_ID", "id"),
+            patch.object(steam_wishlist.httpx, "AsyncClient", return_value=_Client()),
+            patch.object(
+                steam_wishlist, "fetch_app_name", AsyncMock(return_value="Wishlist Only Resync")
+            ),
+        ):
+            result = await steam_wishlist.fetch_wishlist()
+
+        self.assertEqual(result, {"added": 0, "matched": 1, "skipped": 0, "removed": 0})
+        async with db_module.get_db() as db:
+            rows = await db.execute_fetchall(
+                "SELECT id FROM game_wishlist WHERE game_id = ?", (game_id,)
+            )
+        self.assertEqual(len(rows), 1)
+
+    async def test_manual_wishlisted_at_default_is_second_precision(self):
+        # The Steam sync writes second-precision timestamps (epoch date_added);
+        # the manual-add default should be indistinguishable in format.
+        game_id = await seed_game("Precision Check")
+        await db_module.upsert_wishlist_entry(game_id, "steam", source="manual")
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT wishlisted_at FROM game_wishlist WHERE game_id = ?", (game_id,)
+            )
+        self.assertNotIn(".", row["wishlisted_at"])
 
     async def test_missing_credentials_reports_unconfigured(self):
         with (
