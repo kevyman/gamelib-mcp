@@ -23,7 +23,15 @@ class UpsertWishlistEntryTests(ToolDBTestCase):
     async def test_lives_in_its_own_table_not_game_platforms(self):
         game_id = await seed_game("Wanted Game")
 
-        wishlist_id = await db_module.upsert_wishlist_entry(game_id, "switch2", source="manual")
+        upserted = await db_module.upsert_wishlist_entry(game_id, "switch2", source="manual")
+        self.assertTrue(upserted["created"])
+        wishlist_id = upserted["id"]
+        # A second upsert updates in place and says so — the sync counters
+        # read this flag, so it must be reported from the same transaction
+        # as the write (not a separate exists-check racing other writers).
+        self.assertFalse(
+            (await db_module.upsert_wishlist_entry(game_id, "switch2", source="manual"))["created"]
+        )
 
         async with db_module.get_db() as db:
             wishlist_row = await db.execute_fetchone(

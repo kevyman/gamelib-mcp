@@ -60,7 +60,6 @@ from .db import (
     get_game_by_identifier,
     upsert_game,
     upsert_wishlist_entry,
-    wishlist_entry_exists,
 )
 from .steam_session import _USER_AGENT as _STEAM_USER_AGENT
 from .steam_session import (
@@ -411,15 +410,16 @@ async def fetch_wishlist() -> dict:
                     continue
                 game_id = await upsert_game(appid, prepared_title)
 
-            # Count by what happens to the wishlist row, not by how the game
-            # resolved (see docstring).
-            if await wishlist_entry_exists(game_id, "steam"):
-                matched += 1
-            else:
-                added += 1
-            await upsert_wishlist_entry(
+            # Count by what happened to the wishlist row, not by how the game
+            # resolved (see docstring). The upsert reports created atomically,
+            # so a concurrent sync/manual add can't skew the counters.
+            upserted = await upsert_wishlist_entry(
                 game_id, "steam", wishlisted_at=item_added_at, source="steam", store_identifier=str(appid)
             )
+            if upserted["created"]:
+                added += 1
+            else:
+                matched += 1
             resolved_game_ids.add(game_id)
 
     removed = 0

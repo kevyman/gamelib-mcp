@@ -697,19 +697,3 @@ async def load_wishlist_with_prices(platform: str | None) -> list[aiosqlite.Row]
         )
     return rows
 
-
-async def wishlist_entry_exists(game_id: int, platform: str) -> bool:
-    """True when a game_wishlist row already exists for (game_id, platform).
-
-    Lets the wishlist syncs count added (row minted this run) vs matched (row
-    re-observed and updated in place) by what actually happened to the WISHLIST
-    row — resolving the game via identifiers or name says nothing about whether
-    the wishlist entry itself is new, and wishlist-only games deliberately have
-    no game_platforms/identifier rows at all.
-    """
-    async with get_db() as db:
-        row = await db.execute_fetchone(
-            "SELECT 1 FROM game_wishlist WHERE game_id = ? AND platform = ?",
-            (game_id, platform),
-        )
-    return row is not None

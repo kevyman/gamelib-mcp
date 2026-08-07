@@ -711,8 +711,8 @@ async def upsert_wishlist_entry(
     wishlisted_at: str | None = None,
     source: str | None = None,
     store_identifier: str | None = None,
-) -> int:
-    """Insert or update a game_wishlist row and return its id.
+) -> dict:
+    """Insert or update a game_wishlist row; returns {"id": int, "created": bool}.
 
     Lives in its own table rather than game_platforms — a wishlist item may not
     be owned anywhere yet, and game_platforms rows are meant to mean "a real
@@ -720,12 +720,26 @@ async def upsert_wishlist_entry(
     where the entry came from (e.g. "steam", "dekudeals", "manual").
     store_identifier captures the store's own ID (e.g. Steam appid) at sync time.
 
+    created reports whether this call minted the row (vs updating one in
+    place) ATOMICALLY: the wishlist syncs count added/matched from it, and a
+    separate exists-then-upsert pair could misreport under a concurrent sync
+    or manual add (nothing serializes sync_wishlist). BEGIN IMMEDIATE makes
+    the read+write a single writer transaction from its first statement, so
+    it queues under busy_timeout instead of building a read snapshot a
+    concurrent commit invalidates (see the write-contention pattern in
+    CLAUDE.md).
+
     The default wishlisted_at uses second precision to match what the syncs
     write (Steam date_added is epoch seconds) — a manual add shouldn't be
     distinguishable from a synced row by timestamp format.
     """
     now = wishlisted_at or datetime.now(UTC).isoformat(timespec="seconds")
     async with get_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        existing = await db.execute_fetchone(
+            "SELECT id FROM game_wishlist WHERE game_id = ? AND platform = ?",
+            (game_id, platform),
+        )
         await db.execute(
             """INSERT INTO game_wishlist (game_id, platform, wishlisted_at, source, store_identifier)
                VALUES (?, ?, ?, ?, ?)
@@ -740,7 +754,7 @@ async def upsert_wishlist_entry(
             (game_id, platform),
         )
         await db.commit()
-        return row["id"]
+        return {"id": row["id"], "created": existing is None}
 
 
 async def clear_fulfilled_wishlist_entries(
