@@ -11,8 +11,10 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml  # transitively pinned via the MCP SDK stack; used to prove stub validity
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
+from mcp.shared.exceptions import McpError
 
 from gamelib_mcp import skill_resources
 
@@ -125,6 +127,38 @@ class SkillResourcesRegisteredTests(unittest.IsolatedAsyncioTestCase):
                 content = await client.read_resource("skill://demo-skill/SKILL.md")
 
         self.assertIn("Edited after registration.", content[0].text)
+
+    async def test_skill_added_after_startup_reaches_the_resource_surface_too(self) -> None:
+        # Enumeration is as fresh as content: the index rebuilds from disk
+        # per read, and the skill://{skill}/{path*} wildcard template serves
+        # files whose concrete URIs weren't registered at startup — so the
+        # resources never lag behind what get_skill's per-call scan reports.
+        with (
+            tempfile_skill_layout() as skills_dir,
+            patch.object(skill_resources, "SKILLS_DIR", skills_dir),
+        ):
+            mcp = FastMCP("test")
+            skill_resources.register_skill_resources(mcp)
+
+            late_dir = skills_dir / "late-skill"
+            late_dir.mkdir()
+            (late_dir / "SKILL.md").write_text(
+                '---\nname: late-skill\ndescription: Arrived late.\nversion: "0.1.0"\n---\n\nLate body.\n',
+                encoding="utf-8",
+            )
+
+            async with Client(mcp) as client:
+                index = json.loads(
+                    (await client.read_resource("skill://index.json"))[0].text
+                )
+                self.assertIn("late-skill", {entry["name"] for entry in index})
+
+                content = await client.read_resource("skill://late-skill/SKILL.md")
+                self.assertIn("Late body.", content[0].text)
+
+                # The whitelist guard holds on the template path as well.
+                with self.assertRaises(McpError):
+                    await client.read_resource("skill://late-skill/no-such-file.md")
 
 
 class SkillResourcesRealAppTests(unittest.IsolatedAsyncioTestCase):
@@ -513,6 +547,17 @@ class PackageSkillsScriptTests(unittest.TestCase):
         cls.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.module)
 
+    @staticmethod
+    def _strict_yaml_frontmatter(stub: str) -> dict:
+        """Parse a stub's frontmatter with a real YAML parser.
+
+        Deliberately NOT _parse_frontmatter: the upload target may parse
+        strictly, and the descriptions contain ': ' and quotes, so anything
+        short of valid YAML is a rejected zip (Codex P1 on PR #142).
+        """
+        block = stub.split("---\n")[1]
+        return yaml.safe_load(block)
+
     def test_stub_preserves_frontmatter_and_points_at_get_skill(self) -> None:
         with (
             tempfile_skill_layout() as skills_dir,
@@ -522,7 +567,7 @@ class PackageSkillsScriptTests(unittest.TestCase):
             zips = self.module.package_skills(Path(out))
 
             stub = (Path(out) / "demo-skill" / "SKILL.md").read_text(encoding="utf-8")
-            fields = skill_resources._parse_frontmatter(stub)
+            fields = self._strict_yaml_frontmatter(stub)
             self.assertEqual(fields["name"], "demo-skill")
             self.assertEqual(fields["description"], "A demo skill.")
             self.assertEqual(fields["version"], "1.0.0")
@@ -535,7 +580,7 @@ class PackageSkillsScriptTests(unittest.TestCase):
                 self.assertEqual(zf.namelist(), ["demo-skill/SKILL.md"])
                 self.assertEqual(zf.read("demo-skill/SKILL.md").decode("utf-8"), stub)
 
-    def test_real_skills_all_package_with_canonical_descriptions(self) -> None:
+    def test_real_skills_package_as_valid_yaml_with_canonical_descriptions(self) -> None:
         with tempfile.TemporaryDirectory() as out:
             self.module.package_skills(Path(out))
             for skill_dir in sorted(skill_resources.SKILLS_DIR.glob("*/")):
@@ -546,11 +591,13 @@ class PackageSkillsScriptTests(unittest.TestCase):
                 )
                 stub_path = Path(out) / canonical["name"] / "SKILL.md"
                 self.assertTrue(stub_path.is_file(), stub_path)
-                stub = skill_resources._parse_frontmatter(
+                stub = self._strict_yaml_frontmatter(
                     stub_path.read_text(encoding="utf-8")
                 )
                 # The description is the trigger surface — it must survive
-                # stub generation verbatim or auto-triggering degrades.
+                # stub generation verbatim (through a STRICT parser: the real
+                # descriptions embed ': ' and double quotes) or
+                # auto-triggering degrades.
                 self.assertEqual(stub["description"], canonical["description"])
                 self.assertEqual(stub["version"], canonical["version"])
 

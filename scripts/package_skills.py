@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import json
 import sys
 import zipfile
 from pathlib import Path
@@ -43,8 +44,14 @@ older memory of this skill's methodology.
 
 
 def build_stub(name: str, description: str, version: str) -> str:
+    # Scalars are JSON-encoded: a JSON string is a valid YAML double-quoted
+    # scalar, and the descriptions contain ": " (e.g. 'Triggers: "..."'),
+    # which a strict YAML parser rejects as a bare value — the canonical
+    # SKILL.md files get away with it only because skill hosts parse
+    # frontmatter leniently, and an upload target may not.
     frontmatter = (
-        f"---\nname: {name}\ndescription: {description}\nversion: \"{version}\"\n---\n\n"
+        f"---\nname: {json.dumps(name)}\ndescription: {json.dumps(description)}\n"
+        f"version: {json.dumps(version)}\n---\n\n"
     )
     return frontmatter + STUB_BODY_TEMPLATE.format(name=name, version=version)
 

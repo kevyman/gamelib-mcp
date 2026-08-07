@@ -32,7 +32,12 @@ not a skill directory and is skipped.
 
 Content is read from disk lazily, at request time, not captured into a
 closure at registration time — an edited skill file is served fresh without
-a server restart.
+a server restart. Enumeration is fresh too, on both surfaces: the tool and
+``skill://index.json`` rebuild from a disk scan per request, and a wildcard
+resource template (``skill://{skill}/{path*}``) serves any currently scanned
+file, so a skill added after startup is readable everywhere even though its
+concrete per-file resource URIs (the SEP-2640 enumerable shape) are only
+registered at startup.
 
 Fails soft: no ``skills/`` directory, or a directory with no valid skill
 subfolders, logs a warning and registers nothing (including no
@@ -181,9 +186,19 @@ def _register_skill_file_resource(
     )(_read_skill_file)
 
 
-def _register_index_resource(mcp: Any, index: list[dict[str, Any]]) -> None:
+def _register_index_resource(mcp: Any) -> None:
     def _skill_index() -> list[dict[str, Any]]:
-        return index
+        # Rebuilt from disk per read, mirroring skill_index_payload(), so the
+        # index and the get_skill tool always agree on what exists.
+        return [
+            {
+                "name": scan.name,
+                "description": scan.description,
+                "version": scan.version,
+                "files": [f"skill://{scan.name}/{rel}" for rel in scan.files],
+            }
+            for scan in _scan_skills()
+        ]
 
     mcp.resource(
         "skill://index.json",
@@ -196,6 +211,30 @@ def _register_index_resource(mcp: Any, index: list[dict[str, Any]]) -> None:
     )(_skill_index)
 
 
+def _register_wildcard_resource(mcp: Any) -> None:
+    """Catch-all template so files added after startup are still readable.
+
+    Concrete per-file resources are registered from the startup scan (the
+    SEP-2640 enumerable shape) and take precedence on exact URI match; this
+    template answers for anything the per-request scan knows that startup
+    didn't. Lookup is whitelisted against the scanned file list, same as
+    read_skill_file.
+    """
+
+    def _read_any_skill_file(skill: str, path: str) -> str:
+        scan = next((s for s in _scan_skills() if s.name == skill), None)
+        if scan is None or path not in scan.files:
+            raise ValueError(f"no such skill file: skill://{skill}/{path}")
+        return (scan.directory / path).read_text(encoding="utf-8")
+
+    mcp.resource(
+        "skill://{skill}/{path*}",
+        name="skill_file",
+        description="Any current file of a served gaming skill, looked up on demand.",
+        mime_type="text/plain",
+    )(_read_any_skill_file)
+
+
 def register_skill_resources(mcp: Any) -> None:
     """Register one ``skill://`` resource per skill file, plus ``skill://index.json``."""
     if not SKILLS_DIR.is_dir():
@@ -204,29 +243,18 @@ def register_skill_resources(mcp: Any) -> None:
         )
         return
 
-    index: list[dict[str, Any]] = []
-
-    for scan in _scan_skills():
-        file_uris: list[str] = []
+    scans = _scan_skills()
+    for scan in scans:
         for rel_path in scan.files:
             uri = f"skill://{scan.name}/{rel_path}"
             _register_skill_file_resource(mcp, uri, scan.name, rel_path, scan.directory / rel_path)
-            file_uris.append(uri)
 
-        index.append(
-            {
-                "name": scan.name,
-                "description": scan.description,
-                "version": scan.version,
-                "files": file_uris,
-            }
-        )
-
-    if not index:
+    if not scans:
         logger.warning("No skill files found under %s; no skill:// resources registered", SKILLS_DIR)
         return
 
-    _register_index_resource(mcp, index)
+    _register_index_resource(mcp)
+    _register_wildcard_resource(mcp)
 
 
 # ── get_skill tool backends (decision 4b) ─────────────────────────────────────
