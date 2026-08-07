@@ -241,6 +241,29 @@ async def get_game_by_appid(appid: int) -> aiosqlite.Row | None:
     return await get_game_by_identifier(STEAM_APP_ID, str(appid))
 
 
+async def get_wishlist_game_id_by_store_identifier(
+    platform: str, store_identifier: str
+) -> int | None:
+    """The game_id already wishlisted under this (platform, store_identifier).
+
+    Lets a re-synced wishlist-only item resolve without any name lookup: the
+    wishlist row itself already carries the store's id
+    (``game_wishlist.store_identifier``, captured on first sync), even though
+    the item has no ``game_platforms``/identifier row to key off of (it isn't
+    owned). ``ORDER BY id LIMIT 1`` guards against the rare duplicate-identifier
+    rows this table can carry (e.g. two wishlist entries minted onto separate
+    games rows for the same appid before this resolution path existed).
+    """
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            """SELECT game_id FROM game_wishlist
+               WHERE platform = ? AND store_identifier = ?
+               ORDER BY id ASC LIMIT 1""",
+            (platform, store_identifier),
+        )
+        return row["game_id"] if row else None
+
+
 async def get_game_by_igdb_id(igdb_id: int) -> aiosqlite.Row | None:
     async with get_db() as db:
         return await db.execute_fetchone(
@@ -271,6 +294,44 @@ async def get_game_by_name_exact(name: str) -> aiosqlite.Row | None:
             "SELECT * FROM games WHERE lower(name) = lower(?) ORDER BY id LIMIT 1",
             (name,),
         )
+
+
+async def exact_name_steam_conflict(name: str, appid: int | str) -> bool:
+    """True when attaching a steam item with ``appid`` onto the exact-name row
+    would collapse two different games.
+
+    Guards the wishlist name fallback (see ``fetch_wishlist``). Two conflict
+    shapes, per the anti-collapse identity rule ("name is a cross-platform
+    key, never within-platform"):
+
+    - The exact-name row OWNS steam (owned=1): Steam never returns a game you
+      already own on Steam in your wishlist, so the wishlisted item cannot be
+      that game, whatever identifiers it carries.
+    - The exact-name row has a steam platform row carrying a steam_appid
+      identifier DIFFERENT from ``appid`` — owned or not. Ownership status is
+      irrelevant to identity: a refunded copy (owned=0, ADR 0007) keeps its
+      identifiers, and attaching a different appid onto it is the same
+      Dead-Space-style collapse with extra steps.
+
+    A steam row that is owned=0 with NO stored appid does NOT conflict: it is
+    plausibly the same game (previously refunded, identifier never captured),
+    and re-wishlisting it should keep its history on one row. Case-insensitive
+    to match the exact-name fallback it guards.
+    """
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            """SELECT 1 FROM games g
+               JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = ?
+               LEFT JOIN game_platform_identifiers gpi
+                 ON gpi.game_platform_id = gp.id AND gpi.identifier_type = ?
+               WHERE lower(g.name) = lower(?)
+                 AND (gp.owned = 1
+                      OR (gpi.identifier_value IS NOT NULL
+                          AND gpi.identifier_value != ?))
+               LIMIT 1""",
+            (STEAM_PLATFORM, STEAM_APP_ID, name, str(appid)),
+        )
+        return row is not None
 
 
 async def get_platform_game_by_normalized_name(
