@@ -1201,7 +1201,9 @@ async def add_game_to_platform(
     origin: "manual" (default) for a hand-curated entry, or "assessment" for a
     promotion out of a game-quality verdict ("wishlist for sale" → a
     price-watched row) so it never blurs into hand-curated manual entries.
-    Sync-reserved sources (e.g. "steam", "dekudeals") are rejected.
+    Sync-reserved sources (e.g. "steam", "dekudeals") are rejected. New rows
+    only: an already-wishlisted game keeps its stored source, and the
+    response's wishlist_source reports the row's actual value.
 
     Pass `items` (max 200) — a list taking exactly the parameters above — to
     add many at once. created then counts items that minted a brand-new game

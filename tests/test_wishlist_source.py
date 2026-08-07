@@ -48,6 +48,50 @@ class WishlistSourceAssessmentTests(ToolDBTestCase):
         row = await _wishlist_row(gid, "steam")
         self.assertEqual(row["source"], "assessment")
 
+    async def test_promotion_preserves_existing_manual_provenance(self):
+        # Codex review finding on #141: promoting an already-wishlisted game
+        # must not relabel the existing row — a hand-curated manual entry
+        # would become assessment-bulk-removable. The write succeeds but the
+        # stored source wins, and the response reports it.
+        gid = await seed_game("Already Hand Wishlisted")
+        await platforms.add_game_to_platform(game_id=gid, platform="steam", owned=False)
+        result = await platforms.add_game_to_platform(
+            game_id=gid, platform="steam", owned=False, wishlist_source="assessment"
+        )
+        self.assertEqual(result["wishlist_source"], "manual")
+        row = await _wishlist_row(gid, "steam")
+        self.assertEqual(row["source"], "manual")
+
+    async def test_promotion_preserves_steam_sourced_provenance(self):
+        # A steam-sourced row relabeled "assessment" would silently leave the
+        # Steam sync's source-scoped removal reconciliation — removed upstream,
+        # it would linger locally forever. Provenance stays "steam".
+        gid = await seed_game("Steam Synced Wishlist Row")
+        await db_module.upsert_wishlist_entry(
+            gid, "steam", source="steam", store_identifier="424242"
+        )
+        result = await platforms.add_game_to_platform(
+            game_id=gid, platform="steam", owned=False, wishlist_source="assessment"
+        )
+        self.assertEqual(result["wishlist_source"], "steam")
+        row = await _wishlist_row(gid, "steam")
+        self.assertEqual(row["source"], "steam")
+
+    async def test_sync_upsert_still_overwrites_source(self):
+        # The preserve behavior is the MANUAL path only — the sync default
+        # (overwrite_source=True) must keep flipping assessment/manual rows to
+        # the sync's source on convergence.
+        gid = await seed_game("Converging Promotion")
+        await platforms.add_game_to_platform(
+            game_id=gid, platform="steam", owned=False, wishlist_source="assessment"
+        )
+        upserted = await db_module.upsert_wishlist_entry(
+            gid, "steam", source="steam", store_identifier="515151"
+        )
+        self.assertEqual(upserted["source"], "steam")
+        row = await _wishlist_row(gid, "steam")
+        self.assertEqual(row["source"], "steam")
+
     async def test_case_normalized(self):
         gid = await seed_game("Capitalized Source Game")
         result = await platforms.add_game_to_platform(

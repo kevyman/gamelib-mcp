@@ -318,7 +318,12 @@ async def add_game_to_platform(
         a price-watched row) so it stays distinct from hand-curated entries and
         is bulk-removable later by source. Any other value is rejected,
         including the sync-reserved sources ("steam", "dekudeals") — see
-        WISHLIST_SOURCES above for why.
+        WISHLIST_SOURCES above for why. Applies to a NEW row only: an
+        already-wishlisted game keeps its stored source (a hand write never
+        rewrites provenance — relabeling would make a hand-curated row
+        assessment-bulk-removable, or pull a steam-sourced row out of the
+        sync's removal reconciliation), and the response's wishlist_source
+        reports what the row actually holds.
     acquired_at / price_paid / price_currency / purchase_source / bundle_name:
         optional acquisition details recorded on the new ownership row, with
         the same validation and vocabulary as set_acquisition. They require
@@ -589,14 +594,20 @@ async def add_game_to_platform(
                             push_appid = None
             if push_appid is not None and store_identifier is None:
                 store_identifier = str(push_appid)
-        wishlist_id = (
-            await upsert_wishlist_entry(
-                game_id,
-                platform,
-                source=resolved_wishlist_source,
-                store_identifier=store_identifier,
-            )
-        )["id"]
+        # overwrite_source=False: an existing row keeps its provenance — a
+        # promotion onto an already-wishlisted game must not relabel a
+        # hand-curated row (making it assessment-bulk-removable) or pull a
+        # steam-sourced row out of removal reconciliation. The stored source
+        # comes back for the response echo.
+        wishlist_upsert = await upsert_wishlist_entry(
+            game_id,
+            platform,
+            source=resolved_wishlist_source,
+            store_identifier=store_identifier,
+            overwrite_source=False,
+        )
+        wishlist_id = wishlist_upsert["id"]
+        resolved_wishlist_source = wishlist_upsert["source"]
         if store_identifier:
             added_identifier = {"type": "steam_appid", "value": store_identifier}
 
