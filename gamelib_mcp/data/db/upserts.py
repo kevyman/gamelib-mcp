@@ -711,14 +711,28 @@ async def upsert_wishlist_entry(
     wishlisted_at: str | None = None,
     source: str | None = None,
     store_identifier: str | None = None,
+    *,
+    overwrite_source: bool = True,
 ) -> dict:
-    """Insert or update a game_wishlist row; returns {"id": int, "created": bool}.
+    """Insert or update a game_wishlist row; returns
+    {"id": int, "created": bool, "source": str | None}.
 
     Lives in its own table rather than game_platforms — a wishlist item may not
     be owned anywhere yet, and game_platforms rows are meant to mean "a real
     platform relationship exists" (owned, or a manual stub). source records
-    where the entry came from (e.g. "steam", "dekudeals", "manual").
-    store_identifier captures the store's own ID (e.g. Steam appid) at sync time.
+    where the entry came from (e.g. "steam", "dekudeals", "manual",
+    "assessment"). store_identifier captures the store's own ID (e.g. Steam
+    appid) at sync time.
+
+    overwrite_source=True (default, the sync behavior) stamps ``source`` even
+    onto an existing row — that's how a manual/assessment row converges to
+    source="steam" once the real Steam wishlist re-observes it. The manual
+    tool path passes False: an existing row's provenance is never rewritten by
+    a hand write, so promoting an already-wishlisted game can't relabel a
+    hand-curated entry (making it bulk-removable as an assessment row) or pull
+    a steam-sourced row out of the sync's source-scoped removal
+    reconciliation. The returned "source" is what the row actually holds after
+    the call — the preserved value when an update kept it.
 
     created reports whether this call minted the row (vs updating one in
     place) ATOMICALLY: the wishlist syncs count added/matched from it, and a
@@ -740,21 +754,24 @@ async def upsert_wishlist_entry(
             "SELECT id FROM game_wishlist WHERE game_id = ? AND platform = ?",
             (game_id, platform),
         )
+        # "source = source" (unqualified) keeps the EXISTING row's value on
+        # conflict; a fresh insert still records the passed source either way.
+        source_set = "excluded.source" if overwrite_source else "source"
         await db.execute(
-            """INSERT INTO game_wishlist (game_id, platform, wishlisted_at, source, store_identifier)
+            f"""INSERT INTO game_wishlist (game_id, platform, wishlisted_at, source, store_identifier)
                VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(game_id, platform) DO UPDATE SET
                    wishlisted_at = excluded.wishlisted_at,
-                   source = excluded.source,
+                   source = {source_set},
                    store_identifier = COALESCE(excluded.store_identifier, store_identifier)""",
             (game_id, platform, now, source, store_identifier),
         )
         row = await db.execute_fetchone(
-            "SELECT id FROM game_wishlist WHERE game_id = ? AND platform = ?",
+            "SELECT id, source FROM game_wishlist WHERE game_id = ? AND platform = ?",
             (game_id, platform),
         )
         await db.commit()
-        return {"id": row["id"], "created": existing is None}
+        return {"id": row["id"], "created": existing is None, "source": row["source"]}
 
 
 async def clear_fulfilled_wishlist_entries(
