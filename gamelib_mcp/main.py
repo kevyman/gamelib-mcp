@@ -1133,6 +1133,7 @@ async def add_game_to_platform(
     delisted: bool | None = None,
     unowned_at: str | None = None,
     push_to_store: bool = False,
+    wishlist_source: str | None = None,
     items: list[dict] | None = None,
     dry_run: bool = False,
 ) -> AddGameToPlatformResponse:
@@ -1196,6 +1197,14 @@ async def add_game_to_platform(
     explicitly asked (default False); dry_run never pushes (store_push is
     always null on a dry run).
 
+    wishlist_source (owned=False only) labels an owned=False wishlist entry's
+    origin: "manual" (default) for a hand-curated entry, or "assessment" for a
+    promotion out of a game-quality verdict ("wishlist for sale" → a
+    price-watched row) so it never blurs into hand-curated manual entries.
+    Sync-reserved sources (e.g. "steam", "dekudeals") are rejected. New rows
+    only: an already-wishlisted game keeps its stored source, and the
+    response's wishlist_source reports the row's actual value.
+
     Pass `items` (max 200) — a list taking exactly the parameters above — to
     add many at once. created then counts items that minted a brand-new game
     (vs matching an existing one by exact name). Per-item results carry status
@@ -1216,6 +1225,8 @@ async def add_game_to_platform(
     )
     if items is not None:
         return await _many(items, dry_run)
+    # wishlist_source: ADR 0006 / issue #110 phase 1 (assessment-verdict
+    # wishlist promotion) — passed by keyword since it's keyword-only on the impl.
     return await _add(
         name,
         platform,
@@ -1233,6 +1244,7 @@ async def add_game_to_platform(
         unowned_at,
         dry_run=dry_run,
         push_to_store=push_to_store,
+        wishlist_source=wishlist_source,
     )
 
 

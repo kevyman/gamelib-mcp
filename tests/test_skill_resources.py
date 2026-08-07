@@ -84,7 +84,7 @@ class SkillResourcesRegisteredTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("skill://backlog-triage/SKILL.md", backlog_entry["files"])
 
         quality_entry = by_name["game-quality"]
-        self.assertEqual(quality_entry["version"], "2.1.0")
+        self.assertEqual(quality_entry["version"], "2.2.0")
         self.assertEqual(quality_entry["files"], ["skill://game-quality/SKILL.md"])
 
         bundle_entry = by_name["bundle-evaluation"]
