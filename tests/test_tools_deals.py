@@ -610,6 +610,44 @@ class PreferenceAwareDealsTests(ToolDBTestCase):
 
         self.assertEqual(result["switch2_lookups_deferred"], deals._MAX_SWITCH2_SEARCH_LOOKUPS)
 
+    async def test_never_priced_candidates_get_cap_slots_before_stale_reprices(self):
+        # Root cause of a prod backlog pinned at ~47 for weeks: the lookup
+        # queue was one wishlisted_at-DESC list, so once the newest-wishlisted
+        # candidates were priced and their 12h TTL lapsed they re-took every
+        # capped slot on each call, starving the never-priced tail whenever
+        # calls arrive further apart than the TTL. Never-priced candidates
+        # must claim the slots first — a stale price still serves from cache.
+        cap = deals._MAX_SWITCH2_SEARCH_LOOKUPS
+        ids = await self._seed_search_candidates(cap + 3)
+        pending_ids, stale_ids = ids[:3], ids[3:]
+        now = datetime.now(UTC)
+        stale_fetch = (now - timedelta(hours=48)).isoformat()
+        async with db_module.get_db() as db:
+            for rank, gid in enumerate([*stale_ids, *pending_ids]):
+                # Stale-priced games newest-wishlisted, pending ones oldest —
+                # the exact order that starved the tail before the fix.
+                await db.execute(
+                    "UPDATE game_wishlist SET wishlisted_at = ? WHERE game_id = ?",
+                    ((now - timedelta(days=rank)).isoformat(), gid),
+                )
+            await db.commit()
+        for gid in stale_ids:
+            await _seed_price(gid, "switch2", "dekudeals", 12.0, fetched_at=stale_fetch)
+
+        with patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.fetch_search_prices",
+                   AsyncMock(side_effect=_price_every_requested_title)) as search, \
+             patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock(return_value={})), \
+             patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True):
+            result = await deals.get_wishlist_deals()
+
+        requested = search.await_args.args[0]
+        self.assertEqual(len(requested), cap)
+        for i in range(3):
+            self.assertIn(f"Cap Game {i}", requested)  # the never-priced three
+        # Everything never-priced was looked up this call, so no backlog left.
+        self.assertNotIn("switch2_lookups_deferred", result)
+
     async def test_deferred_counter_omitted_once_backlog_drains(self):
         await self._seed_search_candidates(2)
 
