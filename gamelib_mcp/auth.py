@@ -7,13 +7,16 @@ policy out of the tool-registration module.
 
 from __future__ import annotations
 
+import functools
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from fastmcp.server.auth import AuthContext, AuthProvider
+from fastmcp.server.auth.auth import PrivateKeyJWTClientAuthenticator
 from fastmcp.server.auth.providers.github import GitHubProvider
 
 AuthMode = Literal["oauth", "disabled"]
@@ -32,6 +35,51 @@ _ACCESS_TOKEN_LIFETIME_SECONDS = 30 * 24 * 60 * 60
 # Only consulted if the upstream provider returns a refresh_token — inert under an
 # OAuth App, live if this is ever migrated to a GitHub App with expiring tokens.
 _REFRESH_TOKEN_LIFETIME_SECONDS = 30 * 24 * 60 * 60
+
+
+def _normalize_token_audience(url: str) -> str:
+    """Collapse duplicate slashes in the path of a token-endpoint URL."""
+
+    scheme, sep, rest = url.partition("://")
+    if not sep:
+        return url
+    return scheme + sep + re.sub(r"/{2,}", "/", rest)
+
+
+def _patch_cimd_token_audience() -> None:
+    """Normalize the private_key_jwt audience FastMCP expects from CIMD clients.
+
+    FastMCP (≤3.4.6, CIMD is beta) builds it as ``f"{self.base_url}/token"``
+    (oauth_proxy/proxy.py), but ``base_url`` is a pydantic AnyHttpUrl that
+    stringifies a bare origin with a trailing slash, so the expected audience
+    becomes ``https://host//token``. ChatGPT signs its client assertion with the
+    single-slash token endpoint advertised in the discovery metadata, so every
+    private_key_jwt token exchange 401s (claude.ai is unaffected — its CIMD
+    document uses ``token_endpoint_auth_method: none``). Patching the class
+    attribute reaches FastMCP's own call site; a fixed upstream URL passes
+    through unchanged, at which point this shim can be deleted.
+    """
+
+    original = PrivateKeyJWTClientAuthenticator.__init__
+    if getattr(original, "_gamelib_audience_fix", False):
+        return
+
+    @functools.wraps(original)
+    def patched_init(
+        self: PrivateKeyJWTClientAuthenticator,
+        provider: Any,
+        cimd_manager: Any,
+        token_endpoint_url: str,
+    ) -> None:
+        original(
+            self,
+            provider,
+            cimd_manager,
+            _normalize_token_audience(token_endpoint_url),
+        )
+
+    patched_init._gamelib_audience_fix = True  # type: ignore[attr-defined]
+    PrivateKeyJWTClientAuthenticator.__init__ = patched_init  # type: ignore[method-assign]
 
 
 @dataclass(frozen=True)
@@ -60,6 +108,7 @@ class SecurityConfig:
         if self.oauth is None:
             return None
 
+        _patch_cimd_token_audience()
         return GitHubProvider(
             client_id=self.oauth.github_client_id,
             client_secret=self.oauth.github_client_secret,
