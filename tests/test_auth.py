@@ -11,7 +11,11 @@ from fastmcp import FastMCP
 from fastmcp.server.auth import AccessToken, AuthContext
 from key_value.aio.stores.memory import MemoryStore
 
-from gamelib_mcp.auth import load_security_config
+from gamelib_mcp.auth import (
+    _normalize_token_audience,
+    _patch_cimd_token_audience,
+    load_security_config,
+)
 
 
 def _oauth_environment() -> dict[str, str]:
@@ -326,3 +330,55 @@ print(json.dumps(result))
     outcome = json.loads(result.stdout)
 
     assert outcome == {"owner": True, "other_user": False, "no_token": False}
+
+
+def test_cimd_private_key_jwt_audience_is_normalized():
+    """The shim must undo FastMCP's double-slash CIMD token audience.
+
+    FastMCP builds the expected private_key_jwt audience as
+    ``f"{self.base_url}/token"`` (oauth_proxy/proxy.py); base_url stringifies
+    with a trailing slash, so ChatGPT's correctly-signed assertion
+    (aud = the advertised single-slash token endpoint) is rejected with 401.
+    """
+    from fastmcp.server.auth.auth import PrivateKeyJWTClientAuthenticator
+
+    config = load_security_config(_oauth_environment())
+    provider = config.build_auth_provider(client_storage=MemoryStore())
+
+    # The upstream call-site expression, verbatim. If this stops producing a
+    # double slash, upstream fixed the bug — delete _patch_cimd_token_audience.
+    upstream_audience = f"{provider.base_url}/token"
+    assert upstream_audience == "https://gamelibmcp.johnwilkos.com//token"
+
+    authenticator = PrivateKeyJWTClientAuthenticator(
+        provider=Mock(),
+        cimd_manager=Mock(),
+        token_endpoint_url=upstream_audience,
+    )
+
+    assert (
+        authenticator._token_endpoint_url == "https://gamelibmcp.johnwilkos.com/token"
+    )
+
+
+def test_cimd_audience_patch_is_idempotent():
+    from fastmcp.server.auth.auth import PrivateKeyJWTClientAuthenticator
+
+    _patch_cimd_token_audience()
+    patched_once = PrivateKeyJWTClientAuthenticator.__init__
+    _patch_cimd_token_audience()
+
+    assert PrivateKeyJWTClientAuthenticator.__init__ is patched_once
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://gamelibmcp.johnwilkos.com//token", "https://gamelibmcp.johnwilkos.com/token"),
+        ("https://gamelibmcp.johnwilkos.com/token", "https://gamelibmcp.johnwilkos.com/token"),
+        ("https://host///deep//path", "https://host/deep/path"),
+        ("no-scheme-passthrough", "no-scheme-passthrough"),
+    ],
+)
+def test_normalize_token_audience(url: str, expected: str):
+    assert _normalize_token_audience(url) == expected
