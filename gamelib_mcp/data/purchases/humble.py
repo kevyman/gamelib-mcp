@@ -7,17 +7,27 @@ JSON file shape as the Nintendo cookie files — set it with
 ``create_session_ingest_link(provider="humble")``.
 
 Record building:
-- Game keys in ``tpkd_dict.all_tpks`` are preferred — they are the actual
-  redeemable games. ``key_type`` maps to the library platform: "steam" →
-  steam, "gog" → gog, anything else (generic keys, origin, …) → "other".
-  Key-delivery suffixes ("… Steam Key", "… Registration Key") are Humble
-  packaging noise, not game identity, and are stripped from the title.
-- Orders without tpks fall back to ``subproducts``; those have no platform
-  signal, so they land on "other" (deliberately NOT guessed as steam).
-  A subproduct whose downloads are all non-game media (ebook/audio/video —
-  Humble Book Bundles have subproducts too) is excluded so novels never
-  become library games; a subproduct with no downloads at all is kept
-  (a bare key delivery is indistinguishable from a game there).
+- An order's games are the UNION of ``tpkd_dict.all_tpks`` (redeemable keys)
+  and ``subproducts`` (DRM-free downloads), de-duplicated. Neither side is a
+  superset: a Humble Monthly/Choice month mixes Steam keys with DRM-free-only
+  titles that appear solely as subproducts, and treating tpks as authoritative
+  dropped those with no record and no skip entry.
+- A key's ``key_type`` maps to the library platform: "steam" → steam, "gog" →
+  gog, anything else (generic keys, origin, …) → "other". Key-delivery
+  suffixes ("… Steam Key", "… Registration Key") are Humble packaging noise,
+  not game identity, and are stripped from the title.
+- Subproducts have no platform signal, so they land on "other" (deliberately
+  NOT guessed as steam). A subproduct whose downloads are all non-game media
+  (ebook/audio/video — Humble Book Bundles have subproducts too) is excluded
+  so novels never become library games; a subproduct with no downloads at all
+  is kept (a bare key delivery is indistinguishable from a game there).
+- De-duplication spans both sides and is what makes the union safe: Humble
+  lists the same game once per key and again per download platform, and since
+  the order price splits across the collected items, a missed duplicate
+  dilutes every real game's share. An entry is dropped when its normalized
+  title was already collected, or when its ``machine_name`` is an
+  already-collected one minus a delivery-channel tail ("crimsonland" vs
+  "crimsonland_steam", "reus" vs "reussteam").
 - In-game currency/consumable SKUs are excluded the same way (shared
   ``is_consumable_title``), including the tails Humble bolts onto a real game
   name ("Quake Champions Early Access plus 50 Shards, 100 Platinum, 2000
@@ -38,8 +48,9 @@ Record building:
   purchase_source "subscription"; everything else → "humble". amount_spent 0
   (freebies) → price 0.0. A missing currency is assumed USD.
 - Subscription plan payments ("Annual Plan", "12-Month Classic Plan",
-  "Month-to-Month Classic Plan") are separate game-less orders — the monthly
-  Choice drops themselves carry amount_spent 0. records_from_orders
+  "Month-to-Month Classic Plan") are separate game-less orders of category
+  "subscriptionplan" — the monthly Choice drops ("subscriptioncontent")
+  themselves carry amount_spent 0. records_from_orders
   attributes chronologically via a FIFO credit queue: each plan payment
   pushes N month-credits (its price split N ways), each zero-priced Choice
   drop consumes the oldest credit as its month price and splits it across
@@ -60,6 +71,7 @@ import httpx
 
 from gamelib_mcp.data.content import classify_title_override, match_addon_name
 from gamelib_mcp.data.db import default_data_dir
+from gamelib_mcp.data.title_normalization import normalize_search_text
 
 from . import PurchaseRecord, is_consumable_title, normalize_purchase_date
 
@@ -98,9 +110,13 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 # Raider Monthly Outlast Deluxe Edition Cross-Promo", "… 2 Card Packs
 # (Skyrim) …" consumables). Excluded like non-game media so their share of
 # the order price redistributes to the real games.
+# The launcher/runtime a subproduct list ships beside the game it needs
+# ("Uplay Client (will download latest version)") is a Windows download like
+# any other, so the media check below cannot see it — only the name can.
 _PROMO_NAME_RE = re.compile(
     r"cross-?promo|redemption deadline|key expiration|\bcard packs?\b"
-    r"|\bevent tickets?\b",
+    r"|\bevent tickets?\b"
+    r"|\b(?:uplay|origin|steam|rockstar(?: games)?|battle\.net|ea)\s+client\b",
     re.IGNORECASE,
 )
 
@@ -191,13 +207,90 @@ def _is_non_game_subproduct(sub: dict) -> bool:
     return bool(platforms) and platforms <= _NON_GAME_DOWNLOAD_PLATFORMS
 
 
+# Machine-name tails Humble appends when the same product appears once per
+# delivery channel ("crimsonland" → "crimsonland_steam"/"crimsonland_android",
+# "reus" → "reussteam", "almostthere_theplatformer" →
+# "almostthere_theplatformer_monthly_steam"). Used to recognize a subproduct
+# that is the DRM-free half of a key already collected, when the two carry
+# different human_names. Every leftover token must be a known tail, so
+# "fez" does NOT swallow a hypothetical "fez_2_steam".
+_MACHINE_NAME_TAILS = frozenset(
+    {
+        "steam", "gog", "origin", "uplay", "epic", "desura", "battlenet",
+        "android", "asm", "monthly", "choice", "key", "keys", "drmfree",
+        "download", "windows", "mac", "linux",
+    }
+)
+
+
+def _identity_key(title: str) -> str:
+    """Normalized identity for "is this the same product?" comparisons."""
+    return normalize_search_text(_clean_title(title))
+
+
+def _machine_name_variant_of(candidate: str, claimed: str) -> bool:
+    """True when ``candidate`` is ``claimed`` minus a delivery-channel tail."""
+    if not candidate or not claimed:
+        return False
+    if candidate == claimed:
+        return True
+    if not claimed.startswith(candidate):
+        return False
+    rest = claimed[len(candidate) :]
+    tokens = [token for token in rest.split("_") if token]
+    return bool(tokens) and all(token in _MACHINE_NAME_TAILS for token in tokens)
+
+
 def _order_games(order: dict) -> tuple[list[tuple[str, str]], list[str]]:
-    """Extract ([(title, platform)], excluded_non_game_titles) from an order —
-    tpks first, subproducts as the fallback."""
+    """Extract ([(title, platform)], excluded_non_game_titles) from an order.
+
+    Keys and subproducts are UNIONED, not alternatives. They overlap heavily —
+    a bundle lists the same game once per key and again per download platform —
+    but neither side is a superset: a Humble Monthly/Choice month routinely
+    mixes Steam keys with DRM-free-only titles that exist *only* as
+    subproducts (August 2019 Monthly delivered "DON'T GIVE UP" that way). The
+    old tpks-are-authoritative early return dropped every such title with no
+    record and no skip entry — invisible until someone noticed one game's
+    acquisition row was blank.
+
+    De-duplication is what makes the union safe. A subproduct is skipped when
+    its normalized title was already collected, or when its machine_name is an
+    already-collected one minus a delivery-channel tail. Without it the same
+    game would be counted once per download platform, and since the order
+    price splits across the collected items, every real game's share would be
+    diluted (a real PC-and-Android bundle listed all ten games twice, halving
+    each one's recorded spend). Keys are deliberately exempt from the check:
+    an order handing out a Steam key AND a GOG key for the same game grants
+    two real platform relationships, not one duplicate.
+    """
     games: list[tuple[str, str]] = []
     non_game: list[str] = []
-    tpks = (order.get("tpkd_dict") or {}).get("all_tpks") or []
-    for tpk in tpks:
+    seen_titles: set[str] = set()
+    seen_machine_names: list[str] = []
+
+    def register(entry: dict, name: str, platform: str) -> None:
+        """Collect one game and record what it was, for later de-duplication."""
+        identity = _identity_key(name)
+        machine_name = str(entry.get("machine_name") or "").lower()
+        if identity:
+            seen_titles.add(identity)
+        if machine_name:
+            seen_machine_names.append(machine_name)
+        games.append((_clean_title(name), platform))
+
+    def already_collected(entry: dict, name: str) -> bool:
+        """Whether an equivalent entry has already been collected."""
+        identity = _identity_key(name)
+        if identity and identity in seen_titles:
+            return True
+        machine_name = str(entry.get("machine_name") or "").lower()
+        return any(
+            _machine_name_variant_of(machine_name, claimed)
+            or _machine_name_variant_of(claimed, machine_name)
+            for claimed in seen_machine_names
+        )
+
+    for tpk in (order.get("tpkd_dict") or {}).get("all_tpks") or []:
         if not isinstance(tpk, dict):
             continue
         name = tpk.get("human_name")
@@ -206,12 +299,11 @@ def _order_games(order: dict) -> tuple[list[tuple[str, str]], list[str]]:
         if _PROMO_NAME_RE.search(name) or is_consumable_title(name):
             non_game.append(name.strip())
             continue
+        # Keys are never de-duplicated against each other: one order handing
+        # out a Steam key AND a GOG key for the same game grants two real
+        # platform relationships, and each deserves its own acquisition row.
         key_type = str(tpk.get("key_type") or "").lower()
-        games.append((_clean_title(name), _KEY_TYPE_TO_PLATFORM.get(key_type, "other")))
-    if games or non_game:
-        # tpks are authoritative when they yield anything — never also read
-        # subproducts (they mirror the same items).
-        return games, non_game
+        register(tpk, name, _KEY_TYPE_TO_PLATFORM.get(key_type, "other"))
 
     for sub in order.get("subproducts") or []:
         if not isinstance(sub, dict):
@@ -226,8 +318,10 @@ def _order_games(order: dict) -> tuple[list[tuple[str, str]], list[str]]:
         ):
             non_game.append(name.strip())
             continue
+        if already_collected(sub, name):
+            continue
         # No platform signal on a subproduct — "other" beats a wrong guess.
-        games.append((_clean_title(name), "other"))
+        register(sub, name, "other")
     return games, non_game
 
 
@@ -348,7 +442,14 @@ def records_from_orders(orders: list[dict]) -> tuple[list[PurchaseRecord], list[
             product.get("human_name") or order.get("gamekey") or "(unknown order)"
         )
         games, _ = _order_games(order)
-        is_plan = category.startswith("subscription") and not games
+        # A plan payment is its OWN category ("subscriptionplan"); the monthly
+        # drops are "subscriptioncontent". Keying on "subscription* with no
+        # games" instead made a Choice month whose content we failed to parse
+        # masquerade as a plan payment — silently pushing month credits a
+        # different month then consumed, and reporting the month under
+        # "plan payment" rather than as a drop that produced nothing. The
+        # no-games condition stays as a guard for the reverse shape.
+        is_plan = category == "subscriptionplan" and not games
         return category, name, games, is_plan
 
     ordered = sorted(

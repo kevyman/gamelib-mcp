@@ -712,6 +712,192 @@ class HumbleParserTests(unittest.TestCase):
         self.assertEqual(len(skipped), 1)
         self.assertIn("non-game item(s) excluded", skipped[0]["reason"])
 
+    def test_choice_month_keeps_drm_free_only_subproducts(self):
+        # Shape taken from a real August 2019 Humble Monthly order: Steam keys
+        # for most of the month, plus a DRM-free-only title ("DON'T GIVE UP")
+        # that exists solely as a subproduct. Treating tpks as authoritative
+        # dropped it with no record and no skip entry.
+        order = {
+            "product": {
+                "human_name": "August 2019 Humble Monthly",
+                "category": "subscriptioncontent",
+            },
+            "amount_spent": 12.00,
+            "currency": "USD",
+            "created": "2019-07-18T13:58:15",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {
+                        "human_name": "Kingdom Come: Deliverance",
+                        "key_type": "steam",
+                        "machine_name": "kingdomcome_deliverance_monthly_steam",
+                    },
+                    {
+                        "human_name": "Almost There: The Platformer",
+                        "key_type": "steam",
+                        "machine_name": "almostthere_theplatformer_monthly_steam",
+                    },
+                ]
+            },
+            "subproducts": [
+                # The DRM-free half of a key already collected — same game.
+                {
+                    "human_name": "Almost There: The Platformer",
+                    "machine_name": "almostthere_theplatformer",
+                    "downloads": [{"platform": "windows"}, {"platform": "linux"}],
+                },
+                {
+                    "human_name": "DON'T GIVE UP",
+                    "machine_name": "dontgiveup",
+                    "downloads": [{"platform": "windows"}],
+                },
+            ],
+        }
+
+        records, _ = humble_module.records_from_order(order)
+
+        self.assertEqual(
+            [(r.title, r.platform) for r in records],
+            [
+                ("Kingdom Come: Deliverance", "steam"),
+                ("Almost There: The Platformer", "steam"),
+                # No platform signal on a subproduct — never guessed as steam.
+                ("DON'T GIVE UP", "other"),
+            ],
+        )
+        self.assertEqual({r.purchase_source for r in records}, {"subscription"})
+        self.assertEqual(sum(r.price_paid for r in records), 12.00)
+
+    def test_same_game_listed_per_download_platform_counted_once(self):
+        # A PC-and-Android bundle lists every game twice in subproducts. Each
+        # collected item takes a share of the order price, so counting the
+        # duplicate halved every real game's recorded spend.
+        order = {
+            "product": {"human_name": "PC and Android 8", "category": "bundle"},
+            "amount_spent": 10.00,
+            "currency": "USD",
+            "created": "2013-11-19T00:00:00",
+            "subproducts": [
+                {
+                    "human_name": "Gemini Rue",
+                    "machine_name": "geminirue",
+                    "downloads": [{"platform": "windows"}],
+                },
+                {
+                    "human_name": "Gemini Rue",
+                    "machine_name": "geminirue_android",
+                    "downloads": [{"platform": "android"}],
+                },
+                {
+                    "human_name": "Little Inferno",
+                    "machine_name": "littleinferno",
+                    "downloads": [{"platform": "windows"}],
+                },
+            ],
+        }
+
+        records, _ = humble_module.records_from_order(order)
+
+        self.assertEqual([r.title for r in records], ["Gemini Rue", "Little Inferno"])
+        self.assertEqual([r.price_paid for r in records], [5.00, 5.00])
+
+    def test_key_and_subproduct_halves_dedupe_by_machine_name(self):
+        # Humble renames the DRM-free half often enough that titles alone
+        # don't always bridge the two ("reussteam" vs "reus"). The
+        # machine_name stem does — but only when everything left over is a
+        # delivery-channel tail, so a numbered sequel never gets swallowed.
+        order = {
+            "product": {"human_name": "Store Purchase", "category": "storefront"},
+            "amount_spent": 8.00,
+            "currency": "USD",
+            "created": "2014-05-05T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "Reus", "key_type": "steam", "machine_name": "reussteam"},
+                    {"human_name": "Fez II", "key_type": "steam", "machine_name": "fez_2_steam"},
+                ]
+            },
+            "subproducts": [
+                {
+                    "human_name": "Reus: DRM-Free Edition",
+                    "machine_name": "reus",
+                    "downloads": [{"platform": "windows"}],
+                },
+                {
+                    "human_name": "Fez",
+                    "machine_name": "fez",
+                    "downloads": [{"platform": "windows"}],
+                },
+            ],
+        }
+
+        records, _ = humble_module.records_from_order(order)
+
+        self.assertEqual([r.title for r in records], ["Reus", "Fez II", "Fez"])
+
+    def test_two_key_types_for_one_game_stay_two_records(self):
+        # De-duplication is a subproduct-side concern. An order handing out
+        # both a Steam and a GOG key for one game granted it on two platforms,
+        # and each needs its own acquisition row.
+        order = {
+            "product": {"human_name": "Two-Store Bundle", "category": "storefront"},
+            "amount_spent": 4.00,
+            "currency": "USD",
+            "created": "2018-06-06T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "Torchlight", "key_type": "steam",
+                     "machine_name": "torchlight_steam"},
+                    {"human_name": "Torchlight", "key_type": "gog",
+                     "machine_name": "torchlight_gog"},
+                ]
+            },
+            "subproducts": [
+                {
+                    "human_name": "Torchlight",
+                    "machine_name": "torchlight",
+                    "downloads": [{"platform": "windows"}],
+                }
+            ],
+        }
+
+        records, _ = humble_module.records_from_order(order)
+
+        self.assertEqual(
+            [(r.title, r.platform) for r in records],
+            [("Torchlight", "steam"), ("Torchlight", "gog")],
+        )
+
+    def test_launcher_subproduct_is_not_a_game(self):
+        order = {
+            "product": {"human_name": "Rayman Legends", "category": "storefront"},
+            "amount_spent": 15.00,
+            "currency": "USD",
+            "created": "2015-01-01T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {
+                        "human_name": "Rayman Legends",
+                        "key_type": "uplay",
+                        "machine_name": "raymanlegends_uplay",
+                    }
+                ]
+            },
+            "subproducts": [
+                {
+                    "human_name": "Uplay Client (will download latest version)",
+                    "machine_name": "uplayclient",
+                    "downloads": [{"platform": "windows"}],
+                }
+            ],
+        }
+
+        records, skipped = humble_module.records_from_order(order)
+
+        self.assertEqual([r.title for r in records], ["Rayman Legends"])
+        self.assertEqual(records[0].price_paid, 15.00)
+        self.assertIn("Uplay Client", skipped[0]["reason"])
+
     def test_monthly_plan_payment_funds_next_choice_drop(self):
         plan = {
             "product": {
@@ -820,6 +1006,44 @@ class HumbleParserTests(unittest.TestCase):
         self.assertEqual(len(gift_notes), 1)
         self.assertEqual(gift_notes[0]["description"], "Annual Plan")
         self.assertIn("2024-11-29", gift_notes[0]["reason"])
+
+    def test_content_order_without_games_is_not_read_as_a_plan_payment(self):
+        # A Choice month whose content we failed to extract must surface as a
+        # drop that produced nothing — not as a plan payment. Classifying any
+        # game-less subscription order as a plan let an unparsed month push
+        # month credits that a DIFFERENT month then consumed, so the money
+        # landed on the wrong games and the gap never showed up anywhere.
+        unparsed_drop = {
+            "product": {
+                "human_name": "Humble Choice April 2023",
+                "category": "subscriptioncontent",
+            },
+            "amount_spent": 11.99,
+            "currency": "USD",
+            "created": "2023-04-04T00:00:00",
+        }
+        later_drop = {
+            "product": {
+                "human_name": "Humble Choice May 2023",
+                "category": "subscriptioncontent",
+            },
+            "amount_spent": 0,
+            "currency": "USD",
+            "created": "2023-05-02T00:00:00",
+            "tpkd_dict": {"all_tpks": [{"human_name": "May Game", "key_type": "steam"}]},
+        }
+
+        records, skipped = humble_module.records_from_orders(
+            [unparsed_drop, later_drop]
+        )
+
+        # No phantom credit was minted, so May stays unfunded rather than
+        # quietly billing April's charge to it.
+        self.assertEqual([(r.title, r.price_paid) for r in records], [("May Game", 0.0)])
+        april = [s for s in skipped if s["description"] == "Humble Choice April 2023"]
+        self.assertEqual(len(april), 1)
+        self.assertIn("no game keys or subproducts", april[0]["reason"])
+        self.assertEqual([s for s in skipped if "plan payment" in s["reason"]], [])
 
     def test_pre_choice_monthly_orders_keep_their_own_price(self):
         # Old Humble Monthly charged the content order itself — a plan credit
