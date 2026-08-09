@@ -66,6 +66,7 @@ import logging
 import os
 import re
 from collections import deque
+from typing import NamedTuple
 
 import httpx
 
@@ -231,6 +232,28 @@ _MACHINE_NAME_TAILS = frozenset(
 )
 
 
+class _OrderGame(NamedTuple):
+    title: str
+    platform: str
+    # Steam appid off the key's own `steam_app_id`, when it carries one.
+    store_identifier: str | None
+
+
+def _tpk_steam_appid(tpk: dict, platform: str) -> str | None:
+    """The key's Steam appid, when it is a Steam key that carries one.
+
+    Humble's own record of WHICH Steam game a key unlocks — the one exact
+    identity signal in an order, where names are fragile. Scoped to Steam
+    keys on purpose: the value is meaningless on a GOG/Origin key, and the
+    batch writer reads a Humble record's identifier as a steam_appid.
+    """
+    if platform != "steam":
+        return None
+    raw = str(tpk.get("steam_app_id") or "").strip()
+    # Humble sends "" for a Steam key it has no appid for.
+    return raw if raw.isdigit() else None
+
+
 def _identity_key(title: str) -> str:
     """Normalized identity for "is this the same product?" comparisons."""
     return normalize_search_text(_clean_title(title))
@@ -249,8 +272,8 @@ def _machine_name_variant_of(candidate: str, claimed: str) -> bool:
     return bool(tokens) and all(token in _MACHINE_NAME_TAILS for token in tokens)
 
 
-def _order_games(order: dict) -> tuple[list[tuple[str, str]], list[str]]:
-    """Extract ([(title, platform)], excluded_non_game_titles) from an order.
+def _order_games(order: dict) -> tuple[list[_OrderGame], list[str]]:
+    """Extract ([_OrderGame], excluded_non_game_titles) from an order.
 
     Keys and subproducts are UNIONED, not alternatives. They overlap heavily —
     a bundle lists the same game once per key and again per download platform —
@@ -271,12 +294,14 @@ def _order_games(order: dict) -> tuple[list[tuple[str, str]], list[str]]:
     an order handing out a Steam key AND a GOG key for the same game grants
     two real platform relationships, not one duplicate.
     """
-    games: list[tuple[str, str]] = []
+    games: list[_OrderGame] = []
     non_game: list[str] = []
     seen_titles: set[str] = set()
     seen_machine_names: list[str] = []
 
-    def register(entry: dict, name: str, platform: str) -> None:
+    def register(
+        entry: dict, name: str, platform: str, store_identifier: str | None = None
+    ) -> None:
         """Collect one game and record what it was, for later de-duplication."""
         identity = _identity_key(name)
         machine_name = str(entry.get("machine_name") or "").lower()
@@ -284,7 +309,7 @@ def _order_games(order: dict) -> tuple[list[tuple[str, str]], list[str]]:
             seen_titles.add(identity)
         if machine_name:
             seen_machine_names.append(machine_name)
-        games.append((_clean_title(name), platform))
+        games.append(_OrderGame(_clean_title(name), platform, store_identifier))
 
     def already_collected(entry: dict, name: str) -> bool:
         """Whether an equivalent entry has already been collected."""
@@ -311,7 +336,8 @@ def _order_games(order: dict) -> tuple[list[tuple[str, str]], list[str]]:
         # out a Steam key AND a GOG key for the same game grants two real
         # platform relationships, and each deserves its own acquisition row.
         key_type = str(tpk.get("key_type") or "").lower()
-        register(tpk, name, _KEY_TYPE_TO_PLATFORM.get(key_type, "other"))
+        platform = _KEY_TYPE_TO_PLATFORM.get(key_type, "other")
+        register(tpk, name, platform, _tpk_steam_appid(tpk, platform))
 
     for sub in order.get("subproducts") or []:
         if not isinstance(sub, dict):
@@ -397,7 +423,7 @@ def records_from_order(
     shares = _split_amount(amount_spent, len(games))
 
     records = []
-    for (title, platform), share in zip(games, shares, strict=True):
+    for (title, platform, store_identifier), share in zip(games, shares, strict=True):
         # Humble has no per-item content typing — an addon-ish NAME is the
         # only nested signal, so DLC/soundtrack keys match exact-name-only
         # and mint nested instead of as phantom base games. Known DLC whose
@@ -418,6 +444,12 @@ def records_from_order(
                 price_currency=currency,
                 bundle_name=bundle_name,
                 content_type=addon[0] if addon is not None else None,
+                # The key's own Steam appid (Steam keys only) — the batch
+                # writer matches on it before any name tier, which is the
+                # difference between landing on the row that actually holds
+                # the Steam copy and landing on a same-game edition row that
+                # happens to own the title.
+                store_identifier=store_identifier,
                 # One key naming several games — divert to
                 # bundles_needing_split rather than minting a giant row.
                 is_bundle=_looks_like_enumerated_bundle(title),
@@ -443,7 +475,7 @@ def records_from_orders(orders: list[dict]) -> tuple[list[PurchaseRecord], list[
     month); leftover credits are months paid for but not (yet) delivered.
     """
 
-    def order_facts(order: dict) -> tuple[str, str, list[tuple[str, str]], bool]:
+    def order_facts(order: dict) -> tuple[str, str, list[_OrderGame], bool]:
         product = order.get("product") or {}
         category = str(product.get("category") or "").lower()
         name = str(

@@ -16,7 +16,13 @@ from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
 import httpx
-from conftest import ToolDBTestCase, add_identifier, add_platform, seed_game
+from conftest import (
+    ToolDBTestCase,
+    add_game_alias,
+    add_identifier,
+    add_platform,
+    seed_game,
+)
 from fastmcp.exceptions import ToolError
 
 from gamelib_mcp.data import db as db_module
@@ -95,12 +101,15 @@ class PurchaseRegistryTests(unittest.TestCase):
             IDENTIFIER_TYPES,
             {
                 "gog": db_module.GOG_PRODUCT_ID,
+                # A Humble key carries `steam_app_id` and no other id, so the
+                # source maps to steam_appid; only its steam records ever set
+                # store_identifier (enforced below).
+                "humble": db_module.STEAM_APP_ID,
                 "steam": db_module.STEAM_APP_ID,
             },
         )
-        # Humble orders and eShop transactions carry no store identifiers
-        # (the eShop GraphQL API exposes no product id) — deliberately no entry.
-        self.assertNotIn("humble", IDENTIFIER_TYPES)
+        # eShop transactions carry no store identifier (the GraphQL API
+        # exposes no product id) — deliberately no entry.
         self.assertNotIn("eshop", IDENTIFIER_TYPES)
         # Epic order items carry an offerId, but the library stores
         # epic_artifact_id — different id spaces, so deliberately no entry.
@@ -834,6 +843,82 @@ class HumbleParserTests(unittest.TestCase):
         records, _ = humble_module.records_from_order(order)
 
         self.assertEqual([r.title for r in records], ["Reus", "Fez II", "Fez"])
+
+    def test_steam_key_carries_its_appid_as_the_store_identifier(self):
+        # The one exact identity signal in a Humble order. Without it a key
+        # titled with an edition suffix matches by name/alias and can land on
+        # a same-game edition row that owns the title but not the Steam copy,
+        # so the acquisition goes nowhere.
+        order = {
+            "product": {
+                "human_name": "Humble Choice April 2023",
+                "category": "subscriptioncontent",
+            },
+            "amount_spent": 10.75,
+            "currency": "USD",
+            "created": "2023-04-04T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {
+                        "human_name": "DEATH STRANDING DIRECTOR'S CUT",
+                        "key_type": "steam",
+                        "steam_app_id": "1850570",
+                    },
+                    # Humble sends "" for a Steam key with no appid recorded.
+                    {"human_name": "Revita", "key_type": "steam", "steam_app_id": ""},
+                    # The value is meaningless off a Steam key, so it is
+                    # never carried — the writer would read it as an appid.
+                    {
+                        "human_name": "Some GOG Game",
+                        "key_type": "gog",
+                        "steam_app_id": "999999",
+                    },
+                ]
+            },
+        }
+
+        records, _ = humble_module.records_from_order(order)
+
+        self.assertEqual(
+            [(r.title, r.platform, r.store_identifier) for r in records],
+            [
+                ("DEATH STRANDING DIRECTOR'S CUT", "steam", "1850570"),
+                ("Revita", "steam", None),
+                ("Some GOG Game", "gog", None),
+            ],
+        )
+
+    def test_only_steam_records_carry_a_store_identifier(self):
+        # IDENTIFIER_TYPES maps the whole humble source to steam_appid, so a
+        # non-Steam record carrying an identifier would be matched against
+        # Steam appids. Nothing may set one.
+        order = {
+            "product": {"human_name": "Mixed Bundle", "category": "bundle"},
+            "amount_spent": 6.00,
+            "created": "2020-01-01T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "A Steam Game", "key_type": "steam",
+                     "steam_app_id": "123"},
+                    {"human_name": "A GOG Game", "key_type": "gog",
+                     "steam_app_id": "456"},
+                    {"human_name": "An Origin Game", "key_type": "origin",
+                     "steam_app_id": "789"},
+                ]
+            },
+            "subproducts": [
+                {"human_name": "A DRM-Free Game", "machine_name": "drmfreegame",
+                 "downloads": [{"platform": "windows"}]},
+            ],
+        }
+
+        records, _ = humble_module.records_from_order(order)
+
+        for record in records:
+            if record.platform != "steam":
+                self.assertIsNone(
+                    record.store_identifier, f"{record.title} ({record.platform})"
+                )
 
     def test_two_key_types_for_one_game_stay_two_records(self):
         # De-duplication is a subproduct-side concern. An order handing out
@@ -3429,6 +3514,100 @@ class ImportDryRunParityTests(ToolDBTestCase):
         async with db_module.get_db() as db:
             count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
         self.assertEqual(count["c"], 0)
+
+
+class HumbleSteamAppidMatchingTests(ToolDBTestCase):
+    """The appid on a Humble key resolves what its title cannot (issue: Humble
+    Choice acquisitions landing on the wrong row, or on none)."""
+
+    @staticmethod
+    def _humble_record(title, appid, **overrides):
+        fields = {
+            "title": title,
+            "platform": "steam",
+            "purchase_source": "subscription",
+            "acquired_at": "2023-04-04",
+            "price_paid": 1.34,
+            "price_currency": "USD",
+            "store_identifier": appid,
+        }
+        fields.update(overrides)
+        return PurchaseRecord(**fields)
+
+    async def test_edition_named_key_lands_on_the_row_holding_the_steam_copy(self):
+        # The real shape this was found in. The library holds TWO rows for the
+        # game: "Disco Elysium" (which owns the Steam copy) and "Disco Elysium:
+        # The Final Cut" (epic/switch only), and the second carries the exact
+        # alias Humble's key is titled with. Matching by name/alias therefore
+        # landed the Steam acquisition on the row with no Steam platform row,
+        # where — imports not creating platform rows — it was silently
+        # discarded. The appid points at the right row regardless.
+        steam_row_game = await seed_game("Disco Elysium")
+        gp = await add_platform(steam_row_game, "steam", playtime_minutes=3)
+        await add_identifier(gp, db_module.STEAM_APP_ID, "632470")
+
+        edition_row = await seed_game("Disco Elysium: The Final Cut")
+        await add_platform(edition_row, "epic")
+        await add_game_alias(edition_row, "Disco Elysium - The Final Cut")
+
+        records = [self._humble_record("Disco Elysium - The Final Cut", "632470")]
+        with _patch_fetchers(
+            fetch_humble_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["humble"])
+
+        humble = result["sources"]["humble"]
+        self.assertEqual(humble["filled"], 1)
+        self.assertEqual(humble["no_platform_row"], 0)
+        self.assertEqual(humble["created"], 0)
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                """SELECT game_id, acquired_at, price_paid, purchase_source
+                   FROM game_platforms WHERE platform = 'steam'""",
+            )
+        self.assertEqual(row["game_id"], steam_row_game)
+        self.assertEqual(row["acquired_at"], "2023-04-04")
+        self.assertEqual(row["purchase_source"], "subscription")
+
+    async def test_appid_beats_a_title_the_library_never_carried(self):
+        # "DEATH STRANDING DIRECTOR'S CUT" against a row named "DEATH
+        # STRANDING": the appid makes the match exact instead of relying on
+        # edition-suffix stripping.
+        game_id = await seed_game("DEATH STRANDING")
+        gp = await add_platform(game_id, "steam", playtime_minutes=513)
+        await add_identifier(gp, db_module.STEAM_APP_ID, "1850570")
+
+        records = [self._humble_record("DEATH STRANDING DIRECTOR'S CUT", "1850570")]
+        with _patch_fetchers(
+            fetch_humble_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["humble"])
+
+        humble = result["sources"]["humble"]
+        self.assertEqual((humble["filled"], humble["created"]), (1, 0))
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT price_paid, purchase_source FROM game_platforms "
+                "WHERE game_id = ? AND platform = 'steam'",
+                (game_id,),
+            )
+        self.assertEqual(row["price_paid"], 1.34)
+        self.assertEqual(row["purchase_source"], "subscription")
+
+    async def test_appid_miss_still_falls_through_to_name_matching(self):
+        # A first import can predate the sync that attaches the appid, so an
+        # identifier miss must not be terminal.
+        game_id = await seed_game("Revita")
+        await add_platform(game_id, "steam")
+
+        records = [self._humble_record("Revita", "1124260")]
+        with _patch_fetchers(
+            fetch_humble_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["humble"])
+
+        self.assertEqual(result["sources"]["humble"]["filled"], 1)
 
 
 class CreateMissingQualityTests(ToolDBTestCase):
