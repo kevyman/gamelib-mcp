@@ -1204,6 +1204,67 @@ class HumbleParserTests(unittest.TestCase):
             [s for s in skipped if s["description"] == "unrevealed-key detection"], []
         )
 
+    def test_unrevealed_key_does_not_take_its_drm_free_twin_down_with_it(self):
+        # A Monthly/Choice title often ships as BOTH a Steam key and a
+        # DRM-free download. If the key was never revealed but the download
+        # is there, the game is genuinely owned — so the key must not hold
+        # the de-duplication slot and then take the download with it when the
+        # gate drops it. The subproduct takes the slot instead: still ONE
+        # entry, so the order's price split is unchanged.
+        order = {
+            "product": {"human_name": "Monthly", "category": "subscriptioncontent"},
+            "amount_spent": 10.00,
+            "currency": "USD",
+            "created": "2019-07-18T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    self._key("Redeemed Game", revealed=True,
+                              machine_name="redeemed_monthly_steam"),
+                    self._key("Owned DRM-Free", machine_name="owneddrmfree_steam"),
+                ]
+            },
+            "subproducts": [
+                {
+                    "human_name": "Owned DRM-Free",
+                    "machine_name": "owneddrmfree",
+                    "downloads": [{"platform": "windows"}],
+                }
+            ],
+        }
+
+        records, skipped = humble_module.records_from_orders([order])
+
+        self.assertEqual(
+            [(r.title, r.platform) for r in records],
+            [("Redeemed Game", "steam"), ("Owned DRM-Free", "other")],
+        )
+        # Two entries, so the split is still 5.00/5.00 — the unrevealed key
+        # did not become an unattributed share.
+        self.assertEqual([r.price_paid for r in records], [5.00, 5.00])
+        self.assertEqual([s for s in skipped if "unrevealed key(s)" in s["reason"]], [])
+
+    def test_unrevealed_key_with_no_drm_free_twin_is_still_gated(self):
+        # The counterpart to the test above: with nothing but the key, there
+        # is no evidence of ownership and it stays gated.
+        order = {
+            "product": {"human_name": "Monthly", "category": "subscriptioncontent"},
+            "amount_spent": 10.00,
+            "currency": "USD",
+            "created": "2019-07-18T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    self._key("Redeemed Game", revealed=True),
+                    self._key("Never Touched"),
+                ]
+            },
+        }
+
+        records, skipped = humble_module.records_from_orders([order])
+
+        self.assertEqual([r.title for r in records], ["Redeemed Game"])
+        held = next(s for s in skipped if "unrevealed key(s)" in s["reason"])
+        self.assertIn("1 unrevealed key(s)", held["reason"])
+
     def test_drm_free_subproducts_are_never_gated_on_a_key_value(self):
         # A subproduct is a direct download, not a key — it has no reveal
         # state and is owned outright.
@@ -1497,6 +1558,42 @@ class HumbleFetchTests(unittest.IsolatedAsyncioTestCase):
             per_order_paths, ["/api/v1/order/abc123", "/api/v1/order/def456"]
         )
         self.assertEqual([r.title for r in records], ["Hollow Knight", "Celeste"])
+
+    async def test_unexpected_bulk_payload_shape_reaches_the_fallback(self):
+        # The fallback exists for exactly this: the undocumented endpoint
+        # answering 200 with valid JSON of a different shape. Validating that
+        # with an error the handler re-raises would take the whole import
+        # down instead of retrying the way that still works.
+        per_order_paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v1/user/order":
+                return httpx.Response(
+                    200,
+                    json=[{"gamekey": "abc123"}],
+                    headers={"content-type": "application/json"},
+                )
+            if request.url.path == "/api/v1/orders":
+                # A list, not the gamekey-keyed object.
+                return httpx.Response(
+                    200, json=[], headers={"content-type": "application/json"}
+                )
+            per_order_paths.append(request.url.path)
+            return httpx.Response(
+                200,
+                json=self._order_detail("Hollow Knight"),
+                headers={"content-type": "application/json"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp)
+            with patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": path}):
+                records, _ = await humble_module.fetch_humble_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
+
+        self.assertEqual(per_order_paths, ["/api/v1/order/abc123"])
+        self.assertEqual([r.title for r in records], ["Hollow Knight"])
 
     async def test_stale_session_is_not_retried_per_order(self):
         # An auth failure means the session expired. Falling back would be

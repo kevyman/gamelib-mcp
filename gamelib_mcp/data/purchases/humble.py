@@ -37,7 +37,10 @@ Record building:
   share is reported in ``skipped``. The gate is armed only when the WHOLE
   history contains at least one revealed key: if the field ever disappears
   from the payload, reading that as "every key is unredeemed" would import
-  nothing while reporting success, so its absence is reported instead.
+  nothing while reporting success, so its absence is reported instead. A
+  title delivered as BOTH an unrevealed key and a DRM-free download is owned
+  through the download, so there the subproduct takes the de-duplication slot
+  from the key — one entry either way, so the price split is unchanged.
 - In-game currency/consumable SKUs are excluded the same way (shared
   ``is_consumable_title``), including the tails Humble bolts onto a real game
   name ("Quake Champions Early Access plus 50 Shards, 100 Platinum, 2000
@@ -297,7 +300,9 @@ def _machine_name_variant_of(candidate: str, claimed: str) -> bool:
     return bool(tokens) and all(token in _MACHINE_NAME_TAILS for token in tokens)
 
 
-def _order_games(order: dict) -> tuple[list[_OrderGame], list[str]]:
+def _order_games(
+    order: dict, *, honor_revealed: bool = False
+) -> tuple[list[_OrderGame], list[str]]:
     """Extract ([_OrderGame], excluded_non_game_titles) from an order.
 
     Keys and subproducts are UNIONED, not alternatives. They overlap heavily —
@@ -318,11 +323,18 @@ def _order_games(order: dict) -> tuple[list[_OrderGame], list[str]]:
     each one's recorded spend). Keys are deliberately exempt from the check:
     an order handing out a Steam key AND a GOG key for the same game grants
     two real platform relationships, not one duplicate.
+
+    ``honor_revealed`` mirrors records_from_order's gate. It matters here
+    because a game delivered as BOTH an unrevealed key and a DRM-free
+    download is still owned through the download: with the gate armed the
+    subproduct takes the de-duplication slot from the key, so gating the key
+    out does not take the owned copy with it.
     """
     games: list[_OrderGame] = []
     non_game: list[str] = []
-    seen_titles: set[str] = set()
-    seen_machine_names: list[str] = []
+    # (normalized title, machine_name) per collected entry, positionally
+    # aligned with `games` so a later entry can replace an earlier one.
+    collected_keys: list[tuple[str, str]] = []
 
     def register(
         entry: dict,
@@ -332,27 +344,26 @@ def _order_games(order: dict) -> tuple[list[_OrderGame], list[str]]:
         revealed: bool = True,
     ) -> None:
         """Collect one game and record what it was, for later de-duplication."""
-        identity = _identity_key(name)
-        machine_name = str(entry.get("machine_name") or "").lower()
-        if identity:
-            seen_titles.add(identity)
-        if machine_name:
-            seen_machine_names.append(machine_name)
+        collected_keys.append(
+            (_identity_key(name), str(entry.get("machine_name") or "").lower())
+        )
         games.append(
             _OrderGame(_clean_title(name), platform, store_identifier, revealed)
         )
 
-    def already_collected(entry: dict, name: str) -> bool:
-        """Whether an equivalent entry has already been collected."""
+    def collected_index(entry: dict, name: str) -> int | None:
+        """Index of an equivalent entry already collected, if any."""
         identity = _identity_key(name)
-        if identity and identity in seen_titles:
-            return True
         machine_name = str(entry.get("machine_name") or "").lower()
-        return any(
-            _machine_name_variant_of(machine_name, claimed)
-            or _machine_name_variant_of(claimed, machine_name)
-            for claimed in seen_machine_names
-        )
+        for index, claimed_name in enumerate(collected_keys):
+            claimed_identity, claimed_machine = claimed_name
+            if identity and identity == claimed_identity:
+                return index
+            if _machine_name_variant_of(
+                machine_name, claimed_machine
+            ) or _machine_name_variant_of(claimed_machine, machine_name):
+                return index
+        return None
 
     for tpk in (order.get("tpkd_dict") or {}).get("all_tpks") or []:
         if not isinstance(tpk, dict):
@@ -389,7 +400,16 @@ def _order_games(order: dict) -> tuple[list[_OrderGame], list[str]]:
         ):
             non_game.append(name.strip())
             continue
-        if already_collected(sub, name):
+        index = collected_index(sub, name)
+        if index is not None:
+            if honor_revealed and not games[index].revealed:
+                # The key for this game was never revealed, but the DRM-free
+                # download beside it is owned outright. Letting the key hold
+                # the slot would drop BOTH when the unrevealed key is gated
+                # out, losing a game that is genuinely owned. The subproduct
+                # takes the slot instead — still one entry for the game, so
+                # the order's price split is unchanged.
+                games[index] = _OrderGame(_clean_title(name), "other", None, True)
             continue
         # No platform signal on a subproduct — "other" beats a wrong guess.
         register(sub, name, "other")
@@ -444,7 +464,7 @@ def records_from_order(
     order_name = product.get("human_name") or order.get("gamekey") or "(unknown order)"
     category = str(product.get("category") or "").lower()
 
-    games, non_game = _order_games(order)
+    games, non_game = _order_games(order, honor_revealed=honor_revealed)
     skipped: list[dict] = []
     if non_game:
         skipped.append(
@@ -573,7 +593,7 @@ def records_from_orders(orders: list[dict]) -> tuple[list[PurchaseRecord], list[
         name = str(
             product.get("human_name") or order.get("gamekey") or "(unknown order)"
         )
-        games, _ = _order_games(order)
+        games, _ = _order_games(order, honor_revealed=reveal_signal)
         # A plan payment is its OWN category ("subscriptionplan"); the monthly
         # drops are "subscriptioncontent". Keying on "subscription* with no
         # games" instead made a Choice month whose content we failed to parse
@@ -674,13 +694,24 @@ def records_from_orders(orders: list[dict]) -> tuple[list[PurchaseRecord], list[
     return records, skipped
 
 
+class HumbleAuthError(RuntimeError):
+    """Stale or missing session.
+
+    A distinct type so retry/fallback paths can tell "the session expired"
+    (retrying is pointless — it fails identically every time) apart from
+    "this endpoint answered oddly" (retrying another way is the whole point).
+    Subclasses RuntimeError so the orchestrator's per-source handling and
+    every existing caller are unaffected.
+    """
+
+
 def _check_auth(response: httpx.Response) -> None:
     if response.status_code in (401, 403):
-        raise RuntimeError(_AUTH_ERROR)
+        raise HumbleAuthError(_AUTH_ERROR)
     content_type = response.headers.get("content-type", "")
     if "text/html" in content_type or response.text.lstrip()[:1] == "<":
         # Unauthenticated API calls bounce to the HTML login page.
-        raise RuntimeError(_AUTH_ERROR)
+        raise HumbleAuthError(_AUTH_ERROR)
 
 
 def _chunked(items: list[str], size: int) -> list[list[str]]:
@@ -729,10 +760,10 @@ async def _fetch_order_chunk(
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
-            raise RuntimeError(
-                f"Unexpected Humble bulk-order payload: {type(payload).__name__}"
+            raise ValueError(
+                f"unexpected bulk-order payload: {type(payload).__name__}"
             )
-    except RuntimeError:
+    except HumbleAuthError:
         raise
     except Exception as exc:
         logger.warning(
