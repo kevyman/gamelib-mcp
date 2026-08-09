@@ -1092,6 +1092,140 @@ class HumbleParserTests(unittest.TestCase):
         self.assertEqual(gift_notes[0]["description"], "Annual Plan")
         self.assertIn("2024-11-29", gift_notes[0]["reason"])
 
+    @staticmethod
+    def _key(name, *, revealed=False, **extra):
+        tpk = {"human_name": name, "key_type": "steam", **extra}
+        if revealed:
+            tpk["redeemed_key_val"] = "AAAAA-BBBBB-CCCCC"
+        return tpk
+
+    def test_unrevealed_keys_record_no_ownership_but_keep_the_split_honest(self):
+        # A key Humble never revealed was never redeemed — the title was
+        # already owned elsewhere, or is being held to gift. Recording it
+        # would claim ownership the storefront sync never reported. It still
+        # takes its share of the split, so the redeemed games keep the price
+        # they actually cost instead of absorbing the vault's money.
+        order = {
+            "product": {"human_name": "Humble Choice", "category": "subscriptioncontent"},
+            "amount_spent": 12.00,
+            "currency": "USD",
+            "created": "2023-04-04T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    self._key("Redeemed Game", revealed=True),
+                    self._key("Already Owned Elsewhere"),
+                    self._key("Held To Gift"),
+                ]
+            },
+        }
+
+        records, skipped = humble_module.records_from_orders([order])
+
+        self.assertEqual([r.title for r in records], ["Redeemed Game"])
+        # 12.00 split three ways — the redeemed game keeps its own 4.00 share
+        # rather than inheriting the two it never paid for separately.
+        self.assertEqual(records[0].price_paid, 4.00)
+        held = [s for s in skipped if "unrevealed key(s)" in s["reason"]]
+        self.assertEqual(len(held), 1)
+        self.assertIn("2 unrevealed key(s)", held[0]["reason"])
+        self.assertIn("8.00 USD unattributed", held[0]["reason"])
+        self.assertIn("Already Owned Elsewhere", held[0]["reason"])
+
+    def test_expired_key_counts_as_unrevealed(self):
+        order = {
+            "product": {"human_name": "Old Bundle", "category": "bundle"},
+            "amount_spent": 4.00,
+            "currency": "USD",
+            "created": "2015-01-01T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    self._key("Live Key", revealed=True),
+                    self._key("Lapsed Key", revealed=True, is_expired=True),
+                ]
+            },
+        }
+
+        records, _ = humble_module.records_from_orders([order])
+
+        self.assertEqual([r.title for r in records], ["Live Key"])
+
+    def test_no_revealed_key_anywhere_means_the_field_is_gone_not_the_keys(self):
+        # The failure this guard exists for: Humble is under no obligation to
+        # keep sending redeemed_key_val. Reading its disappearance as "every
+        # key is unredeemed" would import NOTHING while reporting success —
+        # exactly the silent no-op that hid the original gap. With no reveal
+        # signal in the whole history, import everything and say so.
+        orders = [
+            {
+                "product": {"human_name": "Bundle A", "category": "bundle"},
+                "amount_spent": 5.00,
+                "currency": "USD",
+                "created": "2020-01-01T00:00:00",
+                "tpkd_dict": {"all_tpks": [self._key("Game A"), self._key("Game B")]},
+            },
+            {
+                "product": {"human_name": "Bundle B", "category": "bundle"},
+                "amount_spent": 5.00,
+                "currency": "USD",
+                "created": "2021-01-01T00:00:00",
+                "tpkd_dict": {"all_tpks": [self._key("Game C")]},
+            },
+        ]
+
+        records, skipped = humble_module.records_from_orders(orders)
+
+        self.assertEqual([r.title for r in records], ["Game A", "Game B", "Game C"])
+        notes = [s for s in skipped if s["description"] == "unrevealed-key detection"]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("treating redeemed_key_val as absent", notes[0]["reason"])
+
+    def test_one_revealed_key_anywhere_arms_the_gate_for_the_whole_history(self):
+        orders = [
+            {
+                "product": {"human_name": "Bundle A", "category": "bundle"},
+                "amount_spent": 5.00,
+                "currency": "USD",
+                "created": "2020-01-01T00:00:00",
+                "tpkd_dict": {"all_tpks": [self._key("Game A", revealed=True)]},
+            },
+            {
+                "product": {"human_name": "Bundle B", "category": "bundle"},
+                "amount_spent": 5.00,
+                "currency": "USD",
+                "created": "2021-01-01T00:00:00",
+                "tpkd_dict": {"all_tpks": [self._key("Game C")]},
+            },
+        ]
+
+        records, skipped = humble_module.records_from_orders(orders)
+
+        self.assertEqual([r.title for r in records], ["Game A"])
+        self.assertEqual(
+            [s for s in skipped if s["description"] == "unrevealed-key detection"], []
+        )
+
+    def test_drm_free_subproducts_are_never_gated_on_a_key_value(self):
+        # A subproduct is a direct download, not a key — it has no reveal
+        # state and is owned outright.
+        order = {
+            "product": {"human_name": "Monthly", "category": "subscriptioncontent"},
+            "amount_spent": 6.00,
+            "currency": "USD",
+            "created": "2019-07-18T00:00:00",
+            "tpkd_dict": {"all_tpks": [self._key("Keyed Game", revealed=True)]},
+            "subproducts": [
+                {
+                    "human_name": "DRM-Free Game",
+                    "machine_name": "drmfreegame",
+                    "downloads": [{"platform": "windows"}],
+                }
+            ],
+        }
+
+        records, _ = humble_module.records_from_orders([order])
+
+        self.assertEqual([r.title for r in records], ["Keyed Game", "DRM-Free Game"])
+
     def test_content_order_without_games_is_not_read_as_a_plan_payment(self):
         # A Choice month whose content we failed to extract must surface as a
         # drop that produced nothing — not as a plan payment. Classifying any

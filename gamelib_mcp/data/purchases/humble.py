@@ -28,6 +28,16 @@ Record building:
   title was already collected, or when its ``machine_name`` is an
   already-collected one minus a delivery-channel tail ("crimsonland" vs
   "crimsonland_steam", "reus" vs "reussteam").
+- A key Humble never revealed (no ``redeemed_key_val``, or expired) was never
+  redeemed — the title was already owned elsewhere, or is being held to gift.
+  It records NO ownership: the storefront sync is what proves what you own,
+  and writing the row would also bill this bundle's money to a copy that came
+  from somewhere else. It still takes its share of the order split, so the
+  redeemed games keep the price they actually cost, and the unattributed
+  share is reported in ``skipped``. The gate is armed only when the WHOLE
+  history contains at least one revealed key: if the field ever disappears
+  from the payload, reading that as "every key is unredeemed" would import
+  nothing while reporting success, so its absence is reported instead.
 - In-game currency/consumable SKUs are excluded the same way (shared
   ``is_consumable_title``), including the tails Humble bolts onto a real game
   name ("Quake Champions Early Access plus 50 Shards, 100 Platinum, 2000
@@ -237,6 +247,21 @@ class _OrderGame(NamedTuple):
     platform: str
     # Steam appid off the key's own `steam_app_id`, when it carries one.
     store_identifier: str | None
+    # False only for a key Humble never revealed — see _tpk_is_revealed.
+    revealed: bool = True
+
+
+def _tpk_is_revealed(tpk: dict) -> bool:
+    """Whether the key's value was ever shown, i.e. could have been redeemed.
+
+    ``redeemed_key_val`` is absent until Humble reveals the key, so its
+    absence is positive evidence the key was never used — the bundle title
+    already owned elsewhere, or kept to gift. An expired key is the same
+    thing with a deadline attached.
+    """
+    if tpk.get("is_expired"):
+        return False
+    return bool(str(tpk.get("redeemed_key_val") or "").strip())
 
 
 def _tpk_steam_appid(tpk: dict, platform: str) -> str | None:
@@ -300,7 +325,11 @@ def _order_games(order: dict) -> tuple[list[_OrderGame], list[str]]:
     seen_machine_names: list[str] = []
 
     def register(
-        entry: dict, name: str, platform: str, store_identifier: str | None = None
+        entry: dict,
+        name: str,
+        platform: str,
+        store_identifier: str | None = None,
+        revealed: bool = True,
     ) -> None:
         """Collect one game and record what it was, for later de-duplication."""
         identity = _identity_key(name)
@@ -309,7 +338,9 @@ def _order_games(order: dict) -> tuple[list[_OrderGame], list[str]]:
             seen_titles.add(identity)
         if machine_name:
             seen_machine_names.append(machine_name)
-        games.append(_OrderGame(_clean_title(name), platform, store_identifier))
+        games.append(
+            _OrderGame(_clean_title(name), platform, store_identifier, revealed)
+        )
 
     def already_collected(entry: dict, name: str) -> bool:
         """Whether an equivalent entry has already been collected."""
@@ -337,7 +368,13 @@ def _order_games(order: dict) -> tuple[list[_OrderGame], list[str]]:
         # platform relationships, and each deserves its own acquisition row.
         key_type = str(tpk.get("key_type") or "").lower()
         platform = _KEY_TYPE_TO_PLATFORM.get(key_type, "other")
-        register(tpk, name, platform, _tpk_steam_appid(tpk, platform))
+        register(
+            tpk,
+            name,
+            platform,
+            _tpk_steam_appid(tpk, platform),
+            revealed=_tpk_is_revealed(tpk),
+        )
 
     for sub in order.get("subproducts") or []:
         if not isinstance(sub, dict):
@@ -378,13 +415,30 @@ def _plan_month_count(name: str) -> int:
     return 1
 
 
+def order_reveals_any_key(order: dict) -> bool:
+    """Whether this order carries at least one revealed key value."""
+    return any(
+        isinstance(tpk, dict) and _tpk_is_revealed(tpk)
+        for tpk in (order.get("tpkd_dict") or {}).get("all_tpks") or []
+    )
+
+
 def records_from_order(
-    order: dict, *, price_override: tuple[float, str] | None = None
+    order: dict,
+    *,
+    price_override: tuple[float, str] | None = None,
+    honor_revealed: bool = False,
 ) -> tuple[list[PurchaseRecord], list[dict]]:
     """Convert one order-detail payload into (records, skipped).
 
     ``price_override`` = (amount, currency) replaces the order's own
     amount_spent/currency — how a plan credit funds a zero-priced Choice drop.
+
+    ``honor_revealed`` drops keys Humble never revealed. It defaults OFF and
+    only records_from_orders turns it on, because a single order cannot tell
+    an unredeemed key from a payload that stopped carrying redeemed_key_val
+    at all — and reading the second as the first would silently import
+    nothing. That judgement needs the whole history.
     """
     product = order.get("product") or {}
     order_name = product.get("human_name") or order.get("gamekey") or "(unknown order)"
@@ -423,7 +477,23 @@ def records_from_order(
     shares = _split_amount(amount_spent, len(games))
 
     records = []
-    for (title, platform, store_identifier), share in zip(games, shares, strict=True):
+    unrevealed: list[str] = []
+    unrevealed_total = 0.0
+    for (title, platform, store_identifier, revealed), share in zip(
+        games, shares, strict=True
+    ):
+        if honor_revealed and not revealed:
+            # A key Humble never revealed was never redeemed: the bundle
+            # title was already owned elsewhere, or it is being kept to gift.
+            # Recording it would claim ownership the storefront sync (which
+            # IS authoritative for what you own) never reported, and would
+            # attribute this bundle's money to a copy that came from
+            # somewhere else. It still takes its share of the split, so the
+            # redeemed games keep the price they actually cost — the share
+            # is reported rather than silently redistributed.
+            unrevealed.append(title)
+            unrevealed_total += share
+            continue
         # Humble has no per-item content typing — an addon-ish NAME is the
         # only nested signal, so DLC/soundtrack keys match exact-name-only
         # and mint nested instead of as phantom base games. Known DLC whose
@@ -455,6 +525,18 @@ def records_from_order(
                 is_bundle=_looks_like_enumerated_bundle(title),
             )
         )
+    if unrevealed:
+        skipped.append(
+            {
+                "description": str(order_name),
+                "reason": (
+                    f"{len(unrevealed)} unrevealed key(s) — never redeemed, so no "
+                    f"ownership recorded ({unrevealed_total:.2f} {currency} "
+                    f"unattributed): {', '.join(unrevealed[:5])}"
+                    + (", …" if len(unrevealed) > 5 else "")
+                ),
+            }
+        )
     return records, skipped
 
 
@@ -473,7 +555,17 @@ def records_from_orders(orders: list[dict]) -> tuple[list[PurchaseRecord], list[
     the oldest credit as its month price. Stacked plan purchases just queue
     more credits; a drop left without a credit stays price 0 (trial/free
     month); leftover credits are months paid for but not (yet) delivered.
+
+    The unrevealed-key gate is decided here, once, over the whole history: a
+    key with no revealed value was never redeemed, so recording it would
+    claim ownership the storefront sync never reported. But if NOTHING in the
+    entire history looks revealed, the field is missing rather than the keys
+    unredeemed — Humble is under no obligation to keep sending it — and
+    honoring the signal then would import nothing at all while reporting
+    success. So the gate applies only when the history proves the field
+    exists, and its absence is reported instead of assumed.
     """
+    reveal_signal = any(order_reveals_any_key(order) for order in orders)
 
     def order_facts(order: dict) -> tuple[str, str, list[_OrderGame], bool]:
         product = order.get("product") or {}
@@ -543,10 +635,25 @@ def records_from_orders(orders: list[dict]) -> tuple[list[PurchaseRecord], list[
         ):
             override = credits.popleft()
         order_records, order_skipped = records_from_order(
-            order, price_override=override
+            order, price_override=override, honor_revealed=reveal_signal
         )
         records.extend(order_records)
         skipped.extend(order_skipped)
+
+    if not reveal_signal and any(
+        (order.get("tpkd_dict") or {}).get("all_tpks") for order in orders
+    ):
+        skipped.append(
+            {
+                "description": "unrevealed-key detection",
+                "reason": (
+                    "no key in the whole order history carries a revealed value — "
+                    "treating redeemed_key_val as absent from the payload rather "
+                    "than every key as unredeemed, so all keys were imported. "
+                    "Unredeemed keys cannot be told apart in this run."
+                ),
+            }
+        )
 
     if credits:
         by_currency: dict[str, tuple[int, float]] = {}
