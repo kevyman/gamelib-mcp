@@ -1176,14 +1176,113 @@ class HumbleFetchTests(unittest.IsolatedAsyncioTestCase):
                     transport=httpx.MockTransport(handler)
                 )
 
-    async def test_orders_fetched_per_gamekey(self):
-        order_detail = {
-            "product": {"human_name": "Hollow Knight", "category": "storefront"},
+    @staticmethod
+    def _order_detail(title: str) -> dict:
+        return {
+            "product": {"human_name": title, "category": "storefront"},
             "amount_spent": 14.99,
             "currency": "USD",
             "created": "2024-02-10T00:00:00",
-            "tpkd_dict": {"all_tpks": [{"human_name": "Hollow Knight", "key_type": "steam"}]},
+            "tpkd_dict": {"all_tpks": [{"human_name": title, "key_type": "steam"}]},
         }
+
+    async def test_orders_fetched_in_chunked_bulk_requests(self):
+        # One request per order does not scale with account age: several
+        # hundred orders at one round trip each ran past the caller's timeout
+        # long before the import finished, so the source stopped completing at
+        # all. Detail comes from the bulk endpoint, chunked.
+        gamekeys = [f"key{n:03d}" for n in range(40)]
+        bulk_requests: list[list[str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v1/user/order":
+                return httpx.Response(
+                    200,
+                    json=[{"gamekey": key} for key in gamekeys],
+                    headers={"content-type": "application/json"},
+                )
+            self.assertEqual(request.url.path, "/api/v1/orders")
+            self.assertEqual(request.url.params["all_tpkds"], "true")
+            requested = request.url.params.get_list("gamekeys")
+            bulk_requests.append(requested)
+            return httpx.Response(
+                200,
+                json={key: self._order_detail(f"Game {key}") for key in requested},
+                headers={"content-type": "application/json"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp)
+            with patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": path}):
+                records, _ = await humble_module.fetch_humble_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
+
+        # 40 orders in 2 requests, not 40.
+        self.assertEqual([len(chunk) for chunk in bulk_requests], [35, 5])
+        self.assertEqual(len(records), 40)
+
+    async def test_null_bulk_entry_is_skipped_not_fatal(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v1/user/order":
+                return httpx.Response(
+                    200,
+                    json=[{"gamekey": "abc123"}, {"gamekey": "gone456"}],
+                    headers={"content-type": "application/json"},
+                )
+            return httpx.Response(
+                200,
+                json={"abc123": self._order_detail("Hollow Knight"), "gone456": None},
+                headers={"content-type": "application/json"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp)
+            with patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": path}):
+                records, _ = await humble_module.fetch_humble_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
+
+        self.assertEqual([r.title for r in records], ["Hollow Knight"])
+
+    async def test_bulk_endpoint_failure_falls_back_to_per_order_fetch(self):
+        # The bulk endpoint is undocumented. If Humble changes it, a slow
+        # import still beats a source that imports nothing.
+        per_order_paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v1/user/order":
+                return httpx.Response(
+                    200,
+                    json=[{"gamekey": "abc123"}, {"gamekey": "def456"}],
+                    headers={"content-type": "application/json"},
+                )
+            if request.url.path == "/api/v1/orders":
+                return httpx.Response(500, text="nope")
+            per_order_paths.append(request.url.path)
+            title = "Hollow Knight" if request.url.path.endswith("abc123") else "Celeste"
+            return httpx.Response(
+                200,
+                json=self._order_detail(title),
+                headers={"content-type": "application/json"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp)
+            with patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": path}):
+                records, _ = await humble_module.fetch_humble_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
+
+        self.assertEqual(
+            per_order_paths, ["/api/v1/order/abc123", "/api/v1/order/def456"]
+        )
+        self.assertEqual([r.title for r in records], ["Hollow Knight", "Celeste"])
+
+    async def test_stale_session_is_not_retried_per_order(self):
+        # An auth failure means the session expired. Falling back would be
+        # several hundred more ways to fail with the same error.
+        attempted: list[str] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/api/v1/user/order":
@@ -1192,21 +1291,20 @@ class HumbleFetchTests(unittest.IsolatedAsyncioTestCase):
                     json=[{"gamekey": "abc123"}],
                     headers={"content-type": "application/json"},
                 )
-            self.assertEqual(request.url.path, "/api/v1/order/abc123")
-            self.assertEqual(request.url.params["all_tpkds"], "true")
-            return httpx.Response(
-                200, json=order_detail, headers={"content-type": "application/json"}
-            )
+            attempted.append(request.url.path)
+            return httpx.Response(403, json={"error": "forbidden"})
 
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_cookies(tmp)
-            with patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": path}):
-                records, skipped = await humble_module.fetch_humble_purchases(
+            with (
+                patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": path}),
+                self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"),
+            ):
+                await humble_module.fetch_humble_purchases(
                     transport=httpx.MockTransport(handler)
                 )
 
-        self.assertEqual(skipped, [])
-        self.assertEqual([r.title for r in records], ["Hollow Knight"])
+        self.assertEqual(attempted, ["/api/v1/orders"])
 
 
 class GogOrderParserTests(unittest.TestCase):

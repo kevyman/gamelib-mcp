@@ -81,7 +81,15 @@ PURCHASE_SOURCE = "humble"
 
 _ORDER_LIST_URL = "https://www.humblebundle.com/api/v1/user/order"
 _ORDER_DETAIL_URL = "https://www.humblebundle.com/api/v1/order/{gamekey}"
-# Politeness delay between sequential order-detail requests.
+# Bulk detail endpoint: repeated `gamekeys` params, one response object keyed
+# by gamekey. Fetching orders one at a time does not scale with account age —
+# a decade of Humble history is several hundred orders, which at one request
+# each blew past the MCP tool timeout long before the import could finish, so
+# the whole source silently stopped completing. Chunked bulk turns that into
+# ~10 requests.
+_ORDERS_BULK_URL = "https://www.humblebundle.com/api/v1/orders"
+_BULK_CHUNK_SIZE = 35
+# Politeness delay between sequential requests.
 _REQUEST_DELAY_SECONDS = 0.2
 
 _KEY_TYPE_TO_PLATFORM = {"steam": "steam", "gog": "gog"}
@@ -536,6 +544,75 @@ def _check_auth(response: httpx.Response) -> None:
         raise RuntimeError(_AUTH_ERROR)
 
 
+def _chunked(items: list[str], size: int) -> list[list[str]]:
+    return [items[start : start + size] for start in range(0, len(items), size)]
+
+
+async def _fetch_order_detail(
+    client: httpx.AsyncClient, gamekey: str, headers: dict[str, str]
+) -> dict:
+    """One order's detail payload."""
+    response = await client.get(
+        _ORDER_DETAIL_URL.format(gamekey=gamekey),
+        params={"all_tpkds": "true"},
+        headers=headers,
+    )
+    _check_auth(response)
+    response.raise_for_status()
+    order = response.json()
+    if not isinstance(order, dict):
+        raise RuntimeError(
+            f"Unexpected Humble order payload for {gamekey}: {type(order).__name__}"
+        )
+    return order
+
+
+async def _fetch_order_chunk(
+    client: httpx.AsyncClient, gamekeys: list[str], headers: dict[str, str]
+) -> list[dict]:
+    """Detail payloads for up to _BULK_CHUNK_SIZE orders in ONE request.
+
+    Falls back to the per-order endpoint for the whole chunk when the bulk one
+    answers with anything unexpected. The fallback is what keeps a Humble-side
+    change to an undocumented endpoint from taking the entire import down —
+    it is slow, but slow beats a source that reports an error and imports
+    nothing. An auth failure is NOT caught here: it means the session is
+    stale, and retrying every order one at a time would just be several
+    hundred more ways to fail.
+    """
+    params: list[tuple[str, str | int | float | bool | None]] = [
+        ("all_tpkds", "true"),
+        *(("gamekeys", key) for key in gamekeys),
+    ]
+    try:
+        response = await client.get(_ORDERS_BULK_URL, params=params, headers=headers)
+        _check_auth(response)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"Unexpected Humble bulk-order payload: {type(payload).__name__}"
+            )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Humble bulk order fetch failed for %d gamekey(s) (%s) — falling back "
+            "to one request per order",
+            len(gamekeys), exc,
+        )
+        orders = []
+        for index, gamekey in enumerate(gamekeys):
+            if index:
+                await asyncio.sleep(_REQUEST_DELAY_SECONDS)
+            orders.append(await _fetch_order_detail(client, gamekey, headers))
+        return orders
+
+    # A gamekey the bulk endpoint answers null for is not an error — it is an
+    # order the account can no longer read. Keep the parseable ones.
+    return [order for order in payload.values() if isinstance(order, dict)]
+
+
 async def fetch_humble_purchases(
     *, transport: httpx.AsyncBaseTransport | None = None
 ) -> tuple[list[PurchaseRecord], list[dict]]:
@@ -576,23 +653,10 @@ async def fetch_humble_purchases(
             if isinstance(entry, dict) and entry.get("gamekey")
         ]
 
-        for index, gamekey in enumerate(gamekeys):
+        for index, chunk in enumerate(_chunked(gamekeys, _BULK_CHUNK_SIZE)):
             if index:
                 await asyncio.sleep(_REQUEST_DELAY_SECONDS)
-            detail_resp = await client.get(
-                _ORDER_DETAIL_URL.format(gamekey=gamekey),
-                params={"all_tpkds": "true"},
-                headers=headers,
-            )
-            _check_auth(detail_resp)
-            detail_resp.raise_for_status()
-            order = detail_resp.json()
-            if not isinstance(order, dict):
-                raise RuntimeError(
-                    f"Unexpected Humble order payload for {gamekey}: "
-                    f"{type(order).__name__}"
-                )
-            orders.append(order)
+            orders.extend(await _fetch_order_chunk(client, chunk, headers))
 
     # Cross-order plan-payment attribution needs the full history in hand.
     records, skipped = records_from_orders(orders)
