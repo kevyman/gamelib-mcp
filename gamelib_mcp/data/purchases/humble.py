@@ -7,17 +7,40 @@ JSON file shape as the Nintendo cookie files — set it with
 ``create_session_ingest_link(provider="humble")``.
 
 Record building:
-- Game keys in ``tpkd_dict.all_tpks`` are preferred — they are the actual
-  redeemable games. ``key_type`` maps to the library platform: "steam" →
-  steam, "gog" → gog, anything else (generic keys, origin, …) → "other".
-  Key-delivery suffixes ("… Steam Key", "… Registration Key") are Humble
-  packaging noise, not game identity, and are stripped from the title.
-- Orders without tpks fall back to ``subproducts``; those have no platform
-  signal, so they land on "other" (deliberately NOT guessed as steam).
-  A subproduct whose downloads are all non-game media (ebook/audio/video —
-  Humble Book Bundles have subproducts too) is excluded so novels never
-  become library games; a subproduct with no downloads at all is kept
-  (a bare key delivery is indistinguishable from a game there).
+- An order's games are the UNION of ``tpkd_dict.all_tpks`` (redeemable keys)
+  and ``subproducts`` (DRM-free downloads), de-duplicated. Neither side is a
+  superset: a Humble Monthly/Choice month mixes Steam keys with DRM-free-only
+  titles that appear solely as subproducts, and treating tpks as authoritative
+  dropped those with no record and no skip entry.
+- A key's ``key_type`` maps to the library platform: "steam" → steam, "gog" →
+  gog, anything else (generic keys, origin, …) → "other". Key-delivery
+  suffixes ("… Steam Key", "… Registration Key") are Humble packaging noise,
+  not game identity, and are stripped from the title.
+- Subproducts have no platform signal, so they land on "other" (deliberately
+  NOT guessed as steam). A subproduct whose downloads are all non-game media
+  (ebook/audio/video — Humble Book Bundles have subproducts too) is excluded
+  so novels never become library games; a subproduct with no downloads at all
+  is kept (a bare key delivery is indistinguishable from a game there).
+- De-duplication spans both sides and is what makes the union safe: Humble
+  lists the same game once per key and again per download platform, and since
+  the order price splits across the collected items, a missed duplicate
+  dilutes every real game's share. An entry is dropped when its normalized
+  title was already collected, or when its ``machine_name`` is an
+  already-collected one minus a delivery-channel tail ("crimsonland" vs
+  "crimsonland_steam", "reus" vs "reussteam").
+- A key Humble never revealed (no ``redeemed_key_val``, or expired) was never
+  redeemed — the title was already owned elsewhere, or is being held to gift.
+  It records NO ownership: the storefront sync is what proves what you own,
+  and writing the row would also bill this bundle's money to a copy that came
+  from somewhere else. It still takes its share of the order split, so the
+  redeemed games keep the price they actually cost, and the unattributed
+  share is reported in ``skipped``. The gate is armed only when the WHOLE
+  history contains at least one revealed key: if the field ever disappears
+  from the payload, reading that as "every key is unredeemed" would import
+  nothing while reporting success, so its absence is reported instead. A
+  title delivered as BOTH an unrevealed key and a DRM-free download is owned
+  through the download, so there the subproduct takes the de-duplication slot
+  from the key — one entry either way, so the price split is unchanged.
 - In-game currency/consumable SKUs are excluded the same way (shared
   ``is_consumable_title``), including the tails Humble bolts onto a real game
   name ("Quake Champions Early Access plus 50 Shards, 100 Platinum, 2000
@@ -38,8 +61,9 @@ Record building:
   purchase_source "subscription"; everything else → "humble". amount_spent 0
   (freebies) → price 0.0. A missing currency is assumed USD.
 - Subscription plan payments ("Annual Plan", "12-Month Classic Plan",
-  "Month-to-Month Classic Plan") are separate game-less orders — the monthly
-  Choice drops themselves carry amount_spent 0. records_from_orders
+  "Month-to-Month Classic Plan") are separate game-less orders of category
+  "subscriptionplan" — the monthly Choice drops ("subscriptioncontent")
+  themselves carry amount_spent 0. records_from_orders
   attributes chronologically via a FIFO credit queue: each plan payment
   pushes N month-credits (its price split N ways), each zero-priced Choice
   drop consumes the oldest credit as its month price and splits it across
@@ -55,11 +79,13 @@ import logging
 import os
 import re
 from collections import deque
+from typing import NamedTuple
 
 import httpx
 
 from gamelib_mcp.data.content import classify_title_override, match_addon_name
 from gamelib_mcp.data.db import default_data_dir
+from gamelib_mcp.data.title_normalization import normalize_search_text
 
 from . import PurchaseRecord, is_consumable_title, normalize_purchase_date
 
@@ -69,7 +95,15 @@ PURCHASE_SOURCE = "humble"
 
 _ORDER_LIST_URL = "https://www.humblebundle.com/api/v1/user/order"
 _ORDER_DETAIL_URL = "https://www.humblebundle.com/api/v1/order/{gamekey}"
-# Politeness delay between sequential order-detail requests.
+# Bulk detail endpoint: repeated `gamekeys` params, one response object keyed
+# by gamekey. Fetching orders one at a time does not scale with account age —
+# a decade of Humble history is several hundred orders, which at one request
+# each blew past the MCP tool timeout long before the import could finish, so
+# the whole source silently stopped completing. Chunked bulk turns that into
+# ~10 requests.
+_ORDERS_BULK_URL = "https://www.humblebundle.com/api/v1/orders"
+_BULK_CHUNK_SIZE = 35
+# Politeness delay between sequential requests.
 _REQUEST_DELAY_SECONDS = 0.2
 
 _KEY_TYPE_TO_PLATFORM = {"steam": "steam", "gog": "gog"}
@@ -98,9 +132,13 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 # Raider Monthly Outlast Deluxe Edition Cross-Promo", "… 2 Card Packs
 # (Skyrim) …" consumables). Excluded like non-game media so their share of
 # the order price redistributes to the real games.
+# The launcher/runtime a subproduct list ships beside the game it needs
+# ("Uplay Client (will download latest version)") is a Windows download like
+# any other, so the media check below cannot see it — only the name can.
 _PROMO_NAME_RE = re.compile(
     r"cross-?promo|redemption deadline|key expiration|\bcard packs?\b"
-    r"|\bevent tickets?\b",
+    r"|\bevent tickets?\b"
+    r"|\b(?:uplay|origin|steam|rockstar(?: games)?|battle\.net|ea)\s+client\b",
     re.IGNORECASE,
 )
 
@@ -191,13 +229,143 @@ def _is_non_game_subproduct(sub: dict) -> bool:
     return bool(platforms) and platforms <= _NON_GAME_DOWNLOAD_PLATFORMS
 
 
-def _order_games(order: dict) -> tuple[list[tuple[str, str]], list[str]]:
-    """Extract ([(title, platform)], excluded_non_game_titles) from an order —
-    tpks first, subproducts as the fallback."""
-    games: list[tuple[str, str]] = []
+# Machine-name tails Humble appends when the same product appears once per
+# delivery channel ("crimsonland" → "crimsonland_steam"/"crimsonland_android",
+# "reus" → "reussteam", "almostthere_theplatformer" →
+# "almostthere_theplatformer_monthly_steam"). Used to recognize a subproduct
+# that is the DRM-free half of a key already collected, when the two carry
+# different human_names. Every leftover token must be a known tail, so
+# "fez" does NOT swallow a hypothetical "fez_2_steam".
+_MACHINE_NAME_TAILS = frozenset(
+    {
+        "steam", "gog", "origin", "uplay", "epic", "desura", "battlenet",
+        "android", "asm", "monthly", "choice", "key", "keys", "drmfree",
+        "download", "windows", "mac", "linux",
+    }
+)
+
+
+class _OrderGame(NamedTuple):
+    title: str
+    platform: str
+    # Steam appid off the key's own `steam_app_id`, when it carries one.
+    store_identifier: str | None
+    # False only for a key Humble never revealed — see _tpk_is_revealed.
+    revealed: bool = True
+
+
+def _tpk_is_revealed(tpk: dict) -> bool:
+    """Whether the key's value was ever shown, i.e. could have been redeemed.
+
+    ``redeemed_key_val`` is absent until Humble reveals the key, so its
+    absence is positive evidence the key was never used — the bundle title
+    already owned elsewhere, or kept to gift. An expired key is the same
+    thing with a deadline attached.
+    """
+    if tpk.get("is_expired"):
+        return False
+    return bool(str(tpk.get("redeemed_key_val") or "").strip())
+
+
+def _tpk_steam_appid(tpk: dict, platform: str) -> str | None:
+    """The key's Steam appid, when it is a Steam key that carries one.
+
+    Humble's own record of WHICH Steam game a key unlocks — the one exact
+    identity signal in an order, where names are fragile. Scoped to Steam
+    keys on purpose: the value is meaningless on a GOG/Origin key, and the
+    batch writer reads a Humble record's identifier as a steam_appid.
+    """
+    if platform != "steam":
+        return None
+    raw = str(tpk.get("steam_app_id") or "").strip()
+    # Humble sends "" for a Steam key it has no appid for.
+    return raw if raw.isdigit() else None
+
+
+def _identity_key(title: str) -> str:
+    """Normalized identity for "is this the same product?" comparisons."""
+    return normalize_search_text(_clean_title(title))
+
+
+def _machine_name_variant_of(candidate: str, claimed: str) -> bool:
+    """True when ``candidate`` is ``claimed`` minus a delivery-channel tail."""
+    if not candidate or not claimed:
+        return False
+    if candidate == claimed:
+        return True
+    if not claimed.startswith(candidate):
+        return False
+    rest = claimed[len(candidate) :]
+    tokens = [token for token in rest.split("_") if token]
+    return bool(tokens) and all(token in _MACHINE_NAME_TAILS for token in tokens)
+
+
+def _order_games(
+    order: dict, *, honor_revealed: bool = False
+) -> tuple[list[_OrderGame], list[str]]:
+    """Extract ([_OrderGame], excluded_non_game_titles) from an order.
+
+    Keys and subproducts are UNIONED, not alternatives. They overlap heavily —
+    a bundle lists the same game once per key and again per download platform —
+    but neither side is a superset: a Humble Monthly/Choice month routinely
+    mixes Steam keys with DRM-free-only titles that exist *only* as
+    subproducts (August 2019 Monthly delivered "DON'T GIVE UP" that way). The
+    old tpks-are-authoritative early return dropped every such title with no
+    record and no skip entry — invisible until someone noticed one game's
+    acquisition row was blank.
+
+    De-duplication is what makes the union safe. A subproduct is skipped when
+    its normalized title was already collected, or when its machine_name is an
+    already-collected one minus a delivery-channel tail. Without it the same
+    game would be counted once per download platform, and since the order
+    price splits across the collected items, every real game's share would be
+    diluted (a real PC-and-Android bundle listed all ten games twice, halving
+    each one's recorded spend). Keys are deliberately exempt from the check:
+    an order handing out a Steam key AND a GOG key for the same game grants
+    two real platform relationships, not one duplicate.
+
+    ``honor_revealed`` mirrors records_from_order's gate. It matters here
+    because a game delivered as BOTH an unrevealed key and a DRM-free
+    download is still owned through the download: with the gate armed the
+    subproduct takes the de-duplication slot from the key, so gating the key
+    out does not take the owned copy with it.
+    """
+    games: list[_OrderGame] = []
     non_game: list[str] = []
-    tpks = (order.get("tpkd_dict") or {}).get("all_tpks") or []
-    for tpk in tpks:
+    # (normalized title, machine_name) per collected entry, positionally
+    # aligned with `games` so a later entry can replace an earlier one.
+    collected_keys: list[tuple[str, str]] = []
+
+    def register(
+        entry: dict,
+        name: str,
+        platform: str,
+        store_identifier: str | None = None,
+        revealed: bool = True,
+    ) -> None:
+        """Collect one game and record what it was, for later de-duplication."""
+        collected_keys.append(
+            (_identity_key(name), str(entry.get("machine_name") or "").lower())
+        )
+        games.append(
+            _OrderGame(_clean_title(name), platform, store_identifier, revealed)
+        )
+
+    def collected_index(entry: dict, name: str) -> int | None:
+        """Index of an equivalent entry already collected, if any."""
+        identity = _identity_key(name)
+        machine_name = str(entry.get("machine_name") or "").lower()
+        for index, claimed_name in enumerate(collected_keys):
+            claimed_identity, claimed_machine = claimed_name
+            if identity and identity == claimed_identity:
+                return index
+            if _machine_name_variant_of(
+                machine_name, claimed_machine
+            ) or _machine_name_variant_of(claimed_machine, machine_name):
+                return index
+        return None
+
+    for tpk in (order.get("tpkd_dict") or {}).get("all_tpks") or []:
         if not isinstance(tpk, dict):
             continue
         name = tpk.get("human_name")
@@ -206,12 +374,18 @@ def _order_games(order: dict) -> tuple[list[tuple[str, str]], list[str]]:
         if _PROMO_NAME_RE.search(name) or is_consumable_title(name):
             non_game.append(name.strip())
             continue
+        # Keys are never de-duplicated against each other: one order handing
+        # out a Steam key AND a GOG key for the same game grants two real
+        # platform relationships, and each deserves its own acquisition row.
         key_type = str(tpk.get("key_type") or "").lower()
-        games.append((_clean_title(name), _KEY_TYPE_TO_PLATFORM.get(key_type, "other")))
-    if games or non_game:
-        # tpks are authoritative when they yield anything — never also read
-        # subproducts (they mirror the same items).
-        return games, non_game
+        platform = _KEY_TYPE_TO_PLATFORM.get(key_type, "other")
+        register(
+            tpk,
+            name,
+            platform,
+            _tpk_steam_appid(tpk, platform),
+            revealed=_tpk_is_revealed(tpk),
+        )
 
     for sub in order.get("subproducts") or []:
         if not isinstance(sub, dict):
@@ -226,8 +400,19 @@ def _order_games(order: dict) -> tuple[list[tuple[str, str]], list[str]]:
         ):
             non_game.append(name.strip())
             continue
+        index = collected_index(sub, name)
+        if index is not None:
+            if honor_revealed and not games[index].revealed:
+                # The key for this game was never revealed, but the DRM-free
+                # download beside it is owned outright. Letting the key hold
+                # the slot would drop BOTH when the unrevealed key is gated
+                # out, losing a game that is genuinely owned. The subproduct
+                # takes the slot instead — still one entry for the game, so
+                # the order's price split is unchanged.
+                games[index] = _OrderGame(_clean_title(name), "other", None, True)
+            continue
         # No platform signal on a subproduct — "other" beats a wrong guess.
-        games.append((_clean_title(name), "other"))
+        register(sub, name, "other")
     return games, non_game
 
 
@@ -250,19 +435,36 @@ def _plan_month_count(name: str) -> int:
     return 1
 
 
+def order_reveals_any_key(order: dict) -> bool:
+    """Whether this order carries at least one revealed key value."""
+    return any(
+        isinstance(tpk, dict) and _tpk_is_revealed(tpk)
+        for tpk in (order.get("tpkd_dict") or {}).get("all_tpks") or []
+    )
+
+
 def records_from_order(
-    order: dict, *, price_override: tuple[float, str] | None = None
+    order: dict,
+    *,
+    price_override: tuple[float, str] | None = None,
+    honor_revealed: bool = False,
 ) -> tuple[list[PurchaseRecord], list[dict]]:
     """Convert one order-detail payload into (records, skipped).
 
     ``price_override`` = (amount, currency) replaces the order's own
     amount_spent/currency — how a plan credit funds a zero-priced Choice drop.
+
+    ``honor_revealed`` drops keys Humble never revealed. It defaults OFF and
+    only records_from_orders turns it on, because a single order cannot tell
+    an unredeemed key from a payload that stopped carrying redeemed_key_val
+    at all — and reading the second as the first would silently import
+    nothing. That judgement needs the whole history.
     """
     product = order.get("product") or {}
     order_name = product.get("human_name") or order.get("gamekey") or "(unknown order)"
     category = str(product.get("category") or "").lower()
 
-    games, non_game = _order_games(order)
+    games, non_game = _order_games(order, honor_revealed=honor_revealed)
     skipped: list[dict] = []
     if non_game:
         skipped.append(
@@ -295,7 +497,23 @@ def records_from_order(
     shares = _split_amount(amount_spent, len(games))
 
     records = []
-    for (title, platform), share in zip(games, shares, strict=True):
+    unrevealed: list[str] = []
+    unrevealed_total = 0.0
+    for (title, platform, store_identifier, revealed), share in zip(
+        games, shares, strict=True
+    ):
+        if honor_revealed and not revealed:
+            # A key Humble never revealed was never redeemed: the bundle
+            # title was already owned elsewhere, or it is being kept to gift.
+            # Recording it would claim ownership the storefront sync (which
+            # IS authoritative for what you own) never reported, and would
+            # attribute this bundle's money to a copy that came from
+            # somewhere else. It still takes its share of the split, so the
+            # redeemed games keep the price they actually cost — the share
+            # is reported rather than silently redistributed.
+            unrevealed.append(title)
+            unrevealed_total += share
+            continue
         # Humble has no per-item content typing — an addon-ish NAME is the
         # only nested signal, so DLC/soundtrack keys match exact-name-only
         # and mint nested instead of as phantom base games. Known DLC whose
@@ -316,10 +534,28 @@ def records_from_order(
                 price_currency=currency,
                 bundle_name=bundle_name,
                 content_type=addon[0] if addon is not None else None,
+                # The key's own Steam appid (Steam keys only) — the batch
+                # writer matches on it before any name tier, which is the
+                # difference between landing on the row that actually holds
+                # the Steam copy and landing on a same-game edition row that
+                # happens to own the title.
+                store_identifier=store_identifier,
                 # One key naming several games — divert to
                 # bundles_needing_split rather than minting a giant row.
                 is_bundle=_looks_like_enumerated_bundle(title),
             )
+        )
+    if unrevealed:
+        skipped.append(
+            {
+                "description": str(order_name),
+                "reason": (
+                    f"{len(unrevealed)} unrevealed key(s) — never redeemed, so no "
+                    f"ownership recorded ({unrevealed_total:.2f} {currency} "
+                    f"unattributed): {', '.join(unrevealed[:5])}"
+                    + (", …" if len(unrevealed) > 5 else "")
+                ),
+            }
         )
     return records, skipped
 
@@ -339,16 +575,33 @@ def records_from_orders(orders: list[dict]) -> tuple[list[PurchaseRecord], list[
     the oldest credit as its month price. Stacked plan purchases just queue
     more credits; a drop left without a credit stays price 0 (trial/free
     month); leftover credits are months paid for but not (yet) delivered.
-    """
 
-    def order_facts(order: dict) -> tuple[str, str, list[tuple[str, str]], bool]:
+    The unrevealed-key gate is decided here, once, over the whole history: a
+    key with no revealed value was never redeemed, so recording it would
+    claim ownership the storefront sync never reported. But if NOTHING in the
+    entire history looks revealed, the field is missing rather than the keys
+    unredeemed — Humble is under no obligation to keep sending it — and
+    honoring the signal then would import nothing at all while reporting
+    success. So the gate applies only when the history proves the field
+    exists, and its absence is reported instead of assumed.
+    """
+    reveal_signal = any(order_reveals_any_key(order) for order in orders)
+
+    def order_facts(order: dict) -> tuple[str, str, list[_OrderGame], bool]:
         product = order.get("product") or {}
         category = str(product.get("category") or "").lower()
         name = str(
             product.get("human_name") or order.get("gamekey") or "(unknown order)"
         )
-        games, _ = _order_games(order)
-        is_plan = category.startswith("subscription") and not games
+        games, _ = _order_games(order, honor_revealed=reveal_signal)
+        # A plan payment is its OWN category ("subscriptionplan"); the monthly
+        # drops are "subscriptioncontent". Keying on "subscription* with no
+        # games" instead made a Choice month whose content we failed to parse
+        # masquerade as a plan payment — silently pushing month credits a
+        # different month then consumed, and reporting the month under
+        # "plan payment" rather than as a drop that produced nothing. The
+        # no-games condition stays as a guard for the reverse shape.
+        is_plan = category == "subscriptionplan" and not games
         return category, name, games, is_plan
 
     ordered = sorted(
@@ -402,10 +655,25 @@ def records_from_orders(orders: list[dict]) -> tuple[list[PurchaseRecord], list[
         ):
             override = credits.popleft()
         order_records, order_skipped = records_from_order(
-            order, price_override=override
+            order, price_override=override, honor_revealed=reveal_signal
         )
         records.extend(order_records)
         skipped.extend(order_skipped)
+
+    if not reveal_signal and any(
+        (order.get("tpkd_dict") or {}).get("all_tpks") for order in orders
+    ):
+        skipped.append(
+            {
+                "description": "unrevealed-key detection",
+                "reason": (
+                    "no key in the whole order history carries a revealed value — "
+                    "treating redeemed_key_val as absent from the payload rather "
+                    "than every key as unredeemed, so all keys were imported. "
+                    "Unredeemed keys cannot be told apart in this run."
+                ),
+            }
+        )
 
     if credits:
         by_currency: dict[str, tuple[int, float]] = {}
@@ -426,13 +694,93 @@ def records_from_orders(orders: list[dict]) -> tuple[list[PurchaseRecord], list[
     return records, skipped
 
 
+class HumbleAuthError(RuntimeError):
+    """Stale or missing session.
+
+    A distinct type so retry/fallback paths can tell "the session expired"
+    (retrying is pointless — it fails identically every time) apart from
+    "this endpoint answered oddly" (retrying another way is the whole point).
+    Subclasses RuntimeError so the orchestrator's per-source handling and
+    every existing caller are unaffected.
+    """
+
+
 def _check_auth(response: httpx.Response) -> None:
     if response.status_code in (401, 403):
-        raise RuntimeError(_AUTH_ERROR)
+        raise HumbleAuthError(_AUTH_ERROR)
     content_type = response.headers.get("content-type", "")
     if "text/html" in content_type or response.text.lstrip()[:1] == "<":
         # Unauthenticated API calls bounce to the HTML login page.
-        raise RuntimeError(_AUTH_ERROR)
+        raise HumbleAuthError(_AUTH_ERROR)
+
+
+def _chunked(items: list[str], size: int) -> list[list[str]]:
+    return [items[start : start + size] for start in range(0, len(items), size)]
+
+
+async def _fetch_order_detail(
+    client: httpx.AsyncClient, gamekey: str, headers: dict[str, str]
+) -> dict:
+    """One order's detail payload."""
+    response = await client.get(
+        _ORDER_DETAIL_URL.format(gamekey=gamekey),
+        params={"all_tpkds": "true"},
+        headers=headers,
+    )
+    _check_auth(response)
+    response.raise_for_status()
+    order = response.json()
+    if not isinstance(order, dict):
+        raise RuntimeError(
+            f"Unexpected Humble order payload for {gamekey}: {type(order).__name__}"
+        )
+    return order
+
+
+async def _fetch_order_chunk(
+    client: httpx.AsyncClient, gamekeys: list[str], headers: dict[str, str]
+) -> list[dict]:
+    """Detail payloads for up to _BULK_CHUNK_SIZE orders in ONE request.
+
+    Falls back to the per-order endpoint for the whole chunk when the bulk one
+    answers with anything unexpected. The fallback is what keeps a Humble-side
+    change to an undocumented endpoint from taking the entire import down —
+    it is slow, but slow beats a source that reports an error and imports
+    nothing. An auth failure is NOT caught here: it means the session is
+    stale, and retrying every order one at a time would just be several
+    hundred more ways to fail.
+    """
+    params: list[tuple[str, str | int | float | bool | None]] = [
+        ("all_tpkds", "true"),
+        *(("gamekeys", key) for key in gamekeys),
+    ]
+    try:
+        response = await client.get(_ORDERS_BULK_URL, params=params, headers=headers)
+        _check_auth(response)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError(
+                f"unexpected bulk-order payload: {type(payload).__name__}"
+            )
+    except HumbleAuthError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Humble bulk order fetch failed for %d gamekey(s) (%s) — falling back "
+            "to one request per order",
+            len(gamekeys), exc,
+        )
+        orders = []
+        for index, gamekey in enumerate(gamekeys):
+            if index:
+                await asyncio.sleep(_REQUEST_DELAY_SECONDS)
+            orders.append(await _fetch_order_detail(client, gamekey, headers))
+        return orders
+
+    # A gamekey the bulk endpoint answers null for is not an error — it is an
+    # order the account can no longer read. Keep the parseable ones.
+    return [order for order in payload.values() if isinstance(order, dict)]
 
 
 async def fetch_humble_purchases(
@@ -475,23 +823,10 @@ async def fetch_humble_purchases(
             if isinstance(entry, dict) and entry.get("gamekey")
         ]
 
-        for index, gamekey in enumerate(gamekeys):
+        for index, chunk in enumerate(_chunked(gamekeys, _BULK_CHUNK_SIZE)):
             if index:
                 await asyncio.sleep(_REQUEST_DELAY_SECONDS)
-            detail_resp = await client.get(
-                _ORDER_DETAIL_URL.format(gamekey=gamekey),
-                params={"all_tpkds": "true"},
-                headers=headers,
-            )
-            _check_auth(detail_resp)
-            detail_resp.raise_for_status()
-            order = detail_resp.json()
-            if not isinstance(order, dict):
-                raise RuntimeError(
-                    f"Unexpected Humble order payload for {gamekey}: "
-                    f"{type(order).__name__}"
-                )
-            orders.append(order)
+            orders.extend(await _fetch_order_chunk(client, chunk, headers))
 
     # Cross-order plan-payment attribution needs the full history in hand.
     records, skipped = records_from_orders(orders)

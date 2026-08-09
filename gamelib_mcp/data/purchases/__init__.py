@@ -66,13 +66,20 @@ PURCHASE_IMPORTERS: dict[str, tuple[str, str]] = {
 # source key → game_platform_identifiers.identifier_type carried by that
 # source's PurchaseRecord.store_identifier, letting set_acquisitions_batch
 # match identifier-first (a renamed/localized library title still resolves).
-# No "humble" or "eshop" entry — neither exposes a per-item store identifier
-# (Humble orders carry none; the eShop GraphQL API returns no product id), so
-# both fall back to title matching. No "epic" entry either: order items carry
-# an offerId, which is a different id space from the epic_artifact_id the
-# library sync stores — matching one against the other would never hit.
+# No "eshop" entry — the eShop GraphQL API returns no product id, so it falls
+# back to title matching. No "epic" entry either: order items carry an
+# offerId, which is a different id space from the epic_artifact_id the library
+# sync stores — matching one against the other would never hit.
+#
+# "humble" maps to STEAM_APP_ID because a Humble key carries `steam_app_id`
+# and nothing else: only its STEAM records ever set store_identifier (see
+# data/purchases/humble.py::_tpk_steam_appid), so there is no second id space
+# for this entry to be wrong about. Attaching an identifier to a Humble GOG
+# key would silently make it match against Steam appids — hence the invariant
+# is enforced in the importer and covered by a test.
 IDENTIFIER_TYPES: dict[str, str] = {
     "gog": GOG_PRODUCT_ID,
+    "humble": STEAM_APP_ID,
     "steam": STEAM_APP_ID,
 }
 
