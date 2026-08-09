@@ -16,7 +16,13 @@ from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
 import httpx
-from conftest import ToolDBTestCase, add_identifier, add_platform, seed_game
+from conftest import (
+    ToolDBTestCase,
+    add_game_alias,
+    add_identifier,
+    add_platform,
+    seed_game,
+)
 from fastmcp.exceptions import ToolError
 
 from gamelib_mcp.data import db as db_module
@@ -95,12 +101,15 @@ class PurchaseRegistryTests(unittest.TestCase):
             IDENTIFIER_TYPES,
             {
                 "gog": db_module.GOG_PRODUCT_ID,
+                # A Humble key carries `steam_app_id` and no other id, so the
+                # source maps to steam_appid; only its steam records ever set
+                # store_identifier (enforced below).
+                "humble": db_module.STEAM_APP_ID,
                 "steam": db_module.STEAM_APP_ID,
             },
         )
-        # Humble orders and eShop transactions carry no store identifiers
-        # (the eShop GraphQL API exposes no product id) — deliberately no entry.
-        self.assertNotIn("humble", IDENTIFIER_TYPES)
+        # eShop transactions carry no store identifier (the GraphQL API
+        # exposes no product id) — deliberately no entry.
         self.assertNotIn("eshop", IDENTIFIER_TYPES)
         # Epic order items carry an offerId, but the library stores
         # epic_artifact_id — different id spaces, so deliberately no entry.
@@ -712,6 +721,268 @@ class HumbleParserTests(unittest.TestCase):
         self.assertEqual(len(skipped), 1)
         self.assertIn("non-game item(s) excluded", skipped[0]["reason"])
 
+    def test_choice_month_keeps_drm_free_only_subproducts(self):
+        # Shape taken from a real August 2019 Humble Monthly order: Steam keys
+        # for most of the month, plus a DRM-free-only title ("DON'T GIVE UP")
+        # that exists solely as a subproduct. Treating tpks as authoritative
+        # dropped it with no record and no skip entry.
+        order = {
+            "product": {
+                "human_name": "August 2019 Humble Monthly",
+                "category": "subscriptioncontent",
+            },
+            "amount_spent": 12.00,
+            "currency": "USD",
+            "created": "2019-07-18T13:58:15",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {
+                        "human_name": "Kingdom Come: Deliverance",
+                        "key_type": "steam",
+                        "machine_name": "kingdomcome_deliverance_monthly_steam",
+                    },
+                    {
+                        "human_name": "Almost There: The Platformer",
+                        "key_type": "steam",
+                        "machine_name": "almostthere_theplatformer_monthly_steam",
+                    },
+                ]
+            },
+            "subproducts": [
+                # The DRM-free half of a key already collected — same game.
+                {
+                    "human_name": "Almost There: The Platformer",
+                    "machine_name": "almostthere_theplatformer",
+                    "downloads": [{"platform": "windows"}, {"platform": "linux"}],
+                },
+                {
+                    "human_name": "DON'T GIVE UP",
+                    "machine_name": "dontgiveup",
+                    "downloads": [{"platform": "windows"}],
+                },
+            ],
+        }
+
+        records, _ = humble_module.records_from_order(order)
+
+        self.assertEqual(
+            [(r.title, r.platform) for r in records],
+            [
+                ("Kingdom Come: Deliverance", "steam"),
+                ("Almost There: The Platformer", "steam"),
+                # No platform signal on a subproduct — never guessed as steam.
+                ("DON'T GIVE UP", "other"),
+            ],
+        )
+        self.assertEqual({r.purchase_source for r in records}, {"subscription"})
+        self.assertEqual(sum(r.price_paid for r in records), 12.00)
+
+    def test_same_game_listed_per_download_platform_counted_once(self):
+        # A PC-and-Android bundle lists every game twice in subproducts. Each
+        # collected item takes a share of the order price, so counting the
+        # duplicate halved every real game's recorded spend.
+        order = {
+            "product": {"human_name": "PC and Android 8", "category": "bundle"},
+            "amount_spent": 10.00,
+            "currency": "USD",
+            "created": "2013-11-19T00:00:00",
+            "subproducts": [
+                {
+                    "human_name": "Gemini Rue",
+                    "machine_name": "geminirue",
+                    "downloads": [{"platform": "windows"}],
+                },
+                {
+                    "human_name": "Gemini Rue",
+                    "machine_name": "geminirue_android",
+                    "downloads": [{"platform": "android"}],
+                },
+                {
+                    "human_name": "Little Inferno",
+                    "machine_name": "littleinferno",
+                    "downloads": [{"platform": "windows"}],
+                },
+            ],
+        }
+
+        records, _ = humble_module.records_from_order(order)
+
+        self.assertEqual([r.title for r in records], ["Gemini Rue", "Little Inferno"])
+        self.assertEqual([r.price_paid for r in records], [5.00, 5.00])
+
+    def test_key_and_subproduct_halves_dedupe_by_machine_name(self):
+        # Humble renames the DRM-free half often enough that titles alone
+        # don't always bridge the two ("reussteam" vs "reus"). The
+        # machine_name stem does — but only when everything left over is a
+        # delivery-channel tail, so a numbered sequel never gets swallowed.
+        order = {
+            "product": {"human_name": "Store Purchase", "category": "storefront"},
+            "amount_spent": 8.00,
+            "currency": "USD",
+            "created": "2014-05-05T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "Reus", "key_type": "steam", "machine_name": "reussteam"},
+                    {"human_name": "Fez II", "key_type": "steam", "machine_name": "fez_2_steam"},
+                ]
+            },
+            "subproducts": [
+                {
+                    "human_name": "Reus: DRM-Free Edition",
+                    "machine_name": "reus",
+                    "downloads": [{"platform": "windows"}],
+                },
+                {
+                    "human_name": "Fez",
+                    "machine_name": "fez",
+                    "downloads": [{"platform": "windows"}],
+                },
+            ],
+        }
+
+        records, _ = humble_module.records_from_order(order)
+
+        self.assertEqual([r.title for r in records], ["Reus", "Fez II", "Fez"])
+
+    def test_steam_key_carries_its_appid_as_the_store_identifier(self):
+        # The one exact identity signal in a Humble order. Without it a key
+        # titled with an edition suffix matches by name/alias and can land on
+        # a same-game edition row that owns the title but not the Steam copy,
+        # so the acquisition goes nowhere.
+        order = {
+            "product": {
+                "human_name": "Humble Choice April 2023",
+                "category": "subscriptioncontent",
+            },
+            "amount_spent": 10.75,
+            "currency": "USD",
+            "created": "2023-04-04T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {
+                        "human_name": "DEATH STRANDING DIRECTOR'S CUT",
+                        "key_type": "steam",
+                        "steam_app_id": "1850570",
+                    },
+                    # Humble sends "" for a Steam key with no appid recorded.
+                    {"human_name": "Revita", "key_type": "steam", "steam_app_id": ""},
+                    # The value is meaningless off a Steam key, so it is
+                    # never carried — the writer would read it as an appid.
+                    {
+                        "human_name": "Some GOG Game",
+                        "key_type": "gog",
+                        "steam_app_id": "999999",
+                    },
+                ]
+            },
+        }
+
+        records, _ = humble_module.records_from_order(order)
+
+        self.assertEqual(
+            [(r.title, r.platform, r.store_identifier) for r in records],
+            [
+                ("DEATH STRANDING DIRECTOR'S CUT", "steam", "1850570"),
+                ("Revita", "steam", None),
+                ("Some GOG Game", "gog", None),
+            ],
+        )
+
+    def test_only_steam_records_carry_a_store_identifier(self):
+        # IDENTIFIER_TYPES maps the whole humble source to steam_appid, so a
+        # non-Steam record carrying an identifier would be matched against
+        # Steam appids. Nothing may set one.
+        order = {
+            "product": {"human_name": "Mixed Bundle", "category": "bundle"},
+            "amount_spent": 6.00,
+            "created": "2020-01-01T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "A Steam Game", "key_type": "steam",
+                     "steam_app_id": "123"},
+                    {"human_name": "A GOG Game", "key_type": "gog",
+                     "steam_app_id": "456"},
+                    {"human_name": "An Origin Game", "key_type": "origin",
+                     "steam_app_id": "789"},
+                ]
+            },
+            "subproducts": [
+                {"human_name": "A DRM-Free Game", "machine_name": "drmfreegame",
+                 "downloads": [{"platform": "windows"}]},
+            ],
+        }
+
+        records, _ = humble_module.records_from_order(order)
+
+        for record in records:
+            if record.platform != "steam":
+                self.assertIsNone(
+                    record.store_identifier, f"{record.title} ({record.platform})"
+                )
+
+    def test_two_key_types_for_one_game_stay_two_records(self):
+        # De-duplication is a subproduct-side concern. An order handing out
+        # both a Steam and a GOG key for one game granted it on two platforms,
+        # and each needs its own acquisition row.
+        order = {
+            "product": {"human_name": "Two-Store Bundle", "category": "storefront"},
+            "amount_spent": 4.00,
+            "currency": "USD",
+            "created": "2018-06-06T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "Torchlight", "key_type": "steam",
+                     "machine_name": "torchlight_steam"},
+                    {"human_name": "Torchlight", "key_type": "gog",
+                     "machine_name": "torchlight_gog"},
+                ]
+            },
+            "subproducts": [
+                {
+                    "human_name": "Torchlight",
+                    "machine_name": "torchlight",
+                    "downloads": [{"platform": "windows"}],
+                }
+            ],
+        }
+
+        records, _ = humble_module.records_from_order(order)
+
+        self.assertEqual(
+            [(r.title, r.platform) for r in records],
+            [("Torchlight", "steam"), ("Torchlight", "gog")],
+        )
+
+    def test_launcher_subproduct_is_not_a_game(self):
+        order = {
+            "product": {"human_name": "Rayman Legends", "category": "storefront"},
+            "amount_spent": 15.00,
+            "currency": "USD",
+            "created": "2015-01-01T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {
+                        "human_name": "Rayman Legends",
+                        "key_type": "uplay",
+                        "machine_name": "raymanlegends_uplay",
+                    }
+                ]
+            },
+            "subproducts": [
+                {
+                    "human_name": "Uplay Client (will download latest version)",
+                    "machine_name": "uplayclient",
+                    "downloads": [{"platform": "windows"}],
+                }
+            ],
+        }
+
+        records, skipped = humble_module.records_from_order(order)
+
+        self.assertEqual([r.title for r in records], ["Rayman Legends"])
+        self.assertEqual(records[0].price_paid, 15.00)
+        self.assertIn("Uplay Client", skipped[0]["reason"])
+
     def test_monthly_plan_payment_funds_next_choice_drop(self):
         plan = {
             "product": {
@@ -820,6 +1091,239 @@ class HumbleParserTests(unittest.TestCase):
         self.assertEqual(len(gift_notes), 1)
         self.assertEqual(gift_notes[0]["description"], "Annual Plan")
         self.assertIn("2024-11-29", gift_notes[0]["reason"])
+
+    @staticmethod
+    def _key(name, *, revealed=False, **extra):
+        tpk = {"human_name": name, "key_type": "steam", **extra}
+        if revealed:
+            tpk["redeemed_key_val"] = "AAAAA-BBBBB-CCCCC"
+        return tpk
+
+    def test_unrevealed_keys_record_no_ownership_but_keep_the_split_honest(self):
+        # A key Humble never revealed was never redeemed — the title was
+        # already owned elsewhere, or is being held to gift. Recording it
+        # would claim ownership the storefront sync never reported. It still
+        # takes its share of the split, so the redeemed games keep the price
+        # they actually cost instead of absorbing the vault's money.
+        order = {
+            "product": {"human_name": "Humble Choice", "category": "subscriptioncontent"},
+            "amount_spent": 12.00,
+            "currency": "USD",
+            "created": "2023-04-04T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    self._key("Redeemed Game", revealed=True),
+                    self._key("Already Owned Elsewhere"),
+                    self._key("Held To Gift"),
+                ]
+            },
+        }
+
+        records, skipped = humble_module.records_from_orders([order])
+
+        self.assertEqual([r.title for r in records], ["Redeemed Game"])
+        # 12.00 split three ways — the redeemed game keeps its own 4.00 share
+        # rather than inheriting the two it never paid for separately.
+        self.assertEqual(records[0].price_paid, 4.00)
+        held = [s for s in skipped if "unrevealed key(s)" in s["reason"]]
+        self.assertEqual(len(held), 1)
+        self.assertIn("2 unrevealed key(s)", held[0]["reason"])
+        self.assertIn("8.00 USD unattributed", held[0]["reason"])
+        self.assertIn("Already Owned Elsewhere", held[0]["reason"])
+
+    def test_expired_key_counts_as_unrevealed(self):
+        order = {
+            "product": {"human_name": "Old Bundle", "category": "bundle"},
+            "amount_spent": 4.00,
+            "currency": "USD",
+            "created": "2015-01-01T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    self._key("Live Key", revealed=True),
+                    self._key("Lapsed Key", revealed=True, is_expired=True),
+                ]
+            },
+        }
+
+        records, _ = humble_module.records_from_orders([order])
+
+        self.assertEqual([r.title for r in records], ["Live Key"])
+
+    def test_no_revealed_key_anywhere_means_the_field_is_gone_not_the_keys(self):
+        # The failure this guard exists for: Humble is under no obligation to
+        # keep sending redeemed_key_val. Reading its disappearance as "every
+        # key is unredeemed" would import NOTHING while reporting success —
+        # exactly the silent no-op that hid the original gap. With no reveal
+        # signal in the whole history, import everything and say so.
+        orders = [
+            {
+                "product": {"human_name": "Bundle A", "category": "bundle"},
+                "amount_spent": 5.00,
+                "currency": "USD",
+                "created": "2020-01-01T00:00:00",
+                "tpkd_dict": {"all_tpks": [self._key("Game A"), self._key("Game B")]},
+            },
+            {
+                "product": {"human_name": "Bundle B", "category": "bundle"},
+                "amount_spent": 5.00,
+                "currency": "USD",
+                "created": "2021-01-01T00:00:00",
+                "tpkd_dict": {"all_tpks": [self._key("Game C")]},
+            },
+        ]
+
+        records, skipped = humble_module.records_from_orders(orders)
+
+        self.assertEqual([r.title for r in records], ["Game A", "Game B", "Game C"])
+        notes = [s for s in skipped if s["description"] == "unrevealed-key detection"]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("treating redeemed_key_val as absent", notes[0]["reason"])
+
+    def test_one_revealed_key_anywhere_arms_the_gate_for_the_whole_history(self):
+        orders = [
+            {
+                "product": {"human_name": "Bundle A", "category": "bundle"},
+                "amount_spent": 5.00,
+                "currency": "USD",
+                "created": "2020-01-01T00:00:00",
+                "tpkd_dict": {"all_tpks": [self._key("Game A", revealed=True)]},
+            },
+            {
+                "product": {"human_name": "Bundle B", "category": "bundle"},
+                "amount_spent": 5.00,
+                "currency": "USD",
+                "created": "2021-01-01T00:00:00",
+                "tpkd_dict": {"all_tpks": [self._key("Game C")]},
+            },
+        ]
+
+        records, skipped = humble_module.records_from_orders(orders)
+
+        self.assertEqual([r.title for r in records], ["Game A"])
+        self.assertEqual(
+            [s for s in skipped if s["description"] == "unrevealed-key detection"], []
+        )
+
+    def test_unrevealed_key_does_not_take_its_drm_free_twin_down_with_it(self):
+        # A Monthly/Choice title often ships as BOTH a Steam key and a
+        # DRM-free download. If the key was never revealed but the download
+        # is there, the game is genuinely owned — so the key must not hold
+        # the de-duplication slot and then take the download with it when the
+        # gate drops it. The subproduct takes the slot instead: still ONE
+        # entry, so the order's price split is unchanged.
+        order = {
+            "product": {"human_name": "Monthly", "category": "subscriptioncontent"},
+            "amount_spent": 10.00,
+            "currency": "USD",
+            "created": "2019-07-18T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    self._key("Redeemed Game", revealed=True,
+                              machine_name="redeemed_monthly_steam"),
+                    self._key("Owned DRM-Free", machine_name="owneddrmfree_steam"),
+                ]
+            },
+            "subproducts": [
+                {
+                    "human_name": "Owned DRM-Free",
+                    "machine_name": "owneddrmfree",
+                    "downloads": [{"platform": "windows"}],
+                }
+            ],
+        }
+
+        records, skipped = humble_module.records_from_orders([order])
+
+        self.assertEqual(
+            [(r.title, r.platform) for r in records],
+            [("Redeemed Game", "steam"), ("Owned DRM-Free", "other")],
+        )
+        # Two entries, so the split is still 5.00/5.00 — the unrevealed key
+        # did not become an unattributed share.
+        self.assertEqual([r.price_paid for r in records], [5.00, 5.00])
+        self.assertEqual([s for s in skipped if "unrevealed key(s)" in s["reason"]], [])
+
+    def test_unrevealed_key_with_no_drm_free_twin_is_still_gated(self):
+        # The counterpart to the test above: with nothing but the key, there
+        # is no evidence of ownership and it stays gated.
+        order = {
+            "product": {"human_name": "Monthly", "category": "subscriptioncontent"},
+            "amount_spent": 10.00,
+            "currency": "USD",
+            "created": "2019-07-18T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    self._key("Redeemed Game", revealed=True),
+                    self._key("Never Touched"),
+                ]
+            },
+        }
+
+        records, skipped = humble_module.records_from_orders([order])
+
+        self.assertEqual([r.title for r in records], ["Redeemed Game"])
+        held = next(s for s in skipped if "unrevealed key(s)" in s["reason"])
+        self.assertIn("1 unrevealed key(s)", held["reason"])
+
+    def test_drm_free_subproducts_are_never_gated_on_a_key_value(self):
+        # A subproduct is a direct download, not a key — it has no reveal
+        # state and is owned outright.
+        order = {
+            "product": {"human_name": "Monthly", "category": "subscriptioncontent"},
+            "amount_spent": 6.00,
+            "currency": "USD",
+            "created": "2019-07-18T00:00:00",
+            "tpkd_dict": {"all_tpks": [self._key("Keyed Game", revealed=True)]},
+            "subproducts": [
+                {
+                    "human_name": "DRM-Free Game",
+                    "machine_name": "drmfreegame",
+                    "downloads": [{"platform": "windows"}],
+                }
+            ],
+        }
+
+        records, _ = humble_module.records_from_orders([order])
+
+        self.assertEqual([r.title for r in records], ["Keyed Game", "DRM-Free Game"])
+
+    def test_content_order_without_games_is_not_read_as_a_plan_payment(self):
+        # A Choice month whose content we failed to extract must surface as a
+        # drop that produced nothing — not as a plan payment. Classifying any
+        # game-less subscription order as a plan let an unparsed month push
+        # month credits that a DIFFERENT month then consumed, so the money
+        # landed on the wrong games and the gap never showed up anywhere.
+        unparsed_drop = {
+            "product": {
+                "human_name": "Humble Choice April 2023",
+                "category": "subscriptioncontent",
+            },
+            "amount_spent": 11.99,
+            "currency": "USD",
+            "created": "2023-04-04T00:00:00",
+        }
+        later_drop = {
+            "product": {
+                "human_name": "Humble Choice May 2023",
+                "category": "subscriptioncontent",
+            },
+            "amount_spent": 0,
+            "currency": "USD",
+            "created": "2023-05-02T00:00:00",
+            "tpkd_dict": {"all_tpks": [{"human_name": "May Game", "key_type": "steam"}]},
+        }
+
+        records, skipped = humble_module.records_from_orders(
+            [unparsed_drop, later_drop]
+        )
+
+        # No phantom credit was minted, so May stays unfunded rather than
+        # quietly billing April's charge to it.
+        self.assertEqual([(r.title, r.price_paid) for r in records], [("May Game", 0.0)])
+        april = [s for s in skipped if s["description"] == "Humble Choice April 2023"]
+        self.assertEqual(len(april), 1)
+        self.assertIn("no game keys or subproducts", april[0]["reason"])
+        self.assertEqual([s for s in skipped if "plan payment" in s["reason"]], [])
 
     def test_pre_choice_monthly_orders_keep_their_own_price(self):
         # Old Humble Monthly charged the content order itself — a plan credit
@@ -952,14 +1456,115 @@ class HumbleFetchTests(unittest.IsolatedAsyncioTestCase):
                     transport=httpx.MockTransport(handler)
                 )
 
-    async def test_orders_fetched_per_gamekey(self):
-        order_detail = {
-            "product": {"human_name": "Hollow Knight", "category": "storefront"},
+    @staticmethod
+    def _order_detail(title: str) -> dict:
+        return {
+            "product": {"human_name": title, "category": "storefront"},
             "amount_spent": 14.99,
             "currency": "USD",
             "created": "2024-02-10T00:00:00",
-            "tpkd_dict": {"all_tpks": [{"human_name": "Hollow Knight", "key_type": "steam"}]},
+            "tpkd_dict": {"all_tpks": [{"human_name": title, "key_type": "steam"}]},
         }
+
+    async def test_orders_fetched_in_chunked_bulk_requests(self):
+        # One request per order does not scale with account age: several
+        # hundred orders at one round trip each ran past the caller's timeout
+        # long before the import finished, so the source stopped completing at
+        # all. Detail comes from the bulk endpoint, chunked.
+        gamekeys = [f"key{n:03d}" for n in range(40)]
+        bulk_requests: list[list[str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v1/user/order":
+                return httpx.Response(
+                    200,
+                    json=[{"gamekey": key} for key in gamekeys],
+                    headers={"content-type": "application/json"},
+                )
+            self.assertEqual(request.url.path, "/api/v1/orders")
+            self.assertEqual(request.url.params["all_tpkds"], "true")
+            requested = request.url.params.get_list("gamekeys")
+            bulk_requests.append(requested)
+            return httpx.Response(
+                200,
+                json={key: self._order_detail(f"Game {key}") for key in requested},
+                headers={"content-type": "application/json"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp)
+            with patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": path}):
+                records, _ = await humble_module.fetch_humble_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
+
+        # 40 orders in 2 requests, not 40.
+        self.assertEqual([len(chunk) for chunk in bulk_requests], [35, 5])
+        self.assertEqual(len(records), 40)
+
+    async def test_null_bulk_entry_is_skipped_not_fatal(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v1/user/order":
+                return httpx.Response(
+                    200,
+                    json=[{"gamekey": "abc123"}, {"gamekey": "gone456"}],
+                    headers={"content-type": "application/json"},
+                )
+            return httpx.Response(
+                200,
+                json={"abc123": self._order_detail("Hollow Knight"), "gone456": None},
+                headers={"content-type": "application/json"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp)
+            with patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": path}):
+                records, _ = await humble_module.fetch_humble_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
+
+        self.assertEqual([r.title for r in records], ["Hollow Knight"])
+
+    async def test_bulk_endpoint_failure_falls_back_to_per_order_fetch(self):
+        # The bulk endpoint is undocumented. If Humble changes it, a slow
+        # import still beats a source that imports nothing.
+        per_order_paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v1/user/order":
+                return httpx.Response(
+                    200,
+                    json=[{"gamekey": "abc123"}, {"gamekey": "def456"}],
+                    headers={"content-type": "application/json"},
+                )
+            if request.url.path == "/api/v1/orders":
+                return httpx.Response(500, text="nope")
+            per_order_paths.append(request.url.path)
+            title = "Hollow Knight" if request.url.path.endswith("abc123") else "Celeste"
+            return httpx.Response(
+                200,
+                json=self._order_detail(title),
+                headers={"content-type": "application/json"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp)
+            with patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": path}):
+                records, _ = await humble_module.fetch_humble_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
+
+        self.assertEqual(
+            per_order_paths, ["/api/v1/order/abc123", "/api/v1/order/def456"]
+        )
+        self.assertEqual([r.title for r in records], ["Hollow Knight", "Celeste"])
+
+    async def test_unexpected_bulk_payload_shape_reaches_the_fallback(self):
+        # The fallback exists for exactly this: the undocumented endpoint
+        # answering 200 with valid JSON of a different shape. Validating that
+        # with an error the handler re-raises would take the whole import
+        # down instead of retrying the way that still works.
+        per_order_paths: list[str] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/api/v1/user/order":
@@ -968,21 +1573,54 @@ class HumbleFetchTests(unittest.IsolatedAsyncioTestCase):
                     json=[{"gamekey": "abc123"}],
                     headers={"content-type": "application/json"},
                 )
-            self.assertEqual(request.url.path, "/api/v1/order/abc123")
-            self.assertEqual(request.url.params["all_tpkds"], "true")
+            if request.url.path == "/api/v1/orders":
+                # A list, not the gamekey-keyed object.
+                return httpx.Response(
+                    200, json=[], headers={"content-type": "application/json"}
+                )
+            per_order_paths.append(request.url.path)
             return httpx.Response(
-                200, json=order_detail, headers={"content-type": "application/json"}
+                200,
+                json=self._order_detail("Hollow Knight"),
+                headers={"content-type": "application/json"},
             )
 
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_cookies(tmp)
             with patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": path}):
-                records, skipped = await humble_module.fetch_humble_purchases(
+                records, _ = await humble_module.fetch_humble_purchases(
                     transport=httpx.MockTransport(handler)
                 )
 
-        self.assertEqual(skipped, [])
+        self.assertEqual(per_order_paths, ["/api/v1/order/abc123"])
         self.assertEqual([r.title for r in records], ["Hollow Knight"])
+
+    async def test_stale_session_is_not_retried_per_order(self):
+        # An auth failure means the session expired. Falling back would be
+        # several hundred more ways to fail with the same error.
+        attempted: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v1/user/order":
+                return httpx.Response(
+                    200,
+                    json=[{"gamekey": "abc123"}],
+                    headers={"content-type": "application/json"},
+                )
+            attempted.append(request.url.path)
+            return httpx.Response(403, json={"error": "forbidden"})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_cookies(tmp)
+            with (
+                patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": path}),
+                self.assertRaisesRegex(RuntimeError, "create_session_ingest_link"),
+            ):
+                await humble_module.fetch_humble_purchases(
+                    transport=httpx.MockTransport(handler)
+                )
+
+        self.assertEqual(attempted, ["/api/v1/orders"])
 
 
 class GogOrderParserTests(unittest.TestCase):
@@ -3107,6 +3745,100 @@ class ImportDryRunParityTests(ToolDBTestCase):
         async with db_module.get_db() as db:
             count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
         self.assertEqual(count["c"], 0)
+
+
+class HumbleSteamAppidMatchingTests(ToolDBTestCase):
+    """The appid on a Humble key resolves what its title cannot (issue: Humble
+    Choice acquisitions landing on the wrong row, or on none)."""
+
+    @staticmethod
+    def _humble_record(title, appid, **overrides):
+        fields = {
+            "title": title,
+            "platform": "steam",
+            "purchase_source": "subscription",
+            "acquired_at": "2023-04-04",
+            "price_paid": 1.34,
+            "price_currency": "USD",
+            "store_identifier": appid,
+        }
+        fields.update(overrides)
+        return PurchaseRecord(**fields)
+
+    async def test_edition_named_key_lands_on_the_row_holding_the_steam_copy(self):
+        # The real shape this was found in. The library holds TWO rows for the
+        # game: "Disco Elysium" (which owns the Steam copy) and "Disco Elysium:
+        # The Final Cut" (epic/switch only), and the second carries the exact
+        # alias Humble's key is titled with. Matching by name/alias therefore
+        # landed the Steam acquisition on the row with no Steam platform row,
+        # where — imports not creating platform rows — it was silently
+        # discarded. The appid points at the right row regardless.
+        steam_row_game = await seed_game("Disco Elysium")
+        gp = await add_platform(steam_row_game, "steam", playtime_minutes=3)
+        await add_identifier(gp, db_module.STEAM_APP_ID, "632470")
+
+        edition_row = await seed_game("Disco Elysium: The Final Cut")
+        await add_platform(edition_row, "epic")
+        await add_game_alias(edition_row, "Disco Elysium - The Final Cut")
+
+        records = [self._humble_record("Disco Elysium - The Final Cut", "632470")]
+        with _patch_fetchers(
+            fetch_humble_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["humble"])
+
+        humble = result["sources"]["humble"]
+        self.assertEqual(humble["filled"], 1)
+        self.assertEqual(humble["no_platform_row"], 0)
+        self.assertEqual(humble["created"], 0)
+
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                """SELECT game_id, acquired_at, price_paid, purchase_source
+                   FROM game_platforms WHERE platform = 'steam'""",
+            )
+        self.assertEqual(row["game_id"], steam_row_game)
+        self.assertEqual(row["acquired_at"], "2023-04-04")
+        self.assertEqual(row["purchase_source"], "subscription")
+
+    async def test_appid_beats_a_title_the_library_never_carried(self):
+        # "DEATH STRANDING DIRECTOR'S CUT" against a row named "DEATH
+        # STRANDING": the appid makes the match exact instead of relying on
+        # edition-suffix stripping.
+        game_id = await seed_game("DEATH STRANDING")
+        gp = await add_platform(game_id, "steam", playtime_minutes=513)
+        await add_identifier(gp, db_module.STEAM_APP_ID, "1850570")
+
+        records = [self._humble_record("DEATH STRANDING DIRECTOR'S CUT", "1850570")]
+        with _patch_fetchers(
+            fetch_humble_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["humble"])
+
+        humble = result["sources"]["humble"]
+        self.assertEqual((humble["filled"], humble["created"]), (1, 0))
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT price_paid, purchase_source FROM game_platforms "
+                "WHERE game_id = ? AND platform = 'steam'",
+                (game_id,),
+            )
+        self.assertEqual(row["price_paid"], 1.34)
+        self.assertEqual(row["purchase_source"], "subscription")
+
+    async def test_appid_miss_still_falls_through_to_name_matching(self):
+        # A first import can predate the sync that attaches the appid, so an
+        # identifier miss must not be terminal.
+        game_id = await seed_game("Revita")
+        await add_platform(game_id, "steam")
+
+        records = [self._humble_record("Revita", "1124260")]
+        with _patch_fetchers(
+            fetch_humble_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["humble"])
+
+        self.assertEqual(result["sources"]["humble"]["filled"], 1)
 
 
 class CreateMissingQualityTests(ToolDBTestCase):
