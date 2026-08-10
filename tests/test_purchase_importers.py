@@ -810,6 +810,198 @@ class HumbleParserTests(unittest.TestCase):
         self.assertEqual([r.title for r in records], ["Gemini Rue", "Little Inferno"])
         self.assertEqual([r.price_paid for r in records], [5.00, 5.00])
 
+    def test_edition_named_key_dedupes_against_its_base_named_twin(self):
+        # Humble Choice April 2023: the key is "Life Is Strange 2 Complete
+        # Edition" and the second entry is "Life is Strange 2". Neither the
+        # title nor the machine_name bridges them ("completeedition" is not a
+        # delivery-channel tail), so the month counted the game twice, wrote
+        # two acquisition rows for it, and diluted every sibling's share.
+        order = {
+            "product": {
+                "human_name": "April 2023 Humble Choice",
+                "category": "subscriptioncontent",
+            },
+            "amount_spent": 10.75,
+            "currency": "USD",
+            "created": "2023-04-04T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {
+                        "human_name": "Life Is Strange 2 Complete Edition",
+                        "key_type": "steam",
+                        "machine_name": "lifeisstrange2_completeedition_choice_steam",
+                        "redeemed_key_val": "AAAAA-BBBBB-CCCCC",
+                    },
+                    {
+                        "human_name": "Revita",
+                        "key_type": "steam",
+                        "machine_name": "revita_choice_steam",
+                        "redeemed_key_val": "DDDDD-EEEEE-FFFFF",
+                    },
+                ]
+            },
+            "subproducts": [
+                {
+                    "human_name": "Life is Strange 2",
+                    "machine_name": "lifeisstrange2",
+                    "downloads": [{"platform": "windows"}],
+                }
+            ],
+        }
+
+        records, _ = humble_module.records_from_orders([order])
+
+        self.assertEqual(
+            [r.title for r in records],
+            ["Life Is Strange 2 Complete Edition", "Revita"],
+        )
+        # Two entries, not three — so the split is 5.38/5.37, not thirds.
+        self.assertEqual([r.price_paid for r in records], [5.38, 5.37])
+        self.assertEqual(sum(r.price_paid for r in records), 10.75)
+
+    def test_edition_dedupe_keeps_separately_sold_re_releases_apart(self):
+        # The edition key must use the CURATED phrase list, not
+        # normalize_edition_comparison_title — that one strips a qualifier
+        # plus up to two riding words and any <=3 words ending in "edition",
+        # which merges pairs that are separate store products the account can
+        # own separately. Dropping one would be the same silent loss this
+        # union was written to end, with the survivors' prices overstated
+        # instead of diluted.
+        order = {
+            "product": {"human_name": "Devolver Bundle", "category": "bundle"},
+            "amount_spent": 10.00,
+            "currency": "USD",
+            "created": "2015-01-01T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "Shadow Warrior", "key_type": "steam",
+                     "machine_name": "shadowwarrior_steam", "redeemed_key_val": "AAA"},
+                    {"human_name": "Tomb Raider", "key_type": "steam",
+                     "machine_name": "tombraider_steam", "redeemed_key_val": "BBB"},
+                    {"human_name": "Metro 2033", "key_type": "steam",
+                     "machine_name": "metro2033_steam", "redeemed_key_val": "CCC"},
+                    {"human_name": "DOOM", "key_type": "steam",
+                     "machine_name": "doom_steam", "redeemed_key_val": "DDD"},
+                ]
+            },
+            "subproducts": [
+                {"human_name": "Shadow Warrior Classic Redux",
+                 "machine_name": "shadowwarrior_classicredux",
+                 "downloads": [{"platform": "windows"}]},
+                {"human_name": "Tomb Raider: Anniversary",
+                 "machine_name": "tombraider_anniversary",
+                 "downloads": [{"platform": "windows"}]},
+                {"human_name": "Metro 2033 Redux", "machine_name": "metro2033_redux",
+                 "downloads": [{"platform": "windows"}]},
+                {"human_name": "DOOM Classic Complete",
+                 "machine_name": "doom_classiccomplete",
+                 "downloads": [{"platform": "windows"}]},
+            ],
+        }
+
+        records, _ = humble_module.records_from_orders([order])
+
+        self.assertEqual(
+            [r.title for r in records],
+            [
+                "Shadow Warrior", "Tomb Raider", "Metro 2033", "DOOM",
+                "Shadow Warrior Classic Redux", "Tomb Raider: Anniversary",
+                "Metro 2033 Redux", "DOOM Classic Complete",
+            ],
+        )
+
+    def test_approximate_fold_is_reported_exact_ones_are_not(self):
+        # An approximate fold is the one de-duplication decision that can be
+        # wrong, and a wrong one deletes a game and redistributes its money.
+        # Exact-title and machine-name folds are unambiguous and routine —
+        # reporting those would bury this in hundreds of per-platform dupes.
+        order = {
+            "product": {"human_name": "Choice", "category": "subscriptioncontent"},
+            "amount_spent": 8.00,
+            "currency": "USD",
+            "created": "2023-04-04T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "Life Is Strange 2 Complete Edition",
+                     "key_type": "steam", "machine_name": "lis2ce_steam",
+                     "redeemed_key_val": "AAA"},
+                    {"human_name": "Revita", "key_type": "steam",
+                     "machine_name": "revita_steam", "redeemed_key_val": "BBB"},
+                ]
+            },
+            "subproducts": [
+                # Approximate: bridged only by the edition key.
+                {"human_name": "Life is Strange 2", "machine_name": "lis2",
+                 "downloads": [{"platform": "windows"}]},
+                # Exact title match — routine, not reported.
+                {"human_name": "Revita", "machine_name": "revita",
+                 "downloads": [{"platform": "windows"}]},
+            ],
+        }
+
+        _, skipped = humble_module.records_from_orders([order])
+
+        folds = [s for s in skipped if "folded into an existing one" in s["reason"]]
+        self.assertEqual(len(folds), 1)
+        self.assertIn(
+            "Life is Strange 2 -> Life Is Strange 2 Complete Edition",
+            folds[0]["reason"],
+        )
+        self.assertNotIn("Revita", folds[0]["reason"])
+
+    def test_exact_title_match_outranks_an_earlier_edition_match(self):
+        # Scanned strongest-key-first, never first-index-wins. The subproduct
+        # here matches index 1 EXACTLY by title and index 0 only approximately
+        # by the edition key. First-match-by-any-key took index 0 — the
+        # unrevealed entry — and replaced it, destroying that key's identity
+        # (title AND its Steam appid) and leaving two entries under the same
+        # name, which is the duplicate this de-duplication exists to prevent.
+        order = {
+            "product": {
+                "human_name": "April 2023 Humble Choice",
+                "category": "subscriptioncontent",
+            },
+            "amount_spent": 10.00,
+            "currency": "USD",
+            "created": "2023-04-04T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {
+                        "human_name": "Life is Strange 2",
+                        "key_type": "steam",
+                        "machine_name": "lifeisstrange2_choice_steam",
+                        "steam_app_id": "532210",
+                        # Unrevealed, so it is the one the slot-replacement
+                        # path would overwrite if it were matched.
+                    },
+                    {
+                        "human_name": "Life Is Strange 2 Complete Edition",
+                        "key_type": "steam",
+                        "machine_name": "lifeisstrange2completeedition_choice_steam",
+                        "steam_app_id": "999999",
+                        "redeemed_key_val": "AAAAA-BBBBB",
+                    },
+                ]
+            },
+            "subproducts": [
+                {
+                    "human_name": "Life Is Strange 2 Complete Edition",
+                    "machine_name": "lifeisstrange2completeedition",
+                    "downloads": [{"platform": "windows"}],
+                }
+            ],
+        }
+
+        records, _ = humble_module.records_from_orders([order])
+
+        self.assertEqual(
+            [(r.title, r.platform, r.store_identifier) for r in records],
+            [
+                ("Life is Strange 2", "steam", "532210"),
+                ("Life Is Strange 2 Complete Edition", "steam", "999999"),
+            ],
+        )
+
     def test_key_and_subproduct_halves_dedupe_by_machine_name(self):
         # Humble renames the DRM-free half often enough that titles alone
         # don't always bridge the two ("reussteam" vs "reus"). The
