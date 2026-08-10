@@ -304,6 +304,41 @@ def is_edition_variant_of(name: str, other: str) -> bool:
     )
 
 
+# SKU phrases that repackage the SAME store product — a "Complete"/"Deluxe"/
+# "Gold"/GOTY edition is (near-universally) the base game plus its DLC under
+# one storefront listing, not a separate app. Deliberately a strict SUBSET of
+# _SERIES_GAP_EDITION_PATTERNS: remastered / director's cut / anniversary /
+# legendary / definitive / enhanced / bare "edition" are EXCLUDED because
+# those routinely ship as their own Steam appid and their own library row
+# (BioShock vs BioShock Remastered, Death Stranding vs its Director's Cut,
+# Mafia II vs its Definitive Edition). Used where a match DELETES a record —
+# the Humble importer's key-vs-key fold — so a phrase belongs here only when
+# collapsing on it can never lose a separately-owned product.
+_SAME_PRODUCT_SKU_PATTERNS = (
+    re.compile(r"[\s:–—-]+(?:the\s+)?game of the year(?: edition)?\s*$", re.IGNORECASE),
+    re.compile(r"[\s:–—-]+(?:the\s+)?goty(?: edition)?\s*$", re.IGNORECASE),
+    re.compile(r"[\s:–—-]+(?:the\s+)?complete edition\s*$", re.IGNORECASE),
+    re.compile(r"[\s:–—-]+(?:the\s+)?deluxe edition\s*$", re.IGNORECASE),
+    re.compile(r"[\s:–—-]+(?:the\s+)?gold edition\s*$", re.IGNORECASE),
+)
+
+
+def normalize_same_product_sku_title(name: str) -> str:
+    """Normalize a title for "same store product, different SKU?" comparisons.
+
+    The destructive-merge counterpart of normalize_series_gap_title: same
+    loop, far narrower phrase list (see _SAME_PRODUCT_SKU_PATTERNS). Use this
+    one when a match will DROP a record rather than merely report or redirect.
+    """
+    cleaned = name
+    previous = None
+    while cleaned != previous:
+        previous = cleaned
+        for pattern in _SAME_PRODUCT_SKU_PATTERNS:
+            cleaned = pattern.sub("", cleaned)
+    return normalize_search_text(cleaned)
+
+
 def normalize_series_gap_title(name: str) -> str:
     """Normalize a title for discover_series_gaps have/gap exclusion matching.
 
