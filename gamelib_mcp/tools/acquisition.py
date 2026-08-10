@@ -1718,11 +1718,19 @@ async def _import_one_source(
     # of feeding them to the single-game matcher, where they'd only ever miss.
     bundles = [await _record_to_bundle_entry(r) for r in records if r.is_bundle]
     importable = [r for r in records if not r.is_bundle]
-    items = [_record_to_batch_item(r, source) for r in importable]
+    # A record the source cannot confirm was granted (an unrevealed Humble
+    # key) may fill a row an ownership sync already established, but must
+    # never mint one — see PurchaseRecord.mint_allowed. Split it out and run
+    # it through the same writer with creation switched off, rather than
+    # dropping it: the signal is too weak to create ownership on AND too weak
+    # to throw away a confirmed row's provenance over.
+    restricted = [r for r in importable if not r.mint_allowed]
+    items = [_record_to_batch_item(r, source) for r in importable if r.mint_allowed]
 
     # Second bundle net: sources that can't flag bundles themselves (Steam's
     # history page is just SKU names) get compilation-named MISSES diverted
-    # here instead of minted/unmatched.
+    # here instead of minted/unmatched. Restricted records skip this: they
+    # cannot mint, so a miss needs no split hand-off.
     items, suspect_bundles = await _divert_unmatched_bundle_suspects(items)
     bundles.extend(suspect_bundles)
     # One order can emit the same bundle once per key platform — split it once.
@@ -1735,26 +1743,45 @@ async def _import_one_source(
     no_platform_row_details: list[dict] = []
     family_conflict_details: list[dict] = []
     create_refused_details: list[dict] = []
-    for start in range(0, len(items), _BATCH_ITEM_CAP):
-        batch = await set_acquisitions_batch(
-            items[start : start + _BATCH_ITEM_CAP],
-            overwrite=overwrite,
-            create_platform_rows=create_platform_rows,
-            create_missing=create_missing,
-            dry_run=dry_run,
+    unconfirmed_unmatched: list[dict] = []
+
+    async def run(batch_items: list[dict], *, allow_creation: bool) -> list[dict]:
+        """Push items through the batch writer, accumulating counters."""
+        nonlocal applied, filled, no_change, created, no_platform_row
+        nonlocal family_conflict, errors
+        misses: list[dict] = []
+        for start in range(0, len(batch_items), _BATCH_ITEM_CAP):
+            batch = await set_acquisitions_batch(
+                batch_items[start : start + _BATCH_ITEM_CAP],
+                overwrite=overwrite,
+                create_platform_rows=create_platform_rows and allow_creation,
+                create_missing=create_missing and allow_creation,
+                dry_run=dry_run,
+            )
+            applied += batch["applied"]
+            filled += batch["filled"]
+            no_change += batch["no_change"]
+            created += batch["created"]
+            no_platform_row += batch["no_platform_row"]
+            family_conflict += batch["family_conflict"]
+            errors += batch["errors"]
+            misses.extend(batch["unmatched"])
+            created_details.extend(batch["created_details"])
+            no_platform_row_details.extend(batch["no_platform_row_details"])
+            family_conflict_details.extend(batch["family_conflict_details"])
+            create_refused_details.extend(batch["create_refused_details"])
+        return misses
+
+    unmatched.extend(await run(items, allow_creation=True))
+    # Reported apart from real unmatched spend: a restricted record missing is
+    # the EXPECTED outcome for a key that really was never redeemed, so mixing
+    # them in would bury the misses that mean something.
+    unconfirmed_unmatched.extend(
+        await run(
+            [_record_to_batch_item(r, source) for r in restricted],
+            allow_creation=False,
         )
-        applied += batch["applied"]
-        filled += batch["filled"]
-        no_change += batch["no_change"]
-        created += batch["created"]
-        no_platform_row += batch["no_platform_row"]
-        family_conflict += batch["family_conflict"]
-        errors += batch["errors"]
-        unmatched.extend(batch["unmatched"])
-        created_details.extend(batch["created_details"])
-        no_platform_row_details.extend(batch["no_platform_row_details"])
-        family_conflict_details.extend(batch["family_conflict_details"])
-        create_refused_details.extend(batch["create_refused_details"])
+    )
 
     # Zero-price promo lines (bonus packs, wallpapers, costume sets claimed for
     # free) are expected to miss — reporting them beside real unmatched spend
@@ -1773,6 +1800,10 @@ async def _import_one_source(
         "created_details": created_details,
         "unmatched": unmatched,
         "unmatched_free": unmatched_free,
+        # Records the source could not confirm were granted, which then found
+        # no confirmed row to fill. Expected, not a gap — kept out of
+        # `unmatched` so real misses stay visible.
+        "unconfirmed_unmatched": unconfirmed_unmatched,
         "no_platform_row": no_platform_row,
         "no_platform_row_details": no_platform_row_details,
         "family_conflict": family_conflict,

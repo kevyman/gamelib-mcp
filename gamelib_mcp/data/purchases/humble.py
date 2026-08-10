@@ -28,13 +28,17 @@ Record building:
   title was already collected, or when its ``machine_name`` is an
   already-collected one minus a delivery-channel tail ("crimsonland" vs
   "crimsonland_steam", "reus" vs "reussteam").
-- A key Humble never revealed (no ``redeemed_key_val``, or expired) was never
-  redeemed — the title was already owned elsewhere, or is being held to gift.
-  It records NO ownership: the storefront sync is what proves what you own,
-  and writing the row would also bill this bundle's money to a copy that came
-  from somewhere else. It still takes its share of the order split, so the
-  redeemed games keep the price they actually cost, and the unattributed
-  share is reported in ``skipped``. The gate is armed only when the WHOLE
+- A key Humble reports no ``redeemed_key_val`` for was USUALLY never
+  redeemed — already owned elsewhere, or held to gift — so its record is
+  RESTRICTED (``mint_allowed=False``): it may fill a platform row an
+  ownership sync already confirmed, but may never mint a game or a platform
+  row. It is deliberately not dropped, because the signal is weak in BOTH
+  directions: ``is_expired`` is not consulted at all (the expiry date is a
+  deadline for redeeming and passes either way — Humble reports Death
+  Stranding Director's Cut from Choice April 2023 as expired even though
+  Steam Support confirmed the activation on 2023-04-05), and Humble stops
+  reporting a value for expired keys regardless of whether they were used.
+  Every key keeps its share of the order split. The gate is armed only when the WHOLE
   history contains at least one revealed key: if the field ever disappears
   from the payload, reading that as "every key is unredeemed" would import
   nothing while reporting success, so its absence is reported instead. A
@@ -255,15 +259,21 @@ class _OrderGame(NamedTuple):
 
 
 def _tpk_is_revealed(tpk: dict) -> bool:
-    """Whether the key's value was ever shown, i.e. could have been redeemed.
+    """Whether Humble has shown this key's value.
 
-    ``redeemed_key_val`` is absent until Humble reveals the key, so its
-    absence is positive evidence the key was never used — the bundle title
-    already owned elsewhere, or kept to gift. An expired key is the same
-    thing with a deadline attached.
+    ``is_expired`` is deliberately NOT consulted. The expiry date is a
+    deadline for REDEEMING, and it passes whether or not you redeemed —
+    Humble flags a long-since-redeemed key expired exactly like an untouched
+    one, and its UI says "this key has expired and can no longer be redeemed"
+    over a banner that also says CLAIMED. Death Stranding Director's Cut from
+    Humble Choice April 2023 is the proof: Steam Support confirmed the
+    activation on 2023-04-05, and Humble still reports the key expired.
+    Reading expiry as non-redemption discarded a game the account owns.
+
+    Absence of ``redeemed_key_val`` remains the signal — but it is a weak
+    one, which is why an unrevealed key is now restricted rather than
+    dropped (see PurchaseRecord.mint_allowed).
     """
-    if tpk.get("is_expired"):
-        return False
     return bool(str(tpk.get("redeemed_key_val") or "").strip())
 
 
@@ -503,17 +513,21 @@ def records_from_order(
         games, shares, strict=True
     ):
         if honor_revealed and not revealed:
-            # A key Humble never revealed was never redeemed: the bundle
-            # title was already owned elsewhere, or it is being kept to gift.
-            # Recording it would claim ownership the storefront sync (which
-            # IS authoritative for what you own) never reported, and would
-            # attribute this bundle's money to a copy that came from
-            # somewhere else. It still takes its share of the split, so the
-            # redeemed games keep the price they actually cost — the share
-            # is reported rather than silently redistributed.
+            # Humble never showed this key's value. That USUALLY means it was
+            # never redeemed — the title was already owned elsewhere, or is
+            # being kept to gift — so the record must not mint a game or a
+            # platform row, which is what turned the vault into phantom
+            # ownership. But the signal is not proof: Humble also stops
+            # reporting a value for keys it considers expired, including ones
+            # redeemed years earlier. So the record is RESTRICTED, not
+            # dropped — it can still fill a platform row the storefront sync
+            # has confirmed, where ownership is established independently and
+            # the purchase is simply the best provenance available for it.
             unrevealed.append(title)
             unrevealed_total += share
-            continue
+            restricted = True
+        else:
+            restricted = False
         # Humble has no per-item content typing — an addon-ish NAME is the
         # only nested signal, so DLC/soundtrack keys match exact-name-only
         # and mint nested instead of as phantom base games. Known DLC whose
@@ -543,6 +557,7 @@ def records_from_order(
                 # One key naming several games — divert to
                 # bundles_needing_split rather than minting a giant row.
                 is_bundle=_looks_like_enumerated_bundle(title),
+                mint_allowed=not restricted,
             )
         )
     if unrevealed:
@@ -550,9 +565,10 @@ def records_from_order(
             {
                 "description": str(order_name),
                 "reason": (
-                    f"{len(unrevealed)} unrevealed key(s) — never redeemed, so no "
-                    f"ownership recorded ({unrevealed_total:.2f} {currency} "
-                    f"unattributed): {', '.join(unrevealed[:5])}"
+                    f"{len(unrevealed)} key(s) Humble reports no value for "
+                    f"({unrevealed_total:.2f} {currency}) — recorded only against "
+                    "a platform row an ownership sync already confirmed, never "
+                    f"minting one: {', '.join(unrevealed[:5])}"
                     + (", …" if len(unrevealed) > 5 else "")
                 ),
             }
