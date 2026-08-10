@@ -851,9 +851,11 @@ class HumbleParserTests(unittest.TestCase):
 
         records, _ = humble_module.records_from_orders([order])
 
+        # The survivor keeps the key's platform but adopts the BASE title —
+        # the un-suffixed name matches a base-named library row at rank 0.
         self.assertEqual(
-            [r.title for r in records],
-            ["Life Is Strange 2 Complete Edition", "Revita"],
+            [(r.title, r.platform) for r in records],
+            [("Life is Strange 2", "steam"), ("Revita", "steam")],
         )
         # Two entries, not three — so the split is 5.38/5.37, not thirds.
         self.assertEqual([r.price_paid for r in records], [5.38, 5.37])
@@ -943,8 +945,9 @@ class HumbleParserTests(unittest.TestCase):
 
         folds = [s for s in skipped if "folded into an existing one" in s["reason"]]
         self.assertEqual(len(folds), 1)
+        # Reported as (dropped SKU title) -> (kept base title).
         self.assertIn(
-            "Life is Strange 2 -> Life Is Strange 2 Complete Edition",
+            "Life Is Strange 2 Complete Edition -> Life is Strange 2",
             folds[0]["reason"],
         )
         self.assertNotIn("Revita", folds[0]["reason"])
@@ -1111,6 +1114,233 @@ class HumbleParserTests(unittest.TestCase):
                 self.assertIsNone(
                     record.store_identifier, f"{record.title} ({record.platform})"
                 )
+
+    def test_same_platform_edition_key_pair_folds_to_one_share(self):
+        # The REAL April 2023 shape, which the subproduct fold cannot see:
+        # Humble delivered "Life Is Strange 2 Complete Edition" and "Life is
+        # Strange 2" as two Steam KEYS. Keys were wholly exempt from
+        # de-duplication, so the month split ten ways instead of nine and
+        # every game recorded 1.07 instead of its real share. Two
+        # same-platform keys can never become two library rows
+        # (UNIQUE(game_id, platform)), so folding cannot lose ownership —
+        # it can only stop the dilution.
+        order = {
+            "product": {
+                "human_name": "April 2023 Humble Choice",
+                "category": "subscriptioncontent",
+            },
+            "amount_spent": 10.75,
+            "currency": "USD",
+            "created": "2023-04-04T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "Life Is Strange 2 Complete Edition",
+                     "key_type": "steam", "machine_name": "lis2ce_choice_steam",
+                     "steam_app_id": "532210", "redeemed_key_val": "AAA"},
+                    {"human_name": "Life is Strange 2", "key_type": "steam",
+                     "machine_name": "lis2_choice_steam"},
+                    {"human_name": "Revita", "key_type": "steam",
+                     "machine_name": "revita_choice_steam",
+                     "redeemed_key_val": "BBB"},
+                ]
+            },
+        }
+
+        records, skipped = humble_module.records_from_orders([order])
+
+        # The BASE title survives whichever key Humble listed first — it is
+        # the one that matches a base-named library row at rank 0 — while the
+        # appid rides over from the edition-named twin.
+        self.assertEqual(
+            [(r.title, r.platform, r.store_identifier) for r in records],
+            [
+                ("Life is Strange 2", "steam", "532210"),
+                ("Revita", "steam", None),
+            ],
+        )
+        # Two entries → the split halves, no dilution by the folded twin.
+        self.assertEqual([r.price_paid for r in records], [5.38, 5.37])
+        folds = [s for s in skipped if "folded into an existing one" in s["reason"]]
+        self.assertEqual(len(folds), 1)
+        self.assertIn(
+            "Life Is Strange 2 Complete Edition -> Life is Strange 2",
+            folds[0]["reason"],
+        )
+
+    def test_key_fold_merges_revealed_and_appid_from_either_twin(self):
+        # The survivor keeps the union of what the pair knew: the appid from
+        # whichever key carried it, and revealed if EITHER copy was revealed —
+        # one redeemed key is proof the game was granted, however its twin
+        # reads. Without the merge, folding into an unrevealed survivor would
+        # gate a game the account demonstrably redeemed.
+        order = {
+            "product": {"human_name": "Choice", "category": "subscriptioncontent"},
+            "amount_spent": 6.00,
+            "currency": "USD",
+            "created": "2023-04-04T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    # Unrevealed, no appid — collected first.
+                    {"human_name": "Life Is Strange 2 Complete Edition",
+                     "key_type": "steam", "machine_name": "lis2ce_steam"},
+                    # Revealed, carries the appid.
+                    {"human_name": "Life is Strange 2", "key_type": "steam",
+                     "machine_name": "lis2_steam", "steam_app_id": "532210",
+                     "redeemed_key_val": "AAA"},
+                    # Second revealed key so the reveal gate is armed.
+                    {"human_name": "Revita", "key_type": "steam",
+                     "machine_name": "revita_steam", "redeemed_key_val": "BBB"},
+                ]
+            },
+        }
+
+        records, _ = humble_module.records_from_orders([order])
+
+        survivor = records[0]
+        # Base title adopted from the folded twin — the un-suffixed name is
+        # the one the acquisition writer can match when no appid rescues it.
+        self.assertEqual(survivor.title, "Life is Strange 2")
+        self.assertEqual(survivor.store_identifier, "532210")
+        # Revealed via the folded twin → not restricted.
+        self.assertTrue(survivor.mint_allowed)
+
+    def test_key_pair_named_like_a_re_release_never_folds(self):
+        # Adversarial-review finding: the key-vs-key fold must use the narrow
+        # same-product SKU list, not the wider edition list the subproduct
+        # fold uses. Remastered / Director's Cut / Anniversary / Legendary /
+        # Definitive routinely ship as their own Steam appid — BioShock and
+        # BioShock Remastered are two apps — and the appid guard cannot save
+        # this: a fifth of real Steam tpks carry no appid, and non-Steam keys
+        # never do. Folding here deletes a separately-owned product and
+        # overstates every survivor's price.
+        order = {
+            "product": {"human_name": "2K Bundle", "category": "bundle"},
+            "amount_spent": 10.00,
+            "currency": "USD",
+            "created": "2019-01-01T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    # Deliberately NO steam_app_id on either half of any pair.
+                    {"human_name": "BioShock", "key_type": "steam",
+                     "machine_name": "bioshock_steam", "redeemed_key_val": "A"},
+                    {"human_name": "BioShock Remastered", "key_type": "steam",
+                     "machine_name": "bioshockremastered_steam",
+                     "redeemed_key_val": "B"},
+                    {"human_name": "Death Stranding", "key_type": "steam",
+                     "machine_name": "deathstranding_steam",
+                     "redeemed_key_val": "C"},
+                    {"human_name": "Death Stranding Director's Cut",
+                     "key_type": "steam", "machine_name": "dsdc_steam",
+                     "redeemed_key_val": "D"},
+                ]
+            },
+        }
+
+        records, skipped = humble_module.records_from_orders([order])
+
+        self.assertEqual(
+            [r.title for r in records],
+            [
+                "BioShock", "BioShock Remastered",
+                "Death Stranding", "Death Stranding Director's Cut",
+            ],
+        )
+        self.assertEqual([r.price_paid for r in records], [2.5, 2.5, 2.5, 2.5])
+        self.assertEqual(
+            [s for s in skipped if "folded into" in s["reason"]], []
+        )
+
+    def test_fold_survivor_title_does_not_depend_on_payload_order(self):
+        # Adversarial-review finding: keeping "whichever key Humble listed
+        # first" made the record's identity depend on payload order — the
+        # edition-titled survivor with no appid matches nothing in the
+        # library, so the acquisition went from recorded to unrecorded based
+        # on ordering alone. The base title must survive both ways.
+        def order_with(tpks):
+            return {
+                "product": {"human_name": "Choice", "category": "subscriptioncontent"},
+                "amount_spent": 4.00,
+                "currency": "USD",
+                "created": "2023-04-04T00:00:00",
+                "tpkd_dict": {"all_tpks": tpks},
+            }
+
+        ce = {"human_name": "Life Is Strange 2 Complete Edition",
+              "key_type": "steam", "machine_name": "lis2ce_steam",
+              "redeemed_key_val": "A"}
+        base = {"human_name": "Life is Strange 2", "key_type": "steam",
+                "machine_name": "lis2_steam", "redeemed_key_val": "B"}
+
+        for tpks in ([ce, base], [base, ce]):
+            with self.subTest(first=tpks[0]["human_name"]):
+                records, _ = humble_module.records_from_orders([order_with(tpks)])
+                self.assertEqual(
+                    [(r.title, r.price_paid) for r in records],
+                    [("Life is Strange 2", 4.00)],
+                )
+
+    def test_keys_with_different_appids_never_fold(self):
+        # Two Steam appids are Humble's own statement that the keys unlock
+        # different store products, whatever the titles suggest.
+        order = {
+            "product": {"human_name": "Bundle", "category": "bundle"},
+            "amount_spent": 8.00,
+            "currency": "USD",
+            "created": "2020-01-01T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "Life is Strange 2", "key_type": "steam",
+                     "machine_name": "lis2_steam", "steam_app_id": "532210",
+                     "redeemed_key_val": "AAA"},
+                    {"human_name": "Life Is Strange 2 Complete Edition",
+                     "key_type": "steam", "machine_name": "lis2ce_steam",
+                     "steam_app_id": "999999", "redeemed_key_val": "BBB"},
+                ]
+            },
+        }
+
+        records, _ = humble_module.records_from_orders([order])
+
+        self.assertEqual(
+            [(r.title, r.store_identifier) for r in records],
+            [
+                ("Life is Strange 2", "532210"),
+                ("Life Is Strange 2 Complete Edition", "999999"),
+            ],
+        )
+
+    def test_third_key_folds_into_its_platform_twin_not_the_first_match(self):
+        # With a Steam+GOG pair already collected, a second Steam key must
+        # fold into the STEAM twin even though the GOG entry sits earlier in
+        # the list — a platform-blind first-match would refuse the fold (or
+        # fold into the wrong grant).
+        order = {
+            "product": {"human_name": "Two-Store Bundle", "category": "bundle"},
+            "amount_spent": 6.00,
+            "currency": "USD",
+            "created": "2018-01-01T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "Torchlight", "key_type": "gog",
+                     "machine_name": "torchlight_gog", "redeemed_key_val": "AAA"},
+                    {"human_name": "Torchlight", "key_type": "steam",
+                     "machine_name": "torchlight_steam", "redeemed_key_val": "BBB"},
+                    {"human_name": "Torchlight Complete Edition",
+                     "key_type": "steam", "machine_name": "torchlightce_steam",
+                     "redeemed_key_val": "CCC"},
+                ]
+            },
+        }
+
+        records, _ = humble_module.records_from_orders([order])
+
+        # The GOG grant survives; the edition-named Steam key folded into the
+        # Steam twin, not past it.
+        self.assertEqual(
+            [(r.title, r.platform) for r in records],
+            [("Torchlight", "gog"), ("Torchlight", "steam")],
+        )
+        self.assertEqual([r.price_paid for r in records], [3.00, 3.00])
 
     def test_two_key_types_for_one_game_stay_two_records(self):
         # De-duplication is a subproduct-side concern. An order handing out

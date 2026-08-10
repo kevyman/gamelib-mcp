@@ -27,7 +27,10 @@ Record building:
   dilutes every real game's share. An entry is dropped when its normalized
   title was already collected, or when its ``machine_name`` is an
   already-collected one minus a delivery-channel tail ("crimsonland" vs
-  "crimsonland_steam", "reus" vs "reussteam").
+  "crimsonland_steam", "reus" vs "reussteam"), or when a curated edition
+  phrase is all that separates the titles. Keys fold against keys only
+  WITHIN a platform (and never when their Steam appids differ); a
+  cross-platform key pair is two real grants and always stays separate.
 - A key Humble reports no ``redeemed_key_val`` for was USUALLY never
   redeemed — already owned elsewhere, or held to gift — so its record is
   RESTRICTED (``mint_allowed=False``): it may fill a platform row an
@@ -90,6 +93,7 @@ import httpx
 from gamelib_mcp.data.content import classify_title_override, match_addon_name
 from gamelib_mcp.data.db import default_data_dir
 from gamelib_mcp.data.title_normalization import (
+    normalize_same_product_sku_title,
     normalize_search_text,
     normalize_series_gap_title,
 )
@@ -359,9 +363,17 @@ def _order_games(
     those would be the same silent loss this union was written to end, with
     the surviving games' prices overstated instead of diluted.
 
-    Keys are deliberately exempt from the whole check: an order handing out a
+    Keys are exempt from the check ACROSS platforms — an order handing out a
     Steam key AND a GOG key for the same game grants two real platform
-    relationships, not one duplicate.
+    relationships, not one duplicate — but fold WITHIN a platform: two
+    same-platform keys for one game can never become two library rows
+    (game_platforms is UNIQUE(game_id, platform)), so keeping both only
+    dilutes the price split. April 2023's edition-named key beside its
+    base-named twin, both Steam, is the shape that proved it. A pair carrying
+    two DIFFERENT Steam appids never folds — that is Humble's own statement
+    they unlock different store products. When a pair folds, the survivor
+    keeps the union of what both knew (appid from either, revealed if either
+    was).
 
     ``honor_revealed`` mirrors records_from_order's gate. It matters here
     because a game delivered as BOTH an unrevealed key and a DRM-free
@@ -373,17 +385,47 @@ def _order_games(
     non_game: list[str] = []
     # (folded title, title it was folded into) for approximate matches only.
     folded: list[tuple[str, str]] = []
-    # (normalized title, machine_name, edition-collapsed title) per collected
-    # entry, positionally aligned with `games` so a later entry can replace an
-    # earlier one.
-    collected_keys: list[tuple[str, str, str]] = []
+    # (normalized title, machine_name, edition-collapsed title, same-product
+    # SKU title) per collected entry, positionally aligned with `games` so a
+    # later entry can replace an earlier one. The last two differ on purpose:
+    # the edition key (curated list) drives key-vs-SUBPRODUCT folds, where the
+    # two sides are the same order item under two names; the far narrower SKU
+    # key drives key-vs-KEY folds, where both sides are independent grants and
+    # a wrong collapse deletes a separately-owned product (BioShock beside
+    # BioShock Remastered are two Steam apps; so are Death Stranding and its
+    # Director's Cut).
+    collected_keys: list[tuple[str, str, str, str]] = []
 
-    def _keys(entry: dict, name: str) -> tuple[str, str, str]:
+    def _keys(entry: dict, name: str) -> tuple[str, str, str, str]:
+        cleaned = _clean_title(name)
         return (
             _identity_key(name),
             str(entry.get("machine_name") or "").lower(),
-            normalize_series_gap_title(_clean_title(name)),
+            normalize_series_gap_title(cleaned),
+            normalize_same_product_sku_title(cleaned),
         )
+
+    def record_fold(dropped: str, kept: str) -> None:
+        """Report an approximate fold once, however many passes re-derive it."""
+        if (dropped, kept) not in folded:
+            folded.append((dropped, kept))
+
+    def base_title(prior_title: str, new_title: str, shared: str) -> str:
+        """The half of an approximately-folded pair WITHOUT the SKU suffix.
+
+        The survivor's title is what the acquisition writer matches on when no
+        appid rescues it, and the un-suffixed title is strictly the better
+        key: it exact-matches a base-named library row at rank 0 AND
+        prefix-matches an edition-named row, while the suffixed title matches
+        only the latter. Keeping "whichever key Humble listed first" made the
+        outcome depend on payload order.
+        """
+        if (
+            normalize_search_text(new_title) == shared
+            and normalize_search_text(prior_title) != shared
+        ):
+            return new_title
+        return prior_title
 
     def register(
         entry: dict,
@@ -409,7 +451,7 @@ def _order_games(
         wrong game, and giving Classic Complete the two acquisition rows this
         de-duplication exists to prevent.
         """
-        identity, machine_name, edition = _keys(entry, name)
+        identity, machine_name, edition, _ = _keys(entry, name)
         if identity:
             for index, claimed in enumerate(collected_keys):
                 if identity == claimed[0]:
@@ -426,6 +468,50 @@ def _order_games(
                     return index, True
         return None, False
 
+    def key_fold_index(
+        entry: dict, name: str, platform: str, appid: str | None
+    ) -> tuple[int | None, bool]:
+        """collected_index restricted to a SAME-PLATFORM, appid-compatible key.
+
+        The platform filter is applied inside each pass rather than on the
+        winner of a platform-blind scan: with a Steam+GOG pair already
+        collected, a third Steam key for the same game must fold into the
+        Steam twin even when the GOG one sits earlier in the list. The
+        approximate pass uses the narrow same-product SKU key, NOT the wider
+        edition key the subproduct fold uses — both sides here are
+        independent grants, and the appid guard cannot make the wide key
+        safe (a fifth of real Steam tpks carry no appid, and non-Steam keys
+        never do).
+        """
+        identity, machine_name, _, sku = _keys(entry, name)
+
+        def compatible(index: int) -> bool:
+            prior = games[index]
+            if prior.platform != platform:
+                return False
+            return (
+                prior.store_identifier is None
+                or appid is None
+                or prior.store_identifier == appid
+            )
+
+        if identity:
+            for index, claimed in enumerate(collected_keys):
+                if identity == claimed[0] and compatible(index):
+                    return index, False
+        if machine_name:
+            for index, claimed in enumerate(collected_keys):
+                if (
+                    _machine_name_variant_of(machine_name, claimed[1])
+                    or _machine_name_variant_of(claimed[1], machine_name)
+                ) and compatible(index):
+                    return index, False
+        if sku:
+            for index, claimed in enumerate(collected_keys):
+                if sku == claimed[3] and compatible(index):
+                    return index, True
+        return None, False
+
     for tpk in (order.get("tpkd_dict") or {}).get("all_tpks") or []:
         if not isinstance(tpk, dict):
             continue
@@ -435,18 +521,42 @@ def _order_games(
         if _PROMO_NAME_RE.search(name) or is_consumable_title(name):
             non_game.append(name.strip())
             continue
-        # Keys are never de-duplicated against each other: one order handing
-        # out a Steam key AND a GOG key for the same game grants two real
-        # platform relationships, and each deserves its own acquisition row.
         key_type = str(tpk.get("key_type") or "").lower()
         platform = _KEY_TYPE_TO_PLATFORM.get(key_type, "other")
-        register(
-            tpk,
-            name,
-            platform,
-            _tpk_steam_appid(tpk, platform),
-            revealed=_tpk_is_revealed(tpk),
-        )
+        appid = _tpk_steam_appid(tpk, platform)
+        revealed = _tpk_is_revealed(tpk)
+        # A key folds into an earlier key ONLY on the same platform, and only
+        # when their appids don't disagree. Cross-platform pairs (a Steam key
+        # AND a GOG key for one game) are two real grants and always stay
+        # separate. Same-platform pairs can never become two library rows —
+        # game_platforms is UNIQUE(game_id, platform) — so keeping both only
+        # ever dilutes the order's price split, which is how Humble Choice
+        # April 2023 (an edition-named key beside its base-named twin, both
+        # Steam) recorded every game in the month at 1.07 instead of 1.34.
+        # Two keys carrying DIFFERENT Steam appids are Humble's own statement
+        # that they unlock different store products, and never fold.
+        index, approximate = key_fold_index(tpk, name, platform, appid)
+        if index is not None:
+            prior = games[index]
+            title = prior.title
+            if approximate:
+                shared = normalize_same_product_sku_title(prior.title)
+                title = base_title(prior.title, _clean_title(name), shared)
+                dropped = (
+                    _clean_title(name) if title == prior.title else prior.title
+                )
+                record_fold(dropped, title)
+            # Merge instead of drop: the surviving entry keeps the union of
+            # what the pair knew — an appid whichever key carried it, and
+            # revealed if EITHER copy was revealed (one redeemed key is
+            # proof the game was granted, however its twin reads).
+            games[index] = prior._replace(
+                title=title,
+                store_identifier=prior.store_identifier or appid,
+                revealed=prior.revealed or revealed,
+            )
+            continue
+        register(tpk, name, platform, appid, revealed=revealed)
 
     for sub in order.get("subproducts") or []:
         if not isinstance(sub, dict):
@@ -466,8 +576,18 @@ def _order_games(
             if approximate:
                 # Only the edition key can be wrong. Exact-title and
                 # machine-name folds are unambiguous and would bury this in
-                # hundreds of routine per-download-platform duplicates.
-                folded.append((_clean_title(name), games[index].title))
+                # hundreds of routine per-download-platform duplicates. The
+                # survivor also adopts the base (un-suffixed) title — see
+                # base_title; a subproduct is usually the base-named half.
+                prior = games[index]
+                shared = normalize_series_gap_title(prior.title)
+                title = base_title(prior.title, _clean_title(name), shared)
+                dropped = (
+                    _clean_title(name) if title == prior.title else prior.title
+                )
+                record_fold(dropped, title)
+                if title != prior.title:
+                    games[index] = prior._replace(title=title)
             if honor_revealed and not games[index].revealed:
                 # The key for this game was never revealed, but the DRM-free
                 # download beside it is owned outright. Letting the key hold
