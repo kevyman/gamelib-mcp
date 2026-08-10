@@ -1099,12 +1099,14 @@ class HumbleParserTests(unittest.TestCase):
             tpk["redeemed_key_val"] = "AAAAA-BBBBB-CCCCC"
         return tpk
 
-    def test_unrevealed_keys_record_no_ownership_but_keep_the_split_honest(self):
-        # A key Humble never revealed was never redeemed — the title was
-        # already owned elsewhere, or is being held to gift. Recording it
-        # would claim ownership the storefront sync never reported. It still
-        # takes its share of the split, so the redeemed games keep the price
-        # they actually cost instead of absorbing the vault's money.
+    def test_key_with_no_reported_value_is_restricted_not_dropped(self):
+        # Humble reporting no value for a key USUALLY means it was never
+        # redeemed — already owned elsewhere, or held to gift — so it must
+        # never mint. But it is not proof (Humble stops reporting a value for
+        # keys it calls expired, including ones redeemed years earlier), so
+        # the record survives with mint_allowed False and can still fill a
+        # row an ownership sync confirmed. Every key keeps its share of the
+        # split either way.
         order = {
             "product": {"human_name": "Humble Choice", "category": "subscriptioncontent"},
             "amount_spent": 12.00,
@@ -1121,33 +1123,55 @@ class HumbleParserTests(unittest.TestCase):
 
         records, skipped = humble_module.records_from_orders([order])
 
-        self.assertEqual([r.title for r in records], ["Redeemed Game"])
+        self.assertEqual(
+            [(r.title, r.mint_allowed) for r in records],
+            [
+                ("Redeemed Game", True),
+                ("Already Owned Elsewhere", False),
+                ("Held To Gift", False),
+            ],
+        )
         # 12.00 split three ways — the redeemed game keeps its own 4.00 share
         # rather than inheriting the two it never paid for separately.
-        self.assertEqual(records[0].price_paid, 4.00)
-        held = [s for s in skipped if "unrevealed key(s)" in s["reason"]]
+        self.assertEqual([r.price_paid for r in records], [4.00, 4.00, 4.00])
+        held = [s for s in skipped if "Humble reports no value for" in s["reason"]]
         self.assertEqual(len(held), 1)
-        self.assertIn("2 unrevealed key(s)", held[0]["reason"])
-        self.assertIn("8.00 USD unattributed", held[0]["reason"])
+        self.assertIn("2 key(s)", held[0]["reason"])
         self.assertIn("Already Owned Elsewhere", held[0]["reason"])
 
-    def test_expired_key_counts_as_unrevealed(self):
+    def test_expiry_is_not_evidence_a_key_went_unredeemed(self):
+        # Death Stranding Director's Cut, Humble Choice April 2023: Steam
+        # Support confirmed the activation on 2023-04-05, and Humble STILL
+        # reports the key expired — its UI shows "this key has expired and
+        # can no longer be redeemed" over a CLAIMED banner. The expiry date
+        # is a deadline for redeeming and it passes either way, so reading it
+        # as non-redemption discarded a game the account demonstrably owns.
         order = {
-            "product": {"human_name": "Old Bundle", "category": "bundle"},
+            "product": {
+                "human_name": "April 2023 Humble Choice",
+                "category": "subscriptioncontent",
+            },
             "amount_spent": 4.00,
             "currency": "USD",
-            "created": "2015-01-01T00:00:00",
+            "created": "2023-04-04T00:00:00",
             "tpkd_dict": {
                 "all_tpks": [
                     self._key("Live Key", revealed=True),
-                    self._key("Lapsed Key", revealed=True, is_expired=True),
+                    self._key(
+                        "DEATH STRANDING DIRECTOR'S CUT",
+                        revealed=True,
+                        is_expired=True,
+                    ),
                 ]
             },
         }
 
         records, _ = humble_module.records_from_orders([order])
 
-        self.assertEqual([r.title for r in records], ["Live Key"])
+        self.assertEqual(
+            [(r.title, r.mint_allowed) for r in records],
+            [("Live Key", True), ("DEATH STRANDING DIRECTOR'S CUT", True)],
+        )
 
     def test_no_revealed_key_anywhere_means_the_field_is_gone_not_the_keys(self):
         # The failure this guard exists for: Humble is under no obligation to
@@ -1199,7 +1223,10 @@ class HumbleParserTests(unittest.TestCase):
 
         records, skipped = humble_module.records_from_orders(orders)
 
-        self.assertEqual([r.title for r in records], ["Game A"])
+        self.assertEqual(
+            [(r.title, r.mint_allowed) for r in records],
+            [("Game A", True), ("Game C", False)],
+        )
         self.assertEqual(
             [s for s in skipped if s["description"] == "unrevealed-key detection"], []
         )
@@ -1243,9 +1270,10 @@ class HumbleParserTests(unittest.TestCase):
         self.assertEqual([r.price_paid for r in records], [5.00, 5.00])
         self.assertEqual([s for s in skipped if "unrevealed key(s)" in s["reason"]], [])
 
-    def test_unrevealed_key_with_no_drm_free_twin_is_still_gated(self):
+    def test_unrevealed_key_with_no_drm_free_twin_stays_restricted(self):
         # The counterpart to the test above: with nothing but the key, there
-        # is no evidence of ownership and it stays gated.
+        # is no download proving ownership, so the record stays restricted
+        # and can only ever fill a row a sync already confirmed.
         order = {
             "product": {"human_name": "Monthly", "category": "subscriptioncontent"},
             "amount_spent": 10.00,
@@ -1261,9 +1289,12 @@ class HumbleParserTests(unittest.TestCase):
 
         records, skipped = humble_module.records_from_orders([order])
 
-        self.assertEqual([r.title for r in records], ["Redeemed Game"])
-        held = next(s for s in skipped if "unrevealed key(s)" in s["reason"])
-        self.assertIn("1 unrevealed key(s)", held["reason"])
+        self.assertEqual(
+            [(r.title, r.mint_allowed) for r in records],
+            [("Redeemed Game", True), ("Never Touched", False)],
+        )
+        held = next(s for s in skipped if "Humble reports no value for" in s["reason"])
+        self.assertIn("1 key(s)", held["reason"])
 
     def test_drm_free_subproducts_are_never_gated_on_a_key_value(self):
         # A subproduct is a direct download, not a key — it has no reveal
@@ -3839,6 +3870,187 @@ class HumbleSteamAppidMatchingTests(ToolDBTestCase):
             result = await acquisition.import_purchases(sources=["humble"])
 
         self.assertEqual(result["sources"]["humble"]["filled"], 1)
+
+
+class RestrictedRecordTests(ToolDBTestCase):
+    """A record the source can't confirm was granted fills a sync-confirmed
+    row but never mints one (PurchaseRecord.mint_allowed)."""
+
+    @staticmethod
+    def _rec(title, *, mint_allowed, **overrides):
+        fields = {
+            "title": title,
+            "platform": "steam",
+            "purchase_source": "subscription",
+            "acquired_at": "2023-04-04",
+            "price_paid": 1.07,
+            "price_currency": "USD",
+            "mint_allowed": mint_allowed,
+        }
+        fields.update(overrides)
+        return PurchaseRecord(**fields)
+
+    async def test_restricted_record_fills_a_row_the_sync_confirmed(self):
+        # Death Stranding: the Steam sync returns it with playtime, so
+        # ownership is established independently of anything Humble says.
+        # The purchase is then the best provenance available for that row.
+        game_id = await seed_game("DEATH STRANDING")
+        gp = await add_platform(
+            game_id, "steam", playtime_minutes=513, from_source=True
+        )
+        await add_identifier(gp, db_module.STEAM_APP_ID, "1850570")
+
+        records = [
+            self._rec(
+                "DEATH STRANDING DIRECTOR'S CUT",
+                mint_allowed=False,
+                store_identifier="1850570",
+            )
+        ]
+        with _patch_fetchers(
+            fetch_humble_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["humble"])
+
+        humble = result["sources"]["humble"]
+        self.assertEqual((humble["filled"], humble["created"]), (1, 0))
+        self.assertEqual(humble["unconfirmed_unmatched"], [])
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT acquired_at, price_paid, purchase_source FROM game_platforms "
+                "WHERE game_id = ? AND platform = 'steam'",
+                (game_id,),
+            )
+        self.assertEqual(row["acquired_at"], "2023-04-04")
+        self.assertEqual(row["purchase_source"], "subscription")
+
+    async def test_restricted_record_never_mints_a_game(self):
+        # The vault: a key for a game the account does not have. No row, no
+        # mint, and reported apart from real unmatched spend.
+        records = [self._rec("Some Game Never Redeemed", mint_allowed=False)]
+        with _patch_fetchers(
+            fetch_humble_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["humble"])
+
+        humble = result["sources"]["humble"]
+        self.assertEqual((humble["created"], humble["filled"]), (0, 0))
+        self.assertEqual(humble["unmatched"], [])
+        self.assertEqual(
+            [i["name"] for i in humble["unconfirmed_unmatched"]],
+            ["Some Game Never Redeemed"],
+        )
+        async with db_module.get_db() as db:
+            count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM games")
+        self.assertEqual(count["c"], 0)
+
+    async def test_restricted_record_never_mints_a_platform_row(self):
+        # The game exists but the Steam sync has never returned it — that
+        # missing row is the evidence the key was not redeemed.
+        game_id = await seed_game("Owned On GOG Only")
+        await add_platform(game_id, "gog", from_source=True)
+
+        records = [self._rec("Owned On GOG Only", mint_allowed=False)]
+        with _patch_fetchers(
+            fetch_humble_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(
+                sources=["humble"], create_platform_rows=True
+            )
+
+        humble = result["sources"]["humble"]
+        self.assertEqual(humble["created"], 0)
+        self.assertEqual(
+            [i["name"] for i in humble["unconfirmed_unmatched"]], ["Owned On GOG Only"]
+        )
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT COUNT(*) AS c FROM game_platforms WHERE platform = 'steam'"
+            )
+        self.assertEqual(row["c"], 0)
+
+    async def test_restricted_record_will_not_legitimize_an_unconfirmed_row(self):
+        # The phantom shape: a steam row exists, but only because an earlier
+        # import minted it — no ownership sync has ever returned it
+        # (last_seen_in_source IS NULL). Switching creation off does not
+        # catch this; only the source stamp does. Filling it would let an
+        # unrevealed key vouch for the very rows the restriction exists to
+        # stop being created.
+        game_id = await seed_game("Never Confirmed By Steam")
+        await add_platform(game_id, "steam")  # minted, not sync-returned
+
+        records = [self._rec("Never Confirmed By Steam", mint_allowed=False)]
+        with _patch_fetchers(
+            fetch_humble_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["humble"])
+
+        humble = result["sources"]["humble"]
+        self.assertEqual((humble["filled"], humble["applied"]), (0, 0))
+        self.assertEqual(
+            [i["name"] for i in humble["unconfirmed_unmatched"]],
+            ["Never Confirmed By Steam"],
+        )
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT acquired_at, purchase_source FROM game_platforms "
+                "WHERE game_id = ? AND platform = 'steam'",
+                (game_id,),
+            )
+        self.assertIsNone(row["acquired_at"])
+        self.assertIsNone(row["purchase_source"])
+
+    async def test_restricted_bundle_is_withheld_from_the_split_handoff(self):
+        # split_bundle_acquisition creates a platform row for every matched
+        # constituent unconditionally, so handing it a key that was never
+        # redeemed would mint ownership for the whole SKU by way of the
+        # documented workflow.
+        records = [
+            self._rec("Game A, Game B, and Game C", mint_allowed=False, is_bundle=True),
+            self._rec("Real Bundle, Other, and More", mint_allowed=True, is_bundle=True),
+        ]
+        with _patch_fetchers(
+            fetch_humble_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["humble"])
+
+        humble = result["sources"]["humble"]
+        self.assertEqual(
+            [b["bundle_name"] for b in humble["bundles_needing_split"]],
+            ["Real Bundle, Other, and More"],
+        )
+        self.assertEqual(
+            [i["name"] for i in humble["unconfirmed_unmatched"]],
+            ["Game A, Game B, and Game C"],
+        )
+
+    async def test_dry_run_echo_includes_restricted_items(self):
+        # Restricted items move the counters, so a preview that omitted them
+        # reported mutations its own proposal could not explain.
+        game_id = await seed_game("Confirmed Game")
+        await add_platform(game_id, "steam", from_source=True)
+
+        records = [self._rec("Confirmed Game", mint_allowed=False)]
+        with _patch_fetchers(
+            fetch_humble_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(
+                sources=["humble"], dry_run=True
+            )
+
+        humble = result["sources"]["humble"]
+        self.assertEqual(humble["filled"], 1)
+        self.assertEqual([i["name"] for i in humble["proposed"]], ["Confirmed Game"])
+        self.assertFalse(humble["truncated"])
+
+    async def test_unrestricted_records_still_mint(self):
+        records = [self._rec("Brand New Game", mint_allowed=True)]
+        with _patch_fetchers(
+            fetch_humble_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["humble"])
+
+        self.assertEqual(result["sources"]["humble"]["created"], 1)
 
 
 class CreateMissingQualityTests(ToolDBTestCase):

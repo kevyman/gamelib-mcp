@@ -1696,6 +1696,45 @@ async def _divert_unmatched_bundle_suspects(
     return importable, diverted
 
 
+async def _source_confirmed_items(items: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split items by whether an ownership sync has RETURNED their target row.
+
+    A restricted record is only allowed to fill a row whose ownership was
+    established independently. Switching creation off is not that test: it
+    only proves the row exists, and a row can exist because a previous import
+    minted it or because it was added by hand. `last_seen_in_source` is the
+    real discriminator — every sync stamps it via
+    `upsert_game_platform(from_source=True)`, and nothing else does — so a
+    NULL there means no source has ever reported owning this. Without the
+    check an unrevealed key could legitimize the very phantom rows the
+    restriction exists to stop being created.
+    """
+    confirmed: list[dict] = []
+    unconfirmed: list[dict] = []
+    for item in items:
+        nested = item.get("content_type") in NESTED_CONTENT_TYPES
+        row, _ = await _match_batch_game(
+            item.get("name"),
+            item.get("game_id"),
+            item.get("identifier_type"),
+            item.get("identifier_value"),
+            exact_only=nested,
+        )
+        platform_row = None
+        if row is not None:
+            async with get_db() as db:
+                platform_row = await db.execute_fetchone(
+                    """SELECT last_seen_in_source FROM game_platforms
+                       WHERE game_id = ? AND platform = ?""",
+                    (row["id"], item.get("platform")),
+                )
+        if platform_row is not None and platform_row["last_seen_in_source"]:
+            confirmed.append(item)
+        else:
+            unconfirmed.append(item)
+    return confirmed, unconfirmed
+
+
 async def _import_one_source(
     source: str,
     fetch,
@@ -1716,13 +1755,31 @@ async def _import_one_source(
     # Multi-game bundles can't attach to a single row — divert them to a
     # dedicated bucket (with price/date) for split_bundle_acquisition instead
     # of feeding them to the single-game matcher, where they'd only ever miss.
-    bundles = [await _record_to_bundle_entry(r) for r in records if r.is_bundle]
+    # A RESTRICTED bundle is deliberately withheld from that hand-off:
+    # split_bundle_acquisition creates a platform row for every matched
+    # constituent unconditionally (unlike set_acquisitions_batch, it does not
+    # honor create_platform_rows), so following the documented workflow on a
+    # key that was never redeemed would mint ownership for the whole SKU.
+    bundles = [
+        await _record_to_bundle_entry(r)
+        for r in records
+        if r.is_bundle and r.mint_allowed
+    ]
     importable = [r for r in records if not r.is_bundle]
-    items = [_record_to_batch_item(r, source) for r in importable]
+    # A record the source cannot confirm was granted (an unrevealed Humble
+    # key) may fill a row an ownership sync already established, but must
+    # never mint one — see PurchaseRecord.mint_allowed. Split it out and run
+    # it through the same writer with creation switched off, rather than
+    # dropping it: the signal is too weak to create ownership on AND too weak
+    # to throw away a confirmed row's provenance over.
+    restricted = [r for r in importable if not r.mint_allowed]
+    restricted += [r for r in records if r.is_bundle and not r.mint_allowed]
+    items = [_record_to_batch_item(r, source) for r in importable if r.mint_allowed]
 
     # Second bundle net: sources that can't flag bundles themselves (Steam's
     # history page is just SKU names) get compilation-named MISSES diverted
-    # here instead of minted/unmatched.
+    # here instead of minted/unmatched. Restricted records skip this: they
+    # cannot mint, so a miss needs no split hand-off.
     items, suspect_bundles = await _divert_unmatched_bundle_suspects(items)
     bundles.extend(suspect_bundles)
     # One order can emit the same bundle once per key platform — split it once.
@@ -1735,26 +1792,44 @@ async def _import_one_source(
     no_platform_row_details: list[dict] = []
     family_conflict_details: list[dict] = []
     create_refused_details: list[dict] = []
-    for start in range(0, len(items), _BATCH_ITEM_CAP):
-        batch = await set_acquisitions_batch(
-            items[start : start + _BATCH_ITEM_CAP],
-            overwrite=overwrite,
-            create_platform_rows=create_platform_rows,
-            create_missing=create_missing,
-            dry_run=dry_run,
-        )
-        applied += batch["applied"]
-        filled += batch["filled"]
-        no_change += batch["no_change"]
-        created += batch["created"]
-        no_platform_row += batch["no_platform_row"]
-        family_conflict += batch["family_conflict"]
-        errors += batch["errors"]
-        unmatched.extend(batch["unmatched"])
-        created_details.extend(batch["created_details"])
-        no_platform_row_details.extend(batch["no_platform_row_details"])
-        family_conflict_details.extend(batch["family_conflict_details"])
-        create_refused_details.extend(batch["create_refused_details"])
+    unconfirmed_unmatched: list[dict] = []
+
+    async def run(batch_items: list[dict], *, allow_creation: bool) -> list[dict]:
+        """Push items through the batch writer, accumulating counters."""
+        nonlocal applied, filled, no_change, created, no_platform_row
+        nonlocal family_conflict, errors
+        misses: list[dict] = []
+        for start in range(0, len(batch_items), _BATCH_ITEM_CAP):
+            batch = await set_acquisitions_batch(
+                batch_items[start : start + _BATCH_ITEM_CAP],
+                overwrite=overwrite,
+                create_platform_rows=create_platform_rows and allow_creation,
+                create_missing=create_missing and allow_creation,
+                dry_run=dry_run,
+            )
+            applied += batch["applied"]
+            filled += batch["filled"]
+            no_change += batch["no_change"]
+            created += batch["created"]
+            no_platform_row += batch["no_platform_row"]
+            family_conflict += batch["family_conflict"]
+            errors += batch["errors"]
+            misses.extend(batch["unmatched"])
+            created_details.extend(batch["created_details"])
+            no_platform_row_details.extend(batch["no_platform_row_details"])
+            family_conflict_details.extend(batch["family_conflict_details"])
+            create_refused_details.extend(batch["create_refused_details"])
+        return misses
+
+    unmatched.extend(await run(items, allow_creation=True))
+    restricted_items = [_record_to_batch_item(r, source) for r in restricted]
+    confirmed_items, unconfirmed_items = await _source_confirmed_items(restricted_items)
+    # Reported apart from real unmatched spend: a restricted record finding no
+    # sync-confirmed row is the EXPECTED outcome for a key that really was
+    # never redeemed, so mixing them in would bury the misses that mean
+    # something.
+    unconfirmed_unmatched.extend(unconfirmed_items)
+    unconfirmed_unmatched.extend(await run(confirmed_items, allow_creation=False))
 
     # Zero-price promo lines (bonus packs, wallpapers, costume sets claimed for
     # free) are expected to miss — reporting them beside real unmatched spend
@@ -1773,6 +1848,10 @@ async def _import_one_source(
         "created_details": created_details,
         "unmatched": unmatched,
         "unmatched_free": unmatched_free,
+        # Records the source could not confirm were granted, which then found
+        # no confirmed row to fill. Expected, not a gap — kept out of
+        # `unmatched` so real misses stay visible.
+        "unconfirmed_unmatched": unconfirmed_unmatched,
         "no_platform_row": no_platform_row,
         "no_platform_row_details": no_platform_row_details,
         "family_conflict": family_conflict,
@@ -1784,8 +1863,14 @@ async def _import_one_source(
     }
     if dry_run:
         result["dry_run"] = True
-        result["proposed"] = items[:_DRY_RUN_ECHO_CAP]
-        result["truncated"] = len(items) > _DRY_RUN_ECHO_CAP
+        # Restricted items run through the writer too, so they move `filled`,
+        # `no_change` and the miss counters. Echoing only the unrestricted
+        # ones left a preview whose numbers its own proposal couldn't
+        # explain — a source of nothing but restricted keys reported
+        # mutations beside an empty list.
+        echoed = items + restricted_items
+        result["proposed"] = echoed[:_DRY_RUN_ECHO_CAP]
+        result["truncated"] = len(echoed) > _DRY_RUN_ECHO_CAP
         # Faithful preview of what create_missing would mint (game_id null),
         # including the parent a nested mint would link — the review step that
         # catches a bad mint before it needs a manual delete_game.

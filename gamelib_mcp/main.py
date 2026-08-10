@@ -842,7 +842,8 @@ async def check_library(
       ownership.orphan, ownership.unseen_in_source
     - playtime: playtime.farming, playtime.orphan_switch_summary,
       playtime.snapshot_regression
-    - spend: spend.duplicate_purchase, spend.price_anomaly
+    - spend: spend.duplicate_purchase, spend.price_anomaly,
+      spend.unconfirmed_ownership
     - sync: sync.platform_error, sync.staleness
     - wishlist: wishlist.already_owned
 
