@@ -3895,7 +3895,9 @@ class RestrictedRecordTests(ToolDBTestCase):
         # ownership is established independently of anything Humble says.
         # The purchase is then the best provenance available for that row.
         game_id = await seed_game("DEATH STRANDING")
-        gp = await add_platform(game_id, "steam", playtime_minutes=513)
+        gp = await add_platform(
+            game_id, "steam", playtime_minutes=513, from_source=True
+        )
         await add_identifier(gp, db_module.STEAM_APP_ID, "1850570")
 
         records = [
@@ -3946,7 +3948,7 @@ class RestrictedRecordTests(ToolDBTestCase):
         # The game exists but the Steam sync has never returned it — that
         # missing row is the evidence the key was not redeemed.
         game_id = await seed_game("Owned On GOG Only")
-        await add_platform(game_id, "gog")
+        await add_platform(game_id, "gog", from_source=True)
 
         records = [self._rec("Owned On GOG Only", mint_allowed=False)]
         with _patch_fetchers(
@@ -3956,12 +3958,90 @@ class RestrictedRecordTests(ToolDBTestCase):
                 sources=["humble"], create_platform_rows=True
             )
 
-        self.assertEqual(result["sources"]["humble"]["no_platform_row"], 1)
+        humble = result["sources"]["humble"]
+        self.assertEqual(humble["created"], 0)
+        self.assertEqual(
+            [i["name"] for i in humble["unconfirmed_unmatched"]], ["Owned On GOG Only"]
+        )
         async with db_module.get_db() as db:
             row = await db.execute_fetchone(
                 "SELECT COUNT(*) AS c FROM game_platforms WHERE platform = 'steam'"
             )
         self.assertEqual(row["c"], 0)
+
+    async def test_restricted_record_will_not_legitimize_an_unconfirmed_row(self):
+        # The phantom shape: a steam row exists, but only because an earlier
+        # import minted it — no ownership sync has ever returned it
+        # (last_seen_in_source IS NULL). Switching creation off does not
+        # catch this; only the source stamp does. Filling it would let an
+        # unrevealed key vouch for the very rows the restriction exists to
+        # stop being created.
+        game_id = await seed_game("Never Confirmed By Steam")
+        await add_platform(game_id, "steam")  # minted, not sync-returned
+
+        records = [self._rec("Never Confirmed By Steam", mint_allowed=False)]
+        with _patch_fetchers(
+            fetch_humble_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["humble"])
+
+        humble = result["sources"]["humble"]
+        self.assertEqual((humble["filled"], humble["applied"]), (0, 0))
+        self.assertEqual(
+            [i["name"] for i in humble["unconfirmed_unmatched"]],
+            ["Never Confirmed By Steam"],
+        )
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT acquired_at, purchase_source FROM game_platforms "
+                "WHERE game_id = ? AND platform = 'steam'",
+                (game_id,),
+            )
+        self.assertIsNone(row["acquired_at"])
+        self.assertIsNone(row["purchase_source"])
+
+    async def test_restricted_bundle_is_withheld_from_the_split_handoff(self):
+        # split_bundle_acquisition creates a platform row for every matched
+        # constituent unconditionally, so handing it a key that was never
+        # redeemed would mint ownership for the whole SKU by way of the
+        # documented workflow.
+        records = [
+            self._rec("Game A, Game B, and Game C", mint_allowed=False, is_bundle=True),
+            self._rec("Real Bundle, Other, and More", mint_allowed=True, is_bundle=True),
+        ]
+        with _patch_fetchers(
+            fetch_humble_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(sources=["humble"])
+
+        humble = result["sources"]["humble"]
+        self.assertEqual(
+            [b["bundle_name"] for b in humble["bundles_needing_split"]],
+            ["Real Bundle, Other, and More"],
+        )
+        self.assertEqual(
+            [i["name"] for i in humble["unconfirmed_unmatched"]],
+            ["Game A, Game B, and Game C"],
+        )
+
+    async def test_dry_run_echo_includes_restricted_items(self):
+        # Restricted items move the counters, so a preview that omitted them
+        # reported mutations its own proposal could not explain.
+        game_id = await seed_game("Confirmed Game")
+        await add_platform(game_id, "steam", from_source=True)
+
+        records = [self._rec("Confirmed Game", mint_allowed=False)]
+        with _patch_fetchers(
+            fetch_humble_purchases=AsyncMock(return_value=(records, [])),
+        ):
+            result = await acquisition.import_purchases(
+                sources=["humble"], dry_run=True
+            )
+
+        humble = result["sources"]["humble"]
+        self.assertEqual(humble["filled"], 1)
+        self.assertEqual([i["name"] for i in humble["proposed"]], ["Confirmed Game"])
+        self.assertFalse(humble["truncated"])
 
     async def test_unrestricted_records_still_mint(self):
         records = [self._rec("Brand New Game", mint_allowed=True)]
