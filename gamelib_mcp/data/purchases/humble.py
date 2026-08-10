@@ -89,7 +89,10 @@ import httpx
 
 from gamelib_mcp.data.content import classify_title_override, match_addon_name
 from gamelib_mcp.data.db import default_data_dir
-from gamelib_mcp.data.title_normalization import normalize_search_text
+from gamelib_mcp.data.title_normalization import (
+    normalize_search_text,
+    normalize_series_gap_title,
+)
 
 from . import PurchaseRecord, is_consumable_title, normalize_purchase_date
 
@@ -312,8 +315,8 @@ def _machine_name_variant_of(candidate: str, claimed: str) -> bool:
 
 def _order_games(
     order: dict, *, honor_revealed: bool = False
-) -> tuple[list[_OrderGame], list[str]]:
-    """Extract ([_OrderGame], excluded_non_game_titles) from an order.
+) -> tuple[list[_OrderGame], list[str], list[tuple[str, str]]]:
+    """Extract ([_OrderGame], excluded_non_game_titles, approximate_folds).
 
     Keys and subproducts are UNIONED, not alternatives. They overlap heavily —
     a bundle lists the same game once per key and again per download platform —
@@ -325,14 +328,40 @@ def _order_games(
     acquisition row was blank.
 
     De-duplication is what makes the union safe. A subproduct is skipped when
-    its normalized title was already collected, or when its machine_name is an
-    already-collected one minus a delivery-channel tail. Without it the same
-    game would be counted once per download platform, and since the order
-    price splits across the collected items, every real game's share would be
-    diluted (a real PC-and-Android bundle listed all ten games twice, halving
-    each one's recorded spend). Keys are deliberately exempt from the check:
-    an order handing out a Steam key AND a GOG key for the same game grants
-    two real platform relationships, not one duplicate.
+    an already-collected entry matches it on ANY of three keys: the
+    normalized title, the machine_name minus a delivery-channel tail, or the
+    edition-collapsed title. Without it the same game would be counted once
+    per download platform, and since the order price splits across the
+    collected items, every real game's share would be diluted (a real
+    PC-and-Android bundle listed all ten games twice, halving each one's
+    recorded spend).
+
+    The edition key exists because Humble routinely names the two halves
+    differently: Choice April 2023 carried "Life Is Strange 2 Complete
+    Edition" as the key and "Life is Strange 2" as the second entry. Neither
+    of the other keys bridges that — the titles differ, and
+    `_machine_name_variant_of` only strips KNOWN channel tails, which
+    "completeedition" is not — so the month counted the game twice, recorded
+    two acquisition rows for it, and diluted every sibling from 1.34 to 1.07.
+
+    It uses `normalize_series_gap_title` (a CURATED list of edition phrases)
+    and deliberately NOT `normalize_edition_comparison_title`, which strips a
+    qualifier plus up to two riding words and any ≤3 words ending in
+    "edition". Every other caller of that looser normalizer is
+    non-destructive — checks.py only reports, psn.py sums playtime,
+    acquisition.py redirects a mint onto an existing row. This is the one
+    place a collapse DELETES an entry and redistributes its money, so it gets
+    the conservative list. The looser one merges pairs that are separate
+    store products the account can own separately: Shadow Warrior / Shadow
+    Warrior Classic Redux, Tomb Raider / Tomb Raider: Anniversary, Metro 2033
+    / Metro 2033 Redux, DOOM / DOOM Classic Complete, and — present in a real
+    captured order — Trine 2: Complete Story / its Soundtrack. Dropping one of
+    those would be the same silent loss this union was written to end, with
+    the surviving games' prices overstated instead of diluted.
+
+    Keys are deliberately exempt from the whole check: an order handing out a
+    Steam key AND a GOG key for the same game grants two real platform
+    relationships, not one duplicate.
 
     ``honor_revealed`` mirrors records_from_order's gate. It matters here
     because a game delivered as BOTH an unrevealed key and a DRM-free
@@ -342,9 +371,19 @@ def _order_games(
     """
     games: list[_OrderGame] = []
     non_game: list[str] = []
-    # (normalized title, machine_name) per collected entry, positionally
-    # aligned with `games` so a later entry can replace an earlier one.
-    collected_keys: list[tuple[str, str]] = []
+    # (folded title, title it was folded into) for approximate matches only.
+    folded: list[tuple[str, str]] = []
+    # (normalized title, machine_name, edition-collapsed title) per collected
+    # entry, positionally aligned with `games` so a later entry can replace an
+    # earlier one.
+    collected_keys: list[tuple[str, str, str]] = []
+
+    def _keys(entry: dict, name: str) -> tuple[str, str, str]:
+        return (
+            _identity_key(name),
+            str(entry.get("machine_name") or "").lower(),
+            normalize_series_gap_title(_clean_title(name)),
+        )
 
     def register(
         entry: dict,
@@ -354,26 +393,38 @@ def _order_games(
         revealed: bool = True,
     ) -> None:
         """Collect one game and record what it was, for later de-duplication."""
-        collected_keys.append(
-            (_identity_key(name), str(entry.get("machine_name") or "").lower())
-        )
+        collected_keys.append(_keys(entry, name))
         games.append(
             _OrderGame(_clean_title(name), platform, store_identifier, revealed)
         )
 
-    def collected_index(entry: dict, name: str) -> int | None:
-        """Index of an equivalent entry already collected, if any."""
-        identity = _identity_key(name)
-        machine_name = str(entry.get("machine_name") or "").lower()
-        for index, claimed_name in enumerate(collected_keys):
-            claimed_identity, claimed_machine = claimed_name
-            if identity and identity == claimed_identity:
-                return index
-            if _machine_name_variant_of(
-                machine_name, claimed_machine
-            ) or _machine_name_variant_of(claimed_machine, machine_name):
-                return index
-        return None
+    def collected_index(entry: dict, name: str) -> tuple[int | None, bool]:
+        """(index of an equivalent collected entry, whether the match was approximate).
+
+        Scanned STRONGEST KEY FIRST across the whole list, never first-index
+        wins: an approximate edition hit on an earlier entry must not outrank
+        an exact-title hit on a later one. First-match-by-any-key let a key
+        named "DOOM" at index 0 swallow the subproduct belonging to "DOOM
+        Classic Complete" at index 1 — losing DOOM, booking its money to the
+        wrong game, and giving Classic Complete the two acquisition rows this
+        de-duplication exists to prevent.
+        """
+        identity, machine_name, edition = _keys(entry, name)
+        if identity:
+            for index, claimed in enumerate(collected_keys):
+                if identity == claimed[0]:
+                    return index, False
+        if machine_name:
+            for index, claimed in enumerate(collected_keys):
+                if _machine_name_variant_of(
+                    machine_name, claimed[1]
+                ) or _machine_name_variant_of(claimed[1], machine_name):
+                    return index, False
+        if edition:
+            for index, claimed in enumerate(collected_keys):
+                if edition == claimed[2]:
+                    return index, True
+        return None, False
 
     for tpk in (order.get("tpkd_dict") or {}).get("all_tpks") or []:
         if not isinstance(tpk, dict):
@@ -410,8 +461,13 @@ def _order_games(
         ):
             non_game.append(name.strip())
             continue
-        index = collected_index(sub, name)
+        index, approximate = collected_index(sub, name)
         if index is not None:
+            if approximate:
+                # Only the edition key can be wrong. Exact-title and
+                # machine-name folds are unambiguous and would bury this in
+                # hundreds of routine per-download-platform duplicates.
+                folded.append((_clean_title(name), games[index].title))
             if honor_revealed and not games[index].revealed:
                 # The key for this game was never revealed, but the DRM-free
                 # download beside it is owned outright. Letting the key hold
@@ -423,7 +479,7 @@ def _order_games(
             continue
         # No platform signal on a subproduct — "other" beats a wrong guess.
         register(sub, name, "other")
-    return games, non_game
+    return games, non_game, folded
 
 
 def _order_amount(order: dict) -> float:
@@ -474,7 +530,7 @@ def records_from_order(
     order_name = product.get("human_name") or order.get("gamekey") or "(unknown order)"
     category = str(product.get("category") or "").lower()
 
-    games, non_game = _order_games(order, honor_revealed=honor_revealed)
+    games, non_game, folded = _order_games(order, honor_revealed=honor_revealed)
     skipped: list[dict] = []
     if non_game:
         skipped.append(
@@ -560,6 +616,21 @@ def records_from_order(
                 mint_allowed=not restricted,
             )
         )
+    if folded:
+        # An approximate fold is the one de-duplication decision that can be
+        # WRONG, and a wrong one deletes a game and redistributes its money.
+        # Reporting it is what keeps that from being silent.
+        skipped.append(
+            {
+                "description": str(order_name),
+                "reason": (
+                    f"{len(folded)} entry(ies) folded into an existing one as the "
+                    "same game under a different name: "
+                    + ", ".join(f"{a} -> {b}" for a, b in folded[:5])
+                    + (", …" if len(folded) > 5 else "")
+                ),
+            }
+        )
     if unrevealed:
         skipped.append(
             {
@@ -609,7 +680,7 @@ def records_from_orders(orders: list[dict]) -> tuple[list[PurchaseRecord], list[
         name = str(
             product.get("human_name") or order.get("gamekey") or "(unknown order)"
         )
-        games, _ = _order_games(order, honor_revealed=reveal_signal)
+        games, _, _ = _order_games(order, honor_revealed=reveal_signal)
         # A plan payment is its OWN category ("subscriptionplan"); the monthly
         # drops are "subscriptioncontent". Keying on "subscription* with no
         # games" instead made a Choice month whose content we failed to parse
