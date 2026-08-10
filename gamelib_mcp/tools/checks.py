@@ -1207,6 +1207,98 @@ async def _run_spend_price_anomaly(*, apply: bool, options: dict[str, Any]) -> C
     }
 
 
+# --- adapters: spend.unconfirmed_ownership ----------------------------------
+
+
+async def _run_spend_unconfirmed_ownership(
+    *, apply: bool, options: dict[str, Any]
+) -> CheckOutcome:
+    """Acquisition recorded against a platform row no source ever returned.
+
+    `last_seen_in_source` is stamped only by a sync
+    (`upsert_game_platform(from_source=True)`), so NULL on an owned row means
+    no storefront has ever reported owning this — while the acquisition
+    columns say money changed hands for it. That is the shape a purchase
+    importer mints from a key that was bought but never redeemed, and it is
+    invisible from either side alone: the acquisition looks like evidence of
+    ownership, and the missing sync stamp is not something any spend report
+    reads.
+
+    Two exclusions keep it honest. `delisted` rows are legitimately absent
+    from the owned-games API (that is what the flag means). And a platform
+    with no sync-stamped rows AT ALL has simply never been synced — every row
+    there would flag, saying nothing; "other" is permanently in that state
+    since no source reports it.
+    """
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            """SELECT gp.game_id, gp.platform, gp.acquired_at, gp.price_paid,
+                      gp.price_currency, gp.purchase_source, gp.playtime_minutes,
+                      g.name
+               FROM game_platforms gp JOIN games g ON g.id = gp.game_id
+               WHERE gp.owned = 1
+                 AND gp.last_seen_in_source IS NULL
+                 AND COALESCE(gp.delisted, 0) = 0
+                 AND (gp.acquired_at IS NOT NULL
+                      OR gp.price_paid IS NOT NULL
+                      OR gp.purchase_source IS NOT NULL)
+                 AND gp.platform IN (
+                     SELECT platform FROM game_platforms
+                     WHERE last_seen_in_source IS NOT NULL
+                 )
+               ORDER BY gp.price_paid DESC, g.name"""
+        )
+    findings = []
+    spend: dict[str, float] = {}
+    for row in rows:
+        if row["price_paid"] is not None:
+            currency = row["price_currency"] or "?"
+            spend[currency] = spend.get(currency, 0.0) + float(row["price_paid"])
+        priced = (
+            f"{row['price_paid']} {row['price_currency'] or ''}".strip()
+            if row["price_paid"] is not None
+            else "no price"
+        )
+        findings.append(
+            _finding(
+                "spend.unconfirmed_ownership",
+                "notice",
+                f"'{row['name']}' has an acquisition on {row['platform']} "
+                f"({priced}, source {row['purchase_source'] or 'unset'}) but no "
+                f"{row['platform']} sync has ever returned the row — likely bought "
+                "and never redeemed",
+                game_id=row["game_id"],
+                name=row["name"],
+                evidence={
+                    "platform": row["platform"],
+                    "acquired_at": row["acquired_at"],
+                    "price_paid": row["price_paid"],
+                    "price_currency": row["price_currency"],
+                    "purchase_source": row["purchase_source"],
+                    "playtime_minutes": row["playtime_minutes"],
+                },
+                suggested_action={
+                    "tool": "add_game_to_platform",
+                    "args": {
+                        "game_id": row["game_id"],
+                        "platform": row["platform"],
+                        "unowned_at": "YYYY-MM-DD",
+                    },
+                    "note": (
+                        "retires the row while keeping the spend on record, if you "
+                        "confirm the key was never redeemed; playtime here would "
+                        "mean it WAS, so check that first"
+                    ),
+                },
+            )
+        )
+    return findings, {
+        "unconfirmed_rows": len(rows),
+        "unconfirmed_spend": {k: round(v, 2) for k, v in sorted(spend.items())},
+        "with_playtime": sum(1 for r in rows if (r["playtime_minutes"] or 0) > 0),
+    }
+
+
 # --- adapters: enrich.coverage (Phase B, new) -------------------------------
 
 
@@ -1904,6 +1996,19 @@ CHECKS: dict[str, CheckSpec] = {
             writes_on_apply=False,
             default_severity="notice",
             runner=_run_spend_price_anomaly,
+        ),
+        _spec(
+            "spend.unconfirmed_ownership",
+            description=(
+                "An owned row carrying acquisition data that no sync has ever "
+                "returned (last_seen_in_source IS NULL) — the shape a purchase "
+                "import mints from a key bought but never redeemed. Skips "
+                "delisted rows and platforms nothing syncs"
+            ),
+            network=None,
+            writes_on_apply=False,
+            default_severity="notice",
+            runner=_run_spend_unconfirmed_ownership,
         ),
         _spec(
             "enrich.coverage",

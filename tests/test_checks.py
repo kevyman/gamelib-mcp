@@ -927,6 +927,117 @@ class SpendDuplicatePurchaseTests(ToolDBTestCase):
         self.assertIsNone(finding["suggested_action"])
 
 
+class SpendUnconfirmedOwnershipTests(ToolDBTestCase):
+    """Money recorded against a row no ownership source has ever returned.
+
+    The shape a purchase import mints from a key bought but never redeemed —
+    invisible from either side alone, since the acquisition looks like
+    evidence of ownership and no spend report reads the sync stamp.
+    """
+
+    CHECK = "spend.unconfirmed_ownership"
+
+    @staticmethod
+    async def _acquire(platform_id: int, **fields) -> None:
+        await db_module.set_platform_acquisition(
+            platform_id,
+            {
+                "purchase_source": "humble",
+                "price_paid": 1.34,
+                "price_currency": "USD",
+                "acquired_at": "2023-04-04",
+                **fields,
+            },
+        )
+
+    async def test_sync_confirmed_row_is_not_reported(self):
+        game = await seed_game("Really Owned")
+        pid = await add_platform(game, "steam", from_source=True)
+        await self._acquire(pid)
+
+        result = await checks.run_library_checks(checks=[self.CHECK])
+        self.assertEqual(result["findings"], [])
+
+    async def test_unconfirmed_row_with_acquisition_is_reported(self):
+        confirmed = await seed_game("Really Owned")
+        await add_platform(confirmed, "steam", from_source=True)
+        phantom = await seed_game("Never Redeemed")
+        pid = await add_platform(phantom, "steam")
+        await self._acquire(pid)
+
+        result = await checks.run_library_checks(checks=[self.CHECK])
+
+        self.assertEqual([f["name"] for f in result["findings"]], ["Never Redeemed"])
+        finding = result["findings"][0]
+        _assert_envelope(self, finding)
+        self.assertEqual(finding["evidence"]["platform"], "steam")
+        self.assertEqual(
+            finding["suggested_action"]["tool"], "add_game_to_platform"
+        )
+        self.assertEqual(
+            finding["suggested_action"]["args"]["unowned_at"], "YYYY-MM-DD"
+        )
+        summary = result["summary"][self.CHECK]
+        self.assertEqual(summary["unconfirmed_rows"], 1)
+        self.assertEqual(summary["unconfirmed_spend"], {"USD": 1.34})
+
+    async def test_row_without_acquisition_is_not_reported(self):
+        # No money attached — that is ownership.unseen_in_source's territory,
+        # not a spend-integrity finding.
+        confirmed = await seed_game("Really Owned")
+        await add_platform(confirmed, "steam", from_source=True)
+        bare = await seed_game("No Acquisition Recorded")
+        await add_platform(bare, "steam")
+
+        result = await checks.run_library_checks(checks=[self.CHECK])
+        self.assertEqual(result["findings"], [])
+
+    async def test_delisted_row_is_not_reported(self):
+        # A delisted row is legitimately absent from the owned-games API —
+        # that is exactly what the flag records.
+        confirmed = await seed_game("Really Owned")
+        await add_platform(confirmed, "steam", from_source=True)
+        retired = await seed_game("Retired From Store")
+        pid = await add_platform(retired, "steam")
+        await self._acquire(pid)
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE game_platforms SET delisted = 1 WHERE id = ?", (pid,)
+            )
+            await db.commit()
+
+        result = await checks.run_library_checks(checks=[self.CHECK])
+        self.assertEqual(result["findings"], [])
+
+    async def test_never_synced_platform_is_not_reported(self):
+        # "other" has no source at all, so every row there lacks the stamp and
+        # flagging them would say nothing. Only platforms that HAVE been
+        # synced can testify to a row's absence.
+        game = await seed_game("DRM-Free Download")
+        pid = await add_platform(game, "other")
+        await self._acquire(pid)
+
+        result = await checks.run_library_checks(checks=[self.CHECK])
+        self.assertEqual(result["findings"], [])
+        self.assertEqual(
+            result["summary"][self.CHECK]["unconfirmed_rows"], 0
+        )
+
+    async def test_playtime_on_an_unconfirmed_row_is_surfaced(self):
+        # Playtime means it WAS redeemed, so the suggested retirement would be
+        # wrong — the summary counts these so they can't be actioned blindly.
+        confirmed = await seed_game("Really Owned")
+        await add_platform(confirmed, "steam", from_source=True)
+        played = await seed_game("Played But Unstamped")
+        pid = await add_platform(played, "steam", playtime_minutes=513)
+        await self._acquire(pid)
+
+        result = await checks.run_library_checks(checks=[self.CHECK])
+
+        self.assertEqual(result["summary"][self.CHECK]["with_playtime"], 1)
+        self.assertIn("check that first", result["findings"][0]["suggested_action"]["note"])
+
+
 class SpendPriceAnomalyTests(ToolDBTestCase):
     async def test_clean_library_reports_nothing(self):
         a = await seed_game("Normal Purchase")

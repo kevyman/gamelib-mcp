@@ -52,6 +52,16 @@ class PurchaseRecord:
     # typing when the source exposes one (eShop), or from an addon-ish name
     # (Humble, which has no item typing). None = no signal.
     content_type: str | None = None
+    # False when the source cannot confirm the item was ever granted — a
+    # Humble key whose value Humble never revealed. Such a record may FILL a
+    # platform row the storefront sync has already confirmed (that sync is
+    # what proves ownership, and the purchase is then the best available
+    # provenance for it), but may never MINT a game or a platform row. The
+    # asymmetry is the point: the reveal signal is too weak to create
+    # ownership on, and too weak to justify discarding a confirmed row's
+    # provenance over. import_purchases reports restricted misses separately
+    # from real unmatched spend.
+    mint_allowed: bool = True
 
 
 # source key → (module_path, attr) of the fetch coroutine, resolved lazily.

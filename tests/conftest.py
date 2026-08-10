@@ -334,14 +334,21 @@ async def add_platform(
     playtime_minutes: int | None = None,
     playtime_2weeks_minutes: int | None = None,
     owned: int = 1,
+    from_source: bool = False,
 ) -> int:
-    """Attach a platform to a game and return the game_platform id."""
+    """Attach a platform to a game and return the game_platform id.
+
+    ``from_source=True`` stamps ``last_seen_in_source`` exactly as a real sync
+    does — the difference between a row an ownership source RETURNED and one
+    minted by an import or added by hand.
+    """
     return await db_module.upsert_game_platform(
         game_id,
         platform,
         playtime_minutes=playtime_minutes,
         playtime_2weeks_minutes=playtime_2weeks_minutes,
         owned=owned,
+        from_source=from_source,
     )
 
 
