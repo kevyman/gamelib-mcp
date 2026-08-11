@@ -319,8 +319,10 @@ def _machine_name_variant_of(candidate: str, claimed: str) -> bool:
 
 def _order_games(
     order: dict, *, honor_revealed: bool = False
-) -> tuple[list[_OrderGame], list[str], list[tuple[str, str]]]:
-    """Extract ([_OrderGame], excluded_non_game_titles, approximate_folds).
+) -> tuple[
+    list[_OrderGame], list[str], list[tuple[str, str]], list[tuple[str, str, str, str]]
+]:
+    """Extract (games, excluded_non_game_titles, approximate_folds, kept_apart).
 
     Keys and subproducts are UNIONED, not alternatives. They overlap heavily —
     a bundle lists the same game once per key and again per download platform —
@@ -385,6 +387,11 @@ def _order_games(
     non_game: list[str] = []
     # (folded title, title it was folded into) for approximate matches only.
     folded: list[tuple[str, str]] = []
+    # (title A, appid A, title B, appid B) for same-platform key pairs whose
+    # SKU-collapsed titles MATCH but whose Steam appids differ — the appid
+    # guard keeping them apart. Reported so "why didn't these fold?" is
+    # answerable from the import report instead of by reading source.
+    kept_apart: list[tuple[str, str, str, str]] = []
     # (normalized title, machine_name, edition-collapsed title, same-product
     # SKU title) per collected entry, positionally aligned with `games` so a
     # later entry can replace an earlier one. The last two differ on purpose:
@@ -508,8 +515,22 @@ def _order_games(
                     return index, False
         if sku:
             for index, claimed in enumerate(collected_keys):
-                if sku == claimed[3] and compatible(index):
+                if sku != claimed[3]:
+                    continue
+                if compatible(index):
                     return index, True
+                prior = games[index]
+                if (
+                    prior.platform == platform
+                    and prior.store_identifier is not None
+                    and appid is not None
+                    and prior.store_identifier != appid
+                ):
+                    # Same platform, same SKU-collapsed title, two appids:
+                    # the one refusal a reader would otherwise have to infer.
+                    kept_apart.append(
+                        (prior.title, prior.store_identifier, _clean_title(name), appid)
+                    )
         return None, False
 
     for tpk in (order.get("tpkd_dict") or {}).get("all_tpks") or []:
@@ -599,7 +620,7 @@ def _order_games(
             continue
         # No platform signal on a subproduct — "other" beats a wrong guess.
         register(sub, name, "other")
-    return games, non_game, folded
+    return games, non_game, folded, kept_apart
 
 
 def _order_amount(order: dict) -> float:
@@ -650,7 +671,9 @@ def records_from_order(
     order_name = product.get("human_name") or order.get("gamekey") or "(unknown order)"
     category = str(product.get("category") or "").lower()
 
-    games, non_game, folded = _order_games(order, honor_revealed=honor_revealed)
+    games, non_game, folded, kept_apart = _order_games(
+        order, honor_revealed=honor_revealed
+    )
     skipped: list[dict] = []
     if non_game:
         skipped.append(
@@ -736,6 +759,22 @@ def records_from_order(
                 mint_allowed=not restricted,
             )
         )
+    if kept_apart:
+        skipped.append(
+            {
+                "description": str(order_name),
+                "reason": (
+                    f"{len(kept_apart)} same-name key pair(s) kept apart by "
+                    "differing Steam appids (Humble's own statement they unlock "
+                    "different products): "
+                    + ", ".join(
+                        f"{a} [{aid}] vs {b} [{bid}]"
+                        for a, aid, b, bid in kept_apart[:3]
+                    )
+                    + (", …" if len(kept_apart) > 3 else "")
+                ),
+            }
+        )
     if folded:
         # An approximate fold is the one de-duplication decision that can be
         # WRONG, and a wrong one deletes a game and redistributes its money.
@@ -800,7 +839,7 @@ def records_from_orders(orders: list[dict]) -> tuple[list[PurchaseRecord], list[
         name = str(
             product.get("human_name") or order.get("gamekey") or "(unknown order)"
         )
-        games, _, _ = _order_games(order, honor_revealed=reveal_signal)
+        games, _, _, _ = _order_games(order, honor_revealed=reveal_signal)
         # A plan payment is its OWN category ("subscriptionplan"); the monthly
         # drops are "subscriptioncontent". Keying on "subscription* with no
         # games" instead made a Choice month whose content we failed to parse
