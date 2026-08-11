@@ -153,7 +153,7 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 # full share of the order's price split. April 2023 Choice split 10 ways
 # instead of 8 because of two of them.
 _PROMO_NAME_RE = re.compile(
-    r"cross-?promo|redemption deadline|key expiration|\bcard packs?\b"
+    r"cross[\s-]?promo|redemption deadline|key expiration|\bcard packs?\b"
     r"|\bevent tickets?\b"
     r"|\b(?:uplay|origin|steam|rockstar(?: games)?|battle\.net|ea)\s+client\b"
     # Tail-anchored (except the discount phrase, which leads): a real game
