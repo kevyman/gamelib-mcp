@@ -1347,6 +1347,37 @@ class HumbleParserTests(unittest.TestCase):
             ["Bleed 2", "Standalone Game", "DRM-Free Delight"],
         )
 
+    def test_mmo_consumables_and_service_trials_take_no_price_share(self):
+        # The share-eaters the shared is_consumable_title misses: in-game
+        # currency with unusual phrasing, vanity items, loot crates, service
+        # trials. Each rode a real order as an ordinary line.
+        order = {
+            "product": {"human_name": "Extra Life Bundle", "category": "bundle"},
+            "amount_spent": 6.00,
+            "currency": "USD",
+            "created": "2015-11-05T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "Rebel Galaxy", "key_type": "steam",
+                     "machine_name": "rebelgalaxy_steam", "redeemed_key_val": "A"},
+                    {"human_name": "Total War: ARENA 18,000 in-game gold ($10 value)",
+                     "key_type": "generic", "machine_name": "twa_gold"},
+                    {"human_name": "H1Z1 Trickster Crate", "key_type": "generic",
+                     "machine_name": "h1z1_crate"},
+                    {"human_name": "XSplit Premium 1-Month License",
+                     "key_type": "generic", "machine_name": "xsplit"},
+                    {"human_name": "One Month of IGN Plus", "key_type": "generic",
+                     "machine_name": "ign_plus"},
+                ]
+            },
+        }
+
+        records, skipped = humble_module.records_from_order(order)
+
+        self.assertEqual([r.title for r in records], ["Rebel Galaxy"])
+        self.assertEqual(records[0].price_paid, 6.00)
+        self.assertIn("4 non-game item(s) excluded", skipped[0]["reason"])
+
     def test_discount_coupons_and_store_notices_take_no_price_share(self):
         # The real April 2023 divisor bug: two coupons ("40% off …",
         # "50% off … DLC Bundle") rode the order as ordinary tpk lines, each
