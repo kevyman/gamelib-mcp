@@ -146,10 +146,21 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 # The launcher/runtime a subproduct list ships beside the game it needs
 # ("Uplay Client (will download latest version)") is a Windows download like
 # any other, so the media check below cannot see it — only the name can.
+# Discount coupons and store notices ride subscription orders as ordinary
+# tpk lines ("40% off Aliens: Fireteam Elite - Pathogen Expansion", "Get your
+# Borderlands 3 DLC coupon", "Rocket League DLC Messaging", "Overwatch DL
+# Page Legal Text", "Warframe Free Promo Banner") — each one silently eats a
+# full share of the order's price split. April 2023 Choice split 10 ways
+# instead of 8 because of two of them.
 _PROMO_NAME_RE = re.compile(
     r"cross-?promo|redemption deadline|key expiration|\bcard packs?\b"
     r"|\bevent tickets?\b"
-    r"|\b(?:uplay|origin|steam|rockstar(?: games)?|battle\.net|ea)\s+client\b",
+    r"|\b(?:uplay|origin|steam|rockstar(?: games)?|battle\.net|ea)\s+client\b"
+    # Tail-anchored (except the discount phrase, which leads): a real game
+    # could contain one of these words mid-title, but every observed promo
+    # line ends with them.
+    r"|\b\d{1,3}\s*%\s*off\b|\bcoupon\s*$|\bmessaging\s*$"
+    r"|\blegal text\s*$|\bpromo banner\s*$",
     re.IGNORECASE,
 )
 

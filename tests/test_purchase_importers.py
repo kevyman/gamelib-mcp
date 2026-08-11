@@ -1279,6 +1279,45 @@ class HumbleParserTests(unittest.TestCase):
                     [("Life is Strange 2", 4.00)],
                 )
 
+    def test_discount_coupons_and_store_notices_take_no_price_share(self):
+        # The real April 2023 divisor bug: two coupons ("40% off …",
+        # "50% off … DLC Bundle") rode the order as ordinary tpk lines, each
+        # eating a full share — so 8 games split $10.75 ten ways. The "50%
+        # off … Bundle" line was even diverted to bundles_needing_split as if
+        # it were a game bundle. Excluded like any promo, their share
+        # redistributes to the real games.
+        order = {
+            "product": {
+                "human_name": "April 2023 Humble Choice",
+                "category": "subscriptioncontent",
+            },
+            "amount_spent": 10.75,
+            "currency": "USD",
+            "created": "2023-04-04T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "Revita", "key_type": "steam",
+                     "machine_name": "revita_steam", "redeemed_key_val": "A"},
+                    {"human_name": "Rollerdrome", "key_type": "steam",
+                     "machine_name": "rollerdrome_steam", "redeemed_key_val": "B"},
+                    {"human_name": "40% off Aliens: Fireteam Elite - Pathogen Expansion",
+                     "key_type": "generic", "machine_name": "aliens_coupon"},
+                    {"human_name": "50% off Monster Camp: Camp Forever DLC Bundle",
+                     "key_type": "generic", "machine_name": "monstercamp_coupon"},
+                ]
+            },
+        }
+
+        records, skipped = humble_module.records_from_orders([order])
+
+        self.assertEqual(
+            [(r.title, r.price_paid) for r in records],
+            [("Revita", 5.38), ("Rollerdrome", 5.37)],
+        )
+        self.assertFalse(any(r.is_bundle for r in records))
+        excluded = next(s for s in skipped if "non-game item(s) excluded" in s["reason"])
+        self.assertIn("40% off Aliens", excluded["reason"])
+
     def test_appid_guard_refusal_is_reported_not_silent(self):
         # When two same-platform keys share a SKU-collapsed title but carry
         # different appids, the guard keeps them apart — correctly, but until
