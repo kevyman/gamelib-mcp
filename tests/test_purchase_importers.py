@@ -1279,6 +1279,39 @@ class HumbleParserTests(unittest.TestCase):
                     [("Life is Strange 2", 4.00)],
                 )
 
+    def test_appid_guard_refusal_is_reported_not_silent(self):
+        # When two same-platform keys share a SKU-collapsed title but carry
+        # different appids, the guard keeps them apart — correctly, but until
+        # now silently, which made "why didn't these fold?" unanswerable from
+        # the import report. (Diagnosed on prod: April 2023's LiS2 pair.)
+        order = {
+            "product": {"human_name": "Choice", "category": "subscriptioncontent"},
+            "amount_spent": 9.00,
+            "currency": "USD",
+            "created": "2023-04-04T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "Life is Strange 2", "key_type": "steam",
+                     "machine_name": "lis2_steam", "steam_app_id": "532210",
+                     "redeemed_key_val": "A"},
+                    {"human_name": "Life Is Strange 2 Complete Edition",
+                     "key_type": "steam", "machine_name": "lis2ce_steam",
+                     "steam_app_id": "999999", "redeemed_key_val": "B"},
+                    {"human_name": "Revita", "key_type": "steam",
+                     "machine_name": "revita_steam", "redeemed_key_val": "C"},
+                ]
+            },
+        }
+
+        records, skipped = humble_module.records_from_orders([order])
+
+        # Kept apart: three entries, three shares.
+        self.assertEqual(len(records), 3)
+        apart = [s for s in skipped if "kept apart by differing" in s["reason"]]
+        self.assertEqual(len(apart), 1)
+        self.assertIn("Life is Strange 2 [532210]", apart[0]["reason"])
+        self.assertIn("Life Is Strange 2 Complete Edition [999999]", apart[0]["reason"])
+
     def test_keys_with_different_appids_never_fold(self):
         # Two Steam appids are Humble's own statement that the keys unlock
         # different store products, whatever the titles suggest.
