@@ -168,7 +168,16 @@ _PROMO_NAME_RE = re.compile(
     # "... Special Instructions"). Under create_missing each minted a phantom
     # owned game; as order entries each also ate a share of the price split.
     r"|\btech demo\s*$|\bsneak peek\b|\(\s*demo\s*\)\s*$|\bbeta\s*$"
-    r"|\bplaytests?\s*$|\bspecial instructions\s*$|\bsource\s?codes?\s*$",
+    r"|\bplaytests?\s*$|\bspecial instructions\s*$|\bsource\s?codes?\s*$"
+    # MMO consumables and service trials the shared is_consumable_title
+    # misses ("Total War: ARENA 18,000 in-game gold", "Trove Skyfire Helm"
+    # excepted — too item-specific to pattern safely, it stays a miss —
+    # "H1Z1 Trickster Crate", "ESO Vanity pet: …", "XSplit Premium 1-Month
+    # License", "DC Comics 1-Month Free Trial", "One Month of IGN Plus",
+    # '"Helping Heart" Paradox Forum Icon'). Not games; each ate a share.
+    r"|\bin-game gold\b|\bvanity pet\b|\bcrate\s*$|\bforum icon\s*$"
+    r"|\b1-month (?:license|free trial)\s*$|^one month of\b|\bfree promo\b"
+    r"|\bclosed beta\)?\s*$",
     re.IGNORECASE,
 )
 
