@@ -1279,6 +1279,74 @@ class HumbleParserTests(unittest.TestCase):
                     [("Life is Strange 2", 4.00)],
                 )
 
+    def test_unkeyed_junk_tail_is_excluded_not_minted(self):
+        # The un-keyed tail of old bundles: builds and marketing artifacts
+        # that are not purchasable games. Under create_missing each minted a
+        # phantom owned game (170 on the live library), and each ate a share
+        # of its order's price split.
+        order = {
+            "product": {"human_name": "Frozenbyte Bundle", "category": "bundle"},
+            "amount_spent": 6.00,
+            "currency": "USD",
+            "created": "2011-04-01T00:00:00",
+            "subproducts": [
+                {"human_name": "Trine", "machine_name": "trine",
+                 "downloads": [{"platform": "windows"}]},
+                {"human_name": "Splot Beta", "machine_name": "splotbeta",
+                 "downloads": [{"platform": "windows"}]},
+                {"human_name": "City Generator Tech Demo",
+                 "machine_name": "citygen", "downloads": [{"platform": "windows"}]},
+                {"human_name": "Hollow Knight (Sneak Peek)",
+                 "machine_name": "hksneak", "downloads": [{"platform": "windows"}]},
+                {"human_name": "Wandersong Sneak Peek (DEMO)",
+                 "machine_name": "wandersneak", "downloads": [{"platform": "windows"}]},
+                {"human_name": "Dungeon Baller Playtest",
+                 "machine_name": "dbplaytest", "downloads": [{"platform": "windows"}]},
+                {"human_name": "Darwinia, Multiwinia, DEFCON, Uplink Sourcecodes",
+                 "machine_name": "sourcecodes", "downloads": [{"platform": "windows"}]},
+            ],
+        }
+
+        records, skipped = humble_module.records_from_order(order)
+
+        self.assertEqual([r.title for r in records], ["Trine"])
+        # The one real game keeps the whole price — junk takes no share.
+        self.assertEqual(records[0].price_paid, 6.00)
+        self.assertIn("6 non-game item(s) excluded", skipped[0]["reason"])
+
+    def test_drm_free_build_marker_is_packaging_not_identity(self):
+        # "Bleed 2 (DRM-Free)" beside the "Bleed 2" key is the same grant's
+        # download half — the marker strips, so exact-title de-duplication
+        # catches it. A standalone DRM-free game keeps a matchable name, and
+        # a game whose NAME merely starts with "DRM-Free" is untouched.
+        order = {
+            "product": {"human_name": "Bundle", "category": "bundle"},
+            "amount_spent": 9.00,
+            "currency": "USD",
+            "created": "2018-01-01T00:00:00",
+            "tpkd_dict": {
+                "all_tpks": [
+                    {"human_name": "Bleed 2", "key_type": "steam",
+                     "machine_name": "bleed2_steam", "redeemed_key_val": "A"},
+                ]
+            },
+            "subproducts": [
+                {"human_name": "Bleed 2 (DRM-Free)", "machine_name": "bleed2_drmfree_x",
+                 "downloads": [{"platform": "windows"}]},
+                {"human_name": "Standalone Game DRM Free Build",
+                 "machine_name": "standalone", "downloads": [{"platform": "windows"}]},
+                {"human_name": "DRM-Free Delight", "machine_name": "delight",
+                 "downloads": [{"platform": "windows"}]},
+            ],
+        }
+
+        records, _ = humble_module.records_from_order(order)
+
+        self.assertEqual(
+            [r.title for r in records],
+            ["Bleed 2", "Standalone Game", "DRM-Free Delight"],
+        )
+
     def test_discount_coupons_and_store_notices_take_no_price_share(self):
         # The real April 2023 divisor bug: two coupons ("40% off …",
         # "50% off … DLC Bundle") rode the order as ordinary tpk lines, each
@@ -1741,13 +1809,13 @@ class HumbleParserTests(unittest.TestCase):
                 "all_tpks": [
                     self._key("Redeemed Game", revealed=True,
                               machine_name="redeemed_monthly_steam"),
-                    self._key("Owned DRM-Free", machine_name="owneddrmfree_steam"),
+                    self._key("Owned Download Only", machine_name="owneddownload_steam"),
                 ]
             },
             "subproducts": [
                 {
-                    "human_name": "Owned DRM-Free",
-                    "machine_name": "owneddrmfree",
+                    "human_name": "Owned Download Only",
+                    "machine_name": "owneddownload",
                     "downloads": [{"platform": "windows"}],
                 }
             ],
@@ -1757,7 +1825,7 @@ class HumbleParserTests(unittest.TestCase):
 
         self.assertEqual(
             [(r.title, r.platform) for r in records],
-            [("Redeemed Game", "steam"), ("Owned DRM-Free", "other")],
+            [("Redeemed Game", "steam"), ("Owned Download Only", "other")],
         )
         # Two entries, so the split is still 5.00/5.00 — the unrevealed key
         # did not become an unattributed share.

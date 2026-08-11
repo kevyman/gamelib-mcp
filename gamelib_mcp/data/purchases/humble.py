@@ -160,7 +160,15 @@ _PROMO_NAME_RE = re.compile(
     # could contain one of these words mid-title, but every observed promo
     # line ends with them.
     r"|\b\d{1,3}\s*%\s*off\b|\bcoupon\s*$|\bmessaging\s*$"
-    r"|\blegal text\s*$|\bpromo banner\s*$",
+    r"|\blegal text\s*$|\bpromo banner\s*$"
+    # The un-keyed tail of old bundles: builds and marketing artifacts that
+    # are not purchasable games ("City Generator Tech Demo", "Hollow Knight
+    # (Sneak Peek)", "Wandersong Sneak Peek (DEMO)", "Splot Beta", "Dungeon
+    # Baller Playtest", "Darwinia, Multiwinia, DEFCON, Uplink Sourcecodes",
+    # "... Special Instructions"). Under create_missing each minted a phantom
+    # owned game; as order entries each also ate a share of the price split.
+    r"|\btech demo\s*$|\bsneak peek\b|\(\s*demo\s*\)\s*$|\bbeta\s*$"
+    r"|\bplaytests?\s*$|\bspecial instructions\s*$|\bsource\s?codes?\s*$",
     re.IGNORECASE,
 )
 
@@ -228,14 +236,24 @@ def _split_amount(amount: float, count: int) -> list[float]:
     return shares
 
 
+# A DRM-free build marker on a subproduct title ("Bleed 2 (DRM-Free)",
+# "Cook, Serve, Delicious! 2!! DRM Free Build") is packaging, not identity —
+# stripped so the entry de-duplicates against its key twin by exact title, and
+# so a standalone DRM-free game keeps a name the library can match.
+_DRM_FREE_SUFFIX_RE = re.compile(
+    r"[\s:–—-]*\(?\s*drm[\s-]?free(?:\s+build)?\s*\)?\s*$", re.IGNORECASE
+)
+
+
 def _clean_title(name: str) -> str:
-    """Strip embedded HTML and key-delivery tails (iterated so stacked tails
-    peel off)."""
+    """Strip embedded HTML and key-delivery/packaging tails (iterated so
+    stacked tails peel off)."""
     cleaned = " ".join(_HTML_TAG_RE.sub(" ", name).split())
     previous = None
     while cleaned != previous:
         previous = cleaned
         cleaned = _KEY_SUFFIX_RE.sub("", cleaned).strip()
+        cleaned = _DRM_FREE_SUFFIX_RE.sub("", cleaned).strip()
     return cleaned or name.strip()
 
 
