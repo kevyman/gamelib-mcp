@@ -1,0 +1,34 @@
+{
+  "id": "skipped-2021-09",
+  "official_name": "Humble Choice September 2021",
+  "structure": "choice: pick N of M",
+  "price": {
+    "amount": 19.99,
+    "currency": "USD",
+    "note": "Premium plan $19.99/mo: all 12 games (Humble's ongoing 'get all games' promotion superseded the nominal pick-9-of-12 entitlement); Basic plan $14.99/mo: pick 3 of 12; Classic plan $12/mo (grandfathered Humble Monthly subscribers): all 12 games. Available September 7 - October 5, 2021. Combined retail value reported ~$323 USD."
+  },
+  "full_lineup": [
+    "PGA TOUR 2K21",
+    "Neon Abyss",
+    "Not For Broadcast",
+    "Roki",
+    "Narita Boy",
+    "West of Dead",
+    "Atomicrops",
+    "Heaven's Vault",
+    "Swag and Sorcery",
+    "Fort Triumph",
+    "Orwell: Ignorance is Strength",
+    "FRAMED Collection"
+  ],
+  "extras": [
+    "Sluggish Morss: Pattern Circus (Humble Original)"
+  ],
+  "confidence": "high",
+  "sources": [
+    "https://www.indiegamebundles.com/humble-choice-september-2021/",
+    "https://hardcoregamer.com/news/september-2021-humble-choice-games-revealed/410221/",
+    "https://gg.deals/bundle/humble-choice-september-2021/",
+    "https://www.steamgifts.com/discussion/c3ZkA/humble-bundle-september-2021-humble-choice-22"
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "id": "monthly-2018-08",
+  "official_name": "September 2018 Humble Monthly (#35)",
+  "structure": "monthly mystery box ($12, early unlocks + reveal)",
+  "price": {"amount": 12, "currency": "USD", "note": "Flat $12/month subscription; full bundle dropped Friday 2018-09-07."},
+  "early_unlocks": [
+    "Sniper Elite 4",
+    "Tales of Berseria",
+    "Staxel"
+  ],
+  "full_lineup": [
+    "Sniper Elite 4",
+    "Tales of Berseria",
+    "Staxel",
+    "Little Nightmares",
+    "Darksiders II Deathinitive Edition",
+    "Battle Chef Brigade",
+    "Zombie Night Terror",
+    "Figment",
+    "ETHEREAL"
+  ],
+  "picked": null,
+  "db_received_matches": false,
+  "discrepancies": "DB is MISSING ETHEREAL, part of the drop-day reveal (9 official titles vs 8 in DB). Barter.vg records an alternative offer for this month: choose either the three early unlocks (Sniper Elite 4, Tales of Berseria, Staxel) OR Rise of the Tomb Raider; DB contents show John received the standard three-unlock track. Mapping note: DB redemption month 2018-08 is one month before the official September 2018 drop because the early unlocks were announced/redeemable from 2018-08-03.",
+  "confidence": "high",
+  "sources": [
+    "https://barter.vg/bundle/3574/",
+    "https://www.steamgifts.com/discussion/T4GKP/humble-bundle-september-2018-monthly-bundle-sniper-elite-4-tales-of-berseria-staxel",
+    "https://armchairarcade.com/perspectives/2018/08/06/the-september-humble-monthly-early-unlocks-are-available-now-sniper-elite-4-tales-of-berseria-and-staxel/"
+  ]
+}

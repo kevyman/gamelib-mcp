@@ -1,0 +1,28 @@
+{
+  "id": "choice-2024-05",
+  "official_name": "Humble Choice May 2024",
+  "structure": "choice: all games included",
+  "price": {
+    "amount": 10.75,
+    "currency": "USD",
+    "note": "monthly subscription share actually paid: $10.75 (annual-plan rate, $129/yr / 12); list price at the time was $11.99/month, promoted as $12"
+  },
+  "full_lineup": [
+    "Hi-Fi RUSH",
+    "Yakuza: Like a Dragon",
+    "Steelrising",
+    "Loddlenaut",
+    "King Of The Castle",
+    "Bravery and Greed",
+    "Amanda the Adventurer",
+    "Mediterranea Inferno"
+  ],
+  "db_received_matches": true,
+  "discrepancies": "None. All 8 official games are present in the DB.",
+  "confidence": "high",
+  "sources": [
+    "https://www.gamespot.com/articles/humble-bundle-choice-may-2024/1100-6523250/",
+    "https://gg.deals/bundle/humble-choice-may-2024-is-here-get-hi-fi-rush-yakuza-like-a-dragon-more/",
+    "https://twistedvoxel.com/humble-choice-bundle-may-2024-hi-fi-rush/"
+  ]
+}
