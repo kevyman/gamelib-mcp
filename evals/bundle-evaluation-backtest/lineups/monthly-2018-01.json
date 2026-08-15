@@ -1,0 +1,30 @@
+{
+  "id": "monthly-2018-01",
+  "official_name": "February 2018 Humble Monthly (#28)",
+  "structure": "monthly mystery box ($12, early unlocks + reveal)",
+  "price": {"amount": 12, "currency": "USD", "note": "Flat $12/month subscription; full bundle dropped Friday 2018-02-02."},
+  "early_unlocks": [
+    "Sid Meier's Civilization VI (+ Australia Civilization & Scenario Pack + Vikings Scenario Pack)",
+    "Owlboy (added as a bonus early unlock mid-January)"
+  ],
+  "full_lineup": [
+    "Sid Meier's Civilization VI (+ Australia Civilization & Scenario Pack + Vikings Scenario Pack)",
+    "Owlboy",
+    "Life is Strange (Complete Season)",
+    "Tacoma",
+    "Black The Fall",
+    "Snake Pass",
+    "The Norwood Suite",
+    "Fortune-499 (Humble Original)"
+  ],
+  "picked": null,
+  "db_received_matches": false,
+  "discrepancies": "DB is MISSING Fortune-499, this month's Humble Original (non-Steam/DRM-free delivery — plausibly never imported). All other official items match. Civ VI (+2 DLC) was the early unlock announced 2018-01-05; Owlboy was added later in January as an extra early unlock before the 2018-02-02 reveal. Mapping note: DB redemption month 2018-01 is one month before the official February 2018 drop because the early unlocks were redeemable through January.",
+  "confidence": "high",
+  "sources": [
+    "https://barter.vg/bundle/3072/",
+    "https://www.indiegamebundles.com/humble-monthly-bundle-february-2018/",
+    "https://www.resetera.com/threads/owlboy-added-to-february-humble-monthly-unlocked-now.19327/",
+    "https://www.vgfusion.com/147-humble-monthly-bundle-february-2018-revealed/"
+  ]
+}

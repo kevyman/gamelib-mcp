@@ -1,0 +1,29 @@
+{
+  "id": "choice-2023-04",
+  "official_name": "Humble Choice April 2023",
+  "structure": "choice: all games included",
+  "price": {
+    "amount": 10.75,
+    "currency": "USD",
+    "note": "monthly subscription share actually paid: $10.75 (annual-plan rate, $129/yr / 12); list price at the time was $11.99/month, promoted as $12"
+  },
+  "full_lineup": [
+    "DEATH STRANDING DIRECTOR'S CUT",
+    "Aliens: Fireteam Elite",
+    "Rollerdrome",
+    "Life is Strange 2: Complete Season",
+    "The Life and Suffering of Sir Brante",
+    "Monster Prom 2: Monster Camp",
+    "Revita",
+    "Founders' Fortune"
+  ],
+  "db_received_matches": true,
+  "discrepancies": "DB row is titled 'DEATH STRANDING' but the bundle's headline item was Death Stranding Director's Cut (Steam) — same key, naming difference only. Life is Strange 2 was the Complete Season (with Mascot Bundle DLC). All 8 official games are present in the DB.",
+  "confidence": "high",
+  "sources": [
+    "https://www.indiegamebundles.com/humble-choice-april-2023/",
+    "https://gg.deals/bundle/humble-choice-april-2023/",
+    "https://steamdeckhq.com/news/humble-choice-april-2023-bundle/",
+    "https://www.steamgifts.com/discussion/bKFpq/humble-bundle-april-2023-humble-choice-41-jul-2025-death-stranding-for-egs-added"
+  ]
+}

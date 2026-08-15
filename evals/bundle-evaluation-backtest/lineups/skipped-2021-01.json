@@ -1,0 +1,31 @@
+{
+  "id": "skipped-2021-01",
+  "official_name": "Humble Choice January 2021",
+  "structure": "choice: pick N of M",
+  "price": {
+    "amount": 19.99,
+    "currency": "USD",
+    "note": "Premium plan $19.99/mo: all 12 games (Humble's ongoing 'get all games' promotion, running monthly since August 2020, superseded the nominal pick-9-of-12 entitlement); Basic plan $14.99/mo: pick 3 of 12; Classic plan $12/mo (grandfathered Humble Monthly subscribers): all 12 games."
+  },
+  "full_lineup": [
+    "PC Building Simulator",
+    "Pathologic 2",
+    "Tales of the Neon Sea",
+    "Not Tonight",
+    "Minoria",
+    "Deleveled",
+    "SONG OF HORROR Complete Edition",
+    "Ancestors: The Humankind Odyssey",
+    "Total Tank Simulator",
+    "Vampire: The Masquerade - Shadows of New York",
+    "The Ambassador: Fractured Timelines",
+    "Warhammer: Chaosbane"
+  ],
+  "confidence": "high",
+  "sources": [
+    "https://www.epicbundle.com/humble-choice-monthly-bundle-january-2021/",
+    "https://barter.vg/bundle/5272/",
+    "https://gg.deals/bundle/humble-choice-january-2021/",
+    "https://playco-opgame.com/humble-choice-january-2021/"
+  ]
+}

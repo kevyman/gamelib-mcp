@@ -1,0 +1,31 @@
+{
+  "id": "monthly-2018-11",
+  "official_name": "December 2018 Humble Monthly (#38)",
+  "structure": "monthly mystery box ($12, early unlocks + reveal)",
+  "price": {"amount": 12, "currency": "USD", "note": "Flat $12/month subscription; full bundle dropped Friday 2018-12-07."},
+  "early_unlocks": [
+    "METAL GEAR SOLID V: The Definitive Experience",
+    "Cities: Skylines (+ After Dark DLC)"
+  ],
+  "full_lineup": [
+    "METAL GEAR SOLID V: The Definitive Experience",
+    "Cities: Skylines (+ After Dark DLC)",
+    "Mega Man Legacy Collection",
+    "Zombie Army Trilogy",
+    "Seven: The Days Long Gone",
+    "NeuroVoider",
+    "Purrfect Date",
+    "Immortal Redneck",
+    "Cut & Run (Humble Original)",
+    "Forager (sneak peek, extra)"
+  ],
+  "picked": null,
+  "db_received_matches": false,
+  "discrepancies": "DB is MISSING Cut & Run, this month's Humble Original, and the Forager sneak peek (extras; plausibly never imported). Naming: DB 'METAL GEAR SOLID V: GROUND ZEROES (+ The Definitive Experience DLC)' is how MGSV: The Definitive Experience keys out on Steam (Ground Zeroes + The Phantom Pain + all DLC); DB 'Seven: Enhanced Edition' = official 'Seven: The Days Long Gone', which was upgraded free to Enhanced Edition for owners in March 2019. Mapping note: DB redemption month 2018-11 is one month before the official December 2018 drop because the early unlocks were announced/redeemable from 2018-11-02.",
+  "confidence": "high",
+  "sources": [
+    "https://barter.vg/bundle/3793/",
+    "https://www.indiegamebundles.com/humble-monthly-bundle-december-2018-brings-mgs-v/",
+    "https://gameinformer.com/psa/2018/11/04/metal-gear-solid-v-cities-skylines-headline-decembers-humble-monthly-bundle"
+  ]
+}

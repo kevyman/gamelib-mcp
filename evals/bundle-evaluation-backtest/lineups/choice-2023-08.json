@@ -1,0 +1,29 @@
+{
+  "id": "choice-2023-08",
+  "official_name": "Humble Choice August 2023",
+  "structure": "choice: all games included",
+  "price": {
+    "amount": 10.21,
+    "currency": "USD",
+    "note": "monthly subscription share actually paid: $10.21; list price at the time was $11.99/month, promoted as $12"
+  },
+  "full_lineup": [
+    "Disco Elysium - The Final Cut",
+    "Chivalry 2",
+    "Trek to Yomi",
+    "Road 96",
+    "Arcade Paradise",
+    "SuchArt: Genius Artist Simulator",
+    "Tin Can",
+    "Hot Brass"
+  ],
+  "db_received_matches": false,
+  "discrepancies": "Official lineup has 8 games; DB shows only 7 Steam keys. Arcade Paradise is in the official lineup but absent from the DB — most likely unredeemed. All other 7 DB rows match ('SuchArt' = 'SuchArt: Genius Artist Simulator').",
+  "confidence": "high",
+  "sources": [
+    "https://www.indiegamebundles.com/humble-choice-august-2023-disco-elysium-the-final-cut-7-more-steam-games-for-12/",
+    "https://barter.vg/bundle/6942/",
+    "https://www.gamespot.com/articles/humble-choice-collection-august-2023/1100-6516460/",
+    "https://nerdgirlthoughts.game.blog/2023/08/11/quick-look-arcade-paradise-humble-choice-august-2023-edition/"
+  ]
+}

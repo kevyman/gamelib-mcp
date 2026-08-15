@@ -1,0 +1,36 @@
+{
+  "id": "skipped-2020-10",
+  "official_name": "Humble Choice October 2020",
+  "structure": "choice: pick N of M",
+  "price": {
+    "amount": 19.99,
+    "currency": "USD",
+    "note": "Premium plan $19.99/mo (nominal entitlement: pick 9 of 12, but Humble's ongoing 'get all games' promotion running since August 2020 granted Premium and Classic subscribers all 12 games this month); Basic plan $14.99/mo: pick 3 of 12; Classic plan $12/mo (grandfathered Humble Monthly subscribers): all 12 games. New-subscriber promo that month: Premium at $12/mo for 12 months. Available October 2 - November 6, 2020. Combined retail value reported ~$306.87 USD."
+  },
+  "full_lineup": [
+    "Tropico 6 - El Prez Edition",
+    "Autonauts",
+    "The Sunless Bundle (Sunless Sea + Sunless Skies)",
+    "Iron Danger",
+    "Shadows: Awakening",
+    "Fae Tactics",
+    "Fantasy Blacksmith",
+    "The Suicide of Rachel Foster",
+    "Goat of Duty",
+    "The Uncertain: Episode 1 - The Last Quiet Day",
+    "Basement",
+    "Lightmatter"
+  ],
+  "extras": [
+    "Fate of Kai (Humble Original, DRM-free)",
+    "SYZYGY (Humble Original, DRM-free)"
+  ],
+  "confidence": "high",
+  "sources": [
+    "https://www.epicbundle.com/humble-choice-monthly-bundle-october-2020/",
+    "https://www.indiegamebundles.com/humble-choice-october-2020/",
+    "https://barter.vg/bundle/5124/",
+    "https://gg.deals/bundle/humble-choice-october-2020/",
+    "https://gamingrespawn.com/news/51207/october-2020-humble-choice-includes-tropico-6-sunless-skies-fae-tactics-and-more/"
+  ]
+}

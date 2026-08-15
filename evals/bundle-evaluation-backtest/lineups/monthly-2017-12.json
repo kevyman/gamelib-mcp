@@ -1,0 +1,32 @@
+{
+  "id": "monthly-2017-12",
+  "official_name": "January 2018 Humble Monthly (#27)",
+  "structure": "monthly mystery box ($12, early unlocks + reveal)",
+  "price": {"amount": 12, "currency": "USD", "note": "Flat $12/month subscription; full bundle dropped Friday 2018-01-05."},
+  "early_unlocks": [
+    "Quantum Break",
+    "The Long Dark",
+    "Warhammer 40,000: Dawn of War III"
+  ],
+  "full_lineup": [
+    "Quantum Break",
+    "The Long Dark",
+    "Warhammer 40,000: Dawn of War III",
+    "Tomb Raider (2013)",
+    "Sleeping Dogs: Definitive Edition",
+    "Mr Shifty",
+    "Cursed Castilla (Maldita Castilla EX)",
+    "HIVESWAP: ACT 1",
+    "HitchHiker (Humble Original)"
+  ],
+  "picked": null,
+  "db_received_matches": false,
+  "discrepancies": "DB is MISSING Tomb Raider (2013, standard edition), which was part of the drop-day reveal — likely already owned so the key was traded/unredeemed or deduped. Naming: DB 'Sleeping Dogs' = official 'Sleeping Dogs: Definitive Edition'. Mapping note: DB redemption month 2017-12 is one month before the official January 2018 drop because the three early unlocks were announced/redeemable from 2017-12-01.",
+  "confidence": "high",
+  "sources": [
+    "https://barter.vg/bundle/2940/",
+    "https://www.indiegamebundles.com/humble-monthly-bundle-january-2018/",
+    "https://www.dualshockers.com/humble-monthly-bundle-kicks-off-2018-style-offering-quantum-break-long-dark-12/",
+    "https://www.resetera.com/threads/january-humble-monthly-just-unlocked-tomb-raider-sleeping-dogs-quantum-break.14519/"
+  ]
+}

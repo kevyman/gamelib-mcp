@@ -1,0 +1,26 @@
+{
+  "id": "skipped-2022-08",
+  "official_name": "Humble Choice August 2022",
+  "structure": "choice: all games included",
+  "price": {
+    "amount": 11.99,
+    "currency": "USD",
+    "note": "Single-tier Humble Choice (post-February 2022 relaunch): every subscriber gets all games in the month for $11.99/mo (regional pricing applied outside the US); subscription also included access to 50+ games in the Humble app (Humble Games Collection) and Humble Store discounts. Available August 2 - September 6, 2022. Combined retail value reported ~$180 USD."
+  },
+  "full_lineup": [
+    "The Ascent",
+    "HOT WHEELS UNLEASHED",
+    "A Plague Tale: Innocence",
+    "Gas Station Simulator",
+    "In Sound Mind",
+    "Mind Scanners",
+    "Emily is Away <3",
+    "Omno"
+  ],
+  "confidence": "high",
+  "sources": [
+    "https://www.indiegamebundles.com/humble-choice-august-2022/",
+    "https://gamefreaks365.com/the-humble-choice-lineup-is-here-for-august-2022/",
+    "https://n4g.com/news/2495237/the-humble-choice-lineup-is-here-for-august-2022"
+  ]
+}

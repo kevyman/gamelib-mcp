@@ -1,0 +1,26 @@
+{
+  "id": "monthly-2017-09",
+  "official_name": "October 2017 Humble Monthly",
+  "structure": "monthly mystery box ($12, early unlocks + reveal)",
+  "price": {"amount": 12, "currency": "USD", "note": "Flat $12/month subscription; full bundle dropped Friday 2017-10-06."},
+  "early_unlocks": ["Rise of the Tomb Raider"],
+  "full_lineup": [
+    "Rise of the Tomb Raider",
+    "Wargame: Red Dragon",
+    "Seasons after Fall",
+    "Furi",
+    "Scanner Sombre",
+    "Orwell: Keeping an Eye On You",
+    "The Shrouded Isle",
+    "Getting Over It with Bennett Foddy (Humble Original)"
+  ],
+  "picked": null,
+  "db_received_matches": true,
+  "discrepancies": "None — all 8 official items appear in the DB list. Getting Over It with Bennett Foddy was this month's Humble Original and made its world debut in this bundle (released 2017-10-06 as part of it). Mapping note: DB redemption month 2017-09 is one month before the official October 2017 drop because the early unlock (Rise of the Tomb Raider) was announced/redeemable from early September at purchase time. Minor naming: official Orwell key is 'Orwell: Keeping an Eye On You' (DB: 'Orwell').",
+  "confidence": "high",
+  "sources": [
+    "https://www.indiegamebundles.com/humble-monthly-bundle-october-2017/",
+    "https://www.vgfusion.com/128-humble-monthly-bundle-october-2017-revealed/",
+    "https://en.wikipedia.org/wiki/Getting_Over_It_with_Bennett_Foddy"
+  ]
+}

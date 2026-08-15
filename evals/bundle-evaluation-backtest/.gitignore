@@ -1,0 +1,7 @@
+fixtures/
+results/
+work/owned_dated.tsv
+work/ground_truth.json
+work/taste_profile.json
+work/scoring.json
+__pycache__/

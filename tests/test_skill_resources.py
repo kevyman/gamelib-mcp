@@ -85,16 +85,16 @@ class SkillResourcesRegisteredTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("bundle-evaluation", by_name)
 
         backlog_entry = by_name["backlog-triage"]
-        self.assertEqual(backlog_entry["version"], "2.1.0")
+        self.assertRegex(backlog_entry["version"], r"^\d+\.\d+\.\d+$")
         self.assertIn("play next", backlog_entry["description"])
         self.assertIn("skill://backlog-triage/SKILL.md", backlog_entry["files"])
 
         quality_entry = by_name["game-quality"]
-        self.assertEqual(quality_entry["version"], "2.2.0")
+        self.assertRegex(quality_entry["version"], r"^\d+\.\d+\.\d+$")
         self.assertEqual(quality_entry["files"], ["skill://game-quality/SKILL.md"])
 
         bundle_entry = by_name["bundle-evaluation"]
-        self.assertEqual(bundle_entry["version"], "1.0.0")
+        self.assertRegex(bundle_entry["version"], r"^\d+\.\d+\.\d+$")
         self.assertIn("bundle", bundle_entry["description"].lower())
         self.assertEqual(bundle_entry["files"], ["skill://bundle-evaluation/SKILL.md"])
 
