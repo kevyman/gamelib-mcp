@@ -1,0 +1,27 @@
+{
+  "id": "skipped-2022-05",
+  "official_name": "Humble Choice May 2022",
+  "structure": "choice: all games included",
+  "price": {
+    "amount": 11.99,
+    "currency": "USD",
+    "note": "Single-tier Humble Choice (post-February 2022 relaunch): every subscriber gets all games in the month for $11.99/mo (regional pricing applied outside the US); subscription also included access to the Humble Games Collection library via the Humble app and Humble Store discounts (10-20% scaling with subscription length). Available May 3 - June 7, 2022."
+  },
+  "full_lineup": [
+    "Command & Conquer Remastered Collection",
+    "Planet Zoo",
+    "SpongeBob SquarePants: Battle for Bikini Bottom - Rehydrated",
+    "Surviving the Aftermath",
+    "Embr",
+    "Genesis Noir",
+    "If Found...",
+    "Spellcaster University"
+  ],
+  "confidence": "high",
+  "sources": [
+    "https://isthereanydeal.com/bundles/11455/",
+    "https://www.gamespot.com/articles/8-pc-games-are-up-for-grabs-for-humble-choice-subscribers-this-month/1100-6503249/",
+    "https://gamefreaks365.com/the-humble-choice-lineup-is-here-for-may-2022/",
+    "https://gamespace.com/all-articles/news/may-humble-choice-titles-revealed-including-sponge-bob-and-planet-zoo/"
+  ]
+}

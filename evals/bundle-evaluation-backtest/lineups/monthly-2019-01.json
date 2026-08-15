@@ -1,0 +1,31 @@
+{
+  "id": "monthly-2019-01",
+  "official_name": "February 2019 Humble Monthly (#40)",
+  "structure": "monthly mystery box ($12, early unlocks + reveal)",
+  "price": {"amount": 12, "currency": "USD", "note": "Flat $12/month subscription; full bundle dropped Friday 2019-02-01."},
+  "early_unlocks": [
+    "Yakuza 0",
+    "Tom Clancy's The Division (+ DLC)",
+    "Rapture Rejects (+ Safari Outfit DLC)"
+  ],
+  "full_lineup": [
+    "Yakuza 0",
+    "Tom Clancy's The Division (+ DLC)",
+    "Rapture Rejects (+ Safari Outfit DLC)",
+    "Sniper Elite 3",
+    "Rock of Ages 2: Bigger & Boulder",
+    "Full Metal Furies",
+    "Aaero",
+    "Bleed 2",
+    "Super Daryl Deluxe",
+    "after HOURS (Humble Original)"
+  ],
+  "picked": null,
+  "db_received_matches": false,
+  "discrepancies": "DB is MISSING Tom Clancy's The Division (+ DLC), one of the three early unlocks (10 official items vs 9 in DB) — likely already owned so the key went unredeemed/traded. Everything else matches, including the Rapture Rejects Safari Outfit DLC and the after HOURS Humble Original. Mapping note: DB redemption month 2019-01 is one month before the official February 2019 drop because the early unlocks were announced/redeemable from 2019-01-04.",
+  "confidence": "high",
+  "sources": [
+    "https://barter.vg/bundle/3900/",
+    "https://www.indiegamebundles.com/humble-monthly-bundle-february-2019/"
+  ]
+}

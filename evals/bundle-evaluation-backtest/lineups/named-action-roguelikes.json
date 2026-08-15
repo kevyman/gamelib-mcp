@@ -1,0 +1,58 @@
+{
+  "id": "named-action-roguelikes",
+  "official_name": "Action Roguelikes: What Kills You Makes You Stronger",
+  "store": "humble",
+  "sale_window": "2023-11 to 2023-12 (launched ~2023-11-15/16, ran until 2023-12-07)",
+  "purchase_date": "2023-11-16",
+  "price_paid": "13.00",
+  "structure": "tiered",
+  "tiers": [
+    {
+      "price": "1 USD | 1 EUR",
+      "adds": [
+        "CRYPTARK"
+      ]
+    },
+    {
+      "price": "5 USD | 4.65 EUR",
+      "adds": [
+        "God Of Weapons",
+        "Wall World"
+      ]
+    },
+    {
+      "price": "10 USD | 10.48 EUR",
+      "adds": [
+        "Dead Estate",
+        "Paint the Town Red"
+      ]
+    },
+    {
+      "price": "13 USD | 12.10 EUR",
+      "adds": [
+        "Barony",
+        "Lumencraft"
+      ]
+    }
+  ],
+  "full_lineup": [
+    "CRYPTARK",
+    "God Of Weapons",
+    "Wall World",
+    "Dead Estate",
+    "Paint the Town Red",
+    "Barony",
+    "Lumencraft"
+  ],
+  "key_platform": "steam",
+  "db_received_matches": true,
+  "discrepancies": "None on content: John's 7 received items exactly match the full top-tier (tier 4) lineup, and 13.00 paid equals the 13 USD top-tier minimum, bought on launch day. Tier 2 and up also included a 40% off Humble Store coupon for GUNHEAD (Cryptark's sequel), which is not a game key.",
+  "confidence": "high",
+  "sources": [
+    "https://barter.vg/bundle/7150/",
+    "https://web.phenixxgaming.com/2023/11/16/new-humble-bundle-for-action-roguelikes/",
+    "https://www.allkeyshop.com/blog/8-ultimate-roguelikes-bundle-2023-news-k/",
+    "https://www.steamgifts.com/discussion/rELRM/humble-bundle-action-roguelikes-what-kills-you-makes-you-stronger",
+    "https://web.archive.org/web/20231115193237/https://www.humblebundle.com/games/action-roguelikes-what-kills-you-makes-you-stronger"
+  ]
+}

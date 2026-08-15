@@ -1,0 +1,31 @@
+{
+  "id": "choice-2024-12",
+  "official_name": "Humble Choice December 2024",
+  "structure": "choice: all games included",
+  "price": {
+    "amount": 8.58,
+    "currency": "EUR",
+    "note": "monthly subscription share actually paid: EUR 8.58 (he pays EUR from late 2024); EUR list price at the time was EUR 9.99/month (USD list $11.99)"
+  },
+  "full_lineup": [
+    "Atlas Fallen: Reign of Sand",
+    "Bomb Rush Cyberfunk",
+    "Crime Boss: Rockay City - First Month Edition",
+    "Inkulinati",
+    "Monster Prom 3: Monster Roadtrip",
+    "Old World",
+    "The Invincible",
+    "Venba",
+    "Moonstone Island"
+  ],
+  "db_received_matches": false,
+  "discrepancies": "Announced lineup was 8 games; Moonstone Island was added to the bundle mid-month (confirmed by ITAD and barter.vg) and is absent from the DB — likely claimed before the addition or unredeemed. Wreckfest appears on barter.vg only as a regional substitute (China) and is not part of the standard lineup. DB's 'Atlas Fallen' + 'Reign of Sand DLC' rows correspond to the single bundle item 'Atlas Fallen: Reign of Sand'; DB's 'Crime Boss: Rockay City' was the First Month Edition. The Boot.dev 1 Month Subscription perk (present in DB, excluded here) was a non-game bonus item. Tier-2 content was DLC discount vouchers only (Old World DLC, Bomb Rush Cyberfunk DLC).",
+  "confidence": "high",
+  "sources": [
+    "https://isthereanydeal.com/bundles/14677/",
+    "https://barter.vg/bundle/7837/",
+    "https://www.gamespot.com/articles/grab-8-games-including-bomb-rush-cyberfunk-and-atlas-fallen-for-just-12-at-humble-this-month/1100-6528212/",
+    "https://www.dlcompare.com/gaming-news/the-last-humble-choice-bundle-of-2024-has-arrived-48581",
+    "https://www.steamgifts.com/discussion/MO8hE/humble-bundle-december-2024-humble-choice-61-moonstone-island-back-in-stock"
+  ]
+}

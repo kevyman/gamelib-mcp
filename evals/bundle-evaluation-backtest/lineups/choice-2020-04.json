@@ -1,0 +1,45 @@
+{
+  "id": "choice-2020-04",
+  "official_name": "Humble Choice April 2020 (#5)",
+  "structure": "choice: pick 10 of 12 (Classic plan)",
+  "price": {"amount": 12, "currency": "USD", "note": "Humble Choice tiers: Lite $4.99 (no picks, Trove access), Basic $14.99 pick 3, Premium $19.99 pick 9, Classic $12 pick 10 (grandfathered Humble Monthly subscribers who never cancelled). John's 10 picks indicate the Classic plan. Menu live 2020-04-03 to 2020-05-01."},
+  "early_unlocks": null,
+  "full_lineup": [
+    "HITMAN 2",
+    "GRIS",
+    "Opus Magnum",
+    "MOLEK-SYNTEZ",
+    "This Is the Police 2",
+    "Raiden V: Director's Cut",
+    "Driftland: The Magic Revival",
+    "Turok 2: Seeds of Evil",
+    "Truberbrook",
+    "The Bard's Tale IV: Director's Cut",
+    "Shoppe Keep 2",
+    "Capitalism 2",
+    "Divinoids (Humble Original, included for all subscribers regardless of picks)",
+    "Train Valley 2 (bonus game for all active subscribers, unlocked 2020-05-01 — not one of the 12 picks)",
+    "Ring of Pain (sneak peek, extra)"
+  ],
+  "picked": [
+    "HITMAN 2",
+    "GRIS",
+    "Opus Magnum",
+    "Turok 2: Seeds of Evil",
+    "Capitalism 2",
+    "Driftland: The Magic Revival",
+    "Truberbrook",
+    "This Is the Police 2",
+    "The Bard's Tale IV: Director's Cut",
+    "MOLEK-SYNTEZ"
+  ],
+  "db_received_matches": true,
+  "discrepancies": "None once extras are accounted for: DB's 11 Steam titles = 10 picks from the official 12-game menu + Train Valley 2, which was NOT a menu pick but a bonus game granted to all subscribers still active on 2020-05-01 (paused/cancelled subscribers did not get it). Divinoids was the month's Humble Original for all subscribers. Not picked: Raiden V: Director's Cut and Shoppe Keep 2. DB does not show the Ring of Pain sneak peek (demo content, not a key). 10 picks is consistent with the Classic ($12) plan. Total menu value advertised: US$241.88.",
+  "confidence": "high",
+  "sources": [
+    "https://barter.vg/bundle/4838/",
+    "https://www.indiegamebundles.com/humble-choice-april-2020/",
+    "https://www.steamgifts.com/discussion/4V3Cy/humble-bundle-april-2020-humble-choice-5-bonus-game-train-valley-2",
+    "https://techraptor.net/gaming/features/april-2020-humble-choice-overview"
+  ]
+}

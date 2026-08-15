@@ -1,0 +1,43 @@
+{
+  "id": "choice-2020-02",
+  "official_name": "Humble Choice February 2020 (#3)",
+  "structure": "choice: pick 10 of 12 (Classic plan)",
+  "price": {"amount": 12, "currency": "USD", "note": "Humble Choice tiers: Lite $4.99 (no picks, Trove access), Basic $14.99 pick 3, Premium $19.99 pick 9, Classic $12 pick 10 (grandfathered Humble Monthly subscribers who never cancelled). John's 10 picks indicate the Classic plan. Menu live 2020-02-07 to 2020-03-06; all games visible up front (no mystery/early-unlock structure)."},
+  "early_unlocks": null,
+  "full_lineup": [
+    "Frostpunk (+ The Rifts DLC)",
+    "Okami HD",
+    "Pathfinder: Kingmaker - Explorer Edition",
+    "Book of Demons",
+    "SHENZHEN I/O",
+    "Eliza",
+    "The Hex",
+    "Underhero",
+    "CryoFall",
+    "Project Warlock",
+    "Warstone TD",
+    "Night Call",
+    "Tales From Off-Peak City Vol. 1 (Humble Original, included for all subscribers regardless of picks)"
+  ],
+  "picked": [
+    "Frostpunk (+ The Rifts DLC)",
+    "Book of Demons",
+    "SHENZHEN I/O",
+    "The Hex",
+    "Underhero",
+    "Okami HD",
+    "Pathfinder: Kingmaker - Explorer Edition",
+    "Eliza",
+    "CryoFall",
+    "Project Warlock"
+  ],
+  "db_received_matches": true,
+  "discrepancies": "None — DB shows exactly 10 picks from the official 12-game menu plus the Humble Original (Tales From Off-Peak City Vol. 1, granted to all subscribers, not a pick). Not picked: Warstone TD and Night Call. 10 picks is consistent with the Classic ($12) plan, not Premium (pick 9). Total menu value advertised: US$241.88.",
+  "confidence": "high",
+  "sources": [
+    "https://barter.vg/bundle/4711/",
+    "https://www.indiegamebundles.com/humble-choice-february-2020/",
+    "https://www.pcinvasion.com/humble-choice-february-2020-includes-frostpunk-okami-and-more/",
+    "https://techraptor.net/gaming/news/humble-monthly-is-now-humble-choice-current-subscribers-grandfathered"
+  ]
+}

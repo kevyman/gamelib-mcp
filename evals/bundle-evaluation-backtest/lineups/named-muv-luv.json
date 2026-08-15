@@ -1,0 +1,63 @@
+{
+  "id": "named-muv-luv",
+  "official_name": "The Many Worlds of Muv-Luv",
+  "store": "humble",
+  "sale_window": "2024-07 (John bought on 2024-07-04, likely at/near launch; bundle ran until 2024-07-25)",
+  "purchase_date": "2024-07-04",
+  "price_paid": "EUR 23.85",
+  "structure": "tiered",
+  "tiers": [
+    {
+      "price": "12 USD",
+      "adds": [
+        "Muv-Luv",
+        "Muv-Luv photonflowers*",
+        "[TDA00] Muv-Luv Unlimited: THE DAY AFTER - Episode 00 REMASTERED"
+      ]
+    },
+    {
+      "price": "15 USD",
+      "adds": [
+        "Muv-Luv photonmelodies♮",
+        "[TDA01] Muv-Luv Unlimited: THE DAY AFTER - Episode 01 REMASTERED",
+        "[TDA02] Muv-Luv Unlimited: THE DAY AFTER - Episode 02 REMASTERED",
+        "[TDA03] Muv-Luv Unlimited: THE DAY AFTER - Episode 03 REMASTERED"
+      ]
+    },
+    {
+      "price": "21 USD",
+      "adds": [
+        "Muv-Luv Alternative",
+        "The Imperial Capital Burns - Muv-Luv Alternative Total Eclipse"
+      ]
+    },
+    {
+      "price": "26 USD",
+      "adds": [
+        "Muv-Luv Alternative Total Eclipse"
+      ]
+    }
+  ],
+  "full_lineup": [
+    "Muv-Luv",
+    "Muv-Luv Alternative",
+    "Muv-Luv Alternative Total Eclipse",
+    "Muv-Luv photonflowers*",
+    "Muv-Luv photonmelodies♮",
+    "The Imperial Capital Burns - Muv-Luv Alternative Total Eclipse",
+    "[TDA00] Muv-Luv Unlimited: THE DAY AFTER - Episode 00 REMASTERED",
+    "[TDA01] Muv-Luv Unlimited: THE DAY AFTER - Episode 01 REMASTERED",
+    "[TDA02] Muv-Luv Unlimited: THE DAY AFTER - Episode 02 REMASTERED",
+    "[TDA03] Muv-Luv Unlimited: THE DAY AFTER - Episode 03 REMASTERED"
+  ],
+  "key_platform": "steam",
+  "db_received_matches": true,
+  "discrepancies": "John's 10 received items exactly match the full 10-item top-tier ($26) lineup (his '[TDA00]-[TDA03] ... Episodes 00-03' entry corresponds to the four separate TDA episode items, and 'Muv-Luv Alternative Total Eclipse' to the Total Eclipse Remastered release). Price paid EUR 23.85 is consistent with the EUR equivalent of the $26 top tier; per-tier EUR minimums were not published in the sources found. Keys activate on Steam, playable on Windows.",
+  "confidence": "high",
+  "sources": [
+    "https://www.indiegamebundles.com/humble-bundle-the-many-worlds-of-muv-luv/",
+    "https://gg.deals/bundle/humble-the-many-worlds-of-muv-luv-game-bundle-a-must-have-for-all-visual-novel-fans/",
+    "https://slickdeals.net/f/17596692-the-many-worlds-of-muv-luv-game-bundles-pc-digital-download-games-10-item-bundle-26-3-item-bundle-12-more",
+    "https://www.steamgifts.com/discussion/aXtlD/humble-bundle-the-many-worlds-of-muv-luv"
+  ]
+}

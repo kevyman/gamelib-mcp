@@ -1,9 +1,3 @@
----
-name: bundle-evaluation
-description: Decide whether John should buy a game BUNDLE — Humble Bundle/Choice, Fanatical build-your-own, platform-sale multi-game sets, any list of games with one price. Triggers: "is this bundle worth it", "should I grab this month's Humble Choice", a pasted game list + price, "worth it for X alone?". NOT for one named game (game-quality) and NOT for picking what to play (backlog-triage).
-version: "1.2.2"
----
-
 # Bundle Evaluation
 
 A bundle is worth **what you'd pay for the games you actually want in it — nothing else**. Games he already owns contribute €0. Filler he'll never launch contributes €0, whatever its Steam rating. The publisher's "€466 value!" MSRP-sum is price anchoring and never enters the math. The honest comparison is:
@@ -28,25 +22,6 @@ Note the structure while you're there:
 - **Key platform**: where do the keys land (Steam / GOG / DRM-free)? A Steam-key bundle is worth less for a game he'd rather own on another platform per his stored hardware preference.
 - **Humble Choice specifics**: skipping a month must be actioned before the last Tuesday; claimed games are kept forever even after cancelling; skipping forfeits that month's Vault access. State these as context when the ask is a Choice month.
 - **Is he already subscribed?** Check before anything else — Step 1 gives it away, since claimed Choice games land in the library with `purchase_source: "subscription"` and a per-game share as their `price_paid`. If this month's games are already owned that way, the bundle is *already bought*: the real question is whether to keep the subscription running (pause/skip next month), and the honest per-game cost is the subscription share, not the sticker price. Answer that question instead of a buy/skip he's already past.
-- **The claim-to-launch record is a gate, not framing.** For any subscription month, before weighing the lineup at all: of the last ~6 claimed Choice months, how many produced ≥2h of play on anything? **Compute it, never guess it** — and Step 1's search tools cannot: Choice imports carry `purchase_source: "subscription"` and no `bundle_name`, and neither `search_games` nor `get_library_stats` filters by acquisition source. The tool that answers is `query_library`:
-
-  ```sql
-  SELECT substr(gp.acquired_at,1,7) AS month, COUNT(*) AS games,
-         SUM(CASE WHEN v.playtime_minutes >= 120 AND g.is_farmed = 0
-                   AND (gp.last_played IS NULL OR gp.last_played >= substr(gp.acquired_at,1,10))
-              THEN 1 ELSE 0 END) AS launched_2h
-  FROM game_platforms gp
-  JOIN games g ON g.id = gp.game_id
-  LEFT JOIN v_game_playtime v ON v.game_id = gp.game_id AND v.platform = gp.platform
-  WHERE gp.purchase_source = 'subscription' AND gp.platform = 'steam'
-    AND gp.acquired_at >= date('now', '-7 months')
-  GROUP BY month ORDER BY month
-  ```
-
-  The join is per-platform and the `last_played >= acquired` guard is deliberate: play on
-  another platform's copy, or family-share play predating the claim, is not evidence the
-  claimed copy gets launched — without them the gate credits months for engagement the
-  subscription never caused. If the answer is ≈0, the default verdict for this month is **Skip (pause)**, overridable only by a must-have or collection-want whose realistic solo price clears the month price on its own. State the record in the verdict ("last 6 claimed months: 0 games launched"). Backtested against his history, the skill said Buy on every month he had rightly skipped — this gate is what was missing.
 
 ## Step 1: Ownership screen
 
@@ -72,10 +47,9 @@ Do **not** run a full assessment on every constituent — a 12-game bundle would
 
 1. `get_stats(report="taste")` once — the high/low-affinity tags.
 2. **Get tags for the unowned constituents — the library cannot give you them.** Search results carry review and critic signal (`steam_review_desc`, `metacritic_score`, `opencritic_score`, `hltb_main`) but *no tags at all*, and an unowned game returns no row in the first place. So the tags this step compares against the profile have to come from outside: the bundle/store page usually lists genre per title, and an ITAD bundle page gives Steam tags for every constituent in one fetch — that single page covers the whole bundle and is the cheapest source. Do this before assigning tiers rather than guessing from the title, or unfamiliar games get dumped into filler because you didn't recognise them.
-3. Cross those tags plus the review signal against the profile and the standing priors (single-player story-rich indie ↑, roguelite deckbuilders proven, multiplayer-only/live-service hard penalty). The negative-tag penalties punish **modes, not genres**: a single-player campaign with strong reviews does not inherit the multiplayer/military/tactical/violent penalty from its genre tags. Check the library first — if he has real playtime on same-franchise or same-genre titles, the penalty doesn't apply (backtest: Sniper Elite 4, which he went on to complete, was filed filler off "military/tactical"; his played Sniper Elite copies were sitting right there in the ownership screen).
-4. Sort every constituent into want-tiers:
-   - **Must-have** — he'd plausibly buy it on its own. Full assessment in Step 3. **Tag fit alone doesn't mint a must-have**: promote only with (a) a wishlist entry or a series/franchise he has actually played, or (b) profile-tag fit *plus* a played (≥2h, non-farmed) library neighbor in the same genre. The affinity profile measures what he rates highly when he plays — aspiration; the playtime record measures what he reaches for — behavior; must-have needs both. The short/emotional/story-rich cluster is the proven trap (backtest: must-haves minted on those tags alone almost all went unlaunched). Fit without corroboration caps at nice — unless it qualifies as a collection-want below.
-   - **Collection-want** — John is a collector, and completing a series he collects is real value to him *independent of whether he'll launch it soon* (his own buy-again labels say so: RPG Legends at zero minutes played is a firm "yes, again"). A constituent earns this tier only with **all three**: (1) it fills a hole in a series he demonstrably collects — ≥2 entries already in the library, acquired deliberately over time (`get_stats(report="series")` / the Step 1 acquisition data show this); (2) it carries strong acclaim or genuine anticipation — high critic score, a big well-received release, or John saying he's excited (hype is legitimate *purchase-preference* evidence here, even though it stays banned as *quality* evidence per game-quality); (3) the bundle gets it at a genuinely good price vs. its realistic cost — collection value converts on deals. Playtime on the earlier entries is **not** required — owned-but-unplayed does not disqualify (that rule got Like a Dragon: Infinite Wealth wrong; he was excited for it). But the series relationship must pre-exist: a franchise he owns none or one of is not a collection (the Muv-Luv trap — ten VNs of a saga he had no history with, top tier, zero play, "wouldn't buy again"), and a themed compilation of retro one-offs is not a series.
+3. Cross those tags plus the review signal against the profile and the standing priors (single-player story-rich indie ↑, roguelite deckbuilders proven, multiplayer-only/live-service hard penalty).
+4. Sort every constituent into three want-tiers:
+   - **Must-have** — he'd plausibly buy it on its own. Full assessment in Step 3.
    - **Nice** — would play if it showed up, wouldn't seek out. Counts at a heavy discount in Step 4; assess fully only if the verdict turns on it.
    - **Filler** — wrong genre, live-service, DLC without the base, shovelware. Worth **€0**, never "might play someday". At 2,800 mostly-unplayed games, an unwanted free game is a backlog tax, not upside.
 
@@ -123,7 +97,7 @@ Wanted subset: [games] ≈ €[sum] vs. bundle €[price]
 Verdict: [Buy / Buy at €X tier / Buy only if you want [X] and [Y] / Skip]
 ```
 
-Apply the buy trigger honestly: **≥2 wanted games whose combined realistic price clears the bundle price, or 1 wanted game whose realistic price alone does.** "Worth it for X alone" is only true when `bundle price ≤ historical low of X` — it rarely is; say so when it isn't. For a Choice/subscription month the trigger is stricter: only **must-have and collection-want** games count toward it (nice-tier value is margin, never the case), and price them *after* the bundled-before decay — a regularly-bundled indie's realistic cost is its next bundle appearance, not its ITAD low. With ~8 games a month, "two wanted games clear $12" is no bar at all; the bar is "this month beats the pause button", answered with Step 0's claim-to-launch record in evidence. Confidence statement is mandatory when the shortlist assessment ran on thin data.
+Apply the buy trigger honestly: **≥2 wanted games whose combined realistic price clears the bundle price, or 1 wanted game whose realistic price alone does.** "Worth it for X alone" is only true when `bundle price ≤ historical low of X` — it rarely is; say so when it isn't. Confidence statement is mandatory when the shortlist assessment ran on thin data.
 
 If the verdict is Skip but a constituent is genuinely wanted, close the loop: offer to wishlist it so the deals machinery watches its price instead.
 

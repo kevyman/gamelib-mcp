@@ -1,0 +1,68 @@
+{
+  "id": "named-rpg-legends",
+  "official_name": "RPG Legends: Baldur's Gate & Beyond",
+  "store": "humble",
+  "sale_window": "2023-07 to 2023-08 (started 2023-07-26, press stated end 2023-08-16; this is the July 2023 rerun of the Sept/Oct 2022 bundle of the same name)",
+  "purchase_date": "2023-07-29",
+  "price_paid": "11.14",
+  "structure": "tiered",
+  "tiers": [
+    {
+      "price": "6 USD | 5.44 EUR",
+      "adds": [
+        "Icewind Dale: Enhanced Edition",
+        "Planescape: Torment: Enhanced Edition"
+      ]
+    },
+    {
+      "price": "12 USD | 10.88 EUR",
+      "adds": [
+        "Baldur's Gate: Enhanced Edition",
+        "Baldur's Gate II: Enhanced Edition",
+        "Baldur's Gate: Faces of Good and Evil",
+        "Baldur's Gate: Siege of Dragonspear",
+        "Neverwinter Nights: Enhanced Edition",
+        "Neverwinter Nights: Enhanced Edition - Darkness Over Daggerford",
+        "Neverwinter Nights: Enhanced Edition - Dark Dreams of Furiae",
+        "Neverwinter Nights: Enhanced Edition - Tyrants of the Moonsea",
+        "Neverwinter Nights: Enhanced Edition - Infinite Dungeons",
+        "Neverwinter Nights: Enhanced Edition - Pirates of the Sword Coast",
+        "Neverwinter Nights: Enhanced Edition - Wyvern Crown of Cormyr",
+        "Pathfinder: Wrath of the Righteous - Enhanced Edition"
+      ]
+    },
+    {
+      "price": "30 USD | 27.21 EUR (removed ~8h after bundle launch)",
+      "adds": [
+        "MythForce"
+      ]
+    }
+  ],
+  "full_lineup": [
+    "Icewind Dale: Enhanced Edition",
+    "Planescape: Torment: Enhanced Edition",
+    "Baldur's Gate: Enhanced Edition",
+    "Baldur's Gate II: Enhanced Edition",
+    "Baldur's Gate: Faces of Good and Evil",
+    "Baldur's Gate: Siege of Dragonspear",
+    "Neverwinter Nights: Enhanced Edition",
+    "Neverwinter Nights: Enhanced Edition - Darkness Over Daggerford",
+    "Neverwinter Nights: Enhanced Edition - Dark Dreams of Furiae",
+    "Neverwinter Nights: Enhanced Edition - Tyrants of the Moonsea",
+    "Neverwinter Nights: Enhanced Edition - Infinite Dungeons",
+    "Neverwinter Nights: Enhanced Edition - Pirates of the Sword Coast",
+    "Neverwinter Nights: Enhanced Edition - Wyvern Crown of Cormyr",
+    "Pathfinder: Wrath of the Righteous - Enhanced Edition"
+  ],
+  "key_platform": "steam",
+  "db_received_matches": true,
+  "discrepancies": "John's 14 received items exactly match tier 1 + tier 2 of the July 2023 rerun. Tier 3 (MythForce, 30 USD) was removed from the bundle ~8 hours after launch (per barter.vg), so by his purchase date (2023-07-29) tier 2 WAS the top tier — he bought the full available lineup. Differences vs the Sept/Oct 2022 original run: tiers there were 1/10/20 USD with Pathfinder: WotR EE in tier 3; the 2023 rerun moved Pathfinder into tier 2 and put MythForce in tier 3. Tier 2 also carried a 25% off Humble Store coupon for MythForce. Price paid 11.14 does not equal either the 12 USD or 10.88 EUR tier-2 minimum exactly; it is consistent with a EUR-denominated payment slightly above the EUR tier-2 minimum (currency of the recorded amount not established here).",
+  "confidence": "high",
+  "sources": [
+    "https://barter.vg/bundle/6932/",
+    "https://barter.vg/bundle/6437/",
+    "https://www.consolecreatures.com/humble-bundle-launches-rpg-legends/",
+    "https://gamespace.com/all-articles/news/the-new-humble-rpg-legends-bundle-offers-eight-huge-crpgs-including-baldurs-gate-1-and-2/",
+    "https://web.archive.org/web/20230726181107/https://www.humblebundle.com/games/rpg-legends-baldurs-gate-beyond"
+  ]
+}

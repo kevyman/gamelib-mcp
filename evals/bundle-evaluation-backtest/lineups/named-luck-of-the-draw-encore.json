@@ -1,0 +1,47 @@
+{
+  "id": "named-luck-of-the-draw-encore",
+  "official_name": "Luck of the Draw: Roguelike Deckbuilders Encore",
+  "store": "humble",
+  "sale_window": "2023-12 (48-hour encore: live by 2023-12-09/10, nominal end ~2023-12-11, end time extended ~2 days per barter.vg, so ended ~2023-12-13)",
+  "purchase_date": "2023-12-10",
+  "price_paid": "15.43",
+  "structure": "tiered",
+  "tiers": [
+    {
+      "price": "12 USD | 11.14 EUR",
+      "adds": [
+        "Alina of the Arena",
+        "Banners of Ruin - Collection",
+        "Chrono Ark",
+        "Dicey Dungeons",
+        "Luck be a Landlord",
+        "Tainted Grail: Conquest"
+      ]
+    },
+    {
+      "price": "18 USD | 16.71 EUR",
+      "adds": [
+        "Fights in Tight Spaces"
+      ]
+    }
+  ],
+  "full_lineup": [
+    "Alina of the Arena",
+    "Banners of Ruin - Collection",
+    "Chrono Ark",
+    "Dicey Dungeons",
+    "Luck be a Landlord",
+    "Tainted Grail: Conquest",
+    "Fights in Tight Spaces"
+  ],
+  "key_platform": "steam",
+  "db_received_matches": false,
+  "discrepancies": "John's received list includes the tier-2 exclusive (Fights in Tight Spaces), so he bought the top tier, but it is missing tier-1 item 'Banners of Ruin - Collection' (base game + Supporter Pack + Iris/Moonstone/Powdermaster DLC) — 6 of 7 items received per the DB (key possibly unredeemed or not imported). Price paid 15.43 sits between the published tier minimums (12/18 USD, 11.14/16.71 EUR); it matches neither exactly, and the recorded amount's currency is not established here. Bundle listing names the deckbuilder 'Tainted Grail' (barter.vg) — this is Tainted Grail: Conquest, matching the DB row. This encore is a rerun of the Feb/Mar 2023 'Luck of the Draw: Roguelike Deckbuilders' bundle with Banners of Ruin - Collection replacing Beneath Oresa.",
+  "confidence": "high",
+  "sources": [
+    "https://barter.vg/bundle/7199/",
+    "https://www.indiegamebundles.com/humble-game-bundle-deckbuilders-encore/",
+    "https://www.gamingonlinux.com/2023/12/humbles-roguelike-deckbuilders-bundle-is-back-for-a-limited-time/",
+    "https://www.steamgifts.com/discussion/qnwkE/humble-bundle-luck-of-the-draw-roguelike-deckbuilders-encore"
+  ]
+}
