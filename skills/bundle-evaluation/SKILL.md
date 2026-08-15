@@ -1,7 +1,7 @@
 ---
 name: bundle-evaluation
 description: Decide whether John should buy a game BUNDLE — Humble Bundle/Choice, Fanatical build-your-own, platform-sale multi-game sets, any list of games with one price. Triggers: "is this bundle worth it", "should I grab this month's Humble Choice", a pasted game list + price, "worth it for X alone?". NOT for one named game (game-quality) and NOT for picking what to play (backlog-triage).
-version: "1.2.1"
+version: "1.2.2"
 ---
 
 # Bundle Evaluation
@@ -32,15 +32,21 @@ Note the structure while you're there:
 
   ```sql
   SELECT substr(gp.acquired_at,1,7) AS month, COUNT(*) AS games,
-         SUM(CASE WHEN v.pt >= 120 AND g.is_farmed = 0 THEN 1 ELSE 0 END) AS launched_2h
+         SUM(CASE WHEN v.playtime_minutes >= 120 AND g.is_farmed = 0
+                   AND (gp.last_played IS NULL OR gp.last_played >= substr(gp.acquired_at,1,10))
+              THEN 1 ELSE 0 END) AS launched_2h
   FROM game_platforms gp
   JOIN games g ON g.id = gp.game_id
-  LEFT JOIN (SELECT game_id, SUM(playtime_minutes) AS pt
-             FROM v_game_playtime GROUP BY game_id) v ON v.game_id = g.id
+  LEFT JOIN v_game_playtime v ON v.game_id = gp.game_id AND v.platform = gp.platform
   WHERE gp.purchase_source = 'subscription' AND gp.platform = 'steam'
     AND gp.acquired_at >= date('now', '-7 months')
   GROUP BY month ORDER BY month
-  ``` If the answer is ≈0, the default verdict for this month is **Skip (pause)**, overridable only by a must-have or collection-want whose realistic solo price clears the month price on its own. State the record in the verdict ("last 6 claimed months: 0 games launched"). Backtested against his history, the skill said Buy on every month he had rightly skipped — this gate is what was missing.
+  ```
+
+  The join is per-platform and the `last_played >= acquired` guard is deliberate: play on
+  another platform's copy, or family-share play predating the claim, is not evidence the
+  claimed copy gets launched — without them the gate credits months for engagement the
+  subscription never caused. If the answer is ≈0, the default verdict for this month is **Skip (pause)**, overridable only by a must-have or collection-want whose realistic solo price clears the month price on its own. State the record in the verdict ("last 6 claimed months: 0 games launched"). Backtested against his history, the skill said Buy on every month he had rightly skipped — this gate is what was missing.
 
 ## Step 1: Ownership screen
 

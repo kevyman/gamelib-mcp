@@ -45,9 +45,12 @@ honest read per John's idling confirmation; the loose matrix is shown for compar
 |---|---|---|---|---|
 | must-have | **7 (21%)** | 11 (33%) | **15 (45%)** | 33 |
 | nice | 8 (16%) | 15 (30%) | 27 (54%) | 50 |
-| filler | **5 (7%)** | 13 (19%) | 52 (74%) | 70 |
+| filler | **5 (7%)** | 12 (17%) | 52 (75%) | 69 |
 
-Loose (any ≥2h counted as wanted): must-have 55% wanted, nice 46%, filler 26%.
+Loose (any ≥2h counted as wanted): must-have 55% wanted, nice 46%, filler 25%.
+(Train Valley 2 is excluded from the matrix: it entered the April 2020 fixture as a
+constituent but was actually a bonus unlocked 2020-05-01, after the decision date —
+review-caught fixture leak.)
 
 Reading it: the ordering is right and the bottom end is well-calibrated — of six explicit
 negatives (games John declined or never redeemed), five were tiered filler and one nice.

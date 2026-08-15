@@ -108,8 +108,13 @@ def main():
         lineup = json.loads((LINEUPS / f"{bid}.json").read_text(encoding="utf-8"))
         constituents = []
         for title in lineup["full_lineup"]:
-            if "sneak peek" in title.lower():
+            tl = title.lower()
+            if "sneak peek" in tl:
                 continue  # demo teaser, not a constituent
+            if "bonus game" in tl and "unlocked" in tl:
+                # Post-decision addition (e.g. Train Valley 2, unlocked 2020-05-01
+                # after the April 2020 decision) - not visible at decision time.
+                continue
             entry = {"title": title}
             ob = owned_before_for(bid, title)
             if ob:
