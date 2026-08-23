@@ -9,10 +9,13 @@ Registered in .claude/settings.json for two events:
   ``## <key>`` section of rules/model-postures.md as additionalContext.
 
 UserPromptSubmit payloads carry no model field, so resolution is layered:
-last assistant message in the transcript (freshest once the session has
-turns — it tracks a mid-session /model switch, which the SessionStart cache
-never would), then the SessionStart cache (covers the first prompts of a
-session), then $ANTHROPIC_MODEL, then the orchestrator default.
+the last assistant message in the transcript and the SessionStart cache
+compete on recency (transcript entry timestamp vs. cache file mtime) —
+right after a start or resume the cache is fresher and wins, so a resumed
+session's stale transcript cannot override the newly reported model; once
+the session produces assistant turns the transcript is fresher and tracks
+a mid-session /model switch with a one-prompt lag the payload cannot
+avoid. Then $ANTHROPIC_MODEL, then the orchestrator default.
 
 Subagents never see UserPromptSubmit; their postures are baked into
 .claude/agents/*.md instead. Stdlib only — runs under any python3, no venv.
@@ -26,6 +29,7 @@ import os
 import re
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 # Ordered: first substring match on the model ID wins. "mythos" shares the
@@ -68,12 +72,21 @@ def payload_model(payload: dict) -> str:
     return ""
 
 
-def model_from_transcript(transcript_path: str) -> str:
-    """Model of the last assistant message in the session transcript (JSONL)."""
+def _epoch(iso_ts) -> "float | None":
+    if not isinstance(iso_ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(iso_ts.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def model_from_transcript(transcript_path: str) -> "tuple[str, float | None]":
+    """Model and timestamp of the transcript's last assistant message (JSONL)."""
     try:
         lines = Path(transcript_path).read_text(encoding="utf-8").splitlines()
     except OSError:
-        return ""
+        return "", None
     for line in reversed(lines):
         if '"model"' not in line:
             continue
@@ -85,31 +98,52 @@ def model_from_transcript(transcript_path: str) -> str:
         if isinstance(message, dict) and message.get("role") == "assistant":
             model = message.get("model")
             if isinstance(model, str):
-                return model
-    return ""
+                return model, _epoch(entry.get("timestamp"))
+    return "", None
 
 
-def model_from_cache(session_id: str) -> str:
+def model_from_cache(session_id: str) -> "tuple[str, float | None]":
     try:
-        return cache_file(session_id).read_text(encoding="utf-8").strip()
+        path = cache_file(session_id)
+        return path.read_text(encoding="utf-8").strip(), path.stat().st_mtime
     except OSError:
-        return ""
+        return "", None
 
 
 def detect_model(payload: dict) -> str:
     model = payload_model(payload)
     if model:
         return model
+
+    transcript_model, transcript_ts = "", None
     transcript = payload.get("transcript_path")
     if isinstance(transcript, str) and transcript:
-        model = model_from_transcript(transcript)
-        if model:
-            return model
+        transcript_model, transcript_ts = model_from_transcript(transcript)
+
+    cache_model, cache_mtime = "", None
     session_id = payload.get("session_id")
     if isinstance(session_id, str) and session_id:
-        model = model_from_cache(session_id)
-        if model:
-            return model
+        cache_model, cache_mtime = model_from_cache(session_id)
+
+    if transcript_model and cache_model:
+        # Newer source wins. The cache is written at SessionStart, so right
+        # after a start or resume it outranks a transcript still ending in
+        # the previous model's turns; once this session has assistant turns
+        # the transcript is newer and tracks a mid-session /model switch.
+        # Unknown transcript age falls through to the transcript: its
+        # staleness is bounded (next turn corrects it), a stale cache's is
+        # not.
+        if (
+            transcript_ts is not None
+            and cache_mtime is not None
+            and cache_mtime > transcript_ts
+        ):
+            return cache_model
+        return transcript_model
+    if transcript_model:
+        return transcript_model
+    if cache_model:
+        return cache_model
     return os.environ.get("ANTHROPIC_MODEL", "")
 
 
