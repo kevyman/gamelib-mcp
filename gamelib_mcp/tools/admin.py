@@ -831,14 +831,18 @@ async def merge_games(
 
     Transfers all platform ownership rows (re-pointing or merging into an
     existing target platform), platform identifiers, enrichment, ratings, series
-    memberships, game aliases, play history, wishlist entries, and cached price
-    rows from source to target in a single atomic transaction. When both games
+    memberships, game aliases, play history, wishlist entries, cached price
+    rows, and recorded assessments from source to target in a single atomic
+    transaction. When both games
     own the same platform, identifiers are re-pointed to the target row,
     playtime is set to the higher of the two values, and the source platform
     row is deleted. Ratings for the same source are kept on the target if
     already present; otherwise they are moved. A source wishlist entry whose
     platform the merged target owns is dropped as fulfilled; a price row the
-    target already caches for the same platform+shop is dropped (target wins).
+    target already caches for the same platform+shop is dropped (target wins);
+    a source assessment colliding on the target's (game, UTC day) is dropped
+    the same way, and "play what you own instead" links pointing at the source
+    are re-pointed at the target.
     Children nested under the source are re-pointed at the target, and a nested
     target that absorbs its own parent (or inherits children) is promoted to a
     primary base game — the remediation path for phantom edition parents.
@@ -1153,6 +1157,46 @@ async def merge_games(
                 # let the source's row cascade away (it's a cache, not history).
                 price_rows_dropped += 1
 
+        # game_assessments — FK games(id) ON DELETE CASCADE like the two above,
+        # so the source-row DELETE would erase the recorded verdicts the
+        # calibration report reads. Transfer them; on the (game_id, UTC day)
+        # unique index the TARGET's row wins (the merge's keep-target rule)
+        # and the source's cascades away. Verdicts that named the source as
+        # "play what you own instead: X" are re-pointed too — the game they
+        # meant is the surviving row.
+        source_assessments = await db.execute_fetchall(
+            "SELECT id, date(assessed_at) AS day FROM game_assessments WHERE game_id = ?",
+            (source_game_id,),
+        )
+        assessments_transferred = 0
+        assessments_dropped = 0
+        for assessment in source_assessments:
+            collision = await db.execute_fetchone(
+                """SELECT 1 FROM game_assessments
+                    WHERE game_id = ? AND date(assessed_at) = ?""",
+                (target_game_id, assessment["day"]),
+            )
+            if collision is not None:
+                assessments_dropped += 1
+                continue
+            if not dry_run:
+                await db.execute(
+                    "UPDATE game_assessments SET game_id = ? WHERE id = ?",
+                    (target_game_id, assessment["id"]),
+                )
+            assessments_transferred += 1
+
+        instead_row = await db.execute_fetchone(
+            "SELECT COUNT(*) AS c FROM game_assessments WHERE instead_game_id = ?",
+            (source_game_id,),
+        )
+        assessment_instead_links_repointed = instead_row["c"] if instead_row else 0
+        if not dry_run and assessment_instead_links_repointed:
+            await db.execute(
+                "UPDATE game_assessments SET instead_game_id = ? WHERE instead_game_id = ?",
+                (target_game_id, source_game_id),
+            )
+
         # Nested children — games.parent_game_id is ON DELETE SET NULL, so the
         # source DELETE would strand its children parentless (dropping them into
         # detect_misclassified_dlc's needs_parent bucket). Re-point them at the
@@ -1228,6 +1272,9 @@ async def merge_games(
         "wishlist_entries_dropped": wishlist_entries_dropped,
         "price_rows_transferred": price_rows_transferred,
         "price_rows_dropped": price_rows_dropped,
+        "assessments_transferred": assessments_transferred,
+        "assessments_dropped": assessments_dropped,
+        "assessment_instead_links_repointed": assessment_instead_links_repointed,
         "children_reparented": children_reparented,
         "target_promoted_to_primary": target_promoted_to_primary,
         "source_deleted": not dry_run,
@@ -1330,7 +1377,7 @@ async def delete_game(
     name is echoed back so you can confirm the right row), then remove it and
     every dependent record: platform ownership rows, store identifiers,
     provider enrichment, ratings, wishlist entries, price cache, play-history
-    snapshots, series memberships, and aliases.
+    snapshots, series memberships, aliases, and recorded assessments.
 
     Two-step by design: with confirm=False (the default) nothing is deleted —
     the call returns deleted=false plus a would_delete breakdown of the row
@@ -1373,7 +1420,8 @@ async def delete_game(
         # Count dependents for the preview / summary. game_platform_identifiers,
         # steam_platform_data, and game_platform_enrichment cascade from
         # game_platforms; game_wishlist/game_prices/play_history/
-        # game_series_membership/game_aliases cascade from games.
+        # game_series_membership/game_aliases/game_assessments cascade from
+        # games.
         async def _count(sql: str) -> int:
             r = await db.execute_fetchone(sql, (resolved_id,))
             return r["c"] if r else 0
@@ -1399,6 +1447,9 @@ async def delete_game(
             ),
             "aliases": await _count(
                 "SELECT COUNT(*) AS c FROM game_aliases WHERE game_id = ?"
+            ),
+            "assessments": await _count(
+                "SELECT COUNT(*) AS c FROM game_assessments WHERE game_id = ?"
             ),
         }
         # Synthetic manual-baseline playtime rows (set_switch2_playtime_baseline)
@@ -1906,6 +1957,11 @@ async def detect_orphan_games() -> dict:
     * wishlist-only (a ``game_wishlist`` row exists) — a normal, intentional
       shape produced by ``sync_wishlist``/``add_game_to_platform(owned=False)``.
       Counted in ``wishlist_only_count`` but not returned as a candidate.
+    * assessment-only (a ``game_assessments`` row exists) — the row
+      ``record_assessment`` mints for a candidate that was evaluated but
+      neither bought nor wishlisted (a "skip" verdict is exactly this shape).
+      Counted in ``assessment_only_count``, never an orphan: deleting it would
+      erase the recorded verdict the calibration report reads.
     * a true orphan (no ``game_platforms`` row AND no ``game_wishlist`` row) —
       e.g. a wishlist entry that was later removed upstream
       (``delete_stale_wishlist_entries``) without ever being owned, leaving the
@@ -1945,6 +2001,8 @@ async def detect_orphan_games() -> dict:
     async with get_db() as db:
         orphan_rows = await db.execute_fetchall(
             """SELECT g.id AS game_id, g.name, g.igdb_id,
+                      EXISTS (SELECT 1 FROM game_assessments a
+                              WHERE a.game_id = g.id) AS has_assessment,
                       (SELECT COUNT(*) FROM games c WHERE c.parent_game_id = g.id)
                           AS child_count,
                       (SELECT COUNT(*) FROM games c
@@ -1968,6 +2026,7 @@ async def detect_orphan_games() -> dict:
 
     orphans = []
     phantom_parents = []
+    assessment_only_count = 0
     for row in orphan_rows:
         if row["child_count"]:
             phantom_parents.append(
@@ -1984,6 +2043,10 @@ async def detect_orphan_games() -> dict:
                     ),
                 }
             )
+        elif row["has_assessment"]:
+            # A recorded verdict is what points at this row; it is no more an
+            # orphan than a wishlist entry is. Counted, never listed.
+            assessment_only_count += 1
         else:
             orphans.append(
                 {
@@ -1999,6 +2062,7 @@ async def detect_orphan_games() -> dict:
         "phantom_parents": phantom_parents,
         "phantom_parent_count": len(phantom_parents),
         "wishlist_only_count": wishlist_only_row["c"] if wishlist_only_row else 0,
+        "assessment_only_count": assessment_only_count,
         "license_audit": {
             "configured": is_license_audit_configured(),
             # None = the audit has never run; run audit_steam_licenses first.

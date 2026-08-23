@@ -12,6 +12,7 @@ from ..data.db import (
     get_meta,
     get_steam_appid_for_game,
     load_platforms_for_games,
+    load_recent_assessments,
     load_related_content_for_games,
     load_series_for_games,
 )
@@ -32,6 +33,11 @@ from .search import (
     build_name_match,
     fuzzy_fallback_game_ids,
 )
+
+# Recorded assessments are capped here rather than in tools/assessment.py:
+# that module imports this one, so the constant lives on the importing
+# side of the edge.
+DETAIL_ASSESSMENT_CAP = 5
 
 
 async def get_game_detail(
@@ -293,6 +299,20 @@ async def get_game_detail(
 
     if dlc_ownership is not None:
         result["dlc_ownership"] = dlc_ownership
+
+    # Past verdicts recorded by record_assessment (ADR 0006 decision 5) —
+    # read-only context, never an input to any scoring path. Single mode only:
+    # `enrich` is this module's established single/bulk discriminator, and bulk
+    # detail deliberately skips verbose per-game blocks. Bounded like every
+    # other growing list — newest 5, with the true total and a truncation flag.
+    if enrich:
+        assessments, assessment_count = await load_recent_assessments(
+            row["id"], DETAIL_ASSESSMENT_CAP
+        )
+        if assessments:
+            result["assessments"] = assessments
+            result["assessment_count"] = assessment_count
+            result["assessments_truncated"] = assessment_count > len(assessments)
 
     return result
 

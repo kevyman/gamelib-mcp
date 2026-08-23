@@ -1,7 +1,7 @@
 ---
 name: game-quality
 description: Evaluate whether a NAMED game is good and worth John's time and money — owned or not. Triggers: "is X any good", "should I get X", "thoughts on X", "X vs Y", "is X worth playing", buy/wishlist/skip calls. NOT for picking a game for him ("what should I play", "I have 2 hours") — that's backlog-triage.
-version: "2.2.0"
+version: "2.3.0"
 ---
 
 # Game Quality Assessment
@@ -48,6 +48,7 @@ All tools below live on the **Game Library** MCP.
    - `fit` — the candidate's tags crossed against the taste profile (see Step 2).
    - `anchors` / `anchor_count` / `anchors_truncated` — up to 8 owned, rated/played library games sharing the candidate's core tags (see Step 2).
    - `pace` — last-30-day play summary, for the Context step's time-shape judgment.
+   - `past_assessments` / `past_assessment_count` / `past_assessments_truncated` — present only when this game was assessed before (see Step 4). **If it is present, this is a repeat ask: lead with the prior verdict, its date, and the price seen then, and answer what has CHANGED since** — a price move, patches, a shift in review trajectory, a new anchor he's since played. Do not re-derive the call blind and do not pretend it's the first time; the up-to-5 newest entries carry verdict, summary, fit_call, craft_adjusted, price_seen/price_currency, and target_price.
    - `game` / `game_resolution` — when identity resolves, a compact ownership block: owned platforms with playtime and acquisition (`price_paid`/`bundle_name`/`purchase_source`), `wishlisted`, `completion_status`, `play_state`, `my_rating`, HLTB main/extra hours. `game_resolution="not_found"` is normal for an unowned candidate — the other blocks still come back. Check that `game.name` is actually the candidate: a fuzzy match can land on a sibling title.
 3. **Critic/technical detail** — `get_game_detail` (accepts `name`, `game_id`, or Steam `appid`) still, for what assessment context doesn't carry: OpenCritic score + percentile, Metacritic score, ProtonDB rating, the full tags list (if you didn't already pass them), and — for the DLC note in Step 3 — `related_content`, `parent_game_id`, `dlc_ownership`. No need to re-derive ownership, wishlist status, completion status, HLTB, or personal rating — assessment context already returned those.
 4. For Switch 2 / non-Steam titles: substitute OpenCritic + Metacritic user score + reputable outlet consensus from `get_game_detail`; skip the Steam review web search and pass no review numbers to `get_assessment_context` (its `craft` block falls back to `source="server_cache"`, or stays absent).
@@ -126,6 +127,28 @@ Verdict: [Buy now / Wishlist for sale / Try the demo / Skip / Play what you own 
 Confidence statement is mandatory when data is thin (low review count, no anchors, pre-release).
 
 When the verdict is **Wishlist for sale**, offer to promote it onto the internal wishlist in the same conversation — it's a library write; say so, don't do it silently. Skip the offer entirely when Step 0 already reported `wishlisted: true` — the row exists, and a re-write wouldn't change its provenance anyway (an existing row keeps its stored source; the server never lets a hand write relabel one). One confirmation writes: `add_game_to_platform(name=... or game_id=..., platform=..., owned=False, wishlist_source="assessment")`. Platform: steam for a PC candidate, switch2 when the Switch version is the recommendation (his stored hardware preference — the same signal the price/value step above reads via `recommendation_reason`), ps5 for a PSN-only title. **On `platform="steam"` only**, also pass `identifier_type="steam_appid", identifier_value=<appid>` whenever Step 0 surfaced one — it makes the row immediately priceable via ITAD and resolvable by future syncs; the tool rejects a steam appid on any other platform, so a switch2/ps5 promotion goes without identifiers. Use `wishlist_source="assessment"`, never plain manual — promoted rows stay distinct from hand-curated entries, are bulk-removable by source, and sit outside reconciliation's reach. Steam only, and only after he's confirmed the promotion itself: offer a second, separate confirmation for `push_to_store=True` on the same call, which additionally pushes the add to his real Steam wishlist for store-side sale notifications — it needs a known appid, and a failed push still records the local row. From there it's a price-watched entry: `get_wishlist(with_prices=True)` covers it like any other.
+
+**Always record the verdict.** After delivering the verdict block (and after making the wishlist-promotion offer above, if any — recording never waits on his answer to it), call `record_assessment` once, mapping the lines you just wrote to its components:
+
+```
+record_assessment(
+    game_id=...,            # or name=... / appid=... — mint is automatic for an unowned candidate
+    verdict="wishlist_for_sale",   # buy_now | wishlist_for_sale | try_demo | skip | play_what_you_own
+    summary="<the one-line verdict>",
+    craft_adjusted=0.87, craft_positive_pct=88, review_count=114479,   # from the craft block
+    recent_trajectory="stable",    # improving | stable | regressing
+    opencritic_score=85,
+    fit_call="probable fit",       # the same four strings the fit block uses
+    anchors_cited=[{"name": "Hollow Knight", "game_id": 412}, ...],    # game_ids from Step 0's anchors
+    flags=["live service", "80h main story"],
+    price_seen=29.99, price_currency="EUR", price_platform="steam",
+    target_price=19.99,            # whenever "Wishlist for sale" names a threshold
+    instead_game_id=...,           # for "Play what you own instead: X"
+    context="bundle: Humble Choice 2026-08",   # when the assessment came out of a bundle/sale context
+)
+```
+
+This is silent bookkeeping — one line ("logged for calibration"), never a re-explanation of the verdict. Re-recording the same game on the same day replaces that day's entry, so refining a call mid-conversation is safe. The recorded verdict feeds nothing but future context and `get_stats(report="calibration")`; it never touches the wishlist, the taste profile, or recommendations.
 
 If he already owns the game, the Price line reports what he paid from the acquisition data (`already owned — paid €X in [bundle] via [source]`, or "already owned — price unrecorded") and the verdict answers *is this worth your time*, not *play this tonight*. Never treat what he paid as a reason to play it; sunk cost is not an argument.
 

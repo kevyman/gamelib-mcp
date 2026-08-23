@@ -35,6 +35,7 @@ from ..data.db import (
     has_nested_children,
     invalidate_igdb_match_enrichment,
     invalidate_name_derived_enrichment,
+    load_latest_assessments,
     nesting_substance_conflict,
     normalize_identifier_value,
     recompute_tag_affinity,
@@ -202,6 +203,12 @@ async def get_wishlist(
     Paginated: the wishlist grows without bound, so results are capped at
     `limit` (newest first). count is the page size, total_matches the true
     total, has_more whether another page exists.
+
+    An item that was assessed (record_assessment) additionally carries
+    `assessment` — the LATEST verdict, its date, and the target price the
+    verdict named — so "wishlist at €20" is visible where the wishlist is
+    read. Absent for games never assessed. One joined query for the page, not
+    one per item.
     """
     resolved_platform = _validate_platform(platform, LIBRARY_PLATFORMS) if platform else None
     limit = max(1, min(int(limit), 500))
@@ -233,22 +240,33 @@ async def get_wishlist(
             [*params, limit, offset],
         )
 
+    assessments = await load_latest_assessments(r["game_id"] for r in rows)
+
+    items = []
+    for r in rows:
+        item = {
+            "game_id": r["game_id"],
+            "name": r["name"],
+            "platform": r["platform"],
+            "wishlisted_at": r["wishlisted_at"],
+            "source": r["source"],
+            "owned": bool(r["owned"]),
+            "content_type": r["content_type"],
+        }
+        assessment = assessments.get(r["game_id"])
+        if assessment is not None:
+            item["assessment"] = {
+                "verdict": assessment["verdict"],
+                "assessed_at": assessment["assessed_at"],
+                "target_price": assessment["target_price"],
+            }
+        items.append(item)
+
     return {
         "count": len(rows),
         "total_matches": total["c"],
         "has_more": offset + len(rows) < total["c"],
-        "items": [
-            {
-                "game_id": r["game_id"],
-                "name": r["name"],
-                "platform": r["platform"],
-                "wishlisted_at": r["wishlisted_at"],
-                "source": r["source"],
-                "owned": bool(r["owned"]),
-                "content_type": r["content_type"],
-            }
-            for r in rows
-        ],
+        "items": items,
     }
 
 
