@@ -770,8 +770,8 @@ async def load_wishlist_with_prices(platform: str | None) -> list[aiosqlite.Row]
 # The component subset every read path shows: enough to lead with "you already
 # called this a skip in June at €30" without shipping the whole row.
 ASSESSMENT_SUMMARY_COLUMNS = (
-    "assessed_at, verdict, summary, fit_call, craft_adjusted, "
-    "price_seen, price_currency, target_price"
+    "id AS assessment_id, assessed_at, verdict, summary, fit_call, "
+    "craft_adjusted, price_seen, price_currency, target_price"
 )
 
 

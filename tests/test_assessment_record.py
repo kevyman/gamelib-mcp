@@ -24,6 +24,8 @@ from gamelib_mcp import main
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import admin, deals, platforms
 from gamelib_mcp.tools.assessment import (
+    _ordinal_near_miss,
+    _sequel_near_miss,
     get_assessment_context,
     record_assessment,
     record_assessments_batch,
@@ -65,6 +67,14 @@ class RecordAssessmentTests(ToolDBTestCase):
         self.assertFalse(result["created"])
         self.assertFalse(result["replaced"])
         self.assertNotIn("repeat_ask", result)
+        self.assertEqual(
+            result["resolution"],
+            {
+                "mode": "exact",
+                "query": "Hollow Knight",
+                "matched_name": "Hollow Knight",
+            },
+        )
 
         (row,) = await _assessment_rows(game_id)
         self.assertEqual(row["verdict"], "buy_now")
@@ -86,6 +96,8 @@ class RecordAssessmentTests(ToolDBTestCase):
             verdict="try_demo",
         )
         self.assertTrue(result["created"])
+        self.assertEqual(result["resolution"]["mode"], "minted")
+        self.assertEqual(result["resolution"]["query"], "Some Unreleased Thing")
 
         rows = await _assessment_rows(result["game_id"])
         self.assertEqual(rows[0]["steam_appid"], 999001)
@@ -116,6 +128,9 @@ class RecordAssessmentTests(ToolDBTestCase):
         self.assertFalse(again["created"])
         self.assertEqual(again["game_id"], first["game_id"])
         self.assertEqual(again["repeat_ask"]["previous_count"], 1)
+        self.assertEqual(again["resolution"]["mode"], "by_assessed_appid")
+        self.assertEqual(again["resolution"]["query"], "999001")
+        self.assertEqual(again["resolution"]["matched_name"], "Some Unreleased Thing")
 
         context = await get_assessment_context(appid=999001)
         self.assertEqual(context["game_resolution"], "resolved")
@@ -238,6 +253,234 @@ class RecordAssessmentTests(ToolDBTestCase):
                 [{"game_id": game_id, "verdict": "skip", "assessed_at": "2026-05-05"}]
             )
         recompute.assert_not_awaited()
+
+
+class OrdinalNearMissTests(unittest.TestCase):
+    """The pure guard behind get_assessment_context's sequel rejection (#150)."""
+
+    def test_trailing_arabic_ordinal_in_both_directions(self):
+        self.assertTrue(_ordinal_near_miss("alan wake 2", "alan wake"))
+        self.assertTrue(_ordinal_near_miss("alan wake", "alan wake 2"))
+
+    def test_a_lone_trailing_character_counts(self):
+        self.assertTrue(_ordinal_near_miss("silent hill f", "silent hill"))
+
+    def test_trailing_roman_numeral_counts(self):
+        self.assertTrue(_ordinal_near_miss("diablo iv", "diablo"))
+
+    def test_two_different_ordinals_are_not_a_near_miss_by_this_rule(self):
+        # Neither token list is the other plus a trailing token, so this
+        # function honestly returns False — and the tiers MISS the pair, which
+        # is what exposes it to the fuzzy fallback. _sequel_near_miss unions
+        # in titles_conflict_on_identity to reject exactly that shape.
+        self.assertFalse(_ordinal_near_miss("final fantasy vii", "final fantasy viii"))
+
+    def test_a_genuine_typo_is_not_an_ordinal_difference(self):
+        self.assertFalse(_ordinal_near_miss("hollow knigt", "hollow knight"))
+
+    def test_a_multi_token_subtitle_is_not_an_ordinal(self):
+        self.assertFalse(_ordinal_near_miss("the witcher 3", "the witcher 3 wild hunt"))
+
+
+class SequelNearMissTests(unittest.TestCase):
+    """The union guard: _ordinal_near_miss OR titles_conflict_on_identity."""
+
+    def test_differing_ordinals_in_place_are_rejected(self):
+        # The Codex-review case: equal-length titles, disagreeing ordinals —
+        # tiers miss, fuzzy scores ~97, identity comparison rejects.
+        self.assertTrue(_sequel_near_miss("final fantasy viii", "final fantasy vii"))
+        self.assertTrue(_sequel_near_miss("final fantasy vii", "final fantasy viii"))
+
+    def test_added_trailing_ordinal_still_rejected(self):
+        self.assertTrue(_sequel_near_miss("alan wake 2", "alan wake"))
+
+    def test_lone_trailing_character_still_rejected(self):
+        # No digit, no roman numeral — only _ordinal_near_miss sees this one.
+        self.assertTrue(_sequel_near_miss("silent hill f", "silent hill"))
+
+    def test_a_genuine_typo_still_passes(self):
+        self.assertFalse(_sequel_near_miss("hollow knigt", "hollow knight"))
+
+    def test_a_subtitle_with_the_same_ordinal_still_passes(self):
+        self.assertFalse(_sequel_near_miss("the witcher 3", "the witcher 3 wild hunt"))
+
+
+class AssessmentNameResolutionTests(ToolDBTestCase):
+    """Issue #150: writes never resolve a name loosely; reads guard the sequel."""
+
+    async def test_a_sequel_name_mints_instead_of_attaching_to_the_predecessor(self):
+        predecessor = await seed_game("Alan Wake")
+
+        result = await record_assessment(name="Alan Wake 2", verdict="buy_now")
+
+        self.assertTrue(result["created"])
+        self.assertNotEqual(result["game_id"], predecessor)
+        self.assertEqual(result["resolution"]["mode"], "minted")
+        self.assertEqual(result["resolution"]["matched_name"], "Alan Wake 2")
+        # The predecessor must carry no verdict at all — the silent misfile.
+        self.assertEqual(await _assessment_rows(predecessor), [])
+
+    async def test_a_near_miss_name_is_never_adopted_by_the_write_path(self):
+        # Not an ordinal difference, just close: the write path mints anyway,
+        # because ANY loose match on a write is unverifiable by the caller.
+        existing = await seed_game("Hollow Knight")
+        result = await record_assessment(name="Hollow Knigt", verdict="skip")
+        self.assertTrue(result["created"])
+        self.assertNotEqual(result["game_id"], existing)
+
+    async def test_context_rejects_the_sequel_shaped_match(self):
+        await seed_game("Alan Wake")
+        context = await get_assessment_context(name="Alan Wake 2")
+
+        self.assertEqual(context["game_resolution"], "not_found")
+        self.assertNotIn("game", context)
+        self.assertEqual(context["resolution"]["mode"], "none")
+        self.assertEqual(context["resolution"]["query"], "Alan Wake 2")
+        self.assertEqual(context["resolution"]["rejected_near_miss"], "Alan Wake")
+        self.assertNotIn("matched_name", context["resolution"])
+
+    async def test_context_rejects_the_reverse_direction_too(self):
+        await seed_game("Alan Wake 2")
+        context = await get_assessment_context(name="Alan Wake")
+
+        self.assertEqual(context["game_resolution"], "not_found")
+        self.assertEqual(context["resolution"]["rejected_near_miss"], "Alan Wake 2")
+
+    async def test_context_rejects_disagreeing_ordinals_in_place(self):
+        # Equal-length sequels: the tiers miss ("viii" is no token-AND hit for
+        # "vii"), the fuzzy fallback scores ~97, and the identity comparison
+        # in _sequel_near_miss refuses the wrong sequel (Codex review, PR #152).
+        await seed_game("Final Fantasy VII")
+        context = await get_assessment_context(name="Final Fantasy VIII")
+
+        self.assertEqual(context["game_resolution"], "not_found")
+        self.assertEqual(context["resolution"]["mode"], "none")
+        self.assertEqual(
+            context["resolution"]["rejected_near_miss"], "Final Fantasy VII"
+        )
+
+    async def test_context_still_resolves_a_genuine_typo_fuzzily(self):
+        game_id = await seed_game("Hollow Knight")
+        context = await get_assessment_context(name="Hollow Knigt")
+
+        self.assertEqual(context["game_resolution"], "resolved")
+        self.assertEqual(context["game"]["game_id"], game_id)
+        self.assertEqual(context["resolution"]["mode"], "fuzzy")
+        self.assertEqual(context["resolution"]["matched_name"], "Hollow Knight")
+
+    async def test_context_reports_exact_and_by_id_modes(self):
+        game_id = await seed_game("Celeste")
+
+        exact = await get_assessment_context(name="Celeste")
+        self.assertEqual(exact["resolution"]["mode"], "exact")
+        self.assertEqual(exact["resolution"]["matched_name"], "Celeste")
+
+        by_id = await get_assessment_context(game_id=game_id)
+        self.assertEqual(by_id["resolution"]["mode"], "by_id")
+        self.assertEqual(by_id["resolution"]["query"], str(game_id))
+
+    async def test_context_reports_a_partial_match(self):
+        await seed_game("Sekiro Shadows Die Twice")
+        context = await get_assessment_context(name="Sekiro")
+        self.assertEqual(context["resolution"]["mode"], "partial")
+        self.assertEqual(
+            context["resolution"]["matched_name"], "Sekiro Shadows Die Twice"
+        )
+
+    async def test_context_reports_none_for_an_unknown_game_id(self):
+        context = await get_assessment_context(game_id=424242)
+        self.assertEqual(context["game_resolution"], "not_found")
+        self.assertEqual(context["resolution"], {"mode": "none", "query": "424242"})
+
+
+class VoidAssessmentTests(ToolDBTestCase):
+    async def test_void_deletes_the_row_and_reports_it(self):
+        game_id = await seed_game("Misfiled Onto Me")
+        await add_platform(game_id, "steam", playtime_minutes=30)
+        recorded = await record_assessment(
+            game_id=game_id, verdict="buy_now", assessed_at="2026-03-01"
+        )
+
+        result = await record_assessment(
+            void_assessment_id=recorded["assessment_id"]
+        )
+
+        self.assertTrue(result["voided"])
+        self.assertEqual(result["assessment_id"], recorded["assessment_id"])
+        self.assertEqual(result["game_id"], game_id)
+        self.assertEqual(result["name"], "Misfiled Onto Me")
+        self.assertEqual(result["verdict"], "buy_now")
+        self.assertTrue(result["assessed_at"].startswith("2026-03-01"))
+        self.assertEqual(await _assessment_rows(game_id), [])
+        # An owned row is not stranded by the void.
+        self.assertNotIn("suggested_action", result)
+
+    async def test_voiding_the_last_assessment_of_a_minted_row_suggests_delete(self):
+        minted = await record_assessment(name="Phantom Candidate", verdict="skip")
+
+        result = await record_assessment(void_assessment_id=minted["assessment_id"])
+
+        self.assertEqual(result["suggested_action"]["tool"], "delete_game")
+        self.assertEqual(
+            result["suggested_action"]["args"],
+            {"game_id": minted["game_id"], "confirm": False},
+        )
+
+    async def test_one_of_several_assessments_leaves_the_row_alone(self):
+        minted = await record_assessment(
+            name="Assessed Twice", verdict="skip", assessed_at="2026-01-01"
+        )
+        second = await record_assessment(
+            game_id=minted["game_id"], verdict="buy_now", assessed_at="2026-02-01"
+        )
+
+        result = await record_assessment(void_assessment_id=second["assessment_id"])
+        self.assertNotIn("suggested_action", result)
+        rows = await _assessment_rows(minted["game_id"])
+        self.assertEqual([row["verdict"] for row in rows], ["skip"])
+
+    async def test_unknown_assessment_id_errors(self):
+        with self.assertRaises(ToolError) as ctx:
+            await record_assessment(void_assessment_id=987654)
+        self.assertIn("987654", str(ctx.exception))
+
+    async def test_void_is_exclusive_of_every_other_parameter(self):
+        game_id = await seed_game("Exclusive Probe")
+        recorded = await record_assessment(game_id=game_id, verdict="skip")
+        for kwargs in (
+            {"verdict": "skip"},
+            {"game_id": game_id},
+            {"name": "Exclusive Probe"},
+            {"appid": 4242},
+            {"summary": "leftover"},
+        ):
+            with self.subTest(**kwargs), self.assertRaises(ToolError) as ctx:
+                await record_assessment(
+                    void_assessment_id=recorded["assessment_id"], **kwargs
+                )
+            self.assertIn(next(iter(kwargs)), str(ctx.exception))
+        # Nothing was deleted by any of the refused calls.
+        self.assertEqual(len(await _assessment_rows(game_id)), 1)
+
+    async def test_void_cannot_be_combined_with_items(self):
+        game_id = await seed_game("Bulk And Void")
+        recorded = await record_assessment(game_id=game_id, verdict="skip")
+        with self.assertRaises(ToolError) as ctx:
+            await main.record_assessment(
+                void_assessment_id=recorded["assessment_id"],
+                items=[{"game_id": game_id, "verdict": "buy_now"}],
+            )
+        self.assertIn("items", str(ctx.exception))
+        self.assertEqual(len(await _assessment_rows(game_id)), 1)
+
+    async def test_void_routes_through_the_tool(self):
+        game_id = await seed_game("Routed Void")
+        recorded = await record_assessment(game_id=game_id, verdict="skip")
+        result = await main.record_assessment(
+            void_assessment_id=recorded["assessment_id"]
+        )
+        self.assertTrue(result["voided"])
+        self.assertEqual(await _assessment_rows(game_id), [])
 
 
 class RecordAssessmentValidationTests(ToolDBTestCase):
@@ -426,6 +669,9 @@ class AssessmentReadBlockTests(ToolDBTestCase):
         self.assertEqual(detail["assessments"][0]["verdict"], "buy_now")
         self.assertEqual(detail["assessments"][1]["target_price"], 15.0)
         self.assertEqual(detail["assessments"][1]["fit_call"], "coin flip")
+        # assessment_id makes the block a usable source for
+        # record_assessment(void_assessment_id=…) on a historical misfile.
+        self.assertIsInstance(detail["assessments"][0]["assessment_id"], int)
 
     async def test_bulk_detail_skips_the_block(self):
         game_id = await seed_game("Bulk Detail")
@@ -440,7 +686,7 @@ class AssessmentReadBlockTests(ToolDBTestCase):
 
     async def test_context_reports_past_assessments(self):
         game_id = await seed_game("Repeat Ask", tags=["metroidvania"])
-        await record_assessment(
+        recorded = await record_assessment(
             game_id=game_id,
             verdict="wishlist_for_sale",
             assessed_at="2026-05-01",
@@ -450,6 +696,10 @@ class AssessmentReadBlockTests(ToolDBTestCase):
         self.assertEqual(context["past_assessment_count"], 1)
         self.assertFalse(context["past_assessments_truncated"])
         self.assertEqual(context["past_assessments"][0]["verdict"], "wishlist_for_sale")
+        self.assertEqual(
+            context["past_assessments"][0]["assessment_id"],
+            recorded["assessment_id"],
+        )
 
     async def test_context_omits_the_block_for_an_unassessed_game(self):
         game_id = await seed_game("Fresh Candidate", tags=["metroidvania"])
@@ -597,6 +847,16 @@ class AssessmentsReportTests(ToolDBTestCase):
         result = await main.get_stats(report="assessments", verdict="skip")
         self.assertEqual(result["total_matches"], 1)
         self.assertEqual(result["assessments"][0]["game_id"], first)
+
+    async def test_report_carries_the_assessment_id_for_void(self):
+        # The browse report is the advertised way to recover the id a
+        # historical misfile needs for record_assessment(void_assessment_id=…).
+        game_id = await seed_game("Voidable Later")
+        recorded = await record_assessment(game_id=game_id, verdict="skip")
+        result = await main.get_stats(report="assessments")
+        self.assertEqual(
+            result["assessments"][0]["assessment_id"], recorded["assessment_id"]
+        )
 
     async def test_verdict_does_not_apply_to_other_reports(self):
         with self.assertRaises(ToolError) as ctx:
