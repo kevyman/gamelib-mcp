@@ -44,7 +44,7 @@ EXPECTED_TOOLS = {
     "get_stats": {
         "params": {
             "report", "platform", "year", "purchase_source", "counting_mode",
-            "kind", "min_games", "include_games", "limit", "offset",
+            "kind", "min_games", "include_games", "verdict", "limit", "offset",
         },
         "required": {"report"},
     },
@@ -123,6 +123,17 @@ EXPECTED_TOOLS = {
         },
         "required": set(),
     },
+    "record_assessment": {
+        "params": {
+            "name", "appid", "game_id", "verdict", "assessed_at", "summary",
+            "craft_adjusted", "craft_positive_pct", "review_count",
+            "recent_trajectory", "opencritic_score", "fit_call",
+            "anchors_cited", "flags", "price_seen", "price_currency",
+            "price_platform", "target_price", "instead_game_id", "steam_appid",
+            "context", "items",
+        },
+        "required": set(),
+    },
     "merge_games": {
         "params": {"source_game_id", "target_game_id", "items", "dry_run"},
         "required": set(),
@@ -198,6 +209,9 @@ EXPECTED_ANNOTATIONS = {
     "update_game": {"readOnlyHint": False, "idempotentHint": True},
     "set_playtime": {"readOnlyHint": False, "idempotentHint": True},
     "set_acquisition": {"readOnlyHint": False, "idempotentHint": True},
+    # A same-day re-record replaces that day's row, so repeating the call is a
+    # no-op rather than a second verdict — idempotent, and it destroys nothing.
+    "record_assessment": {"readOnlyHint": False, "idempotentHint": True},
     "merge_games": {"readOnlyHint": False, "idempotentHint": False, "destructiveHint": True},
     "delete_game": {"readOnlyHint": False, "idempotentHint": False, "destructiveHint": True},
     "sync": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
@@ -254,9 +268,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_31(self):
+    async def test_tool_count_is_32(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 31)
+        self.assertEqual(len(tools), 32)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()

@@ -1022,6 +1022,63 @@ _V36_SCHEMA_DDL = _V34_SCHEMA_DDL.replace(
     "        PRIMARY KEY (game_id, platform, snapshot_date)",
 )
 
+# v37 adds game_assessments: the recorded COMPONENTS of a game-quality verdict
+# (ADR 0006 decision 5) — craft numbers, fit call, anchors cited, price seen,
+# the verdict itself. Append-only history with at most one row per (game, UTC
+# day): a re-record on the same day REPLACES that day's row through the
+# expression unique index below, the same "≤1 row per day" convention
+# play_history uses, so an assessment refined mid-conversation doesn't mint a
+# second verdict.
+#
+# The row carries steam_appid itself because an assessed candidate may be
+# unowned: identifiers hang off game_platforms, so a bare games row minted for
+# a candidate has nowhere to keep one (the same reason game_wishlist carries
+# store_identifier). instead_game_id is ON DELETE SET NULL — the "play what you
+# own instead: X" link is evidence about the verdict, not a dependency of it.
+#
+# HARD CONSTRAINT (ADR 0006): nothing here ever feeds tag_affinity or
+# discover_games. Verdicts are model output; mining them back into ranking
+# would be a self-reinforcement loop. Read-only context + calibration only.
+_V37_SCHEMA_DDL = (
+    _V36_SCHEMA_DDL
+    + """
+    CREATE TABLE IF NOT EXISTS game_assessments (
+        id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id                  INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        assessed_at              TEXT NOT NULL,
+        verdict                  TEXT NOT NULL CHECK (verdict IN
+                                     ('buy_now', 'wishlist_for_sale', 'try_demo',
+                                      'skip', 'play_what_you_own')),
+        summary                  TEXT,
+        craft_adjusted           REAL,
+        craft_positive_pct       REAL,
+        review_count             INTEGER,
+        recent_trajectory        TEXT CHECK (recent_trajectory IN
+                                     ('improving', 'stable', 'regressing')),
+        opencritic_score         REAL,
+        fit_call                 TEXT CHECK (fit_call IN
+                                     ('strong fit', 'probable fit', 'coin flip',
+                                      'probable miss')),
+        anchors_cited            TEXT,
+        flags                    TEXT,
+        price_seen               REAL,
+        price_currency           TEXT,
+        price_platform           TEXT,
+        target_price             REAL,
+        instead_game_id          INTEGER REFERENCES games(id) ON DELETE SET NULL,
+        steam_appid              INTEGER,
+        context                  TEXT,
+        owned_at_assessment      INTEGER NOT NULL DEFAULT 0,
+        wishlisted_at_assessment INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_game_assessments_game_day
+        ON game_assessments(game_id, date(assessed_at));
+    CREATE INDEX IF NOT EXISTS idx_game_assessments_game_id
+        ON game_assessments(game_id);
+"""
+)
+
 # Semantic views backing query_library()/get_db_schema() — NOT part of the
 # versioned schema chain (like _FTS_DDL below). Dropped and recreated on every
 # migrate_db run via _sync_query_views so a view definition change deploys on

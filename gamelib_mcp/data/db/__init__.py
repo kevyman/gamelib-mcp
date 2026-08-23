@@ -113,7 +113,7 @@ XBOX_TITLE_ID = "xbox_title_id"
 # module load time, so this package must never import back from nintendo.py.
 # Must stay in sync with that constant's value.
 NINTENDO_TITLE_ID_TYPE = "nintendo_title_id"
-SCHEMA_VERSION = 36
+SCHEMA_VERSION = 37
 
 
 def normalize_identifier_value(identifier_type: str, value: str) -> str:
@@ -295,6 +295,7 @@ from .schema import (
     _V32_SCHEMA_DDL,
     _V34_SCHEMA_DDL,
     _V36_SCHEMA_DDL,
+    _V37_SCHEMA_DDL,
 )
 
 
@@ -1990,6 +1991,62 @@ async def _migrate_v35_to_v36(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v36_to_v37(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add game_assessments (additive; see schema.py's v37 note).
+
+    Nothing to backfill: recorded verdicts start the day the recording tool
+    ships. The expression unique index (game_id, date(assessed_at)) is created
+    here rather than left to the fresh-schema pass at the end of migrate_db,
+    because it is the ON CONFLICT target ``record_assessment`` writes against —
+    without it a same-day re-record would append a second verdict instead of
+    replacing the day's row.
+    """
+    if progress is not None:
+        progress("Migrating to v37: add game_assessments.")
+
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS game_assessments (
+            id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_id                  INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+            assessed_at              TEXT NOT NULL,
+            verdict                  TEXT NOT NULL CHECK (verdict IN
+                                         ('buy_now', 'wishlist_for_sale', 'try_demo',
+                                          'skip', 'play_what_you_own')),
+            summary                  TEXT,
+            craft_adjusted           REAL,
+            craft_positive_pct       REAL,
+            review_count             INTEGER,
+            recent_trajectory        TEXT CHECK (recent_trajectory IN
+                                         ('improving', 'stable', 'regressing')),
+            opencritic_score         REAL,
+            fit_call                 TEXT CHECK (fit_call IN
+                                         ('strong fit', 'probable fit', 'coin flip',
+                                          'probable miss')),
+            anchors_cited            TEXT,
+            flags                    TEXT,
+            price_seen               REAL,
+            price_currency           TEXT,
+            price_platform           TEXT,
+            target_price             REAL,
+            instead_game_id          INTEGER REFERENCES games(id) ON DELETE SET NULL,
+            steam_appid              INTEGER,
+            context                  TEXT,
+            owned_at_assessment      INTEGER NOT NULL DEFAULT 0,
+            wishlisted_at_assessment INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_game_assessments_game_day
+            ON game_assessments(game_id, date(assessed_at));
+        CREATE INDEX IF NOT EXISTS idx_game_assessments_game_id
+            ON game_assessments(game_id);
+        """
+    )
+
+    await _set_user_version(db, 37)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -2026,7 +2083,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V36_SCHEMA_DDL)
+    await db.executescript(_V37_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -2168,6 +2225,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (33, _migrate_v33_to_v34),
     (34, _migrate_v34_to_v35),
     (35, _migrate_v35_to_v36),
+    (36, _migrate_v36_to_v37),
 )
 
 
@@ -2185,7 +2243,7 @@ async def _run_migrations(
         _emit(progress, f"Backed up database to {snapshot_path} before migrating.", applied_steps)
 
     if detected_state == "fresh":
-        await db.executescript(_V36_SCHEMA_DDL)
+        await db.executescript(_V37_SCHEMA_DDL)
         fts_enabled = await _sync_fts_index(db)
         await _sync_query_views(db)
         await _set_user_version(db, SCHEMA_VERSION)
@@ -2223,7 +2281,7 @@ async def _run_migrations(
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V36_SCHEMA_DDL)
+    await db.executescript(_V37_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
@@ -2461,12 +2519,14 @@ from .fuzzy import (
 )
 from .history import record_play_history_snapshots
 from .queries import (
+    ASSESSMENT_SUMMARY_COLUMNS,
     NINTENDO_BASELINE_DEVICE_ID,
     NINTENDO_BASELINE_PERIOD_KEY,
     _coerce_identifier_value,
     _platform_dict,
     edition_hides_owned_game,
     exact_name_steam_conflict,
+    get_assessed_game_id_by_appid,
     get_game_by_appid,
     get_game_by_identifier,
     get_game_by_igdb_id,
@@ -2482,7 +2542,9 @@ from .queries import (
     get_steam_platform_row_by_appid,
     get_wishlist_game_id_by_store_identifier,
     has_nested_children,
+    load_latest_assessments,
     load_platforms_for_games,
+    load_recent_assessments,
     load_related_content_for_games,
     load_series_for_games,
     load_wishlist_with_prices,

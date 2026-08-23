@@ -340,6 +340,10 @@ async def _run_ownership_orphan(*, apply: bool, options: dict[str, Any]) -> Chec
     ]
     extras = {
         "wishlist_only_count": result["wishlist_only_count"],
+        # The third legitimate ownership-free shape: a games row a recorded
+        # verdict points at (record_assessment mints one for an unowned
+        # candidate). Reported like wishlist_only_count, never as a finding.
+        "assessment_only_count": result["assessment_only_count"],
         "license_audit": result["license_audit"],
     }
     return findings, extras

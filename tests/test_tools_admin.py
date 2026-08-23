@@ -907,6 +907,8 @@ class MergeGamesTests(ToolDBTestCase):
             "play_history_rows_transferred",
             "wishlist_entries_transferred", "wishlist_entries_dropped",
             "price_rows_transferred", "price_rows_dropped",
+            "assessments_transferred", "assessments_dropped",
+            "assessment_instead_links_repointed",
             "children_reparented", "target_promoted_to_primary",
             "source_deleted",
         }

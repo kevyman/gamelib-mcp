@@ -53,6 +53,7 @@ from .tools.models import (
     PlayHistoryResponse,
     RateGameResponse,
     RatingsResponse,
+    RecordAssessmentResponse,
     SearchGamesResponse,
     SeriesGapsResponse,
     SessionIngestLinkResponse,
@@ -293,7 +294,9 @@ async def get_game_detail(
     related_content (children with ownership/prices/acquisition), parent link
     (for nested DLC/editions), and dlc_ownership (for base games with a cached
     Steam or IGDB DLC catalog, comparing known catalog size vs. actually-owned
-    children).
+    children). A game with recorded verdicts (record_assessment) also carries
+    `assessments` — the 5 newest, with assessment_count as the true total and
+    assessments_truncated as the flag — in single-game mode only.
 
     Pass `items` (max 50) — a list of {name, appid, or game_id}, the same
     resolution — to fetch many at once. Per-item results carry status "ok"
@@ -370,7 +373,10 @@ async def discover_games(
 
 @mcp.tool(title="Library Reports", annotations=READ_ONLY_TOOL)
 async def get_stats(
-    report: Literal["backlog", "platforms", "taste", "spending", "series"],
+    report: Literal[
+        "backlog", "platforms", "taste", "spending", "series",
+        "assessments", "calibration",
+    ],
     platform: str | None = None,
     year: int | None = None,
     purchase_source: str | None = None,
@@ -378,6 +384,9 @@ async def get_stats(
     kind: Literal["collection", "franchise"] | None = None,
     min_games: int = 1,
     include_games: bool = False,
+    verdict: Literal[
+        "buy_now", "wishlist_for_sale", "try_demo", "skip", "play_what_you_own"
+    ] | None = None,
     limit: int = 25,
     offset: int = 0,
 ) -> GetStatsResponse:
@@ -446,6 +455,30 @@ async def get_stats(
     platform scopes counts to one platform. include_games adds each series'
     included_games and collapsed_entries ({name, reason}) for the page.
     Returns results, counting_mode, total_matches, and has_more.
+
+    report="assessments" (limit, offset, verdict) — browse recorded verdicts
+    (see record_assessment), newest first: game_id, name, assessed_at,
+    verdict, summary, price_seen/price_currency, target_price, plus current
+    owned/wishlisted state. verdict filters to one call ("buy_now",
+    "wishlist_for_sale", "try_demo", "skip", "play_what_you_own"). Paginated
+    like report="series": assessments is the page (limit default 25, max
+    200), total_matches the true total, has_more whether more remain.
+
+    report="calibration" (limit) — how those verdicts held up, for judging
+    the assessment methodology, NEVER as a recommendation input. overall
+    carries totals, the date range, and a verdict histogram. by_verdict
+    reports, per verdict and counting each game once (its most recent
+    assessment with that verdict): how many were not owned at the time,
+    how many are owned now (acquired_count/acquired_pct), how many of those
+    passed 2h of playtime, and the average rating since. wishlist_for_sale
+    adds average price seen, average target, and — among the ones bought —
+    average price paid with within_target_count, all grouped PER CURRENCY and
+    never summed across currencies. mismatches lists the disagreements
+    (skip_but_acquired, buy_now_still_unplayed, wishlist_still_waiting), each
+    capped at limit with its true count and a truncated flag.
+    play_what_you_own_follow_through counts whether the game he was pointed
+    at instead has been played since; a platform reporting no last_played is
+    unknown_count, counted on neither side.
     """
     # A parameter that belongs to another report is a caller error, not
     # something to drop on the floor: silently ignoring year= on report="series"
@@ -459,6 +492,8 @@ async def get_stats(
             "counting_mode", "kind", "min_games", "platform", "include_games",
             "limit", "offset",
         },
+        "assessments": {"limit", "offset", "verdict"},
+        "calibration": {"limit"},
     }
     _passed = {
         "platform": platform is not None,
@@ -468,6 +503,7 @@ async def get_stats(
         "kind": kind is not None,
         "min_games": min_games != 1,
         "include_games": include_games,
+        "verdict": verdict is not None,
         "limit": limit != 25,
         "offset": offset != 0,
     }
@@ -491,6 +527,12 @@ async def get_stats(
     if report == "spending":
         from .tools.acquisition import get_spending_stats as _spending
         return {"report": report, **await _spending(year, platform, purchase_source)}
+    if report == "assessments":
+        from .tools.assessment import get_assessments_report as _assessments
+        return {"report": report, **await _assessments(limit, offset, verdict)}
+    if report == "calibration":
+        from .tools.assessment import get_calibration_report as _calibration
+        return {"report": report, **await _calibration(limit)}
     from .tools.series import get_series_breakdown as _series
     return {
         "report": report,
@@ -956,6 +998,9 @@ async def get_wishlist(
     when the wishlisted item is itself nested content rather than a base game),
     newest first and paged by limit (default 100, max 500) / offset — count is
     the page size, total_matches the true total, has_more whether more remain.
+    An item whose game carries a recorded verdict (record_assessment) also
+    has `assessment` — the latest verdict, its date, and the target price it
+    named ("wishlist at €20").
 
     with_prices=True instead returns current deals — one entry per game,
     cheapest-recommended first, honoring the set_hardware_preference platform
@@ -975,7 +1020,10 @@ async def get_wishlist(
     Each deal's flat fields are the RECOMMENDED purchase (preferred platform
     unless another platform's price is below preference_override_ratio × the
     preferred price — "the deal is too good"); other platforms appear in
-    alternatives, reasoning in recommendation_reason. availability_pending
+    alternatives, reasoning in recommendation_reason. A priced entry with a
+    recorded verdict carries the same `assessment` block, plus
+    below_assessed_target=true when the best price IN THAT CURRENCY has
+    reached the verdict's target_price. availability_pending
     counts wishlist games whose IGDB platform data hasn't been fetched yet
     (background enrichment fills it). max_price/min_cut_pct keep a game if ANY
     of its priced options — recommended or alternative — satisfies both given
@@ -1093,6 +1141,13 @@ async def get_assessment_context(
       sibling title. game_resolution="not_found" (no game block) simply
       means the library doesn't know the game — normal for unowned
       candidates; the other blocks still come back.
+    - past_assessments: present only when identity resolved AND this game
+      was assessed before (record_assessment) — up to 5 newest verdicts
+      with date, summary, fit_call, craft_adjusted, price seen and target
+      price, plus past_assessment_count (true total) and
+      past_assessments_truncated. When it is present, LEAD with the prior
+      verdict and what has changed since (price, patches, review
+      trajectory) instead of re-deriving the call blind.
     """
     from .tools.assessment import get_assessment_context as _assess
     return await _assess(
@@ -1105,6 +1160,112 @@ async def get_assessment_context(
         steam_recent_positive_pct,
         steam_recent_total_reviews,
         early_access,
+    )
+
+
+@mcp.tool(title="Record Assessment", annotations=MUTATION_TOOL)
+async def record_assessment(
+    name: str | None = None,
+    appid: int | None = None,
+    game_id: int | None = None,
+    verdict: Literal[
+        "buy_now", "wishlist_for_sale", "try_demo", "skip", "play_what_you_own"
+    ] | None = None,
+    assessed_at: str | None = None,
+    summary: str | None = None,
+    craft_adjusted: float | None = None,
+    craft_positive_pct: float | None = None,
+    review_count: int | None = None,
+    recent_trajectory: Literal["improving", "stable", "regressing"] | None = None,
+    opencritic_score: float | None = None,
+    fit_call: Literal[
+        "strong fit", "probable fit", "coin flip", "probable miss"
+    ] | None = None,
+    anchors_cited: list[dict] | None = None,
+    flags: list[str] | None = None,
+    price_seen: float | None = None,
+    price_currency: str | None = None,
+    price_platform: str | None = None,
+    target_price: float | None = None,
+    instead_game_id: int | None = None,
+    steam_appid: int | None = None,
+    context: str | None = None,
+    items: list[dict] | None = None,
+) -> RecordAssessmentResponse:
+    """
+    Log a game-quality verdict and the components behind it — one game, or
+    many in one call.
+
+    Call this at the END of an assessment, after delivering the verdict, so
+    the call can be compared later against what was actually bought, played,
+    and rated (get_stats(report="calibration")) and so a repeat ask about the
+    same game starts from what was already decided. Recording is silent
+    bookkeeping: mention it in one line, never re-explain the verdict.
+
+    Identity: game_id, Steam appid, or name (partial/fuzzy, like
+    get_game_detail) — at least one. A candidate the library has never seen
+    gets a games row minted for it (created=true), which is normal for an
+    unowned title; pass name= as well when only an appid is known, since a
+    row cannot be minted without a title.
+
+    verdict (required) is the Step 4 line: "buy_now", "wishlist_for_sale",
+    "try_demo", "skip", or "play_what_you_own". Everything else is optional
+    and should mirror the verdict block you just delivered: summary (the
+    one-liner, 300 chars), craft_adjusted (the 0-1 adjusted score — NOT the
+    raw percentage, which is craft_positive_pct 0-100), review_count,
+    recent_trajectory, opencritic_score, fit_call (the same four strings
+    get_assessment_context's fit.suggested_call uses), anchors_cited (up to 8
+    names or {name, game_id} objects — use the game_ids from the anchors
+    block), flags (up to 8 short strings), price_seen + price_currency +
+    price_platform, target_price (the "wishlist at €X" threshold),
+    instead_game_id (the game pointed at by "play what you own instead: X"),
+    steam_appid, and context (e.g. "bundle: Humble Choice 2026-08").
+    assessed_at backfills a past verdict (ISO 8601, UTC); it defaults to now.
+
+    At most one assessment per game per UTC day: re-recording the same day
+    REPLACES that day's row (replaced=true) rather than appending a second
+    verdict, so refining a call mid-conversation is safe. Assessing the same
+    game on a later day appends, and the response's repeat_ask reports how
+    many prior verdicts exist plus the last one's date and call.
+
+    This NEVER writes the wishlist and never affects recommendations: a
+    wishlist_for_sale verdict on a game that isn't wishlisted comes back with
+    suggested_action naming the add_game_to_platform call to offer, and
+    recorded verdicts deliberately do not feed the taste profile or
+    discover_games (they are model output; ranking stays grounded in actual
+    ratings and playtime).
+
+    Pass `items` (max 200) — a list of these same keys — to record several at
+    once. Per-item results carry status "ok" or "error" (message + original
+    item); one bad item never fails the rest, and results preserve input
+    order.
+    """
+    from .tools.assessment import record_assessment as _record
+    from .tools.assessment import record_assessments_batch as _many
+    if items is not None:
+        return await _many(items)
+    return await _record(
+        name,
+        appid,
+        game_id,
+        verdict,
+        assessed_at,
+        summary,
+        craft_adjusted,
+        craft_positive_pct,
+        review_count,
+        recent_trajectory,
+        opencritic_score,
+        fit_call,
+        anchors_cited,
+        flags,
+        price_seen,
+        price_currency,
+        price_platform,
+        target_price,
+        instead_game_id,
+        steam_appid,
+        context,
     )
 
 
@@ -1835,9 +1996,9 @@ async def merge_games(
     localized-name row that was ingested before the English title resolver
     existed, alongside the correct English row. All platform ownership,
     identifiers, enrichment, ratings, series memberships, aliases, play
-    history, wishlist entries, and cached price rows are transferred from
-    source to target in one atomic transaction, then the source game row is
-    deleted. Children nested under the source are re-pointed at the target,
+    history, wishlist entries, cached price rows, and recorded assessments
+    are transferred from source to target in one atomic transaction, then the
+    source game row is deleted. Children nested under the source are re-pointed at the target,
     and a nested target that absorbs its own parent (or inherits children) is
     promoted to a primary base game — so merging a phantom edition parent into
     its owned edition row leaves one visible, owned game.
@@ -1848,8 +2009,11 @@ async def merge_games(
     the target's value. A source wishlist entry is dropped when the merged
     target owns that platform (fulfilled) or already has the entry; a price
     row the target already caches for the same platform+shop keeps the
-    target's. Pass dry_run=True to preview what would change without writing
-    anything. Returns a summary dict with counts for each data type.
+    target's; an assessment landing on a UTC day the target already has one
+    for keeps the target's too, and "play what you own instead" links naming
+    the source are re-pointed at the target. Pass dry_run=True to preview what
+    would change without writing anything. Returns a summary dict with counts
+    for each data type.
 
     Pass `items` (max 200) — a list of {source_game_id, target_game_id} — for
     duplicate-cluster repair sessions. Because a merge consumes its source row,
@@ -1888,7 +2052,7 @@ async def delete_game(
     name is echoed back so you can confirm the right row), then remove it and
     every dependent record: platform ownership, store identifiers, provider
     enrichment, ratings, wishlist entries, price cache, play-history snapshots,
-    series memberships, and aliases.
+    series memberships, aliases, and recorded assessments.
 
     Two-step by design: with confirm=False (default) nothing is deleted — the
     call returns deleted=false and a would_delete breakdown of the row counts
@@ -1998,7 +2162,7 @@ async def query_library(sql: str | None = None, row_limit: int = 200) -> dict:
     Tables: games, game_platforms, game_platform_identifiers, steam_platform_data,
     game_platform_enrichment, ratings, tag_affinity, meta, game_series,
     game_series_membership, game_aliases, nintendo_play_summary, game_wishlist,
-    scrape_config, game_prices, play_history, query_log.
+    scrape_config, game_prices, play_history, game_assessments, query_log.
     Views: v_owned_games, v_game_playtime.
     """
     if sql is None:

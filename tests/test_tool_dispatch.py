@@ -16,6 +16,7 @@ from conftest import ToolDBTestCase, add_platform, seed_game
 
 from gamelib_mcp import main
 from gamelib_mcp.data import db as db_module
+from gamelib_mcp.tools.assessment import record_assessment
 
 
 class SyncTargetDispatchTests(unittest.IsolatedAsyncioTestCase):
@@ -397,11 +398,36 @@ class ResponseSizeGuardTests(ToolDBTestCase):
         # anchors scales with how many owned games share the candidate's core
         # tags — capped at ANCHOR_CAP (8) with anchor_count/anchors_truncated.
         ("get_assessment_context", {"tags": ["bulk tag"]}, {"anchors": 8}),
+        # Recorded verdicts grow per game (detail/context blocks) and library-
+        # wide (the reports) — every one of those lists carries a cap.
+        ("get_stats", {"report": "assessments"}, {"assessments": 25}),
+        ("get_stats", {"report": "assessments", "limit": 4}, {"assessments": 4}),
+    ]
+
+    # Nested list caps: (tool, args, {dotted path: cap}).
+    NESTED_CONTRACTS: ClassVar[list[tuple]] = [
+        (
+            "get_stats",
+            {"report": "calibration", "limit": 5},
+            {
+                "mismatches.skip_but_acquired.items": 5,
+                "mismatches.buy_now_still_unplayed.items": 5,
+                "mismatches.wishlist_still_waiting.items": 5,
+            },
+        ),
     ]
 
     async def _seed_bulk(self, n=40):
         for i in range(n):
             gid = await seed_game(f"Bulk {i}", hltb_main=5.0, tags=["bulk tag"])
+            # Assessed as "skip" BEFORE the ownership rows below, so
+            # owned_at_assessment is 0 and every one lands in the
+            # skip_but_acquired mismatch list.
+            await record_assessment(
+                game_id=gid,
+                verdict="skip",
+                assessed_at=f"2026-0{1 + i % 9}-0{1 + i % 9}",
+            )
             # owned on two platforms so it lands in the overlap list
             await add_platform(gid, "steam", playtime_minutes=100 + i)
             await add_platform(gid, "gog", playtime_minutes=50)
@@ -426,6 +452,45 @@ class ResponseSizeGuardTests(ToolDBTestCase):
                         f"{tool}{args} returned {len(got)} entries at '{path}' "
                         f"but the contract caps it at {cap}",
                     )
+
+    async def test_no_nested_response_list_exceeds_its_documented_cap(self):
+        await self._seed_bulk()
+        for tool, args, caps in self.NESTED_CONTRACTS:
+            with self.subTest(tool=tool, args=args):
+                result = await getattr(main, tool)(**args)
+                for path, cap in caps.items():
+                    node = result
+                    for key in path.split("."):
+                        self.assertIn(
+                            key, node,
+                            f"{tool}{args} has no '{path}'; the contract is stale",
+                        )
+                        node = node[key]
+                    self.assertLessEqual(
+                        len(node), cap,
+                        f"{tool}{args} returned {len(node)} entries at '{path}' "
+                        f"but the contract caps it at {cap}",
+                    )
+
+    async def test_per_game_assessment_blocks_are_capped(self):
+        # Both blocks grow with how often ONE game was re-assessed (one row per
+        # UTC day), which is exactly the shape the guard exists for.
+        gid = await seed_game("Repeatedly Assessed", tags=["bulk tag"])
+        await add_platform(gid, "steam", playtime_minutes=10)
+        for day in range(1, 9):
+            await record_assessment(
+                game_id=gid, verdict="skip", assessed_at=f"2026-03-0{day}"
+            )
+
+        detail = await main.get_game_detail(game_id=gid)
+        self.assertEqual(len(detail["assessments"]), 5)
+        self.assertEqual(detail["assessment_count"], 8)
+        self.assertTrue(detail["assessments_truncated"])
+
+        context = await main.get_assessment_context(game_id=gid)
+        self.assertEqual(len(context["past_assessments"]), 5)
+        self.assertEqual(context["past_assessment_count"], 8)
+        self.assertTrue(context["past_assessments_truncated"])
 
     async def test_capped_lists_still_report_the_true_total(self):
         await self._seed_bulk()

@@ -218,6 +218,12 @@ class GameDetailResponse(GameSummary):
     my_rating: dict[str, Any] | None = None
     manual_overrides: list[str] | None = None
     related_content: dict[str, list[dict[str, Any]]] | None = None
+    # Recorded verdicts (record_assessment), newest first — SINGLE mode only,
+    # capped at 5 with assessment_count the true total. Absent when the game
+    # was never assessed.
+    assessments: list[dict[str, Any]] | None = None
+    assessment_count: int | None = None
+    assessments_truncated: bool | None = None
     # Bulk (items=) mode: GameSummary's game_id/name move inside each result.
     game_id: int | None = None  # type: ignore[assignment]
     name: str | None = None  # type: ignore[assignment]
@@ -281,8 +287,18 @@ class GetStatsResponse(FlexibleModel):
     # report="series" (the only paginated report)
     results: list[SeriesBreakdownEntry] | None = None
     counting_mode: str | None = None
+    # report="series" and report="assessments" (both paginated)
     total_matches: int | None = None
     has_more: bool | None = None
+    # report="assessments" — the page itself, plus the verdict filter echoed.
+    assessments: list[dict[str, Any]] | None = None
+    verdict: str | None = None
+    # report="calibration"
+    overall: dict[str, Any] | None = None
+    by_verdict: list[dict[str, Any]] | None = None
+    wishlist_for_sale: dict[str, Any] | None = None
+    mismatches: dict[str, Any] | None = None
+    play_what_you_own_follow_through: dict[str, Any] | None = None
 
 
 class SyncResponse(FlexibleModel):
@@ -446,6 +462,9 @@ class WishlistItem(FlexibleModel):
     # base_game (the common case) or a nested type (dlc/expansion/edition/…)
     # when the wishlisted item is itself DLC/an edition rather than a base game.
     content_type: str | None = None
+    # The latest recorded verdict for this game ({verdict, assessed_at,
+    # target_price}); absent when the game was never assessed.
+    assessment: dict[str, Any] | None = None
 
 
 class GetWishlistResponse(FlexibleModel):
@@ -768,6 +787,11 @@ class WishlistDealEntry(FlexibleModel):
     wishlisted_on: list[str] = Field(default_factory=list)
     recommendation_reason: str | None = None
     alternatives: list[WishlistDealAlternative] = Field(default_factory=list)
+    # Latest recorded verdict ({verdict, assessed_at, target_price}), absent
+    # when never assessed; below_assessed_target is set only when the best
+    # same-currency price has reached that target.
+    assessment: dict[str, Any] | None = None
+    below_assessed_target: bool | None = None
 
 
 class CompletionSuggestion(FlexibleModel):
@@ -814,6 +838,8 @@ class AssessmentContextResponse(FlexibleModel):
     tags). anchors is CAPPED at 8; anchor_count is the true total.
     game / game_resolution — when identity (name/appid/game_id) was given;
     game only when it resolved (game_resolution="resolved").
+    past_assessments (+ count/truncated) — when identity resolved AND the
+    game carries recorded verdicts; CAPPED at 5, newest first.
     pace — always (last-30-day play summary).
     """
 
@@ -825,7 +851,34 @@ class AssessmentContextResponse(FlexibleModel):
     anchors: list[AssessmentAnchor] | None = None
     anchor_count: int | None = None
     anchors_truncated: bool | None = None
+    past_assessments: list[dict[str, Any]] | None = None
+    past_assessment_count: int | None = None
+    past_assessments_truncated: bool | None = None
     pace: dict[str, Any] | None = None
+
+
+class RecordAssessmentResponse(BatchEnvelope):
+    """record_assessment in either mode (ADR 0004: every field optional).
+
+    Single mode fills the flat keys below; an ``items=`` call fills
+    BatchEnvelope's results/total/ok/errors instead.
+    """
+
+    game_id: int | None = None
+    name: str | None = None
+    # True when the candidate had no library row and one was minted.
+    created: bool | None = None
+    # True when a same-day assessment already existed and was replaced.
+    replaced: bool | None = None
+    assessment_id: int | None = None
+    assessed_at: str | None = None
+    verdict: str | None = None
+    # Only when this game was assessed on an EARLIER day:
+    # {previous_count, last_assessed_at, last_verdict}.
+    repeat_ask: dict[str, Any] | None = None
+    # Only for verdict="wishlist_for_sale" on a game not currently wishlisted:
+    # the add_game_to_platform call to offer. Never performed automatically.
+    suggested_action: dict[str, Any] | None = None
 
 
 class PlayHistoryWindow(FlexibleModel):
