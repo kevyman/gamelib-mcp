@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/inject_model_posture.py",
+            "timeout": 10,
+            "statusMessage": "Caching session model"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/inject_model_posture.py",
+            "timeout": 10,
+            "statusMessage": "Injecting model posture"
+          }
+        ]
+      }
+    ]
+  }
+}

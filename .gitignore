@@ -8,7 +8,13 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 *.db-journal
-.claude/
+# Shared Claude Code config (settings/hooks/agents) is committed; everything
+# else under .claude/ (session state, personal overrides) stays local.
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+!.claude/agents/
+.claude/settings.local.json
 retry_deploy.sh
 .worktrees/
 gamelib.db
