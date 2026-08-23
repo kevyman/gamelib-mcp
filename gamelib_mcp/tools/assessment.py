@@ -26,6 +26,7 @@ from fastmcp.exceptions import ToolError
 from ..data.db import (
     exact_name_steam_conflict,
     fts_ready,
+    get_assessed_game_id_by_appid,
     get_db,
     get_game_by_appid,
     load_recent_assessments,
@@ -474,7 +475,15 @@ async def _resolve_game_id(
         return row["id"] if row is not None else None
     if appid is not None:
         row = await get_game_by_appid(appid)
-        return row["id"] if row is not None else None
+        if row is not None:
+            return row["id"]
+        # Identifier rows hang off game_platforms, so a candidate that
+        # record_assessment minted (unowned, unwishlisted) is invisible to
+        # get_game_by_appid — its appid lives on the assessment row itself,
+        # like game_wishlist.store_identifier. Without this fallback a repeat
+        # ask by appid reported not_found and re-asked for a name it had
+        # already been given.
+        return await get_assessed_game_id_by_appid(appid)
     assert name is not None
     match = build_name_match(name, column=NORMALIZED_NAME_SQL, use_fts=fts_ready())
     async with get_db() as db:
@@ -1243,7 +1252,15 @@ async def get_assessments_report(
 # describe the SAME platform row; that order deliberately references nothing
 # from the outer row, because SQLite does not resolve correlated names inside
 # a subquery's ORDER BY.
-_CALIBRATION_SQL = """
+#
+# Playtime is deliberately PLAYTIME_SUM_SQL over game_platforms — NOT
+# v_game_playtime. The PCTL sync recomputes the switch2 gp total from the
+# Nintendo daily summaries on every run (see the view's own comment), so the
+# only divergence window is sync lag, and every sibling rollup (the anchors
+# CTE above, backlog, discovery, library stats) reads the same column through
+# the same constant. Calibration's played_count must agree with what those
+# reports say, not answer from a different source during the same lag.
+_CALIBRATION_SQL = f"""
 WITH ranked AS (
     SELECT a.*,
            ROW_NUMBER() OVER (
@@ -1262,7 +1279,7 @@ SELECT r.game_id, g.name, r.verdict, r.assessed_at, r.owned_at_assessment,
            SELECT 1 FROM game_wishlist w WHERE w.game_id = r.game_id
        ) AS wishlisted_now,
        (
-           SELECT SUM(gp.playtime_minutes) FROM game_platforms gp
+           SELECT {PLAYTIME_SUM_SQL} FROM game_platforms gp
            WHERE gp.game_id = r.game_id AND gp.owned = 1
        ) AS playtime_minutes,
        (

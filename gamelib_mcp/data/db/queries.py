@@ -826,3 +826,28 @@ async def load_latest_assessments(game_ids: Iterable[int]) -> dict[int, dict]:
             ids,
         )
     return {row["game_id"]: dict(row) for row in rows}
+
+
+async def get_assessed_game_id_by_appid(appid: int) -> int | None:
+    """The game_id a past assessment recorded under this Steam appid.
+
+    The assessment-only twin of ``get_wishlist_game_id_by_store_identifier``,
+    for the same reason: an assessed-but-unowned candidate has no
+    ``game_platforms`` row, so no identifier row either — its appid lives on
+    the assessment itself. Without this fallback a repeat ask by appid could
+    not find the row ``record_assessment`` minted (``get_game_by_appid``
+    searches only platform identifiers), so ``get_assessment_context``
+    answered ``not_found`` and a second appid-only recording asked for a name
+    it already knew. Newest assessment wins the rare duplicate-appid case;
+    resolution through a real identifier row still outranks this (callers try
+    ``get_game_by_appid`` first).
+    """
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            """SELECT game_id FROM game_assessments
+               WHERE steam_appid = ?
+               ORDER BY assessed_at DESC, id DESC
+               LIMIT 1""",
+            (appid,),
+        )
+    return row["game_id"] if row else None

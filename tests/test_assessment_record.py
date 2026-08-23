@@ -97,6 +97,33 @@ class RecordAssessmentTests(ToolDBTestCase):
             )
         self.assertEqual(platform_rows, [])
 
+    async def test_minted_candidate_resolves_by_appid_on_a_repeat_ask(self):
+        # get_game_by_appid searches only platform identifier rows, which a
+        # minted (unowned) candidate never has — resolution falls back to the
+        # appid the assessment itself carries, the same shape as the
+        # wishlist's store_identifier path. Without it, the repeat ask below
+        # reported not_found and re-asked for a name it had already been given.
+        first = await record_assessment(
+            name="Some Unreleased Thing",
+            appid=999001,
+            verdict="try_demo",
+            assessed_at="2026-01-01",
+        )
+
+        again = await record_assessment(
+            appid=999001, verdict="skip", assessed_at="2026-02-01"
+        )
+        self.assertFalse(again["created"])
+        self.assertEqual(again["game_id"], first["game_id"])
+        self.assertEqual(again["repeat_ask"]["previous_count"], 1)
+
+        context = await get_assessment_context(appid=999001)
+        self.assertEqual(context["game_resolution"], "resolved")
+        self.assertEqual(
+            [a["verdict"] for a in context["past_assessments"]],
+            ["skip", "try_demo"],
+        )
+
     async def test_mint_respects_the_anti_collapse_guard(self):
         # The exact-name row owns Steam under a DIFFERENT appid: assessing the
         # remake must not attach onto the original (root CLAUDE.md's identity
@@ -517,6 +544,20 @@ class WishlistAnnotationTests(ToolDBTestCase):
 
     async def test_a_price_in_another_currency_is_not_evidence(self):
         game_id = await self._priced_wishlist_game(14.99, currency="USD")
+        await record_assessment(
+            game_id=game_id,
+            verdict="wishlist_for_sale",
+            target_price=19.99,
+            price_currency="EUR",
+        )
+        result = await self._deals()
+        self.assertNotIn("below_assessed_target", result["deals"][0])
+
+    async def test_a_price_with_unknown_currency_is_not_evidence_either(self):
+        # A cached/provider row without currency metadata can't prove a EUR
+        # target was reached — only an exact currency match counts once the
+        # assessment names one.
+        game_id = await self._priced_wishlist_game(14.99, currency=None)
         await record_assessment(
             game_id=game_id,
             verdict="wishlist_for_sale",

@@ -69,7 +69,9 @@ def _below_assessed_target(options: list[dict], assessment: dict | None) -> bool
 
     "Wishlist at €20" is only answered by a price in the SAME currency —
     prices are never currency-converted here (the repo rule), so an option
-    priced in another currency is not evidence either way and is skipped. An
+    priced in another currency, OR one whose currency is unknown (cached/
+    provider rows without currency metadata), is not evidence either way and
+    is skipped: an unknown currency cannot prove a EUR target was reached. An
     assessment that recorded no currency is compared against every option:
     that is the honest reading of "the number he wrote down", and it degrades
     to the old behavior of having no target at all when nothing is priced.
@@ -81,7 +83,7 @@ def _below_assessed_target(options: list[dict], assessment: dict | None) -> bool
         option["price"]
         for option in options
         if option.get("price") is not None
-        and (currency is None or option.get("currency") in (None, currency))
+        and (currency is None or option.get("currency") == currency)
     ]
     return bool(prices) and min(prices) <= assessment["target_price"]
 
