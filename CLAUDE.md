@@ -24,6 +24,16 @@ Three conventions keep the suite fast and honest about time, all in `tests/conft
 
 `pytest-xdist` runs the suite across all cores by default (`addopts` in `pyproject.toml`). It only works because tests share no mutable state — each gets its own temp DB, and module-level globals are per-process.
 
+## Model orchestration (always-on)
+
+Multi-model sessions follow `rules/router.md`. Per-model postures live in `rules/model-postures.md` and are injected into every main-session prompt by the `UserPromptSubmit` hook in `.claude/settings.json` (`.claude/hooks/inject_model_posture.py` picks the section matching the live model; `SessionStart` caches the model since prompt payloads don't carry it).
+
+- The main session (Fable 5 at high effort) owns requirements, judgment, integration, and final verification. It does not inline-execute large builds: for a bounded, difficult implementation it writes the spec, dispatches the `opus-executor` agent, and verifies the result against that spec. An executor converging fast on an approved spec is desired behavior, not a defect.
+- Every dispatch brief states the exact delta, scope, output, stopping condition, and exclusions.
+- `sonnet-worker` handles fan-out needing per-item judgment (reader panels, audits, sweeps); `haiku-worker` handles bounded mechanical reads/transforms. Workers return extracted key numbers and paths, never raw dumps, and never delegate further.
+- Never turn a partial search failure into a global conclusion: "not found in the path I checked" ≠ "does not exist". Look at the full context before deciding something is broken.
+- Postures are duplicated into `.claude/agents/*.md` because subagents never see `UserPromptSubmit` — edit `rules/model-postures.md` and the matching agent file together; they must not drift.
+
 ## Environment
 
 Copy `.env.example` → `.env` for production (OAuth required) or `.env.local.example` → `.env` for localhost-only dev. `MCP_AUTH_MODE` must be explicit (`oauth` or `disabled`) — the server fails closed otherwise.
