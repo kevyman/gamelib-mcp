@@ -30,6 +30,7 @@ from ..data.db import (
     get_db,
     get_game_by_appid,
     load_recent_assessments,
+    titles_conflict_on_identity,
     upsert_game,
 )
 from ..data.tag_synonyms import canonical_tag
@@ -498,8 +499,13 @@ def _ordinal_near_miss(query: str, matched_name: str) -> bool:
     Definition, and its limit: one list must equal the other PLUS one trailing
     ordinal token. Two different ordinals in the same position ("final fantasy
     vii" vs "final fantasy viii") are NOT a near miss by this rule and the
-    function returns False; those are protected upstream instead, by the tier
-    match (neither is a prefix/substring/token-AND hit for the other).
+    function returns False — the tiers miss that pair, which is exactly what
+    EXPOSES it to the fuzzy fallback (~97 on token-sort), so
+    ``_sequel_near_miss`` unions this test with
+    ``titles_conflict_on_identity``, whose number-identity comparison catches
+    it. What this function alone contributes to the union is the lone
+    trailing character with no digit ("Silent Hill f"), which carries no
+    number identity for the other test to compare.
     """
     query_tokens = normalize_search_text(query).split()
     name_tokens = normalize_search_text(matched_name).split()
@@ -513,6 +519,23 @@ def _ordinal_near_miss(query: str, matched_name: str) -> bool:
     if len(longer) != len(shorter) + 1 or longer[:-1] != shorter:
         return False
     return _is_ordinal_token(longer[-1])
+
+
+def _sequel_near_miss(query: str, matched_name: str) -> bool:
+    """A non-exact match that reads as a DIFFERENT entry in the same series.
+
+    Union of two complementary tests. ``titles_conflict_on_identity``
+    (data/db/fuzzy.py — the same guard the sync-side fuzzy resolvers use)
+    compares number-identity token sets with roman numerals normalized and
+    edition decorations stripped, so it rejects both the added-ordinal shape
+    ("Alan Wake 2" vs "Alan Wake") and the equal-length differing-ordinal
+    shape ("Final Fantasy VIII" vs "Final Fantasy VII" — tiers miss it, fuzzy
+    scores ~97). ``_ordinal_near_miss`` adds the one shape identity tokens
+    cannot see: a lone trailing character with no digit ("Silent Hill f").
+    """
+    return _ordinal_near_miss(query, matched_name) or titles_conflict_on_identity(
+        query, matched_name
+    )
 
 
 async def _resolve_by_id_or_appid(
@@ -575,7 +598,7 @@ async def _resolve_name_for_context(name: str) -> tuple[int | None, str, str | N
     if row is not None:
         if row["match_rank"] == 0:
             return row["id"], "exact", None
-        if _ordinal_near_miss(name, row["name"]):
+        if _sequel_near_miss(name, row["name"]):
             return None, "none", row["name"]
         return row["id"], "partial", None
 
@@ -588,7 +611,7 @@ async def _resolve_name_for_context(name: str) -> tuple[int | None, str, str | N
         )
     if fuzzy_row is None:
         return None, "none", None
-    if _ordinal_near_miss(name, fuzzy_row["name"]):
+    if _sequel_near_miss(name, fuzzy_row["name"]):
         return None, "none", fuzzy_row["name"]
     return fuzzy_row["id"], "fuzzy", None
 
@@ -1511,7 +1534,8 @@ async def get_assessments_report(
             f"SELECT COUNT(*) AS c FROM game_assessments a {where}", params
         )
         rows = await db.execute_fetchall(
-            f"""SELECT a.game_id, g.name, a.assessed_at, a.verdict, a.summary,
+            f"""SELECT a.id AS assessment_id, a.game_id, g.name,
+                       a.assessed_at, a.verdict, a.summary,
                        a.price_seen, a.price_currency, a.target_price,
                        EXISTS (
                            SELECT 1 FROM game_platforms gp
@@ -1532,6 +1556,10 @@ async def get_assessments_report(
     return {
         "assessments": [
             {
+                # assessment_id is what record_assessment(void_assessment_id=…)
+                # takes — this report and the per-game summary blocks are the
+                # advertised ways to recover it for a historical misfile.
+                "assessment_id": row["assessment_id"],
                 "game_id": row["game_id"],
                 "name": row["name"],
                 "assessed_at": row["assessed_at"],

@@ -457,9 +457,10 @@ async def get_stats(
     Returns results, counting_mode, total_matches, and has_more.
 
     report="assessments" (limit, offset, verdict) — browse recorded verdicts
-    (see record_assessment), newest first: game_id, name, assessed_at,
-    verdict, summary, price_seen/price_currency, target_price, plus current
-    owned/wishlisted state. verdict filters to one call ("buy_now",
+    (see record_assessment), newest first: assessment_id (what
+    record_assessment's void_assessment_id repair mode takes), game_id, name,
+    assessed_at, verdict, summary, price_seen/price_currency, target_price,
+    plus current owned/wishlisted state. verdict filters to one call ("buy_now",
     "wishlist_for_sale", "try_demo", "skip", "play_what_you_own"). Paginated
     like report="series": assessments is the page (limit default 25, max
     200), total_matches the true total, has_more whether more remain.
@@ -1147,13 +1148,16 @@ async def get_assessment_context(
       `query` used and — only when resolved — `matched_name`. When mode is
       anything other than exact/by_id, DIFF matched_name against the
       candidate before trusting the game block. A sequel-shaped near miss
-      ("Alan Wake 2" against a library "Alan Wake", either direction) is
-      rejected outright: game_resolution="not_found", mode "none", and
-      `rejected_near_miss` names the row that was refused — pass game_id if
-      that row really was the game you meant.
+      is rejected outright — an added trailing ordinal ("Alan Wake 2"
+      against a library "Alan Wake", either direction) AND disagreeing
+      ordinals in place ("Final Fantasy VIII" against "Final Fantasy VII"):
+      game_resolution="not_found", mode "none", and `rejected_near_miss`
+      names the row that was refused — pass game_id if that row really was
+      the game you meant.
     - past_assessments: present only when identity resolved AND this game
       was assessed before (record_assessment) — up to 5 newest verdicts
-      with date, summary, fit_call, craft_adjusted, price seen and target
+      with assessment_id (usable as void_assessment_id), date, summary,
+      fit_call, craft_adjusted, price seen and target
       price, plus past_assessment_count (true total) and
       past_assessments_truncated. When it is present, LEAD with the prior
       verdict and what has changed since (price, patches, review
@@ -1233,9 +1237,13 @@ async def record_assessment(
     void_assessment_id is an exclusive repair mode — pass it alone (no
     verdict, no identity, no items) to HARD-DELETE one recorded assessment by
     id: the fix for a verdict filed onto the wrong game and noticed after the
-    same-UTC-day replace window. It answers with voided=true plus the deleted
-    row's game/verdict/date, and a delete_game suggested_action when voiding
-    left a minted row with no ownership, wishlist entry or assessment behind.
+    same-UTC-day replace window. The id comes from this tool's response
+    (assessment_id), from get_game_detail's / get_assessment_context's
+    per-game assessment blocks, or from get_stats(report="assessments") —
+    all three carry assessment_id. It answers with voided=true plus the
+    deleted row's game/verdict/date, and a delete_game suggested_action when
+    voiding left a minted row with no ownership, wishlist entry or assessment
+    behind.
 
     verdict (required) is the Step 4 line: "buy_now", "wishlist_for_sale",
     "try_demo", "skip", or "play_what_you_own". Everything else is optional

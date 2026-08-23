@@ -25,6 +25,7 @@ from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import admin, deals, platforms
 from gamelib_mcp.tools.assessment import (
     _ordinal_near_miss,
+    _sequel_near_miss,
     get_assessment_context,
     record_assessment,
     record_assessments_batch,
@@ -268,10 +269,10 @@ class OrdinalNearMissTests(unittest.TestCase):
         self.assertTrue(_ordinal_near_miss("diablo iv", "diablo"))
 
     def test_two_different_ordinals_are_not_a_near_miss_by_this_rule(self):
-        # Neither token list is the other plus a trailing token, so the
-        # function honestly returns False. Those pairs are kept apart upstream
-        # by the tier match instead ("final fantasy viii" is not a prefix,
-        # substring, or token-AND hit for "final fantasy vii").
+        # Neither token list is the other plus a trailing token, so this
+        # function honestly returns False — and the tiers MISS the pair, which
+        # is what exposes it to the fuzzy fallback. _sequel_near_miss unions
+        # in titles_conflict_on_identity to reject exactly that shape.
         self.assertFalse(_ordinal_near_miss("final fantasy vii", "final fantasy viii"))
 
     def test_a_genuine_typo_is_not_an_ordinal_difference(self):
@@ -279,6 +280,29 @@ class OrdinalNearMissTests(unittest.TestCase):
 
     def test_a_multi_token_subtitle_is_not_an_ordinal(self):
         self.assertFalse(_ordinal_near_miss("the witcher 3", "the witcher 3 wild hunt"))
+
+
+class SequelNearMissTests(unittest.TestCase):
+    """The union guard: _ordinal_near_miss OR titles_conflict_on_identity."""
+
+    def test_differing_ordinals_in_place_are_rejected(self):
+        # The Codex-review case: equal-length titles, disagreeing ordinals —
+        # tiers miss, fuzzy scores ~97, identity comparison rejects.
+        self.assertTrue(_sequel_near_miss("final fantasy viii", "final fantasy vii"))
+        self.assertTrue(_sequel_near_miss("final fantasy vii", "final fantasy viii"))
+
+    def test_added_trailing_ordinal_still_rejected(self):
+        self.assertTrue(_sequel_near_miss("alan wake 2", "alan wake"))
+
+    def test_lone_trailing_character_still_rejected(self):
+        # No digit, no roman numeral — only _ordinal_near_miss sees this one.
+        self.assertTrue(_sequel_near_miss("silent hill f", "silent hill"))
+
+    def test_a_genuine_typo_still_passes(self):
+        self.assertFalse(_sequel_near_miss("hollow knigt", "hollow knight"))
+
+    def test_a_subtitle_with_the_same_ordinal_still_passes(self):
+        self.assertFalse(_sequel_near_miss("the witcher 3", "the witcher 3 wild hunt"))
 
 
 class AssessmentNameResolutionTests(ToolDBTestCase):
@@ -321,6 +345,19 @@ class AssessmentNameResolutionTests(ToolDBTestCase):
 
         self.assertEqual(context["game_resolution"], "not_found")
         self.assertEqual(context["resolution"]["rejected_near_miss"], "Alan Wake 2")
+
+    async def test_context_rejects_disagreeing_ordinals_in_place(self):
+        # Equal-length sequels: the tiers miss ("viii" is no token-AND hit for
+        # "vii"), the fuzzy fallback scores ~97, and the identity comparison
+        # in _sequel_near_miss refuses the wrong sequel (Codex review, PR #152).
+        await seed_game("Final Fantasy VII")
+        context = await get_assessment_context(name="Final Fantasy VIII")
+
+        self.assertEqual(context["game_resolution"], "not_found")
+        self.assertEqual(context["resolution"]["mode"], "none")
+        self.assertEqual(
+            context["resolution"]["rejected_near_miss"], "Final Fantasy VII"
+        )
 
     async def test_context_still_resolves_a_genuine_typo_fuzzily(self):
         game_id = await seed_game("Hollow Knight")
@@ -632,6 +669,9 @@ class AssessmentReadBlockTests(ToolDBTestCase):
         self.assertEqual(detail["assessments"][0]["verdict"], "buy_now")
         self.assertEqual(detail["assessments"][1]["target_price"], 15.0)
         self.assertEqual(detail["assessments"][1]["fit_call"], "coin flip")
+        # assessment_id makes the block a usable source for
+        # record_assessment(void_assessment_id=…) on a historical misfile.
+        self.assertIsInstance(detail["assessments"][0]["assessment_id"], int)
 
     async def test_bulk_detail_skips_the_block(self):
         game_id = await seed_game("Bulk Detail")
@@ -646,7 +686,7 @@ class AssessmentReadBlockTests(ToolDBTestCase):
 
     async def test_context_reports_past_assessments(self):
         game_id = await seed_game("Repeat Ask", tags=["metroidvania"])
-        await record_assessment(
+        recorded = await record_assessment(
             game_id=game_id,
             verdict="wishlist_for_sale",
             assessed_at="2026-05-01",
@@ -656,6 +696,10 @@ class AssessmentReadBlockTests(ToolDBTestCase):
         self.assertEqual(context["past_assessment_count"], 1)
         self.assertFalse(context["past_assessments_truncated"])
         self.assertEqual(context["past_assessments"][0]["verdict"], "wishlist_for_sale")
+        self.assertEqual(
+            context["past_assessments"][0]["assessment_id"],
+            recorded["assessment_id"],
+        )
 
     async def test_context_omits_the_block_for_an_unassessed_game(self):
         game_id = await seed_game("Fresh Candidate", tags=["metroidvania"])
@@ -803,6 +847,16 @@ class AssessmentsReportTests(ToolDBTestCase):
         result = await main.get_stats(report="assessments", verdict="skip")
         self.assertEqual(result["total_matches"], 1)
         self.assertEqual(result["assessments"][0]["game_id"], first)
+
+    async def test_report_carries_the_assessment_id_for_void(self):
+        # The browse report is the advertised way to recover the id a
+        # historical misfile needs for record_assessment(void_assessment_id=…).
+        game_id = await seed_game("Voidable Later")
+        recorded = await record_assessment(game_id=game_id, verdict="skip")
+        result = await main.get_stats(report="assessments")
+        self.assertEqual(
+            result["assessments"][0]["assessment_id"], recorded["assessment_id"]
+        )
 
     async def test_verdict_does_not_apply_to_other_reports(self):
         with self.assertRaises(ToolError) as ctx:
