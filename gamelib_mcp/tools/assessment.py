@@ -33,6 +33,7 @@ from ..data.db import (
     upsert_game,
 )
 from ..data.tag_synonyms import canonical_tag
+from ..data.title_normalization import normalize_search_text
 from ..utils import _parse_json
 from .batch import apply_batch_item, check_batch_items, count_status
 from .common import PLAY_STATE_SQL, PLAYTIME_SUM_SQL, clamp_limit
@@ -463,32 +464,108 @@ def _validate_inputs(
 # ── Resolution + assembly ────────────────────────────────────────────────────
 
 
-async def _resolve_game_id(
-    name: str | None, appid: int | None, game_id: int | None
-) -> int | None:
-    """Resolve identity exactly like get_game_detail (id > appid > name+fuzzy)."""
+# Ordinal tokens a near-miss can differ by — the shapes a sequel number takes
+# in a title. Roman numerals stop at xx (Final Fantasy's range); "i" is
+# deliberately included even though it also spells a word, because a false
+# reject only degrades to not_found, which the skill already treats as a
+# normal unowned candidate, while a false ACCEPT misfiles a verdict.
+_ROMAN_ORDINALS = frozenset(
+    (
+        "i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x",
+        "xi", "xii", "xiii", "xiv", "xv", "xvi", "xvii", "xviii", "xix", "xx",
+    )
+)
+
+
+def _is_ordinal_token(token: str) -> bool:
+    """An arabic number, a roman numeral i..xx, or a single character."""
+    if token.isdigit():
+        return len(token) <= 4
+    if token in _ROMAN_ORDINALS:
+        return True
+    # "Silent Hill f", "Devil May Cry 5" -> a lone character is a series marker.
+    return len(token) == 1 and token.isalnum()
+
+
+def _ordinal_near_miss(query: str, matched_name: str) -> bool:
+    """True when the two titles differ by exactly ONE TRAILING ordinal token.
+
+    The sequel-shaped near miss issue #150 was filed for: "Alan Wake 2"
+    token-AND-misses the library's "Alan Wake" (the "2" appears nowhere), then
+    the fuzzy fallback scores ~90 and hands back the predecessor. Symmetric —
+    the query may be either the longer or the shorter title.
+
+    Definition, and its limit: one list must equal the other PLUS one trailing
+    ordinal token. Two different ordinals in the same position ("final fantasy
+    vii" vs "final fantasy viii") are NOT a near miss by this rule and the
+    function returns False; those are protected upstream instead, by the tier
+    match (neither is a prefix/substring/token-AND hit for the other).
+    """
+    query_tokens = normalize_search_text(query).split()
+    name_tokens = normalize_search_text(matched_name).split()
+    if not query_tokens or not name_tokens:
+        return False
+    longer, shorter = (
+        (query_tokens, name_tokens)
+        if len(query_tokens) > len(name_tokens)
+        else (name_tokens, query_tokens)
+    )
+    if len(longer) != len(shorter) + 1 or longer[:-1] != shorter:
+        return False
+    return _is_ordinal_token(longer[-1])
+
+
+async def _resolve_by_id_or_appid(
+    appid: int | None, game_id: int | None
+) -> tuple[int | None, str | None]:
+    """The identity resolution BOTH assessment tools share: id, then appid.
+
+    Returns (game_id, mode) with mode one of "by_id" / "by_appid" /
+    "by_assessed_appid", or (None, None) when the given identity missed. Name
+    resolution is deliberately not here: the read path matches names loosely
+    (``_resolve_name_for_context``) while the write path is exact-or-mint.
+    """
     if game_id is not None:
         async with get_db() as db:
             row = await db.execute_fetchone(
                 "SELECT id FROM games WHERE id = ?", (game_id,)
             )
-        return row["id"] if row is not None else None
+        return (row["id"], "by_id") if row is not None else (None, None)
     if appid is not None:
         row = await get_game_by_appid(appid)
         if row is not None:
-            return row["id"]
+            return row["id"], "by_appid"
         # Identifier rows hang off game_platforms, so a candidate that
         # record_assessment minted (unowned, unwishlisted) is invisible to
         # get_game_by_appid — its appid lives on the assessment row itself,
         # like game_wishlist.store_identifier. Without this fallback a repeat
         # ask by appid reported not_found and re-asked for a name it had
         # already been given.
-        return await get_assessed_game_id_by_appid(appid)
-    assert name is not None
+        assessed_id = await get_assessed_game_id_by_appid(appid)
+        if assessed_id is not None:
+            return assessed_id, "by_assessed_appid"
+    return None, None
+
+
+async def _resolve_name_for_context(name: str) -> tuple[int | None, str, str | None]:
+    """Tiered + fuzzy name resolution — READ PATH ONLY (get_assessment_context).
+
+    Returns (game_id, mode, rejected_near_miss). mode is "exact" (rank 0),
+    "partial" (rank 1-3), "fuzzy" (the rapidfuzz fallback), or "none" when
+    nothing matched — including when the ordinal guard REJECTED a non-exact
+    match, in which case the rejected row's name comes back so the caller can
+    surface it ("did you mean…"; pass game_id if it was the intended game).
+
+    record_assessment deliberately does NOT call this: a loose match on a
+    write path silently files a verdict onto the wrong game (issue #150),
+    which is invisible, whereas a minted phantom row is visible and
+    repairable. Reads keep the loose match because a wrong-but-close context
+    block is recoverable by the caller reading game.name.
+    """
     match = build_name_match(name, column=NORMALIZED_NAME_SQL, use_fts=fts_ready())
     async with get_db() as db:
         row = await db.execute_fetchone(
-            f"""SELECT g.id, {match.rank_sql} AS match_rank
+            f"""SELECT g.id, g.name, {match.rank_sql} AS match_rank
                 FROM games g
                 WHERE {match.where_sql}
                 ORDER BY match_rank ASC, length(g.name) ASC, g.id ASC
@@ -496,9 +573,50 @@ async def _resolve_game_id(
             (*match.rank_params, *match.where_params),
         )
     if row is not None:
-        return row["id"]
+        if row["match_rank"] == 0:
+            return row["id"], "exact", None
+        if _ordinal_near_miss(name, row["name"]):
+            return None, "none", row["name"]
+        return row["id"], "partial", None
+
     fuzzy_ids = await fuzzy_fallback_game_ids(name)
-    return fuzzy_ids[0] if fuzzy_ids else None
+    if not fuzzy_ids:
+        return None, "none", None
+    async with get_db() as db:
+        fuzzy_row = await db.execute_fetchone(
+            "SELECT id, name FROM games WHERE id = ?", (fuzzy_ids[0],)
+        )
+    if fuzzy_row is None:
+        return None, "none", None
+    if _ordinal_near_miss(name, fuzzy_row["name"]):
+        return None, "none", fuzzy_row["name"]
+    return fuzzy_row["id"], "fuzzy", None
+
+
+_NAME_MODES = ("exact", "partial", "fuzzy", "minted")
+
+
+def _resolution_query(
+    mode: str | None, name: str | None, appid: int | None, game_id: int | None
+) -> str | None:
+    """The identity string a ``resolution`` block echoes back.
+
+    Whichever input actually did the resolving — not simply the highest-
+    precedence one given, since an appid that missed can still fall through to
+    the name (record_assessment's mint path). Unresolved identity falls back to
+    precedence order.
+    """
+    if mode == "by_id":
+        return str(game_id)
+    if mode in ("by_appid", "by_assessed_appid"):
+        return str(appid)
+    if mode in _NAME_MODES:
+        return name
+    if game_id is not None:
+        return str(game_id)
+    if appid is not None:
+        return str(appid)
+    return name
 
 
 def _compact_game_block(detail: dict[str, Any]) -> dict[str, Any]:
@@ -584,7 +702,10 @@ async def get_assessment_context(
       review enum for a resolved game (source="server_cache"), else absent.
     - fit + anchors (+ anchor_count/anchors_truncated): whenever candidate
       tags exist — caller-supplied, else the resolved game's stored tags.
-    - game + game_resolution: when identity was given (game only on resolve).
+    - game + game_resolution + resolution: when identity was given (game and
+      resolution.matched_name only on resolve; resolution.rejected_near_miss
+      only when the ordinal guard turned a sequel-shaped match into
+      not_found).
     - past_assessments (+ count/truncated): when identity resolved AND this
       game was assessed before — the repeat-ask signal, capped at
       PAST_ASSESSMENT_CAP.
@@ -607,7 +728,21 @@ async def get_assessment_context(
     resolved_id: int | None = None
     detail: dict[str, Any] | None = None
     if name is not None or appid is not None or game_id is not None:
-        resolved_id = await _resolve_game_id(name, appid, game_id)
+        near_miss: str | None = None
+        resolved_id, mode = await _resolve_by_id_or_appid(appid, game_id)
+        if resolved_id is None and game_id is None and appid is None:
+            assert name is not None
+            resolved_id, mode, near_miss = await _resolve_name_for_context(name)
+        resolution: dict[str, Any] = {
+            "mode": mode or "none",
+            "query": _resolution_query(mode, name, appid, game_id),
+        }
+        if near_miss is not None:
+            # The guard rejected a sequel-shaped match: name it, so a caller
+            # who DID mean that row can re-ask with game_id instead of taking
+            # not_found at face value.
+            resolution["rejected_near_miss"] = near_miss
+        result["resolution"] = resolution
         if resolved_id is None:
             result["game_resolution"] = "not_found"
         else:
@@ -615,6 +750,7 @@ async def get_assessment_context(
             # enrich=False: serves cached enrichment only — never provider HTTP.
             detail = await get_game_detail(game_id=resolved_id, enrich=False)
             result["game"] = _compact_game_block(detail)
+            resolution["matched_name"] = detail["name"]
             # Repeat-ask detection, for free, in the skill's Step 0: if this
             # game was assessed before, the prior verdict/date/price is what a
             # new assessment should be argued against — not re-derived blind.
@@ -975,8 +1111,34 @@ async def _validate_assessment_inputs(
     }
 
 
-async def _mint_assessed_game(name: str, appid: int | None) -> int:
-    """Create the games row for a candidate the library has never seen.
+async def _existing_exact_game_id(
+    name: str, appid: int | None, *, match_by_name: bool
+) -> int | None:
+    """``upsert_game``'s own two lookups, run ahead of it.
+
+    upsert_game adopts-or-mints in one statement and never says which it did,
+    so ``created`` would otherwise be a guess. Mirroring its identifier-then-
+    exact-name lookups here (same order, same ``match_existing_by_name``
+    branch) keeps the reported mode honest without a second write path.
+    """
+    if appid is not None:
+        row = await get_game_by_appid(appid)
+        if row is not None:
+            return row["id"]
+    if not match_by_name:
+        return None
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            "SELECT id FROM games WHERE lower(name) = lower(?) ORDER BY id LIMIT 1",
+            (name,),
+        )
+    return row["id"] if row is not None else None
+
+
+async def _adopt_or_mint_assessed_game(
+    name: str, appid: int | None
+) -> tuple[int, str]:
+    """EXACT-name adopt, else mint — the write path's whole name resolution.
 
     Same path sync_wishlist mints an unowned row through — ``upsert_game``
     with the anti-collapse guards — because an assessed candidate is exactly
@@ -986,10 +1148,22 @@ async def _mint_assessed_game(name: str, appid: int | None) -> int:
     exact-name row that already owns Steam under a DIFFERENT appid is a
     different game (Dead Space 2008 vs 2023), and attaching onto it would
     collapse two titles.
+
+    Deliberately NO tiered/fuzzy matching, mirroring add_game_to_platform
+    (issue #150): a fuzzy write attached "Alan Wake 2" onto the library's
+    "Alan Wake" and reported created=false, which is invisible. A typo now
+    mints a visible phantom row instead — repairable with merge_games — which
+    is the trade the whole write surface already makes.
+
+    Returns (game_id, "exact" | "minted").
     """
-    if appid is not None and await exact_name_steam_conflict(name, appid):
-        return await upsert_game(appid, name, match_existing_by_name=False)
-    return await upsert_game(appid, name)
+    conflict = appid is not None and await exact_name_steam_conflict(name, appid)
+    existing = await _existing_exact_game_id(name, appid, match_by_name=not conflict)
+    if conflict:
+        game_id = await upsert_game(appid, name, match_existing_by_name=False)
+    else:
+        game_id = await upsert_game(appid, name)
+    return game_id, "exact" if existing is not None else "minted"
 
 
 async def _live_ownership_state(game_id: int) -> tuple[bool, bool]:
@@ -1002,6 +1176,81 @@ async def _live_ownership_state(game_id: int) -> tuple[bool, bool]:
             "SELECT 1 FROM game_wishlist WHERE game_id = ? LIMIT 1", (game_id,)
         )
     return owned_row is not None, wishlisted_row is not None
+
+
+# Everything record_assessment accepts BESIDES void_assessment_id — the void
+# mode is exclusive, and naming the conflict beats a half-applied write.
+_VOID_EXCLUSIVE_PARAMS = (
+    "name",
+    "appid",
+    "game_id",
+    "verdict",
+    "assessed_at",
+    *_ASSESSMENT_COMPONENT_COLUMNS,
+)
+
+
+async def _void_assessment(assessment_id: int) -> dict[str, Any]:
+    """Hard-delete one misfiled assessment row.
+
+    A HARD delete on an otherwise append-only table, on purpose: a verdict
+    filed onto the wrong game was never an observation of that game, and
+    leaving it as tombstoned history would keep it in the calibration report
+    and in the wrong game's past_assessments. This is the repair for a misfile
+    noticed after the same-UTC-day replace window has passed (within the day,
+    re-recording simply overwrites).
+    """
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            """SELECT a.id, a.game_id, a.assessed_at, a.verdict, g.name
+               FROM game_assessments a
+               JOIN games g ON g.id = a.game_id
+               WHERE a.id = ?""",
+            (assessment_id,),
+        )
+        if row is None:
+            raise ToolError(
+                f"Assessment {assessment_id} not found — get the id from "
+                "record_assessment's response, get_game_detail's assessments "
+                "block, or get_stats(report=\"assessments\")"
+            )
+        game_id = row["game_id"]
+        await db.execute("DELETE FROM game_assessments WHERE id = ?", (assessment_id,))
+        # Bare = the third ownership-free shape (detect_orphan_games) is gone
+        # too: nothing owns it, nothing wants it, nothing assessed it.
+        remaining = await db.execute_fetchone(
+            """SELECT
+                 (SELECT COUNT(*) FROM game_platforms WHERE game_id = ?) AS platforms,
+                 (SELECT COUNT(*) FROM game_wishlist WHERE game_id = ?) AS wishlist,
+                 (SELECT COUNT(*) FROM game_assessments WHERE game_id = ?) AS assessments
+            """,
+            (game_id, game_id, game_id),
+        )
+        await db.commit()
+
+    result: dict[str, Any] = {
+        "voided": True,
+        "assessment_id": assessment_id,
+        "game_id": game_id,
+        "name": row["name"],
+        "verdict": row["verdict"],
+        "assessed_at": row["assessed_at"],
+    }
+    if remaining is not None and not any(
+        remaining[column] for column in ("platforms", "wishlist", "assessments")
+    ):
+        # Reported, never done — deleting a games row is a confirmed human
+        # action, and the row may predate the assessment entirely.
+        result["suggested_action"] = {
+            "tool": "delete_game",
+            "args": {"game_id": game_id, "confirm": False},
+            "note": (
+                "this game row now has no ownership, wishlist entry or "
+                "assessment left — if the void stranded a row minted for the "
+                "misfiled verdict, preview the delete before confirming"
+            ),
+        }
+    return result
 
 
 async def record_assessment(
@@ -1026,19 +1275,67 @@ async def record_assessment(
     instead_game_id: int | None = None,
     steam_appid: int | None = None,
     context: str | None = None,
+    void_assessment_id: int | None = None,
 ) -> dict:
     """Record one game-quality verdict and its components.
 
-    Identity resolves exactly like get_assessment_context (game_id > appid >
-    name + fuzzy); an unknown candidate gets a games row minted through the
-    wishlist mint path (created=true). At most one assessment per game per UTC
-    day: a same-day re-record REPLACES that day's row (replaced=true) instead
-    of appending a second verdict.
+    Identity resolves by game_id, then appid (identifier row, then the appid a
+    past assessment carries), then name — and the name branch is EXACT-match-
+    or-mint (``_adopt_or_mint_assessed_game``), like add_game_to_platform.
+    Loose matching stays on the read path only; see that function for why.
+    At most one assessment per game per UTC day: a same-day re-record REPLACES
+    that day's row (replaced=true) instead of appending a second verdict.
+
+    ``void_assessment_id`` is an exclusive third mode: it hard-deletes one
+    recorded row (the repair for a misfile noticed after that same-day
+    window), and every other parameter must be absent.
 
     Never touches tag_affinity, discover_games, or the wishlist — a
     wishlist_for_sale verdict on an unwishlisted game answers with a
     suggested_action naming add_game_to_platform, and stops there.
     """
+    if void_assessment_id is not None:
+        # Validated before anything else: a void that also carried a verdict
+        # would be two operations in one call, and the caller means one.
+        conflicts = [
+            label
+            for label, value in zip(
+                _VOID_EXCLUSIVE_PARAMS,
+                (
+                    name,
+                    appid,
+                    game_id,
+                    verdict,
+                    assessed_at,
+                    summary,
+                    craft_adjusted,
+                    craft_positive_pct,
+                    review_count,
+                    recent_trajectory,
+                    opencritic_score,
+                    fit_call,
+                    anchors_cited,
+                    flags,
+                    price_seen,
+                    price_currency,
+                    price_platform,
+                    target_price,
+                    instead_game_id,
+                    steam_appid,
+                    context,
+                ),
+                strict=True,
+            )
+            if value is not None
+        ]
+        if conflicts:
+            raise ToolError(
+                f"void_assessment_id is exclusive — it deletes one recorded "
+                f"assessment and records nothing; drop {conflicts} (or drop "
+                "void_assessment_id to record a verdict)"
+            )
+        return await _void_assessment(void_assessment_id)
+
     values = await _validate_assessment_inputs(
         name=name,
         appid=appid,
@@ -1063,8 +1360,7 @@ async def record_assessment(
         context=context,
     )
 
-    resolved_id = await _resolve_game_id(name, appid, game_id)
-    created = False
+    resolved_id, mode = await _resolve_by_id_or_appid(appid, game_id)
     if resolved_id is None:
         if game_id is not None:
             raise ToolError(f"Game {game_id} not found")
@@ -1073,8 +1369,10 @@ async def record_assessment(
                 f"No library game matches appid {appid} — pass name= as well so "
                 "the candidate can be recorded as a new row"
             )
-        resolved_id = await _mint_assessed_game(name, appid or steam_appid)
-        created = True
+        resolved_id, mode = await _adopt_or_mint_assessed_game(
+            name, appid or steam_appid
+        )
+    created = mode == "minted"
 
     owned_now, wishlisted_now = await _live_ownership_state(resolved_id)
     day = values["assessed_at"][:10]
@@ -1125,14 +1423,22 @@ async def record_assessment(
         assessment_id = same_day["id"] if same_day is not None else cursor.lastrowid
         await db.commit()
 
+    resolved_name = game_row["name"] if game_row else name
     result: dict[str, Any] = {
         "game_id": resolved_id,
-        "name": game_row["name"] if game_row else name,
+        "name": resolved_name,
         "created": created,
         "replaced": same_day is not None,
         "assessment_id": assessment_id,
         "assessed_at": values["assessed_at"],
         "verdict": values["verdict"],
+        # How identity resolved, so a caller can diff matched_name against the
+        # candidate it meant (issue #150) rather than trusting created=false.
+        "resolution": {
+            "mode": mode,
+            "query": _resolution_query(mode, name, appid, game_id),
+            "matched_name": resolved_name,
+        },
     }
     if previous:
         result["repeat_ask"] = {

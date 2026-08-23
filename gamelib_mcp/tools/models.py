@@ -826,6 +826,24 @@ class AssessmentAnchor(FlexibleModel):
     play_state: str | None = None
 
 
+class AssessmentResolution(FlexibleModel):
+    """How an assessment tool resolved the identity it was given (issue #150).
+
+    mode: "by_id" | "by_appid" | "by_assessed_appid" | "exact" | "minted"
+    (record_assessment) / plus "partial" | "fuzzy" | "none"
+    (get_assessment_context, whose name matching stays loose). matched_name is
+    the resolved row's games.name — absent when nothing resolved.
+    rejected_near_miss is filled only by get_assessment_context, when the
+    trailing-ordinal guard refused a sequel-shaped match and answered
+    not_found instead.
+    """
+
+    mode: str
+    query: str | None = None
+    matched_name: str | None = None
+    rejected_near_miss: str | None = None
+
+
 class AssessmentContextResponse(FlexibleModel):
     """get_assessment_context: every block optional — presence depends on inputs.
 
@@ -848,6 +866,8 @@ class AssessmentContextResponse(FlexibleModel):
     game: dict[str, Any] | None = None
     # "resolved" | "not_found"; absent when no identity was passed.
     game_resolution: str | None = None
+    # How that resolution happened; absent when no identity was passed.
+    resolution: AssessmentResolution | None = None
     anchors: list[AssessmentAnchor] | None = None
     anchor_count: int | None = None
     anchors_truncated: bool | None = None
@@ -858,10 +878,13 @@ class AssessmentContextResponse(FlexibleModel):
 
 
 class RecordAssessmentResponse(BatchEnvelope):
-    """record_assessment in either mode (ADR 0004: every field optional).
+    """record_assessment in any of its three modes (ADR 0004: all optional).
 
     Single mode fills the flat keys below; an ``items=`` call fills
-    BatchEnvelope's results/total/ok/errors instead.
+    BatchEnvelope's results/total/ok/errors instead; the exclusive
+    ``void_assessment_id`` mode fills voided + the deleted row's
+    assessment_id/game_id/name/verdict/assessed_at (and nothing else except a
+    delete_game suggested_action).
     """
 
     game_id: int | None = None
@@ -873,11 +896,16 @@ class RecordAssessmentResponse(BatchEnvelope):
     assessment_id: int | None = None
     assessed_at: str | None = None
     verdict: str | None = None
+    # Recording modes only: how identity resolved (mode/query/matched_name).
+    resolution: AssessmentResolution | None = None
+    # void mode only: the row was hard-deleted.
+    voided: bool | None = None
     # Only when this game was assessed on an EARLIER day:
     # {previous_count, last_assessed_at, last_verdict}.
     repeat_ask: dict[str, Any] | None = None
-    # Only for verdict="wishlist_for_sale" on a game not currently wishlisted:
-    # the add_game_to_platform call to offer. Never performed automatically.
+    # Recording: the add_game_to_platform promotion to offer for a
+    # wishlist_for_sale verdict on an unwishlisted game. Voiding: the
+    # delete_game preview for a row the void left bare. Never performed.
     suggested_action: dict[str, Any] | None = None
 
 
