@@ -457,9 +457,10 @@ async def get_stats(
     Returns results, counting_mode, total_matches, and has_more.
 
     report="assessments" (limit, offset, verdict) — browse recorded verdicts
-    (see record_assessment), newest first: game_id, name, assessed_at,
-    verdict, summary, price_seen/price_currency, target_price, plus current
-    owned/wishlisted state. verdict filters to one call ("buy_now",
+    (see record_assessment), newest first: assessment_id (what
+    record_assessment's void_assessment_id repair mode takes), game_id, name,
+    assessed_at, verdict, summary, price_seen/price_currency, target_price,
+    plus current owned/wishlisted state. verdict filters to one call ("buy_now",
     "wishlist_for_sale", "try_demo", "skip", "play_what_you_own"). Paginated
     like report="series": assessments is the page (limit default 25, max
     200), total_matches the true total, has_more whether more remain.
@@ -1137,13 +1138,26 @@ async def get_assessment_context(
       ownership subset — owned_platforms with playtime and acquisition
       (price_paid/bundle_name/purchase_source), wishlisted,
       completion_status, play_state, my_rating, HLTB hours. Check that
-      game.name is actually the candidate: a fuzzy match can land on a
-      sibling title. game_resolution="not_found" (no game block) simply
+      game.name is actually the candidate: a partial/fuzzy match can land on
+      a sibling title. game_resolution="not_found" (no game block) simply
       means the library doesn't know the game — normal for unowned
       candidates; the other blocks still come back.
+    - resolution: present whenever identity was given. mode is "by_id" |
+      "by_appid" | "by_assessed_appid" | "exact" (normalized name match) |
+      "partial" (prefix/substring/token match) | "fuzzy" | "none", with the
+      `query` used and — only when resolved — `matched_name`. When mode is
+      anything other than exact/by_id, DIFF matched_name against the
+      candidate before trusting the game block. A sequel-shaped near miss
+      is rejected outright — an added trailing ordinal ("Alan Wake 2"
+      against a library "Alan Wake", either direction) AND disagreeing
+      ordinals in place ("Final Fantasy VIII" against "Final Fantasy VII"):
+      game_resolution="not_found", mode "none", and `rejected_near_miss`
+      names the row that was refused — pass game_id if that row really was
+      the game you meant.
     - past_assessments: present only when identity resolved AND this game
       was assessed before (record_assessment) — up to 5 newest verdicts
-      with date, summary, fit_call, craft_adjusted, price seen and target
+      with assessment_id (usable as void_assessment_id), date, summary,
+      fit_call, craft_adjusted, price seen and target
       price, plus past_assessment_count (true total) and
       past_assessments_truncated. When it is present, LEAD with the prior
       verdict and what has changed since (price, patches, review
@@ -1190,6 +1204,7 @@ async def record_assessment(
     instead_game_id: int | None = None,
     steam_appid: int | None = None,
     context: str | None = None,
+    void_assessment_id: int | None = None,
     items: list[dict] | None = None,
 ) -> RecordAssessmentResponse:
     """
@@ -1202,11 +1217,33 @@ async def record_assessment(
     same game starts from what was already decided. Recording is silent
     bookkeeping: mention it in one line, never re-explain the verdict.
 
-    Identity: game_id, Steam appid, or name (partial/fuzzy, like
-    get_game_detail) — at least one. A candidate the library has never seen
-    gets a games row minted for it (created=true), which is normal for an
-    unowned title; pass name= as well when only an appid is known, since a
-    row cannot be minted without a title.
+    Identity: game_id, Steam appid, or name — at least one. PREFER game_id
+    when get_assessment_context already resolved the candidate, and when
+    correcting or re-recording. Unlike the read tools, `name` here is matched
+    EXACTLY (case-insensitively) or MINTED — never partially or fuzzily: a
+    loose write silently files the verdict onto a near-miss sibling ("Alan
+    Wake 2" onto "Alan Wake") with created=false, while a typo that mints a
+    phantom row is visible and repairable with merge_games. A candidate the
+    library has never seen therefore gets a games row minted for it
+    (created=true), which is normal for an unowned title; pass name= as well
+    when only an appid is known, since a row cannot be minted without a title.
+
+    The response's `resolution` block reports how identity was resolved:
+    mode ("by_id" | "by_appid" | "by_assessed_appid" | "exact" | "minted"),
+    the `query` used, and `matched_name` — the name of the row actually
+    written to. Whenever mode is not "by_id", check matched_name IS the
+    candidate; if it is not, void the row (below) and re-record with game_id.
+
+    void_assessment_id is an exclusive repair mode — pass it alone (no
+    verdict, no identity, no items) to HARD-DELETE one recorded assessment by
+    id: the fix for a verdict filed onto the wrong game and noticed after the
+    same-UTC-day replace window. The id comes from this tool's response
+    (assessment_id), from get_game_detail's / get_assessment_context's
+    per-game assessment blocks, or from get_stats(report="assessments") —
+    all three carry assessment_id. It answers with voided=true plus the
+    deleted row's game/verdict/date, and a delete_game suggested_action when
+    voiding left a minted row with no ownership, wishlist entry or assessment
+    behind.
 
     verdict (required) is the Step 4 line: "buy_now", "wishlist_for_sale",
     "try_demo", "skip", or "play_what_you_own". Everything else is optional
@@ -1243,6 +1280,12 @@ async def record_assessment(
     from .tools.assessment import record_assessment as _record
     from .tools.assessment import record_assessments_batch as _many
     if items is not None:
+        if void_assessment_id is not None:
+            raise ToolError(
+                "void_assessment_id is exclusive — it deletes one recorded "
+                "assessment and records nothing; drop ['items'] (or drop "
+                "void_assessment_id to record verdicts)"
+            )
         return await _many(items)
     return await _record(
         name,
@@ -1266,6 +1309,7 @@ async def record_assessment(
         instead_game_id,
         steam_appid,
         context,
+        void_assessment_id,
     )
 
 

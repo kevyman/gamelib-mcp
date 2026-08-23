@@ -130,7 +130,7 @@ EXPECTED_TOOLS = {
             "recent_trajectory", "opencritic_score", "fit_call",
             "anchors_cited", "flags", "price_seen", "price_currency",
             "price_platform", "target_price", "instead_game_id", "steam_appid",
-            "context", "items",
+            "context", "void_assessment_id", "items",
         },
         "required": set(),
     },

@@ -1,7 +1,7 @@
 ---
 name: game-quality
 description: Evaluate whether a NAMED game is good and worth John's time and money — owned or not. Triggers: "is X any good", "should I get X", "thoughts on X", "X vs Y", "is X worth playing", buy/wishlist/skip calls. NOT for picking a game for him ("what should I play", "I have 2 hours") — that's backlog-triage.
-version: "2.3.0"
+version: "2.3.1"
 ---
 
 # Game Quality Assessment
@@ -49,7 +49,7 @@ All tools below live on the **Game Library** MCP.
    - `anchors` / `anchor_count` / `anchors_truncated` — up to 8 owned, rated/played library games sharing the candidate's core tags (see Step 2).
    - `pace` — last-30-day play summary, for the Context step's time-shape judgment.
    - `past_assessments` / `past_assessment_count` / `past_assessments_truncated` — present only when this game was assessed before (see Step 4). **If it is present, this is a repeat ask: lead with the prior verdict, its date, and the price seen then, and answer what has CHANGED since** — a price move, patches, a shift in review trajectory, a new anchor he's since played. Do not re-derive the call blind and do not pretend it's the first time; the up-to-5 newest entries carry verdict, summary, fit_call, craft_adjusted, price_seen/price_currency, and target_price.
-   - `game` / `game_resolution` — when identity resolves, a compact ownership block: owned platforms with playtime and acquisition (`price_paid`/`bundle_name`/`purchase_source`), `wishlisted`, `completion_status`, `play_state`, `my_rating`, HLTB main/extra hours. `game_resolution="not_found"` is normal for an unowned candidate — the other blocks still come back. Check that `game.name` is actually the candidate: a fuzzy match can land on a sibling title.
+   - `game` / `game_resolution` — when identity resolves, a compact ownership block: owned platforms with playtime and acquisition (`price_paid`/`bundle_name`/`purchase_source`), `wishlisted`, `completion_status`, `play_state`, `my_rating`, HLTB main/extra hours. `game_resolution="not_found"` is normal for an unowned candidate — the other blocks still come back. Check that `game.name` is actually the candidate: a partial or fuzzy match can land on a sibling title. The `resolution` block says exactly how identity resolved — `mode` (`by_id` / `by_appid` / `by_assessed_appid` / `exact` / `partial` / `fuzzy` / `none`), the `query` used, and `matched_name`. **Whenever mode is not `exact` or `by_id`, diff `matched_name` against the candidate before using the `game` block**; if it's a different game, treat it as unowned and pass `name=` + `appid=` onward rather than that row's `game_id`. A sequel-shaped near miss is rejected for you: "Alan Wake 2" against a library "Alan Wake" (either direction) comes back `not_found` with `resolution.rejected_near_miss: "Alan Wake"` — if that row genuinely IS the candidate (a title he owns under a different spelling), re-ask with `game_id`.
 3. **Critic/technical detail** — `get_game_detail` (accepts `name`, `game_id`, or Steam `appid`) still, for what assessment context doesn't carry: OpenCritic score + percentile, Metacritic score, ProtonDB rating, the full tags list (if you didn't already pass them), and — for the DLC note in Step 3 — `related_content`, `parent_game_id`, `dlc_ownership`. No need to re-derive ownership, wishlist status, completion status, HLTB, or personal rating — assessment context already returned those.
 4. For Switch 2 / non-Steam titles: substitute OpenCritic + Metacritic user score + reputable outlet consensus from `get_game_detail`; skip the Steam review web search and pass no review numbers to `get_assessment_context` (its `craft` block falls back to `source="server_cache"`, or stays absent).
 
@@ -132,7 +132,7 @@ When the verdict is **Wishlist for sale**, offer to promote it onto the internal
 
 ```
 record_assessment(
-    game_id=...,            # or name=... / appid=... — mint is automatic for an unowned candidate
+    game_id=...,            # PREFER this — Step 0 returns game.game_id whenever the candidate resolved
     verdict="wishlist_for_sale",   # buy_now | wishlist_for_sale | try_demo | skip | play_what_you_own
     summary="<the one-line verdict>",
     craft_adjusted=0.87, craft_positive_pct=88, review_count=114479,   # from the craft block
@@ -147,6 +147,10 @@ record_assessment(
     context="bundle: Humble Choice 2026-08",   # when the assessment came out of a bundle/sale context
 )
 ```
+
+**Identity: pass `game_id` whenever Step 0 resolved the candidate** (`game.game_id`, and only when `resolution.matched_name` really is the candidate). Pass `name=` — plus `appid=` when you have one — only for a candidate Step 0 could NOT resolve. Unlike Step 0's lookup, `name` here matches exactly or MINTS a new row: a name miss minting a row is correct for an unowned candidate, and a typo makes a visible phantom row (repairable with `merge_games`) rather than silently filing the verdict onto a sibling title.
+
+Then check the response: `resolution.matched_name` is the row that was written to. If it isn't the candidate, repair it — `record_assessment(void_assessment_id=<assessment_id>)` hard-deletes the misfiled row (it's exclusive: nothing else in that call), then re-record with the right `game_id`. Voiding is also the fix for any assessment recorded on a past day that shouldn't stand; same-day mistakes need no void, since re-recording replaces that day's entry.
 
 This is silent bookkeeping — one line ("logged for calibration"), never a re-explanation of the verdict. Re-recording the same game on the same day replaces that day's entry, so refining a call mid-conversation is safe. The recorded verdict feeds nothing but future context and `get_stats(report="calibration")`; it never touches the wishlist, the taste profile, or recommendations.
 
