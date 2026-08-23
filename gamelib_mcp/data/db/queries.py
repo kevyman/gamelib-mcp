@@ -758,3 +758,71 @@ async def load_wishlist_with_prices(platform: str | None) -> list[aiosqlite.Row]
         )
     return rows
 
+
+
+# ── Recorded assessments (ADR 0006 decision 5) ───────────────────────────────
+#
+# Read helpers only. Nothing in this section may ever be joined into affinity
+# or discovery scoring (the ADR's hard constraint) — a recorded verdict is
+# model output, and mining it back into ranking would be a self-reinforcement
+# loop. These serve context blocks and the calibration report.
+
+# The component subset every read path shows: enough to lead with "you already
+# called this a skip in June at €30" without shipping the whole row.
+ASSESSMENT_SUMMARY_COLUMNS = (
+    "assessed_at, verdict, summary, fit_call, craft_adjusted, "
+    "price_seen, price_currency, target_price"
+)
+
+
+async def load_recent_assessments(
+    game_id: int, limit: int
+) -> tuple[list[dict], int]:
+    """Newest-first assessments for one game, capped, plus the TRUE total.
+
+    Bounded-response pattern: callers surface the list, the count, and a
+    truncation flag rather than a list that grows with how often a game was
+    re-assessed.
+    """
+    async with get_db() as db:
+        total_row = await db.execute_fetchone(
+            "SELECT COUNT(*) AS c FROM game_assessments WHERE game_id = ?",
+            (game_id,),
+        )
+        rows = await db.execute_fetchall(
+            f"""SELECT {ASSESSMENT_SUMMARY_COLUMNS}
+                FROM game_assessments
+                WHERE game_id = ?
+                ORDER BY assessed_at DESC, id DESC
+                LIMIT ?""",
+            (game_id, limit),
+        )
+    return [dict(row) for row in rows], (total_row["c"] if total_row else 0)
+
+
+async def load_latest_assessments(game_ids: Iterable[int]) -> dict[int, dict]:
+    """The newest assessment per game, for a set of games — one query, no N+1.
+
+    Used to annotate wishlist/deal listings, which already know their page's
+    game ids. Returns {game_id: {verdict, assessed_at, target_price,
+    price_currency}}; games with no assessment are simply absent.
+    """
+    ids = list(dict.fromkeys(game_ids))
+    if not ids:
+        return {}
+    placeholders = ", ".join("?" * len(ids))
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            f"""SELECT a.game_id, a.verdict, a.assessed_at, a.target_price,
+                       a.price_currency
+                FROM game_assessments a
+                WHERE a.game_id IN ({placeholders})
+                  AND a.id = (
+                      SELECT a2.id FROM game_assessments a2
+                      WHERE a2.game_id = a.game_id
+                      ORDER BY a2.assessed_at DESC, a2.id DESC
+                      LIMIT 1
+                  )""",
+            ids,
+        )
+    return {row["game_id"]: dict(row) for row in rows}

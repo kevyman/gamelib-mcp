@@ -243,6 +243,46 @@ TABLE_ANNOTATIONS: dict[str, dict] = {
             )
         },
     },
+    "game_assessments": {
+        "description": (
+            "Recorded game-quality VERDICTS and their components (ADR 0006 "
+            "decision 5) — what was decided about a game, not what is true of "
+            "it. Append-only history with at most one row per (game_id, UTC "
+            "day): a same-day re-record replaces that day's row. A row can "
+            "point at a game owned nowhere and wishlisted nowhere (a 'skip' on "
+            "a candidate), which is a legitimate shape, not an orphan. NEVER "
+            "join this into taste/affinity or recommendation queries: verdicts "
+            "are model output and feeding them back into ranking is a "
+            "self-reinforcement loop the ADR forbids."
+        ),
+        "columns": {
+            "verdict": (
+                "buy_now / wishlist_for_sale / try_demo / skip / "
+                "play_what_you_own."
+            ),
+            "craft_adjusted": (
+                "The 0-1 sample-adjusted review score (see "
+                "get_assessment_context); craft_positive_pct is the raw 0-100 "
+                "percentage — different scales, don't mix them."
+            ),
+            "owned_at_assessment": (
+                "Ownership AT THE TIME of the verdict (0/1). Compare it with "
+                "current ownership to ask whether a verdict was followed."
+            ),
+            "wishlisted_at_assessment": "Wishlist state at the time of the verdict (0/1).",
+            "anchors_cited": "JSON array of {name, game_id?} — the library games the verdict rested on.",
+            "flags": "JSON array of short strings (the verdict's red flags).",
+            "target_price": "The 'wishlist at €X' threshold, in price_currency.",
+            "instead_game_id": (
+                "For 'play_what_you_own': the games.id he was pointed at "
+                "instead. ON DELETE SET NULL."
+            ),
+            "steam_appid": (
+                "Identity evidence carried on the row itself — an unowned "
+                "candidate has no game_platforms row to hang an identifier on."
+            ),
+        },
+    },
     "play_history": {
         "description": (
             "Cumulative per-(game, platform) playtime SNAPSHOTS (totals, never "

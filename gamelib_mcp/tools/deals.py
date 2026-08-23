@@ -31,6 +31,7 @@ import aiosqlite
 from ..data.db import (
     extract_best_fuzzy_key,
     get_meta,
+    load_latest_assessments,
     load_wishlist_with_prices,
     upsert_game_prices,
 )
@@ -61,6 +62,28 @@ _MAX_SWITCH2_SEARCH_LOOKUPS = 12
 # would take), so a later hit simply overwrites the marker.
 _SWITCH2_MISS_RETRY_HOURS = 72
 _DEFAULT_OVERRIDE_RATIO = 0.5
+
+
+def _below_assessed_target(options: list[dict], assessment: dict | None) -> bool:
+    """True when the best comparable price has reached the assessed target.
+
+    "Wishlist at €20" is only answered by a price in the SAME currency —
+    prices are never currency-converted here (the repo rule), so an option
+    priced in another currency is not evidence either way and is skipped. An
+    assessment that recorded no currency is compared against every option:
+    that is the honest reading of "the number he wrote down", and it degrades
+    to the old behavior of having no target at all when nothing is priced.
+    """
+    if assessment is None or assessment.get("target_price") is None:
+        return False
+    currency = assessment.get("price_currency")
+    prices = [
+        option["price"]
+        for option in options
+        if option.get("price") is not None
+        and (currency is None or option.get("currency") in (None, currency))
+    ]
+    return bool(prices) and min(prices) <= assessment["target_price"]
 
 
 def _fetched_at_is_stale(fetched_at: str | None, hours: int = _PRICE_TTL_HOURS) -> bool:
@@ -297,6 +320,12 @@ async def get_wishlist_deals(
     never become candidates — an enrichment gap, not a "no Switch release").
     Each is omitted when zero.
 
+    A game with a recorded verdict (record_assessment) carries `assessment`
+    (latest verdict, its date, the target price it named) and, when the best
+    price in the SAME currency has reached that target,
+    `below_assessed_target: true`. Annotation only — it never changes which
+    option is recommended or which entries the filters keep.
+
     platform filters by where the game is WISHLISTED, not where the
     recommendation lands. max_price/min_cut_pct keep a game if
     ANY of its priced options — recommended or alternative — satisfies both
@@ -472,6 +501,11 @@ async def get_wishlist_deals(
         1 for gid in switch2_search_candidates if _switch2_lookup_pending(games.get(gid))
     )
 
+    # Latest recorded verdict per wishlist game — one query for the whole
+    # listing, never one per deal. Read-only annotation: an assessment never
+    # changes which option is recommended, only what the reader knows about it.
+    assessments = await load_latest_assessments(games)
+
     deals: list[dict[str, Any]] = []
     unpriced: list[str] = []
     for game_id, state in games.items():
@@ -498,17 +532,25 @@ async def get_wishlist_deals(
             unpriced.append(state["name"])
             continue
         recommended, reason = _pick_recommended(options, hw_pref, preference_override_ratio)
-        deals.append(
-            {
-                "game_id": game_id,
-                "name": state["name"],
-                **recommended,
-                "wishlisted_at": min(state["wishlisted_on"].values()),
-                "wishlisted_on": sorted(state["wishlisted_on"]),
-                "recommendation_reason": reason,
-                "alternatives": [o for o in options if o is not recommended],
+        entry = {
+            "game_id": game_id,
+            "name": state["name"],
+            **recommended,
+            "wishlisted_at": min(state["wishlisted_on"].values()),
+            "wishlisted_on": sorted(state["wishlisted_on"]),
+            "recommendation_reason": reason,
+            "alternatives": [o for o in options if o is not recommended],
+        }
+        assessment = assessments.get(game_id)
+        if assessment is not None:
+            entry["assessment"] = {
+                "verdict": assessment["verdict"],
+                "assessed_at": assessment["assessed_at"],
+                "target_price": assessment["target_price"],
             }
-        )
+            if _below_assessed_target(options, assessment):
+                entry["below_assessed_target"] = True
+        deals.append(entry)
 
     currencies = {
         c
