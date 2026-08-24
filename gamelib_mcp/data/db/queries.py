@@ -768,10 +768,13 @@ async def load_wishlist_with_prices(platform: str | None) -> list[aiosqlite.Row]
 # loop. These serve context blocks and the calibration report.
 
 # The component subset every read path shows: enough to lead with "you already
-# called this a skip in June at €30" without shipping the whole row.
+# called this a skip in June at €30" without shipping the whole row — plus the
+# declared methodology (skill/skill_version/model, NULL when the recorder said
+# nothing), so a prior verdict can be read against how it was produced.
 ASSESSMENT_SUMMARY_COLUMNS = (
     "id AS assessment_id, assessed_at, verdict, summary, fit_call, "
-    "craft_adjusted, price_seen, price_currency, target_price"
+    "craft_adjusted, price_seen, price_currency, target_price, "
+    "skill, skill_version, model"
 )
 
 

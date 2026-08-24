@@ -1309,7 +1309,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             async with db_module.get_db() as db:
                 version = await db_module._get_user_version(db)
             self.assertEqual(version, db_module.SCHEMA_VERSION)
-            self.assertEqual(db_module.SCHEMA_VERSION, 37)
+            self.assertEqual(db_module.SCHEMA_VERSION, 38)
 
             unresolved = await seed_game("Still Unresolved Wishlisted Game")
             resolved = await seed_game("Already Resolved Wishlisted Game")
