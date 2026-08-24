@@ -63,6 +63,15 @@ filterwarnings = [
     "error::pytest.PytestUnhandledThreadExceptionWarning",
     "error::pytest.PytestUnraisableExceptionWarning",
 ]
+# Hang tripwire (issue #155): any single test running past this dumps EVERY
+# thread's stack to stderr and keeps going. The deploy run of merge 3c90d68
+# hung twice at the same test and was killed by the job's 10-minute cap with
+# zero evidence — 300s fires with the whole suite normally done in ~60s, well
+# before that cap, so a recurrence leaves a diagnosis in the CI log instead of
+# a cancelled job. Local reproduction failed (8 idle + 80 CPU-saturated runs
+# green, same uv-managed Python/SQLite as the runner), so this stays until the
+# tripwire catches a stack or the hang stops recurring.
+faulthandler_timeout = 300
 
 [tool.ruff]
 target-version = "py311"
