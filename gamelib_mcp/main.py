@@ -479,7 +479,10 @@ async def get_stats(
     by_model regroup those same rates by the DECLARED provenance on each
     verdict — one entry per (skill, skill_version) pair and per model, newest
     last-assessed first, each with assessments, distinct_games, the date
-    range, and acquired/played/rated counts plus avg_rating. A verdict that
+    range, and the outcome funnel with its denominators:
+    unowned_at_assessment, acquired_count/acquired_pct (of unowned),
+    played_count/played_pct and rated_count/rated_pct (of acquired — the
+    funnel step each measures), plus avg_rating. A verdict that
     declared nothing is its own bucket with null keys — unversioned history is
     still history — and nothing is ever stamped server-side, so a null means
     the recorder didn't say. Both blocks are capped at limit with count and

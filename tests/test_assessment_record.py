@@ -1229,9 +1229,16 @@ class CalibrationProvenanceTests(ToolDBTestCase):
         self.assertEqual(old["distinct_games"], 2)
         self.assertEqual(old["first_assessed_at"][:10], "2026-01-01")
         self.assertEqual(old["last_assessed_at"][:10], "2026-01-02")
+        # Denominator + funnel rates (Codex review, PR #154): without
+        # unowned_at_assessment, acquired_count=0 can't distinguish "ignored
+        # every recommendation" from "nothing was unowned to begin with".
+        self.assertEqual(old["unowned_at_assessment"], 2)
         self.assertEqual(old["acquired_count"], 1)
+        self.assertEqual(old["acquired_pct"], 50.0)
         self.assertEqual(old["played_count"], 1)
+        self.assertEqual(old["played_pct"], 100.0)
         self.assertEqual(old["rated_count"], 1)
+        self.assertEqual(old["rated_pct"], 100.0)
         self.assertEqual(old["avg_rating"], 9.0)
 
         # The unknown bucket is reported with explicit nulls, never dropped —
@@ -1239,7 +1246,13 @@ class CalibrationProvenanceTests(ToolDBTestCase):
         unknown = by_version[None]
         self.assertIsNone(unknown["skill"])
         self.assertEqual(unknown["assessments"], 1)
+        self.assertEqual(unknown["unowned_at_assessment"], 1)
         self.assertEqual(unknown["acquired_count"], 0)
+        self.assertEqual(unknown["acquired_pct"], 0.0)
+        # Nothing acquired → the played/rated funnel steps have no
+        # denominator, and None (not 0.0) is the honest value.
+        self.assertIsNone(unknown["played_pct"])
+        self.assertIsNone(unknown["rated_pct"])
         self.assertIsNone(unknown["avg_rating"])
 
     async def test_groups_by_model_including_the_unknown_bucket(self):

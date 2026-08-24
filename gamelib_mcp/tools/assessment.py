@@ -1774,9 +1774,26 @@ def _group_by_provenance(rows: list, keys: tuple[str, ...]) -> list[dict]:
                 "distinct_games": len({row["game_id"] for row in group}),
                 "first_assessed_at": min(dates),
                 "last_assessed_at": max(dates),
+                # Denominator + funnel rates, so groups with different owned/
+                # unowned mixes stay comparable: a bare acquired_count of 0
+                # can't distinguish "every recommendation ignored" from "no
+                # unowned candidates at all". Same pct convention as
+                # by_verdict (1 decimal, None when the denominator is empty);
+                # played/rated read against ACQUIRED — the funnel step they
+                # actually measure (recommend → acquire → play → rate).
+                "unowned_at_assessment": len(unowned),
                 "acquired_count": len(acquired),
+                "acquired_pct": (
+                    round(100 * len(acquired) / len(unowned), 1) if unowned else None
+                ),
                 "played_count": len(played),
+                "played_pct": (
+                    round(100 * len(played) / len(acquired), 1) if acquired else None
+                ),
                 "rated_count": len(ratings),
+                "rated_pct": (
+                    round(100 * len(ratings) / len(acquired), 1) if acquired else None
+                ),
                 "avg_rating": _mean(ratings),
             }
         )
