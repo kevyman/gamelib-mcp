@@ -132,8 +132,18 @@ class BulkUpsertTransactionShapeTests(ToolDBTestCase):
         original = upserts.get_db
         upserts.get_db = recording_get_db
         try:
-            await bulk_upsert_steam_library(
-                _steam_rows(30, start_appid=910_000), SYNCED_AT, chunk_size=10
+            # Deadlock guard, not a latency assertion (conftest convention —
+            # this was the one await in this file without one). Three ten-row
+            # chunks on a private DB finish in well under a second even on a
+            # fully saturated 4-core box (measured 0.6s for this whole file
+            # under CPU stress), so 10s is ~20x margin — while the un-guarded
+            # call is what burned two 10-minute deploy jobs when this test
+            # wedged on the CI runner with nothing to show for it (issue #155).
+            await asyncio.wait_for(
+                bulk_upsert_steam_library(
+                    _steam_rows(30, start_appid=910_000), SYNCED_AT, chunk_size=10
+                ),
+                timeout=DEADLOCK_TIMEOUT,
             )
         finally:
             upserts.get_db = original
