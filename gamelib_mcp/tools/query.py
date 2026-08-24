@@ -281,6 +281,22 @@ TABLE_ANNOTATIONS: dict[str, dict] = {
                 "Identity evidence carried on the row itself — an unowned "
                 "candidate has no game_platforms row to hang an identifier on."
             ),
+            "skill": (
+                "Methodology provenance: the skill that produced the verdict "
+                "(e.g. 'game-quality'), as DECLARED by the recording client. "
+                "Never stamped server-side — NULL means unknown, not "
+                "'no skill', and every row predating this column is NULL."
+            ),
+            "skill_version": (
+                "That skill's frontmatter version at execution time, declared "
+                "by the client (case preserved). NULL = unknown."
+            ),
+            "model": (
+                "The model identifier the assessing client's environment "
+                "declared, verbatim and lowercased. Expect family-level values "
+                "from router-based clients ('gpt-5') — the exact variant is "
+                "not reliably visible to the model itself. NULL = unknown."
+            ),
         },
     },
     "play_history": {

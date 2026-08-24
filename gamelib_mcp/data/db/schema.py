@@ -1079,6 +1079,29 @@ _V37_SCHEMA_DDL = (
 """
 )
 
+# v38 records the METHODOLOGY behind each verdict: which skill recorded it, at
+# which version, declared by which model. All three are DECLARED-ONLY — a claim
+# the recording client made about itself — and NULL means unknown. The server
+# never default-stamps its own idea of "current": a stale installed copy of the
+# skill, or an ad-hoc assessment made without one, must not inherit the
+# canonical version this repo happens to ship, or the columns would answer a
+# question nobody asked and calibration would compare methodologies that were
+# never used.
+#
+# Free text, no CHECK and no index: new skills and new models must not need a
+# schema change, and the table is small enough that calibration scans it
+# anyway. `model` is whatever the assessing client's environment declared,
+# verbatim and lowercased — expect FAMILY-level values from ChatGPT ("gpt-5"),
+# because a router's fast/thinking variant is not reliably visible to the model
+# itself; a guessed variant would be worse than the family.
+_V38_SCHEMA_DDL = _V37_SCHEMA_DDL.replace(
+    "        owned_at_assessment      INTEGER NOT NULL DEFAULT 0,",
+    "        skill                    TEXT,\n"
+    "        skill_version            TEXT,\n"
+    "        model                    TEXT,\n"
+    "        owned_at_assessment      INTEGER NOT NULL DEFAULT 0,",
+)
+
 # Semantic views backing query_library()/get_db_schema() — NOT part of the
 # versioned schema chain (like _FTS_DDL below). Dropped and recreated on every
 # migrate_db run via _sync_query_views so a view definition change deploys on

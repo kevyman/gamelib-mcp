@@ -645,6 +645,147 @@ class RecordAssessmentBulkTests(ToolDBTestCase):
         self.assertEqual(row["context"], "summer sale")
 
 
+class AssessmentProvenanceTests(ToolDBTestCase):
+    """Declared-only methodology provenance (issue #153).
+
+    The rule under test everywhere here: the server records what the client
+    CLAIMED and nothing else. It never stamps a skill version or a model of
+    its own, so an omitted value stays NULL — "unknown", not "no skill".
+    """
+
+    async def test_round_trip_normalizes_without_inventing_a_vocabulary(self):
+        game_id = await seed_game("Provenance Round Trip")
+        await main.record_assessment(
+            game_id=game_id,
+            verdict="skip",
+            skill="  Game-Quality  ",
+            # Version case is preserved: a version string is not a name.
+            skill_version=" 2.4.0-RC1 ",
+            model=" Claude-Opus-5 ",
+        )
+        (row,) = await _assessment_rows(game_id)
+        self.assertEqual(row["skill"], "game-quality")
+        self.assertEqual(row["skill_version"], "2.4.0-RC1")
+        self.assertEqual(row["model"], "claude-opus-5")
+
+    async def test_nothing_is_stamped_when_the_caller_declares_nothing(self):
+        game_id = await seed_game("Silent Recorder")
+        await record_assessment(game_id=game_id, verdict="skip")
+        (row,) = await _assessment_rows(game_id)
+        self.assertIsNone(row["skill"])
+        self.assertIsNone(row["skill_version"])
+        self.assertIsNone(row["model"])
+
+    async def test_blank_declarations_are_null_not_empty_strings(self):
+        game_id = await seed_game("Blank Declaration")
+        await record_assessment(
+            game_id=game_id, verdict="skip", skill="", skill_version="   ", model=""
+        )
+        (row,) = await _assessment_rows(game_id)
+        self.assertIsNone(row["skill"])
+        self.assertIsNone(row["skill_version"])
+        self.assertIsNone(row["model"])
+
+    async def test_over_cap_values_are_rejected_not_truncated(self):
+        # Identifiers, not prose: a silently shortened model id would group
+        # calibration under a name nothing ever declared.
+        game_id = await seed_game("Cap Declaration")
+        for kwargs in (
+            {"model": "m" * 65},
+            {"skill": "s" * 65},
+            {"skill_version": "v" * 33},
+        ):
+            with self.subTest(**kwargs), self.assertRaises(ToolError) as ctx:
+                await record_assessment(game_id=game_id, verdict="skip", **kwargs)
+            self.assertIn("at most", str(ctx.exception))
+        self.assertEqual(await _assessment_rows(game_id), [])
+
+    async def test_same_day_rerecord_updates_the_declared_methodology(self):
+        game_id = await seed_game("Version Bump")
+        await record_assessment(
+            game_id=game_id,
+            verdict="skip",
+            assessed_at="2026-08-10",
+            skill="game-quality",
+            skill_version="2.3.1",
+            model="claude-opus-5",
+        )
+        result = await record_assessment(
+            game_id=game_id,
+            verdict="buy_now",
+            assessed_at="2026-08-10",
+            skill="game-quality",
+            skill_version="2.4.0",
+            model="gpt-5",
+        )
+        self.assertTrue(result["replaced"])
+        (row,) = await _assessment_rows(game_id)
+        self.assertEqual(row["skill_version"], "2.4.0")
+        self.assertEqual(row["model"], "gpt-5")
+
+    async def test_bulk_items_accept_the_provenance_keys(self):
+        game_id = await seed_game("Bulk Provenance")
+        result = await record_assessments_batch(
+            [
+                {
+                    "game_id": game_id,
+                    "verdict": "skip",
+                    "skill": "game-quality",
+                    "skill_version": "2.4.0",
+                    "model": "claude-opus-5",
+                }
+            ]
+        )
+        self.assertEqual(result["ok"], 1)
+        (row,) = await _assessment_rows(game_id)
+        self.assertEqual(row["skill"], "game-quality")
+
+    async def test_void_mode_rejects_provenance_like_every_other_param(self):
+        game_id = await seed_game("Void Provenance")
+        recorded = await record_assessment(game_id=game_id, verdict="skip")
+        for kwargs in (
+            {"skill": "game-quality"},
+            {"skill_version": "2.4.0"},
+            {"model": "claude-opus-5"},
+        ):
+            with self.subTest(**kwargs), self.assertRaises(ToolError) as ctx:
+                await record_assessment(
+                    void_assessment_id=recorded["assessment_id"], **kwargs
+                )
+            self.assertIn("exclusive", str(ctx.exception))
+        # The row survived every refusal.
+        self.assertEqual(len(await _assessment_rows(game_id)), 1)
+
+    async def test_read_blocks_carry_the_declared_methodology(self):
+        game_id = await make_steam_game("Provenance Reader", 4242)
+        await record_assessment(
+            game_id=game_id,
+            verdict="skip",
+            skill="game-quality",
+            skill_version="2.4.0",
+            model="claude-opus-5",
+        )
+
+        detail = await main.get_game_detail(game_id=game_id)
+        self.assertEqual(detail["assessments"][0]["skill"], "game-quality")
+        self.assertEqual(detail["assessments"][0]["skill_version"], "2.4.0")
+        self.assertEqual(detail["assessments"][0]["model"], "claude-opus-5")
+
+        context = await get_assessment_context(game_id=game_id)
+        self.assertEqual(context["past_assessments"][0]["skill_version"], "2.4.0")
+
+        report = await main.get_stats(report="assessments")
+        self.assertEqual(report["assessments"][0]["skill"], "game-quality")
+        self.assertEqual(report["assessments"][0]["model"], "claude-opus-5")
+
+    async def test_unstated_methodology_reads_back_as_null(self):
+        game_id = await seed_game("Unstated Reader")
+        await record_assessment(game_id=game_id, verdict="skip")
+        report = await main.get_stats(report="assessments")
+        self.assertIsNone(report["assessments"][0]["skill"])
+        self.assertIsNone(report["assessments"][0]["model"])
+
+
 class AssessmentReadBlockTests(ToolDBTestCase):
     async def test_detail_carries_the_newest_verdicts(self):
         game_id = await make_steam_game("Detailed", 1000)
@@ -1019,6 +1160,161 @@ class CalibrationReportTests(ToolDBTestCase):
         self.assertEqual(result["overall"]["total_assessments"], 0)
         self.assertEqual(result["by_verdict"], [])
         self.assertEqual(result["mismatches"]["skip_but_acquired"]["count"], 0)
+        self.assertEqual(result["by_methodology"]["items"], [])
+        self.assertEqual(result["by_model"]["count"], 0)
+
+
+class CalibrationProvenanceTests(ToolDBTestCase):
+    """by_methodology / by_model — how each declared methodology's calls held up."""
+
+    async def _seed_two_versions_and_models(self) -> None:
+        # Old skill version, said "buy" — bought and played.
+        old_hit = await seed_game("Old Version Hit")
+        await record_assessment(
+            game_id=old_hit,
+            verdict="buy_now",
+            assessed_at="2026-01-01",
+            skill="game-quality",
+            skill_version="2.3.1",
+            model="claude-opus-5",
+        )
+        await add_platform(old_hit, "steam", playtime_minutes=600)
+        await add_rating(old_hit, "manual", 9.0, 9.0)
+
+        # Same old version, said "buy" — still not bought.
+        old_miss = await seed_game("Old Version Miss")
+        await record_assessment(
+            game_id=old_miss,
+            verdict="buy_now",
+            assessed_at="2026-01-02",
+            skill="game-quality",
+            skill_version="2.3.1",
+            model="claude-opus-5",
+        )
+
+        # New skill version, a different model.
+        new_call = await seed_game("New Version Call")
+        await record_assessment(
+            game_id=new_call,
+            verdict="skip",
+            assessed_at="2026-03-01",
+            skill="game-quality",
+            skill_version="2.4.0",
+            model="gpt-5",
+        )
+
+        # Declared nothing at all — the unknown bucket.
+        unversioned = await seed_game("Unversioned History")
+        await record_assessment(
+            game_id=unversioned, verdict="skip", assessed_at="2026-02-01"
+        )
+
+    async def test_groups_by_skill_version_and_keeps_the_null_bucket(self):
+        await self._seed_two_versions_and_models()
+        result = await main.get_stats(report="calibration")
+
+        block = result["by_methodology"]
+        self.assertEqual(block["count"], 3)
+        self.assertFalse(block["truncated"])
+        # Newest last-assessed first: 2.4.0 (March), unknown (Feb), 2.3.1 (Jan).
+        self.assertEqual(
+            [entry["skill_version"] for entry in block["items"]],
+            ["2.4.0", None, "2.3.1"],
+        )
+
+        by_version = {entry["skill_version"]: entry for entry in block["items"]}
+        old = by_version["2.3.1"]
+        self.assertEqual(old["skill"], "game-quality")
+        self.assertEqual(old["assessments"], 2)
+        self.assertEqual(old["distinct_games"], 2)
+        self.assertEqual(old["first_assessed_at"][:10], "2026-01-01")
+        self.assertEqual(old["last_assessed_at"][:10], "2026-01-02")
+        # Denominator + funnel rates (Codex review, PR #154): without
+        # unowned_at_assessment, acquired_count=0 can't distinguish "ignored
+        # every recommendation" from "nothing was unowned to begin with".
+        self.assertEqual(old["unowned_at_assessment"], 2)
+        self.assertEqual(old["acquired_count"], 1)
+        self.assertEqual(old["acquired_pct"], 50.0)
+        self.assertEqual(old["played_count"], 1)
+        self.assertEqual(old["played_pct"], 100.0)
+        self.assertEqual(old["rated_count"], 1)
+        self.assertEqual(old["rated_pct"], 100.0)
+        self.assertEqual(old["avg_rating"], 9.0)
+
+        # The unknown bucket is reported with explicit nulls, never dropped —
+        # unversioned history is still history.
+        unknown = by_version[None]
+        self.assertIsNone(unknown["skill"])
+        self.assertEqual(unknown["assessments"], 1)
+        self.assertEqual(unknown["unowned_at_assessment"], 1)
+        self.assertEqual(unknown["acquired_count"], 0)
+        self.assertEqual(unknown["acquired_pct"], 0.0)
+        # Nothing acquired → the played/rated funnel steps have no
+        # denominator, and None (not 0.0) is the honest value.
+        self.assertIsNone(unknown["played_pct"])
+        self.assertIsNone(unknown["rated_pct"])
+        self.assertIsNone(unknown["avg_rating"])
+
+    async def test_groups_by_model_including_the_unknown_bucket(self):
+        await self._seed_two_versions_and_models()
+        result = await main.get_stats(report="calibration")
+
+        block = result["by_model"]
+        self.assertEqual(block["count"], 3)
+        self.assertEqual(
+            [entry["model"] for entry in block["items"]],
+            ["gpt-5", None, "claude-opus-5"],
+        )
+        by_model = {entry["model"]: entry for entry in block["items"]}
+        self.assertEqual(by_model["claude-opus-5"]["assessments"], 2)
+        self.assertEqual(by_model["claude-opus-5"]["played_count"], 1)
+        self.assertEqual(by_model["gpt-5"]["distinct_games"], 1)
+
+    async def test_a_game_reassessed_with_the_same_verdict_counts_once(self):
+        # Same dedupe the rest of the report uses: one row per (game, verdict),
+        # the most recent — so provenance follows the surviving row.
+        game_id = await seed_game("Reassessed Same Call")
+        await record_assessment(
+            game_id=game_id,
+            verdict="skip",
+            assessed_at="2026-01-01",
+            skill_version="2.3.1",
+        )
+        await record_assessment(
+            game_id=game_id,
+            verdict="skip",
+            assessed_at="2026-02-01",
+            skill_version="2.4.0",
+        )
+        result = await main.get_stats(report="calibration")
+        block = result["by_methodology"]
+        self.assertEqual(block["count"], 1)
+        self.assertEqual(block["items"][0]["skill_version"], "2.4.0")
+        self.assertEqual(block["items"][0]["assessments"], 1)
+
+    async def test_both_blocks_are_capped_with_a_true_count_and_flag(self):
+        for index in range(4):
+            game_id = await seed_game(f"Capped Provenance {index}")
+            await record_assessment(
+                game_id=game_id,
+                verdict="skip",
+                assessed_at=f"2026-0{index + 1}-01",
+                skill="game-quality",
+                skill_version=f"2.{index}.0",
+                model=f"model-{index}",
+            )
+        result = await main.get_stats(report="calibration", limit=2)
+        for key in ("by_methodology", "by_model"):
+            with self.subTest(block=key):
+                block = result[key]
+                self.assertEqual(len(block["items"]), 2)
+                self.assertEqual(block["count"], 4)
+                self.assertTrue(block["truncated"])
+        # The cap keeps the newest-first head, not an arbitrary slice.
+        self.assertEqual(
+            [entry["skill_version"] for entry in result["by_methodology"]["items"]],
+            ["2.3.0", "2.2.0"],
+        )
 
 
 class AssessmentIntegrityTests(ToolDBTestCase):

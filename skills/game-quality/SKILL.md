@@ -1,7 +1,7 @@
 ---
 name: game-quality
 description: Evaluate whether a NAMED game is good and worth John's time and money — owned or not. Triggers: "is X any good", "should I get X", "thoughts on X", "X vs Y", "is X worth playing", buy/wishlist/skip calls. NOT for picking a game for him ("what should I play", "I have 2 hours") — that's backlog-triage.
-version: "2.3.1"
+version: "2.4.0"
 ---
 
 # Game Quality Assessment
@@ -145,8 +145,13 @@ record_assessment(
     target_price=19.99,            # whenever "Wishlist for sale" names a threshold
     instead_game_id=...,           # for "Play what you own instead: X"
     context="bundle: Humble Choice 2026-08",   # when the assessment came out of a bundle/sale context
+    skill="game-quality",
+    skill_version="<this file's frontmatter version — read it above, don't hardcode it>",
+    model="<the model id YOUR environment declares — see below>",
 )
 ```
+
+**Provenance is declared, never guessed.** `skill_version` is whatever the `version:` field at the top of *this* file says — read it there, since an installed copy may lag the server's. `model` is the identifier your environment states about itself: Claude Code names the exact model id in its system prompt; claude.ai names its model there too; ChatGPT declares a model FAMILY — record the family or the picker selection, never a router variant (fast/thinking) you cannot actually see. Copy it verbatim, lowercased. If your environment declares no model at all — some configurations withhold it — **omit the field**: never answer from training memory, and never infer it. The server stamps nothing, so a missing value stays NULL, which honestly means "unknown"; a confident wrong value silently corrupts `get_stats(report="calibration")`'s `by_model`.
 
 **Identity: pass `game_id` whenever Step 0 resolved the candidate** (`game.game_id`, and only when `resolution.matched_name` really is the candidate). Pass `name=` — plus `appid=` when you have one — only for a candidate Step 0 could NOT resolve. Unlike Step 0's lookup, `name` here matches exactly or MINTS a new row: a name miss minting a row is correct for an unowned candidate, and a typo makes a visible phantom row (repairable with `merge_games`) rather than silently filing the verdict onto a sibling title.
 
