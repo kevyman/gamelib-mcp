@@ -295,8 +295,10 @@ async def get_game_detail(
     (for nested DLC/editions), and dlc_ownership (for base games with a cached
     Steam or IGDB DLC catalog, comparing known catalog size vs. actually-owned
     children). A game with recorded verdicts (record_assessment) also carries
-    `assessments` — the 5 newest, with assessment_count as the true total and
-    assessments_truncated as the flag — in single-game mode only.
+    `assessments` — the 5 newest (each with its verdict, summary, craft/fit
+    numbers, price seen and target, and the declared skill/skill_version/model,
+    null when the recorder stated none), with assessment_count as the true
+    total and assessments_truncated as the flag — in single-game mode only.
 
     Pass `items` (max 50) — a list of {name, appid, or game_id}, the same
     resolution — to fetch many at once. Per-item results carry status "ok"
@@ -460,7 +462,9 @@ async def get_stats(
     (see record_assessment), newest first: assessment_id (what
     record_assessment's void_assessment_id repair mode takes), game_id, name,
     assessed_at, verdict, summary, price_seen/price_currency, target_price,
-    plus current owned/wishlisted state. verdict filters to one call ("buy_now",
+    the declared methodology (skill, skill_version, model — null when the
+    recorder didn't state one), plus current owned/wishlisted state. verdict
+    filters to one call ("buy_now",
     "wishlist_for_sale", "try_demo", "skip", "play_what_you_own"). Paginated
     like report="series": assessments is the page (limit default 25, max
     200), total_matches the true total, has_more whether more remain.
@@ -471,7 +475,15 @@ async def get_stats(
     reports, per verdict and counting each game once (its most recent
     assessment with that verdict): how many were not owned at the time,
     how many are owned now (acquired_count/acquired_pct), how many of those
-    passed 2h of playtime, and the average rating since. wishlist_for_sale
+    passed 2h of playtime, and the average rating since. by_methodology and
+    by_model regroup those same rates by the DECLARED provenance on each
+    verdict — one entry per (skill, skill_version) pair and per model, newest
+    last-assessed first, each with assessments, distinct_games, the date
+    range, and acquired/played/rated counts plus avg_rating. A verdict that
+    declared nothing is its own bucket with null keys — unversioned history is
+    still history — and nothing is ever stamped server-side, so a null means
+    the recorder didn't say. Both blocks are capped at limit with count and
+    truncated. wishlist_for_sale
     adds average price seen, average target, and — among the ones bought —
     average price paid with within_target_count, all grouped PER CURRENCY and
     never summed across currencies. mismatches lists the disagreements
@@ -1157,8 +1169,9 @@ async def get_assessment_context(
     - past_assessments: present only when identity resolved AND this game
       was assessed before (record_assessment) — up to 5 newest verdicts
       with assessment_id (usable as void_assessment_id), date, summary,
-      fit_call, craft_adjusted, price seen and target
-      price, plus past_assessment_count (true total) and
+      fit_call, craft_adjusted, price seen and target price, the declared
+      methodology (skill/skill_version/model, null when unstated), plus
+      past_assessment_count (true total) and
       past_assessments_truncated. When it is present, LEAD with the prior
       verdict and what has changed since (price, patches, review
       trajectory) instead of re-deriving the call blind.
@@ -1204,6 +1217,9 @@ async def record_assessment(
     instead_game_id: int | None = None,
     steam_appid: int | None = None,
     context: str | None = None,
+    skill: str | None = None,
+    skill_version: str | None = None,
+    model: str | None = None,
     void_assessment_id: int | None = None,
     items: list[dict] | None = None,
 ) -> RecordAssessmentResponse:
@@ -1259,6 +1275,15 @@ async def record_assessment(
     steam_appid, and context (e.g. "bundle: Humble Choice 2026-08").
     assessed_at backfills a past verdict (ISO 8601, UTC); it defaults to now.
 
+    skill, skill_version and model record the METHODOLOGY behind the call:
+    the skill you followed ("game-quality"), the version in ITS frontmatter,
+    and the model identifier YOUR ENVIRONMENT declares — all three DECLARED
+    ONLY. Copy them; never guess, never answer from training memory, and omit
+    any your environment does not state (the server never fills them in, and
+    NULL correctly means "unknown"). ChatGPT-family clients should record the
+    model FAMILY they are told, not a guessed router variant. They group
+    get_stats(report="calibration")'s by_methodology / by_model.
+
     At most one assessment per game per UTC day: re-recording the same day
     REPLACES that day's row (replaced=true) rather than appending a second
     verdict, so refining a call mid-conversation is safe. Assessing the same
@@ -1309,6 +1334,9 @@ async def record_assessment(
         instead_game_id,
         steam_appid,
         context,
+        skill,
+        skill_version,
+        model,
         void_assessment_id,
     )
 

@@ -915,6 +915,14 @@ FLAG_MAX_CHARS = 120
 # playtime pseudo-rating uses for "he actually engaged with this".
 CALIBRATION_PLAYED_MINUTES = 120
 
+# Declared-only provenance caps. These are identifiers, not prose, so an
+# over-cap value is REJECTED like an over-cap list rather than truncated: a
+# silently shortened model id would group calibration under a name nothing ever
+# declared.
+SKILL_MAX_CHARS = 64
+MODEL_MAX_CHARS = 64
+SKILL_VERSION_MAX_CHARS = 32
+
 _ASSESSMENT_COMPONENT_COLUMNS = (
     "summary",
     "craft_adjusted",
@@ -934,6 +942,18 @@ _ASSESSMENT_COMPONENT_COLUMNS = (
     "context",
 )
 
+# Methodology provenance (issue #153) — kept apart from the verdict components
+# above because it describes HOW the verdict was produced, not what it says.
+# Declared-only: the server never stamps its own skill version or a model name,
+# so NULL genuinely means "the recording client didn't say".
+_ASSESSMENT_PROVENANCE_COLUMNS = ("skill", "skill_version", "model")
+
+# Everything a recording write touches, in wire order.
+_ASSESSMENT_WRITE_COLUMNS = (
+    *_ASSESSMENT_COMPONENT_COLUMNS,
+    *_ASSESSMENT_PROVENANCE_COLUMNS,
+)
+
 RECORD_ASSESSMENT_ITEM_KEYS = frozenset(
     {
         "name",
@@ -941,7 +961,7 @@ RECORD_ASSESSMENT_ITEM_KEYS = frozenset(
         "game_id",
         "verdict",
         "assessed_at",
-        *_ASSESSMENT_COMPONENT_COLUMNS,
+        *_ASSESSMENT_WRITE_COLUMNS,
     }
 )
 
@@ -1022,6 +1042,33 @@ def _normalize_flags(flags: list | None) -> str | None:
     return json.dumps(cleaned) if cleaned else None
 
 
+def _normalize_declared(
+    label: str, value: str | None, cap: int, *, lowercase: bool
+) -> str | None:
+    """Light normalization for a declared provenance value — never a vocabulary.
+
+    Strip, empty → None (an empty claim is no claim, which is exactly what NULL
+    means here), cap-check, and lowercase the free-form identifiers so
+    "Claude-Opus-5" and "claude-opus-5" don't split a calibration group. Skill
+    VERSIONS keep their case — a version string is not a name. Deliberately no
+    pattern check: a new skill or a new model must never need a code change to
+    be recordable.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ToolError(f"{label} must be a string")
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) > cap:
+        raise ToolError(
+            f"{label} accepts at most {cap} characters (got {len(text)}) — it "
+            "records what recorded the verdict, not a description"
+        )
+    return text.lower() if lowercase else text
+
+
 def _check_range(label: str, value: float | None, low: float, high: float) -> None:
     if value is None:
         return
@@ -1054,6 +1101,9 @@ async def _validate_assessment_inputs(
     instead_game_id: int | None,
     steam_appid: int | None,
     context: str | None,
+    skill: str | None,
+    skill_version: str | None,
+    model: str | None,
 ) -> dict[str, Any]:
     """Validate EVERYTHING before any write (ADR 0004's multi-mode rule).
 
@@ -1131,6 +1181,11 @@ async def _validate_assessment_inputs(
         "instead_game_id": instead_game_id,
         "steam_appid": steam_appid if steam_appid is not None else appid,
         "context": _truncate(context, CONTEXT_MAX_CHARS) if context else None,
+        "skill": _normalize_declared("skill", skill, SKILL_MAX_CHARS, lowercase=True),
+        "skill_version": _normalize_declared(
+            "skill_version", skill_version, SKILL_VERSION_MAX_CHARS, lowercase=False
+        ),
+        "model": _normalize_declared("model", model, MODEL_MAX_CHARS, lowercase=True),
     }
 
 
@@ -1209,7 +1264,7 @@ _VOID_EXCLUSIVE_PARAMS = (
     "game_id",
     "verdict",
     "assessed_at",
-    *_ASSESSMENT_COMPONENT_COLUMNS,
+    *_ASSESSMENT_WRITE_COLUMNS,
 )
 
 
@@ -1298,6 +1353,9 @@ async def record_assessment(
     instead_game_id: int | None = None,
     steam_appid: int | None = None,
     context: str | None = None,
+    skill: str | None = None,
+    skill_version: str | None = None,
+    model: str | None = None,
     void_assessment_id: int | None = None,
 ) -> dict:
     """Record one game-quality verdict and its components.
@@ -1308,6 +1366,12 @@ async def record_assessment(
     Loose matching stays on the read path only; see that function for why.
     At most one assessment per game per UTC day: a same-day re-record REPLACES
     that day's row (replaced=true) instead of appending a second verdict.
+
+    ``skill`` / ``skill_version`` / ``model`` record the METHODOLOGY behind the
+    verdict, and are DECLARED-ONLY: whatever the recording client says about
+    itself, normalized only lightly. Nothing here ever fills them in — an
+    omitted value stays NULL, meaning "unknown", which is the honest answer for
+    an ad-hoc assessment or a stale installed copy of the skill.
 
     ``void_assessment_id`` is an exclusive third mode: it hard-deletes one
     recorded row (the repair for a misfile noticed after that same-day
@@ -1346,6 +1410,9 @@ async def record_assessment(
                     instead_game_id,
                     steam_appid,
                     context,
+                    skill,
+                    skill_version,
+                    model,
                 ),
                 strict=True,
             )
@@ -1381,6 +1448,9 @@ async def record_assessment(
         instead_game_id=instead_game_id,
         steam_appid=steam_appid,
         context=context,
+        skill=skill,
+        skill_version=skill_version,
+        model=model,
     )
 
     resolved_id, mode = await _resolve_by_id_or_appid(appid, game_id)
@@ -1417,22 +1487,25 @@ async def record_assessment(
                WHERE game_id = ? AND date(assessed_at) = ?""",
             (resolved_id, day),
         )
-        columns = ["game_id", "assessed_at", "verdict", *_ASSESSMENT_COMPONENT_COLUMNS,
+        columns = ["game_id", "assessed_at", "verdict", *_ASSESSMENT_WRITE_COLUMNS,
                    "owned_at_assessment", "wishlisted_at_assessment"]
         params = [
             resolved_id,
             values["assessed_at"],
             values["verdict"],
-            *(values[column] for column in _ASSESSMENT_COMPONENT_COLUMNS),
+            *(values[column] for column in _ASSESSMENT_WRITE_COLUMNS),
             int(owned_now),
             int(wishlisted_now),
         ]
+        # Provenance is in the update set too: a same-day re-record under a
+        # newer skill version (or a different model) describes the row that now
+        # stands, so the day's row must carry the methodology that produced it.
         updates = ", ".join(
             f"{column} = excluded.{column}"
             for column in (
                 "assessed_at",
                 "verdict",
-                *_ASSESSMENT_COMPONENT_COLUMNS,
+                *_ASSESSMENT_WRITE_COLUMNS,
                 "owned_at_assessment",
                 "wishlisted_at_assessment",
             )
@@ -1537,6 +1610,7 @@ async def get_assessments_report(
             f"""SELECT a.id AS assessment_id, a.game_id, g.name,
                        a.assessed_at, a.verdict, a.summary,
                        a.price_seen, a.price_currency, a.target_price,
+                       a.skill, a.skill_version, a.model,
                        EXISTS (
                            SELECT 1 FROM game_platforms gp
                            WHERE gp.game_id = a.game_id AND gp.owned = 1
@@ -1568,6 +1642,10 @@ async def get_assessments_report(
                 "price_seen": row["price_seen"],
                 "price_currency": row["price_currency"],
                 "target_price": row["target_price"],
+                # Declared methodology; NULL means the recorder didn't say.
+                "skill": row["skill"],
+                "skill_version": row["skill_version"],
+                "model": row["model"],
                 "owned": bool(row["owned"]),
                 "wishlisted": bool(row["wishlisted"]),
             }
@@ -1605,6 +1683,7 @@ WITH ranked AS (
 )
 SELECT r.game_id, g.name, r.verdict, r.assessed_at, r.owned_at_assessment,
        r.price_seen, r.price_currency, r.target_price, r.instead_game_id,
+       r.skill, r.skill_version, r.model,
        EXISTS (
            SELECT 1 FROM game_platforms gp
            WHERE gp.game_id = r.game_id AND gp.owned = 1
@@ -1660,6 +1739,55 @@ def _mean(values: list[float]) -> float | None:
     return round(sum(values) / len(values), 2) if values else None
 
 
+def _group_by_provenance(rows: list, keys: tuple[str, ...]) -> list[dict]:
+    """Calibration rates grouped by declared methodology (issue #153).
+
+    Runs over the SAME deduped set the rest of the report uses (one row per
+    (game, verdict), its most recent). A NULL — or partially NULL — key is a
+    real bucket and is reported with explicit nulls, never dropped: verdicts
+    recorded before the columns existed, or by a client that declared nothing,
+    are still history, and silently omitting them would make the versioned rows
+    look like the whole record.
+
+    Acquisition/playtime/rating rates read only rows he did NOT already own,
+    the same restriction by_verdict applies for the same reason.
+    """
+    grouped: dict[tuple, list] = {}
+    for row in rows:
+        grouped.setdefault(tuple(row[key] for key in keys), []).append(row)
+
+    entries: list[dict] = []
+    for key, group in grouped.items():
+        unowned = [row for row in group if not row["owned_at_assessment"]]
+        acquired = [row for row in unowned if row["owned_now"]]
+        played = [
+            row
+            for row in acquired
+            if (row["playtime_minutes"] or 0) >= CALIBRATION_PLAYED_MINUTES
+        ]
+        ratings = [row["rating"] for row in acquired if row["rating"] is not None]
+        dates = [row["assessed_at"] for row in group]
+        entries.append(
+            {
+                **dict(zip(keys, key, strict=True)),
+                "assessments": len(group),
+                "distinct_games": len({row["game_id"] for row in group}),
+                "first_assessed_at": min(dates),
+                "last_assessed_at": max(dates),
+                "acquired_count": len(acquired),
+                "played_count": len(played),
+                "rated_count": len(ratings),
+                "avg_rating": _mean(ratings),
+            }
+        )
+
+    # Newest last-assessed first (the methodology in use now on top), with a
+    # deterministic name tiebreak underneath.
+    entries.sort(key=lambda entry: tuple(str(entry[key] or "") for key in keys))
+    entries.sort(key=lambda entry: entry["last_assessed_at"], reverse=True)
+    return entries
+
+
 def _per_currency(rows: list[tuple[str | None, float]]) -> list[dict]:
     """Group amounts by currency — never summed or averaged across them."""
     grouped: dict[str | None, list[float]] = {}
@@ -1673,6 +1801,9 @@ def _per_currency(rows: list[tuple[str | None, float]]) -> list[dict]:
 
 async def get_calibration_report(limit: int = CALIBRATION_LIST_DEFAULT_LIMIT) -> dict:
     """How recorded verdicts held up: acquisition, playtime, and ratings since.
+
+    Grouped by verdict, and — over the same deduped rows — by the declared
+    methodology behind each call (by_methodology / by_model, issue #153).
 
     Read-only calibration — nothing here writes, and nothing here feeds
     affinity or discovery scoring (ADR 0006's hard constraint).
@@ -1831,6 +1962,13 @@ async def get_calibration_report(limit: int = CALIBRATION_LIST_DEFAULT_LIMIT) ->
     return {
         "overall": overall,
         "by_verdict": by_verdict,
+        # Declared methodology (issue #153): which skill version / which model
+        # produced the calls, and how those calls held up. Both blocks include
+        # the unknown bucket with explicit nulls.
+        "by_methodology": _capped(
+            _group_by_provenance(rows, ("skill", "skill_version")), limit
+        ),
+        "by_model": _capped(_group_by_provenance(rows, ("model",)), limit),
         "wishlist_for_sale": wishlist_for_sale,
         "mismatches": mismatches,
         "play_what_you_own_follow_through": {

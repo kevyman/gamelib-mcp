@@ -413,6 +413,10 @@ class ResponseSizeGuardTests(ToolDBTestCase):
                 "mismatches.skip_but_acquired.items": 5,
                 "mismatches.buy_now_still_unplayed.items": 5,
                 "mismatches.wishlist_still_waiting.items": 5,
+                # Provenance grows with every distinct declared skill version
+                # / model, so both blocks carry the same cap.
+                "by_methodology.items": 5,
+                "by_model.items": 5,
             },
         ),
     ]
@@ -427,6 +431,12 @@ class ResponseSizeGuardTests(ToolDBTestCase):
                 game_id=gid,
                 verdict="skip",
                 assessed_at=f"2026-0{1 + i % 9}-0{1 + i % 9}",
+                # Distinct declared provenance per row, so calibration's
+                # by_methodology/by_model blocks really do exceed their cap
+                # here instead of collapsing into one bucket.
+                skill="game-quality",
+                skill_version=f"1.{i}.0",
+                model=f"model-{i}",
             )
             # owned on two platforms so it lands in the overlap list
             await add_platform(gid, "steam", playtime_minutes=100 + i)

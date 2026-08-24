@@ -113,7 +113,7 @@ XBOX_TITLE_ID = "xbox_title_id"
 # module load time, so this package must never import back from nintendo.py.
 # Must stay in sync with that constant's value.
 NINTENDO_TITLE_ID_TYPE = "nintendo_title_id"
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
 
 
 def normalize_identifier_value(identifier_type: str, value: str) -> str:
@@ -296,6 +296,7 @@ from .schema import (
     _V34_SCHEMA_DDL,
     _V36_SCHEMA_DDL,
     _V37_SCHEMA_DDL,
+    _V38_SCHEMA_DDL,
 )
 
 
@@ -2047,6 +2048,33 @@ async def _migrate_v36_to_v37(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v37_to_v38(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add the methodology provenance columns to game_assessments (additive).
+
+    skill / skill_version / model are DECLARED-ONLY claims (see schema.py's v38
+    note): what the recording client said about itself. Existing rows stay NULL
+    and are deliberately NOT backfilled — this repo's canonical skill version is
+    not evidence about a verdict recorded before the columns existed, and
+    stamping it would invent a methodology history. NULL is the honest value,
+    and every reader treats it as "unknown" rather than dropping the row.
+    """
+    if progress is not None:
+        progress("Migrating to v38: add assessment provenance (skill/version/model).")
+
+    cols = await _table_columns(db, "game_assessments")
+    if cols:
+        # An upgrade path that never ran v37 gets the table (already carrying
+        # these columns) from the fresh-schema pass at the end of migrate_db.
+        for column in ("skill", "skill_version", "model"):
+            if column not in cols:
+                await db.execute(
+                    f"ALTER TABLE game_assessments ADD COLUMN {column} TEXT"
+                )
+
+    await _set_user_version(db, 38)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -2083,7 +2111,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V37_SCHEMA_DDL)
+    await db.executescript(_V38_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -2226,6 +2254,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (34, _migrate_v34_to_v35),
     (35, _migrate_v35_to_v36),
     (36, _migrate_v36_to_v37),
+    (37, _migrate_v37_to_v38),
 )
 
 
@@ -2243,7 +2272,7 @@ async def _run_migrations(
         _emit(progress, f"Backed up database to {snapshot_path} before migrating.", applied_steps)
 
     if detected_state == "fresh":
-        await db.executescript(_V37_SCHEMA_DDL)
+        await db.executescript(_V38_SCHEMA_DDL)
         fts_enabled = await _sync_fts_index(db)
         await _sync_query_views(db)
         await _set_user_version(db, SCHEMA_VERSION)
@@ -2281,7 +2310,7 @@ async def _run_migrations(
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V37_SCHEMA_DDL)
+    await db.executescript(_V38_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION

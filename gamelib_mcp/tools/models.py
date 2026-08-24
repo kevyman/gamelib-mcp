@@ -296,6 +296,10 @@ class GetStatsResponse(FlexibleModel):
     # report="calibration"
     overall: dict[str, Any] | None = None
     by_verdict: list[dict[str, Any]] | None = None
+    # Declared methodology provenance, each a capped {items, count, truncated}
+    # block including the unknown (NULL) bucket.
+    by_methodology: dict[str, Any] | None = None
+    by_model: dict[str, Any] | None = None
     wishlist_for_sale: dict[str, Any] | None = None
     mismatches: dict[str, Any] | None = None
     play_what_you_own_follow_through: dict[str, Any] | None = None
