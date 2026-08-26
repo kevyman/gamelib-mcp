@@ -21,8 +21,8 @@ These are the primary operator entrypoints for Hetzner/Docker. They show:
 ### Server details
 
 - **Provider**: Hetzner Cloud
-- **IP**: `178.104.53.83`
-- **SSH**: `ssh root@178.104.53.83`
+- **IP**: `<server-ip>`
+- **SSH**: `ssh root@<server-ip>`
 - **OS**: Ubuntu 24.04 LTS
 - **Specs**: 2 vCPU, 4 GB RAM
 
@@ -62,13 +62,13 @@ git clone https://github.com/kevyman/gamelib-mcp ~/mcps
 In GitHub → Settings → Developer settings → OAuth Apps, create an app with:
 
 - **Application name:** `gamelib-mcp`
-- **Homepage URL:** `https://gamelibmcp.johnwilkos.com`
-- **Authorization callback URL:** `https://gamelibmcp.johnwilkos.com/auth/callback`
+- **Homepage URL:** `https://mcp.example.com`
+- **Authorization callback URL:** `https://mcp.example.com/auth/callback`
 
 Record its client ID and generate a client secret. The server requests only
 GitHub's `read:user` scope and separately restricts tool access to the
-numeric GitHub user ID(s) listed in `MCP_OAUTH_GITHUB_USER_IDS` (e.g.
-`12233501`).
+numeric GitHub user ID(s) listed in `MCP_OAUTH_GITHUB_USER_IDS` (find yours
+at `https://api.github.com/users/<login>`).
 
 #### 4. Configure the server
 
@@ -84,11 +84,12 @@ DATABASE_URL=file:/data/gamelib.db
 STEAM_API_KEY=your-key-from-steamcommunity.com/dev/apikey
 STEAM_ID=your-64bit-steamid
 MCP_AUTH_MODE=oauth
-MCP_PUBLIC_BASE_URL=https://gamelibmcp.johnwilkos.com
+MCP_PUBLIC_BASE_URL=https://mcp.example.com
+SITE_ADDRESS=mcp.example.com         # the domain Caddy serves; must match MCP_PUBLIC_BASE_URL's host
 GITHUB_OAUTH_CLIENT_ID=<from the GitHub OAuth App>
 GITHUB_OAUTH_CLIENT_SECRET=<from the GitHub OAuth App>
 MCP_OAUTH_JWT_SIGNING_KEY=<generate with: openssl rand -hex 32>
-MCP_OAUTH_GITHUB_USER_IDS=12233501   # comma-separated to authorize more than one GitHub user
+MCP_OAUTH_GITHUB_USER_IDS=<your numeric GitHub user id>   # comma-separated to authorize more than one
 MCP_ADMIN_AUTH_TOKEN=<generate separately with: openssl rand -hex 32>
 FASTMCP_HOME=/data/fastmcp
 MCP_ALLOWED_ORIGINS=https://claude.ai,https://chatgpt.com
@@ -114,13 +115,12 @@ reload `.env`.
 
 Point your subdomain to the server IP. Caddy handles TLS automatically.
 
-#### 6. Update the Caddyfile
+#### 6. Set the site address
 
-```
-gamelibmcp.johnwilkos.com {
-    reverse_proxy app:8000
-}
-```
+The checked-in `Caddyfile` reads its site block's domain from the
+`SITE_ADDRESS` env var (docker-compose passes it into the caddy container
+from the server-local `.env`), so the domain never needs to be committed.
+Setting `SITE_ADDRESS` in `.env` (step 4) is all Caddy needs.
 
 #### 7. Deploy
 
@@ -134,7 +134,7 @@ docker compose --profile prod logs -f
 
 ```bash
 curl -H "Authorization: Bearer $MCP_ADMIN_AUTH_TOKEN" \
-  https://gamelibmcp.johnwilkos.com/admin/integrations | jq
+  https://mcp.example.com/admin/integrations | jq
 ```
 
 Use that output or `/admin/integrations/ui` as the first readiness check:
@@ -157,7 +157,7 @@ To deploy manually (or if the Action is unavailable):
 git push
 
 # On server
-ssh root@178.104.53.83
+ssh root@<server-ip>
 cd ~/mcps && git pull && docker compose --profile prod up -d --build
 ```
 
@@ -182,7 +182,7 @@ secret**:
 
 | Secret | Value |
 | --- | --- |
-| `DEPLOY_HOST` | `178.104.53.83` |
+| `DEPLOY_HOST` | your server's IP |
 | `DEPLOY_USER` | `root` |
 | `DEPLOY_SSH_KEY` | A **private** SSH key whose public half is in the server's `~/.ssh/authorized_keys` |
 | `DEPLOY_PORT` | *(optional)* SSH port, defaults to `22` |
@@ -194,7 +194,7 @@ Generate a dedicated deploy key (don't reuse a personal key):
 ssh-keygen -t ed25519 -C "github-actions-deploy" -f deploy_key -N ""
 
 # Authorize the public half on the server
-ssh-copy-id -i deploy_key.pub root@178.104.53.83
+ssh-copy-id -i deploy_key.pub root@<server-ip>
 # (or append deploy_key.pub to ~/.ssh/authorized_keys on the server)
 
 # Paste the PRIVATE key file contents into the DEPLOY_SSH_KEY secret
@@ -208,9 +208,10 @@ Then delete the local `deploy_key`/`deploy_key.pub` files.
 The deploy does `git reset --hard origin/main`, so the server tracks `main`
 exactly. **Anything committed to the repo (including `Caddyfile`) must be
 correct for production** — local edits to *tracked* files on the server will be
-overwritten on the next deploy. In particular, commit the real domain into
-`Caddyfile` rather than editing it on the box. Untracked, gitignored files
-(`.env`, `data/`, the Legendary/lgogdownloader mounts) are never touched.
+overwritten on the next deploy. That's why the `Caddyfile` takes its domain
+from `SITE_ADDRESS` in the server-local `.env` instead of a committed value.
+Untracked, gitignored files (`.env`, `data/`, the Legendary/lgogdownloader
+mounts) are never touched.
 
 #### First-run checklist
 
@@ -218,7 +219,7 @@ overwritten on the next deploy. In particular, commit the real domain into
 2. Ensure the server clone at `~/mcps` is on `main` with a clean working tree
    (`cd ~/mcps && git status`). Commit/move any server-only edits first.
 3. Push to `main` (or use *Run workflow*) and watch the run in the Actions tab.
-4. Verify: `curl https://gamelibmcp.johnwilkos.com/health`.
+4. Verify: `curl https://mcp.example.com/health`.
 
 ### Epic in Docker
 
@@ -252,7 +253,7 @@ lgogdownloader --login   # follow prompts, stores session to ~/.config/lgogdownl
 **Copy the session to the server:**
 
 ```bash
-rsync -av ~/.config/lgogdownloader/ root@178.104.53.83:~/mcps/data/lgogdownloader/
+rsync -av ~/.config/lgogdownloader/ root@<server-ip>:~/mcps/data/lgogdownloader/
 ```
 
 **Server `.env`** (add):
@@ -313,21 +314,21 @@ Then run `refresh_library(["switch2"])` (or a full refresh) — ownership and pl
 ### Verify
 
 ```bash
-curl https://gamelibmcp.johnwilkos.com/health
+curl https://mcp.example.com/health
 # {"status": "ok"}
 
-curl https://gamelibmcp.johnwilkos.com/.well-known/oauth-protected-resource/mcp | jq
-curl https://gamelibmcp.johnwilkos.com/.well-known/oauth-authorization-server | jq
+curl https://mcp.example.com/.well-known/oauth-protected-resource/mcp | jq
+curl https://mcp.example.com/.well-known/oauth-authorization-server | jq
 
 # Must return 401 plus a WWW-Authenticate resource_metadata challenge.
-curl -i https://gamelibmcp.johnwilkos.com/mcp
+curl -i https://mcp.example.com/mcp
 ```
 
 Then check:
 
 ```bash
 curl -H "Authorization: Bearer $MCP_ADMIN_AUTH_TOKEN" \
-  https://gamelibmcp.johnwilkos.com/admin/integrations/ui
+  https://mcp.example.com/admin/integrations/ui
 ```
 
 ---
@@ -346,7 +347,7 @@ Two layers of protection:
    wrong, stop the container and restore that file. Old snapshots are safe to
    delete once a migration has been verified.
 
-2. **Nightly backup cron (installed 2026-07-02)** — the snapshot only guards
+2. **Nightly backup cron** — the snapshot only guards
    migrations; disk loss needs an off-machine copy. `/etc/cron.d/gamelib-backup`
    on the server takes a consistent `.backup` at 04:15 UTC and hands a copy to
    the dedicated `gamelib-backup` user (key-only SSH, no other access):
@@ -356,17 +357,16 @@ Two layers of protection:
 15 4 * * * root sqlite3 /root/mcps/data/library/gamelib.db ".backup /root/mcps/data/library/gamelib-nightly.bak" && install -o gamelib-backup -g gamelib-backup -m 600 /root/mcps/data/library/gamelib-nightly.bak /home/gamelib-backup/gamelib-nightly.bak
 ```
 
-3. **Off-machine pull (Windows) — installed 2026-07-02** on the home Windows
-   machine `CLOSET` (192.168.129.62): scheduled task `GamelibBackup` runs
-   `C:\Scripts\gamelib-backup.ps1` daily at 08:00 local as user `porta`,
-   pulling into `C:\Users\porta\Backups\gamelib\` with 14 rotated copies. The
-   task runs only while `porta` is logged on (no stored password — the account
-   is a passwordless Microsoft account), which matches how the machine is used.
-   Note: port 22 on CLOSET is WSL2 Ubuntu's sshd, not Windows OpenSSH — remote
-   admin goes through `ssh kevlarrelic@closet`, and Windows-side changes via
-   WSL interop (`/mnt/c/...`, `powershell.exe`, `schtasks.exe`).
+3. **Off-machine pull (Windows)** — a home Windows machine runs a scheduled
+   task `GamelibBackup` (`C:\Scripts\gamelib-backup.ps1`, daily at 08:00
+   local) that pulls the nightly snapshot into `%USERPROFILE%\Backups\gamelib\`
+   with 14 rotated copies. Schedule the task to run only while that user is
+   logged on if the account has no stored password. Gotcha worth noting: if
+   the machine runs WSL2 with sshd, port 22 may be WSL's sshd rather than
+   Windows OpenSSH — make Windows-side changes via WSL interop (`/mnt/c/...`,
+   `powershell.exe`, `schtasks.exe`) in that case.
 
-   To redo the setup from scratch (PowerShell on the Windows machine):
+   To set it up from scratch (PowerShell on the Windows machine):
 
 ```powershell
 # Generate a dedicated key (no passphrase so the scheduled task can run unattended)
@@ -389,7 +389,7 @@ $dest = "$env:USERPROFILE\Backups\gamelib"
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 $stamp = Get-Date -Format yyyy-MM-dd
 scp -i $env:USERPROFILE\.ssh\gamelib_backup -o StrictHostKeyChecking=accept-new `
-  gamelib-backup@178.104.53.83:gamelib-nightly.bak "$dest\gamelib-$stamp.bak"
+  gamelib-backup@<server-ip>:gamelib-nightly.bak "$dest\gamelib-$stamp.bak"
 if ($LASTEXITCODE -ne 0) { throw "gamelib backup pull failed" }
 Get-ChildItem $dest -Filter 'gamelib-*.bak' | Sort-Object Name -Descending |
   Select-Object -Skip 14 | Remove-Item
@@ -435,10 +435,11 @@ a backup), `docker compose exec -u 0 app sh` still works.
 ### Configure ChatGPT to use gamelib-mcp
 
 1. In ChatGPT web, enable **Settings → Apps → Advanced settings → Developer mode**.
-2. Create an app with server URL `https://gamelibmcp.johnwilkos.com/mcp`.
+2. Create an app with server URL `https://mcp.example.com/mcp`.
 3. Select **OAuth** and dynamic client registration (DCR). Do not provide a
    static bearer token and do not add credentials to the URL.
-4. Complete the FastMCP consent screen and GitHub login as `kevyman`.
+4. Complete the FastMCP consent screen and GitHub login as an account
+   allowlisted in `MCP_OAUTH_GITHUB_USER_IDS`.
 5. Scan tools, create the app, and test one read tool followed by a
    confirmation-gated write tool.
 6. Delete the previous no-auth/query-token ChatGPT app. Remove
@@ -452,7 +453,7 @@ rejected deliberately.
 
 ### Adding a new MCP
 
-1. **Add a DNS record** pointing a new subdomain to `178.104.53.83`
+1. **Add a DNS record** pointing a new subdomain to `<server-ip>`
 
 2. **Add the service** to `~/mcps/docker-compose.yml`:
    ```yaml
@@ -480,7 +481,7 @@ rejected deliberately.
 
 ### The Stacks (static 3D library visualization)
 
-Served by Caddy at `gamelibmcp.johnwilkos.com/stacks/`. It is a public,
+Served by Caddy at `mcp.example.com/stacks/`. It is a public,
 unauthenticated static site.
 
 - Code (`stacks/index.html`, `main.js`, `vendor/`, `assets_static/`) deploys

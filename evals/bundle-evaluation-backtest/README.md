@@ -1,6 +1,6 @@
 # Bundle-evaluation backtest
 
-Blind backtest of `skills/bundle-evaluation` against John's historical bundle purchases.
+Blind backtest of `skills/bundle-evaluation` against the owner's historical bundle purchases.
 Read `backtest-report.md` for the findings; `inventory.md` for the test-set selection.
 
 **The raw data files are deliberately not committed** — this is a public repo, and the

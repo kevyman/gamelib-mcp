@@ -1,6 +1,6 @@
 # Local Docker Testing
 
-This repo's checked-in [docker-compose.yml](/home/john/code/gamelib-mcp/docker-compose.yml) is aimed at the deployed setup. Use the local override in [docker-compose.local.yml](/home/john/code/gamelib-mcp/docker-compose.local.yml) for local testing; it publishes the app port to localhost while leaving production-only services disabled.
+This repo's checked-in [docker-compose.yml](docker-compose.yml) is aimed at the deployed setup. Use the local override in [docker-compose.local.yml](docker-compose.local.yml) for local testing; it publishes the app port to localhost while leaving production-only services disabled.
 
 ## One-time setup
 
@@ -62,6 +62,6 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml down
 
 ## Notes
 
-- Start only `app` locally. The checked-in Caddy config expects a real domain and is not needed for localhost testing.
+- Start only `app` locally. The checked-in Caddy config takes its domain from the `SITE_ADDRESS` env var (falling back to `localhost`) and is not needed for localhost testing.
 - `caddy` is behind the `prod` Compose profile, so it will not start during local runs unless you explicitly add `--profile prod`.
 - Nintendo needs no extra binaries in the image: Switch **ownership** uses the VGCS cookie HTTP API and Switch **playtime** uses the Parental Controls API via the pure-Python `pynintendoparental` dependency. Populate ownership with `create_session_ingest_link(provider="nintendo")` and playtime with `create_session_ingest_link(provider="nintendo_pctl")`.

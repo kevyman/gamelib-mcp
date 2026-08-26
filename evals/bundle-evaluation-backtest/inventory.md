@@ -1,8 +1,8 @@
 # Bundle-evaluation backtest — Phase 1 inventory
 
 Goal: test whether the `bundle-evaluation` skill's triage (must-have / nice / filler per
-constituent) and verdicts match John's actual historical engagement. This file is the
-candidate test set for John to pick/veto before fixtures are built. Failure-mode
+constituent) and verdicts match the owner's actual historical engagement. This file is the
+candidate test set for the owner to pick/veto before fixtures are built. Failure-mode
 discovery, not a benchmark score.
 
 ## Ground-truth definitions (per constituent, from current DB)
@@ -15,7 +15,7 @@ discovery, not a benchmark score.
 ## Headline findings from the raw inventory
 
 1. **163 named-bundle groups (2011–2026) + 115 Humble Monthly/Choice months (2015-10 → 2026-08).** Far more than needed; selection below optimizes for label quality.
-2. **Engagement collapse after 2020.** Humble Monthly months 2016–2020 average ~40–90% wanted constituents. From 2021-01 onward, nearly every Choice month has **0–1 wanted games out of ~8** — he kept subscribing for 5+ years while almost never launching a single Choice game. (Steam playtime is lifetime-cumulative, so this is real, not a data window artifact.) Consequence: recent months give almost no positive labels, and the bundle-level "he bought it" label is worth very little there. His "would you buy this again?" answers will matter most for these.
+2. **Engagement collapse after 2020.** Humble Monthly months 2016–2020 average ~40–90% wanted constituents. From 2021-01 onward, nearly every Choice month has **0–1 wanted games out of ~8** — they kept subscribing for 5+ years while almost never launching a single Choice game. (Steam playtime is lifetime-cumulative, so this is real, not a data window artifact.) Consequence: recent months give almost no positive labels, and the bundle-level "they bought it" label is worth very little there. Their "would you buy this again?" answers will matter most for these.
 3. **Card-farming era pollutes 2015–2017.** Many mid-2010s months have 3–6 farmed rows; those months' ground truth is degraded. Candidates below prefer low-farmed months.
 4. **Ratings are sparse everywhere** (0–1 rated constituents per bundle) — playtime carries the ground truth almost alone.
 5. **Skipped-month negatives exist**: gaps at 2020-05, 2020-10, 2021-01, 2021-04, 2021-09, and 2022-05…08. Whether each was a real "looked and passed" skip vs. a paused/cancelled subscription needs Gmail confirmation in Phase 2 (the 4-month 2022 gap smells like a pause).
@@ -68,12 +68,12 @@ tests both over-dismissal and over-selling at bundle level and per game.
 | 19 | Atari: Recharged Retro Revival | 2024-10 | €18.32 | 11 | 0 | 10 | 1 |
 
 (15, 18, 19 are pure hoard purchases by engagement — the interesting question is whether the
-skill would have said Skip. 16 and 17 hit John's roguelite-deckbuilder prior — good
+skill would have said Skip. 16 and 17 hit the owner's roguelite-deckbuilder prior — good
 discrimination tests. #18 Muv-Luv and #19 Atari at real €18–24 prices are the highest-stakes
 verdicts in the set.)
 
 Optional borderline: **Indie Fears Bundle** (2025-10, €13.50, 13 games, 0 wanted) — only 10
-months old, ground truth weak; include only if John confirms he's already sure he'd skip it.
+months old, ground truth weak; include only if the owner confirms they're already sure they'd skip it.
 
 ### D. True negatives — skipped/paused months (pending Gmail verification)
 

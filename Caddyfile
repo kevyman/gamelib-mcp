@@ -1,4 +1,9 @@
-gamelibmcp.johnwilkos.com {
+# The site address comes from the SITE_ADDRESS env var so no personal domain
+# lives in the repo. docker-compose.yml passes it into the caddy container from
+# the server-local .env (gitignored, survives deploys); set e.g.
+#   SITE_ADDRESS=mcp.example.com
+# there. The localhost fallback keeps local `--profile prod` runs working.
+{$SITE_ADDRESS:localhost} {
     redir /stacks /stacks/ 308
     handle_path /stacks/* {
         root * /srv/stacks
@@ -11,6 +16,6 @@ gamelibmcp.johnwilkos.com {
 }
 
 # Add future MCPs here, e.g.:
-# notes.johnwilkos.com {
+# notes.example.com {
 #     reverse_proxy notes-mcp:8001
 # }

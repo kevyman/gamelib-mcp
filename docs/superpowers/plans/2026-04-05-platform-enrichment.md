@@ -296,7 +296,7 @@
 - [ ] **Step 5: Verify migration runs cleanly**
 
   ```bash
-  cd /home/john/code/gamelib-mcp
+  cd ~/code/gamelib-mcp
   python -c "import asyncio; from gamelib_mcp.data.db import init_db; asyncio.run(init_db()); print('OK')"
   ```
 

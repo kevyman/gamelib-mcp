@@ -22,11 +22,11 @@ def _oauth_environment() -> dict[str, str]:
     return {
         "MCP_AUTH_MODE": "oauth",
         "MCP_ADMIN_AUTH_TOKEN": "a" * 32,
-        "MCP_PUBLIC_BASE_URL": "https://gamelibmcp.johnwilkos.com",
+        "MCP_PUBLIC_BASE_URL": "https://gamelib.example.com",
         "GITHUB_OAUTH_CLIENT_ID": "github-client-id",
         "GITHUB_OAUTH_CLIENT_SECRET": "github-client-secret",
         "MCP_OAUTH_JWT_SIGNING_KEY": "j" * 32,
-        "MCP_OAUTH_GITHUB_USER_IDS": "12233501",
+        "MCP_OAUTH_GITHUB_USER_IDS": "12345678",
         "FASTMCP_HOME": "/data/fastmcp",
         "MCP_ALLOWED_ORIGINS": "https://chatgpt.com",
     }
@@ -64,7 +64,7 @@ async def _invoke_asgi(
             "raw_path": path.encode(),
             "query_string": query_string,
             "headers": headers or [],
-            "server": ("gamelibmcp.johnwilkos.com", 443),
+            "server": ("gamelib.example.com", 443),
             "client": ("127.0.0.1", 12345),
         },
         receive,
@@ -126,14 +126,14 @@ def test_public_origin_is_automatically_allowed():
     assert config.allowed_origins == frozenset(
         {
             "https://chatgpt.com",
-            "https://gamelibmcp.johnwilkos.com",
+            "https://gamelib.example.com",
         }
     )
 
 
 def test_owner_authorization_accepts_only_configured_github_user_ids():
     environ = _oauth_environment()
-    environ["MCP_OAUTH_GITHUB_USER_IDS"] = "12233501, 555"
+    environ["MCP_OAUTH_GITHUB_USER_IDS"] = "12345678, 555"
     config = load_security_config(environ)
     check = config.owner_authorization_check()
 
@@ -145,7 +145,7 @@ def test_owner_authorization_accepts_only_configured_github_user_ids():
             claims={"sub": sub, "login": "irrelevant"},
         )
 
-    assert check(AuthContext(token=_token("12233501"), component=Mock())) is True
+    assert check(AuthContext(token=_token("12345678"), component=Mock())) is True
     assert check(AuthContext(token=_token("555"), component=Mock())) is True
     assert check(AuthContext(token=_token("999"), component=Mock())) is False
     assert check(AuthContext(token=None, component=Mock())) is False
@@ -173,19 +173,19 @@ def test_oauth_metadata_and_unauthenticated_challenge_are_mcp_compliant():
     resource_metadata = json.loads(resource_body)
     issuer_metadata = json.loads(issuer_body)
     assert resource_status == 200
-    assert resource_metadata["resource"] == "https://gamelibmcp.johnwilkos.com/mcp"
+    assert resource_metadata["resource"] == "https://gamelib.example.com/mcp"
     assert resource_metadata["authorization_servers"] == [
-        "https://gamelibmcp.johnwilkos.com/"
+        "https://gamelib.example.com/"
     ]
     assert resource_metadata["scopes_supported"] == ["read:user"]
     assert issuer_status == 200
     assert issuer_metadata["registration_endpoint"] == (
-        "https://gamelibmcp.johnwilkos.com/register"
+        "https://gamelib.example.com/register"
     )
     assert issuer_metadata["code_challenge_methods_supported"] == ["S256"]
     assert issuer_metadata["scopes_supported"] == ["read:user"]
     assert app.state.fastmcp_server.auth._jwt_issuer.audience == (
-        "https://gamelibmcp.johnwilkos.com/mcp"
+        "https://gamelib.example.com/mcp"
     )
     assert mcp_status == 401
     assert "resource_metadata=" in mcp_headers["www-authenticate"]
@@ -239,7 +239,7 @@ def test_dynamic_registration_restricts_client_redirects(
                 "state": "test-state",
                 "code_challenge": "a" * 43,
                 "code_challenge_method": "S256",
-                "resource": "https://gamelibmcp.johnwilkos.com/mcp",
+                "resource": "https://gamelib.example.com/mcp",
             }
         ).encode()
         authorization_status, _, _ = await _invoke_asgi(
@@ -313,7 +313,7 @@ def token(sub):
 
 
 result = {
-    "owner": check(AuthContext(token=token("12233501"), component=Mock())),
+    "owner": check(AuthContext(token=token("12345678"), component=Mock())),
     "other_user": check(AuthContext(token=token("999"), component=Mock())),
     "no_token": check(AuthContext(token=None, component=Mock())),
 }
@@ -348,7 +348,7 @@ def test_cimd_private_key_jwt_audience_is_normalized():
     # The upstream call-site expression, verbatim. If this stops producing a
     # double slash, upstream fixed the bug — delete _patch_cimd_token_audience.
     upstream_audience = f"{provider.base_url}/token"
-    assert upstream_audience == "https://gamelibmcp.johnwilkos.com//token"
+    assert upstream_audience == "https://gamelib.example.com//token"
 
     authenticator = PrivateKeyJWTClientAuthenticator(
         provider=Mock(),
@@ -357,7 +357,7 @@ def test_cimd_private_key_jwt_audience_is_normalized():
     )
 
     assert (
-        authenticator._token_endpoint_url == "https://gamelibmcp.johnwilkos.com/token"
+        authenticator._token_endpoint_url == "https://gamelib.example.com/token"
     )
 
 
@@ -374,8 +374,8 @@ def test_cimd_audience_patch_is_idempotent():
 @pytest.mark.parametrize(
     ("url", "expected"),
     [
-        ("https://gamelibmcp.johnwilkos.com//token", "https://gamelibmcp.johnwilkos.com/token"),
-        ("https://gamelibmcp.johnwilkos.com/token", "https://gamelibmcp.johnwilkos.com/token"),
+        ("https://gamelib.example.com//token", "https://gamelib.example.com/token"),
+        ("https://gamelib.example.com/token", "https://gamelib.example.com/token"),
         ("https://host///deep//path", "https://host/deep/path"),
         ("no-scheme-passthrough", "no-scheme-passthrough"),
     ],

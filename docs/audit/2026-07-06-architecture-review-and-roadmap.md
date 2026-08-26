@@ -46,7 +46,7 @@ measurement. These constants were picked by feel; nobody knows if they're
 right, and nobody will know if a future change makes them wrong.
 
 **Design.** Offline leave-one-out evaluation over the ratings table, run
-against a **prod DB snapshot** (the nightly CLOSET backups make this free):
+against a **prod DB snapshot** (the nightly off-machine backups make this free):
 
 - `scripts/eval_recsys.py --db <snapshot>`:
   - For each rated game: recompute tag affinity with that rating held out
@@ -70,7 +70,7 @@ instead of a vibe.
 
 **Problem.** `get_wishlist_deals` sorts by price ascending. A €2 shovelware
 deal outranks a €19.99-from-€59.99 game the taste profile would score 95%.
-The buying decision John actually makes weighs taste, discount quality,
+The buying decision the owner actually makes weighs taste, discount quality,
 length-per-euro, and whether the backlog already covers that itch.
 
 **Design.** Extend `get_wishlist_deals` (new `sort_by="advice"` plus new
@@ -109,13 +109,13 @@ Prerequisites, in order:
      chooses the platform; advice ranks *games*, not platforms.
 
 **Effort:** medium (three PRs: enrichment claim set, ITAD history columns,
-scoring). **Payoff:** the tool John explicitly wants during every seasonal
+scoring). **Payoff:** the tool the owner explicitly wants during every seasonal
 sale; converts the wishlist from a price list into a decision.
 
 ### 3. Deal alerts: push, not pull
 
 **Problem.** Deals expire. `get_wishlist_deals` only answers when asked;
-a historical low that lasts 48h during a week John doesn't ask is missed.
+a historical low that lasts 48h during a week the owner doesn’t ask is missed.
 
 **Design.** The periodic refresh loop in `lifecycle.py` already wakes
 regularly. Add a post-refresh hook: re-price wishlist games (respecting the
@@ -151,7 +151,7 @@ affinity.
 
 ### 5. Smaller items, worth a line each
 
-- **Restore drill.** Run one scripted restore from a CLOSET backup into a
+- **Restore drill.** Run one scripted restore from an off-machine backup into a
   scratch dir + `init_db` + row-count sanity check; document in deploy.md.
   Backups that have never been restored are Schrödinger's backups.
 - **Deals widget.** `apps.py`'s game-cards widget + item 2's fields =

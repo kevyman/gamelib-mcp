@@ -3,25 +3,25 @@
 **TL;DR:** Run blind against 24 historical bundle decisions (19 purchased, 5 skipped Humble
 Choice months), the skill's per-game triage ranks correctly in aggregate — strong-engagement
 rate falls 21% → 16% → 7% across must-have → nice → filler, and it almost never dismisses a
-game John truly ends up loving (5 misses in 71 filler calls). But its **verdict machine is
-broken in one direction: it said Buy on 21 of 24 bundles**, including all five months John
-actually looked at and skipped, and all four purchases he now says he wouldn't repeat. The
+game the owner truly ends up loving (5 misses in 71 filler calls). But its **verdict machine is
+broken in one direction: it said Buy on 21 of 24 bundles**, including all five months the owner
+actually looked at and skipped, and all four purchases they now say they wouldn't repeat. The
 two verdicts that deviated from Buy (Muv-Luv conditional-lean-skip, Atari Recharged skip)
-were both vindicated by John's own labels. The systematic failures are (1) a buy trigger
+were both vindicated by the owner's own labels. The systematic failures are (1) a buy trigger
 that any $12 8-game bundle passes trivially, (2) must-have oversell of short narrative/arty
-indies the taste profile loves on paper but John never launches, and (3) a bottom-tag veto
+indies the taste profile loves on paper but the owner never launches, and (3) a bottom-tag veto
 that files single-player AA campaigns (Sniper Elite 4, completed; Dawn of War III, 18h) as
 filler because of "military/tactical/multiplayer" tag penalties. Proposed skill edits at the
 end; none applied.
 
 ## Method (summary)
 
-- Test set (John-approved): 8 Humble Monthly months (2016–2019), 6 Humble Choice months
+- Test set (owner-approved): 8 Humble Monthly months (2016–2019), 6 Humble Choice months
   (2020–2024), 5 named Humble bundles (2023–2024), plus 5 Gmail-confirmed post-reveal
   skipped Choice months as true negatives.
 - Full original lineups reconstructed from ITAD/barter.vg/press (tier structures, early
   unlocks, pick-N rules, mid-month additions, unredeemed keys). Six extra explicit
-  negatives found: games John declined in pick-10-of-12 months or never redeemed.
+  negatives found: games the owner declined in pick-10-of-12 months or never redeemed.
 - Frozen fixture per bundle: lineup, price, structure, prior-ownership flags, and the
   library as of the decision date (dated acquisitions only; 863 undated games excluded as
   a stated lower-bound caveat). No playtime, ratings, or completion of anything.
@@ -31,7 +31,7 @@ end; none applied.
 - Ground truth from the current DB: **wanted** = ≥2h non-farmed playtime, rated ≥7, or
   completion status; **never** = never launched, unrated; ambiguous excluded. A stricter
   **strong-wanted** tier (≥8h / completed / rated ≥7 / relaunched ≥1y later) separates real
-  engagement from the mass idle sessions John confirmed ("mostly idling") pollute 2017–2020
+  engagement from the mass idle sessions the owner confirmed ("mostly idling") pollute 2017–2020
   playtime. Engagement whose `last_played` predates the bundle decision date is excluded
   entirely — it came through another copy/family share and cannot be attributed to the
   purchase (HITMAN and Cities: Skylines were the two such rows).
@@ -39,7 +39,7 @@ end; none applied.
 ## Per-game confusion matrix
 
 Decided rows only (ambiguous excluded; owned/excluded rows removed). **Strict** is the
-honest read per John's idling confirmation; the loose matrix is shown for comparison.
+honest read per the owner's idling confirmation; the loose matrix is shown for comparison.
 
 | Predicted tier | strong-wanted | idle-band 2–8h | never launched | n |
 |---|---|---|---|---|
@@ -53,13 +53,13 @@ constituent but was actually a bonus unlocked 2020-05-01, after the decision dat
 review-caught fixture leak.)
 
 Reading it: the ordering is right and the bottom end is well-calibrated — of six explicit
-negatives (games John declined or never redeemed), five were tiered filler and one nice.
+negatives (games the owner declined or never redeemed), five were tiered filler and one nice.
 The top end is the problem: a must-have call converts to real engagement about one time
 in five, and never-launched (45%) is its single most likely outcome.
 
 ## Bundle-level verdicts
 
-| Bundle | Skill verdict | Reality | Buy again? (John) | Agree? |
+| Bundle | Skill verdict | Reality | Buy again? (owner) | Agree? |
 |---|---|---|---|---|
 | Monthly Oct 2016 | buy | bought | yes | ✓ |
 | Monthly Oct 2017 | buy | bought | yes | ✓ |
@@ -75,9 +75,9 @@ in five, and never-launched (45%) is its single most likely outcome.
 | Choice Aug 2023 | buy (claim) | claimed | **no** | ✗ |
 | Choice May 2024 | buy (claim) | claimed | yes | ✓ |
 | Choice Dec 2024 | buy (claim) | claimed | **no** | ✗ |
-| RPG Legends 2023 | buy_lower_tier (= tier he bought) | bought t2 | yes | ✓ |
+| RPG Legends 2023 | buy_lower_tier (= tier they bought) | bought t2 | yes | ✓ |
 | Action Roguelikes 2023 | buy_lower_tier | bought top | (no label) | – |
-| Luck of the Draw 2023 | buy (t2 = his) | bought t2 | (no label) | – |
+| Luck of the Draw 2023 | buy (t2 = theirs) | bought t2 | (no label) | – |
 | Muv-Luv 2024 | conditional (lean skip) | bought top, 0 min played | **no** | ✓ |
 | Atari Recharged 2024 | **skip** | bought top, ~0 played | (no label) | ✓* |
 | Skipped Oct 2020 | buy | **skipped** | – | ✗ |
@@ -92,7 +92,7 @@ Against buy-again labels: 12/16 agreement, and **all four misses are false Buys 
 frame caveat.** The Monthly-era verdicts above are *hindsight-frame*: the evaluator saw
 the full post-reveal lineup, which the real purchase decision never did. Every monthly
 evaluator also recorded a *decision-frame* verdict from the early unlocks alone: 6 buy /
-2 skip, and both skips (Oct 2016, Dec 2018) hit months John would re-buy — so at decision
+2 skip, and both skips (Oct 2016, Dec 2018) hit months the owner would re-buy — so at decision
 level the skill produces false Skips too (2/8 on Monthly months), and the hindsight table
 overstates its Monthly agreement. Choice-era and named-bundle verdicts are unaffected
 (their full lineups were visible at decision time). Against the skip ground truth: 0/5.
@@ -107,7 +107,7 @@ $10–12: any two plausible-fit indies sum past $12 in historical-low prices. Ev
 month "cleared" it (e.g. Aug 2022: Omno + Emily is Away <3 ≈ $15–19 vs $11.99). The only
 Skip-family verdicts came where deviation was unambiguous (single-franchise VN bundle;
 uniform retro-penalty pile). Note the fairness caveat: the evaluators were blinded to the
-skill's sharpest real-world evidence — "he claimed the last N months and launched nothing"
+skill's sharpest real-world evidence — "they claimed the last N months and launched nothing"
 — because that data is the answer key. In live use Step 4's track-record check has this;
 but the skill treats it as *descriptive framing*, not as a gate, so nothing forces it to
 flip a verdict. It should.
@@ -117,22 +117,22 @@ The 15 must-have→never rows are dominated by exactly one shape: short, story-r
 emotional, minimalist, artistically acclaimed — Eliza, GRIS, The Life and Suffering of Sir
 Brante, Road 96, The Invincible, Venba, Scanner Sombre, MOLEK-SYNTEZ, Moonstone Island.
 The taste profile's top tags (short 0.18, emotional 0.152, minimalist 0.149) are built from
-what John *rates highly when he does play* (avg rating 9.01, mostly indie darlings) — not
-from what he *reaches for*. Tag-affinity fit alone is an aspiration signal, and the skill
+what the owner *rates highly when they do play* (avg rating 9.01, mostly indie darlings) — not
+from what they *reach for*. Tag-affinity fit alone is an aspiration signal, and the skill
 currently lets it mint must-haves. Taste-profile leakage makes this finding *stronger*:
 even with a profile partly trained on these very outcomes, must-have precision was 21%.
 
 ### F3. The bottom-tag veto overrides demonstrated behavior
 The five strict filler misses — the worst cell — are Sniper Elite 4 (**completed**, 25h),
 Dawn of War III (18h), 7 Days to Die (10h+), Dead Island (10h), Pathfinder: Kingmaker
-(12h) — plus buy-again evidence that John values these months. Each was tanked by
+(12h) — plus buy-again evidence that the owner values these months. Each was tanked by
 bottom-tag penalties (military, tactical, multiplayer, violent, rts) applied to a
-single-player campaign, or by CRPG-length skepticism. The penalties describe modes he
-avoids (PvP, live-service), but the evaluators applied them to genres — while the library's
+single-player campaign, or by CRPG-length skepticism. The penalties describe modes they
+avoid (PvP, live-service), but the evaluators applied them to genres — while the library's
 own playtime record (Sniper Elite V2/3 played; strategy titles played) said otherwise.
 
 ### F4. Engagement ≠ worth it — the ground truth cuts both ways
-John would *not* re-buy Sep 2018 (he completed Sniper Elite 4 from it) or Jan 2018 (18h in
+The owner would *not* re-buy Sep 2018 (they completed Sniper Elite 4 from it) or Jan 2018 (18h in
 DoW III), and *would* re-buy Feb 2019 (Yakuza 0 farmed, barely played). Playtime is a
 noisy proxy in both directions, which is why this report leans on the strict tier, the
 explicit negatives, and the buy-again labels together. Post-2020 the proxy is stark:
@@ -142,7 +142,7 @@ recent claims were mistakes, and the two most recent NO labels (Aug 2023, Dec 20
 ### F5. What works — keep it
 Per-game triage ordering; ownership screening (owned/€0 handling was clean everywhere,
 including prior Epic-freebie copies); tier walking (both buy_lower_tier calls landed on
-sensible tiers; RPG Legends tier-2 exactly matched what John actually did); DLC-without-
+sensible tiers; RPG Legends tier-2 exactly matched what the owner actually did); DLC-without-
 base and franchise-sequencing logic (Muv-Luv's 8 sequenced fan-content items correctly
 zeroed); explicit-negative rejection (5/6).
 
@@ -158,7 +158,7 @@ zeroed); explicit-negative rejection (5/6).
 - **Selection bias**: purchased bundles dominate; triage scoring and the 5 skipped months
   + 6 explicit negatives mitigate.
 - **Anachronistic reviews**: evaluators used today's review data flagged as such.
-- **Idle contamination**: 2017–2020 playtime includes mass idle sessions (John-confirmed);
+- **Idle contamination**: 2017–2020 playtime includes mass idle sessions (owner-confirmed);
   handled via the strict tier, imperfectly.
 - **Model confound**: 22 of 24 evaluations ran on Sonnet, 2 (Muv-Luv, Nov 2018) on the
   session model after a mid-run limit reset forced a cheaper rerun. Both nuanced
@@ -166,10 +166,10 @@ zeroed); explicit-negative rejection (5/6).
   so the Buy-bias is not obviously a small-model artifact, but per-verdict boldness may
   vary by model.
 
-## Proposed skill edits (not applied — for John's review)
+## Proposed skill edits (not applied — for the owner's review)
 
 **E1 — Make the subscription-month track record a gate, not framing (Step 0/Step 4).**
-Add to Step 0's "Is he already subscribed?" block:
+Add to Step 0's "Are they already subscribed?" block:
 > Before evaluating the lineup at all, compute the recent claim-to-launch record: of the
 > last 6 claimed Choice months (Step 1 search results carry `playtime_hours` for their
 > constituents), how many produced ≥2h of play on anything? If the answer is ≈0, the
@@ -180,17 +180,17 @@ Add to Step 0's "Is he already subscribed?" block:
 **E2 — Behavioral corroboration required for must-have (Step 2).**
 Append to the tier definitions:
 > **Must-have requires more than tag fit.** Promote to must-have only with (a) a wishlist
-> entry or series/franchise he has played, or (b) profile-tag fit *plus* a played (≥2h,
+> entry or series/franchise they have played, or (b) profile-tag fit *plus* a played (≥2h,
 > non-farmed) library neighbor in the same genre. Tag fit alone — especially the
-> short/emotional/story-rich cluster, which measures what he rates highly, not what he
-> launches — caps a game at **nice**. The affinity profile is an aspiration signal; the
+> short/emotional/story-rich cluster, which measures what they rate highly, not what they
+> launch — caps a game at **nice**. The affinity profile is an aspiration signal; the
 > playtime record is the behavior signal; must-have needs both.
 
 **E3 — Negative tags penalize modes, not campaigns (Step 2).**
 Append after the standing-priors line:
 > The multiplayer/PvP/live-service penalty applies to games that *require* those modes.
 > A single-player campaign with strong reviews does not inherit the penalty from
-> military/tactical/violent genre tags — check the library first: if he has real playtime
+> military/tactical/violent genre tags — check the library first: if they have real playtime
 > on same-franchise or same-genre titles (Sniper Elite, strategy campaigns), the penalty
 > does not apply, and prior-franchise playtime is itself must-have corroboration per E2.
 
@@ -205,14 +205,14 @@ Append after the standing-priors line:
 > For Humble-Monthly-style mystery boxes (if they return): the decision is the early
 > unlocks vs the price; never argue from the expected value of the unrevealed remainder.
 > (Backtest: two months' verdicts flipped between frames — Oct 2016 and Dec 2018 looked
-> skippable on early unlocks alone, yet John would re-buy both. A mystery box's value
+> skippable on early unlocks alone, yet the owner would re-buy both. A mystery box's value
 > genuinely wasn't knowable at decision time; judging only what's visible is the only
 > honest frame, and the bundle-level table's Monthly rows are hindsight-frame — see the
 > frame caveat there.)
 
 ## Files
 
-- `inventory.md` — Phase 1 candidate set (John-approved).
+- `inventory.md` — Phase 1 candidate set (owner-approved).
 - `lineups/*.json` — reconstructed lineups, tiers, early unlocks, sources (public facts).
 - `work/build_fixtures.py`, `work/score.py`, `work/eval_prompt_template.md` — the harness.
 - The raw data (fixtures, results, ground truth, taste profile, dated library dump) is

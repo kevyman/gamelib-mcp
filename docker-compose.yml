@@ -28,6 +28,11 @@ services:
     profiles:
       - prod
     restart: always
+    environment:
+      # Public domain for the Caddyfile's site block. Compose reads the value
+      # from the server-local .env (same file the app's env_file points at);
+      # the fallback keeps local prod-profile runs working without one.
+      SITE_ADDRESS: ${SITE_ADDRESS:-localhost}
     ports:
       - "80:80"
       - "443:443"

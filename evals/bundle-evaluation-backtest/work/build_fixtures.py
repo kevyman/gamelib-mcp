@@ -76,11 +76,11 @@ BUNDLES = {
     "named-luck-of-the-draw-encore":("2023-12-10", "$18.00 paid (tier 2 of 2; tier 1 was $12 for 6 games)", None),
     "named-muv-luv":                ("2024-07-04", "€23.85 paid", None),
     "named-atari-recharged":        ("2024-10-20", "€18.32 paid", None),
-    "skipped-2020-10":  ("2020-10-29", None, "John SKIPPED this month (fact hidden from evaluator; evaluate as an open decision)."),
-    "skipped-2021-01":  ("2021-01-24", None, "John SKIPPED this month (fact hidden from evaluator; evaluate as an open decision)."),
-    "skipped-2021-09":  ("2021-09-10", None, "John SKIPPED this month (fact hidden from evaluator; evaluate as an open decision)."),
-    "skipped-2022-05":  ("2022-05-17", None, "John SKIPPED this month (fact hidden from evaluator; evaluate as an open decision)."),
-    "skipped-2022-08":  ("2022-08-28", None, "John SKIPPED this month (fact hidden from evaluator; evaluate as an open decision)."),
+    "skipped-2020-10":  ("2020-10-29", None, "The owner SKIPPED this month (fact hidden from evaluator; evaluate as an open decision)."),
+    "skipped-2021-01":  ("2021-01-24", None, "The owner SKIPPED this month (fact hidden from evaluator; evaluate as an open decision)."),
+    "skipped-2021-09":  ("2021-09-10", None, "The owner SKIPPED this month (fact hidden from evaluator; evaluate as an open decision)."),
+    "skipped-2022-05":  ("2022-05-17", None, "The owner SKIPPED this month (fact hidden from evaluator; evaluate as an open decision)."),
+    "skipped-2022-08":  ("2022-08-28", None, "The owner SKIPPED this month (fact hidden from evaluator; evaluate as an open decision)."),
 }
 
 
