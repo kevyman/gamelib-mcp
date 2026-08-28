@@ -18,6 +18,21 @@ from gamelib_mcp import main
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools.assessment import record_assessment
 
+# record_assessment assembles an evaluation package whose media step is the
+# only provider call in this module; neutralized module-wide so nothing here
+# reaches the network. The package test below patches it with real payloads.
+_MEDIA_PATCH = patch(
+    "gamelib_mcp.tools.assessment.get_game_media", AsyncMock(return_value=None)
+)
+
+
+def setUpModule():
+    _MEDIA_PATCH.start()
+
+
+def tearDownModule():
+    _MEDIA_PATCH.stop()
+
 
 class SyncTargetDispatchTests(unittest.IsolatedAsyncioTestCase):
     def _patches(self):
@@ -519,3 +534,84 @@ class ResponseSizeGuardTests(ToolDBTestCase):
         self.assertEqual(len(assessment["anchors"]), 8)
         self.assertEqual(assessment["anchor_count"], 40)
         self.assertTrue(assessment["anchors_truncated"])
+
+    async def test_evaluation_package_lists_are_capped(self):
+        # record_assessment's package is a WRITE response, but it carries the
+        # same shapes: media and similar games grow with the source, past
+        # verdicts with how often the game was re-assessed, anchors and
+        # comparisons with what the caller cited.
+        gid = await seed_game("Packaged", tags=["bulk tag"])
+        await add_platform(gid, "steam", playtime_minutes=30)
+        anchors = [await seed_game(f"Anchor {i}") for i in range(8)]
+        for day in range(1, 9):
+            await record_assessment(
+                game_id=gid, verdict="skip", assessed_at=f"2026-03-0{day}"
+            )
+
+        media = {
+            "media": {
+                "source": "igdb",
+                "trailer": None,
+                # Already capped by data/media.py; asserted here so a raised
+                # cap has to be raised deliberately in both places.
+                "screenshots": [{"thumb": f"t{i}", "full": f"f{i}"} for i in range(6)],
+                "screenshot_count": 20,
+                "screenshots_truncated": True,
+                "short_description": "x",
+            },
+            "similar_raw": [
+                {
+                    "igdb_id": 900 + i,
+                    "name": f"Similar {i}",
+                    "release_year": 2020,
+                    "cover_image_id": None,
+                }
+                for i in range(12)
+            ],
+            "similar_count": 12,
+            "igdb_id": 5,
+        }
+        with patch(
+            "gamelib_mcp.tools.assessment.get_game_media",
+            new=AsyncMock(return_value=media),
+        ):
+            result = await main.record_assessment(
+                game_id=gid,
+                verdict="buy_now",
+                assessed_at="2026-04-01",
+                anchors_cited=[
+                    {"name": f"Anchor {i}", "game_id": anchor_id}
+                    for i, anchor_id in enumerate(anchors)
+                ],
+                flags=[f"flag {i}" for i in range(8)],
+                for_you_if=[f"bullet {i}" for i in range(4)],
+                comparisons=[
+                    {"name": f"Anchor {i}", "relation": "similar"} for i in range(6)
+                ],
+            )
+
+        package = result["package"]
+        caps = {
+            "anchors": 8,
+            "comparisons": 6,
+            "flags": 8,
+            "media.screenshots": 6,
+            "similar.items": 8,
+            "past.items": 5,
+            "presentation.for_you_if": 4,
+        }
+        for path, cap in caps.items():
+            node = package
+            for key in path.split("."):
+                self.assertIn(key, node, f"package has no '{path}'; the contract is stale")
+                node = node[key]
+            self.assertLessEqual(
+                len(node), cap,
+                f"package returned {len(node)} entries at '{path}' "
+                f"but the contract caps it at {cap}",
+            )
+        # Capped lists still report the true totals.
+        self.assertEqual(package["similar"]["count"], 12)
+        self.assertTrue(package["similar"]["truncated"])
+        self.assertEqual(package["past"]["count"], 8)
+        self.assertTrue(package["past"]["truncated"])

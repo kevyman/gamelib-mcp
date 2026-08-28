@@ -382,8 +382,16 @@ async def enrich_game(appid: int, client: httpx.AsyncClient | None = None) -> di
     return dict(refreshed) if refreshed else None
 
 
+STORE_ENRICHMENT_FILTERS = (
+    "basic,genres,categories,short_description,metacritic,release_date,dlc"
+)
+
+
 async def fetch_store_appdetails(
-    appid: int, client: httpx.AsyncClient | None = None
+    appid: int,
+    client: httpx.AsyncClient | None = None,
+    *,
+    filters: str = STORE_ENRICHMENT_FILTERS,
 ) -> dict | None:
     """Fetch ONE app's appdetails ``data`` payload; None on failure/no data.
 
@@ -391,16 +399,19 @@ async def fetch_store_appdetails(
     no use for the review summary (e.g. detect_misclassified_dlc's type probe)
     — every request goes through the shared quota-budgeted gate, so a
     discarded reviews call would halve a probe's effective budget.
+
+    ``filters`` selects the appdetails field groups. The default is the
+    enrichment set every long-standing caller wants; data/media.py asks for the
+    media groups instead, which enrichment has no use for (and which the 7-day
+    store cache predates, so media is fetched on demand rather than read off a
+    stored row).
     """
     async def fetch(active_client: httpx.AsyncClient) -> dict | None:
         try:
             payload = await _steam_get_json_with_retry(
                 active_client,
                 STORE_API,
-                params={
-                    "appids": appid,
-                    "filters": "basic,genres,categories,short_description,metacritic,release_date,dlc",
-                },
+                params={"appids": appid, "filters": filters},
                 timeout=15,
             )
             app_data = payload.get(str(appid), {})

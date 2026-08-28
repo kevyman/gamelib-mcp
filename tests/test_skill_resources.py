@@ -455,7 +455,7 @@ class GetSkillToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.content, on_disk)
         self.assertEqual(response.skill, "game-quality")
         self.assertEqual(response.path, "SKILL.md")
-        self.assertEqual(response.version, "2.4.0")
+        self.assertEqual(response.version, "3.0.0")
 
     async def test_wire_call_returns_structured_content(self) -> None:
         from gamelib_mcp import main

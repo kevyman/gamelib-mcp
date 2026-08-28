@@ -27,6 +27,7 @@ from fastmcp.server.middleware import Middleware as FastMCPMiddleware
 from mcp.types import Icon, ToolAnnotations
 
 from .apps import GAME_CARDS_APP, register_apps
+from .apps_eval import EVAL_CARD_APP, register_eval_app
 from .auth import load_security_config
 from .http_admin import HttpSecurityMiddleware, register_http_routes
 from .lifecycle import lifespan
@@ -164,6 +165,7 @@ mcp = FastMCP(
 )
 
 register_apps(mcp)
+register_eval_app(mcp)
 register_skill_resources(mcp)
 
 
@@ -1193,7 +1195,7 @@ async def get_assessment_context(
     )
 
 
-@mcp.tool(title="Record Assessment", annotations=MUTATION_TOOL)
+@mcp.tool(title="Record Assessment", annotations=MUTATION_TOOL, app=EVAL_CARD_APP)
 async def record_assessment(
     name: str | None = None,
     appid: int | None = None,
@@ -1223,6 +1225,10 @@ async def record_assessment(
     skill: str | None = None,
     skill_version: str | None = None,
     model: str | None = None,
+    elevator_pitch: str | None = None,
+    for_you_if: list[str] | None = None,
+    not_for_you_if: list[str] | None = None,
+    comparisons: list[dict] | None = None,
     void_assessment_id: int | None = None,
     items: list[dict] | None = None,
 ) -> RecordAssessmentResponse:
@@ -1287,6 +1293,30 @@ async def record_assessment(
     model FAMILY they are told, not a guessed router variant. They group
     get_stats(report="calibration")'s by_methodology / by_model.
 
+    elevator_pitch, for_you_if, not_for_you_if and comparisons are the
+    PRESENTATION of the verdict — your own writing, stored with it and
+    rendered on the evaluation card. elevator_pitch is one synthesized,
+    spoiler-free line (420 chars). for_you_if / not_for_you_if take up to 4
+    bullets each (200 chars each), and each bullet must be GROUNDED IN HIS
+    DATA ("you put 244h into Slay the Spire", "you abandoned both survival
+    crafters you tried"), never generic genre talk. comparisons takes up to 6
+    {name, relation, note, game_id} objects tracing lineage, with relation one
+    of "better_version", "similar", "ancestor", "descendant" or
+    "cheaper_substitute"; pass game_id when the library already resolved that
+    game (a name is matched exactly or not at all). Over-cap lists are
+    rejected; long text is truncated.
+
+    A single-game recording answers with `package` as well: everything the
+    evaluation card renders — the game (cover, year), the verdict and summary,
+    your presentation echoed back, comparisons and anchors resolved against
+    the library (owned / rating / playtime), craft and fit, ownership and
+    acquisition, HLTB against his recent pace, price seen vs target, media
+    (trailer + up to 6 screenshots + short description), IGDB similar games
+    annotated with what he owns and hasn't played, and prior verdicts (up to
+    5). Media is fetched on demand, so anything that failed or timed out is
+    named in package.errors and the rest of the card still comes back — the
+    verdict is recorded either way. Not returned for `items` or void calls.
+
     At most one assessment per game per UTC day: re-recording the same day
     REPLACES that day's row (replaced=true) rather than appending a second
     verdict, so refining a call mid-conversation is safe. Assessing the same
@@ -1340,6 +1370,10 @@ async def record_assessment(
         skill,
         skill_version,
         model,
+        elevator_pitch,
+        for_you_if,
+        not_for_you_if,
+        comparisons,
         void_assessment_id,
     )
 

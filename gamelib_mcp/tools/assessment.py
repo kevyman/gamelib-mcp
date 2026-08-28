@@ -15,10 +15,13 @@ formula runs only on caller-supplied numbers; the server cache is surfaced
 honestly with a ``limitations`` note instead of fabricated counts.
 """
 
+import asyncio
 import json
+import logging
 import math
 import re
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 
 from fastmcp.exceptions import ToolError
@@ -33,15 +36,26 @@ from ..data.db import (
     titles_conflict_on_identity,
     upsert_game,
 )
+from ..data.media import get_game_media
 from ..data.tag_synonyms import canonical_tag
 from ..data.title_normalization import normalize_search_text
 from ..utils import _parse_json
 from .batch import apply_batch_item, check_batch_items, count_status
-from .common import PLAY_STATE_SQL, PLAYTIME_SUM_SQL, clamp_limit
+from .common import (
+    IGDB_COVER_URL,
+    OWNED_SQL,
+    PLAY_STATE_SQL,
+    PLAYTIME_SUM_SQL,
+    STEAM_APPID_SQL,
+    clamp_limit,
+    cover_url,
+)
 from .detail import get_game_detail
 from .history import get_play_history
 from .ratings import get_taste_profile
 from .search import NORMALIZED_NAME_SQL, build_name_match, fuzzy_fallback_game_ids
+
+logger = logging.getLogger(__name__)
 
 # ── Craft score (ported verbatim from craft_score.py) ─────────────────────────
 
@@ -706,6 +720,25 @@ async def _server_cached_craft(resolved_game_id: int) -> dict[str, Any] | None:
     }
 
 
+# The pace window both assessment tools read: get_assessment_context's `pace`
+# block and the package's recent_weekly_minutes are the same observation, so
+# they come from one place rather than two 30-day queries that could drift.
+PACE_WINDOW_DAYS = 30
+
+
+async def _recent_pace() -> dict[str, Any]:
+    """Last-30-day play summary — the `pace` block, shared with the package."""
+    history = await get_play_history(days=PACE_WINDOW_DAYS, limit=1)
+    return {
+        "window": history["window"],
+        "total_minutes": history["total_minutes"],
+        "total_hours": history["total_hours"],
+        "by_platform": history["by_platform"],
+        "most_played": history["games"][0] if history["games"] else None,
+        "switch2_unmatched_minutes": history["switch2_unmatched_minutes"],
+    }
+
+
 async def get_assessment_context(
     name: str | None = None,
     appid: int | None = None,
@@ -856,15 +889,7 @@ async def get_assessment_context(
         result["anchor_count"] = anchor_count
         result["anchors_truncated"] = anchor_count > len(anchors)
 
-    history = await get_play_history(days=30, limit=1)
-    result["pace"] = {
-        "window": history["window"],
-        "total_minutes": history["total_minutes"],
-        "total_hours": history["total_hours"],
-        "by_platform": history["by_platform"],
-        "most_played": history["games"][0] if history["games"] else None,
-        "switch2_unmatched_minutes": history["switch2_unmatched_minutes"],
-    }
+    result["pace"] = await _recent_pace()
 
     return result
 
@@ -911,6 +936,22 @@ SUMMARY_MAX_CHARS = 300
 CONTEXT_MAX_CHARS = 200
 FLAG_MAX_CHARS = 120
 
+# Presentation caps (the model-authored half of a verdict). Same stance as
+# above: prose is truncated, lists are rejected over their cap.
+ELEVATOR_PITCH_MAX_CHARS = 420
+FOR_YOU_IF_CAP = 4
+FOR_YOU_IF_MAX_CHARS = 200
+COMPARISONS_CAP = 6
+COMPARISON_NAME_MAX_CHARS = 120
+COMPARISON_NOTE_MAX_CHARS = 200
+COMPARISON_RELATIONS = (
+    "better_version",
+    "similar",
+    "ancestor",
+    "descendant",
+    "cheaper_substitute",
+)
+
 # "Played" for calibration: two hours is the same bar the taste-profile
 # playtime pseudo-rating uses for "he actually engaged with this".
 CALIBRATION_PLAYED_MINUTES = 120
@@ -948,10 +989,22 @@ _ASSESSMENT_COMPONENT_COLUMNS = (
 # so NULL genuinely means "the recording client didn't say".
 _ASSESSMENT_PROVENANCE_COLUMNS = ("skill", "skill_version", "model")
 
+# The four model-authored presentation PARAMETERS. They are wire fields, not
+# columns: all four land in the single `presentation` JSON column, so the two
+# lists have to stay separate (item keys and the void-exclusive check read the
+# parameter names, the write path reads the column).
+_PRESENTATION_PARAMS = (
+    "elevator_pitch",
+    "for_you_if",
+    "not_for_you_if",
+    "comparisons",
+)
+
 # Everything a recording write touches, in wire order.
 _ASSESSMENT_WRITE_COLUMNS = (
     *_ASSESSMENT_COMPONENT_COLUMNS,
     *_ASSESSMENT_PROVENANCE_COLUMNS,
+    "presentation",
 )
 
 RECORD_ASSESSMENT_ITEM_KEYS = frozenset(
@@ -961,7 +1014,9 @@ RECORD_ASSESSMENT_ITEM_KEYS = frozenset(
         "game_id",
         "verdict",
         "assessed_at",
-        *_ASSESSMENT_WRITE_COLUMNS,
+        *_ASSESSMENT_COMPONENT_COLUMNS,
+        *_ASSESSMENT_PROVENANCE_COLUMNS,
+        *_PRESENTATION_PARAMS,
     }
 )
 
@@ -1042,6 +1097,111 @@ def _normalize_flags(flags: list | None) -> str | None:
     return json.dumps(cleaned) if cleaned else None
 
 
+def _normalize_bullets(label: str, bullets: list | None) -> list[str] | None:
+    """A short list of grounded one-liners — same shape rules as flags."""
+    if bullets is None:
+        return None
+    if not isinstance(bullets, list):
+        raise ToolError(f"{label} must be a list of short strings")
+    if len(bullets) > FOR_YOU_IF_CAP:
+        raise ToolError(
+            f"{label} accepts at most {FOR_YOU_IF_CAP} entries (got {len(bullets)}) "
+            "— keep the ones actually grounded in his library"
+        )
+    for bullet in bullets:
+        if not isinstance(bullet, str) or not bullet.strip():
+            raise ToolError(f"each {label} entry must be a non-empty string")
+    cleaned = [_truncate(bullet, FOR_YOU_IF_MAX_CHARS) for bullet in bullets]
+    return cleaned or None
+
+
+def _normalize_comparisons(comparisons: list | None) -> list[dict[str, Any]] | None:
+    """The lineage strip: {name, relation, note?, game_id?} entries.
+
+    Relations are a closed vocabulary because the card renders each one
+    differently; an unknown relation would silently render as nothing.
+    """
+    if comparisons is None:
+        return None
+    if not isinstance(comparisons, list):
+        raise ToolError(
+            "comparisons must be a list of {name, relation, note, game_id} objects"
+        )
+    if len(comparisons) > COMPARISONS_CAP:
+        raise ToolError(
+            f"comparisons accepts at most {COMPARISONS_CAP} entries "
+            f"(got {len(comparisons)}) — cite the lineage that matters"
+        )
+    normalized: list[dict[str, Any]] = []
+    for comparison in comparisons:
+        if not isinstance(comparison, dict):
+            raise ToolError(
+                "each comparisons entry must be a {name, relation, note, game_id} object"
+            )
+        unknown = set(comparison) - {"name", "relation", "note", "game_id"}
+        if unknown:
+            raise ToolError(
+                f"comparisons entries accept only 'name', 'relation', 'note' and "
+                f"'game_id' (got {sorted(unknown)})"
+            )
+        name = comparison.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ToolError("each comparisons entry needs a non-empty 'name'")
+        relation = comparison.get("relation")
+        if relation not in COMPARISON_RELATIONS:
+            raise ToolError(
+                f"Unknown comparisons relation {relation!r}. "
+                f"Valid: {list(COMPARISON_RELATIONS)}"
+            )
+        entry: dict[str, Any] = {
+            "name": _truncate(name, COMPARISON_NAME_MAX_CHARS),
+            "relation": relation,
+        }
+        note = comparison.get("note")
+        if note is not None:
+            if not isinstance(note, str):
+                raise ToolError("comparisons note must be a string")
+            if note.strip():
+                entry["note"] = _truncate(note, COMPARISON_NOTE_MAX_CHARS)
+        comparison_id = comparison.get("game_id")
+        if comparison_id is not None:
+            if isinstance(comparison_id, bool) or not isinstance(comparison_id, int):
+                raise ToolError("comparisons game_id must be an integer")
+            entry["game_id"] = comparison_id
+        normalized.append(entry)
+    return normalized or None
+
+
+def _build_presentation(
+    elevator_pitch: str | None,
+    for_you_if: list | None,
+    not_for_you_if: list | None,
+    comparisons: list | None,
+) -> str | None:
+    """The four presentation params as ONE JSON column value (NULL when empty).
+
+    Only non-null members are stored, so the column says what was authored
+    rather than padding absent halves with nulls.
+    """
+    presentation: dict[str, Any] = {}
+    if elevator_pitch is not None and not isinstance(elevator_pitch, str):
+        raise ToolError("elevator_pitch must be a string")
+    pitch = _truncate(elevator_pitch, ELEVATOR_PITCH_MAX_CHARS) if elevator_pitch else None
+    if pitch:
+        presentation["elevator_pitch"] = pitch
+    for label, bullets in (
+        ("for_you_if", for_you_if),
+        ("not_for_you_if", not_for_you_if),
+    ):
+        cleaned = _normalize_bullets(label, bullets)
+        if cleaned:
+            presentation[label] = cleaned
+    resolved_comparisons = _normalize_comparisons(comparisons)
+    if resolved_comparisons:
+        presentation["comparisons"] = resolved_comparisons
+    return json.dumps(presentation) if presentation else None
+
+
 def _normalize_declared(
     label: str, value: str | None, cap: int, *, lowercase: bool
 ) -> str | None:
@@ -1104,6 +1264,10 @@ async def _validate_assessment_inputs(
     skill: str | None,
     skill_version: str | None,
     model: str | None,
+    elevator_pitch: str | None,
+    for_you_if: list | None,
+    not_for_you_if: list | None,
+    comparisons: list | None,
 ) -> dict[str, Any]:
     """Validate EVERYTHING before any write (ADR 0004's multi-mode rule).
 
@@ -1186,6 +1350,9 @@ async def _validate_assessment_inputs(
             "skill_version", skill_version, SKILL_VERSION_MAX_CHARS, lowercase=False
         ),
         "model": _normalize_declared("model", model, MODEL_MAX_CHARS, lowercase=True),
+        "presentation": _build_presentation(
+            elevator_pitch, for_you_if, not_for_you_if, comparisons
+        ),
     }
 
 
@@ -1264,7 +1431,9 @@ _VOID_EXCLUSIVE_PARAMS = (
     "game_id",
     "verdict",
     "assessed_at",
-    *_ASSESSMENT_WRITE_COLUMNS,
+    *_ASSESSMENT_COMPONENT_COLUMNS,
+    *_ASSESSMENT_PROVENANCE_COLUMNS,
+    *_PRESENTATION_PARAMS,
 )
 
 
@@ -1331,6 +1500,353 @@ async def _void_assessment(assessment_id: int) -> dict[str, Any]:
     return result
 
 
+# ── The evaluation package (card payload) ────────────────────────────────────
+#
+# Everything below decorates a verdict that is ALREADY committed. It runs after
+# the write, never before, and is bounded twice over: an inner budget on the one
+# network step (media) so a hanging provider costs the trailer rather than the
+# whole block, and an outer wait_for so nothing here can hold the tool open.
+# Any failure degrades to `errors` — recording a verdict must never fail
+# because a screenshot didn't load.
+
+PACKAGE_TIMEOUT_SECONDS = 10
+_PACKAGE_MEDIA_TIMEOUT_SECONDS = 8
+PACKAGE_PAST_CAP = 5
+PACKAGE_SIMILAR_CAP = 8
+
+# Ownership/rating/playtime for a set of games, as the card renders them. Same
+# rating priority as the anchors and calibration queries (full-weight sources
+# first, then lowest id), same owned-only playtime rollup.
+_PACKAGE_ANNOTATION_SQL = f"""
+SELECT g.id AS game_id,
+       g.name,
+       g.igdb_id,
+       g.release_date,
+       g.completion_status,
+       g.cover_image_id,
+       g.hltb_main,
+       g.hltb_extra,
+       {STEAM_APPID_SQL} AS steam_appid,
+       {OWNED_SQL} AS owned,
+       (
+           SELECT {PLAYTIME_SUM_SQL} FROM game_platforms gp
+           WHERE gp.game_id = g.id AND gp.owned = 1
+       ) AS playtime_minutes,
+       (
+           SELECT rt.normalized_score FROM ratings rt
+           WHERE rt.game_id = g.id AND rt.normalized_score IS NOT NULL
+           ORDER BY CASE rt.source WHEN 'manual' THEN 0 WHEN 'backloggd' THEN 1
+                    ELSE 2 END, rt.id
+           LIMIT 1
+       ) AS my_rating
+FROM games g
+WHERE {{predicate}}
+"""
+
+
+def _release_year(release_date: str | None) -> int | None:
+    """Year component of a stored release_date ('2008-10-13'), or None."""
+    if not release_date:
+        return None
+    head = str(release_date).strip()[:4]
+    return int(head) if head.isdigit() else None
+
+
+def _hours(minutes: float | None) -> float | None:
+    return round(minutes / 60, 1) if minutes is not None else None
+
+
+async def _annotate_games(column: str, values: list) -> dict[Any, Any]:
+    """{value: row} for the given games, looked up by ``column`` (id/igdb_id)."""
+    keys = [value for value in dict.fromkeys(values) if value is not None]
+    if not keys:
+        return {}
+    placeholders = ", ".join("?" * len(keys))
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            _PACKAGE_ANNOTATION_SQL.format(predicate=f"g.{column} IN ({placeholders})"),
+            keys,
+        )
+    result_key = "game_id" if column == "id" else column
+    return {row[result_key]: row for row in rows}
+
+
+def _block_or_none(block: dict[str, Any]) -> dict[str, Any] | None:
+    """A block is absent when every one of its members is."""
+    return block if any(value is not None for value in block.values()) else None
+
+
+async def _package_anchors(anchors_cited: str | None) -> list[dict[str, Any]]:
+    """Cited anchors resolved against the library — by game_id only.
+
+    An entry without a game_id passes through name-only. Resolving a bare name
+    here would be the same loose write-path match issue #150 removed, one layer
+    down: a wrong cover under a verdict's anchor chip is a claim about his
+    library that nothing else would surface.
+    """
+    cited = json.loads(anchors_cited) if anchors_cited else []
+    library = await _annotate_games("id", [a.get("game_id") for a in cited])
+    anchors: list[dict[str, Any]] = []
+    for anchor in cited:
+        row = library.get(anchor.get("game_id"))
+        anchors.append(
+            {
+                "game_id": anchor.get("game_id"),
+                "name": row["name"] if row is not None else anchor.get("name"),
+                "rating": row["my_rating"] if row is not None else None,
+                "playtime_hours": (
+                    _hours(row["playtime_minutes"]) if row is not None else None
+                ),
+                "completion_status": (
+                    row["completion_status"] if row is not None else None
+                ),
+                "cover_url": (
+                    cover_url(row["cover_image_id"], row["steam_appid"])
+                    if row is not None
+                    else None
+                ),
+            }
+        )
+    return anchors
+
+
+async def _package_comparisons(presentation: dict[str, Any]) -> list[dict[str, Any]]:
+    """The lineage strip, annotated with what he owns of it.
+
+    A comparison names a game the model knows about; the library may or may not
+    have it. Resolution is game_id, else an EXACT name match — never fuzzy, for
+    the same reason the write path isn't.
+    """
+    comparisons = presentation.get("comparisons") or []
+    resolved: list[tuple[dict[str, Any], int | None]] = []
+    for comparison in comparisons:
+        game_id = comparison.get("game_id")
+        if game_id is None:
+            game_id = await _existing_exact_game_id(
+                comparison["name"], None, match_by_name=True
+            )
+        resolved.append((comparison, game_id))
+
+    library = await _annotate_games("id", [gid for _, gid in resolved])
+    items: list[dict[str, Any]] = []
+    for comparison, game_id in resolved:
+        row = library.get(game_id)
+        items.append(
+            {
+                "name": comparison["name"],
+                "relation": comparison["relation"],
+                "note": comparison.get("note"),
+                "game_id": game_id,
+                "owned": bool(row["owned"]) if row is not None else None,
+                "my_rating": row["my_rating"] if row is not None else None,
+                "playtime_hours": (
+                    _hours(row["playtime_minutes"]) if row is not None else None
+                ),
+            }
+        )
+    return items
+
+
+async def _package_similar(
+    similar_raw: list[dict[str, Any]], total: int | None
+) -> dict[str, Any]:
+    """IGDB's similar games, annotated with ownership — the play-what-you-own view."""
+    library = await _annotate_games(
+        "igdb_id", [entry.get("igdb_id") for entry in similar_raw]
+    )
+    items: list[dict[str, Any]] = []
+    for entry in similar_raw[:PACKAGE_SIMILAR_CAP]:
+        row = library.get(entry.get("igdb_id"))
+        owned = bool(row["owned"]) if row is not None else False
+        playtime = row["playtime_minutes"] if row is not None else None
+        items.append(
+            {
+                "igdb_id": entry.get("igdb_id"),
+                "name": entry.get("name"),
+                "release_year": entry.get("release_year"),
+                "cover_url": (
+                    IGDB_COVER_URL.format(image_id=entry["cover_image_id"])
+                    if entry.get("cover_image_id")
+                    else None
+                ),
+                "owned": owned,
+                "unplayed": owned and not playtime,
+                "my_rating": row["my_rating"] if row is not None else None,
+                "playtime_hours": _hours(playtime),
+            }
+        )
+    count = total if isinstance(total, int) else len(similar_raw)
+    return {"items": items, "count": count, "truncated": count > len(items)}
+
+
+async def _build_package(
+    *,
+    game_id: int,
+    values: dict[str, Any],
+    appid: int | None,
+    previous: list,
+    owned: bool,
+    wishlisted: bool,
+) -> dict[str, Any]:
+    """Assemble the card payload for one just-recorded verdict."""
+    errors: list[str] = []
+    presentation = json.loads(values["presentation"]) if values["presentation"] else {}
+
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            _PACKAGE_ANNOTATION_SQL.format(predicate="g.id = ?"), (game_id,)
+        )
+        platform_rows = await db.execute_fetchall(
+            """SELECT platform, price_paid, price_currency, purchase_source,
+                      bundle_name
+               FROM game_platforms
+               WHERE game_id = ? AND owned = 1
+               ORDER BY acquired_at IS NULL, acquired_at, id""",
+            (game_id,),
+        )
+
+    acquisition = next(
+        (p for p in platform_rows if p["price_paid"] is not None), None
+    )
+
+    try:
+        pace = await _recent_pace()
+        # A weekly rate, because that is how the card reads a backlog ("≈9
+        # weeks at your current pace"); the window itself stays 30 days so the
+        # number is the same observation get_assessment_context reports.
+        recent_weekly_minutes = round(pace["total_minutes"] * 7 / PACE_WINDOW_DAYS)
+    except Exception:
+        logger.warning("Package pace lookup failed for game %s", game_id, exc_info=True)
+        errors.append("pace: unavailable")
+        recent_weekly_minutes = None
+
+    media_appid = appid or values["steam_appid"] or (row["steam_appid"] if row else None)
+    media_payload: dict[str, Any] | None = None
+    try:
+        media_payload = await asyncio.wait_for(
+            get_game_media(
+                steam_appid=media_appid,
+                igdb_id=row["igdb_id"] if row else None,
+                name=row["name"] if row else None,
+            ),
+            timeout=_PACKAGE_MEDIA_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        logger.warning("Package media fetch failed for game %s", game_id, exc_info=True)
+        errors.append("media: fetch failed")
+
+    similar_block: dict[str, Any] | None = None
+    if media_payload and media_payload.get("similar_raw"):
+        similar_block = await _package_similar(
+            media_payload["similar_raw"], media_payload.get("similar_count")
+        )
+
+    past_items = [
+        {
+            "assessed_at": past["assessed_at"],
+            "verdict": past["verdict"],
+            "summary": past["summary"],
+            "price_seen": past["price_seen"],
+            "price_currency": past["price_currency"],
+        }
+        for past in previous[:PACKAGE_PAST_CAP]
+    ]
+
+    return {
+        "game": {
+            "game_id": game_id,
+            "name": row["name"] if row else None,
+            "release_year": _release_year(row["release_date"]) if row else None,
+            "cover_url": (
+                cover_url(row["cover_image_id"], row["steam_appid"]) if row else None
+            ),
+        },
+        "verdict": values["verdict"],
+        "summary": values["summary"],
+        "presentation": _block_or_none(
+            {
+                "elevator_pitch": presentation.get("elevator_pitch"),
+                "for_you_if": presentation.get("for_you_if"),
+                "not_for_you_if": presentation.get("not_for_you_if"),
+            }
+        ),
+        "comparisons": await _package_comparisons(presentation),
+        "craft": _block_or_none(
+            {
+                "adjusted": values["craft_adjusted"],
+                "positive_pct": values["craft_positive_pct"],
+                "review_count": values["review_count"],
+                "trajectory": values["recent_trajectory"],
+                "opencritic_score": values["opencritic_score"],
+            }
+        ),
+        "fit_call": values["fit_call"],
+        "flags": json.loads(values["flags"]) if values["flags"] else [],
+        "anchors": await _package_anchors(values["anchors_cited"]),
+        "ownership": {
+            "owned": owned,
+            "wishlisted": wishlisted,
+            "platforms": sorted(p["platform"] for p in platform_rows),
+            "completion_status": row["completion_status"] if row else None,
+            "my_rating": row["my_rating"] if row else None,
+            "playtime_hours": _hours(row["playtime_minutes"]) if row else None,
+            "price_paid": acquisition["price_paid"] if acquisition else None,
+            "price_currency": acquisition["price_currency"] if acquisition else None,
+            "purchase_source": acquisition["purchase_source"] if acquisition else None,
+            "bundle_name": acquisition["bundle_name"] if acquisition else None,
+        },
+        "time": _block_or_none(
+            {
+                "hltb_main_hours": row["hltb_main"] if row else None,
+                "hltb_extra_hours": row["hltb_extra"] if row else None,
+                "recent_weekly_minutes": recent_weekly_minutes,
+            }
+        ),
+        "price": _block_or_none(
+            {
+                "seen": values["price_seen"],
+                "currency": values["price_currency"],
+                "platform": values["price_platform"],
+                "target": values["target_price"],
+            }
+        ),
+        "media": media_payload.get("media") if media_payload else None,
+        "similar": similar_block,
+        "past": (
+            {
+                "items": past_items,
+                "count": len(previous),
+                "truncated": len(previous) > len(past_items),
+            }
+            if previous
+            else None
+        ),
+        "errors": errors,
+    }
+
+
+async def _safe_package(**kwargs: Any) -> dict[str, Any]:
+    """``_build_package`` that can never fail the recording it decorates."""
+    try:
+        return await asyncio.wait_for(
+            _build_package(**kwargs), timeout=PACKAGE_TIMEOUT_SECONDS
+        )
+    except Exception:
+        logger.warning(
+            "Evaluation package assembly failed for game %s",
+            kwargs.get("game_id"),
+            exc_info=True,
+        )
+        values = kwargs.get("values") or {}
+        # The verdict is already recorded; answer with the minimum a card needs
+        # to render at all, and say what is missing.
+        return {
+            "game": {"game_id": kwargs.get("game_id")},
+            "verdict": values.get("verdict"),
+            "errors": ["package: assembly failed"],
+        }
+
+
 async def record_assessment(
     name: str | None = None,
     appid: int | None = None,
@@ -1356,7 +1872,13 @@ async def record_assessment(
     skill: str | None = None,
     skill_version: str | None = None,
     model: str | None = None,
+    elevator_pitch: str | None = None,
+    for_you_if: list | None = None,
+    not_for_you_if: list | None = None,
+    comparisons: list | None = None,
     void_assessment_id: int | None = None,
+    *,
+    with_package: bool = True,
 ) -> dict:
     """Record one game-quality verdict and its components.
 
@@ -1373,9 +1895,20 @@ async def record_assessment(
     omitted value stays NULL, meaning "unknown", which is the honest answer for
     an ad-hoc assessment or a stale installed copy of the skill.
 
+    ``elevator_pitch`` / ``for_you_if`` / ``not_for_you_if`` / ``comparisons``
+    are the model-authored PRESENTATION of the verdict; they persist together
+    as one ``presentation`` JSON column and are declared content like the
+    provenance columns — capped and truncated, never synthesized here.
+
     ``void_assessment_id`` is an exclusive third mode: it hard-deletes one
     recorded row (the repair for a misfile noticed after that same-day
     window), and every other parameter must be absent.
+
+    A single-item recording additionally answers with ``package``: the card
+    payload (media, comparisons and anchors resolved against the library, price
+    and time context, prior verdicts). It is assembled AFTER the write, is
+    bounded, and degrades into its own ``errors`` list — nothing in it can fail
+    or delay the recording it describes.
 
     Never touches tag_affinity, discover_games, or the wishlist — a
     wishlist_for_sale verdict on an unwishlisted game answers with a
@@ -1413,6 +1946,10 @@ async def record_assessment(
                     skill,
                     skill_version,
                     model,
+                    elevator_pitch,
+                    for_you_if,
+                    not_for_you_if,
+                    comparisons,
                 ),
                 strict=True,
             )
@@ -1451,6 +1988,10 @@ async def record_assessment(
         skill=skill,
         skill_version=skill_version,
         model=model,
+        elevator_pitch=elevator_pitch,
+        for_you_if=for_you_if,
+        not_for_you_if=not_for_you_if,
+        comparisons=comparisons,
     )
 
     resolved_id, mode = await _resolve_by_id_or_appid(appid, game_id)
@@ -1475,9 +2016,12 @@ async def record_assessment(
             "SELECT name FROM games WHERE id = ?", (resolved_id,)
         )
         # Prior verdicts EXCLUDING the day being written: a same-day re-record
-        # is a correction of this assessment, not a repeat ask.
+        # is a correction of this assessment, not a repeat ask. The package's
+        # `past` block reads these same rows — hence summary/price here rather
+        # than a second query for the same history.
         previous = await db.execute_fetchall(
-            """SELECT assessed_at, verdict FROM game_assessments
+            """SELECT assessed_at, verdict, summary, price_seen, price_currency
+               FROM game_assessments
                WHERE game_id = ? AND date(assessed_at) != ?
                ORDER BY assessed_at DESC, id DESC""",
             (resolved_id, day),
@@ -1559,6 +2103,20 @@ async def record_assessment(
                 "never writes the wishlist itself"
             ),
         }
+
+    # Everything above is the recorded fact; the package is decoration, built
+    # only after the write committed and never able to undo it. Keyword-only
+    # and off in bulk mode (see record_assessments_batch): a card renders one
+    # game, and 200 of them would be 200 media fetches nothing displays.
+    if with_package:
+        result["package"] = await _safe_package(
+            game_id=resolved_id,
+            values=values,
+            appid=appid,
+            previous=previous,
+            owned=owned_now,
+            wishlisted=wishlisted_now,
+        )
     return result
 
 
@@ -1568,11 +2126,16 @@ async def record_assessments_batch(items: list[dict]) -> dict:
     Standard bulk conventions (tools/batch.py): only an empty or over-cap
     items list raises; everything else is a per-item status preserving input
     order. Unlike every other bulk write tool there is NO deferred affinity
-    recompute at the end — verdicts never feed affinity (ADR 0006).
+    recompute at the end — verdicts never feed affinity (ADR 0006). Bulk
+    results also carry no evaluation package: it is a per-game card payload,
+    and assembling one per item would fan out to a media fetch per item for a
+    response nothing renders.
     """
     check_batch_items(items)
     results = [
-        await apply_batch_item(item, RECORD_ASSESSMENT_ITEM_KEYS, record_assessment)
+        await apply_batch_item(
+            item, RECORD_ASSESSMENT_ITEM_KEYS, partial(record_assessment, with_package=False)
+        )
         for item in items
     ]
     return {

@@ -911,6 +911,14 @@ class RecordAssessmentResponse(BatchEnvelope):
     # wishlist_for_sale verdict on an unwishlisted game. Voiding: the
     # delete_game preview for a row the void left bare. Never performed.
     suggested_action: dict[str, Any] | None = None
+    # Single recording mode only: the evaluation-card payload assembled after
+    # the write — game/verdict/summary, the declared presentation, comparisons
+    # and anchors resolved against the library, craft, fit_call, flags,
+    # ownership, time, price, media, similar games, past verdicts, and an
+    # `errors` list naming whatever could not be gathered. Left untyped (like
+    # the other display blocks here) because it is a render payload read whole
+    # by the widget, not a queried structure; batch and void modes omit it.
+    package: dict[str, Any] | None = None
 
 
 class PlayHistoryWindow(FlexibleModel):
