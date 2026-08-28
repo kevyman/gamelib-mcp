@@ -94,8 +94,9 @@ form of the *play-what-you-own* verdict.
 
 Server-supplied (resolved/fetched at record time):
 
-- **Hero**: trailer (see the CSP spike below) or lead screenshot; cover art;
-  title, year, platforms.
+- **Hero**: trailer — inline `<video>` with the constructed Steam mp4 (see
+  spike results), YouTube embed for IGDB-only candidates, poster + link-out
+  as the last rung — or lead screenshot; cover art; title, year, platforms.
 - **Verdict stamp**: BUY NOW / WISHLIST FOR SALE / TRY DEMO / SKIP / PLAY
   WHAT YOU OWN INSTEAD — big toybox-style rotated stamp. The one-line
   summary under it.
@@ -153,29 +154,80 @@ Model-authored (new optional `record_assessment` fields, all capped):
   don't have), accessibility metadata (no good source), Deck-verified
   status (no public API field in appdetails).
 
-## Constraints and open spikes
+## Spike results (2026-08-28) — inline video is GO, with one caveat
 
-1. **CSP spike (do first, it shapes the hero):** can an MCP Apps iframe on
-   claude.ai play video? `ResourceCSP.resource_domains` feeds `img-src`
-   today — verify whether fastmcp/host CSP extends to `media-src`
-   (`<video>` with Steam's mp4) or `frame-src` (YouTube embed — likely
-   never). **Design for the fallback regardless**: poster frame with a play
-   badge that `ui/open-link`s out (the `openLink` helper exists). Inline
-   video is the stretch goal, not the baseline.
-2. **Bounded responses**: every media/comparison list capped with true
+The CSP/media spike ran; findings, most important first:
+
+1. **The spec supports everything we want.** MCP Apps (SEP-1865, the
+   ext-apps spec fastmcp 3.4.7 implements) maps `resourceDomains` to
+   `img-src, script-src, style-src, font-src, media-src` — so `<video>` is
+   spec-legal, not a stretch goal — and `frameDomains` maps to `frame-src`
+   with `["https://www.youtube.com"]` as the spec's *own example*.
+   `ResourceCSP` in fastmcp 3.4.7 already exposes all four fields
+   (`connect_domains`, `resource_domains`, `frame_domains`,
+   `base_uri_domains`); no SDK blocker. Iframe sandbox is
+   `allow-scripts allow-same-origin` (downloads blocked), which is enough
+   for a nested YouTube player.
+2. **Steam media filters verified live.** Adding `screenshots,movies` to
+   `fetch_store_appdetails`' `filters` adds exactly those two keys — no
+   filter breakage (`basic` was always the big group). Screenshots come as
+   `path_thumbnail` (600x338) / `path_full` (1920x1080) on
+   `shared.akamai.steamstatic.com` — NOT the currently allowlisted
+   `cdn.cloudflare.steamstatic.com`; the `shared.cloudflare.steamstatic.com`
+   mirror 301s. Allowlist both `shared.*` hosts.
+3. **appdetails trailers are now DASH/HLS manifests only** (`dash_av1`,
+   `dash_h264`, `hls_h264` on `video.akamai.steamstatic.com`; no mp4/webm
+   keys anymore) — a bare `<video>` cannot play those in Chrome/Firefox,
+   and the widget is deliberately player-library-free. **BUT the legacy
+   constructible mp4 renditions still exist**, verified even for
+   2025-uploaded trailers (Hades II v1.0 Showcase, Silksong release
+   trailer): `https://cdn.cloudflare.steamstatic.com/steam/apps/<movie_id>/movie480.mp4`
+   (also `movie_max.mp4`, also on `cdn.akamai.` and `shared.akamai.`),
+   `content-type: video/mp4`, CORS `*` — and `cdn.cloudflare.steamstatic.com`
+   is already in the widget allowlist. So the hero is a plain
+   `<video controls preload="none" poster=<movie thumbnail>>` with the
+   constructed mp4 URL — zero bandwidth until play, no JS player.
+   *Caveat*: the mp4 pattern is undocumented legacy surface Valve could
+   drop. Mitigation: the server HEAD-validates the constructed URL at
+   package-assembly time (cheap, cacheable) and omits the video on 404;
+   the widget additionally falls back on the `<video>` error event to
+   poster + `ui/open-link`. That fallback chain also covers a host that
+   strips `media-src`, making the remaining claude.ai question
+   non-blocking.
+4. **IGDB untested live** (no creds in the spike environment) but
+   documented: `videos.video_id` is a YouTube ID → `frameDomains`
+   YouTube embed (`www.youtube-nocookie.com`) is the trailer route for
+   non-Steam candidates. A CSP-blocked nested iframe is hard to detect
+   from JS, so YouTube stays the secondary route; Steam mp4 is primary
+   whenever an appid exists.
+5. **The one thing not verifiable from a container**: whether claude.ai's
+   host actually honors `media-src`/`frame-src` declarations (the current
+   widget only exercises `img-src`). A spec-compliant host must; the
+   fallback chain in (3) means we don't need the answer before building —
+   the first deploy IS the probe. Check both claude.ai and the chatgpt.com
+   client (both are registered against prod, per ADR 0004's probe habit).
+
+Evaluation-card CSP, as of the spike:
+`resource_domains`: `images.igdb.com`, `cdn.cloudflare.steamstatic.com`,
+`cdn.akamai.steamstatic.com`, `shared.akamai.steamstatic.com`,
+`shared.cloudflare.steamstatic.com`; `frame_domains`:
+`https://www.youtube-nocookie.com`.
+
+## Constraints
+
+1. **Bounded responses**: every media/comparison list capped with true
    totals + truncation flags; add the package response to
    `ResponseSizeGuardTests`.
-3. **Hard rule unchanged**: assessments (presentation fields included)
+2. **Hard rule unchanged**: assessments (presentation fields included)
    never feed `tag_affinity` or `discover_games`.
-4. New widget = new content-hashed `ui://` URI + a
+3. New widget = new content-hashed `ui://` URI + a
    `scripts/preview_eval_card.py` twin of the game-cards preview script.
-5. Unowned candidates with no appid and no IGDB match get a media-less
+4. Unowned candidates with no appid and no IGDB match get a media-less
    card — every media block must be optional in the layout.
 
 ## Phases
 
-1. **Spike**: CSP/video capability on claude.ai; confirm appdetails media
-   filters return what we expect through the proxy/quota gate.
+1. ~~**Spike**~~ — done, see "Spike results" above.
 2. **Data**: `data/media.py` (Steam + IGDB media, KV cache, caps) +
    `similar_games` fetch with library annotation.
 3. **Server**: `record_assessment` presentation fields + `presentation`
