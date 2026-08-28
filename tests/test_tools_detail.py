@@ -4,6 +4,7 @@ Enrichment calls (Steam Store / ProtonDB / HLTB) are patched to no-ops so the
 test characterizes lookup + formatting only, without network.
 """
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
@@ -403,6 +404,170 @@ class GetGameDetailTests(ToolDBTestCase):
         self.assertIs(result["wishlisted"], True)
         self.assertEqual(result["platforms"], [])
         self.assertIs(result["is_primary_library_item"], True)
+
+
+_MEDIA_PAYLOAD = {
+    "media": {
+        "source": "steam",
+        "trailer": {
+            "kind": "mp4",
+            "url": "https://cdn.cloudflare.steamstatic.com/steam/apps/1/movie480.mp4",
+            "hq_url": "https://cdn.cloudflare.steamstatic.com/steam/apps/1/movie_max.mp4",
+            "poster": "https://shared.akamai.steamstatic.com/poster.jpg",
+            "name": "Trailer",
+        },
+        "screenshots": [{"thumb": "t1", "full": "f1"}],
+        "screenshot_count": 1,
+        "screenshots_truncated": False,
+        "short_description": "A tiny bug with a nail.",
+    },
+    "similar_raw": None,
+    "similar_count": None,
+    "igdb_id": None,
+}
+
+
+class GetGameDetailMediaTests(ToolDBTestCase):
+    """get_game_detail(media=True): the neutral game representation.
+
+    The one provider call is patched at tools/game_media.py's own binding —
+    the seam both this path and record_assessment's package resolve through.
+    media=False needs no patch at all, which is the point: the default costs
+    nothing and reaches nothing.
+    """
+
+    def _media(self, payload=_MEDIA_PAYLOAD, **kwargs):
+        return patch(
+            "gamelib_mcp.tools.game_media.get_game_media",
+            AsyncMock(return_value=payload, **kwargs),
+        )
+
+    async def test_media_off_by_default_adds_no_keys_and_fetches_nothing(self):
+        gid = await make_steam_game("Hollow Knight", 367520, playtime_minutes=120)
+
+        result = await detail.get_game_detail(game_id=gid)
+
+        self.assertNotIn("media", result)
+        self.assertNotIn("similar", result)
+
+    async def test_media_true_adds_the_media_block(self):
+        gid = await make_steam_game("Hollow Knight", 367520, playtime_minutes=120)
+
+        with self._media():
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        self.assertEqual(result["media"], _MEDIA_PAYLOAD["media"])
+        # Nothing similar came back, so that key stays absent rather than null.
+        self.assertNotIn("similar", result)
+
+    async def test_similar_games_are_annotated_against_the_library(self):
+        gid = await seed_game("Similarity Probe")
+        owned_unplayed = await seed_game("Owned Unplayed")
+        await add_platform(owned_unplayed, "steam", playtime_minutes=0)
+        rated = await seed_game("Rated Neighbour")
+        await add_platform(rated, "steam", playtime_minutes=600)
+        await add_rating(rated, "manual", 8.0, 8.0)
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET igdb_id = 101 WHERE id = ?", (owned_unplayed,)
+            )
+            await db.execute("UPDATE games SET igdb_id = 202 WHERE id = ?", (rated,))
+            await db.commit()
+
+        payload = {
+            **_MEDIA_PAYLOAD,
+            "similar_raw": [
+                {
+                    "igdb_id": 101,
+                    "name": "Owned Unplayed",
+                    "release_year": 2016,
+                    "cover_image_id": "abc",
+                },
+                {
+                    "igdb_id": 202,
+                    "name": "Rated Neighbour",
+                    "release_year": 2019,
+                    "cover_image_id": None,
+                },
+                {
+                    "igdb_id": 303,
+                    "name": "Unknown Neighbour",
+                    "release_year": None,
+                    "cover_image_id": None,
+                },
+            ],
+            "similar_count": 11,
+        }
+        with self._media(payload):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        similar = result["similar"]
+        self.assertEqual(similar["count"], 11)
+        self.assertTrue(similar["truncated"])
+        unplayed, rated_entry, unknown = similar["items"]
+        self.assertTrue(unplayed["owned"])
+        self.assertTrue(unplayed["unplayed"])
+        self.assertEqual(
+            unplayed["cover_url"],
+            "https://images.igdb.com/igdb/image/upload/t_cover_big/abc.jpg",
+        )
+        self.assertEqual(rated_entry["my_rating"], 8.0)
+        self.assertEqual(rated_entry["playtime_hours"], 10.0)
+        self.assertFalse(rated_entry["unplayed"])
+        self.assertFalse(unknown["owned"])
+        self.assertIsNone(unknown["cover_url"])
+
+    async def test_identity_passed_is_the_appid_igdb_id_and_name(self):
+        gid = await make_steam_game("Identity Order", 4242)
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = 777 WHERE id = ?", (gid,))
+            await db.commit()
+
+        with self._media(None) as fetch:
+            await detail.get_game_detail(game_id=gid, media=True)
+
+        self.assertEqual(
+            fetch.await_args.kwargs,
+            {"steam_appid": 4242, "igdb_id": 777, "name": "Identity Order"},
+        )
+
+    async def test_nothing_resolved_leaves_both_keys_absent(self):
+        gid = await seed_game("No Media Anywhere")
+
+        with self._media(None):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        self.assertNotIn("media", result)
+        self.assertNotIn("similar", result)
+        self.assertEqual(result["name"], "No Media Anywhere")
+
+    async def test_a_fetch_failure_costs_the_keys_not_the_call(self):
+        gid = await seed_game("Media Outage")
+
+        with self._media(None, side_effect=RuntimeError("provider down")):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        self.assertNotIn("media", result)
+        self.assertNotIn("similar", result)
+        self.assertEqual(result["name"], "Media Outage")
+
+    async def test_a_hanging_provider_is_cut_off_by_the_media_budget(self):
+        # An event nothing ever sets, so the only thing that ends the fetch is
+        # the wait_for budget — no wall-clock sleep, no liveness guess.
+        gid = await seed_game("Hanging Provider")
+        never = asyncio.Event()
+
+        async def hang(**kwargs):
+            await never.wait()
+
+        with (
+            patch.object(detail, "DETAIL_MEDIA_TIMEOUT_SECONDS", 0.05),
+            patch("gamelib_mcp.tools.game_media.get_game_media", hang),
+        ):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        self.assertNotIn("media", result)
+        self.assertEqual(result["name"], "Hanging Provider")
 
 
 class GetGameDetailsBatchTests(ToolDBTestCase):

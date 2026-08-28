@@ -224,6 +224,12 @@ class GameDetailResponse(GameSummary):
     assessments: list[dict[str, Any]] | None = None
     assessment_count: int | None = None
     assessments_truncated: bool | None = None
+    # media=True (SINGLE mode only): the neutral game representation —
+    # trailer + screenshots (capped, with screenshot_count/truncated), and
+    # IGDB's similar games annotated with ownership (capped, with
+    # count/truncated). Both absent when nothing resolved or the lookup failed.
+    media: dict[str, Any] | None = None
+    similar: dict[str, Any] | None = None
     # Bulk (items=) mode: GameSummary's game_id/name move inside each result.
     game_id: int | None = None  # type: ignore[assignment]
     name: str | None = None  # type: ignore[assignment]

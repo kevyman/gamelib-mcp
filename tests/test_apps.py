@@ -96,11 +96,28 @@ class GameCardsResourceTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertIn(hex_color, apps.GAME_CARDS_HTML)
 
-    def test_csp_allows_exactly_the_cover_hosts(self) -> None:
-        domains = apps._GAME_CARDS_CSP.resource_domains
+    def test_csp_allows_exactly_the_cover_and_media_hosts(self) -> None:
+        # Covers + the media hosts a get_game_detail(media=True) card needs:
+        # Steam serves screenshots and movie posters from shared.*, the mp4
+        # renditions from cdn.*, and IGDB trailers are YouTube thumbnails.
         self.assertEqual(
-            domains,
-            ["https://images.igdb.com", "https://cdn.cloudflare.steamstatic.com"],
+            apps._GAME_CARDS_CSP.resource_domains,
+            [
+                "https://images.igdb.com",
+                "https://cdn.cloudflare.steamstatic.com",
+                "https://cdn.akamai.steamstatic.com",
+                "https://shared.akamai.steamstatic.com",
+                "https://shared.cloudflare.steamstatic.com",
+                "https://i.ytimg.com",
+            ],
+        )
+
+    def test_csp_frames_only_the_privacy_mode_youtube_host(self) -> None:
+        # frame_domains feeds frame-src; the trailer embed is the only nested
+        # frame the widget ever creates, and only after a click.
+        self.assertEqual(
+            apps._GAME_CARDS_CSP.frame_domains,
+            ["https://www.youtube-nocookie.com"],
         )
 
 
@@ -163,6 +180,56 @@ class ContentTypeBadgeTests(unittest.TestCase):
         # (never innerHTML with payload data) — verify the new badge/subtitle
         # strings go through that same helper rather than string concatenation
         # into markup.
+        self.assertNotIn("innerHTML", apps.GAME_CARDS_HTML)
+
+    def test_media_sections_render_from_the_detail_payload(self) -> None:
+        # The detail card grows a hero, a screenshot strip and a similar-games
+        # row when get_game_detail(media=True) supplies them. Source-presence
+        # style, like the badge tests above — there is no headless-DOM harness.
+        for marker in (
+            'var media = game.media || {};',      # detailCard reads the block
+            'heroNode(media)',
+            'shotsNode(stack, media, game.name)',
+            'if (game.similar) similarNode(stack, game.similar)',
+            'el("div", "sim-name", item.name)',
+            '"You own " + owned + " of the " + shown + " most similar"',
+        ):
+            self.assertIn(marker, apps.GAME_CARDS_HTML)
+
+    def test_hero_is_trailer_only_and_never_autoplays(self) -> None:
+        # Screenshots alone make no hero here (the card leads with the cover),
+        # and the mp4 hero fetches zero bytes until the viewer hits play.
+        self.assertIn(
+            "if (!trailer || !(trailer.url || trailer.video_id)) return null;",
+            apps.GAME_CARDS_HTML,
+        )
+        self.assertIn('video.preload = "none";', apps.GAME_CARDS_HTML)
+        # …and the YouTube branch loads nothing until the click either.
+        self.assertIn(
+            'frame.src = "https://www.youtube-nocookie.com/embed/"',
+            apps.GAME_CARDS_HTML,
+        )
+
+    def test_screenshots_open_in_a_lightbox_over_the_detail_card(self) -> None:
+        # The overlay machinery is a stack, so enlarging a screenshot from
+        # inside a detail overlay must not close the card underneath it.
+        self.assertIn("openShot(shot, label, btn)", apps.GAME_CARDS_HTML)
+        self.assertIn('el("div", "overlay-panel shot-panel")', apps.GAME_CARDS_HTML)
+        self.assertIn(
+            'if (ev.key === "Escape" && overlays[overlays.length - 1] === entry)',
+            apps.GAME_CARDS_HTML,
+        )
+
+    def test_grid_overlay_upgrade_call_requests_media(self) -> None:
+        self.assertIn(
+            'callTool("get_game_detail", { game_id: game.game_id, media: true })',
+            apps.GAME_CARDS_HTML,
+        )
+
+    def test_widget_stays_dependency_free(self) -> None:
+        # No CDN, no external script, and still no innerHTML anywhere — the
+        # media sections build every node through el()/createElement.
+        self.assertNotIn("<script src", apps.GAME_CARDS_HTML)
         self.assertNotIn("innerHTML", apps.GAME_CARDS_HTML)
 
     def test_uri_is_content_hashed_and_reflects_current_html(self) -> None:

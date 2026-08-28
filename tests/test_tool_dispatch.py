@@ -191,6 +191,27 @@ class ModeDependentDefaultTests(ToolDBTestCase):
             await main.get_game_detail(items=[{"game_id": 1}], enrich=True)
         self.assertIn("not supported with items", str(ctx.exception))
 
+    async def test_get_game_detail_refuses_bulk_media(self):
+        # Same reason as enrich: one provider round trip per game. Rejected
+        # before any impl runs, like every other multi-mode validation.
+        with self.assertRaises(Exception) as ctx:
+            await main.get_game_detail(items=[{"game_id": 1}], media=True)
+        self.assertIn("media=True is not supported with items", str(ctx.exception))
+
+    async def test_get_game_detail_passes_media_through_in_single_mode(self):
+        gid = await seed_game("Media Passthrough")
+        with patch(
+            "gamelib_mcp.tools.detail.get_game_detail", new=AsyncMock(return_value={})
+        ) as m:
+            await main.get_game_detail(game_id=gid)
+        self.assertIs(m.await_args.kwargs["media"], False)  # off by default
+
+        with patch(
+            "gamelib_mcp.tools.detail.get_game_detail", new=AsyncMock(return_value={})
+        ) as m:
+            await main.get_game_detail(game_id=gid, media=True)
+        self.assertIs(m.await_args.kwargs["media"], True)
+
     async def test_set_acquisition_overwrite_flips_by_mode(self):
         with patch(
             "gamelib_mcp.tools.acquisition.set_acquisitions_batch", new=AsyncMock(return_value={})
@@ -534,6 +555,55 @@ class ResponseSizeGuardTests(ToolDBTestCase):
         self.assertEqual(len(assessment["anchors"]), 8)
         self.assertEqual(assessment["anchor_count"], 40)
         self.assertTrue(assessment["anchors_truncated"])
+
+    async def test_detail_media_lists_are_capped(self):
+        # get_game_detail(media=True) serves the same two growing lists the
+        # evaluation package does — screenshots capped in data/media.py,
+        # similar games in tools/game_media.py — each with its true total and
+        # a truncation flag.
+        gid = await seed_game("Media Detail", tags=["bulk tag"])
+        await add_platform(gid, "steam", playtime_minutes=30)
+        media = {
+            "media": {
+                "source": "igdb",
+                "trailer": None,
+                "screenshots": [{"thumb": f"t{i}", "full": f"f{i}"} for i in range(6)],
+                "screenshot_count": 20,
+                "screenshots_truncated": True,
+                "short_description": "x",
+            },
+            "similar_raw": [
+                {
+                    "igdb_id": 900 + i,
+                    "name": f"Similar {i}",
+                    "release_year": 2020,
+                    "cover_image_id": None,
+                }
+                for i in range(12)
+            ],
+            "similar_count": 12,
+            "igdb_id": 5,
+        }
+        with patch(
+            "gamelib_mcp.tools.game_media.get_game_media",
+            new=AsyncMock(return_value=media),
+        ):
+            result = await main.get_game_detail(game_id=gid, media=True)
+
+        for path, cap in {"media.screenshots": 6, "similar.items": 8}.items():
+            node = result
+            for key in path.split("."):
+                self.assertIn(key, node, f"detail has no '{path}'; the contract is stale")
+                node = node[key]
+            self.assertLessEqual(
+                len(node), cap,
+                f"get_game_detail(media=True) returned {len(node)} entries at "
+                f"'{path}' but the contract caps it at {cap}",
+            )
+        self.assertEqual(result["media"]["screenshot_count"], 20)
+        self.assertTrue(result["media"]["screenshots_truncated"])
+        self.assertEqual(result["similar"]["count"], 12)
+        self.assertTrue(result["similar"]["truncated"])
 
     async def test_evaluation_package_lists_are_capped(self):
         # record_assessment's package is a WRITE response, but it carries the

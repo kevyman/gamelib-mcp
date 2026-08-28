@@ -42,7 +42,6 @@ from ..data.title_normalization import normalize_search_text
 from ..utils import _parse_json
 from .batch import apply_batch_item, check_batch_items, count_status
 from .common import (
-    IGDB_COVER_URL,
     OWNED_SQL,
     PLAY_STATE_SQL,
     PLAYTIME_SUM_SQL,
@@ -51,6 +50,7 @@ from .common import (
     cover_url,
 )
 from .detail import get_game_detail
+from .game_media import media_context
 from .history import get_play_history
 from .ratings import get_taste_profile
 from .search import NORMALIZED_NAME_SQL, build_name_match, fuzzy_fallback_game_ids
@@ -1512,7 +1512,8 @@ async def _void_assessment(assessment_id: int) -> dict[str, Any]:
 PACKAGE_TIMEOUT_SECONDS = 10
 _PACKAGE_MEDIA_TIMEOUT_SECONDS = 8
 PACKAGE_PAST_CAP = 5
-PACKAGE_SIMILAR_CAP = 8
+# The similar-games cap lives with the block it caps (tools/game_media.py):
+# the same row renders on the detail card.
 
 # Ownership/rating/playtime for a set of games, as the card renders them. Same
 # rating priority as the anchors and calibration queries (full-weight sources
@@ -1647,38 +1648,6 @@ async def _package_comparisons(presentation: dict[str, Any]) -> list[dict[str, A
     return items
 
 
-async def _package_similar(
-    similar_raw: list[dict[str, Any]], total: int | None
-) -> dict[str, Any]:
-    """IGDB's similar games, annotated with ownership — the play-what-you-own view."""
-    library = await _annotate_games(
-        "igdb_id", [entry.get("igdb_id") for entry in similar_raw]
-    )
-    items: list[dict[str, Any]] = []
-    for entry in similar_raw[:PACKAGE_SIMILAR_CAP]:
-        row = library.get(entry.get("igdb_id"))
-        owned = bool(row["owned"]) if row is not None else False
-        playtime = row["playtime_minutes"] if row is not None else None
-        items.append(
-            {
-                "igdb_id": entry.get("igdb_id"),
-                "name": entry.get("name"),
-                "release_year": entry.get("release_year"),
-                "cover_url": (
-                    IGDB_COVER_URL.format(image_id=entry["cover_image_id"])
-                    if entry.get("cover_image_id")
-                    else None
-                ),
-                "owned": owned,
-                "unplayed": owned and not playtime,
-                "my_rating": row["my_rating"] if row is not None else None,
-                "playtime_hours": _hours(playtime),
-            }
-        )
-    count = total if isinstance(total, int) else len(similar_raw)
-    return {"items": items, "count": count, "truncated": count > len(items)}
-
-
 async def _build_package(
     *,
     game_id: int,
@@ -1735,11 +1704,12 @@ async def _build_package(
         logger.warning("Package media fetch failed for game %s", game_id, exc_info=True)
         errors.append("media: fetch failed")
 
-    similar_block: dict[str, Any] | None = None
-    if media_payload and media_payload.get("similar_raw"):
-        similar_block = await _package_similar(
-            media_payload["similar_raw"], media_payload.get("similar_count")
-        )
+    # The media block and its similar-games row are the neutral game
+    # representation get_game_detail(media=True) also serves — shaped in
+    # tools/game_media.py so both renderers get the same keys. The FETCH stays
+    # here, under this module's own budget and errors bookkeeping: the package
+    # decorates a committed verdict and must degrade, not raise.
+    media_context_block = await media_context(media_payload)
 
     past_items = [
         {
@@ -1810,8 +1780,8 @@ async def _build_package(
                 "target": values["target_price"],
             }
         ),
-        "media": media_payload.get("media") if media_payload else None,
-        "similar": similar_block,
+        "media": media_context_block["media"],
+        "similar": media_context_block["similar"],
         "past": (
             {
                 "items": past_items,

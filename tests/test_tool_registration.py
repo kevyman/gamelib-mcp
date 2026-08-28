@@ -27,7 +27,7 @@ EXPECTED_TOOLS = {
         "required": set(),
     },
     "get_game_detail": {
-        "params": {"name", "appid", "game_id", "items", "enrich"},
+        "params": {"name", "appid", "game_id", "items", "enrich", "media"},
         "required": set(),
     },
     "discover_games": {

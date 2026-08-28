@@ -27,6 +27,15 @@ then upgrades in place when a live ``get_game_detail`` result arrives via an
 app-initiated ``tools/call`` through the bridge. If the host denies or does
 not support app tool calls, the overlay simply keeps the lite view.
 
+A detail card whose payload carries ``media`` (get_game_detail(media=True) —
+which is what that upgrade call asks for) also renders the neutral game
+representation: a hero trailer, a screenshot strip with a click-to-enlarge
+lightbox, and a similar-games row annotated with what he owns. The hero and
+lightbox mirror the evaluation card's implementations (apps_eval.py) rather
+than sharing code with it: each widget is one self-contained HTML resource
+with no build step and no CDN, so that duplication is deliberate — change a
+media pattern in one and port it to the other.
+
 The HTML is deliberately dependency-free: the host↔iframe bridge is the
 ~40-line JSON-RPC postMessage handshake from the MCP Apps spec
 (ui/initialize → ui/notifications/initialized → ui/notifications/tool-result,
@@ -44,13 +53,26 @@ from typing import Any
 
 from fastmcp.apps import AppConfig, ResourceCSP
 
-# Cover art hosts (see tools/common.py cover_url). resource_domains feeds
-# img-src in the host's iframe CSP; everything else stays deny-by-default.
+# Cover art (see tools/common.py cover_url) plus the media hosts a detail card
+# needs once get_game_detail(media=True) answers with a trailer and
+# screenshots. Per the MCP Apps spec, resource_domains feeds img-src, media-src,
+# script-src, style-src and font-src in the host's iframe CSP, while
+# frame_domains feeds frame-src — which is what the lazy youtube-nocookie
+# embed rides on. Covers: IGDB art, Steam capsules and the constructed mp4
+# renditions (cdn.*), Steam screenshots and movie posters (shared.*, where
+# appdetails actually serves them), and YouTube thumbnails for IGDB trailers.
+# Same set as the evaluation card (apps_eval.py); everything else stays
+# deny-by-default.
 _GAME_CARDS_CSP = ResourceCSP(
     resource_domains=[
         "https://images.igdb.com",
         "https://cdn.cloudflare.steamstatic.com",
+        "https://cdn.akamai.steamstatic.com",
+        "https://shared.akamai.steamstatic.com",
+        "https://shared.cloudflare.steamstatic.com",
+        "https://i.ytimg.com",
     ],
+    frame_domains=["https://www.youtube-nocookie.com"],
 )
 
 GAME_CARDS_HTML = r"""<!doctype html>
@@ -380,7 +402,176 @@ GAME_CARDS_HTML = r"""<!doctype html>
   .rating-row b { font-size: 16px; font-weight: 800; }
   .empty { color: var(--muted); font-size: 13px; font-weight: 650; padding: 20px; text-align: center; }
 
-  /* ---- click-to-expand overlay ---- */
+  /* ---- detail media (get_game_detail(media=True)) ---- */
+  /* The detail card becomes a column stack: hero trailer, the card itself,
+     then the screenshot and similar-games panels. Every block keeps its own
+     border so the stack still reads as toybox parts, not one long sheet. */
+  .detail-stack { display: flex; flex-direction: column; gap: 14px; max-width: 720px; }
+  .detail-stack .detail { max-width: none; }
+  .panel {
+    background: var(--card);
+    border: 2px solid var(--ink);
+    border-radius: 14px;
+    box-shadow: 5px 5px 0 var(--shadow-c);
+    padding: 14px 16px;
+  }
+  .section-title {
+    font-size: 10.5px;
+    font-weight: 800;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 9px;
+  }
+  .note { font-size: 11.5px; font-weight: 650; color: var(--muted); margin-top: 8px; }
+
+  /* Hero trailer — mp4 with a poster fallback, or a click-to-load embed. */
+  .hero {
+    position: relative;
+    border: 2px solid var(--ink);
+    border-radius: 14px;
+    box-shadow: 5px 5px 0 var(--shadow-c);
+    overflow: hidden;
+    background: #0d0b07;
+    aspect-ratio: 16 / 9;
+  }
+  .hero-media {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    object-fit: cover;
+    background: #0d0b07;
+  }
+  .play-badge {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(12, 10, 6, 0.3);
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .play-badge span {
+    width: 62px;
+    height: 62px;
+    border-radius: 999px;
+    border: 3px solid var(--ink);
+    background: var(--card);
+    color: var(--ink);
+    box-shadow: 3px 3px 0 var(--shadow-c);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    font-weight: 900;
+    padding-left: 5px;
+    transition: transform 0.12s ease;
+  }
+  .play-badge:hover span, .play-badge:focus-visible span { transform: scale(1.06); }
+  .hero-pill {
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    z-index: 2;
+    font-size: 10.5px;
+    font-weight: 800;
+    padding: 3px 9px;
+    border-radius: 999px;
+    border: 2px solid var(--ink);
+    background: var(--card);
+    color: var(--ink);
+    box-shadow: 2px 2px 0 var(--shadow-c);
+    cursor: pointer;
+  }
+  .hero-missing {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 650;
+  }
+
+  /* Screenshot / similar strips: scroll sideways rather than wrap, so a
+     narrow phone card never grows a second row of thumbnails. */
+  .strip {
+    display: flex;
+    gap: 10px;
+    overflow-x: auto;
+    padding: 2px 2px 6px;
+    scrollbar-width: thin;
+  }
+  .shot {
+    flex: none;
+    padding: 0;
+    border: 2px solid var(--ink);
+    border-radius: 9px;
+    overflow: hidden;
+    background: var(--card);
+    box-shadow: 2px 2px 0 var(--shadow-c);
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    transition: transform 0.12s ease;
+  }
+  .shot img { display: block; width: 188px; height: 106px; object-fit: cover; }
+  .shot:hover { transform: translate(-1px, -1px); }
+  .shot:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+  .more-chip {
+    flex: none;
+    align-self: center;
+    font-size: 11px;
+    font-weight: 800;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1.5px solid var(--ink);
+    background: var(--p2);
+    white-space: nowrap;
+  }
+
+  /* Similar games: mini cover cards with ownership stickers. */
+  .sim {
+    flex: none;
+    width: 108px;
+    border: 2px solid var(--ink);
+    border-radius: 11px;
+    background: var(--card);
+    box-shadow: 3px 3px 0 var(--shadow-c);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .sim .cover-wrap { border-bottom: 2px solid var(--ink); }
+  .sim-body { padding: 7px 8px 8px; display: flex; flex-direction: column; gap: 4px; }
+  .sim-name {
+    font-size: 11.5px;
+    font-weight: 800;
+    line-height: 1.25;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .sim-year { font-size: 10.5px; font-weight: 650; color: var(--muted); }
+  .tags { display: flex; gap: 5px; flex-wrap: wrap; }
+  .tag {
+    font-size: 9.5px;
+    font-weight: 800;
+    padding: 1px 7px;
+    border-radius: 999px;
+    border: 1.5px solid var(--ink);
+    background: var(--p3);
+    white-space: nowrap;
+  }
+  .tag.owned { background: var(--good); color: var(--card); }
+  .tag.unplayed { background: var(--p2); }
+
+  /* ---- click-to-expand overlays (detail card, screenshot lightbox) ---- */
   /* Anchored near the clicked card rather than centered in the (possibly
      very tall) iframe — hosts that don't auto-scroll to modals would
      otherwise open it off-screen. JS sets the panel's top and the overlay's
@@ -406,7 +597,23 @@ GAME_CARDS_HTML = r"""<!doctype html>
     transition: transform 0.19s ease;
   }
   .overlay.open .overlay-panel { transform: translateX(-50%); }
-  .overlay-panel .detail { max-width: none; box-shadow: none; margin: 0; }
+  .overlay-panel .detail-stack { max-width: none; }
+  .overlay-panel .detail { max-width: none; margin: 0; }
+  /* On the backdrop the blocks carry no drop shadow — the panel already
+     floats. */
+  .overlay-panel .detail, .overlay-panel .hero, .overlay-panel .panel {
+    box-shadow: none;
+  }
+  /* The screenshot lightbox is a bare panel of its own (the detail overlay
+     borrows its frame from the card inside it). */
+  .overlay-panel.shot-panel {
+    max-width: 900px;
+    border: 2px solid var(--ink);
+    border-radius: 14px;
+    background: var(--card);
+    overflow: hidden;
+  }
+  .shot-full { display: block; width: 100%; height: auto; }
   .overlay-close {
     position: absolute;
     top: 10px;
@@ -460,10 +667,15 @@ GAME_CARDS_HTML = r"""<!doctype html>
   @media (max-width: 460px) {
     .detail { flex-direction: column; }
     .detail .cover-wrap { flex-basis: auto; width: 150px; }
+    /* Narrow phone: smaller thumbs so more than one fits before scrolling. */
+    .shot img { width: 148px; height: 84px; }
+    .sim { width: 96px; }
   }
   @media (prefers-reduced-motion: reduce) {
-    .card, .overlay, .overlay-panel { transition: none; }
+    .card, .overlay, .overlay-panel, .shot, .play-badge span { transition: none; }
     .card:hover { transform: none; box-shadow: 4px 4px 0 var(--shadow-c); }
+    .shot:hover { transform: none; }
+    .play-badge:hover span, .play-badge:focus-visible span { transform: none; }
     .loading-note::after { animation: none; }
   }
 </style>
@@ -523,6 +735,7 @@ GAME_CARDS_HTML = r"""<!doctype html>
      method-not-found — which we surface as a hint instead of silence. */
   var hostCaps = {};
   function openLink(url) {
+    if (!url) return;
     if (!hostCaps.openLinks) {
       try { if (window.open(url, "_blank", "noopener")) return; } catch (e) { /* sandboxed */ }
     }
@@ -563,6 +776,19 @@ GAME_CARDS_HTML = r"""<!doctype html>
     if (cls) node.className = cls;
     if (text !== undefined && text !== null) node.textContent = text;
     return node;
+  }
+
+  function list(v) { return Array.isArray(v) ? v : []; }
+  function num(v) {
+    if (v === null || v === undefined || v === "") return null;
+    var n = Number(v);
+    return isFinite(n) ? n : null;
+  }
+  function section(parent, title) {
+    var box = el("section", "panel");
+    if (title) box.appendChild(el("div", "section-title", title));
+    parent.appendChild(box);
+    return box;
   }
 
   function coverHue(name) {
@@ -649,52 +875,53 @@ GAME_CARDS_HTML = r"""<!doctype html>
     return null;
   }
 
-  /* ---- click-to-expand: grid card -> live detail overlay ---- */
-  var overlayState = null; // { node, trigger, keydown }
+  /* ---- click-to-expand overlays: detail card + screenshot lightbox ---- */
+  /* A STACK, not a single slot: a screenshot enlarged from inside a detail
+     overlay has to sit on top of it, not replace it. Later overlays are
+     appended later in the DOM, so equal z-index already stacks them right. */
+  var overlays = []; // [{ node, trigger, keydown, position }] — last is topmost
 
-  function closeOverlay() {
-    if (!overlayState) return;
-    var s = overlayState;
-    overlayState = null;
+  function closeOverlay(entry) {
+    var s = entry || overlays[overlays.length - 1];
+    if (!s) return;
+    var i = overlays.indexOf(s);
+    if (i < 0) return; // already closed
+    overlays.splice(i, 1);
     document.removeEventListener("keydown", s.keydown);
     s.node.classList.remove("open");
     setTimeout(function () { s.node.remove(); }, 200);
     if (s.trigger && s.trigger.focus) s.trigger.focus();
   }
+  function closeAllOverlays() {
+    while (overlays.length) closeOverlay();
+  }
 
-  function openDetail(game, trigger) {
-    closeOverlay();
+  function closeButton(label, onClose) {
+    var btn = el("button", "overlay-close", "✕");
+    btn.setAttribute("aria-label", label);
+    btn.addEventListener("click", onClose);
+    return btn;
+  }
+
+  function openOverlay(panel, trigger) {
     var overlay = el("div", "overlay");
-    var panel = el("div", "overlay-panel");
-    panel.setAttribute("role", "dialog");
-    panel.setAttribute("aria-modal", "true");
-    panel.setAttribute("aria-label", game.name || "Game details");
-    panel.tabIndex = -1;
-
-    var close = el("button", "overlay-close", "✕");
-    close.setAttribute("aria-label", "Close details");
-    close.addEventListener("click", closeOverlay);
-    panel.appendChild(close);
-
-    // Instant view from the data already on the card; the live
-    // get_game_detail result replaces it when it arrives.
-    var lite = detailCard(game);
-    var note = el("div", "loading-note", "loading full details");
-    var liteInfo = lite.querySelector(".detail-info");
-    if (liteInfo) liteInfo.appendChild(note);
-    panel.appendChild(lite);
-
+    var entry = { node: overlay, trigger: trigger, keydown: null, position: position };
     overlay.appendChild(panel);
     overlay.addEventListener("click", function (ev) {
-      if (ev.target === overlay) closeOverlay();
+      if (ev.target === overlay) closeOverlay(entry);
     });
-    var keydown = function (ev) { if (ev.key === "Escape") closeOverlay(); };
-    document.addEventListener("keydown", keydown);
-    overlayState = { node: overlay, trigger: trigger, keydown: keydown };
-
+    // Only the topmost overlay answers Escape, so closing a lightbox leaves
+    // the detail card it was opened from standing.
+    entry.keydown = function (ev) {
+      if (ev.key === "Escape" && overlays[overlays.length - 1] === entry) {
+        closeOverlay(entry);
+      }
+    };
+    document.addEventListener("keydown", entry.keydown);
+    overlays.push(entry);
     document.body.appendChild(overlay);
 
-    // Anchor the panel near the clicked card, clamped inside the document;
+    // Anchor the panel near whatever was clicked, clamped inside the document;
     // stretch the backdrop over the full document height.
     function position() {
       var docH = document.documentElement.scrollHeight;
@@ -707,19 +934,63 @@ GAME_CARDS_HTML = r"""<!doctype html>
     position();
     requestAnimationFrame(function () { overlay.classList.add("open"); });
     panel.focus({ preventScroll: true });
+    return entry;
+  }
+
+  function openDetail(game, trigger) {
+    closeAllOverlays();
+    var entry;
+    var panel = el("div", "overlay-panel");
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-modal", "true");
+    panel.setAttribute("aria-label", game.name || "Game details");
+    panel.tabIndex = -1;
+    panel.appendChild(closeButton("Close details", function () { closeOverlay(entry); }));
+
+    // Instant view from the data already on the card; the live
+    // get_game_detail result replaces it when it arrives.
+    var lite = detailCard(game);
+    var note = el("div", "loading-note", "loading full details");
+    var liteInfo = lite.querySelector(".detail-info");
+    if (liteInfo) liteInfo.appendChild(note);
+    panel.appendChild(lite);
+
+    entry = openOverlay(panel, trigger);
 
     if (window.__PREVIEW_DATA__) { note.remove(); return; }
-    callTool("get_game_detail", { game_id: game.game_id }).then(function (res) {
-      if (overlayState && overlayState.node !== overlay) return; // superseded
+    // media:true is what turns the upgraded card into the full game
+    // representation — trailer, screenshots, similar games he owns. The grid
+    // payload carries none of that.
+    callTool("get_game_detail", { game_id: game.game_id, media: true }).then(function (res) {
+      if (overlays.indexOf(entry) < 0) return; // closed or superseded
       var data = resultData(res);
       if (data && data.name) {
         var full = detailCard(data);
         panel.replaceChild(full, lite);
-        position(); // content height changed
+        entry.position(); // content height changed
       } else {
         note.remove(); // host declined or timed out: keep the lite view
       }
     });
+  }
+
+  function openShot(shot, label, trigger) {
+    var entry;
+    var panel = el("div", "overlay-panel shot-panel");
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-modal", "true");
+    panel.setAttribute("aria-label", label || "Screenshot");
+    panel.tabIndex = -1;
+    panel.appendChild(closeButton("Close screenshot", function () { closeOverlay(entry); }));
+
+    var img = document.createElement("img");
+    img.className = "shot-full";
+    img.alt = label || "Screenshot";
+    img.src = shot.full || shot.thumb;
+    panel.appendChild(img);
+
+    entry = openOverlay(panel, trigger);
+    img.addEventListener("load", entry.position); // full-size art changes the height
   }
 
   function gridCard(game) {
@@ -833,7 +1104,188 @@ GAME_CARDS_HTML = r"""<!doctype html>
     }
   }
 
+  /* ---- media blocks (get_game_detail(media=True)) ---- */
+  /* These mirror the evaluation card's implementations (apps_eval.py) on
+     purpose: each widget is one self-contained HTML resource — no build step,
+     no CDN, nothing shared at runtime — so a media pattern changed in one
+     must be ported to the other by hand. */
+  function playBadge(label) {
+    var btn = el("button", "play-badge");
+    btn.setAttribute("aria-label", label);
+    btn.appendChild(el("span", null, "▶"));
+    return btn;
+  }
+  function linkPill(hero, label, url) {
+    var pill = el("button", "hero-pill", label);
+    pill.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      openLink(url);
+    });
+    hero.appendChild(pill);
+    return pill;
+  }
+  function posterNode(url, alt) {
+    var img = document.createElement("img");
+    img.className = "hero-media";
+    img.alt = alt || "";
+    img.src = url;
+    return img;
+  }
+  /* A hero needs a TRAILER: this card already leads with the cover, so a
+     game with screenshots alone gets the strip below and no hero. */
+  function heroNode(media) {
+    var trailer = media.trailer;
+    if (!trailer || !(trailer.url || trailer.video_id)) return null;
+    var hero = el("div", "hero");
+    if (trailer.kind === "mp4" && trailer.url) {
+      mp4Hero(hero, trailer);
+    } else if (trailer.kind === "youtube" && trailer.video_id) {
+      youtubeHero(hero, trailer);
+    } else {
+      return null;                                  // trailer of an unknown kind
+    }
+    return hero;
+  }
+  function mp4Hero(hero, trailer) {
+    var urls = [trailer.url, trailer.hq_url].filter(Boolean);
+    var video = document.createElement("video");
+    video.className = "hero-media";
+    video.controls = true;
+    video.preload = "none";     // never autoplay: zero bytes until the user asks
+    video.playsInline = true;
+    if (trailer.poster) video.poster = trailer.poster;
+    video.setAttribute("aria-label", trailer.name || "Trailer");
+    urls.forEach(function (u) {
+      var src = document.createElement("source");
+      src.src = u;
+      src.type = "video/mp4";
+      video.appendChild(src);
+    });
+    /* A <video> with <source> children never fires `error` on itself — the
+       failures land on the <source> elements and error events don't bubble,
+       so catch them on the way down and give up once every rendition failed.
+       This is the fallback for Valve dropping the undocumented legacy mp4
+       URLs, and equally for a host that strips media-src from the CSP. */
+    var failures = 0;
+    var done = false;
+    video.addEventListener("error", function () {
+      failures += 1;
+      if (done || failures < urls.length) return;
+      done = true;
+      posterFallback(hero, trailer);
+    }, true);
+    hero.appendChild(video);
+  }
+  function posterFallback(hero, trailer) {
+    hero.textContent = "";
+    if (trailer.poster) {
+      hero.appendChild(posterNode(trailer.poster, trailer.name || "Trailer thumbnail"));
+    } else {
+      hero.appendChild(el("div", "hero-missing", "Trailer unavailable here"));
+    }
+    var url = trailer.hq_url || trailer.url;
+    var badge = playBadge("Open the trailer" + (trailer.name ? ": " + trailer.name : ""));
+    badge.addEventListener("click", function () { openLink(url); });
+    hero.appendChild(badge);
+  }
+  function youtubeHero(hero, trailer) {
+    if (trailer.poster) {
+      hero.appendChild(posterNode(trailer.poster, trailer.name || "Trailer thumbnail"));
+    } else {
+      hero.appendChild(el("div", "hero-missing", trailer.name || "Trailer"));
+    }
+    var watchUrl = "https://www.youtube.com/watch?v=" + trailer.video_id;
+    var badge = playBadge("Play trailer" + (trailer.name ? ": " + trailer.name : ""));
+    badge.addEventListener("click", function () {
+      // Lazy by design: nothing is fetched from YouTube until this click.
+      var frame = document.createElement("iframe");
+      frame.className = "hero-media";
+      frame.src = "https://www.youtube-nocookie.com/embed/" + encodeURIComponent(trailer.video_id);
+      frame.setAttribute("allowfullscreen", "");
+      frame.setAttribute("title", trailer.name || "Trailer");
+      hero.textContent = "";
+      hero.appendChild(frame);
+      // A CSP-blocked nested frame is not detectable from JS, so keep the
+      // link-out route visible even after the embed is swapped in.
+      linkPill(hero, "watch ↗", watchUrl);
+      reportSize();
+    });
+    hero.appendChild(badge);
+    linkPill(hero, "watch ↗", watchUrl);
+  }
+
+  function shotsNode(parent, media, gameName) {
+    var shots = list(media.screenshots).filter(function (s) { return s && (s.thumb || s.full); });
+    if (!shots.length) return;
+    var box = section(parent, "Screenshots");
+    var strip = el("div", "strip");
+    shots.forEach(function (shot, i) {
+      var label = (gameName ? gameName + " " : "") + "screenshot " + (i + 1);
+      var btn = el("button", "shot");
+      btn.setAttribute("aria-label", "Enlarge " + label);
+      var img = document.createElement("img");
+      img.alt = "";                       // the button already carries the label
+      img.loading = "lazy";
+      img.src = shot.thumb || shot.full;
+      btn.appendChild(img);
+      btn.addEventListener("click", function () { openShot(shot, label, btn); });
+      strip.appendChild(btn);
+    });
+    var total = num(media.screenshot_count);
+    if (media.screenshots_truncated && total != null && total > shots.length) {
+      strip.appendChild(el("span", "more-chip", "+" + (total - shots.length) + " more"));
+    }
+    box.appendChild(strip);
+  }
+
+  function ownershipTags(item) {
+    var tags = el("div", "tags");
+    if (item.owned) tags.appendChild(el("span", "tag owned", "owned"));
+    if (item.unplayed) tags.appendChild(el("span", "tag unplayed", "unplayed"));
+    var rating = num(item.my_rating);
+    if (rating != null) tags.appendChild(el("span", "tag", rating + "/10"));
+    var hours = hoursLabel(item.playtime_hours);
+    if (hours) tags.appendChild(el("span", "tag", hours));
+    return tags.childNodes.length ? tags : null;
+  }
+
+  /* IGDB's similar games, already annotated server-side with what he owns —
+     the point of the row is the ownership stickers, not the neighbours. */
+  function similarNode(parent, similar) {
+    var items = list(similar.items).filter(function (i) { return i && i.name; });
+    if (!items.length) return;
+    var box = section(parent, "Similar games");
+    var strip = el("div", "strip");
+    items.forEach(function (item) {
+      var card = el("div", "sim");
+      card.appendChild(coverNode(item));
+      var body = el("div", "sim-body");
+      body.appendChild(el("div", "sim-name", item.name));
+      if (item.release_year) body.appendChild(el("div", "sim-year", String(item.release_year)));
+      var tags = ownershipTags(item);
+      if (tags) body.appendChild(tags);
+      card.appendChild(body);
+      strip.appendChild(card);
+    });
+    var total = num(similar.count);
+    if (similar.truncated && total != null && total > items.length) {
+      strip.appendChild(el("span", "more-chip", "+" + (total - items.length) + " more"));
+    }
+    box.appendChild(strip);
+    var owned = items.filter(function (i) { return i.owned; }).length;
+    var shown = total != null && total >= items.length ? total : items.length;
+    box.appendChild(el("div", "note",
+      "You own " + owned + " of the " + shown + " most similar"));
+  }
+
   function detailCard(game) {
+    // A column stack so the media blocks can span the card's full width; with
+    // no media it holds the one .detail panel and looks exactly as before.
+    var stack = el("div", "detail-stack");
+    var media = game.media || {};
+    var hero = heroNode(media);
+    if (hero) stack.appendChild(hero);
+
     var box = el("div", "detail");
     box.appendChild(coverNode(game));
 
@@ -878,7 +1330,10 @@ GAME_CARDS_HTML = r"""<!doctype html>
       info.appendChild(r);
     }
 
-    if (game.short_description) info.appendChild(el("p", "desc", game.short_description));
+    // media.short_description is the same kind of blurb as the stored one and
+    // often literally identical — render one, preferring the library's own.
+    var description = game.short_description || media.short_description;
+    if (description) info.appendChild(el("p", "desc", description));
 
     var tags = (game.tags || []).slice(0, 8);
     if (tags.length) {
@@ -888,7 +1343,11 @@ GAME_CARDS_HTML = r"""<!doctype html>
     }
 
     box.appendChild(info);
-    return box;
+    stack.appendChild(box);
+
+    shotsNode(stack, media, game.name);
+    if (game.similar) similarNode(stack, game.similar);
+    return stack;
   }
 
   function render(data) {

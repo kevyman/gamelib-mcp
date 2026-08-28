@@ -285,6 +285,7 @@ async def get_game_detail(
     game_id: int | None = None,
     items: list[dict] | None = None,
     enrich: bool | None = None,
+    media: bool = False,
 ) -> GameDetailResponse:
     """
     Get full details for one game, or for many in one call.
@@ -301,6 +302,16 @@ async def get_game_detail(
     numbers, price seen and target, and the declared skill/skill_version/model,
     null when the recorder stated none), with assessment_count as the true
     total and assessments_truncated as the flag — in single-game mode only.
+
+    `media=True` (single-game mode only) additionally fetches how the game
+    presents itself, for rendering a card: `media` (a trailer — a playable mp4
+    or a YouTube id — plus up to 6 screenshots with screenshot_count/
+    screenshots_truncated, and the store's short description) and `similar`
+    (up to 8 games IGDB considers similar, each annotated with whether it is
+    owned, unplayed, its rating and playtime, with count/truncated). Both keys
+    are absent when nothing resolves; results are cached server-side for about
+    7 days, so a repeat call on the same game is free. Leave it off when you
+    only need the facts above — it costs a provider round trip on a cold cache.
 
     Pass `items` (max 50) — a list of {name, appid, or game_id}, the same
     resolution — to fetch many at once. Per-item results carry status "ok"
@@ -325,8 +336,20 @@ async def get_game_detail(
                 "fan out to one round of provider HTTP per game. Call "
                 "get_game_detail on a single game to force its fetch."
             )
+        if media:
+            raise ToolError(
+                "media=True is not supported with items — the trailer/"
+                "screenshot lookup is one provider round trip per game. Call "
+                "get_game_detail on a single game to get its media."
+            )
         return await _many(items)
-    return await _detail(name, appid, game_id, enrich=True if enrich is None else enrich)
+    return await _detail(
+        name,
+        appid,
+        game_id,
+        enrich=True if enrich is None else enrich,
+        media=media,
+    )
 
 
 @mcp.tool(title="Discover Games to Play", annotations=READ_ONLY_TOOL, app=GAME_CARDS_APP)
