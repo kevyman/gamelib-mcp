@@ -261,7 +261,9 @@ class ContentTypeBadgeTests(unittest.TestCase):
 
     def test_grid_overlay_upgrade_call_requests_media(self) -> None:
         self.assertIn(
-            'callTool("get_game_detail", { game_id: game.game_id, media: true })',
+            # 30s, not callTool's 15s default: a cold click-through runs full
+            # enrichment plus the media lookup's own 8s budget server-side.
+            'callTool("get_game_detail", { game_id: game.game_id, media: true }, 30000)',
             apps.GAME_CARDS_HTML,
         )
 

@@ -427,9 +427,22 @@ async def fetch_store_appdetails(
                 raise
             logger.warning("Steam store details fetch failed for %s: %s", appid, exc)
             return None
-        # Outside the try: a parse-shaped surprise (non-dict JSON) should not
-        # masquerade as a request failure, so guard it instead of catching it.
-        app_data = payload.get(str(appid), {}) if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict):
+            # A malformed answer is a FAILURE, not "Steam has no data": on the
+            # failure-aware path it must raise (the media cache would otherwise
+            # remember it as a 24h miss); enrichment callers keep the swallow.
+            if raise_on_failure:
+                raise ValueError(
+                    f"unexpected appdetails payload shape for {appid}: "
+                    f"{type(payload).__name__}"
+                )
+            logger.warning(
+                "Unexpected appdetails payload shape for %s: %s",
+                appid,
+                type(payload).__name__,
+            )
+            return None
+        app_data = payload.get(str(appid), {})
         if not app_data.get("success"):
             return None
         return app_data.get("data", {})

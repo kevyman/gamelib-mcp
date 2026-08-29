@@ -286,6 +286,20 @@ class SteamMediaTests(ToolDBTestCase):
         cached = json.loads(await get_meta(media._cache_key("steam", 99)))
         self.assertIsNone(cached["payload"])
 
+    async def test_malformed_appdetails_payload_raises_on_the_failure_aware_path(self):
+        # HTTP-successful JSON with a non-dict top level is a FAILURE, not
+        # "Steam has no data" — swallowed, the media cache would remember it
+        # as a 24h miss. Enrichment callers keep the legacy swallow.
+        from gamelib_mcp.data.steam_store import fetch_store_appdetails
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=[])
+
+        client = _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler))
+        with self.assertRaises(ValueError):
+            await fetch_store_appdetails(367520, client, raise_on_failure=True)
+        self.assertIsNone(await fetch_store_appdetails(367520, client))
+
     async def test_head_transport_failure_keeps_the_trailer(self):
         # The HEAD gate exists to catch Valve DROPPING the legacy renditions
         # (a definitive non-2xx), not to demand a healthy CDN this instant: a

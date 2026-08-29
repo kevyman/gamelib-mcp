@@ -973,7 +973,11 @@ GAME_CARDS_HTML = r"""<!doctype html>
     // media:true is what turns the upgraded card into the full game
     // representation — trailer, screenshots, similar games he owns. The grid
     // payload carries none of that.
-    callTool("get_game_detail", { game_id: game.game_id, media: true }).then(function (res) {
+    // 30s, not callTool's 15s default: a cold click-through runs the full
+    // lazy enrichment AND the media lookup's own 8s budget server-side, and a
+    // response that loses the race is discarded — the overlay would sit on
+    // the lite card forever even though media eventually arrived.
+    callTool("get_game_detail", { game_id: game.game_id, media: true }, 30000).then(function (res) {
       if (overlays.indexOf(entry) < 0) return; // closed or superseded
       var data = resultData(res);
       if (data && data.name) {

@@ -153,6 +153,8 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
             'el("div", "ped-head", headline)',
             'el("div", "ped-pub", "published by " + ped.publisher_name)',
             '"You\'ve played " + (num(record.played_count) || 0) + " of "',
+            # Zero is authoritative NOT-played; "0h played" must never render.
+            'own.playtime_hours > 0 ? hoursLabel(own.playtime_hours) : null',
             '" — avg " + avg + "/10."',
         ):
             self.assertIn(marker, apps_eval.EVAL_CARD_HTML)

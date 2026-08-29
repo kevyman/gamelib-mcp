@@ -965,7 +965,10 @@ EVAL_CARD_HTML = r"""<!doctype html>
     if (game.release_year) bits.push(String(game.release_year));
     var platforms = list(own.platforms).filter(Boolean);
     if (platforms.length) bits.push(platforms.join(" · "));
-    var played = hoursLabel(own.playtime_hours);
+    // Positive hours only: hoursLabel(0) is the truthy string "0h", and
+    // "0h played" would contradict the card's own unplayed badges (zero is
+    // authoritative NOT-played; null is unknown and says nothing).
+    var played = own.playtime_hours > 0 ? hoursLabel(own.playtime_hours) : null;
     if (played) bits.push(played + " played");
     if (own.wishlisted && !own.owned) bits.push("wishlisted");
     if (bits.length) info.appendChild(el("div", "sub", bits.join("  ·  ")));
