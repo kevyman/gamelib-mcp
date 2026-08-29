@@ -192,7 +192,7 @@ class ContentTypeBadgeTests(unittest.TestCase):
             'shotsNode(stack, media, game.name)',
             'if (game.similar) similarNode(stack, game.similar)',
             'el("div", "sim-name", item.name)',
-            '"You own " + owned + " of the " + shown + " most similar"',
+            '"You own " + owned + " of the " + items.length + " most similar"',
         ):
             self.assertIn(marker, apps.GAME_CARDS_HTML)
 
@@ -205,7 +205,7 @@ class ContentTypeBadgeTests(unittest.TestCase):
             'section(parent, "From the studio")',
             'el("div", "ped-head", headline)',
             'el("div", "ped-pub", "published by " + ped.publisher_name)',
-            '"You\'ve played " + (num(record.played_count) || 0) + " of their "',
+            '"You\'ve played " + (num(record.played_count) || 0) + " of "',
             '" — avg " + avg + "/10."',
         ):
             self.assertIn(marker, apps.GAME_CARDS_HTML)

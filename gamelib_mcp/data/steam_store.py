@@ -392,6 +392,7 @@ async def fetch_store_appdetails(
     client: httpx.AsyncClient | None = None,
     *,
     filters: str = STORE_ENRICHMENT_FILTERS,
+    raise_on_failure: bool = False,
 ) -> dict | None:
     """Fetch ONE app's appdetails ``data`` payload; None on failure/no data.
 
@@ -405,6 +406,13 @@ async def fetch_store_appdetails(
     media groups instead, which enrichment has no use for (and which the 7-day
     store cache predates, so media is fetched on demand rather than read off a
     stored row).
+
+    ``raise_on_failure`` re-raises a request failure instead of folding it into
+    the None that also means "Steam has no data for this appid". The default
+    keeps the long-standing swallow for enrichment callers; data/media.py needs
+    the distinction because it CACHES a legitimate miss — a transient outage
+    written down as a 24-hour miss would strip media from every card of that
+    game for the rest of the day.
     """
     async def fetch(active_client: httpx.AsyncClient) -> dict | None:
         try:
@@ -414,13 +422,17 @@ async def fetch_store_appdetails(
                 params={"appids": appid, "filters": filters},
                 timeout=15,
             )
-            app_data = payload.get(str(appid), {})
-            if not app_data.get("success"):
-                return None
-            return app_data.get("data", {})
         except Exception as exc:
+            if raise_on_failure:
+                raise
             logger.warning("Steam store details fetch failed for %s: %s", appid, exc)
             return None
+        # Outside the try: a parse-shaped surprise (non-dict JSON) should not
+        # masquerade as a request failure, so guard it instead of catching it.
+        app_data = payload.get(str(appid), {}) if isinstance(payload, dict) else {}
+        if not app_data.get("success"):
+            return None
+        return app_data.get("data", {})
 
     if client is not None:
         return await fetch(client)

@@ -286,6 +286,41 @@ class SteamMediaTests(ToolDBTestCase):
         cached = json.loads(await get_meta(media._cache_key("steam", 99)))
         self.assertIsNone(cached["payload"])
 
+    async def test_steam_request_failure_is_not_cached_as_a_miss(self):
+        # An outage must stay distinguishable from "Steam has no data": a miss
+        # is remembered for 24h, so caching a transient failure would strip
+        # media from every card of this game for the rest of the day.
+        failing = AsyncMock(side_effect=httpx.ConnectError("steam is down"))
+        with patch.object(media, "fetch_store_appdetails", failing) as store:
+            self.assertIsNone(await media.get_game_media(steam_appid=77))
+            self.assertIsNone(await media.get_game_media(steam_appid=77))
+
+        # Retried on the second call (nothing cached), and no miss written.
+        self.assertEqual(store.await_count, 2)
+        self.assertIsNone(await get_meta(media._cache_key("steam", 77)))
+        # The failure path asked for the failure-aware fetch.
+        self.assertTrue(store.await_args.kwargs["raise_on_failure"])
+
+    async def test_steam_request_failure_serves_the_stale_payload(self):
+        stale = {"media": {"source": "steam", "trailer": None, "screenshots": [],
+                           "screenshot_count": 0, "screenshots_truncated": False,
+                           "short_description": "old but true"},
+                 "similar_raw": None, "similar_count": None, "igdb_id": None,
+                 "pedigree_raw": None}
+        await set_meta(
+            media._cache_key("steam", 88),
+            json.dumps({
+                "fetched_at": (datetime.now(UTC) - timedelta(days=30)).isoformat(),
+                "payload": stale,
+            }),
+        )
+        failing = AsyncMock(side_effect=httpx.ConnectError("steam is down"))
+        with patch.object(media, "fetch_store_appdetails", failing):
+            result = await media.get_game_media(steam_appid=88)
+
+        assert result is not None
+        self.assertEqual(result["media"]["short_description"], "old but true")
+
     async def test_steam_media_borrows_similar_games_from_igdb(self):
         # Similar games exist only on IGDB. A Steam-sourced result still
         # reaches over for them when the game's IGDB record is reachable —

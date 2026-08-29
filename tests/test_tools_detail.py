@@ -467,11 +467,14 @@ class GetGameDetailMediaTests(ToolDBTestCase):
         rated = await seed_game("Rated Neighbour")
         await add_platform(rated, "steam", playtime_minutes=600)
         await add_rating(rated, "manual", 8.0, 8.0)
+        untracked = await seed_game("Untracked Neighbour")
+        await add_platform(untracked, "gog", playtime_minutes=None)
         async with db_module.get_db() as db:
             await db.execute(
                 "UPDATE games SET igdb_id = 101 WHERE id = ?", (owned_unplayed,)
             )
             await db.execute("UPDATE games SET igdb_id = 202 WHERE id = ?", (rated,))
+            await db.execute("UPDATE games SET igdb_id = 404 WHERE id = ?", (untracked,))
             await db.commit()
 
         payload = {
@@ -495,6 +498,12 @@ class GetGameDetailMediaTests(ToolDBTestCase):
                     "release_year": None,
                     "cover_image_id": None,
                 },
+                {
+                    "igdb_id": 404,
+                    "name": "Untracked Neighbour",
+                    "release_year": 2020,
+                    "cover_image_id": None,
+                },
             ],
             "similar_count": 11,
         }
@@ -504,7 +513,7 @@ class GetGameDetailMediaTests(ToolDBTestCase):
         similar = result["similar"]
         self.assertEqual(similar["count"], 11)
         self.assertTrue(similar["truncated"])
-        unplayed, rated_entry, unknown = similar["items"]
+        unplayed, rated_entry, unknown, untracked_entry = similar["items"]
         self.assertTrue(unplayed["owned"])
         self.assertTrue(unplayed["unplayed"])
         self.assertEqual(
@@ -516,6 +525,11 @@ class GetGameDetailMediaTests(ToolDBTestCase):
         self.assertFalse(rated_entry["unplayed"])
         self.assertFalse(unknown["owned"])
         self.assertIsNone(unknown["cover_url"])
+        # NULL playtime (GOG, manual adds) is UNKNOWN, not an authoritative
+        # zero — the three-state convention: only a known 0 earns "unplayed".
+        self.assertTrue(untracked_entry["owned"])
+        self.assertFalse(untracked_entry["unplayed"])
+        self.assertIsNone(untracked_entry["playtime_hours"])
 
     async def test_identity_passed_is_the_appid_igdb_id_and_name(self):
         gid = await make_steam_game("Identity Order", 4242)

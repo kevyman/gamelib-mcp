@@ -152,7 +152,7 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
             'section(parent, "From the studio")',
             'el("div", "ped-head", headline)',
             'el("div", "ped-pub", "published by " + ped.publisher_name)',
-            '"You\'ve played " + (num(record.played_count) || 0) + " of their "',
+            '"You\'ve played " + (num(record.played_count) || 0) + " of "',
             '" — avg " + avg + "/10."',
         ):
             self.assertIn(marker, apps_eval.EVAL_CARD_HTML)

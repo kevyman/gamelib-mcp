@@ -96,7 +96,10 @@ async def annotate_similar_games(
                     else None
                 ),
                 "owned": owned,
-                "unplayed": owned and not playtime,
+                # NULL playtime is UNKNOWN (GOG, manual adds, mid-import rows),
+                # never "unplayed" — the repo-wide three-state convention
+                # (PLAY_STATE_SQL). Only an authoritative zero earns the tag.
+                "unplayed": owned and playtime == 0,
                 "my_rating": row["my_rating"] if row is not None else None,
                 "playtime_hours": _hours(playtime),
             }

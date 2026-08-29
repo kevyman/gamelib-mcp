@@ -237,7 +237,16 @@ async def _steam_trailer(movies: list | None) -> dict | None:
 
 
 async def _fetch_steam_media(appid: int) -> dict | None:
-    data = await fetch_store_appdetails(appid, filters=_STEAM_MEDIA_FILTERS)
+    # raise_on_failure: a request failure must NOT come back as the same None
+    # a "Steam has nothing for this appid" answer uses — _cached would write
+    # it down as a 24-hour miss, and one transient outage would strip media
+    # from every card of this game for the rest of the day.
+    try:
+        data = await fetch_store_appdetails(
+            appid, filters=_STEAM_MEDIA_FILTERS, raise_on_failure=True
+        )
+    except Exception as exc:
+        raise _MediaFetchError(f"steam appdetails failed for {appid}: {exc}") from exc
     if not data:
         return None
 

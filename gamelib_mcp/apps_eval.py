@@ -1274,9 +1274,10 @@ EVAL_CARD_HTML = r"""<!doctype html>
       }
       box.appendChild(strip);
       var owned = items.filter(function (i) { return i.owned; }).length;
-      var shown = total != null && total >= items.length ? total : items.length;
+      // Ownership is annotated only for the SHOWN games — the true total
+      // belongs to the "+N more" chip above, never to this denominator.
       box.appendChild(el("div", "note",
-        "You own " + owned + " of the " + shown + " most similar"));
+        "You own " + owned + " of the " + items.length + " most similar"));
     }
 
     if (alsoSimilar.length) {
@@ -1349,12 +1350,15 @@ EVAL_CARD_HTML = r"""<!doctype html>
     box.appendChild(strip);
     var record = ped.library_track_record;
     if (record) {
-      var total = num(ped.previous_count);
-      var shown = total != null && total >= items.length ? total : items.length;
       var avg = num(record.avg_my_rating);
+      // The track record covers only the annotated (shown) games; when the
+      // catalogue runs deeper, "last N" keeps the claim honest.
+      var span = ped.previous_truncated
+        ? "their last " + items.length + " games"
+        : "their " + items.length + " previous games";
       box.appendChild(el("div", "note",
-        "You've played " + (num(record.played_count) || 0) + " of their "
-        + shown + " previous games" + (avg != null ? " — avg " + avg + "/10." : ".")));
+        "You've played " + (num(record.played_count) || 0) + " of "
+        + span + (avg != null ? " — avg " + avg + "/10." : ".")));
     }
   }
 
