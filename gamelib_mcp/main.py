@@ -306,12 +306,16 @@ async def get_game_detail(
     `media=True` (single-game mode only) additionally fetches how the game
     presents itself, for rendering a card: `media` (a trailer — a playable mp4
     or a YouTube id — plus up to 6 screenshots with screenshot_count/
-    screenshots_truncated, and the store's short description) and `similar`
+    screenshots_truncated, and the store's short description), `similar`
     (up to 8 games IGDB considers similar, each annotated with whether it is
-    owned, unplayed, its rating and playtime, with count/truncated). Both keys
-    are absent when nothing resolves; results are cached server-side for about
-    7 days, so a repeat call on the same game is free. Leave it off when you
-    only need the facts above — it costs a provider round trip on a cold cache.
+    owned, unplayed, its rating and playtime, with count/truncated) and
+    `pedigree` (the developer — name, founding year, catalogue size — plus up
+    to 6 of their games released BEFORE this one, annotated the same way, and
+    library_track_record: how many of them he owns, played and how he rated
+    them). The keys are absent when nothing resolves; results are cached
+    server-side for about 7 days, so a repeat call on the same game is free.
+    Leave it off when you only need the facts above — it costs a provider
+    round trip on a cold cache.
 
     Pass `items` (max 50) — a list of {name, appid, or game_id}, the same
     resolution — to fetch many at once. Per-item results carry status "ok"
@@ -1252,6 +1256,7 @@ async def record_assessment(
     for_you_if: list[str] | None = None,
     not_for_you_if: list[str] | None = None,
     comparisons: list[dict] | None = None,
+    why_care: list[dict] | None = None,
     void_assessment_id: int | None = None,
     items: list[dict] | None = None,
 ) -> RecordAssessmentResponse:
@@ -1329,16 +1334,29 @@ async def record_assessment(
     game (a name is matched exactly or not at all). Over-cap lists are
     rejected; long text is truncated.
 
+    why_care takes up to 3 {kind, text} objects — the one-line reasons this
+    game is worth a look BEFORE the verdict, with kind one of "people" (the
+    credits behind it: "the Bloodborne combat lead directs this"), "studio"
+    ("Larian's first game since Baldur's Gate 3"), "anticipation" ("nine years
+    after the last one") or "moment" ("the first Metroidvania to ship with
+    day-one Steam Deck verified"). Text is capped at 160 chars. SOURCEABLE
+    CLAIMS ONLY: this renders as fact on the card, so write what you could
+    point at, never a guess about who worked on what — the server fetches the
+    developer and their previous games itself (package.pedigree) and never
+    fetches credits, which is exactly the gap this fills.
+
     A single-game recording answers with `package` as well: everything the
     evaluation card renders — the game (cover, year), the verdict and summary,
     your presentation echoed back, comparisons and anchors resolved against
     the library (owned / rating / playtime), craft and fit, ownership and
     acquisition, HLTB against his recent pace, price seen vs target, media
     (trailer + up to 6 screenshots + short description), IGDB similar games
-    annotated with what he owns and hasn't played, and prior verdicts (up to
-    5). Media is fetched on demand, so anything that failed or timed out is
-    named in package.errors and the rest of the card still comes back — the
-    verdict is recorded either way. Not returned for `items` or void calls.
+    annotated with what he owns and hasn't played, `pedigree` (the developer,
+    when they were founded, and up to 6 of their previous games annotated with
+    what he owns, rated and played), and prior verdicts (up to 5). Media is
+    fetched on demand, so anything that failed or timed out is named in
+    package.errors and the rest of the card still comes back — the verdict is
+    recorded either way. Not returned for `items` or void calls.
 
     At most one assessment per game per UTC day: re-recording the same day
     REPLACES that day's row (replaced=true) rather than appending a second
@@ -1397,6 +1415,7 @@ async def record_assessment(
         for_you_if,
         not_for_you_if,
         comparisons,
+        why_care,
         void_assessment_id,
     )
 

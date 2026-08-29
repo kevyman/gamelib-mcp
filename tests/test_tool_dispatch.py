@@ -582,6 +582,35 @@ class ResponseSizeGuardTests(ToolDBTestCase):
                 for i in range(12)
             ],
             "similar_count": 12,
+            # The studio's previous games are capped in data/media.py and again
+            # in tools/game_media.py; a raw block over the cap proves the second
+            # gate holds for a payload that arrived over it.
+            "pedigree_raw": {
+                "developer": {
+                    "name": "Prolific Studio",
+                    "igdb_company_id": 77,
+                    "founded_year": 2001,
+                    "country": 36,
+                },
+                "developer_names": ["Prolific Studio"],
+                "publisher_name": None,
+                "previous_games": [
+                    {
+                        "igdb_id": 800 + i,
+                        "name": f"Earlier {i}",
+                        "release_year": 2015 - i,
+                        "cover_image_id": None,
+                        "critic_score": 70,
+                    }
+                    for i in range(10)
+                ],
+                "previous_count": 10,
+                "previous_truncated": True,
+                "catalog_size": 12,
+                "catalog_truncated": False,
+                "big_catalog": False,
+                "hypes": None,
+            },
             "igdb_id": 5,
         }
         with patch(
@@ -590,7 +619,11 @@ class ResponseSizeGuardTests(ToolDBTestCase):
         ):
             result = await main.get_game_detail(game_id=gid, media=True)
 
-        for path, cap in {"media.screenshots": 6, "similar.items": 8}.items():
+        for path, cap in {
+            "media.screenshots": 6,
+            "similar.items": 8,
+            "pedigree.previous_games": 6,
+        }.items():
             node = result
             for key in path.split("."):
                 self.assertIn(key, node, f"detail has no '{path}'; the contract is stale")
@@ -604,6 +637,8 @@ class ResponseSizeGuardTests(ToolDBTestCase):
         self.assertTrue(result["media"]["screenshots_truncated"])
         self.assertEqual(result["similar"]["count"], 12)
         self.assertTrue(result["similar"]["truncated"])
+        self.assertEqual(result["pedigree"]["previous_count"], 10)
+        self.assertTrue(result["pedigree"]["previous_truncated"])
 
     async def test_evaluation_package_lists_are_capped(self):
         # record_assessment's package is a WRITE response, but it carries the
@@ -639,6 +674,35 @@ class ResponseSizeGuardTests(ToolDBTestCase):
                 for i in range(12)
             ],
             "similar_count": 12,
+            # The studio's previous games are capped in data/media.py and again
+            # in tools/game_media.py; a raw block over the cap proves the second
+            # gate holds for a payload that arrived over it.
+            "pedigree_raw": {
+                "developer": {
+                    "name": "Prolific Studio",
+                    "igdb_company_id": 77,
+                    "founded_year": 2001,
+                    "country": 36,
+                },
+                "developer_names": ["Prolific Studio"],
+                "publisher_name": None,
+                "previous_games": [
+                    {
+                        "igdb_id": 800 + i,
+                        "name": f"Earlier {i}",
+                        "release_year": 2015 - i,
+                        "cover_image_id": None,
+                        "critic_score": 70,
+                    }
+                    for i in range(10)
+                ],
+                "previous_count": 10,
+                "previous_truncated": True,
+                "catalog_size": 12,
+                "catalog_truncated": False,
+                "big_catalog": False,
+                "hypes": None,
+            },
             "igdb_id": 5,
         }
         with patch(
@@ -667,6 +731,7 @@ class ResponseSizeGuardTests(ToolDBTestCase):
             "flags": 8,
             "media.screenshots": 6,
             "similar.items": 8,
+            "pedigree.previous_games": 6,
             "past.items": 5,
             "presentation.for_you_if": 4,
         }
@@ -683,5 +748,7 @@ class ResponseSizeGuardTests(ToolDBTestCase):
         # Capped lists still report the true totals.
         self.assertEqual(package["similar"]["count"], 12)
         self.assertTrue(package["similar"]["truncated"])
+        self.assertEqual(package["pedigree"]["previous_count"], 10)
+        self.assertTrue(package["pedigree"]["previous_truncated"])
         self.assertEqual(package["past"]["count"], 8)
         self.assertTrue(package["past"]["truncated"])

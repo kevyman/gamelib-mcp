@@ -10,6 +10,7 @@ Usage:
     python scripts/preview_game_cards.py detail --name "Hades" [-o out.html]
     python scripts/preview_game_cards.py detail --name "Hades" --media        # live
     python scripts/preview_game_cards.py detail --name "Hades" --sample-media  # offline
+    python scripts/preview_game_cards.py detail --name "Hades" --sample-media --big-studio
 """
 
 import argparse
@@ -94,6 +95,92 @@ SAMPLE_SIMILAR: dict[str, Any] = {
     "truncated": True,
 }
 
+# The "From the studio" strip, contract-exact (tools/game_media.py's annotated
+# shape). previous_games are annotated against the library, so the badge rule
+# — his rating beats the critic score, an owned-but-unrated game gets the
+# ownership sticker — is visible in one glance.
+SAMPLE_PEDIGREE: dict[str, Any] = {
+    "developer": {
+        "name": "Supergiant Games",
+        "igdb_company_id": 1152,
+        "founded_year": 2009,
+        "country": 840,
+    },
+    "developer_names": ["Supergiant Games"],
+    "publisher_name": "Supergiant Games",
+    "previous_games": [
+        {
+            "igdb_id": 113112,
+            "name": "Hades",
+            "release_year": 2020,
+            "critic_score": 93,
+            "cover_url": "https://images.igdb.com/igdb/image/upload/t_cover_big/co39vc.jpg",
+            "owned": True,
+            "my_rating": 9,
+            "playtime_hours": 132.4,
+        },
+        {
+            "igdb_id": 19560,
+            "name": "Pyre",
+            "release_year": 2017,
+            "critic_score": 84,
+            "cover_url": None,
+            "owned": True,
+            "my_rating": None,
+            "playtime_hours": 0.0,
+        },
+        {
+            "igdb_id": 3277,
+            "name": "Transistor",
+            "release_year": 2014,
+            "critic_score": 83,
+            "cover_url": None,
+            "owned": True,
+            "my_rating": 8,
+            "playtime_hours": 11.2,
+        },
+        {
+            "igdb_id": 1465,
+            "name": "Bastion",
+            "release_year": 2011,
+            "critic_score": 86,
+            "cover_url": None,
+            "owned": False,
+            "my_rating": None,
+            "playtime_hours": None,
+        },
+    ],
+    "previous_count": 4,
+    "previous_truncated": False,
+    "catalog_size": 5,
+    "catalog_truncated": False,
+    "big_catalog": False,
+    "library_track_record": {"owned_count": 3, "played_count": 2, "avg_my_rating": 8.5},
+    "hypes": 41,
+}
+
+# The big-studio damper: over BIG_CATALOG_THRESHOLD developed games, the strip
+# is a header line and nothing else — six arbitrary posters out of a catalogue
+# this size say nothing about the game in front of you.
+SAMPLE_PEDIGREE_BIG: dict[str, Any] = {
+    "developer": {
+        "name": "Ubisoft Montreal",
+        "igdb_company_id": 104,
+        "founded_year": 1997,
+        "country": 124,
+    },
+    "developer_names": ["Ubisoft Montreal", "Ubisoft Toronto"],
+    "publisher_name": "Ubisoft Entertainment",
+    "previous_games": [],
+    "previous_count": 0,
+    "previous_truncated": False,
+    "catalog_size": 30,
+    "catalog_truncated": True,
+    "big_catalog": True,
+    "library_track_record": None,
+    "hypes": 12,
+}
+
 
 async def _build_data(args: argparse.Namespace) -> dict:
     if args.mode == "grid":
@@ -111,6 +198,7 @@ async def _build_data(args: argparse.Namespace) -> dict:
     if args.sample_media:
         data["media"] = SAMPLE_MEDIA
         data["similar"] = SAMPLE_SIMILAR
+        data["pedigree"] = SAMPLE_PEDIGREE_BIG if args.big_studio else SAMPLE_PEDIGREE
     return data
 
 
@@ -131,8 +219,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--sample-media", action="store_true",
-        help="detail mode: splice in the built-in sample media/similar blocks "
-             "(no network — the offline way to see those sections)",
+        help="detail mode: splice in the built-in sample media/similar/pedigree "
+             "blocks (no network — the offline way to see those sections)",
+    )
+    parser.add_argument(
+        "--big-studio", action="store_true",
+        help="with --sample-media: use the big-catalog pedigree sample, whose "
+             "damper renders the studio header line and no poster row",
     )
     parser.add_argument("-o", "--out", type=Path, help="output path (default: stdout)")
     args = parser.parse_args()
@@ -140,6 +233,8 @@ def main() -> None:
         parser.error("detail mode requires --name")
     if args.mode == "grid" and (args.media or args.sample_media):
         parser.error("--media/--sample-media apply to detail mode only")
+    if args.big_studio and not args.sample_media:
+        parser.error("--big-studio selects between the sample pedigrees; pass --sample-media")
 
     data = asyncio.run(_build_data(args))
     preview_globals = "window.__PREVIEW_DATA__ = " + json.dumps(data) + ";"

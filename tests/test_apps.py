@@ -196,6 +196,45 @@ class ContentTypeBadgeTests(unittest.TestCase):
         ):
             self.assertIn(marker, apps.GAME_CARDS_HTML)
 
+    def test_pedigree_strip_renders_from_the_detail_payload(self) -> None:
+        # "From the studio": header line, optional publisher line, the poster
+        # row, and the track-record footer. Source-presence style, like the
+        # media markers above.
+        for marker in (
+            "pedigreeNode(stack, game.pedigree)",
+            'section(parent, "From the studio")',
+            'el("div", "ped-head", headline)',
+            'el("div", "ped-pub", "published by " + ped.publisher_name)',
+            '"You\'ve played " + (num(record.played_count) || 0) + " of their "',
+            '" — avg " + avg + "/10."',
+        ):
+            self.assertIn(marker, apps.GAME_CARDS_HTML)
+
+    def test_pedigree_badge_prefers_his_rating_over_the_critic_score(self) -> None:
+        # One badge per poster: his own rating wins the slot, the critic score
+        # only stands in when he hasn't rated it, and an owned-but-unrated game
+        # still gets its ownership sticker.
+        start = apps.GAME_CARDS_HTML.index("function pedigreeBadges(item)")
+        end = apps.GAME_CARDS_HTML.index("function pedigreeNode(", start)
+        badges = apps.GAME_CARDS_HTML[start:end]
+        self.assertIn('if (item.owned && rating != null) {', badges)
+        self.assertIn('el("span", "tag rated", rating + "/10")', badges)
+        self.assertIn('} else if (critic != null && critic >= 0) {', badges)
+        self.assertIn('if (item.owned && rating == null) tags.appendChild', badges)
+
+    def test_the_damper_branch_renders_the_header_line_alone(self) -> None:
+        # previous_games is empty under the big-studio damper: the header (and
+        # the publisher line) render, and the function returns before the strip.
+        start = apps.GAME_CARDS_HTML.index("function pedigreeNode(parent, ped)")
+        end = apps.GAME_CARDS_HTML.index('var strip = el("div", "strip ped-strip")', start)
+        head = apps.GAME_CARDS_HTML[start:end]
+        self.assertIn("if (!items.length) return;", head)
+
+    def test_hype_counts_are_never_rendered(self) -> None:
+        # `hypes` rides in the payload for completeness; this card does not
+        # argue from popularity, so no renderer may read it.
+        self.assertNotIn("hypes", apps.GAME_CARDS_HTML)
+
     def test_hero_is_trailer_only_and_never_autoplays(self) -> None:
         # Screenshots alone make no hero here (the card leads with the cover),
         # and the mp4 hero fetches zero bytes until the viewer hits play.

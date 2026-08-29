@@ -1488,6 +1488,9 @@ class PresentationFieldTests(ToolDBTestCase):
                 "elevator_pitch": "A nail, a kingdom, and no map.",
                 "for_you_if": ["you put 244h into Hollow Knight"],
                 "not_for_you_if": ["you abandoned both metroidvanias you tried"],
+                # Stable shape: the echo carries every authored member, null
+                # for the ones this recording didn't write.
+                "why_care": None,
             },
         )
 
@@ -1617,6 +1620,131 @@ class PresentationFieldTests(ToolDBTestCase):
         self.assertEqual(json.loads(row["presentation"])["elevator_pitch"], "bulk pitch")
 
 
+class WhyCareTests(ToolDBTestCase):
+    """why_care: the editorial half of the pedigree pair (issue #159).
+
+    It rides inside the same `presentation` JSON column as the rest of the
+    authored half — the column is free-form by design, so this needed no
+    migration — and is validated exactly like `comparisons`: closed kind
+    vocabulary, list rejected over its cap, text truncated.
+    """
+
+    async def test_round_trip_and_package_echo(self):
+        game_id = await seed_game("Why Care")
+        result = await main.record_assessment(
+            game_id=game_id,
+            verdict="buy_now",
+            elevator_pitch="A nail, a kingdom, and no map.",
+            why_care=[
+                {"kind": "people", "text": "The Hollow Knight combat lead directs it"},
+                {"kind": "anticipation", "text": "Seven years after the last one"},
+            ],
+        )
+
+        (row,) = await _assessment_rows(game_id)
+        stored = json.loads(row["presentation"])
+        self.assertEqual(
+            stored["why_care"],
+            [
+                {"kind": "people", "text": "The Hollow Knight combat lead directs it"},
+                {"kind": "anticipation", "text": "Seven years after the last one"},
+            ],
+        )
+        self.assertEqual(
+            result["package"]["presentation"]["why_care"], stored["why_care"]
+        )
+
+    async def test_the_echo_is_null_rather_than_absent_when_unauthored(self):
+        # Stable shape: a card reading package.presentation.why_care must not
+        # have to tell "not authored" from "this server is older".
+        game_id = await seed_game("No Why Care")
+        result = await record_assessment(
+            game_id=game_id, verdict="skip", elevator_pitch="just a pitch"
+        )
+        self.assertIsNone(result["package"]["presentation"]["why_care"])
+        self.assertNotIn("why_care", json.loads((await _assessment_rows(game_id))[0]["presentation"]))
+
+    async def test_kinds_are_a_closed_vocabulary(self):
+        game_id = await seed_game("Why Care Kinds")
+        for day, kind in enumerate(("people", "studio", "anticipation", "moment"), 1):
+            with self.subTest(kind=kind):
+                await record_assessment(
+                    game_id=game_id,
+                    verdict="skip",
+                    assessed_at=f"2026-07-{day:02d}",
+                    why_care=[{"kind": kind, "text": "a sourceable line"}],
+                )
+        with self.assertRaises(ToolError) as ctx:
+            await record_assessment(
+                game_id=game_id,
+                verdict="skip",
+                why_care=[{"kind": "vibes", "text": "trust me"}],
+            )
+        self.assertIn("vibes", str(ctx.exception))
+
+    async def test_malformed_entries_are_named_and_nothing_is_written(self):
+        game_id = await seed_game("Why Care Shapes")
+        cases = [
+            ({"why_care": "not a list"}, "why_care"),
+            ({"why_care": ["a line"]}, "why_care"),
+            ({"why_care": [{"text": "no kind"}]}, "kind"),
+            ({"why_care": [{"kind": "studio"}]}, "text"),
+            ({"why_care": [{"kind": "studio", "text": "  "}]}, "text"),
+            ({"why_care": [{"kind": "studio", "text": "x", "source": "wiki"}]}, "source"),
+        ]
+        for kwargs, expected in cases:
+            with self.subTest(**kwargs), self.assertRaises(ToolError) as ctx:
+                await record_assessment(game_id=game_id, verdict="skip", **kwargs)
+            self.assertIn(expected, str(ctx.exception))
+        self.assertEqual(await _assessment_rows(game_id), [])
+
+    async def test_over_cap_is_rejected_and_long_text_truncated(self):
+        game_id = await seed_game("Why Care Caps")
+        with self.assertRaises(ToolError) as ctx:
+            await record_assessment(
+                game_id=game_id,
+                verdict="skip",
+                why_care=[{"kind": "moment", "text": f"line {i}"} for i in range(4)],
+            )
+        self.assertIn("at most 3", str(ctx.exception))
+        self.assertEqual(await _assessment_rows(game_id), [])
+
+        await record_assessment(
+            game_id=game_id, verdict="skip", why_care=[{"kind": "studio", "text": "t" * 400}]
+        )
+        stored = json.loads((await _assessment_rows(game_id))[0]["presentation"])
+        self.assertEqual(len(stored["why_care"][0]["text"]), 160)
+
+    async def test_void_refuses_to_carry_why_care(self):
+        game_id = await seed_game("Why Care Void")
+        recorded = await record_assessment(game_id=game_id, verdict="skip")
+        with self.assertRaises(ToolError) as ctx:
+            await record_assessment(
+                void_assessment_id=recorded["assessment_id"],
+                why_care=[{"kind": "studio", "text": "leftover"}],
+            )
+        self.assertIn("why_care", str(ctx.exception))
+        self.assertEqual(len(await _assessment_rows(game_id)), 1)
+
+    async def test_why_care_is_an_item_key(self):
+        game_id = await seed_game("Bulk Why Care")
+        result = await main.record_assessment(
+            items=[
+                {
+                    "game_id": game_id,
+                    "verdict": "skip",
+                    "why_care": [{"kind": "studio", "text": "their first in a decade"}],
+                }
+            ]
+        )
+        self.assertEqual(result["ok"], 1)
+        (row,) = await _assessment_rows(game_id)
+        self.assertEqual(
+            json.loads(row["presentation"])["why_care"],
+            [{"kind": "studio", "text": "their first in a decade"}],
+        )
+
+
 _MEDIA_PAYLOAD = {
     "media": {
         "source": "steam",
@@ -1652,6 +1780,7 @@ _PACKAGE_KEYS = {
     "price",
     "media",
     "similar",
+    "pedigree",
     "past",
     "errors",
 }
@@ -1821,6 +1950,70 @@ class EvaluationPackageTests(ToolDBTestCase):
         self.assertFalse(unknown_entry["owned"])
         self.assertFalse(unknown_entry["unplayed"])
         self.assertIsNone(unknown_entry["cover_url"])
+
+    async def test_the_pedigree_block_is_annotated_like_the_similar_row(self):
+        # Same shared layer (tools/game_media.py) the detail card goes through,
+        # so the card and the package render identical keys.
+        game_id = await seed_game("Pedigree Package")
+        earlier = await seed_game("Their Last One")
+        await add_platform(earlier, "steam", playtime_minutes=300)
+        await add_rating(earlier, "manual", 9.0, 9.0)
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = 501 WHERE id = ?", (earlier,))
+            await db.commit()
+
+        payload = {
+            **_MEDIA_PAYLOAD,
+            "pedigree_raw": {
+                "developer": {
+                    "name": "Team Cherry",
+                    "igdb_company_id": 6455,
+                    "founded_year": 2012,
+                    "country": 36,
+                },
+                "developer_names": ["Team Cherry"],
+                "publisher_name": None,
+                "previous_games": [
+                    {
+                        "igdb_id": 501,
+                        "name": "Their Last One",
+                        "release_year": 2014,
+                        "cover_image_id": "abc",
+                        "critic_score": 88,
+                    }
+                ],
+                "previous_count": 1,
+                "previous_truncated": False,
+                "catalog_size": 2,
+                "catalog_truncated": False,
+                "big_catalog": False,
+                "hypes": None,
+            },
+        }
+        with self._media(payload):
+            result = await record_assessment(game_id=game_id, verdict="buy_now")
+
+        pedigree = result["package"]["pedigree"]
+        self.assertEqual(pedigree["developer"]["founded_year"], 2012)
+        (entry,) = pedigree["previous_games"]
+        self.assertTrue(entry["owned"])
+        self.assertEqual(entry["my_rating"], 9.0)
+        self.assertEqual(entry["playtime_hours"], 5.0)
+        self.assertEqual(entry["critic_score"], 88)
+        self.assertEqual(
+            entry["cover_url"],
+            "https://images.igdb.com/igdb/image/upload/t_cover_big/abc.jpg",
+        )
+        self.assertEqual(
+            pedigree["library_track_record"],
+            {"owned_count": 1, "played_count": 1, "avg_my_rating": 9.0},
+        )
+
+    async def test_a_candidate_with_no_pedigree_gets_a_null_block(self):
+        game_id = await seed_game("Studioless Package")
+        with self._media(_MEDIA_PAYLOAD):
+            result = await record_assessment(game_id=game_id, verdict="skip")
+        self.assertIsNone(result["package"]["pedigree"])
 
     async def test_past_verdicts_come_from_the_rows_already_queried(self):
         game_id = await seed_game("Repeat Ask")

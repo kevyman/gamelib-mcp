@@ -570,6 +570,191 @@ class GetGameDetailMediaTests(ToolDBTestCase):
         self.assertEqual(result["name"], "Hanging Provider")
 
 
+def _pedigree_raw(previous: list[dict], **overrides) -> dict:
+    """A raw pedigree block as data/media.py hands it over (un-annotated)."""
+    block = {
+        "developer": {
+            "name": "Team Cherry",
+            "igdb_company_id": 6455,
+            "founded_year": 2012,
+            "country": 36,
+        },
+        "developer_names": ["Team Cherry"],
+        "publisher_name": "Team Cherry",
+        "previous_games": previous,
+        "previous_count": len(previous),
+        "previous_truncated": False,
+        "catalog_size": len(previous) + 1,
+        "catalog_truncated": False,
+        "big_catalog": False,
+        "hypes": 12,
+    }
+    block.update(overrides)
+    return block
+
+
+class GetGameDetailPedigreeTests(ToolDBTestCase):
+    """`pedigree`: the developer's previous games, read against the library.
+
+    Same seam and same absence discipline as the media/similar blocks above —
+    what is new here is the annotation and the track record computed from it.
+    """
+
+    def _media(self, payload, **kwargs):
+        return patch(
+            "gamelib_mcp.tools.game_media.get_game_media",
+            AsyncMock(return_value=payload, **kwargs),
+        )
+
+    async def _library_neighbours(self) -> None:
+        """One rated+played, one owned+unplayed, one rated but not owned."""
+        played = await seed_game("Rated And Played")
+        await add_platform(played, "steam", playtime_minutes=600)
+        await add_rating(played, "manual", 8.0, 8.0)
+        untouched = await seed_game("Owned Unplayed")
+        await add_platform(untouched, "steam", playtime_minutes=0)
+        let_go = await seed_game("Rated Not Owned")
+        await add_rating(let_go, "manual", 9.0, 9.0)
+        async with db_module.get_db() as db:
+            for game_id, igdb_id in ((played, 501), (untouched, 502), (let_go, 503)):
+                await db.execute(
+                    "UPDATE games SET igdb_id = ? WHERE id = ?", (igdb_id, game_id)
+                )
+            await db.commit()
+
+    def _payload(self, pedigree: dict | None) -> dict:
+        return {**_MEDIA_PAYLOAD, "pedigree_raw": pedigree}
+
+    async def test_previous_games_are_annotated_and_scored_against_the_library(self):
+        gid = await seed_game("Pedigree Probe")
+        await self._library_neighbours()
+        pedigree = _pedigree_raw(
+            [
+                {
+                    "igdb_id": 501,
+                    "name": "Rated And Played",
+                    "release_year": 2014,
+                    "cover_image_id": "abc",
+                    "critic_score": 86,
+                },
+                {
+                    "igdb_id": 502,
+                    "name": "Owned Unplayed",
+                    "release_year": 2013,
+                    "cover_image_id": None,
+                    "critic_score": None,
+                },
+                {
+                    "igdb_id": 503,
+                    "name": "Rated Not Owned",
+                    "release_year": 2012,
+                    "cover_image_id": None,
+                    "critic_score": 74,
+                },
+                {
+                    "igdb_id": 599,
+                    "name": "Never Heard Of It",
+                    "release_year": 2011,
+                    "cover_image_id": None,
+                    "critic_score": None,
+                },
+            ]
+        )
+        with self._media(self._payload(pedigree)):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        block = result["pedigree"]
+        # Passed through untouched: this layer only knows about ownership.
+        self.assertEqual(block["developer"]["name"], "Team Cherry")
+        self.assertEqual(block["publisher_name"], "Team Cherry")
+        self.assertEqual(block["hypes"], 12)
+        played, unplayed, let_go, unknown = block["previous_games"]
+        self.assertEqual(
+            played,
+            {
+                "igdb_id": 501,
+                "name": "Rated And Played",
+                "release_year": 2014,
+                "critic_score": 86,
+                "cover_url": (
+                    "https://images.igdb.com/igdb/image/upload/t_cover_big/abc.jpg"
+                ),
+                "owned": True,
+                "my_rating": 8.0,
+                "playtime_hours": 10.0,
+            },
+        )
+        self.assertTrue(unplayed["owned"])
+        self.assertEqual(unplayed["playtime_hours"], 0.0)
+        self.assertIsNone(unplayed["my_rating"])
+        self.assertFalse(let_go["owned"])
+        self.assertEqual(let_go["my_rating"], 9.0)
+        self.assertFalse(unknown["owned"])
+        self.assertIsNone(unknown["cover_url"])
+        # The raw slug is replaced by the URL, never carried alongside it.
+        self.assertNotIn("cover_image_id", played)
+
+        self.assertEqual(
+            block["library_track_record"],
+            # Owned twice, but only one of them was ever launched; both ratings
+            # count, including the one he no longer owns.
+            {"owned_count": 2, "played_count": 1, "avg_my_rating": 8.5},
+        )
+
+    async def test_no_ratings_leaves_the_average_null(self):
+        gid = await seed_game("Unrated Studio")
+        owned = await seed_game("Owned Unrated")
+        await add_platform(owned, "steam", playtime_minutes=0)
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = 601 WHERE id = ?", (owned,))
+            await db.commit()
+        pedigree = _pedigree_raw(
+            [
+                {
+                    "igdb_id": 601,
+                    "name": "Owned Unrated",
+                    "release_year": 2015,
+                    "cover_image_id": None,
+                    "critic_score": 70,
+                }
+            ]
+        )
+        with self._media(self._payload(pedigree)):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        self.assertEqual(
+            result["pedigree"]["library_track_record"],
+            {"owned_count": 1, "played_count": 0, "avg_my_rating": None},
+        )
+
+    async def test_the_damper_leaves_the_studio_facts_without_a_track_record(self):
+        gid = await seed_game("Big Studio Probe")
+        pedigree = _pedigree_raw(
+            [], big_catalog=True, catalog_size=30, catalog_truncated=True
+        )
+        with self._media(self._payload(pedigree)):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        block = result["pedigree"]
+        self.assertEqual(block["previous_games"], [])
+        self.assertIsNone(block["library_track_record"])
+        self.assertTrue(block["big_catalog"])
+        self.assertEqual(block["catalog_size"], 30)
+
+    async def test_no_pedigree_leaves_the_key_absent(self):
+        gid = await seed_game("Studioless")
+        with self._media(self._payload(None)):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        self.assertNotIn("pedigree", result)
+        self.assertIn("media", result)
+
+    async def test_media_off_by_default_never_carries_pedigree(self):
+        gid = await seed_game("Quiet Detail")
+        result = await detail.get_game_detail(game_id=gid)
+        self.assertNotIn("pedigree", result)
+
+
 class GetGameDetailsBatchTests(ToolDBTestCase):
     async def test_batch_never_triggers_lazy_enrichment(self):
         gid = await make_steam_game("Celeste", 504230, playtime_minutes=300)

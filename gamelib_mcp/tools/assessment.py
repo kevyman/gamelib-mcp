@@ -952,6 +952,16 @@ COMPARISON_RELATIONS = (
     "cheaper_substitute",
 )
 
+# why_care: the editorial counterpart to the server-fetched pedigree block —
+# the one or two sourceable claims that make a game worth a look at all (who
+# made it, what the studio is, what it is following, the moment it belongs
+# to). A closed KIND vocabulary for the same reason comparisons has one: each
+# kind renders as its own chip, so an unknown kind would silently render as
+# nothing. Three lines maximum — this is an eyebrow, not a paragraph.
+WHY_CARE_CAP = 3
+WHY_CARE_TEXT_MAX_CHARS = 160
+WHY_CARE_KINDS = ("people", "studio", "anticipation", "moment")
+
 # "Played" for calibration: two hours is the same bar the taste-profile
 # playtime pseudo-rating uses for "he actually engaged with this".
 CALIBRATION_PLAYED_MINUTES = 120
@@ -989,15 +999,17 @@ _ASSESSMENT_COMPONENT_COLUMNS = (
 # so NULL genuinely means "the recording client didn't say".
 _ASSESSMENT_PROVENANCE_COLUMNS = ("skill", "skill_version", "model")
 
-# The four model-authored presentation PARAMETERS. They are wire fields, not
-# columns: all four land in the single `presentation` JSON column, so the two
+# The model-authored presentation PARAMETERS. They are wire fields, not
+# columns: they all land in the single `presentation` JSON column, so the two
 # lists have to stay separate (item keys and the void-exclusive check read the
-# parameter names, the write path reads the column).
+# parameter names, the write path reads the column). The column is free-form
+# JSON by design, so a new member here needs no migration.
 _PRESENTATION_PARAMS = (
     "elevator_pitch",
     "for_you_if",
     "not_for_you_if",
     "comparisons",
+    "why_care",
 )
 
 # Everything a recording write touches, in wire order.
@@ -1172,13 +1184,55 @@ def _normalize_comparisons(comparisons: list | None) -> list[dict[str, Any]] | N
     return normalized or None
 
 
+def _normalize_why_care(why_care: list | None) -> list[dict[str, Any]] | None:
+    """The "why care at all" eyebrow: ``{kind, text}`` entries, kinds enumerated.
+
+    Deliberately the editorial half of the pedigree pair: the server fetches
+    the studio and its back catalogue (data/media.py), and the model writes the
+    part no API holds — the credits behind it, the moment it belongs to. Text
+    is truncated like every other one-liner here; a wrong KIND is rejected,
+    because the card renders one chip per kind and an unknown one would vanish.
+    """
+    if why_care is None:
+        return None
+    if not isinstance(why_care, list):
+        raise ToolError("why_care must be a list of {kind, text} objects")
+    if len(why_care) > WHY_CARE_CAP:
+        raise ToolError(
+            f"why_care accepts at most {WHY_CARE_CAP} entries "
+            f"(got {len(why_care)}) — keep the ones a reader would check"
+        )
+    normalized: list[dict[str, Any]] = []
+    for entry in why_care:
+        if not isinstance(entry, dict):
+            raise ToolError("each why_care entry must be a {kind, text} object")
+        unknown = set(entry) - {"kind", "text"}
+        if unknown:
+            raise ToolError(
+                f"why_care entries accept only 'kind' and 'text' (got {sorted(unknown)})"
+            )
+        kind = entry.get("kind")
+        if kind not in WHY_CARE_KINDS:
+            raise ToolError(
+                f"Unknown why_care kind {kind!r}. Valid: {list(WHY_CARE_KINDS)}"
+            )
+        text = entry.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise ToolError("each why_care entry needs a non-empty 'text'")
+        normalized.append(
+            {"kind": kind, "text": _truncate(text, WHY_CARE_TEXT_MAX_CHARS)}
+        )
+    return normalized or None
+
+
 def _build_presentation(
     elevator_pitch: str | None,
     for_you_if: list | None,
     not_for_you_if: list | None,
     comparisons: list | None,
+    why_care: list | None,
 ) -> str | None:
-    """The four presentation params as ONE JSON column value (NULL when empty).
+    """The presentation params as ONE JSON column value (NULL when empty).
 
     Only non-null members are stored, so the column says what was authored
     rather than padding absent halves with nulls.
@@ -1199,6 +1253,9 @@ def _build_presentation(
     resolved_comparisons = _normalize_comparisons(comparisons)
     if resolved_comparisons:
         presentation["comparisons"] = resolved_comparisons
+    resolved_why_care = _normalize_why_care(why_care)
+    if resolved_why_care:
+        presentation["why_care"] = resolved_why_care
     return json.dumps(presentation) if presentation else None
 
 
@@ -1268,6 +1325,7 @@ async def _validate_assessment_inputs(
     for_you_if: list | None,
     not_for_you_if: list | None,
     comparisons: list | None,
+    why_care: list | None,
 ) -> dict[str, Any]:
     """Validate EVERYTHING before any write (ADR 0004's multi-mode rule).
 
@@ -1351,7 +1409,7 @@ async def _validate_assessment_inputs(
         ),
         "model": _normalize_declared("model", model, MODEL_MAX_CHARS, lowercase=True),
         "presentation": _build_presentation(
-            elevator_pitch, for_you_if, not_for_you_if, comparisons
+            elevator_pitch, for_you_if, not_for_you_if, comparisons, why_care
         ),
     }
 
@@ -1738,6 +1796,9 @@ async def _build_package(
                 "elevator_pitch": presentation.get("elevator_pitch"),
                 "for_you_if": presentation.get("for_you_if"),
                 "not_for_you_if": presentation.get("not_for_you_if"),
+                # Echoed with the rest of the authored half, so the block keeps
+                # a stable shape: null here means "unauthored", not "absent".
+                "why_care": presentation.get("why_care"),
             }
         ),
         "comparisons": await _package_comparisons(presentation),
@@ -1782,6 +1843,7 @@ async def _build_package(
         ),
         "media": media_context_block["media"],
         "similar": media_context_block["similar"],
+        "pedigree": media_context_block["pedigree"],
         "past": (
             {
                 "items": past_items,
@@ -1846,6 +1908,7 @@ async def record_assessment(
     for_you_if: list | None = None,
     not_for_you_if: list | None = None,
     comparisons: list | None = None,
+    why_care: list | None = None,
     void_assessment_id: int | None = None,
     *,
     with_package: bool = True,
@@ -1866,9 +1929,12 @@ async def record_assessment(
     an ad-hoc assessment or a stale installed copy of the skill.
 
     ``elevator_pitch`` / ``for_you_if`` / ``not_for_you_if`` / ``comparisons``
-    are the model-authored PRESENTATION of the verdict; they persist together
-    as one ``presentation`` JSON column and are declared content like the
-    provenance columns — capped and truncated, never synthesized here.
+    / ``why_care`` are the model-authored PRESENTATION of the verdict; they
+    persist together as one ``presentation`` JSON column and are declared
+    content like the provenance columns — capped and truncated, never
+    synthesized here. ``why_care`` is the editorial half of the pedigree pair:
+    the server fetches the studio and its back catalogue, the model writes the
+    credits and the moment no API holds.
 
     ``void_assessment_id`` is an exclusive third mode: it hard-deletes one
     recorded row (the repair for a misfile noticed after that same-day
@@ -1920,6 +1986,7 @@ async def record_assessment(
                     for_you_if,
                     not_for_you_if,
                     comparisons,
+                    why_care,
                 ),
                 strict=True,
             )
@@ -1962,6 +2029,7 @@ async def record_assessment(
         for_you_if=for_you_if,
         not_for_you_if=not_for_you_if,
         comparisons=comparisons,
+        why_care=why_care,
     )
 
     resolved_id, mode = await _resolve_by_id_or_appid(appid, game_id)

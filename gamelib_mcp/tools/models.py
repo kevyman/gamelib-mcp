@@ -225,11 +225,15 @@ class GameDetailResponse(GameSummary):
     assessment_count: int | None = None
     assessments_truncated: bool | None = None
     # media=True (SINGLE mode only): the neutral game representation —
-    # trailer + screenshots (capped, with screenshot_count/truncated), and
-    # IGDB's similar games annotated with ownership (capped, with
-    # count/truncated). Both absent when nothing resolved or the lookup failed.
+    # trailer + screenshots (capped, with screenshot_count/truncated), IGDB's
+    # similar games annotated with ownership (capped, with count/truncated),
+    # and `pedigree` — the developer (name, founding year, catalogue size),
+    # their previous games annotated with ownership/rating/playtime (capped at
+    # 6, empty under the big-studio damper) and library_track_record. All
+    # absent when nothing resolved or the lookup failed.
     media: dict[str, Any] | None = None
     similar: dict[str, Any] | None = None
+    pedigree: dict[str, Any] | None = None
     # Bulk (items=) mode: GameSummary's game_id/name move inside each result.
     game_id: int | None = None  # type: ignore[assignment]
     name: str | None = None  # type: ignore[assignment]
@@ -920,7 +924,8 @@ class RecordAssessmentResponse(BatchEnvelope):
     # Single recording mode only: the evaluation-card payload assembled after
     # the write — game/verdict/summary, the declared presentation, comparisons
     # and anchors resolved against the library, craft, fit_call, flags,
-    # ownership, time, price, media, similar games, past verdicts, and an
+    # ownership, time, price, media, similar games, pedigree (the developer
+    # and their previous games, annotated), past verdicts, and an
     # `errors` list naming whatever could not be gathered. Left untyped (like
     # the other display blocks here) because it is a render payload read whole
     # by the widget, not a queried structure; batch and void modes omit it.

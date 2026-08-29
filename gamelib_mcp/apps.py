@@ -30,7 +30,10 @@ not support app tool calls, the overlay simply keeps the lite view.
 A detail card whose payload carries ``media`` (get_game_detail(media=True) —
 which is what that upgrade call asks for) also renders the neutral game
 representation: a hero trailer, a screenshot strip with a click-to-enlarge
-lightbox, and a similar-games row annotated with what he owns. The hero and
+lightbox, a similar-games row annotated with what he owns, and a "From the
+studio" strip (the developer, and their previous games against his
+library — header line alone for a studio too big for six posters to describe).
+The hero and
 lightbox mirror the evaluation card's implementations (apps_eval.py) rather
 than sharing code with it: each widget is one self-contained HTML resource
 with no build step and no CDN, so that duplication is deliberate — change a
@@ -570,6 +573,15 @@ GAME_CARDS_HTML = r"""<!doctype html>
   }
   .tag.owned { background: var(--good); color: var(--card); }
   .tag.unplayed { background: var(--p2); }
+  /* Pedigree badges: HIS rating wins the one slot, the critic score only
+     stands in when he has none — the studio strip is about his history. */
+  .tag.rated { background: var(--good); color: var(--card); }
+  .tag.critic { background: var(--card); color: var(--muted); }
+
+  /* ---- "From the studio" (pedigree) ---- */
+  .ped-head { font-size: 12.5px; font-weight: 800; line-height: 1.35; }
+  .ped-pub { font-size: 11.5px; font-weight: 650; color: var(--muted); margin-top: 3px; }
+  .ped-strip { margin-top: 9px; }
 
   /* ---- click-to-expand overlays (detail card, screenshot lightbox) ---- */
   /* Anchored near the clicked card rather than centered in the (possibly
@@ -1278,6 +1290,76 @@ GAME_CARDS_HTML = r"""<!doctype html>
       "You own " + owned + " of the " + shown + " most similar"));
   }
 
+  /* The studio behind the game and what it shipped BEFORE it — server-fetched
+     and library-annotated (tools/game_media.py). Under the big-studio damper,
+     or with nothing released earlier, only the header line renders: six
+     arbitrary posters out of a 500-game catalogue say nothing about this game.
+     Mirrors the evaluation card's implementation (apps_eval.py) by hand, like
+     every other block these two widgets share. */
+  function pedigreeHeadline(ped) {
+    var dev = ped.developer || {};
+    var names = list(ped.developer_names).filter(Boolean);
+    var parts = [];
+    if (names.length) parts.push(names.join(" & "));
+    else if (dev.name) parts.push(dev.name);
+    var founded = num(dev.founded_year);
+    if (founded != null) parts.push("est. " + founded);
+    var size = num(ped.catalog_size);
+    if (size) parts.push(size + (ped.catalog_truncated ? "+" : "") + " games");
+    return parts.join("  ·  ");
+  }
+  /* ONE badge per poster: his own rating outranks the critic score, which
+     only stands in when he hasn't rated it. An owned game he never rated
+     still gets its ownership sticker. */
+  function pedigreeBadges(item) {
+    var tags = el("div", "tags");
+    var rating = num(item.my_rating);
+    var critic = num(item.critic_score);
+    if (item.owned && rating != null) {
+      tags.appendChild(el("span", "tag rated", rating + "/10"));
+    } else if (critic != null && critic >= 0) {
+      tags.appendChild(el("span", "tag critic", String(Math.round(critic))));
+    }
+    if (item.owned && rating == null) tags.appendChild(el("span", "tag owned", "owned"));
+    return tags.childNodes.length ? tags : null;
+  }
+  function pedigreeNode(parent, ped) {
+    if (!ped) return;
+    var headline = pedigreeHeadline(ped);
+    var items = list(ped.previous_games).filter(function (i) { return i && i.name; });
+    if (!headline && !items.length) return;
+    var box = section(parent, "From the studio");
+    if (headline) box.appendChild(el("div", "ped-head", headline));
+    // The publisher is a line of text, never a poster row: a publisher's back
+    // catalogue is a distribution list, not a body of work.
+    if (ped.publisher_name) {
+      box.appendChild(el("div", "ped-pub", "published by " + ped.publisher_name));
+    }
+    if (!items.length) return;
+    var strip = el("div", "strip ped-strip");
+    items.forEach(function (item) {
+      var card = el("div", "sim");
+      card.appendChild(coverNode(item));
+      var body = el("div", "sim-body");
+      body.appendChild(el("div", "sim-name", item.name));
+      if (item.release_year) body.appendChild(el("div", "sim-year", String(item.release_year)));
+      var badges = pedigreeBadges(item);
+      if (badges) body.appendChild(badges);
+      card.appendChild(body);
+      strip.appendChild(card);
+    });
+    box.appendChild(strip);
+    var record = ped.library_track_record;
+    if (record) {
+      var total = num(ped.previous_count);
+      var shown = total != null && total >= items.length ? total : items.length;
+      var avg = num(record.avg_my_rating);
+      box.appendChild(el("div", "note",
+        "You've played " + (num(record.played_count) || 0) + " of their "
+        + shown + " previous games" + (avg != null ? " — avg " + avg + "/10." : ".")));
+    }
+  }
+
   function detailCard(game) {
     // A column stack so the media blocks can span the card's full width; with
     // no media it holds the one .detail panel and looks exactly as before.
@@ -1347,6 +1429,7 @@ GAME_CARDS_HTML = r"""<!doctype html>
 
     shotsNode(stack, media, game.name);
     if (game.similar) similarNode(stack, game.similar);
+    pedigreeNode(stack, game.pedigree);
     return stack;
   }
 

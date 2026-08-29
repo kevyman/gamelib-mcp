@@ -1,4 +1,4 @@
-"""The neutral game representation: trailer, screenshots, similar-you-own.
+"""The neutral game representation: trailer, screenshots, similar-you-own, pedigree.
 
 Two read paths render the same thing about a game — ``record_assessment``'s
 evaluation package and ``get_game_detail(media=True)`` — so the media payload
@@ -9,7 +9,8 @@ GAME, not an opinion about it.
 The block shapes are frozen (two widgets render them). ``media`` is whatever
 ``data.media.get_game_media`` returned for its source, untouched; ``similar``
 is IGDB's similar games annotated with what the library owns, capped like
-every other growing list.
+every other growing list; ``pedigree`` is the developer's own previous games
+put through the same annotation, plus the track record that reads out of it.
 
 Imports stay one-way — data/* plus tools/common only — so tools/detail.py and
 tools/assessment.py (which itself imports detail) can both depend on this
@@ -27,14 +28,18 @@ logger = logging.getLogger(__name__)
 
 # A card shows a row of neighbours, not IGDB's whole similarity list.
 SIMILAR_ITEM_CAP = 8
+# Mirrors data/media.py's PREVIOUS_GAMES_CAP: the fetch already caps the
+# studio's previous games, and this is the second gate on the same row.
+PEDIGREE_ITEM_CAP = 6
 
-# Ownership/playtime/rating for the similar games, keyed by IGDB id. Narrower
-# than tools/assessment.py's package annotation query (which also feeds anchors
-# and comparisons, and needs names, covers and HLTB): a similar-games chip only
-# renders what is selected here, and the entries carry IGDB's own name, year
-# and cover. Same rating priority as every other "my rating" rollup —
-# full-weight sources first, then lowest id — and the same owned-only playtime.
-_SIMILAR_ANNOTATION_SQL = f"""
+# Ownership/playtime/rating for IGDB-keyed neighbours — similar games and the
+# developer's previous games alike. Narrower than tools/assessment.py's package
+# annotation query (which also feeds anchors and comparisons, and needs names,
+# covers and HLTB): these chips only render what is selected here, and the
+# entries carry IGDB's own name, year and cover. Same rating priority as every
+# other "my rating" rollup — full-weight sources first, then lowest id — and
+# the same owned-only playtime.
+_IGDB_ANNOTATION_SQL = f"""
 SELECT g.igdb_id AS igdb_id,
        {OWNED_SQL} AS owned,
        (
@@ -65,7 +70,7 @@ async def _annotate_by_igdb_id(igdb_ids: list) -> dict[Any, Any]:
     placeholders = ", ".join("?" * len(keys))
     async with get_db() as db:
         rows = await db.execute_fetchall(
-            _SIMILAR_ANNOTATION_SQL.format(placeholders=placeholders), keys
+            _IGDB_ANNOTATION_SQL.format(placeholders=placeholders), keys
         )
     return {row["igdb_id"]: row for row in rows}
 
@@ -100,22 +105,93 @@ async def annotate_similar_games(
     return {"items": items, "count": count, "truncated": count > len(items)}
 
 
+def _track_record(items: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """What HIS library says about the studio's previous games.
+
+    The point of the strip: not "this studio is acclaimed" (critic scores say
+    that, and every card already carries them) but "you played four of their
+    last six and rated them 8.5". Null when there is nothing to count —
+    the header line then stands alone rather than reporting three zeroes.
+    """
+    if not items:
+        return None
+    owned = [item for item in items if item["owned"]]
+    # Every rated entry counts, owned or not: a rating is his judgement of the
+    # studio's work, and a game he rated and later let go still is one.
+    ratings = [item["my_rating"] for item in items if item["my_rating"] is not None]
+    return {
+        "owned_count": len(owned),
+        # Owned-and-touched: an owned-but-never-launched game is evidence about
+        # the backlog, not about the studio.
+        "played_count": sum(1 for item in owned if item["playtime_hours"]),
+        "avg_my_rating": round(sum(ratings) / len(ratings), 1) if ratings else None,
+    }
+
+
+async def annotate_pedigree(pedigree_raw: dict[str, Any]) -> dict[str, Any]:
+    """The raw pedigree block with its previous games read against the library.
+
+    Everything else passes through untouched — this layer only knows about
+    ownership. Under the big-studio damper ``previous_games`` is already empty
+    upstream, so the track record comes back null and the widgets render the
+    header line alone.
+    """
+    raw_previous = [
+        entry
+        for entry in (pedigree_raw.get("previous_games") or [])
+        if isinstance(entry, dict)
+    ]
+    library = await _annotate_by_igdb_id([entry.get("igdb_id") for entry in raw_previous])
+    items: list[dict[str, Any]] = []
+    for entry in raw_previous[:PEDIGREE_ITEM_CAP]:
+        row = library.get(entry.get("igdb_id"))
+        items.append(
+            {
+                "igdb_id": entry.get("igdb_id"),
+                "name": entry.get("name"),
+                "release_year": entry.get("release_year"),
+                "critic_score": entry.get("critic_score"),
+                "cover_url": (
+                    IGDB_COVER_URL.format(image_id=entry["cover_image_id"])
+                    if entry.get("cover_image_id")
+                    else None
+                ),
+                "owned": bool(row["owned"]) if row is not None else False,
+                "my_rating": row["my_rating"] if row is not None else None,
+                "playtime_hours": (
+                    _hours(row["playtime_minutes"]) if row is not None else None
+                ),
+            }
+        )
+    return {
+        **{key: value for key, value in pedigree_raw.items() if key != "previous_games"},
+        "previous_games": items,
+        "library_track_record": _track_record(items),
+    }
+
+
 async def media_context(payload: dict | None) -> dict[str, Any]:
-    """``{"media", "similar"}`` from one ``get_game_media`` payload.
+    """``{"media", "similar", "pedigree"}`` from one ``get_game_media`` payload.
 
     Split from the fetch so a caller that already ran (and time-boxed) its own
     ``get_game_media`` call — record_assessment's package path — shapes the
-    result through exactly this code rather than a copy of it. Either member is
+    result through exactly this code rather than a copy of it. Each member is
     None when the source had nothing of that kind.
     """
     if not payload:
-        return {"media": None, "similar": None}
+        return {"media": None, "similar": None, "pedigree": None}
     similar_raw = payload.get("similar_raw")
+    pedigree_raw = payload.get("pedigree_raw")
     return {
         "media": payload.get("media"),
         "similar": (
             await annotate_similar_games(similar_raw, payload.get("similar_count"))
             if similar_raw
+            else None
+        ),
+        "pedigree": (
+            await annotate_pedigree(pedigree_raw)
+            if isinstance(pedigree_raw, dict)
             else None
         ),
     }
@@ -127,7 +203,7 @@ async def game_media_context(
     igdb_id: int | None,
     name: str | None,
 ) -> dict[str, Any]:
-    """Fetch + shape: ``{"media": …|None, "similar": …|None}`` for one game.
+    """Fetch + shape: ``{"media", "similar", "pedigree"}`` (each …|None) for one game.
 
     Identity resolution is get_game_media's (Steam appid, then IGDB id, then an
     exact-name IGDB lookup), and so is the failure stance: a provider failure

@@ -2,9 +2,10 @@
 
 One `ui://` resource renders `record_assessment` results: the full
 evaluation package when the response carries one (hero trailer/screenshots,
-verdict stamp, craft/fit scores, for-you-if bullets, anchors, lineage,
-similar games, time/price, flags, past verdicts), and a compact note card
-for the bookkeeping-only responses (a plain recorded verdict, or a void).
+verdict stamp, why-care eyebrow lines, craft/fit scores, for-you-if bullets,
+anchors, lineage, similar games, the "from the studio" pedigree strip,
+time/price, flags, past verdicts), and a compact note card for the
+bookkeeping-only responses (a plain recorded verdict, or a void).
 Clients that don't speak the Apps extension ignore the tool metadata and see
 the normal JSON, so attaching ``EVAL_CARD_APP`` to a tool is purely additive.
 
@@ -460,6 +461,33 @@ EVAL_CARD_HTML = r"""<!doctype html>
   }
   .tag.owned { background: var(--good); color: var(--card); }
   .tag.unplayed { background: var(--p2); }
+  /* Pedigree badges: HIS rating wins the one slot, the critic score only
+     stands in when he has none — the studio strip is about his history. */
+  .tag.rated { background: var(--good); color: var(--card); }
+  .tag.critic { background: var(--card); color: var(--muted); }
+
+  /* ---- "From the studio" (pedigree) ---- */
+  .ped-head { font-size: 12.5px; font-weight: 800; line-height: 1.35; }
+  .ped-pub { font-size: 11.5px; font-weight: 650; color: var(--muted); margin-top: 3px; }
+  .ped-strip { margin-top: 9px; }
+
+  /* ---- why care (model-authored eyebrow lines) ---- */
+  .why-care { display: flex; flex-direction: column; gap: 7px; margin-top: 12px; }
+  .wc-line { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; line-height: 1.45; }
+  .wc-eyebrow {
+    flex: none;
+    font-size: 9.5px;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1.5px solid var(--ink);
+    white-space: nowrap;
+  }
+  .wc-people { background: var(--p1); }
+  .wc-studio { background: var(--p3); }
+  .wc-hype { background: var(--p2); }
+  .wc-moment { background: var(--p4); }
 
   /* ---- similar games ---- */
   .sim {
@@ -949,7 +977,33 @@ EVAL_CARD_HTML = r"""<!doctype html>
 
     if (pkg.summary) box.appendChild(el("p", "one-liner", pkg.summary));
     if (pres.elevator_pitch) box.appendChild(el("p", "pitch", pres.elevator_pitch));
+    whyCareNode(box, pres);
     return box;
+  }
+
+  /* why_care: up to three model-authored lines answering "why look at this at
+     all" — the editorial counterpart to the server-fetched pedigree strip
+     below. Chip per kind, one line each, no paragraphs; absent when the
+     recording client authored none. */
+  var WHY_CARE_KINDS = {
+    people: ["PEOPLE", "wc-people"],
+    studio: ["STUDIO", "wc-studio"],
+    anticipation: ["HYPE", "wc-hype"],
+    moment: ["MOMENT", "wc-moment"],
+  };
+  function whyCareNode(parent, pres) {
+    var entries = list(pres.why_care).filter(function (e) { return e && e.text; });
+    if (!entries.length) return;
+    var wrap = el("div", "why-care");
+    entries.slice(0, 3).forEach(function (entry) {
+      var known = WHY_CARE_KINDS[entry.kind];
+      var line = el("div", "wc-line");
+      line.appendChild(el("span", "wc-eyebrow " + (known ? known[1] : "wc-studio"),
+        known ? known[0] : String(entry.kind || "why").toUpperCase()));
+      line.appendChild(el("span", null, String(entry.text)));
+      wrap.appendChild(line);
+    });
+    parent.appendChild(wrap);
   }
 
   /* ---------- 3. screenshot strip ---------- */
@@ -1233,6 +1287,77 @@ EVAL_CARD_HTML = r"""<!doctype html>
     }
   }
 
+  /* ---------- 8b. from the studio (pedigree) ---------- */
+  /* Server-fetched and library-annotated (tools/game_media.py): who made this,
+     and what they shipped BEFORE it. Under the big-studio damper, or with
+     nothing released earlier, only the header line renders — six arbitrary
+     posters out of a 500-game catalogue say nothing about this game. Mirrors
+     the detail card's implementation (apps.py) by hand, like every other block
+     these two widgets share. */
+  function pedigreeHeadline(ped) {
+    var dev = ped.developer || {};
+    var names = list(ped.developer_names).filter(Boolean);
+    var parts = [];
+    if (names.length) parts.push(names.join(" & "));
+    else if (dev.name) parts.push(dev.name);
+    var founded = num(dev.founded_year);
+    if (founded != null) parts.push("est. " + founded);
+    var size = num(ped.catalog_size);
+    if (size) parts.push(size + (ped.catalog_truncated ? "+" : "") + " games");
+    return parts.join("  ·  ");
+  }
+  /* ONE badge per poster: his own rating outranks the critic score, which
+     only stands in when he hasn't rated it. An owned game he never rated
+     still gets its ownership sticker. */
+  function pedigreeBadges(item) {
+    var tags = el("div", "tags");
+    var rating = num(item.my_rating);
+    var critic = num(item.critic_score);
+    if (item.owned && rating != null) {
+      tags.appendChild(el("span", "tag rated", rating + "/10"));
+    } else if (critic != null && critic >= 0) {
+      tags.appendChild(el("span", "tag critic", String(Math.round(critic))));
+    }
+    if (item.owned && rating == null) tags.appendChild(el("span", "tag owned", "owned"));
+    return tags.childNodes.length ? tags : null;
+  }
+  function pedigreeNode(parent, ped) {
+    if (!ped) return;
+    var headline = pedigreeHeadline(ped);
+    var items = list(ped.previous_games).filter(function (i) { return i && i.name; });
+    if (!headline && !items.length) return;
+    var box = section(parent, "From the studio");
+    if (headline) box.appendChild(el("div", "ped-head", headline));
+    // The publisher is a line of text, never a poster row: a publisher's back
+    // catalogue is a distribution list, not a body of work.
+    if (ped.publisher_name) {
+      box.appendChild(el("div", "ped-pub", "published by " + ped.publisher_name));
+    }
+    if (!items.length) return;
+    var strip = el("div", "strip ped-strip");
+    items.forEach(function (item) {
+      var card = el("div", "sim");
+      card.appendChild(coverNode(item));
+      var body = el("div", "sim-body");
+      body.appendChild(el("div", "sim-name", item.name || "?"));
+      if (item.release_year) body.appendChild(el("div", "sim-year", String(item.release_year)));
+      var badges = pedigreeBadges(item);
+      if (badges) body.appendChild(badges);
+      card.appendChild(body);
+      strip.appendChild(card);
+    });
+    box.appendChild(strip);
+    var record = ped.library_track_record;
+    if (record) {
+      var total = num(ped.previous_count);
+      var shown = total != null && total >= items.length ? total : items.length;
+      var avg = num(record.avg_my_rating);
+      box.appendChild(el("div", "note",
+        "You've played " + (num(record.played_count) || 0) + " of their "
+        + shown + " previous games" + (avg != null ? " — avg " + avg + "/10." : ".")));
+    }
+  }
+
   /* ---------- 9. time & price ---------- */
   function factChip(row, label, value) {
     var chip = el("span", "chip");
@@ -1339,6 +1464,7 @@ EVAL_CARD_HTML = r"""<!doctype html>
     similarNode(wrap, similar, foldSimilar
       ? comps.filter(function (c) { return c.relation === "similar"; })
       : []);
+    pedigreeNode(wrap, pkg.pedigree);
 
     timePriceNode(wrap, pkg);
     flagsNode(wrap, list(pkg.flags).filter(Boolean));

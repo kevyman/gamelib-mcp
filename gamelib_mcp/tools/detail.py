@@ -69,11 +69,12 @@ async def get_game_detail(
     have filled.
 
     media=True adds the neutral game representation (tools/game_media.py) as
-    optional `media` and `similar` keys — trailer, screenshots, and IGDB's
-    similar games annotated with what the library owns. Off by default: it is
+    optional `media`, `similar` and `pedigree` keys — trailer, screenshots,
+    IGDB's similar games annotated with what the library owns, and the
+    developer's previous games annotated the same way. Off by default: it is
     card decoration, costs a provider round trip on a cache miss, and nothing
     in the response depends on it. Single mode only (the bulk path never asks
-    for it), and both keys are simply ABSENT when nothing resolved or the
+    for it), and every key is simply ABSENT when nothing resolved or the
     lookup failed — never null placeholders, and never a failed call.
 
     Can resolve to a wishlist-only title (wishlisted but not owned anywhere) —
@@ -354,7 +355,7 @@ async def get_game_detail(
                 exc_info=True,
             )
         else:
-            for key in ("media", "similar"):
+            for key in ("media", "similar", "pedigree"):
                 if context[key] is not None:
                     result[key] = context[key]
 

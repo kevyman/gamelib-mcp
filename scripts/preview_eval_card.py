@@ -60,6 +60,23 @@ SAMPLE_FULL_STEAM: dict[str, Any] = {
                 "You bounced off Dead Cells twice at under 3h",
                 "You want a story you can finish in one sitting",
             ],
+            "why_care": [
+                {
+                    "kind": "studio",
+                    "text": "Supergiant's first-ever sequel, after four "
+                            "stand-alone games in fourteen years",
+                },
+                {
+                    "kind": "people",
+                    "text": "Darren Korb and Ashley Barrett are back on the "
+                            "soundtrack, credited on every Supergiant game",
+                },
+                {
+                    "kind": "anticipation",
+                    "text": "Two years in early access before the 1.0 this "
+                            "verdict is about",
+                },
+            ],
         },
         "comparisons": [
             {
@@ -219,6 +236,75 @@ SAMPLE_FULL_STEAM: dict[str, Any] = {
             "count": 8,
             "truncated": True,
         },
+        # The "From the studio" strip, contract-exact (tools/game_media.py's
+        # annotated shape). The badge rule is visible in one row: his rating
+        # beats the critic score, and an owned-but-unrated game gets the
+        # ownership sticker instead.
+        "pedigree": {
+            "developer": {
+                "name": "Supergiant Games",
+                "igdb_company_id": 1152,
+                "founded_year": 2009,
+                "country": 840,
+            },
+            "developer_names": ["Supergiant Games"],
+            "publisher_name": "Supergiant Games",
+            "previous_games": [
+                {
+                    "igdb_id": 113112,
+                    "name": "Hades",
+                    "release_year": 2020,
+                    "critic_score": 93,
+                    "cover_url": (
+                        "https://images.igdb.com/igdb/image/upload/t_cover_big/co39vc.jpg"
+                    ),
+                    "owned": True,
+                    "my_rating": 9,
+                    "playtime_hours": 132.4,
+                },
+                {
+                    "igdb_id": 19560,
+                    "name": "Pyre",
+                    "release_year": 2017,
+                    "critic_score": 84,
+                    "cover_url": None,
+                    "owned": True,
+                    "my_rating": None,
+                    "playtime_hours": 0.0,
+                },
+                {
+                    "igdb_id": 3277,
+                    "name": "Transistor",
+                    "release_year": 2014,
+                    "critic_score": 83,
+                    "cover_url": None,
+                    "owned": True,
+                    "my_rating": 8,
+                    "playtime_hours": 11.2,
+                },
+                {
+                    "igdb_id": 1465,
+                    "name": "Bastion",
+                    "release_year": 2011,
+                    "critic_score": 86,
+                    "cover_url": None,
+                    "owned": False,
+                    "my_rating": None,
+                    "playtime_hours": None,
+                },
+            ],
+            "previous_count": 4,
+            "previous_truncated": False,
+            "catalog_size": 5,
+            "catalog_truncated": False,
+            "big_catalog": False,
+            "library_track_record": {
+                "owned_count": 3,
+                "played_count": 2,
+                "avg_my_rating": 8.5,
+            },
+            "hypes": 41,
+        },
         "past": {
             "items": [
                 {
@@ -270,6 +356,18 @@ SAMPLE_IGDB_YOUTUBE: dict[str, Any] = {
             ],
             "not_for_you_if": [
                 "You abandoned both first-person games you started last year",
+            ],
+            "why_care": [
+                {
+                    "kind": "anticipation",
+                    "text": "Announced in 2017, rebooted in 2019, and finally "
+                            "dated — eighteen years after Prime 3",
+                },
+                {
+                    "kind": "moment",
+                    "text": "Retro Studios' first release since the 2023 "
+                            "Remastered port",
+                },
             ],
         },
         "comparisons": [
@@ -386,6 +484,27 @@ SAMPLE_IGDB_YOUTUBE: dict[str, Any] = {
             "short_description": None,
         },
         "similar": None,
+        # The big-studio damper: over BIG_CATALOG_THRESHOLD developed games the
+        # strip is a header line and nothing else, since six arbitrary posters
+        # out of a catalogue this size say nothing about this game.
+        "pedigree": {
+            "developer": {
+                "name": "Retro Studios",
+                "igdb_company_id": 203,
+                "founded_year": 1998,
+                "country": 840,
+            },
+            "developer_names": ["Retro Studios", "Nintendo EPD"],
+            "publisher_name": "Nintendo",
+            "previous_games": [],
+            "previous_count": 0,
+            "previous_truncated": False,
+            "catalog_size": 30,
+            "catalog_truncated": True,
+            "big_catalog": True,
+            "library_track_record": None,
+            "hypes": 208,
+        },
         "past": None,
         "errors": ["hltb: completionist time unavailable"],
     },
@@ -438,6 +557,7 @@ SAMPLE_MINIMAL: dict[str, Any] = {
         "price": {"seen": 14.99, "currency": "EUR", "platform": "steam", "target": None},
         "media": None,
         "similar": None,
+        "pedigree": None,
         "past": None,
         "errors": ["igdb: no match for 'Grim Harvest'", "steam: no appid resolved"],
     },
@@ -463,8 +583,8 @@ SAMPLE_VOID: dict[str, Any] = {
 
 SAMPLES: list[tuple[str, dict[str, Any]]] = [
     ("full Steam package (mp4 trailer, 6 screenshots, buy_now)", SAMPLE_FULL_STEAM),
-    ("IGDB package (YouTube trailer, switch2, lineage)", SAMPLE_IGDB_YOUTUBE),
-    ("minimal package (no media/similar/presentation, skip)", SAMPLE_MINIMAL),
+    ("IGDB package (YouTube trailer, switch2, lineage, big-studio pedigree)", SAMPLE_IGDB_YOUTUBE),
+    ("minimal package (no media/similar/pedigree/presentation, skip)", SAMPLE_MINIMAL),
     ("compact recorded verdict (no package)", SAMPLE_COMPACT),
     ("voided assessment", SAMPLE_VOID),
 ]

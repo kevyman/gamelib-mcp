@@ -146,6 +146,57 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
         self.assertIn("posterFallback(hero, trailer);", apps_eval.EVAL_CARD_HTML)
         self.assertIn('video.preload = "none";', apps_eval.EVAL_CARD_HTML)
 
+    def test_pedigree_strip_renders_from_the_package(self) -> None:
+        for marker in (
+            "pedigreeNode(wrap, pkg.pedigree)",
+            'section(parent, "From the studio")',
+            'el("div", "ped-head", headline)',
+            'el("div", "ped-pub", "published by " + ped.publisher_name)',
+            '"You\'ve played " + (num(record.played_count) || 0) + " of their "',
+            '" — avg " + avg + "/10."',
+        ):
+            self.assertIn(marker, apps_eval.EVAL_CARD_HTML)
+
+    def test_pedigree_badge_prefers_his_rating_over_the_critic_score(self) -> None:
+        start = apps_eval.EVAL_CARD_HTML.index("function pedigreeBadges(item)")
+        end = apps_eval.EVAL_CARD_HTML.index("function pedigreeNode(", start)
+        badges = apps_eval.EVAL_CARD_HTML[start:end]
+        self.assertIn("if (item.owned && rating != null) {", badges)
+        self.assertIn('el("span", "tag rated", rating + "/10")', badges)
+        self.assertIn("} else if (critic != null && critic >= 0) {", badges)
+        self.assertIn("if (item.owned && rating == null) tags.appendChild", badges)
+
+    def test_the_damper_branch_renders_the_header_line_alone(self) -> None:
+        start = apps_eval.EVAL_CARD_HTML.index("function pedigreeNode(parent, ped)")
+        end = apps_eval.EVAL_CARD_HTML.index(
+            'var strip = el("div", "strip ped-strip")', start
+        )
+        self.assertIn("if (!items.length) return;", apps_eval.EVAL_CARD_HTML[start:end])
+
+    def test_why_care_renders_a_chip_per_kind_under_the_pitch(self) -> None:
+        # The eval card is the only one that renders why_care (it is authored
+        # content, not a neutral fact about the game), and it sits directly
+        # under the elevator pitch.
+        for kind, label, cls in (
+            ("people", "PEOPLE", "wc-people"),
+            ("studio", "STUDIO", "wc-studio"),
+            ("anticipation", "HYPE", "wc-hype"),
+            ("moment", "MOMENT", "wc-moment"),
+        ):
+            self.assertIn(f'{kind}: ["{label}", "{cls}"]', apps_eval.EVAL_CARD_HTML)
+        self.assertIn(
+            'if (pres.elevator_pitch) box.appendChild(el("p", "pitch", pres.elevator_pitch));\n'
+            "    whyCareNode(box, pres);",
+            apps_eval.EVAL_CARD_HTML,
+        )
+        self.assertIn("list(pres.why_care)", apps_eval.EVAL_CARD_HTML)
+        self.assertIn('el("div", "wc-line")', apps_eval.EVAL_CARD_HTML)
+
+    def test_hype_counts_are_never_rendered(self) -> None:
+        # `hypes` rides in the pedigree payload for completeness; the card does
+        # not argue from popularity, so no renderer may read it.
+        self.assertNotIn("hypes", apps_eval.EVAL_CARD_HTML)
+
     def test_abandoned_anchor_is_styled_as_a_warning(self) -> None:
         # An abandoned anchor is negative evidence about fit.
         self.assertIn('abandoned: ["⚠", "abandoned", "an-warn"]', apps_eval.EVAL_CARD_HTML)
