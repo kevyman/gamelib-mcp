@@ -1,7 +1,7 @@
 ---
 name: game-quality
 description: Evaluate whether a NAMED game is good and worth John's time and money — owned or not. Triggers: "is X any good", "should I get X", "thoughts on X", "X vs Y", "is X worth playing", buy/wishlist/skip calls. NOT for picking a game for him ("what should I play", "I have 2 hours") — that's backlog-triage.
-version: "3.0.0"
+version: "3.1.0"
 ---
 
 # Game Quality Assessment
@@ -150,6 +150,7 @@ record_assessment(
     for_you_if=["...", ...],       # ≤4 each, ≤200 chars
     not_for_you_if=["...", ...],
     comparisons=[{"name": "...", "relation": "ancestor", "note": "...", "game_id": 123}, ...],  # ≤6
+    why_care=[{"kind": "people", "text": "..."}, ...],   # ≤3; kind: people|studio|anticipation|moment
     skill="game-quality",
     skill_version="<this file's frontmatter version — read it above, don't hardcode it>",
     model="<the model id YOUR environment declares — see below>",
@@ -162,7 +163,9 @@ record_assessment(
 - `for_you_if` / `not_for_you_if` — cite his evidence by name: anchors and their status ("you put 244h into Slay the Spire", "you abandoned both survival crafters you tried"), affinity tags, session shape vs. his pace. Each entry one concrete reason; skip a side entirely rather than padding it.
 - `comparisons` — the game's lineage and substitutes, from your knowledge: `relation` is one of `ancestor` (games this one is a baby of), `descendant` (games that are babies of this one), `better_version`, `cheaper_substitute`, `similar`. Add `game_id` when the entry is a library game you've resolved; a short `note` saying why. Only claim `better_version`/`cheaper_substitute` when you'd actually defend it.
 
-The server fetches trailer/screenshots/similar-games itself and annotates ownership — don't describe media in these fields. The response's `package` block is the card; you don't need to restate its contents in chat.
+- `why_care` (3.1) — up to 3 one-liners on why this game matters beyond its scores, each `{kind, text ≤160}`. `kind` picks the label the card shows: `people` (a creator connection — "Directed by the creative director of Bastion and Hades"), `studio` (the studio's story — "First release in 9 years; the team stayed at ~20 people"), `anticipation` ("Steam's most-wishlisted game of 2025"), `moment` (why now — "v1.0 just landed after a beloved two-year early access"). **Every claim must be sourceable** — from Step 0's web search or knowledge you would defend; anticipation is context, never craft evidence (the existing anti-pattern applies to this field). The server has no credits data, so people-connections exist only if you write them. Skip the field rather than pad it. Note the card already shows the studio's previous games with his ratings (the pedigree strip, server-fetched) — don't duplicate that list here; add what the strip can't say.
+
+The server fetches trailer/screenshots/similar-games/studio-pedigree itself and annotates ownership — don't describe media or list the studio's catalog in these fields. The response's `package` block is the card; you don't need to restate its contents in chat.
 
 **Provenance is declared, never guessed.** `skill_version` is whatever the `version:` field at the top of *this* file says — read it there, since an installed copy may lag the server's. `model` is the identifier your environment states about itself: Claude Code names the exact model id in its system prompt; claude.ai names its model there too; ChatGPT declares a model FAMILY — record the family or the picker selection, never a router variant (fast/thinking) you cannot actually see. Copy it verbatim, lowercased. If your environment declares no model at all — some configurations withhold it — **omit the field**: never answer from training memory, and never infer it. The server stamps nothing, so a missing value stays NULL, which honestly means "unknown"; a confident wrong value silently corrupts `get_stats(report="calibration")`'s `by_model`.
 
