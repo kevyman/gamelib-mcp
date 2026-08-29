@@ -1906,6 +1906,46 @@ class EvaluationPackageTests(ToolDBTestCase):
         self.assertIsNone(comparison["my_rating"])
         self.assertIsNone(comparison["playtime_hours"])
 
+    async def test_a_mismatched_comparison_game_id_shows_the_rows_real_name(self):
+        game_id = await seed_game("Mismatch Probe")
+        other = await seed_game("The Actual Game")
+        await add_platform(other, "steam", playtime_minutes=300)
+        with self._media(None):
+            result = await record_assessment(
+                game_id=game_id,
+                verdict="skip",
+                comparisons=[
+                    {"name": "Wrong Label", "relation": "similar", "game_id": other}
+                ],
+            )
+        (comparison,) = result["package"]["comparisons"]
+        # The library row is ground truth: its REAL name renders beside its
+        # stats, so a mismatched id is a visible mistake instead of one game's
+        # name over another game's ownership. The declared name still stands
+        # in the stored presentation JSON.
+        self.assertEqual(comparison["name"], "The Actual Game")
+        self.assertEqual(comparison["game_id"], other)
+        self.assertTrue(comparison["owned"])
+
+    async def test_a_media_source_outage_is_reported_in_package_errors(self):
+        # get_game_media never raises for a provider failure — it answers
+        # empty-handed with an errors list, and the package must relay that
+        # instead of rendering a silently bare card (Codex review, 2026-08-29).
+        game_id = await seed_game("Outage Probe")
+        empty_handed = {
+            "media": None,
+            "similar_raw": None,
+            "similar_count": None,
+            "pedigree_raw": None,
+            "igdb_id": None,
+            "errors": ["steam: fetch failed"],
+        }
+        with self._media(empty_handed):
+            result = await record_assessment(game_id=game_id, verdict="skip")
+        package = result["package"]
+        self.assertIsNone(package["media"])
+        self.assertEqual(package["errors"], ["media: steam: fetch failed"])
+
     async def test_similar_games_are_annotated_against_the_library(self):
         game_id = await seed_game("Similarity Probe")
         owned_unplayed = await seed_game("Owned Unplayed")

@@ -292,9 +292,15 @@ class SteamMediaTests(ToolDBTestCase):
         # media from every card of this game for the rest of the day.
         failing = AsyncMock(side_effect=httpx.ConnectError("steam is down"))
         with patch.object(media, "fetch_store_appdetails", failing) as store:
-            self.assertIsNone(await media.get_game_media(steam_appid=77))
-            self.assertIsNone(await media.get_game_media(steam_appid=77))
+            first = await media.get_game_media(steam_appid=77)
+            second = await media.get_game_media(steam_appid=77)
 
+        # The outage is REPORTED, not disguised as a media-less game: the
+        # payload comes back empty-handed but says why.
+        for result in (first, second):
+            assert result is not None
+            self.assertIsNone(result["media"])
+            self.assertEqual(result["errors"], ["steam: fetch failed"])
         # Retried on the second call (nothing cached), and no miss written.
         self.assertEqual(store.await_count, 2)
         self.assertIsNone(await get_meta(media._cache_key("steam", 77)))
@@ -320,6 +326,8 @@ class SteamMediaTests(ToolDBTestCase):
 
         assert result is not None
         self.assertEqual(result["media"]["short_description"], "old but true")
+        # Stale-served is a successful answer, not a reported failure.
+        self.assertEqual(result["errors"], [])
 
     async def test_steam_media_borrows_similar_games_from_igdb(self):
         # Similar games exist only on IGDB. A Steam-sourced result still
@@ -763,9 +771,14 @@ class NameResolutionTests(ToolDBTestCase):
             patch.dict(os.environ, _IGDB_ENV, clear=False),
             patch("gamelib_mcp.data.media.fetch_games_by_exact_name", lookup),
         ):
-            self.assertIsNone(await media.get_game_media(name="Transient"))
-            self.assertIsNone(await media.get_game_media(name="Transient"))
+            first = await media.get_game_media(name="Transient")
+            second = await media.get_game_media(name="Transient")
 
+        # Reported, not disguised as "this game has no media".
+        for result in (first, second):
+            assert result is not None
+            self.assertIsNone(result["media"])
+            self.assertEqual(result["errors"], ["igdb: name resolution failed"])
         # A failure must not become a 24h "this game doesn't exist" backoff.
         self.assertEqual(lookup.await_count, 2)
         self.assertIsNone(await get_meta("game_media_name:transient"))

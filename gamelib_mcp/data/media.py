@@ -121,6 +121,15 @@ def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+# Returned by ``_cached`` when a refresh FAILED and no stale copy exists — as
+# opposed to None, which means the source genuinely has nothing. Swallowing the
+# difference made a provider outage indistinguishable from a media-less game:
+# ``get_game_media`` folds this into its ``errors`` list instead, so the
+# package can report "unavailable" rather than rendering a silently bare card.
+# Never cached, never returned to callers.
+_FETCH_FAILED: Any = object()
+
+
 # Payload version, carried in the cache KEY rather than inside the entry: a
 # stored payload has no schema, so the only way a widened shape (pedigree,
 # 2026-08) refetches instead of rendering half a card for seven days is to ask
@@ -181,10 +190,10 @@ async def _cached(key: str, fetch, *, ttl: timedelta, label: str) -> Any:
             logger.warning("Media fetch failed for %s; serving stale cache", label)
             return cached[1]
         logger.warning("Media fetch failed for %s and nothing is cached", label)
-        return None
+        return _FETCH_FAILED
     except Exception:
         logger.warning("Unexpected media fetch error for %s", label, exc_info=True)
-        return cached[1] if cached is not None else None
+        return cached[1] if cached is not None else _FETCH_FAILED
 
     if payload is None and cached is not None and cached[1] is not None:
         logger.warning("Media source returned nothing for %s; serving stale cache", label)
@@ -543,7 +552,9 @@ async def _fetch_igdb_media(igdb_id: int) -> dict | None:
     }
 
 
-async def _resolve_igdb_id_by_name(name: str) -> int | None:
+async def _resolve_igdb_id_by_name(
+    name: str, errors: list[str] | None = None
+) -> int | None:
     """EXACT-name IGDB lookup, refusing ambiguity — display use only.
 
     This is igdb.py's own equality lookup (the one search_game falls back to)
@@ -574,6 +585,10 @@ async def _resolve_igdb_id_by_name(name: str) -> int | None:
     payload = await _cached(
         _name_cache_key(name), fetch, ttl=NAME_CACHE_TTL, label=f"name {name!r}"
     )
+    if payload is _FETCH_FAILED:
+        if errors is not None:
+            errors.append("igdb: name resolution failed")
+        return None
     if isinstance(payload, dict):
         igdb_id = payload.get("igdb_id")
         if isinstance(igdb_id, int):
@@ -591,18 +606,25 @@ async def get_game_media(
     name: str | None = None,
 ) -> dict | None:
     """Media for one game: ``{"media", "similar_raw", "similar_count",
-    "pedigree_raw", "igdb_id"}``.
+    "pedigree_raw", "igdb_id", "errors"}``.
 
     Identity order is Steam appid, then IGDB id, then an exact-name IGDB
     resolution. The MEDIA block is whole-source, never mixed — but similar
     games and pedigree exist only on IGDB, so a Steam-sourced result still
     borrows both from the game's IGDB record when one is reachable; otherwise
     the most common candidates (Steam appids) would never get a similar row or
-    a studio strip at all. Returns None when nothing resolves or the source
-    holds no media; never raises for a provider failure.
+    a studio strip at all.
+
+    Never raises for a provider failure, but does not hide one either:
+    ``errors`` names each source whose fetch FAILED (as opposed to genuinely
+    holding nothing), so the package's failure reporting can tell an outage
+    from a media-less game. Returns None only when nothing resolves, nothing
+    failed, and no source holds media.
     """
+    errors: list[str] = []
+
     if igdb_id is None and name:
-        igdb_id = await _resolve_igdb_id_by_name(name)
+        igdb_id = await _resolve_igdb_id_by_name(name, errors)
 
     igdb_payload: dict | None = None
     if igdb_id is not None:
@@ -613,7 +635,11 @@ async def get_game_media(
             ttl=MEDIA_CACHE_TTL,
             label=f"igdb {resolved_id}",
         )
+        if igdb_payload is _FETCH_FAILED:
+            errors.append("igdb: fetch failed")
+            igdb_payload = None
 
+    steam_payload: dict | None = None
     if steam_appid is not None:
         steam_payload = await _cached(
             _cache_key("steam", steam_appid),
@@ -621,15 +647,35 @@ async def get_game_media(
             ttl=MEDIA_CACHE_TTL,
             label=f"steam appid {steam_appid}",
         )
-        if steam_payload is not None:
-            if igdb_payload is not None:
-                return {
-                    **steam_payload,
-                    "similar_raw": igdb_payload.get("similar_raw"),
-                    "similar_count": igdb_payload.get("similar_count"),
-                    "pedigree_raw": igdb_payload.get("pedigree_raw"),
-                    "igdb_id": igdb_payload.get("igdb_id"),
-                }
-            return steam_payload
+        if steam_payload is _FETCH_FAILED:
+            errors.append("steam: fetch failed")
+            steam_payload = None
 
-    return igdb_payload
+    if steam_payload is not None:
+        merged = (
+            {
+                **steam_payload,
+                "similar_raw": igdb_payload.get("similar_raw"),
+                "similar_count": igdb_payload.get("similar_count"),
+                "pedigree_raw": igdb_payload.get("pedigree_raw"),
+                "igdb_id": igdb_payload.get("igdb_id"),
+            }
+            if igdb_payload is not None
+            else steam_payload
+        )
+        return {**merged, "errors": errors}
+    if igdb_payload is not None:
+        return {**igdb_payload, "errors": errors}
+    if errors:
+        # Everything reachable failed (or the one source did): an empty-handed
+        # answer that still SAYS so, rather than the None a media-less game
+        # legitimately earns. Assembled fresh, never cached.
+        return {
+            "media": None,
+            "similar_raw": None,
+            "similar_count": None,
+            "pedigree_raw": None,
+            "igdb_id": igdb_id,
+            "errors": errors,
+        }
+    return None

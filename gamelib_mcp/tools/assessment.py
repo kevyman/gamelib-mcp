@@ -1692,7 +1692,12 @@ async def _package_comparisons(presentation: dict[str, Any]) -> list[dict[str, A
         row = library.get(game_id)
         items.append(
             {
-                "name": comparison["name"],
+                # The resolved row's name, like the anchors path: a mismatched
+                # game_id then shows the row's REAL name beside its stats — a
+                # visible mistake — instead of one game's name over another
+                # game's ownership and rating. The declared name still stands
+                # in the stored presentation JSON.
+                "name": row["name"] if row is not None else comparison["name"],
                 "relation": comparison["relation"],
                 "note": comparison.get("note"),
                 "game_id": game_id,
@@ -1758,6 +1763,13 @@ async def _build_package(
             ),
             timeout=_PACKAGE_MEDIA_TIMEOUT_SECONDS,
         )
+        # get_game_media never raises for a provider failure — it reports one
+        # here instead, so an outage doesn't masquerade as a media-less game.
+        if media_payload:
+            errors.extend(
+                f"media: {source_error}"
+                for source_error in media_payload.get("errors") or []
+            )
     except Exception:
         logger.warning("Package media fetch failed for game %s", game_id, exc_info=True)
         errors.append("media: fetch failed")
