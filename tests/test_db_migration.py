@@ -1157,6 +1157,38 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                        "purchase_source", "bundle_name"):
             self.assertIsNone(row[column])
 
+    async def test_v39_adds_assessment_presentation_and_preserves_verdicts(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V38_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 38")
+        conn.execute("INSERT INTO games (id, name) VALUES (1, 'Hollow Knight')")
+        conn.execute(
+            "INSERT INTO game_assessments (game_id, assessed_at, verdict, summary)"
+            " VALUES (1, '2026-08-01T00:00:00+00:00', 'buy_now', 'buy it')"
+        )
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+
+            async with db_module.get_db() as db:
+                version = await db_module._get_user_version(db)
+                columns = await db_module._table_columns(db, "game_assessments")
+                row = await db.execute_fetchone(
+                    "SELECT verdict, summary, presentation FROM game_assessments"
+                    " WHERE game_id = 1"
+                )
+
+        self.assertEqual(version, db_module.SCHEMA_VERSION)
+        self.assertIn("presentation", columns)
+        self.assertEqual(row["verdict"], "buy_now")
+        self.assertEqual(row["summary"], "buy it")
+        # Never backfilled: a pitch authored at recording time cannot be
+        # reconstructed from the components afterwards.
+        self.assertIsNone(row["presentation"])
+
     async def test_v35_backfills_steam_last_played_from_rtime(self) -> None:
         # v14 added game_platforms.last_played but only PSN/Nintendo ever wrote
         # it; Steam kept its epoch copy in steam_platform_data. Now that
@@ -1309,7 +1341,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             async with db_module.get_db() as db:
                 version = await db_module._get_user_version(db)
             self.assertEqual(version, db_module.SCHEMA_VERSION)
-            self.assertEqual(db_module.SCHEMA_VERSION, 38)
+            self.assertEqual(db_module.SCHEMA_VERSION, 39)
 
             unresolved = await seed_game("Still Unresolved Wishlisted Game")
             resolved = await seed_game("Already Resolved Wishlisted Game")

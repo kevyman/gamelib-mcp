@@ -27,6 +27,7 @@ from fastmcp.server.middleware import Middleware as FastMCPMiddleware
 from mcp.types import Icon, ToolAnnotations
 
 from .apps import GAME_CARDS_APP, register_apps
+from .apps_eval import EVAL_CARD_APP, register_eval_app
 from .auth import load_security_config
 from .http_admin import HttpSecurityMiddleware, register_http_routes
 from .lifecycle import lifespan
@@ -164,6 +165,7 @@ mcp = FastMCP(
 )
 
 register_apps(mcp)
+register_eval_app(mcp)
 register_skill_resources(mcp)
 
 
@@ -283,6 +285,7 @@ async def get_game_detail(
     game_id: int | None = None,
     items: list[dict] | None = None,
     enrich: bool | None = None,
+    media: bool = False,
 ) -> GameDetailResponse:
     """
     Get full details for one game, or for many in one call.
@@ -299,6 +302,20 @@ async def get_game_detail(
     numbers, price seen and target, and the declared skill/skill_version/model,
     null when the recorder stated none), with assessment_count as the true
     total and assessments_truncated as the flag — in single-game mode only.
+
+    `media=True` (single-game mode only) additionally fetches how the game
+    presents itself, for rendering a card: `media` (a trailer — a playable mp4
+    or a YouTube id — plus up to 6 screenshots with screenshot_count/
+    screenshots_truncated, and the store's short description), `similar`
+    (up to 8 games IGDB considers similar, each annotated with whether it is
+    owned, unplayed, its rating and playtime, with count/truncated) and
+    `pedigree` (the developer — name, founding year, catalogue size — plus up
+    to 6 of their games released BEFORE this one, annotated the same way, and
+    library_track_record: how many of them he owns, played and how he rated
+    them). The keys are absent when nothing resolves; results are cached
+    server-side for about 7 days, so a repeat call on the same game is free.
+    Leave it off when you only need the facts above — it costs a provider
+    round trip on a cold cache.
 
     Pass `items` (max 50) — a list of {name, appid, or game_id}, the same
     resolution — to fetch many at once. Per-item results carry status "ok"
@@ -323,8 +340,20 @@ async def get_game_detail(
                 "fan out to one round of provider HTTP per game. Call "
                 "get_game_detail on a single game to force its fetch."
             )
+        if media:
+            raise ToolError(
+                "media=True is not supported with items — the trailer/"
+                "screenshot lookup is one provider round trip per game. Call "
+                "get_game_detail on a single game to get its media."
+            )
         return await _many(items)
-    return await _detail(name, appid, game_id, enrich=True if enrich is None else enrich)
+    return await _detail(
+        name,
+        appid,
+        game_id,
+        enrich=True if enrich is None else enrich,
+        media=media,
+    )
 
 
 @mcp.tool(title="Discover Games to Play", annotations=READ_ONLY_TOOL, app=GAME_CARDS_APP)
@@ -1193,7 +1222,7 @@ async def get_assessment_context(
     )
 
 
-@mcp.tool(title="Record Assessment", annotations=MUTATION_TOOL)
+@mcp.tool(title="Record Assessment", annotations=MUTATION_TOOL, app=EVAL_CARD_APP)
 async def record_assessment(
     name: str | None = None,
     appid: int | None = None,
@@ -1223,6 +1252,11 @@ async def record_assessment(
     skill: str | None = None,
     skill_version: str | None = None,
     model: str | None = None,
+    elevator_pitch: str | None = None,
+    for_you_if: list[str] | None = None,
+    not_for_you_if: list[str] | None = None,
+    comparisons: list[dict] | None = None,
+    why_care: list[dict] | None = None,
     void_assessment_id: int | None = None,
     items: list[dict] | None = None,
 ) -> RecordAssessmentResponse:
@@ -1287,6 +1321,43 @@ async def record_assessment(
     model FAMILY they are told, not a guessed router variant. They group
     get_stats(report="calibration")'s by_methodology / by_model.
 
+    elevator_pitch, for_you_if, not_for_you_if and comparisons are the
+    PRESENTATION of the verdict — your own writing, stored with it and
+    rendered on the evaluation card. elevator_pitch is one synthesized,
+    spoiler-free line (420 chars). for_you_if / not_for_you_if take up to 4
+    bullets each (200 chars each), and each bullet must be GROUNDED IN HIS
+    DATA ("you put 244h into Slay the Spire", "you abandoned both survival
+    crafters you tried"), never generic genre talk. comparisons takes up to 6
+    {name, relation, note, game_id} objects tracing lineage, with relation one
+    of "better_version", "similar", "ancestor", "descendant" or
+    "cheaper_substitute"; pass game_id when the library already resolved that
+    game (a name is matched exactly or not at all). Over-cap lists are
+    rejected; long text is truncated.
+
+    why_care takes up to 3 {kind, text} objects — the one-line reasons this
+    game is worth a look BEFORE the verdict, with kind one of "people" (the
+    credits behind it: "the Bloodborne combat lead directs this"), "studio"
+    ("Larian's first game since Baldur's Gate 3"), "anticipation" ("nine years
+    after the last one") or "moment" ("the first Metroidvania to ship with
+    day-one Steam Deck verified"). Text is capped at 160 chars. SOURCEABLE
+    CLAIMS ONLY: this renders as fact on the card, so write what you could
+    point at, never a guess about who worked on what — the server fetches the
+    developer and their previous games itself (package.pedigree) and never
+    fetches credits, which is exactly the gap this fills.
+
+    A single-game recording answers with `package` as well: everything the
+    evaluation card renders — the game (cover, year), the verdict and summary,
+    your presentation echoed back, comparisons and anchors resolved against
+    the library (owned / rating / playtime), craft and fit, ownership and
+    acquisition, HLTB against his recent pace, price seen vs target, media
+    (trailer + up to 6 screenshots + short description), IGDB similar games
+    annotated with what he owns and hasn't played, `pedigree` (the developer,
+    when they were founded, and up to 6 of their previous games annotated with
+    what he owns, rated and played), and prior verdicts (up to 5). Media is
+    fetched on demand, so anything that failed or timed out is named in
+    package.errors and the rest of the card still comes back — the verdict is
+    recorded either way. Not returned for `items` or void calls.
+
     At most one assessment per game per UTC day: re-recording the same day
     REPLACES that day's row (replaced=true) rather than appending a second
     verdict, so refining a call mid-conversation is safe. Assessing the same
@@ -1340,6 +1411,11 @@ async def record_assessment(
         skill,
         skill_version,
         model,
+        elevator_pitch,
+        for_you_if,
+        not_for_you_if,
+        comparisons,
+        why_care,
         void_assessment_id,
     )
 

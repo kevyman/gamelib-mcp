@@ -27,7 +27,7 @@ EXPECTED_TOOLS = {
         "required": set(),
     },
     "get_game_detail": {
-        "params": {"name", "appid", "game_id", "items", "enrich"},
+        "params": {"name", "appid", "game_id", "items", "enrich", "media"},
         "required": set(),
     },
     "discover_games": {
@@ -131,7 +131,8 @@ EXPECTED_TOOLS = {
             "anchors_cited", "flags", "price_seen", "price_currency",
             "price_platform", "target_price", "instead_game_id", "steam_appid",
             "context", "skill", "skill_version", "model",
-            "void_assessment_id", "items",
+            "elevator_pitch", "for_you_if", "not_for_you_if", "comparisons",
+            "why_care", "void_assessment_id", "items",
         },
         "required": set(),
     },

@@ -31,6 +31,21 @@ from gamelib_mcp.tools.assessment import (
     record_assessments_batch,
 )
 
+# Every single-item recording now assembles a package, whose one network step
+# is the media fetch. Neutralized for the whole module so no test reaches a
+# provider; the package tests below patch it again with what they need.
+_MEDIA_PATCH = patch(
+    "gamelib_mcp.tools.assessment.get_game_media", AsyncMock(return_value=None)
+)
+
+
+def setUpModule():
+    _MEDIA_PATCH.start()
+
+
+def tearDownModule():
+    _MEDIA_PATCH.stop()
+
 
 async def _assessment_rows(game_id: int) -> list[dict]:
     async with db_module.get_db() as db:
@@ -453,6 +468,12 @@ class VoidAssessmentTests(ToolDBTestCase):
             {"name": "Exclusive Probe"},
             {"appid": 4242},
             {"summary": "leftover"},
+            # The presentation params are refused alongside every other one:
+            # a void deletes a row, it does not re-author one.
+            {"elevator_pitch": "leftover pitch"},
+            {"for_you_if": ["leftover"]},
+            {"not_for_you_if": ["leftover"]},
+            {"comparisons": [{"name": "X", "relation": "similar"}]},
         ):
             with self.subTest(**kwargs), self.assertRaises(ToolError) as ctx:
                 await record_assessment(
@@ -481,6 +502,12 @@ class VoidAssessmentTests(ToolDBTestCase):
         )
         self.assertTrue(result["voided"])
         self.assertEqual(await _assessment_rows(game_id), [])
+
+    async def test_void_returns_no_package(self):
+        game_id = await seed_game("Void Package")
+        recorded = await record_assessment(game_id=game_id, verdict="skip")
+        result = await record_assessment(void_assessment_id=recorded["assessment_id"])
+        self.assertNotIn("package", result)
 
 
 class RecordAssessmentValidationTests(ToolDBTestCase):
@@ -1415,6 +1442,715 @@ class AssessmentIntegrityTests(ToolDBTestCase):
         rows = await _assessment_rows(assessed)
         self.assertEqual(len(rows), 1)
         self.assertIsNone(rows[0]["instead_game_id"])
+
+
+class PresentationFieldTests(ToolDBTestCase):
+    """The model-authored half of a verdict: validated, capped, stored as one JSON."""
+
+    async def test_round_trip_into_one_presentation_column(self):
+        game_id = await seed_game("Presented")
+        result = await main.record_assessment(
+            game_id=game_id,
+            verdict="buy_now",
+            elevator_pitch="A nail, a kingdom, and no map.",
+            for_you_if=["you put 244h into Hollow Knight"],
+            not_for_you_if=["you abandoned both metroidvanias you tried"],
+            comparisons=[
+                {
+                    "name": "Ori and the Blind Forest",
+                    "relation": "similar",
+                    "note": "gentler, prettier",
+                }
+            ],
+        )
+
+        (row,) = await _assessment_rows(game_id)
+        self.assertEqual(
+            json.loads(row["presentation"]),
+            {
+                "elevator_pitch": "A nail, a kingdom, and no map.",
+                "for_you_if": ["you put 244h into Hollow Knight"],
+                "not_for_you_if": ["you abandoned both metroidvanias you tried"],
+                "comparisons": [
+                    {
+                        "name": "Ori and the Blind Forest",
+                        "relation": "similar",
+                        "note": "gentler, prettier",
+                    }
+                ],
+            },
+        )
+        # The package echoes back what was stored (comparisons get their own,
+        # library-annotated block).
+        self.assertEqual(
+            result["package"]["presentation"],
+            {
+                "elevator_pitch": "A nail, a kingdom, and no map.",
+                "for_you_if": ["you put 244h into Hollow Knight"],
+                "not_for_you_if": ["you abandoned both metroidvanias you tried"],
+                # Stable shape: the echo carries every authored member, null
+                # for the ones this recording didn't write.
+                "why_care": None,
+            },
+        )
+
+    async def test_column_stays_null_when_nothing_was_authored(self):
+        game_id = await seed_game("Unpresented")
+        result = await record_assessment(game_id=game_id, verdict="skip")
+        (row,) = await _assessment_rows(game_id)
+        self.assertIsNone(row["presentation"])
+        self.assertIsNone(result["package"]["presentation"])
+
+    async def test_only_authored_members_are_stored(self):
+        game_id = await seed_game("Partial Presentation")
+        await record_assessment(
+            game_id=game_id, verdict="skip", for_you_if=["you like short games"]
+        )
+        (row,) = await _assessment_rows(game_id)
+        self.assertEqual(
+            json.loads(row["presentation"]), {"for_you_if": ["you like short games"]}
+        )
+
+    async def test_a_same_day_rerecord_replaces_the_presentation(self):
+        game_id = await seed_game("Revised Pitch")
+        await record_assessment(
+            game_id=game_id,
+            verdict="skip",
+            assessed_at="2026-08-20",
+            elevator_pitch="first take",
+        )
+        await record_assessment(
+            game_id=game_id,
+            verdict="buy_now",
+            assessed_at="2026-08-20",
+            elevator_pitch="second take",
+        )
+        (row,) = await _assessment_rows(game_id)
+        self.assertEqual(json.loads(row["presentation"])["elevator_pitch"], "second take")
+
+    async def test_a_same_day_rerecord_without_presentation_clears_it(self):
+        # The day's row describes the verdict that now stands, exactly as the
+        # provenance columns do.
+        game_id = await seed_game("Dropped Pitch")
+        await record_assessment(
+            game_id=game_id,
+            verdict="skip",
+            assessed_at="2026-08-20",
+            elevator_pitch="first take",
+        )
+        await record_assessment(
+            game_id=game_id, verdict="skip", assessed_at="2026-08-20"
+        )
+        (row,) = await _assessment_rows(game_id)
+        self.assertIsNone(row["presentation"])
+
+    async def test_long_prose_is_truncated_and_over_cap_lists_rejected(self):
+        game_id = await seed_game("Presentation Caps")
+        with self.assertRaises(ToolError) as ctx:
+            await record_assessment(
+                game_id=game_id, verdict="skip", for_you_if=[f"b{i}" for i in range(5)]
+            )
+        self.assertIn("at most 4", str(ctx.exception))
+        with self.assertRaises(ToolError):
+            await record_assessment(
+                game_id=game_id,
+                verdict="skip",
+                not_for_you_if=[f"b{i}" for i in range(5)],
+            )
+        with self.assertRaises(ToolError) as ctx:
+            await record_assessment(
+                game_id=game_id,
+                verdict="skip",
+                comparisons=[
+                    {"name": f"G{i}", "relation": "similar"} for i in range(7)
+                ],
+            )
+        self.assertIn("at most 6", str(ctx.exception))
+        # Nothing was written by any of the refused calls.
+        self.assertEqual(await _assessment_rows(game_id), [])
+
+        await record_assessment(
+            game_id=game_id,
+            verdict="skip",
+            elevator_pitch="p" * 500,
+            for_you_if=["b" * 300],
+            comparisons=[{"name": "n" * 200, "relation": "similar", "note": "x" * 300}],
+        )
+        stored = json.loads((await _assessment_rows(game_id))[0]["presentation"])
+        self.assertEqual(len(stored["elevator_pitch"]), 420)
+        self.assertEqual(len(stored["for_you_if"][0]), 200)
+        self.assertEqual(len(stored["comparisons"][0]["name"]), 120)
+        self.assertEqual(len(stored["comparisons"][0]["note"]), 200)
+
+    async def test_malformed_presentation_entries_are_named(self):
+        game_id = await seed_game("Presentation Shapes")
+        cases = [
+            ({"elevator_pitch": ["not a string"]}, "elevator_pitch"),
+            ({"for_you_if": "not a list"}, "for_you_if"),
+            ({"for_you_if": [""]}, "for_you_if"),
+            ({"comparisons": ["Ori"]}, "comparisons"),
+            ({"comparisons": [{"relation": "similar"}]}, "name"),
+            ({"comparisons": [{"name": "Ori", "relation": "inspired_by"}]}, "relation"),
+            ({"comparisons": [{"name": "Ori", "relation": "similar", "why": "x"}]}, "why"),
+            (
+                {"comparisons": [{"name": "Ori", "relation": "similar", "game_id": "3"}]},
+                "game_id",
+            ),
+        ]
+        for kwargs, expected in cases:
+            with self.subTest(**kwargs), self.assertRaises(ToolError) as ctx:
+                await record_assessment(game_id=game_id, verdict="skip", **kwargs)
+            self.assertIn(expected, str(ctx.exception))
+        self.assertEqual(await _assessment_rows(game_id), [])
+
+    async def test_presentation_params_are_accepted_as_item_keys(self):
+        game_id = await seed_game("Bulk Presentation")
+        result = await main.record_assessment(
+            items=[
+                {
+                    "game_id": game_id,
+                    "verdict": "skip",
+                    "elevator_pitch": "bulk pitch",
+                    "comparisons": [{"name": "Ori", "relation": "ancestor"}],
+                }
+            ]
+        )
+        self.assertEqual(result["ok"], 1)
+        (row,) = await _assessment_rows(game_id)
+        self.assertEqual(json.loads(row["presentation"])["elevator_pitch"], "bulk pitch")
+
+
+class WhyCareTests(ToolDBTestCase):
+    """why_care: the editorial half of the pedigree pair (issue #159).
+
+    It rides inside the same `presentation` JSON column as the rest of the
+    authored half — the column is free-form by design, so this needed no
+    migration — and is validated exactly like `comparisons`: closed kind
+    vocabulary, list rejected over its cap, text truncated.
+    """
+
+    async def test_round_trip_and_package_echo(self):
+        game_id = await seed_game("Why Care")
+        result = await main.record_assessment(
+            game_id=game_id,
+            verdict="buy_now",
+            elevator_pitch="A nail, a kingdom, and no map.",
+            why_care=[
+                {"kind": "people", "text": "The Hollow Knight combat lead directs it"},
+                {"kind": "anticipation", "text": "Seven years after the last one"},
+            ],
+        )
+
+        (row,) = await _assessment_rows(game_id)
+        stored = json.loads(row["presentation"])
+        self.assertEqual(
+            stored["why_care"],
+            [
+                {"kind": "people", "text": "The Hollow Knight combat lead directs it"},
+                {"kind": "anticipation", "text": "Seven years after the last one"},
+            ],
+        )
+        self.assertEqual(
+            result["package"]["presentation"]["why_care"], stored["why_care"]
+        )
+
+    async def test_the_echo_is_null_rather_than_absent_when_unauthored(self):
+        # Stable shape: a card reading package.presentation.why_care must not
+        # have to tell "not authored" from "this server is older".
+        game_id = await seed_game("No Why Care")
+        result = await record_assessment(
+            game_id=game_id, verdict="skip", elevator_pitch="just a pitch"
+        )
+        self.assertIsNone(result["package"]["presentation"]["why_care"])
+        self.assertNotIn("why_care", json.loads((await _assessment_rows(game_id))[0]["presentation"]))
+
+    async def test_kinds_are_a_closed_vocabulary(self):
+        game_id = await seed_game("Why Care Kinds")
+        for day, kind in enumerate(("people", "studio", "anticipation", "moment"), 1):
+            with self.subTest(kind=kind):
+                await record_assessment(
+                    game_id=game_id,
+                    verdict="skip",
+                    assessed_at=f"2026-07-{day:02d}",
+                    why_care=[{"kind": kind, "text": "a sourceable line"}],
+                )
+        with self.assertRaises(ToolError) as ctx:
+            await record_assessment(
+                game_id=game_id,
+                verdict="skip",
+                why_care=[{"kind": "vibes", "text": "trust me"}],
+            )
+        self.assertIn("vibes", str(ctx.exception))
+
+    async def test_malformed_entries_are_named_and_nothing_is_written(self):
+        game_id = await seed_game("Why Care Shapes")
+        cases = [
+            ({"why_care": "not a list"}, "why_care"),
+            ({"why_care": ["a line"]}, "why_care"),
+            ({"why_care": [{"text": "no kind"}]}, "kind"),
+            ({"why_care": [{"kind": "studio"}]}, "text"),
+            ({"why_care": [{"kind": "studio", "text": "  "}]}, "text"),
+            ({"why_care": [{"kind": "studio", "text": "x", "source": "wiki"}]}, "source"),
+        ]
+        for kwargs, expected in cases:
+            with self.subTest(**kwargs), self.assertRaises(ToolError) as ctx:
+                await record_assessment(game_id=game_id, verdict="skip", **kwargs)
+            self.assertIn(expected, str(ctx.exception))
+        self.assertEqual(await _assessment_rows(game_id), [])
+
+    async def test_over_cap_is_rejected_and_long_text_truncated(self):
+        game_id = await seed_game("Why Care Caps")
+        with self.assertRaises(ToolError) as ctx:
+            await record_assessment(
+                game_id=game_id,
+                verdict="skip",
+                why_care=[{"kind": "moment", "text": f"line {i}"} for i in range(4)],
+            )
+        self.assertIn("at most 3", str(ctx.exception))
+        self.assertEqual(await _assessment_rows(game_id), [])
+
+        await record_assessment(
+            game_id=game_id, verdict="skip", why_care=[{"kind": "studio", "text": "t" * 400}]
+        )
+        stored = json.loads((await _assessment_rows(game_id))[0]["presentation"])
+        self.assertEqual(len(stored["why_care"][0]["text"]), 160)
+
+    async def test_void_refuses_to_carry_why_care(self):
+        game_id = await seed_game("Why Care Void")
+        recorded = await record_assessment(game_id=game_id, verdict="skip")
+        with self.assertRaises(ToolError) as ctx:
+            await record_assessment(
+                void_assessment_id=recorded["assessment_id"],
+                why_care=[{"kind": "studio", "text": "leftover"}],
+            )
+        self.assertIn("why_care", str(ctx.exception))
+        self.assertEqual(len(await _assessment_rows(game_id)), 1)
+
+    async def test_why_care_is_an_item_key(self):
+        game_id = await seed_game("Bulk Why Care")
+        result = await main.record_assessment(
+            items=[
+                {
+                    "game_id": game_id,
+                    "verdict": "skip",
+                    "why_care": [{"kind": "studio", "text": "their first in a decade"}],
+                }
+            ]
+        )
+        self.assertEqual(result["ok"], 1)
+        (row,) = await _assessment_rows(game_id)
+        self.assertEqual(
+            json.loads(row["presentation"])["why_care"],
+            [{"kind": "studio", "text": "their first in a decade"}],
+        )
+
+
+_MEDIA_PAYLOAD = {
+    "media": {
+        "source": "steam",
+        "trailer": {
+            "kind": "mp4",
+            "url": "https://cdn.cloudflare.steamstatic.com/steam/apps/1/movie480.mp4",
+            "hq_url": "https://cdn.cloudflare.steamstatic.com/steam/apps/1/movie_max.mp4",
+            "poster": "https://shared.akamai.steamstatic.com/poster.jpg",
+            "name": "Trailer",
+        },
+        "screenshots": [{"thumb": "t1", "full": "f1"}],
+        "screenshot_count": 1,
+        "screenshots_truncated": False,
+        "short_description": "A tiny bug with a nail.",
+    },
+    "similar_raw": None,
+    "similar_count": None,
+    "igdb_id": None,
+}
+
+_PACKAGE_KEYS = {
+    "game",
+    "verdict",
+    "summary",
+    "presentation",
+    "comparisons",
+    "craft",
+    "fit_call",
+    "flags",
+    "anchors",
+    "ownership",
+    "time",
+    "price",
+    "media",
+    "similar",
+    "pedigree",
+    "past",
+    "errors",
+}
+
+
+class EvaluationPackageTests(ToolDBTestCase):
+    """The card payload record_assessment answers with (single mode only).
+
+    The rule under test throughout: the package is decoration over a verdict
+    that is ALREADY committed. Nothing here may fail the recording.
+    """
+
+    def _media(self, payload=_MEDIA_PAYLOAD, **kwargs):
+        return patch(
+            "gamelib_mcp.tools.assessment.get_game_media",
+            AsyncMock(return_value=payload, **kwargs),
+        )
+
+    async def test_the_frozen_shape_comes_back_whole(self):
+        game_id = await make_steam_game("Hollow Knight", 367520, playtime_minutes=180)
+        await add_rating(game_id, "manual", 9.0, 9.0)
+        anchor_id = await seed_game("Ori")
+        await add_platform(anchor_id, "steam", playtime_minutes=600)
+        await add_rating(anchor_id, "manual", 8.0, 8.0)
+
+        with self._media():
+            result = await main.record_assessment(
+                game_id=game_id,
+                verdict="buy_now",
+                summary="buy it",
+                craft_adjusted=0.94,
+                craft_positive_pct=97.0,
+                review_count=140000,
+                recent_trajectory="stable",
+                opencritic_score=90.0,
+                fit_call="strong fit",
+                anchors_cited=[{"name": "Ori", "game_id": anchor_id}, "Dead Cells"],
+                flags=["long for an evening"],
+                price_seen=14.99,
+                price_currency="EUR",
+                price_platform="steam",
+                target_price=9.99,
+                elevator_pitch="A nail, a kingdom, and no map.",
+                comparisons=[{"name": "Ori", "relation": "similar"}],
+            )
+
+        package = result["package"]
+        self.assertEqual(set(package), _PACKAGE_KEYS)
+        self.assertEqual(package["errors"], [])
+        self.assertEqual(
+            package["game"],
+            {
+                "game_id": game_id,
+                "name": "Hollow Knight",
+                "release_year": None,
+                "cover_url": (
+                    "https://cdn.cloudflare.steamstatic.com/steam/apps/"
+                    "367520/library_600x900.jpg"
+                ),
+            },
+        )
+        self.assertEqual(package["verdict"], "buy_now")
+        self.assertEqual(package["media"], _MEDIA_PAYLOAD["media"])
+        self.assertEqual(
+            package["craft"],
+            {
+                "adjusted": 0.94,
+                "positive_pct": 97.0,
+                "review_count": 140000,
+                "trajectory": "stable",
+                "opencritic_score": 90.0,
+            },
+        )
+        self.assertEqual(package["fit_call"], "strong fit")
+        self.assertEqual(package["flags"], ["long for an evening"])
+        self.assertEqual(
+            package["price"],
+            {"seen": 14.99, "currency": "EUR", "platform": "steam", "target": 9.99},
+        )
+        self.assertEqual(package["ownership"]["owned"], True)
+        self.assertEqual(package["ownership"]["platforms"], ["steam"])
+        self.assertEqual(package["ownership"]["playtime_hours"], 3.0)
+        self.assertEqual(package["ownership"]["my_rating"], 9.0)
+        self.assertEqual(package["time"]["recent_weekly_minutes"], 0)
+        self.assertIsNone(package["similar"])
+        self.assertIsNone(package["past"])
+
+        # Anchors resolve by game_id; a name-only citation passes through.
+        resolved, name_only = package["anchors"]
+        self.assertEqual(resolved["game_id"], anchor_id)
+        self.assertEqual(resolved["rating"], 8.0)
+        self.assertEqual(resolved["playtime_hours"], 10.0)
+        self.assertEqual(name_only, {
+            "game_id": None,
+            "name": "Dead Cells",
+            "rating": None,
+            "playtime_hours": None,
+            "completion_status": None,
+            "cover_url": None,
+        })
+
+        # A comparison resolves by EXACT name only, and is annotated with what
+        # he owns of it.
+        (comparison,) = package["comparisons"]
+        self.assertEqual(comparison["game_id"], anchor_id)
+        self.assertEqual(comparison["owned"], True)
+        self.assertEqual(comparison["my_rating"], 8.0)
+        self.assertEqual(comparison["playtime_hours"], 10.0)
+
+    async def test_an_unresolved_comparison_is_left_unannotated(self):
+        game_id = await seed_game("Lineage Probe")
+        with self._media(None):
+            result = await record_assessment(
+                game_id=game_id,
+                verdict="skip",
+                comparisons=[
+                    {"name": "Never Heard Of It", "relation": "better_version"}
+                ],
+            )
+        (comparison,) = result["package"]["comparisons"]
+        self.assertIsNone(comparison["game_id"])
+        self.assertIsNone(comparison["owned"])
+        self.assertIsNone(comparison["my_rating"])
+        self.assertIsNone(comparison["playtime_hours"])
+
+    async def test_a_mismatched_comparison_game_id_shows_the_rows_real_name(self):
+        game_id = await seed_game("Mismatch Probe")
+        other = await seed_game("The Actual Game")
+        await add_platform(other, "steam", playtime_minutes=300)
+        with self._media(None):
+            result = await record_assessment(
+                game_id=game_id,
+                verdict="skip",
+                comparisons=[
+                    {"name": "Wrong Label", "relation": "similar", "game_id": other}
+                ],
+            )
+        (comparison,) = result["package"]["comparisons"]
+        # The library row is ground truth: its REAL name renders beside its
+        # stats, so a mismatched id is a visible mistake instead of one game's
+        # name over another game's ownership. The declared name still stands
+        # in the stored presentation JSON.
+        self.assertEqual(comparison["name"], "The Actual Game")
+        self.assertEqual(comparison["game_id"], other)
+        self.assertTrue(comparison["owned"])
+
+    async def test_a_media_source_outage_is_reported_in_package_errors(self):
+        # get_game_media never raises for a provider failure — it answers
+        # empty-handed with an errors list, and the package must relay that
+        # instead of rendering a silently bare card (Codex review, 2026-08-29).
+        game_id = await seed_game("Outage Probe")
+        empty_handed = {
+            "media": None,
+            "similar_raw": None,
+            "similar_count": None,
+            "pedigree_raw": None,
+            "igdb_id": None,
+            "errors": ["steam: fetch failed"],
+        }
+        with self._media(empty_handed):
+            result = await record_assessment(game_id=game_id, verdict="skip")
+        package = result["package"]
+        self.assertIsNone(package["media"])
+        self.assertEqual(package["errors"], ["media: steam: fetch failed"])
+
+    async def test_similar_games_are_annotated_against_the_library(self):
+        game_id = await seed_game("Similarity Probe")
+        owned_unplayed = await seed_game("Owned Unplayed")
+        await add_platform(owned_unplayed, "steam", playtime_minutes=0)
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET igdb_id = 101 WHERE id = ?", (owned_unplayed,)
+            )
+            await db.commit()
+
+        payload = {
+            **_MEDIA_PAYLOAD,
+            "similar_raw": [
+                {
+                    "igdb_id": 101,
+                    "name": "Owned Unplayed",
+                    "release_year": 2016,
+                    "cover_image_id": "abc",
+                },
+                {
+                    "igdb_id": 202,
+                    "name": "Unknown Neighbour",
+                    "release_year": None,
+                    "cover_image_id": None,
+                },
+            ],
+            "similar_count": 9,
+        }
+        with self._media(payload):
+            result = await record_assessment(game_id=game_id, verdict="skip")
+
+        similar = result["package"]["similar"]
+        self.assertEqual(similar["count"], 9)
+        self.assertTrue(similar["truncated"])
+        owned_entry, unknown_entry = similar["items"]
+        self.assertTrue(owned_entry["owned"])
+        self.assertTrue(owned_entry["unplayed"])
+        self.assertEqual(
+            owned_entry["cover_url"],
+            "https://images.igdb.com/igdb/image/upload/t_cover_big/abc.jpg",
+        )
+        self.assertFalse(unknown_entry["owned"])
+        self.assertFalse(unknown_entry["unplayed"])
+        self.assertIsNone(unknown_entry["cover_url"])
+
+    async def test_the_pedigree_block_is_annotated_like_the_similar_row(self):
+        # Same shared layer (tools/game_media.py) the detail card goes through,
+        # so the card and the package render identical keys.
+        game_id = await seed_game("Pedigree Package")
+        earlier = await seed_game("Their Last One")
+        await add_platform(earlier, "steam", playtime_minutes=300)
+        await add_rating(earlier, "manual", 9.0, 9.0)
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = 501 WHERE id = ?", (earlier,))
+            await db.commit()
+
+        payload = {
+            **_MEDIA_PAYLOAD,
+            "pedigree_raw": {
+                "developer": {
+                    "name": "Team Cherry",
+                    "igdb_company_id": 6455,
+                    "founded_year": 2012,
+                    "country": 36,
+                },
+                "developer_names": ["Team Cherry"],
+                "publisher_name": None,
+                "previous_games": [
+                    {
+                        "igdb_id": 501,
+                        "name": "Their Last One",
+                        "release_year": 2014,
+                        "cover_image_id": "abc",
+                        "critic_score": 88,
+                    }
+                ],
+                "previous_count": 1,
+                "previous_truncated": False,
+                "catalog_size": 2,
+                "catalog_truncated": False,
+                "big_catalog": False,
+                "hypes": None,
+            },
+        }
+        with self._media(payload):
+            result = await record_assessment(game_id=game_id, verdict="buy_now")
+
+        pedigree = result["package"]["pedigree"]
+        self.assertEqual(pedigree["developer"]["founded_year"], 2012)
+        (entry,) = pedigree["previous_games"]
+        self.assertTrue(entry["owned"])
+        self.assertEqual(entry["my_rating"], 9.0)
+        self.assertEqual(entry["playtime_hours"], 5.0)
+        self.assertEqual(entry["critic_score"], 88)
+        self.assertEqual(
+            entry["cover_url"],
+            "https://images.igdb.com/igdb/image/upload/t_cover_big/abc.jpg",
+        )
+        self.assertEqual(
+            pedigree["library_track_record"],
+            {"owned_count": 1, "played_count": 1, "avg_my_rating": 9.0},
+        )
+
+    async def test_a_candidate_with_no_pedigree_gets_a_null_block(self):
+        game_id = await seed_game("Studioless Package")
+        with self._media(_MEDIA_PAYLOAD):
+            result = await record_assessment(game_id=game_id, verdict="skip")
+        self.assertIsNone(result["package"]["pedigree"])
+
+    async def test_past_verdicts_come_from_the_rows_already_queried(self):
+        game_id = await seed_game("Repeat Ask")
+        for day in range(1, 4):
+            await record_assessment(
+                game_id=game_id,
+                verdict="wishlist_for_sale",
+                assessed_at=f"2026-0{day}-01",
+                summary=f"take {day}",
+                price_seen=30.0 - day,
+                price_currency="EUR",
+            )
+        with self._media(None):
+            result = await record_assessment(
+                game_id=game_id, verdict="buy_now", assessed_at="2026-08-01"
+            )
+
+        past = result["package"]["past"]
+        self.assertEqual(past["count"], 3)
+        self.assertFalse(past["truncated"])
+        self.assertEqual(
+            past["items"][0],
+            {
+                "assessed_at": "2026-03-01T00:00:00+00:00",
+                "verdict": "wishlist_for_sale",
+                "summary": "take 3",
+                "price_seen": 27.0,
+                "price_currency": "EUR",
+            },
+        )
+
+    async def test_a_media_failure_degrades_to_an_errors_entry(self):
+        game_id = await seed_game("Media Outage")
+        with patch(
+            "gamelib_mcp.tools.assessment.get_game_media",
+            AsyncMock(side_effect=RuntimeError("provider down")),
+        ):
+            result = await record_assessment(
+                game_id=game_id, verdict="skip", summary="still recorded"
+            )
+
+        # The verdict is recorded either way — that is the whole point.
+        (row,) = await _assessment_rows(game_id)
+        self.assertEqual(row["verdict"], "skip")
+        package = result["package"]
+        self.assertEqual(package["errors"], ["media: fetch failed"])
+        self.assertIsNone(package["media"])
+        self.assertEqual(package["summary"], "still recorded")
+
+    async def test_a_broken_package_never_fails_the_recording(self):
+        game_id = await seed_game("Assembly Outage")
+        with patch(
+            "gamelib_mcp.tools.assessment._build_package",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            result = await record_assessment(game_id=game_id, verdict="buy_now")
+
+        (row,) = await _assessment_rows(game_id)
+        self.assertEqual(row["verdict"], "buy_now")
+        self.assertEqual(
+            result["package"],
+            {
+                "game": {"game_id": game_id},
+                "verdict": "buy_now",
+                "errors": ["package: assembly failed"],
+            },
+        )
+
+    async def test_bulk_mode_returns_no_package(self):
+        game_id = await seed_game("Bulk No Package")
+        result = await main.record_assessment(
+            items=[{"game_id": game_id, "verdict": "skip"}]
+        )
+        self.assertNotIn("package", result)
+        self.assertNotIn("package", result["results"][0])
+
+    async def test_media_identity_prefers_the_appid_then_igdb_then_the_name(self):
+        game_id = await seed_game("Identity Order")
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = 777 WHERE id = ?", (game_id,))
+            await db.commit()
+
+        with self._media(None) as fetch:
+            await record_assessment(game_id=game_id, verdict="skip", steam_appid=4242)
+        self.assertEqual(
+            fetch.await_args.kwargs,
+            {"steam_appid": 4242, "igdb_id": 777, "name": "Identity Order"},
+        )
+
+        with self._media(None) as fetch:
+            await record_assessment(
+                game_id=game_id, verdict="skip", assessed_at="2026-01-02"
+            )
+        self.assertEqual(
+            fetch.await_args.kwargs,
+            {"steam_appid": None, "igdb_id": 777, "name": "Identity Order"},
+        )
 
 
 if __name__ == "__main__":

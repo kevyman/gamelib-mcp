@@ -1,6 +1,8 @@
 """get_game_detail: full info for one game, with platform-aware output."""
 
+import asyncio
 import json
+import logging
 
 from fastmcp.exceptions import ToolError
 
@@ -28,16 +30,24 @@ from .batch import (
     count_status,
 )
 from .common import cover_url
+from .game_media import game_media_context
 from .search import (
     NORMALIZED_NAME_SQL,
     build_name_match,
     fuzzy_fallback_game_ids,
 )
 
+logger = logging.getLogger(__name__)
+
 # Recorded assessments are capped here rather than in tools/assessment.py:
 # that module imports this one, so the constant lives on the importing
 # side of the edge.
 DETAIL_ASSESSMENT_CAP = 5
+
+# The media lookup is the only provider call in this function that isn't a
+# cached enrichment fetch, and it is decoration: the same budget the evaluation
+# package gives it, after which the detail answer ships without it.
+DETAIL_MEDIA_TIMEOUT_SECONDS = 8
 
 
 async def get_game_detail(
@@ -46,6 +56,7 @@ async def get_game_detail(
     game_id: int | None = None,
     *,
     enrich: bool = True,
+    media: bool = False,
 ) -> dict:
     """
     Return full detail for a game, triggering lazy enrichment.
@@ -56,6 +67,15 @@ async def get_game_detail(
     serves whatever is already cached — including a warm IGDB children catalog
     — so enrichment fields may be null/absent that a single-item call would
     have filled.
+
+    media=True adds the neutral game representation (tools/game_media.py) as
+    optional `media`, `similar` and `pedigree` keys — trailer, screenshots,
+    IGDB's similar games annotated with what the library owns, and the
+    developer's previous games annotated the same way. Off by default: it is
+    card decoration, costs a provider round trip on a cache miss, and nothing
+    in the response depends on it. Single mode only (the bulk path never asks
+    for it), and every key is simply ABSENT when nothing resolved or the
+    lookup failed — never null placeholders, and never a failed call.
 
     Can resolve to a wishlist-only title (wishlisted but not owned anywhere) —
     check owned/wishlisted, not is_primary_library_item, which is a
@@ -313,6 +333,31 @@ async def get_game_detail(
             result["assessments"] = assessments
             result["assessment_count"] = assessment_count
             result["assessments_truncated"] = assessment_count > len(assessments)
+
+    # Trailer / screenshots / similar-games-you-own, for a client rendering a
+    # card. Bounded and best-effort in both directions: the lookup can't hold
+    # the response open past its budget, and a provider failure costs the two
+    # keys, not the call.
+    if media:
+        try:
+            context = await asyncio.wait_for(
+                game_media_context(
+                    steam_appid=steam_appid,
+                    igdb_id=row["igdb_id"],
+                    name=row["name"],
+                ),
+                timeout=DETAIL_MEDIA_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.warning(
+                "Media lookup failed for game %s; serving detail without it",
+                game_id,
+                exc_info=True,
+            )
+        else:
+            for key in ("media", "similar", "pedigree"):
+                if context[key] is not None:
+                    result[key] = context[key]
 
     return result
 

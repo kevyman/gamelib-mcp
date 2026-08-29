@@ -4,6 +4,7 @@ Enrichment calls (Steam Store / ProtonDB / HLTB) are patched to no-ops so the
 test characterizes lookup + formatting only, without network.
 """
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
@@ -403,6 +404,369 @@ class GetGameDetailTests(ToolDBTestCase):
         self.assertIs(result["wishlisted"], True)
         self.assertEqual(result["platforms"], [])
         self.assertIs(result["is_primary_library_item"], True)
+
+
+_MEDIA_PAYLOAD = {
+    "media": {
+        "source": "steam",
+        "trailer": {
+            "kind": "mp4",
+            "url": "https://cdn.cloudflare.steamstatic.com/steam/apps/1/movie480.mp4",
+            "hq_url": "https://cdn.cloudflare.steamstatic.com/steam/apps/1/movie_max.mp4",
+            "poster": "https://shared.akamai.steamstatic.com/poster.jpg",
+            "name": "Trailer",
+        },
+        "screenshots": [{"thumb": "t1", "full": "f1"}],
+        "screenshot_count": 1,
+        "screenshots_truncated": False,
+        "short_description": "A tiny bug with a nail.",
+    },
+    "similar_raw": None,
+    "similar_count": None,
+    "igdb_id": None,
+}
+
+
+class GetGameDetailMediaTests(ToolDBTestCase):
+    """get_game_detail(media=True): the neutral game representation.
+
+    The one provider call is patched at tools/game_media.py's own binding —
+    the seam both this path and record_assessment's package resolve through.
+    media=False needs no patch at all, which is the point: the default costs
+    nothing and reaches nothing.
+    """
+
+    def _media(self, payload=_MEDIA_PAYLOAD, **kwargs):
+        return patch(
+            "gamelib_mcp.tools.game_media.get_game_media",
+            AsyncMock(return_value=payload, **kwargs),
+        )
+
+    async def test_media_off_by_default_adds_no_keys_and_fetches_nothing(self):
+        gid = await make_steam_game("Hollow Knight", 367520, playtime_minutes=120)
+
+        result = await detail.get_game_detail(game_id=gid)
+
+        self.assertNotIn("media", result)
+        self.assertNotIn("similar", result)
+
+    async def test_media_true_adds_the_media_block(self):
+        gid = await make_steam_game("Hollow Knight", 367520, playtime_minutes=120)
+
+        with self._media():
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        self.assertEqual(result["media"], _MEDIA_PAYLOAD["media"])
+        # Nothing similar came back, so that key stays absent rather than null.
+        self.assertNotIn("similar", result)
+
+    async def test_similar_games_are_annotated_against_the_library(self):
+        gid = await seed_game("Similarity Probe")
+        owned_unplayed = await seed_game("Owned Unplayed")
+        await add_platform(owned_unplayed, "steam", playtime_minutes=0)
+        rated = await seed_game("Rated Neighbour")
+        await add_platform(rated, "steam", playtime_minutes=600)
+        await add_rating(rated, "manual", 8.0, 8.0)
+        untracked = await seed_game("Untracked Neighbour")
+        await add_platform(untracked, "gog", playtime_minutes=None)
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET igdb_id = 101 WHERE id = ?", (owned_unplayed,)
+            )
+            await db.execute("UPDATE games SET igdb_id = 202 WHERE id = ?", (rated,))
+            await db.execute("UPDATE games SET igdb_id = 404 WHERE id = ?", (untracked,))
+            await db.commit()
+
+        payload = {
+            **_MEDIA_PAYLOAD,
+            "similar_raw": [
+                {
+                    "igdb_id": 101,
+                    "name": "Owned Unplayed",
+                    "release_year": 2016,
+                    "cover_image_id": "abc",
+                },
+                {
+                    "igdb_id": 202,
+                    "name": "Rated Neighbour",
+                    "release_year": 2019,
+                    "cover_image_id": None,
+                },
+                {
+                    "igdb_id": 303,
+                    "name": "Unknown Neighbour",
+                    "release_year": None,
+                    "cover_image_id": None,
+                },
+                {
+                    "igdb_id": 404,
+                    "name": "Untracked Neighbour",
+                    "release_year": 2020,
+                    "cover_image_id": None,
+                },
+            ],
+            "similar_count": 11,
+        }
+        with self._media(payload):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        similar = result["similar"]
+        self.assertEqual(similar["count"], 11)
+        self.assertTrue(similar["truncated"])
+        unplayed, rated_entry, unknown, untracked_entry = similar["items"]
+        self.assertTrue(unplayed["owned"])
+        self.assertTrue(unplayed["unplayed"])
+        self.assertEqual(
+            unplayed["cover_url"],
+            "https://images.igdb.com/igdb/image/upload/t_cover_big/abc.jpg",
+        )
+        self.assertEqual(rated_entry["my_rating"], 8.0)
+        self.assertEqual(rated_entry["playtime_hours"], 10.0)
+        self.assertFalse(rated_entry["unplayed"])
+        self.assertFalse(unknown["owned"])
+        self.assertIsNone(unknown["cover_url"])
+        # NULL playtime (GOG, manual adds) is UNKNOWN, not an authoritative
+        # zero — the three-state convention: only a known 0 earns "unplayed".
+        self.assertTrue(untracked_entry["owned"])
+        self.assertFalse(untracked_entry["unplayed"])
+        self.assertIsNone(untracked_entry["playtime_hours"])
+
+    async def test_identity_passed_is_the_appid_igdb_id_and_name(self):
+        gid = await make_steam_game("Identity Order", 4242)
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = 777 WHERE id = ?", (gid,))
+            await db.commit()
+
+        with self._media(None) as fetch:
+            await detail.get_game_detail(game_id=gid, media=True)
+
+        self.assertEqual(
+            fetch.await_args.kwargs,
+            {"steam_appid": 4242, "igdb_id": 777, "name": "Identity Order"},
+        )
+
+    async def test_nothing_resolved_leaves_both_keys_absent(self):
+        gid = await seed_game("No Media Anywhere")
+
+        with self._media(None):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        self.assertNotIn("media", result)
+        self.assertNotIn("similar", result)
+        self.assertEqual(result["name"], "No Media Anywhere")
+
+    async def test_a_fetch_failure_costs_the_keys_not_the_call(self):
+        gid = await seed_game("Media Outage")
+
+        with self._media(None, side_effect=RuntimeError("provider down")):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        self.assertNotIn("media", result)
+        self.assertNotIn("similar", result)
+        self.assertEqual(result["name"], "Media Outage")
+
+    async def test_a_hanging_provider_is_cut_off_by_the_media_budget(self):
+        # An event nothing ever sets, so the only thing that ends the fetch is
+        # the wait_for budget — no wall-clock sleep, no liveness guess.
+        gid = await seed_game("Hanging Provider")
+        never = asyncio.Event()
+
+        async def hang(**kwargs):
+            await never.wait()
+
+        with (
+            patch.object(detail, "DETAIL_MEDIA_TIMEOUT_SECONDS", 0.05),
+            patch("gamelib_mcp.tools.game_media.get_game_media", hang),
+        ):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        self.assertNotIn("media", result)
+        self.assertEqual(result["name"], "Hanging Provider")
+
+
+def _pedigree_raw(previous: list[dict], **overrides) -> dict:
+    """A raw pedigree block as data/media.py hands it over (un-annotated)."""
+    block = {
+        "developer": {
+            "name": "Team Cherry",
+            "igdb_company_id": 6455,
+            "founded_year": 2012,
+            "country": 36,
+        },
+        "developer_names": ["Team Cherry"],
+        "publisher_name": "Team Cherry",
+        "previous_games": previous,
+        "previous_count": len(previous),
+        "previous_truncated": False,
+        "catalog_size": len(previous) + 1,
+        "catalog_truncated": False,
+        "big_catalog": False,
+        "hypes": 12,
+    }
+    block.update(overrides)
+    return block
+
+
+class GetGameDetailPedigreeTests(ToolDBTestCase):
+    """`pedigree`: the developer's previous games, read against the library.
+
+    Same seam and same absence discipline as the media/similar blocks above —
+    what is new here is the annotation and the track record computed from it.
+    """
+
+    def _media(self, payload, **kwargs):
+        return patch(
+            "gamelib_mcp.tools.game_media.get_game_media",
+            AsyncMock(return_value=payload, **kwargs),
+        )
+
+    async def _library_neighbours(self) -> None:
+        """One rated+played, one owned+unplayed, one rated but not owned."""
+        played = await seed_game("Rated And Played")
+        await add_platform(played, "steam", playtime_minutes=600)
+        await add_rating(played, "manual", 8.0, 8.0)
+        untouched = await seed_game("Owned Unplayed")
+        await add_platform(untouched, "steam", playtime_minutes=0)
+        let_go = await seed_game("Rated Not Owned")
+        await add_rating(let_go, "manual", 9.0, 9.0)
+        async with db_module.get_db() as db:
+            for game_id, igdb_id in ((played, 501), (untouched, 502), (let_go, 503)):
+                await db.execute(
+                    "UPDATE games SET igdb_id = ? WHERE id = ?", (igdb_id, game_id)
+                )
+            await db.commit()
+
+    def _payload(self, pedigree: dict | None) -> dict:
+        return {**_MEDIA_PAYLOAD, "pedigree_raw": pedigree}
+
+    async def test_previous_games_are_annotated_and_scored_against_the_library(self):
+        gid = await seed_game("Pedigree Probe")
+        await self._library_neighbours()
+        pedigree = _pedigree_raw(
+            [
+                {
+                    "igdb_id": 501,
+                    "name": "Rated And Played",
+                    "release_year": 2014,
+                    "cover_image_id": "abc",
+                    "critic_score": 86,
+                },
+                {
+                    "igdb_id": 502,
+                    "name": "Owned Unplayed",
+                    "release_year": 2013,
+                    "cover_image_id": None,
+                    "critic_score": None,
+                },
+                {
+                    "igdb_id": 503,
+                    "name": "Rated Not Owned",
+                    "release_year": 2012,
+                    "cover_image_id": None,
+                    "critic_score": 74,
+                },
+                {
+                    "igdb_id": 599,
+                    "name": "Never Heard Of It",
+                    "release_year": 2011,
+                    "cover_image_id": None,
+                    "critic_score": None,
+                },
+            ]
+        )
+        with self._media(self._payload(pedigree)):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        block = result["pedigree"]
+        # Passed through untouched: this layer only knows about ownership.
+        self.assertEqual(block["developer"]["name"], "Team Cherry")
+        self.assertEqual(block["publisher_name"], "Team Cherry")
+        self.assertEqual(block["hypes"], 12)
+        played, unplayed, let_go, unknown = block["previous_games"]
+        self.assertEqual(
+            played,
+            {
+                "igdb_id": 501,
+                "name": "Rated And Played",
+                "release_year": 2014,
+                "critic_score": 86,
+                "cover_url": (
+                    "https://images.igdb.com/igdb/image/upload/t_cover_big/abc.jpg"
+                ),
+                "owned": True,
+                "my_rating": 8.0,
+                "playtime_hours": 10.0,
+            },
+        )
+        self.assertTrue(unplayed["owned"])
+        self.assertEqual(unplayed["playtime_hours"], 0.0)
+        self.assertIsNone(unplayed["my_rating"])
+        self.assertFalse(let_go["owned"])
+        self.assertEqual(let_go["my_rating"], 9.0)
+        self.assertFalse(unknown["owned"])
+        self.assertIsNone(unknown["cover_url"])
+        # The raw slug is replaced by the URL, never carried alongside it.
+        self.assertNotIn("cover_image_id", played)
+
+        self.assertEqual(
+            block["library_track_record"],
+            # Owned twice, but only one of them was ever launched; both ratings
+            # count, including the one he no longer owns.
+            {"owned_count": 2, "played_count": 1, "avg_my_rating": 8.5},
+        )
+
+    async def test_no_ratings_leaves_the_average_null(self):
+        gid = await seed_game("Unrated Studio")
+        owned = await seed_game("Owned Unrated")
+        await add_platform(owned, "steam", playtime_minutes=0)
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = 601 WHERE id = ?", (owned,))
+            await db.commit()
+        pedigree = _pedigree_raw(
+            [
+                {
+                    "igdb_id": 601,
+                    "name": "Owned Unrated",
+                    "release_year": 2015,
+                    "cover_image_id": None,
+                    "critic_score": 70,
+                }
+            ]
+        )
+        with self._media(self._payload(pedigree)):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        self.assertEqual(
+            result["pedigree"]["library_track_record"],
+            {"owned_count": 1, "played_count": 0, "avg_my_rating": None},
+        )
+
+    async def test_the_damper_leaves_the_studio_facts_without_a_track_record(self):
+        gid = await seed_game("Big Studio Probe")
+        pedigree = _pedigree_raw(
+            [], big_catalog=True, catalog_size=30, catalog_truncated=True
+        )
+        with self._media(self._payload(pedigree)):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        block = result["pedigree"]
+        self.assertEqual(block["previous_games"], [])
+        self.assertIsNone(block["library_track_record"])
+        self.assertTrue(block["big_catalog"])
+        self.assertEqual(block["catalog_size"], 30)
+
+    async def test_no_pedigree_leaves_the_key_absent(self):
+        gid = await seed_game("Studioless")
+        with self._media(self._payload(None)):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        self.assertNotIn("pedigree", result)
+        self.assertIn("media", result)
+
+    async def test_media_off_by_default_never_carries_pedigree(self):
+        gid = await seed_game("Quiet Detail")
+        result = await detail.get_game_detail(game_id=gid)
+        self.assertNotIn("pedigree", result)
 
 
 class GetGameDetailsBatchTests(ToolDBTestCase):

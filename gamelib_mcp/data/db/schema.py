@@ -1102,6 +1102,22 @@ _V38_SCHEMA_DDL = _V37_SCHEMA_DDL.replace(
     "        owned_at_assessment      INTEGER NOT NULL DEFAULT 0,",
 )
 
+# v39 adds game_assessments.presentation: the model-authored presentation of a
+# verdict (elevator pitch, "for you if" / "not for you if" bullets, and the
+# lineage comparisons) as ONE JSON object rather than four columns — it is a
+# display payload read back whole, never filtered or joined on, and a fifth
+# bullet kind must not need a migration.
+#
+# Declared content, exactly like the v38 provenance columns: whatever the
+# recording client authored, capped and lightly normalized, never synthesized
+# here. NULL means the recorder wrote no presentation. And like every other
+# column on this table it stays out of tag_affinity and discover_games.
+_V39_SCHEMA_DDL = _V38_SCHEMA_DDL.replace(
+    "        owned_at_assessment      INTEGER NOT NULL DEFAULT 0,",
+    "        presentation             TEXT,\n"
+    "        owned_at_assessment      INTEGER NOT NULL DEFAULT 0,",
+)
+
 # Semantic views backing query_library()/get_db_schema() — NOT part of the
 # versioned schema chain (like _FTS_DDL below). Dropped and recreated on every
 # migrate_db run via _sync_query_views so a view definition change deploys on
