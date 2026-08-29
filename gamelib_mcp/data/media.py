@@ -17,6 +17,7 @@ failure — the verdict it decorates matters, the trailer does not — and an
 expired cache whose refresh fails is served stale rather than dropped.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -199,6 +200,14 @@ async def _cached(key: str, fetch, *, ttl: timedelta, label: str) -> Any:
         logger.warning("Media source returned nothing for %s; serving stale cache", label)
         return cached[1]
 
+    if isinstance(payload, dict) and payload.get("partial"):
+        # A payload assembled around a FAILED sub-fetch (e.g. the developer
+        # catalog): serve it best-effort this call, but never store it — a
+        # cached partial would freeze the gap for the whole TTL.
+        logger.warning("Partial media payload for %s (%s) — not cached", label,
+                       payload["partial"])
+        return payload
+
     await set_meta(
         key,
         json.dumps({"fetched_at": datetime.now(UTC).isoformat(), "payload": payload}),
@@ -210,13 +219,23 @@ async def _cached(key: str, fetch, *, ttl: timedelta, label: str) -> Any:
 
 
 async def _mp4_is_live(url: str) -> bool:
-    """One HEAD request against the constructed mp4 — the legacy-surface gate."""
+    """One HEAD request against the constructed mp4 — the legacy-surface gate.
+
+    The gate exists to catch Valve DROPPING the legacy renditions (a
+    definitive non-2xx), not to demand a healthy CDN this instant: a
+    transport failure is no evidence the mp4 is gone, and dropping the
+    trailer on one would bake a trailer-less payload into the 7-day cache.
+    Inconclusive checks trust the URL — the widget's own <video> error
+    fallback (poster + link-out) covers a genuinely dead one.
+    """
     try:
         async with httpx.AsyncClient(timeout=_TRAILER_HEAD_TIMEOUT_SECONDS) as client:
             response = await client.head(url, follow_redirects=True)
     except Exception as exc:
-        logger.warning("Trailer HEAD check failed for %s: %s", url, exc)
-        return False
+        logger.warning(
+            "Trailer HEAD check inconclusive for %s (%s) — trusting the URL", url, exc
+        )
+        return True
     return response.status_code == 200
 
 
@@ -406,32 +425,41 @@ async def _fetch_company_catalog(company_id: int) -> list[dict] | None:
     return entries or None
 
 
-async def _company_catalog(company_id: int) -> list[dict]:
+async def _company_catalog(company_id: int) -> tuple[list[dict], bool]:
+    """(catalog, fetch_failed) — the flag keeps a failed catalog fetch from
+    masquerading as an empty catalog, which the enclosing game payload would
+    otherwise cache for seven days."""
     payload = await _cached(
         _company_cache_key(company_id),
         lambda: _fetch_company_catalog(company_id),
         ttl=COMPANY_CACHE_TTL,
         label=f"company {company_id}",
     )
-    return payload if isinstance(payload, list) else []
+    if payload is _FETCH_FAILED:
+        return [], True
+    return (payload, False) if isinstance(payload, list) else ([], False)
 
 
-async def _igdb_pedigree(item: dict, igdb_id: int) -> dict | None:
-    """The raw pedigree block: who made it, and what they shipped before it.
+async def _igdb_pedigree(item: dict, igdb_id: int) -> tuple[dict | None, bool]:
+    """(raw pedigree block, catalog_fetch_failed).
 
-    Returns None when IGDB names no qualifying developer — a pedigree with no
-    studio is not a weaker pedigree, it is no claim at all. Annotation against
-    the library happens one layer up (tools/game_media.py); nothing here knows
-    what is owned.
+    Returns (None, False) when IGDB names no qualifying developer — a pedigree
+    with no studio is not a weaker pedigree, it is no claim at all. The flag
+    reports a FAILED catalog fetch (rendered header-only, like the big-studio
+    damper) so the caller can keep the incomplete payload out of the cache.
+    Annotation against the library happens one layer up (tools/game_media.py);
+    nothing here knows what is owned.
     """
     developer, developer_names, publisher_name = _company_roles(
         item.get("involved_companies")
     )
     if developer is None:
-        return None
+        return None, False
 
     company_id = _int_field(developer.get("id"))
-    catalog = await _company_catalog(company_id) if company_id is not None else []
+    catalog, catalog_failed = (
+        await _company_catalog(company_id) if company_id is not None else ([], False)
+    )
     catalog_size = len(catalog)
     big_catalog = catalog_size > BIG_CATALOG_THRESHOLD
 
@@ -489,7 +517,7 @@ async def _igdb_pedigree(item: dict, igdb_id: int) -> dict | None:
         # Carried, never rendered: an anticipation counter is a popularity
         # signal, and this card does not argue from popularity.
         "hypes": _int_field(item.get("hypes")),
-    }
+    }, catalog_failed
 
 
 async def _post_igdb_media_query(query: str, label: str) -> list[dict]:
@@ -525,7 +553,7 @@ async def _fetch_igdb_media(igdb_id: int) -> dict | None:
     summary = item.get("summary")
     description = _truncate(summary, SUMMARY_MAX_CHARS) if summary else None
     similar, similar_count = _igdb_similar(item.get("similar_games"))
-    pedigree = await _igdb_pedigree(item, igdb_id)
+    pedigree, catalog_failed = await _igdb_pedigree(item, igdb_id)
 
     if (
         not screenshots
@@ -536,7 +564,7 @@ async def _fetch_igdb_media(igdb_id: int) -> dict | None:
     ):
         return None
 
-    return {
+    payload: dict[str, Any] = {
         "media": {
             "source": "igdb",
             "trailer": trailer,
@@ -550,6 +578,13 @@ async def _fetch_igdb_media(igdb_id: int) -> dict | None:
         "pedigree_raw": pedigree,
         "igdb_id": igdb_id,
     }
+    if catalog_failed:
+        # Serve this call best-effort (header-only strip) but keep the payload
+        # OUT of the 7-day cache — otherwise one transient catalog failure
+        # freezes an empty studio strip for a week. ``_cached`` honors the
+        # marker; ``get_game_media`` strips it and reports the error.
+        payload["partial"] = "igdb: company catalog fetch failed"
+    return payload
 
 
 async def _resolve_igdb_id_by_name(
@@ -623,33 +658,48 @@ async def get_game_media(
     """
     errors: list[str] = []
 
-    if igdb_id is None and name:
-        igdb_id = await _resolve_igdb_id_by_name(name, errors)
-
-    igdb_payload: dict | None = None
-    if igdb_id is not None:
-        resolved_id = igdb_id
-        igdb_payload = await _cached(
-            _cache_key("igdb", resolved_id),
-            lambda: _fetch_igdb_media(resolved_id),
-            ttl=MEDIA_CACHE_TTL,
-            label=f"igdb {resolved_id}",
-        )
-        if igdb_payload is _FETCH_FAILED:
-            errors.append("igdb: fetch failed")
-            igdb_payload = None
-
-    steam_payload: dict | None = None
-    if steam_appid is not None:
-        steam_payload = await _cached(
+    async def steam_side() -> dict | None:
+        if steam_appid is None:
+            return None
+        payload = await _cached(
             _cache_key("steam", steam_appid),
             lambda: _fetch_steam_media(steam_appid),
             ttl=MEDIA_CACHE_TTL,
             label=f"steam appid {steam_appid}",
         )
-        if steam_payload is _FETCH_FAILED:
+        if payload is _FETCH_FAILED:
             errors.append("steam: fetch failed")
-            steam_payload = None
+            return None
+        return payload
+
+    async def igdb_side() -> tuple[dict | None, int | None]:
+        resolved = igdb_id
+        if resolved is None and name:
+            resolved = await _resolve_igdb_id_by_name(name, errors)
+        if resolved is None:
+            return None, None
+        query_id = resolved
+        payload = await _cached(
+            _cache_key("igdb", query_id),
+            lambda: _fetch_igdb_media(query_id),
+            ttl=MEDIA_CACHE_TTL,
+            label=f"igdb {query_id}",
+        )
+        if payload is _FETCH_FAILED:
+            errors.append("igdb: fetch failed")
+            return None, resolved
+        if isinstance(payload, dict):
+            partial = payload.pop("partial", None)
+            if partial:
+                errors.append(str(partial))
+        return payload, resolved
+
+    # Concurrent on purpose: both sides sit inside the callers' 8s budget, and
+    # awaiting IGDB first (one request allows 15s plus retries) could burn the
+    # whole budget before the PREFERRED Steam source was even attempted.
+    steam_payload, (igdb_payload, resolved_igdb_id) = await asyncio.gather(
+        steam_side(), igdb_side()
+    )
 
     if steam_payload is not None:
         merged = (
@@ -675,7 +725,7 @@ async def get_game_media(
             "similar_raw": None,
             "similar_count": None,
             "pedigree_raw": None,
-            "igdb_id": igdb_id,
+            "igdb_id": resolved_igdb_id if resolved_igdb_id is not None else igdb_id,
             "errors": errors,
         }
     return None

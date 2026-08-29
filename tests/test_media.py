@@ -286,6 +286,52 @@ class SteamMediaTests(ToolDBTestCase):
         cached = json.loads(await get_meta(media._cache_key("steam", 99)))
         self.assertIsNone(cached["payload"])
 
+    async def test_head_transport_failure_keeps_the_trailer(self):
+        # The HEAD gate exists to catch Valve DROPPING the legacy renditions
+        # (a definitive non-2xx), not to demand a healthy CDN this instant: a
+        # timeout must not bake a trailer-less payload into the 7-day cache.
+        # The widget's own <video> error fallback covers a truly dead URL.
+        def factory(*_args, **_kwargs):
+            def handler(request: httpx.Request) -> httpx.Response:
+                raise httpx.ConnectTimeout("cdn hiccup")
+
+            return _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler))
+
+        with (
+            patch.object(
+                media, "fetch_store_appdetails", AsyncMock(return_value=_appdetails())
+            ),
+            patch("gamelib_mcp.data.media.httpx.AsyncClient", factory),
+        ):
+            result = await media.get_game_media(steam_appid=367520)
+
+        assert result is not None
+        self.assertEqual(result["media"]["trailer"]["kind"], "mp4")
+        self.assertEqual(result["errors"], [])
+
+    async def test_igdb_failure_does_not_block_steam_media(self):
+        # The two sides run concurrently and independently: an unhealthy IGDB
+        # must not stop the PREFERRED Steam source from answering (nor stay
+        # silent about its own failure).
+        factory, _ = _head_transport()
+        with (
+            patch.object(
+                media, "fetch_store_appdetails", AsyncMock(return_value=_appdetails())
+            ),
+            patch("gamelib_mcp.data.media.httpx.AsyncClient", factory),
+            patch.dict(os.environ, _IGDB_ENV, clear=False),
+            patch("gamelib_mcp.data.media._get_token", AsyncMock(return_value="token")),
+            patch(
+                "gamelib_mcp.data.media._post_igdb_games",
+                AsyncMock(side_effect=IGDBRequestFailure("igdb is down")),
+            ),
+        ):
+            result = await media.get_game_media(steam_appid=367520, igdb_id=1520)
+
+        assert result is not None
+        self.assertEqual(result["media"]["source"], "steam")
+        self.assertEqual(result["errors"], ["igdb: fetch failed"])
+
     async def test_steam_request_failure_is_not_cached_as_a_miss(self):
         # An outage must stay distinguishable from "Steam has no data": a miss
         # is remembered for 24h, so caching a transient failure would strip
@@ -456,6 +502,38 @@ class PedigreeTests(ToolDBTestCase):
         with env, token, posted:
             result = await media.get_game_media(igdb_id=1520, **kwargs)
         return result, calls
+
+    async def test_a_failed_catalog_fetch_is_reported_and_never_cached(self):
+        # The game query succeeded but the catalogue query failed: the strip
+        # renders header-only THIS call, the error is reported, and the
+        # incomplete payload must not freeze into the 7-day game cache —
+        # the next call retries the catalogue.
+        calls: dict[str, int] = {"game": 0, "catalog": 0}
+
+        async def post(query: str, headers: dict[str, str]) -> list[dict]:
+            if "involved_companies.company =" in query:
+                calls["catalog"] += 1
+                raise IGDBRequestFailure("catalog outage")
+            calls["game"] += 1
+            return _pedigree_game(involved=[_involved()])
+
+        env, token, posted = self._patched(AsyncMock(side_effect=post))
+        with env, token, posted:
+            first = await media.get_game_media(igdb_id=1520)
+            second = await media.get_game_media(igdb_id=1520)
+
+        for result in (first, second):
+            assert result is not None
+            self.assertNotIn("partial", result)
+            self.assertEqual(result["errors"], ["igdb: company catalog fetch failed"])
+            pedigree = result["pedigree_raw"]
+            self.assertEqual(pedigree["developer"]["name"], "Team Cherry")
+            self.assertEqual(pedigree["previous_games"], [])
+            self.assertFalse(pedigree["big_catalog"])
+        # Neither the game payload nor a catalog miss was cached: both queries
+        # ran again on the second call.
+        self.assertEqual(calls, {"game": 2, "catalog": 2})
+        self.assertIsNone(await get_meta(media._cache_key("igdb", 1520)))
 
     async def test_contractors_never_become_the_studio(self):
         # A developer row ALSO flagged porting or supporting is a contractor on
