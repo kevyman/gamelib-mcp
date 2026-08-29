@@ -443,6 +443,21 @@ async def fetch_store_appdetails(
             )
             return None
         app_data = payload.get(str(appid), {})
+        if not isinstance(app_data, dict):
+            # Same stance as the top-level guard: a malformed member is a
+            # FAILURE on the failure-aware path, a logged None otherwise —
+            # never an AttributeError escaping the best-effort contract.
+            if raise_on_failure:
+                raise ValueError(
+                    f"unexpected appdetails app entry for {appid}: "
+                    f"{type(app_data).__name__}"
+                )
+            logger.warning(
+                "Unexpected appdetails app entry for %s: %s",
+                appid,
+                type(app_data).__name__,
+            )
+            return None
         if not app_data.get("success"):
             return None
         return app_data.get("data", {})

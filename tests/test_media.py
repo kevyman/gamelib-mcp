@@ -300,6 +300,31 @@ class SteamMediaTests(ToolDBTestCase):
             await fetch_store_appdetails(367520, client, raise_on_failure=True)
         self.assertIsNone(await fetch_store_appdetails(367520, client))
 
+        # Same for a malformed NESTED member (dict top level, null app entry):
+        # never an AttributeError escaping the default best-effort contract.
+        def null_entry(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"367520": None})
+
+        client = _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(null_entry))
+        with self.assertRaises(ValueError):
+            await fetch_store_appdetails(367520, client, raise_on_failure=True)
+        self.assertIsNone(await fetch_store_appdetails(367520, client))
+
+    async def test_head_transient_status_keeps_the_trailer(self):
+        # A 429/5xx from the CDN is transient, not evidence the rendition is
+        # gone — only 404/410 is a definitive miss.
+        factory, _ = _head_transport(503)
+        with (
+            patch.object(
+                media, "fetch_store_appdetails", AsyncMock(return_value=_appdetails())
+            ),
+            patch("gamelib_mcp.data.media.httpx.AsyncClient", factory),
+        ):
+            result = await media.get_game_media(steam_appid=367520)
+
+        assert result is not None
+        self.assertEqual(result["media"]["trailer"]["kind"], "mp4")
+
     async def test_head_transport_failure_keeps_the_trailer(self):
         # The HEAD gate exists to catch Valve DROPPING the legacy renditions
         # (a definitive non-2xx), not to demand a healthy CDN this instant: a

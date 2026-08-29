@@ -236,7 +236,18 @@ async def _mp4_is_live(url: str) -> bool:
             "Trailer HEAD check inconclusive for %s (%s) — trusting the URL", url, exc
         )
         return True
-    return response.status_code == 200
+    if response.is_success:
+        return True
+    if response.status_code in (404, 410):
+        return False
+    # 429, 5xx, auth quirks: transient or ambiguous, not evidence the
+    # rendition is gone — same stance as a transport failure.
+    logger.warning(
+        "Trailer HEAD check inconclusive for %s (HTTP %s) — trusting the URL",
+        url,
+        response.status_code,
+    )
+    return True
 
 
 async def _steam_trailer(movies: list | None) -> dict | None:
