@@ -382,8 +382,17 @@ async def enrich_game(appid: int, client: httpx.AsyncClient | None = None) -> di
     return dict(refreshed) if refreshed else None
 
 
+STORE_ENRICHMENT_FILTERS = (
+    "basic,genres,categories,short_description,metacritic,release_date,dlc"
+)
+
+
 async def fetch_store_appdetails(
-    appid: int, client: httpx.AsyncClient | None = None
+    appid: int,
+    client: httpx.AsyncClient | None = None,
+    *,
+    filters: str = STORE_ENRICHMENT_FILTERS,
+    raise_on_failure: bool = False,
 ) -> dict | None:
     """Fetch ONE app's appdetails ``data`` payload; None on failure/no data.
 
@@ -391,25 +400,67 @@ async def fetch_store_appdetails(
     no use for the review summary (e.g. detect_misclassified_dlc's type probe)
     — every request goes through the shared quota-budgeted gate, so a
     discarded reviews call would halve a probe's effective budget.
+
+    ``filters`` selects the appdetails field groups. The default is the
+    enrichment set every long-standing caller wants; data/media.py asks for the
+    media groups instead, which enrichment has no use for (and which the 7-day
+    store cache predates, so media is fetched on demand rather than read off a
+    stored row).
+
+    ``raise_on_failure`` re-raises a request failure instead of folding it into
+    the None that also means "Steam has no data for this appid". The default
+    keeps the long-standing swallow for enrichment callers; data/media.py needs
+    the distinction because it CACHES a legitimate miss — a transient outage
+    written down as a 24-hour miss would strip media from every card of that
+    game for the rest of the day.
     """
     async def fetch(active_client: httpx.AsyncClient) -> dict | None:
         try:
             payload = await _steam_get_json_with_retry(
                 active_client,
                 STORE_API,
-                params={
-                    "appids": appid,
-                    "filters": "basic,genres,categories,short_description,metacritic,release_date,dlc",
-                },
+                params={"appids": appid, "filters": filters},
                 timeout=15,
             )
-            app_data = payload.get(str(appid), {})
-            if not app_data.get("success"):
-                return None
-            return app_data.get("data", {})
         except Exception as exc:
+            if raise_on_failure:
+                raise
             logger.warning("Steam store details fetch failed for %s: %s", appid, exc)
             return None
+        if not isinstance(payload, dict):
+            # A malformed answer is a FAILURE, not "Steam has no data": on the
+            # failure-aware path it must raise (the media cache would otherwise
+            # remember it as a 24h miss); enrichment callers keep the swallow.
+            if raise_on_failure:
+                raise ValueError(
+                    f"unexpected appdetails payload shape for {appid}: "
+                    f"{type(payload).__name__}"
+                )
+            logger.warning(
+                "Unexpected appdetails payload shape for %s: %s",
+                appid,
+                type(payload).__name__,
+            )
+            return None
+        app_data = payload.get(str(appid), {})
+        if not isinstance(app_data, dict):
+            # Same stance as the top-level guard: a malformed member is a
+            # FAILURE on the failure-aware path, a logged None otherwise —
+            # never an AttributeError escaping the best-effort contract.
+            if raise_on_failure:
+                raise ValueError(
+                    f"unexpected appdetails app entry for {appid}: "
+                    f"{type(app_data).__name__}"
+                )
+            logger.warning(
+                "Unexpected appdetails app entry for %s: %s",
+                appid,
+                type(app_data).__name__,
+            )
+            return None
+        if not app_data.get("success"):
+            return None
+        return app_data.get("data", {})
 
     if client is not None:
         return await fetch(client)

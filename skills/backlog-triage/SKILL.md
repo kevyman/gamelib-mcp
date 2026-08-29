@@ -1,7 +1,7 @@
 ---
 name: backlog-triage
 description: Methodology for deciding what John should play next from the games he already owns, sized to the time and energy he actually has. Use this skill whenever John asks what to play next, what to start, what fits tonight/this weekend/a trip, what to pick from his backlog, whether to continue or drop his current game, or says he's bored/stuck/can't decide what to play — even if he doesn't say "backlog". Phrases like "what should I play", "pick something for me", "I have 2 hours", "nothing is grabbing me", "should I keep playing X or move on", or "give me something short" should all trigger this skill. Do NOT use for purchase decisions — that's the game-quality skill.
-version: "2.1.0"
+version: "2.2.0"
 ---
 
 # Backlog Triage
@@ -87,6 +87,8 @@ ALWAYS use this structure, kept short:
 
 **Shelve candidates:** [game(s) stalled >60 days with low return odds — offer to mark abandoned/shelved via update_game], or omit the section.
 ```
+
+**Show the #1 pick (2.2).** After the verdict block, call `get_game_detail(name=<the #1 pick>, media=True)` once — in an MCP Apps host that renders the rich game card (trailer, screenshots, similar games he owns) for the game you just committed to. One call, the top pick only, never all three; skip it entirely when the verdict is "continue the active game" (he knows what it looks like). The response's media is server-cached, so repeats are cheap.
 
 The shelve section is a feature, not an afterthought: triage includes *permission to quit*. A game stalled for months in a genre he historically abandons is dead weight in every future triage — offering to formally shelve it (status change, not deletion) keeps the pool honest. Never frame shelving as failure; framing is "clearing the queue."
 

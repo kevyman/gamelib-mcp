@@ -1,7 +1,7 @@
 ---
 name: game-quality
 description: Evaluate whether a NAMED game is good and worth John's time and money — owned or not. Triggers: "is X any good", "should I get X", "thoughts on X", "X vs Y", "is X worth playing", buy/wishlist/skip calls. NOT for picking a game for him ("what should I play", "I have 2 hours") — that's backlog-triage.
-version: "2.4.0"
+version: "3.1.0"
 ---
 
 # Game Quality Assessment
@@ -128,7 +128,7 @@ Confidence statement is mandatory when data is thin (low review count, no anchor
 
 When the verdict is **Wishlist for sale**, offer to promote it onto the internal wishlist in the same conversation — it's a library write; say so, don't do it silently. Skip the offer entirely when Step 0 already reported `wishlisted: true` — the row exists, and a re-write wouldn't change its provenance anyway (an existing row keeps its stored source; the server never lets a hand write relabel one). One confirmation writes: `add_game_to_platform(name=... or game_id=..., platform=..., owned=False, wishlist_source="assessment")`. Platform: steam for a PC candidate, switch2 when the Switch version is the recommendation (his stored hardware preference — the same signal the price/value step above reads via `recommendation_reason`), ps5 for a PSN-only title. **On `platform="steam"` only**, also pass `identifier_type="steam_appid", identifier_value=<appid>` whenever Step 0 surfaced one — it makes the row immediately priceable via ITAD and resolvable by future syncs; the tool rejects a steam appid on any other platform, so a switch2/ps5 promotion goes without identifiers. Use `wishlist_source="assessment"`, never plain manual — promoted rows stay distinct from hand-curated entries, are bulk-removable by source, and sit outside reconciliation's reach. Steam only, and only after he's confirmed the promotion itself: offer a second, separate confirmation for `push_to_store=True` on the same call, which additionally pushes the add to his real Steam wishlist for store-side sale notifications — it needs a known appid, and a failed push still records the local row. From there it's a price-watched entry: `get_wishlist(with_prices=True)` covers it like any other.
 
-**Always record the verdict.** After delivering the verdict block (and after making the wishlist-promotion offer above, if any — recording never waits on his answer to it), call `record_assessment` once, mapping the lines you just wrote to its components:
+**Always record the verdict.** After delivering the verdict block (and after making the wishlist-promotion offer above, if any — recording never waits on his answer to it), call `record_assessment` once, mapping the lines you just wrote to its components. Since 3.0 this call is also what renders the **evaluation card** in hosts that support MCP Apps — trailer, screenshots, verdict stamp, your for-you/not-for-you reasoning — so author the presentation fields with care; they are the visible product, not metadata:
 
 ```
 record_assessment(
@@ -145,11 +145,27 @@ record_assessment(
     target_price=19.99,            # whenever "Wishlist for sale" names a threshold
     instead_game_id=...,           # for "Play what you own instead: X"
     context="bundle: Humble Choice 2026-08",   # when the assessment came out of a bundle/sale context
+    # --- presentation fields (3.0): what the evaluation card shows ---
+    elevator_pitch="...",          # ≤420 chars, spoiler-free, synthesized — your pitch, never marketing copy
+    for_you_if=["...", ...],       # ≤4 each, ≤200 chars
+    not_for_you_if=["...", ...],
+    comparisons=[{"name": "...", "relation": "ancestor", "note": "...", "game_id": 123}, ...],  # ≤6
+    why_care=[{"kind": "people", "text": "..."}, ...],   # ≤3; kind: people|studio|anticipation|moment
     skill="game-quality",
     skill_version="<this file's frontmatter version — read it above, don't hardcode it>",
     model="<the model id YOUR environment declares — see below>",
 )
 ```
+
+**Authoring the presentation fields (3.0).** These render on the card verbatim, so write them for John, grounded in HIS data — never generic genre talk:
+
+- `elevator_pitch` — your own two-sentence synthesis of what the game actually is and why it's interesting. No review-quote collage, no back-of-box copy, no spoilers.
+- `for_you_if` / `not_for_you_if` — cite his evidence by name: anchors and their status ("you put 244h into Slay the Spire", "you abandoned both survival crafters you tried"), affinity tags, session shape vs. his pace. Each entry one concrete reason; skip a side entirely rather than padding it.
+- `comparisons` — the game's lineage and substitutes, from your knowledge: `relation` is one of `ancestor` (games this one is a baby of), `descendant` (games that are babies of this one), `better_version`, `cheaper_substitute`, `similar`. Add `game_id` when the entry is a library game you've resolved; a short `note` saying why. Only claim `better_version`/`cheaper_substitute` when you'd actually defend it.
+
+- `why_care` (3.1) — up to 3 one-liners on why this game matters beyond its scores, each `{kind, text ≤160}`. `kind` picks the label the card shows: `people` (a creator connection — "Directed by the creative director of Bastion and Hades"), `studio` (the studio's story — "First release in 9 years; the team stayed at ~20 people"), `anticipation` ("Steam's most-wishlisted game of 2025"), `moment` (why now — "v1.0 just landed after a beloved two-year early access"). **Every claim must be sourceable** — from Step 0's web search or knowledge you would defend; anticipation is context, never craft evidence (the existing anti-pattern applies to this field). The server has no credits data, so people-connections exist only if you write them. Skip the field rather than pad it. Note the card already shows the studio's previous games with his ratings (the pedigree strip, server-fetched) — don't duplicate that list here; add what the strip can't say.
+
+The server fetches trailer/screenshots/similar-games/studio-pedigree itself and annotates ownership — don't describe media or list the studio's catalog in these fields. The response's `package` block is the card; you don't need to restate its contents in chat.
 
 **Provenance is declared, never guessed.** `skill_version` is whatever the `version:` field at the top of *this* file says — read it there, since an installed copy may lag the server's. `model` is the identifier your environment states about itself: Claude Code names the exact model id in its system prompt; claude.ai names its model there too; ChatGPT declares a model FAMILY — record the family or the picker selection, never a router variant (fast/thinking) you cannot actually see. Copy it verbatim, lowercased. If your environment declares no model at all — some configurations withhold it — **omit the field**: never answer from training memory, and never infer it. The server stamps nothing, so a missing value stays NULL, which honestly means "unknown"; a confident wrong value silently corrupts `get_stats(report="calibration")`'s `by_model`.
 
@@ -157,7 +173,7 @@ record_assessment(
 
 Then check the response: `resolution.matched_name` is the row that was written to. If it isn't the candidate, repair it — `record_assessment(void_assessment_id=<assessment_id>)` hard-deletes the misfiled row (it's exclusive: nothing else in that call), then re-record with the right `game_id`. Voiding is also the fix for any assessment recorded on a past day that shouldn't stand; same-day mistakes need no void, since re-recording replaces that day's entry.
 
-This is silent bookkeeping — one line ("logged for calibration"), never a re-explanation of the verdict. Re-recording the same game on the same day replaces that day's entry, so refining a call mid-conversation is safe. The recorded verdict feeds nothing but future context and `get_stats(report="calibration")`; it never touches the wishlist, the taste profile, or recommendations.
+In an MCP Apps host the recording call renders the evaluation card, which IS the closing act — one line alongside it ("logged for calibration"), never a prose re-explanation of what the card already shows. In a host without Apps support, same one line; the verdict block you already delivered stands. Re-recording the same game on the same day replaces that day's entry (and re-renders the card), so refining a call mid-conversation is safe. The recorded verdict feeds nothing but future context and `get_stats(report="calibration")`; it never touches the wishlist, the taste profile, or recommendations.
 
 If he already owns the game, the Price line reports what he paid from the acquisition data (`already owned — paid €X in [bundle] via [source]`, or "already owned — price unrecorded") and the verdict answers *is this worth your time*, not *play this tonight*. Never treat what he paid as a reason to play it; sunk cost is not an argument.
 

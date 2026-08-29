@@ -18,6 +18,21 @@ from gamelib_mcp import main
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools.assessment import record_assessment
 
+# record_assessment assembles an evaluation package whose media step is the
+# only provider call in this module; neutralized module-wide so nothing here
+# reaches the network. The package test below patches it with real payloads.
+_MEDIA_PATCH = patch(
+    "gamelib_mcp.tools.assessment.get_game_media", AsyncMock(return_value=None)
+)
+
+
+def setUpModule():
+    _MEDIA_PATCH.start()
+
+
+def tearDownModule():
+    _MEDIA_PATCH.stop()
+
 
 class SyncTargetDispatchTests(unittest.IsolatedAsyncioTestCase):
     def _patches(self):
@@ -175,6 +190,27 @@ class ModeDependentDefaultTests(ToolDBTestCase):
         with self.assertRaises(Exception) as ctx:
             await main.get_game_detail(items=[{"game_id": 1}], enrich=True)
         self.assertIn("not supported with items", str(ctx.exception))
+
+    async def test_get_game_detail_refuses_bulk_media(self):
+        # Same reason as enrich: one provider round trip per game. Rejected
+        # before any impl runs, like every other multi-mode validation.
+        with self.assertRaises(Exception) as ctx:
+            await main.get_game_detail(items=[{"game_id": 1}], media=True)
+        self.assertIn("media=True is not supported with items", str(ctx.exception))
+
+    async def test_get_game_detail_passes_media_through_in_single_mode(self):
+        gid = await seed_game("Media Passthrough")
+        with patch(
+            "gamelib_mcp.tools.detail.get_game_detail", new=AsyncMock(return_value={})
+        ) as m:
+            await main.get_game_detail(game_id=gid)
+        self.assertIs(m.await_args.kwargs["media"], False)  # off by default
+
+        with patch(
+            "gamelib_mcp.tools.detail.get_game_detail", new=AsyncMock(return_value={})
+        ) as m:
+            await main.get_game_detail(game_id=gid, media=True)
+        self.assertIs(m.await_args.kwargs["media"], True)
 
     async def test_set_acquisition_overwrite_flips_by_mode(self):
         with patch(
@@ -519,3 +555,200 @@ class ResponseSizeGuardTests(ToolDBTestCase):
         self.assertEqual(len(assessment["anchors"]), 8)
         self.assertEqual(assessment["anchor_count"], 40)
         self.assertTrue(assessment["anchors_truncated"])
+
+    async def test_detail_media_lists_are_capped(self):
+        # get_game_detail(media=True) serves the same two growing lists the
+        # evaluation package does — screenshots capped in data/media.py,
+        # similar games in tools/game_media.py — each with its true total and
+        # a truncation flag.
+        gid = await seed_game("Media Detail", tags=["bulk tag"])
+        await add_platform(gid, "steam", playtime_minutes=30)
+        media = {
+            "media": {
+                "source": "igdb",
+                "trailer": None,
+                "screenshots": [{"thumb": f"t{i}", "full": f"f{i}"} for i in range(6)],
+                "screenshot_count": 20,
+                "screenshots_truncated": True,
+                "short_description": "x",
+            },
+            "similar_raw": [
+                {
+                    "igdb_id": 900 + i,
+                    "name": f"Similar {i}",
+                    "release_year": 2020,
+                    "cover_image_id": None,
+                }
+                for i in range(12)
+            ],
+            "similar_count": 12,
+            # The studio's previous games are capped in data/media.py and again
+            # in tools/game_media.py; a raw block over the cap proves the second
+            # gate holds for a payload that arrived over it.
+            "pedigree_raw": {
+                "developer": {
+                    "name": "Prolific Studio",
+                    "igdb_company_id": 77,
+                    "founded_year": 2001,
+                    "country": 36,
+                },
+                "developer_names": ["Prolific Studio"],
+                "publisher_name": None,
+                "previous_games": [
+                    {
+                        "igdb_id": 800 + i,
+                        "name": f"Earlier {i}",
+                        "release_year": 2015 - i,
+                        "cover_image_id": None,
+                        "critic_score": 70,
+                    }
+                    for i in range(10)
+                ],
+                "previous_count": 10,
+                "previous_truncated": True,
+                "catalog_size": 12,
+                "catalog_truncated": False,
+                "big_catalog": False,
+                "hypes": None,
+            },
+            "igdb_id": 5,
+        }
+        with patch(
+            "gamelib_mcp.tools.game_media.get_game_media",
+            new=AsyncMock(return_value=media),
+        ):
+            result = await main.get_game_detail(game_id=gid, media=True)
+
+        for path, cap in {
+            "media.screenshots": 6,
+            "similar.items": 8,
+            "pedigree.previous_games": 6,
+        }.items():
+            node = result
+            for key in path.split("."):
+                self.assertIn(key, node, f"detail has no '{path}'; the contract is stale")
+                node = node[key]
+            self.assertLessEqual(
+                len(node), cap,
+                f"get_game_detail(media=True) returned {len(node)} entries at "
+                f"'{path}' but the contract caps it at {cap}",
+            )
+        self.assertEqual(result["media"]["screenshot_count"], 20)
+        self.assertTrue(result["media"]["screenshots_truncated"])
+        self.assertEqual(result["similar"]["count"], 12)
+        self.assertTrue(result["similar"]["truncated"])
+        self.assertEqual(result["pedigree"]["previous_count"], 10)
+        self.assertTrue(result["pedigree"]["previous_truncated"])
+
+    async def test_evaluation_package_lists_are_capped(self):
+        # record_assessment's package is a WRITE response, but it carries the
+        # same shapes: media and similar games grow with the source, past
+        # verdicts with how often the game was re-assessed, anchors and
+        # comparisons with what the caller cited.
+        gid = await seed_game("Packaged", tags=["bulk tag"])
+        await add_platform(gid, "steam", playtime_minutes=30)
+        anchors = [await seed_game(f"Anchor {i}") for i in range(8)]
+        for day in range(1, 9):
+            await record_assessment(
+                game_id=gid, verdict="skip", assessed_at=f"2026-03-0{day}"
+            )
+
+        media = {
+            "media": {
+                "source": "igdb",
+                "trailer": None,
+                # Already capped by data/media.py; asserted here so a raised
+                # cap has to be raised deliberately in both places.
+                "screenshots": [{"thumb": f"t{i}", "full": f"f{i}"} for i in range(6)],
+                "screenshot_count": 20,
+                "screenshots_truncated": True,
+                "short_description": "x",
+            },
+            "similar_raw": [
+                {
+                    "igdb_id": 900 + i,
+                    "name": f"Similar {i}",
+                    "release_year": 2020,
+                    "cover_image_id": None,
+                }
+                for i in range(12)
+            ],
+            "similar_count": 12,
+            # The studio's previous games are capped in data/media.py and again
+            # in tools/game_media.py; a raw block over the cap proves the second
+            # gate holds for a payload that arrived over it.
+            "pedigree_raw": {
+                "developer": {
+                    "name": "Prolific Studio",
+                    "igdb_company_id": 77,
+                    "founded_year": 2001,
+                    "country": 36,
+                },
+                "developer_names": ["Prolific Studio"],
+                "publisher_name": None,
+                "previous_games": [
+                    {
+                        "igdb_id": 800 + i,
+                        "name": f"Earlier {i}",
+                        "release_year": 2015 - i,
+                        "cover_image_id": None,
+                        "critic_score": 70,
+                    }
+                    for i in range(10)
+                ],
+                "previous_count": 10,
+                "previous_truncated": True,
+                "catalog_size": 12,
+                "catalog_truncated": False,
+                "big_catalog": False,
+                "hypes": None,
+            },
+            "igdb_id": 5,
+        }
+        with patch(
+            "gamelib_mcp.tools.assessment.get_game_media",
+            new=AsyncMock(return_value=media),
+        ):
+            result = await main.record_assessment(
+                game_id=gid,
+                verdict="buy_now",
+                assessed_at="2026-04-01",
+                anchors_cited=[
+                    {"name": f"Anchor {i}", "game_id": anchor_id}
+                    for i, anchor_id in enumerate(anchors)
+                ],
+                flags=[f"flag {i}" for i in range(8)],
+                for_you_if=[f"bullet {i}" for i in range(4)],
+                comparisons=[
+                    {"name": f"Anchor {i}", "relation": "similar"} for i in range(6)
+                ],
+            )
+
+        package = result["package"]
+        caps = {
+            "anchors": 8,
+            "comparisons": 6,
+            "flags": 8,
+            "media.screenshots": 6,
+            "similar.items": 8,
+            "pedigree.previous_games": 6,
+            "past.items": 5,
+            "presentation.for_you_if": 4,
+        }
+        for path, cap in caps.items():
+            node = package
+            for key in path.split("."):
+                self.assertIn(key, node, f"package has no '{path}'; the contract is stale")
+                node = node[key]
+            self.assertLessEqual(
+                len(node), cap,
+                f"package returned {len(node)} entries at '{path}' "
+                f"but the contract caps it at {cap}",
+            )
+        # Capped lists still report the true totals.
+        self.assertEqual(package["similar"]["count"], 12)
+        self.assertTrue(package["similar"]["truncated"])
+        self.assertEqual(package["pedigree"]["previous_count"], 10)
+        self.assertTrue(package["pedigree"]["previous_truncated"])
+        self.assertEqual(package["past"]["count"], 8)
+        self.assertTrue(package["past"]["truncated"])
