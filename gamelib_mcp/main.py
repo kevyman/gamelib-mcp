@@ -305,10 +305,11 @@ async def get_game_detail(
 
     `media=True` (single-game mode only) additionally fetches how the game
     presents itself, for rendering a card: `media` (a trailer — a playable mp4
-    or a YouTube id — plus up to 6 screenshots with screenshot_count/
+    or a YouTube id — plus up to 8 screenshots with screenshot_count/
     screenshots_truncated, and the store's short description), `similar`
-    (up to 8 games IGDB considers similar, each annotated with whether it is
-    owned, unplayed, its rating and playtime, with count/truncated) and
+    (up to 8 games IGDB considers similar, owned ones first, each annotated
+    with whether it is owned, unplayed, its rating and playtime, with
+    count/truncated) and
     `pedigree` (the developer — name, founding year, catalogue size — plus up
     to 6 of their games released BEFORE this one, annotated the same way, and
     library_track_record: how many of them he owns, played and how he rated
@@ -1257,6 +1258,7 @@ async def record_assessment(
     not_for_you_if: list[str] | None = None,
     comparisons: list[dict] | None = None,
     why_care: list[dict] | None = None,
+    craft_note: str | None = None,
     void_assessment_id: int | None = None,
     items: list[dict] | None = None,
 ) -> RecordAssessmentResponse:
@@ -1321,10 +1323,12 @@ async def record_assessment(
     model FAMILY they are told, not a guessed router variant. They group
     get_stats(report="calibration")'s by_methodology / by_model.
 
-    elevator_pitch, for_you_if, not_for_you_if and comparisons are the
-    PRESENTATION of the verdict — your own writing, stored with it and
+    elevator_pitch, craft_note, for_you_if, not_for_you_if and comparisons are
+    the PRESENTATION of the verdict — your own writing, stored with it and
     rendered on the evaluation card. elevator_pitch is one synthesized,
-    spoiler-free line (420 chars). for_you_if / not_for_you_if take up to 4
+    spoiler-free line (420 chars). craft_note is one line of craft context the
+    chips can't carry — the critic spread, the recurring knock, the
+    review-bomb caveat (200 chars). for_you_if / not_for_you_if take up to 4
     bullets each (200 chars each), and each bullet must be GROUNDED IN HIS
     DATA ("you put 244h into Slay the Spire", "you abandoned both survival
     crafters you tried"), never generic genre talk. comparisons takes up to 6
@@ -1350,8 +1354,9 @@ async def record_assessment(
     your presentation echoed back, comparisons and anchors resolved against
     the library (owned / rating / playtime), craft and fit, ownership and
     acquisition, HLTB against his recent pace, price seen vs target, media
-    (trailer + up to 6 screenshots + short description), IGDB similar games
-    annotated with what he owns and hasn't played, `pedigree` (the developer,
+    (trailer + up to 8 screenshots + short description), IGDB similar games
+    annotated with what he owns and hasn't played (owned first), `pedigree`
+    (the developer,
     when they were founded, and up to 6 of their previous games annotated with
     what he owns, rated and played), and prior verdicts (up to 5). Media is
     fetched on demand, so anything that failed or timed out is named in
@@ -1416,6 +1421,7 @@ async def record_assessment(
         not_for_you_if,
         comparisons,
         why_care,
+        craft_note,
         void_assessment_id,
     )
 

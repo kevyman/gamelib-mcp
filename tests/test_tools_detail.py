@@ -19,7 +19,7 @@ from conftest import (
 from fastmcp.exceptions import ToolError
 
 from gamelib_mcp.data import db as db_module
-from gamelib_mcp.tools import detail
+from gamelib_mcp.tools import detail, game_media
 from gamelib_mcp.tools.platforms import update_game
 
 
@@ -513,7 +513,18 @@ class GetGameDetailMediaTests(ToolDBTestCase):
         similar = result["similar"]
         self.assertEqual(similar["count"], 11)
         self.assertTrue(similar["truncated"])
-        unplayed, rated_entry, unknown, untracked_entry = similar["items"]
+        # Owned first, IGDB's order kept inside each half: the unowned
+        # "Unknown Neighbour" sat second in the raw list and lands last.
+        unplayed, rated_entry, untracked_entry, unknown = similar["items"]
+        self.assertEqual(
+            [item["name"] for item in similar["items"]],
+            [
+                "Owned Unplayed",
+                "Rated Neighbour",
+                "Untracked Neighbour",
+                "Unknown Neighbour",
+            ],
+        )
         self.assertTrue(unplayed["owned"])
         self.assertTrue(unplayed["unplayed"])
         self.assertEqual(
@@ -530,6 +541,38 @@ class GetGameDetailMediaTests(ToolDBTestCase):
         self.assertTrue(untracked_entry["owned"])
         self.assertFalse(untracked_entry["unplayed"])
         self.assertIsNone(untracked_entry["playtime_hours"])
+
+    async def test_owned_similar_games_sort_first_after_the_cap(self):
+        # The row's claim is "you own X of these", so the owned covers lead —
+        # but the sort happens AFTER the 8-item cap, so the strip is still
+        # IGDB's 8 most similar and count/truncated keep their meaning.
+        owned = await seed_game("Owned Neighbour")
+        await add_platform(owned, "steam", playtime_minutes=60)
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = 909 WHERE id = ?", (owned,))
+            await db.commit()
+
+        raw = [
+            {"igdb_id": 500 + i, "name": f"Stranger {i}", "release_year": 2020,
+             "cover_image_id": None}
+            for i in range(8)
+        ]
+        # Owned, but only just inside the cap; and one owned entry BEYOND it.
+        raw[7] = {"igdb_id": 909, "name": "Owned Neighbour", "release_year": 2018,
+                  "cover_image_id": None}
+        raw.append({"igdb_id": 909, "name": "Beyond The Cap", "release_year": 2017,
+                    "cover_image_id": None})
+
+        block = await game_media.annotate_similar_games(raw, 12)
+
+        names = [item["name"] for item in block["items"]]
+        self.assertEqual(len(names), 8)
+        self.assertEqual(names[0], "Owned Neighbour")
+        # The other seven keep IGDB's own order behind it.
+        self.assertEqual(names[1:], [f"Stranger {i}" for i in range(7)])
+        self.assertNotIn("Beyond The Cap", names)   # sorting never reaches past the cap
+        self.assertEqual(block["count"], 12)
+        self.assertTrue(block["truncated"])
 
     async def test_identity_passed_is_the_appid_igdb_id_and_name(self):
         gid = await make_steam_game("Identity Order", 4242)

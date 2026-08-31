@@ -41,13 +41,16 @@ SAMPLE_MEDIA: dict[str, Any] = {
     },
     "screenshots": [
         {"thumb": f"{_STEAM_SHOTS}/ss_{i}_600x338.jpg", "full": f"{_STEAM_SHOTS}/ss_{i}.jpg"}
-        for i in range(1, 7)
+        for i in range(1, 9)
     ],
+    # Still set, and still deliberately unrendered: the extra images are not in
+    # the payload, so the widget advertises nothing it cannot open.
     "screenshot_count": 14,
     "screenshots_truncated": True,
     "short_description": "Battle beyond the Underworld using dark sorcery.",
 }
 
+# Owned-first, exactly as tools/game_media.py serves the annotated row.
 SAMPLE_SIMILAR: dict[str, Any] = {
     "items": [
         {

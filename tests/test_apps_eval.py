@@ -178,7 +178,7 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
     def test_why_care_renders_a_chip_per_kind_under_the_pitch(self) -> None:
         # The eval card is the only one that renders why_care (it is authored
         # content, not a neutral fact about the game), and it sits directly
-        # under the elevator pitch.
+        # under the elevator pitch — both inside the one pitch panel.
         for kind, label, cls in (
             ("people", "PEOPLE", "wc-people"),
             ("studio", "STUDIO", "wc-studio"),
@@ -199,10 +199,171 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
         # not argue from popularity, so no renderer may read it.
         self.assertNotIn("hypes", apps_eval.EVAL_CARD_HTML)
 
-    def test_abandoned_anchor_is_styled_as_a_warning(self) -> None:
-        # An abandoned anchor is negative evidence about fit.
-        self.assertIn('abandoned: ["⚠", "abandoned", "an-warn"]', apps_eval.EVAL_CARD_HTML)
-        self.assertIn(".anchor.an-warn", apps_eval.EVAL_CARD_HTML)
+    def test_anchor_pills_are_neutral_and_only_the_status_is_coloured(self) -> None:
+        # The live card lit up "Cyberpunk 2077 6.6h" — a game he bounced off —
+        # in endorsement green. The pill is card-coloured now; the completion
+        # glyph carries good/bad, and an unstatused anchor carries neither.
+        for verdictish, cls in (
+            ("completed", "an-good"),
+            ("evergreen", "an-good"),
+            ("abandoned", "an-bad"),
+        ):
+            self.assertIn(f'"{cls}"', apps_eval.EVAL_CARD_HTML)
+            self.assertIn(f"{verdictish}: [", apps_eval.EVAL_CARD_HTML)
+        self.assertIn('playing: ["▶", "playing", ""]', apps_eval.EVAL_CARD_HTML)
+        self.assertIn(
+            'el("span", "an-state" + (state[2] ? " " + state[2] : ""), state[0])',
+            apps_eval.EVAL_CARD_HTML,
+        )
+        self.assertIn(".an-state.an-good { background: var(--good)", apps_eval.EVAL_CARD_HTML)
+        self.assertIn(".an-state.an-bad { background: var(--bad)", apps_eval.EVAL_CARD_HTML)
+        # …and the pill itself no longer paints an opinion.
+        self.assertNotIn("an-warn", apps_eval.EVAL_CARD_HTML)
+
+
+class EvalCardLayoutTests(unittest.TestCase):
+    """The v2 layout (field feedback: "too busy, not ordered naturally").
+
+    Source-presence style like the rest of this module: the render call-sites
+    and the panels they build, in the order the card assembles them.
+    """
+
+    def test_panels_assemble_in_the_reading_order(self) -> None:
+        start = apps_eval.EVAL_CARD_HTML.index("function evalCard(pkg)")
+        end = apps_eval.EVAL_CARD_HTML.index("function noteCard(", start)
+        body = apps_eval.EVAL_CARD_HTML[start:end]
+        order = [
+            "headerNode(pkg)",
+            "pitchNode(wrap, pkg)",
+            "mediaNode(wrap, pkg.media || {}, game.name)",
+            "forYouNode(wrap, pkg.presentation || {})",
+            "anchorsNode(wrap,",
+            "lineageNode(wrap, pkg, comps)",
+            "similarNode(wrap, pkg.similar || {})",
+            "pedigreeNode(wrap, pkg.pedigree)",
+            "closingNode(wrap, pkg)",
+            "errorsNode(wrap,",
+        ]
+        positions = []
+        for marker in order:
+            self.assertIn(marker, body)
+            positions.append(body.index(marker))
+        self.assertEqual(positions, sorted(positions))
+
+    def test_the_score_chips_live_in_the_header_panel(self) -> None:
+        # The standalone "CRAFT & FIT" panel is gone — it held two chips.
+        self.assertIn("var chips = scoreChips(pkg);", apps_eval.EVAL_CARD_HTML)
+        self.assertIn('el("div", "chips head-chips")', apps_eval.EVAL_CARD_HTML)
+        self.assertNotIn("Craft & fit", apps_eval.EVAL_CARD_HTML)
+        self.assertNotIn("scoresNode", apps_eval.EVAL_CARD_HTML)
+
+    def test_metacritic_renders_as_its_own_branded_square(self) -> None:
+        # Same source-brand mapping as the game-cards widget: square box,
+        # green/yellow/red at the games thresholds.
+        self.assertIn(
+            'function mcTier(n) { return n >= 75 ? "mc-hi" : n >= 50 ? "mc-mid" : "mc-lo"; }',
+            apps_eval.EVAL_CARD_HTML,
+        )
+        self.assertIn('el("span", "chip mc " + mcTier(mc))', apps_eval.EVAL_CARD_HTML)
+        self.assertIn("num(craft.metacritic_score)", apps_eval.EVAL_CARD_HTML)
+        for hex_color in ("#6c3", "#fc3", "#f00"):
+            self.assertIn(hex_color, apps_eval.EVAL_CARD_HTML)
+
+    def test_the_craft_note_renders_under_the_chips(self) -> None:
+        self.assertIn(
+            'if (pres.craft_note) box.appendChild(el("div", "craft-note", pres.craft_note));',
+            apps_eval.EVAL_CARD_HTML,
+        )
+
+    def test_media_is_one_viewer_and_one_thumb_strip(self) -> None:
+        for marker in (
+            'section(parent, "Media")',
+            'var viewer = el("div", "hero viewer")',
+            'el("div", "strip thumbs")',
+            "showEntry(viewer, entries[i], shots, gameName)",
+            'btn.classList.toggle("sel", i === j)',
+            "select(0);",                       # trailer first when there is one
+            'el("span", "thumb-play", "▶")',
+        ):
+            self.assertIn(marker, apps_eval.EVAL_CARD_HTML)
+        # The separate screenshot panel is gone with it.
+        self.assertNotIn("Screenshots", apps_eval.EVAL_CARD_HTML)
+
+    def test_the_dead_more_chip_is_gone_from_the_media_block(self) -> None:
+        # "+N more" was unclickable: the extra images are not in the payload,
+        # so neither the flag nor the count is READ any more (the comment
+        # explaining that is the only mention left in the source).
+        self.assertNotIn("media.screenshots_truncated", apps_eval.EVAL_CARD_HTML)
+        self.assertNotIn("media.screenshot_count", apps_eval.EVAL_CARD_HTML)
+        self.assertNotIn('" more"', apps_eval.EVAL_CARD_HTML.split('section(parent, "Media")')[1]
+                         .split('section(parent, "Similar games")')[0])
+
+    def test_screenshots_open_an_edge_to_edge_carousel(self) -> None:
+        for marker in (
+            "openCarousel(shots, entry.index, gameName, btn)",
+            'el("div", "overlay-panel carousel")',
+            ".overlay-panel.carousel {",
+            "width: 100%;",
+            'navButton("car-prev", "‹"',
+            'navButton("car-next", "›"',
+            'counter.textContent = (index + 1) + " / " + shots.length;',
+            'if (ev.key === "Escape") closeOverlay();',
+            'else if (ev.key === "ArrowLeft") show(index - 1);',
+            'else if (ev.key === "ArrowRight") show(index + 1);',
+            'stage.addEventListener("pointerup"',
+            "if (Math.abs(dx) > 40) show(index + (dx < 0 ? 1 : -1));",
+        ):
+            self.assertIn(marker, apps_eval.EVAL_CARD_HTML)
+
+    def test_fullscreen_is_attempted_but_never_faked(self) -> None:
+        # A sandboxed host iframe without allow="fullscreen" reports
+        # fullscreenEnabled false (no button), and a denied request removes the
+        # button rather than leaving an inert control on the viewer.
+        self.assertIn(
+            "if (!document.fullscreenEnabled && !document.webkitFullscreenEnabled) return null;",
+            apps_eval.EVAL_CARD_HTML,
+        )
+        self.assertIn("var req = target.requestFullscreen || target.webkitRequestFullscreen;",
+                      apps_eval.EVAL_CARD_HTML)
+        self.assertIn("pending.catch(function () { btn.remove(); });", apps_eval.EVAL_CARD_HTML)
+        self.assertIn("} catch (e) {\n        btn.remove();", apps_eval.EVAL_CARD_HTML)
+
+    def test_similar_comparisons_moved_into_the_lineage_panel(self) -> None:
+        # Model-authored "similar" note-cards no longer fold into IGDB's strip:
+        # mixing the two is what made the live Similar section confusing.
+        self.assertIn("function lineageNode(parent, pkg, comps)", apps_eval.EVAL_CARD_HTML)
+        self.assertIn('onlySimilar ? "Also similar" : "Other comparisons"',
+                      apps_eval.EVAL_CARD_HTML)
+        self.assertNotIn("foldSimilar", apps_eval.EVAL_CARD_HTML)
+        self.assertIn("function similarNode(parent, similar)", apps_eval.EVAL_CARD_HTML)
+
+    def test_the_closing_panel_merges_time_price_flags_and_past(self) -> None:
+        self.assertIn('section(parent, "The call")', apps_eval.EVAL_CARD_HTML)
+        for gone in ("Time & price", '"Flags"', "Past verdicts"):
+            self.assertNotIn(gone, apps_eval.EVAL_CARD_HTML)
+
+    def test_counts_are_pluralized(self) -> None:
+        # "Rebel Wolves · est. 2022 · 1 games" shipped to the phone.
+        self.assertIn(
+            'return n + (truncated ? "+" : "") + " " + word '
+            '+ (n === 1 && !truncated ? "" : "s");',
+            apps_eval.EVAL_CARD_HTML,
+        )
+        self.assertIn('plural(size, "game", ped.catalog_truncated)', apps_eval.EVAL_CARD_HTML)
+        self.assertIn('"their " + plural(items.length, "previous game")',
+                      apps_eval.EVAL_CARD_HTML)
+
+    def test_sticker_like_pills_tilt_like_the_game_cards_widget(self) -> None:
+        # Toybox language: stickers tilt, data chips (score meter, pace/price)
+        # stay straight so the numbers stay legible.
+        for marker in (
+            ".tag:nth-child(2n) { transform: rotate(",
+            ".flag:nth-child(2n) { transform: rotate(",
+            ".tl-chip:nth-child(2n) { transform: rotate(",
+            ".anchor:nth-child(2n) { transform: rotate(",
+            ".wc-line:nth-child(2n) .wc-eyebrow { transform: rotate(",
+        ):
+            self.assertIn(marker, apps_eval.EVAL_CARD_HTML)
 
 
 if __name__ == "__main__":

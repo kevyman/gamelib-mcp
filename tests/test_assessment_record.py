@@ -1491,6 +1491,7 @@ class PresentationFieldTests(ToolDBTestCase):
                 # Stable shape: the echo carries every authored member, null
                 # for the ones this recording didn't write.
                 "why_care": None,
+                "craft_note": None,
             },
         )
 
@@ -1745,6 +1746,83 @@ class WhyCareTests(ToolDBTestCase):
         )
 
 
+class CraftNoteTests(ToolDBTestCase):
+    """craft_note: one line of craft context the score chips can't carry.
+
+    Same member of the same free-form `presentation` JSON column as the pitch,
+    and validated the same way — prose, so truncated rather than rejected.
+    """
+
+    async def test_round_trip_and_package_echo(self):
+        game_id = await seed_game("Craft Noted")
+        result = await main.record_assessment(
+            game_id=game_id,
+            verdict="wishlist_for_sale",
+            craft_note="Wide critic spread (IGN 9, Game Informer 7); the knock is filler.",
+        )
+
+        (row,) = await _assessment_rows(game_id)
+        self.assertEqual(
+            json.loads(row["presentation"])["craft_note"],
+            "Wide critic spread (IGN 9, Game Informer 7); the knock is filler.",
+        )
+        self.assertEqual(
+            result["package"]["presentation"]["craft_note"],
+            "Wide critic spread (IGN 9, Game Informer 7); the knock is filler.",
+        )
+
+    async def test_the_echo_is_null_rather_than_absent_when_unauthored(self):
+        game_id = await seed_game("No Craft Note")
+        result = await record_assessment(
+            game_id=game_id, verdict="skip", elevator_pitch="just a pitch"
+        )
+        self.assertIsNone(result["package"]["presentation"]["craft_note"])
+        self.assertNotIn(
+            "craft_note", json.loads((await _assessment_rows(game_id))[0]["presentation"])
+        )
+
+    async def test_long_prose_is_truncated_and_a_non_string_rejected(self):
+        game_id = await seed_game("Craft Note Caps")
+        with self.assertRaises(ToolError) as ctx:
+            await record_assessment(
+                game_id=game_id, verdict="skip", craft_note=["not a string"]
+            )
+        self.assertIn("craft_note", str(ctx.exception))
+        self.assertEqual(await _assessment_rows(game_id), [])
+
+        await record_assessment(game_id=game_id, verdict="skip", craft_note="c" * 400)
+        stored = json.loads((await _assessment_rows(game_id))[0]["presentation"])
+        self.assertEqual(len(stored["craft_note"]), 200)
+
+    async def test_void_refuses_to_carry_a_craft_note(self):
+        game_id = await seed_game("Craft Note Void")
+        recorded = await record_assessment(game_id=game_id, verdict="skip")
+        with self.assertRaises(ToolError) as ctx:
+            await record_assessment(
+                void_assessment_id=recorded["assessment_id"], craft_note="leftover"
+            )
+        self.assertIn("craft_note", str(ctx.exception))
+        self.assertEqual(len(await _assessment_rows(game_id)), 1)
+
+    async def test_craft_note_is_an_item_key(self):
+        game_id = await seed_game("Bulk Craft Note")
+        result = await main.record_assessment(
+            items=[
+                {
+                    "game_id": game_id,
+                    "verdict": "skip",
+                    "craft_note": "Review-bombed over a launcher change, not the game.",
+                }
+            ]
+        )
+        self.assertEqual(result["ok"], 1)
+        (row,) = await _assessment_rows(game_id)
+        self.assertEqual(
+            json.loads(row["presentation"])["craft_note"],
+            "Review-bombed over a launcher change, not the game.",
+        )
+
+
 _MEDIA_PAYLOAD = {
     "media": {
         "source": "steam",
@@ -1852,6 +1930,9 @@ class EvaluationPackageTests(ToolDBTestCase):
                 "review_count": 140000,
                 "trajectory": "stable",
                 "opencritic_score": 90.0,
+                # Read off the library, not declared by the caller — null here
+                # because this seeded game carries no enrichment row.
+                "metacritic_score": None,
             },
         )
         self.assertEqual(package["fit_call"], "strong fit")
@@ -1889,6 +1970,58 @@ class EvaluationPackageTests(ToolDBTestCase):
         self.assertEqual(comparison["owned"], True)
         self.assertEqual(comparison["my_rating"], 8.0)
         self.assertEqual(comparison["playtime_hours"], 10.0)
+
+    async def test_an_unowned_candidate_falls_back_to_the_steam_capsule(self):
+        # A minted candidate has no IGDB cover slug and no identifier row, so
+        # the games row yields no cover at all — the appid the media lookup
+        # resolved does, and the card would otherwise render its gradient
+        # placeholder beside real screenshots.
+        with self._media(None):
+            result = await record_assessment(
+                name="Unowned Candidate", appid=424242, verdict="wishlist_for_sale"
+            )
+
+        self.assertTrue(result["created"])
+        self.assertEqual(
+            result["package"]["game"]["cover_url"],
+            "https://cdn.cloudflare.steamstatic.com/steam/apps/424242/library_600x900.jpg",
+        )
+
+    async def test_a_candidate_with_no_appid_anywhere_keeps_a_null_cover(self):
+        game_id = await seed_game("Coverless")
+        with self._media(None):
+            result = await record_assessment(game_id=game_id, verdict="skip")
+        self.assertIsNone(result["package"]["game"]["cover_url"])
+
+    async def test_the_stored_metacritic_score_rides_in_the_craft_block(self):
+        # The one craft number the caller never declares: it is read off the
+        # library's own enrichment (game_platform_enrichment, per platform row).
+        game_id = await make_steam_game("Scored", 606060, metacritic_score=83)
+
+        with self._media(None):
+            result = await record_assessment(game_id=game_id, verdict="buy_now")
+
+        self.assertEqual(result["package"]["craft"]["metacritic_score"], 83)
+
+    async def test_a_stored_metacritic_alone_is_enough_for_a_craft_block(self):
+        # _block_or_none's rule is unchanged — the block exists when ANY member
+        # does, and a critic-only candidate now has one.
+        game_id = await make_steam_game("Critics Only", 707070, metacritic_score=71)
+
+        with self._media(None):
+            result = await record_assessment(game_id=game_id, verdict="skip")
+
+        self.assertEqual(
+            result["package"]["craft"],
+            {
+                "adjusted": None,
+                "positive_pct": None,
+                "review_count": None,
+                "trajectory": None,
+                "opencritic_score": None,
+                "metacritic_score": 71,
+            },
+        )
 
     async def test_an_unresolved_comparison_is_left_unannotated(self):
         game_id = await seed_game("Lineage Probe")

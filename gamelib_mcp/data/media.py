@@ -39,8 +39,11 @@ from .steam_store import fetch_store_appdetails
 
 logger = logging.getLogger(__name__)
 
-# Caps (bounded-response pattern): a card shows a strip, not a gallery.
-SCREENSHOT_CAP = 6
+# Caps (bounded-response pattern): a card shows a strip, not a gallery. Eight
+# rather than six since the widgets stopped advertising the ones they don't
+# have: the "+N more" chip was unclickable (the extra images were never in the
+# payload), so it went, and a couple more real screenshots took its place.
+SCREENSHOT_CAP = 8
 SIMILAR_CAP = 8
 PREVIOUS_GAMES_CAP = 6
 SUMMARY_MAX_CHARS = 500

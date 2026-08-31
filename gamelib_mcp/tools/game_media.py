@@ -78,7 +78,11 @@ async def _annotate_by_igdb_id(igdb_ids: list) -> dict[Any, Any]:
 async def annotate_similar_games(
     similar_raw: list[dict[str, Any]], total: int | None
 ) -> dict[str, Any]:
-    """IGDB's similar games, annotated with ownership — the play-what-you-own view."""
+    """IGDB's similar games, annotated with ownership — the play-what-you-own view.
+
+    The returned items are owned-first; see the sort below for why that happens
+    after the cap rather than before it.
+    """
     library = await _annotate_by_igdb_id([entry.get("igdb_id") for entry in similar_raw])
     items: list[dict[str, Any]] = []
     for entry in similar_raw[:SIMILAR_ITEM_CAP]:
@@ -104,6 +108,13 @@ async def annotate_similar_games(
                 "playtime_hours": _hours(playtime),
             }
         )
+    # Owned first, IGDB's own order preserved inside each half (list.sort is
+    # stable). The row's whole point is "you already own X of these", and on a
+    # phone that claim sat behind three unowned covers nobody scrolled past.
+    # Sorting happens AFTER the cap, so the strip is still IGDB's N most
+    # similar — reordering the raw list would quietly change the denominator
+    # the note reads out.
+    items.sort(key=lambda item: not item["owned"])
     count = total if isinstance(total, int) else len(similar_raw)
     return {"items": items, "count": count, "truncated": count > len(items)}
 

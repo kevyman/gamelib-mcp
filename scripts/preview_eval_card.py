@@ -29,8 +29,9 @@ from gamelib_mcp.apps_eval import EVAL_CARD_HTML
 
 _STEAM_SHOTS = "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1145350"
 
-# 0 — the common case: Steam candidate, mp4 trailer, six screenshots, every
-# section populated, buy_now.
+# 0 — the common case: Steam candidate, mp4 trailer, a full eight screenshots
+# (so the carousel has something to page through), every section populated,
+# buy_now.
 SAMPLE_FULL_STEAM: dict[str, Any] = {
     "recorded": True,
     "game_id": 4821,
@@ -50,6 +51,10 @@ SAMPLE_FULL_STEAM: dict[str, Any] = {
                 "Supergiant took the tightest action roguelike ever made, doubled the "
                 "systems, and kept every run readable — this is the one you clear a "
                 "weekend for."
+            ),
+            "craft_note": (
+                "Critics agree (OC 91 across 84 reviews); the only recurring knock is "
+                "that the second act repeats its arenas."
             ),
             "for_you_if": [
                 "You put 132h into Hades and rated it 9/10",
@@ -104,6 +109,7 @@ SAMPLE_FULL_STEAM: dict[str, Any] = {
             "review_count": 114203,
             "trajectory": "improving",
             "opencritic_score": 91,
+            "metacritic_score": 92,
         },
         "fit_call": "strong fit",
         "flags": ["Early Access history — 1.0 shipped 2025-09"],
@@ -170,8 +176,10 @@ SAMPLE_FULL_STEAM: dict[str, Any] = {
                     "thumb": f"{_STEAM_SHOTS}/ss_{i}_600x338.jpg",
                     "full": f"{_STEAM_SHOTS}/ss_{i}.jpg",
                 }
-                for i in range(1, 7)
+                for i in range(1, 9)
             ],
+            # Still set, and still deliberately unrendered: the extra images
+            # are not in the payload, so the widget advertises nothing.
             "screenshot_count": 14,
             "screenshots_truncated": True,
             "short_description": (
@@ -212,16 +220,9 @@ SAMPLE_FULL_STEAM: dict[str, Any] = {
                     "my_rating": 10,
                     "playtime_hours": 244.0,
                 },
-                {
-                    "igdb_id": 119171,
-                    "name": "Returnal",
-                    "release_year": 2021,
-                    "cover_url": None,
-                    "owned": False,
-                    "unplayed": False,
-                    "my_rating": None,
-                    "playtime_hours": None,
-                },
+                # Owned first, exactly as tools/game_media.py now serves them —
+                # the "you own 4 of the 5 most similar" line has to be visible
+                # without scrolling the row.
                 {
                     "igdb_id": 26192,
                     "name": "Wizard of Legend",
@@ -231,6 +232,16 @@ SAMPLE_FULL_STEAM: dict[str, Any] = {
                     "unplayed": True,
                     "my_rating": None,
                     "playtime_hours": 0.0,
+                },
+                {
+                    "igdb_id": 119171,
+                    "name": "Returnal",
+                    "release_year": 2021,
+                    "cover_url": None,
+                    "owned": False,
+                    "unplayed": False,
+                    "my_rating": None,
+                    "playtime_hours": None,
                 },
             ],
             "count": 8,
@@ -414,6 +425,7 @@ SAMPLE_IGDB_YOUTUBE: dict[str, Any] = {
             "review_count": 1840,
             "trajectory": "stable",
             "opencritic_score": 86,
+            "metacritic_score": 84,
         },
         "fit_call": "probable fit",
         "flags": ["Switch 2 exclusive — no discount history"],
@@ -582,7 +594,7 @@ SAMPLE_VOID: dict[str, Any] = {
 }
 
 SAMPLES: list[tuple[str, dict[str, Any]]] = [
-    ("full Steam package (mp4 trailer, 6 screenshots, buy_now)", SAMPLE_FULL_STEAM),
+    ("full Steam package (mp4 trailer, 8 screenshots, craft note, buy_now)", SAMPLE_FULL_STEAM),
     ("IGDB package (YouTube trailer, switch2, lineage, big-studio pedigree)", SAMPLE_IGDB_YOUTUBE),
     ("minimal package (no media/similar/pedigree/presentation, skip)", SAMPLE_MINIMAL),
     ("compact recorded verdict (no package)", SAMPLE_COMPACT),
