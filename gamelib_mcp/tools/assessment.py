@@ -939,6 +939,9 @@ FLAG_MAX_CHARS = 120
 # Presentation caps (the model-authored half of a verdict). Same stance as
 # above: prose is truncated, lists are rejected over their cap.
 ELEVATOR_PITCH_MAX_CHARS = 420
+# One line of craft context the score chips cannot carry (the critic spread,
+# the recurring knock, the review-bomb caveat). Prose, so truncated.
+CRAFT_NOTE_MAX_CHARS = 200
 FOR_YOU_IF_CAP = 4
 FOR_YOU_IF_MAX_CHARS = 200
 COMPARISONS_CAP = 6
@@ -1010,6 +1013,7 @@ _PRESENTATION_PARAMS = (
     "not_for_you_if",
     "comparisons",
     "why_care",
+    "craft_note",
 )
 
 # Everything a recording write touches, in wire order.
@@ -1231,6 +1235,7 @@ def _build_presentation(
     not_for_you_if: list | None,
     comparisons: list | None,
     why_care: list | None,
+    craft_note: str | None,
 ) -> str | None:
     """The presentation params as ONE JSON column value (NULL when empty).
 
@@ -1243,6 +1248,11 @@ def _build_presentation(
     pitch = _truncate(elevator_pitch, ELEVATOR_PITCH_MAX_CHARS) if elevator_pitch else None
     if pitch:
         presentation["elevator_pitch"] = pitch
+    if craft_note is not None and not isinstance(craft_note, str):
+        raise ToolError("craft_note must be a string")
+    note = _truncate(craft_note, CRAFT_NOTE_MAX_CHARS) if craft_note else None
+    if note:
+        presentation["craft_note"] = note
     for label, bullets in (
         ("for_you_if", for_you_if),
         ("not_for_you_if", not_for_you_if),
@@ -1326,6 +1336,7 @@ async def _validate_assessment_inputs(
     not_for_you_if: list | None,
     comparisons: list | None,
     why_care: list | None,
+    craft_note: str | None,
 ) -> dict[str, Any]:
     """Validate EVERYTHING before any write (ADR 0004's multi-mode rule).
 
@@ -1409,7 +1420,7 @@ async def _validate_assessment_inputs(
         ),
         "model": _normalize_declared("model", model, MODEL_MAX_CHARS, lowercase=True),
         "presentation": _build_presentation(
-            elevator_pitch, for_you_if, not_for_you_if, comparisons, why_care
+            elevator_pitch, for_you_if, not_for_you_if, comparisons, why_care, craft_note
         ),
     }
 
@@ -1573,6 +1584,21 @@ PACKAGE_PAST_CAP = 5
 # The similar-games cap lives with the block it caps (tools/game_media.py):
 # the same row renders on the detail card.
 
+# The stored Metascore. It hangs off the PLATFORM row (migration v11 moved it
+# out of `games` into game_platform_enrichment), so it needs the same shape as
+# STEAM_APPID_SQL rather than a bare column: MAX over the game's platform rows,
+# like every other metacritic rollup in the codebase (tools/library.py). NULL
+# for an unowned candidate with no platform row at all, which is honest — the
+# library holds no score for a game it has never enriched.
+_METACRITIC_SQL = """
+(
+    SELECT MAX(mgpe.metacritic_score)
+    FROM game_platform_enrichment mgpe
+    JOIN game_platforms mgp ON mgp.id = mgpe.game_platform_id
+    WHERE mgp.game_id = g.id
+)
+"""
+
 # Ownership/rating/playtime for a set of games, as the card renders them. Same
 # rating priority as the anchors and calibration queries (full-weight sources
 # first, then lowest id), same owned-only playtime rollup.
@@ -1585,6 +1611,7 @@ SELECT g.id AS game_id,
        g.cover_image_id,
        g.hltb_main,
        g.hltb_extra,
+       {_METACRITIC_SQL} AS metacritic_score,
        {STEAM_APPID_SQL} AS steam_appid,
        {OWNED_SQL} AS owned,
        (
@@ -1797,8 +1824,14 @@ async def _build_package(
             "game_id": game_id,
             "name": row["name"] if row else None,
             "release_year": _release_year(row["release_date"]) if row else None,
+            # An unowned candidate has neither an IGDB cover slug nor a
+            # game_platforms identifier row, so the games row yields nothing and
+            # the card fell back to its name-seeded gradient plate — beside real
+            # screenshots, which looks like a bug. The appid the media lookup
+            # already resolved carries the store capsule.
             "cover_url": (
-                cover_url(row["cover_image_id"], row["steam_appid"]) if row else None
+                (cover_url(row["cover_image_id"], row["steam_appid"]) if row else None)
+                or cover_url(None, media_appid)
             ),
         },
         "verdict": values["verdict"],
@@ -1806,6 +1839,7 @@ async def _build_package(
         "presentation": _block_or_none(
             {
                 "elevator_pitch": presentation.get("elevator_pitch"),
+                "craft_note": presentation.get("craft_note"),
                 "for_you_if": presentation.get("for_you_if"),
                 "not_for_you_if": presentation.get("not_for_you_if"),
                 # Echoed with the rest of the authored half, so the block keeps
@@ -1821,6 +1855,10 @@ async def _build_package(
                 "review_count": values["review_count"],
                 "trajectory": values["recent_trajectory"],
                 "opencritic_score": values["opencritic_score"],
+                # The one craft number the caller doesn't supply: the library's
+                # own stored Metacritic score, so the card's score row isn't
+                # two lonely chips when only critics have spoken.
+                "metacritic_score": row["metacritic_score"] if row else None,
             }
         ),
         "fit_call": values["fit_call"],
@@ -1921,6 +1959,7 @@ async def record_assessment(
     not_for_you_if: list | None = None,
     comparisons: list | None = None,
     why_care: list | None = None,
+    craft_note: str | None = None,
     void_assessment_id: int | None = None,
     *,
     with_package: bool = True,
@@ -1940,8 +1979,8 @@ async def record_assessment(
     omitted value stays NULL, meaning "unknown", which is the honest answer for
     an ad-hoc assessment or a stale installed copy of the skill.
 
-    ``elevator_pitch`` / ``for_you_if`` / ``not_for_you_if`` / ``comparisons``
-    / ``why_care`` are the model-authored PRESENTATION of the verdict; they
+    ``elevator_pitch`` / ``craft_note`` / ``for_you_if`` / ``not_for_you_if`` /
+    ``comparisons`` / ``why_care`` are the model-authored PRESENTATION; they
     persist together as one ``presentation`` JSON column and are declared
     content like the provenance columns — capped and truncated, never
     synthesized here. ``why_care`` is the editorial half of the pedigree pair:
@@ -1999,6 +2038,7 @@ async def record_assessment(
                     not_for_you_if,
                     comparisons,
                     why_care,
+                    craft_note,
                 ),
                 strict=True,
             )
@@ -2042,6 +2082,7 @@ async def record_assessment(
         not_for_you_if=not_for_you_if,
         comparisons=comparisons,
         why_care=why_care,
+        craft_note=craft_note,
     )
 
     resolved_id, mode = await _resolve_by_id_or_appid(appid, game_id)

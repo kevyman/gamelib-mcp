@@ -1,11 +1,16 @@
 """MCP Apps (io.modelcontextprotocol/ui): the evaluation-card widget.
 
 One `ui://` resource renders `record_assessment` results: the full
-evaluation package when the response carries one (hero trailer/screenshots,
-verdict stamp, why-care eyebrow lines, craft/fit scores, for-you-if bullets,
-anchors, lineage, similar games, the "from the studio" pedigree strip,
-time/price, flags, past verdicts), and a compact note card for the
-bookkeeping-only responses (a plain recorded verdict, or a void).
+evaluation package when the response carries one, and a compact note card for
+the bookkeeping-only responses (a plain recorded verdict, or a void).
+
+The package layout reads top to bottom as one argument: a header panel (cover,
+title, verdict stamp, the score chips and the authored craft note), the pitch
+panel (one-liner, elevator pitch, why-care eyebrow lines), the media panel (one
+viewer plus one thumb strip, trailer first, screenshots opening an edge-to-edge
+carousel), for-you-if / not-for-you-if, the anchors it rests on, lineage,
+IGDB's similar games, the "from the studio" pedigree strip, and one closing
+"the call" panel holding time, price, flags and past verdicts.
 Clients that don't speak the Apps extension ignore the tool metadata and see
 the normal JSON, so attaching ``EVAL_CARD_APP`` to a tool is purely additive.
 
@@ -235,6 +240,85 @@ EVAL_CARD_HTML = r"""<!doctype html>
     font-weight: 650;
   }
 
+  /* ---- media panel: one viewer + one thumb strip (the Steam shape) ---- */
+  /* The trailer and the screenshots are the same reel, so they share one
+     16:9 stage and one strip; clicking a thumb swaps the stage in place. */
+  .viewer { box-shadow: 3px 3px 0 var(--shadow-c); }
+  .shot-btn {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: #0d0b07;
+    cursor: zoom-in;
+    -webkit-tap-highlight-color: transparent;
+  }
+  /* Best-effort fullscreen. The button is only rendered where the API exists
+     AND the host allows it — a sandboxed iframe without allow="fullscreen"
+     reports fullscreenEnabled false, and a denied request removes the button
+     rather than pretending anything happened. */
+  .fs-btn {
+    position: absolute;
+    right: 10px;
+    top: 10px;
+    z-index: 3;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    border: 2px solid var(--ink);
+    background: var(--card);
+    color: var(--ink);
+    font: 800 13px/1 system-ui, sans-serif;
+    box-shadow: 2px 2px 0 var(--shadow-c);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .thumbs { margin-top: 10px; }
+  .thumb {
+    position: relative;
+    flex: none;
+    padding: 0;
+    border: 2px solid var(--ink);
+    border-radius: 9px;
+    overflow: hidden;
+    background: var(--card);
+    box-shadow: 2px 2px 0 var(--shadow-c);
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    transition: transform 0.12s ease;
+  }
+  .thumb img { display: block; width: 116px; height: 66px; object-fit: cover; }
+  .thumb:hover { transform: translate(-1px, -1px); }
+  .thumb:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+  .thumb.sel { border-color: var(--ink); box-shadow: 0 0 0 3px var(--ink); }
+  .thumb-play {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(12, 10, 6, 0.34);
+    color: #ffffff;
+    font-size: 17px;
+    font-weight: 900;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  }
+  .thumb-text {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 116px;
+    height: 66px;
+    font-size: 11px;
+    font-weight: 800;
+    color: var(--ink);
+    background: var(--p2);
+  }
+
   /* ---- header ---- */
   .head { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
   .head .cover-wrap {
@@ -255,7 +339,19 @@ EVAL_CARD_HTML = r"""<!doctype html>
     overflow-wrap: anywhere;
   }
   .sub { font-size: 12.5px; font-weight: 650; color: var(--muted); }
-  .one-liner { font-size: 14px; font-weight: 700; line-height: 1.45; margin-top: 14px; }
+  /* The score chips live INSIDE the header now: two lonely chips in a panel of
+     their own ("CRAFT & FIT") was the first thing the owner called out. */
+  .head-chips { margin-top: 13px; }
+  /* One model-authored line of craft context under the chips — the spread, the
+     recurring knock, the review-bomb caveat a number can't carry. */
+  .craft-note {
+    margin-top: 8px;
+    font-size: 11.5px;
+    font-weight: 650;
+    line-height: 1.45;
+    color: var(--muted);
+  }
+  .one-liner { font-size: 14px; font-weight: 700; line-height: 1.45; }
   .pitch {
     margin-top: 10px;
     font-size: 13px;
@@ -267,6 +363,7 @@ EVAL_CARD_HTML = r"""<!doctype html>
     border-radius: 0 12px 12px 0;
     padding: 10px 13px;
   }
+  .pitch:first-child { margin-top: 0; }
   .stamp {
     flex: 0 0 auto;
     align-self: flex-start;
@@ -306,6 +403,15 @@ EVAL_CARD_HTML = r"""<!doctype html>
   }
   .chip .lbl { font-size: 9.5px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); }
   .chip.oc { font-weight: 800; }
+  /* On a brand-coloured chip the muted label colour is unreadable (dark-scheme
+     beige on Metacritic green) — inherit the chip's own text colour instead. */
+  .chip.oc .lbl, .chip.mc .lbl { color: inherit; opacity: 0.7; }
+  /* Metacritic's metascore is a square box in its own green/yellow/red at the
+     games thresholds (75/50) — same brand mapping as the game-cards widget. */
+  .chip.mc { font-weight: 800; border-radius: 5px; }
+  .mc-hi { background: #6c3; color: #17140e; }
+  .mc-mid { background: #fc3; color: #17140e; }
+  .mc-lo { background: #f00; color: #17140e; }
   .oc-mighty { background: #fc430a; color: #17140e; }
   .oc-strong { background: #9e00b4; color: #ffffff; }
   .oc-fair { background: #4aa1ce; color: #17140e; }
@@ -349,21 +455,6 @@ EVAL_CARD_HTML = r"""<!doctype html>
     padding: 2px 2px 6px;
     scrollbar-width: thin;
   }
-  .shot {
-    flex: none;
-    padding: 0;
-    border: 2px solid var(--ink);
-    border-radius: 9px;
-    overflow: hidden;
-    background: var(--card);
-    box-shadow: 2px 2px 0 var(--shadow-c);
-    cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
-    transition: transform 0.12s ease;
-  }
-  .shot img { display: block; width: 188px; height: 106px; object-fit: cover; }
-  .shot:hover { transform: translate(-1px, -1px); }
-  .shot:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
   .more-chip {
     flex: none;
     align-self: center;
@@ -388,6 +479,10 @@ EVAL_CARD_HTML = r"""<!doctype html>
   .col.no .tick { color: var(--p4); -webkit-text-stroke: 0.6px var(--ink); }
 
   /* ---- anchors ---- */
+  /* Deliberately NEUTRAL pills: an anchor is evidence, and the live card lit
+     up "Cyberpunk 2077 6.6h" — a game he bounced off — in endorsement green.
+     The STATUS glyph carries the colour instead: completed/evergreen good,
+     abandoned bad, everything else plain. */
   .anchor {
     display: inline-flex;
     align-items: center;
@@ -397,9 +492,11 @@ EVAL_CARD_HTML = r"""<!doctype html>
     padding: 3px 10px 3px 3px;
     border-radius: 999px;
     border: 1.5px solid var(--ink);
-    background: var(--p3);
+    background: var(--card);
     box-shadow: 2px 2px 0 var(--shadow-c);
+    transform: rotate(-0.8deg);
   }
+  .anchor:nth-child(2n) { transform: rotate(0.9deg); }
   .anchor.no-cover { padding-left: 10px; }
   .anchor-cover {
     width: 20px;
@@ -410,8 +507,19 @@ EVAL_CARD_HTML = r"""<!doctype html>
     flex: none;
   }
   .anchor .dim { color: var(--muted); font-weight: 650; }
-  .anchor.an-warn { background: var(--bad); color: var(--card); }
-  .anchor.an-warn .dim { color: var(--card); opacity: 0.8; }
+  .an-state {
+    flex: none;
+    font-size: 10px;
+    font-weight: 900;
+    line-height: 1.4;
+    padding: 0 6px;
+    border-radius: 999px;
+    border: 1.5px solid var(--ink);
+    background: var(--card);
+    color: var(--muted);
+  }
+  .an-state.an-good { background: var(--good); color: var(--card); }
+  .an-state.an-bad { background: var(--bad); color: var(--card); }
 
   /* ---- lineage / comparisons ---- */
   .callout {
@@ -450,6 +558,8 @@ EVAL_CARD_HTML = r"""<!doctype html>
   .comp-note { font-size: 11.5px; line-height: 1.4; color: var(--muted); }
   .comp.this-game { background: var(--p1); border-width: 2px; box-shadow: 3px 3px 0 var(--shadow-c); }
   .tags { display: flex; gap: 5px; flex-wrap: wrap; }
+  /* Sticker-like, so they tilt like the game-cards widget's pills; the data
+     chips (score meter, pace/price) stay straight for legibility. */
   .tag {
     font-size: 9.5px;
     font-weight: 800;
@@ -458,7 +568,10 @@ EVAL_CARD_HTML = r"""<!doctype html>
     border: 1.5px solid var(--ink);
     background: var(--p3);
     white-space: nowrap;
+    transform: rotate(-1.2deg);
   }
+  .tag:nth-child(2n) { transform: rotate(1.1deg); }
+  .tag:nth-child(3n) { transform: rotate(-0.7deg); }
   .tag.owned { background: var(--good); color: var(--card); }
   .tag.unplayed { background: var(--p2); }
   /* Pedigree badges: HIS rating wins the one slot, the critic score only
@@ -483,7 +596,9 @@ EVAL_CARD_HTML = r"""<!doctype html>
     border-radius: 999px;
     border: 1.5px solid var(--ink);
     white-space: nowrap;
+    transform: rotate(-1.4deg);
   }
+  .wc-line:nth-child(2n) .wc-eyebrow { transform: rotate(1.2deg); }
   .wc-people { background: var(--p1); }
   .wc-studio { background: var(--p3); }
   .wc-hype { background: var(--p2); }
@@ -525,7 +640,9 @@ EVAL_CARD_HTML = r"""<!doctype html>
     background: var(--card);
     color: var(--muted);
     white-space: nowrap;
+    transform: rotate(-0.9deg);
   }
+  .tl-chip:nth-child(2n) { transform: rotate(0.8deg); }
   .errfoot { font-size: 11px; font-weight: 650; color: var(--muted); text-align: center; }
   .note-card { display: flex; gap: 12px; align-items: center; max-width: 560px; margin: 0 auto; }
   .note-text { font-size: 14px; font-weight: 750; line-height: 1.4; overflow-wrap: anywhere; }
@@ -560,7 +677,67 @@ EVAL_CARD_HTML = r"""<!doctype html>
     transition: transform 0.19s ease;
   }
   .overlay.open .overlay-panel { transform: translateX(-50%); }
-  .shot-full { display: block; width: 100%; height: auto; }
+  /* The screenshot carousel goes edge-to-edge of the iframe: on a phone the
+     old centered panel wasted a third of the width on backdrop. */
+  .overlay-panel.carousel {
+    left: 0;
+    width: 100%;
+    max-width: none;
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+    background: #0d0b07;
+    transform: translateY(14px);
+  }
+  .overlay.open .overlay-panel.carousel { transform: none; }
+  .car-stage {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0d0b07;
+    /* Holds the frame open while the full-res image loads (and if it never
+       does) — a zero-height stage would swallow the arrows and the close. */
+    min-height: 180px;
+    /* Let the browser keep vertical scrolling while horizontal drags are ours. */
+    touch-action: pan-y;
+  }
+  .car-img { display: block; width: 100%; max-height: 74vh; object-fit: contain; }
+  .car-nav {
+    position: absolute;
+    top: 50%;
+    z-index: 2;
+    transform: translateY(-50%);
+    width: 38px;
+    height: 38px;
+    border-radius: 999px;
+    border: 2px solid var(--ink);
+    background: var(--card);
+    color: var(--ink);
+    font: 900 19px/1 system-ui, sans-serif;
+    box-shadow: 2px 2px 0 var(--shadow-c);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .car-prev { left: 10px; }
+  .car-next { right: 10px; }
+  .car-count {
+    position: absolute;
+    left: 50%;
+    bottom: 10px;
+    z-index: 2;
+    transform: translateX(-50%);
+    font-size: 11px;
+    font-weight: 800;
+    padding: 3px 10px;
+    border-radius: 999px;
+    border: 2px solid var(--ink);
+    background: var(--card);
+    color: var(--ink);
+  }
+  .carousel .fs-btn { right: 56px; }
   .overlay-close {
     position: absolute;
     top: 10px;
@@ -608,10 +785,12 @@ EVAL_CARD_HTML = r"""<!doctype html>
     .two-col { grid-template-columns: 1fr; }
     .lin-arrow { display: none; }
     .head .cover-wrap { flex-basis: 84px; }
+    /* Narrow phone: smaller thumbs so several fit before scrolling. */
+    .thumb img, .thumb-text { width: 96px; height: 55px; }
   }
   @media (prefers-reduced-motion: reduce) {
-    .overlay, .overlay-panel, .shot, .play-badge span { transition: none; }
-    .shot:hover { transform: none; }
+    .overlay, .overlay-panel, .thumb, .play-badge span { transition: none; }
+    .thumb:hover { transform: none; }
     .play-badge:hover span, .play-badge:focus-visible span { transform: none; }
   }
 </style>
@@ -766,7 +945,34 @@ EVAL_CARD_HTML = r"""<!doctype html>
     return box;
   }
 
-  /* ---------- click-to-enlarge overlay ---------- */
+  /* ---------- best-effort fullscreen ---------- */
+  /* A widget iframe is usually sandboxed, and many hosts don't grant
+     allow="fullscreen" — there the API is either absent or the request is
+     rejected. Both cases DROP the affordance instead of faking one: an
+     inert ⛶ that does nothing is worse than no ⛶ at all. Where the host does
+     allow it (and for the <video>, via its own native controls), it works. */
+  function fullscreenButton(target) {
+    if (!document.fullscreenEnabled && !document.webkitFullscreenEnabled) return null;
+    var req = target.requestFullscreen || target.webkitRequestFullscreen;
+    if (!req) return null;
+    var btn = el("button", "fs-btn", "⛶");
+    btn.setAttribute("aria-label", "Full screen");
+    btn.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      ev.preventDefault();
+      try {
+        var pending = req.call(target);
+        if (pending && pending.catch) {
+          pending.catch(function () { btn.remove(); });
+        }
+      } catch (e) {
+        btn.remove();
+      }
+    });
+    return btn;
+  }
+
+  /* ---------- screenshot carousel (lightbox) ---------- */
   var overlayState = null; // { node, trigger, keydown }
 
   function closeOverlay() {
@@ -779,37 +985,85 @@ EVAL_CARD_HTML = r"""<!doctype html>
     if (s.trigger && s.trigger.focus) s.trigger.focus();
   }
 
-  function openShot(shot, label, trigger) {
+  function navButton(cls, glyph, label, onClick) {
+    var btn = el("button", "car-nav " + cls, glyph);
+    btn.setAttribute("aria-label", label);
+    btn.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      onClick();
+    });
+    return btn;
+  }
+
+  /* Edge-to-edge, and every way through the set a phone or a keyboard would
+     try: drag/swipe, the two arrow buttons, and the arrow keys. */
+  function openCarousel(shots, startIndex, gameName, trigger) {
     closeOverlay();
+    var index = startIndex;
     var overlay = el("div", "overlay");
-    var panel = el("div", "overlay-panel");
+    var panel = el("div", "overlay-panel carousel");
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-modal", "true");
-    panel.setAttribute("aria-label", label || "Screenshot");
+    panel.setAttribute("aria-label", (gameName ? gameName + " " : "") + "screenshots");
     panel.tabIndex = -1;
 
     var close = el("button", "overlay-close", "✕");
-    close.setAttribute("aria-label", "Close screenshot");
+    close.setAttribute("aria-label", "Close screenshots");
     close.addEventListener("click", closeOverlay);
     panel.appendChild(close);
 
+    var stage = el("div", "car-stage");
     var img = document.createElement("img");
-    img.className = "shot-full";
-    img.alt = label || "Screenshot";
-    img.src = shot.full || shot.thumb;
-    panel.appendChild(img);
+    img.className = "car-img";
+    stage.appendChild(img);
+    var counter = el("div", "car-count", "");
+    if (shots.length > 1) {
+      stage.appendChild(navButton("car-prev", "‹", "Previous screenshot",
+        function () { show(index - 1); }));
+      stage.appendChild(navButton("car-next", "›", "Next screenshot",
+        function () { show(index + 1); }));
+      stage.appendChild(counter);
+    }
+    panel.appendChild(stage);
+    var fs = fullscreenButton(stage);
+    if (fs) panel.appendChild(fs);
+
+    function show(i) {
+      index = ((i % shots.length) + shots.length) % shots.length;   // wraps
+      var shot = shots[index];
+      img.src = shot.full || shot.thumb;
+      img.alt = (gameName ? gameName + " " : "") + "screenshot " + (index + 1);
+      counter.textContent = (index + 1) + " / " + shots.length;
+    }
+    show(index);
+
+    // Drag/swipe. Pointer events cover mouse and touch in one path; a drag
+    // shorter than the threshold is a tap and does nothing.
+    var startX = null;
+    stage.addEventListener("pointerdown", function (ev) { startX = ev.clientX; });
+    stage.addEventListener("pointercancel", function () { startX = null; });
+    stage.addEventListener("pointerup", function (ev) {
+      if (startX === null) return;
+      var dx = ev.clientX - startX;
+      startX = null;
+      if (Math.abs(dx) > 40) show(index + (dx < 0 ? 1 : -1));
+    });
 
     overlay.appendChild(panel);
     overlay.addEventListener("click", function (ev) {
       if (ev.target === overlay) closeOverlay();
     });
-    var keydown = function (ev) { if (ev.key === "Escape") closeOverlay(); };
+    var keydown = function (ev) {
+      if (ev.key === "Escape") closeOverlay();
+      else if (ev.key === "ArrowLeft") show(index - 1);
+      else if (ev.key === "ArrowRight") show(index + 1);
+    };
     document.addEventListener("keydown", keydown);
     overlayState = { node: overlay, trigger: trigger, keydown: keydown };
 
     document.body.appendChild(overlay);
 
-    // Anchor the panel near the clicked thumbnail, clamped inside the
+    // Anchor the panel near whatever was clicked, clamped inside the
     // document; stretch the backdrop over the full document height.
     function position() {
       var docH = document.documentElement.scrollHeight;
@@ -825,7 +1079,7 @@ EVAL_CARD_HTML = r"""<!doctype html>
     panel.focus({ preventScroll: true });
   }
 
-  /* ---------- 1. hero ---------- */
+  /* ---------- 1. media: one viewer + one thumb strip ---------- */
   function playBadge(label) {
     var btn = el("button", "play-badge");
     btn.setAttribute("aria-label", label);
@@ -847,23 +1101,6 @@ EVAL_CARD_HTML = r"""<!doctype html>
     img.alt = alt || "";
     img.src = url;
     return img;
-  }
-  function heroNode(media) {
-    var shots = list(media.screenshots);
-    var trailer = media.trailer;
-    var hasTrailer = trailer && (trailer.url || trailer.video_id);
-    if (!hasTrailer && !shots.length) return null;
-    var hero = el("div", "hero");
-    if (hasTrailer && trailer.kind === "mp4" && trailer.url) {
-      mp4Hero(hero, trailer);
-    } else if (hasTrailer && trailer.kind === "youtube" && trailer.video_id) {
-      youtubeHero(hero, trailer);
-    } else if (shots.length) {
-      hero.appendChild(posterNode(shots[0].full || shots[0].thumb, "Screenshot"));
-    } else {
-      return null;                                  // trailer of an unknown kind
-    }
-    return hero;
   }
   function mp4Hero(hero, trailer) {
     var urls = [trailer.url, trailer.hq_url].filter(Boolean);
@@ -933,6 +1170,120 @@ EVAL_CARD_HTML = r"""<!doctype html>
     linkPill(hero, "watch ↗", watchUrl);
   }
 
+  /* The trailer and the screenshots are one reel, shown the way a store page
+     shows them: a single 16:9 stage plus one thumb strip, trailer first.
+     Clicking a thumb swaps the stage in place; clicking a screenshot IN the
+     stage opens the carousel over every delivered screenshot. */
+  function trailerEntry(media) {
+    var trailer = media.trailer;
+    if (!trailer) return null;
+    if (trailer.kind === "mp4" && trailer.url) return { kind: "mp4", trailer: trailer };
+    if (trailer.kind === "youtube" && trailer.video_id) {
+      return { kind: "youtube", trailer: trailer };
+    }
+    return null;                                    // trailer of an unknown kind
+  }
+  function shotLabel(gameName, i) {
+    return (gameName ? gameName + " " : "") + "screenshot " + (i + 1);
+  }
+  function showEntry(viewer, entry, shots, gameName) {
+    viewer.textContent = "";
+    if (entry.kind === "mp4") {
+      mp4Hero(viewer, entry.trailer);
+      // Native controls carry the browser's own fullscreen button; this is the
+      // extra affordance for hosts that surface neither.
+      var video = viewer.querySelector("video");
+      if (video) {
+        var videoFs = fullscreenButton(video);
+        if (videoFs) viewer.appendChild(videoFs);
+      }
+      return;
+    }
+    if (entry.kind === "youtube") {
+      youtubeHero(viewer, entry.trailer);           // the embed handles its own
+      return;
+    }
+    var label = shotLabel(gameName, entry.index);
+    var btn = el("button", "shot-btn");
+    btn.setAttribute("aria-label", "Enlarge " + label);
+    var img = document.createElement("img");
+    img.className = "hero-media";
+    img.alt = "";                                   // the button carries the label
+    img.src = entry.shot.full || entry.shot.thumb;
+    btn.appendChild(img);
+    btn.addEventListener("click", function () {
+      openCarousel(shots, entry.index, gameName, btn);
+    });
+    viewer.appendChild(btn);
+    var fs = fullscreenButton(img);
+    if (fs) viewer.appendChild(fs);
+  }
+  function thumbNode(entry, gameName) {
+    var btn = el("button", "thumb");
+    if (entry.kind === "shot") {
+      btn.setAttribute("aria-label", "Show " + shotLabel(gameName, entry.index));
+      var img = document.createElement("img");
+      img.alt = "";
+      img.loading = "lazy";
+      img.src = entry.shot.thumb || entry.shot.full;
+      btn.appendChild(img);
+      return btn;
+    }
+    btn.setAttribute("aria-label", "Show the trailer");
+    if (entry.trailer.poster) {
+      var poster = document.createElement("img");
+      poster.alt = "";
+      poster.loading = "lazy";
+      poster.src = entry.trailer.poster;
+      btn.appendChild(poster);
+    } else {
+      btn.appendChild(el("span", "thumb-text", "TRAILER"));
+    }
+    btn.appendChild(el("span", "thumb-play", "▶"));
+    return btn;
+  }
+  function mediaNode(parent, media, gameName) {
+    var shots = list(media.screenshots).filter(function (s) {
+      return s && (s.thumb || s.full);
+    });
+    var entries = [];
+    var trailer = trailerEntry(media);
+    if (trailer) entries.push(trailer);
+    shots.forEach(function (shot, i) {
+      entries.push({ kind: "shot", shot: shot, index: i });
+    });
+    if (!entries.length) return;
+
+    var box = section(parent, "Media");
+    var viewer = el("div", "hero viewer");
+    box.appendChild(viewer);
+
+    // `screenshots_truncated` is deliberately NOT surfaced: the extra images
+    // are not in the payload, so the old "+N more" chip advertised something
+    // nothing could open.
+    if (entries.length > 1) {
+      var strip = el("div", "strip thumbs");
+      var thumbs = entries.map(function (entry) { return thumbNode(entry, gameName); });
+      thumbs.forEach(function (btn, i) {
+        btn.setAttribute("aria-pressed", "false");
+        btn.addEventListener("click", function () { select(i); });
+        strip.appendChild(btn);
+      });
+      box.appendChild(strip);
+      var select = function (i) {
+        thumbs.forEach(function (btn, j) {
+          btn.classList.toggle("sel", i === j);
+          btn.setAttribute("aria-pressed", i === j ? "true" : "false");
+        });
+        showEntry(viewer, entries[i], shots, gameName);
+        reportSize();
+      };
+      select(0);                                    // trailer first when there is one
+      return;
+    }
+    showEntry(viewer, entries[0], shots, gameName);
+  }
+
   /* ---------- 2. header + verdict stamp ---------- */
   var VERDICTS = {
     buy_now: ["BUY NOW", "stamp-good"],
@@ -978,10 +1329,25 @@ EVAL_CARD_HTML = r"""<!doctype html>
     if (stamp) head.appendChild(stamp);
     box.appendChild(head);
 
+    // The scores belong to the identity block, not to a panel of their own:
+    // "CRAFT & FIT" held two chips and a lot of air on the live card.
+    var chips = scoreChips(pkg);
+    if (chips) box.appendChild(chips);
+    if (pres.craft_note) box.appendChild(el("div", "craft-note", pres.craft_note));
+    return box;
+  }
+
+  /* The verdict in words: the one-liner, the authored pitch, and the why-care
+     eyebrow — one panel, because they are one argument. */
+  function pitchNode(parent, pkg) {
+    var pres = pkg.presentation || {};
+    var hasWhyCare = list(pres.why_care).filter(function (e) { return e && e.text; }).length;
+    if (!pkg.summary && !pres.elevator_pitch && !hasWhyCare) return;
+    var box = el("section", "panel");
     if (pkg.summary) box.appendChild(el("p", "one-liner", pkg.summary));
     if (pres.elevator_pitch) box.appendChild(el("p", "pitch", pres.elevator_pitch));
     whyCareNode(box, pres);
-    return box;
+    parent.appendChild(box);
   }
 
   /* why_care: up to three model-authored lines answering "why look at this at
@@ -1009,37 +1375,14 @@ EVAL_CARD_HTML = r"""<!doctype html>
     parent.appendChild(wrap);
   }
 
-  /* ---------- 3. screenshot strip ---------- */
-  function shotsNode(parent, media, gameName) {
-    var shots = list(media.screenshots).filter(function (s) { return s && (s.thumb || s.full); });
-    if (!shots.length) return;
-    var box = section(parent, "Screenshots");
-    var strip = el("div", "strip");
-    shots.forEach(function (shot, i) {
-      var label = (gameName ? gameName + " " : "") + "screenshot " + (i + 1);
-      var btn = el("button", "shot");
-      btn.setAttribute("aria-label", "Enlarge " + label);
-      var img = document.createElement("img");
-      img.alt = "";                       // the button already carries the label
-      img.loading = "lazy";
-      img.src = shot.thumb || shot.full;
-      btn.appendChild(img);
-      btn.addEventListener("click", function () { openShot(shot, label, btn); });
-      strip.appendChild(btn);
-    });
-    var total = num(media.screenshot_count);
-    if (media.screenshots_truncated && total != null && total > shots.length) {
-      strip.appendChild(el("span", "more-chip", "+" + (total - shots.length) + " more"));
-    }
-    box.appendChild(strip);
-  }
-
-  /* ---------- 4. craft / trajectory / critic / fit ---------- */
+  /* ---------- 3. the score chips (rendered inside the header) ---------- */
   /* OpenCritic tiers are percentile-based; approximate from the score, with
      the tier palette from their own stylesheet (same mapping as apps.py). */
   function ocTier(n) {
     return "oc-" + (n >= 84 ? "mighty" : n >= 75 ? "strong" : n >= 65 ? "fair" : "weak");
   }
+  /* Metacritic's games thresholds: green >=75, yellow 50-74, red <50. */
+  function mcTier(n) { return n >= 75 ? "mc-hi" : n >= 50 ? "mc-mid" : "mc-lo"; }
   var TRAJECTORIES = {
     improving: ["↗", "improving", "traj-good"],
     stable: ["→", "stable", "traj-flat"],
@@ -1061,9 +1404,9 @@ EVAL_CARD_HTML = r"""<!doctype html>
     if (raw == null) return null;
     return Math.round(raw <= 1 ? raw * 100 : raw);
   }
-  function scoresNode(parent, pkg) {
+  function scoreChips(pkg) {
     var craft = pkg.craft || {};
-    var row = el("div", "chips");
+    var row = el("div", "chips head-chips");
 
     var pct = craftPercent(craft);
     if (pct != null) {
@@ -1091,8 +1434,18 @@ EVAL_CARD_HTML = r"""<!doctype html>
       row.appendChild(tChip);
     }
 
+    // Providers use negative sentinels for "no score yet" — never show those.
+    var mc = num(craft.metacritic_score);
+    if (mc != null && mc >= 0) {
+      var mcChip = el("span", "chip mc " + mcTier(mc));
+      mcChip.appendChild(el("span", "lbl", "MC"));
+      mcChip.appendChild(el("span", null, String(Math.round(mc))));
+      mcChip.title = "Metacritic";
+      row.appendChild(mcChip);
+    }
+
     var oc = num(craft.opencritic_score);
-    if (oc != null && oc >= 0) {           // providers use negatives for "none"
+    if (oc != null && oc >= 0) {
       var ocChip = el("span", "chip oc " + ocTier(oc));
       ocChip.appendChild(el("span", "lbl", "OC"));
       ocChip.appendChild(el("span", null, String(Math.round(oc))));
@@ -1107,11 +1460,10 @@ EVAL_CARD_HTML = r"""<!doctype html>
       row.appendChild(fitChip);
     }
 
-    if (!row.childNodes.length) return;
-    section(parent, "Craft & fit").appendChild(row);
+    return row.childNodes.length ? row : null;
   }
 
-  /* ---------- 5. for you / not for you ---------- */
+  /* ---------- 4. for you / not for you ---------- */
   function bulletColumn(title, items, kind) {
     var col = el("div", "col " + kind);
     col.appendChild(el("div", "col-title", title));
@@ -1138,14 +1490,15 @@ EVAL_CARD_HTML = r"""<!doctype html>
     box.appendChild(cols);
   }
 
-  /* ---------- 6. anchors ---------- */
-  /* An abandoned anchor is negative evidence — styled as a warning, not as
-     another green sticker. */
+  /* ---------- 5. anchors ---------- */
+  /* The PILL is neutral — an anchor is evidence, and half of them are
+     negative ("Cyberpunk 2077, 6.6h"). Only the status glyph is coloured:
+     completed/evergreen good, abandoned bad, anything else plain. */
   var COMPLETION = {
-    completed: ["✓", "completed", ""],
-    evergreen: ["∞", "evergreen", ""],
+    completed: ["✓", "completed", "an-good"],
+    evergreen: ["∞", "evergreen", "an-good"],
     playing: ["▶", "playing", ""],
-    abandoned: ["⚠", "abandoned", "an-warn"],
+    abandoned: ["⚠", "abandoned", "an-bad"],
   };
   function anchorsNode(parent, anchors) {
     if (!anchors.length) return;
@@ -1153,8 +1506,7 @@ EVAL_CARD_HTML = r"""<!doctype html>
     var chips = el("div", "chips");
     anchors.forEach(function (a) {
       var state = COMPLETION[a.completion_status];
-      var chip = el("div", "anchor" + (state && state[2] ? " " + state[2] : "")
-                            + (a.cover_url ? "" : " no-cover"));
+      var chip = el("div", "anchor" + (a.cover_url ? "" : " no-cover"));
       if (a.cover_url) {
         var img = document.createElement("img");
         img.className = "anchor-cover";
@@ -1170,7 +1522,7 @@ EVAL_CARD_HTML = r"""<!doctype html>
       var hours = hoursLabel(a.playtime_hours);
       if (hours) chip.appendChild(el("span", "dim", hours));
       if (state) {
-        var glyph = el("span", null, state[0]);
+        var glyph = el("span", "an-state" + (state[2] ? " " + state[2] : ""), state[0]);
         glyph.title = state[1];
         chip.appendChild(glyph);
       }
@@ -1179,7 +1531,7 @@ EVAL_CARD_HTML = r"""<!doctype html>
     box.appendChild(chips);
   }
 
-  /* ---------- 7. lineage / comparisons ---------- */
+  /* ---------- 6. lineage / comparisons ---------- */
   var CALLOUT_HEADS = {
     better_version: "A better version exists",
     cheaper_substitute: "Cheaper substitute",
@@ -1208,14 +1560,16 @@ EVAL_CARD_HTML = r"""<!doctype html>
     entries.forEach(function (c) { col.appendChild(comparisonNode(c)); });
     return col;
   }
-  function lineageNode(parent, pkg, comps, foldSimilar) {
+  /* Every comparison lives here, "similar" included: folding the authored
+     similar-notes into the IGDB strip below mixed two different things (his
+     model's reading vs. IGDB's neighbours) and read as one confused list. */
+  function lineageNode(parent, pkg, comps) {
     var callouts = comps.filter(function (c) { return CALLOUT_HEADS[c.relation]; });
     var ancestors = comps.filter(function (c) { return c.relation === "ancestor"; });
     var descendants = comps.filter(function (c) { return c.relation === "descendant"; });
     var loose = comps.filter(function (c) {
       return !CALLOUT_HEADS[c.relation] && c.relation !== "ancestor" && c.relation !== "descendant";
     });
-    if (foldSimilar) loose = loose.filter(function (c) { return c.relation !== "similar"; });
     if (!callouts.length && !ancestors.length && !descendants.length && !loose.length) return;
 
     var box = section(parent, "Lineage");
@@ -1246,58 +1600,63 @@ EVAL_CARD_HTML = r"""<!doctype html>
     }
 
     if (loose.length) {
+      // Labelled, because these note-cards now sit above IGDB's own similar
+      // strip and the two must not read as one list.
+      var onlySimilar = loose.every(function (c) { return c.relation === "similar"; });
+      var head = el("div", "lin-head", onlySimilar ? "Also similar" : "Other comparisons");
+      head.style.marginTop = (callouts.length || ancestors.length || descendants.length)
+        ? "12px" : "0";
+      box.appendChild(head);
       var rest = el("div", "chips");
+      rest.style.marginTop = "7px";
       loose.forEach(function (c) { rest.appendChild(comparisonNode(c)); });
       box.appendChild(rest);
     }
   }
 
-  /* ---------- 8. similar games ---------- */
-  function similarNode(parent, similar, alsoSimilar) {
-    var items = list(similar.items);
-    if (!items.length && !alsoSimilar.length) return;
+  /* ---------- 7. similar games (IGDB only) ---------- */
+  function similarNode(parent, similar) {
+    var items = list(similar.items).filter(function (i) { return i && i.name; });
+    if (!items.length) return;
     var box = section(parent, "Similar games");
-
-    if (items.length) {
-      var strip = el("div", "strip");
-      items.forEach(function (item) {
-        var card = el("div", "sim");
-        card.appendChild(coverNode(item));
-        var body = el("div", "sim-body");
-        body.appendChild(el("div", "sim-name", item.name || "?"));
-        if (item.release_year) body.appendChild(el("div", "sim-year", String(item.release_year)));
-        var tags = ownershipTags(item);
-        if (tags) body.appendChild(tags);
-        card.appendChild(body);
-        strip.appendChild(card);
-      });
-      var total = num(similar.count);
-      if (similar.truncated && total != null && total > items.length) {
-        strip.appendChild(el("span", "more-chip", "+" + (total - items.length) + " more"));
-      }
-      box.appendChild(strip);
-      var owned = items.filter(function (i) { return i.owned; }).length;
-      // Ownership is annotated only for the SHOWN games — the true total
-      // belongs to the "+N more" chip above, never to this denominator.
-      box.appendChild(el("div", "note",
-        "You own " + owned + " of the " + items.length + " most similar"));
+    var strip = el("div", "strip");
+    // Server-side the items arrive owned-first (tools/game_media.py), so the
+    // claim below is visible without scrolling the row.
+    items.forEach(function (item) {
+      var card = el("div", "sim");
+      card.appendChild(coverNode(item));
+      var body = el("div", "sim-body");
+      body.appendChild(el("div", "sim-name", item.name || "?"));
+      if (item.release_year) body.appendChild(el("div", "sim-year", String(item.release_year)));
+      var tags = ownershipTags(item);
+      if (tags) body.appendChild(tags);
+      card.appendChild(body);
+      strip.appendChild(card);
+    });
+    var total = num(similar.count);
+    if (similar.truncated && total != null && total > items.length) {
+      strip.appendChild(el("span", "more-chip", "+" + (total - items.length) + " more"));
     }
-
-    if (alsoSimilar.length) {
-      var chips = el("div", "chips");
-      chips.style.marginTop = items.length ? "10px" : "0";
-      alsoSimilar.forEach(function (c) { chips.appendChild(comparisonNode(c)); });
-      box.appendChild(chips);
-    }
+    box.appendChild(strip);
+    var owned = items.filter(function (i) { return i.owned; }).length;
+    // Ownership is annotated only for the SHOWN games — the true total
+    // belongs to the "+N more" chip above, never to this denominator.
+    box.appendChild(el("div", "note",
+      "You own " + owned + " of the " + items.length + " most similar"));
   }
 
-  /* ---------- 8b. from the studio (pedigree) ---------- */
+  /* ---------- 8. from the studio (pedigree) ---------- */
   /* Server-fetched and library-annotated (tools/game_media.py): who made this,
      and what they shipped BEFORE it. Under the big-studio damper, or with
      nothing released earlier, only the header line renders — six arbitrary
      posters out of a 500-game catalogue say nothing about this game. Mirrors
      the detail card's implementation (apps.py) by hand, like every other block
      these two widgets share. */
+  /* "1 games" was on the live card. A count is only singular when it is
+     exactly one AND not a floor ("1+ games" stays plural). */
+  function plural(n, word, truncated) {
+    return n + (truncated ? "+" : "") + " " + word + (n === 1 && !truncated ? "" : "s");
+  }
   function pedigreeHeadline(ped) {
     var dev = ped.developer || {};
     var names = list(ped.developer_names).filter(Boolean);
@@ -1307,7 +1666,7 @@ EVAL_CARD_HTML = r"""<!doctype html>
     var founded = num(dev.founded_year);
     if (founded != null) parts.push("est. " + founded);
     var size = num(ped.catalog_size);
-    if (size) parts.push(size + (ped.catalog_truncated ? "+" : "") + " games");
+    if (size) parts.push(plural(size, "game", ped.catalog_truncated));
     return parts.join("  ·  ");
   }
   /* ONE badge per poster: his own rating outranks the critic score, which
@@ -1357,22 +1716,24 @@ EVAL_CARD_HTML = r"""<!doctype html>
       // The track record covers only the annotated (shown) games; when the
       // catalogue runs deeper, "last N" keeps the claim honest.
       var span = ped.previous_truncated
-        ? "their last " + items.length + " games"
-        : "their " + items.length + " previous games";
+        ? "their last " + plural(items.length, "game")
+        : "their " + plural(items.length, "previous game");
       box.appendChild(el("div", "note",
         "You've played " + (num(record.played_count) || 0) + " of "
         + span + (avg != null ? " — avg " + avg + "/10." : ".")));
     }
   }
 
-  /* ---------- 9. time & price ---------- */
+  /* ---------- 9. the call: time, price, flags, past verdicts ---------- */
+  /* One closing panel instead of three: three boxes holding a chip apiece was
+     the other half of the "too busy" complaint. */
   function factChip(row, label, value) {
     var chip = el("span", "chip");
     chip.appendChild(el("span", "lbl", label));
     chip.appendChild(el("span", null, value));
     row.appendChild(chip);
   }
-  function timePriceNode(parent, pkg) {
+  function factChips(pkg) {
     var time = pkg.time || {};
     var price = pkg.price || {};
     var own = pkg.ownership || {};
@@ -1403,26 +1764,24 @@ EVAL_CARD_HTML = r"""<!doctype html>
       factChip(row, "owned", "paid " + paid + how);
     }
 
-    if (!row.childNodes.length) return;
-    section(parent, "Time & price").appendChild(row);
+    return row.childNodes.length ? row : null;
   }
 
-  /* ---------- 10-12. flags, past verdicts, errors ---------- */
-  function flagsNode(parent, flags) {
-    if (!flags.length) return;
-    var box = section(parent, "Flags");
+  function flagsRow(flags) {
+    if (!flags.length) return null;
     var chips = el("div", "chips");
+    chips.style.marginTop = "10px";
     flags.forEach(function (f) { chips.appendChild(el("span", "flag", String(f))); });
-    box.appendChild(chips);
+    return chips;
   }
-  function pastNode(parent, past) {
+  function pastRow(past) {
     var items = list(past.items).slice();
-    if (!items.length) return;
+    if (!items.length) return null;
     items.sort(function (a, b) {                    // newest first
       return String(b.assessed_at || "").localeCompare(String(a.assessed_at || ""));
     });
-    var box = section(parent, "Past verdicts");
     var line = el("div", "timeline");
+    line.style.marginTop = "10px";
     items.forEach(function (p) {
       var parts = [];
       if (p.assessed_at) parts.push(String(p.assessed_at).slice(0, 10));
@@ -1439,7 +1798,20 @@ EVAL_CARD_HTML = r"""<!doctype html>
     if (past.truncated && total != null && total > items.length) {
       line.appendChild(el("span", "tl-chip", "+" + (total - items.length) + " earlier"));
     }
-    box.appendChild(line);
+    return line;
+  }
+  function closingNode(parent, pkg) {
+    var facts = factChips(pkg);
+    var flags = flagsRow(list(pkg.flags).filter(Boolean));
+    var past = pastRow(pkg.past || {});
+    if (!facts && !flags && !past) return;
+    var box = section(parent, "The call");
+    if (facts) box.appendChild(facts);
+    [flags, past].forEach(function (row) {
+      if (!row) return;
+      if (!box.querySelector(".chips, .timeline")) row.style.marginTop = "0";
+      box.appendChild(row);
+    });
   }
   function errorsNode(parent, errors) {
     if (!errors.length) return;
@@ -1450,32 +1822,25 @@ EVAL_CARD_HTML = r"""<!doctype html>
   }
 
   /* ---------- card assembly ---------- */
+  /* Read top to bottom: what it is (header + scores), what it says (pitch),
+     what it looks like (media), whether it is for HIM (for-you, anchors),
+     where it comes from (lineage, similar, studio), and the call. */
   function evalCard(pkg) {
     var wrap = el("div", "eval");
-    var media = pkg.media || {};
-    var hero = heroNode(media);
-    if (hero) wrap.appendChild(hero);
+    var game = pkg.game || {};
 
     wrap.appendChild(headerNode(pkg));
-
-    var game = pkg.game || {};
-    shotsNode(wrap, media, game.name);
-    scoresNode(wrap, pkg);
+    pitchNode(wrap, pkg);
+    mediaNode(wrap, pkg.media || {}, game.name);
     forYouNode(wrap, pkg.presentation || {});
     anchorsNode(wrap, list(pkg.anchors).filter(function (a) { return a && a.name; }));
 
     var comps = list(pkg.comparisons).filter(function (c) { return c && c.name; });
-    var similar = pkg.similar || {};
-    var foldSimilar = list(similar.items).length > 0;
-    lineageNode(wrap, pkg, comps, foldSimilar);
-    similarNode(wrap, similar, foldSimilar
-      ? comps.filter(function (c) { return c.relation === "similar"; })
-      : []);
+    lineageNode(wrap, pkg, comps);
+    similarNode(wrap, pkg.similar || {});
     pedigreeNode(wrap, pkg.pedigree);
 
-    timePriceNode(wrap, pkg);
-    flagsNode(wrap, list(pkg.flags).filter(Boolean));
-    pastNode(wrap, pkg.past || {});
+    closingNode(wrap, pkg);
     errorsNode(wrap, list(pkg.errors).filter(Boolean));
     return wrap;
   }
