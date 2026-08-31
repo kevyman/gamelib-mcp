@@ -183,18 +183,49 @@ class ContentTypeBadgeTests(unittest.TestCase):
         self.assertNotIn("innerHTML", apps.GAME_CARDS_HTML)
 
     def test_media_sections_render_from_the_detail_payload(self) -> None:
-        # The detail card grows a hero, a screenshot strip and a similar-games
-        # row when get_game_detail(media=True) supplies them. Source-presence
-        # style, like the badge tests above — there is no headless-DOM harness.
+        # The detail card grows a media panel (one viewer + one thumb strip)
+        # and a similar-games row when get_game_detail(media=True) supplies
+        # them. Source-presence style, like the badge tests above — there is no
+        # headless-DOM harness.
         for marker in (
             'var media = game.media || {};',      # detailCard reads the block
-            'heroNode(media)',
-            'shotsNode(stack, media, game.name)',
+            'mediaNode(stack, media, game.name)',
+            'section(parent, "Media")',
+            'var viewer = el("div", "hero viewer")',
+            'el("div", "strip thumbs")',
+            'btn.classList.toggle("sel", i === j)',
+            'select(0);',                         # trailer first when there is one
             'if (game.similar) similarNode(stack, game.similar)',
             'el("div", "sim-name", item.name)',
             '"You own " + owned + " of the " + items.length + " most similar"',
         ):
             self.assertIn(marker, apps.GAME_CARDS_HTML)
+
+    def test_the_dead_more_chip_is_gone_from_the_media_block(self) -> None:
+        # Ported from the evaluation card: "+N more" was unclickable, because
+        # the extra images are not in the payload. Neither the flag nor the
+        # count is read any more.
+        self.assertNotIn("media.screenshots_truncated", apps.GAME_CARDS_HTML)
+        self.assertNotIn("media.screenshot_count", apps.GAME_CARDS_HTML)
+
+    def test_fullscreen_is_attempted_but_never_faked(self) -> None:
+        # A sandboxed host iframe without allow="fullscreen" reports
+        # fullscreenEnabled false (no button at all), and a denied request
+        # removes the button rather than leaving an inert control behind.
+        self.assertIn(
+            "if (!document.fullscreenEnabled && !document.webkitFullscreenEnabled) return null;",
+            apps.GAME_CARDS_HTML,
+        )
+        self.assertIn("pending.catch(function () { btn.remove(); });", apps.GAME_CARDS_HTML)
+
+    def test_counts_are_pluralized(self) -> None:
+        # Hand-ported with the evaluation card's fix: "1 games" shipped once.
+        self.assertIn(
+            'return n + (truncated ? "+" : "") + " " + word '
+            '+ (n === 1 && !truncated ? "" : "s");',
+            apps.GAME_CARDS_HTML,
+        )
+        self.assertIn('plural(size, "game", ped.catalog_truncated)', apps.GAME_CARDS_HTML)
 
     def test_pedigree_strip_renders_from_the_detail_payload(self) -> None:
         # "From the studio": header line, optional publisher line, the poster
@@ -235,13 +266,15 @@ class ContentTypeBadgeTests(unittest.TestCase):
         # argue from popularity, so no renderer may read it.
         self.assertNotIn("hypes", apps.GAME_CARDS_HTML)
 
-    def test_hero_is_trailer_only_and_never_autoplays(self) -> None:
-        # Screenshots alone make no hero here (the card leads with the cover),
-        # and the mp4 hero fetches zero bytes until the viewer hits play.
+    def test_the_trailer_leads_the_reel_and_never_autoplays(self) -> None:
+        # The trailer is thumb one when there is one (screenshots alone still
+        # make a viewer), and the mp4 fetches zero bytes until the viewer hits
+        # play.
         self.assertIn(
-            "if (!trailer || !(trailer.url || trailer.video_id)) return null;",
+            'if (trailer.kind === "mp4" && trailer.url) return { kind: "mp4", trailer: trailer };',
             apps.GAME_CARDS_HTML,
         )
+        self.assertIn("if (trailer) entries.push(trailer);", apps.GAME_CARDS_HTML)
         self.assertIn('video.preload = "none";', apps.GAME_CARDS_HTML)
         # …and the YouTube branch loads nothing until the click either.
         self.assertIn(
@@ -249,15 +282,25 @@ class ContentTypeBadgeTests(unittest.TestCase):
             apps.GAME_CARDS_HTML,
         )
 
-    def test_screenshots_open_in_a_lightbox_over_the_detail_card(self) -> None:
-        # The overlay machinery is a stack, so enlarging a screenshot from
-        # inside a detail overlay must not close the card underneath it.
-        self.assertIn("openShot(shot, label, btn)", apps.GAME_CARDS_HTML)
-        self.assertIn('el("div", "overlay-panel shot-panel")', apps.GAME_CARDS_HTML)
+    def test_screenshots_open_a_carousel_over_the_detail_card(self) -> None:
+        # The overlay machinery is a stack, so paging screenshots from inside a
+        # detail overlay must not close the card underneath it — and only the
+        # topmost overlay answers keys, so the carousel's arrows never reach it.
         self.assertIn(
-            'if (ev.key === "Escape" && overlays[overlays.length - 1] === entry)',
-            apps.GAME_CARDS_HTML,
+            "openCarousel(shots, entry.index, gameName, btn)", apps.GAME_CARDS_HTML
         )
+        self.assertIn('el("div", "overlay-panel carousel")', apps.GAME_CARDS_HTML)
+        self.assertIn(
+            "if (overlays[overlays.length - 1] !== entry) return;", apps.GAME_CARDS_HTML
+        )
+        for marker in (
+            'navButton("car-prev", "‹"',
+            'navButton("car-next", "›"',
+            'counter.textContent = (index + 1) + " / " + shots.length;',
+            'if (ev.key === "ArrowLeft") show(index - 1);',
+            'stage.addEventListener("pointerup"',
+        ):
+            self.assertIn(marker, apps.GAME_CARDS_HTML)
 
     def test_grid_overlay_upgrade_call_requests_media(self) -> None:
         self.assertIn(

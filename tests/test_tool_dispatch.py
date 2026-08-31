@@ -567,7 +567,7 @@ class ResponseSizeGuardTests(ToolDBTestCase):
             "media": {
                 "source": "igdb",
                 "trailer": None,
-                "screenshots": [{"thumb": f"t{i}", "full": f"f{i}"} for i in range(6)],
+                "screenshots": [{"thumb": f"t{i}", "full": f"f{i}"} for i in range(8)],
                 "screenshot_count": 20,
                 "screenshots_truncated": True,
                 "short_description": "x",
@@ -620,7 +620,7 @@ class ResponseSizeGuardTests(ToolDBTestCase):
             result = await main.get_game_detail(game_id=gid, media=True)
 
         for path, cap in {
-            "media.screenshots": 6,
+            "media.screenshots": 8,
             "similar.items": 8,
             "pedigree.previous_games": 6,
         }.items():
@@ -659,7 +659,7 @@ class ResponseSizeGuardTests(ToolDBTestCase):
                 "trailer": None,
                 # Already capped by data/media.py; asserted here so a raised
                 # cap has to be raised deliberately in both places.
-                "screenshots": [{"thumb": f"t{i}", "full": f"f{i}"} for i in range(6)],
+                "screenshots": [{"thumb": f"t{i}", "full": f"f{i}"} for i in range(8)],
                 "screenshot_count": 20,
                 "screenshots_truncated": True,
                 "short_description": "x",
@@ -729,7 +729,7 @@ class ResponseSizeGuardTests(ToolDBTestCase):
             "anchors": 8,
             "comparisons": 6,
             "flags": 8,
-            "media.screenshots": 6,
+            "media.screenshots": 8,
             "similar.items": 8,
             "pedigree.previous_games": 6,
             "past.items": 5,

@@ -1,7 +1,7 @@
 ---
 name: game-quality
 description: Evaluate whether a NAMED game is good and worth John's time and money — owned or not. Triggers: "is X any good", "should I get X", "thoughts on X", "X vs Y", "is X worth playing", buy/wishlist/skip calls. NOT for picking a game for him ("what should I play", "I have 2 hours") — that's backlog-triage.
-version: "3.1.0"
+version: "3.2.0"
 ---
 
 # Game Quality Assessment
@@ -151,6 +151,7 @@ record_assessment(
     not_for_you_if=["...", ...],
     comparisons=[{"name": "...", "relation": "ancestor", "note": "...", "game_id": 123}, ...],  # ≤6
     why_care=[{"kind": "people", "text": "..."}, ...],   # ≤3; kind: people|studio|anticipation|moment
+    craft_note="...",              # ≤200 chars (3.2): the craft context the score chips can't carry
     skill="game-quality",
     skill_version="<this file's frontmatter version — read it above, don't hardcode it>",
     model="<the model id YOUR environment declares — see below>",
@@ -161,6 +162,7 @@ record_assessment(
 
 - `elevator_pitch` — your own two-sentence synthesis of what the game actually is and why it's interesting. No review-quote collage, no back-of-box copy, no spoilers.
 - `for_you_if` / `not_for_you_if` — cite his evidence by name: anchors and their status ("you put 244h into Slay the Spire", "you abandoned both survival crafters you tried"), affinity tags, session shape vs. his pace. Each entry one concrete reason; skip a side entirely rather than padding it.
+- `craft_note` (3.2) — one line of craft context the score chips can't say alone: the critic spread ("wide spread — IGN 9, GI 7"), the recurring knock, a review-bomb or early-access caveat. Skip it when the numbers speak for themselves.
 - `comparisons` — the game's lineage and substitutes, from your knowledge: `relation` is one of `ancestor` (games this one is a baby of), `descendant` (games that are babies of this one), `better_version`, `cheaper_substitute`, `similar`. Add `game_id` when the entry is a library game you've resolved; a short `note` saying why. Only claim `better_version`/`cheaper_substitute` when you'd actually defend it.
 
 - `why_care` (3.1) — up to 3 one-liners on why this game matters beyond its scores, each `{kind, text ≤160}`. `kind` picks the label the card shows: `people` (a creator connection — "Directed by the creative director of Bastion and Hades"), `studio` (the studio's story — "First release in 9 years; the team stayed at ~20 people"), `anticipation` ("Steam's most-wishlisted game of 2025"), `moment` (why now — "v1.0 just landed after a beloved two-year early access"). **Every claim must be sourceable** — from Step 0's web search or knowledge you would defend; anticipation is context, never craft evidence (the existing anti-pattern applies to this field). The server has no credits data, so people-connections exist only if you write them. Skip the field rather than pad it. Note the card already shows the studio's previous games with his ratings (the pedigree strip, server-fetched) — don't duplicate that list here; add what the strip can't say.
