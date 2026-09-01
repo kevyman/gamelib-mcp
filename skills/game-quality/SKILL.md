@@ -1,7 +1,7 @@
 ---
 name: game-quality
 description: Evaluate whether a NAMED game is good and worth John's time and money — owned or not. Triggers: "is X any good", "should I get X", "thoughts on X", "X vs Y", "is X worth playing", buy/wishlist/skip calls. NOT for picking a game for him ("what should I play", "I have 2 hours") — that's backlog-triage.
-version: "3.2.0"
+version: "3.3.0"
 ---
 
 # Game Quality Assessment
@@ -157,6 +157,8 @@ record_assessment(
     model="<the model id YOUR environment declares — see below>",
 )
 ```
+
+The per-field rules — every cap, the `comparisons`/`why_care` vocabularies, and the provenance policy — are collected in this skill's `recording.md`, which is where the server's `record_assessment` description now points instead of restating them on the wire: `get_skill(skill="game-quality", path="recording.md")`. The sections below are the same rules, expanded.
 
 **Authoring the presentation fields (3.0).** These render on the card verbatim, so write them for John, grounded in HIS data — never generic genre talk:
 

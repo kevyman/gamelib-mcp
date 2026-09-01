@@ -7,6 +7,51 @@ roadmap — items 1–4 still open, see §5). State at audit time on `main`
 (`763d903`): ruff clean, mypy clean, **2,333 tests + 357 subtests green in 54 s**,
 **86.5 % line / 81 % branch coverage** (measured with pytest-cov; not gated).
 
+## Status (updated 2026-09-01, same day)
+
+Items 1–9 of §3 were implemented on branch `claude/repo-audit-improvements-w1jwou`
+immediately after the audit:
+
+- **#1** Lockfile patched (pyjwt 2.13.0, cryptography 50.0.1, starlette 1.6.0,
+  plus idna, urllib3, aiohttp, click, requests, pydantic-settings, pygments,
+  soupsieve — twelve packages once pip-audit was iterated to clean). `pip-audit`
+  now gates `ci.yml` on every PR and runs weekly on `main` in `audit.yml`.
+- **#2** All five action references SHA-pinned; `permissions: contents: read`
+  on every workflow; the deploy job polls `/health` inside the new container
+  and rolls back to the previous commit when it never answers; base images
+  digest-pinned with Dependabot `docker`/`docker-compose` entries; the app
+  service drops all capabilities and forbids privilege escalation.
+- **#3** Every session file is written through `_write_private_json` (0600 at
+  creation and re-applied on overwrite), with a test for both cases.
+- **#4** Descriptions 77.7 KB → 53.3 KB; total `tools/list` 171.8 KB →
+  146.4 KB. `SchemaBudgetTests` caps total payload (158 KB), total
+  descriptions (57 KB), per-tool description (3.9 KB) and per-tool payload
+  (11 KB). Field-level recording rules moved to
+  `skill://game-quality/recording.md` (skill 3.3.0); ADR 0004 §6 refreshed and
+  an amendment records the decision. The 48 KB description target was not
+  reached: past ~53 KB every further cut removed a rule this audit said to
+  keep, and `query_library`'s table inventory has a hard floor
+  (`DocstringInventorySyncTests`). Output schemas untouched pending the host
+  probe.
+- **#5** `void_assessment` is its own tool with `NON_IDEMPOTENT_MUTATION_TOOL`
+  (33 tools); the readOnly caveats are stated at the two registration sites;
+  `import_purchases`' four per-source lists are capped at 200 with
+  `_count`/`_truncated`, and totals read the true counts.
+- **#6** `tests/test_mcp_wire.py` (real in-memory `Client`, lifespan patched
+  out, 18 tests), `tests/test_schema_parity.py` (fresh DDL vs the 38-step
+  chain), `tests/test_db_migration_steps.py` (29 of 39 versions have a DDL
+  snapshot; 13, 14, 15, 23, 24, 26, 27, 28, 30, 35 stay chain-only).
+- **#7** Per-provider processed/failed/last_error counters, INFO summaries
+  for all seven worker families, a thresholded WARNING, `last_run_stats()`;
+  `LOG_LEVEL` env var.
+- **#8** README (33 tools, MIT), `.env.example`, `.env.local.example`,
+  LOCAL_DOCKER links; `tests/test_docs_drift.py` guards both directions.
+- **#9** Root CLAUDE.md 43.3 KB → 18.2 KB; rationale moved verbatim into
+  thirteen `docs/patterns/*.md` files; `docs/README.md` index.
+
+Still open: #10–#15. Suite after the work: 2,380 tests + 539 subtests green;
+ruff and mypy clean.
+
 ## 1. Method
 
 How this audit was run, so the next one can repeat or improve it:
