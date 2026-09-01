@@ -80,7 +80,7 @@ its edits uncommitted, finish or redo it from the spec:
   globals in lifecycle.py; move seven test files off per-test `init_db()`
   unless the test is about init_db; give the two assertion-less tests in
   test_tool_dispatch.py (~:389, :393) real assertions.
-- *Item 10 (reshaped) — taste-profile eval.* `evals/taste-profile-eval/eval_profile.py`
+- *Item 10 (reshaped) — taste-profile eval.* **Committed as `1a9531e`.** `evals/taste-profile-eval/eval_profile.py`
   (+ README, .gitignore): K-fold over rated games on a COPY of a snapshot;
   per fold delete the fold's `ratings` rows, `recompute_tag_affinity()`, score
   held-out games with discover_games' own `_SCORING_CTES`/`_MATCH_SCORE_SQL`;
