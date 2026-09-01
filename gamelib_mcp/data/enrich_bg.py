@@ -5,6 +5,7 @@ import logging
 import sqlite3
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
+from typing import Any
 
 import httpx
 
@@ -61,6 +62,82 @@ _OPENCRITIC_SUCCESS_STATUSES = {
     "http_error",
 }
 
+# Per-provider outcome counters for one background_enrich() pass. Every batch
+# function returns "rows handled" whether the fetch worked or threw, so without
+# these a provider that broke outright (markup change, expired token) is
+# indistinguishable at INFO from one that enriched everything.
+_PROVIDERS = ("store", "hltb", "protondb", "steamspy", "opencritic", "metacritic", "igdb")
+_PROVIDER_LABELS = {
+    "store": "Store",
+    "hltb": "HLTB",
+    "protondb": "ProtonDB",
+    "steamspy": "SteamSpy",
+    "opencritic": "OpenCritic",
+    "metacritic": "Metacritic",
+    "igdb": "IGDB",
+}
+_LAST_ERROR_CAP = 200
+# Warn on a provider that is failing outright, not on the odd flaky fetch: three
+# failures in a run, or half of everything it attempted.
+_WARN_FAILURE_COUNT = 3
+_WARN_FAILURE_RATIO = 0.5
+
+
+def _empty_run_stats() -> dict[str, dict[str, Any]]:
+    return {
+        provider: {"processed": 0, "failed": 0, "last_error": None} for provider in _PROVIDERS
+    }
+
+
+_RUN_STATS: dict[str, dict[str, Any]] = _empty_run_stats()
+
+
+def _reset_run_stats() -> None:
+    global _RUN_STATS
+    _RUN_STATS = _empty_run_stats()
+
+
+def _record_processed(provider: str, count: int = 1) -> None:
+    _RUN_STATS[provider]["processed"] += count
+
+
+def _record_failure(provider: str, exc: BaseException) -> None:
+    stats = _RUN_STATS[provider]
+    stats["failed"] += 1
+    stats["last_error"] = repr(exc)[:_LAST_ERROR_CAP]
+
+
+def last_run_stats() -> dict[str, dict[str, Any]]:
+    """Per-provider processed/failed/last_error for the most recent enrichment pass.
+
+    Returns a copy, so a caller (health/status reporting) can hold or mutate the
+    result without touching what the next pass reports.
+    """
+    return {provider: dict(values) for provider, values in _RUN_STATS.items()}
+
+
+def _format_run_stats() -> str:
+    return ", ".join(
+        f"{provider} processed={values['processed']} failed={values['failed']}"
+        for provider, values in _RUN_STATS.items()
+    )
+
+
+def _log_worker_summary(provider: str, rows: int) -> None:
+    label = _PROVIDER_LABELS[provider]
+    stats = _RUN_STATS[provider]
+    failed = int(stats["failed"])
+    logger.info("%s worker complete: processed %d rows, %d failed", label, rows, failed)
+    attempted = int(stats["processed"]) + failed
+    if failed > 0 and (failed >= _WARN_FAILURE_COUNT or failed / attempted >= _WARN_FAILURE_RATIO):
+        logger.warning(
+            "%s enrichment: %d of %d items failed this run; last error: %s",
+            label,
+            failed,
+            attempted,
+            stats["last_error"],
+        )
+
 
 class _RequestStartGate:
     """Serialize request starts to avoid bursty launches while allowing overlap."""
@@ -113,6 +190,7 @@ def is_background_enrichment_paused() -> bool:
 async def background_enrich() -> None:
     """Run enrichment families concurrently until all queues go quiescent."""
     logger.info("Background enrichment started")
+    _reset_run_stats()
     token = _SUPERVISOR_PROGRESS.set(_ProgressTracker())
     try:
         jobs = [
@@ -132,7 +210,11 @@ async def background_enrich() -> None:
                 logger.error("Background enrichment family failed: %s: %s", family, result)
             elif result:
                 processed_any = True
-        logger.info("Background enrichment complete: %r", results)
+        logger.info(
+            "Background enrichment complete: %r (%s)",
+            results,
+            _format_run_stats(),
+        )
         # Tags may have changed (SteamSpy community tags, IGDB union); refresh the
         # tag_affinity table so the taste profile reflects the new vocabulary.
         if processed_any:
@@ -169,33 +251,45 @@ async def _run_until_quiescent(run_batch: Callable[[], Awaitable[int]]) -> int:
 
 
 async def _run_store_workers() -> int:
-    return await _run_until_quiescent(_run_store_batch)
+    total = await _run_until_quiescent(_run_store_batch)
+    _log_worker_summary("store", total)
+    return total
 
 
 async def _run_hltb_workers() -> int:
     total = await _run_until_quiescent(_run_hltb_batch)
-    logger.info("HLTB worker complete: processed %d rows", total)
+    _log_worker_summary("hltb", total)
     return total
 
 
 async def _run_protondb_workers() -> int:
-    return await _run_until_quiescent(_run_protondb_batch)
+    total = await _run_until_quiescent(_run_protondb_batch)
+    _log_worker_summary("protondb", total)
+    return total
 
 
 async def _run_steamspy_workers() -> int:
-    return await _run_until_quiescent(_run_steamspy_batch)
+    total = await _run_until_quiescent(_run_steamspy_batch)
+    _log_worker_summary("steamspy", total)
+    return total
 
 
 async def _run_opencritic_workers() -> int:
-    return await _run_until_quiescent(_run_opencritic_batch)
+    total = await _run_until_quiescent(_run_opencritic_batch)
+    _log_worker_summary("opencritic", total)
+    return total
 
 
 async def _run_metacritic_workers() -> int:
-    return await _run_until_quiescent(_run_metacritic_batch)
+    total = await _run_until_quiescent(_run_metacritic_batch)
+    _log_worker_summary("metacritic", total)
+    return total
 
 
 async def _run_igdb_workers() -> int:
-    return await _run_until_quiescent(_run_igdb_batch)
+    total = await _run_until_quiescent(_run_igdb_batch)
+    _log_worker_summary("igdb", total)
+    return total
 
 
 async def _run_store_batch() -> int:
@@ -215,6 +309,9 @@ async def _run_store_batch() -> int:
                     await enrich_game(row["appid"], client=client)
                 except Exception as exc:
                     logger.debug("Store enrich failed for %s: %s", row["name"], exc)
+                    _record_failure("store", exc)
+                else:
+                    _record_processed("store")
                 finally:
                     await _finalize_store_claim(row["game_platform_id"])
                 return 1
@@ -239,6 +336,9 @@ async def _run_hltb_batch() -> int:
                 await get_hltb(row["game_id"], row["name"])
             except Exception as exc:
                 logger.debug("HLTB enrich failed for %s: %s", row["name"], exc)
+                _record_failure("hltb", exc)
+            else:
+                _record_processed("hltb")
             finally:
                 await _clear_claim_or_defer("games", "hltb_claimed_at", row["game_id"])
             return 1
@@ -260,6 +360,9 @@ async def _run_protondb_batch() -> int:
             await get_protondb(row["appid"])
         except Exception as exc:
             logger.debug("ProtonDB enrich failed for %s: %s", row["name"], exc)
+            _record_failure("protondb", exc)
+        else:
+            _record_processed("protondb")
         finally:
             await _finalize_steam_claim(row["game_platform_id"], "protondb_claimed_at")
         processed += 1
@@ -279,6 +382,9 @@ async def _run_steamspy_batch() -> int:
             await enrich_steamspy(row["appid"])
         except Exception as exc:
             logger.debug("SteamSpy enrich failed for %s: %s", row["name"], exc)
+            _record_failure("steamspy", exc)
+        else:
+            _record_processed("steamspy")
         finally:
             await _finalize_steam_claim(row["game_platform_id"], "steamspy_claimed_at")
         processed += 1
@@ -301,6 +407,9 @@ async def _run_opencritic_batch() -> int:
         except Exception as exc:
             success = False
             logger.debug("OpenCritic enrich failed for %s: %s", row["name"], exc)
+            _record_failure("opencritic", exc)
+        else:
+            _record_processed("opencritic")
         finally:
             await _finalize_platform_enrichment_claim(
                 row["game_platform_id"],
@@ -327,6 +436,9 @@ async def _run_metacritic_batch() -> int:
         except Exception as exc:
             success = False
             logger.debug("Metacritic enrich failed for %s: %s", row["name"], exc)
+            _record_failure("metacritic", exc)
+        else:
+            _record_processed("metacritic")
         finally:
             await _finalize_platform_enrichment_claim(
                 row["game_platform_id"],
@@ -342,7 +454,9 @@ async def _run_metacritic_batch() -> int:
 async def _run_igdb_batch() -> int:
     total = 0
     for _ in range(_IGDB_WORKER_CONCURRENCY):
-        total += await igdb.backfill_missing_games(limit=10)
+        processed = await igdb.backfill_missing_games(limit=10)
+        _record_processed("igdb", processed)
+        total += processed
     return total
 
 
