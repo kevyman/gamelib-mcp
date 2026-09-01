@@ -52,6 +52,112 @@ immediately after the audit:
 Still open: #10–#15. Suite after the work: 2,380 tests + 539 subtests green;
 ruff and mypy clean.
 
+### Handoff (written 2026-09-01 near a session cutoff; delete when done)
+
+Branch `claude/repo-audit-improvements-w1jwou`. Items 1–9 and 14 are
+committed. The 07-06 roadmap was re-derived against current code (see
+"Disposition of the 07-06 roadmap" below) and its reshaped items are in
+progress. Resume with `uv sync --frozen`, then the gates in CLAUDE.md
+"Commands"; the full suite is ~50 s.
+
+**In flight when the session ended (four executors, disjoint files).** If a
+piece is committed, its commit message says so; if the working tree carries
+its edits uncommitted, finish or redo it from the spec:
+
+- *Item 12 — widgets.* `gamelib_mcp/apps_shared.py` holds the JS/CSS blocks
+  that apps.py and apps_eval.py duplicated (899 identical lines); both splice
+  the constants in so served HTML stays self-contained; tests assert each
+  widget's HTML contains every shared constant and a difflib drift guard fails
+  on any ≥ 20-line identical block outside apps_shared.py; the "deliberately
+  duplicated" wording in docs/patterns/mcp-surface.md and CLAUDE.md changes
+  to "shared blocks in apps_shared.py".
+- *Item 13 — hygiene.* Explicit `timeout=` on the four bare
+  `httpx.AsyncClient()` sites (enrich_bg.py, steam_store.py ×3); one shared
+  client around steam_licenses.py's retired-app probe loop; delete
+  `prewarm_hltb`, `meets_min_tier`, `is_dekudeals_configured`, opencritic
+  `is_configured`, the five `is_*_configured` vestiges kept alive only by
+  `patch(..., create=True)` in test_startup_sync.py, and the three unused lock
+  globals in lifecycle.py; move seven test files off per-test `init_db()`
+  unless the test is about init_db; give the two assertion-less tests in
+  test_tool_dispatch.py (~:389, :393) real assertions.
+- *Item 10 (reshaped) — taste-profile eval.* `evals/taste-profile-eval/eval_profile.py`
+  (+ README, .gitignore): K-fold over rated games on a COPY of a snapshot;
+  per fold delete the fold's `ratings` rows, `recompute_tag_affinity()`, score
+  held-out games with discover_games' own `_SCORING_CTES`/`_MATCH_SCORE_SQL`;
+  metrics: Spearman, precision@10 (rating ≥ 8), separation (≤ 4 vs ≥ 8), and
+  Spearman of match_score vs log1p(playtime) over unrated owned games;
+  `--baseline` neutralises affinity; `tests/test_eval_profile.py` on a
+  learnable synthetic fixture (rho > 0.3, baseline lower, input untouched);
+  docs/patterns/tag-affinity.md gets the "paste before/after metrics in any
+  scoring PR" rule.
+- *Item 11 — structural split.* tools/admin.py → `tools/detectors.py`
+  (the seven ADR-0003 detectors + helpers, ~1,300 LOC; checks.py imports from
+  it) and `tools/session_admin.py` (the `set_*_session`/`prepare_*` cluster,
+  `_save_session_cookies`, `_write_private_json`, `_token_file_path`;
+  session_ingest.py's two `getattr(admin_tools, …)` sites repoint); one
+  fan-out helper shared by `run_library_sync` and `sync_wishlist`;
+  `data/db/__init__.py` → `data/db/migrations.py` for `_MIGRATION_STEPS`, the
+  38 step functions, `_snapshot_before_migration`, `_run_migrations`,
+  `_detect_schema_state`, with `init_db`/`migrate_db` staying on the façade;
+  tests that reach migration internals import from `migrations`. Zero
+  behaviour change; 0 import cycles.
+
+**Not started — specs to dispatch after the above land (they touch files the
+split moves):**
+
+- *07-06 items 2+3+4 (reshaped) — one build.* (a) ITAD: `data/itad.py`
+  already calls `POST /games/prices/v3`; also read per game
+  `historyLow.all.{amount,currency}` and per deal `expiry` (nullable ISO) and
+  `storeLow`; extend `PriceInfo`. Migration v40 (`schema.py` `_V40_SCHEMA_DDL`
+  + `SCHEMA_VERSION=40` + step in `migrations.py`): `game_prices` +
+  `history_low REAL`, `history_low_currency TEXT`, `deal_ends_at TEXT`;
+  `game_wishlist` + `last_alerted_at TEXT`, `last_alert_key TEXT`.
+  `upsert_game_prices` writes the new columns. `get_wishlist(with_prices=True)`
+  entries gain `history_low`, `at_history_low` (price ≤ history_low, same
+  currency), `deal_ends_at`; `get_assessment_context` gains a cache-only
+  `deal` block (price, currency, cut_pct, history_low, at_history_low,
+  deal_ends_at, fetched_at) when a `game_prices` row exists — no network on
+  the read path. (b) Alerts: new `gamelib_mcp/deal_alerts.py`; enabled only
+  when `DEAL_ALERT_WEBHOOK_URL` is set; called at the end of
+  `lifecycle._run_startup_refresh` (which the periodic loop also runs) inside
+  try/except that logs and never fails the refresh; re-prices the wishlist
+  through `get_wishlist_deals` (respecting its 12 h TTL); triggers per game:
+  `below_assessed_target` newly true (uses the existing
+  `_below_assessed_target`), or `at_history_low` with `cut_pct > 0`; debounce
+  with `last_alert_key` = e.g. `"target:19.99"` / `"low:12.49"` so the same
+  event never repeats but a lower price re-alerts; POST JSON
+  `{"content": text, "text": text}` (Discord- and Slack-compatible), all
+  alerts of a run in one message chunked under 2,000 chars; stamp
+  `last_alerted_at`/`last_alert_key` only after a 2xx; tests patch the httpx
+  client at the module namespace. Document the env var in `.env.example`,
+  `.env.local.example`, README's config table, CLAUDE.md's Environment list.
+  (c) Taste report: `tools/ratings.py::get_taste_profile` gains `rate_next`
+  (top 10 unrated, owned, primary, not completed/abandoned games ranked by
+  information value: log1p(playtime) + rarity of their tags in the rated
+  sample + recency of `last_played`), each with `reasons`; model field on
+  `GetStatsResponse`; one sentence in `get_stats`' docstring. Stay inside
+  `SchemaBudgetTests` (per-tool 3,900 chars; total 57,000).
+- *Item 15 — typing.* `[tool.mypy]` add `disallow_untyped_defs = true`,
+  `disallow_incomplete_defs = true`, fix the ~27 unannotated functions; run
+  last because it touches every module.
+- *CI matrix.* `.python-version` = 3.12 (prod parity) and a `python-version:
+  ["3.11", "3.12"]` matrix in ci.yml via setup-uv's input; re-run the suite on
+  3.12 once locally.
+- *Disposition of the 07-06 roadmap* (write into
+  docs/audit/2026-07-06-architecture-review-and-roadmap.md as a "Status
+  (updated 2026-09-01)" block): item 1 reshaped into the taste-profile eval
+  (the profile now also feeds `get_assessment_context`'s fit check, and the
+  repo's eval pattern is the blind skill backtest); item 2 superseded by the
+  game-quality skill + `record_assessment` (`target_price`, verdict wishlist
+  promotion #141, `get_wishlist`'s `below_assessed_target`) — only the ITAD
+  historical-low/expiry kernel is kept, the composite `advice_score` is
+  dropped; item 3 kept, built on the existing trigger with no `alert_price`
+  column or new tool; item 4 kept as a `rate_next` section of
+  `get_stats(report="taste")`, not a new tool; item 5: restore drill scripted
+  (run it on the box and log it in deploy.md), `db/__init__.py` split done,
+  deals widget / sale-window urgency: `deal_ends_at` ships with item 2, the
+  widget stays unbuilt.
+
 ## 1. Method
 
 How this audit was run, so the next one can repeat or improve it:
