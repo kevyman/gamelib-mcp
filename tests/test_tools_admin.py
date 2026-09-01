@@ -271,6 +271,32 @@ class SetNintendoSessionValidationTests(ToolDBTestCase):
             with open(cookie_path, encoding="utf-8") as f:
                 self.assertEqual(json.load(f), {"id_token": "abc"})
 
+    async def test_cookie_file_is_readable_by_owner_only(self):
+        import os
+        import stat
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cookie_path = os.path.join(tmp, "cookies.json")
+            # A file written before the 0600 guard existed (world-readable)
+            # must be tightened on overwrite, not only on creation.
+            with open(cookie_path, "w", encoding="utf-8") as f:
+                f.write("{}")
+            os.chmod(cookie_path, 0o644)
+            with patch.dict(os.environ, {"NINTENDO_COOKIES_FILE": cookie_path}):
+                await admin.set_nintendo_session(
+                    json.dumps([{"name": "id_token", "value": "abc"}])
+                )
+            self.assertEqual(stat.S_IMODE(os.stat(cookie_path).st_mode), 0o600)
+
+            fresh_path = os.path.join(tmp, "nested", "fresh.json")
+            with patch.dict(os.environ, {"NINTENDO_COOKIES_FILE": fresh_path}):
+                await admin.set_nintendo_session(
+                    json.dumps([{"name": "id_token", "value": "abc"}])
+                )
+            self.assertEqual(stat.S_IMODE(os.stat(fresh_path).st_mode), 0o600)
+
 
 class RefreshLibraryValidationTests(ToolDBTestCase):
     class FakeContext:
