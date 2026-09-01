@@ -660,6 +660,11 @@ class ImportPurchasesResponse(FlexibleModel):
     # multi-game bundles to hand to split_bundle_acquisition (they're never
     # written by this tool); created_details names games minted from
     # unmatched single-game purchases (create_missing, default on).
+    # Four of those lists grow with the fetched history rather than with a
+    # fixed vocabulary — created_details, unmatched, skipped and
+    # bundles_needing_split — so each is CAPPED at 200 entries per source and
+    # ships <list>_count (the true total) and <list>_truncated beside it.
+    # Read the count, never len() of the list: `totals` does.
     sources: dict[str, dict[str, Any]]
     dry_run: bool
     totals: dict[str, Any]
@@ -892,13 +897,12 @@ class AssessmentContextResponse(FlexibleModel):
 
 
 class RecordAssessmentResponse(BatchEnvelope):
-    """record_assessment in any of its three modes (ADR 0004: all optional).
+    """record_assessment in either of its two modes (ADR 0004: all optional).
 
     Single mode fills the flat keys below; an ``items=`` call fills
-    BatchEnvelope's results/total/ok/errors instead; the exclusive
-    ``void_assessment_id`` mode fills voided + the deleted row's
-    assessment_id/game_id/name/verdict/assessed_at (and nothing else except a
-    delete_game suggested_action).
+    BatchEnvelope's results/total/ok/errors instead. Voiding a misfiled row is
+    its own tool (see VoidAssessmentResponse) — a hard delete is not
+    idempotent, and this write is.
     """
 
     game_id: int | None = None
@@ -910,16 +914,13 @@ class RecordAssessmentResponse(BatchEnvelope):
     assessment_id: int | None = None
     assessed_at: str | None = None
     verdict: str | None = None
-    # Recording modes only: how identity resolved (mode/query/matched_name).
+    # How identity resolved (mode/query/matched_name); single mode only.
     resolution: AssessmentResolution | None = None
-    # void mode only: the row was hard-deleted.
-    voided: bool | None = None
     # Only when this game was assessed on an EARLIER day:
     # {previous_count, last_assessed_at, last_verdict}.
     repeat_ask: dict[str, Any] | None = None
-    # Recording: the add_game_to_platform promotion to offer for a
-    # wishlist_for_sale verdict on an unwishlisted game. Voiding: the
-    # delete_game preview for a row the void left bare. Never performed.
+    # The add_game_to_platform promotion to offer for a wishlist_for_sale
+    # verdict on an unwishlisted game. Reported, never performed.
     suggested_action: dict[str, Any] | None = None
     # Single recording mode only: the evaluation-card payload assembled after
     # the write — game/verdict/summary, the declared presentation, comparisons
@@ -930,6 +931,23 @@ class RecordAssessmentResponse(BatchEnvelope):
     # the other display blocks here) because it is a render payload read whole
     # by the widget, not a queried structure; batch and void modes omit it.
     package: dict[str, Any] | None = None
+
+
+class VoidAssessmentResponse(FlexibleModel):
+    """void_assessment: the recorded row that was hard-deleted.
+
+    Every key is always present except suggested_action, which appears only
+    when the void left the game row with no ownership, wishlist entry or
+    assessment behind — a delete_game preview, reported and never performed.
+    """
+
+    voided: bool
+    assessment_id: int
+    game_id: int
+    name: str
+    verdict: str
+    assessed_at: str
+    suggested_action: dict[str, Any] | None = None
 
 
 class PlayHistoryWindow(FlexibleModel):

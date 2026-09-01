@@ -1492,21 +1492,7 @@ async def _live_ownership_state(game_id: int) -> tuple[bool, bool]:
     return owned_row is not None, wishlisted_row is not None
 
 
-# Everything record_assessment accepts BESIDES void_assessment_id — the void
-# mode is exclusive, and naming the conflict beats a half-applied write.
-_VOID_EXCLUSIVE_PARAMS = (
-    "name",
-    "appid",
-    "game_id",
-    "verdict",
-    "assessed_at",
-    *_ASSESSMENT_COMPONENT_COLUMNS,
-    *_ASSESSMENT_PROVENANCE_COLUMNS,
-    *_PRESENTATION_PARAMS,
-)
-
-
-async def _void_assessment(assessment_id: int) -> dict[str, Any]:
+async def void_assessment(assessment_id: int) -> dict[str, Any]:
     """Hard-delete one misfiled assessment row.
 
     A HARD delete on an otherwise append-only table, on purpose: a verdict
@@ -1960,7 +1946,6 @@ async def record_assessment(
     comparisons: list | None = None,
     why_care: list | None = None,
     craft_note: str | None = None,
-    void_assessment_id: int | None = None,
     *,
     with_package: bool = True,
 ) -> dict:
@@ -1987,9 +1972,8 @@ async def record_assessment(
     the server fetches the studio and its back catalogue, the model writes the
     credits and the moment no API holds.
 
-    ``void_assessment_id`` is an exclusive third mode: it hard-deletes one
-    recorded row (the repair for a misfile noticed after that same-day
-    window), and every other parameter must be absent.
+    A misfiled verdict is repaired with ``void_assessment``, a tool of its
+    own — hard-deleting a row is not idempotent, and this one is.
 
     A single-item recording additionally answers with ``package``: the card
     payload (media, comparisons and anchors resolved against the library, price
@@ -2001,57 +1985,6 @@ async def record_assessment(
     wishlist_for_sale verdict on an unwishlisted game answers with a
     suggested_action naming add_game_to_platform, and stops there.
     """
-    if void_assessment_id is not None:
-        # Validated before anything else: a void that also carried a verdict
-        # would be two operations in one call, and the caller means one.
-        conflicts = [
-            label
-            for label, value in zip(
-                _VOID_EXCLUSIVE_PARAMS,
-                (
-                    name,
-                    appid,
-                    game_id,
-                    verdict,
-                    assessed_at,
-                    summary,
-                    craft_adjusted,
-                    craft_positive_pct,
-                    review_count,
-                    recent_trajectory,
-                    opencritic_score,
-                    fit_call,
-                    anchors_cited,
-                    flags,
-                    price_seen,
-                    price_currency,
-                    price_platform,
-                    target_price,
-                    instead_game_id,
-                    steam_appid,
-                    context,
-                    skill,
-                    skill_version,
-                    model,
-                    elevator_pitch,
-                    for_you_if,
-                    not_for_you_if,
-                    comparisons,
-                    why_care,
-                    craft_note,
-                ),
-                strict=True,
-            )
-            if value is not None
-        ]
-        if conflicts:
-            raise ToolError(
-                f"void_assessment_id is exclusive — it deletes one recorded "
-                f"assessment and records nothing; drop {conflicts} (or drop "
-                "void_assessment_id to record a verdict)"
-            )
-        return await _void_assessment(void_assessment_id)
-
     values = await _validate_assessment_inputs(
         name=name,
         appid=appid,
@@ -2284,7 +2217,7 @@ async def get_assessments_report(
     return {
         "assessments": [
             {
-                # assessment_id is what record_assessment(void_assessment_id=…)
+                # assessment_id is what void_assessment(assessment_id=…)
                 # takes — this report and the per-game summary blocks are the
                 # advertised ways to recover it for a historical misfile.
                 "assessment_id": row["assessment_id"],

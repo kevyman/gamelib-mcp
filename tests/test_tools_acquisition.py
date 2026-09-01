@@ -1893,3 +1893,69 @@ class BundleBreakdownCapTests(ToolDBTestCase):
         stats = await acquisition.get_spending_stats()
         self.assertEqual(stats["by_bundle_count"], 1)
         self.assertFalse(stats["by_bundle_truncated"])
+
+
+class ImportPurchaseListCapTests(ToolDBTestCase):
+    """The four per-source lists that grow with the fetched purchase history.
+
+    A first import of a decade of receipts produces hundreds of unmatched
+    entries; before the cap they were the whole response. Bounded-response
+    contract: cap + true count + truncation flag, with the scalar counters and
+    `totals` still reporting the true numbers.
+    """
+
+    def _records(self, count: int) -> list[PurchaseRecord]:
+        return [
+            PurchaseRecord(
+                title=f"Never Owned Title {i}",
+                platform="steam",
+                purchase_source="steam",
+                acquired_at="2024-01-01",
+                price_paid=9.99,
+                price_currency="USD",
+            )
+            for i in range(count)
+        ]
+
+    async def test_unmatched_is_capped_with_a_true_count_and_flag(self):
+        cap = acquisition._IMPORT_LIST_CAP
+        steam = AsyncMock(return_value=(self._records(cap + 11), []))
+        with _patch_fetchers(fetch_steam_purchases=steam):
+            result = await acquisition.import_purchases(
+                sources=["steam"], create_missing=False
+            )
+
+        src = result["sources"]["steam"]
+        self.assertEqual(len(src["unmatched"]), cap)
+        self.assertEqual(src["unmatched_count"], cap + 11)
+        self.assertTrue(src["unmatched_truncated"])
+        # The aggregate reads the count, not len() of the capped page.
+        self.assertEqual(result["totals"]["unmatched"], cap + 11)
+
+    async def test_skipped_is_capped_with_a_true_count_and_flag(self):
+        cap = acquisition._IMPORT_LIST_CAP
+        skipped = [{"title": f"Refund {i}", "reason": "refund"} for i in range(cap + 3)]
+        steam = AsyncMock(return_value=([], skipped))
+        with _patch_fetchers(fetch_steam_purchases=steam):
+            result = await acquisition.import_purchases(sources=["steam"])
+
+        src = result["sources"]["steam"]
+        self.assertEqual(len(src["skipped"]), cap)
+        self.assertEqual(src["skipped_count"], cap + 3)
+        self.assertTrue(src["skipped_truncated"])
+
+    async def test_short_lists_report_their_true_length_and_no_truncation(self):
+        steam = AsyncMock(return_value=(self._records(3), []))
+        with _patch_fetchers(fetch_steam_purchases=steam):
+            result = await acquisition.import_purchases(
+                sources=["steam"], create_missing=False
+            )
+
+        src = result["sources"]["steam"]
+        self.assertEqual(len(src["unmatched"]), 3)
+        self.assertEqual(src["unmatched_count"], 3)
+        self.assertFalse(src["unmatched_truncated"])
+        self.assertEqual(src["skipped_count"], 0)
+        self.assertFalse(src["skipped_truncated"])
+        self.assertEqual(src["created_details_count"], 0)
+        self.assertEqual(src["bundles_needing_split_count"], 0)

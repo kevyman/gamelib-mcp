@@ -1509,6 +1509,21 @@ async def _apply_bundle_game(
 
 # How many proposed items a dry_run echoes back per source before truncating.
 _DRY_RUN_ECHO_CAP = 200
+# The bounded-response cap for the per-source lists that grow with the size of
+# the fetched purchase history rather than with a fixed vocabulary. Same value
+# as the dry_run echo above, and same contract as `overlap_games` elsewhere:
+# each capped list ships a `<list>_count` true total and a `<list>_truncated`
+# flag beside it, and the aggregate `totals` are computed from the counts, so
+# truncation never changes a number.
+_IMPORT_LIST_CAP = 200
+# Lists capped in every per-source result. Their counters (applied, filled,
+# created, …) are scalars and are never truncated.
+_CAPPED_SOURCE_LISTS = (
+    "created_details",
+    "unmatched",
+    "skipped",
+    "bundles_needing_split",
+)
 
 
 def _resolve_purchase_fetchers(sources: list[str]) -> dict:
@@ -1875,6 +1890,26 @@ async def _import_one_source(
         # including the parent a nested mint would link — the review step that
         # catches a bad mint before it needs a manual delete_game.
         result["would_create"] = created_details[:_DRY_RUN_ECHO_CAP]
+    return _cap_source_lists(result)
+
+
+def _cap_source_lists(result: dict) -> dict:
+    """Apply the bounded-response contract to one source's growing lists.
+
+    Each of ``_CAPPED_SOURCE_LISTS`` keeps at most ``_IMPORT_LIST_CAP``
+    entries and gains ``<list>_count`` (the true total, computed BEFORE the
+    slice) and ``<list>_truncated``. Callers that need a number — the tool's
+    aggregate ``totals`` above all — must read the count, never ``len()`` of
+    the capped list: a 900-entry unmatched list is exactly the shape a first
+    import of a decade of receipts produces, and it was the whole response.
+    """
+    for key in _CAPPED_SOURCE_LISTS:
+        entries = result.get(key)
+        if entries is None:
+            continue
+        result[f"{key}_count"] = len(entries)
+        result[f"{key}_truncated"] = len(entries) > _IMPORT_LIST_CAP
+        result[key] = entries[:_IMPORT_LIST_CAP]
     return result
 
 
@@ -1919,6 +1954,12 @@ async def import_purchases(
     are deduplicated per (name, date, price, source): the surviving entry lists
     every platform under `platforms`, and already_recorded is true once ANY
     platform's split has been written.
+
+    Each source's created_details, unmatched, skipped and bundles_needing_split
+    lists are capped at ``_IMPORT_LIST_CAP`` entries with a ``<list>_count``
+    true total and a ``<list>_truncated`` flag beside each; the scalar counters
+    and the aggregate ``totals`` are computed from the counts and are never
+    truncated.
     """
     if sources is None:
         selected = sorted(PURCHASE_IMPORTERS)
@@ -1965,13 +2006,13 @@ async def import_purchases(
         "filled": _total("filled"),
         "no_change": _total("no_change"),
         "created": _total("created"),
-        "unmatched": sum(len(r.get("unmatched", [])) for r in results.values()),
+        # From the `_count` keys, not len() of the capped lists — a truncated
+        # source must still contribute its true total here.
+        "unmatched": _total("unmatched_count"),
         "unmatched_free": sum(
             len(r.get("unmatched_free", [])) for r in results.values()
         ),
-        "bundles_needing_split": sum(
-            len(r.get("bundles_needing_split", [])) for r in results.values()
-        ),
+        "bundles_needing_split": _total("bundles_needing_split_count"),
         # Per-item validation errors plus whole-source fetch failures.
         "errors": _total("errors")
         + sum(1 for r in results.values() if r["status"] == "error"),
