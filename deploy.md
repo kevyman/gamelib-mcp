@@ -169,11 +169,42 @@ cd ~/mcps && git pull && docker compose --profile prod up -d --build
 triggered manually from the Actions tab via *Run workflow*):
 
 1. **Test** — `uv sync --frozen` then the full `pytest` suite. This gates the
-   deploy: if tests fail, nothing ships.
+   deploy: if tests fail, nothing ships. (`ci.yml` runs the same suite plus
+   ruff, mypy, and a `pip-audit` of the locked dependencies on every pull
+   request, and `audit.yml` re-runs the audit weekly on `main` so an advisory
+   published against an unchanged lockfile is still caught.)
 2. **Deploy** — SSHes into the Hetzner box and runs the equivalent of the
    manual redeploy: `git fetch` → `git reset --hard origin/main` →
-   `docker compose --profile prod up -d --build` → `docker image prune -f`
-   (the prune keeps the small VM's disk from filling with stale layers).
+   `docker compose --profile prod up -d --build`.
+3. **Gate** — polls `/health` from inside the new `app` container for up to
+   two minutes. A container that never answers HTTP 200 (a startup exception,
+   a bad `.env`, a failed migration) fails the run, prints the last 100 log
+   lines, and **rolls back**: `git reset --hard <previous commit>` and a
+   rebuild of that commit, so `main` stays deployable without a laptop. Only a
+   healthy deploy runs `docker image prune -f` (the prune keeps the small VM's
+   disk from filling with stale layers).
+
+Every third-party action in the workflows is pinned to a full commit SHA with
+the release tag in a trailing comment; Dependabot's `github-actions` entry
+moves the pins forward. Do not "simplify" a pin back to a bare tag: the deploy
+job holds the production SSH key, and a retagged action would run someone
+else's code with it.
+
+#### Manual rollback
+
+If a deploy passes the gate but misbehaves afterwards, or the automatic
+rollback itself needs repeating:
+
+```bash
+cd ~/mcps
+git log --oneline -5                # pick the commit to return to
+git reset --hard <commit>
+docker compose --profile prod up -d --build
+curl -fsS https://gamelibmcp.johnwilkos.com/health
+```
+
+The next push to `main` deploys `origin/main` again, so a rollback is a
+stopgap; fix forward on `main` afterwards.
 
 #### Required GitHub secrets
 

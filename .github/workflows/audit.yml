@@ -1,0 +1,29 @@
+name: Dependency audit
+
+# ci.yml audits the lockfile on every PR; this re-runs the same check on main
+# once a week so an advisory published against an UNCHANGED lockfile is still
+# noticed. Mondays before Dependabot's own Monday run, so a failure here and a
+# bump PR usually land together.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: pip-audit uv.lock
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+
+      - name: Audit locked dependencies for known vulnerabilities
+        run: |
+          uv export --frozen --no-dev --no-emit-project --format requirements-txt --no-hashes -o requirements-audit.txt > /dev/null
+          uvx pip-audit==2.10.1 -r requirements-audit.txt --no-deps --strict --progress-spinner off
