@@ -397,6 +397,34 @@ Two layers of protection:
    admin goes through `ssh kevlarrelic@closet`, and Windows-side changes via
    WSL interop (`/mnt/c/...`, `powershell.exe`, `schtasks.exe`).
 
+4. **Restore drill (scripted 2026-09-01)** — a backup that has never been
+   restored is not a backup. `scripts/restore_drill.py` copies a backup file
+   into a scratch directory, integrity-checks it, runs the app's own startup
+   migration against the copy (so an older backup is proven to migrate
+   forward), and reports row counts for the irreplaceable tables. It never
+   opens the live database. On the server, from the repo clone (`scripts/` is
+   not copied into the image, so mount it):
+
+```bash
+cd ~/mcps
+docker compose run --rm --no-deps -v "$PWD/scripts:/app/scripts:ro" app \
+  python /app/scripts/restore_drill.py /data/gamelib-nightly.bak
+```
+
+   On the off-machine copy (WSL on CLOSET, from a clone with `uv sync`):
+
+```bash
+uv run python scripts/restore_drill.py /mnt/c/Users/porta/Backups/gamelib/<newest>.bak
+```
+
+   Exit status 0 and `restore drill: PASS` is the whole point; a FAIL names
+   the check. Run it after any migration lands and at least quarterly, and log
+   it here so the next audit can see the backups actually restore:
+
+   | Date | Backup | Result |
+   | --- | --- | --- |
+   | *(not yet run on the box)* | | |
+
    To redo the setup from scratch (PowerShell on the Windows machine):
 
 ```powershell
