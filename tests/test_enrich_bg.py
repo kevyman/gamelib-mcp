@@ -2,6 +2,7 @@ import asyncio
 import sqlite3
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -591,3 +592,191 @@ class BackgroundEnrichmentSupervisorTests(unittest.IsolatedAsyncioTestCase):
         sql = db_mock.execute.await_args.args[0]
         self.assertIn("SET steamspy_claimed_at = NULL", sql)
         self.assertNotIn("steamspy_cached_at = 'FAILED'", sql)
+
+
+class EnrichmentRunStatsTests(unittest.IsolatedAsyncioTestCase):
+    """Per-provider processed/failed accounting.
+
+    Every batch function returns "rows handled" whether the fetch succeeded or
+    threw, so the worker summary alone cannot tell a healthy provider from one
+    that broke outright. These tests pin the counters and the WARNING that makes
+    a dead provider visible at production's INFO level.
+    """
+
+    def setUp(self) -> None:
+        enrich_bg._reset_run_stats()
+
+    def tearDown(self) -> None:
+        enrich_bg._reset_run_stats()
+
+    def _enter_hltb_patches(self, stack: ExitStack, rows, fetch) -> None:
+        # _run_until_quiescent polls until three consecutive empty batches, so
+        # the loaders keep answering after the one real batch.
+        empties = [[] for _ in range(6)]
+        for patcher in (
+            patch(
+                "gamelib_mcp.data.enrich_bg.claim_game_ids_for_hltb",
+                AsyncMock(side_effect=[[row["game_id"] for row in rows], *empties]),
+            ),
+            patch(
+                "gamelib_mcp.data.enrich_bg.load_hltb_batch_rows",
+                AsyncMock(side_effect=[rows, *empties]),
+            ),
+            patch("gamelib_mcp.data.enrich_bg.get_hltb", fetch),
+            patch("gamelib_mcp.data.enrich_bg.clear_claim", AsyncMock()),
+            patch("gamelib_mcp.data.enrich_bg.asyncio.sleep", AsyncMock()),
+        ):
+            stack.enter_context(patcher)
+
+    def _enter_protondb_patches(self, stack: ExitStack, rows, fetch) -> None:
+        empties = [[] for _ in range(6)]
+        for patcher in (
+            patch(
+                "gamelib_mcp.data.enrich_bg.claim_steam_platform_ids_for_protondb",
+                AsyncMock(side_effect=[[row["game_platform_id"] for row in rows], *empties]),
+            ),
+            patch(
+                "gamelib_mcp.data.enrich_bg.load_steam_platform_batch_rows",
+                AsyncMock(side_effect=[rows, *empties]),
+            ),
+            patch("gamelib_mcp.data.enrich_bg.get_protondb", fetch),
+            patch("gamelib_mcp.data.enrich_bg._finalize_steam_claim", AsyncMock()),
+            patch("gamelib_mcp.data.enrich_bg.asyncio.sleep", AsyncMock()),
+        ):
+            stack.enter_context(patcher)
+
+    async def test_hltb_worker_counts_failures_and_warns(self) -> None:
+        rows = [{"game_id": n, "name": f"Game {n}"} for n in (1, 2, 3)]
+        fetch = AsyncMock(side_effect=RuntimeError("hltb markup changed"))
+
+        with ExitStack() as stack:
+            self._enter_hltb_patches(stack, rows, fetch)
+            with self.assertLogs("gamelib_mcp.data.enrich_bg", level="WARNING") as logs:
+                total = await enrich_bg._run_hltb_workers()
+
+        stats = enrich_bg.last_run_stats()["hltb"]
+        self.assertEqual(total, 3)
+        self.assertEqual(stats["failed"], 3)
+        self.assertEqual(stats["processed"], 0)
+        self.assertIn("hltb markup changed", stats["last_error"])
+        self.assertTrue(
+            any(
+                "HLTB enrichment: 3 of 3 items failed this run" in line
+                and "hltb markup changed" in line
+                for line in logs.output
+            ),
+            logs.output,
+        )
+
+    async def test_protondb_worker_counts_failures_and_warns(self) -> None:
+        rows = [
+            {"game_platform_id": 10 + n, "appid": 100 + n, "name": f"Game {n}"} for n in (1, 2, 3)
+        ]
+        fetch = AsyncMock(side_effect=RuntimeError("protondb 502"))
+
+        with ExitStack() as stack:
+            self._enter_protondb_patches(stack, rows, fetch)
+            with self.assertLogs("gamelib_mcp.data.enrich_bg", level="WARNING") as logs:
+                total = await enrich_bg._run_protondb_workers()
+
+        stats = enrich_bg.last_run_stats()["protondb"]
+        self.assertEqual(total, 3)
+        self.assertEqual(stats["failed"], 3)
+        self.assertEqual(stats["processed"], 0)
+        self.assertIn("protondb 502", stats["last_error"])
+        self.assertTrue(
+            any(
+                "ProtonDB enrichment: 3 of 3 items failed this run" in line
+                and "protondb 502" in line
+                for line in logs.output
+            ),
+            logs.output,
+        )
+
+    async def test_hltb_worker_stays_quiet_when_every_fetch_succeeds(self) -> None:
+        rows = [{"game_id": n, "name": f"Game {n}"} for n in (1, 2, 3)]
+
+        with ExitStack() as stack:
+            self._enter_hltb_patches(stack, rows, AsyncMock(return_value=None))
+            with self.assertNoLogs("gamelib_mcp.data.enrich_bg", level="WARNING"):
+                total = await enrich_bg._run_hltb_workers()
+
+        stats = enrich_bg.last_run_stats()["hltb"]
+        self.assertEqual(total, 3)
+        self.assertEqual(stats["processed"], 3)
+        self.assertEqual(stats["failed"], 0)
+        self.assertIsNone(stats["last_error"])
+
+    async def test_protondb_worker_stays_quiet_when_every_fetch_succeeds(self) -> None:
+        rows = [
+            {"game_platform_id": 10 + n, "appid": 100 + n, "name": f"Game {n}"} for n in (1, 2, 3)
+        ]
+
+        with ExitStack() as stack:
+            self._enter_protondb_patches(stack, rows, AsyncMock(return_value=None))
+            with self.assertNoLogs("gamelib_mcp.data.enrich_bg", level="WARNING"):
+                total = await enrich_bg._run_protondb_workers()
+
+        stats = enrich_bg.last_run_stats()["protondb"]
+        self.assertEqual(total, 3)
+        self.assertEqual(stats["processed"], 3)
+        self.assertEqual(stats["failed"], 0)
+
+    async def test_single_failure_in_a_healthy_batch_does_not_warn(self) -> None:
+        # One flaky fetch out of four is neither 3 failures nor half the batch,
+        # which is the point of the threshold: the WARNING has to mean "this
+        # provider is broken", not "one request timed out".
+        rows = [{"game_id": n, "name": f"Game {n}"} for n in (1, 2, 3, 4)]
+
+        async def fetch(game_id: int, _name: str) -> None:
+            if game_id == 2:
+                raise RuntimeError("one flaky fetch")
+
+        with ExitStack() as stack:
+            self._enter_hltb_patches(stack, rows, AsyncMock(side_effect=fetch))
+            with self.assertNoLogs("gamelib_mcp.data.enrich_bg", level="WARNING"):
+                total = await enrich_bg._run_hltb_workers()
+
+        stats = enrich_bg.last_run_stats()["hltb"]
+        self.assertEqual(total, 4)
+        self.assertEqual(stats["processed"], 3)
+        self.assertEqual(stats["failed"], 1)
+
+    async def test_last_run_stats_returns_a_copy(self) -> None:
+        enrich_bg._record_failure("steamspy", RuntimeError("boom"))
+
+        snapshot = enrich_bg.last_run_stats()
+        snapshot["steamspy"]["failed"] = 999
+        snapshot["steamspy"]["last_error"] = "mutated"
+        snapshot.pop("hltb")
+
+        fresh = enrich_bg.last_run_stats()
+        self.assertEqual(fresh["steamspy"]["failed"], 1)
+        self.assertIn("boom", fresh["steamspy"]["last_error"])
+        self.assertIn("hltb", fresh)
+
+    async def test_background_enrich_resets_stats_and_logs_summary(self) -> None:
+        enrich_bg._record_failure("hltb", RuntimeError("stale failure from a previous run"))
+
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch("gamelib_mcp.data.enrich_bg._run_store_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_igdb_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_hltb_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_protondb_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_steamspy_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_opencritic_workers", AsyncMock(return_value=0)),
+            patch("gamelib_mcp.data.enrich_bg._run_metacritic_workers", AsyncMock(return_value=0)),
+            self.assertLogs("gamelib_mcp.data.enrich_bg", level="INFO") as logs,
+        ):
+            await enrich_bg.background_enrich()
+
+        self.assertEqual(enrich_bg.last_run_stats()["hltb"]["failed"], 0)
+        self.assertIsNone(enrich_bg.last_run_stats()["hltb"]["last_error"])
+        self.assertTrue(
+            any(
+                "Background enrichment complete" in line and "hltb processed=0 failed=0" in line
+                for line in logs.output
+            ),
+            logs.output,
+        )
