@@ -67,9 +67,25 @@ from .tools.models import (
     SyncResponse,
     SyncStatusResponse,
     UpdateGameResponse,
+    VoidAssessmentResponse,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+def _log_level_from_env() -> int:
+    """Root log level from ``LOG_LEVEL`` (DEBUG/INFO/WARNING/ERROR; default INFO).
+
+    The per-item enrichment failures in data/enrich_bg.py log at DEBUG; this is
+    the knob that surfaces them in production without a code change. An
+    unrecognised value falls back to INFO rather than failing startup.
+    """
+    name = (os.getenv("LOG_LEVEL") or "INFO").strip().upper()
+    level = logging.getLevelName(name)
+    return level if isinstance(level, int) else logging.INFO
+
+
+logging.basicConfig(
+    level=_log_level_from_env(), format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 security_config = load_security_config()
@@ -278,6 +294,10 @@ async def get_library_stats(
     )
 
 
+# readOnlyHint stays True deliberately: single mode triggers lazy provider
+# enrichment and caches it, but that write is an idempotent server-side cache
+# of derived data, never user state. "Does not modify its environment"
+# (spec 2025-11-25) is read here as user-visible state, not cache warmth.
 @mcp.tool(title="Game Detail", annotations=READ_ONLY_TOOL, app=GAME_CARDS_APP)
 async def get_game_detail(
     name: str | None = None,
@@ -490,7 +510,7 @@ async def get_stats(
 
     report="assessments" (limit, offset, verdict) — browse recorded verdicts
     (see record_assessment), newest first: assessment_id (what
-    record_assessment's void_assessment_id repair mode takes), game_id, name,
+    void_assessment takes), game_id, name,
     assessed_at, verdict, summary, price_seen/price_currency, target_price,
     the declared methodology (skill, skill_version, model — null when the
     recorder didn't state one), plus current owned/wishlisted state. verdict
@@ -1020,6 +1040,10 @@ async def split_game(
     return await _split(source_game_id, platform, identifier_values, new_name, dry_run)
 
 
+# readOnlyHint stays True deliberately: with_prices=True persists fetched
+# prices via upsert_game_prices, but game_prices is an idempotent server-side
+# cache overwritten in place, never user state — the same reading of the
+# spec's "does not modify its environment" as get_game_detail above.
 @mcp.tool(title="Wishlist & Deals", annotations=DIAGNOSTIC_NETWORK_TOOL)
 async def get_wishlist(
     platform: str | None = None,
@@ -1060,9 +1084,9 @@ async def get_wishlist(
     remembered and not re-searched for 3 days, and
     switch2_availability_unknown wishlist games with no IGDB platform list, so
     a Switch release can neither be confirmed nor ruled out — fix those by
-    letting IGDB enrichment run, not by refreshing prices). Cached 12h;
-    refresh=True forces a live price fetch (it does not re-search known
-    misses).
+    letting IGDB enrichment run, not by refreshing prices). Fetched prices are
+    cached server-side for 12h; refresh=True forces a live price fetch (it
+    does not re-search known misses).
     Each deal's flat fields are the RECOMMENDED purchase (preferred platform
     unless another platform's price is below preference_override_ratio × the
     preferred price — "the deal is too good"); other platforms appear in
@@ -1201,7 +1225,7 @@ async def get_assessment_context(
       the game you meant.
     - past_assessments: present only when identity resolved AND this game
       was assessed before (record_assessment) — up to 5 newest verdicts
-      with assessment_id (usable as void_assessment_id), date, summary,
+      with assessment_id (what void_assessment takes), date, summary,
       fit_call, craft_adjusted, price seen and target price, the declared
       methodology (skill/skill_version/model, null when unstated), plus
       past_assessment_count (true total) and
@@ -1259,7 +1283,6 @@ async def record_assessment(
     comparisons: list[dict] | None = None,
     why_care: list[dict] | None = None,
     craft_note: str | None = None,
-    void_assessment_id: int | None = None,
     items: list[dict] | None = None,
 ) -> RecordAssessmentResponse:
     """
@@ -1289,16 +1312,7 @@ async def record_assessment(
     written to. Whenever mode is not "by_id", check matched_name IS the
     candidate; if it is not, void the row (below) and re-record with game_id.
 
-    void_assessment_id is an exclusive repair mode — pass it alone (no
-    verdict, no identity, no items) to HARD-DELETE one recorded assessment by
-    id: the fix for a verdict filed onto the wrong game and noticed after the
-    same-UTC-day replace window. The id comes from this tool's response
-    (assessment_id), from get_game_detail's / get_assessment_context's
-    per-game assessment blocks, or from get_stats(report="assessments") —
-    all three carry assessment_id. It answers with voided=true plus the
-    deleted row's game/verdict/date, and a delete_game suggested_action when
-    voiding left a minted row with no ownership, wishlist entry or assessment
-    behind.
+    To delete a misfiled verdict, use void_assessment(assessment_id=...).
 
     verdict (required) is the Step 4 line: "buy_now", "wishlist_for_sale",
     "try_demo", "skip", or "play_what_you_own". Everything else is optional
@@ -1384,12 +1398,6 @@ async def record_assessment(
     from .tools.assessment import record_assessment as _record
     from .tools.assessment import record_assessments_batch as _many
     if items is not None:
-        if void_assessment_id is not None:
-            raise ToolError(
-                "void_assessment_id is exclusive — it deletes one recorded "
-                "assessment and records nothing; drop ['items'] (or drop "
-                "void_assessment_id to record verdicts)"
-            )
         return await _many(items)
     return await _record(
         name,
@@ -1422,8 +1430,33 @@ async def record_assessment(
         comparisons,
         why_care,
         craft_note,
-        void_assessment_id,
     )
+
+
+@mcp.tool(title="Void Assessment", annotations=NON_IDEMPOTENT_MUTATION_TOOL)
+async def void_assessment(assessment_id: int) -> VoidAssessmentResponse:
+    """
+    Hard-delete one recorded assessment (record_assessment) by id.
+
+    The repair for a verdict filed onto the wrong game and noticed after the
+    same-UTC-day replace window; within that day just re-record instead, which
+    overwrites the day's row. Deleting rather than tombstoning is deliberate:
+    a verdict about the wrong game was never an observation of it.
+
+    assessment_id comes from record_assessment's response, from
+    get_game_detail's or get_assessment_context's per-game assessment blocks,
+    or from get_stats(report="assessments").
+
+    Answers with voided=true plus the deleted row's game_id, name, verdict and
+    assessed_at — and a delete_game suggested_action when the void left a
+    minted row with no ownership, wishlist entry or assessment behind.
+
+    Repeating the call errors ("not found"): the row is gone. That is why this
+    is a tool of its own rather than a mode of record_assessment, which is
+    idempotent.
+    """
+    from .tools.assessment import void_assessment as _void
+    return await _void(assessment_id)
 
 
 @mcp.tool(title="Gaming Skill Methodology", annotations=READ_ONLY_TOOL)
@@ -2131,7 +2164,10 @@ async def import_purchases(
     "error", nothing written for it) never blocks the others. Each ok source
     reports fetched/applied/filled/no_change/created/created_details/unmatched/
     no_platform_row/bundles_needing_split/errors plus the rows it skipped, and
-    totals aggregates across sources.
+    totals aggregates across sources. created_details, unmatched, skipped and
+    bundles_needing_split are each CAPPED at 200 entries per source, with
+    <list>_count giving the true total and <list>_truncated the flag; the
+    counters and totals always report the true numbers.
     """
     from .tools.acquisition import import_purchases as _import_purchases
     return await _import_purchases(

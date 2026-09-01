@@ -132,9 +132,13 @@ EXPECTED_TOOLS = {
             "price_platform", "target_price", "instead_game_id", "steam_appid",
             "context", "skill", "skill_version", "model",
             "elevator_pitch", "for_you_if", "not_for_you_if", "comparisons",
-            "why_care", "craft_note", "void_assessment_id", "items",
+            "why_care", "craft_note", "items",
         },
         "required": set(),
+    },
+    "void_assessment": {
+        "params": {"assessment_id"},
+        "required": {"assessment_id"},
     },
     "merge_games": {
         "params": {"source_game_id", "target_game_id", "items", "dry_run"},
@@ -214,6 +218,13 @@ EXPECTED_ANNOTATIONS = {
     # A same-day re-record replaces that day's row, so repeating the call is a
     # no-op rather than a second verdict — idempotent, and it destroys nothing.
     "record_assessment": {"readOnlyHint": False, "idempotentHint": True},
+    # The void HARD-deletes one row, so a repeat call errors ("not found")
+    # rather than being a no-op — the reason it is not a record_assessment mode.
+    "void_assessment": {
+        "readOnlyHint": False,
+        "idempotentHint": False,
+        "destructiveHint": True,
+    },
     "merge_games": {"readOnlyHint": False, "idempotentHint": False, "destructiveHint": True},
     "delete_game": {"readOnlyHint": False, "idempotentHint": False, "destructiveHint": True},
     "sync": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
@@ -270,9 +281,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_32(self):
+    async def test_tool_count_is_33(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 32)
+        self.assertEqual(len(tools), 33)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()
