@@ -16,8 +16,16 @@ concurrency:
 
 jobs:
   test:
-    name: Test
+    name: Test (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the floor pyproject declares (requires-python >= 3.11);
+        # 3.12 is what the Dockerfile ships. Until 2026-09-01 the suite ran on
+        # whichever interpreter setup-uv happened to pick, so neither end of
+        # that range was actually pinned by CI.
+        python-version: ["3.11", "3.12"]
     # The suite runs in about a minute (pytest-xdist fans it across the runner's
     # cores; see [tool.pytest.ini_options]). Without a cap, a process that
     # passes every test and then hangs at interpreter exit (a leaked non-daemon
@@ -36,11 +44,13 @@ jobs:
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           enable-cache: true
+          python-version: ${{ matrix.python-version }}
 
       - name: Sync dependencies
         run: uv sync --frozen
 
       - name: Audit locked dependencies for known vulnerabilities
+        if: matrix.python-version == '3.12'
         # The export is the fully resolved lockfile (transitive deps included,
         # the project itself excluded), so --no-deps skips pip's re-resolution
         # and audits exactly what uv.lock pins. Dependabot only proposes
