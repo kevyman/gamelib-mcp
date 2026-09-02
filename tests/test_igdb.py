@@ -162,6 +162,28 @@ class TwitchTokenFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(exc.__cause__)
 
 
+class IGDBCanaryHealthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_canary_answer_is_recorded_as_a_provider_failure(self) -> None:
+        # HTTP 200 with zero candidates for the canary title is treated as a
+        # confirmed outage (the backfill aborts with nothing resolved), so the
+        # health counter has to see it the same way the exception branch does.
+        provider_health.reset()
+        with (
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(return_value=[])),
+            self.assertLogs("gamelib_mcp.data.igdb", level="WARNING"),
+        ):
+            self.assertFalse(await igdb._igdb_canary_alive())
+        stats = provider_health.snapshot()["igdb"]
+        self.assertEqual(stats["failures"], 1)
+        self.assertIn("no candidates", stats["last_error"])
+
+    async def test_canary_with_candidates_records_nothing(self) -> None:
+        provider_health.reset()
+        with patch("gamelib_mcp.data.igdb.search_game", AsyncMock(return_value=[object()])):
+            self.assertTrue(await igdb._igdb_canary_alive())
+        self.assertNotIn("igdb", provider_health.snapshot())
+
+
 class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
     async def test_search_game_builds_platform_filter_without_placeholder_clause(self) -> None:
         post_mock = AsyncMock(return_value=[])

@@ -1556,7 +1556,17 @@ async def _igdb_canary_alive() -> bool:
         provider_health.record_failure("igdb", exc)
         logger.warning("IGDB canary search failed: %s", exc)
         return False
-    return bool(results)
+    if not results:
+        # HTTP 200 with zero candidates for a blockbuster is the other outage
+        # shape this probe exists to confirm; the backfill aborts on it with
+        # zero rows resolved, so without this record the pass would publish
+        # processed=0, failed=0 and the outage would vanish from /admin/health.
+        provider_health.record_failure(
+            "igdb", f"IGDB canary search returned no candidates for {_CANARY_TITLE!r}"
+        )
+        logger.warning("IGDB canary search returned no candidates for %r", _CANARY_TITLE)
+        return False
+    return True
 
 
 def _decode_manual_overrides(raw) -> set[str]:

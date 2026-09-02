@@ -502,6 +502,9 @@ async def _fetch_all(appid: int, client: httpx.AsyncClient | None = None) -> tup
             )
             return payload.get("query_summary", {})
         except Exception as exc:
+            # Same provider, same swallow: a reviews-endpoint outage must not
+            # read as "processed" just because appdetails answered.
+            provider_health.record_failure("store", exc)
             logger.warning("Steam review summary fetch failed for %s: %s", appid, exc)
             return {}
 

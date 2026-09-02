@@ -6,7 +6,7 @@ import httpx
 from conftest import ToolDBTestCase, make_steam_game, virtual_clock
 
 from gamelib_mcp.data import db as db_module
-from gamelib_mcp.data import steam_store
+from gamelib_mcp.data import provider_health, steam_store
 
 
 def _store(**overrides) -> dict:
@@ -391,3 +391,30 @@ class EnrichGameContentClassificationTests(ToolDBTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StoreReviewsHealthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reviews_request_failure_is_recorded_even_when_appdetails_succeeds(self) -> None:
+        # _fetch_all runs appdetails and appreviews concurrently and swallows a
+        # reviews failure into {}; the Store batch would otherwise count the
+        # row as processed through a reviews-endpoint outage.
+        provider_health.reset()
+
+        async def fake_get_json(client, url, **kwargs):
+            if "appreviews" in url:
+                raise httpx.ConnectError("reviews down", request=httpx.Request("GET", url))
+            return {"1": {"success": True, "data": {"name": "Game"}}}
+
+        with (
+            patch.object(steam_store, "_steam_get_json_with_retry", fake_get_json),
+            self.assertLogs("gamelib_mcp.data.steam_store", level="WARNING"),
+        ):
+            store_data, reviews = await steam_store._fetch_all(1, client=AsyncMock())
+
+        self.assertEqual(store_data, {"name": "Game"})
+        self.assertEqual(reviews, {})
+        stats = provider_health.snapshot()["store"]
+        self.assertEqual(stats["failures"], 1)
+        self.assertEqual(stats["successes"], 1)
+        self.assertIn("ConnectError", stats["last_error"])
+
