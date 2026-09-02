@@ -5,7 +5,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, Mock, patch
 
-from conftest import DEADLOCK_TIMEOUT
+from conftest import DEADLOCK_TIMEOUT, ToolDBTestCase
 
 from gamelib_mcp import lifecycle
 from gamelib_mcp.data import db as db_module
@@ -102,12 +102,22 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
 
         mock_ensure_refresh.assert_awaited_once()
 
-    def test_main_defers_lock_creation_until_runtime(self) -> None:
-        import gamelib_mcp.lifecycle as main_module
-
-        self.assertIsNone(main_module._LIBRARY_REFRESH_LOCK)
-        self.assertIsNone(main_module._PERIODIC_REFRESH_LOCK)
-        self.assertIsNone(main_module._ENRICHMENT_LOCK)
+    async def test_lock_creation_is_deferred_to_the_running_loop(self) -> None:
+        # An asyncio.Lock built at import time binds to whatever loop happens to
+        # be current, which is why these live in per-loop registries instead:
+        # nothing is bound until a coroutine on this loop asks, and the lock it
+        # gets is then reused for that loop.
+        loop = asyncio.get_running_loop()
+        for registry, accessor in (
+            (lifecycle._LIBRARY_REFRESH_LOCKS, lifecycle._get_library_refresh_lock),
+            (lifecycle._PERIODIC_REFRESH_LOCKS, lifecycle._get_periodic_refresh_lock),
+            (lifecycle._ENRICHMENT_LOCKS, lifecycle._get_enrichment_lock),
+        ):
+            self.assertIsNone(registry.get(loop))
+            lock = accessor()
+            self.assertIsInstance(lock, asyncio.Lock)
+            self.assertIs(registry.get(loop), lock)
+            self.assertIs(accessor(), lock)
 
     async def test_run_startup_refresh_records_success_state(self) -> None:
         refresh_result = {"steam": {"games_upserted": 3, "synced_at": "2026-04-07T00:00:00+00:00"}}
@@ -573,12 +583,6 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             _stub_sync_side_effects(),
-            patch("gamelib_mcp.tools.admin.is_steam_configured", return_value=True, create=True),
-            patch("gamelib_mcp.tools.admin.is_epic_configured", return_value=True, create=True),
-            patch("gamelib_mcp.tools.admin.is_gog_configured", return_value=True, create=True),
-            patch("gamelib_mcp.tools.admin.is_nintendo_configured", return_value=True, create=True),
-            patch("gamelib_mcp.tools.admin.is_psn_configured", return_value=True, create=True),
-            patch("gamelib_mcp.tools.admin.is_xbox_configured", return_value=True, create=True),
             patch("gamelib_mcp.tools.admin.fetch_library", AsyncMock(side_effect=steam_sync)),
             patch("gamelib_mcp.tools.admin.sync_epic", AsyncMock(side_effect=epic_sync)),
             patch("gamelib_mcp.tools.admin.sync_gog", AsyncMock(side_effect=gog_sync)),
@@ -796,35 +800,6 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(seen["platforms"], ["gog"])
 
-    async def test_reconcile_resets_stale_in_progress(self) -> None:
-        from gamelib_mcp.data.db import get_meta, init_db, set_meta_many
-        from gamelib_mcp.lifecycle import reconcile_stale_sync_status
-
-        await init_db()
-        await set_meta_many(
-            {
-                "library_sync_status": "in_progress",
-                "sync_platform_state_steam": "running",
-                "sync_platform_state_gog": "done",
-            }
-        )
-
-        await reconcile_stale_sync_status()
-
-        self.assertEqual(await get_meta("library_sync_status"), "idle")
-        self.assertEqual(await get_meta("sync_platform_state_steam"), "error")
-        self.assertEqual(await get_meta("sync_platform_state_gog"), "done")
-        self.assertIsNotNone(await get_meta("library_sync_error"))
-
-    async def test_reconcile_noop_when_idle(self) -> None:
-        from gamelib_mcp.data.db import get_meta, init_db, set_meta
-        from gamelib_mcp.lifecycle import reconcile_stale_sync_status
-
-        await init_db()
-        await set_meta("library_sync_status", "idle")
-        await reconcile_stale_sync_status()
-        self.assertEqual(await get_meta("library_sync_status"), "idle")
-
     async def test_refresh_library_reports_already_running_when_startup_in_flight(self) -> None:
         import gamelib_mcp.lifecycle as main_module
 
@@ -847,6 +822,42 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             await startup_task
             main_module._LIBRARY_REFRESH_TASK = None
+
+
+class ReconcileStaleSyncStatusTests(ToolDBTestCase):
+    """Split out of StartupSyncTests: these two need a real database.
+
+    They used to migrate one per test onto whatever DATABASE_URL was current —
+    which was the session default, so both wrote their meta rows into the same
+    shared file. ToolDBTestCase gives each its own copy of the session template.
+    """
+
+    async def test_reconcile_resets_stale_in_progress(self) -> None:
+        from gamelib_mcp.data.db import get_meta, set_meta_many
+        from gamelib_mcp.lifecycle import reconcile_stale_sync_status
+
+        await set_meta_many(
+            {
+                "library_sync_status": "in_progress",
+                "sync_platform_state_steam": "running",
+                "sync_platform_state_gog": "done",
+            }
+        )
+
+        await reconcile_stale_sync_status()
+
+        self.assertEqual(await get_meta("library_sync_status"), "idle")
+        self.assertEqual(await get_meta("sync_platform_state_steam"), "error")
+        self.assertEqual(await get_meta("sync_platform_state_gog"), "done")
+        self.assertIsNotNone(await get_meta("library_sync_error"))
+
+    async def test_reconcile_noop_when_idle(self) -> None:
+        from gamelib_mcp.data.db import get_meta, set_meta
+        from gamelib_mcp.lifecycle import reconcile_stale_sync_status
+
+        await set_meta("library_sync_status", "idle")
+        await reconcile_stale_sync_status()
+        self.assertEqual(await get_meta("library_sync_status"), "idle")
 
 
 if __name__ == "__main__":

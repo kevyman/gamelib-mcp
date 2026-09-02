@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict
@@ -670,7 +671,7 @@ def inspect_xbox(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
 
 def _safe_inspect(
     platform: str,
-    inspector,
+    inspector: Callable[[LastSyncMeta | None], IntegrationStatus],
     last_sync: LastSyncMeta | None = None,
 ) -> IntegrationStatus:
     try:

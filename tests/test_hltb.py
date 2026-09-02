@@ -1,61 +1,41 @@
 import asyncio
-import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+from conftest import ToolDBTestCase
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import hltb
 
 
-class HLTBRegressionTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = Path(self.tmpdir.name) / "hltb.sqlite"
-        db_module._DB_READY_PATH = None
-        with patch.dict(
-            "os.environ",
-            {"DATABASE_URL": f"file:{self.db_path}"},
-            clear=False,
-        ):
-            await db_module.init_db()
-
-    async def asyncTearDown(self) -> None:
-        db_module._DB_READY_PATH = None
-        self.tmpdir.cleanup()
-
+class HLTBRegressionTests(ToolDBTestCase):
     async def test_get_hltb_retries_legacy_failed_rows(self) -> None:
-        with patch.dict(
-            "os.environ",
-            {"DATABASE_URL": f"file:{self.db_path}"},
-            clear=False,
-        ):
-            game_id = await db_module.upsert_game(appid=None, name="Elden Ring")
-            async with db_module.get_db() as db:
-                await db.execute(
-                    "UPDATE games SET hltb_cached_at = 'FAILED' WHERE id = ?",
-                    (game_id,),
-                )
-                await db.commit()
-
-            fake_result = SimpleNamespace(main_story=56.0, main_extra=92.0, completionist=133.0, similarity=1.0)
-            with patch(
-                "gamelib_mcp.data.hltb.HowLongToBeat.async_search",
-                return_value=[fake_result],
-            ):
-                result = await hltb.get_hltb(game_id, "Elden Ring")
-
-            self.assertEqual(
-                result,
-                {"hltb_main": 56.0, "hltb_extra": 92.0, "hltb_complete": 133.0},
+        game_id = await db_module.upsert_game(appid=None, name="Elden Ring")
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET hltb_cached_at = 'FAILED' WHERE id = ?",
+                (game_id,),
             )
-            async with db_module.get_db() as db:
-                row = await db.execute_fetchone(
-                    "SELECT hltb_main, hltb_extra, hltb_complete, hltb_cached_at FROM games WHERE id = ?",
-                    (game_id,),
-                )
+            await db.commit()
+
+        fake_result = SimpleNamespace(main_story=56.0, main_extra=92.0, completionist=133.0, similarity=1.0)
+        with patch(
+            "gamelib_mcp.data.hltb.HowLongToBeat.async_search",
+            return_value=[fake_result],
+        ):
+            result = await hltb.get_hltb(game_id, "Elden Ring")
+
+        self.assertEqual(
+            result,
+            {"hltb_main": 56.0, "hltb_extra": 92.0, "hltb_complete": 133.0},
+        )
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT hltb_main, hltb_extra, hltb_complete, hltb_cached_at FROM games WHERE id = ?",
+                (game_id,),
+            )
 
         self.assertEqual(row["hltb_main"], 56.0)
         self.assertEqual(row["hltb_extra"], 92.0)
@@ -63,32 +43,27 @@ class HLTBRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(row["hltb_cached_at"], "FAILED")
 
     async def test_get_hltb_leaves_request_failures_retryable(self) -> None:
-        with patch.dict(
-            "os.environ",
-            {"DATABASE_URL": f"file:{self.db_path}"},
-            clear=False,
+        game_id = await db_module.upsert_game(appid=None, name="Elden Ring")
+        # Seed prior good data so we can verify it is preserved on failure.
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET hltb_main = 56.0, hltb_extra = 92.0, hltb_complete = 133.0 WHERE id = ?",
+                (game_id,),
+            )
+            await db.commit()
+
+        with patch(
+            "gamelib_mcp.data.hltb.HowLongToBeat.async_search",
+            return_value=None,
         ):
-            game_id = await db_module.upsert_game(appid=None, name="Elden Ring")
-            # Seed prior good data so we can verify it is preserved on failure.
-            async with db_module.get_db() as db:
-                await db.execute(
-                    "UPDATE games SET hltb_main = 56.0, hltb_extra = 92.0, hltb_complete = 133.0 WHERE id = ?",
-                    (game_id,),
-                )
-                await db.commit()
+            result = await hltb.get_hltb(game_id, "Elden Ring")
 
-            with patch(
-                "gamelib_mcp.data.hltb.HowLongToBeat.async_search",
-                return_value=None,
-            ):
-                result = await hltb.get_hltb(game_id, "Elden Ring")
-
-            self.assertIsNone(result)
-            async with db_module.get_db() as db:
-                row = await db.execute_fetchone(
-                    "SELECT hltb_main, hltb_extra, hltb_complete, hltb_cached_at FROM games WHERE id = ?",
-                    (game_id,),
-                )
+        self.assertIsNone(result)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT hltb_main, hltb_extra, hltb_complete, hltb_cached_at FROM games WHERE id = ?",
+                (game_id,),
+            )
 
         # Prior good data must survive the API failure.
         self.assertEqual(row["hltb_main"], 56.0)
@@ -98,60 +73,50 @@ class HLTBRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(row["hltb_cached_at"])
 
     async def test_get_hltb_coerces_zero_durations_to_null(self) -> None:
-        with patch.dict(
-            "os.environ",
-            {"DATABASE_URL": f"file:{self.db_path}"},
-            clear=False,
+        game_id = await db_module.upsert_game(appid=None, name="ASTRO BOT")
+        # HLTB has the title but no main-story duration -> returns 0.0.
+        fake_result = SimpleNamespace(main_story=0.0, main_extra=0.0, completionist=12.5, similarity=1.0)
+        with patch(
+            "gamelib_mcp.data.hltb.HowLongToBeat.async_search",
+            return_value=[fake_result],
         ):
-            game_id = await db_module.upsert_game(appid=None, name="ASTRO BOT")
-            # HLTB has the title but no main-story duration -> returns 0.0.
-            fake_result = SimpleNamespace(main_story=0.0, main_extra=0.0, completionist=12.5, similarity=1.0)
-            with patch(
-                "gamelib_mcp.data.hltb.HowLongToBeat.async_search",
-                return_value=[fake_result],
-            ):
-                result = await hltb.get_hltb(game_id, "ASTRO BOT")
+            result = await hltb.get_hltb(game_id, "ASTRO BOT")
 
-            self.assertEqual(
-                result,
-                {"hltb_main": None, "hltb_extra": None, "hltb_complete": 12.5},
+        self.assertEqual(
+            result,
+            {"hltb_main": None, "hltb_extra": None, "hltb_complete": 12.5},
+        )
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT hltb_main, hltb_extra, hltb_complete FROM games WHERE id = ?",
+                (game_id,),
             )
-            async with db_module.get_db() as db:
-                row = await db.execute_fetchone(
-                    "SELECT hltb_main, hltb_extra, hltb_complete FROM games WHERE id = ?",
-                    (game_id,),
-                )
 
         self.assertIsNone(row["hltb_main"])
         self.assertIsNone(row["hltb_extra"])
         self.assertEqual(row["hltb_complete"], 12.5)
 
     async def test_get_hltb_preserves_data_on_empty_results(self) -> None:
-        with patch.dict(
-            "os.environ",
-            {"DATABASE_URL": f"file:{self.db_path}"},
-            clear=False,
+        game_id = await db_module.upsert_game(appid=None, name="Elden Ring")
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET hltb_main = 56.0, hltb_extra = 92.0, hltb_complete = 133.0 WHERE id = ?",
+                (game_id,),
+            )
+            await db.commit()
+
+        with patch(
+            "gamelib_mcp.data.hltb.HowLongToBeat.async_search",
+            return_value=[],
         ):
-            game_id = await db_module.upsert_game(appid=None, name="Elden Ring")
-            async with db_module.get_db() as db:
-                await db.execute(
-                    "UPDATE games SET hltb_main = 56.0, hltb_extra = 92.0, hltb_complete = 133.0 WHERE id = ?",
-                    (game_id,),
-                )
-                await db.commit()
+            result = await hltb.get_hltb(game_id, "Elden Ring")
 
-            with patch(
-                "gamelib_mcp.data.hltb.HowLongToBeat.async_search",
-                return_value=[],
-            ):
-                result = await hltb.get_hltb(game_id, "Elden Ring")
-
-            self.assertIsNone(result)
-            async with db_module.get_db() as db:
-                row = await db.execute_fetchone(
-                    "SELECT hltb_main, hltb_extra, hltb_complete, hltb_cached_at FROM games WHERE id = ?",
-                    (game_id,),
-                )
+        self.assertIsNone(result)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT hltb_main, hltb_extra, hltb_complete, hltb_cached_at FROM games WHERE id = ?",
+                (game_id,),
+            )
 
         # Data survives a not-found result; only the (timestamped, retryable)
         # marker is written.
@@ -161,31 +126,26 @@ class HLTBRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(row["hltb_cached_at"].startswith(f"{hltb.HLTB_NOT_FOUND}:"))
 
     async def test_get_hltb_preserves_data_on_exception(self) -> None:
-        with patch.dict(
-            "os.environ",
-            {"DATABASE_URL": f"file:{self.db_path}"},
-            clear=False,
+        game_id = await db_module.upsert_game(appid=None, name="Elden Ring")
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET hltb_main = 56.0, hltb_extra = 92.0, hltb_complete = 133.0 WHERE id = ?",
+                (game_id,),
+            )
+            await db.commit()
+
+        with patch(
+            "gamelib_mcp.data.hltb.HowLongToBeat.async_search",
+            side_effect=RuntimeError("network error"),
         ):
-            game_id = await db_module.upsert_game(appid=None, name="Elden Ring")
-            async with db_module.get_db() as db:
-                await db.execute(
-                    "UPDATE games SET hltb_main = 56.0, hltb_extra = 92.0, hltb_complete = 133.0 WHERE id = ?",
-                    (game_id,),
-                )
-                await db.commit()
+            result = await hltb.get_hltb(game_id, "Elden Ring")
 
-            with patch(
-                "gamelib_mcp.data.hltb.HowLongToBeat.async_search",
-                side_effect=RuntimeError("network error"),
-            ):
-                result = await hltb.get_hltb(game_id, "Elden Ring")
-
-            self.assertIsNone(result)
-            async with db_module.get_db() as db:
-                row = await db.execute_fetchone(
-                    "SELECT hltb_main, hltb_extra, hltb_complete, hltb_cached_at FROM games WHERE id = ?",
-                    (game_id,),
-                )
+        self.assertIsNone(result)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT hltb_main, hltb_extra, hltb_complete, hltb_cached_at FROM games WHERE id = ?",
+                (game_id,),
+            )
 
         # Data survives a fetch exception; row stays retryable.
         self.assertEqual(row["hltb_main"], 56.0)
@@ -194,53 +154,31 @@ class HLTBRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(row["hltb_cached_at"])
 
     async def test_get_hltb_marks_true_no_match_as_not_found(self) -> None:
-        with patch.dict(
-            "os.environ",
-            {"DATABASE_URL": f"file:{self.db_path}"},
-            clear=False,
-        ):
-            game_id = await db_module.upsert_game(appid=None, name="Unknown Game")
-            with patch(
-                "gamelib_mcp.data.hltb.HowLongToBeat.async_search",
-                return_value=[],
-            ) as search:
-                first = await hltb.get_hltb(game_id, "Unknown Game")
-                second = await hltb.get_hltb(game_id, "Unknown Game")
+        game_id = await db_module.upsert_game(appid=None, name="Unknown Game")
+        with patch(
+            "gamelib_mcp.data.hltb.HowLongToBeat.async_search",
+            return_value=[],
+        ) as search:
+            first = await hltb.get_hltb(game_id, "Unknown Game")
+            second = await hltb.get_hltb(game_id, "Unknown Game")
 
-            self.assertIsNone(first)
-            self.assertIsNone(second)
-            # The first call walks the whole variant ladder ("Unknown Game" is
-            # its own normalized form, so a single variant here); the second
-            # call is served from the fresh NOT_FOUND marker without searching.
-            self.assertEqual(search.await_count, 1)
-            async with db_module.get_db() as db:
-                row = await db.execute_fetchone(
-                    "SELECT hltb_cached_at FROM games WHERE id = ?",
-                    (game_id,),
-                )
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        # The first call walks the whole variant ladder ("Unknown Game" is
+        # its own normalized form, so a single variant here); the second
+        # call is served from the fresh NOT_FOUND marker without searching.
+        self.assertEqual(search.await_count, 1)
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT hltb_cached_at FROM games WHERE id = ?",
+                (game_id,),
+            )
 
         self.assertTrue(row["hltb_cached_at"].startswith("NOT_FOUND:"))
 
 
-class HLTBVariantLadderTests(unittest.IsolatedAsyncioTestCase):
+class HLTBVariantLadderTests(ToolDBTestCase):
     """Matcher fallbacks for the observed prod NOT_FOUND shapes."""
-
-    async def asyncSetUp(self) -> None:
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = Path(self.tmpdir.name) / "hltb-variants.sqlite"
-        db_module._DB_READY_PATH = None
-        self._env = patch.dict(
-            "os.environ",
-            {"DATABASE_URL": f"file:{self.db_path}"},
-            clear=False,
-        )
-        self._env.start()
-        await db_module.init_db()
-
-    async def asyncTearDown(self) -> None:
-        self._env.stop()
-        db_module._DB_READY_PATH = None
-        self.tmpdir.cleanup()
 
     def _result(self, main: float = 10.0) -> SimpleNamespace:
         return SimpleNamespace(

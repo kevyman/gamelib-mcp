@@ -2,7 +2,7 @@
 
 Replaces the ad-hoc ``detect_*``/``audit_steam_licenses``/``revalidate_igdb_matches``
 MCP tools with one tool backed by a registry (``CHECKS``). Every check is an
-adapter over an EXISTING function in ``tools/admin.py`` or ``data/steam_licenses.py``
+adapter over an EXISTING function in ``tools/detectors.py`` or ``data/steam_licenses.py``
 — their logic and unit tests are untouched; this module only reshapes their
 output into the uniform finding envelope below and adds selection/suppression/
 apply-gating plumbing.
@@ -47,7 +47,7 @@ from ..data.title_normalization import (
     normalize_search_text,
 )
 from ..platforms_registry import SYNCABLE_PLATFORMS
-from .admin import (
+from .detectors import (
     detect_collapsed_games,
     detect_cross_platform_collapses,
     detect_farmed_games,
@@ -1743,7 +1743,7 @@ async def _run_ownership_unseen_in_source(
 
 # The heuristic itself stays in tools/completion.py (unchanged, with its own
 # unit tests) — this only adapts its suggestions into the finding envelope, the
-# same way the migrated detectors in tools/admin.py are adapted. It was its own
+# same way the migrated detectors in tools/detectors.py are adapted. It was its own
 # MCP tool (suggest_completion_status) until ADR 0004; it always was a
 # report-only heuristic whose remedy is an update_game call, which is exactly
 # what a check is.

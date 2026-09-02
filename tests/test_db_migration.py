@@ -10,6 +10,7 @@ from conftest import DEADLOCK_TIMEOUT, add_platform, seed_game
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steam_store
+from gamelib_mcp.data.db import migrations as migrations_module
 
 
 class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
@@ -99,7 +100,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         async with aiosqlite.connect(self.db_path) as db:
             await db_module._configure_connection(db, enable_wal=True)
-            await db_module._run_migrations(db)
+            await migrations_module._run_migrations(db)
 
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -312,7 +313,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         async with aiosqlite.connect(self.db_path) as db:
             await db_module._configure_connection(db, enable_wal=True)
-            await db_module._run_migrations(db)
+            await migrations_module._run_migrations(db)
 
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -372,7 +373,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         async with aiosqlite.connect(self.db_path) as db:
             await db_module._configure_connection(db, enable_wal=True)
-            await db_module._run_migrations(db)
+            await migrations_module._run_migrations(db)
 
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -515,13 +516,13 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_fresh_db_initializes_with_latest_columns(self):
         async with aiosqlite.connect(self.db_path) as db:
             await db_module._configure_connection(db, enable_wal=True)
-            result = await db_module._run_migrations(db)
+            result = await migrations_module._run_migrations(db)
 
-            version = await db_module._get_user_version(db)
+            version = await migrations_module._get_user_version(db)
             cols = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(game_platform_enrichment)")}
             game_cols = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(games)")}
             gp_cols = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(game_platforms)")}
-            tables = await db_module._table_names(db)
+            tables = await migrations_module._table_names(db)
 
         self.assertEqual(version, db_module.SCHEMA_VERSION)
         self.assertEqual(result.final_version, db_module.SCHEMA_VERSION)
@@ -545,16 +546,16 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                     UNIQUE(game_id, platform)
                 )"""
             )
-            await db_module._set_user_version(db, 30)
+            await migrations_module._set_user_version(db, 30)
             await db.commit()
 
             before = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(game_platforms)")}
             self.assertNotIn("manual_overrides", before)
 
-            await db_module._migrate_v30_to_v31(db, None)
+            await migrations_module._migrate_v30_to_v31(db, None)
 
             after = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(game_platforms)")}
-            version = await db_module._get_user_version(db)
+            version = await migrations_module._get_user_version(db)
 
         self.assertIn("manual_overrides", after)
         self.assertEqual(version, 31)
@@ -578,15 +579,15 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                 "INSERT INTO game_platforms (game_id, platform, owned, last_synced)"
                 " VALUES (1, 'steam', 1, '2026-07-01T00:00:00+00:00')"
             )
-            await db_module._set_user_version(db, 33)
+            await migrations_module._set_user_version(db, 33)
             await db.commit()
 
-            await db_module._migrate_v33_to_v34(db, None)
+            await migrations_module._migrate_v33_to_v34(db, None)
 
             after = {
                 row[1] for row in await db.execute_fetchall("PRAGMA table_info(game_platforms)")
             }
-            version = await db_module._get_user_version(db)
+            version = await migrations_module._get_user_version(db)
             row = await db.execute_fetchone(
                 "SELECT unowned_at, last_seen_in_source FROM game_platforms WHERE game_id = 1"
             )
@@ -746,7 +747,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
             await db_module.init_db()
             async with db_module.get_db() as db:
-                version = await db_module._get_user_version(db)
+                version = await migrations_module._get_user_version(db)
                 games = {
                     row["name"]: row
                     for row in await db.execute_fetchall(
@@ -790,7 +791,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
             await db_module.init_db()
             async with db_module.get_db() as db:
-                version = await db_module._get_user_version(db)
+                version = await migrations_module._get_user_version(db)
                 rows = await db.execute_fetchall(
                     "SELECT id, name_normalized FROM games ORDER BY id"
                 )
@@ -848,7 +849,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
             await db_module.init_db()
             async with db_module.get_db() as db:
-                version = await db_module._get_user_version(db)
+                version = await migrations_module._get_user_version(db)
                 games = {
                     row["id"]: row
                     for row in await db.execute_fetchall(
@@ -895,8 +896,8 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
             await db_module.init_db()
             async with db_module.get_db() as db:
-                version = await db_module._get_user_version(db)
-                cols = await db_module._table_columns(db, "games")
+                version = await migrations_module._get_user_version(db)
+                cols = await migrations_module._table_columns(db, "games")
                 overrides = await db_module.get_manual_overrides(db, 1)
 
         self.assertEqual(version, db_module.SCHEMA_VERSION)
@@ -944,7 +945,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
             await db_module.init_db()
             async with db_module.get_db() as db:
-                version = await db_module._get_user_version(db)
+                version = await migrations_module._get_user_version(db)
                 games = {
                     row["id"]: row
                     for row in await db.execute_fetchall(
@@ -998,7 +999,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
             await db_module.init_db()
             async with db_module.get_db() as db:
-                version = await db_module._get_user_version(db)
+                version = await migrations_module._get_user_version(db)
                 rows = {
                     row["id"]: row
                     for row in await db.execute_fetchall(
@@ -1030,9 +1031,9 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
             await db_module.init_db()
             async with db_module.get_db() as db:
-                version = await db_module._get_user_version(db)
-                tables = await db_module._table_names(db)
-                gp_cols = await db_module._table_columns(db, "game_platforms")
+                version = await migrations_module._get_user_version(db)
+                tables = await migrations_module._table_names(db)
+                gp_cols = await migrations_module._table_columns(db, "game_platforms")
                 gp_row = await db.execute_fetchone(
                     "SELECT owned FROM game_platforms WHERE id = 1"
                 )
@@ -1063,7 +1064,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                 cols = {
                     row[1] for row in await db.execute_fetchall("PRAGMA table_info(game_prices)")
                 }
-                wl_cols = await db_module._table_columns(db, "game_wishlist")
+                wl_cols = await migrations_module._table_columns(db, "game_wishlist")
                 wl_row = await db.execute_fetchone(
                     "SELECT platform, source FROM game_wishlist WHERE id = 1"
                 )
@@ -1110,7 +1111,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             await db_module.upsert_wishlist_entry(wished, "steam", source="steam")
 
             async with db_module.get_db() as db:
-                from gamelib_mcp.data.db import _migrate_v18_to_v19
+                from gamelib_mcp.data.db.migrations import _migrate_v18_to_v19
 
                 await _migrate_v18_to_v19(db, None)
                 await db.commit()
@@ -1143,7 +1144,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             await db_module.init_db()
 
             async with db_module.get_db() as db:
-                version = await db_module._get_user_version(db)
+                version = await migrations_module._get_user_version(db)
                 row = await db.execute_fetchone(
                     "SELECT platform, owned, playtime_minutes, acquired_at, price_paid,"
                     "       price_currency, purchase_source, bundle_name"
@@ -1174,8 +1175,8 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             await db_module.init_db()
 
             async with db_module.get_db() as db:
-                version = await db_module._get_user_version(db)
-                columns = await db_module._table_columns(db, "game_assessments")
+                version = await migrations_module._get_user_version(db)
+                columns = await migrations_module._table_columns(db, "game_assessments")
                 row = await db.execute_fetchone(
                     "SELECT verdict, summary, presentation FROM game_assessments"
                     " WHERE game_id = 1"
@@ -1339,7 +1340,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             await db_module.init_db()
 
             async with db_module.get_db() as db:
-                version = await db_module._get_user_version(db)
+                version = await migrations_module._get_user_version(db)
             self.assertEqual(version, db_module.SCHEMA_VERSION)
             self.assertEqual(db_module.SCHEMA_VERSION, 39)
 
@@ -1360,7 +1361,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             await db_module.upsert_wishlist_entry(resolved, "steam", source="steam")
 
             async with db_module.get_db() as db:
-                from gamelib_mcp.data.db import _migrate_v19_to_v20
+                from gamelib_mcp.data.db.migrations import _migrate_v19_to_v20
 
                 await _migrate_v19_to_v20(db, None)
                 await db.commit()
@@ -1418,7 +1419,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                 await db.commit()
 
             async with db_module.get_db() as db:
-                from gamelib_mcp.data.db import _migrate_v27_to_v28
+                from gamelib_mcp.data.db.migrations import _migrate_v27_to_v28
 
                 await _migrate_v27_to_v28(db, None)
                 await db.commit()
@@ -1667,7 +1668,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gp_row["game_id"], 1)
         self.assertEqual(gp_row["platform"], "steam")
         self.assertEqual(updated["completion_status"], "evergreen")
-        for expected_index in db_module._GAMES_TABLE_INDEXES:
+        for expected_index in migrations_module._GAMES_TABLE_INDEXES:
             self.assertIn(expected_index, index_names)
 
     async def test_v22_to_v23_skips_rebuild_when_no_check_constraint(self) -> None:
@@ -1755,7 +1756,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await db.commit()
 
-                from gamelib_mcp.data.db import _migrate_v23_to_v24
+                from gamelib_mcp.data.db.migrations import _migrate_v23_to_v24
 
                 await _migrate_v23_to_v24(db, None)
                 await db.commit()
@@ -1815,8 +1816,8 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                 1, [("collection", 5, "Hollow Knight"), ("franchise", 6, "Team Cherry")]
             )
             async with db_module.get_db() as db:
-                version = await db_module._get_user_version(db)
-                tables = await db_module._table_names(db)
+                version = await migrations_module._get_user_version(db)
+                tables = await migrations_module._table_names(db)
             series = await db_module.load_series_for_games([1])
 
         self.assertEqual(version, db_module.SCHEMA_VERSION)
@@ -2040,7 +2041,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await db.commit()
 
-                await db_module._repair_identifier_primary_flags(db)
+                await migrations_module._repair_identifier_primary_flags(db)
 
                 rows = await db.execute_fetchall(
                     "SELECT identifier_value, is_primary FROM game_platform_identifiers WHERE game_platform_id = ? AND identifier_type = ? ORDER BY id",
@@ -2231,7 +2232,7 @@ class InterruptedMigrationMarkerTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "interrupted.sqlite"
             self._seed_v1(db_path)
-            first_from, first_step = db_module._MIGRATION_STEPS[0]
+            first_from, first_step = migrations_module._MIGRATION_STEPS[0]
 
             async def crash_after_partial_commit(db, progress):
                 # The real step renames tables (committed) and stamps v2 at its
@@ -2242,11 +2243,11 @@ class InterruptedMigrationMarkerTests(unittest.IsolatedAsyncioTestCase):
                 await db.commit()
                 raise RuntimeError("simulated crash mid-migration")
 
-            steps = [(first_from, crash_after_partial_commit), *db_module._MIGRATION_STEPS[1:]]
+            steps = [(first_from, crash_after_partial_commit), *migrations_module._MIGRATION_STEPS[1:]]
             env = {"DATABASE_URL": f"file:{db_path}"}
             with (
                 patch.dict("os.environ", env, clear=False),
-                patch.object(db_module, "_MIGRATION_STEPS", steps),
+                patch.object(migrations_module, "_MIGRATION_STEPS", steps),
             ):
                 db_module._DB_READY_PATH = None
                 with self.assertRaisesRegex(RuntimeError, "simulated crash"):

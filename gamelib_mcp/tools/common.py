@@ -7,6 +7,10 @@ adds tag handling, stats selects genres and omits the steam appid), and merging
 them would change query output.
 """
 
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable
+
+from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
 from ..data.db import STEAM_APP_ID
@@ -17,6 +21,7 @@ from ..platforms_registry import (  # noqa: F401
     LIBRARY_PLATFORMS,
     PLATFORM_ALIASES,
     SYNCABLE_PLATFORMS,
+    resolve_platform_functions,
 )
 
 # Result-count ceiling shared by all list-returning tools. Keeps a single tool
@@ -161,11 +166,86 @@ def cover_url(cover_image_id: str | None, steam_appid: int | None) -> str | None
     return None
 
 
-async def report_progress(ctx, progress: int, total: int) -> None:
+async def report_progress(ctx: Context | None, progress: int, total: int) -> None:
     if ctx is not None:
         await ctx.report_progress(progress, total)
 
 
-async def info(ctx, message: str) -> None:
+async def info(ctx: Context | None, message: str) -> None:
     if ctx is not None:
         await ctx.info(message)
+
+
+class PlatformSyncFanout:
+    """The resolve → validate → dispatch → gather skeleton of a sync fan-out.
+
+    ``run_library_sync`` and ``sync_wishlist`` differ in what they do with each
+    platform's outcome, not in how they reach it: both alias-resolve the
+    caller's platform list, reject anything the selected target cannot sync,
+    look the sync callables up in the platform registry, run them concurrently
+    and tick the progress counter once per finished platform. Only that
+    skeleton lives here — the per-outcome bookkeeping (sync-state records, play
+    history, log lines) stays with each caller, which is where the two really
+    diverge.
+
+    ``unknown_message`` builds the rejection text from the unresolved names and
+    the sorted valid vocabulary: the two callers word it differently (the
+    wishlist one adds the PSN hint) and both wordings are asserted by tests, so
+    the message stays the caller's to write.
+    """
+
+    def __init__(
+        self,
+        platforms: list[str] | None,
+        supported: frozenset[str],
+        *,
+        unknown_message: Callable[[list[str], list[str]], str],
+    ) -> None:
+        def _resolve(p: str) -> str:
+            return PLATFORM_ALIASES.get(p.lower(), p.lower())
+
+        self.requested = list(platforms) if platforms else sorted(supported)
+        unknown = [p for p in self.requested if _resolve(p) not in supported]
+        if unknown:
+            raise ToolError(
+                unknown_message(unknown, sorted(supported | set(PLATFORM_ALIASES)))
+            )
+        self.targets = {_resolve(p) for p in self.requested}
+        # Results echo the spelling the caller used, so an alias ("switch2" for
+        # "nintendo") comes back under the alias.
+        self.display_names: dict[str, str] = {name: name for name in self.targets}
+        for requested in self.requested:
+            self.display_names[_resolve(requested)] = requested
+        self.selected: list[tuple[str, Callable[[], Awaitable[dict]]]] = []
+
+    def dispatch(
+        self, kind: str, *, namespace: object
+    ) -> list[tuple[str, Callable[[], Awaitable[dict]]]]:
+        """Bind the selected targets to their registry functions.
+
+        Resolution prefers names bound on ``namespace`` (the calling module), so
+        the established ``patch("gamelib_mcp.tools.admin.sync_epic", ...)`` seam
+        keeps intercepting the sync.
+        """
+        registry = resolve_platform_functions(kind, namespace=namespace)
+        self.selected = [(name, fn) for name, fn in registry.items() if name in self.targets]
+        return self.selected
+
+    async def gather(self, ctx: Context | None) -> AsyncIterator[tuple[str, object]]:
+        """Run every selected sync concurrently, yielding (name, outcome).
+
+        ``outcome`` is either the sync's result or the exception it raised —
+        callers branch on ``isinstance(outcome, BaseException)``. The progress
+        counter is ticked *after* each yielded outcome has been handled, which
+        is where the callers' own loops ticked it.
+        """
+        outcomes = await asyncio.gather(
+            *(fn() for _, fn in self.selected),
+            return_exceptions=True,
+        )
+        total = len(self.selected)
+        for index, ((name, _), outcome) in enumerate(
+            zip(self.selected, outcomes, strict=True), start=1
+        ):
+            yield name, outcome
+            await report_progress(ctx, index, total)

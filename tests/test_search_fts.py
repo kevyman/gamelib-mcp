@@ -55,6 +55,9 @@ class FtsTestBase(unittest.IsolatedAsyncioTestCase):
         self._tmp.cleanup()
 
     async def _seed(self):
+        # Exempt from the copy-the-template rule: this file's subject IS what
+        # init_db builds — the trigram table and the triggers that keep it live
+        # — so it must run the real thing rather than adopt a finished copy.
         await db_module.init_db()
         for name in NAMES:
             await db_module.upsert_game(None, name, match_existing_by_name=False)
@@ -62,6 +65,7 @@ class FtsTestBase(unittest.IsolatedAsyncioTestCase):
 
 class TestFtsLifecycle(FtsTestBase):
     async def test_init_db_creates_fts_and_reports_ready(self):
+        # Exempt from the copy-the-template rule: init_db IS the subject here.
         await db_module.init_db()
         self.assertTrue(db_module.fts_ready())
         async with db_module.get_db() as db:
