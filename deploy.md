@@ -175,7 +175,8 @@ triggered manually from the Actions tab via *Run workflow*):
    published against an unchanged lockfile is still caught.)
 2. **Deploy** — SSHes into the Hetzner box and runs the equivalent of the
    manual redeploy: `git fetch` → `git reset --hard origin/main` →
-   `docker compose --profile prod up -d --build`.
+   `docker compose --profile prod up -d --build`. The fetch authenticates
+   as the workflow run itself (see "Why the fetch authenticates" below).
 3. **Gate** — polls `/health` from inside the new `app` container for up to
    two minutes. A container that never answers HTTP 200 (a startup exception,
    a bad `.env`, a failed migration) fails the run, prints the last 100 log
@@ -195,6 +196,32 @@ triggered manually from the Actions tab via *Run workflow*):
    visible, rather than a silently wrong schema, which is not. The app
    enforces the same rule itself: with a marker present and the stamp not at
    the build's version it refuses to start and names the snapshot to restore.
+
+**Why the fetch authenticates.** Until 2026-09-02 the host fetched
+anonymously over HTTPS, and against the repository's pre-rename URL
+(`kevyman/steam-mcp`, which GitHub still redirects). That day every deploy
+started failing in about two seconds with
+
+    fatal: could not read Username for 'https://github.com': No such device or address
+    fatal: expected flush after ref listing
+
+which is git's message when GitHub answers the ref advertisement with an
+authentication challenge and there is no terminal to ask on. Nothing in the
+workflow's git line had changed since the previous successful deploy, the
+repository is public, and the same fetch worked from an authenticated
+machine, so the host's anonymous access is what GitHub stopped honouring —
+consistent with the tighter limits on unauthenticated HTTPS clones GitHub
+announced in May 2025 (a Hetzner address shares its anonymous quota with
+every neighbour on that range). The workflow therefore hands the deploy
+step its own `GITHUB_TOKEN` (`permissions: contents: read`, expires when
+the job ends) and fetches through a one-off URL carrying it: the token never
+touches the host's disk, `.git/config` keeps the plain canonical URL (the
+script also re-points `origin` at `github.repository`, so a future rename
+cannot strand the clone), and a URL with userinfo bypasses any
+`url.<base>.insteadOf` rewrite a stale host-side credential setup might
+have left behind. If you ever need to fetch by hand on the box, use a
+fine-grained PAT with read access to this repository or a deploy key over
+SSH — an anonymous `git fetch` there should be expected to fail.
 
 Every third-party action in the workflows is pinned to a full commit SHA with
 the release tag in a trailing comment; Dependabot's `github-actions` entry

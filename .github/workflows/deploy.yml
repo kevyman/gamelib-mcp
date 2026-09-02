@@ -49,18 +49,38 @@ jobs:
     steps:
       - name: Deploy over SSH
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          # The job's own short-lived token (permissions: contents: read above;
+          # it expires when the job ends). The host used to fetch anonymously
+          # over HTTPS, against the repository's pre-rename URL; on 2026-09-02
+          # GitHub began answering that ref advertisement with an
+          # authentication challenge ("could not read Username for
+          # 'https://github.com'"), which broke every deploy. See deploy.md,
+          # "Why the fetch authenticates".
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.DEPLOY_PORT || 22 }}
+          envs: GITHUB_TOKEN,GITHUB_REPOSITORY
           script: |
             set -euo pipefail
             cd "${DEPLOY_PATH:-$HOME/mcps}"
             previous="$(git rev-parse HEAD)"
             db="${DEPLOY_PATH:-$HOME/mcps}/data/library/gamelib.db"
             schema_before="$(sqlite3 "$db" 'PRAGMA user_version' 2>/dev/null || echo unknown)"
-            git fetch --prune origin main
+            # Keep .git/config pointing at the canonical, credential-free URL
+            # (the clone predates the repository's rename), and fetch through
+            # a one-off URL that carries the token: it never lands on disk,
+            # and a URL with userinfo is not matched by any url.<base>.insteadOf
+            # rewrite a stale host-side credential setup might have left.
+            git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
+            if ! git fetch --prune "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "+refs/heads/main:refs/remotes/origin/main"; then
+              echo "::error::git fetch of ${GITHUB_REPOSITORY} failed on the host; remote is $(git remote get-url origin | sed -E 's#//[^@/]+@#//***@#')"
+              exit 1
+            fi
             # The repo is the source of truth: mirror origin/main exactly.
             # Server-local secrets live in .env (gitignored) and survive this.
             git reset --hard origin/main
