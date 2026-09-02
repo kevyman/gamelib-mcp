@@ -17,7 +17,7 @@ from conftest import (
 )
 
 from gamelib_mcp.data import db as db_module
-from gamelib_mcp.tools import admin
+from gamelib_mcp.tools import detectors
 
 
 def _now() -> str:
@@ -188,7 +188,7 @@ class DetectCollapsedGamesTests(ToolDBTestCase):
             )
             await db.commit()
 
-        result = await admin.detect_collapsed_games()
+        result = await detectors.detect_collapsed_games()
         self.assertEqual(result["collapsed_count"], 1)
         candidate = result["candidates"][0]
         self.assertEqual(candidate["game_id"], game_id)
@@ -200,6 +200,6 @@ class DetectCollapsedGamesTests(ToolDBTestCase):
         await make_steam_game("Dead Space", 17470)
         await make_steam_game("Portal", 400)
 
-        result = await admin.detect_collapsed_games()
+        result = await detectors.detect_collapsed_games()
         self.assertEqual(result["collapsed_count"], 0)
         self.assertEqual(result["candidates"], [])

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from fastmcp.exceptions import ToolError
 
-from ..data.db import get_db
+from ..data.db import DBConnection, get_db
 from .common import LIBRARY_PLATFORMS, clamp_limit, validate_platform
 
 if TYPE_CHECKING:
@@ -171,7 +171,7 @@ async def get_series_breakdown(
 
 
 async def _load_members(
-    db, series_ids: list[int], platform: str | None
+    db: DBConnection, series_ids: list[int], platform: str | None
 ) -> dict[int, tuple[list[str], list[dict]]]:
     """For the page's series, split member games into primary vs collapsed entries."""
     placeholders = ",".join(f":sid{i}" for i in range(len(series_ids)))

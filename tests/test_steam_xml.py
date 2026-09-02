@@ -1,9 +1,9 @@
 import os
-import tempfile
 import unittest
 from datetime import UTC, datetime
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
+
+from conftest import ToolDBTestCase
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steam_xml
@@ -202,26 +202,7 @@ class SteamXmlFetchLibraryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["games_upserted"], 2)
 
 
-class SteamBulkUpsertTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = Path(self.tmpdir.name) / "steam-bulk.sqlite"
-        self.original_ready_path = db_module._DB_READY_PATH
-        self.original_init_lock = db_module._DB_INIT_LOCK
-        db_module._DB_READY_PATH = None
-        db_module._DB_INIT_LOCK = None
-        self.env = patch.dict(os.environ, {"DATABASE_URL": f"file:{self.db_path}"}, clear=False)
-        self.env.start()
-
-    async def asyncSetUp(self) -> None:
-        await db_module.init_db()
-
-    async def asyncTearDown(self) -> None:
-        db_module._DB_READY_PATH = self.original_ready_path
-        db_module._DB_INIT_LOCK = self.original_init_lock
-        self.env.stop()
-        self.tmpdir.cleanup()
-
+class SteamBulkUpsertTests(ToolDBTestCase):
     async def test_bulk_upsert_is_idempotent_for_duplicate_appids_and_uses_stable_name_resolution(
         self,
     ) -> None:

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from typing import Any
 
 from fastmcp.exceptions import ToolError
 
@@ -378,7 +379,7 @@ async def get_game_details_batch(items: list[dict]) -> dict:
     """
     check_batch_items(items, cap=DETAIL_BATCH_ITEM_CAP)
 
-    async def _one(**kwargs):
+    async def _one(**kwargs: Any) -> dict:
         return await get_game_detail(**kwargs, enrich=False)
 
     results = [

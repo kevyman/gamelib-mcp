@@ -6,12 +6,25 @@ presence of the render call-sites and host-quirk workarounds that the layout
 depends on, rather than executing the script.
 """
 
+import difflib
 import hashlib
 import unittest
+from pathlib import Path
 
 from fastmcp import Client, FastMCP
 
-from gamelib_mcp import apps_eval
+from gamelib_mcp import apps_eval, apps_shared
+
+_WIDGET_DIR = Path(apps_eval.__file__).parent
+
+
+def shared_blocks() -> list[tuple[str, str]]:
+    """The (name, text) pairs both widgets splice into their HTML."""
+    return [
+        (name, value)
+        for name, value in sorted(vars(apps_shared).items())
+        if name.isupper() and not name.startswith("_") and isinstance(value, str)
+    ]
 
 
 class EvalCardResourceTests(unittest.IsolatedAsyncioTestCase):
@@ -365,6 +378,59 @@ class EvalCardLayoutTests(unittest.TestCase):
             ".wc-line:nth-child(2n) .wc-eyebrow { transform: rotate(",
         ):
             self.assertIn(marker, apps_eval.EVAL_CARD_HTML)
+
+
+class SharedBlockTests(unittest.TestCase):
+    """apps_shared.py is spliced in, never paraphrased (see tests/test_apps.py)."""
+
+    def test_every_shared_constant_is_spliced_in_verbatim(self) -> None:
+        for name, block in shared_blocks():
+            with self.subTest(block=name):
+                self.assertIn(block, apps_eval.EVAL_CARD_HTML)
+
+
+class WidgetDriftTests(unittest.TestCase):
+    """The two widget modules must not grow a second copy of the same block.
+
+    Before apps_shared.py existed the two files shared 899 identical lines in
+    33 blocks — the trailer stage, the carousel, the bridge, the link-out
+    fallback — and a fix applied to one was easy to forget in the other. What
+    is left in apps.py and apps_eval.py is each widget's own layout; anything
+    substantial they agree on belongs in apps_shared.py, where one edit reaches
+    both. The longest identical run today is 15 non-blank lines (the tail of
+    the initialize handshake, the document's closing tags, and the
+    content-hash comment under them), so the cap leaves room for a small block
+    to be ported deliberately before this fires.
+    """
+
+    MAX_IDENTICAL_LINES = 20
+
+    @staticmethod
+    def _significant_lines(name: str) -> list[str]:
+        # Blank lines carry no logic, and the one apps_shared import is the
+        # whole point of the refactor — neither counts as a duplicated block.
+        source = (_WIDGET_DIR / name).read_text().splitlines()
+        return [
+            line
+            for line in source
+            if line.strip() and line.strip() != "from . import apps_shared"
+        ]
+
+    def test_no_large_block_is_duplicated_outside_apps_shared(self) -> None:
+        cards = self._significant_lines("apps.py")
+        evaluation = self._significant_lines("apps_eval.py")
+        matcher = difflib.SequenceMatcher(None, cards, evaluation, autojunk=False)
+        offenders = [
+            (size, cards[start])
+            for start, _, size in matcher.get_matching_blocks()
+            if size >= self.MAX_IDENTICAL_LINES
+        ]
+        self.assertEqual(
+            offenders,
+            [],
+            "apps.py and apps_eval.py share a block that belongs in apps_shared.py: "
+            + "; ".join(f"{n} lines from {first.strip()!r}" for n, first in offenders),
+        )
 
 
 if __name__ == "__main__":

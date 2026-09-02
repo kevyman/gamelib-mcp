@@ -344,7 +344,7 @@ def _basic_whitespace_clean(name: str) -> str:
     return re.sub(r"\s+", " ", name).strip()
 
 
-def _parse_steam_added_at(value) -> str | None:
+def _parse_steam_added_at(value: object) -> str | None:
     """Best-effort parse of a wishlist item's date_added into an ISO string.
 
     Steam Web API timestamps are conventionally Unix epoch seconds (int, or a

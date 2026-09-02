@@ -119,6 +119,15 @@ python_version = "3.11"
 # Several scraper/provider deps (howlongtobeatpy, psnawp, pynintendoparental)
 # ship no type stubs.
 ignore_missing_imports = true
+# Every def carries full annotations and every body is checked, so a helper
+# cannot silently opt its whole body out of type checking by omitting one
+# parameter annotation — the failure mode that hid most of this file's
+# historical drift. Full --strict stays off deliberately: it reports 876
+# findings here, nearly all `Any` propagating out of the untyped provider
+# libraries above, which no annotation on our side can fix.
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
 
 [[tool.mypy.overrides]]
 # The @mcp.tool passthroughs return the tool-layer dicts; FastMCP validates

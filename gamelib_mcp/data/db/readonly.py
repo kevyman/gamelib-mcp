@@ -24,6 +24,7 @@ import asyncio
 import re
 import sqlite3
 import time
+from collections.abc import Callable
 from weakref import WeakKeyDictionary
 
 import aiosqlite
@@ -116,7 +117,7 @@ async def _install_authorizer(conn: aiosqlite.Connection) -> None:
     await conn.set_authorizer(_authorizer)
 
 
-def _make_progress_handler(deadline: float):
+def _make_progress_handler(deadline: float) -> Callable[[], int]:
     def _handler() -> int:
         # A non-zero return aborts the running statement (raises
         # sqlite3.OperationalError: interrupted).

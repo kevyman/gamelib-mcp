@@ -7,6 +7,7 @@ successful file-write path (writes to a temp NINTENDO_COOKIES_FILE).
 import asyncio
 import json
 import os
+import unittest
 from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
@@ -25,7 +26,7 @@ from fastmcp.exceptions import ToolError
 from gamelib_mcp import lifecycle
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.db import get_meta, set_meta_many
-from gamelib_mcp.tools import admin
+from gamelib_mcp.tools import admin, detectors, session_admin
 
 
 async def _insert_play_history(game_id: int, platform: str, day: str, minutes: int) -> None:
@@ -71,7 +72,7 @@ class DetectFarmedGamesTests(ToolDBTestCase):
 
     async def test_dry_run_reports_candidates_without_marking(self):
         await self._seed_farming_day()
-        result = await admin.detect_farmed_games(dry_run=True, min_games_per_day=2)
+        result = await detectors.detect_farmed_games(dry_run=True, min_games_per_day=2)
         self.assertEqual(
             set(result),
             {
@@ -100,7 +101,7 @@ class DetectFarmedGamesTests(ToolDBTestCase):
 
     async def test_non_dry_run_marks_games(self):
         await self._seed_farming_day()
-        result = await admin.detect_farmed_games(dry_run=False, min_games_per_day=2)
+        result = await detectors.detect_farmed_games(dry_run=False, min_games_per_day=2)
         self.assertFalse(result["dry_run"])
         async with db_module.get_db() as db:
             row = await db.execute_fetchone(
@@ -118,7 +119,7 @@ class DetectFarmedGamesTests(ToolDBTestCase):
         from gamelib_mcp.tools import platforms
         await platforms.update_game(game_id=target["id"], is_farmed=False)
 
-        await admin.detect_farmed_games(dry_run=False, min_games_per_day=2)
+        await detectors.detect_farmed_games(dry_run=False, min_games_per_day=2)
 
         async with db_module.get_db() as db:
             row = await db.execute_fetchone(
@@ -128,7 +129,7 @@ class DetectFarmedGamesTests(ToolDBTestCase):
 
     async def test_below_threshold_no_farming_day(self):
         await make_steam_game("Lonely", 1, playtime_minutes=30, rtime_last_played=1700000000)
-        result = await admin.detect_farmed_games(dry_run=True, min_games_per_day=8)
+        result = await detectors.detect_farmed_games(dry_run=True, min_games_per_day=8)
         self.assertEqual(result["candidates"], 0)
         self.assertEqual(result["farming_days"], [])
 
@@ -138,14 +139,14 @@ class DetectFarmedGamesTests(ToolDBTestCase):
         await self._seed_farming_day()
         gid = await seed_game("Manual")
         await add_platform(gid, "gog")  # NULL playtime, no steam data
-        result = await admin.detect_farmed_games(dry_run=True, min_games_per_day=2)
+        result = await detectors.detect_farmed_games(dry_run=True, min_games_per_day=2)
         self.assertNotIn("Manual", [g["name"] for g in result["sample_games"]])
 
 
 class DetectOrphanGamesTests(ToolDBTestCase):
     async def test_clean_library_reports_nothing(self):
         await make_steam_game("Dead Space", 17470)
-        result = await admin.detect_orphan_games()
+        result = await detectors.detect_orphan_games()
         self.assertEqual(result["orphans"], [])
         self.assertEqual(result["orphan_count"], 0)
         self.assertEqual(result["wishlist_only_count"], 0)
@@ -156,7 +157,7 @@ class DetectOrphanGamesTests(ToolDBTestCase):
         wishlist_only = await seed_game("Persona 3 Reload")
         await db_module.upsert_wishlist_entry(wishlist_only, "switch2", source="dekudeals")
 
-        result = await admin.detect_orphan_games()
+        result = await detectors.detect_orphan_games()
 
         self.assertEqual(result["orphans"], [])
         self.assertEqual(result["orphan_count"], 0)
@@ -173,7 +174,7 @@ class DetectOrphanGamesTests(ToolDBTestCase):
             )
             await db.commit()
 
-        result = await admin.detect_orphan_games()
+        result = await detectors.detect_orphan_games()
 
         self.assertEqual(result["orphan_count"], 1)
         self.assertEqual(result["wishlist_only_count"], 0)
@@ -187,7 +188,7 @@ class DetectOrphanGamesTests(ToolDBTestCase):
         stub = await seed_game("Manual Stub")
         await add_platform(stub, "switch2", owned=0)
 
-        result = await admin.detect_orphan_games()
+        result = await detectors.detect_orphan_games()
 
         self.assertEqual(result["orphans"], [])
         self.assertEqual(result["orphan_count"], 0)
@@ -199,7 +200,7 @@ class DetectOrphanGamesTests(ToolDBTestCase):
         await seed_game(
             "Some DLC", content_type="dlc", is_primary_library_item=0
         )
-        result = await admin.detect_orphan_games()
+        result = await detectors.detect_orphan_games()
         self.assertEqual(result["orphans"], [])
         self.assertEqual(result["orphan_count"], 0)
 
@@ -224,7 +225,7 @@ class DetectOrphanGamesTests(ToolDBTestCase):
         )
         del soundtrack  # unowned child: counted in child_count only
 
-        result = await admin.detect_orphan_games()
+        result = await detectors.detect_orphan_games()
 
         self.assertEqual(result["orphans"], [])
         self.assertEqual(result["orphan_count"], 0)
@@ -237,7 +238,7 @@ class DetectOrphanGamesTests(ToolDBTestCase):
 
     async def test_phantom_parent_bucket_empty_on_clean_library(self):
         await make_steam_game("Owned", 1)
-        result = await admin.detect_orphan_games()
+        result = await detectors.detect_orphan_games()
         self.assertEqual(result["phantom_parents"], [])
         self.assertEqual(result["phantom_parent_count"], 0)
 
@@ -245,15 +246,15 @@ class DetectOrphanGamesTests(ToolDBTestCase):
 class SetNintendoSessionValidationTests(ToolDBTestCase):
     async def test_invalid_json_returns_error(self):
         with self.assertRaisesRegex(ToolError, "Invalid JSON"):
-            await admin.set_nintendo_session("not json{")
+            await session_admin.set_nintendo_session("not json{")
 
     async def test_non_object_or_array_rejected(self):
         with self.assertRaisesRegex(ToolError, "Expected a JSON object or array"):
-            await admin.set_nintendo_session(json.dumps(42))
+            await session_admin.set_nintendo_session(json.dumps(42))
 
     async def test_empty_cookies_rejected(self):
         with self.assertRaisesRegex(ToolError, "No valid cookies found in input"):
-            await admin.set_nintendo_session(json.dumps({}))
+            await session_admin.set_nintendo_session(json.dumps({}))
 
     async def test_valid_cookies_write_succeeds(self):
         import os
@@ -263,7 +264,7 @@ class SetNintendoSessionValidationTests(ToolDBTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cookie_path = os.path.join(tmp, "nested", "cookies.json")
             with patch.dict(os.environ, {"NINTENDO_COOKIES_FILE": cookie_path}):
-                result = await admin.set_nintendo_session(
+                result = await session_admin.set_nintendo_session(
                     json.dumps([{"name": "id_token", "value": "abc"}])
                 )
             self.assertEqual(result["cookie_count"], 1)
@@ -285,14 +286,14 @@ class SetNintendoSessionValidationTests(ToolDBTestCase):
                 f.write("{}")
             os.chmod(cookie_path, 0o644)
             with patch.dict(os.environ, {"NINTENDO_COOKIES_FILE": cookie_path}):
-                await admin.set_nintendo_session(
+                await session_admin.set_nintendo_session(
                     json.dumps([{"name": "id_token", "value": "abc"}])
                 )
             self.assertEqual(stat.S_IMODE(os.stat(cookie_path).st_mode), 0o600)
 
             fresh_path = os.path.join(tmp, "nested", "fresh.json")
             with patch.dict(os.environ, {"NINTENDO_COOKIES_FILE": fresh_path}):
-                await admin.set_nintendo_session(
+                await session_admin.set_nintendo_session(
                     json.dumps([{"name": "id_token", "value": "abc"}])
                 )
             self.assertEqual(stat.S_IMODE(os.stat(fresh_path).st_mode), 0o600)
@@ -1342,7 +1343,7 @@ class RevalidateIgdbMatchesTests(ToolDBTestCase):
                 AsyncMock(return_value=self._IGDB_RECORDS),
             ),
         ):
-            result = await admin.revalidate_igdb_matches(dry_run=True)
+            result = await detectors.revalidate_igdb_matches(dry_run=True)
 
         self.assertTrue(result["dry_run"])
         self.assertEqual(result["checked"], 4)  # unenriched row not checked
@@ -1381,7 +1382,7 @@ class RevalidateIgdbMatchesTests(ToolDBTestCase):
                 AsyncMock(return_value=self._IGDB_RECORDS),
             ),
         ):
-            result = await admin.revalidate_igdb_matches(dry_run=False)
+            result = await detectors.revalidate_igdb_matches(dry_run=False)
 
         self.assertFalse(result["dry_run"])
         self.assertEqual(result["reset_count"], 2)
@@ -1445,7 +1446,7 @@ class RevalidateIgdbMatchesTests(ToolDBTestCase):
                 AsyncMock(return_value=records),
             ),
         ):
-            result = await admin.revalidate_igdb_matches(dry_run=False)
+            result = await detectors.revalidate_igdb_matches(dry_run=False)
 
         self.assertEqual(result["mismatch_count"], 1)
         self.assertEqual(result["classification_reset_count"], 1)
@@ -1487,7 +1488,7 @@ class RevalidateIgdbMatchesTests(ToolDBTestCase):
                 AsyncMock(return_value=records),
             ),
         ):
-            result = await admin.revalidate_igdb_matches(dry_run=False)
+            result = await detectors.revalidate_igdb_matches(dry_run=False)
 
         self.assertEqual(result["mismatch_count"], 1)
         self.assertEqual(result["classification_reset_count"], 0)
@@ -1534,7 +1535,7 @@ class RevalidateIgdbMatchesTests(ToolDBTestCase):
                 AsyncMock(return_value=records),
             ),
         ):
-            result = await admin.revalidate_igdb_matches(dry_run=False)
+            result = await detectors.revalidate_igdb_matches(dry_run=False)
 
         self.assertEqual(result["classification_reset_count"], 0)
         self.assertFalse(result["mismatches"][0]["classification_reset"])
@@ -1573,7 +1574,7 @@ class RevalidateIgdbMatchesTests(ToolDBTestCase):
                 AsyncMock(return_value=records),
             ),
         ):
-            result = await admin.revalidate_igdb_matches(dry_run=True)
+            result = await detectors.revalidate_igdb_matches(dry_run=True)
 
         self.assertTrue(result["mismatches"][0]["classification_reset"])
         self.assertEqual(result["classification_reset_count"], 0)
@@ -1594,7 +1595,7 @@ class RevalidateIgdbMatchesTests(ToolDBTestCase):
                 AsyncMock(return_value={}),
             ),
         ):
-            result = await admin.revalidate_igdb_matches(dry_run=False)
+            result = await detectors.revalidate_igdb_matches(dry_run=False)
 
         self.assertEqual(result["mismatch_count"], 0)
         self.assertEqual(result["reset_count"], 0)
@@ -1615,7 +1616,7 @@ class RevalidateIgdbMatchesTests(ToolDBTestCase):
                 AsyncMock(return_value=self._IGDB_RECORDS),
             ) as fetch_mock,
         ):
-            result = await admin.revalidate_igdb_matches(dry_run=True, limit=2)
+            result = await detectors.revalidate_igdb_matches(dry_run=True, limit=2)
 
         self.assertEqual(result["checked"], 2)
         # Only the first two rows' ids were sent to IGDB.
@@ -1628,7 +1629,7 @@ class RevalidateIgdbMatchesTests(ToolDBTestCase):
             for key in ("TWITCH_CLIENT_ID", "TWITCH_CLIENT_SECRET")
         }
         try:
-            result = await admin.revalidate_igdb_matches()
+            result = await detectors.revalidate_igdb_matches()
         finally:
             for key, value in env_backup.items():
                 if value is not None:
@@ -1678,7 +1679,7 @@ class DetectStrandedDuplicatesTests(ToolDBTestCase):
         switch_side = await self._insert_duplicate_game("Hades")
         await add_platform(switch_side, "switch2")
 
-        result = await admin.detect_stranded_duplicates()
+        result = await detectors.detect_stranded_duplicates()
 
         self.assertEqual(result["stranded_count"], 1)
         candidate = result["candidates"][0]
@@ -1688,7 +1689,7 @@ class DetectStrandedDuplicatesTests(ToolDBTestCase):
         self.assertEqual(candidate["identifiers"], ["psn_title_id=PPSA01492_00"])
 
     async def test_empty_library_reports_nothing(self):
-        result = await admin.detect_stranded_duplicates()
+        result = await detectors.detect_stranded_duplicates()
         self.assertEqual(result, {"stranded_count": 0, "candidates": []})
 
 
@@ -1715,7 +1716,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
             is_primary_library_item=0,
         )
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
 
         stranded = self._by_reason(result, "nested_parent")
         self.assertEqual([c["game_id"] for c in stranded], [base])
@@ -1750,7 +1751,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
             "Base Thing: The Extra", content_type="dlc", is_primary_library_item=0
         )
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
 
         needs = self._by_reason(result, "needs_parent")
         self.assertEqual([c["game_id"] for c in needs], [child])
@@ -1765,7 +1766,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
             "Standalone Mystery Widget", content_type="dlc", is_primary_library_item=0
         )
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
 
         needs = self._by_reason(result, "needs_parent")
         self.assertEqual([c["game_id"] for c in needs], [child])
@@ -1789,7 +1790,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
         gpid = await add_platform(child, "steam", playtime_minutes=1198, owned=1)
         await add_identifier(gpid, "steam_appid", "253230")
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
 
         bucket = {c["game_id"]: c for c in self._by_reason(result, "wrong_parent_suspect")}
         self.assertIn(child, bucket)
@@ -1827,7 +1828,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
             is_primary_library_item=0,
         )
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
 
         bucket = {c["game_id"]: c for c in self._by_reason(result, "wrong_parent_suspect")}
         self.assertIn(child, bucket)
@@ -1859,7 +1860,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
             is_primary_library_item=0,
         )
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
 
         flagged = {c["game_id"] for c in self._by_reason(result, "wrong_parent_suspect")}
         self.assertNotIn(season2, flagged)
@@ -1880,7 +1881,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
         gpid = await add_platform(child, "steam", playtime_minutes=0, owned=1)
         await add_identifier(gpid, "steam_appid", "1489630")
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
 
         bucket = {c["game_id"]: c for c in self._by_reason(result, "wrong_parent_suspect")}
         self.assertIn(child, bucket)
@@ -1904,7 +1905,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
         gpid = await add_platform(edition, "steam", playtime_minutes=0, owned=1)
         await add_identifier(gpid, "steam_appid", "22490")
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
 
         self.assertNotIn(
             edition,
@@ -1930,7 +1931,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
             )
             await db.commit()
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
 
         self.assertNotIn(
             child,
@@ -1941,7 +1942,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
         season = await seed_game("Elden Ring Season Pass")
         soundtrack = await seed_game("Celeste Soundtrack")
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
 
         by_id = {c["game_id"]: c for c in self._by_reason(result, "addon_name_pattern")}
         self.assertEqual(by_id[season]["suggested_update"], {"game_id": season, "content_type": "dlc"})
@@ -1958,7 +1959,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
         parent = await seed_game("Elden Ring")
         pass_id = await seed_game("Elden Ring: Season Pass")
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
 
         by_id = {c["game_id"]: c for c in self._by_reason(result, "addon_name_pattern")}
         self.assertEqual(
@@ -1976,7 +1977,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
         gpid = await add_platform(forza, "steam", playtime_minutes=600, owned=1)
         await add_identifier(gpid, "steam_appid", "1293830")
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
 
         bucket = {
             c["game_id"]: c
@@ -1998,7 +1999,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
             "Cool Game: Season Pass", content_type="dlc", is_primary_library_item=1
         )
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
 
         bucket = {
             c["game_id"]: c
@@ -2023,7 +2024,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
             )
             await db.commit()
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
 
         self.assertNotIn(
             pinned,
@@ -2044,7 +2045,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
             is_primary_library_item=0,
         )
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
         needs_parent_ids = {c["game_id"] for c in self._by_reason(result, "needs_parent")}
         self.assertNotIn(desync, needs_parent_ids)
 
@@ -2055,7 +2056,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
         # User pins content_type via update_game — the detector must not nag.
         await platforms.update_game(game_id=pinned, content_type="base_game")
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
 
         self.assertNotIn(
             pinned, [c["game_id"] for c in self._by_reason(result, "addon_name_pattern")]
@@ -2068,7 +2069,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
         await db_module.set_platform_acquisition(gpid, {"purchase_source": "humble"})
         # No identifier, no igdb_id — the phantom shape.
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
 
         suspects = {c["game_id"]: c for c in self._by_reason(result, "purchase_minted_suspect")}
         self.assertIn(phantom, suspects)
@@ -2086,7 +2087,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
         await db_module.set_platform_acquisition(gpid, {"purchase_source": "humble"})
         await add_identifier(gpid, "steam_appid", "424481")
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
 
         self.assertNotIn(
             owned, [c["game_id"] for c in self._by_reason(result, "purchase_minted_suspect")]
@@ -2098,7 +2099,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
             "Cool Game: Season Pass", content_type="dlc", is_primary_library_item=0
         )
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
 
         matching = [c for c in result["candidates"] if c["game_id"] == child]
         self.assertEqual(len(matching), 1)
@@ -2109,8 +2110,8 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
         game = await make_steam_game("Mysterious Content", 555)
 
         payload = {"type": "dlc", "fullgame": {"appid": 999, "name": "Base Game"}}
-        with patch.object(admin, "_fetch_steam_appdetails", AsyncMock(return_value=payload)):
-            result = await admin.detect_misclassified_dlc(limit=5, probe_steam=True)
+        with patch.object(detectors, "_fetch_steam_appdetails", AsyncMock(return_value=payload)):
+            result = await detectors.detect_misclassified_dlc(limit=5, probe_steam=True)
 
         mismatches = {c["game_id"]: c for c in self._by_reason(result, "steam_type_mismatch")}
         self.assertIn(game, mismatches)
@@ -2128,9 +2129,9 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
 
         payload = {"type": "dlc", "fullgame": {"appid": 999, "name": "Unknown"}}
         with patch.object(
-            admin, "_fetch_steam_appdetails", AsyncMock(return_value=payload)
+            detectors, "_fetch_steam_appdetails", AsyncMock(return_value=payload)
         ) as fetch_mock:
-            result = await admin.detect_misclassified_dlc(limit=1, probe_steam=True)
+            result = await detectors.detect_misclassified_dlc(limit=1, probe_steam=True)
 
         self.assertEqual(result["probed"], 1)
         self.assertEqual(result["probe_remaining"], 1)
@@ -2153,10 +2154,10 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
 
         offset = 0
         with patch.object(
-            admin, "_fetch_steam_appdetails", AsyncMock(side_effect=fake_fetch)
+            detectors, "_fetch_steam_appdetails", AsyncMock(side_effect=fake_fetch)
         ):
             for _ in range(3):
-                result = await admin.detect_misclassified_dlc(
+                result = await detectors.detect_misclassified_dlc(
                     limit=1, probe_steam=True, probe_offset=offset
                 )
                 self.assertEqual(result["probed"], 1)
@@ -2175,9 +2176,9 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
         await make_steam_game("All Two", 222)
 
         with patch.object(
-            admin, "_fetch_steam_appdetails", AsyncMock(return_value={"type": "game"})
+            detectors, "_fetch_steam_appdetails", AsyncMock(return_value={"type": "game"})
         ) as fetch_mock:
-            result = await admin.detect_misclassified_dlc(limit=0, probe_steam=True)
+            result = await detectors.detect_misclassified_dlc(limit=0, probe_steam=True)
 
         self.assertEqual(result["probed"], 2)
         self.assertEqual(fetch_mock.await_count, 2)
@@ -2193,8 +2194,8 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
                 raise RuntimeError("boom")
             return {"type": "dlc", "fullgame": {"appid": 999, "name": "Unknown"}}
 
-        with patch.object(admin, "_fetch_steam_appdetails", AsyncMock(side_effect=fake_fetch)):
-            result = await admin.detect_misclassified_dlc(limit=5, probe_steam=True)
+        with patch.object(detectors, "_fetch_steam_appdetails", AsyncMock(side_effect=fake_fetch)):
+            result = await detectors.detect_misclassified_dlc(limit=5, probe_steam=True)
 
         self.assertEqual(result["probed"], 2)
         self.assertEqual([s["steam_appid"] for s in result["skipped"]], ["111"])
@@ -2206,8 +2207,8 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
     async def test_probe_steam_false_does_no_fetch(self):
         await make_steam_game("Some Game", 555)
 
-        with patch.object(admin, "_fetch_steam_appdetails", AsyncMock()) as fetch_mock:
-            result = await admin.detect_misclassified_dlc(probe_steam=False)
+        with patch.object(detectors, "_fetch_steam_appdetails", AsyncMock()) as fetch_mock:
+            result = await detectors.detect_misclassified_dlc(probe_steam=False)
 
         fetch_mock.assert_not_awaited()
         self.assertEqual(result["probed"], 0)
@@ -2222,7 +2223,7 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
             "Repairable Base: Story DLC", content_type="dlc", is_primary_library_item=0
         )
 
-        result = await admin.detect_misclassified_dlc(probe_steam=False)
+        result = await detectors.detect_misclassified_dlc(probe_steam=False)
         cand = self._by_reason(result, "needs_parent")[0]
         self.assertEqual(cand["game_id"], child)
 
@@ -2258,8 +2259,8 @@ class DetectMisclassifiedDlcTests(ToolDBTestCase):
             return [tuple(r) for r in rows]
 
         before = await snapshot()
-        with patch.object(admin, "_fetch_steam_appdetails", AsyncMock(return_value=None)):
-            await admin.detect_misclassified_dlc(limit=10, probe_steam=True)
+        with patch.object(detectors, "_fetch_steam_appdetails", AsyncMock(return_value=None)):
+            await detectors.detect_misclassified_dlc(limit=10, probe_steam=True)
         after = await snapshot()
 
         self.assertEqual(before, after)
@@ -2738,3 +2739,29 @@ class MergeGamesBatchTests(ToolDBTestCase):
             await admin.merge_games_batch(
                 [{"source_game_id": 1, "target_game_id": 2}] * 201
             )
+
+
+class SessionFileChokepointTests(unittest.TestCase):
+    """AGENTS.md: every session file is written through _write_private_json.
+
+    The guard lives in one function so the 0600-before-secret rule cannot be
+    bypassed by a new provider; this pins that no other write-mode open exists
+    in the module that holds the set_*_session save paths.
+    """
+
+    def test_session_admin_has_exactly_one_write_path(self) -> None:
+        import inspect
+        import re
+
+        from gamelib_mcp.tools import session_admin
+
+        source = inspect.getsource(session_admin)
+        chokepoint = inspect.getsource(session_admin._write_private_json)
+        write_opens = re.findall(r"\bos\.open\(|\bopen\([^)]*[\"'][wa]", source)
+        self.assertEqual(len(write_opens), 1, write_opens)
+        self.assertIn("os.open(", chokepoint)
+        self.assertIn("os.fchmod(fd, 0o600)", chokepoint)
+        savers = [name for name in dir(session_admin) if name.startswith("set_") and name.endswith("_session")]
+        self.assertTrue(savers)
+        for name in savers:
+            self.assertIn("_write_private_json", inspect.getsource(getattr(session_admin, name)) + inspect.getsource(session_admin._save_session_cookies), name)

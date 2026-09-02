@@ -13,7 +13,7 @@ from conftest import (
 from fastmcp.exceptions import ToolError
 
 from gamelib_mcp.data import db as db_module
-from gamelib_mcp.tools import admin
+from gamelib_mcp.tools import admin, detectors
 
 
 async def _appids_by_game(platform: str = "steam") -> dict[int, list[str]]:
@@ -210,7 +210,7 @@ class DetectCrossPlatformCollapsesTests(ToolDBTestCase):
                 AsyncMock(return_value={999: "Dead Space (2023)", 222: "Dead Space"}),
             ),
         ):
-            result = await admin.detect_cross_platform_collapses()
+            result = await detectors.detect_cross_platform_collapses()
 
         self.assertEqual(result["checked"], 1)
         self.assertEqual(result["collapsed_count"], 1)
@@ -235,7 +235,7 @@ class DetectCrossPlatformCollapsesTests(ToolDBTestCase):
                 AsyncMock(return_value={}),
             ),
         ):
-            result = await admin.detect_cross_platform_collapses()
+            result = await detectors.detect_cross_platform_collapses()
 
         self.assertEqual(result["checked"], 1)
         self.assertEqual(result["collapsed_count"], 0)
@@ -245,7 +245,7 @@ class DetectCrossPlatformCollapsesTests(ToolDBTestCase):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TWITCH_CLIENT_ID", None)
             os.environ.pop("TWITCH_CLIENT_SECRET", None)
-            result = await admin.detect_cross_platform_collapses()
+            result = await detectors.detect_cross_platform_collapses()
         self.assertFalse(result["igdb_configured"])
         self.assertEqual(result["checked"], 0)
 
@@ -254,7 +254,7 @@ class DetectCrossPlatformCollapsesTests(ToolDBTestCase):
         await self._multi_platform_steam_game("Dead Space", 17470, 999)
         with patch.dict(os.environ, {"TWITCH_CLIENT_ID": "x"}, clear=False):
             os.environ.pop("TWITCH_CLIENT_SECRET", None)
-            result = await admin.detect_cross_platform_collapses()
+            result = await detectors.detect_cross_platform_collapses()
         self.assertFalse(result["igdb_configured"])
         self.assertEqual(result["checked"], 0)
         self.assertEqual(result["candidates"], [])

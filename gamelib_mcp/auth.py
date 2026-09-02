@@ -10,7 +10,7 @@ from __future__ import annotations
 import functools
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -124,7 +124,7 @@ class SecurityConfig:
             fallback_refresh_token_expiry_seconds=_REFRESH_TOKEN_LIFETIME_SECONDS,
         )
 
-    def owner_authorization_check(self):
+    def owner_authorization_check(self) -> Callable[[AuthContext], bool]:
         """Return a FastMCP auth check restricted to the configured GitHub IDs."""
 
         if self.oauth is None:

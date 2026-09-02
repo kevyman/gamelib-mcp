@@ -304,64 +304,68 @@ async def audit_steam_licenses(
                 {"appid": appid, "name": prepared}
             )
 
-    for appid in to_probe:
-        data = await fetch_store_appdetails(appid)
-        if data:
-            app_type = (data.get("type") or "").strip().lower()
-            raw_name = data.get("name") or ""
-            prepared = prepare_catalog_title(raw_name)
-            if app_type == "game" and prepared:
+    # One client for the whole probe loop: each fetch_store_appdetails call
+    # would otherwise open (and tear down) its own connection pool per appid.
+    # 15s matches the per-request timeout that call already passes.
+    async with httpx.AsyncClient(timeout=15) as probe_client:
+        for appid in to_probe:
+            data = await fetch_store_appdetails(appid, probe_client)
+            if data:
+                app_type = (data.get("type") or "").strip().lower()
+                raw_name = data.get("name") or ""
+                prepared = prepare_catalog_title(raw_name)
+                if app_type == "game" and prepared:
+                    if mint:
+                        await bulk_upsert_steam_library(
+                            [{"appid": appid, "name": prepared}], synced_at=now
+                        )
+                        # NO delisted flag here: appdetails just served a live store
+                        # page for this appid, so it is not retired. GetOwnedGames
+                        # omits never-launched apps too (a freshly redeemed bundle
+                        # is the common case) — absence there is not evidence of a
+                        # delisting, and flagging it made every delisted-filtered
+                        # view under-report.
+                        audit[str(appid)] = {"outcome": "minted", "name": raw_name or None, "at": now}
+                        minted.append({"appid": appid, "name": prepared})
+                    else:
+                        audit[str(appid)] = {"outcome": "classified_game", "name": prepared, "at": now}
+                        would_mint.append({"appid": appid, "name": prepared})
+                else:
+                    # DLC/music/demo/tool — or a junk title prepare_catalog_title
+                    # rejects. Nested/tool content never mints a games row. The skip
+                    # is a mint-independent fact, so report mode records it too.
+                    audit[str(appid)] = {
+                        "outcome": f"skipped_{app_type or 'non_game'}",
+                        "name": raw_name or None,
+                        "at": now,
+                    }
+                    skipped.append({"appid": appid, "type": app_type or None, "name": raw_name or None})
+                audit_dirty = True
+                continue
+
+            # Retired from the store entirely. SteamSpy still knows real games.
+            spy_name = await fetch_steamspy_name(appid)
+            prepared = prepare_catalog_title(spy_name) if spy_name else None
+            if prepared:
                 if mint:
                     await bulk_upsert_steam_library(
                         [{"appid": appid, "name": prepared}], synced_at=now
                     )
-                    # NO delisted flag here: appdetails just served a live store
-                    # page for this appid, so it is not retired. GetOwnedGames
-                    # omits never-launched apps too (a freshly redeemed bundle
-                    # is the common case) — absence there is not evidence of a
-                    # delisting, and flagging it made every delisted-filtered
-                    # view under-report.
-                    audit[str(appid)] = {"outcome": "minted", "name": raw_name or None, "at": now}
-                    minted.append({"appid": appid, "name": prepared})
+                    await set_steam_delisted([appid], True)
+                    audit[str(appid)] = {"outcome": "minted_delisted", "name": spy_name, "at": now}
+                    minted_delisted.append({"appid": appid, "name": prepared})
                 else:
-                    audit[str(appid)] = {"outcome": "classified_game", "name": prepared, "at": now}
-                    would_mint.append({"appid": appid, "name": prepared})
+                    audit[str(appid)] = {
+                        "outcome": "classified_retired_game",
+                        "name": prepared,
+                        "at": now,
+                    }
+                    would_mint_delisted.append({"appid": appid, "name": prepared})
             else:
-                # DLC/music/demo/tool — or a junk title prepare_catalog_title
-                # rejects. Nested/tool content never mints a games row. The skip
-                # is a mint-independent fact, so report mode records it too.
-                audit[str(appid)] = {
-                    "outcome": f"skipped_{app_type or 'non_game'}",
-                    "name": raw_name or None,
-                    "at": now,
-                }
-                skipped.append({"appid": appid, "type": app_type or None, "name": raw_name or None})
+                # Mint-independent fact (retriable via retry_unresolved either way).
+                audit[str(appid)] = {"outcome": "unresolved", "name": None, "at": now}
+                unresolved.append(appid)
             audit_dirty = True
-            continue
-
-        # Retired from the store entirely. SteamSpy still knows real games.
-        spy_name = await fetch_steamspy_name(appid)
-        prepared = prepare_catalog_title(spy_name) if spy_name else None
-        if prepared:
-            if mint:
-                await bulk_upsert_steam_library(
-                    [{"appid": appid, "name": prepared}], synced_at=now
-                )
-                await set_steam_delisted([appid], True)
-                audit[str(appid)] = {"outcome": "minted_delisted", "name": spy_name, "at": now}
-                minted_delisted.append({"appid": appid, "name": prepared})
-            else:
-                audit[str(appid)] = {
-                    "outcome": "classified_retired_game",
-                    "name": prepared,
-                    "at": now,
-                }
-                would_mint_delisted.append({"appid": appid, "name": prepared})
-        else:
-            # Mint-independent fact (retriable via retry_unresolved either way).
-            audit[str(appid)] = {"outcome": "unresolved", "name": None, "at": now}
-            unresolved.append(appid)
-        audit_dirty = True
 
     if mint and (minted or minted_delisted):
         # Report the rows this run actually created, so a healed license is

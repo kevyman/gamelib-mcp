@@ -11,6 +11,7 @@ from . import (
     NINTENDO_TITLE_ID_TYPE,
     STEAM_APP_ID,
     STEAM_PLATFORM,
+    DBConnection,
     get_db,
     normalize_identifier_value,
 )
@@ -139,7 +140,7 @@ async def set_meta_many(values: dict[str, str | None]) -> None:
         await db.commit()
 
 
-async def get_game_substance(db, game_id: int) -> dict:
+async def get_game_substance(db: DBConnection, game_id: int) -> dict:
     """How much observable reality backs a games row.
 
     Returns ``{"has_identifier": bool, "playtime_minutes": int,
@@ -170,7 +171,7 @@ async def get_game_substance(db, game_id: int) -> dict:
 
 
 async def nesting_substance_conflict(
-    db, child_game_id: int, parent_game_id: int
+    db: DBConnection, child_game_id: int, parent_game_id: int
 ) -> bool:
     """True when nesting ``child`` under ``parent`` would hide a real game.
 
@@ -193,7 +194,7 @@ async def nesting_substance_conflict(
 
 
 async def edition_hides_owned_game(
-    db, child_game_id: int, parent_game_id: int | None
+    db: DBConnection, child_game_id: int, parent_game_id: int | None
 ) -> bool:
     """True when an *edition* verdict would nest an OWNED row under a parent
     with no ownership.
@@ -271,7 +272,7 @@ async def get_game_by_igdb_id(igdb_id: int) -> aiosqlite.Row | None:
         )
 
 
-async def has_nested_children(db, game_id: int) -> bool:
+async def has_nested_children(db: DBConnection, game_id: int) -> bool:
     """True when some other row nests under ``game_id`` (it is a parent).
 
     A parent must stay a primary library item (ADR 0002): nesting one would hide

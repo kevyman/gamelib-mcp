@@ -6,9 +6,18 @@ from unittest.mock import AsyncMock, patch
 
 from fastmcp import Client, FastMCP
 
-from gamelib_mcp import apps
+from gamelib_mcp import apps, apps_shared
 from gamelib_mcp.data import igdb
 from gamelib_mcp.tools.common import cover_url
+
+
+def shared_blocks() -> list[tuple[str, str]]:
+    """The (name, text) pairs both widgets splice into their HTML."""
+    return [
+        (name, value)
+        for name, value in sorted(vars(apps_shared).items())
+        if name.isupper() and not name.startswith("_") and isinstance(value, str)
+    ]
 
 
 class CoverUrlTests(unittest.TestCase):
@@ -196,7 +205,7 @@ class ContentTypeBadgeTests(unittest.TestCase):
             'btn.classList.toggle("sel", i === j)',
             'select(0);',                         # trailer first when there is one
             'if (game.similar) similarNode(stack, game.similar)',
-            'el("div", "sim-name", item.name)',
+            'el("div", "sim-name", item.name || "?")',
             '"You own " + owned + " of the " + items.length + " most similar"',
         ):
             self.assertIn(marker, apps.GAME_CARDS_HTML)
@@ -324,6 +333,28 @@ class ContentTypeBadgeTests(unittest.TestCase):
         )
         self.assertEqual(apps.GAME_CARDS_URI, expected)
 
+
+class SharedBlockTests(unittest.TestCase):
+    """apps_shared.py is spliced in, never paraphrased.
+
+    The two widgets serve self-contained HTML, so the only thing keeping their
+    common blocks in step is that both files splice the SAME constants. If a
+    constant stops appearing verbatim, an edit to apps_shared.py has silently
+    stopped reaching this widget.
+    """
+
+    def test_every_shared_constant_is_spliced_in_verbatim(self) -> None:
+        for name, block in shared_blocks():
+            with self.subTest(block=name):
+                self.assertIn(block, apps.GAME_CARDS_HTML)
+
+    def test_the_shared_module_carries_the_blocks_worth_sharing(self) -> None:
+        # A guard on the guard: an empty apps_shared would make the assertions
+        # above pass vacuously.
+        names = [name for name, _ in shared_blocks()]
+        self.assertGreater(len(names), 20)
+        for expected in ("BRIDGE_JS", "HERO_MEDIA_JS", "MEDIA_PANEL_JS", "CAROUSEL_STAGE_JS"):
+            self.assertIn(expected, names)
 
 if __name__ == "__main__":
     unittest.main()

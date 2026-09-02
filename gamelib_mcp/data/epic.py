@@ -272,11 +272,6 @@ async def fetch_epic_playtime(
     return playtime, last_played
 
 
-def is_epic_configured() -> bool:
-    config_path = _legendary_config_path()
-    return config_path.exists() and (config_path / "user.json").is_file() and (config_path / "metadata").is_dir()
-
-
 async def sync_epic() -> dict:
     """
     Sync Epic Games library into game_platforms.

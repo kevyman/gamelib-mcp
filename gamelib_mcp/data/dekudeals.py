@@ -98,10 +98,6 @@ _SEARCH_REQUEST_DELAY_SECONDS = 0.5
 _SEARCH_PLATFORM_FILTERS = ("switch_2", "switch")
 
 
-def is_dekudeals_configured() -> bool:
-    return bool(os.getenv("DEKUDEALS_WISHLIST_URL", DEKUDEALS_WISHLIST_URL))
-
-
 async def sync_dekudeals_wishlist() -> dict:
     """
     Fetch the configured DekuDeals shared wishlist and fuzzy-match titles to DB

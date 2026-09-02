@@ -2,7 +2,9 @@
 
 import json
 import logging
+from collections.abc import Iterable
 from datetime import UTC, datetime
+from typing import Any, cast
 
 from ..content import (
     CONTENT_BASE_GAME,
@@ -16,6 +18,7 @@ from . import (
     NINTENDO_TITLE_ID_TYPE,
     STEAM_APP_ID,
     STEAM_PLATFORM,
+    DBConnection,
     _backfill_name_normalized,
     _iter_chunks,
     get_db,
@@ -51,7 +54,7 @@ GAME_EDITABLE_FIELDS = {
 }
 
 
-def _decode_overrides(raw) -> set[str]:
+def _decode_overrides(raw: str | None) -> set[str]:
     if not raw:
         return set()
     try:
@@ -61,7 +64,7 @@ def _decode_overrides(raw) -> set[str]:
     return set(data) if isinstance(data, list) else set()
 
 
-async def get_manual_overrides(db, game_id: int) -> set[str]:
+async def get_manual_overrides(db: DBConnection, game_id: int) -> set[str]:
     """Return the set of games columns marked as manual overrides for a game.
 
     ``db`` is an open connection (enrichment writers already hold one). Used by
@@ -101,7 +104,7 @@ async def apply_manual_game_fields(game_id: int, fields: dict) -> set[str]:
         return merged
 
 
-async def remove_manual_overrides(game_id: int, columns) -> set[str]:
+async def remove_manual_overrides(game_id: int, columns: Iterable[str]) -> set[str]:
     """Stop protecting the given columns so sync/enrichment may update them again.
 
     Removing protection does not change the current value — it just lets the next
@@ -135,7 +138,9 @@ PLATFORM_EDITABLE_FIELDS = {
 }
 
 
-async def get_platform_manual_overrides(db, game_platform_id: int) -> set[str]:
+async def get_platform_manual_overrides(
+    db: DBConnection, game_platform_id: int
+) -> set[str]:
     """Return the set of game_platforms columns pinned by hand on one row.
 
     ``db`` is an open connection (the sync write paths consult this inline via
@@ -176,7 +181,9 @@ async def apply_manual_platform_fields(game_platform_id: int, fields: dict) -> s
         return merged
 
 
-async def remove_platform_manual_overrides(game_platform_id: int, columns) -> set[str]:
+async def remove_platform_manual_overrides(
+    game_platform_id: int, columns: Iterable[str]
+) -> set[str]:
     """Stop protecting the given game_platforms columns so sync may update them.
 
     Removing protection does not change the current value — it just lets the next
@@ -197,7 +204,7 @@ async def upsert_game(
     name: str,
     *,
     match_existing_by_name: bool = True,
-    **fields,
+    **fields: Any,
 ) -> int:
     """Insert or update a canonical game row. Returns games.id.
 
@@ -228,7 +235,9 @@ async def upsert_game(
 
         if row is None:
             cursor = await db.execute("INSERT INTO games (name) VALUES (?)", (name,))
-            game_id = cursor.lastrowid
+            # A committed INSERT always sets lastrowid; the Optional belongs to
+            # sqlite3's signature, not to any outcome reachable here.
+            game_id = cast("int", cursor.lastrowid)
         else:
             game_id = row["id"]
 
@@ -814,7 +823,7 @@ async def clear_fulfilled_wishlist_entries(
 async def delete_stale_wishlist_entries(
     platform: str,
     source: str,
-    keep_game_ids,
+    keep_game_ids: Iterable[int],
 ) -> int:
     """Delete (platform, source) game_wishlist rows not in keep_game_ids.
 
@@ -1087,7 +1096,7 @@ async def seed_platform_provider_alias(
 
 
 @retry_on_write_contention
-async def upsert_steam_platform_data(game_platform_id: int, **fields) -> None:
+async def upsert_steam_platform_data(game_platform_id: int, **fields: object) -> None:
     if not fields:
         return
 
@@ -1377,7 +1386,7 @@ async def bulk_upsert_steam_library(
 
 
 @retry_on_write_contention
-async def set_steam_delisted(appids, delisted: bool) -> int:
+async def set_steam_delisted(appids: Iterable[int | str], delisted: bool) -> int:
     """Set game_platforms.delisted for the Steam rows holding these appids.
 
     delisted=1 marks ownership sourced from the account license audit for an
@@ -1415,7 +1424,9 @@ async def set_steam_delisted(appids, delisted: bool) -> int:
 
 
 @retry_on_write_contention
-async def upsert_game_platform_enrichment(game_platform_id: int, **fields) -> None:
+async def upsert_game_platform_enrichment(
+    game_platform_id: int, **fields: object
+) -> None:
     if not fields:
         return
     columns = ", ".join(["game_platform_id", *fields.keys()])
@@ -1431,7 +1442,9 @@ async def upsert_game_platform_enrichment(game_platform_id: int, **fields) -> No
         await db.commit()
 
 
-async def upsert_game_series_links(game_id: int, series_entries) -> None:
+async def upsert_game_series_links(
+    game_id: int, series_entries: Iterable[tuple[str, int | None, str | None]]
+) -> None:
     """Link a game to its series (IGDB collections/franchises).
 
     ``series_entries`` is an iterable of (kind, igdb_id, name) tuples, where

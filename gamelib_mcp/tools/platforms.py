@@ -6,6 +6,7 @@ import math
 import re
 import urllib.parse
 from datetime import date
+from typing import Any
 
 from fastmcp.exceptions import ToolError
 
@@ -1110,7 +1111,7 @@ async def update_game(
         if "tags" in fields and recompute_affinity:
             await recompute_tag_affinity()
 
-    def _display(key: str, value):
+    def _display(key: str, value: Any) -> Any:
         if key in {"genres", "tags", "features", "igdb_platforms"}:
             return json.loads(value)
         if key in {"is_farmed", "is_primary_library_item"}:
@@ -1497,7 +1498,7 @@ async def update_games_batch(items: list[dict], dry_run: bool = False) -> dict:
     """
     check_batch_items(items)
 
-    async def _one(**kwargs):
+    async def _one(**kwargs: Any) -> dict:
         return await update_game(**kwargs, dry_run=dry_run, recompute_affinity=False)
 
     results: list[dict] = []
@@ -1554,7 +1555,7 @@ async def add_games_to_platform_batch(items: list[dict], dry_run: bool = False) 
     # name); mirror that in dry_run so the created counter matches.
     seen_new_names: set[str] = set()
 
-    async def _one(**kwargs):
+    async def _one(**kwargs: Any) -> dict:
         result = await add_game_to_platform(**kwargs, dry_run=dry_run)
         if dry_run and result["created"]:
             key = result["name"].lower()
@@ -1601,7 +1602,7 @@ async def set_playtime_batch(items: list[dict], dry_run: bool = False) -> dict:
     """
     check_batch_items(items)
 
-    async def _one(**kwargs):
+    async def _one(**kwargs: Any) -> dict:
         return await set_playtime(**kwargs, dry_run=dry_run)
 
     results = [

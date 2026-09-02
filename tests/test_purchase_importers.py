@@ -38,7 +38,7 @@ from gamelib_mcp.data.purchases import (
 )
 from gamelib_mcp.data.purchases import humble as humble_module
 from gamelib_mcp.data.scrape_validate import FIXTURES_DIR
-from gamelib_mcp.tools import acquisition, admin
+from gamelib_mcp.tools import acquisition, session_admin
 
 _FETCHER_ATTRS = (
     "fetch_epic_purchases",
@@ -4032,7 +4032,7 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "nested", "humble.json")
             with patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": path}):
-                result = await admin.set_humble_session(
+                result = await session_admin.set_humble_session(
                     json.dumps({"_simpleauth_sess": "abc"})
                 )
             self.assertEqual(result, {"cookie_count": 1, "path": path})
@@ -4043,7 +4043,7 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "humble.json")
             with patch.dict(os.environ, {"HUMBLE_COOKIES_FILE": path}):
-                result = await admin.set_humble_session(
+                result = await session_admin.set_humble_session(
                     json.dumps([
                         {"name": "_simpleauth_sess", "value": "abc", "domain": ".humblebundle.com"},
                         {"name": "csrf_cookie", "value": "xyz"},
@@ -4057,7 +4057,7 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_set_humble_session_rejects_invalid_json(self):
         with self.assertRaisesRegex(ToolError, "Invalid JSON"):
-            await admin.set_humble_session("{not json")
+            await session_admin.set_humble_session("{not json")
 
     async def test_nintendo_session_shared_between_ownership_and_eshop(self):
         # The one accounts.nintendo.com session set_nintendo_session stores is the
@@ -4065,7 +4065,7 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "nintendo_cookies.json")
             with patch.dict(os.environ, {"NINTENDO_COOKIES_FILE": path}):
-                result = await admin.set_nintendo_session(
+                result = await session_admin.set_nintendo_session(
                     json.dumps({"NASID": "s", "NATID": "t"})
                 )
                 self.assertEqual(result, {"cookie_count": 2, "path": path})
@@ -4077,7 +4077,7 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "epic.json")
             with patch.dict(os.environ, {"EPIC_COOKIES_FILE": path}):
-                result = await admin.set_epic_session(
+                result = await session_admin.set_epic_session(
                     json.dumps({"EPIC_BEARER_TOKEN": "tok", "EPIC_SSO_RM": "rm"})
                 )
                 self.assertEqual(result, {"cookie_count": 2, "path": path})
@@ -4090,7 +4090,7 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "steam.json")
             with patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}):
-                result = await admin.set_steam_store_session(
+                result = await session_admin.set_steam_store_session(
                     json.dumps({"steamLoginSecure": "765-abc", "sessionid": "s1"})
                 )
             self.assertEqual(result, {"cookie_count": 2, "path": path})
@@ -4106,7 +4106,7 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "steam_refresh_token.json")
             with patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path}):
-                result = await admin.set_steam_refresh_session(
+                result = await session_admin.set_steam_refresh_session(
                     json.dumps({"steamRefresh_steam": token})
                 )
                 self.assertEqual(result, {"cookie_count": 1, "path": path})
@@ -4118,7 +4118,7 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
             path = os.path.join(tmp, "steam.json")
             value = _make_login_secure(["web:store"])
             with patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}):
-                result = await admin.set_steam_store_session(
+                result = await session_admin.set_steam_store_session(
                     json.dumps({"steamLoginSecure": value, "sessionid": "s1"})
                 )
             self.assertEqual(result["cookie_count"], 2)
@@ -4132,7 +4132,7 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
                 patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}),
                 self.assertRaisesRegex(ToolError, "wrong Steam domain"),
             ):
-                await admin.set_steam_store_session(
+                await session_admin.set_steam_store_session(
                     json.dumps({"steamLoginSecure": value})
                 )
             # A known-bad cookie must never be written to disk.
@@ -4145,7 +4145,7 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
                 patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}),
                 self.assertRaisesRegex(ToolError, "steamLoginSecure"),
             ):
-                await admin.set_steam_store_session(
+                await session_admin.set_steam_store_session(
                     json.dumps({"sessionid": "s1", "browserid": "b"})
                 )
             self.assertFalse(os.path.exists(path))
@@ -4157,7 +4157,7 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "steam_refresh_token.json")
             with patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path}):
-                result = await admin.set_steam_refresh_session(raw)
+                result = await session_admin.set_steam_refresh_session(raw)
                 self.assertEqual(result["cookie_count"], 1)
                 with open(path, encoding="utf-8") as f:
                     self.assertEqual(json.load(f), {"steamRefresh_steam": raw})
@@ -4180,7 +4180,7 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "steam.json")
             with patch.dict(os.environ, {"STEAM_STORE_COOKIES_FILE": path}):
-                result = await admin.set_steam_store_session(raw)
+                result = await session_admin.set_steam_store_session(raw)
                 self.assertEqual(result["cookie_count"], 1)
                 with open(path, encoding="utf-8") as f:
                     self.assertEqual(json.load(f), {"steamLoginSecure": raw})
@@ -4194,7 +4194,7 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
                 patch.dict(os.environ, {"STEAM_REFRESH_TOKEN_FILE": path}),
                 self.assertRaisesRegex(ToolError, "steamRefresh_steam"),
             ):
-                await admin.set_steam_refresh_session(
+                await session_admin.set_steam_refresh_session(
                     json.dumps(
                         {"steamLoginSecure": _make_login_secure(["web:store"])}
                     )
@@ -4205,7 +4205,7 @@ class SessionCookieToolTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "nintendo.json")
             with patch.dict(os.environ, {"NINTENDO_COOKIES_FILE": path}):
-                result = await admin.set_nintendo_session(
+                result = await session_admin.set_nintendo_session(
                     json.dumps([{"name": "id_token", "value": "abc"}])
                 )
             self.assertEqual(result, {"cookie_count": 1, "path": path})

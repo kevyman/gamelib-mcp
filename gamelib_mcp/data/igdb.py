@@ -9,11 +9,13 @@ import re
 import sqlite3
 import time
 from collections import deque
+from collections.abc import Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
-from typing import Self
+from types import TracebackType
+from typing import Any, Self, TypeVar
 from weakref import WeakKeyDictionary
 
 import httpx
@@ -49,6 +51,8 @@ from .title_normalization import (
 )
 
 logger = logging.getLogger(__name__)
+
+_ChunkItem = TypeVar("_ChunkItem")
 
 # Cap on the merged SteamSpy(≤20) + IGDB(≤30) tag cloud, to bound bloat in
 # get_game_detail and tag_affinity. Existing (SteamSpy, vote-ranked) tags are kept
@@ -198,7 +202,12 @@ class _IGDBRequestGate:
         await self.acquire()
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> bool:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
         self.release()
         return False
 
@@ -1569,7 +1578,7 @@ async def _igdb_canary_alive() -> bool:
     return True
 
 
-def _decode_manual_overrides(raw) -> set[str]:
+def _decode_manual_overrides(raw: str | None) -> set[str]:
     if not raw:
         return set()
     try:
@@ -1579,7 +1588,7 @@ def _decode_manual_overrides(raw) -> set[str]:
     return set(data) if isinstance(data, list) else set()
 
 
-def _row_value(row, key: str):
+def _row_value(row: sqlite3.Row | Mapping[str, Any], key: str) -> Any:
     """Tolerant row access: sqlite3.Row raises IndexError, dicts KeyError."""
     try:
         return row[key]
@@ -1851,7 +1860,7 @@ def _igdb_headers(client_id: str, token: str) -> dict[str, str]:
     }
 
 
-def _chunked(items: list, size: int):
+def _chunked(items: list[_ChunkItem], size: int) -> Iterator[list[_ChunkItem]]:
     for start in range(0, len(items), size):
         yield items[start : start + size]
 

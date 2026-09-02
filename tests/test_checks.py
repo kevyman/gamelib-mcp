@@ -26,7 +26,7 @@ from fastmcp.exceptions import ToolError
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steam_licenses, steam_session
-from gamelib_mcp.tools import admin, checks
+from gamelib_mcp.tools import checks, detectors
 
 _IGDB_ENV = {"TWITCH_CLIENT_ID": "test-client", "TWITCH_CLIENT_SECRET": "test-secret"}
 
@@ -381,7 +381,7 @@ class NestingMisclassifiedTests(ToolDBTestCase):
         await seed_game(
             "Base Game: Story DLC", content_type="dlc", is_primary_library_item=0
         )
-        with patch.object(admin, "_fetch_steam_appdetails", AsyncMock()) as fetch_mock:
+        with patch.object(detectors, "_fetch_steam_appdetails", AsyncMock()) as fetch_mock:
             result = await checks.run_library_checks(checks=["nesting.misclassified"])
         fetch_mock.assert_not_awaited()
         self.assertEqual(result["summary"]["nesting.misclassified"]["probed"], 0)
@@ -393,7 +393,7 @@ class NestingMisclassifiedTests(ToolDBTestCase):
         base = await seed_game("Base Game")
         game = await make_steam_game("Mysterious Content", 555)
         payload = {"type": "dlc", "fullgame": {"appid": 999, "name": "Base Game"}}
-        with patch.object(admin, "_fetch_steam_appdetails", AsyncMock(return_value=payload)):
+        with patch.object(detectors, "_fetch_steam_appdetails", AsyncMock(return_value=payload)):
             result = await checks.run_library_checks(
                 checks=["nesting.misclassified"],
                 options={"nesting.misclassified": {"probe_steam": True, "limit": 5}},
@@ -516,7 +516,8 @@ class _LicenseGapRunnerMixin:
             patch.object(
                 steam_licenses,
                 "fetch_store_appdetails",
-                AsyncMock(side_effect=lambda appid: appdetails.get(appid)),
+                # The probe passes its shared client positionally; the fake accepts it.
+                AsyncMock(side_effect=lambda appid, client=None: appdetails.get(appid)),
             ),
             patch.object(
                 steam_licenses,

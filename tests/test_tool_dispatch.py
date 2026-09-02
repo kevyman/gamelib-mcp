@@ -387,13 +387,34 @@ class GetStatsParamMismatchTests(ToolDBTestCase):
         self.assertIn("no parameters", str(ctx.exception))
 
     async def test_platform_is_shared_by_spending_and_series(self):
-        await main.get_stats(report="spending", platform="steam")
-        await main.get_stats(report="series", platform="steam")
+        # Both accept it, and each still answers with its OWN payload — a param
+        # two reports share must not blur one report's answer into the other's.
+        spending = await main.get_stats(report="spending", platform="steam")
+        self.assertEqual(spending["report"], "spending")
+        self.assertIsInstance(spending["by_platform"], list)
+        self.assertNotIn("results", spending)
+
+        series = await main.get_stats(report="series", platform="steam")
+        self.assertEqual(series["report"], "series")
+        self.assertIsInstance(series["results"], list)
+        self.assertNotIn("by_platform", series)
 
     async def test_defaults_never_trip_the_guard(self):
-        for report in ("backlog", "platforms", "taste", "spending", "series"):
+        # Every report has to be callable with no params at all: the mismatch
+        # guard must ignore the defaults get_stats fills in for itself, and
+        # still return that report's own payload.
+        signature_field = {
+            "backlog": "total_library",
+            "platforms": "by_platform",
+            "taste": "top_tags",
+            "spending": "totals",
+            "series": "results",
+        }
+        for report, field in signature_field.items():
             with self.subTest(report=report):
-                await main.get_stats(report=report)
+                result = await main.get_stats(report=report)
+                self.assertEqual(result["report"], report)
+                self.assertIn(field, result)
 
 
 class SetAcquisitionSingleModeGuardTests(ToolDBTestCase):
