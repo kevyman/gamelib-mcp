@@ -2232,7 +2232,7 @@ class InterruptedMigrationMarkerTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "interrupted.sqlite"
             self._seed_v1(db_path)
-            first_from, first_step = db_module._MIGRATION_STEPS[0]
+            first_from, first_step = migrations_module._MIGRATION_STEPS[0]
 
             async def crash_after_partial_commit(db, progress):
                 # The real step renames tables (committed) and stamps v2 at its
@@ -2243,11 +2243,11 @@ class InterruptedMigrationMarkerTests(unittest.IsolatedAsyncioTestCase):
                 await db.commit()
                 raise RuntimeError("simulated crash mid-migration")
 
-            steps = [(first_from, crash_after_partial_commit), *db_module._MIGRATION_STEPS[1:]]
+            steps = [(first_from, crash_after_partial_commit), *migrations_module._MIGRATION_STEPS[1:]]
             env = {"DATABASE_URL": f"file:{db_path}"}
             with (
                 patch.dict("os.environ", env, clear=False),
-                patch.object(db_module, "_MIGRATION_STEPS", steps),
+                patch.object(migrations_module, "_MIGRATION_STEPS", steps),
             ):
                 db_module._DB_READY_PATH = None
                 with self.assertRaisesRegex(RuntimeError, "simulated crash"):
