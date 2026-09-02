@@ -105,7 +105,7 @@ its edits uncommitted, finish or redo it from the spec:
 **Not started — specs to dispatch after the above land (they touch files the
 split moves):**
 
-- *07-06 items 2+3+4 (reshaped) — one build.* (a) ITAD: `data/itad.py`
+- *07-06 items 2+3+4 (reshaped) — one build.* **Committed as `8500a97`.** (a) ITAD: `data/itad.py`
   already calls `POST /games/prices/v3`; also read per game
   `historyLow.all.{amount,currency}` and per deal `expiry` (nullable ISO) and
   `storeLow`; extend `PriceInfo`. Migration v40 (`schema.py` `_V40_SCHEMA_DDL`
