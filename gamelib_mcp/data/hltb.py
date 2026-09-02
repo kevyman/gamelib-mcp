@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from howlongtobeatpy import HowLongToBeat
 
+from . import provider_health
 from .db import HLTB_NOT_FOUND_RETRY_DAYS, get_db, get_manual_overrides
 from .title_normalization import normalize_catalog_title
 
@@ -111,6 +112,9 @@ async def _fetch_and_cache(game_id: int, name: str) -> dict | None:
                 if results is None:
                     # API failure — preserve existing data, leave row retryable.
                     # An operational failure must never be recorded as NOT_FOUND.
+                    provider_health.record_failure(
+                        "hltb", f"HLTB search returned no response for {query!r}"
+                    )
                     return None
                 if results:
                     break
@@ -122,6 +126,8 @@ async def _fetch_and_cache(game_id: int, name: str) -> dict | None:
                 # timestamp (retried after HLTB_NOT_FOUND_RETRY_DAYS) but keep
                 # any prior data intact.
                 await _set_cached_at(game_id, f"{HLTB_NOT_FOUND}:{now}")
+                # Answered, and HLTB genuinely has no entry: not a failure.
+                provider_health.record_success("hltb")
                 return None
 
             # Pick closest match by similarity score
@@ -134,8 +140,10 @@ async def _fetch_and_cache(game_id: int, name: str) -> dict | None:
             comp = _nonzero(best.completionist)
 
             await _cache_result(game_id, main, extra, comp, now)
+            provider_health.record_success("hltb")
             return {"hltb_main": main, "hltb_extra": extra, "hltb_complete": comp}
         except Exception as e:
+            provider_health.record_failure("hltb", e)
             logger.warning("HLTB fetch failed for %s (%d): %s", name, game_id, e)
             # Preserve existing data, leave row retryable
             return None

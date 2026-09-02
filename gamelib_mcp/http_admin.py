@@ -177,6 +177,7 @@ async def _integration_status_payload(force_refresh: bool = False) -> dict[str, 
 
 async def _health_payload() -> dict:
     from .data.db import SCHEMA_VERSION, _db_path, get_db, get_meta, get_meta_prefix
+    from .data.enrich_bg import last_run_stats
 
     db_path = _db_path()
     async with get_db() as db:
@@ -216,6 +217,12 @@ async def _health_payload() -> dict:
     return {
         "status": overall_status,
         "library_synced_at": last_sync,
+        # Per-provider outcome of the LAST background enrichment pass. Reported,
+        # never scored: the providers are best-effort by contract, so a dead
+        # HowLongToBeat is an operator's cue to look, not a degraded server —
+        # it deliberately does not feed overall_status. All-zero counters mean
+        # no pass has run in this process yet.
+        "enrichment": last_run_stats(),
         "checks": {
             "database": {
                 "status": db_status,

@@ -1862,8 +1862,6 @@ EVAL_CARD_HTML = r"""<!doctype html>
     var name = data && data.name ? " — " + data.name : "";
     if (data && data.package) {
       root.appendChild(evalCard(data.package));
-    } else if (data && data.voided) {
-      root.appendChild(noteCard("Assessment voided" + name, null));
     } else if (data && data.verdict) {
       root.appendChild(noteCard("Recorded: " + data.verdict + name, data.verdict));
     } else {

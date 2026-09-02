@@ -9,7 +9,9 @@ from unittest.mock import AsyncMock, patch
 import httpx
 from conftest import virtual_clock
 
-from gamelib_mcp.data import igdb
+from gamelib_mcp.data import igdb, provider_health
+
+IGDBFailure = igdb.IGDBRequestFailure
 
 
 class _DummyResponse:
@@ -109,6 +111,77 @@ class IGDBRequestGateTests(unittest.IsolatedAsyncioTestCase):
             gate.release()
 
         self.assertEqual(clock.sleeps, [0.5])
+
+
+class TwitchTokenFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def _fail_token_fetch(self, exc: Exception) -> IGDBFailure:
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def post(self, url, params=None, **kwargs):
+                raise exc
+
+        env = {"TWITCH_CLIENT_ID": "cid", "TWITCH_CLIENT_SECRET": "sekrit-value"}
+        with (
+            patch.dict(os.environ, env, clear=False),
+            patch.object(igdb, "_token", None),
+            patch.object(igdb, "_token_expires_at", None),
+            patch("gamelib_mcp.data.igdb.httpx.AsyncClient", lambda *a, **k: _Client()),
+            self.assertRaises(igdb.IGDBRequestFailure) as ctx,
+        ):
+            await igdb._get_token()
+        return ctx.exception
+
+    async def test_http_error_never_carries_the_secret_bearing_url(self) -> None:
+        # httpx puts the request URL in its message, and the token request
+        # carries the client secret in its query string — exactly what the
+        # enrichment WARNING and the /admin/health last_error would repr().
+        url = f"{igdb._TWITCH_TOKEN_URL}?client_id=cid&client_secret=sekrit-value&grant_type=client_credentials"
+        request = httpx.Request("POST", url)
+        response = httpx.Response(403, request=request)
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as built:
+            raw = built
+        self.assertIn("sekrit-value", str(raw))
+
+        exc = await self._fail_token_fetch(raw)
+        self.assertEqual(str(exc), "Twitch token request failed: HTTP 403")
+        self.assertNotIn("sekrit-value", repr(exc))
+        self.assertIsNone(exc.__cause__)
+        self.assertTrue(exc.__suppress_context__)
+
+    async def test_transport_error_is_wrapped_by_type_only(self) -> None:
+        raw = httpx.ConnectError("connect failed", request=httpx.Request("POST", igdb._TWITCH_TOKEN_URL))
+        exc = await self._fail_token_fetch(raw)
+        self.assertEqual(str(exc), "Twitch token request failed: ConnectError")
+        self.assertIsNone(exc.__cause__)
+
+
+class IGDBCanaryHealthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_canary_answer_is_recorded_as_a_provider_failure(self) -> None:
+        # HTTP 200 with zero candidates for the canary title is treated as a
+        # confirmed outage (the backfill aborts with nothing resolved), so the
+        # health counter has to see it the same way the exception branch does.
+        provider_health.reset()
+        with (
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(return_value=[])),
+            self.assertLogs("gamelib_mcp.data.igdb", level="WARNING"),
+        ):
+            self.assertFalse(await igdb._igdb_canary_alive())
+        stats = provider_health.snapshot()["igdb"]
+        self.assertEqual(stats["failures"], 1)
+        self.assertIn("no candidates", stats["last_error"])
+
+    async def test_canary_with_candidates_records_nothing(self) -> None:
+        provider_health.reset()
+        with patch("gamelib_mcp.data.igdb.search_game", AsyncMock(return_value=[object()])):
+            self.assertTrue(await igdb._igdb_canary_alive())
+        self.assertNotIn("igdb", provider_health.snapshot())
 
 
 class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
@@ -662,6 +735,64 @@ class IGDBBackfillTests(unittest.IsolatedAsyncioTestCase):
         mark_checked.assert_not_awaited()
         release_claim.assert_awaited_once_with(7, "igdb_claimed_at")
         self.assertTrue(any("IGDB backfill leaving game retryable" in line for line in logs.output))
+
+    async def test_backfill_records_provider_health_for_a_swallowed_failure(self) -> None:
+        # backfill_missing_games returns rows RESOLVED and swallows the
+        # operational failure so the pass keeps going, so its return value
+        # cannot tell a dead IGDB from a queue with nothing left in it. The
+        # enrichment run's failure counters read this instead.
+        game_row = {"id": 7, "name": "Portal 2", "igdb_id": None}
+        provider_health.reset()
+
+        with (
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[game_row])),
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=igdb.IGDB_PLATFORM_PC)),
+            patch(
+                "gamelib_mcp.data.igdb._resolve_game_with_status",
+                AsyncMock(side_effect=igdb.IGDBRequestFailure("credentials not configured")),
+            ),
+            patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
+        ):
+            count = await igdb.backfill_missing_games(limit=1)
+
+        self.assertEqual(count, 0)
+        snapshot = provider_health.snapshot()["igdb"]
+        self.assertEqual(snapshot["failures"], 1)
+        self.assertIn("credentials not configured", snapshot["last_error"])
+        provider_health.reset()
+
+    async def test_backfill_records_provider_health_success_for_a_resolved_row(self) -> None:
+        resolved = igdb.IGDBGame(
+            igdb_id=7346,
+            name="Portal 2",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2011-04-18",
+            platforms=[6],
+        )
+        game_row = {"id": 7, "name": "Portal 2", "igdb_id": None}
+        provider_health.reset()
+
+        with (
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[game_row])),
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=igdb.IGDB_PLATFORM_PC)),
+            patch(
+                "gamelib_mcp.data.igdb._resolve_game_with_status",
+                AsyncMock(return_value=igdb._ResolveOutcome(game=resolved, saw_candidates=True)),
+            ),
+            patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
+        ):
+            count = await igdb.backfill_missing_games(limit=1)
+
+        self.assertEqual(count, 1)
+        snapshot = provider_health.snapshot()["igdb"]
+        self.assertEqual(snapshot["failures"], 0)
+        self.assertEqual(snapshot["successes"], 1)
+        provider_health.reset()
 
     async def test_backfill_missing_games_fetches_by_id_when_igdb_id_already_set(self) -> None:
         # NieR:Automata case: the row already has a matched igdb_id from an

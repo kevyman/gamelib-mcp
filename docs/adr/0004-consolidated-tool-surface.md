@@ -262,13 +262,21 @@ alone.
 
 ### 6. Known deviations from published guidance
 
-AWS prescriptive guidance recommends ≤8 parameters per tool. Eight tools exceed
-it: `update_game` (23), `add_game_to_platform` (15), `set_acquisition` (14),
-`get_library_stats` (14), `get_stats`/`split_bundle_acquisition` (10),
-`discover_games`/`set_playtime` (9). These are "set any subset of these fields"
-shapes; collapsing them into a `fields: dict` would trade away the top-level
-wire validation that is the entire reason decision 1 kept scalar params. Left
-as a conscious deviation.
+AWS prescriptive guidance recommends ≤8 parameters per tool. Ten of the 33 tools
+exceed it (re-counted 2026-09-01 against `list_tools()`): `record_assessment`
+(31), `update_game` (23), `add_game_to_platform` (18), `set_acquisition` (14),
+`get_library_stats` (14), `get_stats` (11), `split_bundle_acquisition` (10),
+`discover_games` (9), `get_assessment_context` (9), `set_playtime` (9). These
+are "set any subset of these fields" shapes; collapsing them into a
+`fields: dict` would trade away the top-level wire validation that is the entire
+reason decision 1 kept scalar params. Left as a conscious deviation.
+
+The cost is not free, and it is paid in the input schema rather than in
+parameter count as such: `record_assessment`'s 31 params are 2,844 bytes of
+`inputSchema`, 19% of the 19,982-byte total across all 33 tools, and the four
+biggest-signature tools carry a third of it. That is the one slice a future
+consolidation could actually shrink — see the 2026-09-01 amendment, which
+budgets the schema side but deliberately left signatures untouched.
 
 ## Amendment (2026-07-27): the dual-encoding question, answered empirically
 
@@ -451,3 +459,130 @@ Net surface: **30 → 29 tools**. The lesson for the next rejection is that
 "these are different shapes" is an argument about the tool's signature, and the
 question worth asking first is what the merge is *for* — here, that no
 credential reaches the chat.
+
+## Amendment (2026-09-01): the schema side gets a budget
+
+The July amendments capped every RESPONSE field that scales with library size
+and pinned the caps with `ResponseSizeGuardTests`. The schema side got measured
+once, declared "barely moved", and was then left alone. It grew: from 30 tools
+to 33, and from the 130,753 chars this ADR recorded to **171,823 payload bytes
+— descriptions 77,731, input schemas 19,982, output schemas 64,440** (measured
+2026-09-01, serializing `list_tools()` → `to_mcp_tool().model_dump(mode="json",
+exclude_none=True)` → `json.dumps(separators=(",", ":"))`).
+
+### Why "paid once per connect" was the wrong model
+
+The original consequences section reasoned about schema as a connect-time cost,
+which is why it lost to responses (2.5× schema in one short session) and got
+dropped. That is right for a client that connects, reads `tools/list` once, and
+holds it in a cache the model never sees. It is wrong for the two clients this
+server actually has: for a hosted connector the tool definitions ride in the
+model's context on **every turn of every conversation with the connector
+enabled**. 171,823 bytes is roughly 43k tokens, re-read on every turn, whether
+or not the conversation ever touches this server. Responses are paid per call;
+schema is paid per turn, which is strictly more often.
+
+### What was trimmed, and where it went
+
+Descriptions: **77,731 → 53,258 chars (−31%)**. Total payload: **171,823 →
+146,434 bytes (−15%)**. Largest description now 3,575 chars (`get_stats`), down
+from 6,522 (`record_assessment`). Nothing was removed from the wire surface: no
+parameter, name, annotation, return model or behaviour changed, and no output
+schema was touched.
+
+Three kinds of text came out, in priority order:
+
+1. **Prose restating the input schema.** A parameter's type, default and enum
+   are already in `inputSchema`; spelling them out again in the description was
+   the single largest category. What stayed is everything the schema cannot
+   say: the meaning of each mode/report/action selector, the vocabularies that
+   are plain `str` rather than `Literal` (platforms, `purchase_source`, check
+   ids), and every mode-dependent default (`enrich`, `overwrite`,
+   `create_platform_row`), which is precisely the footgun decision 2 warned
+   about.
+2. **Prose restating the output schema**, minus the caveats. Enumerating every
+   returned key duplicates `outputSchema`. What stayed is the response facts a
+   model must read to act correctly: `resolution.matched_name` and the
+   sequel-shaped near-miss rejection, `suggested_action`, every cap with its
+   true-total and truncation flag, `store_push.error`, `chained_preview`,
+   `stale_id`, `excluded_stale_games`.
+3. **Repeated rationale and narrative examples.** The *rule* stayed wherever
+   the rule is what changes behaviour; the war story behind it did not. The
+   exceptions are the identity rules, where the reason IS the instruction:
+   `record_assessment`'s exact-or-mint branch and `add_game_to_platform`'s
+   name-mints/game_id-only-edits split both keep their "a loose write files the
+   verdict onto a sibling and nothing surfaces it" justification, because a
+   model that does not understand the asymmetry will reach for the wrong one.
+
+**Methodology moved to the skill that owns it.** `record_assessment`'s
+field-level authoring guidance — the presentation-field rules, the 420/200/160
+char caps, the `comparisons` and `why_care` vocabularies, and the
+declared-only provenance policy — was 2,000+ chars of the wire surface teaching
+a client HOW TO WRITE a verdict. Per ADR 0006 that is methodology, and the
+model recording an assessment has already loaded the game-quality skill. It now
+lives verbatim in `skills/game-quality/recording.md`, served by the same
+`skill_resources.py` scan as SKILL.md, with a one-line pointer left in the
+docstring: `get_skill(skill="game-quality", path="recording.md")`. Nothing is
+lost at the wire — the server still validates and caps every one of those
+fields, and rejects an over-cap list, whether or not the file was read.
+`get_assessment_context` got the same treatment for the craft-band and
+trajectory thresholds, which the skill's Step 1 already carries.
+
+This is the first supporting file `game-quality` has shipped since ADR 0006
+stage 4 removed `scripts/`, and the distinction is deliberate: the scripts left
+because the server could compute them (`get_assessment_context`); this text
+arrived because the server cannot — it is judgment about how to write, which
+only the client model does.
+
+### The caps
+
+`tests/test_tool_registration.py::SchemaBudgetTests` is the schema-side twin of
+`ResponseSizeGuardTests`. It serializes exactly as measured above and asserts
+four things, each ~8% above what was achieved so ordinary editing is free and a
+regression is loud:
+
+| | cap | achieved |
+|---|---|---|
+| total payload bytes | 158,000 | 146,434 |
+| total description chars | 57,000 | 53,258 |
+| per-tool description chars | 3,900 | 3,575 (`get_stats`) |
+| per-tool payload bytes | 11,000 | 10,045 (`get_stats`) |
+
+**The trim stopped short of its own target, and that is the finding.** The work
+opened aiming at ≤48,000 description chars; four successive passes landed at
+53,258. The first pass (schema-restating prose) returned ~11,000 chars, the
+second ~8,000, the third ~2,800, the fourth ~1,500 — and the fifth was already
+deleting caveats rather than padding. Past roughly 53k, every further char came
+out of the keep-list this amendment defines: a cap and its truncation flag, a
+mode-dependent default, an identity rule, a vocabulary the schema does not
+carry. The remaining descriptions are close to their honest floor for 33 tools
+of this complexity, so the next real reduction is structural — fewer tools,
+narrower signatures, or the outputSchema question below — not more editing.
+Anyone re-opening this should start there rather than re-running the wordsmith.
+
+The per-tool caps matter as much as the totals: the failure mode this replaces
+was one docstring quietly absorbing a subsystem's documentation
+(`check_library` at 11,290 chars in July, `record_assessment` at 6,522 now).
+The assertion message names the offending tool and its number, and points at
+the two available moves — put methodology in a skill file, or cut prose that
+restates the schema.
+
+### Open question: is `outputSchema` even forwarded?
+
+**Output schemas are 64,440 bytes — 44% of the whole payload, and now the
+single largest slice.** They were left untouched on purpose, because nobody has
+measured whether a host forwards `outputSchema` to the model at all, or merely
+uses it to validate `structuredContent` on the way back. If it is not
+forwarded, the real per-turn cost is ~82k bytes rather than 146k and this slice
+should never be optimized; if it is, it is the biggest remaining win by a wide
+margin — and the cheapest lever there is `dereference_schemas=False`, measured
+in the first amendment at only −1.2% but re-measurable now that the merged
+`FlexibleModel` responses share more sub-models.
+
+The way to settle it is the differential probe from the 2026-07-27 second
+amendment, which answered the same class of question for the duplicate text
+block: put a marker in the schema that only a model reading it could report, and
+ask each registered client. **Run that probe before optimizing output schemas**,
+and do not repeat the mistake this amendment corrects — the July estimate of
+schema cost was wrong because it modelled the wrong payment schedule, not
+because the numbers were bad.

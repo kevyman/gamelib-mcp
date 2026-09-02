@@ -12,11 +12,12 @@ gamelib-mcp is single-user by design: one deployment serves one person's library
 - **Rich enrichment** — completion times (HowLongToBeat), Linux/Steam Deck compatibility (ProtonDB), critic scores (OpenCritic, Metacritic), metadata and identity resolution (IGDB), community sentiment (Steam reviews, SteamSpy).
 - **Personalized discovery** — syncs your ratings from Backloggd and Steam (or rate games directly in chat with `rate_game`), computes weighted per-tag affinity scores, and ranks unplayed games by predicted fit. One `discover_games` tool covers vibe-based moods ("cozy", "souls"), taste-profile matches (with "why this rec" tag explanations), critic-score ranking, and backlog value picks.
 - **Backlog intelligence** — backlog stats, platform breakdowns, hardware-preference-aware recommendations (e.g. prefer Switch 2 over Steam Deck over PS5), and farmed-achievement detection.
+- **Game-quality assessments** — the `game-quality`, `backlog-triage`, and `bundle-evaluation` skills are served from this repo (`get_skill`, `skill://` resources); verdicts are recorded with their components and rendered as an evaluation card, then compared against what was actually bought, played, and rated (`get_stats(report="calibration")`).
 - **Operator control plane** — `get_integration_status` plus `/admin/integrations` (JSON) and `/admin/integrations/ui` (HTML) show per-platform readiness, missing credentials/mounts, and remediation steps.
 
 ## MCP Tools
 
-29 tools. Any tool that acts on one game also takes `items=[...]` to do the same
+33 tools. Any tool that acts on one game also takes `items=[...]` to do the same
 thing in bulk in a single call — see [ADR 0004](docs/adr/0004-consolidated-tool-surface.md).
 
 | Tool | Description |
@@ -29,6 +30,7 @@ thing in bulk in a single call — see [ADR 0004](docs/adr/0004-consolidated-too
 | `get_ratings` / `rate_game` | Read synced ratings; rate a game 0–10 directly, feeding the taste profile immediately |
 | `get_wishlist` | Wishlist contents, or with `with_prices=True` current deals (Steam/GOG/Epic via IsThereAnyDeal, Switch via DekuDeals) |
 | `get_play_history` | What you actually played in a time window, per game |
+| `discover_series_gaps` | Unowned entries in series you own and rate highly (IGDB collections/franchises) |
 | `sync` | Re-sync `library`, `wishlist`, and/or `ratings`; `platforms` scopes the first two |
 | `get_sync_status` | Poll a running library sync |
 | `check_library` | One registry of data-integrity checks (identity, nesting, ownership, spend, completion…) with machine-readable repair pointers |
@@ -40,6 +42,9 @@ thing in bulk in a single call — see [ADR 0004](docs/adr/0004-consolidated-too
 | `create_session_ingest_link` | Mint a single-use browser link for connecting a store/account session outside the chat — cookie pastes (Nintendo/Epic/Humble/Steam) and the Nintendo Parental Controls sign-in that enables Switch playtime |
 | `get_integration_status` | Per-platform integration health |
 | `get_scrape_config` / `manage_scrape_config` | Inspect or heal the declarative scrape config |
+| `get_assessment_context` / `record_assessment` / `void_assessment` | Game-quality evaluation: the library-grounded context for a verdict, recording the verdict's components (rendered as an evaluation card), and hard-deleting a misfiled one |
+| `get_skill` | Load the gaming-skills methodology this server is the canonical home of (`game-quality`, `backlog-triage`, `bundle-evaluation`) |
+| `set_switch2_playtime_baseline` | Record pre-tracking Switch hours as a baseline that future Parental Controls syncs add to |
 
 ## Quick Start
 
@@ -86,6 +91,7 @@ All configuration is via environment variables. Production starts from [.env.exa
 | `MCP_ALLOWED_ORIGINS` | recommended | Comma-separated browser origins allowed to call MCP |
 | `DATABASE_URL` | no | SQLite path; defaults to `data/gamelib.db` |
 | `PORT` | no | Server port (default `8000`) |
+| `LOG_LEVEL` | no | Root log level: `DEBUG`, `INFO` (default), `WARNING`, `ERROR`; `DEBUG` surfaces per-item enrichment failures |
 | `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET` | optional | IGDB enrichment ([dev.twitch.tv/console](https://dev.twitch.tv/console)) |
 | `BACKLOGGD_USER` | optional | Backloggd username for rating sync |
 | `PSN_NPSSO` | optional | PSN NPSSO cookie for PlayStation sync |
@@ -135,7 +141,7 @@ Key design points:
 
 - **Layer separation** — `tools/` handles MCP-facing logic and formatting; `data/` handles fetching and caching; `data/db/` owns all SQLite access.
 - **Lazy enrichment** — bulk library calls stay fast by skipping unenriched fields; `get_game_detail` fetches and caches provider data on demand, while background workers enrich the rest over time.
-- **Tag affinity** — after `sync_ratings` or `rate_game`, weighted tag scores are recomputed across all rated games (Backloggd/manual weight 1.0, Steam 0.5) and drive `discover_games`; Steam storefront feature flags are quarantined into a separate `features` column so they never skew taste.
+- **Tag affinity** — after `sync(targets=["ratings"])` or `rate_game`, weighted tag scores are recomputed across all rated games (Backloggd/manual weight 1.0, Steam 0.5) and drive `discover_games`; Steam storefront feature flags are quarantined into a separate `features` column so they never skew taste.
 - **Caching & rate limiting** — provider responses are cached (Steam Store 7 days, HLTB/ProtonDB 30 days) and HLTB pre-warming is throttled with an asyncio semaphore.
 - **Fuzzy matching** — rapidfuzz-based title matching where providers lack stable identifiers.
 
@@ -158,4 +164,4 @@ DB-backed tests use temporary SQLite files and do not require a checked-in datab
 
 ## License
 
-No license file is currently included; all rights reserved by default.
+MIT — see [LICENSE](LICENSE).

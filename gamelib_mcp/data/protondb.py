@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import httpx
 
+from . import provider_health
 from .db import get_steam_platform_row_by_appid, upsert_steam_platform_data
 
 CACHE_DAYS = 30
@@ -33,6 +34,15 @@ async def _fetch_and_cache(appid: int, game_platform_id: int) -> str | None:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(PROTONDB_API.format(appid=appid))
             if resp.status_code != 200:
+                if resp.status_code == 404:
+                    # ProtonDB answered: it has no reports for this app. A
+                    # miss, not an outage — an obscure library would otherwise
+                    # trip the enrichment WARNING on every unreported game.
+                    provider_health.record_success("protondb")
+                else:
+                    provider_health.record_failure(
+                        "protondb", f"ProtonDB HTTP {resp.status_code} for appid {appid}"
+                    )
                 logger.warning("ProtonDB returned %s for appid %d", resp.status_code, appid)
                 # Write backoff timestamp without touching tier so the background
                 # worker doesn't immediately re-claim the row and hot-loop.
@@ -41,10 +51,14 @@ async def _fetch_and_cache(appid: int, game_platform_id: int) -> str | None:
             data = resp.json()
             tier = data.get("tier")
     except Exception as e:
+        provider_health.record_failure("protondb", e)
         logger.warning("ProtonDB fetch failed for appid %d: %s", appid, e)
         await upsert_steam_platform_data(game_platform_id, protondb_cached_at=now)
         return None
 
+    # A 200 with no tier is an answer ("nobody has reported on this app"),
+    # so it counts as processed like any other successful fetch.
+    provider_health.record_success("protondb")
     await upsert_steam_platform_data(
         game_platform_id,
         protondb_tier=tier,

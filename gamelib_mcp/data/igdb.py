@@ -18,6 +18,7 @@ from weakref import WeakKeyDictionary
 
 import httpx
 
+from . import provider_health
 from .content import (
     CONTENT_DLC,
     CONTENT_EDITION,
@@ -338,17 +339,30 @@ async def _get_token() -> str:
     if not client_id or not client_secret:
         raise OSError("TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET must be set for IGDB enrichment")
 
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(
-            _TWITCH_TOKEN_URL,
-            params={
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "grant_type": "client_credentials",
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                _TWITCH_TOKEN_URL,
+                params={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "grant_type": "client_credentials",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPStatusError as exc:
+        # Never let the raw error escape: httpx puts the full request URL in
+        # its message, and this one carries the client secret in its query
+        # string. Every log line and health counter downstream repr()s the
+        # exception it was handed.
+        raise IGDBRequestFailure(
+            f"Twitch token request failed: HTTP {exc.response.status_code}"
+        ) from None
+    except httpx.HTTPError as exc:
+        raise IGDBRequestFailure(
+            f"Twitch token request failed: {type(exc).__name__}"
+        ) from None
 
     _token = data["access_token"]
     expires_in = data.get("expires_in", 3600)
@@ -1539,9 +1553,20 @@ async def _igdb_canary_alive() -> bool:
     try:
         results = await search_game(_CANARY_TITLE, suppress_errors=False)
     except IGDBRequestFailure as exc:
+        provider_health.record_failure("igdb", exc)
         logger.warning("IGDB canary search failed: %s", exc)
         return False
-    return bool(results)
+    if not results:
+        # HTTP 200 with zero candidates for a blockbuster is the other outage
+        # shape this probe exists to confirm; the backfill aborts on it with
+        # zero rows resolved, so without this record the pass would publish
+        # processed=0, failed=0 and the outage would vanish from /admin/health.
+        provider_health.record_failure(
+            "igdb", f"IGDB canary search returned no candidates for {_CANARY_TITLE!r}"
+        )
+        logger.warning("IGDB canary search returned no candidates for %r", _CANARY_TITLE)
+        return False
+    return True
 
 
 def _decode_manual_overrides(raw) -> set[str]:
@@ -1726,6 +1751,7 @@ async def backfill_missing_games(limit: int = 10) -> int:
                         igdb_game.igdb_id,
                     )
                     await mark_igdb_checked(game_id)
+                provider_health.record_success("igdb")
                 processed += 1
                 if resolved_via_search:
                     # Search demonstrably works, so buffered no-matches are
@@ -1789,6 +1815,10 @@ async def backfill_missing_games(limit: int = 10) -> int:
                             len(game_ids) - next_index,
                         )
         except IGDBRequestFailure as exc:
+            # backfill_missing_games returns "rows resolved", so an operational
+            # failure it swallows here is invisible in that number — record it
+            # so a dead IGDB stops reading as a pass with nothing to do.
+            provider_health.record_failure("igdb", exc)
             logger.warning(
                 "IGDB backfill leaving game retryable after operational failure: game_id=%s name=%r error=%s",
                 game_id,

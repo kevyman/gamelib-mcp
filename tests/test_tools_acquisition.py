@@ -1893,3 +1893,156 @@ class BundleBreakdownCapTests(ToolDBTestCase):
         stats = await acquisition.get_spending_stats()
         self.assertEqual(stats["by_bundle_count"], 1)
         self.assertFalse(stats["by_bundle_truncated"])
+
+
+class ImportPurchaseListCapTests(ToolDBTestCase):
+    """Every per-source list that grows with the fetched purchase history.
+
+    A first import of a decade of receipts produces hundreds of unmatched
+    entries; before the cap they were the whole response. Bounded-response
+    contract: cap + true count + truncation flag, with the scalar counters and
+    `totals` still reporting the true numbers. The lists that miss the cap are
+    exactly the ones nobody looks at until an import is huge — an account full
+    of unrevealed Humble keys answers in `unconfirmed_unmatched`, an Epic
+    account in `unmatched_free` — so the coverage here is the whole tuple, plus
+    a guard against a new list being added outside it.
+    """
+
+    def _records(
+        self, count: int, *, price: float | None = 9.99, **overrides
+    ) -> list[PurchaseRecord]:
+        return [
+            PurchaseRecord(
+                title=f"Never Owned Title {i}",
+                platform="steam",
+                purchase_source="steam",
+                acquired_at="2024-01-01",
+                price_paid=price,
+                price_currency="USD" if price is not None else None,
+                **overrides,
+            )
+            for i in range(count)
+        ]
+
+    async def test_unmatched_is_capped_with_a_true_count_and_flag(self):
+        cap = acquisition._IMPORT_LIST_CAP
+        steam = AsyncMock(return_value=(self._records(cap + 11), []))
+        with _patch_fetchers(fetch_steam_purchases=steam):
+            result = await acquisition.import_purchases(
+                sources=["steam"], create_missing=False
+            )
+
+        src = result["sources"]["steam"]
+        self.assertEqual(len(src["unmatched"]), cap)
+        self.assertEqual(src["unmatched_count"], cap + 11)
+        self.assertTrue(src["unmatched_truncated"])
+        # The aggregate reads the count, not len() of the capped page.
+        self.assertEqual(result["totals"]["unmatched"], cap + 11)
+
+    async def test_skipped_is_capped_with_a_true_count_and_flag(self):
+        cap = acquisition._IMPORT_LIST_CAP
+        skipped = [{"title": f"Refund {i}", "reason": "refund"} for i in range(cap + 3)]
+        steam = AsyncMock(return_value=([], skipped))
+        with _patch_fetchers(fetch_steam_purchases=steam):
+            result = await acquisition.import_purchases(sources=["steam"])
+
+        src = result["sources"]["steam"]
+        self.assertEqual(len(src["skipped"]), cap)
+        self.assertEqual(src["skipped_count"], cap + 3)
+        self.assertTrue(src["skipped_truncated"])
+
+    async def test_short_lists_report_their_true_length_and_no_truncation(self):
+        steam = AsyncMock(return_value=(self._records(3), []))
+        with _patch_fetchers(fetch_steam_purchases=steam):
+            result = await acquisition.import_purchases(
+                sources=["steam"], create_missing=False
+            )
+
+        src = result["sources"]["steam"]
+        self.assertEqual(len(src["unmatched"]), 3)
+        self.assertEqual(src["unmatched_count"], 3)
+        self.assertFalse(src["unmatched_truncated"])
+        self.assertEqual(src["skipped_count"], 0)
+        self.assertFalse(src["skipped_truncated"])
+        self.assertEqual(src["created_details_count"], 0)
+        self.assertEqual(src["bundles_needing_split_count"], 0)
+        # Every capped list reports itself, even when empty.
+        for key in acquisition._CAPPED_SOURCE_LISTS:
+            self.assertEqual(src[f"{key}_count"], len(src[key]), key)
+            self.assertFalse(src[f"{key}_truncated"], key)
+
+    async def test_unmatched_free_is_capped_with_a_true_count_and_flag(self):
+        # Zero-price promo misses are split out of `unmatched`, so they escaped
+        # its cap entirely: an Epic account is mostly giveaway claims.
+        cap = acquisition._IMPORT_LIST_CAP
+        steam = AsyncMock(return_value=(self._records(cap + 7, price=0.0), []))
+        with _patch_fetchers(fetch_steam_purchases=steam):
+            result = await acquisition.import_purchases(
+                sources=["steam"], create_missing=False
+            )
+
+        src = result["sources"]["steam"]
+        self.assertEqual(len(src["unmatched_free"]), cap)
+        self.assertEqual(src["unmatched_free_count"], cap + 7)
+        self.assertTrue(src["unmatched_free_truncated"])
+        # The aggregate reads the count, not len() of the capped page.
+        self.assertEqual(result["totals"]["unmatched_free"], cap + 7)
+
+    async def test_unconfirmed_unmatched_is_capped_with_a_true_count_and_flag(self):
+        # One entry per unrevealed Humble key that found no sync-confirmed row.
+        cap = acquisition._IMPORT_LIST_CAP
+        humble = AsyncMock(
+            return_value=(self._records(cap + 5, mint_allowed=False), [])
+        )
+        with _patch_fetchers(fetch_humble_purchases=humble):
+            result = await acquisition.import_purchases(sources=["humble"])
+
+        src = result["sources"]["humble"]
+        self.assertEqual(len(src["unconfirmed_unmatched"]), cap)
+        self.assertEqual(src["unconfirmed_unmatched_count"], cap + 5)
+        self.assertTrue(src["unconfirmed_unmatched_truncated"])
+
+    async def test_create_refused_details_is_capped_with_a_true_count_and_flag(self):
+        # A nested record that resolves no parent is refused rather than
+        # minted — one entry per record, and an eShop history is full of DLC.
+        cap = acquisition._IMPORT_LIST_CAP
+        eshop = AsyncMock(
+            return_value=(self._records(cap + 4, content_type="dlc"), [])
+        )
+        with _patch_fetchers(fetch_eshop_purchases=eshop):
+            result = await acquisition.import_purchases(sources=["eshop"])
+
+        src = result["sources"]["eshop"]
+        self.assertEqual(src["create_refused_details_count"], cap + 4)
+        self.assertEqual(len(src["create_refused_details"]), cap)
+        self.assertTrue(src["create_refused_details_truncated"])
+
+    async def test_every_growing_list_carries_a_count_and_flag(self):
+        # The two remaining lists (no_platform_row_details,
+        # family_conflict_details) need a bespoke library shape to fill; what
+        # matters for the contract is that _cap_source_lists covers them, so
+        # drive it directly with every key over the cap at once.
+        cap = acquisition._IMPORT_LIST_CAP
+        result = acquisition._cap_source_lists(
+            {key: [{"n": i} for i in range(cap + 2)] for key in acquisition._CAPPED_SOURCE_LISTS}
+        )
+
+        for key in acquisition._CAPPED_SOURCE_LISTS:
+            self.assertEqual(len(result[key]), cap, key)
+            self.assertEqual(result[f"{key}_count"], cap + 2, key)
+            self.assertTrue(result[f"{key}_truncated"], key)
+
+    async def test_no_source_list_escapes_the_cap(self):
+        # Drift guard: a new per-source list added outside _CAPPED_SOURCE_LISTS
+        # is unbounded, which is how unconfirmed_unmatched and unmatched_free
+        # got missed the first time. The dry-run echoes carry their own cap.
+        steam = AsyncMock(return_value=(self._records(2), []))
+        with _patch_fetchers(fetch_steam_purchases=steam):
+            result = await acquisition.import_purchases(sources=["steam"], dry_run=True)
+
+        src = result["sources"]["steam"]
+        listed = {key for key, value in src.items() if isinstance(value, list)}
+        self.assertEqual(
+            listed - {"proposed", "would_create"},
+            set(acquisition._CAPPED_SOURCE_LISTS),
+        )

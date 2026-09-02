@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 import httpx
 from bs4 import BeautifulSoup
 
+from . import provider_health
 from .db import seed_platform_provider_alias, upsert_game_platform_enrichment
 from .scrape_config import MetacriticScrapeConfig, fetch_allowlisted, load_scrape_config
 
@@ -150,14 +151,19 @@ async def _fetch_score_from_url(
         ) as client:
             resp = await fetch_allowlisted(client, url, provider="metacritic")
             if resp.status_code == 404:
+                # Metacritic answered: it has no page at this slug. A miss, not
+                # a broken scraper.
+                provider_health.record_success("metacritic")
                 return None, url
             resp.raise_for_status()
             html = resp.text
             final_url = str(resp.url)
     except Exception as exc:
+        provider_health.record_failure("metacritic", exc)
         logger.debug("Metacritic fetch failed for %s: %s", url, exc)
         return None, url
 
+    provider_health.record_success("metacritic")
     return _extract_score(html, config), final_url
 
 

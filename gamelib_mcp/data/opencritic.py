@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from . import provider_health
 from .db import get_db, seed_platform_provider_alias, upsert_game_platform_enrichment
 
 logger = logging.getLogger(__name__)
@@ -256,6 +257,9 @@ async def _fetch_opencritic_record(client: httpx.AsyncClient, url: str) -> dict:
                     url,
                     _log_excerpt(response.text),
                 )
+                provider_health.record_failure(
+                    "opencritic", f"OpenCritic export parse failed: {url}"
+                )
                 return {"status": "parse_failed"}
             logger.info(
                 "OpenCritic export parsed: url=%s opencritic_id=%s score=%s reviews=%s",
@@ -264,6 +268,7 @@ async def _fetch_opencritic_record(client: httpx.AsyncClient, url: str) -> dict:
                 parsed["opencritic_score"],
                 parsed["opencritic_num_reviews"],
             )
+            provider_health.record_success("opencritic")
             return {"status": "matched", "fields": parsed}
         except httpx.HTTPStatusError as exc:
             if exc.response is not None and exc.response.status_code in (429, 500, 502, 503, 504) and retry_delay is not None:
@@ -281,6 +286,9 @@ async def _fetch_opencritic_record(client: httpx.AsyncClient, url: str) -> dict:
                 exc.response.status_code if exc.response is not None else "unknown",
                 _log_excerpt(exc.response.text) if exc.response is not None else "",
             )
+            provider_health.record_failure(
+                "opencritic", f"OpenCritic export http error: {url}"
+            )
             return {"status": "http_error"}
         except httpx.RequestError:
             if retry_delay is not None:
@@ -288,7 +296,11 @@ async def _fetch_opencritic_record(client: httpx.AsyncClient, url: str) -> dict:
                 await _sleep_with_jitter(retry_delay)
                 continue
             logger.info("OpenCritic export request error: url=%s exhausted retries", url)
+            provider_health.record_failure(
+                "opencritic", f"OpenCritic export http error: {url}"
+            )
             return {"status": "http_error"}
+    provider_health.record_failure("opencritic", f"OpenCritic export exhausted retries: {url}")
     return {"status": "http_error"}
 
 
@@ -305,16 +317,26 @@ async def _get_opencritic_api_bearer(client: httpx.AsyncClient, force_refresh: b
         script_matches = re.findall(r'<script[^>]+src="([^"]+)"', search_page.text)
         main_script = next((src for src in script_matches if re.search(r"(?:^|/)main\.[^/]+\.js$", src)), None)
         if main_script is None:
+            # No bearer means every discovery below answers "no candidates",
+            # which enrich_opencritic writes down as a permanent NO_MATCH — the
+            # exact outage shape this counter exists to surface.
+            provider_health.record_failure(
+                "opencritic", "OpenCritic bearer discovery failed: main script not found"
+            )
             return None
 
         bundle = await client.get(_normalize_opencritic_url(main_script))
         bundle.raise_for_status()
     except Exception as exc:
+        provider_health.record_failure("opencritic", exc)
         logger.debug("OpenCritic bearer discovery failed: %s", exc)
         return None
 
     match = re.search(r'client:\{baseUrl:"[^"]+",apiKey:"([^"]+)"\}', bundle.text)
     if match is None:
+        provider_health.record_failure(
+            "opencritic", "OpenCritic bearer discovery failed: apiKey missing from bundle"
+        )
         logger.debug("OpenCritic bearer discovery failed: apiKey missing from bundle")
         return None
 
@@ -370,6 +392,7 @@ async def _discover_from_opencritic(title: str) -> list[dict]:
                 )
             response.raise_for_status()
     except Exception as exc:
+        provider_health.record_failure("opencritic", exc)
         logger.debug("OpenCritic primary discovery failed for %r: %s", title, exc)
         return []
 
@@ -396,6 +419,7 @@ async def _discover_from_search_fallback(title: str) -> list[dict]:
                 await _sleep_with_jitter(_DDG_403_COOLDOWN_SECONDS)
             response.raise_for_status()
     except Exception as exc:
+        provider_health.record_failure("opencritic", exc)
         logger.debug("OpenCritic search fallback failed for %r: %s", title, exc)
         return []
 
