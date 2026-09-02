@@ -14,7 +14,7 @@ one-line map plus the rules; the rationale and the measurements moved here on
 
 `response_encoding.py` — `StructuredOnlyMiddleware` drops the duplicate text block FastMCP ships alongside `structuredContent` (the spec's backwards-compat SHOULD). Measured at 48% of all response bytes; both clients registered against prod (claude.ai AND chatgpt.com) were probed on 2026-07-27 and read `structuredContent`. `MCP_DUPLICATE_TEXT_CONTENT=1` restores spec-default behavior for a client that needs the text block — re-run ADR 0004's differential probe before assuming a new client is safe.
 
-`session_ingest.py` — single-use cookie-paste links: in-memory nonce store (TTL 15 min, pop-on-success) + `/ingest/{nonce}` GET form / POST handler that dispatches to `tools.admin.set_*_session`. In-memory by design (single-user, single-process); a server restart invalidates outstanding links.
+`session_ingest.py` — single-use cookie-paste links: in-memory nonce store (TTL 15 min, pop-on-success) + `/ingest/{nonce}` GET form / POST handler that dispatches to `tools.session_admin.set_*_session`. In-memory by design (single-user, single-process); a server restart invalidates outstanding links.
 
 `MCP_ALLOWED_ORIGINS` — browser origins allowed on the HTTP surface; requests without an `Origin` header (native/CLI clients) still pass. The `create_session_ingest_link` paste form POSTs a same-origin `Origin`, so oauth mode auto-allowlists `MCP_PUBLIC_BASE_URL`'s origin, but local `disabled` mode must include `http://localhost:8000` here.
 
