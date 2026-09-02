@@ -199,6 +199,20 @@ class ToolDBTestCase(unittest.IsolatedAsyncioTestCase):
         shutil.rmtree(self._tmpdir.name, ignore_errors=True)
 
 
+def adopt_migrated_db(db_path: Path) -> None:
+    """Give a plain-pytest test the same migrated database ToolDBTestCase gets.
+
+    The migrate-once/copy-per-test rule applies to every test, but a function
+    style test can't inherit ToolDBTestCase's asyncSetUp. Call this in its place,
+    with ``DATABASE_URL`` already pointing at ``db_path``; the caller clears both
+    ready flags afterwards exactly as ToolDBTestCase's teardown does.
+    """
+    assert _DB_TEMPLATE is not None, "the session's migrated template fixture never ran"
+    shutil.copyfile(_DB_TEMPLATE.path, db_path)
+    resolved = db_module._db_path()
+    db_module._DB_READY_PATH = resolved
+    db_module._FTS_READY_PATH = resolved if _DB_TEMPLATE.fts_enabled else None
+
 
 # --- timing ------------------------------------------------------------------
 

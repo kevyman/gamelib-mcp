@@ -52,10 +52,6 @@ _EDITION_PATTERNS = {
 }
 
 
-def is_configured() -> bool:
-    return True
-
-
 def _is_opencritic_fresh(cached_at: str | None, release_date: str | None, now: datetime) -> bool:
     if not cached_at:
         return False

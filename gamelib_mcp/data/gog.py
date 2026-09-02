@@ -108,10 +108,6 @@ def _has_auth_files(config_path: Path) -> bool:
     )
 
 
-def is_gog_configured() -> bool:
-    return shutil.which(_LGOGDOWNLOADER_BIN) is not None and _has_auth_files(_config_dir())
-
-
 async def sync_gog() -> dict:
     """
     Sync GOG library into game_platforms via lgogdownloader --list.

@@ -192,34 +192,6 @@ async def _cache_result(
         await db.commit()
 
 
-async def prewarm_hltb() -> None:
-    """
-    Background task: pre-warm HLTB for unplayed games with store data,
-    ordered by steam_review_score DESC. Rate-limited by semaphore + 1s delay.
-    """
-    logger.info("HLTB pre-warm started")
-    async with get_db() as db:
-        rows = await db.execute_fetchall(
-            """SELECT g.id AS game_id, g.name FROM games g
-               LEFT JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'steam'
-               LEFT JOIN steam_platform_data spd ON spd.game_platform_id = gp.id
-               WHERE COALESCE(gp.playtime_minutes, 0) = 0
-                 AND g.tags IS NOT NULL
-                 AND (g.hltb_cached_at IS NULL)
-               ORDER BY spd.steam_review_score DESC NULLS LAST
-               LIMIT 500"""
-        )
-
-    batch_size = 3
-    for i in range(0, len(rows), batch_size):
-        batch = rows[i : i + batch_size]
-        tasks = [get_hltb(r["game_id"], r["name"]) for r in batch]
-        await asyncio.gather(*tasks, return_exceptions=True)
-        await asyncio.sleep(1)
-
-    logger.info("HLTB pre-warm complete: processed %d games", len(rows))
-
-
 def _is_fresh(cached_at: str | None, days: int) -> bool:
     if not cached_at or cached_at == "FAILED":
         return False

@@ -37,11 +37,8 @@ from .platforms_registry import (  # noqa: E402, F401
 _admin_refresh_library = None
 
 _LIBRARY_REFRESH_TASK: asyncio.Task | None = None
-_LIBRARY_REFRESH_LOCK: asyncio.Lock | None = None
 _PERIODIC_REFRESH_TASK: asyncio.Task | None = None
-_PERIODIC_REFRESH_LOCK: asyncio.Lock | None = None
 _ENRICHMENT_TASK: asyncio.Task | None = None
-_ENRICHMENT_LOCK: asyncio.Lock | None = None
 _ENRICHMENT_RERUN_REQUESTED = False
 _RATINGS_SYNC_TASK: asyncio.Task | None = None
 _STARTUP_RATINGS_SYNC_TASK: asyncio.Task | None = None

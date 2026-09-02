@@ -1,42 +1,26 @@
 import asyncio
 import sqlite3
-import tempfile
 import unittest
 from contextlib import ExitStack
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from conftest import DEADLOCK_TIMEOUT
+from conftest import DEADLOCK_TIMEOUT, ToolDBTestCase
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import enrich_bg
 
 
-class EnrichmentClaimTests(unittest.IsolatedAsyncioTestCase):
+class EnrichmentClaimTests(ToolDBTestCase):
     async def asyncSetUp(self) -> None:
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = Path(self.tmpdir.name) / "enrich.sqlite"
-        db_module._DB_READY_PATH = None
-        with patch.dict(
-            "os.environ",
-            {"DATABASE_URL": f"file:{self.db_path}"},
-            clear=False,
-        ):
-            await db_module.init_db()
-
-    async def asyncTearDown(self) -> None:
-        db_module._DB_READY_PATH = None
-        self.tmpdir.cleanup()
+        await super().asyncSetUp()
+        # Two tests open the same file with plain sqlite3 to force real write
+        # contention, so they need the path the harness chose by name.
+        self.db_path = self._db_path
 
     async def test_claim_helper_prevents_double_claim(self) -> None:
-        with patch.dict(
-            "os.environ",
-            {"DATABASE_URL": f"file:{self.db_path}"},
-            clear=False,
-        ):
-            game_id = await db_module.upsert_game(appid=None, name="Portal")
-            first = await db_module.claim_game_ids_for_igdb(limit=1, stale_before="1970-01-01T00:00:00+00:00")
-            second = await db_module.claim_game_ids_for_igdb(limit=1, stale_before="1970-01-01T00:00:00+00:00")
+        game_id = await db_module.upsert_game(appid=None, name="Portal")
+        first = await db_module.claim_game_ids_for_igdb(limit=1, stale_before="1970-01-01T00:00:00+00:00")
+        second = await db_module.claim_game_ids_for_igdb(limit=1, stale_before="1970-01-01T00:00:00+00:00")
 
         self.assertEqual(first, [game_id])
         self.assertEqual(second, [])
@@ -76,11 +60,6 @@ class EnrichmentClaimTests(unittest.IsolatedAsyncioTestCase):
         # lock had to be released within 300ms of the attempt, and a loaded
         # machine overshooting failed a perfectly good clear_claim.
         with (
-            patch.dict(
-                "os.environ",
-                {"DATABASE_URL": f"file:{self.db_path}"},
-                clear=False,
-            ),
             patch.object(db_module.aiosqlite.Connection, "execute", signal_then_execute),
             patch.object(db_module, "_SQLITE_CONNECT_TIMEOUT_SECONDS", 5.0, create=True),
             patch.object(db_module, "_SQLITE_BUSY_TIMEOUT_MS", 5000, create=True),
@@ -111,150 +90,125 @@ class EnrichmentClaimTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(row["hltb_claimed_at"])
 
     async def test_hltb_claim_helper_reclaims_legacy_failed_rows(self) -> None:
-        with patch.dict(
-            "os.environ",
-            {"DATABASE_URL": f"file:{self.db_path}"},
-            clear=False,
-        ):
-            game_id = await db_module.upsert_game(appid=None, name="Portal")
-            platform_id = await db_module.upsert_game_platform(
-                game_id=game_id,
-                platform="steam",
-                playtime_minutes=120,
-                owned=1,
+        game_id = await db_module.upsert_game(appid=None, name="Portal")
+        platform_id = await db_module.upsert_game_platform(
+            game_id=game_id,
+            platform="steam",
+            playtime_minutes=120,
+            owned=1,
+        )
+        await db_module.upsert_steam_platform_data(
+            platform_id,
+            store_cached_at="2026-04-07T12:00:00+00:00",
+        )
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET hltb_cached_at = 'FAILED' WHERE id = ?",
+                (game_id,),
             )
-            await db_module.upsert_steam_platform_data(
-                platform_id,
-                store_cached_at="2026-04-07T12:00:00+00:00",
-            )
-            async with db_module.get_db() as db:
-                await db.execute(
-                    "UPDATE games SET hltb_cached_at = 'FAILED' WHERE id = ?",
-                    (game_id,),
-                )
-                await db.commit()
+            await db.commit()
 
-            claimed = await db_module.claim_game_ids_for_hltb(
-                limit=1,
-                stale_before="1970-01-01T00:00:00+00:00",
-            )
+        claimed = await db_module.claim_game_ids_for_hltb(
+            limit=1,
+            stale_before="1970-01-01T00:00:00+00:00",
+        )
 
         self.assertEqual(claimed, [game_id])
 
     async def test_hltb_claims_farmed_games_after_regular_games(self) -> None:
-        with patch.dict(
-            "os.environ",
-            {"DATABASE_URL": f"file:{self.db_path}"},
-            clear=False,
-        ):
-            farmed_id = await db_module.upsert_game(appid=None, name="Farmed", is_farmed=1)
-            regular_id = await db_module.upsert_game(appid=None, name="Regular")
+        farmed_id = await db_module.upsert_game(appid=None, name="Farmed", is_farmed=1)
+        regular_id = await db_module.upsert_game(appid=None, name="Regular")
 
-            claimed = await db_module.claim_game_ids_for_hltb(
-                limit=2,
-                stale_before="1970-01-01T00:00:00+00:00",
-            )
+        claimed = await db_module.claim_game_ids_for_hltb(
+            limit=2,
+            stale_before="1970-01-01T00:00:00+00:00",
+        )
 
         self.assertEqual(claimed, [regular_id, farmed_id])
 
     async def test_igdb_claims_farmed_games_after_regular_games(self) -> None:
-        with patch.dict(
-            "os.environ",
-            {"DATABASE_URL": f"file:{self.db_path}"},
-            clear=False,
-        ):
-            farmed_id = await db_module.upsert_game(appid=None, name="Farmed", is_farmed=1)
-            regular_id = await db_module.upsert_game(appid=None, name="Regular")
+        farmed_id = await db_module.upsert_game(appid=None, name="Farmed", is_farmed=1)
+        regular_id = await db_module.upsert_game(appid=None, name="Regular")
 
-            claimed = await db_module.claim_game_ids_for_igdb(
-                limit=2,
-                stale_before="1970-01-01T00:00:00+00:00",
-            )
+        claimed = await db_module.claim_game_ids_for_igdb(
+            limit=2,
+            stale_before="1970-01-01T00:00:00+00:00",
+        )
 
         self.assertEqual(claimed, [regular_id, farmed_id])
 
     async def test_steam_claims_include_farmed_games_after_regular_playtime(self) -> None:
-        with patch.dict(
-            "os.environ",
-            {"DATABASE_URL": f"file:{self.db_path}"},
-            clear=False,
-        ):
-            farmed_game_id = await db_module.upsert_game(appid=None, name="Farmed", is_farmed=1)
-            farmed_platform_id = await db_module.upsert_game_platform(
-                game_id=farmed_game_id,
-                platform="steam",
-                playtime_minutes=9999,
-                owned=1,
-            )
-            await db_module.upsert_game_platform_identifier(
-                farmed_platform_id,
-                db_module.STEAM_APP_ID,
-                "1",
-            )
-            await db_module.upsert_steam_platform_data(farmed_platform_id, rtime_last_played=0)
+        farmed_game_id = await db_module.upsert_game(appid=None, name="Farmed", is_farmed=1)
+        farmed_platform_id = await db_module.upsert_game_platform(
+            game_id=farmed_game_id,
+            platform="steam",
+            playtime_minutes=9999,
+            owned=1,
+        )
+        await db_module.upsert_game_platform_identifier(
+            farmed_platform_id,
+            db_module.STEAM_APP_ID,
+            "1",
+        )
+        await db_module.upsert_steam_platform_data(farmed_platform_id, rtime_last_played=0)
 
-            regular_game_id = await db_module.upsert_game(appid=None, name="Regular")
-            regular_platform_id = await db_module.upsert_game_platform(
-                game_id=regular_game_id,
-                platform="steam",
-                playtime_minutes=10,
-                owned=1,
-            )
-            await db_module.upsert_game_platform_identifier(
-                regular_platform_id,
-                db_module.STEAM_APP_ID,
-                "2",
-            )
-            await db_module.upsert_steam_platform_data(regular_platform_id, rtime_last_played=0)
+        regular_game_id = await db_module.upsert_game(appid=None, name="Regular")
+        regular_platform_id = await db_module.upsert_game_platform(
+            game_id=regular_game_id,
+            platform="steam",
+            playtime_minutes=10,
+            owned=1,
+        )
+        await db_module.upsert_game_platform_identifier(
+            regular_platform_id,
+            db_module.STEAM_APP_ID,
+            "2",
+        )
+        await db_module.upsert_steam_platform_data(regular_platform_id, rtime_last_played=0)
 
-            stale_before = "1970-01-01T00:00:00+00:00"
-            store_claimed = await db_module.claim_steam_platform_ids_for_store(
-                limit=2,
-                stale_before=stale_before,
-            )
-            proton_claimed = await db_module.claim_steam_platform_ids_for_protondb(
-                limit=2,
-                stale_before=stale_before,
-            )
-            steamspy_claimed = await db_module.claim_steam_platform_ids_for_steamspy(
-                limit=2,
-                stale_before=stale_before,
-            )
+        stale_before = "1970-01-01T00:00:00+00:00"
+        store_claimed = await db_module.claim_steam_platform_ids_for_store(
+            limit=2,
+            stale_before=stale_before,
+        )
+        proton_claimed = await db_module.claim_steam_platform_ids_for_protondb(
+            limit=2,
+            stale_before=stale_before,
+        )
+        steamspy_claimed = await db_module.claim_steam_platform_ids_for_steamspy(
+            limit=2,
+            stale_before=stale_before,
+        )
 
         self.assertEqual(store_claimed, [regular_platform_id, farmed_platform_id])
         self.assertEqual(proton_claimed, [regular_platform_id, farmed_platform_id])
         self.assertEqual(steamspy_claimed, [regular_platform_id, farmed_platform_id])
 
     async def test_review_claims_include_farmed_games_after_regular_playtime(self) -> None:
-        with patch.dict(
-            "os.environ",
-            {"DATABASE_URL": f"file:{self.db_path}"},
-            clear=False,
-        ):
-            farmed_game_id = await db_module.upsert_game(appid=None, name="Farmed", is_farmed=1)
-            farmed_platform_id = await db_module.upsert_game_platform(
-                game_id=farmed_game_id,
-                platform="steam",
-                playtime_minutes=9999,
-                owned=1,
-            )
-            regular_game_id = await db_module.upsert_game(appid=None, name="Regular")
-            regular_platform_id = await db_module.upsert_game_platform(
-                game_id=regular_game_id,
-                platform="steam",
-                playtime_minutes=10,
-                owned=1,
-            )
+        farmed_game_id = await db_module.upsert_game(appid=None, name="Farmed", is_farmed=1)
+        farmed_platform_id = await db_module.upsert_game_platform(
+            game_id=farmed_game_id,
+            platform="steam",
+            playtime_minutes=9999,
+            owned=1,
+        )
+        regular_game_id = await db_module.upsert_game(appid=None, name="Regular")
+        regular_platform_id = await db_module.upsert_game_platform(
+            game_id=regular_game_id,
+            platform="steam",
+            playtime_minutes=10,
+            owned=1,
+        )
 
-            stale_before = "1970-01-01T00:00:00+00:00"
-            opencritic_claimed = await db_module.claim_game_platform_ids_for_opencritic(
-                limit=2,
-                stale_before=stale_before,
-            )
-            metacritic_claimed = await db_module.claim_game_platform_ids_for_metacritic(
-                limit=2,
-                stale_before=stale_before,
-            )
+        stale_before = "1970-01-01T00:00:00+00:00"
+        opencritic_claimed = await db_module.claim_game_platform_ids_for_opencritic(
+            limit=2,
+            stale_before=stale_before,
+        )
+        metacritic_claimed = await db_module.claim_game_platform_ids_for_metacritic(
+            limit=2,
+            stale_before=stale_before,
+        )
 
         self.assertEqual(opencritic_claimed, [regular_platform_id, farmed_platform_id])
         self.assertEqual(metacritic_claimed, [regular_platform_id, farmed_platform_id])

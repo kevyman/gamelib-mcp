@@ -3,7 +3,7 @@ import json
 import os
 from unittest.mock import AsyncMock, patch
 
-from conftest import add_platform, seed_game
+from conftest import add_platform, adopt_migrated_db, seed_game
 from starlette.requests import Request
 
 from gamelib_mcp.data import db as db_module
@@ -385,7 +385,7 @@ def test_health_reports_platform_coverage_degraded_when_platforms_are_missing(tm
         db_module._DB_READY_PATH = None
         db_module._ENV_LOADED = True
         with patch.dict(os.environ, {"DATABASE_URL": f"file:{db_path}"}, clear=False):
-            await db_module.init_db()
+            adopt_migrated_db(db_path)
             steam_game_id = await seed_game("Portal")
             epic_game_id = await seed_game("Alan Wake")
             await add_platform(steam_game_id, "steam")
@@ -403,6 +403,7 @@ def test_health_reports_platform_coverage_degraded_when_platforms_are_missing(tm
             response = await route.endpoint(_request("/health"))
 
         db_module._DB_READY_PATH = None
+        db_module._FTS_READY_PATH = None
         return response
 
     response = asyncio.run(run_test())
@@ -418,7 +419,7 @@ def test_admin_health_reports_platform_coverage_details_when_platforms_are_missi
         db_module._DB_READY_PATH = None
         db_module._ENV_LOADED = True
         with patch.dict(os.environ, {"DATABASE_URL": f"file:{db_path}"}, clear=False):
-            await db_module.init_db()
+            adopt_migrated_db(db_path)
             steam_game_id = await seed_game("Portal")
             epic_game_id = await seed_game("Alan Wake")
             await add_platform(steam_game_id, "steam")
@@ -436,6 +437,7 @@ def test_admin_health_reports_platform_coverage_details_when_platforms_are_missi
             response = await route.endpoint(_request("/admin/health"))
 
         db_module._DB_READY_PATH = None
+        db_module._FTS_READY_PATH = None
         return response
 
     response = asyncio.run(run_test())
@@ -458,7 +460,7 @@ def test_health_ok_when_never_synced_platforms_have_no_games(tmp_path):
         db_module._DB_READY_PATH = None
         db_module._ENV_LOADED = True
         with patch.dict(os.environ, {"DATABASE_URL": f"file:{db_path}"}, clear=False):
-            await db_module.init_db()
+            adopt_migrated_db(db_path)
             steam_game_id = await seed_game("Portal")
             await add_platform(steam_game_id, "steam")
             await db_module.set_meta("library_synced_at", "2026-06-14T20:13:18+00:00")
@@ -472,6 +474,7 @@ def test_health_ok_when_never_synced_platforms_have_no_games(tmp_path):
             response = await route.endpoint(_request("/health"))
 
         db_module._DB_READY_PATH = None
+        db_module._FTS_READY_PATH = None
         return response
 
     response = asyncio.run(run_test())
