@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 from weakref import WeakKeyDictionary
 
 import aiosqlite
@@ -2162,6 +2162,24 @@ async def _repair_game_foreign_keys(db: aiosqlite.Connection) -> None:
         await db.execute("PRAGMA foreign_keys=ON")
 
 
+_MIGRATION_MARKER_SUFFIX = ".migrating"
+
+
+async def _db_file_path(db: aiosqlite.Connection) -> str:
+    """Path of the file behind THIS connection ('' for in-memory/temporary)."""
+    # Not _db_path(): callers such as tests migrate connections that aren't
+    # the configured database.
+    row = await db.execute_fetchone(  # type: ignore[attr-defined]
+        "SELECT file FROM pragma_database_list WHERE name = 'main'"
+    )
+    return row[0] if row and row[0] else ""
+
+
+def _migration_marker_path(db_file: str) -> Path | None:
+    """Sidecar written while a migration is in flight (see _run_migrations)."""
+    return Path(db_file + _MIGRATION_MARKER_SUFFIX) if db_file else None
+
+
 async def _snapshot_before_migration(
     db: aiosqlite.Connection, detected_state: str, current_version: int
 ) -> str | None:
@@ -2179,10 +2197,7 @@ async def _snapshot_before_migration(
 
     # Resolve the file behind THIS connection (not _db_path(): callers such as
     # tests migrate connections that aren't the configured database).
-    row = await db.execute_fetchone(  # type: ignore[attr-defined]
-        "SELECT file FROM pragma_database_list WHERE name = 'main'"
-    )
-    db_path = row[0] if row else ""
+    db_path = await _db_file_path(db)
     if not db_path:  # in-memory / temporary database — nothing on disk to back up
         return None
 
@@ -2299,9 +2314,54 @@ async def _run_migrations(
         )
     applied_steps: list[str] = []
 
+    # Migration steps commit as they go (table rebuilds, backfills) and stamp
+    # user_version only at their end, so a process that dies mid-step leaves
+    # the schema between versions with the OLD stamp — undetectable from the
+    # version alone, and a retry would re-snapshot the broken state over the
+    # good pre-v{N}.bak. A sidecar marker written after the snapshot and
+    # removed after the final stamp makes "interrupted" detectable, here and
+    # in the deploy gate (deploy.yml), before anything else touches the file.
+    db_file = await _db_file_path(db)
+    marker = _migration_marker_path(db_file)
+    # Several connections can initialize the same file at once (each get_db
+    # runs _ensure_db_initialized until the ready cache is set), so every
+    # marker operation tolerates another initializer having just removed it.
+    if marker is not None and marker.exists():
+        if initial_version == SCHEMA_VERSION:
+            # The final stamp committed; only the marker removal was lost.
+            marker.unlink(missing_ok=True)
+        else:
+            started: dict[str, Any] | None
+            try:
+                started = json.loads(marker.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                started = None  # vanished: a concurrent initializer just finished
+            except (OSError, ValueError):
+                started = {}
+            if started is not None:
+                snapshot_hint = started.get("snapshot") or f"{db_file}.pre-v{initial_version}.bak"
+                raise RuntimeError(
+                    f"a previous migration from v{started.get('from', initial_version)} to "
+                    f"v{started.get('to', SCHEMA_VERSION)} was interrupted before it finished "
+                    f"({marker}); the schema may be between versions. Restore {snapshot_hint} "
+                    "(deploy.md, Manual rollback), delete the marker, then start again."
+                )
+
     snapshot_path = await _snapshot_before_migration(db, detected_state, initial_version)
     if snapshot_path is not None:
         _emit(progress, f"Backed up database to {snapshot_path} before migrating.", applied_steps)
+    if marker is not None and detected_state != "fresh" and initial_version != SCHEMA_VERSION:
+        marker.write_text(
+            json.dumps(
+                {
+                    "from": initial_version,
+                    "to": SCHEMA_VERSION,
+                    "snapshot": snapshot_path,
+                    "started_at": datetime.now(UTC).isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
 
     if detected_state == "fresh":
         await db.executescript(_V39_SCHEMA_DDL)
@@ -2347,6 +2407,8 @@ async def _run_migrations(
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION
     await db.commit()
+    if marker is not None:
+        marker.unlink(missing_ok=True)
     fts_enabled = await _sync_fts_index(db)
     await _sync_query_views(db)
 

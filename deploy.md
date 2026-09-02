@@ -184,13 +184,17 @@ triggered manually from the Actions tab via *Run workflow*):
    healthy deploy runs `docker image prune -f` (the prune keeps the small VM's
    disk from filling with stale layers).
 
-   The rollback checks `PRAGMA user_version` before and after. If the failed
-   build had already migrated the database, old code must not start against
-   the newer schema (it would re-stamp the version down, and the next forward
-   deploy would re-apply the migration over migrated data): the gate restores
-   the app's own `gamelib.db.pre-v{N}.bak` snapshot first, and if that file is
-   missing it refuses to roll back and leaves the new build crash-looping,
-   which is visible, rather than a silently wrong schema, which is not.
+   The rollback checks `PRAGMA user_version` before and after, and for the
+   app's `gamelib.db.migrating` marker (written after the pre-migration
+   snapshot, removed after the final version stamp — migration steps commit
+   as they go, so a crash mid-step leaves the schema between versions with
+   the OLD stamp). If either says the failed build touched the schema, old
+   code must not start against it: the gate restores the app's own
+   `gamelib.db.pre-v{N}.bak` snapshot first, and if that file is missing it
+   refuses to roll back and leaves the new build crash-looping, which is
+   visible, rather than a silently wrong schema, which is not. The app
+   enforces the same rule itself: with a marker present and the stamp not at
+   the build's version it refuses to start and names the snapshot to restore.
 
 Every third-party action in the workflows is pinned to a full commit SHA with
 the release tag in a trailing comment; Dependabot's `github-actions` entry
@@ -208,6 +212,9 @@ cd ~/mcps
 sqlite3 data/library/gamelib.db 'PRAGMA user_version'   # if this is HIGHER than the
                                                        # target commit's SCHEMA_VERSION,
                                                        # restore gamelib.db.pre-v{N}.bak first
+ls data/library/gamelib.db.migrating 2>/dev/null       # present = a migration was interrupted:
+                                                       # restore the snapshot named inside it,
+                                                       # then delete the marker
 git log --oneline -5                # pick the commit to return to
 git reset --hard <commit>
 docker compose --profile prod up -d --build

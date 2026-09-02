@@ -84,21 +84,25 @@ jobs:
               echo "::error::${target} never answered /health"
               docker compose --profile prod logs --tail=100 app || true
               schema_after="$(sqlite3 "$db" 'PRAGMA user_version' 2>/dev/null || echo unknown)"
-              if [ "$schema_before" != "$schema_after" ]; then
-                # The new build migrated the database before dying. Old code
-                # started against a newer schema would re-stamp user_version
-                # DOWN and the next forward deploy would re-apply the step over
-                # already-migrated data. Restore the app's own pre-migration
-                # snapshot first; if it is missing, leave the new build in place
-                # (crash-looping is visible; a silently wrong schema is not).
+              # Two signals that the new build touched the schema: the version
+              # stamp moved, or the app's ".migrating" marker exists (written
+              # after the pre-migration snapshot, removed after the final
+              # stamp — so an interruption mid-step, which leaves the stamp
+              # unchanged, is still visible). Old code must not start against
+              # either: it would re-stamp user_version down or run on a schema
+              # between versions. Restore the app's own snapshot first; if it
+              # is missing, leave the new build in place (crash-looping is
+              # visible; a silently wrong schema is not).
+              marker="${db}.migrating"
+              if [ "$schema_before" != "$schema_after" ] || [ -f "$marker" ]; then
                 snapshot="${db}.pre-v${schema_before}.bak"
                 if [ -f "$snapshot" ]; then
-                  echo "schema moved v${schema_before} -> v${schema_after}; restoring ${snapshot} before rolling back"
+                  echo "migration attempted (v${schema_before} -> v${schema_after}, marker $([ -f "$marker" ] && echo present || echo absent)); restoring ${snapshot} before rolling back"
                   docker compose --profile prod stop app
                   cp -f "$snapshot" "$db"
-                  rm -f "${db}-wal" "${db}-shm"
+                  rm -f "${db}-wal" "${db}-shm" "$marker"
                 else
-                  echo "::error::schema moved v${schema_before} -> v${schema_after} but ${snapshot} is missing; NOT rolling back code. Restore the nightly backup by hand (deploy.md, Database backups) before redeploying."
+                  echo "::error::migration attempted (v${schema_before} -> v${schema_after}) but ${snapshot} is missing; NOT rolling back code. Restore the nightly backup by hand (deploy.md, Database backups) before redeploying."
                   exit 1
                 fi
               fi
