@@ -25,6 +25,8 @@ Three `tests/conftest.py` conventions keep the suite fast and honest about time 
 
 `faulthandler_timeout = 300` (pyproject) backstops all three, dumping every thread's stack past 5 minutes; `pytest-xdist` runs all cores, so tests must share no mutable state. Under Codex sandboxing aiosqlite can hang at `connect()` — re-run outside it before changing fixtures or DB paths.
 
+Shipping a branch follows `.claude/skills/ship/SKILL.md`: gates + same-family `/code-review` first, one Codex cross-model review (it reads `AGENTS.md` → "Code Review Rules"; keep that file and this one in agreement), one refute-or-fix pass with tests, squash merge. → patterns/review-and-merge.md
+
 ## Model orchestration (always-on)
 
 Multi-model sessions follow `rules/router.md`. Per-model postures live in `rules/model-postures.md` and are injected into every main-session prompt by the `UserPromptSubmit` hook in `.claude/settings.json` (`.claude/hooks/inject_model_posture.py` picks the section matching the live model; `SessionStart` caches the model since prompt payloads don't carry it).
