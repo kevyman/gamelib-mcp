@@ -11,6 +11,8 @@ from conftest import virtual_clock
 
 from gamelib_mcp.data import igdb, provider_health
 
+IGDBFailure = igdb.IGDBRequestFailure
+
 
 class _DummyResponse:
     def __init__(self, status_code: int, json_data, headers: dict[str, str] | None = None):
@@ -109,6 +111,55 @@ class IGDBRequestGateTests(unittest.IsolatedAsyncioTestCase):
             gate.release()
 
         self.assertEqual(clock.sleeps, [0.5])
+
+
+class TwitchTokenFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def _fail_token_fetch(self, exc: Exception) -> IGDBFailure:
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def post(self, url, params=None, **kwargs):
+                raise exc
+
+        env = {"TWITCH_CLIENT_ID": "cid", "TWITCH_CLIENT_SECRET": "sekrit-value"}
+        with (
+            patch.dict(os.environ, env, clear=False),
+            patch.object(igdb, "_token", None),
+            patch.object(igdb, "_token_expires_at", None),
+            patch("gamelib_mcp.data.igdb.httpx.AsyncClient", lambda *a, **k: _Client()),
+            self.assertRaises(igdb.IGDBRequestFailure) as ctx,
+        ):
+            await igdb._get_token()
+        return ctx.exception
+
+    async def test_http_error_never_carries_the_secret_bearing_url(self) -> None:
+        # httpx puts the request URL in its message, and the token request
+        # carries the client secret in its query string — exactly what the
+        # enrichment WARNING and the /admin/health last_error would repr().
+        url = f"{igdb._TWITCH_TOKEN_URL}?client_id=cid&client_secret=sekrit-value&grant_type=client_credentials"
+        request = httpx.Request("POST", url)
+        response = httpx.Response(403, request=request)
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as built:
+            raw = built
+        self.assertIn("sekrit-value", str(raw))
+
+        exc = await self._fail_token_fetch(raw)
+        self.assertEqual(str(exc), "Twitch token request failed: HTTP 403")
+        self.assertNotIn("sekrit-value", repr(exc))
+        self.assertIsNone(exc.__cause__)
+        self.assertTrue(exc.__suppress_context__)
+
+    async def test_transport_error_is_wrapped_by_type_only(self) -> None:
+        raw = httpx.ConnectError("connect failed", request=httpx.Request("POST", igdb._TWITCH_TOKEN_URL))
+        exc = await self._fail_token_fetch(raw)
+        self.assertEqual(str(exc), "Twitch token request failed: ConnectError")
+        self.assertIsNone(exc.__cause__)
 
 
 class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):

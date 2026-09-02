@@ -339,17 +339,30 @@ async def _get_token() -> str:
     if not client_id or not client_secret:
         raise OSError("TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET must be set for IGDB enrichment")
 
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(
-            _TWITCH_TOKEN_URL,
-            params={
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "grant_type": "client_credentials",
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                _TWITCH_TOKEN_URL,
+                params={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "grant_type": "client_credentials",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPStatusError as exc:
+        # Never let the raw error escape: httpx puts the full request URL in
+        # its message, and this one carries the client secret in its query
+        # string. Every log line and health counter downstream repr()s the
+        # exception it was handed.
+        raise IGDBRequestFailure(
+            f"Twitch token request failed: HTTP {exc.response.status_code}"
+        ) from None
+    except httpx.HTTPError as exc:
+        raise IGDBRequestFailure(
+            f"Twitch token request failed: {type(exc).__name__}"
+        ) from None
 
     _token = data["access_token"]
     expires_in = data.get("expires_in", 3600)
