@@ -71,7 +71,7 @@ its edits uncommitted, finish or redo it from the spec:
   on any ≥ 20-line identical block outside apps_shared.py; the "deliberately
   duplicated" wording in docs/patterns/mcp-surface.md and CLAUDE.md changes
   to "shared blocks in apps_shared.py".
-- *Item 13 — hygiene.* Explicit `timeout=` on the four bare
+- *Item 13 — hygiene.* **Committed as `fb5c7f7`.** Explicit `timeout=` on the four bare
   `httpx.AsyncClient()` sites (enrich_bg.py, steam_store.py ×3); one shared
   client around steam_licenses.py's retired-app probe loop; delete
   `prewarm_hltb`, `meets_min_tier`, `is_dekudeals_configured`, opencritic
