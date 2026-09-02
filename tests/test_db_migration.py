@@ -2172,3 +2172,139 @@ class BackgroundEnrichmentRegressionTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NewerDatabaseRefusesToRunTests(unittest.IsolatedAsyncioTestCase):
+    """A file migrated by a newer build must not be re-stamped down by an older one.
+
+    The deploy gate can roll code back across a schema bump; without this guard
+    the older build would set user_version back to its own SCHEMA_VERSION over
+    the newer tables and the next forward deploy would re-apply the step.
+    """
+
+    async def test_newer_user_version_raises_before_any_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "newer.sqlite"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(db_module._V1_SCHEMA_DDL)
+            conn.execute(f"PRAGMA user_version = {db_module.SCHEMA_VERSION + 1}")
+            conn.commit()
+            conn.close()
+            with patch.dict("os.environ", {"DATABASE_URL": f"file:{db_path}"}, clear=False):
+                db_module._DB_READY_PATH = None
+                with self.assertRaisesRegex(RuntimeError, "newer build migrated it"):
+                    await db_module.migrate_db()
+                db_module._DB_READY_PATH = None
+            conn = sqlite3.connect(db_path)
+            try:
+                self.assertEqual(
+                    conn.execute("PRAGMA user_version").fetchone()[0], db_module.SCHEMA_VERSION + 1
+                )
+            finally:
+                conn.close()
+            self.assertEqual(
+                sorted(p.name for p in Path(tmp).glob("*.bak")), [],
+                "the guard must fire before the pre-migration snapshot is written",
+            )
+
+
+class InterruptedMigrationMarkerTests(unittest.IsolatedAsyncioTestCase):
+    """Migration steps commit as they go and stamp user_version at their end.
+
+    A crash mid-step leaves the schema between versions with the OLD stamp.
+    The `.migrating` sidecar is written after the pre-migration snapshot and
+    removed after the final stamp, so the next start (old build or new) can
+    tell "interrupted" from "never started" — and, crucially, does not
+    re-snapshot the broken state over the good pre-v{N}.bak (Codex P0 on
+    PR #162).
+    """
+
+    def _seed_v1(self, db_path: Path) -> None:
+        conn = sqlite3.connect(db_path)
+        conn.executescript(db_module._V1_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 1")
+        conn.execute("INSERT INTO games (name) VALUES ('Survivor')")
+        conn.commit()
+        conn.close()
+
+    async def test_interrupted_step_blocks_restart_and_keeps_the_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "interrupted.sqlite"
+            self._seed_v1(db_path)
+            first_from, first_step = db_module._MIGRATION_STEPS[0]
+
+            async def crash_after_partial_commit(db, progress):
+                # The real step renames tables (committed) and stamps v2 at its
+                # end; undo the stamp to reproduce "changes committed, stamp
+                # not", then die.
+                await first_step(db, progress)
+                await db.execute("PRAGMA user_version = 1")
+                await db.commit()
+                raise RuntimeError("simulated crash mid-migration")
+
+            steps = [(first_from, crash_after_partial_commit), *db_module._MIGRATION_STEPS[1:]]
+            env = {"DATABASE_URL": f"file:{db_path}"}
+            with (
+                patch.dict("os.environ", env, clear=False),
+                patch.object(db_module, "_MIGRATION_STEPS", steps),
+            ):
+                db_module._DB_READY_PATH = None
+                with self.assertRaisesRegex(RuntimeError, "simulated crash"):
+                    await db_module.migrate_db()
+                db_module._DB_READY_PATH = None
+
+            marker = Path(f"{db_path}.migrating")
+            snapshot = Path(f"{db_path}.pre-v1.bak")
+            self.assertTrue(marker.exists(), "the marker must survive the crash")
+            self.assertTrue(snapshot.exists())
+            snapshot_bytes = snapshot.read_bytes()
+
+            # Any build starting now must refuse, and must not touch the snapshot.
+            with patch.dict("os.environ", env, clear=False):
+                db_module._DB_READY_PATH = None
+                with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                    await db_module.migrate_db()
+                db_module._DB_READY_PATH = None
+            self.assertEqual(snapshot.read_bytes(), snapshot_bytes)
+            self.assertTrue(marker.exists())
+
+            snap = sqlite3.connect(snapshot)
+            try:
+                tables = {r[0] for r in snap.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+                self.assertIn("games", tables)
+                self.assertNotIn("games_v1_old", tables)
+                self.assertEqual(snap.execute("PRAGMA user_version").fetchone()[0], 1)
+                self.assertEqual(snap.execute("SELECT name FROM games").fetchone()[0], "Survivor")
+            finally:
+                snap.close()
+
+    async def test_completed_migration_leaves_no_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "complete.sqlite"
+            self._seed_v1(db_path)
+            with patch.dict("os.environ", {"DATABASE_URL": f"file:{db_path}"}, clear=False):
+                db_module._DB_READY_PATH = None
+                result = await db_module.migrate_db()
+                db_module._DB_READY_PATH = None
+            self.assertEqual(result.final_version, db_module.SCHEMA_VERSION)
+            self.assertFalse(Path(f"{db_path}.migrating").exists())
+
+    async def test_stale_marker_after_a_completed_migration_is_cleared(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "stale.sqlite"
+            self._seed_v1(db_path)
+            env = {"DATABASE_URL": f"file:{db_path}"}
+            with patch.dict("os.environ", env, clear=False):
+                db_module._DB_READY_PATH = None
+                await db_module.migrate_db()
+                db_module._DB_READY_PATH = None
+            marker = Path(f"{db_path}.migrating")
+            marker.write_text('{"from": 1, "to": 999}', encoding="utf-8")
+            # The stamp is at SCHEMA_VERSION: the migration finished and only the
+            # marker removal was lost. Start must succeed and clean it up.
+            with patch.dict("os.environ", env, clear=False):
+                db_module._DB_READY_PATH = None
+                result = await db_module.migrate_db()
+                db_module._DB_READY_PATH = None
+            self.assertEqual(result.final_version, db_module.SCHEMA_VERSION)
+            self.assertFalse(marker.exists())

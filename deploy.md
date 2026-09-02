@@ -169,11 +169,60 @@ cd ~/mcps && git pull && docker compose --profile prod up -d --build
 triggered manually from the Actions tab via *Run workflow*):
 
 1. **Test** — `uv sync --frozen` then the full `pytest` suite. This gates the
-   deploy: if tests fail, nothing ships.
+   deploy: if tests fail, nothing ships. (`ci.yml` runs the same suite plus
+   ruff, mypy, and a `pip-audit` of the locked dependencies on every pull
+   request, and `audit.yml` re-runs the audit weekly on `main` so an advisory
+   published against an unchanged lockfile is still caught.)
 2. **Deploy** — SSHes into the Hetzner box and runs the equivalent of the
    manual redeploy: `git fetch` → `git reset --hard origin/main` →
-   `docker compose --profile prod up -d --build` → `docker image prune -f`
-   (the prune keeps the small VM's disk from filling with stale layers).
+   `docker compose --profile prod up -d --build`.
+3. **Gate** — polls `/health` from inside the new `app` container for up to
+   two minutes. A container that never answers HTTP 200 (a startup exception,
+   a bad `.env`, a failed migration) fails the run, prints the last 100 log
+   lines, and **rolls back**: `git reset --hard <previous commit>` and a
+   rebuild of that commit, so `main` stays deployable without a laptop. Only a
+   healthy deploy runs `docker image prune -f` (the prune keeps the small VM's
+   disk from filling with stale layers).
+
+   The rollback checks `PRAGMA user_version` before and after, and for the
+   app's `gamelib.db.migrating` marker (written after the pre-migration
+   snapshot, removed after the final version stamp — migration steps commit
+   as they go, so a crash mid-step leaves the schema between versions with
+   the OLD stamp). If either says the failed build touched the schema, old
+   code must not start against it: the gate restores the app's own
+   `gamelib.db.pre-v{N}.bak` snapshot first, and if that file is missing it
+   refuses to roll back and leaves the new build crash-looping, which is
+   visible, rather than a silently wrong schema, which is not. The app
+   enforces the same rule itself: with a marker present and the stamp not at
+   the build's version it refuses to start and names the snapshot to restore.
+
+Every third-party action in the workflows is pinned to a full commit SHA with
+the release tag in a trailing comment; Dependabot's `github-actions` entry
+moves the pins forward. Do not "simplify" a pin back to a bare tag: the deploy
+job holds the production SSH key, and a retagged action would run someone
+else's code with it.
+
+#### Manual rollback
+
+If a deploy passes the gate but misbehaves afterwards, or the automatic
+rollback itself needs repeating:
+
+```bash
+cd ~/mcps
+sqlite3 data/library/gamelib.db 'PRAGMA user_version'   # if this is HIGHER than the
+                                                       # target commit's SCHEMA_VERSION,
+                                                       # restore gamelib.db.pre-v{N}.bak first
+ls data/library/gamelib.db.migrating 2>/dev/null       # present = a migration was interrupted:
+                                                       # restore the snapshot named inside it,
+                                                       # then delete the marker
+git log --oneline -5                # pick the commit to return to
+git reset --hard <commit>
+docker compose --profile prod up -d --build
+curl -fsS https://gamelibmcp.johnwilkos.com/health
+```
+
+The next push to `main` deploys `origin/main` again, so a rollback is a
+stopgap; fix forward on `main` afterwards.
 
 #### Required GitHub secrets
 
@@ -365,6 +414,34 @@ Two layers of protection:
    Note: port 22 on CLOSET is WSL2 Ubuntu's sshd, not Windows OpenSSH — remote
    admin goes through `ssh kevlarrelic@closet`, and Windows-side changes via
    WSL interop (`/mnt/c/...`, `powershell.exe`, `schtasks.exe`).
+
+4. **Restore drill (scripted 2026-09-01)** — a backup that has never been
+   restored is not a backup. `scripts/restore_drill.py` copies a backup file
+   into a scratch directory, integrity-checks it, runs the app's own startup
+   migration against the copy (so an older backup is proven to migrate
+   forward), and reports row counts for the irreplaceable tables. It never
+   opens the live database. On the server, from the repo clone (`scripts/` is
+   not copied into the image, so mount it):
+
+```bash
+cd ~/mcps
+docker compose run --rm --no-deps -v "$PWD/scripts:/app/scripts:ro" app \
+  python /app/scripts/restore_drill.py /data/gamelib-nightly.bak
+```
+
+   On the off-machine copy (WSL on CLOSET, from a clone with `uv sync`):
+
+```bash
+uv run python scripts/restore_drill.py /mnt/c/Users/porta/Backups/gamelib/<newest>.bak
+```
+
+   Exit status 0 and `restore drill: PASS` is the whole point; a FAIL names
+   the check. Run it after any migration lands and at least quarterly, and log
+   it here so the next audit can see the backups actually restore:
+
+   | Date | Backup | Result |
+   | --- | --- | --- |
+   | *(not yet run on the box)* | | |
 
    To redo the setup from scratch (PowerShell on the Windows machine):
 

@@ -22,3 +22,15 @@ updates:
       actions:
         patterns:
           - "*"
+  # Base images are pinned by digest in Dockerfile / docker-compose.yml (audit
+  # 2026-09-01, #2); these two entries move the digests forward.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
