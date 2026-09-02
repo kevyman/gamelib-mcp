@@ -41,11 +41,19 @@ standards live.
   changed" sections become the squash commit message, so write them as the
   history you want. Fill "Review scope for Codex" honestly: it steers the one
   pass toward the risk.
-- Open as a DRAFT (`create_pull_request` with `draft: true`), then mark it
-  ready (`update_pull_request` with `draft: false`). Automatic Codex reviews
-  fire on "ready for review", so there is no need to comment
-  `@codex review`; post that comment only if nothing has happened after
-  10 minutes (Codex reacts 👀 while running, 👍 when it has nothing).
+- Open the PR READY (`create_pull_request` with `draft: false`) — the
+  branch already passed the gates in step 1, so a draft protects nothing,
+  and "opens a new PR for review" is the documented automatic trigger.
+  Codex reacts 👀 within a minute when it picks the PR up. Do NOT comment
+  `@codex review` up front: with automatic reviews on, that is two reviews,
+  which is the thing this process exists to avoid. Post the comment only
+  if nothing has happened after 10 minutes.
+- If the automatic review does not start, the first thing to check is the
+  repository's **Automatic reviews** toggle at
+  https://chatgpt.com/codex/settings/code-review — it was off for this
+  repo until 2026-09-02, which is why #162, #166 (draft → ready) and #167
+  (opened ready) all needed the comment. The comment works regardless of
+  the toggle.
 
 ## 3. Subscribe and wait
 
