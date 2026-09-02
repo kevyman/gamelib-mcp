@@ -63,7 +63,7 @@ Top-level modules (rationale and measurements: → patterns/mcp-surface.md):
 - `http_admin.py` — origin-allowlist middleware + `/health`, `/admin/integrations*`, `/ingest/{nonce}` (outside `/admin/`, so a browser navigation needs no bearer header); `/mcp` is authenticated by FastMCP's OAuth provider.
 - `response_encoding.py` — `StructuredOnlyMiddleware` drops FastMCP's duplicate text block beside `structuredContent` (`MCP_DUPLICATE_TEXT_CONTENT=1` restores it).
 - `session_ingest.py` — single-use cookie-paste links: in-memory nonce store (TTL 15 min, pop-on-success) + the `/ingest/{nonce}` form; a restart voids open links.
-- `apps.py` / `apps_eval.py` — the two MCP Apps widgets (game cards; the evaluation card from `record_assessment`'s `package`). Content-hashed `ui://` URIs, no CDN, per-widget CSP, deliberately duplicated not shared. Preview: `scripts/preview_{game_cards,eval_card}.py`.
+- `apps.py` / `apps_eval.py` — the two MCP Apps widgets (game cards; the evaluation card from `record_assessment`'s `package`). Content-hashed `ui://` URIs, no CDN, per-widget CSP, shared blocks in `apps_shared.py`; served HTML stays self-contained. Preview: `scripts/preview_{game_cards,eval_card}.py`.
 - `skill_resources.py` — serves `skills/` as `skill://<skill-name>/<path>` + `skill://index.json` (ADR 0006) AND backs `get_skill`, from one disk scan so the two can't drift.
 
 `skills/` (repo root) is the canonical home of the client-side gaming skills (`game-quality`, `backlog-triage`, `bundle-evaluation`) per ADR 0006; `~/.claude/skills` and claude.ai installs are copies.
