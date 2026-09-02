@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from gamelib_mcp.data import db as db_module
-from gamelib_mcp.data import protondb
+from gamelib_mcp.data import protondb, provider_health
 
 
 class ProtonDBQualityGateTests(unittest.IsolatedAsyncioTestCase):
@@ -76,6 +76,36 @@ class ProtonDBQualityGateTests(unittest.IsolatedAsyncioTestCase):
         # Tier must survive the failure; cached_at should be stamped (backoff marker).
         self.assertEqual(row["protondb_tier"], "platinum")
         self.assertIsNotNone(row["protondb_cached_at"])
+
+    async def _fetch_with_status(self, status_code: int) -> None:
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            _, game_platform_id = await self._seed_game_with_tier("platinum")
+            mock_resp = MagicMock()
+            mock_resp.status_code = status_code
+            mock_client = AsyncMock()
+            mock_client.get.return_value = mock_resp
+            with patch("gamelib_mcp.data.protondb.httpx.AsyncClient") as mock_cls:
+                mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+                await protondb._fetch_and_cache(123, game_platform_id)
+
+    async def test_404_is_a_miss_not_a_provider_failure(self) -> None:
+        # ProtonDB answers 404 for an app nobody has reported on. That is an
+        # answer, so the enrichment health counter must not read a library of
+        # obscure games as a dead provider.
+        provider_health.reset()
+        await self._fetch_with_status(404)
+        stats = provider_health.snapshot()["protondb"]
+        self.assertEqual(stats["failures"], 0)
+        self.assertEqual(stats["successes"], 1)
+
+    async def test_server_error_is_a_provider_failure(self) -> None:
+        provider_health.reset()
+        await self._fetch_with_status(503)
+        stats = provider_health.snapshot()["protondb"]
+        self.assertEqual(stats["failures"], 1)
+        self.assertEqual(stats["successes"], 0)
+        self.assertIn("503", stats["last_error"])
 
     async def test_success_writes_tier(self) -> None:
         with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):

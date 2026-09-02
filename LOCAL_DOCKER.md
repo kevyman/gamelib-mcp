@@ -1,6 +1,6 @@
 # Local Docker Testing
 
-This repo's checked-in [docker-compose.yml](/home/john/code/gamelib-mcp/docker-compose.yml) is aimed at the deployed setup. Use the local override in [docker-compose.local.yml](/home/john/code/gamelib-mcp/docker-compose.local.yml) for local testing; it publishes the app port to localhost while leaving production-only services disabled.
+This repo's checked-in [docker-compose.yml](docker-compose.yml) is aimed at the deployed setup. Use the local override in [docker-compose.local.yml](docker-compose.local.yml) for local testing; it publishes the app port to localhost while leaving production-only services disabled.
 
 ## One-time setup
 

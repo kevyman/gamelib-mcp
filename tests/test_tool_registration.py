@@ -5,6 +5,7 @@ that changes a tool name, drops a parameter, or alters required-ness will fail
 here. Description assertions stay limited to known regressions.
 """
 
+import json
 import unittest
 
 from gamelib_mcp import main
@@ -132,9 +133,13 @@ EXPECTED_TOOLS = {
             "price_platform", "target_price", "instead_game_id", "steam_appid",
             "context", "skill", "skill_version", "model",
             "elevator_pitch", "for_you_if", "not_for_you_if", "comparisons",
-            "why_care", "craft_note", "void_assessment_id", "items",
+            "why_care", "craft_note", "items",
         },
         "required": set(),
+    },
+    "void_assessment": {
+        "params": {"assessment_id"},
+        "required": {"assessment_id"},
     },
     "merge_games": {
         "params": {"source_game_id", "target_game_id", "items", "dry_run"},
@@ -214,6 +219,13 @@ EXPECTED_ANNOTATIONS = {
     # A same-day re-record replaces that day's row, so repeating the call is a
     # no-op rather than a second verdict — idempotent, and it destroys nothing.
     "record_assessment": {"readOnlyHint": False, "idempotentHint": True},
+    # The void HARD-deletes one row, so a repeat call errors ("not found")
+    # rather than being a no-op — the reason it is not a record_assessment mode.
+    "void_assessment": {
+        "readOnlyHint": False,
+        "idempotentHint": False,
+        "destructiveHint": True,
+    },
     "merge_games": {"readOnlyHint": False, "idempotentHint": False, "destructiveHint": True},
     "delete_game": {"readOnlyHint": False, "idempotentHint": False, "destructiveHint": True},
     "sync": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
@@ -270,9 +282,9 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         tools = await self._tools()
         self.assertEqual(set(tools), set(EXPECTED_TOOLS))
 
-    async def test_tool_count_is_32(self):
+    async def test_tool_count_is_33(self):
         tools = await self._tools()
-        self.assertEqual(len(tools), 32)
+        self.assertEqual(len(tools), 33)
 
     async def test_parameter_names_and_required(self):
         tools = await self._tools()
@@ -342,6 +354,89 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         # The merged tools are only a win if a client knows to reach for
         # items=[...] instead of looping single calls (ADR 0004).
         self.assertIn("items=[...]", main.mcp.instructions)
+
+
+class SchemaBudgetTests(unittest.IsolatedAsyncioTestCase):
+    """The schema-side twin of ResponseSizeGuardTests (test_tool_dispatch.py).
+
+    ADR 0004 capped every RESPONSE field that scales with library size, but
+    left the schema side unbudgeted, and it grew: measured 2026-09-01 at
+    171,823 payload bytes / 77,731 description chars across 33 tools. Schema
+    is nominally paid once per connect — but for a hosted connector the tool
+    definitions ride in the model's context on EVERY turn of every
+    conversation, so an unbudgeted description is a per-turn tax.
+
+    The 2026-09-01 amendment trimmed descriptions to 53,258 chars / 146,434
+    payload bytes and moved record_assessment's field-level authoring rules
+    into skills/game-quality/recording.md (ADR 0006: methodology lives with
+    the skill, not on the wire). These caps sit ~8% above that, so ordinary
+    editing is free and a new tool or a docstring that grows back into prose
+    fails here instead of silently costing every turn.
+
+    Output schemas are inside the payload cap but have no cap of their own:
+    whether hosts forward outputSchema to the model is unmeasured (see the
+    amendment's open question). Measure before optimizing that slice.
+    """
+
+    # Whole serialized tools/list payload, json.dumps(separators=(",", ":")).
+    MAX_TOTAL_PAYLOAD_BYTES = 158_000  # achieved 146,434
+    # Sum of every tool description (chars, as the model reads them).
+    MAX_TOTAL_DESCRIPTION_CHARS = 57_000  # achieved 53,258
+    # No single tool may hold a disproportionate share of that budget.
+    MAX_TOOL_DESCRIPTION_CHARS = 3_900  # largest: get_stats, 3,575
+    MAX_TOOL_PAYLOAD_BYTES = 11_000  # largest: get_stats, 10,045
+
+    async def _serialized(self) -> dict[str, tuple[int, int]]:
+        """Per tool: (serialized payload bytes, description chars)."""
+        tools = await main.mcp.list_tools()
+        sizes = {}
+        for tool in tools:
+            dumped = tool.to_mcp_tool().model_dump(mode="json", exclude_none=True)
+            payload = json.dumps(dumped, separators=(",", ":"))
+            sizes[dumped["name"]] = (len(payload), len(dumped.get("description") or ""))
+        return sizes
+
+    async def test_total_payload_within_budget(self):
+        sizes = await self._serialized()
+        total = sum(payload for payload, _ in sizes.values())
+        self.assertLessEqual(
+            total,
+            self.MAX_TOTAL_PAYLOAD_BYTES,
+            f"tools/list payload is {total} bytes, over the "
+            f"{self.MAX_TOTAL_PAYLOAD_BYTES} budget",
+        )
+
+    async def test_total_description_chars_within_budget(self):
+        sizes = await self._serialized()
+        total = sum(description for _, description in sizes.values())
+        self.assertLessEqual(
+            total,
+            self.MAX_TOTAL_DESCRIPTION_CHARS,
+            f"tool descriptions total {total} chars, over the "
+            f"{self.MAX_TOTAL_DESCRIPTION_CHARS} budget",
+        )
+
+    async def test_no_tool_description_over_cap(self):
+        for name, (_, description) in (await self._serialized()).items():
+            with self.subTest(tool=name):
+                self.assertLessEqual(
+                    description,
+                    self.MAX_TOOL_DESCRIPTION_CHARS,
+                    f"{name}'s description is {description} chars, over the "
+                    f"{self.MAX_TOOL_DESCRIPTION_CHARS} per-tool cap — move "
+                    f"methodology to a skill file (get_skill) or cut prose "
+                    f"that restates the schema",
+                )
+
+    async def test_no_tool_payload_over_cap(self):
+        for name, (payload, _) in (await self._serialized()).items():
+            with self.subTest(tool=name):
+                self.assertLessEqual(
+                    payload,
+                    self.MAX_TOOL_PAYLOAD_BYTES,
+                    f"{name} serializes to {payload} bytes, over the "
+                    f"{self.MAX_TOOL_PAYLOAD_BYTES} per-tool cap",
+                )
 
 
 if __name__ == "__main__":

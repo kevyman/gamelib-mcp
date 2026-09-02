@@ -29,6 +29,7 @@ from gamelib_mcp.tools.assessment import (
     get_assessment_context,
     record_assessment,
     record_assessments_batch,
+    void_assessment,
 )
 
 # Every single-item recording now assembles a package, whose one network step
@@ -416,9 +417,7 @@ class VoidAssessmentTests(ToolDBTestCase):
             game_id=game_id, verdict="buy_now", assessed_at="2026-03-01"
         )
 
-        result = await record_assessment(
-            void_assessment_id=recorded["assessment_id"]
-        )
+        result = await void_assessment(recorded["assessment_id"])
 
         self.assertTrue(result["voided"])
         self.assertEqual(result["assessment_id"], recorded["assessment_id"])
@@ -433,7 +432,7 @@ class VoidAssessmentTests(ToolDBTestCase):
     async def test_voiding_the_last_assessment_of_a_minted_row_suggests_delete(self):
         minted = await record_assessment(name="Phantom Candidate", verdict="skip")
 
-        result = await record_assessment(void_assessment_id=minted["assessment_id"])
+        result = await void_assessment(minted["assessment_id"])
 
         self.assertEqual(result["suggested_action"]["tool"], "delete_game")
         self.assertEqual(
@@ -449,64 +448,50 @@ class VoidAssessmentTests(ToolDBTestCase):
             game_id=minted["game_id"], verdict="buy_now", assessed_at="2026-02-01"
         )
 
-        result = await record_assessment(void_assessment_id=second["assessment_id"])
+        result = await void_assessment(second["assessment_id"])
         self.assertNotIn("suggested_action", result)
         rows = await _assessment_rows(minted["game_id"])
         self.assertEqual([row["verdict"] for row in rows], ["skip"])
 
     async def test_unknown_assessment_id_errors(self):
         with self.assertRaises(ToolError) as ctx:
-            await record_assessment(void_assessment_id=987654)
+            await void_assessment(987654)
         self.assertIn("987654", str(ctx.exception))
 
-    async def test_void_is_exclusive_of_every_other_parameter(self):
+    async def test_voiding_twice_errors_not_found(self):
+        # The reason this is a tool of its own rather than a record_assessment
+        # mode: a repeat call cannot be a no-op, so it is not idempotent.
+        game_id = await seed_game("Voided Twice")
+        recorded = await record_assessment(game_id=game_id, verdict="skip")
+        await void_assessment(recorded["assessment_id"])
+        with self.assertRaises(ToolError) as ctx:
+            await void_assessment(recorded["assessment_id"])
+        self.assertIn("not found", str(ctx.exception))
+
+    async def test_record_assessment_no_longer_takes_void_assessment_id(self):
+        # The exclusivity guard is gone because the parameter is: voiding is
+        # its own non-idempotent tool, so there is no mode to be exclusive of.
         game_id = await seed_game("Exclusive Probe")
         recorded = await record_assessment(game_id=game_id, verdict="skip")
-        for kwargs in (
-            {"verdict": "skip"},
-            {"game_id": game_id},
-            {"name": "Exclusive Probe"},
-            {"appid": 4242},
-            {"summary": "leftover"},
-            # The presentation params are refused alongside every other one:
-            # a void deletes a row, it does not re-author one.
-            {"elevator_pitch": "leftover pitch"},
-            {"for_you_if": ["leftover"]},
-            {"not_for_you_if": ["leftover"]},
-            {"comparisons": [{"name": "X", "relation": "similar"}]},
-        ):
-            with self.subTest(**kwargs), self.assertRaises(ToolError) as ctx:
-                await record_assessment(
-                    void_assessment_id=recorded["assessment_id"], **kwargs
-                )
-            self.assertIn(next(iter(kwargs)), str(ctx.exception))
-        # Nothing was deleted by any of the refused calls.
-        self.assertEqual(len(await _assessment_rows(game_id)), 1)
-
-    async def test_void_cannot_be_combined_with_items(self):
-        game_id = await seed_game("Bulk And Void")
-        recorded = await record_assessment(game_id=game_id, verdict="skip")
-        with self.assertRaises(ToolError) as ctx:
+        with self.assertRaises(TypeError):
+            await record_assessment(void_assessment_id=recorded["assessment_id"])
+        with self.assertRaises(TypeError):
             await main.record_assessment(
-                void_assessment_id=recorded["assessment_id"],
-                items=[{"game_id": game_id, "verdict": "buy_now"}],
+                void_assessment_id=recorded["assessment_id"]
             )
-        self.assertIn("items", str(ctx.exception))
         self.assertEqual(len(await _assessment_rows(game_id)), 1)
 
     async def test_void_routes_through_the_tool(self):
         game_id = await seed_game("Routed Void")
         recorded = await record_assessment(game_id=game_id, verdict="skip")
-        result = await main.record_assessment(
-            void_assessment_id=recorded["assessment_id"]
-        )
+        result = await main.void_assessment(recorded["assessment_id"])
         self.assertTrue(result["voided"])
         self.assertEqual(await _assessment_rows(game_id), [])
 
     async def test_void_returns_no_package(self):
         game_id = await seed_game("Void Package")
         recorded = await record_assessment(game_id=game_id, verdict="skip")
-        result = await record_assessment(void_assessment_id=recorded["assessment_id"])
+        result = await void_assessment(recorded["assessment_id"])
         self.assertNotIn("package", result)
 
 
@@ -767,22 +752,6 @@ class AssessmentProvenanceTests(ToolDBTestCase):
         (row,) = await _assessment_rows(game_id)
         self.assertEqual(row["skill"], "game-quality")
 
-    async def test_void_mode_rejects_provenance_like_every_other_param(self):
-        game_id = await seed_game("Void Provenance")
-        recorded = await record_assessment(game_id=game_id, verdict="skip")
-        for kwargs in (
-            {"skill": "game-quality"},
-            {"skill_version": "2.4.0"},
-            {"model": "claude-opus-5"},
-        ):
-            with self.subTest(**kwargs), self.assertRaises(ToolError) as ctx:
-                await record_assessment(
-                    void_assessment_id=recorded["assessment_id"], **kwargs
-                )
-            self.assertIn("exclusive", str(ctx.exception))
-        # The row survived every refusal.
-        self.assertEqual(len(await _assessment_rows(game_id)), 1)
-
     async def test_read_blocks_carry_the_declared_methodology(self):
         game_id = await make_steam_game("Provenance Reader", 4242)
         await record_assessment(
@@ -838,7 +807,7 @@ class AssessmentReadBlockTests(ToolDBTestCase):
         self.assertEqual(detail["assessments"][1]["target_price"], 15.0)
         self.assertEqual(detail["assessments"][1]["fit_call"], "coin flip")
         # assessment_id makes the block a usable source for
-        # record_assessment(void_assessment_id=…) on a historical misfile.
+        # void_assessment(assessment_id=…) on a historical misfile.
         self.assertIsInstance(detail["assessments"][0]["assessment_id"], int)
 
     async def test_bulk_detail_skips_the_block(self):
@@ -1018,7 +987,7 @@ class AssessmentsReportTests(ToolDBTestCase):
 
     async def test_report_carries_the_assessment_id_for_void(self):
         # The browse report is the advertised way to recover the id a
-        # historical misfile needs for record_assessment(void_assessment_id=…).
+        # historical misfile needs for void_assessment(assessment_id=…).
         game_id = await seed_game("Voidable Later")
         recorded = await record_assessment(game_id=game_id, verdict="skip")
         result = await main.get_stats(report="assessments")
@@ -1716,17 +1685,6 @@ class WhyCareTests(ToolDBTestCase):
         stored = json.loads((await _assessment_rows(game_id))[0]["presentation"])
         self.assertEqual(len(stored["why_care"][0]["text"]), 160)
 
-    async def test_void_refuses_to_carry_why_care(self):
-        game_id = await seed_game("Why Care Void")
-        recorded = await record_assessment(game_id=game_id, verdict="skip")
-        with self.assertRaises(ToolError) as ctx:
-            await record_assessment(
-                void_assessment_id=recorded["assessment_id"],
-                why_care=[{"kind": "studio", "text": "leftover"}],
-            )
-        self.assertIn("why_care", str(ctx.exception))
-        self.assertEqual(len(await _assessment_rows(game_id)), 1)
-
     async def test_why_care_is_an_item_key(self):
         game_id = await seed_game("Bulk Why Care")
         result = await main.record_assessment(
@@ -1793,16 +1751,6 @@ class CraftNoteTests(ToolDBTestCase):
         await record_assessment(game_id=game_id, verdict="skip", craft_note="c" * 400)
         stored = json.loads((await _assessment_rows(game_id))[0]["presentation"])
         self.assertEqual(len(stored["craft_note"]), 200)
-
-    async def test_void_refuses_to_carry_a_craft_note(self):
-        game_id = await seed_game("Craft Note Void")
-        recorded = await record_assessment(game_id=game_id, verdict="skip")
-        with self.assertRaises(ToolError) as ctx:
-            await record_assessment(
-                void_assessment_id=recorded["assessment_id"], craft_note="leftover"
-            )
-        self.assertIn("craft_note", str(ctx.exception))
-        self.assertEqual(len(await _assessment_rows(game_id)), 1)
 
     async def test_craft_note_is_an_item_key(self):
         game_id = await seed_game("Bulk Craft Note")

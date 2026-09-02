@@ -56,10 +56,13 @@ class SkillResourcesRegisteredTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(text, on_disk)
         self.assertIn("name: backlog-triage", text)
 
-    async def test_game_quality_is_skill_md_only(self) -> None:
-        # ADR 0006 stage 4: the craft/fit scripts moved server-side
-        # (get_assessment_context) and skills/game-quality/scripts/ was
-        # removed, so game-quality no longer ships any supporting files.
+    async def test_game_quality_ships_skill_md_and_recording_reference(self) -> None:
+        # ADR 0006 stage 4 removed skills/game-quality/scripts/ (the craft/fit
+        # scripts moved server-side into get_assessment_context). The one
+        # supporting file that came back is recording.md — the field-level
+        # authoring rules for record_assessment, moved off the wire schema by
+        # ADR 0004's 2026-09-01 amendment. Methodology belongs with the skill;
+        # executable scripts still do not.
         mcp = FastMCP("test")
         skill_resources.register_skill_resources(mcp)
 
@@ -68,7 +71,10 @@ class SkillResourcesRegisteredTests(unittest.IsolatedAsyncioTestCase):
             uris = {str(r.uri) for r in resources}
 
         quality_uris = {u for u in uris if u.startswith("skill://game-quality/")}
-        self.assertEqual(quality_uris, {"skill://game-quality/SKILL.md"})
+        self.assertEqual(
+            quality_uris,
+            {"skill://game-quality/SKILL.md", "skill://game-quality/recording.md"},
+        )
 
     async def test_index_json_lists_each_skill_with_frontmatter_fields(self) -> None:
         mcp = FastMCP("test")
@@ -91,7 +97,10 @@ class SkillResourcesRegisteredTests(unittest.IsolatedAsyncioTestCase):
 
         quality_entry = by_name["game-quality"]
         self.assertRegex(quality_entry["version"], r"^\d+\.\d+\.\d+$")
-        self.assertEqual(quality_entry["files"], ["skill://game-quality/SKILL.md"])
+        self.assertEqual(
+            quality_entry["files"],
+            ["skill://game-quality/SKILL.md", "skill://game-quality/recording.md"],
+        )
 
         bundle_entry = by_name["bundle-evaluation"]
         self.assertRegex(bundle_entry["version"], r"^\d+\.\d+\.\d+$")
@@ -455,7 +464,7 @@ class GetSkillToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.content, on_disk)
         self.assertEqual(response.skill, "game-quality")
         self.assertEqual(response.path, "SKILL.md")
-        self.assertEqual(response.version, "3.2.0")
+        self.assertEqual(response.version, "3.3.0")
 
     async def test_wire_call_returns_structured_content(self) -> None:
         from gamelib_mcp import main

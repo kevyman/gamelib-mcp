@@ -1,7 +1,7 @@
 ---
 name: game-quality
 description: Evaluate whether a NAMED game is good and worth John's time and money — owned or not. Triggers: "is X any good", "should I get X", "thoughts on X", "X vs Y", "is X worth playing", buy/wishlist/skip calls. NOT for picking a game for him ("what should I play", "I have 2 hours") — that's backlog-triage.
-version: "3.2.0"
+version: "3.3.0"
 ---
 
 # Game Quality Assessment
@@ -158,6 +158,8 @@ record_assessment(
 )
 ```
 
+The per-field rules — every cap, the `comparisons`/`why_care` vocabularies, and the provenance policy — are collected in this skill's `recording.md`, which is where the server's `record_assessment` description now points instead of restating them on the wire: `get_skill(skill="game-quality", path="recording.md")`. The sections below are the same rules, expanded.
+
 **Authoring the presentation fields (3.0).** These render on the card verbatim, so write them for John, grounded in HIS data — never generic genre talk:
 
 - `elevator_pitch` — your own two-sentence synthesis of what the game actually is and why it's interesting. No review-quote collage, no back-of-box copy, no spoilers.
@@ -173,7 +175,7 @@ The server fetches trailer/screenshots/similar-games/studio-pedigree itself and 
 
 **Identity: pass `game_id` whenever Step 0 resolved the candidate** (`game.game_id`, and only when `resolution.matched_name` really is the candidate). Pass `name=` — plus `appid=` when you have one — only for a candidate Step 0 could NOT resolve. Unlike Step 0's lookup, `name` here matches exactly or MINTS a new row: a name miss minting a row is correct for an unowned candidate, and a typo makes a visible phantom row (repairable with `merge_games`) rather than silently filing the verdict onto a sibling title.
 
-Then check the response: `resolution.matched_name` is the row that was written to. If it isn't the candidate, repair it — `record_assessment(void_assessment_id=<assessment_id>)` hard-deletes the misfiled row (it's exclusive: nothing else in that call), then re-record with the right `game_id`. Voiding is also the fix for any assessment recorded on a past day that shouldn't stand; same-day mistakes need no void, since re-recording replaces that day's entry.
+Then check the response: `resolution.matched_name` is the row that was written to. If it isn't the candidate, repair it — `void_assessment(assessment_id=<assessment_id>)` hard-deletes the misfiled row, then re-record with the right `game_id`. Voiding is also the fix for any assessment recorded on a past day that shouldn't stand; same-day mistakes need no void, since re-recording replaces that day's entry.
 
 In an MCP Apps host the recording call renders the evaluation card, which IS the closing act — one line alongside it ("logged for calibration"), never a prose re-explanation of what the card already shows. In a host without Apps support, same one line; the verdict block you already delivered stands. Re-recording the same game on the same day replaces that day's entry (and re-renders the card), so refining a call mid-conversation is safe. The recorded verdict feeds nothing but future context and `get_stats(report="calibration")`; it never touches the wishlist, the taste profile, or recommendations.
 
