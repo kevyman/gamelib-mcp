@@ -64,7 +64,7 @@ progress. Resume with `uv sync --frozen`, then the gates in CLAUDE.md
 piece is committed, its commit message says so; if the working tree carries
 its edits uncommitted, finish or redo it from the spec:
 
-- *Item 12 — widgets.* `gamelib_mcp/apps_shared.py` holds the JS/CSS blocks
+- *Item 12 — widgets.* **Committed as `0852a41`.** `gamelib_mcp/apps_shared.py` holds the JS/CSS blocks
   that apps.py and apps_eval.py duplicated (899 identical lines); both splice
   the constants in so served HTML stays self-contained; tests assert each
   widget's HTML contains every shared constant and a difflib drift guard fails
