@@ -23,8 +23,9 @@ ADR 0004 before turning it back off.
 
 import os
 
-from fastmcp.server.middleware import Middleware, MiddlewareContext
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools.tool import ToolResult
+from mcp.types import CallToolRequestParams
 
 ENV_VAR = "MCP_DUPLICATE_TEXT_CONTENT"
 
@@ -52,7 +53,11 @@ class StructuredOnlyMiddleware(Middleware):
       can never be stripped from a client that needs it to self-correct.
     """
 
-    async def on_call_tool(self, context: MiddlewareContext, call_next):
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[CallToolRequestParams],
+        call_next: CallNext[CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
         result = await call_next(context)
         if not isinstance(result, ToolResult) or result.structured_content is None:
             return result

@@ -19,13 +19,13 @@ import os
 import re
 import sqlite3
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import TypeVar
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 from weakref import WeakKeyDictionary
 
 import aiosqlite
@@ -34,13 +34,35 @@ from gamelib_mcp.env import load_project_dotenv
 
 
 # Polyfill: aiosqlite <0.20 doesn't have execute_fetchone as a Connection method
-async def _execute_fetchone(self, sql, parameters=()):
+async def _execute_fetchone(
+    self: aiosqlite.Connection, sql: str, parameters: Iterable[Any] = ()
+) -> Any:
     async with self.execute(sql, parameters) as cursor:
         return await cursor.fetchone()
 
 
 if not hasattr(aiosqlite.Connection, "execute_fetchone"):
     aiosqlite.Connection.execute_fetchone = _execute_fetchone  # type: ignore[attr-defined]
+
+
+if TYPE_CHECKING:
+    class DBConnection(aiosqlite.Connection):
+        """An aiosqlite connection as this package hands it out.
+
+        Identical to aiosqlite.Connection at runtime — the only difference is
+        the execute_fetchone polyfill installed above, which aiosqlite's own
+        class does not declare. Typed as a plain callable returning Any because
+        a row's columns are whatever the caller's SELECT asked for.
+        """
+
+        execute_fetchone: Callable[..., Coroutine[Any, Any, Any]]
+        # aiosqlite declares execute_fetchall as returning Iterable[Row],
+        # but sqlite3's fetchall really returns a list and callers here len()
+        # and index the result. Left loose rather than narrowed to list[Any],
+        # which mypy rejects as an incompatible override of the base class.
+        execute_fetchall: Callable[..., Any]
+else:
+    DBConnection = aiosqlite.Connection
 
 
 logger = logging.getLogger(__name__)
@@ -50,6 +72,8 @@ _FTS_READY_PATH: str | None = None
 _DB_INIT_LOCK: asyncio.Lock | None = None
 _ENV_LOADED = False
 _FuzzyKey = TypeVar("_FuzzyKey")
+_RetryParams = ParamSpec("_RetryParams")
+_RetryResult = TypeVar("_RetryResult")
 _Progress = Callable[[str], None]
 _SQLITE_CONNECT_TIMEOUT_SECONDS = 30.0
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
@@ -65,7 +89,7 @@ _REQUIRE_ABSOLUTE_DB_PATH_ENV = "GAMELIB_REQUIRE_ABSOLUTE_DB_PATH"
 _POOL_ENABLED = False
 _POOL_MAX_IDLE = 4
 _POOL_IDLE: WeakKeyDictionary[
-    asyncio.AbstractEventLoop, dict[str, list[aiosqlite.Connection]]
+    asyncio.AbstractEventLoop, dict[str, list[DBConnection]]
 ] = WeakKeyDictionary()
 
 
@@ -86,7 +110,7 @@ async def close_db_pool() -> None:
             await conn.close()
 
 
-def _pool_checkout(db_path: str) -> "aiosqlite.Connection | None":
+def _pool_checkout(db_path: str) -> "DBConnection | None":
     loop = asyncio.get_running_loop()
     conns = _POOL_IDLE.get(loop, {}).get(db_path)
     if conns:
@@ -94,7 +118,7 @@ def _pool_checkout(db_path: str) -> "aiosqlite.Connection | None":
     return None
 
 
-async def _pool_checkin(db_path: str, conn: aiosqlite.Connection) -> None:
+async def _pool_checkin(db_path: str, conn: DBConnection) -> None:
     loop = asyncio.get_running_loop()
     conns = _POOL_IDLE.setdefault(loop, {}).setdefault(db_path, [])
     if _POOL_ENABLED and len(conns) < _POOL_MAX_IDLE:
@@ -397,7 +421,9 @@ def _is_write_contention_error(exc: BaseException) -> bool:
     return "database is locked" in message or "database is busy" in message
 
 
-def retry_on_write_contention(func):
+def retry_on_write_contention(
+    func: Callable[_RetryParams, Awaitable[_RetryResult]],
+) -> Callable[_RetryParams, Awaitable[_RetryResult]]:
     """Retry an idempotent DB write on SQLITE_BUSY/BUSY_SNAPSHOT, backing off.
 
     Delays are 0.1s, 0.2s, 0.4s, 0.8s — under a second in total, since the
@@ -406,7 +432,9 @@ def retry_on_write_contention(func):
     a genuinely stuck database still surfaces as an error rather than a hang.
     """
     @functools.wraps(func)
-    async def wrapper(*args, **kwargs):
+    async def wrapper(
+        *args: _RetryParams.args, **kwargs: _RetryParams.kwargs
+    ) -> _RetryResult:
         for attempt in range(_WRITE_RETRY_ATTEMPTS):
             try:
                 return await func(*args, **kwargs)
@@ -430,7 +458,7 @@ def retry_on_write_contention(func):
 
 
 @asynccontextmanager
-async def get_db():
+async def get_db() -> AsyncIterator[DBConnection]:
     """Async context manager for a WAL-enabled, Row-factory SQLite connection.
 
     When pooling is enabled (server lifespan), connections are checked out
@@ -440,15 +468,18 @@ async def get_db():
     _ensure_db_parent_dir(db_path)
 
     if not _POOL_ENABLED:
-        async with aiosqlite.connect(db_path, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS) as conn:
-            await _configure_connection(conn, enable_wal=_DB_READY_PATH != db_path)
-            await _ensure_db_initialized(conn)
-            yield conn
+        async with aiosqlite.connect(db_path, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS) as direct:
+            await _configure_connection(direct, enable_wal=_DB_READY_PATH != db_path)
+            await _ensure_db_initialized(direct)
+            yield cast("DBConnection", direct)
         return
 
-    conn = _pool_checkout(db_path)
+    conn: DBConnection | None = _pool_checkout(db_path)
     if conn is None:
-        conn = await aiosqlite.connect(db_path, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS)
+        conn = cast(
+            "DBConnection",
+            await aiosqlite.connect(db_path, timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS),
+        )
         try:
             await _configure_connection(conn, enable_wal=_DB_READY_PATH != db_path)
             await _ensure_db_initialized(conn)

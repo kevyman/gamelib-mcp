@@ -20,6 +20,7 @@ import json
 import logging
 import math
 import re
+import sqlite3
 from datetime import UTC, datetime
 from functools import partial
 from typing import Any
@@ -2543,7 +2544,7 @@ async def get_calibration_report(limit: int = CALIBRATION_LIST_DEFAULT_LIMIT) ->
         "acquired": paid_by_currency,
     }
 
-    def _entry(row) -> dict:
+    def _entry(row: sqlite3.Row) -> dict:
         return {
             "game_id": row["game_id"],
             "name": row["name"],

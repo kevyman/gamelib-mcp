@@ -305,7 +305,7 @@ async def _run_store_batch() -> int:
     # passes (steam_store's appdetails/appreviews fetches), so an unattended
     # background worker can never inherit httpx's silent default instead.
     async with httpx.AsyncClient(timeout=15) as client:
-        async def enrich_one(row) -> int:
+        async def enrich_one(row: sqlite3.Row) -> int:
             async with semaphore:
                 try:
                     await start_gate.wait_turn()
@@ -334,7 +334,7 @@ async def _run_hltb_batch() -> int:
     for index in range(0, len(rows), _BATCH_SIZE):
         batch = rows[index : index + _BATCH_SIZE]
 
-        async def run_one(row) -> int:
+        async def run_one(row: sqlite3.Row) -> int:
             try:
                 await get_hltb(row["game_id"], row["name"])
             except Exception as exc:

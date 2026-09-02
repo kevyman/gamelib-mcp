@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -170,7 +171,9 @@ def _parse_cache(raw: str | None) -> tuple[datetime, Any] | None:
     return fetched_at, payload
 
 
-async def _cached(key: str, fetch, *, ttl: timedelta, label: str) -> Any:
+async def _cached(
+    key: str, fetch: Callable[[], Awaitable[Any]], *, ttl: timedelta, label: str
+) -> Any:
     """Serve ``key`` from the meta KV, refreshing through ``fetch`` when stale.
 
     A refresh that FAILS (``_MediaFetchError``) falls back to the cached copy

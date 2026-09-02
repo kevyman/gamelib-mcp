@@ -5,6 +5,7 @@ import math
 from datetime import UTC, date, datetime
 from typing import Any, Literal
 
+from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
 from ..data.backloggd import sync_backloggd
@@ -55,7 +56,7 @@ _RATE_NEXT_RECENT_DAYS = 90
 
 
 
-async def sync_ratings(ctx=None) -> dict:
+async def sync_ratings(ctx: Context | None = None) -> dict:
     """
     Scrape Backloggd plus Steam reviews, upsert into ratings,
     then recompute tag_affinity.
@@ -198,7 +199,7 @@ async def rate_games_batch(items: list[dict], dry_run: bool = False) -> dict:
     """
     check_batch_items(items)
 
-    async def _one(**kwargs):
+    async def _one(**kwargs: Any) -> dict:
         return await rate_game(**kwargs, dry_run=dry_run, recompute_affinity=False)
 
     results: list[dict] = []

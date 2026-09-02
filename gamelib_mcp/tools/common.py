@@ -10,6 +10,7 @@ them would change query output.
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 
+from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
 from ..data.db import STEAM_APP_ID
@@ -165,12 +166,12 @@ def cover_url(cover_image_id: str | None, steam_appid: int | None) -> str | None
     return None
 
 
-async def report_progress(ctx, progress: int, total: int) -> None:
+async def report_progress(ctx: Context | None, progress: int, total: int) -> None:
     if ctx is not None:
         await ctx.report_progress(progress, total)
 
 
-async def info(ctx, message: str) -> None:
+async def info(ctx: Context | None, message: str) -> None:
     if ctx is not None:
         await ctx.info(message)
 
@@ -217,7 +218,9 @@ class PlatformSyncFanout:
             self.display_names[_resolve(requested)] = requested
         self.selected: list[tuple[str, Callable[[], Awaitable[dict]]]] = []
 
-    def dispatch(self, kind: str, *, namespace) -> list[tuple[str, Callable[[], Awaitable[dict]]]]:
+    def dispatch(
+        self, kind: str, *, namespace: object
+    ) -> list[tuple[str, Callable[[], Awaitable[dict]]]]:
         """Bind the selected targets to their registry functions.
 
         Resolution prefers names bound on ``namespace`` (the calling module), so
@@ -228,7 +231,7 @@ class PlatformSyncFanout:
         self.selected = [(name, fn) for name, fn in registry.items() if name in self.targets]
         return self.selected
 
-    async def gather(self, ctx) -> AsyncIterator[tuple[str, object]]:
+    async def gather(self, ctx: Context | None) -> AsyncIterator[tuple[str, object]]:
         """Run every selected sync concurrently, yielding (name, outcome).
 
         ``outcome`` is either the sync's result or the exception it raised —

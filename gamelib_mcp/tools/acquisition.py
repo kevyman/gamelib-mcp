@@ -12,7 +12,9 @@ avoid an import cycle.
 import asyncio
 import importlib
 import re
+import sqlite3
 import sys
+from collections.abc import Awaitable, Callable
 from datetime import date
 
 from fastmcp.exceptions import ToolError
@@ -143,7 +145,7 @@ _BATCH_ITEM_KEYS = frozenset({
 _VALID_CONTENT_TYPES = PRIMARY_CONTENT_TYPES | NESTED_CONTENT_TYPES
 
 
-def _validate_content_type(value) -> str | None:
+def _validate_content_type(value: object) -> str | None:
     """Validate an item's optional content_type. None = no signal (allowed)."""
     if value is None:
         return None
@@ -316,7 +318,7 @@ def _validated_fields(
     return fields
 
 
-def _validate_clear_list(clear) -> list[str]:
+def _validate_clear_list(clear: object) -> list[str]:
     """Validate a clear=[...] list of acquisition columns (order-preserving)."""
     if clear is None:
         return []
@@ -419,7 +421,7 @@ async def _match_batch_game(
     *,
     fuzzy: bool = True,
     exact_only: bool = False,
-):
+) -> tuple[sqlite3.Row | None, str | None]:
     """Resolve one batch item to (row, match_type); (None, None) on a miss.
 
     Same tiers as platforms._resolve_game_row (id > tiered name > fuzzy) but
@@ -1752,7 +1754,7 @@ async def _source_confirmed_items(items: list[dict]) -> tuple[list[dict], list[d
 
 async def _import_one_source(
     source: str,
-    fetch,
+    fetch: Callable[[], Awaitable[tuple[list[PurchaseRecord], list[dict]]]],
     dry_run: bool,
     overwrite: bool,
     create_platform_rows: bool,
@@ -2020,7 +2022,7 @@ async def import_purchases(
     return {"sources": results, "dry_run": dry_run, "totals": totals}
 
 
-def _rounded(value) -> float | None:
+def _rounded(value: float | None) -> float | None:
     return None if value is None else round(value, 2)
 
 

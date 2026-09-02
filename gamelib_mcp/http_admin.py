@@ -12,8 +12,10 @@ import logging
 import time
 from typing import cast
 
+from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .lifecycle import INSPECTOR_PLATFORM_ALIASES, SYNC_METADATA_PLATFORMS
 
@@ -35,12 +37,14 @@ class HttpSecurityMiddleware:
     only in the Authorization header and only for ``/admin/*``.
     """
 
-    def __init__(self, app, *, admin_token: str, allowed_origins: frozenset[str]):
+    def __init__(
+        self, app: ASGIApp, *, admin_token: str, allowed_origins: frozenset[str]
+    ) -> None:
         self.app = app
         self.admin_token = admin_token
         self.allowed_origins = allowed_origins
 
-    async def __call__(self, scope, receive, send):
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
@@ -93,7 +97,7 @@ class HttpSecurityMiddleware:
                 await send({"type": "http.response.body", "body": b""})
                 return
 
-        async def send_with_cors(message):
+        async def send_with_cors(message: Message) -> None:
             if cors_headers and message["type"] == "http.response.start":
                 message = {
                     **message,
@@ -311,7 +315,7 @@ def _render_integrations_ui(payload: dict[str, dict]) -> str:
     )
 
 
-def register_http_routes(mcp) -> None:
+def register_http_routes(mcp: FastMCP) -> None:
     """Register /health and /admin/* routes on the given FastMCP instance."""
 
     @mcp.custom_route("/health", methods=["GET"])
