@@ -5,6 +5,11 @@ on:
     branches: [main]
   workflow_dispatch: {}
 
+# Reads the repository only; the deploy talks to the host over SSH with its own
+# secrets and never needs the job token (Scorecard: Token-Permissions).
+permissions:
+  contents: read
+
 # Never run two deploys at once. A newer push supersedes an in-flight run so a
 # stuck test cannot block the latest main commit from deploying for hours.
 concurrency:
@@ -17,10 +22,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      # Pinned to full commit SHAs (tag in the comment is informational): this
+      # job runs with the production SSH key in reach, so a moved tag on any
+      # of these actions would be a direct path to the host. Dependabot keeps
+      # the SHAs current.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           enable-cache: true
 
@@ -34,11 +43,12 @@ jobs:
     name: Deploy to Hetzner
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Only deploy real pushes/manual runs on main, never forks or PRs.
     if: github.ref == 'refs/heads/main'
     steps:
       - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
@@ -47,9 +57,59 @@ jobs:
           script: |
             set -euo pipefail
             cd "${DEPLOY_PATH:-$HOME/mcps}"
+            previous="$(git rev-parse HEAD)"
+            db="${DEPLOY_PATH:-$HOME/mcps}/data/library/gamelib.db"
+            schema_before="$(sqlite3 "$db" 'PRAGMA user_version' 2>/dev/null || echo unknown)"
             git fetch --prune origin main
             # The repo is the source of truth: mirror origin/main exactly.
             # Server-local secrets live in .env (gitignored) and survive this.
             git reset --hard origin/main
+            target="$(git rev-parse --short HEAD)"
             docker compose --profile prod up -d --build
+            # Gate: the new container must answer /health (HTTP 200) within the
+            # budget. A build that succeeds and a process that dies before the
+            # lifespan yields (bad env, failed migration, import error) would
+            # otherwise sit in a silent `restart: always` crash-loop until
+            # someone noticed. The probe runs inside the container because the
+            # app only exposes :8000 on the compose network.
+            healthy=0
+            for attempt in $(seq 1 24); do
+              if docker compose --profile prod exec -T app python -c 'import os, sys, urllib.request; r = urllib.request.urlopen("http://127.0.0.1:%s/health" % os.getenv("PORT", "8000"), timeout=4); sys.exit(0 if r.status == 200 else 1)' >/dev/null 2>&1; then
+                healthy=1
+                break
+              fi
+              sleep 5
+            done
+            if [ "$healthy" != "1" ]; then
+              echo "::error::${target} never answered /health"
+              docker compose --profile prod logs --tail=100 app || true
+              schema_after="$(sqlite3 "$db" 'PRAGMA user_version' 2>/dev/null || echo unknown)"
+              # Two signals that the new build touched the schema: the version
+              # stamp moved, or the app's ".migrating" marker exists (written
+              # after the pre-migration snapshot, removed after the final
+              # stamp — so an interruption mid-step, which leaves the stamp
+              # unchanged, is still visible). Old code must not start against
+              # either: it would re-stamp user_version down or run on a schema
+              # between versions. Restore the app's own snapshot first; if it
+              # is missing, leave the new build in place (crash-looping is
+              # visible; a silently wrong schema is not).
+              marker="${db}.migrating"
+              if [ "$schema_before" != "$schema_after" ] || [ -f "$marker" ]; then
+                snapshot="${db}.pre-v${schema_before}.bak"
+                if [ -f "$snapshot" ]; then
+                  echo "migration attempted (v${schema_before} -> v${schema_after}, marker $([ -f "$marker" ] && echo present || echo absent)); restoring ${snapshot} before rolling back"
+                  docker compose --profile prod stop app
+                  cp -f "$snapshot" "$db"
+                  rm -f "${db}-wal" "${db}-shm" "$marker"
+                else
+                  echo "::error::migration attempted (v${schema_before} -> v${schema_after}) but ${snapshot} is missing; NOT rolling back code. Restore the nightly backup by hand (deploy.md, Database backups) before redeploying."
+                  exit 1
+                fi
+              fi
+              echo "rolling back to ${previous}"
+              git reset --hard "$previous"
+              docker compose --profile prod up -d --build
+              exit 1
+            fi
+            echo "${target} healthy"
             docker image prune -f

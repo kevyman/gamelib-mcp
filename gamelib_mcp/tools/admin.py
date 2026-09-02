@@ -501,6 +501,27 @@ def _validate_steam_store_cookies(normalized: dict[str, str]) -> None:
         )
 
 
+
+def _write_private_json(path: str, payload: object) -> None:
+    """Write ``payload`` as JSON readable by the owning user only (mode 0600).
+
+    Everything routed through here is a long-lived credential — store cookies,
+    the ~200-day Steam refresh token, the Parental Controls session token — so
+    the mode is set at creation (no window at the umask default, typically
+    0644) and re-applied on overwrite, which also tightens a file written
+    before this guard existed the next time it is saved. The containing
+    directory is deliberately left alone: in production it is the shared
+    ``/data`` mount that the backup user has to traverse.
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # The mode argument applies only when the file is created; a file saved
+    # before this guard keeps its 0644 through O_TRUNC, so tighten the open
+    # descriptor BEFORE the secret is written, not after.
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
 def _save_session_cookies(
     cookies: str,
     env_var: str,
@@ -554,9 +575,7 @@ def _save_session_cookies(
         validate(normalized)
 
     path = os.getenv(env_var) or str(default_data_dir() / default_filename)
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(normalized, f, indent=2)
+    _write_private_json(path, normalized)
 
     logger.info("%s session cookies saved to %s (%d cookies)", label, path, len(normalized))
     return {"cookie_count": len(normalized), "path": path}
@@ -807,9 +826,7 @@ async def set_nintendo_pctl_session(
     path = _token_file_path()
 
     def _write_token_file() -> None:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"session_token": token}, f, indent=2)
+        _write_private_json(path, {"session_token": token})
 
     # Small write, but it runs on the event loop that is also serving the ingest
     # form request; keep the blocking filesystem calls off it.

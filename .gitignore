@@ -14,6 +14,7 @@ __pycache__/
 !.claude/settings.json
 !.claude/hooks/
 !.claude/agents/
+!.claude/skills/
 .claude/settings.local.json
 retry_deploy.sh
 .worktrees/
@@ -29,3 +30,8 @@ stacks/.cover_cache/
 
 # scripts/package_skills.py output (generated skill stubs + upload zips)
 /dist/
+
+# pytest-cov output and the CI vulnerability-audit export
+.coverage
+coverage.xml
+requirements-audit.txt

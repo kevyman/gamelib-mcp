@@ -2,6 +2,14 @@ services:
   app:
     build: .
     restart: always
+    # The app runs as a fixed non-root UID and binds an unprivileged port, so
+    # it needs no Linux capabilities at all; dropping them and forbidding
+    # privilege escalation bounds what a compromised process can do (CIS
+    # Docker 5.3 / 5.25).
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     expose:
       - "8000"
     environment:
@@ -24,7 +32,7 @@ services:
   #   env_file: ./notes-mcp/.env
 
   caddy:
-    image: caddy:alpine
+    image: caddy:alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
     profiles:
       - prod
     restart: always
