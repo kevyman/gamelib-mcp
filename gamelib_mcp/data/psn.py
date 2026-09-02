@@ -171,10 +171,6 @@ class _SkuAggregate:
         return max(self.skus, key=lambda sku: sku[1])[0]
 
 
-def is_psn_configured() -> bool:
-    return bool(os.getenv("PSN_NPSSO"))
-
-
 def _get_psnawp():
     """Return an authenticated PSNAWP instance, or raise if not configured."""
     from psnawp_api import PSNAWP  # lazy import — optional dependency

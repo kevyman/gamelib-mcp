@@ -78,7 +78,7 @@ class AuditSteamLicensesTests(ToolDBTestCase):
             patch.object(
                 steam_licenses,
                 "fetch_store_appdetails",
-                AsyncMock(side_effect=lambda appid: appdetails.get(appid)),
+                AsyncMock(side_effect=lambda appid, client=None: appdetails.get(appid)),
             ),
             patch.object(
                 steam_licenses,
@@ -214,7 +214,7 @@ class AuditSteamLicensesReportModeTests(ToolDBTestCase):
             patch.object(
                 steam_licenses,
                 "fetch_store_appdetails",
-                AsyncMock(side_effect=lambda appid: appdetails.get(appid)),
+                AsyncMock(side_effect=lambda appid, client=None: appdetails.get(appid)),
             ),
             patch.object(
                 steam_licenses,

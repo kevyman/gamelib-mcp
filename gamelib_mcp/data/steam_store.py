@@ -280,7 +280,9 @@ async def fetch_app_name(appid: int, client: httpx.AsyncClient | None = None) ->
     if client is not None:
         return await fetch(client)
 
-    async with httpx.AsyncClient() as owned_client:
+    # Same 15s the request below passes explicitly; the client default only
+    # matters if a future call forgets its own timeout.
+    async with httpx.AsyncClient(timeout=15) as owned_client:
         return await fetch(owned_client)
 
 
@@ -483,7 +485,9 @@ async def fetch_store_appdetails(
     if client is not None:
         return await fetch(client)
 
-    async with httpx.AsyncClient() as owned_client:
+    # Same 15s the request above passes explicitly; the client default only
+    # matters if a future call forgets its own timeout.
+    async with httpx.AsyncClient(timeout=15) as owned_client:
         return await fetch(owned_client)
 
 
@@ -512,7 +516,10 @@ async def _fetch_all(appid: int, client: httpx.AsyncClient | None = None) -> tup
         store_data, review_summary = await asyncio.gather(fetch_store(client), fetch_reviews(client))
         return store_data, review_summary
 
-    async with httpx.AsyncClient() as owned_client:
+    # The looser of the two per-request timeouts these calls pass (appdetails
+    # 15s, appreviews 10s), so the client default never binds tighter than a
+    # request that states its own.
+    async with httpx.AsyncClient(timeout=15) as owned_client:
         store_data, review_summary = await asyncio.gather(
             fetch_store(owned_client),
             fetch_reviews(owned_client),

@@ -78,11 +78,6 @@ def tier_rank(tier: str | None) -> int:
         return 999
 
 
-def meets_min_tier(tier: str | None, min_tier: str) -> bool:
-    """Check if tier is at least as good as min_tier."""
-    return tier_rank(tier) <= tier_rank(min_tier)
-
-
 def _is_fresh(cached_at: str | None, days: int) -> bool:
     if not cached_at:
         return False

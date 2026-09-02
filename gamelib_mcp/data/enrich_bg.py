@@ -383,7 +383,10 @@ async def _run_store_batch() -> int:
     start_gate = _RequestStartGate(_STORE_START_INTERVAL)
     outcome = _BatchOutcome("store")
 
-    async with httpx.AsyncClient() as client:
+    # Matches the per-request timeout every call through this client already
+    # passes (steam_store's appdetails/appreviews fetches), so an unattended
+    # background worker can never inherit httpx's silent default instead.
+    async with httpx.AsyncClient(timeout=15) as client:
         async def enrich_one(row) -> int:
             async with semaphore:
                 try:
