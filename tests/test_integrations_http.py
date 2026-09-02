@@ -7,6 +7,7 @@ from conftest import add_platform, seed_game
 from starlette.requests import Request
 
 from gamelib_mcp.data import db as db_module
+from gamelib_mcp.data import enrich_bg
 from gamelib_mcp.http_admin import HttpSecurityMiddleware
 from gamelib_mcp.main import mcp
 
@@ -595,3 +596,52 @@ def test_get_admin_integrations_ui_renders_summary_text_and_escapes_unsafe_field
     assert "Run `&lt;legendary auth&gt;`." in text
     assert "<script>alert(1)</script>" not in text
     assert "<b>Ownership</b>" not in text
+
+
+def test_admin_health_carries_the_last_enrichment_run_per_provider(tmp_path):
+    """The counters exist to make a dead provider visible to an OPERATOR.
+
+    They are logged at the end of each pass, which is exactly where nobody is
+    looking three days later; /health is where someone checks. Reported, not
+    scored: a provider outage is not a degraded server.
+    """
+
+    async def run_test():
+        db_path = tmp_path / "enrichment-health.sqlite"
+        db_module._DB_READY_PATH = None
+        db_module._ENV_LOADED = True
+        with patch.dict(os.environ, {"DATABASE_URL": f"file:{db_path}"}, clear=False):
+            await db_module.init_db()
+            steam_game_id = await seed_game("Portal")
+            await add_platform(steam_game_id, "steam")
+            await db_module.set_meta(
+                "integration_sync_steam_last_success_at", "2026-06-14T20:13:18+00:00"
+            )
+
+            enrich_bg._reset_run_stats()
+            enrich_bg._record_processed("store", 41)
+            enrich_bg._record_failure("hltb", RuntimeError("hltb markup changed"))
+
+            route = _get_route("/admin/health")
+            response = await route.endpoint(_request("/admin/health"))
+
+        enrich_bg._reset_run_stats()
+        db_module._DB_READY_PATH = None
+        return response
+
+    response = asyncio.run(run_test())
+    payload = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert payload["enrichment"]["store"] == {
+        "processed": 41,
+        "failed": 0,
+        "last_error": None,
+    }
+    assert payload["enrichment"]["hltb"]["failed"] == 1
+    assert "hltb markup changed" in payload["enrichment"]["hltb"]["last_error"]
+    # Every provider is present, so an operator sees a silent family too.
+    assert set(payload["enrichment"]) == set(enrich_bg._PROVIDERS)
+    # Reported, never scored.
+    assert payload["status"] == "ok"
+

@@ -1516,13 +1516,28 @@ _DRY_RUN_ECHO_CAP = 200
 # flag beside it, and the aggregate `totals` are computed from the counts, so
 # truncation never changes a number.
 _IMPORT_LIST_CAP = 200
-# Lists capped in every per-source result. Their counters (applied, filled,
-# created, …) are scalars and are never truncated.
+# Lists capped in every per-source result: EVERY list whose length scales with
+# the size of the fetched purchase history rather than with a fixed vocabulary.
+# Their scalar counters (applied, filled, created, …) are never truncated.
+# A new per-source list belongs here the moment it can hold one entry per
+# fetched record — capping only the four obvious ones still let a first import
+# of a decade of receipts answer with hundreds of unconfirmed/refused entries.
 _CAPPED_SOURCE_LISTS = (
     "created_details",
     "unmatched",
+    # Zero-price promo misses, split out of `unmatched` — a free-giveaway-heavy
+    # account (Epic) produces these by the hundred.
+    "unmatched_free",
+    # Restricted records that found no sync-confirmed row: one per unrevealed
+    # Humble key, and an old account has thousands of keys.
+    "unconfirmed_unmatched",
     "skipped",
     "bundles_needing_split",
+    # Misses a human has to act on: refused mints, matched games with no
+    # platform row, and family-conflict diagnostics — all one entry per record.
+    "create_refused_details",
+    "no_platform_row_details",
+    "family_conflict_details",
 )
 
 
@@ -1955,10 +1970,13 @@ async def import_purchases(
     every platform under `platforms`, and already_recorded is true once ANY
     platform's split has been written.
 
-    Each source's created_details, unmatched, skipped and bundles_needing_split
-    lists are capped at ``_IMPORT_LIST_CAP`` entries with a ``<list>_count``
-    true total and a ``<list>_truncated`` flag beside each; the scalar counters
-    and the aggregate ``totals`` are computed from the counts and are never
+    Every per-source list whose length scales with the fetched history
+    (``_CAPPED_SOURCE_LISTS``: created_details, unmatched, unmatched_free,
+    unconfirmed_unmatched, skipped, bundles_needing_split,
+    create_refused_details, no_platform_row_details, family_conflict_details)
+    is capped at ``_IMPORT_LIST_CAP`` entries with a ``<list>_count`` true
+    total and a ``<list>_truncated`` flag beside each; the scalar counters and
+    the aggregate ``totals`` are computed from the counts and are never
     truncated.
     """
     if sources is None:
@@ -2009,9 +2027,7 @@ async def import_purchases(
         # From the `_count` keys, not len() of the capped lists — a truncated
         # source must still contribute its true total here.
         "unmatched": _total("unmatched_count"),
-        "unmatched_free": sum(
-            len(r.get("unmatched_free", [])) for r in results.values()
-        ),
+        "unmatched_free": _total("unmatched_free_count"),
         "bundles_needing_split": _total("bundles_needing_split_count"),
         # Per-item validation errors plus whole-source fetch failures.
         "errors": _total("errors")

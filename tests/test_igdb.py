@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 from conftest import virtual_clock
 
-from gamelib_mcp.data import igdb
+from gamelib_mcp.data import igdb, provider_health
 
 
 class _DummyResponse:
@@ -662,6 +662,64 @@ class IGDBBackfillTests(unittest.IsolatedAsyncioTestCase):
         mark_checked.assert_not_awaited()
         release_claim.assert_awaited_once_with(7, "igdb_claimed_at")
         self.assertTrue(any("IGDB backfill leaving game retryable" in line for line in logs.output))
+
+    async def test_backfill_records_provider_health_for_a_swallowed_failure(self) -> None:
+        # backfill_missing_games returns rows RESOLVED and swallows the
+        # operational failure so the pass keeps going, so its return value
+        # cannot tell a dead IGDB from a queue with nothing left in it. The
+        # enrichment run's failure counters read this instead.
+        game_row = {"id": 7, "name": "Portal 2", "igdb_id": None}
+        provider_health.reset()
+
+        with (
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[game_row])),
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=igdb.IGDB_PLATFORM_PC)),
+            patch(
+                "gamelib_mcp.data.igdb._resolve_game_with_status",
+                AsyncMock(side_effect=igdb.IGDBRequestFailure("credentials not configured")),
+            ),
+            patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
+        ):
+            count = await igdb.backfill_missing_games(limit=1)
+
+        self.assertEqual(count, 0)
+        snapshot = provider_health.snapshot()["igdb"]
+        self.assertEqual(snapshot["failures"], 1)
+        self.assertIn("credentials not configured", snapshot["last_error"])
+        provider_health.reset()
+
+    async def test_backfill_records_provider_health_success_for_a_resolved_row(self) -> None:
+        resolved = igdb.IGDBGame(
+            igdb_id=7346,
+            name="Portal 2",
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2011-04-18",
+            platforms=[6],
+        )
+        game_row = {"id": 7, "name": "Portal 2", "igdb_id": None}
+        provider_health.reset()
+
+        with (
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[game_row])),
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=igdb.IGDB_PLATFORM_PC)),
+            patch(
+                "gamelib_mcp.data.igdb._resolve_game_with_status",
+                AsyncMock(return_value=igdb._ResolveOutcome(game=resolved, saw_candidates=True)),
+            ),
+            patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
+        ):
+            count = await igdb.backfill_missing_games(limit=1)
+
+        self.assertEqual(count, 1)
+        snapshot = provider_health.snapshot()["igdb"]
+        self.assertEqual(snapshot["failures"], 0)
+        self.assertEqual(snapshot["successes"], 1)
+        provider_health.reset()
 
     async def test_backfill_missing_games_fetches_by_id_when_igdb_id_already_set(self) -> None:
         # NieR:Automata case: the row already has a matched igdb_id from an

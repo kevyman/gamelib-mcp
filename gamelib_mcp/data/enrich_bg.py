@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from . import igdb
+from . import igdb, provider_health
 from .db import (
     _claim_cutoff_iso,
     claim_game_ids_for_hltb,
@@ -61,11 +61,23 @@ _OPENCRITIC_SUCCESS_STATUSES = {
     "parse_failed",
     "http_error",
 }
+# The subset of those that means "the fetch did not work". They stay in
+# _OPENCRITIC_SUCCESS_STATUSES because that set answers a different question —
+# whether the claim was resolved rather than re-queued — but a run in which
+# every row came back http_error is an outage, not an enrichment pass.
+_OPENCRITIC_HEALTH_FAILURE_STATUSES = {"parse_failed", "http_error"}
 
 # Per-provider outcome counters for one background_enrich() pass. Every batch
 # function returns "rows handled" whether the fetch worked or threw, so without
 # these a provider that broke outright (markup change, expired token) is
 # indistinguishable at INFO from one that enriched everything.
+#
+# Counting exceptions here is not enough, and was the original bug: the
+# providers keep the data layer's best-effort contract and swallow their own
+# transport/parse failures (see data/provider_health.py), so a dead provider
+# raised nothing and every row landed in `processed`. Each batch therefore
+# diffs provider_health around the rows it just handled and folds the swallowed
+# failures in beside the exceptions that still escape.
 _PROVIDERS = ("store", "hltb", "protondb", "steamspy", "opencritic", "metacritic", "igdb")
 _PROVIDER_LABELS = {
     "store": "Store",
@@ -101,10 +113,79 @@ def _record_processed(provider: str, count: int = 1) -> None:
     _RUN_STATS[provider]["processed"] += count
 
 
-def _record_failure(provider: str, exc: BaseException) -> None:
+def _record_failure(provider: str, exc: BaseException | str) -> None:
     stats = _RUN_STATS[provider]
     stats["failed"] += 1
-    stats["last_error"] = repr(exc)[:_LAST_ERROR_CAP]
+    detail = exc if isinstance(exc, str) else repr(exc)
+    stats["last_error"] = detail[:_LAST_ERROR_CAP]
+
+
+class _BatchOutcome:
+    """One batch's real outcome, folded into this run's counters.
+
+    A provider failure reaches a batch three ways: the provider SWALLOWED it and
+    answered None (invisible here — that is what ``provider_health`` counts),
+    it RETURNED a failure status (``record_reported_failure``), or it RAISED
+    (``record_raised``). The batch's failed count is the explicit ones plus the
+    swallowed ones it hasn't already accounted for, clamped to the rows actually
+    attempted: one row can swallow several failures (Metacritic tries up to
+    three candidate URLs; OpenCritic can fail bearer discovery and then its
+    search fallback), and a lazy ``get_game_detail`` enrichment failing mid-pass
+    adds to the same process-wide counter. The clamp keeps the ratio in the
+    WARNING meaningful; it can still round a partly-broken row up to a whole
+    failed one, which errs toward surfacing an outage.
+    """
+
+    def __init__(self, provider: str) -> None:
+        self._provider = provider
+        self._baseline = provider_health.failures(provider)
+        self._explicit = 0
+        self._absorbed = 0
+        self._last_detail: str | None = None
+
+    def record_raised(self, exc: BaseException) -> None:
+        """An exception that escaped the provider's own swallow."""
+        self._explicit += 1
+        self._last_detail = repr(exc)
+
+    def record_reported_failure(self, detail: str) -> None:
+        """The provider RETURNED a failure (OpenCritic's http_error status).
+
+        Absorbs one swallowed record, because the provider that reported this
+        status is the same one that counted it on its way out — without that,
+        one bad row would be counted twice.
+        """
+        self._explicit += 1
+        self._absorbed += 1
+        self._last_detail = detail
+
+    def _failed(self) -> int:
+        swallowed = max(0, provider_health.failures(self._provider) - self._baseline)
+        return self._explicit + max(0, swallowed - self._absorbed)
+
+    def _settle(self, failed: int, processed: int) -> None:
+        stats = _RUN_STATS[self._provider]
+        stats["failed"] += failed
+        stats["processed"] += processed
+        if failed:
+            detail = self._last_detail or provider_health.snapshot().get(
+                self._provider, {}
+            ).get("last_error")
+            stats["last_error"] = detail[:_LAST_ERROR_CAP] if detail else detail
+
+    def settle_rows(self, rows: int) -> None:
+        """For a batch that attempted ``rows`` items: the rest are processed."""
+        failed = min(rows, self._failed())
+        self._settle(failed, max(0, rows - failed))
+
+    def settle_processed(self, processed: int) -> None:
+        """For a batch that reports successes rather than attempts (IGDB).
+
+        ``backfill_missing_games`` returns rows RESOLVED, not rows tried, so
+        there is no attempt count to clamp against — the swallowed failures are
+        the only evidence that the pass did anything but run out of work.
+        """
+        self._settle(self._failed(), processed)
 
 
 def last_run_stats() -> dict[str, dict[str, Any]]:
@@ -300,6 +381,7 @@ async def _run_store_batch() -> int:
 
     semaphore = asyncio.Semaphore(_STORE_CONCURRENCY)
     start_gate = _RequestStartGate(_STORE_START_INTERVAL)
+    outcome = _BatchOutcome("store")
 
     async with httpx.AsyncClient() as client:
         async def enrich_one(row) -> int:
@@ -309,14 +391,15 @@ async def _run_store_batch() -> int:
                     await enrich_game(row["appid"], client=client)
                 except Exception as exc:
                     logger.debug("Store enrich failed for %s: %s", row["name"], exc)
-                    _record_failure("store", exc)
-                else:
-                    _record_processed("store")
+                    outcome.record_raised(exc)
                 finally:
                     await _finalize_store_claim(row["game_platform_id"])
                 return 1
 
-        return sum(await asyncio.gather(*(enrich_one(row) for row in rows)))
+        handled = sum(await asyncio.gather(*(enrich_one(row) for row in rows)))
+
+    outcome.settle_rows(handled)
+    return handled
 
 
 async def _run_hltb_batch() -> int:
@@ -327,6 +410,7 @@ async def _run_hltb_batch() -> int:
 
     logger.info("HLTB worker claimed %d rows", len(rows))
 
+    outcome = _BatchOutcome("hltb")
     total = 0
     for index in range(0, len(rows), _BATCH_SIZE):
         batch = rows[index : index + _BATCH_SIZE]
@@ -336,15 +420,14 @@ async def _run_hltb_batch() -> int:
                 await get_hltb(row["game_id"], row["name"])
             except Exception as exc:
                 logger.debug("HLTB enrich failed for %s: %s", row["name"], exc)
-                _record_failure("hltb", exc)
-            else:
-                _record_processed("hltb")
+                outcome.record_raised(exc)
             finally:
                 await _clear_claim_or_defer("games", "hltb_claimed_at", row["game_id"])
             return 1
 
         total += sum(await asyncio.gather(*(run_one(row) for row in batch)))
         await asyncio.sleep(_HLTB_DELAY)
+    outcome.settle_rows(total)
     return total
 
 
@@ -354,19 +437,19 @@ async def _run_protondb_batch() -> int:
     if not rows:
         return 0
 
+    outcome = _BatchOutcome("protondb")
     processed = 0
     for row in rows:
         try:
             await get_protondb(row["appid"])
         except Exception as exc:
             logger.debug("ProtonDB enrich failed for %s: %s", row["name"], exc)
-            _record_failure("protondb", exc)
-        else:
-            _record_processed("protondb")
+            outcome.record_raised(exc)
         finally:
             await _finalize_steam_claim(row["game_platform_id"], "protondb_claimed_at")
         processed += 1
         await asyncio.sleep(_PROTON_DELAY)
+    outcome.settle_rows(processed)
     return processed
 
 
@@ -376,19 +459,19 @@ async def _run_steamspy_batch() -> int:
     if not rows:
         return 0
 
+    outcome = _BatchOutcome("steamspy")
     processed = 0
     for row in rows:
         try:
             await enrich_steamspy(row["appid"])
         except Exception as exc:
             logger.debug("SteamSpy enrich failed for %s: %s", row["name"], exc)
-            _record_failure("steamspy", exc)
-        else:
-            _record_processed("steamspy")
+            outcome.record_raised(exc)
         finally:
             await _finalize_steam_claim(row["game_platform_id"], "steamspy_claimed_at")
         processed += 1
         await asyncio.sleep(_STEAMSPY_DELAY)
+    outcome.settle_rows(processed)
     return processed
 
 
@@ -398,18 +481,25 @@ async def _run_opencritic_batch() -> int:
     if not rows:
         return 0
 
+    outcome = _BatchOutcome("opencritic")
     processed = 0
     for row in rows:
         success = True
         try:
             result = await enrich_opencritic(row["game_platform_id"], row["name"])
             success = result.get("status") in _OPENCRITIC_SUCCESS_STATUSES
+            status = result.get("status")
+            if status in _OPENCRITIC_HEALTH_FAILURE_STATUSES:
+                # The provider answered with a status that MEANS the fetch did
+                # not work. It stays "handled" for the claim (the row is not
+                # re-queued forever), but it is not an enrichment that worked.
+                outcome.record_reported_failure(
+                    f"OpenCritic returned status {status!r} for {row['name']!r}"
+                )
         except Exception as exc:
             success = False
             logger.debug("OpenCritic enrich failed for %s: %s", row["name"], exc)
-            _record_failure("opencritic", exc)
-        else:
-            _record_processed("opencritic")
+            outcome.record_raised(exc)
         finally:
             await _finalize_platform_enrichment_claim(
                 row["game_platform_id"],
@@ -419,6 +509,7 @@ async def _run_opencritic_batch() -> int:
             )
         processed += 1
         await asyncio.sleep(_OPENCRITIC_DELAY)
+    outcome.settle_rows(processed)
     return processed
 
 
@@ -428,6 +519,7 @@ async def _run_metacritic_batch() -> int:
     if not rows:
         return 0
 
+    outcome = _BatchOutcome("metacritic")
     processed = 0
     for row in rows:
         success = True
@@ -436,9 +528,7 @@ async def _run_metacritic_batch() -> int:
         except Exception as exc:
             success = False
             logger.debug("Metacritic enrich failed for %s: %s", row["name"], exc)
-            _record_failure("metacritic", exc)
-        else:
-            _record_processed("metacritic")
+            outcome.record_raised(exc)
         finally:
             await _finalize_platform_enrichment_claim(
                 row["game_platform_id"],
@@ -448,15 +538,24 @@ async def _run_metacritic_batch() -> int:
             )
         processed += 1
         await asyncio.sleep(_METACRITIC_DELAY)
+    outcome.settle_rows(processed)
     return processed
 
 
 async def _run_igdb_batch() -> int:
+    outcome = _BatchOutcome("igdb")
     total = 0
-    for _ in range(_IGDB_WORKER_CONCURRENCY):
-        processed = await igdb.backfill_missing_games(limit=10)
-        _record_processed("igdb", processed)
-        total += processed
+    try:
+        for _ in range(_IGDB_WORKER_CONCURRENCY):
+            total += await igdb.backfill_missing_games(limit=10)
+    except Exception as exc:
+        # backfill_missing_games handles IGDB's own failures internally; an
+        # exception out of it is something else entirely (a DB error), but it
+        # is still this provider's batch failing.
+        outcome.record_raised(exc)
+        outcome.settle_processed(total)
+        raise
+    outcome.settle_processed(total)
     return total
 
 

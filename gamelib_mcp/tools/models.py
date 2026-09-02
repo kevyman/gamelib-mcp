@@ -660,11 +660,13 @@ class ImportPurchasesResponse(FlexibleModel):
     # multi-game bundles to hand to split_bundle_acquisition (they're never
     # written by this tool); created_details names games minted from
     # unmatched single-game purchases (create_missing, default on).
-    # Four of those lists grow with the fetched history rather than with a
-    # fixed vocabulary — created_details, unmatched, skipped and
-    # bundles_needing_split — so each is CAPPED at 200 entries per source and
-    # ships <list>_count (the true total) and <list>_truncated beside it.
-    # Read the count, never len() of the list: `totals` does.
+    # Every list here that grows with the fetched history rather than with a
+    # fixed vocabulary — created_details, unmatched, unmatched_free,
+    # unconfirmed_unmatched, skipped, bundles_needing_split,
+    # create_refused_details, no_platform_row_details, family_conflict_details
+    # — is CAPPED at 200 entries per source and ships <list>_count (the true
+    # total) and <list>_truncated beside it. Read the count, never len() of the
+    # list: `totals` does.
     sources: dict[str, dict[str, Any]]
     dry_run: bool
     totals: dict[str, Any]

@@ -16,6 +16,7 @@ from weakref import WeakKeyDictionary
 
 import httpx
 
+from . import provider_health
 from .content import classify_steam_app_type
 from .db import (
     apply_content_classification,
@@ -423,6 +424,10 @@ async def fetch_store_appdetails(
                 timeout=15,
             )
         except Exception as exc:
+            # Recorded before the re-raise too: the provider failed either way,
+            # and the caller that asked for the distinction (data/media.py)
+            # handles it for its own cache, not for this counter.
+            provider_health.record_failure("store", exc)
             if raise_on_failure:
                 raise
             logger.warning("Steam store details fetch failed for %s: %s", appid, exc)
@@ -431,6 +436,11 @@ async def fetch_store_appdetails(
             # A malformed answer is a FAILURE, not "Steam has no data": on the
             # failure-aware path it must raise (the media cache would otherwise
             # remember it as a 24h miss); enrichment callers keep the swallow.
+            provider_health.record_failure(
+                "store",
+                f"unexpected appdetails payload shape for {appid}: "
+                f"{type(payload).__name__}",
+            )
             if raise_on_failure:
                 raise ValueError(
                     f"unexpected appdetails payload shape for {appid}: "
@@ -447,6 +457,11 @@ async def fetch_store_appdetails(
             # Same stance as the top-level guard: a malformed member is a
             # FAILURE on the failure-aware path, a logged None otherwise —
             # never an AttributeError escaping the best-effort contract.
+            provider_health.record_failure(
+                "store",
+                f"unexpected appdetails app entry for {appid}: "
+                f"{type(app_data).__name__}",
+            )
             if raise_on_failure:
                 raise ValueError(
                     f"unexpected appdetails app entry for {appid}: "
@@ -458,6 +473,9 @@ async def fetch_store_appdetails(
                 type(app_data).__name__,
             )
             return None
+        # Steam answered. ``success: false`` is its "no such app / no store
+        # page" — a miss, not an outage — so both exits count as processed.
+        provider_health.record_success("store")
         if not app_data.get("success"):
             return None
         return app_data.get("data", {})

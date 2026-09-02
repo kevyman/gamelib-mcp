@@ -1,15 +1,18 @@
 import asyncio
+import contextlib
 import sqlite3
 import tempfile
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from conftest import DEADLOCK_TIMEOUT
+import httpx
+from conftest import DEADLOCK_TIMEOUT, ToolDBTestCase
 
 from gamelib_mcp.data import db as db_module
-from gamelib_mcp.data import enrich_bg
+from gamelib_mcp.data import enrich_bg, provider_health
 
 
 class EnrichmentClaimTests(unittest.IsolatedAsyncioTestCase):
@@ -695,9 +698,12 @@ class EnrichmentRunStatsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_hltb_worker_stays_quiet_when_every_fetch_succeeds(self) -> None:
         rows = [{"game_id": n, "name": f"Game {n}"} for n in (1, 2, 3)]
+        # A COMPLETE result, not None: get_hltb answers None for a failed fetch
+        # too, so pinning success on None pinned the bug this class exists for.
+        hit = {"hltb_main": 8.5, "hltb_extra": 12.0, "hltb_complete": 30.0}
 
         with ExitStack() as stack:
-            self._enter_hltb_patches(stack, rows, AsyncMock(return_value=None))
+            self._enter_hltb_patches(stack, rows, AsyncMock(return_value=hit))
             with self.assertNoLogs("gamelib_mcp.data.enrich_bg", level="WARNING"):
                 total = await enrich_bg._run_hltb_workers()
 
@@ -713,7 +719,8 @@ class EnrichmentRunStatsTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         with ExitStack() as stack:
-            self._enter_protondb_patches(stack, rows, AsyncMock(return_value=None))
+            # A real tier, not None — None is also what a 502 returns.
+            self._enter_protondb_patches(stack, rows, AsyncMock(return_value="platinum"))
             with self.assertNoLogs("gamelib_mcp.data.enrich_bg", level="WARNING"):
                 total = await enrich_bg._run_protondb_workers()
 
@@ -780,3 +787,244 @@ class EnrichmentRunStatsTests(unittest.IsolatedAsyncioTestCase):
             ),
             logs.output,
         )
+
+
+class ProviderSwallowedFailureTests(ToolDBTestCase):
+    """The counters have to see the failures the providers SWALLOW.
+
+    Every provider here keeps data/CLAUDE.md's best-effort contract: a dead API
+    becomes a logged ``None`` (or a status dict), never an exception, so that
+    ``get_game_detail`` can never fail on enrichment. Counting exceptions in
+    enrich_bg therefore counted nothing: an outage logged "processed 25 rows, 0
+    failed" and the WARNING that exists to surface it could not fire. These
+    tests break the provider's own HTTP layer so the real swallow runs, and
+    assert what the run reported afterwards.
+    """
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        enrich_bg._reset_run_stats()
+        provider_health.reset()
+
+    async def asyncTearDown(self) -> None:
+        enrich_bg._reset_run_stats()
+        provider_health.reset()
+        await super().asyncTearDown()
+
+    @contextlib.contextmanager
+    def _real_hltb_batch(self, rows, search, *, empties: int = 0):
+        """Claim `rows` and run the REAL get_hltb over a patched HLTB client."""
+        client = MagicMock()
+        client.async_search = search
+        empty = [[] for _ in range(empties)]
+        with ExitStack() as stack:
+            for patcher in (
+                patch(
+                    "gamelib_mcp.data.enrich_bg.claim_game_ids_for_hltb",
+                    AsyncMock(side_effect=[[row["game_id"] for row in rows], *empty]),
+                ),
+                patch(
+                    "gamelib_mcp.data.enrich_bg.load_hltb_batch_rows",
+                    AsyncMock(side_effect=[rows, *empty]),
+                ),
+                patch("gamelib_mcp.data.enrich_bg._clear_claim_or_defer", AsyncMock()),
+                patch("gamelib_mcp.data.enrich_bg.asyncio.sleep", AsyncMock()),
+                patch("gamelib_mcp.data.hltb.HowLongToBeat", MagicMock(return_value=client)),
+            ):
+                stack.enter_context(patcher)
+            yield
+
+    @contextlib.contextmanager
+    def _opencritic_batch(self, rows, enrich, *, empties: int = 0):
+        empty = [[] for _ in range(empties)]
+        with ExitStack() as stack:
+            for patcher in (
+                patch(
+                    "gamelib_mcp.data.enrich_bg.claim_game_platform_ids_for_opencritic",
+                    AsyncMock(
+                        side_effect=[[row["game_platform_id"] for row in rows], *empty]
+                    ),
+                ),
+                patch(
+                    "gamelib_mcp.data.enrich_bg.load_opencritic_batch_rows",
+                    AsyncMock(side_effect=[rows, *empty]),
+                ),
+                patch("gamelib_mcp.data.enrich_bg.enrich_opencritic", enrich),
+                patch(
+                    "gamelib_mcp.data.enrich_bg._finalize_platform_enrichment_claim",
+                    AsyncMock(),
+                ),
+                patch("gamelib_mcp.data.enrich_bg.asyncio.sleep", AsyncMock()),
+            ):
+                stack.enter_context(patcher)
+            yield
+
+    async def test_hltb_transport_failure_the_provider_swallows_is_counted(self) -> None:
+        rows = [{"game_id": n, "name": f"Game {n}"} for n in (1, 2, 3)]
+        search = AsyncMock(side_effect=httpx.ConnectError("hltb is unreachable"))
+
+        with self._real_hltb_batch(rows, search):
+            handled = await enrich_bg._run_hltb_batch()
+
+        stats = enrich_bg.last_run_stats()["hltb"]
+        self.assertEqual(handled, 3)
+        self.assertEqual(stats["failed"], 3)
+        self.assertEqual(stats["processed"], 0)
+        self.assertIn("hltb is unreachable", stats["last_error"])
+
+    async def test_hltb_api_answering_nothing_is_a_failure_not_a_not_found(self) -> None:
+        # howlongtobeatpy answers None (not []) when the request itself failed.
+        # The provider deliberately does NOT write a NOT_FOUND marker for it,
+        # and it must not read as a processed row either.
+        rows = [{"game_id": n, "name": f"Game {n}"} for n in (1, 2)]
+
+        with self._real_hltb_batch(rows, AsyncMock(return_value=None)):
+            await enrich_bg._run_hltb_batch()
+
+        stats = enrich_bg.last_run_stats()["hltb"]
+        self.assertEqual(stats["failed"], 2)
+        self.assertEqual(stats["processed"], 0)
+
+    async def test_hltb_not_found_counts_as_processed(self) -> None:
+        # HLTB answered and has no entry for the title. That is the provider
+        # working, and it must never look like an outage.
+        rows = [{"game_id": n, "name": f"Game {n}"} for n in (1, 2, 3)]
+
+        with self._real_hltb_batch(rows, AsyncMock(return_value=[])):
+            await enrich_bg._run_hltb_batch()
+
+        stats = enrich_bg.last_run_stats()["hltb"]
+        self.assertEqual(stats["processed"], 3)
+        self.assertEqual(stats["failed"], 0)
+        self.assertIsNone(stats["last_error"])
+
+    async def test_hltb_match_counts_as_processed(self) -> None:
+        rows = [{"game_id": n, "name": f"Game {n}"} for n in (1, 2)]
+        entry = SimpleNamespace(
+            similarity=0.98, main_story=8.5, main_extra=12.0, completionist=30.0
+        )
+
+        with self._real_hltb_batch(rows, AsyncMock(return_value=[entry])):
+            await enrich_bg._run_hltb_batch()
+
+        stats = enrich_bg.last_run_stats()["hltb"]
+        self.assertEqual(stats["processed"], 2)
+        self.assertEqual(stats["failed"], 0)
+
+    async def test_dead_hltb_still_warns_through_the_swallow(self) -> None:
+        # The whole point: the WARNING has to fire for the outage shape that
+        # never raises, which is the only shape HLTB actually produces.
+        rows = [{"game_id": n, "name": f"Game {n}"} for n in (1, 2, 3)]
+        search = AsyncMock(side_effect=httpx.ReadTimeout("hltb timed out"))
+
+        with (
+            self._real_hltb_batch(rows, search, empties=6),
+            self.assertLogs("gamelib_mcp.data.enrich_bg", level="WARNING") as logs,
+        ):
+            await enrich_bg._run_hltb_workers()
+
+        self.assertTrue(
+            any("HLTB enrichment: 3 of 3 items failed this run" in line for line in logs.output),
+            logs.output,
+        )
+
+    async def test_opencritic_failure_status_is_counted_as_a_failure(self) -> None:
+        # enrich_opencritic reports failure in its RETURN VALUE; http_error
+        # stays in _OPENCRITIC_SUCCESS_STATUSES because that set answers a
+        # different question (was the claim resolved), so nothing before this
+        # counted it as anything but a processed row.
+        rows = [{"game_platform_id": 10 + n, "name": f"Game {n}"} for n in (1, 2, 3)]
+        enrich = AsyncMock(return_value={"status": "http_error"})
+
+        with self._opencritic_batch(rows, enrich):
+            handled = await enrich_bg._run_opencritic_batch()
+
+        stats = enrich_bg.last_run_stats()["opencritic"]
+        self.assertEqual(handled, 3)
+        self.assertEqual(stats["failed"], 3)
+        self.assertEqual(stats["processed"], 0)
+        self.assertIn("http_error", stats["last_error"])
+
+    async def test_opencritic_no_match_counts_as_processed(self) -> None:
+        rows = [{"game_platform_id": 10 + n, "name": f"Game {n}"} for n in (1, 2, 3)]
+        enrich = AsyncMock(return_value={"status": "no_match", "cached_at": "NO_MATCH:x"})
+
+        with self._opencritic_batch(rows, enrich):
+            await enrich_bg._run_opencritic_batch()
+
+        stats = enrich_bg.last_run_stats()["opencritic"]
+        self.assertEqual(stats["processed"], 3)
+        self.assertEqual(stats["failed"], 0)
+
+    async def test_opencritic_row_is_not_counted_twice(self) -> None:
+        # The provider records the http_error on its way out AND reports it in
+        # the status dict. One bad row is one failed row.
+        rows = [{"game_platform_id": 10 + n, "name": f"Game {n}"} for n in (1, 2, 3)]
+
+        async def enrich(game_platform_id: int, name: str) -> dict:
+            if game_platform_id == 11:
+                provider_health.record_failure("opencritic", "export http error")
+                return {"status": "http_error"}
+            return {"status": "matched", "fields": {}}
+
+        with self._opencritic_batch(rows, AsyncMock(side_effect=enrich)):
+            await enrich_bg._run_opencritic_batch()
+
+        stats = enrich_bg.last_run_stats()["opencritic"]
+        self.assertEqual(stats["failed"], 1)
+        self.assertEqual(stats["processed"], 2)
+
+    async def test_igdb_swallowed_request_failure_is_counted(self) -> None:
+        # backfill_missing_games returns rows RESOLVED and swallows
+        # IGDBRequestFailure per game, so a dead IGDB used to be
+        # indistinguishable from a pass with no work left.
+        async def backfill(limit: int = 10) -> int:
+            provider_health.record_failure(
+                "igdb", RuntimeError("IGDB search failed for 'Portal 2'")
+            )
+            return 0
+
+        with (
+            patch("gamelib_mcp.data.enrich_bg.igdb.backfill_missing_games", backfill),
+            patch("gamelib_mcp.data.enrich_bg.asyncio.sleep", AsyncMock()),
+        ):
+            total = await enrich_bg._run_igdb_batch()
+
+        stats = enrich_bg.last_run_stats()["igdb"]
+        self.assertEqual(total, 0)
+        self.assertEqual(stats["processed"], 0)
+        self.assertEqual(stats["failed"], enrich_bg._IGDB_WORKER_CONCURRENCY)
+        self.assertIn("IGDB search failed", stats["last_error"])
+
+    async def test_igdb_resolved_rows_count_as_processed(self) -> None:
+        with (
+            patch(
+                "gamelib_mcp.data.enrich_bg.igdb.backfill_missing_games",
+                AsyncMock(return_value=4),
+            ),
+            patch("gamelib_mcp.data.enrich_bg.asyncio.sleep", AsyncMock()),
+        ):
+            total = await enrich_bg._run_igdb_batch()
+
+        stats = enrich_bg.last_run_stats()["igdb"]
+        self.assertEqual(total, 4 * enrich_bg._IGDB_WORKER_CONCURRENCY)
+        self.assertEqual(stats["processed"], total)
+        self.assertEqual(stats["failed"], 0)
+
+    async def test_lazy_path_failures_cannot_inflate_a_batch_past_its_rows(self) -> None:
+        # provider_health is process-wide, so a get_game_detail enrichment
+        # failing mid-pass lands in the same counter. It may not report more
+        # failed rows than the batch attempted — the WARNING's ratio depends on
+        # that.
+        rows = [{"game_id": 1, "name": "Game 1"}]
+
+        async def search(query: str):
+            provider_health.record_failure("hltb", "a concurrent lazy fetch failed")
+            raise httpx.ConnectError("hltb is unreachable")
+
+        with self._real_hltb_batch(rows, AsyncMock(side_effect=search)):
+            await enrich_bg._run_hltb_batch()
+
+        stats = enrich_bg.last_run_stats()["hltb"]
+        self.assertEqual(stats["failed"], 1)
+        self.assertEqual(stats["processed"], 0)

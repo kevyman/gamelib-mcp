@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import httpx
 
+from . import provider_health
 from .db import (
     get_db,
     get_manual_overrides,
@@ -63,10 +64,15 @@ async def _fetch_steamspy(appid: int) -> dict | None:
                 STEAMSPY_API, params={"request": "appdetails", "appid": appid}
             )
             resp.raise_for_status()
-            return resp.json().get("tags") or None
+            tags = resp.json().get("tags") or None
     except Exception as e:
+        provider_health.record_failure("steamspy", e)
         logger.warning("SteamSpy fetch failed for appid %d: %s", appid, e)
         return None
+    # SteamSpy answered; an app with no community tags yet is a miss, not a
+    # provider failure.
+    provider_health.record_success("steamspy")
+    return tags
 
 
 async def fetch_steamspy_name(appid: int) -> str | None:
@@ -86,8 +92,10 @@ async def fetch_steamspy_name(appid: int) -> str | None:
             resp.raise_for_status()
             name = resp.json().get("name")
     except Exception as e:
+        provider_health.record_failure("steamspy", e)
         logger.warning("SteamSpy name fetch failed for appid %d: %s", appid, e)
         return None
+    provider_health.record_success("steamspy")
     if isinstance(name, str) and name.strip():
         return name.strip()
     return None

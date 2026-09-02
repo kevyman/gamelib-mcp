@@ -18,6 +18,7 @@ from weakref import WeakKeyDictionary
 
 import httpx
 
+from . import provider_health
 from .content import (
     CONTENT_DLC,
     CONTENT_EDITION,
@@ -1539,6 +1540,7 @@ async def _igdb_canary_alive() -> bool:
     try:
         results = await search_game(_CANARY_TITLE, suppress_errors=False)
     except IGDBRequestFailure as exc:
+        provider_health.record_failure("igdb", exc)
         logger.warning("IGDB canary search failed: %s", exc)
         return False
     return bool(results)
@@ -1726,6 +1728,7 @@ async def backfill_missing_games(limit: int = 10) -> int:
                         igdb_game.igdb_id,
                     )
                     await mark_igdb_checked(game_id)
+                provider_health.record_success("igdb")
                 processed += 1
                 if resolved_via_search:
                     # Search demonstrably works, so buffered no-matches are
@@ -1789,6 +1792,10 @@ async def backfill_missing_games(limit: int = 10) -> int:
                             len(game_ids) - next_index,
                         )
         except IGDBRequestFailure as exc:
+            # backfill_missing_games returns "rows resolved", so an operational
+            # failure it swallows here is invisible in that number — record it
+            # so a dead IGDB stops reading as a pass with nothing to do.
+            provider_health.record_failure("igdb", exc)
             logger.warning(
                 "IGDB backfill leaving game retryable after operational failure: game_id=%s name=%r error=%s",
                 game_id,
