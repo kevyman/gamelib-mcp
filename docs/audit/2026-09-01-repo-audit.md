@@ -7,6 +7,93 @@ roadmap — items 1–4 still open, see §5). State at audit time on `main`
 (`763d903`): ruff clean, mypy clean, **2,333 tests + 357 subtests green in 54 s**,
 **86.5 % line / 81 % branch coverage** (measured with pytest-cov; not gated).
 
+## Status (updated 2026-09-01, same day)
+
+Items 1–9 of §3 were implemented on branch `claude/repo-audit-improvements-w1jwou`
+immediately after the audit:
+
+- **#1** Lockfile patched (pyjwt 2.13.0, cryptography 50.0.1, starlette 1.6.0,
+  plus idna, urllib3, aiohttp, click, requests, pydantic-settings, pygments,
+  soupsieve — twelve packages once pip-audit was iterated to clean). `pip-audit`
+  now gates `ci.yml` on every PR and runs weekly on `main` in `audit.yml`.
+- **#2** All five action references SHA-pinned; `permissions: contents: read`
+  on every workflow; the deploy job polls `/health` inside the new container
+  and rolls back to the previous commit when it never answers; base images
+  digest-pinned with Dependabot `docker`/`docker-compose` entries; the app
+  service drops all capabilities and forbids privilege escalation.
+- **#3** Every session file is written through `_write_private_json` (0600 at
+  creation and re-applied on overwrite), with a test for both cases.
+- **#4** Descriptions 77.7 KB → 53.3 KB; total `tools/list` 171.8 KB →
+  146.4 KB. `SchemaBudgetTests` caps total payload (158 KB), total
+  descriptions (57 KB), per-tool description (3.9 KB) and per-tool payload
+  (11 KB). Field-level recording rules moved to
+  `skill://game-quality/recording.md` (skill 3.3.0); ADR 0004 §6 refreshed and
+  an amendment records the decision. The 48 KB description target was not
+  reached: past ~53 KB every further cut removed a rule this audit said to
+  keep, and `query_library`'s table inventory has a hard floor
+  (`DocstringInventorySyncTests`). Output schemas untouched pending the host
+  probe.
+- **#5** `void_assessment` is its own tool with `NON_IDEMPOTENT_MUTATION_TOOL`
+  (33 tools); the readOnly caveats are stated at the two registration sites;
+  `import_purchases`' four per-source lists are capped at 200 with
+  `_count`/`_truncated`, and totals read the true counts.
+- **#6** `tests/test_mcp_wire.py` (real in-memory `Client`, lifespan patched
+  out, 18 tests), `tests/test_schema_parity.py` (fresh DDL vs the 38-step
+  chain), `tests/test_db_migration_steps.py` (29 of 39 versions have a DDL
+  snapshot; 13, 14, 15, 23, 24, 26, 27, 28, 30, 35 stay chain-only).
+- **#7** Per-provider processed/failed/last_error counters, INFO summaries
+  for all seven worker families, a thresholded WARNING, `last_run_stats()`;
+  `LOG_LEVEL` env var.
+- **#8** README (33 tools, MIT), `.env.example`, `.env.local.example`,
+  LOCAL_DOCKER links; `tests/test_docs_drift.py` guards both directions.
+- **#9** Root CLAUDE.md 43.3 KB → 18.2 KB; rationale moved verbatim into
+  thirteen `docs/patterns/*.md` files; `docs/README.md` index.
+
+Items 10–15 followed the same day, after the 07-06 roadmap was re-derived
+against current code (its own Status block records the disposition):
+
+- **#10 (reshaped)** `evals/taste-profile-eval/`: K-fold / leave-one-out
+  harness for the taste profile over a snapshot copy, scored through
+  `discover_games`' own SQL, with a shuffled baseline and a rating-free
+  playtime control; docs/patterns/tag-affinity.md carries the
+  "paste before/after metrics" rule.
+- **07-06 items 2–4 (reshaped)** Schema v40: ITAD historical low and deal
+  expiry on `game_prices`, surfaced in `get_wishlist` (`at_history_low`)
+  and a cache-only `deal` block in `get_assessment_context`; webhook deal
+  alerts (`DEAL_ALERT_WEBHOOK_URL`, after every refresh, debounced by
+  `game_wishlist.last_alert_key`, never fails the refresh); `rate_next` in
+  `get_stats(report="taste")`. The composite advice score and the
+  `suggest_games_to_rate` tool were not built, by decision.
+- **#11** `tools/admin.py` 3,159 → 1,413 lines (`detectors.py`,
+  `session_admin.py`); `data/db/__init__.py` 2,637 → 613 (`migrations.py`);
+  one `PlatformSyncFanout` helper; 0 import cycles.
+- **#12** `apps_shared.py` holds the widgets' 899 shared lines once; tests
+  assert every constant is served and a difflib guard fails on any new
+  20-line duplicate. The game-cards widget picked up three fixes that had
+  only reached the eval card.
+- **#13** Explicit httpx timeouts, one client for the retired-app probe,
+  nine dead functions and three dead locks removed, seven test files off
+  per-test `init_db()`, two assertion-less tests fixed.
+- **#14** `scripts/restore_drill.py` + deploy.md layer 4 — still to be run on
+  the box and logged there.
+- **#15** `disallow_untyped_defs` / `disallow_incomplete_defs` /
+  `check_untyped_defs` on; 77 annotations, no `type: ignore`; the DB layer
+  gained a real `DBConnection` type. `--strict` (876 findings) deliberately
+  off.
+- **CI** tests on 3.11 and 3.12; `.python-version` pins 3.12 (prod parity).
+
+Suite after the work: 2,443 tests + 606 subtests, ruff and mypy clean, on
+3.11 and 3.12. One observation, not fixed: on the first 3.12 run after
+rebuilding the venv, `test_tools_admin.py::RefreshLibraryValidationTests::
+test_reports_progress` failed once under xdist with a
+`PytestUnhandledThreadExceptionWarning` from an aiosqlite
+`_connection_worker_thread` (no traceback captured); three further full
+runs and three serial runs were green. Same class as issue #155's
+tripwire — worth a look if it recurs in CI's 3.12 leg.
+
+Still open from this audit: nothing. Not built by decision: the composite
+purchase-advice score, a `suggest_games_to_rate` tool, the deals widget.
+
 ## 1. Method
 
 How this audit was run, so the next one can repeat or improve it:

@@ -6,6 +6,47 @@ is now **fully executed**: CI/lint/types, backups, LICENSE, OAuth, wishlist
 deals, completion status, series gaps, play history, Xbox sync, single-user
 ADR. Zero open issues, zero TODOs in source. This doc is the next roadmap.
 
+## Status (updated 2026-09-01)
+
+Re-derived against the code by the 2026-09-01 audit
+(`2026-09-01-repo-audit.md`), two months and ~30 PRs later. The repo changed
+shape underneath this roadmap: the "brain" moved from the SQL ranker to the
+client-side skills (ADR 0006), verdict recording with `target_price` shipped
+(#154, #158, #160), verdicts promote to the wishlist (#141) and push to Steam
+(#137), and the eval pattern became the blind skill backtest
+(`evals/bundle-evaluation-backtest`, #147). Disposition per item:
+
+1. **Recommender eval harness — reshaped, then built** as
+   `evals/taste-profile-eval/` (2026-09-01). The profile now feeds
+   `get_assessment_context`'s fit check as well as `discover_games`, so the
+   harness measures whether `tag_affinity` predicts held-out ratings and
+   playtime (K-fold or leave-one-out on a snapshot copy, with a shuffled
+   baseline), scoring through `discover_games`' own SQL so the ranker is the
+   secondary check. Rule recorded in `docs/patterns/tag-affinity.md`: scoring
+   PRs paste before/after metrics.
+2. **Purchase advisor — superseded.** The game-quality skill plus
+   `record_assessment` (verdict, `target_price`, fit, craft) is the advisor;
+   `get_wishlist(with_prices=True)` already flags `below_assessed_target`. The
+   composite `advice_score` is dropped. Kept: the one kernel the model cannot
+   know — ITAD historical low and deal expiry (`game_prices.history_low`,
+   `deal_ends_at`), surfaced in `get_wishlist` and `get_assessment_context`.
+3. **Deal alerts — kept, simplified.** Built on the existing trigger
+   (`below_assessed_target`) plus historical low; no `alert_price` column and
+   no `set_wishlist_alert` tool (ADR 0004). `DEAL_ALERT_WEBHOOK_URL` enables
+   it; debounced per game by `game_wishlist.last_alert_key`.
+4. **`suggest_games_to_rate` — kept as a report section, not a tool.** The
+   profile now shapes purchase verdicts, so coverage matters more, but the
+   tool surface has a schema budget (ADR 0004 amendment 2026-09-01): it is
+   `rate_next` inside `get_stats(report="taste")`.
+5. Restore drill: scripted as `scripts/restore_drill.py` and documented in
+   `deploy.md` (still to be run on the box and logged). `data/db/__init__.py`
+   split: done (`data/db/migrations.py`). Deals widget: unbuilt, cosmetic.
+   Sale-window urgency: `deal_ends_at` ships with item 2.
+
+Items 2–4 as reshaped are being built on `claude/repo-audit-improvements-w1jwou`;
+if a later reader finds them absent, the 2026-09-01 audit's handoff section
+carries the spec.
+
 ## Overall verdict
 
 The architecture is in unusually good shape for a personal project: the
