@@ -90,7 +90,7 @@ its edits uncommitted, finish or redo it from the spec:
   learnable synthetic fixture (rho > 0.3, baseline lower, input untouched);
   docs/patterns/tag-affinity.md gets the "paste before/after metrics in any
   scoring PR" rule.
-- *Item 11 — structural split.* tools/admin.py → `tools/detectors.py`
+- *Item 11 — structural split.* **Committed as `1827d62`.** tools/admin.py → `tools/detectors.py`
   (the seven ADR-0003 detectors + helpers, ~1,300 LOC; checks.py imports from
   it) and `tools/session_admin.py` (the `set_*_session`/`prepare_*` cluster,
   `_save_session_cookies`, `_write_private_json`, `_token_file_path`;
