@@ -2,7 +2,7 @@
 
 ``create_session_ingest_link`` mints a nonce URL (``/ingest/{nonce}``); the
 user opens it in a browser, pastes what the provider's steps asked for, and
-the POST handler saves it through the matching ``tools.admin.set_*_session``
+the POST handler saves it through the matching ``tools.session_admin.set_*_session``
 function. The nonce is the only credential: minting already happens behind the
 MCP OAuth owner check, the link expires after ``_INGEST_TTL_SECONDS`` and is
 consumed on first successful save.
@@ -37,7 +37,7 @@ from starlette.responses import HTMLResponse
 class IngestProvider:
     key: str
     label: str
-    # Attribute on gamelib_mcp.tools.admin — dispatching through the existing
+    # Attribute on gamelib_mcp.tools.session_admin — dispatching through the existing
     # setter keeps env-var/filename/label knowledge in one place.
     setter_name: str
     export_url: str
@@ -51,7 +51,7 @@ class IngestProvider:
     required_cookie: str | None = None
 
     # --- interactive-login flows ------------------------------------------
-    # Attribute on gamelib_mcp.tools.admin: an async () -> dict run ONCE per
+    # Attribute on gamelib_mcp.tools.session_admin: an async () -> dict run ONCE per
     # link, before the form first renders, whose result is stored on the link
     # and handed back to the setter as `state`. Nintendo's Parental Controls
     # login needs it — the URL the user signs in through embeds a PKCE
@@ -420,9 +420,9 @@ async def _ensure_prepared(link: _IngestLink, spec: IngestProvider) -> None:
     """
     if spec.prepare_name is None or link.state:
         return
-    from .tools import admin as admin_tools
+    from .tools import session_admin
 
-    link.state = await getattr(admin_tools, spec.prepare_name)()
+    link.state = await getattr(session_admin, spec.prepare_name)()
 
 
 async def _handle_get(nonce: str) -> HTMLResponse:
@@ -470,9 +470,9 @@ async def _handle_post(request: Request, nonce: str) -> HTMLResponse:
             400,
         )
 
-    from .tools import admin as admin_tools
+    from .tools import session_admin
 
-    setter = getattr(admin_tools, spec.setter_name)
+    setter = getattr(session_admin, spec.setter_name)
     try:
         # A prepare-hook provider's setter needs the state that hook produced;
         # the cookie setters take the paste and nothing else.

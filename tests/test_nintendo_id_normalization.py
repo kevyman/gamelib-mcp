@@ -12,6 +12,7 @@ from unittest.mock import patch
 from conftest import ToolDBTestCase, add_platform, seed_game
 
 from gamelib_mcp.data import db as db_module
+from gamelib_mcp.data.db import migrations as migrations_module
 
 
 class IngestNormalizationTests(ToolDBTestCase):
@@ -227,7 +228,7 @@ class NintendoIdMigrationTests(unittest.IsolatedAsyncioTestCase):
             await db_module.migrate_db()
 
             async with db_module.get_db() as db:
-                await db_module._normalize_nintendo_title_ids(db)
+                await migrations_module._normalize_nintendo_title_ids(db)
 
                 gpi_rows = await db.execute_fetchall(
                     "SELECT identifier_value FROM game_platform_identifiers "

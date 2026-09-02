@@ -22,7 +22,7 @@ from fastmcp.exceptions import ToolError
 
 from gamelib_mcp import main
 from gamelib_mcp.data import db as db_module
-from gamelib_mcp.tools import admin, deals, platforms
+from gamelib_mcp.tools import admin, deals, detectors, platforms
 from gamelib_mcp.tools.assessment import (
     _ordinal_near_miss,
     _sequel_near_miss,
@@ -1319,7 +1319,7 @@ class AssessmentIntegrityTests(ToolDBTestCase):
         await record_assessment(game_id=assessed, verdict="skip")
         true_orphan = await seed_game("Truly Dangling")
 
-        result = await admin.detect_orphan_games()
+        result = await detectors.detect_orphan_games()
         self.assertEqual([o["game_id"] for o in result["orphans"]], [true_orphan])
         self.assertEqual(result["assessment_only_count"], 1)
 

@@ -4,11 +4,18 @@
 db_module.<name> by string. As db.py is split into submodules, the package
 __init__ must keep re-exporting every one of these. This test fails loudly if an
 extraction drops a name from the facade.
+
+The migration chain is the one deliberate exception: it lives in
+gamelib_mcp.data.db.migrations and is NOT re-exported wholesale, since nothing
+outside migrate_db calls a step. Only `_run_migrations` stays bound on the
+facade (init_db's first-touch path reaches it by that name); the rest is frozen
+against the migrations module instead, below.
 """
 
 import unittest
 
 from gamelib_mcp.data import db as db_module
+from gamelib_mcp.data.db import migrations as migrations_module
 
 # Names consumers and tests import or patch via gamelib_mcp.data.db.<name>.
 EXPECTED_NAMES = {
@@ -32,14 +39,8 @@ EXPECTED_NAMES = {
     "_db_path",
     "_configure_connection",
     "_DB_READY_PATH",
-    # schema detection + migrations
-    "_detect_schema_state",
+    # migration entry point (the chain itself lives in .migrations)
     "_run_migrations",
-    "_get_user_version",
-    "_set_user_version",
-    "_table_names",
-    "_table_columns",
-    "_repair_identifier_primary_flags",
     # claims + batch loaders
     "clear_claim",
     "clear_all_enrichment_claims",
@@ -90,10 +91,42 @@ EXPECTED_NAMES = {
 }
 
 
+# Migration internals tests and repair scripts reach as
+# gamelib_mcp.data.db.migrations.<name>.
+EXPECTED_MIGRATION_NAMES = {
+    "_detect_schema_state",
+    "_run_migrations",
+    "_snapshot_before_migration",
+    "_MIGRATION_STEPS",
+    "_get_user_version",
+    "_set_user_version",
+    "_table_names",
+    "_table_columns",
+    "_repair_identifier_primary_flags",
+    "_normalize_nintendo_title_ids",
+    "_GAMES_TABLE_INDEXES",
+}
+
+
 class DbFacadeTests(unittest.TestCase):
     def test_all_expected_names_importable(self):
         missing = {name for name in EXPECTED_NAMES if not hasattr(db_module, name)}
         self.assertEqual(missing, set(), f"db facade dropped names: {sorted(missing)}")
+
+    def test_migration_internals_importable(self):
+        missing = {
+            name for name in EXPECTED_MIGRATION_NAMES if not hasattr(migrations_module, name)
+        }
+        self.assertEqual(missing, set(), f"migrations dropped names: {sorted(missing)}")
+
+    def test_migration_chain_is_not_re_exported(self):
+        """Only _run_migrations crosses back onto the facade."""
+        leaked = sorted(
+            name
+            for name in EXPECTED_MIGRATION_NAMES - {"_run_migrations"}
+            if hasattr(db_module, name)
+        )
+        self.assertEqual(leaked, [], f"migration internals re-exported by the facade: {leaked}")
 
 
 if __name__ == "__main__":
