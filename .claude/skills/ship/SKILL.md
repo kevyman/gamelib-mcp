@@ -28,8 +28,10 @@ standards live.
 2. `/code-review` (medium effort) on the diff — same family as the author,
    so it finds the obvious; fix those now so Codex's single pass is spent on
    what this family misses. If the diff touches `auth.py`, `http_admin.py`,
-   `session_ingest.py`, `session_admin.py`, `deal_alerts.py`, `readonly.py`
-   or anything with `subprocess`, also run `/security-review`.
+   `session_ingest.py`, the session-file save path (`_write_private_json` and
+   the `set_*_session` functions, wherever they live), `data/steam_session.py`,
+   `data/nintendo_pctl.py`, `data/db/readonly.py`, any webhook or outbound
+   notifier, or anything with `subprocess`, also run `/security-review`.
 3. Re-run the gates after fixes. Commit; push.
 
 ## 2. Open the PR

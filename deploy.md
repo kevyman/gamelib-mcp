@@ -184,6 +184,14 @@ triggered manually from the Actions tab via *Run workflow*):
    healthy deploy runs `docker image prune -f` (the prune keeps the small VM's
    disk from filling with stale layers).
 
+   The rollback checks `PRAGMA user_version` before and after. If the failed
+   build had already migrated the database, old code must not start against
+   the newer schema (it would re-stamp the version down, and the next forward
+   deploy would re-apply the migration over migrated data): the gate restores
+   the app's own `gamelib.db.pre-v{N}.bak` snapshot first, and if that file is
+   missing it refuses to roll back and leaves the new build crash-looping,
+   which is visible, rather than a silently wrong schema, which is not.
+
 Every third-party action in the workflows is pinned to a full commit SHA with
 the release tag in a trailing comment; Dependabot's `github-actions` entry
 moves the pins forward. Do not "simplify" a pin back to a bare tag: the deploy
@@ -197,6 +205,9 @@ rollback itself needs repeating:
 
 ```bash
 cd ~/mcps
+sqlite3 data/library/gamelib.db 'PRAGMA user_version'   # if this is HIGHER than the
+                                                       # target commit's SCHEMA_VERSION,
+                                                       # restore gamelib.db.pre-v{N}.bak first
 git log --oneline -5                # pick the commit to return to
 git reset --hard <commit>
 docker compose --profile prod up -d --build

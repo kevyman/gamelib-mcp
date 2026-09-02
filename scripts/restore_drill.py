@@ -100,8 +100,9 @@ async def _migrate(copy: Path) -> dict[str, Any]:
             os.environ["DATABASE_URL"] = prev
     return {
         "schema_version": db_module.SCHEMA_VERSION,
-        "migrated": bool(getattr(result, "migrated", False)),
-        "from_version": getattr(result, "from_version", None),
+        "initial_version": result.initial_version,
+        "final_version": result.final_version,
+        "applied_steps": list(result.applied_steps),
     }
 
 
@@ -133,6 +134,11 @@ async def run_drill(backup: Path, keep_dir: Path | None = None) -> dict[str, Any
     copy = dest_dir / "restored.sqlite"
 
     try:
+        # A stale restored.sqlite-wal/-shm from an interrupted --keep run would be
+        # replayed onto the fresh copy and the drill would pass on the previous
+        # database's rows. Start from nothing.
+        for stale in (copy, copy.with_name(copy.name + "-wal"), copy.with_name(copy.name + "-shm")):
+            stale.unlink(missing_ok=True)
         shutil.copyfile(backup, copy)
         # A .backup/VACUUM INTO file is a single self-contained database; a raw
         # copy of a live WAL-mode DB would need its -wal/-shm siblings too, and
@@ -141,38 +147,64 @@ async def run_drill(backup: Path, keep_dir: Path | None = None) -> dict[str, Any
             if sibling.exists():
                 check("no stray wal/shm beside backup", False, str(sibling))
 
-        conn = sqlite3.connect(copy)
+        version_before: int | None = None
+        version_after: int | None = None
+        counts_before: dict[str, int] = {}
+        counts_after: dict[str, int] = {}
+        migration: dict[str, Any] = {}
+        # A backup that is not SQLite, or is truncated, must produce a failed
+        # check and a report — never a traceback — because that is exactly the
+        # case the drill exists to catch.
         try:
-            integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
-            check("integrity_check", integrity == "ok", integrity)
-            fk = conn.execute("PRAGMA foreign_key_check").fetchall()
-            check("foreign_key_check", not fk, len(fk))
-            version_before = conn.execute("PRAGMA user_version").fetchone()[0]
-            counts_before = _counts(conn)
-        finally:
-            conn.close()
-        check("has games rows", counts_before.get("games", 0) > 0, counts_before.get("games", 0))
+            conn = sqlite3.connect(copy)
+            try:
+                integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+                check("integrity_check", integrity == "ok", integrity)
+                if integrity == "ok":
+                    fk = conn.execute("PRAGMA foreign_key_check").fetchall()
+                    check("foreign_key_check", not fk, len(fk))
+                    version_before = conn.execute("PRAGMA user_version").fetchone()[0]
+                    counts_before = _counts(conn)
+            finally:
+                conn.close()
+        except sqlite3.DatabaseError as exc:
+            check("readable sqlite database", False, str(exc))
 
-        migration = await _migrate(copy)
-        conn = sqlite3.connect(copy)
-        try:
-            version_after = conn.execute("PRAGMA user_version").fetchone()[0]
-            counts_after = _counts(conn)
-            integrity_after = conn.execute("PRAGMA integrity_check").fetchone()[0]
-        finally:
-            conn.close()
-        check(
-            "migrated to current schema",
-            version_after == migration["schema_version"],
-            {"before": version_before, "after": version_after, "current": migration["schema_version"]},
-        )
-        check("integrity_check after migration", integrity_after == "ok", integrity_after)
-        lost = {
-            table: (counts_before[table], counts_after.get(table))
-            for table in counts_before
-            if counts_after.get(table, 0) < counts_before[table]
-        }
-        check("no table lost rows in migration", not lost, lost or None)
+        if all(c["ok"] for c in checks):
+            check("has games rows", counts_before.get("games", 0) > 0, counts_before.get("games", 0))
+            try:
+                migration = await _migrate(copy)
+                conn = sqlite3.connect(copy)
+                try:
+                    version_after = conn.execute("PRAGMA user_version").fetchone()[0]
+                    counts_after = _counts(conn)
+                    integrity_after = conn.execute("PRAGMA integrity_check").fetchone()[0]
+                finally:
+                    conn.close()
+            except (sqlite3.DatabaseError, RuntimeError) as exc:
+                # RuntimeError: the backup is NEWER than this build (see
+                # _run_migrations' guard) — a real finding, not a crash.
+                check("migration ran", False, str(exc))
+            else:
+                check(
+                    "migrated to current schema",
+                    version_after == migration["schema_version"],
+                    {
+                        "before": version_before,
+                        "after": version_after,
+                        "current": migration["schema_version"],
+                        "applied_steps": migration["applied_steps"],
+                    },
+                )
+                check("integrity_check after migration", integrity_after == "ok", integrity_after)
+                lost = {
+                    table: (counts_before[table], counts_after.get(table))
+                    for table in counts_before
+                    if counts_after.get(table, 0) < counts_before[table]
+                }
+                check("no table lost rows in migration", not lost, lost or None)
+        else:
+            check("migration ran", False, "skipped: the copy did not pass its pre-checks")
 
         passed = all(c["ok"] for c in checks)
         report: dict[str, Any] = {
@@ -181,7 +213,8 @@ async def run_drill(backup: Path, keep_dir: Path | None = None) -> dict[str, Any
             "restored_to": str(copy) if keep_dir is not None else None,
             "user_version_before": version_before,
             "user_version_after": version_after,
-            "schema_version": migration["schema_version"],
+            "schema_version": migration.get("schema_version"),
+            "applied_steps": migration.get("applied_steps", []),
             "counts": counts_after,
             "checks": checks,
             "passed": passed,
@@ -199,7 +232,7 @@ def _print_summary(report: dict[str, Any]) -> None:
     print(f"  backup: {report['backup']} ({report['backup_bytes']:,} bytes)")
     print(
         f"  schema: v{report['user_version_before']} -> v{report['user_version_after']}"
-        f" (current v{report['schema_version']})"
+        f" (current v{report['schema_version']}, {len(report['applied_steps'])} migration steps applied)"
     )
     print("  rows:")
     for table, n in report["counts"].items():

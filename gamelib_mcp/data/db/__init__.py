@@ -2286,6 +2286,17 @@ async def _run_migrations(
     detected_state = await _detect_schema_state(db)
     initial_version = await _get_user_version(db)
     version = initial_version
+    if initial_version > SCHEMA_VERSION:
+        # A newer build already migrated this file (a rollback across a schema
+        # bump). Running on would re-stamp user_version DOWN below the tables
+        # that exist, and the next forward deploy would re-apply that step over
+        # already-migrated data. Refuse before touching anything, snapshot
+        # included; deploy.md "Manual rollback" says what to restore.
+        raise RuntimeError(
+            f"database schema is v{initial_version} but this build knows v{SCHEMA_VERSION}: "
+            "a newer build migrated it. Deploy that build, or restore "
+            f"gamelib.db.pre-v{SCHEMA_VERSION}.bak before running this one."
+        )
     applied_steps: list[str] = []
 
     snapshot_path = await _snapshot_before_migration(db, detected_state, initial_version)

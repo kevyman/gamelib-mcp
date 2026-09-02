@@ -2172,3 +2172,37 @@ class BackgroundEnrichmentRegressionTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NewerDatabaseRefusesToRunTests(unittest.IsolatedAsyncioTestCase):
+    """A file migrated by a newer build must not be re-stamped down by an older one.
+
+    The deploy gate can roll code back across a schema bump; without this guard
+    the older build would set user_version back to its own SCHEMA_VERSION over
+    the newer tables and the next forward deploy would re-apply the step.
+    """
+
+    async def test_newer_user_version_raises_before_any_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "newer.sqlite"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(db_module._V1_SCHEMA_DDL)
+            conn.execute(f"PRAGMA user_version = {db_module.SCHEMA_VERSION + 1}")
+            conn.commit()
+            conn.close()
+            with patch.dict("os.environ", {"DATABASE_URL": f"file:{db_path}"}, clear=False):
+                db_module._DB_READY_PATH = None
+                with self.assertRaisesRegex(RuntimeError, "newer build migrated it"):
+                    await db_module.migrate_db()
+                db_module._DB_READY_PATH = None
+            conn = sqlite3.connect(db_path)
+            try:
+                self.assertEqual(
+                    conn.execute("PRAGMA user_version").fetchone()[0], db_module.SCHEMA_VERSION + 1
+                )
+            finally:
+                conn.close()
+            self.assertEqual(
+                sorted(p.name for p in Path(tmp).glob("*.bak")), [],
+                "the guard must fire before the pre-migration snapshot is written",
+            )

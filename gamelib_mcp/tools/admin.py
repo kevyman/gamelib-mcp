@@ -515,9 +515,12 @@ def _write_private_json(path: str, payload: object) -> None:
     """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # The mode argument applies only when the file is created; a file saved
+    # before this guard keeps its 0644 through O_TRUNC, so tighten the open
+    # descriptor BEFORE the secret is written, not after.
+    os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
-    os.chmod(path, 0o600)
 
 def _save_session_cookies(
     cookies: str,

@@ -9,9 +9,8 @@ two in agreement when you change an invariant.
 
 gamelib-mcp is a single-user Model Context Protocol server (FastMCP, aiosqlite)
 that syncs one person's game library across stores, enriches it, and serves
-33 tools to claude.ai / chatgpt.com. Architecture, environment and the
-one-line rules live in `CLAUDE.md`; rationale in `docs/adr/` and
-`docs/patterns/` (`docs/README.md` is the index).
+its MCP tools to claude.ai / chatgpt.com. Architecture, environment and the
+rules live in `CLAUDE.md`; decisions in `docs/adr/`.
 
 ```bash
 uv sync                                          # deps (uv; Python 3.12 pinned)
@@ -21,7 +20,7 @@ uv sync                                          # deps (uv; Python 3.12 pinned)
 .venv/bin/python -m pytest tests/test_x.py -n0   # one file, serial, live logs
 ```
 
-Test conventions are non-negotiable (see `docs/patterns/testing.md`): copy the
+Test conventions are non-negotiable (see `CLAUDE.md` → Commands): copy the
 migrated template per test — never a per-test `init_db()`; `DEADLOCK_TIMEOUT`
 on every `wait_for`; `virtual_clock` for anything that backs off; no timed
 `asyncio.sleep` as a liveness assertion; no real network. In a Codex sandbox
@@ -30,10 +29,9 @@ fixtures or DB paths.
 
 ## Code Review Rules
 
-Review the diff for consequential, repository-specific behaviour. Lint, types,
-docstring length, response caps and doc/tool-name drift are enforced by CI
-(`ruff`, `mypy`, `SchemaBudgetTests`, `ResponseSizeGuardTests`,
-`test_docs_drift.py`) — do not spend findings on them. One precise finding
+Review the diff for consequential, repository-specific behaviour. Lint, types
+and response caps are enforced by CI (`ruff`, `mypy`,
+`ResponseSizeGuardTests`) — do not spend findings on them. One precise finding
 with a file:line and a concrete failure beats five plausible ones: every
 finding is reproduced or refuted with a test before it is fixed, so a finding
 that cannot be made to fail costs more than it saves.
@@ -96,8 +94,8 @@ that cannot be made to fail costs more than it saves.
   hot paths open `BEGIN IMMEDIATE`. A "database is locked" retry loop added
   anywhere else is a P1.
 - Schema changes need all three: `_V{N}_SCHEMA_DDL` + `SCHEMA_VERSION` in
-  `data/db/schema.py`, and a step in `data/db/migrations.py` — the fresh-DB
-  path and the migration chain must agree (parity test).
+  `data/db/schema.py`, and a registered `_migrate_vN_to_vN+1` step — the
+  fresh-DB path and the migration chain must produce the same schema.
 - `play_history` rows are cumulative totals written only on change; readers
   of `last_played` treat NULL as unknown, never as "never played".
 
@@ -114,13 +112,14 @@ that cannot be made to fail costs more than it saves.
 
 ### Providers, security, operations
 
-- Provider fetchers degrade to a logged failure that is COUNTED (see
-  `enrich_bg.py`'s per-provider stats), never a silent success; every
+- Provider fetchers degrade to a logged failure, never a silent success, and
+  a failure that only ever reaches DEBUG logging is a P1; every
   `httpx.AsyncClient` has an explicit timeout; scraper URLs stay inside the
   host allowlist with redirects re-checked per hop.
 - `MCP_AUTH_MODE` fails closed; `/admin/*` is header-bearer only with a
   timing-safe compare; session files are written through
-  `_write_private_json` (0600); the SQL escape hatch stays authorizer-enforced
+  `tools/admin.py::_write_private_json` (0600, before the secret is written);
+  the SQL escape hatch stays authorizer-enforced
   read-only. Secrets never appear in logs, tracebacks or tool responses.
 - Deploy runs migrations at container start: a migration that cannot be
   snapshotted (`VACUUM INTO`) must abort rather than proceed.

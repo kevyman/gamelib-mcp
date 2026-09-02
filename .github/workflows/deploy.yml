@@ -58,6 +58,8 @@ jobs:
             set -euo pipefail
             cd "${DEPLOY_PATH:-$HOME/mcps}"
             previous="$(git rev-parse HEAD)"
+            db="${DEPLOY_PATH:-$HOME/mcps}/data/library/gamelib.db"
+            schema_before="$(sqlite3 "$db" 'PRAGMA user_version' 2>/dev/null || echo unknown)"
             git fetch --prune origin main
             # The repo is the source of truth: mirror origin/main exactly.
             # Server-local secrets live in .env (gitignored) and survive this.
@@ -79,8 +81,28 @@ jobs:
               sleep 5
             done
             if [ "$healthy" != "1" ]; then
-              echo "::error::${target} never answered /health; rolling back to ${previous}"
+              echo "::error::${target} never answered /health"
               docker compose --profile prod logs --tail=100 app || true
+              schema_after="$(sqlite3 "$db" 'PRAGMA user_version' 2>/dev/null || echo unknown)"
+              if [ "$schema_before" != "$schema_after" ]; then
+                # The new build migrated the database before dying. Old code
+                # started against a newer schema would re-stamp user_version
+                # DOWN and the next forward deploy would re-apply the step over
+                # already-migrated data. Restore the app's own pre-migration
+                # snapshot first; if it is missing, leave the new build in place
+                # (crash-looping is visible; a silently wrong schema is not).
+                snapshot="${db}.pre-v${schema_before}.bak"
+                if [ -f "$snapshot" ]; then
+                  echo "schema moved v${schema_before} -> v${schema_after}; restoring ${snapshot} before rolling back"
+                  docker compose --profile prod stop app
+                  cp -f "$snapshot" "$db"
+                  rm -f "${db}-wal" "${db}-shm"
+                else
+                  echo "::error::schema moved v${schema_before} -> v${schema_after} but ${snapshot} is missing; NOT rolling back code. Restore the nightly backup by hand (deploy.md, Database backups) before redeploying."
+                  exit 1
+                fi
+              fi
+              echo "rolling back to ${previous}"
               git reset --hard "$previous"
               docker compose --profile prod up -d --build
               exit 1
