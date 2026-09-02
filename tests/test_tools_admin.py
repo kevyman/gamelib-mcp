@@ -2738,3 +2738,29 @@ class MergeGamesBatchTests(ToolDBTestCase):
             await admin.merge_games_batch(
                 [{"source_game_id": 1, "target_game_id": 2}] * 201
             )
+
+
+class SessionFileChokepointTests(unittest.TestCase):
+    """AGENTS.md: every session file is written through _write_private_json.
+
+    The guard lives in one function so the 0600-before-secret rule cannot be
+    bypassed by a new provider; this pins that no other write-mode open exists
+    in the module that holds the set_*_session save paths.
+    """
+
+    def test_session_admin_has_exactly_one_write_path(self) -> None:
+        import inspect
+        import re
+
+        from gamelib_mcp.tools import session_admin
+
+        source = inspect.getsource(session_admin)
+        chokepoint = inspect.getsource(session_admin._write_private_json)
+        write_opens = re.findall(r"\bos\.open\(|\bopen\([^)]*[\"'][wa]", source)
+        self.assertEqual(len(write_opens), 1, write_opens)
+        self.assertIn("os.open(", chokepoint)
+        self.assertIn("os.fchmod(fd, 0o600)", chokepoint)
+        savers = [name for name in dir(session_admin) if name.startswith("set_") and name.endswith("_session")]
+        self.assertTrue(savers)
+        for name in savers:
+            self.assertIn("_write_private_json", inspect.getsource(getattr(session_admin, name)) + inspect.getsource(session_admin._save_session_cookies), name)

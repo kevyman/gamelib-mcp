@@ -118,7 +118,7 @@ that cannot be made to fail costs more than it saves.
   host allowlist with redirects re-checked per hop.
 - `MCP_AUTH_MODE` fails closed; `/admin/*` is header-bearer only with a
   timing-safe compare; session files are written through
-  `tools/admin.py::_write_private_json` (0600, before the secret is written);
+  `tools/session_admin.py::_write_private_json` (0600, before the secret is written; the one write path for every session file);
   the SQL escape hatch stays authorizer-enforced
   read-only. Secrets never appear in logs, tracebacks or tool responses.
 - Deploy runs migrations at container start: a migration that cannot be
