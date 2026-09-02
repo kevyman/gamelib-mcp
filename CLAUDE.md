@@ -25,6 +25,8 @@ Three `tests/conftest.py` conventions keep the suite fast and honest about time 
 
 `faulthandler_timeout = 300` (pyproject) backstops all three, dumping every thread's stack past 5 minutes; `pytest-xdist` runs all cores, so tests must share no mutable state. Under Codex sandboxing aiosqlite can hang at `connect()` — re-run outside it before changing fixtures or DB paths.
 
+Shipping a branch follows `.claude/skills/ship/SKILL.md`: gates + same-family `/code-review` first, one Codex cross-model review (it reads `AGENTS.md` → "Code Review Rules"; keep that file and this one in agreement), one refute-or-fix pass with tests, squash merge. → patterns/review-and-merge.md
+
 ## Model orchestration (always-on)
 
 Multi-model sessions follow `rules/router.md`. Per-model postures live in `rules/model-postures.md` and are injected into every main-session prompt by the `UserPromptSubmit` hook in `.claude/settings.json` (`.claude/hooks/inject_model_posture.py` picks the section matching the live model; `SessionStart` caches the model since prompt payloads don't carry it).
@@ -45,15 +47,15 @@ Copy `.env.example` → `.env` for production (OAuth required) or `.env.local.ex
 - `MCP_ADMIN_AUTH_TOKEN` — independent header-only bearer token gating `/admin/*`.
 - `MCP_DUPLICATE_TEXT_CONTENT` — `1` restores the MCP spec's duplicate serialized-JSON text block on every tool result; off by default because both registered clients read `structuredContent` (halves response bytes). See `response_encoding.py`.
 - `MCP_ALLOWED_ORIGINS` — browser origins allowed on the HTTP surface; requests with no `Origin` (native/CLI clients) still pass. oauth mode auto-allowlists `MCP_PUBLIC_BASE_URL`'s origin; local `disabled` mode must list `http://localhost:8000`.
-- Optional: `PORT` (default 8000); `LOG_LEVEL` (DEBUG/INFO/WARNING/ERROR, default INFO — DEBUG surfaces per-item enrichment failures); `DEKUDEALS_WISHLIST_URL` (switch2 wishlist source; Nintendo has no wishlist API); `ITAD_API_KEY`/`ITAD_COUNTRY` (Steam/GOG/Epic prices for `get_wishlist(with_prices=True)`; without a key those land in `unpriced`); `SCRAPE_HEAL_REQUIRE_APPROVAL=1` (validated overrides land `pending`, not active).
-- Optional session files (`import_purchases` + Nintendo syncs), populated **only** via `create_session_ingest_link`, whose single-use paste form keeps cookies out of the chat (`tools/admin.py::set_*_session` is its save path); defaults under `data/`. → patterns/sessions-and-sso.md
+- Optional: `PORT` (default 8000); `LOG_LEVEL` (DEBUG/INFO/WARNING/ERROR, default INFO — DEBUG surfaces per-item enrichment failures); `DEKUDEALS_WISHLIST_URL` (switch2 wishlist source; Nintendo has no wishlist API); `ITAD_API_KEY`/`ITAD_COUNTRY` (Steam/GOG/Epic prices for `get_wishlist(with_prices=True)`; without a key those land in `unpriced`); `DEAL_ALERT_WEBHOOK_URL` (Discord/Slack incoming webhook — wishlist deal alerts after each library refresh; empty disables); `SCRAPE_HEAL_REQUIRE_APPROVAL=1` (validated overrides land `pending`, not active).
+- Optional session files (`import_purchases` + Nintendo syncs), populated **only** via `create_session_ingest_link`, whose single-use paste form keeps cookies out of the chat (`tools/session_admin.py::set_*_session` is its save path); defaults under `data/`. → patterns/sessions-and-sso.md
   - `NINTENDO_COOKIES_FILE` (`"nintendo"`) — the one accounts.nintendo.com session, driving Switch ownership *and* eShop purchases; `NINTENDO_PCTL_SESSION_FILE` (`"nintendo_pctl"`) — Switch playtime, an interactive sign-in rather than a cookie paste.
   - `STEAM_REFRESH_TOKEN_FILE` (`"steam_refresh"`, **preferred**) — long-lived, mints store cookies on demand; `STEAM_STORE_COOKIES_FILE` (`"steam_store"`) — legacy short-lived fallback, only when no refresh token is stored.
   - `EPIC_COOKIES_FILE` (`"epic"`) — website orders, not the Legendary launcher session that syncs ownership; `HUMBLE_COOKIES_FILE` (`"humble"`).
 
 ## Architecture
 
-Dependency direction is a clean DAG: `main → lifecycle`, `main → http_admin`, `tools.admin → lifecycle`; `lifecycle` reaches `tools.admin.refresh_library` lazily (no top-level import) to avoid a cycle.
+Dependency direction is a clean DAG: `main → lifecycle`, `main → http_admin`, `tools.admin → lifecycle`, `lifecycle → deal_alerts → tools.deals` (lazily, inside the function); `lifecycle` reaches `tools.admin.refresh_library` lazily (no top-level import) to avoid a cycle.
 
 Top-level modules (rationale and measurements: → patterns/mcp-surface.md):
 
@@ -63,7 +65,8 @@ Top-level modules (rationale and measurements: → patterns/mcp-surface.md):
 - `http_admin.py` — origin-allowlist middleware + `/health`, `/admin/integrations*`, `/ingest/{nonce}` (outside `/admin/`, so a browser navigation needs no bearer header); `/mcp` is authenticated by FastMCP's OAuth provider.
 - `response_encoding.py` — `StructuredOnlyMiddleware` drops FastMCP's duplicate text block beside `structuredContent` (`MCP_DUPLICATE_TEXT_CONTENT=1` restores it).
 - `session_ingest.py` — single-use cookie-paste links: in-memory nonce store (TTL 15 min, pop-on-success) + the `/ingest/{nonce}` form; a restart voids open links.
-- `apps.py` / `apps_eval.py` — the two MCP Apps widgets (game cards; the evaluation card from `record_assessment`'s `package`). Content-hashed `ui://` URIs, no CDN, per-widget CSP, deliberately duplicated not shared. Preview: `scripts/preview_{game_cards,eval_card}.py`.
+- `deal_alerts.py` — the wishlist deal notifier (`DEAL_ALERT_WEBHOOK_URL`), called at the end of `lifecycle._run_startup_refresh` and never able to fail it. → patterns/ownership-and-wishlist.md
+- `apps.py` / `apps_eval.py` — the two MCP Apps widgets (game cards; the evaluation card from `record_assessment`'s `package`). Content-hashed `ui://` URIs, no CDN, per-widget CSP, shared blocks in `apps_shared.py`; served HTML stays self-contained. Preview: `scripts/preview_{game_cards,eval_card}.py`.
 - `skill_resources.py` — serves `skills/` as `skill://<skill-name>/<path>` + `skill://index.json` (ADR 0006) AND backs `get_skill`, from one disk scan so the two can't drift.
 
 `skills/` (repo root) is the canonical home of the client-side gaming skills (`game-quality`, `backlog-triage`, `bundle-evaluation`) per ADR 0006; `~/.claude/skills` and claude.ai installs are copies.
@@ -77,13 +80,13 @@ Nested memory files load in their own directories: `tools/CLAUDE.md` (tool handl
 
 ### Database (SQLite via aiosqlite; WAL, foreign keys on)
 
-Auto-migrated on startup in `db.init_db()`. Column semantics: → patterns/database.md.
+Auto-migrated on startup in `db.init_db()` (`data/db/migrations.py`): a `VACUUM INTO` snapshot `gamelib.db.pre-v{N}.bak` before any step, a `gamelib.db.migrating` sidecar between the snapshot and the final stamp, and a fail-closed start against a database that is newer than the build or still carries the marker (naming the snapshot to restore); the deploy gate reads both before rolling back, and `scripts/restore_drill.py` rehearses a restore + migrate-forward on a scratch copy. Column semantics: → patterns/database.md.
 
 - `games`: canonical rows + shared enrichment. `completion_status` (`playing`/`completed`/`abandoned`/`evergreen`) is user-set only; `cover_image_id` (IGDB slug) beats the Steam capsule.
 - `game_platforms`: ownership/playtime per platform — always a real platform relationship, never a wishlist-only entry. Holds the 5 acquisition columns (user/importer-supplied only), `delisted`, `unowned_at`, `last_seen_in_source`, `manual_overrides`.
 - `game_platform_identifiers`: provider IDs (`steam_appid`, `gog_product_id`, `xbox_title_id`, …).
-- `game_wishlist`: want-to-play tracking, deliberately separate from `game_platforms`. `UNIQUE(game_id, platform)`; `source` ∈ steam/dekudeals/manual/assessment.
-- `game_prices`: current-price cache, overwritten in place — not history. A NULL price is a *negative* cache entry: readers must filter `price IS NOT NULL`.
+- `game_wishlist`: want-to-play tracking, deliberately separate from `game_platforms`. `UNIQUE(game_id, platform)`; `source` ∈ steam/dekudeals/manual/assessment; `last_alerted_at`/`last_alert_key` debounce deal alerts.
+- `game_prices`: current-price cache, overwritten in place — not history, though it caches ITAD's all-time `history_low` (with its own currency, never converted) and the deal's `deal_ends_at` beside the current price. A NULL price is a *negative* cache entry: readers must filter `price IS NOT NULL`.
 - `play_history`: cumulative per-(game, platform) playtime snapshots, ≤1 row per UTC day, written post-sync only on change. Totals, never deltas; forward-only.
 - `game_assessments`: verdict components + `presentation` (model-authored card content) + declared-only provenance (`skill`/`skill_version`/`model`; NULL = unknown). Append-only, ≤1 row per (game, UTC day); never joined into affinity or discovery.
 - `nintendo_play_summary` (per-device/application/day Switch playtime), `steam_platform_data` + `game_platform_enrichment` (provider metadata), `game_series` + `game_series_membership` (IGDB collections), `scrape_config` (versioned overrides, ≤1 `active` row per provider; empty = code defaults), `ratings`, `tag_affinity`, `meta`.
@@ -92,7 +95,7 @@ Auto-migrated on startup in `db.init_db()`. Column semantics: → patterns/datab
 
 Each bullet is the rule; the reasoning and incidents live at the pointer.
 
-- **Bounded responses**: every response field whose length scales with library size must carry a cap, the true total, and a truncation flag (`get_wishlist`: `limit`/`total_matches`/`has_more`). `tests/test_tool_dispatch.py::ResponseSizeGuardTests` fails on any list over its documented cap — add new read paths there. → patterns/mcp-surface.md
+- **Bounded responses**: every response field whose length scales with library size must carry a cap, the true total, and a truncation flag (`get_wishlist`: `limit`/`total_matches`/`has_more`). `tests/test_tool_dispatch.py::ResponseSizeGuardTests` fails on any list over its documented cap — add new read paths there. The schema side has the same guard: `tests/test_tool_registration.py::SchemaBudgetTests` (and `tests/test_docs_drift.py` keeps every tool name in README/.env examples a real tool) caps the serialized `tools/list` payload and every tool's description — trim before adding, and keep field-level methodology in `skills/` (ADR 0006), not in docstrings. → patterns/mcp-surface.md
 - **One tool per operation, not per arity** (ADR 0004): 33 MCP tools over ~50 impls in `tools/`. Bulk is `items=[...]` on the single-item tool, never a second `*_batch` tool; verb families take an `action`/`report` selector; a merged tool inherits the STRICTEST annotation it absorbs; a multi-mode tool validates EVERY selected mode's inputs before running the first one. Read docs/adr/0004 — especially its "Rejected" list — before adding or merging a tool.
 - **Lazy enrichment**: `get_game_detail` fetches provider enrichment on demand and caches; bulk calls skip unenriched fields.
 - **Tag affinity**: **`k` (the shrinkage prior) is estimated from the data every recompute, never hand-picked** (`estimate_shrinkage_weight`), so **`affinity_score` has no fixed scale** — compare tags to each other or to `strong_affinity_cut()`, never to a constant, and never damp it by `game_count`. `discover_games` uses IDF-weighted mean affinity over **all** a game's tags, `df` floored at `_IDF_DF_FLOOR`; vibe filters only match tags within the first `VIBE_TAG_PROMINENCE_CUTOFF` entries of the vote-ranked list. → patterns/tag-affinity.md

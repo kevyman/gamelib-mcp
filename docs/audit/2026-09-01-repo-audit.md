@@ -552,3 +552,23 @@ the "recommender flies blind" critique.
 - SQLite backup strategies in production — https://oldmoe.blog/2024/04/30/backup-strategies-for-sqlite-in-production/
 - Advisories: PYSEC-2026-179 (pyjwt), PYSEC-2026-248 (starlette), GHSA-537c-gmf6-5ccf (cryptography) — https://osv.dev
 - Method reference (evidence-first LLM audits): RepoAudit (ICML 2025); kevinpatrickrobbins/codebase-audit playbook
+
+## 8. Shipped (2026-09-02/03)
+
+The fifteen items landed on `main` as five squash-merged PRs, each through the
+`/ship` process with one Codex pass: #162 perimeter (items 1–3, 9, 10, 14 +
+the review process itself), #166 tool surface (4–8), #169 refactors (11–13,
+15), #170 features (the re-derived 07-06 roadmap), and this docs PR. Codex
+found 5 findings across them (1 P0: the rollback gate was blind to a
+migration interrupted mid-step → the `.migrating` marker; 4 P1), all fixed
+with reproducing tests, none refuted.
+
+Two things surfaced on the way that were not in the audit. Production
+deploys failed from 20:07 UTC on 09-02 because the host fetched anonymously
+over HTTPS and GitHub intermittently refused it (the workflow's git line was
+unchanged); #167 makes the deploy fetch with the job's own token
+(`deploy.md`, "Why the fetch authenticates"). And Codex's automatic review
+needs both the repository's Automatic reviews toggle and a Codex cloud
+environment; until both were set, the `@codex review` comment was the only
+working trigger (#168 records it in the skill).
+
