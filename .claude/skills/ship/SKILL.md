@@ -48,12 +48,18 @@ standards live.
   `@codex review` up front: with automatic reviews on, that is two reviews,
   which is the thing this process exists to avoid. Post the comment only
   if nothing has happened after 10 minutes.
-- If the automatic review does not start, the first thing to check is the
-  repository's **Automatic reviews** toggle at
-  https://chatgpt.com/codex/settings/code-review — it was off for this
-  repo until 2026-09-02, which is why #162, #166 (draft → ready) and #167
-  (opened ready) all needed the comment. The comment works regardless of
-  the toggle.
+- The automatic review has TWO prerequisites, both in Codex settings, and
+  the failure modes differ: with the repository's **Automatic reviews**
+  toggle (https://chatgpt.com/codex/settings/code-review) off, nothing
+  happens at all — that was #162, #166 (draft → ready) and #167 (opened
+  ready); with the toggle on but no Codex cloud **environment** for the
+  repo (https://chatgpt.com/codex/cloud/settings/environments), Codex
+  answers the open with a comment, "To use Codex here, create an
+  environment for this repo", and does not review — that was #168. The
+  `@codex review` comment runs without the environment (it reacted 👀 on
+  #167 the same minute), so it is the fallback in both cases; when it is
+  the fallback, post it as soon as the "create an environment" comment
+  appears rather than waiting the 10 minutes.
 
 ## 3. Subscribe and wait
 

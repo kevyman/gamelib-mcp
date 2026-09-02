@@ -16,14 +16,18 @@ applies are `AGENTS.md` → "Code Review Rules".
    it first means the cross-model pass is spent on blind spots.
 2. **One PR, one theme, reviewable size.** Title is the squash subject, body is
    the squash message, "Review scope for Codex" says where the risk is.
-3. **One Codex pass.** The repository's **Automatic reviews** toggle
-   (chatgpt.com/codex/settings/code-review) is on, so opening a PR for
-   review starts the review; `@codex review` is the manual fallback, posted
-   only when nothing has happened in 10 minutes, since both firing would be
-   two reviews. (The toggle was off until 2026-09-02: #162, #166 and #167
-   all needed the comment, and the process briefly blamed the trigger
-   instead of the setting.) Codex reads `AGENTS.md`, reviews the diff
-   statically, posts P0/P1 inline, reacts 👍 when it has nothing.
+3. **One Codex pass.** Opening a PR for review starts the review, given
+   two Codex settings: the repository's **Automatic reviews** toggle
+   (chatgpt.com/codex/settings/code-review) and a Codex cloud
+   **environment** for the repo (chatgpt.com/codex/cloud/settings/environments).
+   `@codex review` is the manual fallback — it runs without the
+   environment — posted only when the automatic review is not going to
+   happen (nothing after 10 minutes, or Codex's "create an environment"
+   reply), since both firing would be two reviews. (Measured: the toggle
+   was off until 2026-09-02, so #162, #166 and #167 needed the comment;
+   #168 then hit the missing environment.) Codex reads `AGENTS.md`,
+   reviews the diff statically, posts P0/P1 inline, reacts 👍 when it has
+   nothing.
 4. **Refute or fix, once.** Every finding gets the test that would prove it.
    Fails → fix. Cannot be made to fail → refuted on the thread with evidence.
    Reply, resolve. No second full review; one targeted re-check only for a
