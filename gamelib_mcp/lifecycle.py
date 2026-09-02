@@ -466,6 +466,21 @@ async def _run_startup_refresh(platforms: list[str] | None = None) -> dict:
     if refresh_result is not None:
         await _drain_background_enrich_reruns()
 
+    # Deal alerts ride on the refresh the periodic loop already runs, so there
+    # is no second scheduler to keep alive. Lazily imported like the admin
+    # module above, and belt-and-braces wrapped: run_deal_alerts already
+    # swallows its own failures, and a notification must never be able to turn
+    # a successful library sync into a failed one.
+    from .deal_alerts import is_deal_alerts_configured
+
+    if is_deal_alerts_configured():
+        try:
+            from .deal_alerts import run_deal_alerts
+
+            await run_deal_alerts()
+        except Exception:
+            logger.exception("Deal alert run failed")
+
     return refresh_result or {}
 
 

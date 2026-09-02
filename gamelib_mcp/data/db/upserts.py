@@ -847,6 +847,34 @@ async def delete_stale_wishlist_entries(
         return cursor.rowcount
 
 
+async def stamp_wishlist_alerts(keys_by_game: dict[int, str]) -> int:
+    """Record that a deal alert went out, per game: {game_id: alert_key}.
+
+    Written ONLY after the notification was actually delivered (see
+    ``deal_alerts.py``) — stamping an alert that failed to send would silence
+    the retry, and a missed price drop is exactly what the feature exists to
+    prevent.
+
+    Every wishlist row for the game is stamped, not just one platform's: the
+    key describes an event about the GAME ("target reached at 19.99"), and
+    leaving a sibling row unstamped would let the same event alert twice
+    through the other platform. Returns the number of rows stamped.
+    """
+    if not keys_by_game:
+        return 0
+    now = datetime.now(UTC).isoformat()
+    async with get_db() as db:
+        cursor = await db.executemany(
+            """UPDATE game_wishlist
+               SET last_alerted_at = ?, last_alert_key = ?
+               WHERE game_id = ?""",
+            [(now, key, game_id) for game_id, key in keys_by_game.items()],
+        )
+        rowcount = cursor.rowcount
+        await db.commit()
+    return rowcount if rowcount and rowcount > 0 else 0
+
+
 async def repair_misclassified_platform_row(
     *,
     source_game_id: int,
@@ -1538,7 +1566,11 @@ async def upsert_game_prices(rows: list[dict]) -> int:
     """Upsert current-price rows into game_prices, overwriting stale prices.
 
     Each row: {game_id, platform, shop, price, regular_price, cut_pct,
-    currency, deal_url}. This is a current-price cache, not a history table —
+    currency, deal_url} plus the optional ITAD extras {history_low,
+    history_low_currency, deal_ends_at}, which a provider without a
+    history-of-record (DekuDeals) simply omits and which are then written
+    NULL — a refresh always states the whole current answer, so a missing
+    key means "this provider has none", never "keep the old value". This is a current-price cache, not a history table —
     fetched_at is stamped here (UTC now) on every call, even when the price
     is unchanged, so a later staleness check can trust it: a failed/partial
     fetch must never delete or blank a previously cached price, but a
@@ -1563,14 +1595,18 @@ async def upsert_game_prices(rows: list[dict]) -> int:
         await db.executemany(
             """INSERT INTO game_prices
                (game_id, platform, shop, price, regular_price, cut_pct,
-                currency, deal_url, fetched_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                currency, deal_url, history_low, history_low_currency,
+                deal_ends_at, fetched_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(game_id, platform, shop) DO UPDATE SET
                    price = excluded.price,
                    regular_price = excluded.regular_price,
                    cut_pct = excluded.cut_pct,
                    currency = excluded.currency,
                    deal_url = excluded.deal_url,
+                   history_low = excluded.history_low,
+                   history_low_currency = excluded.history_low_currency,
+                   deal_ends_at = excluded.deal_ends_at,
                    fetched_at = excluded.fetched_at""",
             [
                 (
@@ -1582,6 +1618,9 @@ async def upsert_game_prices(rows: list[dict]) -> int:
                     r.get("cut_pct"),
                     r.get("currency"),
                     r.get("deal_url"),
+                    r.get("history_low"),
+                    r.get("history_low_currency"),
+                    r.get("deal_ends_at"),
                     now,
                 )
                 for r in rows

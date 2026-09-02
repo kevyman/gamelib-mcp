@@ -10,6 +10,7 @@ from conftest import (
     set_tag_affinity,
 )
 
+from gamelib_mcp.data import db as db_module
 from gamelib_mcp.tools import ratings
 
 
@@ -96,7 +97,15 @@ class GetTasteProfileTests(ToolDBTestCase):
         await set_tag_affinity("sports", affinity_score=0.111111, avg_score=3.4, game_count=2)
         profile = await ratings.get_taste_profile()
         self.assertEqual(
-            set(profile), {"summary", "top_tags", "bottom_tags", "shrinkage"}
+            set(profile),
+            {
+                "summary",
+                "top_tags",
+                "bottom_tags",
+                "shrinkage",
+                "rate_next",
+                "rate_next_candidates",
+            },
         )
         summary = profile["summary"]
         self.assertEqual(summary["total_rated"], 2)
@@ -150,6 +159,141 @@ class GetTasteProfileTests(ToolDBTestCase):
         self.assertEqual(profile["summary"]["total_rated"], 0)
         self.assertIsNone(profile["summary"]["avg_score"])
         self.assertEqual(profile["top_tags"], [])
+
+
+class RateNextTests(ToolDBTestCase):
+    """The coverage section of the taste report: what to rate next, and why."""
+
+    async def test_ranks_by_playtime_then_tag_rarity(self):
+        # One rated game establishes "roguelike" as well-covered; the two
+        # candidates differ only in playtime and how novel their tags are.
+        rated = await make_steam_game("Hades", 1, tags=["Roguelike"])
+        await add_rating(rated, "backloggd", 4.5, 9.0)
+
+        much_played = await make_steam_game(
+            "Long Haul", 2, playtime_minutes=12_000, tags=["Roguelike"]
+        )
+        barely_played = await make_steam_game(
+            "Quick Look", 3, playtime_minutes=30, tags=["Roguelike"]
+        )
+        novel_tags = await make_steam_game(
+            "Odd One", 4, playtime_minutes=30, tags=["Fishing", "Farming Sim"]
+        )
+
+        profile = await ratings.get_taste_profile()
+        order = [entry["game_id"] for entry in profile["rate_next"]]
+        self.assertEqual(order[0], much_played)
+        # Same playtime, so the rarity term breaks the tie: two tags the rated
+        # sample has never seen beat one it already covers.
+        self.assertLess(order.index(novel_tags), order.index(barely_played))
+        self.assertEqual(profile["rate_next_candidates"], 3)
+
+    async def test_recently_played_outranks_an_equal_dormant_game(self):
+        from datetime import UTC, datetime, timedelta
+
+        recent_day = (datetime.now(UTC) - timedelta(days=3)).date().isoformat()
+        old_day = (datetime.now(UTC) - timedelta(days=400)).date().isoformat()
+
+        recent = await make_steam_game("Fresh", 1, playtime_minutes=600, tags=["indie"])
+        dormant = await make_steam_game("Dusty", 2, playtime_minutes=600, tags=["indie"])
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE game_platforms SET last_played = ? WHERE game_id = ?",
+                (recent_day, recent),
+            )
+            await db.execute(
+                "UPDATE game_platforms SET last_played = ? WHERE game_id = ?",
+                (old_day, dormant),
+            )
+            await db.commit()
+
+        entries = (await ratings.get_taste_profile())["rate_next"]
+        by_id = {entry["game_id"]: entry for entry in entries}
+        self.assertEqual(entries[0]["game_id"], recent)
+        self.assertIn("played in the last 90 days", by_id[recent]["reasons"])
+        self.assertNotIn("played in the last 90 days", by_id[dormant]["reasons"])
+        self.assertEqual(by_id[recent]["last_played"], recent_day)
+
+    async def test_reasons_name_the_playtime_and_the_rare_tags(self):
+        game_id = await make_steam_game(
+            "Explainable", 1, playtime_minutes=14_640, tags=["Fishing", "Cozy"]
+        )
+
+        entry = (await ratings.get_taste_profile())["rate_next"][0]
+        self.assertEqual(entry["game_id"], game_id)
+        self.assertEqual(entry["playtime_hours"], 244.0)
+        self.assertEqual(entry["reasons"][0], "244h played, unrated")
+        self.assertEqual(entry["reasons"][1], "2 rarely-rated tags: cozy, fishing")
+
+    async def test_never_played_candidate_says_so(self):
+        await make_steam_game("Shelfware", 1, tags=["indie"])
+        entry = (await ratings.get_taste_profile())["rate_next"][0]
+        self.assertEqual(entry["playtime_hours"], 0.0)
+        self.assertEqual(entry["reasons"][0], "owned but never played, unrated")
+
+    async def test_excludes_rated_unowned_untagged_and_finished_games(self):
+        keeper = await make_steam_game("Keeper", 1, playtime_minutes=100, tags=["indie"])
+
+        rated = await make_steam_game("Rated", 2, playtime_minutes=100, tags=["indie"])
+        await add_rating(rated, "manual", 8.0, 8.0)
+
+        await make_steam_game("Untagged", 3, playtime_minutes=100)
+
+        unowned = await seed_game("Wishlisted Only", tags=["indie"])
+        await db_module.upsert_wishlist_entry(unowned, "steam", source="manual")
+
+        retired = await make_steam_game("Refunded", 4, playtime_minutes=100, tags=["indie"])
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE game_platforms SET owned = 0 WHERE game_id = ?", (retired,)
+            )
+            await db.commit()
+
+        finished = await make_steam_game("Done", 5, playtime_minutes=100, tags=["indie"])
+        dropped = await make_steam_game("Dropped", 6, playtime_minutes=100, tags=["indie"])
+        evergreen = await make_steam_game(
+            "Forever", 7, playtime_minutes=100, tags=["indie"]
+        )
+        async with db_module.get_db() as db:
+            for game_id, status in (
+                (finished, "completed"),
+                (dropped, "abandoned"),
+                (evergreen, "evergreen"),
+            ):
+                await db.execute(
+                    "UPDATE games SET completion_status = ? WHERE id = ?",
+                    (status, game_id),
+                )
+            await db.commit()
+
+        dlc = await make_steam_game("Some DLC", 8, playtime_minutes=100, tags=["indie"])
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET content_type = 'dlc', is_primary_library_item = 0"
+                " WHERE id = ?",
+                (dlc,),
+            )
+            await db.commit()
+
+        profile = await ratings.get_taste_profile()
+        # evergreen stays a candidate — an endless game is unrated, not judged.
+        self.assertEqual(
+            {entry["game_id"] for entry in profile["rate_next"]}, {keeper, evergreen}
+        )
+        self.assertEqual(profile["rate_next_candidates"], 2)
+
+    async def test_list_is_capped_but_the_count_is_true(self):
+        for i in range(ratings.RATE_NEXT_LIMIT + 5):
+            await make_steam_game(f"Candidate {i}", i + 1, playtime_minutes=i, tags=["indie"])
+
+        profile = await ratings.get_taste_profile()
+        self.assertEqual(len(profile["rate_next"]), ratings.RATE_NEXT_LIMIT)
+        self.assertEqual(profile["rate_next_candidates"], ratings.RATE_NEXT_LIMIT + 5)
+
+    async def test_empty_library_returns_an_empty_queue(self):
+        profile = await ratings.get_taste_profile()
+        self.assertEqual(profile["rate_next"], [])
+        self.assertEqual(profile["rate_next_candidates"], 0)
 
 
 class SyncRatingsTests(ToolDBTestCase):

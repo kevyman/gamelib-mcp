@@ -32,6 +32,7 @@ from ..data.db import (
     get_assessed_game_id_by_appid,
     get_db,
     get_game_by_appid,
+    load_cheapest_cached_price,
     load_recent_assessments,
     titles_conflict_on_identity,
     upsert_game,
@@ -49,6 +50,7 @@ from .common import (
     clamp_limit,
     cover_url,
 )
+from .deals import _at_history_low, _fetched_at_is_stale
 from .detail import get_game_detail
 from .game_media import media_context
 from .history import get_play_history
@@ -720,6 +722,35 @@ async def _server_cached_craft(resolved_game_id: int) -> dict[str, Any] | None:
     }
 
 
+async def _cached_deal_block(game_id: int) -> dict[str, Any] | None:
+    """The cheapest CACHED price for a resolved candidate, or None.
+
+    Cache-only, deliberately: this is a read tool with a no-network contract,
+    so it reports what ``get_wishlist(with_prices=True)`` last wrote rather
+    than pricing the game itself. It therefore reports its own age instead of
+    hiding it — ``fetched_at`` plus ``stale``, computed against the same TTL
+    the deals tool refreshes on (imported, not redeclared, so the two can
+    never disagree about what stale means). A stale block is still worth
+    showing: "€19.99 as of two days ago" beats no price at all, as long as the
+    reader is told which it is.
+    """
+    row = await load_cheapest_cached_price(game_id)
+    if row is None:
+        return None
+    return {
+        "platform": row["platform"],
+        "shop": row["shop"],
+        "price": row["price"],
+        "currency": row["currency"],
+        "cut_pct": row["cut_pct"],
+        "history_low": row["history_low"],
+        "at_history_low": _at_history_low(row),
+        "deal_ends_at": row["deal_ends_at"],
+        "fetched_at": row["fetched_at"],
+        "stale": _fetched_at_is_stale(row["fetched_at"]),
+    }
+
+
 # The pace window both assessment tools read: get_assessment_context's `pace`
 # block and the package's recent_weekly_minutes are the same observation, so
 # they come from one place rather than two 30-day queries that could drift.
@@ -762,6 +793,9 @@ async def get_assessment_context(
       resolution.matched_name only on resolve; resolution.rejected_near_miss
       only when the ordinal guard turned a sequel-shaped match into
       not_found).
+    - deal: when identity resolved AND a cached price exists for it — the
+      cheapest cached row, with its age and a stale flag. Cache only; this
+      call never prices anything itself.
     - past_assessments (+ count/truncated): when identity resolved AND this
       game was assessed before — the repeat-ask signal, capped at
       PAST_ASSESSMENT_CAP.
@@ -810,6 +844,9 @@ async def get_assessment_context(
             # Repeat-ask detection, for free, in the skill's Step 0: if this
             # game was assessed before, the prior verdict/date/price is what a
             # new assessment should be argued against — not re-derived blind.
+            deal = await _cached_deal_block(resolved_id)
+            if deal is not None:
+                result["deal"] = deal
             past, past_total = await load_recent_assessments(
                 resolved_id, PAST_ASSESSMENT_CAP
             )
@@ -839,7 +876,7 @@ async def get_assessment_context(
 
     if cand_pairs:
         display_tags = [display for display, _ in cand_pairs]
-        profile = await get_taste_profile()
+        profile = await get_taste_profile(include_rate_next=False)
         fit = compute_fit(display_tags, profile)
         fit["tags_source"] = tags_source
         if not profile["top_tags"] and not profile["bottom_tags"]:

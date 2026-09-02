@@ -279,6 +279,10 @@ class GetStatsResponse(FlexibleModel):
     # The estimated affinity scale (prior weight + variance components) the
     # tags above are expressed on — affinity_score has no fixed scale.
     shrinkage: dict[str, Any] | None = None
+    # Owned, unrated games whose ratings would teach the profile most, capped
+    # at RATE_NEXT_LIMIT; rate_next_candidates is the true total.
+    rate_next: list[dict[str, Any]] | None = None
+    rate_next_candidates: int | None = None
     # report="spending"
     owned_rows: int | None = None
     priced_rows: int | None = None
@@ -790,6 +794,11 @@ class WishlistDealAlternative(FlexibleModel):
     cut_pct: int | None = None
     currency: str | None = None
     deal_url: str | None = None
+    # ITAD's all-time low for the game, in its OWN currency (never converted),
+    # and when this deal expires. Null on every DekuDeals (switch2) row.
+    history_low: float | None = None
+    history_low_currency: str | None = None
+    deal_ends_at: str | None = None
 
 
 class WishlistDealEntry(FlexibleModel):
@@ -802,6 +811,12 @@ class WishlistDealEntry(FlexibleModel):
     cut_pct: int | None = None
     currency: str | None = None
     deal_url: str | None = None
+    history_low: float | None = None
+    history_low_currency: str | None = None
+    deal_ends_at: str | None = None
+    # True only when the RECOMMENDED price has reached history_low in the SAME
+    # currency; a missing low or a currency mismatch is False, not unknown.
+    at_history_low: bool | None = None
     wishlisted_at: str | None = None
     wishlisted_on: list[str] = Field(default_factory=list)
     recommendation_reason: str | None = None
@@ -877,6 +892,7 @@ class AssessmentContextResponse(FlexibleModel):
     game only when it resolved (game_resolution="resolved").
     past_assessments (+ count/truncated) — when identity resolved AND the
     game carries recorded verdicts; CAPPED at 5, newest first.
+    deal — when identity resolved AND a price is cached for it.
     pace — always (last-30-day play summary).
     """
 
@@ -893,6 +909,10 @@ class AssessmentContextResponse(FlexibleModel):
     past_assessments: list[dict[str, Any]] | None = None
     past_assessment_count: int | None = None
     past_assessments_truncated: bool | None = None
+    # Cheapest CACHED price for a resolved game ({platform, shop, price,
+    # currency, cut_pct, history_low, at_history_low, deal_ends_at,
+    # fetched_at, stale}); absent when nothing is cached. Never fetched here.
+    deal: dict[str, Any] | None = None
     pace: dict[str, Any] | None = None
 
 
