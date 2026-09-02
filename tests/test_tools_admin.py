@@ -7,6 +7,7 @@ successful file-write path (writes to a temp NINTENDO_COOKIES_FILE).
 import asyncio
 import json
 import os
+import unittest
 from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
