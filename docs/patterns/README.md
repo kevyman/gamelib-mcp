@@ -19,4 +19,4 @@ Decisions themselves live in `../adr/`.
 | `assessments.md` | Assessment recording (ADR 0006 decision 5): declared provenance, exact-or-mint writes, read paths, the affinity firewall. |
 | `scrapers.md` | The healable declarative surface and the propose/validate gate. |
 | `sessions-and-sso.md` | Cookie/session ingest per provider and the Nintendo accounts-SSO handshake. |
-- `review-and-merge.md` — shipping: one cross-model Codex review (rules in `AGENTS.md`), one refute-or-fix pass, squash merge; settings and sources.
+| `review-and-merge.md` | Shipping: one cross-model Codex review (rules in `AGENTS.md`), one refute-or-fix pass, squash merge; settings and sources. |
