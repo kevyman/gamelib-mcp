@@ -459,6 +459,9 @@ class ResponseSizeGuardTests(ToolDBTestCase):
         # wide (the reports) — every one of those lists carries a cap.
         ("get_stats", {"report": "assessments"}, {"assessments": 25}),
         ("get_stats", {"report": "assessments", "limit": 4}, {"assessments": 4}),
+        # rate_next grows with every owned unrated game — capped at
+        # RATE_NEXT_LIMIT with rate_next_candidates as the true total.
+        ("get_stats", {"report": "taste"}, {"rate_next": 10}),
     ]
 
     # Nested list caps: (tool, args, {dotted path: cap}).

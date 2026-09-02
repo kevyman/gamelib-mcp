@@ -1190,6 +1190,61 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
         # reconstructed from the components afterwards.
         self.assertIsNone(row["presentation"])
 
+    async def test_v40_adds_price_history_and_wishlist_alert_columns(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(db_module._V39_SCHEMA_DDL)
+        conn.execute("PRAGMA user_version = 39")
+        conn.execute("INSERT INTO games (id, name) VALUES (1, 'Hades')")
+        conn.execute(
+            "INSERT INTO game_prices"
+            " (game_id, platform, shop, price, currency, fetched_at)"
+            " VALUES (1, 'steam', 'Steam', 9.99, 'EUR', '2026-08-01T00:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO game_wishlist (game_id, platform, wishlisted_at, source)"
+            " VALUES (1, 'steam', '2026-07-01T00:00:00+00:00', 'steam')"
+        )
+        conn.commit()
+        conn.close()
+
+        db_module._DB_READY_PATH = None
+        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
+            await db_module.init_db()
+
+            async with db_module.get_db() as db:
+                version = await migrations_module._get_user_version(db)
+                price_columns = await migrations_module._table_columns(db, "game_prices")
+                wishlist_columns = await migrations_module._table_columns(
+                    db, "game_wishlist"
+                )
+                price = await db.execute_fetchone(
+                    "SELECT price, currency, history_low, history_low_currency,"
+                    "       deal_ends_at FROM game_prices WHERE game_id = 1"
+                )
+                wishlist = await db.execute_fetchone(
+                    "SELECT source, last_alerted_at, last_alert_key"
+                    " FROM game_wishlist WHERE game_id = 1"
+                )
+
+        self.assertEqual(version, db_module.SCHEMA_VERSION)
+        for column in ("history_low", "history_low_currency", "deal_ends_at"):
+            self.assertIn(column, price_columns)
+        for column in ("last_alerted_at", "last_alert_key"):
+            self.assertIn(column, wishlist_columns)
+
+        # The existing rows survive untouched...
+        self.assertEqual(price["price"], 9.99)
+        self.assertEqual(price["currency"], "EUR")
+        self.assertEqual(wishlist["source"], "steam")
+        # ...and every new column starts NULL. history_low is a fact ITAD
+        # reported at fetch time and cannot be invented for a cached row;
+        # a NULL alert key is exactly "never alerted about this game", which
+        # is what lets the first deal_alerts run speak.
+        for column in ("history_low", "history_low_currency", "deal_ends_at"):
+            self.assertIsNone(price[column])
+        for column in ("last_alerted_at", "last_alert_key"):
+            self.assertIsNone(wishlist[column])
+
     async def test_v35_backfills_steam_last_played_from_rtime(self) -> None:
         # v14 added game_platforms.last_played but only PSN/Nintendo ever wrote
         # it; Steam kept its epoch copy in steam_platform_data. Now that
@@ -1342,7 +1397,7 @@ class MigrationRegressionTests(unittest.IsolatedAsyncioTestCase):
             async with db_module.get_db() as db:
                 version = await migrations_module._get_user_version(db)
             self.assertEqual(version, db_module.SCHEMA_VERSION)
-            self.assertEqual(db_module.SCHEMA_VERSION, 39)
+            self.assertEqual(db_module.SCHEMA_VERSION, 40)
 
             unresolved = await seed_game("Still Unresolved Wishlisted Game")
             resolved = await seed_game("Already Resolved Wishlisted Game")

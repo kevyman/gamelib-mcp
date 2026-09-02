@@ -438,7 +438,9 @@ async def get_stats(
     = neutral, negative = actively avoided) and shrunk by an evidence prior
     estimated from the library, so they have NO absolute scale: read them
     against each other or against shrinkage.strong_affinity, never against a
-    fixed number, and never re-weight them by game_count.
+    fixed number, and never re-weight them by game_count. rate_next lists up to
+    10 owned unrated games (of rate_next_candidates) whose ratings would teach
+    the profile most, each with the `reasons` it was picked.
 
     "spending" (year, platform, purchase_source) — spending from recorded
     acquisitions (set_acquisition) over owned rows, DLC/editions included. year
@@ -973,7 +975,11 @@ async def get_wishlist(
     × the preferred price; the rest appear in alternatives. A priced entry with
     a recorded verdict carries the same `assessment` block plus
     below_assessed_target=true when the best price IN THAT CURRENCY has reached
-    the verdict's target_price. max_price and min_cut_pct keep a game if ANY of
+    the verdict's target_price. Every priced option also carries ITAD's
+    all-time low (history_low, in its own currency) and deal_ends_at, with
+    at_history_low true when the recommended price reached that low in the same
+    currency — DekuDeals (switch2) rows carry none of the three.
+    max_price and min_cut_pct keep a game if ANY of
     its priced options satisfies both together; they never change which option
     is recommended. Prices are NOT currency-converted, so the ratio and
     max_price compare raw numbers. limit/offset apply to the default listing
@@ -1076,6 +1082,11 @@ async def get_assessment_context(
     Fantasy VIII" against "VII") answers not_found with `rejected_near_miss`
     naming the refused row, so pass game_id if that row really was the game you
     meant.
+
+    `deal` appears when identity resolved AND a price is already cached for it:
+    the cheapest cached row with cut_pct, ITAD's history_low, at_history_low,
+    deal_ends_at and its own fetched_at/stale — cache only, since this call
+    never fetches prices (use get_wishlist(with_prices=True) for a live one).
 
     `past_assessments` appears only when identity resolved AND this game was
     assessed before (record_assessment) — up to 5 newest verdicts with the

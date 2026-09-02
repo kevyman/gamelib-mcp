@@ -1118,6 +1118,41 @@ _V39_SCHEMA_DDL = _V38_SCHEMA_DDL.replace(
     "        owned_at_assessment      INTEGER NOT NULL DEFAULT 0,",
 )
 
+# v40 adds the two things about a price that the model cannot work out from
+# the library, and the bookkeeping that lets an alert fire on them once.
+#
+# game_prices.history_low / history_low_currency: ITAD's all-time low for the
+# game (`historyLow.all`). It is still not price HISTORY — one number, cached
+# beside the current price and overwritten with it — but it is the difference
+# between "50% off" and "cheaper than it has ever been". Its currency is stored
+# separately and never assumed to equal the deal's: nothing in this codebase
+# converts currencies, so a comparison across two of them is refused, not
+# approximated.
+#
+# game_prices.deal_ends_at: when the winning deal expires (nullable in ITAD's
+# payload — plenty of prices are open-ended). Sale-window urgency.
+#
+# game_wishlist.last_alerted_at / last_alert_key: the debounce for
+# deal_alerts.py. The KEY is what makes it a debounce rather than a mute — it
+# encodes the event (target reached / all-time low) *and* the price that
+# triggered it, so the same deal never repeats while a further drop mints a new
+# key and alerts again. NULL = never alerted, which is the honest state for
+# every row predating this column.
+_V40_SCHEMA_DDL = _V39_SCHEMA_DDL.replace(
+    "        deal_url      TEXT,\n        fetched_at    TEXT NOT NULL,",
+    "        deal_url      TEXT,\n"
+    "        history_low   REAL,\n"
+    "        history_low_currency TEXT,\n"
+    "        deal_ends_at  TEXT,\n"
+    "        fetched_at    TEXT NOT NULL,",
+).replace(
+    "        store_identifier TEXT,\n        UNIQUE(game_id, platform)",
+    "        store_identifier TEXT,\n"
+    "        last_alerted_at TEXT,\n"
+    "        last_alert_key TEXT,\n"
+    "        UNIQUE(game_id, platform)",
+)
+
 # Semantic views backing query_library()/get_db_schema() — NOT part of the
 # versioned schema chain (like _FTS_DDL below). Dropped and recreated on every
 # migrate_db run via _sync_query_views so a view definition change deploys on
