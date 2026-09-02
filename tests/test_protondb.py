@@ -61,16 +61,15 @@ class ProtonDBQualityGateTests(ToolDBTestCase):
         self.assertIsNotNone(row["protondb_cached_at"])
 
     async def _fetch_with_status(self, status_code: int) -> None:
-        with patch.dict("os.environ", {"DATABASE_URL": f"file:{self.db_path}"}, clear=False):
-            _, game_platform_id = await self._seed_game_with_tier("platinum")
-            mock_resp = MagicMock()
-            mock_resp.status_code = status_code
-            mock_client = AsyncMock()
-            mock_client.get.return_value = mock_resp
-            with patch("gamelib_mcp.data.protondb.httpx.AsyncClient") as mock_cls:
-                mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-                mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-                await protondb._fetch_and_cache(123, game_platform_id)
+        _, game_platform_id = await self._seed_game_with_tier("platinum")
+        mock_resp = MagicMock()
+        mock_resp.status_code = status_code
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_resp
+        with patch("gamelib_mcp.data.protondb.httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            await protondb._fetch_and_cache(123, game_platform_id)
 
     async def test_404_is_a_miss_not_a_provider_failure(self) -> None:
         # ProtonDB answers 404 for an app nobody has reported on. That is an

@@ -1,7 +1,7 @@
 """Ratings implementations: read, sync, manual rate, and the taste profile."""
 
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
