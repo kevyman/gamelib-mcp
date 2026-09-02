@@ -443,7 +443,7 @@ async def get_taste_profile(include_rate_next: bool = True) -> dict:
     weight k, the variance components it came from, and the `strong_affinity`
     rank cut consumers should threshold against instead of a constant.
 
-    `rate_next` (capped at RATE_NEXT_LIMIT, with the true `rate_next_candidates`
+    `rate_next` (capped at RATE_NEXT_LIMIT, with the true `rate_next_candidates` and `rate_next_truncated`
     count) is the coverage half of the same picture: owned, unrated games
     ranked by how much rating them would teach the profile. See
     ``_rate_next_entry`` for the heuristic and what each term is for.
@@ -528,4 +528,7 @@ async def get_taste_profile(include_rate_next: bool = True) -> dict:
         # count beside it.
         "rate_next": rate_next,
         "rate_next_candidates": rate_next_candidates,
+        # The bounded-response contract: cap, true total, and an explicit flag
+        # so a caller never has to infer truncation from the two numbers.
+        "rate_next_truncated": rate_next_candidates > len(rate_next),
     }

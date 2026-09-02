@@ -105,6 +105,7 @@ class GetTasteProfileTests(ToolDBTestCase):
                 "shrinkage",
                 "rate_next",
                 "rate_next_candidates",
+                "rate_next_truncated",
             },
         )
         summary = profile["summary"]
@@ -187,6 +188,15 @@ class RateNextTests(ToolDBTestCase):
         # sample has never seen beat one it already covers.
         self.assertLess(order.index(novel_tags), order.index(barely_played))
         self.assertEqual(profile["rate_next_candidates"], 3)
+        self.assertFalse(profile["rate_next_truncated"])
+
+    async def test_rate_next_reports_truncation_when_capped(self) -> None:
+        # The cap is RATE_NEXT_LIMIT; a queue longer than the list must say so
+        # explicitly, not leave the caller to compare two numbers.
+        with patch.object(ratings, "get_rate_next", AsyncMock(return_value=([{"game_id": 1}], 11))):
+            profile = await ratings.get_taste_profile()
+        self.assertEqual(profile["rate_next_candidates"], 11)
+        self.assertTrue(profile["rate_next_truncated"])
 
     async def test_recently_played_outranks_an_equal_dormant_game(self):
         from datetime import UTC, datetime, timedelta

@@ -283,6 +283,7 @@ class GetStatsResponse(FlexibleModel):
     # at RATE_NEXT_LIMIT; rate_next_candidates is the true total.
     rate_next: list[dict[str, Any]] | None = None
     rate_next_candidates: int | None = None
+    rate_next_truncated: bool | None = None  # candidates > len(rate_next)
     # report="spending"
     owned_rows: int | None = None
     priced_rows: int | None = None

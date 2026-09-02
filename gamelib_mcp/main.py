@@ -439,7 +439,7 @@ async def get_stats(
     estimated from the library, so they have NO absolute scale: read them
     against each other or against shrinkage.strong_affinity, never against a
     fixed number, and never re-weight them by game_count. rate_next lists up to
-    10 owned unrated games (of rate_next_candidates) whose ratings would teach
+    10 owned unrated games (rate_next_candidates/_truncated) whose ratings would teach
     the profile most, each with the `reasons` it was picked.
 
     "spending" (year, platform, purchase_source) — spending from recorded
