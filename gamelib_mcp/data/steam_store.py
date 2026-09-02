@@ -11,7 +11,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from typing import Self
+from types import TracebackType
+from typing import Any, Self
 from weakref import WeakKeyDictionary
 
 import httpx
@@ -94,7 +95,12 @@ class _SteamRequestGate:
         await self.acquire()
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> bool:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
         self.release()
         return False
 
@@ -223,7 +229,7 @@ async def _steam_get_json_with_retry(
     *,
     params: dict[str, int | str],
     timeout: int,
-):
+) -> dict[str, Any]:
     last_error: Exception | None = None
 
     for attempt in range(_STEAM_MAX_RETRIES + 1):
@@ -493,10 +499,10 @@ async def fetch_store_appdetails(
 
 async def _fetch_all(appid: int, client: httpx.AsyncClient | None = None) -> tuple[dict | None, dict]:
     """Fetch appdetails and appreviews concurrently. Returns (store_data, review_summary)."""
-    async def fetch_store(active_client: httpx.AsyncClient):
+    async def fetch_store(active_client: httpx.AsyncClient) -> dict | None:
         return await fetch_store_appdetails(appid, client=active_client)
 
-    async def fetch_reviews(active_client: httpx.AsyncClient):
+    async def fetch_reviews(active_client: httpx.AsyncClient) -> dict:
         try:
             payload = await _steam_get_json_with_retry(
                 active_client,
@@ -527,7 +533,7 @@ async def _fetch_all(appid: int, client: httpx.AsyncClient | None = None) -> tup
         return store_data, review_summary
 
 
-def _coerce_appid(value) -> int | None:
+def _coerce_appid(value: object) -> int | None:
     """Best-effort int coercion for a Steam appid (JSON gives it as int or str)."""
     if isinstance(value, bool):
         return None

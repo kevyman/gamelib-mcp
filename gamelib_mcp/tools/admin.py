@@ -12,6 +12,7 @@ import logging
 import sys
 from datetime import UTC, datetime
 
+from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
 from ..data.db import (
@@ -82,7 +83,7 @@ async def _mark_sync_started(targets: set[str]) -> None:
 
 async def run_library_sync(
     platforms: list[str] | None = None,
-    ctx=None,
+    ctx: Context | None = None,
 ) -> dict:
     """
     Re-sync game library. Defaults to all configured platforms.
@@ -259,7 +260,7 @@ def validate_sync_platforms(targets: list[str], platforms: list[str] | None) -> 
 
 async def refresh_library(
     platforms: list[str] | None = None,
-    ctx=None,
+    ctx: Context | None = None,
 ) -> dict:
     """
     Schedule a library re-sync and return immediately (non-blocking).
@@ -358,7 +359,7 @@ async def get_sync_status() -> dict:
 
 async def sync_wishlist(
     platforms: list[str] | None = None,
-    ctx=None,
+    ctx: Context | None = None,
 ) -> dict:
     """
     Sync wishlists from configured automated sources: Steam (official wishlist
@@ -910,7 +911,9 @@ async def merge_games_batch(items: list[dict], dry_run: bool = False) -> dict:
     targets_seen: set[int] = set()
     ratings_touched = False
 
-    async def _one(source_game_id=None, target_game_id=None):
+    async def _one(
+        source_game_id: int | None = None, target_game_id: int | None = None
+    ) -> dict:
         nonlocal ratings_touched
         if source_game_id is None or target_game_id is None:
             raise ToolError("each item requires source_game_id and target_game_id")

@@ -12,8 +12,10 @@ keeps working).
 
 import json
 import logging
+import sqlite3
 import statistics
 from collections import defaultdict
+from collections.abc import Iterable
 
 from ..data.content import (
     CONTENT_BASE_GAME,
@@ -21,7 +23,7 @@ from ..data.content import (
     NESTED_CONTENT_TYPES,
     match_addon_name,
 )
-from ..data.db import STEAM_APP_ID, get_db
+from ..data.db import STEAM_APP_ID, DBConnection, get_db
 from ..data.title_normalization import normalize_search_text
 
 logger = logging.getLogger(__name__)
@@ -435,7 +437,7 @@ async def detect_cross_platform_collapses(limit: int = 0) -> dict:
 _MISCLASSIFIED_BUCKET_CAP = 200
 
 
-def _pinned_columns(raw) -> set[str]:
+def _pinned_columns(raw: str | None) -> set[str]:
     """Parse a games.manual_overrides JSON blob into a set of column names.
 
     Duplicates data/db/upserts.py::_decode_overrides (private, per-connection
@@ -452,7 +454,10 @@ def _pinned_columns(raw) -> set[str]:
 
 
 async def _resolve_primary_parent(
-    candidate_names, exclude_game_id: int, *, steam_appid: int | None = None
+    candidate_names: Iterable[str],
+    exclude_game_id: int,
+    *,
+    steam_appid: int | None = None,
 ) -> tuple[int, str] | None:
     """First candidate that resolves to an existing PRIMARY library game.
 
@@ -1171,7 +1176,9 @@ async def revalidate_igdb_matches(
             category = record.get("game_type")
         return content_type_from_igdb_category(category)
 
-    async def _classification_attributable(db, row, record: dict) -> bool:
+    async def _classification_attributable(
+        db: DBConnection, row: sqlite3.Row, record: dict
+    ) -> bool:
         """Whether the stored classification plausibly came from the bad match."""
         stored_default = (
             (row["content_type"] or "base_game") == "base_game"

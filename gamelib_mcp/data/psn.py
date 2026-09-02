@@ -15,6 +15,8 @@ import asyncio
 import logging
 import os
 import re
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any, cast
 
 from psnawp_api.models.title_stats import PlatformCategory
 
@@ -29,12 +31,15 @@ from gamelib_mcp.data.db import (
     upsert_game_platform_enrichment,
     upsert_game_platform_identifier,
 )
-from gamelib_mcp.data.igdb import PLATFORM_TO_IGDB, resolve_and_link_game
+from gamelib_mcp.data.igdb import PLATFORM_TO_IGDB, IGDBGame, resolve_and_link_game
 from gamelib_mcp.data.title_normalization import (
     normalize_edition_comparison_title,
     normalize_search_text,
     prepare_catalog_title,
 )
+
+if TYPE_CHECKING:
+    from psnawp_api import PSNAWP
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +68,7 @@ def _is_probably_non_latin(name: str) -> bool:
     return bool(_NON_LATIN_RE.search(name))
 
 
-def _resolve_english_title(psnawp, title_id: str, fallback: str) -> str:
+def _resolve_english_title(psnawp: "PSNAWP", title_id: str, fallback: str) -> str:
     """Best-effort: look up a title's canonical English name via the PSN catalog.
 
     The gamelist endpoint honours the account language, not Accept-Language, so a
@@ -127,12 +132,12 @@ class _SkuAggregate:
         self.last_played: str | None = None
         # (title_id, playtime_minutes) per SKU, in the order PSN returned them.
         self.skus: list[tuple[str, int]] = []
-        self.igdb_game = None
+        self.igdb_game: IGDBGame | None = None
         # Which of added/matched this aggregate was tallied under, so an
         # aggregate evicted onto a freshly minted row can be re-tallied.
         self.counted_as: str | None = None
 
-    def add(self, entry: dict, igdb_game=None) -> None:
+    def add(self, entry: dict, igdb_game: IGDBGame | None = None) -> None:
         minutes = entry.get("playtime_minutes")
         if minutes is not None:
             self.playtime_minutes = (self.playtime_minutes or 0) + minutes
@@ -171,7 +176,7 @@ class _SkuAggregate:
         return max(self.skus, key=lambda sku: sku[1])[0]
 
 
-def _get_psnawp():
+def _get_psnawp() -> "PSNAWP":
     """Return an authenticated PSNAWP instance, or raise if not configured."""
     from psnawp_api import PSNAWP  # lazy import — optional dependency
     npsso = os.environ.get("PSN_NPSSO")
@@ -190,7 +195,7 @@ async def fetch_psn_library() -> list[dict]:
     2-week playtime, so only lifetime playtime and last-played are captured.
     Runs PSNAWP synchronously in an executor.
     """
-    def _fetch():
+    def _fetch() -> list[dict[str, Any]]:
         psnawp = _get_psnawp()
         client = psnawp.me()
         results = []
@@ -207,7 +212,10 @@ async def fetch_psn_library() -> list[dict]:
             # so it matches the existing library instead of spawning a duplicate.
             if title_id and _is_probably_non_latin(name):
                 name = _resolve_english_title(psnawp, title_id, name)
-            minutes = int(entry.play_duration.total_seconds() // 60)
+            # psnawp types play_duration Optional for every TitleStats; a
+            # played title always carries one, and a missing duration should
+            # still surface rather than be silently read as zero.
+            minutes = int(cast(timedelta, entry.play_duration).total_seconds() // 60)
             last_played_dt = getattr(entry, "last_played_date_time", None)
             last_played = last_played_dt.date().isoformat() if last_played_dt else None
             results.append(

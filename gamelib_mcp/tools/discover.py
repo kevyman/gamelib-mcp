@@ -1,6 +1,8 @@
 """discover_games: unified vibe / taste / value discovery tool."""
 
 import json
+import sqlite3
+from collections.abc import Sequence
 from typing import Literal
 
 from fastmcp.exceptions import ToolError
@@ -378,7 +380,7 @@ async def _load_matched_tags(game_ids: list[int]) -> dict[int, list[dict]]:
 
 
 async def _format_rows(
-    rows,
+    rows: Sequence[sqlite3.Row],
     hw_pref: list[str] | None = None,
     matched_tags: dict[int, list[dict]] | None = None,
     include_value_note: bool = False,

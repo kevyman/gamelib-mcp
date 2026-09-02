@@ -16,9 +16,12 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from weakref import WeakKeyDictionary
+
+from fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
 
@@ -525,7 +528,7 @@ async def _cancel_task(task: asyncio.Task | None) -> None:
 
 
 @asynccontextmanager
-async def lifespan(app):
+async def lifespan(app: FastMCP) -> AsyncIterator[None]:
     """Startup: init DB, sync library if stale, kick off HLTB pre-warm."""
     from .data.db import (
         clear_all_enrichment_claims,

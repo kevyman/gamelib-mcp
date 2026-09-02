@@ -1,5 +1,7 @@
 """search_games and get_library_stats tools."""
 
+import sqlite3
+from collections.abc import Sequence
 from typing import Literal
 
 from fastmcp.exceptions import ToolError
@@ -672,7 +674,9 @@ async def get_library_stats(
     }
 
 
-async def _format_rows(rows, response_format: ResponseFormat = "detailed") -> list[dict]:
+async def _format_rows(
+    rows: Sequence[sqlite3.Row], response_format: ResponseFormat = "detailed"
+) -> list[dict]:
     platforms_by_game = (
         await load_platforms_for_games(row["game_id"] for row in rows)
         if response_format == "detailed"
@@ -684,7 +688,9 @@ async def _format_rows(rows, response_format: ResponseFormat = "detailed") -> li
     ]
 
 
-def _format_game(row, platforms: list[dict], response_format: ResponseFormat) -> dict:
+def _format_game(
+    row: sqlite3.Row, platforms: list[dict], response_format: ResponseFormat
+) -> dict:
     row_keys = set(row.keys())
     play_state = row["play_state"] if "play_state" in row_keys else None
     game = {
