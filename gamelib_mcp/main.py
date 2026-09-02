@@ -214,8 +214,8 @@ async def search_games(
 
     `queries` resolves several titles at once, each with the same matching,
     capped at limit_per_query, under results_by_query keyed by the original
-    string. The other filters apply to `query` mode only.
-    
+    string. The other filters apply to `query` mode only. response_format=
+    concise omits each game's platforms array.
     """
     from .tools.library import search_games as _search
     from .tools.library import search_games_batch as _many
@@ -263,8 +263,7 @@ async def get_library_stats(
     match case-insensitively and a game must carry EVERY listed entry (e.g.
     genres=["RPG"] with max_hltb_hours=10). Results are paged with
     total_matches/has_more, and the addons block is always present, whatever
-    `content` says.
-    
+    `content` says. response_format=concise omits each game's platforms array.
     """
     from .tools.library import get_library_stats as _stats
     return await _stats(
@@ -325,7 +324,6 @@ async def get_game_detail(
     enrichment="skipped"), so bulk fields may be null for a never-enriched game
     — call this on that one game to force the fetch. enrich=True with items is
     an error, not a silent fan-out.
-    
     """
     from .tools.detail import get_game_detail as _detail
     from .tools.detail import get_game_details_batch as _many
@@ -382,8 +380,7 @@ async def discover_games(
     platinum, gold, silver, bronze, borked. Results carry matched_tags
     explaining WHY each game ranks, match_percent (normalized 0-100 against the
     library-wide best match) and suggested_platform from the hardware
-    preference.
-    
+    preference. response_format=concise omits platforms and tags.
     """
     from .tools.discover import discover_games as _discover
     return await _discover(
@@ -479,7 +476,6 @@ async def get_stats(
     whether the game pointed at instead has been played since — a platform
     reporting no last_played is unknown_count, counted on neither side. Every
     list is capped at limit with its true count and a truncated flag.
-    
     """
     # A parameter that belongs to another report is a caller error, not
     # something to drop on the floor: silently ignoring year= on report="series"
@@ -584,7 +580,6 @@ async def rate_game(
     recomputed ONCE after the loop rather than per game.
 
     dry_run=True validates and resolves without writing, in either mode.
-    
     """
     from .tools.ratings import rate_game as _rate
     from .tools.ratings import rate_games_batch as _many
@@ -622,7 +617,6 @@ async def discover_series_gaps(
     Requires IGDB credentials (TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET) — returns
     status="unconfigured" rather than erroring when absent. A per-series IGDB
     failure lands in errors without failing the call.
-    
     """
     from .tools.series import discover_series_gaps as _series_gaps
     return await _series_gaps(
@@ -664,7 +658,6 @@ async def sync(
     platforms must be syncable for EVERY selected target: combining "wishlist"
     with a library-only platform (e.g. ["gog"]) is rejected without syncing
     anything — use one call per target instead.
-    
     """
     from .tools.admin import (
         refresh_library as _refresh,
@@ -709,7 +702,6 @@ async def get_sync_status() -> SyncStatusResponse:
     (pending/running/done/error), last_success_at and any error. status="idle"
     means the sync itself has finished; a follow-up sync call may still briefly
     report "already_running" while background enrichment drains.
-    
     """
     from .tools.admin import get_sync_status as _status
     return await _status()
@@ -756,7 +748,6 @@ async def get_scrape_config(provider: str, diagnose: bool = False) -> GetScrapeC
     manage_scrape_config. Only the declarative layer (selectors, regexes, URL
     paths, JSON keys) is healable; layout changes that break traversal logic
     need a code change.
-    
     """
     from .tools.scrape_admin import (
         diagnose_scrape as _diagnose,
@@ -803,7 +794,6 @@ async def manage_scrape_config(
     version becomes active again, or the provider returns to code defaults
     (always recoverable). Each rollback walks back ONE step and is NOT
     idempotent, so re-check get_scrape_config before retrying one.
-    
     """
     from .tools.scrape_admin import (
         approve_scrape_config as _approve,
@@ -893,7 +883,6 @@ async def check_library(
     remove from a library-wide muted list (tool config, not library data),
     post-filtering every future run's findings. list_checks=True returns only
     the catalog and runs nothing else.
-    
     """
     from .tools.checks import run_library_checks
 
@@ -931,7 +920,6 @@ async def split_game(
     Pass a distinct new_name (e.g. "Dead Space (2023)") so the new game does not
     re-resolve onto the source's identity. Ratings and the source's game-level
     fields stay on the source. dry_run=True previews.
-    
     """
     from .tools.admin import split_game as _split
     return await _split(source_game_id, platform, identifier_values, new_name, dry_run)
@@ -990,7 +978,6 @@ async def get_wishlist(
     is recommended. Prices are NOT currency-converted, so the ratio and
     max_price compare raw numbers. limit/offset apply to the default listing
     only.
-    
     """
     if with_prices:
         from .tools.deals import get_wishlist_deals as _deals
@@ -1026,7 +1013,6 @@ async def get_play_history(
     cumulative, so a correction to a stored total would otherwise read as a play
     session in whichever window the correcting sync landed in. Platforms
     reporting no last_played are unaffected.
-    
     """
     from .tools.history import get_play_history as _get_play_history
     return await _get_play_history(days, start_date, end_date, platform, limit)
@@ -1096,7 +1082,6 @@ async def get_assessment_context(
     assessment_id void_assessment takes, capped with count/truncated. When it is
     present, LEAD with the prior verdict and what has changed since (price,
     patches, review trajectory) instead of re-deriving the call blind.
-    
     """
     from .tools.assessment import get_assessment_context as _assess
     return await _assess(
@@ -1206,7 +1191,6 @@ async def record_assessment(
 
     `items` (max 200) — a list of these same keys — records several at once,
     status ok/error per item in input order; one bad item never fails the rest.
-    
     """
     from .tools.assessment import record_assessment as _record
     from .tools.assessment import record_assessments_batch as _many
@@ -1263,7 +1247,6 @@ async def void_assessment(assessment_id: int) -> VoidAssessmentResponse:
     Answers with the deleted row plus a delete_game suggested_action when the
     void left a minted row with no ownership, wishlist entry or assessment
     behind. Repeating the call errors: the row is gone.
-    
     """
     from .tools.assessment import void_assessment as _void
     return await _void(assessment_id)
@@ -1286,7 +1269,6 @@ async def get_skill(skill: str | None = None, path: str = "SKILL.md") -> GetSkil
     copy IS present but this server's index reports a newer version, prefer the
     fetched text. Clients that can read MCP resources may read
     skill://<name>/<path> and skill://index.json instead; identical bytes.
-    
     """
     from .skill_resources import SKILLS_DIR, read_skill_file, skill_index_payload
 
@@ -1399,7 +1381,6 @@ async def add_game_to_platform(
     are computed against the current database, so in `items` mode a
     to-be-created game reports game_id null and cross-item interactions are not
     simulated.
-    
     """
     from .tools.platforms import (
         add_game_to_platform as _add,
@@ -1505,7 +1486,6 @@ async def update_game(
     Preview statuses are computed against the current database, so in `items`
     mode an item depending on an earlier item's write may preview ok yet error
     in the wet run.
-    
     """
     from .tools.platforms import update_game as _update
     from .tools.platforms import update_games_batch as _many
@@ -1604,7 +1584,6 @@ async def set_acquisition(
     fuzzy matching all miss; it defaults False here, unlike import_purchases.
     dry_run=True runs the identical matching path without writing, so preview
     counters are faithful.
-    
     """
     from .tools.acquisition import (
         set_acquisition as _set_acquisition,
@@ -1689,7 +1668,6 @@ async def set_playtime(
     dry_run=True validates and simulates the post-write state without writing;
     in `items` mode an item depending on an earlier item's write may preview as
     error where the wet run succeeds.
-    
     """
     from .tools.platforms import set_playtime as _set_playtime
     from .tools.platforms import set_playtime_batch as _many
@@ -1733,7 +1711,6 @@ async def set_switch2_playtime_baseline(
     16-character hex Nintendo title id, from the game's eShop page URL) is only
     needed for a game Parental Controls has never seen, and is then recorded so
     future sync and history bridging work. dry_run=True previews the delta math.
-    
     """
     from .tools.platforms import set_switch2_playtime_baseline as _set_baseline
     return await _set_baseline(name, game_id, total_hours, application_id, dry_run)
@@ -1790,7 +1767,6 @@ async def split_bundle_acquisition(
     collapse onto "BioShock"). reconciled is false when the persisted total
     falls short — a share with no game to land on, or a fill-only constituent
     that already had a price (rerun with overwrite=True).
-    
     """
     from .tools.acquisition import split_bundle_acquisition as _split_bundle
     return await _split_bundle(
@@ -1872,7 +1848,6 @@ async def import_purchases(
     skipped and bundles_needing_split are each CAPPED at 200 entries per source,
     with <list>_count the true total and <list>_truncated the flag; the counters
     and totals always report the true numbers.
-    
     """
     from .tools.acquisition import import_purchases as _import_purchases
     return await _import_purchases(
@@ -1913,7 +1888,6 @@ async def merge_games(
     computed against the CURRENT database, so a chained item whose source or
     target was an earlier item's target (A→B then B→C) may understate the wet
     run — those carry chained_preview=true.
-    
     """
     from .tools.admin import merge_games as _merge
     from .tools.admin import merge_games_batch as _many
@@ -1958,7 +1932,6 @@ async def delete_game(
     and confirm. A parent of nested content gets status="refused" and never
     aborts the rest; that guard ignores ids earlier in the same call, so a
     [child, parent] list previews and deletes both.
-    
     """
     from .tools.admin import delete_game as _delete
     from .tools.admin import delete_games_batch as _many
@@ -1999,7 +1972,6 @@ async def create_session_ingest_link(provider: str) -> SessionIngestLinkResponse
     server restart. Without MCP_PUBLIC_BASE_URL (local disabled-auth mode) the
     URL falls back to http://localhost:PORT and only works from the server's own
     machine.
-    
     """
     from .tools.admin import create_session_ingest_link as _create_link
     return await _create_link(provider)

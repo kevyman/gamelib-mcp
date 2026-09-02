@@ -127,16 +127,17 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
             self.assertIn(f'{verdict}: ["{label}", "{cls}"]', apps_eval.EVAL_CARD_HTML)
 
     def test_render_branches_cover_the_whole_response_contract(self) -> None:
-        # package -> full card, voided -> note, verdict -> note, else empty.
+        # package -> full card, verdict -> note, else empty. There is no
+        # "voided" branch: void_assessment is its own tool and is not bound to
+        # the card, so record_assessment responses never carry that key.
         for marker in (
             "if (data && data.package)",
-            "else if (data && data.voided)",
             "else if (data && data.verdict)",
-            '"Assessment voided"',
             '"Recorded: "',
             '"Nothing to display."',
         ):
             self.assertIn(marker, apps_eval.EVAL_CARD_HTML)
+        self.assertNotIn("data.voided", apps_eval.EVAL_CARD_HTML)
 
     def test_trailer_falls_back_when_the_media_element_fails(self) -> None:
         # Valve's constructed mp4 URLs are undocumented legacy surface and a

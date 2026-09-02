@@ -44,7 +44,7 @@ thing in bulk in a single call — see [ADR 0004](docs/adr/0004-consolidated-too
 | `get_scrape_config` / `manage_scrape_config` | Inspect or heal the declarative scrape config |
 | `get_assessment_context` / `record_assessment` / `void_assessment` | Game-quality evaluation: the library-grounded context for a verdict, recording the verdict's components (rendered as an evaluation card), and hard-deleting a misfiled one |
 | `get_skill` | Load the gaming-skills methodology this server is the canonical home of (`game-quality`, `backlog-triage`, `bundle-evaluation`) |
-| `set_switch2_playtime_baseline` | Pin the Switch playtime total the Parental Controls history starts counting from |
+| `set_switch2_playtime_baseline` | Record pre-tracking Switch hours as a baseline that future Parental Controls syncs add to |
 
 ## Quick Start
 
