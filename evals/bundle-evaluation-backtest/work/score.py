@@ -175,7 +175,7 @@ def main():
     print(f"Dismissed a hit (filler -> wanted): {len(out['failure_buckets'].get('dismissed_a_hit', []))}")
     for x in out["failure_buckets"].get("dismissed_a_hit", []):
         print("   ", x)
-    print(f"Explicit negatives, how tiered: ")
+    print("Explicit negatives, how tiered: ")
     for x in out["failure_buckets"].get("explicit_negative", []):
         print("   ", x)
     if unmatched:

@@ -1,8 +1,8 @@
 """A fresh install and a migrated install must end up with the same schema.
 
 ``_run_migrations`` has two paths. A database with no ``games`` table is
-"fresh": it gets ``_V39_SCHEMA_DDL`` executed straight over it and is stamped
-at ``SCHEMA_VERSION``, never touching the 38 chained ``_migrate_vN_to_vN+1``
+"fresh": it gets ``_V40_SCHEMA_DDL`` executed straight over it and is stamped
+at ``SCHEMA_VERSION``, never touching the 39 chained ``_migrate_vN_to_vN+1``
 steps. Production came up the other way, one step at a time. Nothing until now
 compared the results, so a column added to the DDL but not to a migration step
 (or the reverse) would ship silently and only surface as a missing-column error
@@ -19,8 +19,8 @@ What is compared, per object:
 
 Column ORDER within a table is deliberately excluded: ``ALTER TABLE ADD
 COLUMN`` appends, so the migrated database carries columns in the order they
-were introduced while a fresh one carries the DDL's order. Five tables differ
-that way today (games, game_platforms, game_assessments,
+were introduced while a fresh one carries the DDL's order. Six tables differ
+that way today (games, game_platforms, game_prices, game_assessments,
 game_platform_enrichment, steam_platform_data) and it is harmless — SQLite
 addresses columns by name, and every query in this codebase names them.
 """
@@ -115,7 +115,7 @@ class _Snapshot:
 
 
 class SchemaParityTests(unittest.IsolatedAsyncioTestCase):
-    """The fresh-install DDL and the 38-step chain must converge."""
+    """The fresh-install DDL and the 39-step chain must converge."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -220,7 +220,7 @@ class SchemaParityTests(unittest.IsolatedAsyncioTestCase):
     def test_column_order_may_differ_but_never_the_column_set(self):
         # The one tolerated divergence, asserted rather than assumed: ALTER
         # TABLE ADD COLUMN appends, so the migrated database lists columns in
-        # the order they were introduced. Five tables differ that way today.
+        # the order they were introduced. Six tables differ that way today.
         # Whatever the order, the same names must be present on both paths.
         for table in sorted(set(self.fresh.column_order) & set(self.chained.column_order)):
             with self.subTest(table=table):

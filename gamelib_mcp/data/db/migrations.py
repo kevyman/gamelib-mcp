@@ -5,7 +5,7 @@ of ``__init__.py`` and none of it is reachable outside ``migrate_db``. What
 lives here is shape detection for pre-``user_version`` databases
 (``_detect_schema_state``), the pre-migration snapshot
 (``_snapshot_before_migration``), the ``_MIGRATION_STEPS`` chain (legacy -> v1
-plus v1 -> v2 … v38 -> v39) and the reconciliation tail that runs after it
+plus v1 -> v2 … v39 -> v40) and the reconciliation tail that runs after it
 (``_run_migrations``).
 
 The façade keeps the layer this depends on — ``SCHEMA_VERSION``,
@@ -40,7 +40,7 @@ from .schema import (
     _V2_SCHEMA_DDL,
     _V10_SCHEMA_DDL,
     _V22_SCHEMA_DDL,
-    _V39_SCHEMA_DDL,
+    _V40_SCHEMA_DDL,
 )
 
 
@@ -1823,6 +1823,43 @@ async def _migrate_v38_to_v39(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v39_to_v40(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add ITAD history/expiry to game_prices and the alert debounce to
+    game_wishlist (additive, no backfill).
+
+    game_prices.history_low/history_low_currency/deal_ends_at stay NULL until
+    the next ITAD refresh writes them — they are facts about a price fetched
+    at a moment in time, and inventing them for a cached row would claim ITAD
+    said something it never did. The DekuDeals (switch2) path never fills them
+    at all; that scrape has no history-of-record behind it.
+
+    game_wishlist.last_alerted_at/last_alert_key stay NULL, which is exactly
+    "never alerted about this game" — the correct starting state, and the one
+    that lets the first deal_alerts run speak.
+    """
+    if progress is not None:
+        progress("Migrating to v40: add price history/expiry and wishlist alert state.")
+
+    price_cols = await _table_columns(db, "game_prices")
+    if price_cols:
+        for column, kind in (
+            ("history_low", "REAL"),
+            ("history_low_currency", "TEXT"),
+            ("deal_ends_at", "TEXT"),
+        ):
+            if column not in price_cols:
+                await db.execute(f"ALTER TABLE game_prices ADD COLUMN {column} {kind}")
+
+    wishlist_cols = await _table_columns(db, "game_wishlist")
+    if wishlist_cols:
+        for column in ("last_alerted_at", "last_alert_key"):
+            if column not in wishlist_cols:
+                await db.execute(f"ALTER TABLE game_wishlist ADD COLUMN {column} TEXT")
+
+    await _set_user_version(db, 40)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1859,7 +1896,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V39_SCHEMA_DDL)
+    await db.executescript(_V40_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -2019,6 +2056,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (36, _migrate_v36_to_v37),
     (37, _migrate_v37_to_v38),
     (38, _migrate_v38_to_v39),
+    (39, _migrate_v39_to_v40),
 )
 
 
@@ -2092,7 +2130,7 @@ async def _run_migrations(
         )
 
     if detected_state == "fresh":
-        await db.executescript(_V39_SCHEMA_DDL)
+        await db.executescript(_V40_SCHEMA_DDL)
         fts_enabled = await _sync_fts_index(db)
         await _sync_query_views(db)
         await _set_user_version(db, SCHEMA_VERSION)
@@ -2130,7 +2168,7 @@ async def _run_migrations(
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V39_SCHEMA_DDL)
+    await db.executescript(_V40_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION

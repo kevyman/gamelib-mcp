@@ -137,7 +137,7 @@ XBOX_TITLE_ID = "xbox_title_id"
 # module load time, so this package must never import back from nintendo.py.
 # Must stay in sync with that constant's value.
 NINTENDO_TITLE_ID_TYPE = "nintendo_title_id"
-SCHEMA_VERSION = 39
+SCHEMA_VERSION = 40
 
 
 def normalize_identifier_value(identifier_type: str, value: str) -> str:
@@ -340,6 +340,7 @@ from .schema import (
     _V37_SCHEMA_DDL,
     _V38_SCHEMA_DDL,
     _V39_SCHEMA_DDL,
+    _V40_SCHEMA_DDL,
 )
 
 
@@ -599,11 +600,13 @@ from .queries import (
     get_steam_platform_row_by_appid,
     get_wishlist_game_id_by_store_identifier,
     has_nested_children,
+    load_cheapest_cached_price,
     load_latest_assessments,
     load_platforms_for_games,
     load_recent_assessments,
     load_related_content_for_games,
     load_series_for_games,
+    load_wishlist_alert_state,
     load_wishlist_with_prices,
     nesting_substance_conflict,
     set_meta,
@@ -631,6 +634,7 @@ from .upserts import (
     set_platform_acquisition,
     set_platform_ownership,
     set_steam_delisted,
+    stamp_wishlist_alerts,
     upsert_game,
     upsert_game_alias,
     upsert_game_platform,

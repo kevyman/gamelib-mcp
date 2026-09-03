@@ -1,0 +1,5 @@
+# Metrics are committable; snapshots and per-game outputs are personal data.
+results/
+*.sqlite
+*.db
+*.bak

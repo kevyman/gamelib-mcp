@@ -749,7 +749,8 @@ async def load_wishlist_with_prices(platform: str | None) -> list[aiosqlite.Row]
                        ) AS steam_appid,
                        gp.platform AS price_platform,
                        gp.shop, gp.price, gp.regular_price, gp.cut_pct,
-                       gp.currency, gp.deal_url, gp.fetched_at
+                       gp.currency, gp.deal_url, gp.history_low,
+                       gp.history_low_currency, gp.deal_ends_at, gp.fetched_at
                 FROM game_wishlist w
                 JOIN games g ON g.id = w.game_id
                 LEFT JOIN game_prices gp ON gp.game_id = w.game_id
@@ -759,6 +760,53 @@ async def load_wishlist_with_prices(platform: str | None) -> list[aiosqlite.Row]
         )
     return rows
 
+
+
+async def load_cheapest_cached_price(game_id: int) -> dict | None:
+    """The cheapest CACHED price row for one game, or None if nothing is cached.
+
+    A pure cache read — no provider fetch, no staleness verdict (the caller
+    owns the TTL, since only it knows what "stale" means for its own answer).
+    NULL-price rows are skipped: in ``game_prices`` a NULL price is a NEGATIVE
+    cache entry (a confirmed DekuDeals miss), not a free game.
+    """
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            """SELECT platform, shop, price, regular_price, cut_pct, currency,
+                      deal_url, history_low, history_low_currency, deal_ends_at,
+                      fetched_at
+               FROM game_prices
+               WHERE game_id = ? AND price IS NOT NULL
+               ORDER BY price ASC, id ASC
+               LIMIT 1""",
+            (game_id,),
+        )
+    return dict(row) if row else None
+
+
+async def load_wishlist_alert_state(game_ids: Iterable[int]) -> dict[int, dict]:
+    """Per game, the last deal alert its wishlist rows recorded — one query.
+
+    A game can be wishlisted on several platforms, but an alert is about the
+    GAME ("Hades hit your target"), so the newest stamp across its rows is the
+    answer; games never alerted about are absent. Returns
+    {game_id: {"last_alerted_at", "last_alert_key"}}.
+    """
+    ids = list(dict.fromkeys(game_ids))
+    if not ids:
+        return {}
+    placeholders = ", ".join("?" * len(ids))
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            f"""SELECT game_id, MAX(last_alerted_at) AS last_alerted_at,
+                       last_alert_key
+                FROM game_wishlist
+                WHERE game_id IN ({placeholders})
+                  AND last_alert_key IS NOT NULL
+                GROUP BY game_id""",
+            ids,
+        )
+    return {row["game_id"]: dict(row) for row in rows}
 
 
 # ── Recorded assessments (ADR 0006 decision 5) ───────────────────────────────

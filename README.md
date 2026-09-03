@@ -102,6 +102,7 @@ All configuration is via environment variables. Production starts from [.env.exa
 | `EPIC_LEGENDARY_HOST_PATH` | optional | Legendary config dir for Epic sync |
 | `LGOGDOWNLOADER_HOST_PATH` | optional | lgogdownloader config dir for GOG sync |
 | `HARDWARE_PREFERENCE` | optional | Platform priority for recommendations, e.g. `switch2,steam_deck,ps5` |
+| `DEAL_ALERT_WEBHOOK_URL` | optional | Discord/Slack incoming webhook for wishlist deal alerts (target price reached, or an all-time low on discount); empty disables them |
 
 ## Docker
 

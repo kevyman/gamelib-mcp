@@ -1,6 +1,6 @@
 """Every seedable schema version must migrate to current WITHOUT losing rows.
 
-``_MIGRATION_STEPS`` registers 38 transitions. ``tests/test_db_migration.py``
+``_MIGRATION_STEPS`` registers 39 transitions. ``tests/test_db_migration.py``
 covers the ones with interesting data semantics, and the rest are exercised
 only as "the chain ran and did not raise" — from v1, so a step that drops and
 recreates a table in the middle of the chain would still pass while silently
@@ -101,7 +101,7 @@ class SeedableVersionSetTests(unittest.TestCase):
         )
 
     def test_no_ddl_constant_claims_a_version_beyond_the_current_schema(self):
-        # A stray _V40_SCHEMA_DDL would mean the DDL moved ahead of
+        # A stray _V41_SCHEMA_DDL would mean the DDL moved ahead of
         # SCHEMA_VERSION and fresh installs are being stamped a version behind.
         self.assertLessEqual(max(seedable_versions()), db_module.SCHEMA_VERSION)
 
