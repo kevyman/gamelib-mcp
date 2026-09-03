@@ -139,6 +139,58 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("library_sync_finished_at", finished)
         mock_drain.assert_awaited_once()
 
+    async def test_run_startup_refresh_runs_deal_alerts_when_configured(self) -> None:
+        refresh_result = {"steam": {"games_upserted": 1, "synced_at": "2026-09-02T00:00:00+00:00"}}
+        alerts = AsyncMock(return_value={"configured": True, "sent": 2})
+
+        with (
+            patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()),
+            patch("gamelib_mcp.lifecycle._admin_refresh_library", AsyncMock(return_value=refresh_result)),
+            patch("gamelib_mcp.lifecycle._drain_background_enrich_reruns", AsyncMock()),
+            patch("gamelib_mcp.deal_alerts.is_deal_alerts_configured", return_value=True),
+            patch("gamelib_mcp.deal_alerts.run_deal_alerts", alerts),
+        ):
+            result = await _run_startup_refresh()
+
+        alerts.assert_awaited_once()
+        self.assertEqual(result, refresh_result)
+
+    async def test_run_startup_refresh_skips_deal_alerts_when_unconfigured(self) -> None:
+        alerts = AsyncMock()
+
+        with (
+            patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()),
+            patch("gamelib_mcp.lifecycle._admin_refresh_library", AsyncMock(return_value={})),
+            patch("gamelib_mcp.lifecycle._drain_background_enrich_reruns", AsyncMock()),
+            patch("gamelib_mcp.deal_alerts.is_deal_alerts_configured", return_value=False),
+            patch("gamelib_mcp.deal_alerts.run_deal_alerts", alerts),
+        ):
+            await _run_startup_refresh()
+
+        alerts.assert_not_awaited()
+
+    async def test_deal_alert_failure_never_fails_the_refresh(self) -> None:
+        # run_deal_alerts swallows its own failures; this pins the second belt
+        # in lifecycle, so even a broken alert module leaves the sync green.
+        refresh_result = {"steam": {"games_upserted": 1, "synced_at": "2026-09-02T00:00:00+00:00"}}
+
+        with (
+            patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()) as mock_set_meta_many,
+            patch("gamelib_mcp.lifecycle._admin_refresh_library", AsyncMock(return_value=refresh_result)),
+            patch("gamelib_mcp.lifecycle._drain_background_enrich_reruns", AsyncMock()),
+            patch("gamelib_mcp.deal_alerts.is_deal_alerts_configured", return_value=True),
+            patch(
+                "gamelib_mcp.deal_alerts.run_deal_alerts",
+                AsyncMock(side_effect=RuntimeError("webhook exploded")),
+            ),
+        ):
+            result = await _run_startup_refresh()
+
+        self.assertEqual(result, refresh_result)
+        finished = mock_set_meta_many.await_args_list[1].args[0]
+        self.assertEqual(finished["library_sync_status"], "idle")
+        self.assertIsNone(finished["library_sync_error"])
+
     async def test_run_startup_refresh_records_partial_failure_summary(self) -> None:
         refresh_result = {
             "steam": {"games_upserted": 3, "synced_at": "2026-04-07T00:00:00+00:00"},

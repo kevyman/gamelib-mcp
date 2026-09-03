@@ -40,6 +40,9 @@ async def _seed_price(
     currency: str = "USD",
     deal_url: str = "https://example.com/deal",
     fetched_at: str | None = None,
+    history_low: float | None = None,
+    history_low_currency: str | None = None,
+    deal_ends_at: str | None = None,
 ) -> None:
     await db_module.upsert_game_prices(
         [
@@ -52,6 +55,9 @@ async def _seed_price(
                 "cut_pct": cut_pct,
                 "currency": currency,
                 "deal_url": deal_url,
+                "history_low": history_low,
+                "history_low_currency": history_low_currency,
+                "deal_ends_at": deal_ends_at,
             }
         ]
     )
@@ -863,6 +869,134 @@ class DealsPureHelperTests(unittest.TestCase):
         self.assertEqual(chosen["platform"], "switch2")
         self.assertIn("also preferred platform", reason)
         self.assertIn("switch2", reason)
+
+
+class HistoryLowAndExpiryTests(ToolDBTestCase):
+    """ITAD's all-time low and the deal's expiry, cached and surfaced."""
+
+    @staticmethod
+    def _no_fetch():
+        return (
+            patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock()),
+            patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()),
+            patch("gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()),
+            patch("gamelib_mcp.tools.deals.is_itad_configured", return_value=True),
+        )
+
+    async def _deal_for(self, game_id: int) -> dict:
+        itad, deku, search, configured = self._no_fetch()
+        with itad, deku, search, configured:
+            result = await deals.get_wishlist_deals()
+        return next(d for d in result["deals"] if d["game_id"] == game_id)
+
+    async def test_price_at_the_all_time_low_is_flagged(self):
+        game_id = await seed_game("Hollow Knight")
+        await _seed_wishlist(game_id, "steam", store_identifier="367520")
+        await _seed_price(
+            game_id, "steam", "Steam", 7.49, cut_pct=50, currency="EUR",
+            history_low=7.49, history_low_currency="EUR",
+            deal_ends_at="2026-09-15T17:00:00+00:00",
+        )
+
+        entry = await self._deal_for(game_id)
+        self.assertEqual(entry["history_low"], 7.49)
+        self.assertEqual(entry["history_low_currency"], "EUR")
+        self.assertEqual(entry["deal_ends_at"], "2026-09-15T17:00:00+00:00")
+        self.assertTrue(entry["at_history_low"])
+
+    async def test_price_above_the_low_is_not_flagged(self):
+        game_id = await seed_game("Above The Low")
+        await _seed_wishlist(game_id, "steam", store_identifier="1")
+        await _seed_price(
+            game_id, "steam", "Steam", 12.99, currency="EUR",
+            history_low=7.49, history_low_currency="EUR",
+        )
+
+        entry = await self._deal_for(game_id)
+        self.assertEqual(entry["history_low"], 7.49)
+        self.assertFalse(entry["at_history_low"])
+
+    async def test_row_without_history_reports_nulls_and_false(self):
+        # The DekuDeals (switch2) shape: a real price, no history behind it.
+        # "No known low" must never read as "lowest ever".
+        game_id = await seed_game("Pikmin 4")
+        await _seed_wishlist(game_id, "switch2", source="dekudeals")
+        await _seed_price(game_id, "switch2", "dekudeals", 39.99, currency="EUR")
+
+        entry = await self._deal_for(game_id)
+        self.assertIsNone(entry["history_low"])
+        self.assertIsNone(entry["history_low_currency"])
+        self.assertIsNone(entry["deal_ends_at"])
+        self.assertFalse(entry["at_history_low"])
+
+    async def test_mismatched_currency_never_claims_the_low(self):
+        # Prices are never converted here, so a USD low proves nothing about a
+        # EUR price even when the number is lower.
+        game_id = await seed_game("Cross Currency")
+        await _seed_wishlist(game_id, "steam", store_identifier="2")
+        await _seed_price(
+            game_id, "steam", "Steam", 5.00, currency="EUR",
+            history_low=9.99, history_low_currency="USD",
+        )
+
+        entry = await self._deal_for(game_id)
+        self.assertFalse(entry["at_history_low"])
+
+    async def test_alternatives_carry_the_same_fields(self):
+        game_id = await seed_game("Two Platforms")
+        await _seed_wishlist(game_id, "steam", store_identifier="3")
+        await _seed_wishlist(game_id, "switch2", source="dekudeals")
+        await _seed_price(
+            game_id, "steam", "Steam", 5.00, currency="EUR",
+            history_low=5.00, history_low_currency="EUR",
+            deal_ends_at="2026-09-20T00:00:00+00:00",
+        )
+        await _seed_price(game_id, "switch2", "dekudeals", 29.99, currency="EUR")
+
+        entry = await self._deal_for(game_id)
+        self.assertEqual(entry["platform"], "steam")
+        self.assertTrue(entry["at_history_low"])
+        alternative = entry["alternatives"][0]
+        self.assertEqual(alternative["platform"], "switch2")
+        self.assertIsNone(alternative["history_low"])
+        self.assertIsNone(alternative["deal_ends_at"])
+
+    async def test_itad_refresh_persists_history_and_expiry(self):
+        game_id = await seed_game("Fresh From ITAD")
+        await _seed_wishlist(game_id, "steam", store_identifier="99")
+
+        info = PriceInfo(
+            "Steam", 4.99, 19.99, 75, "USD", "https://store/99",
+            history_low=4.99,
+            history_low_currency="USD",
+            deal_ends_at="2026-09-30T17:00:00+00:00",
+        )
+        with patch(
+            "gamelib_mcp.tools.deals.fetch_steam_prices",
+            AsyncMock(return_value={99: info}),
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.is_itad_configured", return_value=True
+        ):
+            result = await deals.get_wishlist_deals()
+
+        entry = next(d for d in result["deals"] if d["game_id"] == game_id)
+        self.assertTrue(entry["at_history_low"])
+        self.assertEqual(entry["deal_ends_at"], "2026-09-30T17:00:00+00:00")
+
+        # ...and the cache carries them, so the next (cached) call agrees.
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT history_low, history_low_currency, deal_ends_at"
+                " FROM game_prices WHERE game_id = ?",
+                (game_id,),
+            )
+        self.assertEqual(row["history_low"], 4.99)
+        self.assertEqual(row["history_low_currency"], "USD")
+        self.assertEqual(row["deal_ends_at"], "2026-09-30T17:00:00+00:00")
 
 
 if __name__ == "__main__":

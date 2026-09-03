@@ -88,6 +88,26 @@ def _below_assessed_target(options: list[dict], assessment: dict | None) -> bool
     return bool(prices) and min(prices) <= assessment["target_price"]
 
 
+def _at_history_low(option: dict) -> bool:
+    """True when this option's price has reached ITAD's all-time low for the game.
+
+    Same currency discipline as ``_below_assessed_target``: the low is stored
+    with its own currency and nothing here converts, so a comparison across
+    two currencies — or against an unknown one — is refused rather than
+    approximated. A missing history_low (every DekuDeals row, and any ITAD row
+    whose payload carried none) is not evidence either way, so it answers
+    False, never "no known low, therefore lowest ever".
+    """
+    low = option.get("history_low")
+    price = option.get("price")
+    if low is None or price is None:
+        return False
+    low_currency = option.get("history_low_currency")
+    if low_currency is None or option.get("currency") != low_currency:
+        return False
+    return price <= low
+
+
 def _fetched_at_is_stale(fetched_at: str | None, hours: int = _PRICE_TTL_HOURS) -> bool:
     """True if fetched_at is missing, unparseable, or older than `hours`
     (the price TTL by default; miss markers get their own longer window)."""
@@ -328,6 +348,14 @@ async def get_wishlist_deals(
     `below_assessed_target: true`. Annotation only — it never changes which
     option is recommended or which entries the filters keep.
 
+    Every priced option also carries ITAD's all-time low (`history_low` plus
+    its own `history_low_currency` — never converted) and `deal_ends_at`, the
+    winning deal's expiry when it has one; the entry's `at_history_low` says
+    whether the RECOMMENDED option has reached that low in the same currency.
+    The DekuDeals (switch2) scrape has no history-of-record behind it, so its
+    rows leave all three NULL and answer `at_history_low: false` — "no known
+    low" is never read as "lowest ever".
+
     platform filters by where the game is WISHLISTED, not where the
     recommendation lands. max_price/min_cut_pct keep a game if
     ANY of its priced options — recommended or alternative — satisfies both
@@ -431,6 +459,9 @@ async def get_wishlist_deals(
                         "cut_pct": info.cut_pct,
                         "currency": info.currency,
                         "deal_url": info.deal_url,
+                        "history_low": info.history_low,
+                        "history_low_currency": info.history_low_currency,
+                        "deal_ends_at": info.deal_ends_at,
                     }
                     for appid, info in prices.items()
                     if appid in steam_needs_refresh
@@ -528,6 +559,9 @@ async def get_wishlist_deals(
                     "cut_pct": cheapest["cut_pct"],
                     "currency": cheapest["currency"],
                     "deal_url": cheapest["deal_url"],
+                    "history_low": cheapest["history_low"],
+                    "history_low_currency": cheapest["history_low_currency"],
+                    "deal_ends_at": cheapest["deal_ends_at"],
                 }
             )
         if not options:
@@ -542,6 +576,7 @@ async def get_wishlist_deals(
             "wishlisted_on": sorted(state["wishlisted_on"]),
             "recommendation_reason": reason,
             "alternatives": [o for o in options if o is not recommended],
+            "at_history_low": _at_history_low(recommended),
         }
         assessment = assessments.get(game_id)
         if assessment is not None:

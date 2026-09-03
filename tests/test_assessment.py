@@ -552,5 +552,108 @@ class GameBlockAndPaceTests(ToolDBTestCase):
         self.assertEqual(pace["most_played"]["name"], "Active Game")
 
 
+class CachedDealBlockTests(ToolDBTestCase):
+    """The `deal` block: cache only, cheapest row, honest about its own age."""
+
+    @staticmethod
+    async def _cache_price(game_id: int, **overrides) -> None:
+        from gamelib_mcp.data import db as db_module
+
+        row = {
+            "game_id": game_id,
+            "platform": "steam",
+            "shop": "Steam",
+            "price": 9.99,
+            "regular_price": 19.99,
+            "cut_pct": 50,
+            "currency": "EUR",
+            "deal_url": "https://store/1",
+            "history_low": 7.49,
+            "history_low_currency": "EUR",
+            "deal_ends_at": "2026-09-15T17:00:00+00:00",
+        }
+        fetched_at = overrides.pop("fetched_at", None)
+        row.update(overrides)
+        await db_module.upsert_game_prices([row])
+        if fetched_at is not None:
+            async with db_module.get_db() as db:
+                await db.execute(
+                    "UPDATE game_prices SET fetched_at = ? WHERE game_id = ?",
+                    (fetched_at, game_id),
+                )
+                await db.commit()
+
+    async def test_cached_price_becomes_the_deal_block(self):
+        gid = await seed_game("Priced Candidate", tags=["indie"])
+        await add_platform(gid, "steam")
+        await self._cache_price(gid)
+
+        result = await main.get_assessment_context(game_id=gid)
+        deal = result["deal"]
+        self.assertEqual(deal["platform"], "steam")
+        self.assertEqual(deal["shop"], "Steam")
+        self.assertEqual(deal["price"], 9.99)
+        self.assertEqual(deal["currency"], "EUR")
+        self.assertEqual(deal["cut_pct"], 50)
+        self.assertEqual(deal["history_low"], 7.49)
+        self.assertFalse(deal["at_history_low"])  # 9.99 > 7.49
+        self.assertEqual(deal["deal_ends_at"], "2026-09-15T17:00:00+00:00")
+        self.assertFalse(deal["stale"])
+        self.assertIn("fetched_at", deal)
+
+    async def test_price_at_the_low_is_flagged(self):
+        gid = await seed_game("At The Low", tags=["indie"])
+        await add_platform(gid, "steam")
+        await self._cache_price(gid, price=7.49)
+
+        result = await main.get_assessment_context(game_id=gid)
+        self.assertTrue(result["deal"]["at_history_low"])
+
+    async def test_cheapest_cached_row_wins(self):
+        gid = await seed_game("Two Shops", tags=["indie"])
+        await add_platform(gid, "steam")
+        await self._cache_price(gid)
+        await self._cache_price(
+            gid, platform="switch2", shop="dekudeals", price=4.99,
+            history_low=None, history_low_currency=None, deal_ends_at=None,
+        )
+
+        deal = (await main.get_assessment_context(game_id=gid))["deal"]
+        self.assertEqual(deal["price"], 4.99)
+        self.assertEqual(deal["shop"], "dekudeals")
+        self.assertIsNone(deal["history_low"])
+        self.assertFalse(deal["at_history_low"])
+
+    async def test_stale_price_is_reported_not_hidden(self):
+        gid = await seed_game("Old Price", tags=["indie"])
+        await add_platform(gid, "steam")
+        await self._cache_price(gid, fetched_at="2020-01-01T00:00:00+00:00")
+
+        deal = (await main.get_assessment_context(game_id=gid))["deal"]
+        self.assertEqual(deal["price"], 9.99)
+        self.assertTrue(deal["stale"])
+
+    async def test_negative_cache_row_is_not_a_deal(self):
+        # A NULL price is a recorded DekuDeals MISS, not a free game.
+        gid = await seed_game("Never Priced", tags=["indie"])
+        await add_platform(gid, "steam")
+        await self._cache_price(
+            gid, platform="switch2", shop="dekudeals", price=None,
+            regular_price=None, cut_pct=None, currency=None, deal_url=None,
+            history_low=None, history_low_currency=None, deal_ends_at=None,
+        )
+
+        self.assertNotIn("deal", await main.get_assessment_context(game_id=gid))
+
+    async def test_no_cached_price_omits_the_block(self):
+        gid = await seed_game("Unpriced", tags=["indie"])
+        await add_platform(gid, "steam")
+        self.assertNotIn("deal", await main.get_assessment_context(game_id=gid))
+
+    async def test_unresolved_candidate_has_no_deal_block(self):
+        result = await main.get_assessment_context(tags=["indie"])
+        self.assertNotIn("deal", result)
+
+
 if __name__ == "__main__":
     unittest.main()
