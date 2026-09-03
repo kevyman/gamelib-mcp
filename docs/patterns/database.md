@@ -1,0 +1,29 @@
+# Database: table and column semantics
+
+Why this exists: the schema is auto-migrated in `db.init_db()`, so the columns
+are easy to read but their *meaning* is not — `delisted`, `unowned_at`,
+`last_seen_in_source`, `manual_overrides` and the NULL-price rows in
+`game_prices` all distinguish states that look identical in a `SELECT *`. The
+root `CLAUDE.md` keeps a two-line-per-table list; the column semantics moved
+here on 2026-09-01.
+
+## Tables (SQLite via aiosqlite; WAL, foreign keys on)
+
+Auto-migrated on startup in `db.init_db()`:
+- `games`: canonical rows + shared enrichment. `igdb_platforms` = ownership-independent JSON of IGDB platform ids (Switch 2 = 508, Switch = 130, both → internal switch2). `completion_status` (nullable; `playing`/`completed`/`abandoned`/`evergreen`) is user-set only. `cover_image_id` = IGDB cover slug; `tools/common.py::cover_url` prefers it, falls back to the Steam capsule by appid.
+- `game_platforms`: ownership/playtime per platform. A row here always means a real platform relationship — never a wishlist-only entry. `delisted` = ownership confirmed via the account license list for an app the public owned-games API no longer returns (typically retired from the store); set by `audit_steam_licenses` only for an app whose store page is gone, cleared by the Steam sync when the app reappears, and hand-correctable via `add_game_to_platform(delisted=...)`. Also carries the 5 acquisition columns (`acquired_at`, `price_paid`, `price_currency`, `purchase_source`, `bundle_name`) — user/importer-supplied only; sync SQL never references them. `unowned_at` = ownership that ENDED (refund / revoked key / lapsed subscription); the row survives with `owned=0` so its history does, and every aggregate already filters `owned = 1` (see the ownership-lifecycle pattern). `last_seen_in_source` = the last sync in which the platform's own source RETURNED this row — distinct from `last_synced`, which any write touches; NULL means never seen in a source. `manual_overrides` (JSON array, like `games.manual_overrides`) protects sync-written columns a user pinned via set_playtime (`playtime_minutes`, `last_played`) or add_game_to_platform (`delisted`, `owned`) — the sync write paths (`upsert_game_platform`, `bulk_upsert_steam_library`, `set_steam_delisted`) skip a protected column via a `json_each` guard.
+- `game_platform_identifiers`: provider IDs (`steam_appid`, `gog_product_id`, `xbox_title_id`, …).
+- `game_wishlist`: want-to-play tracking, deliberately separate from `game_platforms` (see wishlist pattern). `UNIQUE(game_id, platform)`; `source` ∈ steam/dekudeals/manual/assessment (last two are the only manual-write values — see wishlist pattern); `store_identifier` captured at sync time for unowned items.
+- `game_prices`: current-price cache, overwritten in place — not history (ITAD is the historical source of record). A NULL-price switch2/dekudeals row is a *negative* cache entry: DekuDeals had no card for that title, remembered so `get_wishlist(with_prices=True)`'s capped per-title lookups stop retrying it (72h backoff). Readers must filter `price IS NOT NULL`.
+- `steam_platform_data`, `game_platform_enrichment`: provider metadata / cross-platform enrichment.
+- `nintendo_play_summary`: per-(device, application, day) Switch playtime.
+- `play_history`: cumulative per-(game, platform) playtime snapshots, ≤1 row per UTC day, written post-sync only on change. Snapshots are totals, never deltas. Forward-only.
+- `game_assessments`: recorded game-quality VERDICTS + their components (verdict, summary, craft numbers, fit call, anchors cited, price seen/target, `instead_game_id`, `steam_appid`, `owned_at_assessment`/`wishlisted_at_assessment`) plus `presentation` (one JSON column, migration v39: the model-authored card content — `elevator_pitch`, `craft_note`, `for_you_if`/`not_for_you_if`, `comparisons` with a fixed relation vocabulary, `why_care` with a fixed kind vocabulary (people/studio/anticipation/moment — the credits/anticipation notes no API can serve) — declared content like provenance, validated/capped but never server-synthesized) and the methodology provenance columns (`skill`, `skill_version`, `model`), which are **declared-only** — whatever the recording client claimed about itself, never stamped server-side, NULL = unknown (existing rows stay NULL; free text, no CHECK, so a new skill or model needs no migration). Append-only, ≤1 row per (game, UTC day) via a `UNIQUE(game_id, date(assessed_at))` expression index — the same-day re-record conflict target. Never joined into affinity or discovery.
+- `scrape_config`: versioned scrape overrides, ≤1 `active` row per provider; empty table = code defaults everywhere.
+- `game_series` / `game_series_membership`: IGDB collections/franchises, many-to-many.
+- `ratings`: 1–10 scores — Backloggd 1.0, manual 1.0, Steam 0.5 weight.
+- `tag_affinity`, `meta`: precomputed tag scores; KV store.
+
+## Manual overrides
+
+**Manual overrides**: `update_game` records edited column names in `games.manual_overrides`; all sync/enrichment writers consult `get_manual_overrides` and skip those columns. Revocable via `update_game(clear_overrides=[...])`. The same pattern extends to `game_platforms.manual_overrides` for per-platform playtime: `set_playtime` records the pinned columns and the sync write paths honor them (revocable via `set_playtime(clear=[...])`, which also releases the `delisted` and `owned` pins add_game_to_platform sets). A pinned playtime still flows into `play_history` like any synced value.

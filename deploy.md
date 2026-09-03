@@ -209,7 +209,7 @@ which is git's message when GitHub answers the ref advertisement with an
 authentication challenge and there is no terminal to ask on. Nothing in the
 workflow's git line had changed since the previous successful deploy, the
 repository is public, and the same fetch worked from an authenticated
-machine, so the host's anonymous access is what GitHub stopped honouring —
+machine, so the host's anonymous access is what GitHub intermittently refused (the run for 08e1eeb fetched anonymously at 23:18 the same day; the three around it failed) —
 consistent with the tighter limits on unauthenticated HTTPS clones GitHub
 announced in May 2025 (a Hetzner address shares its anonymous quota with
 every neighbour on that range). The workflow therefore hands the deploy

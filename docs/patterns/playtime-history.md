@@ -1,0 +1,20 @@
+# Playtime history, last_played, completion status
+
+Why this exists: play-history snapshots are cumulative totals, so a *correction*
+to a stored total is indistinguishable from a play session — which is why the
+read-time gate exists, why it reads the `last_played` frozen onto the snapshot
+rather than the live column, and why NULL must mean "unknown" everywhere. The
+root `CLAUDE.md` keeps those rules; the incidents and the coverage table moved
+here on 2026-09-01.
+
+## Playtime history
+
+**Playtime history**: `record_play_history_snapshots` runs after each platform sync (failure logs a warning, never fails the sync); writes only on change, never NULL playtime. `get_play_history` derives window deltas: `latest_in_window − baseline_before_window`, falling back to the first in-window snapshot (whose prior growth is excluded, not misreported). **Snapshots are cumulative totals, so a delta is attributed to the window the later snapshot landed in — not to the day the game was played.** That makes a *correction* to a stored total (a sync fix, a `set_playtime` pin, a source re-accounting) indistinguishable from a play session: the PSN cross-gen SKU fix stepped 7 totals at once and Ghost of Tsushima read as 81 hours "played" in a month it was never launched. `last_played` settles what the totals cannot, so `get_play_history` **suppresses a row whose last_played predates the window** and reports it as `excluded_stale_games`/`excluded_stale_minutes` rather than dropping it silently; NULL means "this source doesn't say", which is not evidence of staleness and passes through. **The gate reads the last_played frozen onto the END SNAPSHOT (`play_history.last_played`, migration v36), never the live `game_platforms` column** — the live one moves, so reading it made a past window's answer change the next time the game was launched: a correction correctly suppressed while the game sat unplayed since 2022 came back as playtime once last_played advanced past that old window's start. A snapshot is an immutable observation, so the date it was taken with belongs on it. That is a read-time gate — `scripts/repair_play_history_corrections.py` removes the step from the stored series (level-shift the pre-correction snapshots, preserving the shape of real growth; dry-run by default, idempotent) and applies the same rule against the frozen value.
+
+## `last_played` is a cross-platform signal, not a derived value
+
+**`last_played` is a cross-platform signal, not a derived value** (`data/last_played.py`): an ISO `YYYY-MM-DD` on `game_platforms` meaning "the last day this platform's own source says you played". Nothing computes it from playtime, and NULL means *unknown*, never "never played" — readers must branch on that. Coverage is deliberately best-effort and uneven: psn (title_stats) and switch2 (Parental Controls) always; steam mirrors `steam_platform_data.rtime_last_played` (epoch → date, `0` = never played → NULL, backfilled by migration v35); xbox and epic probe undocumented payload keys (`XBOX_LAST_PLAYED_KEYS`/`EPIC_LAST_PLAYED_KEYS`) and degrade to NULL rather than break an ownership sync; gog has no source for it at all. Every source goes through `coerce_last_played_date`, which rejects sentinels (epoch ≤ 0, anything pre-1980) so they can't masquerade as very old real dates and trip the history gate. switch2 skips snapshot math entirely — served from `nintendo_play_summary` daily rows via `nintendo_title_id`; unmatched playtime is reported as `switch2_unmatched_minutes`, not dropped.
+
+## Completion status
+
+**Completion status**: set only through `update_game` — no sync/enrichment writer ever touches it. `evergreen` = endless games (MMOs, sandboxes). `PLAY_STATE_SQL` treats explicit `completed` as `played` even with unknown playtime, but does *not* force `abandoned`/`evergreen` play state. Backlog/discovery exclude `completed`/`abandoned` but not `evergreen` (still recommendable); `get_stats(report="backlog")`'s backlog-hours/best-unplayed queries *do* also exclude `evergreen`.
