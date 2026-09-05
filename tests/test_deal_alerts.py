@@ -16,6 +16,7 @@ from gamelib_mcp import deal_alerts
 from gamelib_mcp.data import db as db_module
 
 _WEBHOOK = "https://example.invalid/webhook"
+_DISCORD_WEBHOOK = "https://discord.com/api/webhooks/123/test-token"
 
 
 def _deal(game_id: int, name: str, **overrides) -> dict:
@@ -83,6 +84,33 @@ class TriggerRulesTests(unittest.TestCase):
 
 
 class MessageFormatTests(unittest.TestCase):
+    def test_switch2_shop_has_a_display_name(self) -> None:
+        line = deal_alerts._format_discord_line(
+            _deal(1, "Hades", platform="switch2", shop="dekudeals"),
+            "reached your target price",
+        )
+        self.assertIn("Switch 2 · DekuDeals · 🎯 Target reached", line)
+
+    def test_discord_renderer_preserves_complete_rows_and_page_metadata(self) -> None:
+        row = "**€3.69** **[Gunbrella](<https://store/1>)**\n-# Steam · All-time low"
+        chunk = [(1, "low:3.69", row)]
+        self.assertEqual(
+            deal_alerts._render_discord(chunk, page=1, pages=1, total=1),
+            f"## 🏷️ Wishlist deals\n-# 1 deal\n\n{row}",
+        )
+        self.assertEqual(
+            deal_alerts._render_discord(chunk, page=2, pages=3, total=8),
+            f"## 🏷️ Wishlist deals\n-# 8 deals · 2/3\n\n{row}",
+        )
+
+    def test_discord_renderer_checks_full_page_size_including_emoji_and_header(self) -> None:
+        # Row alone fits; adding the header exceeds 1,900 UTF-16 units.
+        # Counting Python characters instead would miss this overflow.
+        with self.assertRaisesRegex(ValueError, "Discord deal page exceeds"):
+            deal_alerts._render_discord(
+                [(1, "low:3.69", "🎮" * 940)], page=1, pages=1, total=1,
+            )
+
     def test_line_names_the_price_platform_reason_expiry_and_url(self) -> None:
         line = deal_alerts._format_line(
             _deal(1, "Hollow Knight", price=7.49, cut_pct=50,
@@ -114,10 +142,12 @@ class MessageFormatTests(unittest.TestCase):
 
 
 class RunDealAlertsTests(ToolDBTestCase):
-    async def _run(self, deals: list[dict], *, status_codes=(204,)) -> tuple[dict, Mock]:
+    async def _run(
+        self, deals: list[dict], *, status_codes=(204,), webhook=_WEBHOOK
+    ) -> tuple[dict, Mock]:
         client = _client(list(status_codes))
         with (
-            patch.dict(os.environ, {"DEAL_ALERT_WEBHOOK_URL": _WEBHOOK}),
+            patch.dict(os.environ, {"DEAL_ALERT_WEBHOOK_URL": webhook}),
             patch(
                 "gamelib_mcp.deal_alerts.get_wishlist_deals",
                 AsyncMock(return_value={"deals": deals}),
@@ -134,6 +164,114 @@ class RunDealAlertsTests(ToolDBTestCase):
 
     async def _alert_state(self, game_id: int) -> dict:
         return (await db_module.load_wishlist_alert_state([game_id])).get(game_id) or {}
+
+    async def test_malformed_webhook_still_checks_deals_and_counts_failed_delivery(self):
+        game_id = await self._wishlisted("Hades")
+        result, client = await self._run(
+            [_deal(game_id, "Hades", below_assessed_target=True)],
+            webhook="https://[broken/webhook", status_codes=[400],
+        )
+        self.assertEqual(result, {
+            "configured": True, "checked": 1, "triggered": 1, "sent": 0, "failed": 1,
+        })
+        body = client.post.call_args.kwargs["json"]
+        self.assertEqual(body["content"], body["text"])
+        self.assertEqual(await self._alert_state(game_id), {})
+
+    async def test_oversized_discord_page_is_not_sent_or_stamped_and_next_page_sends(self):
+        game_ids = [await self._wishlisted(name) for name in ("Hades", "Gunbrella")]
+        # Simulate a future formatter change outgrowing the row budget.
+        with patch(
+            "gamelib_mcp.deal_alerts._format_discord_line",
+            side_effect=["🎮" * 940, "**€3.69** **Gunbrella**"],
+        ):
+            result, client = await self._run(
+                [_deal(gid, name, below_assessed_target=True)
+                 for gid, name in zip(game_ids, ("Hades", "Gunbrella"), strict=True)],
+                webhook=_DISCORD_WEBHOOK, status_codes=[204, 204],
+            )
+        self.assertEqual(result["sent"], 1)
+        self.assertEqual(result["failed"], 1)
+        self.assertNotIn("error", result)
+        client.post.assert_awaited_once()
+        self.assertIn("Gunbrella", client.post.call_args.kwargs["json"]["content"])
+        self.assertEqual(await self._alert_state(game_ids[0]), {})
+        self.assertTrue(await self._alert_state(game_ids[1]))
+
+    async def test_discord_digest_has_price_hierarchy_and_no_previews_or_pings(self):
+        game_id = await self._wishlisted("Gunbrella")
+        result, client = await self._run([
+            _deal(game_id, "Gunbrella", price=3.69, cut_pct=75, shop="Humble Store",
+                  at_history_low=True, deal_ends_at="2026-09-07T17:00:00Z"),
+        ], webhook=_DISCORD_WEBHOOK)
+
+        body = client.post.call_args.kwargs["json"]
+        self.assertEqual(body["content"],
+            "## 🏷️ Wishlist deals\n-# 1 deal\n\n"
+            "**€3.69** `−75%` **[Gunbrella](<https://store/1>)**\n"
+            "-# Steam · Humble Store · All-time low · Ends 7 Sep")
+        self.assertEqual(body["flags"], 4)
+        self.assertEqual(body["allowed_mentions"], {"parse": []})
+        self.assertNotIn("embeds", body)
+        self.assertNotIn("text", body)
+        self.assertEqual(result["sent"], 1)
+        self.assertEqual((await self._alert_state(game_id))["last_alert_key"], "low:3.69")
+
+    async def test_discord_pages_preserve_links_and_only_stamp_delivered_games(self):
+        deals = [
+            _deal(await self._wishlisted(f"Bargain {i}"), f"Bargain {i}",
+                  below_assessed_target=True, deal_url=f"https://store/{i}/" + "x" * 500)
+            for i in range(8)
+        ]
+        result, client = await self._run(
+            deals, webhook=_DISCORD_WEBHOOK, status_codes=[204, 500] + [204] * 8,
+        )
+        calls = client.post.call_args_list
+        self.assertGreater(len(calls), 1)
+        delivered = 0
+        all_content = "\n".join(call.kwargs["json"]["content"] for call in calls)
+        for i, call in enumerate(calls):
+            content = call.kwargs["json"]["content"]
+            self.assertLessEqual(len(content.encode("utf-16-le")) // 2, 1900)
+            self.assertIn(f"8 deals · {i + 1}/{len(calls)}", content)
+            for deal in deals:
+                if f"[{deal['name']}]" in content:
+                    self.assertIn(f"(<{deal['deal_url']}>)", content)
+                    state = await self._alert_state(deal["game_id"])
+                    self.assertEqual(bool(state), i != 1)
+                    delivered += i != 1
+        for deal in deals:
+            self.assertEqual(all_content.count(f"[{deal['name']}]"), 1)
+        self.assertEqual(result["sent"], delivered)
+        self.assertEqual(result["failed"], 8 - delivered)
+
+    async def test_discord_escapes_titles_and_handles_missing_optional_details(self):
+        name = "A **bold** [title]\n@everyone"
+        game_id = await self._wishlisted(name)
+        _, client = await self._run([
+            _deal(game_id, name, below_assessed_target=True, deal_url=None,
+                  shop="Steam", currency="CAD", cut_pct=0),
+        ], webhook=_DISCORD_WEBHOOK)
+        content = client.post.call_args.kwargs["json"]["content"]
+        self.assertIn(r"A \*\*bold\*\* \[title\] @everyone", content)
+        self.assertIn("**19.99 CAD**", content)
+        self.assertIn("-# Steam · 🎯 Target reached", content)
+        self.assertNotIn("Steam · Steam", content)
+        self.assertNotIn("Ends", content)
+        self.assertNotIn("None", content)
+
+    async def test_discord_pathological_title_and_url_do_not_break_a_message(self):
+        game_id = await self._wishlisted("Long title")
+        _, client = await self._run([
+            _deal(game_id, "🎮*" * 2000, below_assessed_target=True,
+                  deal_url="https://store/" + "x" * 3000),
+        ], webhook=_DISCORD_WEBHOOK)
+        content = client.post.call_args.kwargs["json"]["content"]
+        self.assertLessEqual(len(content.encode("utf-16-le")) // 2, 1900)
+        self.assertIn("**€19.99**", content)
+        self.assertIn("Target reached", content)
+        self.assertNotIn("https://", content)
+        self.assertNotIn("[", content)
 
     async def test_unconfigured_is_a_no_op(self) -> None:
         with (
