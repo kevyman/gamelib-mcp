@@ -337,8 +337,10 @@ async def load_games_for_igdb_backfill(game_ids: Iterable[int]) -> list[aiosqlit
     """Rows for the IGDB backfill: identity + steam_appid + manual_overrides.
 
     steam_appid feeds the external_games-first resolution (the authoritative
-    appid -> IGDB mapping); manual_overrides lets the backfill honor a pinned
-    igdb_id without a per-row lookup.
+    appid -> IGDB mapping). Prefer a platform identifier, falling back to the
+    Steam wishlist's store_identifier for games with no Steam identifier row.
+    manual_overrides lets the backfill honor a pinned igdb_id without a per-row
+    lookup.
     """
     ids = list(dict.fromkeys(game_ids))
     if not ids:
@@ -348,14 +350,17 @@ async def load_games_for_igdb_backfill(game_ids: Iterable[int]) -> list[aiosqlit
     async with get_db() as db:
         return await db.execute_fetchall(
             f"""SELECT g.id, g.name, g.igdb_id, g.manual_overrides,
-                       (SELECT gpi.identifier_value
+                       COALESCE((SELECT gpi.identifier_value
                         FROM game_platforms gp
                         JOIN game_platform_identifiers gpi
                           ON gpi.game_platform_id = gp.id
                          AND gpi.identifier_type = ?
                         WHERE gp.game_id = g.id
                         ORDER BY gpi.is_primary DESC, gpi.id ASC
-                        LIMIT 1) AS steam_appid
+                        LIMIT 1),
+                       (SELECT w.store_identifier
+                        FROM game_wishlist w
+                        WHERE w.game_id = g.id AND w.platform = 'steam')) AS steam_appid
                 FROM games g
                 WHERE g.id IN ({placeholders})
                 ORDER BY g.id""",
