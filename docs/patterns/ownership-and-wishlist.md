@@ -14,7 +14,13 @@ invariant, that `game_platforms.owned=0` must never be overloaded to mean
 
 ### Deal notifications
 
-`DEAL_ALERT_WEBHOOK_URL` enables deal pushes after library refresh. Discord
+`DEAL_ALERT_WEBHOOK_URL` enables deal pushes after library refresh. There is
+deliberately no second scheduler: `run_deal_alerts()` is the last step of
+`lifecycle._run_startup_refresh`, so the alert cadence IS the refresh cadence —
+`LIBRARY_REFRESH_INTERVAL_HOURS` (default 24, so daily), plus the startup
+refresh when the library is already stale (`STALE_HOURS = 6`). Setting the
+interval to zero or a negative value disables the periodic loop and therefore
+the alerts with it, leaving only that stale-startup pass. Discord
 webhook hosts receive a compact Markdown digest: a price-tag heading, bold
 prices, discount badges, clickable game titles, and subtext for platform,
 shop, trigger, and sale end date. This deliberately gives deals a different
