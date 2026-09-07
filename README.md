@@ -92,6 +92,7 @@ All configuration is via environment variables. Production starts from [.env.exa
 | `DATABASE_URL` | no | SQLite path; defaults to `data/gamelib.db` |
 | `PORT` | no | Server port (default `8000`) |
 | `LOG_LEVEL` | no | Root log level: `DEBUG`, `INFO` (default), `WARNING`, `ERROR`; `DEBUG` surfaces per-item enrichment failures |
+| `LIBRARY_REFRESH_INTERVAL_HOURS` | no | Hours between background library refreshes (default `24`); `0` or negative disables the periodic loop, which also stops deal alerts |
 | `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET` | optional | IGDB enrichment ([dev.twitch.tv/console](https://dev.twitch.tv/console)) |
 | `BACKLOGGD_USER` | optional | Backloggd username for rating sync |
 | `PSN_NPSSO` | optional | PSN NPSSO cookie for PlayStation sync |
@@ -102,7 +103,7 @@ All configuration is via environment variables. Production starts from [.env.exa
 | `EPIC_LEGENDARY_HOST_PATH` | optional | Legendary config dir for Epic sync |
 | `LGOGDOWNLOADER_HOST_PATH` | optional | lgogdownloader config dir for GOG sync |
 | `HARDWARE_PREFERENCE` | optional | Platform priority for recommendations, e.g. `switch2,steam_deck,ps5` |
-| `DEAL_ALERT_WEBHOOK_URL` | optional | Discord/Slack incoming webhook for wishlist deal alerts (target price reached, or an all-time low on discount); empty disables them |
+| `DEAL_ALERT_WEBHOOK_URL` | optional | Discord/Slack incoming webhook for wishlist deal alerts (target price reached, or an all-time low on discount), pushed at the end of each library refresh — see `LIBRARY_REFRESH_INTERVAL_HOURS`; empty disables them |
 
 ## Docker
 
