@@ -169,6 +169,114 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
 
         alerts.assert_not_awaited()
 
+    async def test_deal_alerts_run_before_the_enrichment_drain(self) -> None:
+        # The regression this whole ordering exists for: the drain holds the
+        # refresh coroutine open for as long as enrichment has work (forever,
+        # with a provider that never resolves its rows), so alerts scheduled
+        # after it never spoke. Never-set event rather than a timed sleep —
+        # "the drain has not finished" is the property under test.
+        refresh_result = {"steam": {"games_upserted": 1, "synced_at": "2026-09-02T00:00:00+00:00"}}
+        order: list[str] = []
+        drain_entered = asyncio.Event()
+
+        async def alerts() -> dict:
+            order.append("alerts")
+            return {"configured": True, "checked": 3, "triggered": 1, "sent": 1, "failed": 0}
+
+        async def never_ending_drain() -> None:
+            order.append("drain")
+            drain_entered.set()
+            await asyncio.Event().wait()
+
+        with (
+            patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()),
+            patch("gamelib_mcp.lifecycle._admin_refresh_library", AsyncMock(return_value=refresh_result)),
+            patch(
+                "gamelib_mcp.lifecycle._drain_background_enrich_reruns",
+                AsyncMock(side_effect=never_ending_drain),
+            ),
+            patch("gamelib_mcp.deal_alerts.is_deal_alerts_configured", return_value=True),
+            patch("gamelib_mcp.deal_alerts.run_deal_alerts", AsyncMock(side_effect=alerts)) as mock_alerts,
+        ):
+            task = asyncio.create_task(_run_startup_refresh())
+            # The drain never returns, so waiting on it is the only way to know
+            # the refresh reached it — and the recorded order says the alerts
+            # had already spoken by then.
+            await asyncio.wait_for(drain_entered.wait(), timeout=DEADLOCK_TIMEOUT)
+            self.assertEqual(order, ["alerts", "drain"])
+            self.assertFalse(task.done())
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        mock_alerts.assert_awaited_once()
+
+    async def test_deal_alert_result_is_logged(self) -> None:
+        refresh_result = {"steam": {"games_upserted": 1, "synced_at": "2026-09-02T00:00:00+00:00"}}
+        alerts = AsyncMock(
+            return_value={"configured": True, "checked": 7, "triggered": 2, "sent": 2, "failed": 0}
+        )
+
+        with (
+            patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()),
+            patch("gamelib_mcp.lifecycle._admin_refresh_library", AsyncMock(return_value=refresh_result)),
+            patch("gamelib_mcp.lifecycle._drain_background_enrich_reruns", AsyncMock()),
+            patch("gamelib_mcp.deal_alerts.is_deal_alerts_configured", return_value=True),
+            patch("gamelib_mcp.deal_alerts.run_deal_alerts", alerts),
+            self.assertLogs("gamelib_mcp.lifecycle", level="INFO") as logs,
+        ):
+            await _run_startup_refresh()
+
+        self.assertTrue(
+            any(
+                "Deal alert run: checked=7 triggered=2 sent=2 failed=0" in line
+                for line in logs.output
+            ),
+            logs.output,
+        )
+
+    async def test_deal_alerts_still_run_when_the_sync_itself_raised(self) -> None:
+        # A failed sync is exactly when a price may still have moved; the drain
+        # is skipped in that case, the alerts are not.
+        alerts = AsyncMock(return_value={"configured": True, "checked": 0, "triggered": 0,
+                                         "sent": 0, "failed": 0})
+
+        with (
+            patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()),
+            patch("gamelib_mcp.lifecycle._admin_refresh_library", AsyncMock(side_effect=RuntimeError("boom"))),
+            patch("gamelib_mcp.lifecycle._drain_background_enrich_reruns", AsyncMock()) as mock_drain,
+            patch("gamelib_mcp.deal_alerts.is_deal_alerts_configured", return_value=True),
+            patch("gamelib_mcp.deal_alerts.run_deal_alerts", alerts),
+        ):
+            await _run_startup_refresh()
+
+        alerts.assert_awaited_once()
+        mock_drain.assert_not_awaited()
+
+    async def test_cancelled_refresh_never_runs_deal_alerts(self) -> None:
+        started = asyncio.Event()
+        alerts = AsyncMock()
+
+        async def blocked_refresh(*_args, **_kwargs) -> dict:
+            started.set()
+            await asyncio.Event().wait()
+            return {}
+
+        with (
+            patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()),
+            patch("gamelib_mcp.lifecycle._admin_refresh_library", AsyncMock(side_effect=blocked_refresh)),
+            patch("gamelib_mcp.lifecycle._drain_background_enrich_reruns", AsyncMock()),
+            patch("gamelib_mcp.deal_alerts.is_deal_alerts_configured", return_value=True),
+            patch("gamelib_mcp.deal_alerts.run_deal_alerts", alerts),
+        ):
+            task = asyncio.create_task(_run_startup_refresh())
+            await asyncio.wait_for(started.wait(), timeout=DEADLOCK_TIMEOUT)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        alerts.assert_not_awaited()
+
     async def test_deal_alert_failure_never_fails_the_refresh(self) -> None:
         # run_deal_alerts swallows its own failures; this pins the second belt
         # in lifecycle, so even a broken alert module leaves the sync green.
@@ -386,6 +494,71 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(mock_refresh.await_count, 1)
 
             release.set()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+    async def test_periodic_loop_warns_when_the_previous_refresh_is_still_running(self) -> None:
+        # _ensure_startup_refresh returns the live task silently, so a refresh
+        # wedged in its enrichment drain made every subsequent interval a
+        # no-op with nothing in the log to say so.
+        import gamelib_mcp.lifecycle as main_module
+
+        running_task = asyncio.create_task(_never_finishes())
+        main_module._LIBRARY_REFRESH_TASK = running_task
+        skipped = asyncio.Event()
+
+        original = main_module._ensure_startup_refresh
+
+        async def ensure(*args, **kwargs) -> asyncio.Task:
+            task = await original(*args, **kwargs)
+            skipped.set()
+            return task
+
+        with (
+            patch("gamelib_mcp.lifecycle._ensure_startup_refresh", AsyncMock(side_effect=ensure)),
+            # The running refresh's own start time, read back from meta rather
+            # than tracked separately.
+            patch(
+                "gamelib_mcp.data.db.get_meta",
+                AsyncMock(return_value="2026-09-07T03:00:00+00:00"),
+            ),
+            self.assertLogs("gamelib_mcp.lifecycle", level="WARNING") as logs,
+        ):
+            loop_task = asyncio.create_task(_run_periodic_refresh_loop(0.01))
+            # skipped is set inside the wrapper, before it returns to the loop
+            # — and the loop reaches the warning without awaiting again, so it
+            # is already logged by the time this resumes.
+            await asyncio.wait_for(skipped.wait(), timeout=DEADLOCK_TIMEOUT)
+            loop_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await loop_task
+
+        self.assertTrue(
+            any(
+                "Periodic library refresh skipped: previous refresh still running "
+                "(started 2026-09-07T03:00:00+00:00)" in line
+                for line in logs.output
+            ),
+            logs.output,
+        )
+        running_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await running_task
+
+    async def test_periodic_loop_stays_quiet_when_it_starts_a_new_refresh(self) -> None:
+        started = asyncio.Event()
+
+        async def fake_refresh() -> asyncio.Task:
+            started.set()
+            return asyncio.current_task()
+
+        with (
+            patch("gamelib_mcp.lifecycle._ensure_startup_refresh", AsyncMock(side_effect=fake_refresh)),
+            self.assertNoLogs("gamelib_mcp.lifecycle", level="WARNING"),
+        ):
+            task = asyncio.create_task(_run_periodic_refresh_loop(0.01))
+            await asyncio.wait_for(started.wait(), timeout=DEADLOCK_TIMEOUT)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task

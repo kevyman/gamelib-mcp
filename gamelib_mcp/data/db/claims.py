@@ -397,7 +397,7 @@ async def load_hltb_batch_rows(game_ids: Iterable[int]) -> list[aiosqlite.Row]:
     placeholders = ",".join("?" for _ in ids)
     async with get_db() as db:
         return await db.execute_fetchall(
-            f"""SELECT id AS game_id, name
+            f"""SELECT id AS game_id, name, hltb_cached_at
                 FROM games
                 WHERE id IN ({placeholders})
                 ORDER BY id""",

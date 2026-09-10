@@ -14,6 +14,7 @@ from conftest import ToolDBTestCase, seed_game
 
 from gamelib_mcp import deal_alerts
 from gamelib_mcp.data import db as db_module
+from gamelib_mcp.tools.assessment import record_assessment
 
 _WEBHOOK = "https://example.invalid/webhook"
 _DISCORD_WEBHOOK = "https://discord.com/api/webhooks/123/test-token"
@@ -418,6 +419,113 @@ class RunDealAlertsTests(ToolDBTestCase):
 
         state = await db_module.load_wishlist_alert_state(game_ids)
         self.assertEqual(len(state), 30)
+
+
+class EndToEndDealAlertTests(ToolDBTestCase):
+    """One run with NOTHING between the database and the webhook body.
+
+    Every other test here hands ``run_deal_alerts`` a ready-made deals list, so
+    the pricing path — which is what actually decides whether a game speaks —
+    was never exercised end to end. This one seeds the rows a real library
+    holds and lets ``get_wishlist_deals`` read them. Prices are inside the 12h
+    TTL, so no provider is called; the fetchers are patched anyway and asserted
+    unawaited, because a test that silently reached the network would be worse
+    than no test.
+    """
+
+    async def _seed_price(self, game_id: int, **fields) -> None:
+        # Mirrors tests/test_tools_deals.py::_seed_price: write through the
+        # production upsert, then age fetched_at only if a test needs staleness
+        # (this one deliberately does not — fresh rows are what keep the
+        # providers out of the run).
+        row = {
+            "game_id": game_id,
+            "platform": "steam",
+            "shop": "steam",
+            "currency": "EUR",
+            "deal_url": "https://store.steampowered.com/app/1",
+        }
+        row.update(fields)
+        await db_module.upsert_game_prices([row])
+
+    async def _run(self) -> tuple[dict, list[dict]]:
+        posts: list[dict] = []
+
+        async def fake_post(_self, url: str, **kwargs) -> Mock:
+            posts.append({"url": url, "json": kwargs.get("json")})
+            return Mock(status_code=204)
+
+        with (
+            patch.dict(os.environ, {"DEAL_ALERT_WEBHOOK_URL": _DISCORD_WEBHOOK}),
+            patch.object(deal_alerts.httpx.AsyncClient, "post", fake_post),
+            patch("gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock()) as itad,
+            patch("gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()) as deku,
+            patch("gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()) as deku_search,
+        ):
+            result = await deal_alerts.run_deal_alerts()
+
+        itad.assert_not_awaited()
+        deku.assert_not_awaited()
+        deku_search.assert_not_awaited()
+        return result, posts
+
+    async def test_a_history_low_and_a_target_hit_both_speak_and_are_stamped(self) -> None:
+        low_id = await seed_game("All Time Low")
+        await db_module.upsert_wishlist_entry(low_id, "steam", source="manual")
+        # price == history_low in the SAME currency, with a real discount —
+        # both halves are required, and neither is inferred.
+        await self._seed_price(
+            low_id, price=12.49, regular_price=24.99, cut_pct=50,
+            history_low=12.49, history_low_currency="EUR",
+        )
+
+        target_id = await seed_game("Wishlisted At Twenty")
+        await db_module.upsert_wishlist_entry(target_id, "steam", source="manual")
+        await self._seed_price(
+            target_id, price=14.99, regular_price=39.99, cut_pct=62,
+        )
+        await record_assessment(
+            game_id=target_id,
+            verdict="wishlist_for_sale",
+            target_price=19.99,
+            price_currency="EUR",
+        )
+
+        result, posts = await self._run()
+
+        self.assertEqual(result["checked"], 2)
+        self.assertEqual(result["triggered"], 2)
+        self.assertEqual(result["sent"], 2)
+        self.assertEqual(result["failed"], 0)
+        self.assertNotIn("error", result)
+
+        content = "\n".join(post["json"]["content"] for post in posts)
+        self.assertIn("All Time Low", content)
+        self.assertIn("Wishlisted At Twenty", content)
+        self.assertIn("All-time low", content)
+        self.assertIn("🎯 Target reached", content)
+
+        state = await db_module.load_wishlist_alert_state([low_id, target_id])
+        self.assertEqual(state[low_id]["last_alert_key"], "low:12.49")
+        self.assertEqual(state[target_id]["last_alert_key"], "target:14.99")
+
+    async def test_a_second_run_over_the_same_prices_stays_quiet(self) -> None:
+        # The debounce is the reason the alert can ride on every refresh.
+        game_id = await seed_game("All Time Low")
+        await db_module.upsert_wishlist_entry(game_id, "steam", source="manual")
+        await self._seed_price(
+            game_id, price=12.49, regular_price=24.99, cut_pct=50,
+            history_low=12.49, history_low_currency="EUR",
+        )
+
+        first, _ = await self._run()
+        second, posts = await self._run()
+
+        self.assertEqual(first["sent"], 1)
+        self.assertEqual(second["checked"], 1)
+        self.assertEqual(second["triggered"], 0)
+        self.assertEqual(second["sent"], 0)
+        self.assertEqual(posts, [])
 
 
 if __name__ == "__main__":

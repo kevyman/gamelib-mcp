@@ -877,7 +877,7 @@ requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.15.0" },
     { name = "curl-cffi", specifier = ">=0.15" },
     { name = "fastmcp", specifier = ">=3.4.5,<4.0" },
-    { name = "howlongtobeatpy", specifier = ">=1.0.22" },
+    { name = "howlongtobeatpy", specifier = ">=1.0.23" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "lxml", specifier = ">=6.1.1" },
     { name = "psnawp", specifier = ">=2.1,<4.0" },
@@ -916,7 +916,7 @@ wheels = [
 
 [[package]]
 name = "howlongtobeatpy"
-version = "1.0.22"
+version = "1.0.23"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -925,9 +925,9 @@ dependencies = [
     { name = "fake-useragent" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b3/3c/8653a75a38326b74ce36aba81bf5cea494447206a72e69d2cfd9ea7388e0/howlongtobeatpy-1.0.22.tar.gz", hash = "sha256:8a724856b0704c1a23668dce5fe75e26882b0b0310ac60e5384e6551ac6d9079", size = 16480, upload-time = "2026-06-23T13:42:13.242Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b7/b1/1f70430e1afd9b4d7e1441e4246e030a06551a68c7cbe67e76c712756c67/howlongtobeatpy-1.0.23.tar.gz", hash = "sha256:1445bcd72b90c8172e7858ffe46ff357bc4d4b360a74299701dd04418a2296eb", size = 16235, upload-time = "2026-08-25T09:19:24.651Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d1/cf/574764990ecd15c66126083e3c9a776a7c4b49951692bfb4aee82927d692/howlongtobeatpy-1.0.22-py3-none-any.whl", hash = "sha256:455d6f2783e352048103e6b81ef9338c2af41e017b5f013ed4361b17a6882731", size = 13780, upload-time = "2026-06-23T13:42:12.143Z" },
+    { url = "https://files.pythonhosted.org/packages/53/79/4627a4f61942bea808a7dcc7de9392a511cc9c7ea3ab62cc444ff68c8a2a/howlongtobeatpy-1.0.23-py3-none-any.whl", hash = "sha256:9faff74f6a864f96d6a72b2871ce91845cfee06533ed867441f2156e535f920c", size = 13492, upload-time = "2026-08-25T09:19:23.57Z" },
 ]
 
 [[package]]
