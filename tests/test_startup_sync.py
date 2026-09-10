@@ -483,12 +483,12 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         started = asyncio.Event()
         release = asyncio.Event()
 
-        async def fake_refresh() -> asyncio.Task:
+        async def fake_refresh() -> tuple[asyncio.Task, bool]:
             started.set()
             await release.wait()
-            return asyncio.current_task()
+            return asyncio.current_task(), True
 
-        with patch("gamelib_mcp.lifecycle._ensure_startup_refresh", AsyncMock(side_effect=fake_refresh)) as mock_refresh:
+        with patch("gamelib_mcp.lifecycle._start_or_get_refresh", AsyncMock(side_effect=fake_refresh)) as mock_refresh:
             task = asyncio.create_task(_run_periodic_refresh_loop(0.01))
             await asyncio.wait_for(started.wait(), timeout=DEADLOCK_TIMEOUT)
             self.assertEqual(mock_refresh.await_count, 1)
@@ -499,7 +499,7 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
                 await task
 
     async def test_periodic_loop_warns_when_the_previous_refresh_is_still_running(self) -> None:
-        # _ensure_startup_refresh returns the live task silently, so a refresh
+        # _start_or_get_refresh hands back the live task silently, so a refresh
         # wedged in its enrichment drain made every subsequent interval a
         # no-op with nothing in the log to say so.
         import gamelib_mcp.lifecycle as main_module
@@ -508,15 +508,15 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
         main_module._LIBRARY_REFRESH_TASK = running_task
         skipped = asyncio.Event()
 
-        original = main_module._ensure_startup_refresh
+        original = main_module._start_or_get_refresh
 
-        async def ensure(*args, **kwargs) -> asyncio.Task:
-            task = await original(*args, **kwargs)
+        async def ensure(*args, **kwargs) -> tuple[asyncio.Task, bool]:
+            result = await original(*args, **kwargs)
             skipped.set()
-            return task
+            return result
 
         with (
-            patch("gamelib_mcp.lifecycle._ensure_startup_refresh", AsyncMock(side_effect=ensure)),
+            patch("gamelib_mcp.lifecycle._start_or_get_refresh", AsyncMock(side_effect=ensure)),
             # The running refresh's own start time, read back from meta rather
             # than tracked separately.
             patch(
@@ -547,21 +547,42 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             await running_task
 
     async def test_periodic_loop_stays_quiet_when_it_starts_a_new_refresh(self) -> None:
-        started = asyncio.Event()
+        # A FINISHED previous task, not the absence of one: the quiet path has
+        # to be "the stored task was done, so this interval really did start a
+        # refresh". Reading a task handle before and after the call could not
+        # tell those apart, which is why the flag is decided under the lock and
+        # asserted here.
+        import gamelib_mcp.lifecycle as main_module
 
-        async def fake_refresh() -> asyncio.Task:
-            started.set()
-            return asyncio.current_task()
+        async def _already_done() -> None:
+            return None
+
+        finished_task = asyncio.create_task(_already_done())
+        await finished_task
+        main_module._LIBRARY_REFRESH_TASK = finished_task
+
+        original = main_module._start_or_get_refresh
+        created_flags: list[bool] = []
+        answered = asyncio.Event()
+
+        async def start(*args, **kwargs) -> tuple[asyncio.Task, bool]:
+            result = await original(*args, **kwargs)
+            created_flags.append(result[1])
+            answered.set()
+            return result
 
         with (
-            patch("gamelib_mcp.lifecycle._ensure_startup_refresh", AsyncMock(side_effect=fake_refresh)),
+            patch("gamelib_mcp.lifecycle._start_or_get_refresh", AsyncMock(side_effect=start)),
+            patch("gamelib_mcp.lifecycle._run_startup_refresh", AsyncMock(return_value={})),
             self.assertNoLogs("gamelib_mcp.lifecycle", level="WARNING"),
         ):
             task = asyncio.create_task(_run_periodic_refresh_loop(0.01))
-            await asyncio.wait_for(started.wait(), timeout=DEADLOCK_TIMEOUT)
+            await asyncio.wait_for(answered.wait(), timeout=DEADLOCK_TIMEOUT)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task
+
+        self.assertEqual(created_flags, [True])
 
     async def test_ensure_periodic_refresh_loop_skips_duplicate_running_task(self) -> None:
         import gamelib_mcp.lifecycle as main_module

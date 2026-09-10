@@ -4,12 +4,16 @@ Quiescence rule for every family: a batch may only count a row as processed
 when that row can no longer be re-claimed. ``_run_until_quiescent`` stops after
 ``_IDLE_POLLS`` empty batches, so a family that counts rows its claim query
 will hand back on the next poll never stops — and the refresh task holding the
-drain stays alive with it. Store, ProtonDB, SteamSpy, OpenCritic and Metacritic
-satisfy this by always writing a ``*_cached_at`` value (a real timestamp, a
-status marker, or ``FAILED``) even when the fetch failed, and IGDB's backfill
-returns only rows that reached a terminal state. HLTB is the exception — a
-failed lookup deliberately writes nothing — so ``_run_hltb_batch`` checks the
-row's state instead of trusting the attempt.
+drain stays alive with it. That idle count is also reset while any OTHER family
+is still progressing (the supervisor epoch, see ``_run_until_quiescent``), so a
+dead family keeps re-claiming at the 15-minute claim TTL for as long as the
+rest of the drain runs — bounded by the other families' work, never by its own.
+Store, ProtonDB, SteamSpy, OpenCritic and Metacritic satisfy this by always
+writing a ``*_cached_at`` value (a real timestamp, a status marker, or
+``FAILED``) even when the fetch failed, and IGDB's backfill returns only rows
+that reached a terminal state. HLTB is the exception — a failed lookup
+deliberately writes nothing — so ``_run_hltb_batch`` checks the row's state
+instead of trusting the attempt.
 """
 
 import asyncio
@@ -461,9 +465,11 @@ async def _run_hltb_batch() -> int:
                 progressed += 1
             # Otherwise the claim is deliberately LEFT stamped: the provider
             # gave nothing, so releasing it would hand the same dead row back
-            # on the very next poll (four fetches per drain, and a run-stat
-            # WARNING counting 25 rows as 100 failures). The 15-minute claim
-            # TTL in _claim_cutoff_iso is the retry window instead.
+            # on the very next poll. With the count fixed but the claim
+            # released, each drain would re-fetch the same dead rows once per
+            # idle poll (four times) and the run-stat WARNING would report 25
+            # rows as 100 failures. The 15-minute claim TTL in
+            # _claim_cutoff_iso is the retry window instead.
         attempted += len(batch)
         await asyncio.sleep(_HLTB_DELAY)
     # Settled against rows ATTEMPTED, not rows that progressed: the run stats

@@ -501,16 +501,30 @@ async def _run_startup_refresh(platforms: list[str] | None = None) -> dict:
     return refresh_result or {}
 
 
-async def _ensure_startup_refresh(platforms: list[str] | None = None) -> asyncio.Task:
+async def _start_or_get_refresh(
+    platforms: list[str] | None = None,
+) -> tuple[asyncio.Task, bool]:
+    """The refresh task plus whether THIS call created it.
+
+    The flag has to be decided under the lock: a caller that compared the task
+    handle before and after would read it while another coroutine was between
+    its own check and its create_task, and conclude it had started a refresh
+    that someone else owns (or the reverse).
+    """
     global _LIBRARY_REFRESH_TASK
 
     async with _get_library_refresh_lock():
         if _LIBRARY_REFRESH_TASK is not None and not _LIBRARY_REFRESH_TASK.done():
-            return _LIBRARY_REFRESH_TASK
+            return _LIBRARY_REFRESH_TASK, False
 
         _LIBRARY_REFRESH_TASK = asyncio.create_task(_run_startup_refresh(platforms))
         _LIBRARY_REFRESH_TASK.add_done_callback(_clear_library_refresh_task)
-        return _LIBRARY_REFRESH_TASK
+        return _LIBRARY_REFRESH_TASK, True
+
+
+async def _ensure_startup_refresh(platforms: list[str] | None = None) -> asyncio.Task:
+    task, _created = await _start_or_get_refresh(platforms)
+    return task
 
 
 def get_startup_refresh_task() -> asyncio.Task | None:
@@ -541,15 +555,13 @@ async def _run_periodic_refresh_loop(interval_seconds: float) -> None:
     while True:
         await asyncio.sleep(interval_seconds)
         try:
-            previous = _LIBRARY_REFRESH_TASK
-            task = await _ensure_startup_refresh()
-            if previous is not None and task is previous:
-                # _ensure_startup_refresh returned the task it already had
-                # rather than starting a new one. That is silent by design, and
-                # the silence is what made a wedged refresh invisible: nothing
-                # else says "this interval did nothing". The running refresh
-                # wrote its own start time, so read it back rather than
-                # tracking a second copy of it here.
+            _task, created = await _start_or_get_refresh()
+            if not created:
+                # A refresh was already in flight, so this interval did
+                # nothing. That is silent by design, and the silence is what
+                # made a wedged refresh invisible. The running refresh wrote
+                # its own start time, so read it back rather than tracking a
+                # second copy of it here.
                 logger.warning(
                     "Periodic library refresh skipped: previous refresh still running (started %s)",
                     await get_meta("library_sync_started_at"),
