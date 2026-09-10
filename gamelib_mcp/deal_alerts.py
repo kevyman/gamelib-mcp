@@ -14,6 +14,11 @@ AND the price that produced it (``target:19.99`` / ``low:12.49``), so the same
 deal never repeats while a FURTHER drop mints a new key and speaks again. It is
 a debounce, not a mute.
 
+Cadence: this has no scheduler of its own. ``lifecycle._run_startup_refresh``
+calls it once the sync result has settled and BEFORE the background-enrichment
+drain — deliberately, because that drain can hold the refresh task open for
+hours and every periodic refresh no-ops while it does.
+
 Contract: this never raises and never fails the refresh that called it. A
 webhook that is down loses an alert, which is recoverable; a webhook that takes
 the library sync down with it is not. Nothing is stamped unless the POST

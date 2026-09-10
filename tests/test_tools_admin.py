@@ -5,6 +5,7 @@ successful file-write path (writes to a temp NINTENDO_COOKIES_FILE).
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import unittest
@@ -620,6 +621,37 @@ class GetSyncStatusTests(ToolDBTestCase):
             status["platforms"]["xbox"]["error"], "OPENXBL_API_KEY is not set"
         )
         self.assertIsNone(status["platforms"]["xbox"]["last_success_at"])
+
+    async def test_background_task_flags_are_false_at_rest(self):
+        status = await admin.get_sync_status()
+        self.assertFalse(status["refresh_task_alive"])
+        self.assertFalse(status["enrichment_in_flight"])
+
+    async def test_background_task_flags_see_the_live_tasks(self):
+        # library_sync_status goes "idle" the moment the platform syncs settle,
+        # while the refresh coroutine runs on through deal alerts and the
+        # enrichment drain — and blocks every periodic refresh for as long as
+        # it does. Never-set events, because "still running" is the property.
+        refresh_task = asyncio.create_task(asyncio.Event().wait())
+        enrichment_task = asyncio.create_task(asyncio.Event().wait())
+        lifecycle._LIBRARY_REFRESH_TASK = refresh_task
+        lifecycle._ENRICHMENT_TASK = enrichment_task
+        try:
+            status = await admin.get_sync_status()
+            self.assertEqual(status["status"], "idle")
+            self.assertTrue(status["refresh_task_alive"])
+            self.assertTrue(status["enrichment_in_flight"])
+        finally:
+            for task in (refresh_task, enrichment_task):
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            lifecycle._LIBRARY_REFRESH_TASK = None
+            lifecycle._ENRICHMENT_TASK = None
+
+        status = await admin.get_sync_status()
+        self.assertFalse(status["refresh_task_alive"])
+        self.assertFalse(status["enrichment_in_flight"])
 
     async def test_a_legacy_done_row_with_a_config_error_reads_as_unconfigured(self):
         await set_meta_many(

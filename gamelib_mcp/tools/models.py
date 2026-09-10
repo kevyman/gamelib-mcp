@@ -344,6 +344,10 @@ class SyncStatusResponse(FlexibleModel):
     status: str  # "in_progress" or "idle"
     started_at: str | None = None
     finished_at: str | None = None
+    # The refresh coroutine outlives the "idle" status (deal alerts, then the
+    # enrichment drain), and while it does the periodic refresh no-ops.
+    refresh_task_alive: bool = False
+    enrichment_in_flight: bool = False
     platforms: dict[str, dict[str, Any]]
 
 

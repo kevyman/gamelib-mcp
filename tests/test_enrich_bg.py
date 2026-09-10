@@ -217,6 +217,117 @@ class EnrichmentClaimTests(ToolDBTestCase):
         self.assertEqual(metacritic_claimed, [regular_platform_id, farmed_platform_id])
 
 
+class HltbQuiescenceTests(ToolDBTestCase):
+    """A dead provider has to reach quiescence, not spin.
+
+    ``claim_game_ids_for_hltb`` re-offers any row whose ``hltb_cached_at`` is
+    still NULL (or an expired NOT_FOUND marker), and a failed lookup writes
+    nothing — so counting a claimed row as processed made every batch look
+    productive, ``_run_until_quiescent`` never reached its idle polls, and the
+    refresh task holding the drain never finished. These run the real claim
+    queries against a real database, with only the HLTB fetch patched.
+    """
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        enrich_bg._reset_run_stats()
+        provider_health.reset()
+
+    async def asyncTearDown(self) -> None:
+        enrich_bg._reset_run_stats()
+        provider_health.reset()
+        await super().asyncTearDown()
+
+    async def _seed_claimable(self, count: int) -> list[int]:
+        return [
+            await db_module.upsert_game(appid=None, name=f"Unfetched {n}")
+            for n in range(count)
+        ]
+
+    async def _row(self, game_id: int) -> dict:
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT hltb_cached_at, hltb_claimed_at FROM games WHERE id = ?",
+                (game_id,),
+            )
+        return dict(row)
+
+    async def test_a_provider_that_writes_nothing_still_goes_quiescent(self) -> None:
+        game_ids = await self._seed_claimable(5)
+        fetch = AsyncMock(return_value=None)
+
+        with (
+            # The exact shape of a dead HLTB: answers None, writes nothing.
+            patch("gamelib_mcp.data.enrich_bg.get_hltb", fetch),
+            patch("gamelib_mcp.data.enrich_bg.asyncio.sleep", AsyncMock()),
+        ):
+            total = await asyncio.wait_for(
+                enrich_bg._run_hltb_workers(), timeout=DEADLOCK_TIMEOUT
+            )
+
+        self.assertEqual(total, 0)
+        # Once each, not once per idle poll: the claim is left stamped, so the
+        # next three polls find nothing to hand out instead of re-fetching the
+        # same dead rows.
+        self.assertEqual(fetch.await_count, len(game_ids))
+        for game_id in game_ids:
+            row = await self._row(game_id)
+            self.assertIsNone(row["hltb_cached_at"])
+            self.assertIsNotNone(row["hltb_claimed_at"])
+
+        # Held by the claim TTL, not permanently: a cutoff past the stamp
+        # offers every row again.
+        self.assertEqual(
+            await db_module.claim_game_ids_for_hltb(
+                limit=10, stale_before="1970-01-01T00:00:00+00:00"
+            ),
+            [],
+        )
+        self.assertEqual(
+            await db_module.claim_game_ids_for_hltb(
+                limit=10, stale_before="2999-01-01T00:00:00+00:00"
+            ),
+            game_ids,
+        )
+
+    async def test_a_not_found_marker_counts_and_stops_the_reclaim(self) -> None:
+        game_ids = await self._seed_claimable(3)
+
+        async def fetch(game_id: int, _name: str) -> None:
+            # What the real provider does when HLTB answers "no such game":
+            # a timestamped marker, which suppresses re-claiming for 30 days.
+            async with db_module.get_db() as db:
+                await db.execute(
+                    "UPDATE games SET hltb_cached_at = ? WHERE id = ?",
+                    ("NOT_FOUND:2026-09-10T00:00:00+00:00", game_id),
+                )
+                await db.commit()
+
+        with (
+            patch("gamelib_mcp.data.enrich_bg.get_hltb", AsyncMock(side_effect=fetch)),
+            patch("gamelib_mcp.data.enrich_bg.asyncio.sleep", AsyncMock()),
+        ):
+            total = await asyncio.wait_for(
+                enrich_bg._run_hltb_workers(), timeout=DEADLOCK_TIMEOUT
+            )
+
+        self.assertEqual(total, len(game_ids))
+        for game_id in game_ids:
+            row = await self._row(game_id)
+            self.assertEqual(row["hltb_cached_at"], "NOT_FOUND:2026-09-10T00:00:00+00:00")
+            # A row that MOVED gets its claim released — the marker is what
+            # keeps it out of the queue now.
+            self.assertIsNone(row["hltb_claimed_at"])
+        # And the claim query agrees: nothing left to hand out, even with a
+        # cutoff that would ignore any claim stamp.
+        self.assertEqual(
+            await db_module.claim_game_ids_for_hltb(
+                limit=10, stale_before="2999-01-01T00:00:00+00:00"
+            ),
+            [],
+        )
+
+
 class BackgroundEnrichmentSupervisorTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_until_quiescent_does_not_claim_new_work_while_paused(self) -> None:
         run_batch = AsyncMock(return_value=1)
@@ -358,10 +469,11 @@ class BackgroundEnrichmentSupervisorTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.data.enrich_bg.claim_game_ids_for_hltb", AsyncMock(return_value=[1, 2])),
             patch(
                 "gamelib_mcp.data.enrich_bg.load_hltb_batch_rows",
+                # Same rows on the post-fetch re-read: nothing was written.
                 AsyncMock(
                     return_value=[
-                        {"game_id": 1, "name": "Portal"},
-                        {"game_id": 2, "name": "Half-Life 2"},
+                        {"game_id": 1, "name": "Portal", "hltb_cached_at": None},
+                        {"game_id": 2, "name": "Half-Life 2", "hltb_cached_at": None},
                     ]
                 ),
             ),
@@ -372,7 +484,9 @@ class BackgroundEnrichmentSupervisorTests(unittest.IsolatedAsyncioTestCase):
         ):
             processed = await enrich_bg._run_hltb_batch()
 
-        self.assertEqual(processed, 2)
+        # The claim log counts rows CLAIMED; the return value counts rows whose
+        # state changed, and a patched get_hltb writes nothing.
+        self.assertEqual(processed, 0)
         self.assertTrue(any("HLTB worker claimed 2 rows" in line for line in logs.output))
 
     async def test_hltb_workers_log_total_processed(self) -> None:
@@ -512,7 +626,14 @@ class BackgroundEnrichmentSupervisorTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.data.enrich_bg.claim_game_ids_for_hltb", AsyncMock(return_value=[1])),
             patch(
                 "gamelib_mcp.data.enrich_bg.load_hltb_batch_rows",
-                AsyncMock(return_value=[{"game_id": 1, "name": "Portal"}]),
+                # The fetch cached something, so the claim IS due for release —
+                # which is what makes the pause deferral observable at all.
+                AsyncMock(
+                    side_effect=[
+                        [{"game_id": 1, "name": "Portal", "hltb_cached_at": None}],
+                        [{"game_id": 1, "name": "Portal", "hltb_cached_at": "2026-09-10T00:00:00+00:00"}],
+                    ]
+                ),
             ),
             patch("gamelib_mcp.data.enrich_bg.get_hltb", AsyncMock(side_effect=pause_during_hltb)),
             patch("gamelib_mcp.data.enrich_bg.clear_claim", AsyncMock()) as clear_claim,
@@ -566,19 +687,40 @@ class EnrichmentRunStatsTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self) -> None:
         enrich_bg._reset_run_stats()
 
-    def _enter_hltb_patches(self, stack: ExitStack, rows, fetch) -> None:
+    def _enter_hltb_patches(
+        self, stack: ExitStack, rows, fetch, *, cached_at_after: str | None = None
+    ) -> None:
         # _run_until_quiescent polls until three consecutive empty batches, so
         # the loaders keep answering after the one real batch.
+        #
+        # The batch loader is called twice per chunk — once for the claimed
+        # rows, once to re-read their state after the fetch — so it answers
+        # from `rows` the first time and from `cached_at_after` afterwards.
+        # Leaving that None models a fetch that wrote nothing (the shape a dead
+        # HLTB produces); passing a marker models one that did.
         empties = [[] for _ in range(6)]
+        before = {row["game_id"]: row for row in rows}
+        after = {
+            game_id: ({**row, "hltb_cached_at": cached_at_after} if cached_at_after else row)
+            for game_id, row in before.items()
+        }
+        state = {"loaded": False}
+
+        async def load(game_ids):
+            ids = list(game_ids)
+            if not ids:
+                return []
+            if not state["loaded"]:
+                state["loaded"] = True
+                return [before[game_id] for game_id in ids if game_id in before]
+            return [after[game_id] for game_id in ids if game_id in after]
+
         for patcher in (
             patch(
                 "gamelib_mcp.data.enrich_bg.claim_game_ids_for_hltb",
                 AsyncMock(side_effect=[[row["game_id"] for row in rows], *empties]),
             ),
-            patch(
-                "gamelib_mcp.data.enrich_bg.load_hltb_batch_rows",
-                AsyncMock(side_effect=[rows, *empties]),
-            ),
+            patch("gamelib_mcp.data.enrich_bg.load_hltb_batch_rows", AsyncMock(side_effect=load)),
             patch("gamelib_mcp.data.enrich_bg.get_hltb", fetch),
             patch("gamelib_mcp.data.enrich_bg.clear_claim", AsyncMock()),
             patch("gamelib_mcp.data.enrich_bg.asyncio.sleep", AsyncMock()),
@@ -603,7 +745,7 @@ class EnrichmentRunStatsTests(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patcher)
 
     async def test_hltb_worker_counts_failures_and_warns(self) -> None:
-        rows = [{"game_id": n, "name": f"Game {n}"} for n in (1, 2, 3)]
+        rows = [{"game_id": n, "name": f"Game {n}", "hltb_cached_at": None} for n in (1, 2, 3)]
         fetch = AsyncMock(side_effect=RuntimeError("hltb markup changed"))
 
         with ExitStack() as stack:
@@ -612,7 +754,9 @@ class EnrichmentRunStatsTests(unittest.IsolatedAsyncioTestCase):
                 total = await enrich_bg._run_hltb_workers()
 
         stats = enrich_bg.last_run_stats()["hltb"]
-        self.assertEqual(total, 3)
+        # Nothing was written, so nothing counts as progress — the whole point:
+        # these rows are still claimable and the family has to go quiescent.
+        self.assertEqual(total, 0)
         self.assertEqual(stats["failed"], 3)
         self.assertEqual(stats["processed"], 0)
         self.assertIn("hltb markup changed", stats["last_error"])
@@ -651,13 +795,16 @@ class EnrichmentRunStatsTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_hltb_worker_stays_quiet_when_every_fetch_succeeds(self) -> None:
-        rows = [{"game_id": n, "name": f"Game {n}"} for n in (1, 2, 3)]
+        rows = [{"game_id": n, "name": f"Game {n}", "hltb_cached_at": None} for n in (1, 2, 3)]
         # A COMPLETE result, not None: get_hltb answers None for a failed fetch
         # too, so pinning success on None pinned the bug this class exists for.
         hit = {"hltb_main": 8.5, "hltb_extra": 12.0, "hltb_complete": 30.0}
 
         with ExitStack() as stack:
-            self._enter_hltb_patches(stack, rows, AsyncMock(return_value=hit))
+            self._enter_hltb_patches(
+                stack, rows, AsyncMock(return_value=hit),
+                cached_at_after="2026-09-10T00:00:00+00:00",
+            )
             with self.assertNoLogs("gamelib_mcp.data.enrich_bg", level="WARNING"):
                 total = await enrich_bg._run_hltb_workers()
 
@@ -687,19 +834,23 @@ class EnrichmentRunStatsTests(unittest.IsolatedAsyncioTestCase):
         # One flaky fetch out of four is neither 3 failures nor half the batch,
         # which is the point of the threshold: the WARNING has to mean "this
         # provider is broken", not "one request timed out".
-        rows = [{"game_id": n, "name": f"Game {n}"} for n in (1, 2, 3, 4)]
+        rows = [{"game_id": n, "name": f"Game {n}", "hltb_cached_at": None} for n in (1, 2, 3, 4)]
 
         async def fetch(game_id: int, _name: str) -> None:
             if game_id == 2:
                 raise RuntimeError("one flaky fetch")
 
         with ExitStack() as stack:
-            self._enter_hltb_patches(stack, rows, AsyncMock(side_effect=fetch))
+            self._enter_hltb_patches(
+                stack, rows, AsyncMock(side_effect=fetch),
+                cached_at_after="2026-09-10T00:00:00+00:00",
+            )
             with self.assertNoLogs("gamelib_mcp.data.enrich_bg", level="WARNING"):
                 total = await enrich_bg._run_hltb_workers()
 
         stats = enrich_bg.last_run_stats()["hltb"]
-        self.assertEqual(total, 4)
+        # Three rows cached something; the one that raised never got that far.
+        self.assertEqual(total, 3)
         self.assertEqual(stats["processed"], 3)
         self.assertEqual(stats["failed"], 1)
 
@@ -771,6 +922,21 @@ class ProviderSwallowedFailureTests(ToolDBTestCase):
         client = MagicMock()
         client.async_search = search
         empty = [[] for _ in range(empties)]
+        state = {"loaded": False}
+        real_loader = db_module.load_hltb_batch_rows
+
+        async def load(game_ids):
+            # The claimed rows are supplied; the post-fetch re-read goes to the
+            # real database, so what the real get_hltb wrote (or didn't) is
+            # what the batch sees.
+            ids = list(game_ids)
+            if not ids:
+                return []
+            if not state["loaded"]:
+                state["loaded"] = True
+                return rows
+            return await real_loader(ids)
+
         with ExitStack() as stack:
             for patcher in (
                 patch(
@@ -779,7 +945,7 @@ class ProviderSwallowedFailureTests(ToolDBTestCase):
                 ),
                 patch(
                     "gamelib_mcp.data.enrich_bg.load_hltb_batch_rows",
-                    AsyncMock(side_effect=[rows, *empty]),
+                    AsyncMock(side_effect=load),
                 ),
                 patch("gamelib_mcp.data.enrich_bg._clear_claim_or_defer", AsyncMock()),
                 patch("gamelib_mcp.data.enrich_bg.asyncio.sleep", AsyncMock()),
@@ -814,14 +980,17 @@ class ProviderSwallowedFailureTests(ToolDBTestCase):
             yield
 
     async def test_hltb_transport_failure_the_provider_swallows_is_counted(self) -> None:
-        rows = [{"game_id": n, "name": f"Game {n}"} for n in (1, 2, 3)]
+        rows = [{"game_id": n, "name": f"Game {n}", "hltb_cached_at": None} for n in (1, 2, 3)]
         search = AsyncMock(side_effect=httpx.ConnectError("hltb is unreachable"))
 
         with self._real_hltb_batch(rows, search):
             handled = await enrich_bg._run_hltb_batch()
 
         stats = enrich_bg.last_run_stats()["hltb"]
-        self.assertEqual(handled, 3)
+        # A swallowed transport failure writes no marker, so the row stays
+        # claimable and the batch reports no progress — while still counting
+        # the failure, which is what the WARNING reads.
+        self.assertEqual(handled, 0)
         self.assertEqual(stats["failed"], 3)
         self.assertEqual(stats["processed"], 0)
         self.assertIn("hltb is unreachable", stats["last_error"])
@@ -830,7 +999,7 @@ class ProviderSwallowedFailureTests(ToolDBTestCase):
         # howlongtobeatpy answers None (not []) when the request itself failed.
         # The provider deliberately does NOT write a NOT_FOUND marker for it,
         # and it must not read as a processed row either.
-        rows = [{"game_id": n, "name": f"Game {n}"} for n in (1, 2)]
+        rows = [{"game_id": n, "name": f"Game {n}", "hltb_cached_at": None} for n in (1, 2)]
 
         with self._real_hltb_batch(rows, AsyncMock(return_value=None)):
             await enrich_bg._run_hltb_batch()
@@ -842,7 +1011,7 @@ class ProviderSwallowedFailureTests(ToolDBTestCase):
     async def test_hltb_not_found_counts_as_processed(self) -> None:
         # HLTB answered and has no entry for the title. That is the provider
         # working, and it must never look like an outage.
-        rows = [{"game_id": n, "name": f"Game {n}"} for n in (1, 2, 3)]
+        rows = [{"game_id": n, "name": f"Game {n}", "hltb_cached_at": None} for n in (1, 2, 3)]
 
         with self._real_hltb_batch(rows, AsyncMock(return_value=[])):
             await enrich_bg._run_hltb_batch()
@@ -853,7 +1022,7 @@ class ProviderSwallowedFailureTests(ToolDBTestCase):
         self.assertIsNone(stats["last_error"])
 
     async def test_hltb_match_counts_as_processed(self) -> None:
-        rows = [{"game_id": n, "name": f"Game {n}"} for n in (1, 2)]
+        rows = [{"game_id": n, "name": f"Game {n}", "hltb_cached_at": None} for n in (1, 2)]
         entry = SimpleNamespace(
             similarity=0.98, main_story=8.5, main_extra=12.0, completionist=30.0
         )
@@ -868,7 +1037,7 @@ class ProviderSwallowedFailureTests(ToolDBTestCase):
     async def test_dead_hltb_still_warns_through_the_swallow(self) -> None:
         # The whole point: the WARNING has to fire for the outage shape that
         # never raises, which is the only shape HLTB actually produces.
-        rows = [{"game_id": n, "name": f"Game {n}"} for n in (1, 2, 3)]
+        rows = [{"game_id": n, "name": f"Game {n}", "hltb_cached_at": None} for n in (1, 2, 3)]
         search = AsyncMock(side_effect=httpx.ReadTimeout("hltb timed out"))
 
         with (
@@ -970,7 +1139,7 @@ class ProviderSwallowedFailureTests(ToolDBTestCase):
         # failing mid-pass lands in the same counter. It may not report more
         # failed rows than the batch attempted — the WARNING's ratio depends on
         # that.
-        rows = [{"game_id": 1, "name": "Game 1"}]
+        rows = [{"game_id": 1, "name": "Game 1", "hltb_cached_at": None}]
 
         async def search(query: str):
             provider_health.record_failure("hltb", "a concurrent lazy fetch failed")

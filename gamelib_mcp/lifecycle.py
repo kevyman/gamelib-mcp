@@ -466,37 +466,65 @@ async def _run_startup_refresh(platforms: list[str] | None = None) -> dict:
         if cancelled:
             logger.info("Startup library refresh cancelled")
 
-    if refresh_result is not None:
-        await _drain_background_enrich_reruns()
-
     # Deal alerts ride on the refresh the periodic loop already runs, so there
-    # is no second scheduler to keep alive. Lazily imported like the admin
-    # module above, and belt-and-braces wrapped: run_deal_alerts already
-    # swallows its own failures, and a notification must never be able to turn
-    # a successful library sync into a failed one.
+    # is no second scheduler to keep alive. They run as soon as the sync result
+    # is settled and BEFORE the enrichment drain below: the drain can take
+    # hours (or, with a dead provider, longer), and for the whole of it this
+    # coroutine — and the _LIBRARY_REFRESH_TASK holding it — is still alive, so
+    # the next periodic refresh no-ops and prices go unchecked. Prod went five
+    # days without an alert that way. Lazily imported like the admin module
+    # above, and belt-and-braces wrapped: run_deal_alerts already swallows its
+    # own failures, and a notification must never be able to turn a successful
+    # library sync into a failed one. A CANCELLED refresh never gets here — the
+    # re-raise above leaves through the finally.
     from .deal_alerts import is_deal_alerts_configured
 
     if is_deal_alerts_configured():
         try:
             from .deal_alerts import run_deal_alerts
 
-            await run_deal_alerts()
+            alert_result = await run_deal_alerts()
+            logger.info(
+                "Deal alert run: checked=%d triggered=%d sent=%d failed=%d%s",
+                alert_result.get("checked", 0),
+                alert_result.get("triggered", 0),
+                alert_result.get("sent", 0),
+                alert_result.get("failed", 0),
+                f" error={alert_result['error']}" if alert_result.get("error") else "",
+            )
         except Exception:
             logger.exception("Deal alert run failed")
+
+    if refresh_result is not None:
+        await _drain_background_enrich_reruns()
 
     return refresh_result or {}
 
 
-async def _ensure_startup_refresh(platforms: list[str] | None = None) -> asyncio.Task:
+async def _start_or_get_refresh(
+    platforms: list[str] | None = None,
+) -> tuple[asyncio.Task, bool]:
+    """The refresh task plus whether THIS call created it.
+
+    The flag has to be decided under the lock: a caller that compared the task
+    handle before and after would read it while another coroutine was between
+    its own check and its create_task, and conclude it had started a refresh
+    that someone else owns (or the reverse).
+    """
     global _LIBRARY_REFRESH_TASK
 
     async with _get_library_refresh_lock():
         if _LIBRARY_REFRESH_TASK is not None and not _LIBRARY_REFRESH_TASK.done():
-            return _LIBRARY_REFRESH_TASK
+            return _LIBRARY_REFRESH_TASK, False
 
         _LIBRARY_REFRESH_TASK = asyncio.create_task(_run_startup_refresh(platforms))
         _LIBRARY_REFRESH_TASK.add_done_callback(_clear_library_refresh_task)
-        return _LIBRARY_REFRESH_TASK
+        return _LIBRARY_REFRESH_TASK, True
+
+
+async def _ensure_startup_refresh(platforms: list[str] | None = None) -> asyncio.Task:
+    task, _created = await _start_or_get_refresh(platforms)
+    return task
 
 
 def get_startup_refresh_task() -> asyncio.Task | None:
@@ -504,11 +532,40 @@ def get_startup_refresh_task() -> asyncio.Task | None:
     return _LIBRARY_REFRESH_TASK
 
 
+def background_task_flags() -> dict[str, bool]:
+    """Whether each background task is still alive, for status/health readers.
+
+    library_sync_status flips to "idle" the moment the platform syncs settle,
+    while the refresh coroutine runs on through deal alerts and the enrichment
+    drain — and blocks every periodic refresh for as long as it does. Reported
+    from the task handles here so no caller has to reach across for a private
+    global.
+    """
+    return {
+        "refresh_task_alive": _LIBRARY_REFRESH_TASK is not None
+        and not _LIBRARY_REFRESH_TASK.done(),
+        "enrichment_in_flight": _ENRICHMENT_TASK is not None
+        and not _ENRICHMENT_TASK.done(),
+    }
+
+
 async def _run_periodic_refresh_loop(interval_seconds: float) -> None:
+    from .data.db import get_meta
+
     while True:
         await asyncio.sleep(interval_seconds)
         try:
-            await _ensure_startup_refresh()
+            _task, created = await _start_or_get_refresh()
+            if not created:
+                # A refresh was already in flight, so this interval did
+                # nothing. That is silent by design, and the silence is what
+                # made a wedged refresh invisible. The running refresh wrote
+                # its own start time, so read it back rather than tracking a
+                # second copy of it here.
+                logger.warning(
+                    "Periodic library refresh skipped: previous refresh still running (started %s)",
+                    await get_meta("library_sync_started_at"),
+                )
         except asyncio.CancelledError:
             raise
         except Exception:

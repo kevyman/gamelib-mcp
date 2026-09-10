@@ -15,7 +15,7 @@ invariant, that `game_platforms.owned=0` must never be overloaded to mean
 ### Deal notifications
 
 `DEAL_ALERT_WEBHOOK_URL` enables deal pushes after library refresh. There is
-deliberately no second scheduler: `run_deal_alerts()` is the last step of
+deliberately no second scheduler: `run_deal_alerts()` runs inside
 `lifecycle._run_startup_refresh`, so the alert cadence IS the refresh cadence —
 `LIBRARY_REFRESH_INTERVAL_HOURS` (default 24, so daily), plus the startup
 refresh when the library is already stale (`STALE_HOURS = 6`). Setting the
@@ -27,6 +27,19 @@ shop, trigger, and sale end date. This deliberately gives deals a different
 shape from the illustrated daily briefing cards sharing the channel. Link
 previews are suppressed and mentions disabled. Other webhook hosts retain
 the plain-text Slack-compatible payload.
+
+It runs as soon as the sync result settles and BEFORE the background-enrichment
+drain, not after it. That ordering is load-bearing rather than cosmetic: the
+drain holds the same coroutine (and `_LIBRARY_REFRESH_TASK`) open for as long
+as it takes, and `_start_or_get_refresh` hands back the live task instead of a new one, so
+every periodic refresh no-ops while it runs. With HowLongToBeat dead for
+weeks, that drain never ended and prod went five days without an alert —
+alerts now speak before anything that can outlive the sync. The trade is that a
+game first wishlisted by the SAME refresh has no `games.igdb_platforms` yet (the
+IGDB backfill writes it inside the drain), so its Switch availability is
+undecidable and a switch2 price for it can be skipped until the next refresh;
+the prices themselves are unaffected, and the debounce key encodes the price, so
+the deal is still eligible to speak on that next run.
 
 Discord messages split between complete deals within 1,900 UTF-16 units,
 with the total deal count on each page and page numbers when a digest spans

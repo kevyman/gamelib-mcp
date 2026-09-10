@@ -1,4 +1,20 @@
-"""Concurrent background enrichment with claim-aware worker families."""
+"""Concurrent background enrichment with claim-aware worker families.
+
+Quiescence rule for every family: a batch may only count a row as processed
+when that row can no longer be re-claimed. ``_run_until_quiescent`` stops after
+``_IDLE_POLLS`` empty batches, so a family that counts rows its claim query
+will hand back on the next poll never stops — and the refresh task holding the
+drain stays alive with it. That idle count is also reset while any OTHER family
+is still progressing (the supervisor epoch, see ``_run_until_quiescent``), so a
+dead family keeps re-claiming at the 15-minute claim TTL for as long as the
+rest of the drain runs — bounded by the other families' work, never by its own.
+Store, ProtonDB, SteamSpy, OpenCritic and Metacritic satisfy this by always
+writing a ``*_cached_at`` value (a real timestamp, a status marker, or
+``FAILED``) even when the fetch failed, and IGDB's backfill returns only rows
+that reached a terminal state. HLTB is the exception — a failed lookup
+deliberately writes nothing — so ``_run_hltb_batch`` checks the row's state
+instead of trusting the attempt.
+"""
 
 import asyncio
 import logging
@@ -414,24 +430,53 @@ async def _run_hltb_batch() -> int:
     logger.info("HLTB worker claimed %d rows", len(rows))
 
     outcome = _BatchOutcome("hltb")
-    total = 0
+    attempted = 0
+    progressed = 0
     for index in range(0, len(rows), _BATCH_SIZE):
         batch = rows[index : index + _BATCH_SIZE]
 
-        async def run_one(row: sqlite3.Row) -> int:
+        async def run_one(row: sqlite3.Row) -> bool:
+            """Fetch one row; True when the provider answered without raising."""
             try:
                 await get_hltb(row["game_id"], row["name"])
             except Exception as exc:
                 logger.debug("HLTB enrich failed for %s: %s", row["name"], exc)
                 outcome.record_raised(exc)
-            finally:
-                await _clear_claim_or_defer("games", "hltb_claimed_at", row["game_id"])
-            return 1
+                return False
+            return True
 
-        total += sum(await asyncio.gather(*(run_one(row) for row in batch)))
+        answered = await asyncio.gather(*(run_one(row) for row in batch))
+        # A failed HLTB lookup writes nothing — not the durations, not even a
+        # NOT_FOUND marker (an outage must never be recorded as "HLTB has no
+        # entry"). So the row's own state is the only evidence that anything
+        # happened: one re-read of the chunk, compared against what was loaded
+        # before it. Counting a claimed row as processed regardless made every
+        # batch look productive and _run_until_quiescent never reached its idle
+        # polls — with HLTB down, ~193 rows re-claimed each other forever and
+        # the refresh task never finished.
+        after = {
+            row["game_id"]: row["hltb_cached_at"]
+            for row in await load_hltb_batch_rows([row["game_id"] for row in batch])
+        }
+        for row, provider_answered in zip(batch, answered, strict=True):
+            changed = provider_answered and after.get(row["game_id"]) != row["hltb_cached_at"]
+            if changed:
+                await _clear_claim_or_defer("games", "hltb_claimed_at", row["game_id"])
+                progressed += 1
+            # Otherwise the claim is deliberately LEFT stamped: the provider
+            # gave nothing, so releasing it would hand the same dead row back
+            # on the very next poll. With the count fixed but the claim
+            # released, each drain would re-fetch the same dead rows once per
+            # idle poll (four times) and the run-stat WARNING would report 25
+            # rows as 100 failures. The 15-minute claim TTL in
+            # _claim_cutoff_iso is the retry window instead.
+        attempted += len(batch)
         await asyncio.sleep(_HLTB_DELAY)
-    outcome.settle_rows(total)
-    return total
+    # Settled against rows ATTEMPTED, not rows that progressed: the run stats
+    # (and the dead-provider WARNING they drive) still have to see every row the
+    # batch tried, even when none of them moved.
+    outcome.settle_rows(attempted)
+    return progressed
 
 
 async def _run_protondb_batch() -> int:
