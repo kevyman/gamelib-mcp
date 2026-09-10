@@ -10,7 +10,7 @@ dependencies = [
     # fingerprints on www.epicgames.com, so the real fetch path impersonates
     # a browser (see data/purchases/epic_orders.py).
     "curl-cffi>=0.15",
-    "howlongtobeatpy>=1.0.22",
+    "howlongtobeatpy>=1.0.23",
     "aiosqlite>=0.22.1,<0.23",
     "pydantic>=2.13.4",
     "python-dotenv>=1.0",

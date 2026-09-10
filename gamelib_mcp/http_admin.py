@@ -17,7 +17,11 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from .lifecycle import INSPECTOR_PLATFORM_ALIASES, SYNC_METADATA_PLATFORMS
+from .lifecycle import (
+    INSPECTOR_PLATFORM_ALIASES,
+    SYNC_METADATA_PLATFORMS,
+    background_task_flags,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +242,7 @@ async def _health_payload() -> dict:
                 "status": sync_status,
                 "state": library_sync_status,
                 "error": library_sync_error,
+                **background_task_flags(),
             },
             "platform_coverage": {
                 "status": platform_status,

@@ -37,6 +37,7 @@ from ..data.title_normalization import normalize_search_text
 from ..data.xbox import sync_xbox  # noqa: F401
 from ..lifecycle import (
     _schedule_background_enrich,
+    background_task_flags,
     get_startup_refresh_task,
     record_platform_sync_outcome,
 )
@@ -315,6 +316,9 @@ async def get_sync_status() -> dict:
     in_progress (other platforms, the license audit, and background enrichment
     can outlast it). "unconfigured" means the integration has never been set up
     — the error names what is missing, and last_success_at is null.
+
+    refresh_task_alive/enrichment_in_flight expose the two background tasks the
+    meta status cannot see, so "idle" next to a live refresh task is legible.
     """
     from ..data.db import get_meta, get_meta_prefix
 
@@ -348,6 +352,10 @@ async def get_sync_status() -> dict:
         "status": overall,
         "started_at": started_at,
         "finished_at": finished_at,
+        # Reading the meta key alone made "idle, but the refresh task is still
+        # draining" invisible — a `sync` answering already_running was the one
+        # tell.
+        **background_task_flags(),
         "platforms": platforms,
     }
 
