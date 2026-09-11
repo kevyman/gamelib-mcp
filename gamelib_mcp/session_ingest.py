@@ -7,9 +7,12 @@ function. The nonce is the only credential: minting already happens behind the
 MCP OAuth owner check, the link expires after ``_INGEST_TTL_SECONDS`` and is
 consumed on first successful save.
 
-Most providers are a plain cookie paste. ``nintendo_pctl`` is an interactive
-login: a ``prepare_name`` hook mints Nintendo's PKCE sign-in URL when the form
-first renders, the page offers it as a button, and the user pastes back the
+Most providers are a plain cookie paste. Two — ``psn`` and ``xbox`` — are a
+single opaque token instead (Sony's NPSSO cookie, an OpenXBL API key); their
+setters accept the bare value, so the paste box takes whatever the provider's
+page hands the user. ``nintendo_pctl`` is an interactive login: a
+``prepare_name`` hook mints Nintendo's PKCE sign-in URL when the form first
+renders, the page offers it as a button, and the user pastes back the
 ``npf://`` link — which carries a one-time code, hence the same
 keep-it-out-of-the-chat treatment as a cookie.
 
@@ -200,6 +203,66 @@ INGEST_PROVIDERS: dict[str, IngestProvider] = {
             "Paste what was copied into the box below and click Save.",
         ),
         required_cookie="steamLoginSecure",
+    ),
+    "psn": IngestProvider(
+        key="psn",
+        label="PlayStation Network",
+        setter_name="set_psn_session",
+        export_url="https://ca.account.sony.com/api/v1/ssocookie",
+        hint=(
+            "Sony's NPSSO token lasts roughly two months. When "
+            "get_integration_status reports PSN as stale, repeat these steps — no "
+            "server access needed."
+        ),
+        steps=(
+            (
+                "In your browser, open https://www.playstation.com/ and sign in "
+                "(top right, \"Sign In\") with the PlayStation account you play on."
+            ),
+            (
+                "In the SAME browser, open "
+                "https://ca.account.sony.com/api/v1/ssocookie . You should see one "
+                "short line of text that looks like {\"npsso\":\"…\"} — that is your "
+                "token."
+            ),
+            (
+                "Select everything on that page (Ctrl+A on Windows, Cmd+A on Mac), "
+                "copy it, and paste it into the box below. Pasting just the "
+                "64-character value between the quotes also works."
+            ),
+            (
+                "If that page shows an error instead, you are not signed in — go "
+                "back to step 1, sign in, and reload the page from step 2."
+            ),
+            "Click Save.",
+        ),
+        required_cookie="npsso",
+        placeholder='Paste the {"npsso":"…"} text (or just the 64-character token) here',
+        submit_label="Save token",
+    ),
+    "xbox": IngestProvider(
+        key="xbox",
+        label="Xbox (OpenXBL)",
+        setter_name="set_xbox_session",
+        export_url="https://xbl.io/console",
+        hint=(
+            "OpenXBL is a third-party Xbox Live API. Ownership comes from your "
+            "title history (games you have played on this account); playtime is "
+            "best-effort."
+        ),
+        steps=(
+            (
+                "In your browser, open https://xbl.io/ and click \"Login\". Sign in "
+                "with the Microsoft account you use on your Xbox."
+            ),
+            (
+                "Open https://xbl.io/console . Under \"API Keys\", click \"Create\" if "
+                "you don't have one yet."
+            ),
+            "Copy the key shown there, paste it into the box below, and click Save.",
+        ),
+        placeholder="Paste your OpenXBL API key here",
+        submit_label="Save API key",
     ),
     "nintendo_pctl": IngestProvider(
         key="nintendo_pctl",

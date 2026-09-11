@@ -1,6 +1,9 @@
 import asyncio
+import json
 import os
+import shutil
 import sys
+import tempfile
 import types
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -71,6 +74,22 @@ _SAMPLE_TITLE_HISTORY = {
 }
 
 
+def _absent_api_key_file(case):
+    """Point OPENXBL_API_KEY_FILE at a path that cannot exist.
+
+    Clearing the env var alone no longer proves "unconfigured": the loader reads
+    the stored file first, and default_data_dir() is only a throwaway temp dir
+    while the session fixture holds DATABASE_URL.
+    """
+    tmp = tempfile.mkdtemp(prefix="openxbl-absent-")
+    case.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+    return patch.dict(
+        "os.environ",
+        {"OPENXBL_API_KEY_FILE": os.path.join(tmp, "absent.json")},
+        clear=False,
+    )
+
+
 class ExtractTitleTests(unittest.TestCase):
     def test_extract_title_reads_id_and_name(self):
         title_id, name = _extract_title(_SAMPLE_TITLE_HISTORY["titles"][0])
@@ -92,16 +111,77 @@ class ExtractTitleTests(unittest.TestCase):
         self.assertIsNone(name)
 
 
+class LoadOpenxblApiKeyTests(unittest.TestCase):
+    """The stored file is the configured path; OPENXBL_API_KEY is the fallback."""
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp(prefix="openxbl-key-test-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self.path = os.path.join(tmp, "openxbl_api_key.json")
+
+    def _write(self, payload):
+        with open(self.path, "w", encoding="utf-8") as f:
+            if isinstance(payload, str):
+                f.write(payload)
+            else:
+                json.dump(payload, f)
+
+    def _env(self, **extra):
+        return patch.dict(
+            "os.environ", {"OPENXBL_API_KEY_FILE": self.path, **extra}, clear=True
+        )
+
+    def test_file_beats_env(self):
+        # A key just pasted through the ingest form must beat a stale .env.
+        self._write({"api_key": "from-file"})
+        with self._env(OPENXBL_API_KEY="from-env"):
+            self.assertEqual(xbox.load_openxbl_api_key(), "from-file")
+            self.assertEqual(xbox.openxbl_key_source(), "file")
+
+    def test_env_used_when_file_absent(self):
+        with self._env(OPENXBL_API_KEY="from-env"):
+            self.assertEqual(xbox.load_openxbl_api_key(), "from-env")
+            self.assertEqual(xbox.openxbl_key_source(), "env")
+
+    def test_malformed_file_falls_back_to_env(self):
+        self._write("{not json at all")
+        with self._env(OPENXBL_API_KEY="from-env"):
+            self.assertEqual(xbox.load_openxbl_api_key(), "from-env")
+            self.assertEqual(xbox.openxbl_key_source(), "env")
+
+    def test_file_without_api_key_falls_back_to_env(self):
+        self._write({"token": "x"})
+        with self._env(OPENXBL_API_KEY="from-env"):
+            self.assertEqual(xbox.load_openxbl_api_key(), "from-env")
+
+    def test_neither_is_none(self):
+        with self._env():
+            self.assertIsNone(xbox.load_openxbl_api_key())
+            self.assertIsNone(xbox.openxbl_key_source())
+
+    def test_headers_carry_the_stored_key(self):
+        self._write({"api_key": "from-file"})
+        with self._env():
+            self.assertEqual(xbox._headers()["X-Authorization"], "from-file")
+
+
 class IsXboxConfiguredTests(unittest.TestCase):
     def test_unconfigured_without_api_key(self):
-        with patch.dict("os.environ", {}, clear=False):
-            import os
-
+        with _absent_api_key_file(self):
             os.environ.pop("OPENXBL_API_KEY", None)
             self.assertFalse(xbox.is_xbox_configured())
 
     def test_configured_with_api_key(self):
         with patch.dict("os.environ", {"OPENXBL_API_KEY": "test-key"}, clear=False):
+            self.assertTrue(xbox.is_xbox_configured())
+
+    def test_configured_from_stored_file_alone(self):
+        tmp = tempfile.mkdtemp(prefix="openxbl-key-test-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        path = os.path.join(tmp, "openxbl_api_key.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"api_key": "from-file"}, f)
+        with patch.dict("os.environ", {"OPENXBL_API_KEY_FILE": path}, clear=True):
             self.assertTrue(xbox.is_xbox_configured())
 
 
@@ -291,14 +371,16 @@ class SyncXboxTests(unittest.TestCase):
         return result, mock_resolve, mock_upsert_platform, mock_enrichment, mock_get_by_identifier
 
     def test_sync_xbox_unconfigured(self):
-        with patch.dict("os.environ", {}, clear=False):
-            import os
-
+        with _absent_api_key_file(self):
             os.environ.pop("OPENXBL_API_KEY", None)
             result = asyncio.run(xbox.sync_xbox())
 
         self.assertEqual(result["sync_status"], "unconfigured")
         self.assertEqual(result["error_classification"], "missing_configuration")
+        self.assertEqual(
+            result["error_summary"],
+            'Xbox is not connected — run create_session_ingest_link(provider="xbox")',
+        )
         self.assertEqual(result["added"], 0)
         self.assertEqual(result["matched"], 0)
         self.assertEqual(result["skipped"], 0)

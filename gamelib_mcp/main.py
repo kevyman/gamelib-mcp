@@ -1978,6 +1978,9 @@ async def create_session_ingest_link(provider: str) -> SessionIngestLinkResponse
     - "nintendo_pctl" — Switch PLAYTIME via the Parental Controls API, including
       games played on the console under another account. Not cookies: the page
       walks the user through Nintendo's sign-in and takes the npf:// link back.
+    - "psn" — the PlayStation NPSSO token (a single value, not a cookie export);
+      lasts ~2 months, so expect to repeat it when PSN goes stale.
+    - "xbox" — an OpenXBL API key from xbl.io/console (a single value).
 
     The link expires in 15 minutes, works exactly once, and is invalidated by a
     server restart. Without MCP_PUBLIC_BASE_URL (local disabled-auth mode) the

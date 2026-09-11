@@ -19,7 +19,8 @@ STEAM_ID=...
 Optional integrations:
 
 - `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET` for IGDB enrichment
-- `PSN_NPSSO` for PSN sync
+- `PSN_NPSSO_FILE` for PSN sync (populated at runtime via `create_session_ingest_link(provider="psn")`; bare `PSN_NPSSO` in the env still works as a legacy fallback)
+- `OPENXBL_API_KEY_FILE` for Xbox sync (populated at runtime via `create_session_ingest_link(provider="xbox")`; bare `OPENXBL_API_KEY` in the env still works as a legacy fallback)
 - `BACKLOGGD_USER` for rating sync
 - `NINTENDO_COOKIES_FILE` for Switch ownership and `NINTENDO_PCTL_SESSION_FILE` for Switch playtime (populated at runtime via `create_session_ingest_link(provider="nintendo")` and `create_session_ingest_link(provider="nintendo_pctl")`)
 - `EPIC_LEGENDARY_HOST_PATH` and `LGOGDOWNLOADER_HOST_PATH` if you want Epic/GOG sync in Docker

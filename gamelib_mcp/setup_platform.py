@@ -5,7 +5,8 @@ Usage: python -m gamelib_mcp.setup_platform <platform>
 Supported platforms:
   gog    — opens GOG OAuth2 flow, writes GOG_REFRESH_TOKEN to .env
   epic   — prints legendary auth instructions
-  psn    — prints NPSSO cookie extraction instructions
+  psn    — prints NPSSO token paste instructions (ingest link, no .env edit)
+  xbox   — prints OpenXBL API key paste instructions (ingest link, no .env edit)
   switch — prints Nintendo Switch setup instructions
 """
 
@@ -33,11 +34,32 @@ def _setup_epic() -> None:
 
 def _setup_psn() -> None:
     print(
-        "PSN auth requires a one-time manual step:\n"
-        "1. Log in to your PSN account in a browser.\n"
-        "2. Visit: https://ca.account.sony.com/api/v1/ssocookie\n"
-        "3. Copy the value of the 'npsso' field.\n"
-        "4. Add to .env:  PSN_NPSSO=<value>"
+        "PSN auth is a token paste — no .env edit and no server access:\n"
+        "1. Call create_session_ingest_link(provider='psn') and open the link.\n"
+        "2. In the same browser, sign in at https://www.playstation.com/ and then\n"
+        "   open https://ca.account.sony.com/api/v1/ssocookie .\n"
+        "3. Copy that page (the {\"npsso\":\"...\"} line) into the form and submit.\n"
+        "\n"
+        "The token lands in PSN_NPSSO_FILE (psn_npsso.json beside the database);\n"
+        "a legacy PSN_NPSSO env var still works but the stored file wins.\n"
+        "\n"
+        'Then run sync(targets=["library"], platforms=["ps5"]) to sync.'
+    )
+
+
+def _setup_xbox() -> None:
+    print(
+        "Xbox auth is an OpenXBL API key paste — no .env edit and no server access:\n"
+        "1. Call create_session_ingest_link(provider='xbox') and open the link.\n"
+        "2. Sign in at https://xbl.io/ with the Microsoft account you use on your\n"
+        "   Xbox, then open https://xbl.io/console and create an API key.\n"
+        "3. Paste that key into the form and submit.\n"
+        "\n"
+        "The key lands in OPENXBL_API_KEY_FILE (openxbl_api_key.json beside the\n"
+        "database); a legacy OPENXBL_API_KEY env var still works but the stored\n"
+        "file wins. OPENXBL_XUID (optional) stays an env var.\n"
+        "\n"
+        'Then run sync(targets=["library"], platforms=["xbox"]) to sync.'
     )
 
 
@@ -64,6 +86,7 @@ _HANDLERS = {
     "gog": _setup_gog,
     "epic": _setup_epic,
     "psn": _setup_psn,
+    "xbox": _setup_xbox,
     "switch": _setup_switch,
 }
 

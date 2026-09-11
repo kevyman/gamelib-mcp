@@ -1,7 +1,11 @@
 """Xbox library sync via OpenXBL (https://xbl.io).
 
-Requires OPENXBL_API_KEY (personal key from xbl.io/console; sent as the
-X-Authorization header). Xbox has no purchase-library API, so ownership is
+Auth: a personal OpenXBL API key (from https://xbl.io/console, sent as the
+X-Authorization header), pasted through
+``create_session_ingest_link(provider="xbox")`` and stored at
+``OPENXBL_API_KEY_FILE`` (defaults to ``openxbl_api_key.json`` beside the
+database); ``OPENXBL_API_KEY`` in the environment remains a legacy fallback,
+and the stored file wins over it. Xbox has no purchase-library API, so ownership is
 derived from the account's title history ("played on this account") — the
 same approximation nintendo_pctl makes for Parental Controls playtime.
 Playtime is fetched best-effort from the stats endpoint; when unavailable,
@@ -11,15 +15,17 @@ OPENXBL_XUID optionally pins the account to inspect; it defaults to the API
 key owner's own xuid, resolved via GET /account.
 """
 
+import json
 import logging
 import os
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
 from gamelib_mcp.data.db import (
     XBOX_TITLE_ID,
     adopt_platform_identifier,
+    default_data_dir,
     get_game_by_identifier,
     load_fuzzy_candidates,
     upsert_game_alias,
@@ -38,13 +44,62 @@ _OPENXBL_TIMEOUT = 30.0
 _MINUTES_PLAYED_STAT = "MinutesPlayed"
 
 
+def _api_key_file_path() -> str:
+    return os.getenv("OPENXBL_API_KEY_FILE") or str(
+        default_data_dir() / "openxbl_api_key.json"
+    )
+
+
+def _load_api_key_file() -> str | None:
+    """Read the OpenXBL key pasted through the ingest form, or None.
+
+    A missing file is the normal unconfigured case; a malformed/unreadable one
+    degrades to None (logged at DEBUG) so the env fallback still applies.
+    """
+    path = _api_key_file_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        logger.debug("Failed to load OpenXBL API key from %s: %s", path, exc)
+        return None
+
+    if isinstance(data, dict):
+        key = data.get("api_key")
+        if isinstance(key, str) and key.strip():
+            return key.strip()
+    logger.debug("OpenXBL key file %s has no usable 'api_key' value", path)
+    return None
+
+
+def load_openxbl_api_key() -> str | None:
+    """The OpenXBL key to authenticate with: the stored file, else the env var.
+
+    The FILE WINS: ``OPENXBL_API_KEY`` is the legacy path, and a key just pasted
+    through ``create_session_ingest_link(provider="xbox")`` must beat whatever
+    stale value is still sitting in a deployment's ``.env``.
+    """
+    return _load_api_key_file() or (os.environ.get("OPENXBL_API_KEY") or None)
+
+
+def openxbl_key_source() -> Literal["file", "env"] | None:
+    """Where ``load_openxbl_api_key`` found a key — for the integration inspector."""
+    if _load_api_key_file():
+        return "file"
+    if os.environ.get("OPENXBL_API_KEY"):
+        return "env"
+    return None
+
+
 def is_xbox_configured() -> bool:
-    return bool(os.getenv("OPENXBL_API_KEY"))
+    return bool(load_openxbl_api_key())
 
 
 def _headers() -> dict[str, str]:
     return {
-        "X-Authorization": os.getenv("OPENXBL_API_KEY", ""),
+        "X-Authorization": load_openxbl_api_key() or "",
         "Accept": "application/json",
     }
 
@@ -194,13 +249,15 @@ async def sync_xbox() -> dict:
     Returns: {"added": int, "matched": int, "skipped": int}
     """
     if not is_xbox_configured():
-        logger.info("OPENXBL_API_KEY not set — skipping Xbox sync")
+        logger.info("OpenXBL API key not set — skipping Xbox sync")
         return {
             "added": 0,
             "matched": 0,
             "skipped": 0,
             "sync_status": "unconfigured",
-            "error_summary": "OPENXBL_API_KEY is not set",
+            "error_summary": (
+                'Xbox is not connected — run create_session_ingest_link(provider="xbox")'
+            ),
             "error_classification": "missing_configuration",
         }
 
