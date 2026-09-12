@@ -52,6 +52,7 @@ Copy `.env.example` → `.env` for production (OAuth required) or `.env.local.ex
   - `NINTENDO_COOKIES_FILE` (`"nintendo"`) — the one accounts.nintendo.com session, driving Switch ownership *and* eShop purchases; `NINTENDO_PCTL_SESSION_FILE` (`"nintendo_pctl"`) — Switch playtime, an interactive sign-in rather than a cookie paste.
   - `STEAM_REFRESH_TOKEN_FILE` (`"steam_refresh"`, **preferred**) — long-lived, mints store cookies on demand; `STEAM_STORE_COOKIES_FILE` (`"steam_store"`) — legacy short-lived fallback, only when no refresh token is stored.
   - `EPIC_COOKIES_FILE` (`"epic"`) — website orders, not the Legendary launcher session that syncs ownership; `HUMBLE_COOKIES_FILE` (`"humble"`).
+  - `PSN_NPSSO_FILE` (`"psn"`) — single-value NPSSO token, env `PSN_NPSSO` a legacy fallback; `OPENXBL_API_KEY_FILE` (`"xbox"`) — single-value OpenXBL API key, env `OPENXBL_API_KEY` a legacy fallback.
 
 ## Architecture
 

@@ -554,29 +554,38 @@ def inspect_nintendo(last_sync: LastSyncMeta | None = None) -> IntegrationStatus
     )
 
 
+_PSN_REMEDIATION = (
+    'Run create_session_ingest_link(provider="psn") and paste a fresh NPSSO token.'
+)
+
+
 def inspect_psn(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
-    has_npsso = bool(os.getenv("PSN_NPSSO"))
+    from ..data.psn import npsso_source
+
+    # The stored file is the configured path; PSN_NPSSO is the legacy fallback.
+    # Which one answered is reported, so a stale .env value left behind after a
+    # paste is visible rather than merely implied.
+    source = npsso_source()
+    detected = {"file": ["PSN_NPSSO_FILE"], "env": ["PSN_NPSSO"]}.get(source or "", [])
     auth_stale = (last_sync or {}).get("last_error_classification") == "auth_stale"
-    if auth_stale and has_npsso:
+    if auth_stale and source is not None:
         return IntegrationStatus(
             platform="ps5",
             overall_status="stale",
             active_backend="psnawp",
-            summary="PSN auth is stale and the NPSSO token must be re-extracted.",
+            summary="PSN auth is stale and the NPSSO token must be re-pasted.",
             capabilities=[
                 CapabilityStatus("ownership", "stale", "PSN auth must be refreshed before ownership can be read."),
                 CapabilityStatus("playtime", "stale", "PSN auth must be refreshed before playtime can be read."),
             ],
-            checks=[CheckStatus("psn_npsso", "warn", "Recent PSN auth failed and NPSSO must be refreshed")],
-            required_inputs=["PSN_NPSSO"],
-            detected_inputs=["PSN_NPSSO"] if has_npsso else [],
-            remediation_steps=[
-                "Re-extract `PSN_NPSSO` from a fresh PlayStation browser session cookie.",
-            ],
+            checks=[CheckStatus("psn_npsso", "warn", "Recent PSN auth failed and the NPSSO token must be refreshed")],
+            required_inputs=["PSN_NPSSO_FILE"],
+            detected_inputs=detected,
+            remediation_steps=[_PSN_REMEDIATION],
             last_sync=last_sync or {},
         )
 
-    if has_npsso:
+    if source is not None:
         return IntegrationStatus(
             platform="ps5",
             overall_status="ready",
@@ -586,9 +595,9 @@ def inspect_psn(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
                 CapabilityStatus("ownership", "ready", "Played PSN titles can be listed."),
                 CapabilityStatus("playtime", "ready", "Playtime is available from PSN title stats."),
             ],
-            checks=[CheckStatus("psn_npsso", "pass", "PSN_NPSSO is set")],
-            required_inputs=["PSN_NPSSO"],
-            detected_inputs=["PSN_NPSSO"],
+            checks=[CheckStatus("psn_npsso", "pass", "An NPSSO token is stored")],
+            required_inputs=["PSN_NPSSO_FILE"],
+            detected_inputs=detected,
             remediation_steps=[],
             last_sync=last_sync or {},
         )
@@ -599,21 +608,30 @@ def inspect_psn(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
         active_backend=None,
         summary="PSN is not configured.",
         capabilities=[
-            CapabilityStatus("ownership", "unconfigured", "PSN_NPSSO is not set."),
-            CapabilityStatus("playtime", "unconfigured", "PSN_NPSSO is not set."),
+            CapabilityStatus("ownership", "unconfigured", "No NPSSO token is stored."),
+            CapabilityStatus("playtime", "unconfigured", "No NPSSO token is stored."),
         ],
-        checks=[CheckStatus("psn_npsso", "fail", "PSN_NPSSO is not set")],
-        required_inputs=["PSN_NPSSO"],
+        checks=[CheckStatus("psn_npsso", "fail", "No NPSSO token is stored")],
+        required_inputs=["PSN_NPSSO_FILE"],
         detected_inputs=[],
-        remediation_steps=[
-            "Set `PSN_NPSSO` from a valid PlayStation browser session cookie.",
-        ],
+        remediation_steps=[_PSN_REMEDIATION],
         last_sync=last_sync or {},
     )
 
 
+_XBOX_REMEDIATION = (
+    'Run create_session_ingest_link(provider="xbox") and paste a fresh OpenXBL API key.'
+)
+
+
 def inspect_xbox(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
-    has_api_key = bool(os.getenv("OPENXBL_API_KEY"))
+    from ..data.xbox import openxbl_key_source
+
+    source = openxbl_key_source()
+    detected = {"file": ["OPENXBL_API_KEY_FILE"], "env": ["OPENXBL_API_KEY"]}.get(
+        source or "", []
+    )
+    has_api_key = source is not None
     auth_stale = (last_sync or {}).get("last_error_classification") == "auth_stale"
 
     if has_api_key and auth_stale:
@@ -627,9 +645,9 @@ def inspect_xbox(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
                 CapabilityStatus("playtime", "stale", "OpenXBL auth must be refreshed before playtime can be read."),
             ],
             checks=[CheckStatus("openxbl_api_key", "warn", "Recent OpenXBL auth failed and the key should be refreshed")],
-            required_inputs=["OPENXBL_API_KEY"],
-            detected_inputs=["OPENXBL_API_KEY"],
-            remediation_steps=["Regenerate a personal API key at https://xbl.io/console."],
+            required_inputs=["OPENXBL_API_KEY_FILE"],
+            detected_inputs=detected,
+            remediation_steps=[_XBOX_REMEDIATION],
             last_sync=last_sync or {},
         )
 
@@ -643,9 +661,9 @@ def inspect_xbox(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
                 CapabilityStatus("ownership", "ready", "Title history can be fetched from OpenXBL (played-on-account signal)."),
                 CapabilityStatus("playtime", "ready", "Playtime is best-effort via the OpenXBL stats endpoint."),
             ],
-            checks=[CheckStatus("openxbl_api_key", "pass", "OPENXBL_API_KEY is set")],
-            required_inputs=["OPENXBL_API_KEY"],
-            detected_inputs=["OPENXBL_API_KEY"],
+            checks=[CheckStatus("openxbl_api_key", "pass", "An OpenXBL API key is stored")],
+            required_inputs=["OPENXBL_API_KEY_FILE"],
+            detected_inputs=detected,
             remediation_steps=[],
             last_sync=last_sync or {},
         )
@@ -656,15 +674,13 @@ def inspect_xbox(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
         active_backend=None,
         summary="Xbox is not configured.",
         capabilities=[
-            CapabilityStatus("ownership", "unconfigured", "OPENXBL_API_KEY is not set."),
-            CapabilityStatus("playtime", "unconfigured", "OPENXBL_API_KEY is not set."),
+            CapabilityStatus("ownership", "unconfigured", "No OpenXBL API key is stored."),
+            CapabilityStatus("playtime", "unconfigured", "No OpenXBL API key is stored."),
         ],
-        checks=[CheckStatus("openxbl_api_key", "fail", "OPENXBL_API_KEY is not set")],
-        required_inputs=["OPENXBL_API_KEY"],
+        checks=[CheckStatus("openxbl_api_key", "fail", "No OpenXBL API key is stored")],
+        required_inputs=["OPENXBL_API_KEY_FILE"],
         detected_inputs=[],
-        remediation_steps=[
-            "Set `OPENXBL_API_KEY` to a personal key from https://xbl.io/console.",
-        ],
+        remediation_steps=[_XBOX_REMEDIATION],
         last_sync=last_sync or {},
     )
 

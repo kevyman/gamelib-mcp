@@ -423,6 +423,9 @@ async def create_session_ingest_link(provider: str) -> dict:
 
     For Steam, prefer provider="steam_refresh" (long-lived token, no re-pasting);
     "steam_store" is a short-lived legacy fallback.
+
+    Providers: nintendo, nintendo_pctl, epic, humble, steam_refresh, steam_store,
+    psn (NPSSO token), xbox (OpenXBL API key).
     """
     # Lazy import keeps session_ingest a leaf module (it imports this module
     # lazily in turn for setter dispatch).

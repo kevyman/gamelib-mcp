@@ -344,27 +344,39 @@ If the control plane reports a missing runtime dependency, the mount is present 
 
 ### PSN Setup
 
-PSN sync uses the [PSNAWP](https://github.com/isFakeAccount/psnawp) library with an NPSSO cookie for authentication. No CLI tools needed — just a single cookie value in `.env`.
+PSN sync uses the [PSNAWP](https://github.com/isFakeAccount/psnawp) library with an NPSSO token for authentication. No SSH, no `.env` edit, and no container recreate — the token is pasted through the same single-use browser link every other session credential uses.
 
 **One-time setup:**
 
-1. Log in to your PSN account in a browser at `https://id.sonyentertainmentnetwork.com/id/management_ca/`
-2. Navigate to `https://ca.account.sony.com/api/v1/ssocookie` — the page renders an error message, but the `npsso` cookie is set
-3. Open browser DevTools (F12) → Application → Cookies → find `npsso` under the Sony domain
-4. Copy the 64-character token value
+1. Call `create_session_ingest_link(provider="psn")` and open the returned single-use link in a browser.
+2. In that browser, sign in to your PlayStation account at `https://www.playstation.com/`.
+3. In the SAME browser, open `https://ca.account.sony.com/api/v1/ssocookie` — you'll see one short line of text like `{"npsso":"…"}`. That is your token.
+4. Select all, copy, and paste it into the ingest form (pasting just the 64-character value between the quotes also works). Click Save.
 
-**Server `.env`** (add):
-```
-PSN_NPSSO=<your 64-char npsso token>
-```
-
-PSNAWP is a pure Python library — no extra system packages required in Docker.
+The token is stored at `PSN_NPSSO_FILE` (default `data/psn_npsso.json`); a bare `PSN_NPSSO` in the env remains a legacy fallback. PSNAWP is a pure Python library — no extra system packages required in Docker.
 
 **Known limitation:** Only played titles appear in the library (`title_stats()` tracks play history, not purchases). Unplayed digital purchases will not sync. This is a PSN platform limitation.
 
-If the NPSSO token expires, repeat the browser extraction, update `.env`, then `docker compose up -d --force-recreate app` (a plain `restart` does not reload `.env`).
+Sony's NPSSO token lasts roughly two months. If the control plane reports PSN auth as stale, repeat the `create_session_ingest_link(provider="psn")` steps above — no server access needed.
 
-If the control plane reports PSN auth as stale, re-extract `PSN_NPSSO`, update `.env`, and `docker compose up -d --force-recreate app`.
+---
+
+### Xbox Setup
+
+Xbox sync uses [OpenXBL](https://xbl.io), a third-party Xbox Live API, authenticated with a personal API key. Like PSN, the key is pasted through the ingest link — no `.env` edit, no container recreate.
+
+**One-time setup:**
+
+1. Call `create_session_ingest_link(provider="xbox")` and open the returned single-use link in a browser.
+2. In that browser, open `https://xbl.io/` and sign in with the Microsoft account you use on your Xbox.
+3. Open `https://xbl.io/console` and create an API key if you don't already have one.
+4. Copy the key, paste it into the ingest form, and click Save.
+
+The key is stored at `OPENXBL_API_KEY_FILE` (default `data/openxbl_api_key.json`); a bare `OPENXBL_API_KEY` in the env remains a legacy fallback. `OPENXBL_XUID` (optional, non-secret) stays env-only and defaults to the API key owner's own account.
+
+**Known limitation:** Xbox has no purchase-library API — ownership comes from OpenXBL title history ("played on this account"), so unplayed digital purchases will not sync; playtime is best-effort.
+
+If the control plane reports Xbox auth as stale, repeat the `create_session_ingest_link(provider="xbox")` steps above.
 
 ---
 

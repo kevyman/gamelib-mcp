@@ -1,4 +1,7 @@
 import asyncio
+import json
+import os
+import shutil
 import sys
 import types
 import unittest
@@ -139,15 +142,79 @@ class FetchPsnLibraryFilterTests(unittest.TestCase):
         self.assertIsNone(result[0]["last_played"])
 
 
+class LoadNpssoTests(unittest.TestCase):
+    """The stored file is the configured path; PSN_NPSSO is the legacy fallback."""
+
+    def setUp(self) -> None:
+        import tempfile
+
+        tmp = tempfile.mkdtemp(prefix="psn-npsso-test-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self.path = os.path.join(tmp, "psn_npsso.json")
+
+    def _write(self, payload: object) -> None:
+        with open(self.path, "w", encoding="utf-8") as f:
+            if isinstance(payload, str):
+                f.write(payload)
+            else:
+                json.dump(payload, f)
+
+    def _env(self, **extra: str):
+        env = {"PSN_NPSSO_FILE": self.path, **extra}
+        return patch.dict("os.environ", env, clear=True)
+
+    def test_file_beats_env(self) -> None:
+        # A token just pasted through the ingest form must beat a stale .env.
+        self._write({"npsso": "from-file"})
+        with self._env(PSN_NPSSO="from-env"):
+            self.assertEqual(psn.load_npsso(), "from-file")
+            self.assertEqual(psn.npsso_source(), "file")
+
+    def test_env_used_when_file_absent(self) -> None:
+        with self._env(PSN_NPSSO="from-env"):
+            self.assertEqual(psn.load_npsso(), "from-env")
+            self.assertEqual(psn.npsso_source(), "env")
+
+    def test_malformed_file_falls_back_to_env(self) -> None:
+        self._write("{not json at all")
+        with self._env(PSN_NPSSO="from-env"):
+            self.assertEqual(psn.load_npsso(), "from-env")
+            self.assertEqual(psn.npsso_source(), "env")
+
+    def test_file_without_npsso_key_falls_back_to_env(self) -> None:
+        self._write({"cookie": "x"})
+        with self._env(PSN_NPSSO="from-env"):
+            self.assertEqual(psn.load_npsso(), "from-env")
+
+    def test_neither_is_none(self) -> None:
+        with self._env():
+            self.assertIsNone(psn.load_npsso())
+            self.assertIsNone(psn.npsso_source())
+
+
 class SyncPsnSkipTests(unittest.TestCase):
     def test_skips_when_npsso_not_set(self) -> None:
-        with patch.dict("os.environ", {}, clear=False):
-            import os
+        import tempfile
+
+        tmp = tempfile.mkdtemp(prefix="psn-unconfigured-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        # Point the file path somewhere that cannot exist as well as clearing the
+        # env var: default_data_dir() is only a temp dir while the session fixture
+        # holds DATABASE_URL, and "unconfigured" must not depend on that.
+        with patch.dict(
+            "os.environ",
+            {"PSN_NPSSO_FILE": os.path.join(tmp, "absent.json")},
+            clear=False,
+        ):
             os.environ.pop("PSN_NPSSO", None)
             result = _run_async(psn.sync_psn())
         self.assertEqual(result["added"], 0)
         self.assertEqual(result["sync_status"], "unconfigured")
         self.assertEqual(result["error_classification"], "missing_configuration")
+        self.assertEqual(
+            result["error_summary"],
+            'PSN is not connected — run create_session_ingest_link(provider="psn")',
+        )
 
     def test_returns_zeros_on_fetch_exception(self) -> None:
         with (

@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from collections.abc import Callable
 
 from fastmcp.exceptions import ToolError
@@ -118,6 +119,51 @@ def _write_private_json(path: str, payload: object) -> None:
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 
+def _normalize_paste(text: str, bare_value_key: str | None = None) -> dict:
+    """Parse a pasted credential into ``{name: value}``.
+
+    The one place that knows the shapes a browser paste arrives in: a JSON
+    object (``{"name": "value", ...}``), a Cookie Editor / EditThisCookie array
+    (``[{"name": ..., "value": ...}, ...]``), or — when ``bare_value_key`` is
+    given — text that is neither, taken as that key's raw value so the user can
+    paste a token straight out of DevTools or a page body without hand-formatting
+    JSON. Shared by the cookie saver and the single-token setters (PSN, Xbox).
+    """
+    if bare_value_key and text[:1] not in ("{", "["):
+        return {bare_value_key: text}
+
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ToolError(f"Invalid JSON: {exc}") from exc
+
+    if isinstance(raw, list):
+        return {c["name"]: c["value"] for c in raw if "name" in c and "value" in c}
+    if isinstance(raw, dict):
+        return raw
+    raise ToolError("Expected a JSON object or array")
+
+
+def _extract_single_value(payload: str, key: str, hint: str) -> str:
+    """Pull ONE named value (``key``) out of a paste, or raise.
+
+    For the providers whose whole credential is a single token — PSN's ``npsso``,
+    OpenXBL's ``api_key``. Accepts everything ``_normalize_paste`` does, so the
+    bare value, the page body ``{"npsso": "…"}``, and a full cookie export all
+    work. The ToolError names the KEYS found (names are not secrets) and never
+    the values — its text is rendered on the ingest page.
+    """
+    normalized = _normalize_paste((payload or "").strip(), bare_value_key=key)
+    value = normalized.get(key)
+    if not isinstance(value, str) or not value.strip():
+        found = ", ".join(sorted(str(name) for name in normalized)) or "(none)"
+        raise ToolError(
+            f"That paste has no '{key}' value, so it won't work. {hint} "
+            f"Names found in your paste: {found}."
+        )
+    return value.strip()
+
+
 def _save_session_cookies(
     cookies: str,
     env_var: str,
@@ -145,24 +191,7 @@ def _save_session_cookies(
     written, so a known-bad paste (missing/wrong-domain cookie) is rejected with
     a clear ToolError instead of being saved as a silently useless file.
     """
-    text = cookies.strip()
-    if bare_value_cookie and text[:1] not in ("{", "["):
-        # A cookie export is always a JSON object/array; anything else is the
-        # bare cookie value pasted directly (e.g. the raw steamRefresh_steam
-        # token, which may itself be `<steamid>||<jwt>`).
-        normalized: dict = {bare_value_cookie: text}
-    else:
-        try:
-            raw = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ToolError(f"Invalid JSON: {exc}") from exc
-
-        if isinstance(raw, list):
-            normalized = {c["name"]: c["value"] for c in raw if "name" in c and "value" in c}
-        elif isinstance(raw, dict):
-            normalized = raw
-        else:
-            raise ToolError("Expected a JSON object or array")
+    normalized = _normalize_paste(cookies.strip(), bare_value_cookie)
 
     if not normalized:
         raise ToolError("No valid cookies found in input")
@@ -323,6 +352,95 @@ async def set_steam_store_session(cookies: str) -> dict:
         validate=_validate_steam_store_cookies,
         bare_value_cookie="steamLoginSecure",
     )
+
+
+_NPSSO_TOKEN_RE = re.compile(r"^[A-Za-z0-9]{64}$")
+# OpenXBL keys are short opaque strings; the cap only rules out a paste that is
+# obviously not a key (a whole cookie export, a page of HTML).
+_MAX_OPENXBL_KEY_LENGTH = 256
+
+
+async def set_psn_session(payload: str) -> dict:
+    """
+    Store the PlayStation Network NPSSO token for PSN library sync.
+
+    Not an MCP tool: reached only through the ingest paste form
+    (``create_session_ingest_link(provider="psn")``), because the NPSSO token is
+    a ~2-month PSN session credential and belongs out of the chat like any cookie.
+
+    Accepts what the ssocookie page actually gives you, in any of its shapes: the
+    page body ``{"npsso": "…"}``, the bare 64-character value, or a Cookie Editor
+    export containing an ``npsso`` cookie. The token must be exactly 64 letters
+    and digits — psnawp rejects anything else, and catching it here means the
+    paste page says so instead of the next sync failing.
+
+    Saved to the path in PSN_NPSSO_FILE (defaults to psn_npsso.json beside the
+    database), which takes precedence over a legacy ``PSN_NPSSO`` env var.
+    """
+    from ..data.psn import _npsso_file_path
+
+    token = _extract_single_value(
+        payload,
+        "npsso",
+        "Copy the whole page at https://ca.account.sony.com/api/v1/ssocookie "
+        "while signed in to PlayStation.",
+    )
+    if not _NPSSO_TOKEN_RE.match(token):
+        # Never quote the paste: whatever was submitted may be the real token.
+        raise ToolError(
+            "That doesn't look like an NPSSO token (expected exactly 64 letters "
+            "and digits). Make sure you are signed in to PlayStation in this "
+            "browser and copy the page at "
+            "https://ca.account.sony.com/api/v1/ssocookie again."
+        )
+
+    path = _npsso_file_path()
+    # Small write, but it runs on the event loop serving the ingest form request.
+    await asyncio.to_thread(_write_private_json, path, {"npsso": token})
+    logger.info("PSN NPSSO token saved to %s", path)
+    return {"status": "stored", "path": path}
+
+
+async def set_xbox_session(payload: str) -> dict:
+    """
+    Store the OpenXBL API key used for Xbox title-history sync.
+
+    Not an MCP tool: reached only through the ingest paste form
+    (``create_session_ingest_link(provider="xbox")``). OpenXBL (https://xbl.io)
+    is a third-party Xbox Live API; the personal key from its console page is a
+    long-lived credential, so it gets the same out-of-the-chat treatment.
+
+    Accepts the bare key or a JSON object ``{"api_key": "…"}``. ``OPENXBL_XUID``
+    (optional, non-secret) stays an environment variable.
+
+    Saved to the path in OPENXBL_API_KEY_FILE (defaults to openxbl_api_key.json
+    beside the database), which takes precedence over a legacy ``OPENXBL_API_KEY``
+    env var.
+    """
+    from ..data.xbox import _api_key_file_path
+
+    key = _extract_single_value(
+        payload,
+        "api_key",
+        'Copy the key shown under "API Keys" at https://xbl.io/console.',
+    )
+    if (
+        len(key) > _MAX_OPENXBL_KEY_LENGTH
+        or any(ch.isspace() for ch in key)
+        or not key.isascii()
+        or not key.isprintable()
+    ):
+        # Never quote the paste: whatever was submitted may be the real key.
+        raise ToolError(
+            "That doesn't look like an OpenXBL API key (expected one short line "
+            'with no spaces). Copy the key shown under "API Keys" at '
+            "https://xbl.io/console and paste just that."
+        )
+
+    path = _api_key_file_path()
+    await asyncio.to_thread(_write_private_json, path, {"api_key": key})
+    logger.info("OpenXBL API key saved to %s", path)
+    return {"status": "stored", "path": path}
 
 
 async def prepare_nintendo_pctl_login() -> dict[str, str]:

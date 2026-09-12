@@ -1,10 +1,11 @@
 """PlayStation Network library sync via PSNAWP.
 
-Auth: set PSN_NPSSO in .env.
-Obtain the NPSSO cookie by visiting https://ca.account.sony.com/api/v1/ssocookie
-while logged in to your PSN account in a browser. The page renders an error message,
-but the `npsso` cookie is set — open DevTools (F12) → Application → Cookies →
-find `npsso` under the Sony domain and copy the 64-character value.
+Auth: the NPSSO token is pasted through ``create_session_ingest_link(provider="psn")``
+— sign in to PlayStation in a browser, open https://ca.account.sony.com/api/v1/ssocookie,
+and paste that page (or the bare 64-character value) into the single-use form. It is
+stored at ``PSN_NPSSO_FILE`` (defaults to ``psn_npsso.json`` beside the database);
+``PSN_NPSSO`` in the environment remains a legacy fallback, and the stored file wins
+over it so a fresh paste always beats a stale ``.env``.
 
 Library source: client.title_stats() — returns all titles the user has played,
 with name, play_count, and play_duration (datetime.timedelta). Only played titles
@@ -12,16 +13,18 @@ appear; unplayed purchases will not show up (PSN platform limitation).
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from psnawp_api.models.title_stats import PlatformCategory
 
 from gamelib_mcp.data.db import (
     adopt_platform_identifier,
+    default_data_dir,
     find_conflicting_fuzzy_key,
     get_game_by_identifier,
     load_fuzzy_candidates,
@@ -176,12 +179,60 @@ class _SkuAggregate:
         return max(self.skus, key=lambda sku: sku[1])[0]
 
 
+def _npsso_file_path() -> str:
+    return os.getenv("PSN_NPSSO_FILE") or str(default_data_dir() / "psn_npsso.json")
+
+
+def _load_npsso_file() -> str | None:
+    """Read the NPSSO token pasted through the ingest form, or None.
+
+    Mirrors ``nintendo_pctl._load_pctl_session_token``: a missing file is the
+    normal unconfigured case, and a malformed/unreadable one must not crash a
+    sync — it degrades to None so the env fallback still gets its turn.
+    """
+    path = _npsso_file_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        logger.debug("Failed to load PSN NPSSO token from %s: %s", path, exc)
+        return None
+
+    if isinstance(data, dict):
+        token = data.get("npsso")
+        if isinstance(token, str) and token.strip():
+            return token.strip()
+    logger.debug("PSN NPSSO file %s has no usable 'npsso' value", path)
+    return None
+
+
+def load_npsso() -> str | None:
+    """The NPSSO token to authenticate with: the stored file, else the env var.
+
+    The FILE WINS: ``PSN_NPSSO`` is the legacy path, and a token just pasted
+    through ``create_session_ingest_link(provider="psn")`` must beat whatever
+    stale value is still sitting in a deployment's ``.env``.
+    """
+    return _load_npsso_file() or (os.environ.get("PSN_NPSSO") or None)
+
+
+def npsso_source() -> Literal["file", "env"] | None:
+    """Where ``load_npsso`` found a token — for the integration inspector."""
+    if _load_npsso_file():
+        return "file"
+    if os.environ.get("PSN_NPSSO"):
+        return "env"
+    return None
+
+
 def _get_psnawp() -> "PSNAWP":
     """Return an authenticated PSNAWP instance, or raise if not configured."""
     from psnawp_api import PSNAWP  # lazy import — optional dependency
-    npsso = os.environ.get("PSN_NPSSO")
+    npsso = load_npsso()
     if not npsso:
-        raise OSError("PSN_NPSSO not set")
+        raise OSError("PSN NPSSO not set")
     return PSNAWP(npsso)
 
 
@@ -238,14 +289,16 @@ async def sync_psn() -> dict:
 
     Returns: {"added": int, "matched": int, "skipped": int}
     """
-    if not os.getenv("PSN_NPSSO"):
-        logger.info("PSN_NPSSO not set — skipping PSN sync")
+    if not load_npsso():
+        logger.info("PSN NPSSO not set — skipping PSN sync")
         return {
             "added": 0,
             "matched": 0,
             "skipped": 0,
             "sync_status": "unconfigured",
-            "error_summary": "PSN_NPSSO is not set",
+            "error_summary": (
+                'PSN is not connected — run create_session_ingest_link(provider="psn")'
+            ),
             "error_classification": "missing_configuration",
         }
 

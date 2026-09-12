@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import get_type_hints
 from unittest.mock import patch
@@ -320,8 +321,23 @@ def test_inspect_nintendo_playtime_only_reports_stale_after_auth_failure(tmp_pat
     assert caps["playtime"] == "stale"
 
 
-def test_inspect_psn_reports_stale_when_configured_auth_requires_reextract():
-    with patch.dict("os.environ", {"PSN_NPSSO": "token"}, clear=True):
+def _absent_token_files(tmp_path) -> dict[str, str]:
+    """Env pointing PSN/Xbox token files at paths that cannot exist.
+
+    ``clear=True`` drops DATABASE_URL, so ``default_data_dir()`` falls back to a
+    relative ``data/`` — a developer's real one. These tests describe env-var-only
+    (or file-only) configuration, so the other side must be pinned absent.
+    """
+    return {
+        "PSN_NPSSO_FILE": str(tmp_path / "absent_psn.json"),
+        "OPENXBL_API_KEY_FILE": str(tmp_path / "absent_xbox.json"),
+    }
+
+
+def test_inspect_psn_reports_stale_when_configured_auth_requires_reextract(tmp_path):
+    with patch.dict(
+        "os.environ", {"PSN_NPSSO": "token", **_absent_token_files(tmp_path)}, clear=True
+    ):
         statuses = inspect_all_integrations(
             last_sync_by_platform={"ps5": {"last_error_classification": "auth_stale"}}
         )
@@ -330,10 +346,11 @@ def test_inspect_psn_reports_stale_when_configured_auth_requires_reextract():
 
     assert psn.overall_status == "stale"
     assert psn.active_backend == "psnawp"
+    assert psn.detected_inputs == ["PSN_NPSSO"]
 
 
-def test_inspect_psn_reports_unconfigured_when_token_removed_after_stale_sync():
-    with patch.dict("os.environ", {}, clear=True):
+def test_inspect_psn_reports_unconfigured_when_token_removed_after_stale_sync(tmp_path):
+    with patch.dict("os.environ", _absent_token_files(tmp_path), clear=True):
         statuses = inspect_all_integrations(
             last_sync_by_platform={"ps5": {"last_error_classification": "auth_stale"}}
         )
@@ -342,30 +359,66 @@ def test_inspect_psn_reports_unconfigured_when_token_removed_after_stale_sync():
 
     assert psn.overall_status == "unconfigured"
     assert psn.active_backend is None
+    assert psn.detected_inputs == []
 
 
-def test_inspect_xbox_unconfigured():
-    with patch.dict("os.environ", {}, clear=True):
+def test_inspect_psn_ready_from_the_stored_file_with_no_env_var(tmp_path):
+    # The ingest flow's shape: a pasted token on disk, nothing in the env.
+    token_file = tmp_path / "psn_npsso.json"
+    token_file.write_text(json.dumps({"npsso": "a" * 64}), encoding="utf-8")
+    env = {**_absent_token_files(tmp_path), "PSN_NPSSO_FILE": str(token_file)}
+    with patch.dict("os.environ", env, clear=True):
+        statuses = inspect_all_integrations()
+
+    psn = statuses["ps5"]
+
+    assert psn.overall_status == "ready"
+    assert psn.active_backend == "psnawp"
+    assert psn.required_inputs == ["PSN_NPSSO_FILE"]
+    assert psn.detected_inputs == ["PSN_NPSSO_FILE"]
+
+
+def test_inspect_xbox_unconfigured(tmp_path):
+    with patch.dict("os.environ", _absent_token_files(tmp_path), clear=True):
         statuses = inspect_all_integrations()
 
     xbox = statuses["xbox"]
 
     assert xbox.overall_status == "unconfigured"
     assert xbox.active_backend is None
+    assert xbox.detected_inputs == []
 
 
-def test_inspect_xbox_configured():
-    with patch.dict("os.environ", {"OPENXBL_API_KEY": "test-key"}, clear=True):
+def test_inspect_xbox_configured(tmp_path):
+    env = {"OPENXBL_API_KEY": "test-key", **_absent_token_files(tmp_path)}
+    with patch.dict("os.environ", env, clear=True):
         statuses = inspect_all_integrations()
 
     xbox = statuses["xbox"]
 
     assert xbox.overall_status == "ready"
     assert xbox.active_backend == "openxbl"
+    assert xbox.detected_inputs == ["OPENXBL_API_KEY"]
 
 
-def test_inspect_xbox_reports_stale_when_configured_auth_is_stale():
-    with patch.dict("os.environ", {"OPENXBL_API_KEY": "test-key"}, clear=True):
+def test_inspect_xbox_ready_from_the_stored_file_with_no_env_var(tmp_path):
+    key_file = tmp_path / "openxbl_api_key.json"
+    key_file.write_text(json.dumps({"api_key": "xbl-key"}), encoding="utf-8")
+    env = {**_absent_token_files(tmp_path), "OPENXBL_API_KEY_FILE": str(key_file)}
+    with patch.dict("os.environ", env, clear=True):
+        statuses = inspect_all_integrations()
+
+    xbox = statuses["xbox"]
+
+    assert xbox.overall_status == "ready"
+    assert xbox.active_backend == "openxbl"
+    assert xbox.required_inputs == ["OPENXBL_API_KEY_FILE"]
+    assert xbox.detected_inputs == ["OPENXBL_API_KEY_FILE"]
+
+
+def test_inspect_xbox_reports_stale_when_configured_auth_is_stale(tmp_path):
+    env = {"OPENXBL_API_KEY": "test-key", **_absent_token_files(tmp_path)}
+    with patch.dict("os.environ", env, clear=True):
         statuses = inspect_all_integrations(
             last_sync_by_platform={"xbox": {"last_error_classification": "auth_stale"}}
         )
@@ -374,6 +427,7 @@ def test_inspect_xbox_reports_stale_when_configured_auth_is_stale():
 
     assert xbox.overall_status == "stale"
     assert xbox.active_backend == "openxbl"
+    assert xbox.detected_inputs == ["OPENXBL_API_KEY"]
 
 
 def test_inspect_steam_reports_ready_when_credentials_present():
