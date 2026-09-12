@@ -212,6 +212,48 @@ class PurchaseSkuSuffixTests(unittest.TestCase):
         # price onto the base game.
         self.assertEqual(normalize_purchase_title("Hexcells Complete"), "Hexcells Complete")
 
+    def test_strips_amazon_prime_and_luna_giveaway_markers(self) -> None:
+        # GOG/Epic Prime Gaming order titles — the importer minted a phantom
+        # "X - Amazon Prime" row beside the real one for every one of them.
+        self.assertEqual(
+            normalize_purchase_title("Dishonored - Definitive Edition - Amazon Prime"),
+            "Dishonored",
+        )
+        self.assertEqual(
+            normalize_purchase_title("Legacy of Kain: Defiance - Amazon Prime"),
+            "Legacy of Kain: Defiance",
+        )
+        self.assertEqual(normalize_purchase_title("Fallout 2 - Amazon Luna"), "Fallout 2")
+        self.assertEqual(
+            normalize_purchase_title("Baldur's Gate (Amazon Prime)"), "Baldur's Gate"
+        )
+        self.assertEqual(
+            normalize_purchase_title("Ghostrunner Amazon Prime Gaming"), "Ghostrunner"
+        )
+        self.assertEqual(normalize_purchase_title("Control Prime Gaming"), "Control")
+
+    def test_mid_title_prime_survives(self) -> None:
+        # Anchored on the two-word marker, never a bare "Prime": only the
+        # existing edition strip may touch this title.
+        self.assertEqual(
+            normalize_purchase_title("Metroid Prime Remastered"), "Metroid Prime"
+        )
+        self.assertEqual(normalize_purchase_title("Metroid Prime"), "Metroid Prime")
+
+    def test_strips_trailing_platform_tag(self) -> None:
+        # Which store delivered the key, never part of the game's name —
+        # "Factorio (Steam)" minted a twin of the real Factorio row.
+        self.assertEqual(normalize_purchase_title("Factorio (Steam)"), "Factorio")
+        self.assertEqual(normalize_purchase_title("Cuphead (GOG)"), "Cuphead")
+        self.assertEqual(normalize_purchase_title("Alan Wake (Epic)"), "Alan Wake")
+        self.assertEqual(
+            normalize_purchase_title("Alan Wake (Epic Games)"), "Alan Wake"
+        )
+        self.assertEqual(
+            normalize_purchase_title("Alan Wake (Epic Games Store)"), "Alan Wake"
+        )
+        self.assertEqual(normalize_purchase_title("Hollow Knight (PC)"), "Hollow Knight")
+
     def test_strips_early_access_marker_and_ultra_tail(self) -> None:
         # Old Humble bundle keys carry store-state and SKU tails the library
         # row never does ("GRAV (Early Access)", "Beat Hazard Ultra").

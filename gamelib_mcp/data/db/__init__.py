@@ -572,6 +572,7 @@ from .fuzzy import (
     load_fuzzy_candidates,
     titles_conflict_on_identity,
 )
+from .gc import delete_unreferenced_games
 from .history import record_play_history_snapshots
 
 # _ensure_db_initialized and migrate_db above call _run_migrations by that

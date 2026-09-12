@@ -18,11 +18,21 @@ from typing import Any
 
 import httpx
 
+from gamelib_mcp.data.content import (
+    CONTENT_BASE_GAME,
+    CONTENT_DLC,
+    ContentClassification,
+)
 from gamelib_mcp.data.db import (
     EPIC_ARTIFACT_ID,
     adopt_platform_identifier,
+    apply_content_classification,
+    get_db,
     get_game_by_identifier,
+    get_manual_overrides,
     load_fuzzy_candidates,
+    resolve_parent_game,
+    upsert_game,
     upsert_game_alias,
     upsert_game_platform,
     upsert_game_platform_enrichment,
@@ -30,7 +40,10 @@ from gamelib_mcp.data.db import (
 )
 from gamelib_mcp.data.igdb import PLATFORM_TO_IGDB, resolve_and_link_game
 from gamelib_mcp.data.last_played import EPIC_LAST_PLAYED_KEYS, extract_last_played
-from gamelib_mcp.data.title_normalization import prepare_catalog_title
+from gamelib_mcp.data.title_normalization import (
+    normalize_search_text,
+    prepare_catalog_title,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +57,10 @@ _EPIC_CLIENT_SECRET = os.getenv("EPIC_CLIENT_SECRET", "daafbccc737745039dffe53d9
 _EPIC_USER_AGENT = "UELauncher/11.0.1-14907503+++Portal+Release-Live Windows/10.0.19041.1.256.64bit"
 _EPIC_TIMEOUT = 20.0
 _TOKEN_REFRESH_SKEW = timedelta(minutes=10)
+# Legendary's own non-game rules: the "ue" asset namespace is the Unreal
+# Engine marketplace, and a "mods" category entry marks user-made content.
+_UE_ASSET_NAMESPACE = "ue"
+_MOD_CATEGORY_PATH = "mods"
 
 
 class EpicConfigurationError(RuntimeError):
@@ -188,6 +205,153 @@ def _extract_epic_artifact_id(game: dict[str, Any]) -> str | None:
     return str(app_name) if app_name else None
 
 
+def _epic_metadata(game: dict[str, Any]) -> dict[str, Any]:
+    metadata = game.get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _is_unreal_engine_asset(game: dict[str, Any]) -> bool:
+    """True for an Unreal Engine marketplace asset, which is not a game.
+
+    Legendary's own rule: anything in the "ue" asset namespace is engine
+    content (a plugin, a mesh pack, an AI system) sold through the UE
+    marketplace and cached beside real games — production carried three
+    versioned artifacts of one such asset as library titles.
+    """
+    asset_infos = game.get("asset_infos")
+    if isinstance(asset_infos, dict):
+        for asset in asset_infos.values():
+            if (
+                isinstance(asset, dict)
+                and str(asset.get("namespace") or "").strip().lower() == _UE_ASSET_NAMESPACE
+            ):
+                return True
+    return str(_epic_metadata(game).get("namespace") or "").strip().lower() == _UE_ASSET_NAMESPACE
+
+
+def _is_mod(game: dict[str, Any]) -> bool:
+    """True when the catalog item carries the "mods" category (also not a game)."""
+    categories = _epic_metadata(game).get("categories")
+    if not isinstance(categories, list):
+        return False
+    return any(
+        isinstance(category, dict)
+        and str(category.get("path") or "").strip().lower() == _MOD_CATEGORY_PATH
+        for category in categories
+    )
+
+
+def _epic_main_game(game: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the base catalog item this item is DLC for, else None.
+
+    ``metadata.mainGameItem`` IS Legendary's DLC marker: its presence means the
+    item is an add-on, and the dict describes the base catalog item (always
+    ``id``, usually ``title``/``namespace``, sometimes ``releaseInfo[{appId}]``).
+    """
+    main_game = _epic_metadata(game).get("mainGameItem")
+    return main_game if isinstance(main_game, dict) else None
+
+
+def _epic_catalog_item_ids(game: dict[str, Any]) -> list[str]:
+    """Every catalog-item id this metadata file claims (``metadata.id`` first)."""
+    ids: list[str] = []
+    catalog_id = _epic_metadata(game).get("id")
+    if catalog_id:
+        ids.append(str(catalog_id))
+    asset_infos = game.get("asset_infos")
+    if isinstance(asset_infos, dict):
+        for asset in asset_infos.values():
+            if not isinstance(asset, dict):
+                continue
+            asset_catalog_id = asset.get("catalog_item_id")
+            if asset_catalog_id and str(asset_catalog_id) not in ids:
+                ids.append(str(asset_catalog_id))
+    return ids
+
+
+def _main_game_artifact_ids(main_game: dict[str, Any]) -> list[str]:
+    """Artifact ids the base item names in ``releaseInfo[*].appId``."""
+    release_info = main_game.get("releaseInfo")
+    if not isinstance(release_info, list):
+        return []
+    artifact_ids: list[str] = []
+    for release in release_info:
+        if not isinstance(release, dict):
+            continue
+        app_id = release.get("appId")
+        if app_id and str(app_id) not in artifact_ids:
+            artifact_ids.append(str(app_id))
+    return artifact_ids
+
+
+def _is_default_classification(row: Any) -> bool:
+    """True when a games row still carries the untouched base_game default."""
+    try:
+        content_type = row["content_type"]
+        is_primary = row["is_primary_library_item"]
+        parent_game_id = row["parent_game_id"]
+    except (KeyError, IndexError, TypeError):
+        return False
+    return (
+        (content_type or CONTENT_BASE_GAME) == CONTENT_BASE_GAME
+        and bool(is_primary)
+        and parent_game_id is None
+    )
+
+
+async def _apply_epic_catalog_title(game_id: int, prepared_title: str) -> bool:
+    """Adopt Epic's catalog spelling when Epic is the row's only source of truth.
+
+    Mirrors the Steam sync's rename, with one extra condition: name is the
+    CROSS-platform reconciliation key, so a row that also owns another platform
+    keeps the name that platform's sync agreed on. A ``name`` pinned in
+    manual_overrides is left alone like every other user-set column.
+    """
+    async with get_db() as db:
+        row = await db.execute_fetchone("SELECT name FROM games WHERE id = ?", (game_id,))
+        if row is None or row["name"] == prepared_title:
+            return False
+        if "name" in await get_manual_overrides(db, game_id):
+            return False
+        other_platform = await db.execute_fetchone(
+            "SELECT 1 FROM game_platforms WHERE game_id = ? AND platform != 'epic' LIMIT 1",
+            (game_id,),
+        )
+        if other_platform is not None:
+            return False
+        await db.execute(
+            "UPDATE games SET name = ?, name_normalized = ? WHERE id = ?",
+            (prepared_title, normalize_search_text(prepared_title), game_id),
+        )
+        await db.commit()
+        return True
+
+
+async def _resolve_epic_parent(
+    main_game: dict[str, Any], catalog_to_game: dict[str, int]
+) -> int | None:
+    """Find the base game an Epic DLC hangs off — never mints one.
+
+    Order: this run's base-game catalog map, then any row already carrying one
+    of the base item's own artifact ids, then an exact/normalized name match.
+    None is an honest answer (ADR 0002 decision 6: parents are never minted
+    from a title) and leaves a parentless nested row for manual repair.
+    """
+    main_id = main_game.get("id")
+    if main_id is not None and str(main_id) in catalog_to_game:
+        return catalog_to_game[str(main_id)]
+
+    for artifact_id in _main_game_artifact_ids(main_game):
+        parent = await get_game_by_identifier(EPIC_ARTIFACT_ID, artifact_id)
+        if parent is not None:
+            return int(parent["id"])
+
+    main_title = main_game.get("title")
+    if main_title:
+        return await resolve_parent_game(str(main_title), create=False)
+    return None
+
+
 async def fetch_epic_playtime(
     suppress_configuration_errors: bool = True,
 ) -> tuple[dict[str, int], dict[str, str]]:
@@ -276,7 +440,7 @@ async def sync_epic() -> dict:
     """
     Sync Epic Games library into game_platforms.
 
-    Returns: {"added": int, "matched": int, "skipped": int}
+    Returns: {"added": int, "matched": int, "skipped": int, "dlc": int}
     """
     config_path = _legendary_config_path()
     if not config_path.exists():
@@ -285,6 +449,7 @@ async def sync_epic() -> dict:
             "added": 0,
             "matched": 0,
             "skipped": 0,
+            "dlc": 0,
             "sync_status": "unconfigured",
             "error_summary": f"Epic config path does not exist: {config_path}",
             "error_classification": "missing_configuration",
@@ -298,6 +463,7 @@ async def sync_epic() -> dict:
             "added": 0,
             "matched": 0,
             "skipped": 0,
+            "dlc": 0,
             "sync_status": "failed",
             "error_summary": f"Epic sync failed: {exc}",
         }
@@ -323,14 +489,22 @@ async def sync_epic() -> dict:
             "added": 0,
             "matched": 0,
             "skipped": 0,
+            "dlc": 0,
             "sync_status": "unconfigured",
             "error_summary": f"Epic metadata cache is empty at {config_path / 'metadata'}",
             "error_classification": "missing_configuration",
         }
 
-    added = matched = skipped = 0
+    added = matched = skipped = dlc_synced = 0
     candidates = await load_fuzzy_candidates()
+    igdb_platform_id = PLATFORM_TO_IGDB.get("epic")
 
+    # Legendary's metadata cache mixes three kinds of item. Partition first:
+    # non-games are dropped here, and DLC is held back so every base game in
+    # this run is already resolved when a DLC looks for its parent (the cache
+    # directory has no ordering guarantee of its own).
+    base_items: list[tuple[dict[str, Any], str, str, str | None]] = []
+    dlc_items: list[tuple[dict[str, Any], str, str, str | None, dict[str, Any]]] = []
     for game in games:
         title = _extract_epic_title(game)
         if not title:
@@ -340,10 +514,26 @@ async def sync_epic() -> dict:
         if prepared_title is None:
             skipped += 1
             continue
+        if _is_unreal_engine_asset(game):
+            logger.debug("Skipping Epic Unreal Engine marketplace asset: %s", title)
+            skipped += 1
+            continue
+        if _is_mod(game):
+            logger.debug("Skipping Epic mod item: %s", title)
+            skipped += 1
+            continue
 
         artifact_id = _extract_epic_artifact_id(game)
-        igdb_platform_id = PLATFORM_TO_IGDB.get("epic")
+        main_game = _epic_main_game(game)
+        if main_game is None:
+            base_items.append((game, title, prepared_title, artifact_id))
+        else:
+            dlc_items.append((game, title, prepared_title, artifact_id, main_game))
 
+    # Pass 1 — base games. catalog_to_game is what a DLC's mainGameItem.id
+    # resolves against in pass 2.
+    catalog_to_game: dict[str, int] = {}
+    for game, title, prepared_title, artifact_id in base_items:
         # Prefer the stable Epic artifact id: a re-sync matches the existing game
         # directly so name/fuzzy resolution (which now refuses to attach onto an
         # existing Epic-owning row) never re-creates it as a duplicate.
@@ -381,6 +571,11 @@ async def sync_epic() -> dict:
                 candidates[game_id] = prepared_title
                 added += 1
 
+        for catalog_id in _epic_catalog_item_ids(game):
+            catalog_to_game.setdefault(catalog_id, game_id)
+
+        await _apply_epic_catalog_title(game_id, prepared_title)
+
         if title != prepared_title:
             await upsert_game_alias(
                 game_id,
@@ -409,14 +604,75 @@ async def sync_epic() -> dict:
         if artifact_id:
             await upsert_game_platform_identifier(platform_id, EPIC_ARTIFACT_ID, artifact_id)
 
+    # Pass 2 — DLC. Nested items match by EXACT identity only (ADR 0002
+    # decision 7): the artifact id, nothing else. No adopt, no IGDB, no fuzzy
+    # name — two different games' "Ultra HD Texture Pack" are two rows, and
+    # letting either of those resolvers see a generic add-on title is exactly
+    # how they collapsed onto one in production.
+    for game, title, prepared_title, artifact_id, main_game in dlc_items:
+        dlc_synced += 1
+        parent_game_id = await _resolve_epic_parent(main_game, catalog_to_game)
+        main_title = main_game.get("title")
+        existing = (
+            await get_game_by_identifier(EPIC_ARTIFACT_ID, artifact_id) if artifact_id else None
+        )
+
+        if existing is not None:
+            game_id = existing["id"]
+            matched += 1
+            # Only a row still at the untouched default is reclassified, and
+            # even then the shared writer's guards (parent-must-stay-primary,
+            # substance, edition-ownership, manual overrides) have the last word.
+            if _is_default_classification(existing):
+                await apply_content_classification(
+                    game_id,
+                    ContentClassification(
+                        content_type=CONTENT_DLC,
+                        is_primary_library_item=False,
+                        parent_name=str(main_title) if main_title else None,
+                    ),
+                    source="epic",
+                    parent_game_id=parent_game_id,
+                )
+        else:
+            # No parent resolved is the honest "DLC without its base game"
+            # shape (Epic giveaways produce it routinely) — a parent is never
+            # minted from a title guess.
+            game_id = await upsert_game(
+                appid=None,
+                name=prepared_title,
+                match_existing_by_name=False,
+                content_type=CONTENT_DLC,
+                parent_game_id=parent_game_id,
+            )
+            added += 1
+
+        platform_id = await upsert_game_platform(
+            game_id=game_id,
+            platform="epic",
+            playtime_minutes=playtime_by_artifact.get(artifact_id) if artifact_id else None,
+            last_played=last_played_by_artifact.get(artifact_id) if artifact_id else None,
+            owned=1,
+            from_source=True,
+        )
+
+        if artifact_id:
+            await upsert_game_platform_identifier(platform_id, EPIC_ARTIFACT_ID, artifact_id)
+
     logger.info(
-        "Epic sync: added=%d matched=%d skipped=%d playtime_rows=%d",
+        "Epic sync: added=%d matched=%d skipped=%d dlc=%d playtime_rows=%d",
         added,
         matched,
         skipped,
+        dlc_synced,
         len(playtime_by_artifact),
     )
-    result: dict[str, object] = {"added": added, "matched": matched, "skipped": skipped}
+    result: dict[str, object] = {
+        "added": added,
+        "matched": matched,
+        "skipped": skipped,
+        "dlc": dlc_synced,
+    }
     if playtime_error is not None:
         result.update(
             {

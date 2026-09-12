@@ -1290,9 +1290,13 @@ class ResolveGameZeroResultLadderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.igdb_id, 136000)
 
-    async def test_exact_name_query_is_an_equality_filter(self) -> None:
+    async def test_exact_name_query_is_a_case_insensitive_equality_filter(self) -> None:
+        # "~" (no wildcards) is Apicalypse's case-insensitive EQUALITY; "=" is
+        # case-sensitive, and library rows carry storefront casing ("DARK SOULS
+        # III") that IGDB's own title ("Dark Souls III") does not match.
         query = igdb._build_exact_name_query("The Forest", 6)
-        self.assertIn('where name = "The Forest"', query)
+        self.assertIn('where name ~ "The Forest"', query)
+        self.assertNotIn('name = "', query)
         self.assertIn("platforms = 6", query)
         self.assertNotIn("search ", query)
 
@@ -1783,7 +1787,10 @@ class FetchMemberSteamAppidsTests(unittest.IsolatedAsyncioTestCase):
         ):
             appids = await igdb.fetch_member_steam_appids([3001, 3002, 3003])
 
-        self.assertIn("where category = 1 & game = (3001, 3002, 3003)", captured["query"])
+        self.assertIn(
+            "where external_game_source = 1 & game = (3001, 3002, 3003)", captured["query"]
+        )
+        self.assertNotIn("category", captured["query"])
         self.assertEqual(captured["url"], igdb._IGDB_EXTERNAL_GAMES_URL)
         self.assertEqual(appids, {3001: ["1088710"], 3002: ["1105500", "999999"]})
 
@@ -2231,7 +2238,10 @@ class IGDBBackfillExternalGamesTests(unittest.IsolatedAsyncioTestCase):
             count = await igdb.backfill_missing_games(limit=1)
 
         self.assertEqual(count, 1)
-        external.assert_awaited_once_with(["391720"])
+        # The canary uid rides along with the real batch (see
+        # _EXTERNAL_MAPPING_CANARY_UIDS) so an empty answer can be told apart
+        # from a broken mapping.
+        external.assert_awaited_once_with(["391720", "292030"])
         fetch_by_id.assert_awaited_once_with(111, suppress_errors=False)
         resolve_game.assert_not_awaited()
         apply_metadata.assert_awaited_once_with(7, fetched)
@@ -2865,26 +2875,36 @@ class ResolveExternalIdsTests(unittest.IsolatedAsyncioTestCase):
             captured["result"] = await coro_factory()
         return captured
 
-    async def test_gog_lookups_send_category_five(self) -> None:
+    async def test_gog_lookups_send_external_game_source_five(self) -> None:
         captured = await self._capture(
             lambda: igdb.resolve_external_ids_to_igdb(
-                igdb.IGDB_EXTERNAL_CATEGORY_GOG, ["1207658930"]
+                igdb.IGDB_EXTERNAL_SOURCE_GOG, ["1207658930"]
             )
         )
-        self.assertIn("where category = 5 & uid = (\"1207658930\")", captured["query"])
+        self.assertIn(
+            "where external_game_source = 5 & uid = (\"1207658930\")", captured["query"]
+        )
+        # IGDB retired external_games.category; filtering on it matched nothing
+        # and took the authoritative store step out of the resolver silently.
+        self.assertNotIn("category", captured["query"])
         self.assertEqual(captured["url"], igdb._IGDB_EXTERNAL_GAMES_URL)
         self.assertEqual(captured["result"], {"1207658930": 7})
 
-    async def test_the_steam_wrapper_still_sends_category_one(self) -> None:
+    async def test_the_steam_wrapper_still_sends_source_one(self) -> None:
         captured = await self._capture(
             lambda: igdb.resolve_steam_appids_to_igdb(["1207658930"])
         )
-        self.assertIn("where category = 1 &", captured["query"])
+        self.assertIn("where external_game_source = 1 &", captured["query"])
+        self.assertNotIn("category", captured["query"])
         self.assertEqual(captured["result"], {"1207658930": 7})
 
-    async def test_category_constants(self) -> None:
-        self.assertEqual(igdb.IGDB_EXTERNAL_CATEGORY_STEAM, 1)
-        self.assertEqual(igdb.IGDB_EXTERNAL_CATEGORY_GOG, 5)
+    async def test_source_constants_and_their_legacy_aliases(self) -> None:
+        self.assertEqual(igdb.IGDB_EXTERNAL_SOURCE_STEAM, 1)
+        self.assertEqual(igdb.IGDB_EXTERNAL_SOURCE_GOG, 5)
+        # The old names stay valid (callers outside this module use them) and
+        # are the same external_game_source values.
+        self.assertEqual(igdb.IGDB_EXTERNAL_CATEGORY_STEAM, igdb.IGDB_EXTERNAL_SOURCE_STEAM)
+        self.assertEqual(igdb.IGDB_EXTERNAL_CATEGORY_GOG, igdb.IGDB_EXTERNAL_SOURCE_GOG)
 
     async def test_no_uids_short_circuits_without_a_request(self) -> None:
         with (
@@ -3117,3 +3137,290 @@ class IGDBBackfillGogExternalGamesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(release_claim.await_count, 2)
         self.assertTrue(any("GOG lookup failed" in line for line in logs.output))
         health.record_failure.assert_called_once_with("igdb", boom)
+
+
+class ExternalMappingCanaryTests(unittest.IsolatedAsyncioTestCase):
+    """An empty store mapping must not be read as "IGDB knows none of these".
+
+    The retired ``external_games.category`` filter answered HTTP 200 with an
+    empty body for every batch, and the backfill happily stamped 904 owned rows
+    "checked, no match" off it — 448 of them carrying a Steam appid IGDB
+    certainly maps. The canary uid rides along so that answer is recognisable.
+    """
+
+    def setUp(self) -> None:
+        igdb._consecutive_backfill_misses = 0
+
+    def tearDown(self) -> None:
+        igdb._consecutive_backfill_misses = 0
+
+    def _creds_env(self):
+        return patch.dict(
+            "os.environ",
+            {"TWITCH_CLIENT_ID": "cid", "TWITCH_CLIENT_SECRET": "secret"},
+            clear=False,
+        )
+
+    @staticmethod
+    def _row(game_id: int, name: str, appid: str) -> dict:
+        return {
+            "id": game_id,
+            "name": name,
+            "igdb_id": None,
+            "manual_overrides": None,
+            "steam_appid": appid,
+        }
+
+    @staticmethod
+    def _game(igdb_id: int, name: str) -> "igdb.IGDBGame":
+        return igdb.IGDBGame(
+            igdb_id=igdb_id,
+            name=name,
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2015-05-19",
+            platforms=[6],
+        )
+
+    async def _run(self, rows, mapping, **patches):
+        claimed = [row["id"] for row in rows]
+        fetch_by_id = patches.pop("fetch_by_id", AsyncMock(return_value=None))
+        resolve = patches.pop("resolve", AsyncMock(return_value=igdb._ResolveOutcome(
+            game=None, saw_candidates=False
+        )))
+        external = AsyncMock(return_value=mapping)
+        recorded: dict = {}
+        with (
+            self._creds_env(),
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=claimed)),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=rows)),
+            patch("gamelib_mcp.data.igdb.resolve_steam_appids_to_igdb", external),
+            patch("gamelib_mcp.data.igdb.fetch_game_by_id", fetch_by_id),
+            patch("gamelib_mcp.data.igdb._resolve_game_with_status", resolve),
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=None)),
+            patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
+            patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()) as release_claim,
+            patch("gamelib_mcp.data.igdb.provider_health") as health,
+        ):
+            recorded["count"] = await igdb.backfill_missing_games(limit=len(rows))
+        recorded.update(
+            external=external,
+            apply_metadata=apply_metadata,
+            mark_checked=mark_checked,
+            release_claim=release_claim,
+            health=health,
+            fetch_by_id=fetch_by_id,
+            resolve=resolve,
+        )
+        return recorded
+
+    async def test_canary_is_appended_to_the_batch_and_never_links_a_row(self) -> None:
+        rows = [self._row(7, "Some Unmapped Game", "1")]
+        # The canary maps; the real uid does not.
+        result = await self._run(rows, {"292030": 1942})
+
+        result["external"].assert_awaited_once_with(["1", "292030"])
+        # Canary alive + a real uid unmapped is a genuine no-match, so the row
+        # falls through to name search and the canary's igdb id links nothing.
+        result["resolve"].assert_awaited_once()
+        result["apply_metadata"].assert_not_awaited()
+        result["health"].record_failure.assert_not_called()
+
+    async def test_a_row_that_really_is_the_canary_still_links(self) -> None:
+        # The canary uid is only STRIPPED when it was appended — a library row
+        # that genuinely owns Steam appid 292030 keeps its mapping.
+        rows = [self._row(7, "The Witcher 3: Wild Hunt", "292030")]
+        witcher = self._game(1942, "The Witcher 3: Wild Hunt")
+        result = await self._run(
+            rows, {"292030": 1942}, fetch_by_id=AsyncMock(return_value=witcher)
+        )
+
+        result["external"].assert_awaited_once_with(["292030"])
+        self.assertEqual(result["count"], 1)
+        result["apply_metadata"].assert_awaited_once_with(7, witcher)
+
+    async def test_missing_canary_and_nothing_mapped_aborts_the_pass(self) -> None:
+        rows = [self._row(7, "Baldur's Gate 3", "1086940"), self._row(8, "DARK SOULS III", "374320")]
+        with self.assertLogs("gamelib_mcp.data.igdb", level="WARNING") as logs:
+            result = await self._run(rows, {})
+
+        self.assertEqual(result["count"], 0)
+        # Exactly the raised-exception contract: nothing checked, every claim
+        # released, the failure counted so a dead mapping is visible in health.
+        result["mark_checked"].assert_not_awaited()
+        result["resolve"].assert_not_awaited()
+        self.assertEqual(result["release_claim"].await_count, 2)
+        result["health"].record_failure.assert_called_once()
+        provider, message = result["health"].record_failure.call_args.args
+        self.assertEqual(provider, "igdb")
+        self.assertIn("292030", str(message))
+        self.assertTrue(any("canary" in line for line in logs.output))
+
+    async def test_missing_canary_but_one_real_mapping_continues(self) -> None:
+        rows = [self._row(7, "Layers of Fear", "391720"), self._row(8, "Unmapped", "2")]
+        fetched = self._game(111, "Layers of Fear")
+        result = await self._run(
+            rows, {"391720": 111}, fetch_by_id=AsyncMock(return_value=fetched)
+        )
+
+        # The endpoint answers — the canary itself may simply have moved — so
+        # the pass runs to completion: the mapped row links and the unmapped
+        # one reaches its normal (buffered, then committed) no-match.
+        self.assertEqual(result["count"], 2)
+        result["health"].record_failure.assert_not_called()
+        result["apply_metadata"].assert_awaited_once_with(7, fetched)
+        # The unmapped row is committed as a genuine no-match rather than left
+        # retryable — that is the difference from the aborted pass above.
+        result["mark_checked"].assert_awaited_once_with(8)
+
+    def test_the_canary_uid_is_the_witcher_3_on_steam(self) -> None:
+        self.assertEqual(igdb._EXTERNAL_MAPPING_CANARY_UIDS, {"steam_appid": "292030"})
+
+
+class ResolverWouldAcceptTests(unittest.TestCase):
+    """The offline "would the resolver have linked this record?" predicate."""
+
+    @staticmethod
+    def _game(name: str, *, year: str = "2015-01-01", alts: list[str] | None = None,
+              igdb_id: int = 1, category: int = 0) -> "igdb.IGDBGame":
+        return igdb.IGDBGame(
+            igdb_id=igdb_id,
+            name=name,
+            category=category,
+            first_release_date=year,
+            alternative_names=alts or [],
+        )
+
+    def test_exact_record_is_accepted(self) -> None:
+        self.assertTrue(
+            igdb.resolver_would_accept(
+                "Baldur's Gate 3",
+                self._game("Baldur's Gate 3", year="2023-08-03", igdb_id=119171),
+                reference_release_date="2023-08-03",
+            )
+        )
+
+    def test_storefront_casing_is_accepted(self) -> None:
+        # The prod shape the case-insensitive exact-name lookup exists for:
+        # the library row carries Steam's "DARK SOULS III", IGDB holds "Dark
+        # Souls III". match_key folds case, so the resolver's RULES always
+        # accepted this pairing — only retrieval was failing.
+        self.assertTrue(
+            igdb.resolver_would_accept(
+                "DARK SOULS III",
+                self._game("Dark Souls III", year="2016-03-24", igdb_id=11133),
+                reference_release_date="2016-04-11",
+            )
+        )
+
+    def test_a_mod_prefixed_title_is_refused(self) -> None:
+        # Documenting what the real ladder does, not what would be convenient:
+        # the only rung that reaches "Defence Alliance 2" from "Killing Floor
+        # Mod: Defence Alliance 2" is the last-two-tokens widener, which is NOT
+        # identity-preserving and is therefore gated against the FULL original
+        # title — which the record's name does not equal. So: False.
+        self.assertFalse(
+            igdb.resolver_would_accept(
+                "Killing Floor Mod: Defence Alliance 2",
+                self._game("Defence Alliance 2", year="2009-01-01"),
+            )
+        )
+
+    def test_a_compilation_record_is_refused_for_the_base_title(self) -> None:
+        self.assertFalse(
+            igdb.resolver_would_accept(
+                "Fallout",
+                self._game(
+                    "Fallout Trilogy",
+                    year="2009-01-01",
+                    category=3,
+                    alts=["Fallout Collection"],
+                ),
+                reference_release_date="1997-10-10",
+            )
+        )
+
+    def test_a_crossover_spinoff_is_refused(self) -> None:
+        self.assertFalse(
+            igdb.resolver_would_accept(
+                "STEINS;GATE",
+                self._game(
+                    "Steins;Gate x Sanrio Characters: Kaikou Souguu - Goldig Party",
+                    year="2018-01-01",
+                ),
+            )
+        )
+
+    def test_it_reads_a_record_straight_off_fetch_igdb_game_records(self) -> None:
+        record = {
+            "id": 11133,
+            "name": "Dark Souls III",
+            "alternative_names": ["DS3"],
+            "first_release_date": "2016-03-24",
+            "category": None,
+            "game_type": 0,
+            "parent_igdb_id": None,
+            "parent_name": None,
+            "version_parent_igdb_id": None,
+            "version_parent_name": None,
+        }
+        game = igdb.igdb_game_from_record(record)
+        self.assertEqual(game.igdb_id, 11133)
+        self.assertEqual(game.name, "Dark Souls III")
+        self.assertEqual(game.alternative_names, ["DS3"])
+        self.assertEqual(game.first_release_date, "2016-03-24")
+        # category absent -> game_type carries the value (IGDB's own migration).
+        self.assertEqual(game.category, 0)
+        self.assertTrue(igdb.resolver_would_accept("DARK SOULS III", game))
+
+    def test_an_abbreviation_only_lives_in_alternative_names(self) -> None:
+        game = igdb.igdb_game_from_record(
+            {
+                "id": 1020,
+                "name": "Grand Theft Auto V",
+                "alternative_names": ["GTA V"],
+                "first_release_date": "2013-09-17",
+                "game_type": 0,
+            }
+        )
+        self.assertTrue(igdb.resolver_would_accept("GTA V", game))
+
+
+class FetchIgdbGameRecordsFieldsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_records_carry_alternative_names_and_release_date(self) -> None:
+        captured: dict = {}
+
+        async def fake_post(query: str, headers: dict[str, str]) -> list[dict]:
+            captured["query"] = query
+            return [
+                {
+                    "id": 11133,
+                    "name": "Dark Souls III",
+                    "alternative_names": [{"name": "DS3"}, {"id": 7}],
+                    "first_release_date": 1458777600,
+                    "game_type": 0,
+                }
+            ]
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"TWITCH_CLIENT_ID": "client", "TWITCH_CLIENT_SECRET": "secret"},
+                clear=True,
+            ),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", side_effect=fake_post),
+        ):
+            records = await igdb.fetch_igdb_game_records([11133])
+
+        self.assertIn("alternative_names.name", captured["query"])
+        self.assertIn("first_release_date", captured["query"])
+        record = records[11133]
+        self.assertEqual(record["alternative_names"], ["DS3"])
+        self.assertEqual(record["first_release_date"], "2016-03-24")
+        # Existing keys are untouched.
+        self.assertEqual(record["name"], "Dark Souls III")
+        self.assertIsNone(record["category"])
+        self.assertEqual(record["game_type"], 0)
+        self.assertIsNone(record["parent_igdb_id"])

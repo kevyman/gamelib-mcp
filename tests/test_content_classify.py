@@ -734,3 +734,54 @@ class UpsertGameDerivesPrimaryTests(ToolDBTestCase):
         game_id2 = await upsert_game(None, "Passed Primary", content_type=content.CONTENT_REMAKE)
         row2 = await _get_content_row(game_id2)
         self.assertEqual(row2["is_primary_library_item"], 1)
+
+
+# --- category 3 (bundle): parentless compilations are real library items -------
+
+def test_parentless_bundle_is_a_primary_base_game():
+    # IGDB's category 3 covers two different things. A bundle record with no
+    # parent is a compilation sold as its own product — "UFO 50", "The Great
+    # Ace Attorney Chronicles", "Fallout Classic" — and nesting it strands a
+    # playable owned item under no parent at all, hiding it from every rollup.
+    for title in ("UFO 50", "The Great Ace Attorney Chronicles", "Fallout Classic"):
+        result = content.classify_igdb_game(title=title, category=3)
+        assert result.content_type == content.CONTENT_BASE_GAME, title
+        assert result.is_primary_library_item is True, title
+        assert result.parent_name is None, title
+
+
+def test_parentless_bundle_via_game_type_is_also_primary():
+    # IGDB's own category -> game_type migration must not change the answer.
+    result = content.classify_igdb_game(title="UFO 50", category=None, game_type=3)
+    assert result.content_type == content.CONTENT_BASE_GAME
+    assert result.is_primary_library_item is True
+
+
+def test_bundle_with_a_parent_stays_nested():
+    # The other half of category 3: a bundle IGDB hangs under a game really is
+    # nested content, and keeps its parent linkage.
+    result = content.classify_igdb_game(
+        title="The Elder Scrolls V: Skyrim - Creation Club Bundle",
+        category=3,
+        parent_name="The Elder Scrolls V: Skyrim",
+        parent_igdb_id=472,
+    )
+    assert result.content_type == content.CONTENT_BUNDLE
+    assert result.is_primary_library_item is False
+    assert result.parent_name == "The Elder Scrolls V: Skyrim"
+    assert result.parent_igdb_id == 472
+
+
+def test_bundle_with_only_a_parent_igdb_id_stays_nested():
+    result = content.classify_igdb_game(
+        title="Some Season Bundle", category=3, parent_igdb_id=999
+    )
+    assert result.content_type == content.CONTENT_BUNDLE
+    assert result.is_primary_library_item is False
+    assert result.parent_igdb_id == 999
+
+
+def test_category_3_still_maps_to_bundle_for_other_callers():
+    # The parentless rule belongs to the classify step — the raw category
+    # mapping is unchanged, because its other callers have no parent to consult.
+    assert content.content_type_from_igdb_category(3) == content.CONTENT_BUNDLE

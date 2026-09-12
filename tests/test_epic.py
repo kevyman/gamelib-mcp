@@ -1,4 +1,6 @@
 import asyncio
+import contextlib
+import itertools
 import json
 import sys
 import tempfile
@@ -159,12 +161,36 @@ class EpicHelpersTests(unittest.TestCase):
 
 class SyncEpicTests(unittest.TestCase):
     def _run_sync(self, games, playtime_by_artifact=None, resolve_result=(42, None),
-                  candidates=None, last_played_by_artifact=None):
-        mock_resolve = AsyncMock(return_value=resolve_result)
+                  candidates=None, last_played_by_artifact=None, *,
+                  identifier_rows=None, adopt_result=None, parent_result=None,
+                  first_minted_id=500):
+        """Run sync_epic against mocked writers.
+
+        ``resolve_result`` may be a single (game_id, igdb_game) tuple or a list
+        used as consecutive side effects. ``identifier_rows`` maps an identifier
+        VALUE (an epic artifact id) to the games row get_game_by_identifier
+        should return for it — it backs both the per-item artifact lookup and
+        the parent lookup by the base item's releaseInfo appIds. Minted rows get
+        consecutive ids from ``first_minted_id`` so two mints are telling apart.
+        """
+        if isinstance(resolve_result, list):
+            mock_resolve = AsyncMock(side_effect=resolve_result)
+        else:
+            mock_resolve = AsyncMock(return_value=resolve_result)
         mock_upsert_platform = AsyncMock(return_value=99)
         mock_enrichment = AsyncMock()
         mock_identifier = AsyncMock()
         mock_alias = AsyncMock()
+        rows = dict(identifier_rows or {})
+        mock_get_by_identifier = AsyncMock(
+            side_effect=lambda _identifier_type, value: rows.get(value)
+        )
+        minted = itertools.count(first_minted_id)
+        mock_upsert_game = AsyncMock(side_effect=lambda **_kwargs: next(minted))
+        mock_adopt = AsyncMock(return_value=adopt_result)
+        mock_classify = AsyncMock(return_value=True)
+        mock_parent = AsyncMock(return_value=parent_result)
+        mock_rename = AsyncMock(return_value=False)
 
         with (
             patch("pathlib.Path.exists", return_value=True),
@@ -172,6 +198,12 @@ class SyncEpicTests(unittest.TestCase):
             patch("gamelib_mcp.data.epic.fetch_epic_playtime", AsyncMock(return_value=(playtime_by_artifact or {}, last_played_by_artifact or {}))),
             patch("gamelib_mcp.data.epic.load_fuzzy_candidates", AsyncMock(return_value=candidates or {})),
             patch("gamelib_mcp.data.epic.resolve_and_link_game", mock_resolve),
+            patch("gamelib_mcp.data.epic.get_game_by_identifier", mock_get_by_identifier),
+            patch("gamelib_mcp.data.epic.adopt_platform_identifier", mock_adopt),
+            patch("gamelib_mcp.data.epic.upsert_game", mock_upsert_game),
+            patch("gamelib_mcp.data.epic.apply_content_classification", mock_classify),
+            patch("gamelib_mcp.data.epic.resolve_parent_game", mock_parent),
+            patch("gamelib_mcp.data.epic._apply_epic_catalog_title", mock_rename),
             patch("gamelib_mcp.data.epic.upsert_game_platform", mock_upsert_platform),
             patch("gamelib_mcp.data.epic.upsert_game_alias", mock_alias),
             patch("gamelib_mcp.data.epic.upsert_game_platform_enrichment", mock_enrichment),
@@ -179,6 +211,19 @@ class SyncEpicTests(unittest.TestCase):
         ):
             result = asyncio.run(epic.sync_epic())
 
+        self.mocks = {
+            "resolve": mock_resolve,
+            "platform": mock_upsert_platform,
+            "enrichment": mock_enrichment,
+            "identifier": mock_identifier,
+            "alias": mock_alias,
+            "get_by_identifier": mock_get_by_identifier,
+            "upsert_game": mock_upsert_game,
+            "adopt": mock_adopt,
+            "classify": mock_classify,
+            "resolve_parent": mock_parent,
+            "rename": mock_rename,
+        }
         return result, mock_resolve, mock_upsert_platform, mock_enrichment
 
     def test_returns_failure_metadata_when_config_missing(self) -> None:
@@ -280,7 +325,7 @@ class SyncEpicTests(unittest.TestCase):
             resolve_result=(42, None),
         )
 
-        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 0})
+        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 0, "dlc": 0})
         mock_resolve.assert_awaited_once()
         self.assertEqual(
             mock_resolve.await_args.args[:2],
@@ -346,7 +391,7 @@ class SyncEpicTests(unittest.TestCase):
             resolve_result=(42, None),
         )
 
-        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 1})
+        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 1, "dlc": 0})
         mock_resolve.assert_awaited_once()
         self.assertEqual(
             mock_resolve.await_args.args[:2],
@@ -360,3 +405,308 @@ class SyncEpicTests(unittest.TestCase):
             owned=1,
             from_source=True,
         )
+
+
+    def test_skips_unreal_engine_marketplace_assets(self) -> None:
+        games = [
+            {
+                "app_title": "Advanced Flock System - Multithreaded Fish AI",
+                "asset_infos": {"Windows": {"asset_id": "artifact-ue", "namespace": "ue"}},
+            },
+            {
+                "app_title": "Advanced Flock System - Multithreaded Fish AI v2",
+                "asset_infos": {"Windows": {"asset_id": "artifact-ue-2"}},
+                "metadata": {"id": "cat-ue-2", "namespace": "ue"},
+            },
+            {
+                "app_title": "Celeste",
+                "asset_infos": {"Windows": {"asset_id": "artifact-1"}},
+            },
+        ]
+
+        result, mock_resolve, mock_upsert_platform, _ = self._run_sync(games)
+
+        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 2, "dlc": 0})
+        mock_resolve.assert_awaited_once()
+        self.assertEqual(mock_resolve.await_args.args[0], "Celeste")
+        mock_upsert_platform.assert_awaited_once()
+
+    def test_skips_mod_items(self) -> None:
+        games = [
+            {
+                "app_title": "Some Community Mod",
+                "asset_infos": {"Windows": {"asset_id": "artifact-mod"}},
+                "metadata": {"id": "cat-mod", "categories": [{"path": "mods"}, {"path": "games"}]},
+            },
+            {
+                "app_title": "Celeste",
+                "asset_infos": {"Windows": {"asset_id": "artifact-1"}},
+            },
+        ]
+
+        result, mock_resolve, _, _ = self._run_sync(games)
+
+        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 1, "dlc": 0})
+        mock_resolve.assert_awaited_once()
+        self.assertEqual(mock_resolve.await_args.args[0], "Celeste")
+
+    def test_dlc_mints_nested_row_under_base_game_from_same_run(self) -> None:
+        games = [
+            {
+                "app_title": "Control Ultra HD Texture Pack",
+                "asset_infos": {"Windows": {"asset_id": "artifact-dlc"}},
+                "metadata": {
+                    "id": "cat-dlc",
+                    "title": "Control Ultra HD Texture Pack",
+                    "mainGameItem": {"id": "cat-control", "title": "Control"},
+                },
+            },
+            {
+                "app_title": "Control",
+                "asset_infos": {"Windows": {"asset_id": "artifact-control"}},
+                "metadata": {"id": "cat-control", "title": "Control"},
+            },
+        ]
+
+        result, mock_resolve, mock_upsert_platform, _ = self._run_sync(
+            games, resolve_result=(42, None)
+        )
+
+        self.assertEqual(result, {"added": 2, "matched": 0, "skipped": 0, "dlc": 1})
+        # The base game is the only item that may reach IGDB/fuzzy resolution.
+        mock_resolve.assert_awaited_once()
+        self.assertEqual(mock_resolve.await_args.args[0], "Control")
+        # adopt/IGDB resolution is reachable for the base game only — the DLC
+        # artifact never touches either.
+        self.assertEqual(
+            [call.kwargs["identifier_value"] for call in self.mocks["adopt"].await_args_list],
+            ["artifact-control"],
+        )
+        self.mocks["upsert_game"].assert_awaited_once_with(
+            appid=None,
+            name="Control Ultra HD Texture Pack",
+            match_existing_by_name=False,
+            content_type="dlc",
+            parent_game_id=42,
+        )
+        self.assertEqual(mock_upsert_platform.await_count, 2)
+        self.assertEqual(
+            [call.kwargs["game_id"] for call in mock_upsert_platform.await_args_list],
+            [42, 500],
+        )
+
+    def test_dlc_parent_resolves_via_main_game_release_artifact(self) -> None:
+        games = [
+            {
+                "app_title": "Ultra HD Texture Pack",
+                "asset_infos": {"Windows": {"asset_id": "artifact-dlc"}},
+                "metadata": {
+                    "id": "cat-dlc",
+                    "mainGameItem": {
+                        "id": "cat-unknown",
+                        "title": "Some Base Game",
+                        "releaseInfo": [{"appId": "artifact-base"}],
+                    },
+                },
+            }
+        ]
+
+        result, mock_resolve, _, _ = self._run_sync(
+            games,
+            identifier_rows={"artifact-base": {"id": 11}},
+        )
+
+        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 0, "dlc": 1})
+        mock_resolve.assert_not_awaited()
+        self.mocks["resolve_parent"].assert_not_awaited()
+        self.assertEqual(self.mocks["upsert_game"].await_args.kwargs["parent_game_id"], 11)
+
+    def test_same_named_dlcs_of_different_games_mint_separate_rows(self) -> None:
+        games = [
+            {
+                "app_title": "Game A",
+                "asset_infos": {"Windows": {"asset_id": "artifact-a"}},
+                "metadata": {"id": "cat-a"},
+            },
+            {
+                "app_title": "Game B",
+                "asset_infos": {"Windows": {"asset_id": "artifact-b"}},
+                "metadata": {"id": "cat-b"},
+            },
+            {
+                "app_title": "Ultra HD Texture Pack",
+                "asset_infos": {"Windows": {"asset_id": "artifact-dlc-a"}},
+                "metadata": {
+                    "id": "cat-dlc-a",
+                    "mainGameItem": {"id": "cat-a", "title": "Game A"},
+                },
+            },
+            {
+                "app_title": "Ultra HD Texture Pack",
+                "asset_infos": {"Windows": {"asset_id": "artifact-dlc-b"}},
+                "metadata": {
+                    "id": "cat-dlc-b",
+                    "mainGameItem": {"id": "cat-b", "title": "Game B"},
+                },
+            },
+        ]
+
+        result, _, mock_upsert_platform, _ = self._run_sync(
+            games, resolve_result=[(1, None), (2, None)]
+        )
+
+        self.assertEqual(result, {"added": 4, "matched": 0, "skipped": 0, "dlc": 2})
+        mint_calls = self.mocks["upsert_game"].await_args_list
+        self.assertEqual(len(mint_calls), 2)
+        self.assertEqual(
+            [call.kwargs["name"] for call in mint_calls],
+            ["Ultra HD Texture Pack", "Ultra HD Texture Pack"],
+        )
+        self.assertEqual([call.kwargs["parent_game_id"] for call in mint_calls], [1, 2])
+        self.assertTrue(all(call.kwargs["match_existing_by_name"] is False for call in mint_calls))
+        # Two distinct nested rows, not one collapsed row.
+        self.assertEqual(
+            [call.kwargs["game_id"] for call in mock_upsert_platform.await_args_list],
+            [1, 2, 500, 501],
+        )
+
+    def test_existing_default_row_holding_the_dlc_artifact_is_reclassified(self) -> None:
+        games = [
+            {
+                "app_title": "Control",
+                "asset_infos": {"Windows": {"asset_id": "artifact-control"}},
+                "metadata": {"id": "cat-control"},
+            },
+            {
+                "app_title": "Ultra HD Texture Pack",
+                "asset_infos": {"Windows": {"asset_id": "artifact-dlc"}},
+                "metadata": {
+                    "id": "cat-dlc",
+                    "mainGameItem": {"id": "cat-control", "title": "Control"},
+                },
+            },
+        ]
+
+        result, _, _, _ = self._run_sync(
+            games,
+            identifier_rows={
+                "artifact-dlc": {
+                    "id": 7,
+                    "content_type": "base_game",
+                    "is_primary_library_item": 1,
+                    "parent_game_id": None,
+                }
+            },
+        )
+
+        self.assertEqual(result, {"added": 1, "matched": 1, "skipped": 0, "dlc": 1})
+        self.mocks["upsert_game"].assert_not_awaited()
+        self.mocks["classify"].assert_awaited_once()
+        call = self.mocks["classify"].await_args
+        self.assertEqual(call.args[0], 7)
+        classification = call.args[1]
+        self.assertEqual(classification.content_type, "dlc")
+        self.assertFalse(classification.is_primary_library_item)
+        self.assertEqual(classification.parent_name, "Control")
+        self.assertEqual(call.kwargs["source"], "epic")
+        self.assertEqual(call.kwargs["parent_game_id"], 42)
+
+    def test_existing_non_default_row_is_not_reclassified(self) -> None:
+        games = [
+            {
+                "app_title": "Ultra HD Texture Pack",
+                "asset_infos": {"Windows": {"asset_id": "artifact-dlc"}},
+                "metadata": {
+                    "id": "cat-dlc",
+                    "mainGameItem": {"id": "cat-control", "title": "Control"},
+                },
+            }
+        ]
+
+        result, _, _, _ = self._run_sync(
+            games,
+            identifier_rows={
+                "artifact-dlc": {
+                    "id": 7,
+                    "content_type": "expansion",
+                    "is_primary_library_item": 0,
+                    "parent_game_id": 3,
+                }
+            },
+        )
+
+        self.assertEqual(result, {"added": 0, "matched": 1, "skipped": 0, "dlc": 1})
+        self.mocks["classify"].assert_not_awaited()
+        self.mocks["upsert_game"].assert_not_awaited()
+
+
+class _FakeDB:
+    """Minimal DBConnection stand-in for the catalog-title rename helper."""
+
+    def __init__(self, *, name: str, other_platform: bool) -> None:
+        self.name = name
+        self.other_platform = other_platform
+        self.writes: list[tuple[str, tuple]] = []
+
+    async def execute_fetchone(self, sql, params=()):
+        if "FROM games" in sql:
+            return {"name": self.name}
+        if "FROM game_platforms" in sql:
+            return {"1": 1} if self.other_platform else None
+        return None
+
+    async def execute(self, sql, params=()):
+        self.writes.append((sql, params))
+
+    async def commit(self):
+        return None
+
+
+@contextlib.asynccontextmanager
+async def _fake_get_db(db):
+    yield db
+
+
+class EpicCatalogTitleRenameTests(unittest.TestCase):
+    def _run_rename(self, *, stored_name, other_platform, overrides=frozenset()):
+        db = _FakeDB(name=stored_name, other_platform=other_platform)
+        with (
+            patch("gamelib_mcp.data.epic.get_db", lambda: _fake_get_db(db)),
+            patch(
+                "gamelib_mcp.data.epic.get_manual_overrides",
+                AsyncMock(return_value=set(overrides)),
+            ),
+        ):
+            renamed = asyncio.run(epic._apply_epic_catalog_title(5, "Hades II"))
+        return renamed, db
+
+    def test_renames_when_epic_is_the_only_platform(self) -> None:
+        renamed, db = self._run_rename(stored_name="Hades 2", other_platform=False)
+
+        self.assertTrue(renamed)
+        self.assertEqual(len(db.writes), 1)
+        sql, params = db.writes[0]
+        self.assertIn("UPDATE games SET name", sql)
+        self.assertEqual(params[0], "Hades II")
+        self.assertEqual(params[2], 5)
+        self.assertEqual(params[1], epic.normalize_search_text("Hades II"))
+
+    def test_skips_rename_when_another_platform_owns_the_game(self) -> None:
+        renamed, db = self._run_rename(stored_name="Hades 2", other_platform=True)
+
+        self.assertFalse(renamed)
+        self.assertEqual(db.writes, [])
+
+    def test_skips_rename_when_name_is_manually_overridden(self) -> None:
+        renamed, db = self._run_rename(
+            stored_name="Hades 2", other_platform=False, overrides={"name"}
+        )
+
+        self.assertFalse(renamed)
+        self.assertEqual(db.writes, [])
+
+    def test_no_write_when_name_already_matches(self) -> None:
+        renamed, db = self._run_rename(stored_name="Hades II", other_platform=False)
+
+        self.assertFalse(renamed)
+        self.assertEqual(db.writes, [])

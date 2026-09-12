@@ -12,6 +12,14 @@ from .title_normalization import normalize_search_text
 # would demote them out of the library rollups (get_library_stats, series,
 # discover). Requires non-space text on both sides of a spaced "+" so we don't
 # match a trailing "+" or a lone operator.
+#
+# This pattern is now only the VERSION_PARENT escape hatch. A bundle record
+# with no parent at all is handled by a name-independent rule in
+# classify_igdb_game: IGDB's category 3 covers both "the season pass contents
+# of game X" (which carries a parent and really is nested) and the purchasable
+# compilation that is the only thing you can buy ("UFO 50", "The Great Ace
+# Attorney Chronicles", "Fallout Classic"), and the latter carries no parent
+# to nest under — nesting it hid an owned, playable item from every rollup.
 _COMPILATION_TITLE_RE = re.compile(r"\S\s+\+\s+\S")
 
 
@@ -204,7 +212,17 @@ def classify_igdb_game(
     # category, when present, is authoritative.
     effective = category if category is not None else game_type
     content_type = content_type_from_igdb_category(effective)
-    if content_type == CONTENT_BUNDLE and compilation:
+    if content_type == CONTENT_BUNDLE and (
+        compilation or not (parent_name or parent_igdb_id)
+    ):
+        # A bundle is only nested content when IGDB says what it is nested
+        # UNDER. A parentless bundle is a compilation sold as its own product
+        # ("UFO 50", "The Great Ace Attorney Chronicles", "Fallout Classic"):
+        # nesting it would strand a playable, owned item with no parent to
+        # surface it, so it is a primary base game.
+        # ``content_type_from_igdb_category`` still maps 3 -> bundle for its
+        # other callers; the parentless rule belongs to the classify step,
+        # which is the only place that knows whether a parent exists.
         return _primary(CONTENT_BASE_GAME)
     if content_type in PRIMARY_CONTENT_TYPES:
         return _primary(content_type)

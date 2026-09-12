@@ -1343,6 +1343,52 @@ async def bulk_upsert_steam_library(
                      )"""
             )
 
+            # Pass 1c — adopt an existing same-name game that already OWNS a
+            # Steam row carrying no steam_appid identifier at all. This is the
+            # Steam counterpart of adopt_platform_identifier (~line 939, used
+            # by the Epic/PSN/Nintendo syncs): a purchase import mints owned
+            # platform rows without a store id, and pass 2's steam-row guard
+            # then refuses them forever, so every later sync forked a second
+            # row for the same game (observed in prod 2026-08-04: a Humble
+            # Choice import minted five identifier-less Steam rows — "Pile
+            # Up!", "Decktamer", "Conquest Dark", "Gatekeeper", "Like a
+            # Dragon: Infinite Wealth" — and the next sync duplicated all
+            # five). Safe against the anti-collapse rule because pass 1
+            # already claimed every appid that HAS an identifier row: a
+            # candidate here has no steam_appid, so adopting it can never
+            # steal an identified row from another appid (Dead Space 2008 vs
+            # 2023 both keep theirs). Guarded exactly like pass 2 — only the
+            # lowest row_order among same-name temp rows may claim, lowest
+            # game id wins — so two appids never collapse onto one game. The
+            # identifier INSERT below then attaches the appid to that existing
+            # platform row, and the platform upsert stamps last_seen_in_source
+            # while leaving its acquisition columns untouched.
+            await db.execute(
+                """UPDATE temp_steam_library_sync AS t
+                   SET resolved_game_id = (
+                       SELECT g.id
+                       FROM games g
+                       JOIN game_platforms gp
+                         ON gp.game_id = g.id AND gp.platform = 'steam'
+                       WHERE lower(g.name) = lower(t.name)
+                         AND NOT EXISTS (
+                             SELECT 1 FROM game_platform_identifiers gpi
+                             WHERE gpi.game_platform_id = gp.id
+                               AND gpi.identifier_type = ?
+                         )
+                       ORDER BY g.id
+                       LIMIT 1
+                   )
+                   WHERE t.resolved_game_id IS NULL
+                     AND t.row_order = (
+                         SELECT MIN(t2.row_order)
+                         FROM temp_steam_library_sync t2
+                         WHERE t2.resolved_game_id IS NULL
+                           AND lower(t2.name) = lower(t.name)
+                     )""",
+                (STEAM_APP_ID,),
+            )
+
             await db.execute(
                 """UPDATE temp_steam_library_sync AS t
                    SET resolved_game_id = (

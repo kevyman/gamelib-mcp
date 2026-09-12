@@ -46,7 +46,7 @@ from ..data.title_normalization import (
     normalize_purchase_title,
     normalize_search_text,
 )
-from ..platforms_registry import SYNCABLE_PLATFORMS
+from ..platforms_registry import NESTED_LISTING_PLATFORMS, SYNCABLE_PLATFORMS
 from .detectors import (
     detect_collapsed_games,
     detect_cross_platform_collapses,
@@ -211,39 +211,89 @@ async def _run_playtime_farming(*, apply: bool, options: dict[str, Any]) -> Chec
 # --- adapters: identity.same_store_collapse (was detect_collapsed_games) ----
 
 
+# Identifier type whose multi-value shape is a DOCUMENTED deliberate fold: the
+# PSN sync attaches every cross-gen SKU (CUSA…/PPSA…) of one game to that
+# game's row, one primary and the rest secondary. There is nothing to review
+# there, so those candidates are dropped rather than reported as notices.
+_DELIBERATE_SKU_FOLD_IDENTIFIER = "psn_title_id"
+
+
 async def _run_identity_same_store_collapse(
     *, apply: bool, options: dict[str, Any]
 ) -> CheckOutcome:
+    """One platform row holding several store identifiers of one type.
+
+    Two different shapes reach this query, and ``primary_count`` — how many of
+    those identifiers claim ``is_primary`` — is what tells them apart:
+
+    * ``primary_count >= 2``: two writers each claiming to be THE identifier for
+      this row. That is the real over-merge ("Dead Space" holding the 2008 and
+      2023 appids), reported as an **error**.
+    * ``primary_count <= 1``: one identifier plus deliberate secondaries — the
+      Steam license audit attaching a retired edition/bonus appid beside the
+      real one, or an Epic edition SKU. A **notice**: worth a look only if the
+      identifiers turn out to name different games.
+    * ``primary_count <= 1`` on ``psn_title_id``: the PSN sync's cross-gen SKU
+      fold, by design. Skipped entirely and counted in
+      ``psn_sku_folds_skipped`` — in prod this shape alone was most of the 19
+      "errors" this check reported, none of them actionable.
+    """
     result = await detect_collapsed_games()
-    findings = [
-        _finding(
-            "identity.same_store_collapse",
-            "error",
-            f"'{c['name']}' holds {c['identifier_count']} distinct "
-            f"{c['identifier_type']} values on {c['platform']} — looks over-merged",
-            game_id=c["game_id"],
-            name=c["name"],
-            evidence={
-                "platform": c["platform"],
-                "identifier_type": c["identifier_type"],
-                "identifier_values": c["identifier_values"],
-            },
-            suggested_action={
-                "tool": "split_game",
-                "args": {
-                    "source_game_id": c["game_id"],
+    findings: list[dict[str, Any]] = []
+    psn_folds_skipped = 0
+    for c in result["candidates"]:
+        primary_count = c.get("primary_count") or 0
+        secondary_count = c["identifier_count"] - primary_count
+        if primary_count >= 2:
+            severity = "error"
+            message = (
+                f"'{c['name']}' holds {c['identifier_count']} distinct "
+                f"{c['identifier_type']} values on {c['platform']}, "
+                f"{primary_count} of them primary — looks over-merged"
+            )
+        elif c["identifier_type"] == _DELIBERATE_SKU_FOLD_IDENTIFIER:
+            psn_folds_skipped += 1
+            continue
+        else:
+            severity = "notice"
+            message = (
+                f"'{c['name']}' carries {secondary_count} secondary "
+                f"{c['identifier_type']} value(s) beside its primary one on "
+                f"{c['platform']} — the fold shape (retired edition/bonus "
+                "appids from the license audit, edition SKUs on Epic). Review "
+                "only if these identifiers name different games"
+            )
+        findings.append(
+            _finding(
+                "identity.same_store_collapse",
+                severity,
+                message,
+                game_id=c["game_id"],
+                name=c["name"],
+                evidence={
                     "platform": c["platform"],
-                    "identifier_values": c["identifier_values"][1:],
+                    "identifier_type": c["identifier_type"],
+                    "identifier_values": c["identifier_values"],
+                    "primary_count": primary_count,
                 },
-                "note": (
-                    "review which identifier belongs to which game before "
-                    "applying; set new_name"
-                ),
-            },
+                suggested_action={
+                    "tool": "split_game",
+                    "args": {
+                        "source_game_id": c["game_id"],
+                        "platform": c["platform"],
+                        "identifier_values": c["identifier_values"][1:],
+                    },
+                    "note": (
+                        "review which identifier belongs to which game before "
+                        "applying; set new_name"
+                    ),
+                },
+            )
         )
-        for c in result["candidates"]
-    ]
-    return findings, {"collapsed_count": result["collapsed_count"]}
+    return findings, {
+        "collapsed_count": result["collapsed_count"],
+        "psn_sku_folds_skipped": psn_folds_skipped,
+    }
 
 
 # --- adapters: identity.stranded_duplicate (was detect_stranded_duplicates) -
@@ -332,7 +382,9 @@ async def _run_ownership_orphan(*, apply: bool, options: dict[str, Any]) -> Chec
                 "args": {"game_id": o["game_id"], "confirm": False},
                 "note": (
                     "run ownership.license_gap first — this can be a "
-                    "retired-but-owned Steam app"
+                    "retired-but-owned Steam app. The wishlist syncs now "
+                    "garbage-collect the rows they un-wishlist, so a remaining "
+                    "orphan is older residue or a hand-minted row"
                 ),
             },
         )
@@ -560,6 +612,7 @@ async def _run_extid_igdb_drift(*, apply: bool, options: dict[str, Any]) -> Chec
         # called drift; excluded from findings (and from any reset) unless
         # options.include_edition_suffix asks for them.
         "edition_suffix_count": result["edition_suffix_count"],
+        "resolver_vouched_count": result.get("resolver_vouched_count", 0),
         "edition_suffix_examples": result["edition_suffix_matches"][:10],
         # Links IGDB's external_games mapping vouches for despite the name
         # difference — never reset (a reset would just be re-applied).
@@ -1106,11 +1159,24 @@ async def _run_playtime_orphan_switch_summary(
 
 
 async def _run_spend_duplicate_purchase(*, apply: bool, options: dict[str, Any]) -> CheckOutcome:
+    """Two rows of the SAME game sharing one identical acquisition record.
+
+    "Same game" is the whole check: either literally the same ``game_id`` on
+    two platforms, or two rows whose normalized names are equal (the twin a
+    purchase import minted beside the real row). Nothing else counts.
+
+    A same-FAMILY pair — a base game and its own DLC, or two DLCs of one
+    parent — carrying an identical per-item share is the bundle/subscription
+    split shape, which is what ``split_bundle_acquisition`` and the Humble
+    importer write; it is not a duplicate whether or not a ``bundle_name``
+    happens to be recorded. Requiring the name to match dropped ~30 of the 34
+    findings this check reported in prod, every one of them a split.
+    """
     async with get_db() as db:
         rows = await db.execute_fetchall(
             """SELECT gp.id AS gp_id, gp.game_id, gp.platform, gp.acquired_at, gp.price_paid,
                       gp.price_currency, gp.purchase_source, gp.bundle_name,
-                      g.name, g.name_normalized, g.parent_game_id
+                      g.name, g.name_normalized
                FROM game_platforms gp
                JOIN games g ON g.id = gp.game_id
                -- owned = 1: a retired row (refund/revoked key/lapsed
@@ -1138,21 +1204,12 @@ async def _run_spend_duplicate_purchase(*, apply: bool, options: dict[str, Any])
         for i in range(len(members)):
             for j in range(i + 1, len(members)):
                 a, b = members[i], members[j]
-                root_a = a["parent_game_id"] or a["game_id"]
-                root_b = b["parent_game_id"] or b["game_id"]
                 norm_a = a["name_normalized"] or normalize_search_text(a["name"])
                 norm_b = b["name_normalized"] or normalize_search_text(b["name"])
-                same_row_identity = a["game_id"] == b["game_id"] or norm_a == norm_b
-                if not (root_a == root_b or same_row_identity):
-                    # Cross-family identical rows are legit (bundle splits share
-                    # acquired_at/source/bundle_name but have different prices —
-                    # matching here already means the prices coincided too).
-                    continue
-                if not same_row_identity and key[4] is not None:
-                    # Same family (parent+child, or two children of one parent)
-                    # under one bundle_name: that is exactly what
-                    # split_bundle_acquisition writes — a base game and its DLC
-                    # each carrying the bundle's per-item share. Not a duplicate.
+                if not (a["game_id"] == b["game_id"] or norm_a == norm_b):
+                    # Different games sharing an acquisition record — a bundle
+                    # or subscription split (including the base-game-plus-its-
+                    # own-DLC shape), never one purchase imported twice.
                     continue
                 findings.append(
                     _finding(
@@ -1277,17 +1334,24 @@ async def _run_spend_unconfirmed_ownership(
     ownership, and the missing sync stamp is not something any spend report
     reads.
 
-    Two exclusions keep it honest. `delisted` rows are legitimately absent
-    from the owned-games API (that is what the flag means). And a platform
+    Three exclusions keep it honest. `delisted` rows are legitimately absent
+    from the owned-games API (that is what the flag means). A platform
     with no sync-stamped rows AT ALL has simply never been synced — every row
     there would flag, saying nothing; "other" is permanently in that state
-    since no source reports it.
+    since no source reports it. And a NESTED row (DLC/expansion) on a platform
+    whose ownership source does not enumerate nested content
+    (`NESTED_LISTING_PLATFORMS` — Epic is the only one that does) can never
+    carry the stamp however genuinely owned it is: Steam's GetOwnedGames never
+    returns DLC, GOG lists per base product, PSN's title list is games only,
+    Nintendo's is per title. Those rows are structurally unconfirmable rather
+    than suspicious, and they were a large share of the 508 rows this check
+    reported in prod; they are counted in `nested_rows_skipped` instead.
     """
     async with get_db() as db:
         rows = await db.execute_fetchall(
             """SELECT gp.game_id, gp.platform, gp.acquired_at, gp.price_paid,
                       gp.price_currency, gp.purchase_source, gp.playtime_minutes,
-                      g.name
+                      g.name, g.is_primary_library_item
                FROM game_platforms gp JOIN games g ON g.id = gp.game_id
                WHERE gp.owned = 1
                  AND gp.last_seen_in_source IS NULL
@@ -1303,7 +1367,17 @@ async def _run_spend_unconfirmed_ownership(
         )
     findings = []
     spend: dict[str, float] = {}
+    reported = 0
+    nested_rows_skipped = 0
     for row in rows:
+        if (
+            not row["is_primary_library_item"]
+            and row["platform"] not in NESTED_LISTING_PLATFORMS
+        ):
+            # Structurally unconfirmable, not unredeemed — see the docstring.
+            nested_rows_skipped += 1
+            continue
+        reported += 1
         if row["price_paid"] is not None:
             currency = row["price_currency"] or "?"
             spend[currency] = spend.get(currency, 0.0) + float(row["price_paid"])
@@ -1346,9 +1420,10 @@ async def _run_spend_unconfirmed_ownership(
             )
         )
     return findings, {
-        "unconfirmed_rows": len(rows),
+        "unconfirmed_rows": reported,
         "unconfirmed_spend": {k: round(v, 2) for k, v in sorted(spend.items())},
-        "with_playtime": sum(1 for r in rows if (r["playtime_minutes"] or 0) > 0),
+        "with_playtime": sum(1 for f in findings if (f["evidence"]["playtime_minutes"] or 0) > 0),
+        "nested_rows_skipped": nested_rows_skipped,
     }
 
 
@@ -1855,11 +1930,13 @@ CHECKS: dict[str, CheckSpec] = {
             "identity.same_store_collapse",
             description=(
                 "One platform row carrying more than one distinct store "
-                "identifier of the same type — an over-merge"
+                "identifier of the same type. An error when two of them are "
+                "primary (a real over-merge); otherwise a notice about "
+                "deliberate secondary SKUs. PSN cross-gen folds are skipped"
             ),
             network=None,
             writes_on_apply=False,
-            default_severity="error",
+            default_severity="notice",
             runner=_run_identity_same_store_collapse,
         ),
         _spec(
@@ -2042,9 +2119,10 @@ CHECKS: dict[str, CheckSpec] = {
         _spec(
             "spend.duplicate_purchase",
             description=(
-                "Two same-family/same-name game_platforms rows sharing an "
-                "identical acquisition record — likely the same purchase "
-                "imported twice"
+                "Two rows of the SAME game (one game_id on two platforms, or "
+                "two same-name rows) sharing an identical acquisition record "
+                "— likely one purchase imported twice. A base game and its "
+                "own DLC sharing a per-item share is a bundle split, not this"
             ),
             network=None,
             writes_on_apply=False,
@@ -2068,7 +2146,8 @@ CHECKS: dict[str, CheckSpec] = {
                 "An owned row carrying acquisition data that no sync has ever "
                 "returned (last_seen_in_source IS NULL) — the shape a purchase "
                 "import mints from a key bought but never redeemed. Skips "
-                "delisted rows and platforms nothing syncs"
+                "delisted rows, platforms nothing syncs, and nested rows on a "
+                "platform whose source never lists DLC"
             ),
             network=None,
             writes_on_apply=False,
