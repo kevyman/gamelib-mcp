@@ -30,11 +30,11 @@ from fastmcp.exceptions import ToolError
 from ..data.db import (
     exact_name_steam_conflict,
     fts_ready,
-    get_assessed_game_id_by_appid,
     get_db,
     get_game_by_appid,
     load_cheapest_cached_price,
     load_recent_assessments,
+    resolve_game_id_by_steam_appid,
     titles_conflict_on_identity,
     upsert_game,
 )
@@ -53,7 +53,7 @@ from .common import (
 )
 from .deals import _at_history_low, _fetched_at_is_stale
 from .detail import get_game_detail
-from .game_media import media_context, similar_in_library
+from .game_media import SIMILAR_MIN_SOURCE_TAGS, media_context, similar_in_library
 from .history import get_play_history
 from .ratings import get_taste_profile
 from .search import NORMALIZED_NAME_SQL, build_name_match, fuzzy_fallback_game_ids
@@ -555,15 +555,32 @@ def _sequel_near_miss(query: str, matched_name: str) -> bool:
     )
 
 
+# resolve_game_id_by_steam_appid's source names, as this module's modes.
+_APPID_MODES = {
+    "identifier": "by_appid",
+    "wishlist": "by_wishlist_appid",
+    "assessment": "by_assessed_appid",
+}
+
+
 async def _resolve_by_id_or_appid(
     appid: int | None, game_id: int | None
 ) -> tuple[int | None, str | None]:
     """The identity resolution BOTH assessment tools share: id, then appid.
 
     Returns (game_id, mode) with mode one of "by_id" / "by_appid" /
-    "by_assessed_appid", or (None, None) when the given identity missed. Name
-    resolution is deliberately not here: the read path matches names loosely
-    (``_resolve_name_for_context``) while the write path is exact-or-mint.
+    "by_wishlist_appid" / "by_assessed_appid", or (None, None) when the given
+    identity missed. Name resolution is deliberately not here: the read path
+    matches names loosely (``_resolve_name_for_context``) while the write path
+    is exact-or-mint.
+
+    The three appid modes are the one effective-appid chain
+    (``resolve_game_id_by_steam_appid``): identifier rows hang off
+    game_platforms — always real ownership — so an unowned wishlist item
+    carries its appid on ``game_wishlist.store_identifier`` and a candidate
+    ``record_assessment`` minted carries it on the assessment row itself.
+    Without the two fallbacks a repeat ask by appid reported not_found and
+    re-asked for a name it had already been given.
     """
     if game_id is not None:
         async with get_db() as db:
@@ -572,18 +589,10 @@ async def _resolve_by_id_or_appid(
             )
         return (row["id"], "by_id") if row is not None else (None, None)
     if appid is not None:
-        row = await get_game_by_appid(appid)
-        if row is not None:
-            return row["id"], "by_appid"
-        # Identifier rows hang off game_platforms, so a candidate that
-        # record_assessment minted (unowned, unwishlisted) is invisible to
-        # get_game_by_appid — its appid lives on the assessment row itself,
-        # like game_wishlist.store_identifier. Without this fallback a repeat
-        # ask by appid reported not_found and re-asked for a name it had
-        # already been given.
-        assessed_id = await get_assessed_game_id_by_appid(appid)
-        if assessed_id is not None:
-            return assessed_id, "by_assessed_appid"
+        resolved = await resolve_game_id_by_steam_appid(appid)
+        if resolved is not None:
+            found_id, source = resolved
+            return found_id, _APPID_MODES[source]
     return None, None
 
 
@@ -648,7 +657,7 @@ def _resolution_query(
     """
     if mode == "by_id":
         return str(game_id)
-    if mode in ("by_appid", "by_assessed_appid"):
+    if mode in ("by_appid", "by_wishlist_appid", "by_assessed_appid"):
         return str(appid)
     if mode in _NAME_MODES:
         return name
@@ -1634,6 +1643,7 @@ SELECT g.id AS game_id,
        g.release_date,
        g.completion_status,
        g.cover_image_id,
+       g.tags,
        g.hltb_main,
        g.hltb_extra,
        {_METACRITIC_SQL} AS metacritic_score,
@@ -1836,6 +1846,7 @@ async def _build_package(
     # The similar row is the library's own tag similarity, not a provider
     # answer: one DB query, outside the media budget, so a dead IGDB costs the
     # trailer and never the neighbours.
+    similar_failed = False
     try:
         similar_block = await similar_in_library(game_id)
     except Exception:
@@ -1846,6 +1857,27 @@ async def _build_package(
         )
         errors.append("similar: lookup failed")
         similar_block = None
+        similar_failed = True
+
+    # Two blocks the card renders empty for a structural reason rather than a
+    # failed lookup, so the quiet "some data unavailable" tooltip says WHICH
+    # and why. Both describe the row, not an outage: an unowned candidate is
+    # typically both unlinked and untagged until a backfill reaches it.
+    resolved_igdb_id = (media_payload or {}).get("igdb_id")
+    if (row is None or row["igdb_id"] is None) and resolved_igdb_id is None:
+        errors.append(
+            "igdb: unresolved — no igdb_id stored and no unique exact-name "
+            "match; pedigree unavailable until the IGDB backfill links this row"
+        )
+    # Enough tags but no qualifying neighbour is a legitimate empty answer and
+    # stays silent; too few tags means there was nothing to reason from.
+    if similar_block is None and not similar_failed:
+        source_tags = _parse_json(row["tags"]) if row else None
+        if len(source_tags or []) < SIMILAR_MIN_SOURCE_TAGS:
+            errors.append(
+                f"similar: skipped — fewer than {SIMILAR_MIN_SOURCE_TAGS} tags "
+                "on this row (not enriched yet)"
+            )
 
     past_items = [
         {

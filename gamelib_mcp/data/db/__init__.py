@@ -609,6 +609,7 @@ from .queries import (
     load_wishlist_alert_state,
     load_wishlist_with_prices,
     nesting_substance_conflict,
+    resolve_game_id_by_steam_appid,
     set_meta,
     set_meta_many,
 )

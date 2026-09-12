@@ -324,6 +324,12 @@ async def get_game_detail(
     enrichment="skipped"), so bulk fields may be null for a never-enriched game
     — call this on that one game to force the fetch. enrich=True with items is
     an error, not a silent fan-out.
+
+    Single mode adds `enrichment` as {provider: reason} ONLY when a provider
+    was skipped for a structural reason: no_steam_appid, no_steam_platform_row
+    (a wishlist-/assessment-only row, whose Steam caches hang off an ownership
+    row it doesn't have), and igdb unconfigured/no_match/unresolved/
+    link_pending/failed.
     """
     from .tools.detail import get_game_detail as _detail
     from .tools.detail import get_game_details_batch as _many
@@ -850,7 +856,8 @@ async def check_library(
     - nesting: nesting.dangling_parent, nesting.misclassified,
       nesting.phantom_parent, nesting.superseded_base
     - ownership: ownership.dlc_without_base, ownership.license_gap,
-      ownership.orphan, ownership.unseen_in_source
+      ownership.orphan, ownership.unidentified_candidate,
+      ownership.unseen_in_source
     - playtime: playtime.farming, playtime.orphan_switch_summary,
       playtime.snapshot_regression
     - spend: spend.duplicate_purchase, spend.price_anomaly,

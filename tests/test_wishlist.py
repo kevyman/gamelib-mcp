@@ -10,7 +10,13 @@ from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
 import httpx
-from conftest import ToolDBTestCase, add_identifier, add_platform, seed_game
+from conftest import (
+    ToolDBTestCase,
+    add_assessment,
+    add_identifier,
+    add_platform,
+    seed_game,
+)
 from fastmcp.exceptions import ToolError
 
 from gamelib_mcp.data import db as db_module
@@ -643,6 +649,52 @@ class FetchSteamWishlistTests(ToolDBTestCase):
             )
         self.assertEqual(len(rows), 1)
         self.assertEqual(wishlist_row["game_id"], refunded_id)
+
+    async def test_adopts_the_assessment_minted_row_for_its_appid(self):
+        # Wishlisting what he just assessed is the normal next step. The
+        # candidate's appid lives on the assessment row (it owns nothing, so
+        # there is no identifier row), and without that resolution arm the
+        # sync minted a second row beside the recorded verdict.
+        assessed_id = await seed_game("Blue Prince")
+        await add_assessment(assessed_id, steam_appid=2132850)
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"response": {"items": [{"appid": 2132850}]}}
+
+        class _Client:
+            def __init__(self):
+                self.get = AsyncMock(return_value=_Resp())
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        fetch_name = AsyncMock(return_value="Blue Prince")
+        with (
+            patch.object(steam_wishlist, "STEAM_API_KEY", "key"),
+            patch.object(steam_wishlist, "STEAM_ID", "id"),
+            patch.object(steam_wishlist.httpx, "AsyncClient", return_value=_Client()),
+            patch.object(steam_wishlist, "fetch_app_name", fetch_name),
+        ):
+            result = await steam_wishlist.fetch_wishlist()
+
+        self.assertEqual(result["added"], 1)
+        # Resolved before the name step, so no store lookup happened at all.
+        fetch_name.assert_not_awaited()
+        async with db_module.get_db() as db:
+            games = await db.execute_fetchall("SELECT id FROM games")
+            wishlist_row = await db.execute_fetchone(
+                "SELECT game_id FROM game_wishlist WHERE store_identifier = ?",
+                ("2132850",),
+            )
+        self.assertEqual([row["id"] for row in games], [assessed_id])
+        self.assertEqual(wishlist_row["game_id"], assessed_id)
 
     async def test_duplicate_store_identifier_resolves_to_oldest_row(self):
         # Prod holds duplicate (platform, store_identifier) pairs (the DL2 /

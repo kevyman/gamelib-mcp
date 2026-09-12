@@ -2,7 +2,7 @@
 
 from unittest.mock import AsyncMock, patch
 
-from conftest import ToolDBTestCase, add_platform, seed_game
+from conftest import ToolDBTestCase, add_assessment, add_platform, seed_game
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import igdb
@@ -90,6 +90,48 @@ class IGDBWishlistIdentityTests(ToolDBTestCase):
         rows = await db_module.load_games_for_igdb_backfill([game_id])
 
         self.assertEqual(rows[0]["steam_appid"], "200")
+
+    async def test_assessment_appid_is_the_last_fallback(self) -> None:
+        # Same shape as the wishlist arm, one table over: record_assessment
+        # mints an ownership-free row and stores the appid on the assessment,
+        # so without this arm the backfill sends an exact store identity
+        # through name matching.
+        game_id = await seed_game("Assessed Candidate")
+        await add_assessment(game_id, steam_appid=2132850)
+
+        rows = await db_module.load_games_for_igdb_backfill([game_id])
+
+        # Typed like the identifier arm it substitutes for (TEXT), since the
+        # external_games batch stringifies every appid anyway.
+        self.assertEqual(rows[0]["steam_appid"], "2132850")
+
+    async def test_wishlist_identity_outranks_the_assessment_one(self) -> None:
+        game_id = await seed_game("Both Shapes")
+        await db_module.upsert_wishlist_entry(
+            game_id, "steam", source="steam", store_identifier="200"
+        )
+        await add_assessment(game_id, steam_appid=300)
+
+        rows = await db_module.load_games_for_igdb_backfill([game_id])
+
+        self.assertEqual(rows[0]["steam_appid"], "200")
+
+    async def test_scoped_claim_claims_only_the_named_rows(self) -> None:
+        wanted = await seed_game("Wanted")
+        other = await seed_game("Other")
+
+        claimed = await db_module.claim_game_ids_for_igdb(
+            limit=10, stale_before="1970-01-01T00:00:00+00:00", game_ids=[wanted]
+        )
+
+        self.assertEqual(claimed, [wanted])
+        # …and the row it left alone is still claimable.
+        self.assertEqual(
+            await db_module.claim_game_ids_for_igdb(
+                limit=10, stale_before="1970-01-01T00:00:00+00:00"
+            ),
+            [other],
+        )
 
     async def test_other_stores_identifiers_are_not_steam_appids(self) -> None:
         game_id = await seed_game("Switch wishlist")

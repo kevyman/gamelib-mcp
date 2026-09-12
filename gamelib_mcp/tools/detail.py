@@ -18,9 +18,17 @@ from ..data.db import (
     load_recent_assessments,
     load_related_content_for_games,
     load_series_for_games,
+    resolve_game_id_by_steam_appid,
 )
 from ..data.hltb import get_hltb
-from ..data.igdb import get_igdb_children_cached
+
+# Imported at module level (not lazily) so tests can patch them on this module;
+# data/igdb.py imports only data/*, so this edge adds no cycle.
+from ..data.igdb import (
+    backfill_missing_games,
+    get_igdb_children_cached,
+    igdb_credentials_configured,
+)
 from ..data.protondb import get_protondb
 from ..data.steam_store import enrich_game
 from ..utils import _parse_json
@@ -49,6 +57,75 @@ DETAIL_ASSESSMENT_CAP = 5
 # cached enrichment fetch, and it is decoration: the same budget the evaluation
 # package gives it, after which the detail answer ships without it.
 DETAIL_MEDIA_TIMEOUT_SECONDS = 8
+
+# How long a single-game detail call waits for the scoped IGDB link it kicked
+# off. IGDB's gate can queue a request behind a whole background pass, and the
+# answer is worth waiting a moment for (it unlocks pedigree, series and the
+# cover slug) but never worth holding the response open indefinitely — past
+# this the fetch keeps running in the background and the response says
+# "link_pending".
+DETAIL_IGDB_LINK_TIMEOUT_SECONDS = 20
+
+# Strong references to the backgrounded link tasks, so a task that outlived its
+# wait_for is not garbage-collected mid-flight (asyncio only holds weak ones).
+_PENDING_IGDB_LINKS: set[asyncio.Task] = set()
+
+
+def _settle_igdb_link(task: asyncio.Task) -> None:
+    """Done-callback for a backgrounded link: drop the reference, but LOOK first.
+
+    Once the caller has gone (it got "link_pending"), nothing awaits this task,
+    so an exception raised after the wait — a DB error mid-write, say — would
+    reach only asyncio's "Task exception was never retrieved" handler at
+    garbage-collection time. A background task must not die silently: retrieve
+    the exception here and log it through the same path a synchronous failure
+    takes.
+    """
+    _PENDING_IGDB_LINKS.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning(
+            "Backgrounded IGDB link task failed after the detail call returned",
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+
+
+async def _link_igdb_scoped(game_id: int) -> str | None:
+    """Run the IGDB backfill for this one row, bounded; report what happened.
+
+    Returns the ``enrichment["igdb"]`` reason, or None when the row got linked.
+    The task is SHIELDED so a timeout only stops the waiting — the fetch itself
+    finishes in the background and the next call serves a linked row.
+    """
+    task = asyncio.create_task(backfill_missing_games(limit=1, game_ids=[game_id]))
+    _PENDING_IGDB_LINKS.add(task)
+    task.add_done_callback(_settle_igdb_link)
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(task), timeout=DETAIL_IGDB_LINK_TIMEOUT_SECONDS
+        )
+    except TimeoutError:
+        return "link_pending"
+    except Exception:
+        logger.warning("Scoped IGDB link failed for game %s", game_id, exc_info=True)
+        return "failed"
+
+    async with get_db() as db:
+        linked = await db.execute_fetchone(
+            "SELECT igdb_id FROM games WHERE id = ?", (game_id,)
+        )
+    return None if linked is not None and linked["igdb_id"] is not None else "unresolved"
+
+
+async def _has_steam_platform_row(game_id: int) -> bool:
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            "SELECT 1 FROM game_platforms WHERE game_id = ? AND platform = 'steam' LIMIT 1",
+            (game_id,),
+        )
+    return row is not None
 
 
 async def get_game_detail(
@@ -87,7 +164,17 @@ async def get_game_detail(
         if game_id is not None:
             row = await db.execute_fetchone("SELECT * FROM games WHERE id = ?", (game_id,))
         elif appid is not None:
+            # Identifier row first, then the rest of the effective-appid chain:
+            # a wishlist-only or assessment-only row owns nothing, so it has no
+            # game_platforms row to hang a steam_appid identifier on and was
+            # simply "not found" by appid before.
             row = await get_game_by_appid(appid)
+            if row is None:
+                resolved = await resolve_game_id_by_steam_appid(appid)
+                if resolved is not None:
+                    row = await db.execute_fetchone(
+                        "SELECT * FROM games WHERE id = ?", (resolved[0],)
+                    )
         elif name is not None:
             match = build_name_match(name, column=NORMALIZED_NAME_SQL, use_fts=fts_ready())
             row = await db.execute_fetchone(
@@ -116,11 +203,47 @@ async def get_game_detail(
     game_name = row["name"]
     steam_appid = await get_steam_appid_for_game(game_id)
 
+    # Why a provider produced nothing, when the reason is STRUCTURAL rather
+    # than a failed fetch — attached below as `enrichment`, and only when
+    # non-empty (this module leaves optional keys out rather than sending null
+    # placeholders). Single mode only: `enrich` is the single/bulk
+    # discriminator, and the bulk path reports its own enrichment="skipped".
+    skipped: dict[str, str] = {}
     if enrich:
-        if steam_appid is not None:
+        if steam_appid is None:
+            # No appid at all: both providers are keyed on one.
+            skipped["steam_store"] = "no_steam_appid"
+            skipped["protondb"] = "no_steam_appid"
+        elif not await _has_steam_platform_row(game_id):
+            # The appid is known (wishlist store_identifier, or the appid an
+            # assessment carries) but steam_platform_data and
+            # game_platform_enrichment both hang off a game_platforms row, so
+            # there is nowhere to cache the answer — the fetch would run on
+            # every call and write nothing. Don't run it.
+            skipped["steam_store"] = "no_steam_platform_row"
+            skipped["protondb"] = "no_steam_platform_row"
+        else:
             await enrich_game(steam_appid)
             await get_protondb(steam_appid)
+        # HLTB is matched by NAME and cached on the games row, so it works for
+        # an ownership-free row and is never reported here.
         await get_hltb(game_id, game_name)
+
+        # IGDB is games-level too (it links by Steam appid through
+        # external_games, or by name), so an unowned row CAN be linked — but
+        # only the background backfill ever tried, and a row nothing else
+        # points at can wait there for a long time. Scope one pass to this row.
+        if row["igdb_id"] is None:
+            if row["igdb_cached_at"] is not None:
+                # Checked before and IGDB had no confident answer; re-asking
+                # on every detail call would just re-spend the rate budget.
+                skipped["igdb"] = "no_match"
+            elif not igdb_credentials_configured():
+                skipped["igdb"] = "unconfigured"
+            else:
+                reason = await _link_igdb_scoped(game_id)
+                if reason is not None:
+                    skipped["igdb"] = reason
 
     async with get_db() as db:
         row = await db.execute_fetchone("SELECT * FROM games WHERE id = ?", (game_id,))
@@ -320,6 +443,9 @@ async def get_game_detail(
 
     if dlc_ownership is not None:
         result["dlc_ownership"] = dlc_ownership
+
+    if skipped:
+        result["enrichment"] = skipped
 
     # Past verdicts recorded by record_assessment (ADR 0006 decision 5) —
     # read-only context, never an input to any scoring path. Single mode only:

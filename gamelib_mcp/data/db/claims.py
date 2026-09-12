@@ -163,15 +163,29 @@ async def _claim_ids(
         return claimed
 
 
-async def claim_game_ids_for_igdb(limit: int, stale_before: str) -> list[int]:
+async def claim_game_ids_for_igdb(
+    limit: int, stale_before: str, game_ids: Iterable[int] | None = None
+) -> list[int]:
+    """Claim up to ``limit`` unlinked games for the IGDB backfill.
+
+    ``game_ids`` narrows the claim to those rows (still subject to every other
+    condition) — the scoped path ``get_game_detail`` uses to link the one row
+    it was asked about instead of waiting for the background drain.
+    """
+    scope = list(dict.fromkeys(game_ids)) if game_ids is not None else None
+    if scope is not None and not scope:
+        return []
+    scope_sql = f" AND id IN ({','.join('?' for _ in scope)})" if scope else ""
+    scope_params = tuple(scope or ())
     return await _claim_ids(
-        """SELECT id
+        f"""SELECT id
            FROM games
            WHERE igdb_cached_at IS NULL
              AND (igdb_claimed_at IS NULL OR igdb_claimed_at < ?)
+             {scope_sql}
            ORDER BY is_farmed ASC, id
            LIMIT ?""",
-        (stale_before, limit),
+        (stale_before, *scope_params, limit),
         """UPDATE games
            SET igdb_claimed_at = ?
            WHERE id = ?
@@ -337,10 +351,14 @@ async def load_games_for_igdb_backfill(game_ids: Iterable[int]) -> list[aiosqlit
     """Rows for the IGDB backfill: identity + steam_appid + manual_overrides.
 
     steam_appid feeds the external_games-first resolution (the authoritative
-    appid -> IGDB mapping). Prefer a platform identifier, falling back to the
-    Steam wishlist's store_identifier for games with no Steam identifier row.
-    manual_overrides lets the backfill honor a pinned igdb_id without a per-row
-    lookup.
+    appid -> IGDB mapping). The effective-appid chain: a platform identifier
+    first, then the Steam wishlist's store_identifier, then the newest
+    assessment's steam_appid — the last two for rows with no Steam identifier
+    row at all, since identifiers hang off game_platforms and an unowned
+    wishlist-/assessment-only row has no ownership to hang one on. IGDB links
+    by appid through external_games, so the fallbacks are exactly what lets
+    such a row get linked at all. manual_overrides lets the backfill honor a
+    pinned igdb_id without a per-row lookup.
     """
     ids = list(dict.fromkeys(game_ids))
     if not ids:
@@ -360,7 +378,12 @@ async def load_games_for_igdb_backfill(game_ids: Iterable[int]) -> list[aiosqlit
                         LIMIT 1),
                        (SELECT w.store_identifier
                         FROM game_wishlist w
-                        WHERE w.game_id = g.id AND w.platform = 'steam')) AS steam_appid
+                        WHERE w.game_id = g.id AND w.platform = 'steam'),
+                       (SELECT CAST(a.steam_appid AS TEXT)
+                        FROM game_assessments a
+                        WHERE a.game_id = g.id AND a.steam_appid IS NOT NULL
+                        ORDER BY a.assessed_at DESC, a.id DESC
+                        LIMIT 1)) AS steam_appid
                 FROM games g
                 WHERE g.id IN ({placeholders})
                 ORDER BY g.id""",

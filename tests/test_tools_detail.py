@@ -99,6 +99,10 @@ class GetGameDetailTests(ToolDBTestCase):
                 "play_state",
                 "owned",
                 "wishlisted",
+                # Present because this row has no igdb_id and IGDB is
+                # unconfigured in the test environment (see
+                # GetGameDetailEnrichmentReportTests below).
+                "enrichment",
             },
         )
         self.assertEqual(result["name"], "Celeste")
@@ -406,6 +410,161 @@ class GetGameDetailTests(ToolDBTestCase):
         self.assertIs(result["wishlisted"], True)
         self.assertEqual(result["platforms"], [])
         self.assertIs(result["is_primary_library_item"], True)
+
+
+class GetGameDetailEnrichmentReportTests(ToolDBTestCase):
+    """`enrichment`: why a provider produced nothing, structurally.
+
+    Only present when something WAS skipped, and only in single mode (the bulk
+    path reports its own enrichment="skipped"). Every provider is patched here
+    — the point is which ones get CALLED, not what they return.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.enrich_game = AsyncMock(return_value=None)
+        self.get_protondb = AsyncMock(return_value=None)
+        self.backfill = AsyncMock(return_value=1)
+        self._patchers = [
+            patch.object(detail, "enrich_game", self.enrich_game),
+            patch.object(detail, "get_protondb", self.get_protondb),
+            patch.object(detail, "get_hltb", AsyncMock(return_value=None)),
+            patch.object(detail, "backfill_missing_games", self.backfill),
+            patch.object(
+                detail, "igdb_credentials_configured", lambda: False
+            ),
+        ]
+        for p in self._patchers:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        super().tearDown()
+
+    async def _link(self, game_id: int, igdb_id: int) -> None:
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET igdb_id = ?, igdb_cached_at = ? WHERE id = ?",
+                (igdb_id, datetime.now(UTC).isoformat(), game_id),
+            )
+            await db.commit()
+
+    async def test_absent_for_an_owned_linked_steam_game(self):
+        gid = await make_steam_game("Hollow Knight", 367520)
+        await self._link(gid, 3227)
+
+        result = await detail.get_game_detail(game_id=gid)
+
+        self.assertNotIn("enrichment", result)
+        self.enrich_game.assert_awaited_once_with(367520)
+        self.get_protondb.assert_awaited_once_with(367520)
+
+    async def test_a_name_only_row_has_no_appid_for_either_steam_provider(self):
+        gid = await seed_game("Nothing But A Name")
+        await self._link(gid, 999)
+
+        result = await detail.get_game_detail(game_id=gid)
+
+        self.assertEqual(
+            result["enrichment"],
+            {"steam_store": "no_steam_appid", "protondb": "no_steam_appid"},
+        )
+        self.enrich_game.assert_not_awaited()
+        self.get_protondb.assert_not_awaited()
+
+    async def test_a_checked_but_unmatched_row_reports_no_match_without_fetching(self):
+        gid = await make_steam_game("Obscure Thing", 424242)
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET igdb_cached_at = ? WHERE id = ?",
+                (datetime.now(UTC).isoformat(), gid),
+            )
+            await db.commit()
+
+        result = await detail.get_game_detail(game_id=gid)
+
+        self.assertEqual(result["enrichment"], {"igdb": "no_match"})
+        self.backfill.assert_not_awaited()
+
+    async def test_an_unlinked_row_runs_the_backfill_scoped_to_itself(self):
+        gid = await make_steam_game("Never Linked", 515151)
+
+        async def _link_it(limit, *, game_ids):
+            await self._link(game_ids[0], 4242)
+            return 1
+
+        self.backfill.side_effect = _link_it
+        with patch.object(detail, "igdb_credentials_configured", lambda: True):
+            result = await detail.get_game_detail(game_id=gid)
+
+        self.backfill.assert_awaited_once_with(limit=1, game_ids=[gid])
+        self.assertNotIn("enrichment", result)
+
+    async def test_a_link_that_resolves_nothing_reports_unresolved(self):
+        gid = await make_steam_game("Not In IGDB", 525252)
+        with patch.object(detail, "igdb_credentials_configured", lambda: True):
+            result = await detail.get_game_detail(game_id=gid)
+
+        self.assertEqual(result["enrichment"], {"igdb": "unresolved"})
+
+    async def test_a_slow_link_reports_link_pending_and_keeps_running(self):
+        gid = await make_steam_game("Slow Link", 535353)
+        started = asyncio.Event()
+        never = asyncio.Event()
+
+        async def _hang(limit, *, game_ids):
+            started.set()
+            # An event nobody sets — a timed sleep would measure machine load.
+            await never.wait()
+            return 0
+
+        self.backfill.side_effect = _hang
+        with (
+            patch.object(detail, "igdb_credentials_configured", lambda: True),
+            patch.object(detail, "DETAIL_IGDB_LINK_TIMEOUT_SECONDS", 0.05),
+        ):
+            result = await detail.get_game_detail(game_id=gid)
+
+        self.assertEqual(result["enrichment"], {"igdb": "link_pending"})
+        # Shielded, so the fetch is still in flight rather than cancelled.
+        await asyncio.wait_for(started.wait(), timeout=DEADLOCK_TIMEOUT)
+        (task,) = [t for t in detail._PENDING_IGDB_LINKS]
+        self.assertFalse(task.done())
+        never.set()
+        await asyncio.wait_for(task, timeout=DEADLOCK_TIMEOUT)
+
+    async def test_a_link_that_fails_after_the_wait_is_logged_not_swallowed(self):
+        # Once the caller has moved on with "link_pending", nobody awaits the
+        # shielded task; a failure then must still reach the log rather than
+        # asyncio's never-retrieved handler (a background task dying silently).
+        gid = await make_steam_game("Late Failure", 545454)
+        release = asyncio.Event()
+
+        async def _fail_late(limit, *, game_ids):
+            await release.wait()
+            raise RuntimeError("database is locked")
+
+        self.backfill.side_effect = _fail_late
+        with (
+            patch.object(detail, "igdb_credentials_configured", lambda: True),
+            patch.object(detail, "DETAIL_IGDB_LINK_TIMEOUT_SECONDS", 0.05),
+        ):
+            result = await detail.get_game_detail(game_id=gid)
+        self.assertEqual(result["enrichment"], {"igdb": "link_pending"})
+
+        (task,) = [t for t in detail._PENDING_IGDB_LINKS]
+        with self.assertLogs(detail.logger, level="WARNING") as logs:
+            release.set()
+            with self.assertRaises(RuntimeError):
+                await asyncio.wait_for(task, timeout=DEADLOCK_TIMEOUT)
+            # Done-callbacks run on the loop after the task settles.
+            await asyncio.sleep(0)
+        self.assertTrue(
+            any("Backgrounded IGDB link task failed" in line for line in logs.output)
+        )
+        self.assertTrue(any("database is locked" in line for line in logs.output))
+        self.assertNotIn(task, detail._PENDING_IGDB_LINKS)
 
 
 _MEDIA_PAYLOAD = {
