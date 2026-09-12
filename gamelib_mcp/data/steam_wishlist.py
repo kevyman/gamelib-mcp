@@ -74,10 +74,12 @@ import httpx
 from .db import (
     STEAM_APP_ID,
     delete_stale_wishlist_entries,
+    delete_unreferenced_games,
     exact_name_steam_conflict,
     get_assessed_game_id_by_appid,
     get_game_by_identifier,
     get_wishlist_game_id_by_store_identifier,
+    stale_wishlist_game_ids,
     upsert_game,
     upsert_wishlist_entry,
 )
@@ -521,14 +523,32 @@ async def fetch_wishlist() -> dict:
             resolved_game_ids.add(game_id)
 
     removed = 0
+    orphans_removed = 0
     if all_resolved:
+        # Read the rows about to go BEFORE the delete: afterwards there is
+        # nothing left to say which games they pointed at. The guard above is
+        # untouched — a partial fetch never reaches here, so the GC can only
+        # ever see genuinely un-wishlisted rows.
+        dropping = await stale_wishlist_game_ids("steam", "steam", resolved_game_ids)
         removed = await delete_stale_wishlist_entries("steam", "steam", resolved_game_ids)
+        # A removed wishlist entry used to leave its games row behind with
+        # nothing pointing at it (check_library's ownership.orphan residue).
+        # Only rows that are bare in every other respect are collected.
+        orphans_removed = len(await delete_unreferenced_games(dropping))
     elif items:
         logger.info(
             "Skipping Steam wishlist removal-reconciliation: %d item(s) unresolved this sync", skipped
         )
 
     logger.info(
-        "Steam wishlist sync: added=%d matched=%d skipped=%d removed=%d", added, matched, skipped, removed
+        "Steam wishlist sync: added=%d matched=%d skipped=%d removed=%d orphans_removed=%d",
+        added, matched, skipped, removed, orphans_removed,
     )
-    return {"added": added, "matched": matched, "skipped": skipped, "removed": removed}
+    return {
+        "added": added,
+        "matched": matched,
+        "skipped": skipped,
+        "removed": removed,
+        "orphans_removed": orphans_removed,
+    }
+

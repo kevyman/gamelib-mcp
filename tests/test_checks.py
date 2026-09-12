@@ -240,23 +240,96 @@ class PlaytimeFarmingCheckTests(ToolDBTestCase):
 
 
 class IdentitySameStoreCollapseTests(ToolDBTestCase):
-    async def test_reports_and_suggests_split(self):
-        game_id = await make_steam_game("Dead Space", 17470)
+    """Three shapes reach one query; primary_count is what tells them apart."""
+
+    @staticmethod
+    async def _platform_row_id(game_id: int, platform: str = "steam") -> int:
         async with db_module.get_db() as db:
             row = await db.execute_fetchone(
-                "SELECT id FROM game_platforms WHERE game_id = ? AND platform = 'steam'",
-                (game_id,),
+                "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",
+                (game_id, platform),
             )
-        await add_identifier(row["id"], db_module.STEAM_APP_ID, "1693980", is_primary=False)
+        return row["id"]
+
+    @staticmethod
+    async def _raw_identifier(platform_row_id: int, id_type: str, value: str) -> None:
+        """Insert a SECOND primary identifier straight into the table.
+
+        ``upsert_game_platform_identifier`` demotes every sibling when it
+        writes a primary, so the two-primary state is unreachable through it —
+        which is exactly why it is the over-merge fingerprint (two writers
+        racing, or a pre-chokepoint write).
+        """
+        async with db_module.get_db() as db:
+            await db.execute(
+                """INSERT INTO game_platform_identifiers
+                   (game_platform_id, identifier_type, identifier_value, is_primary)
+                   VALUES (?, ?, ?, 1)""",
+                (platform_row_id, id_type, value),
+            )
+            await db.commit()
+
+    async def test_secondary_identifier_is_a_notice_not_an_error(self):
+        # The license audit's shape: one primary appid plus a retired
+        # edition/bonus appid attached beside it. A fold, not an over-merge.
+        game_id = await make_steam_game("Dead Space", 17470)
+        pid = await self._platform_row_id(game_id)
+        await add_identifier(pid, db_module.STEAM_APP_ID, "1693980", is_primary=False)
+
+        result = await checks.run_library_checks(checks=["identity.same_store_collapse"])
+        self.assertEqual(len(result["findings"]), 1)
+        finding = result["findings"][0]
+        _assert_envelope(self, finding)
+        self.assertEqual(finding["severity"], "notice")
+        self.assertEqual(finding["game_id"], game_id)
+        self.assertEqual(finding["evidence"]["primary_count"], 1)
+        self.assertIn("secondary", finding["message"])
+        self.assertEqual(finding["suggested_action"]["tool"], "split_game")
+        self.assertEqual(finding["suggested_action"]["args"]["source_game_id"], game_id)
+        self.assertEqual(
+            result["summary"]["identity.same_store_collapse"]["psn_sku_folds_skipped"], 0
+        )
+
+    async def test_two_primary_identifiers_are_an_error(self):
+        # Two writers each claiming to be THE identifier — the real over-merge.
+        game_id = await make_steam_game("Dead Space", 17470)
+        pid = await self._platform_row_id(game_id)
+        await self._raw_identifier(pid, db_module.STEAM_APP_ID, "1693980")
 
         result = await checks.run_library_checks(checks=["identity.same_store_collapse"])
         self.assertEqual(len(result["findings"]), 1)
         finding = result["findings"][0]
         _assert_envelope(self, finding)
         self.assertEqual(finding["severity"], "error")
-        self.assertEqual(finding["game_id"], game_id)
+        self.assertEqual(finding["evidence"]["primary_count"], 2)
+        self.assertIn("over-merged", finding["message"])
         self.assertEqual(finding["suggested_action"]["tool"], "split_game")
-        self.assertEqual(finding["suggested_action"]["args"]["source_game_id"], game_id)
+
+    async def test_psn_cross_gen_sku_fold_is_skipped(self):
+        # The PSN sync folds CUSA/PPSA SKUs of one game onto one row by design.
+        game_id = await seed_game("Ghost of Tsushima")
+        pid = await add_platform(game_id, "ps5")
+        await add_identifier(pid, "psn_title_id", "CUSA13323_00")
+        await add_identifier(pid, "psn_title_id", "PPSA01693_00", is_primary=False)
+
+        result = await checks.run_library_checks(checks=["identity.same_store_collapse"])
+        self.assertEqual(result["findings"], [])
+        self.assertEqual(
+            result["summary"]["identity.same_store_collapse"]["psn_sku_folds_skipped"], 1
+        )
+
+    async def test_psn_row_with_two_primaries_still_reports(self):
+        # Skipping the fold must not blind the check to a genuine PSN over-merge.
+        game_id = await seed_game("Ratchet & Clank")
+        pid = await add_platform(game_id, "ps5")
+        await add_identifier(pid, "psn_title_id", "CUSA01047_00")
+        await self._raw_identifier(pid, "psn_title_id", "PPSA01325_00")
+
+        result = await checks.run_library_checks(checks=["identity.same_store_collapse"])
+        self.assertEqual([f["severity"] for f in result["findings"]], ["error"])
+        self.assertEqual(
+            result["summary"]["identity.same_store_collapse"]["psn_sku_folds_skipped"], 0
+        )
 
     async def test_clean_library_reports_nothing(self):
         await make_steam_game("Dead Space", 17470)
@@ -276,6 +349,32 @@ async def _insert_duplicate_game(name: str) -> int:
         )
         await db.commit()
         return cursor.lastrowid
+
+
+class SameStoreCollapseSplitSuggestionTests(ToolDBTestCase):
+    async def test_fold_shape_suggests_splitting_only_the_secondaries(self):
+        """GROUP_CONCAT order is arbitrary; the primary appid must never be
+        the one the suggestion carves off."""
+        game_id = await seed_game("Alan Wake")
+        platform_id = await add_platform(game_id, "steam")
+        async with db_module.get_db() as db:
+            # Secondary inserted FIRST so it sorts first in the concatenation.
+            await db.execute(
+                """INSERT INTO game_platform_identifiers
+                   (game_platform_id, identifier_type, identifier_value, is_primary)
+                   VALUES (?, ?, '108727', 0), (?, ?, '108710', 1)""",
+                (platform_id, db_module.STEAM_APP_ID, platform_id, db_module.STEAM_APP_ID),
+            )
+            await db.commit()
+
+        result = await checks.run_library_checks(checks=["identity.same_store_collapse"])
+        self.assertEqual(len(result["findings"]), 1)
+        finding = result["findings"][0]
+        self.assertEqual(finding["severity"], "notice")
+        self.assertEqual(finding["evidence"]["primary_values"], ["108710"])
+        self.assertEqual(
+            finding["suggested_action"]["args"]["identifier_values"], ["108727"]
+        )
 
 
 class IdentityStrandedDuplicateTests(ToolDBTestCase):
@@ -538,6 +637,38 @@ class ExtidIgdbDriftTests(ToolDBTestCase):
         async with db_module.get_db() as db:
             row = await db.execute_fetchone("SELECT igdb_id FROM games WHERE id = ?", (bad,))
         self.assertEqual(row["igdb_id"], 150511)  # untouched
+
+    async def test_link_the_resolver_would_make_is_not_drift(self):
+        """A subtitle-bearing IGDB name the resolver itself accepts is vouched for.
+
+        "Demonicon" -> "The Dark Eye: Demonicon" fails a bare name test but is
+        exactly the pairing the resolver's alternative-name gate makes; the
+        audit must replay the resolver, not second-guess it (2026-09-12: ~40
+        correct links were queued for reset by the old name-only test).
+        """
+        good = await seed_game("Demonicon")
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = 3090 WHERE id = ?", (good,))
+            await db.commit()
+
+        with (
+            patch.dict(os.environ, _IGDB_ENV),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_igdb_game_records",
+                AsyncMock(
+                    return_value={
+                        3090: self._record(
+                            "The Dark Eye: Demonicon",
+                            alternative_names=["Demonicon", "Das Schwarze Auge: Demonicon"],
+                        )
+                    }
+                ),
+            ),
+        ):
+            result = await checks.run_library_checks(checks=["extid.igdb_drift"])
+
+        self.assertEqual(result["findings"], [])
+        self.assertEqual(result["summary"]["extid.igdb_drift"]["resolver_vouched_count"], 1)
 
     async def test_apply_resets_igdb_link(self):
         bad = await seed_game("PAYDAY 2")
@@ -989,6 +1120,46 @@ class SpendDuplicatePurchaseTests(ToolDBTestCase):
         _assert_envelope(self, finding)
         self.assertIsNone(finding["suggested_action"])
 
+    async def test_reports_one_game_on_two_platforms(self):
+        # The same game_id carrying the same acquisition record twice — one
+        # purchase booked against two platform rows.
+        game = await seed_game("Hades")
+        for platform in ("steam", "epic"):
+            await self._acquire(
+                game, platform, acquired_at="2026-01-01", price_paid=19.99,
+                price_currency="USD", purchase_source="steam", bundle_name=None,
+            )
+
+        result = await checks.run_library_checks(checks=["spend.duplicate_purchase"])
+        self.assertEqual(len(result["findings"]), 1)
+        _assert_envelope(self, result["findings"][0])
+        self.assertEqual(
+            {r["platform"] for r in result["findings"][0]["evidence"]["rows"]},
+            {"steam", "epic"},
+        )
+
+    async def test_two_dlcs_of_one_parent_are_not_a_duplicate(self):
+        # The other bundle-split shape: two children of one parent splitting a
+        # bundle line evenly. Different names, so never a duplicate.
+        base = await seed_game("Killing Floor")
+        packs = [
+            await seed_game(
+                name,
+                content_type="dlc",
+                is_primary_library_item=0,
+                parent_game_id=base,
+            )
+            for name in ("Killing Floor - Weapon Pack", "Killing Floor - Character Pack")
+        ]
+        for game_id in packs:
+            await self._acquire(
+                game_id, "steam", acquired_at="2013-12-30", price_paid=0.12,
+                price_currency="USD", purchase_source="humble", bundle_name=None,
+            )
+
+        result = await checks.run_library_checks(checks=["spend.duplicate_purchase"])
+        self.assertEqual(result["findings"], [])
+
 
 class SpendUnconfirmedOwnershipTests(ToolDBTestCase):
     """Money recorded against a row no ownership source has ever returned.
@@ -1099,6 +1270,65 @@ class SpendUnconfirmedOwnershipTests(ToolDBTestCase):
 
         self.assertEqual(result["summary"][self.CHECK]["with_playtime"], 1)
         self.assertIn("check that first", result["findings"][0]["suggested_action"]["note"])
+
+    async def test_nested_steam_row_is_skipped_as_unconfirmable(self):
+        # Steam's GetOwnedGames never enumerates DLC, so a nested Steam row can
+        # NEVER carry the stamp however genuinely owned it is. Structurally
+        # unconfirmable, not "bought and never redeemed".
+        confirmed = await seed_game("Really Owned")
+        await add_platform(confirmed, "steam", from_source=True)
+        base = await seed_game("Killing Floor")
+        dlc = await seed_game(
+            "Killing Floor - Community Weapon Pack",
+            content_type="dlc",
+            is_primary_library_item=0,
+            parent_game_id=base,
+        )
+        pid = await add_platform(dlc, "steam")
+        await self._acquire(pid)
+
+        result = await checks.run_library_checks(checks=[self.CHECK])
+
+        self.assertEqual(result["findings"], [])
+        summary = result["summary"][self.CHECK]
+        self.assertEqual(summary["nested_rows_skipped"], 1)
+        self.assertEqual(summary["unconfirmed_rows"], 0)
+        self.assertEqual(summary["unconfirmed_spend"], {})
+
+    async def test_nested_epic_row_still_reports(self):
+        # Epic's catalog DOES list add-ons as their own items, so a missing
+        # stamp there is real evidence (NESTED_LISTING_PLATFORMS).
+        confirmed = await seed_game("Really Owned On Epic")
+        await add_platform(confirmed, "epic", from_source=True)
+        base = await seed_game("Borderlands 3")
+        dlc = await seed_game(
+            "Borderlands 3 - Designer's Cut",
+            content_type="dlc",
+            is_primary_library_item=0,
+            parent_game_id=base,
+        )
+        pid = await add_platform(dlc, "epic")
+        await self._acquire(pid)
+
+        result = await checks.run_library_checks(checks=[self.CHECK])
+
+        self.assertEqual([f["name"] for f in result["findings"]], ["Borderlands 3 - Designer's Cut"])
+        summary = result["summary"][self.CHECK]
+        self.assertEqual(summary["nested_rows_skipped"], 0)
+        self.assertEqual(summary["unconfirmed_rows"], 1)
+
+    async def test_primary_steam_row_still_reports(self):
+        # The skip is nesting-scoped: a PRIMARY row Steam never returned is
+        # still the unredeemed-key shape.
+        confirmed = await seed_game("Really Owned")
+        await add_platform(confirmed, "steam", from_source=True)
+        phantom = await seed_game("Never Redeemed")
+        pid = await add_platform(phantom, "steam")
+        await self._acquire(pid)
+
+        result = await checks.run_library_checks(checks=[self.CHECK])
+        self.assertEqual([f["name"] for f in result["findings"]], ["Never Redeemed"])
+        self.assertEqual(result["summary"][self.CHECK]["nested_rows_skipped"], 0)
 
 
 class SpendPriceAnomalyTests(ToolDBTestCase):
@@ -1369,7 +1599,10 @@ class BugfixRegressionTests(ToolDBTestCase):
         result = await checks.run_library_checks(checks=["spend.duplicate_purchase"])
         self.assertEqual(result["findings"], [])
 
-    async def test_family_rows_without_a_bundle_name_still_report(self):
+    async def test_family_rows_without_a_bundle_name_are_not_a_duplicate(self):
+        # Same shape as above with no bundle_name recorded — still a bundle or
+        # subscription split (a base game and its own DLC), not one purchase
+        # imported twice. ~30 of prod's 34 findings were exactly this.
         base = await seed_game("Magicka")
         dlc = await seed_game(
             "Magicka - Item Pack",
@@ -1390,7 +1623,7 @@ class BugfixRegressionTests(ToolDBTestCase):
             )
 
         result = await checks.run_library_checks(checks=["spend.duplicate_purchase"])
-        self.assertEqual(len(result["findings"]), 1)
+        self.assertEqual(result["findings"], [])
 
     async def test_edition_suffix_link_is_not_reported_as_drift(self):
         # BUG-4: "Nioh 2 - The Complete Edition" → IGDB "Nioh 2" is correct.

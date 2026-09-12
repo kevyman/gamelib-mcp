@@ -2,9 +2,11 @@
 
 These functions were their own MCP tools until ADR 0003 consolidated them into
 ``check_library``; ``tools/checks.py`` now adapts each one's output into a
-finding. They are kept UNCHANGED here (same logic, same unit tests) and split
-out of ``tools/admin.py`` purely so that module stays about identity repair and
-sync orchestration. Read-mostly: only ``detect_farmed_games(dry_run=False)``
+finding. They were split out of ``tools/admin.py`` unchanged, purely so that
+module stays about identity repair and sync orchestration; since then
+``detect_collapsed_games`` reports the primary-identifier count the adapter
+grades severity on, and ``revalidate_igdb_matches`` asks the resolver itself
+(``igdb.resolver_would_accept``) before calling a link wrong. Read-mostly: only ``detect_farmed_games(dry_run=False)``
 writes, and ``run_library_sync`` calls it post-Steam-sync (imported into
 ``tools/admin.py`` so ``patch("gamelib_mcp.tools.admin.detect_farmed_games")``
 keeps working).
@@ -133,6 +135,14 @@ async def detect_collapsed_games() -> dict:
     Read-only: it lists candidates for manual review; cleanup is left to the user
     (re-sync after the resolution fix, or a hand edit). No automatic split is
     attempted because commingled playtime cannot be reliably re-attributed.
+
+    Each candidate also reports ``primary_count``: how many of those distinct
+    identifiers are marked ``is_primary``. That number is what separates the two
+    shapes this query cannot tell apart on its own — two writers each claiming
+    to be THE identifier (an over-merge) from one identifier plus deliberate
+    secondaries (the PSN cross-gen SKU fold, the Steam license audit's retired
+    edition/bonus appids, Epic edition SKUs). The caller decides; this function
+    only supplies the count.
     """
     async with get_db() as db:
         rows = await db.execute_fetchall(
@@ -141,7 +151,16 @@ async def detect_collapsed_games() -> dict:
                       gp.platform,
                       gpi.identifier_type,
                       COUNT(DISTINCT gpi.identifier_value) AS identifier_count,
-                      GROUP_CONCAT(DISTINCT gpi.identifier_value) AS identifier_values
+                      COUNT(DISTINCT CASE WHEN gpi.is_primary = 1
+                                          THEN gpi.identifier_value END)
+                          AS primary_count,
+                      GROUP_CONCAT(DISTINCT gpi.identifier_value) AS identifier_values,
+                      GROUP_CONCAT(DISTINCT CASE WHEN gpi.is_primary = 1
+                                                 THEN gpi.identifier_value END)
+                          AS primary_values,
+                      GROUP_CONCAT(DISTINCT CASE WHEN gpi.is_primary = 0
+                                                 THEN gpi.identifier_value END)
+                          AS secondary_values
                FROM games g
                JOIN game_platforms gp ON gp.game_id = g.id
                JOIN game_platform_identifiers gpi ON gpi.game_platform_id = gp.id
@@ -159,7 +178,13 @@ async def detect_collapsed_games() -> dict:
             "platform": row["platform"],
             "identifier_type": row["identifier_type"],
             "identifier_count": row["identifier_count"],
+            "primary_count": row["primary_count"],
             "identifier_values": (row["identifier_values"] or "").split(","),
+            # Split by is_primary so a caller can suggest carving off the
+            # secondaries: GROUP_CONCAT's order says nothing about which
+            # identifier the sync considers the row's own.
+            "primary_values": [v for v in (row["primary_values"] or "").split(",") if v],
+            "secondary_values": [v for v in (row["secondary_values"] or "").split(",") if v],
         }
         for row in rows
     ]
@@ -1164,7 +1189,9 @@ async def revalidate_igdb_matches(
     from ..data.igdb import (
         fetch_igdb_game_records,
         igdb_credentials_configured,
+        igdb_game_from_record,
         resolve_steam_appids_to_igdb,
+        resolver_would_accept,
     )
     from ..data.title_normalization import (
         normalize_edition_comparison_title,
@@ -1176,7 +1203,7 @@ async def revalidate_igdb_matches(
     async with get_db() as db:
         rows = await db.execute_fetchall(
             """SELECT id, name, igdb_id, content_type, parent_game_id,
-                      is_primary_library_item
+                      is_primary_library_item, release_date
                FROM games WHERE igdb_id IS NOT NULL ORDER BY id"""
         )
     if limit is not None and limit > 0:
@@ -1193,6 +1220,7 @@ async def revalidate_igdb_matches(
         "skipped_overridden": 0,
         "unresolved_igdb_ids": 0,
         "edition_suffix_count": 0,
+        "resolver_vouched_count": 0,
         "edition_suffix_matches": [],
         "store_authoritative_count": 0,
         "store_authoritative_matches": [],
@@ -1251,6 +1279,7 @@ async def revalidate_igdb_matches(
     edition_suffix_matches: list[dict] = []
     skipped_overridden = 0
     unresolved = 0
+    resolver_vouched = 0
     classification_resets: list[int] = []
     async with get_db() as db:
         for row in rows:
@@ -1284,6 +1313,24 @@ async def revalidate_igdb_matches(
                         "drift_kind": drift_kind,
                     }
                 )
+                continue
+            # Ask the resolver itself before calling a link wrong. A name test
+            # of this audit's own cannot know the rules that made the link —
+            # alternative names, the subtitle-stripping ladder rungs, the
+            # year windows — and on 2026-09-12 that gap flagged ~40 correct
+            # links ("Demonicon" ↔ "The Dark Eye: Demonicon", "GALAK-Z" ↔
+            # "Galak-Z: The Dimensional") for reset. resolver_would_accept
+            # replays the gate and the whole query ladder offline against the
+            # record's own names: a pairing the resolver would make today is
+            # not drift, whatever the two names look like side by side. Edition-suffix
+            # links keep their own classification above so the
+            # include_edition_suffix option still finds them.
+            if drift_kind == "wrong_entity" and resolver_would_accept(
+                row["name"],
+                igdb_game_from_record({**record, "id": row["igdb_id"]}),
+                reference_release_date=row["release_date"],
+            ):
+                resolver_vouched += 1
                 continue
             overrides = await get_manual_overrides(db, row["id"])
             if "igdb_id" in overrides:
@@ -1398,6 +1445,7 @@ async def revalidate_igdb_matches(
             "unresolved_igdb_ids": unresolved,
             "edition_suffix_count": len(edition_suffix_matches),
             "edition_suffix_matches": edition_suffix_matches,
+            "resolver_vouched_count": resolver_vouched,
             "store_authoritative_count": len(store_authoritative),
             "store_authoritative_matches": store_authoritative,
         }

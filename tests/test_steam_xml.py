@@ -3,7 +3,7 @@ import unittest
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
-from conftest import ToolDBTestCase
+from conftest import ToolDBTestCase, add_platform, add_steam_appid, seed_game
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import steam_xml
@@ -248,6 +248,136 @@ class SteamBulkUpsertTests(ToolDBTestCase):
         self.assertEqual(platform_row["last_synced"], synced_at)
         self.assertEqual(platform_row["library_updated_at"], synced_at)
         self.assertEqual(identifier_count_row["count"], 1)
+
+    async def test_adoption_compares_normalized_names_not_spelling(self) -> None:
+        """Pass 1c keys on name_normalized: a receipt's punctuation must not fork."""
+        synced_at = "2026-08-05T12:00:00+00:00"
+        game_id = await seed_game("Q.U.B.E")
+        platform_id = await add_platform(game_id, "steam")
+
+        await db_module.bulk_upsert_steam_library(
+            [{"appid": 203730, "name": "Q.U.B.E."}], synced_at=synced_at
+        )
+
+        async with db_module.get_db() as db:
+            games = await db.execute_fetchall(
+                "SELECT id FROM games WHERE name_normalized = 'q u b e' OR name_normalized = 'qube'"
+            )
+            identifier = await db.execute_fetchone(
+                """SELECT game_platform_id FROM game_platform_identifiers
+                   WHERE identifier_type = ? AND identifier_value = '203730'""",
+                (db_module.STEAM_APP_ID,),
+            )
+        self.assertEqual([row["id"] for row in games], [game_id])
+        self.assertEqual(identifier["game_platform_id"], platform_id)
+
+    async def test_identifier_less_steam_row_adopts_the_appid_instead_of_forking(
+        self,
+    ) -> None:
+        """Pass 1c: a purchase-minted Steam row gets the appid, not a twin.
+
+        The prod shape (2026-08-04): a Humble Choice import minted owned Steam
+        rows with no steam_appid, and every later sync forked a second row for
+        the same name because pass 2 excludes any game already owning Steam.
+        """
+        synced_at = "2026-08-05T12:00:00+00:00"
+        game_id = await seed_game("Pile Up!")
+        platform_id = await add_platform(game_id, "steam")
+        await db_module.set_platform_acquisition(
+            platform_id, {"purchase_source": "subscription"}
+        )
+
+        await db_module.bulk_upsert_steam_library(
+            [{"appid": 2094910, "name": "Pile Up!"}], synced_at=synced_at
+        )
+
+        async with db_module.get_db() as db:
+            games = await db.execute_fetchall(
+                "SELECT id FROM games WHERE lower(name) = 'pile up!'"
+            )
+            platform_row = await db.execute_fetchone(
+                """SELECT id, game_id, owned, last_seen_in_source, purchase_source
+                   FROM game_platforms WHERE game_id = ? AND platform = 'steam'""",
+                (game_id,),
+            )
+            identifier = await db.execute_fetchone(
+                """SELECT game_platform_id FROM game_platform_identifiers
+                   WHERE identifier_type = ? AND identifier_value = '2094910'""",
+                (db_module.STEAM_APP_ID,),
+            )
+
+        self.assertEqual([row["id"] for row in games], [game_id])
+        self.assertEqual(identifier["game_platform_id"], platform_id)
+        self.assertEqual(platform_row["last_seen_in_source"], synced_at)
+        self.assertEqual(platform_row["owned"], 1)
+        self.assertEqual(platform_row["purchase_source"], "subscription")
+
+    async def test_same_name_steam_row_with_another_appid_is_not_adopted(self) -> None:
+        """The Dead Space rule: two identified Steam rows stay separate."""
+        synced_at = "2026-08-05T12:00:00+00:00"
+        original_id = await seed_game("Dead Space")
+        original_platform_id = await add_platform(original_id, "steam")
+        await add_steam_appid(original_platform_id, 17470)
+
+        await db_module.bulk_upsert_steam_library(
+            [{"appid": 1693980, "name": "Dead Space"}], synced_at=synced_at
+        )
+
+        async with db_module.get_db() as db:
+            games = await db.execute_fetchall(
+                "SELECT id FROM games WHERE lower(name) = 'dead space' ORDER BY id"
+            )
+            old_identifier = await db.execute_fetchone(
+                """SELECT identifier_value FROM game_platform_identifiers
+                   WHERE game_platform_id = ? AND identifier_type = ?""",
+                (original_platform_id, db_module.STEAM_APP_ID),
+            )
+            new_identifier = await db.execute_fetchone(
+                """SELECT gp.game_id
+                   FROM game_platform_identifiers gpi
+                   JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+                   WHERE gpi.identifier_type = ? AND gpi.identifier_value = '1693980'""",
+                (db_module.STEAM_APP_ID,),
+            )
+
+        self.assertEqual(len(games), 2)
+        self.assertEqual(old_identifier["identifier_value"], "17470")
+        self.assertNotEqual(new_identifier["game_id"], original_id)
+
+    async def test_only_lowest_row_order_adopts_an_identifier_less_steam_row(
+        self,
+    ) -> None:
+        """Two appids sharing a name: the first claims, the second forks."""
+        synced_at = "2026-08-05T12:00:00+00:00"
+        game_id = await seed_game("Gatekeeper")
+        platform_id = await add_platform(game_id, "steam")
+
+        await db_module.bulk_upsert_steam_library(
+            [
+                {"appid": 1196630, "name": "Gatekeeper"},
+                {"appid": 2242530, "name": "Gatekeeper"},
+            ],
+            synced_at=synced_at,
+        )
+
+        async with db_module.get_db() as db:
+            rows = await db.execute_fetchall(
+                """SELECT gpi.identifier_value, gp.game_id, gp.id AS platform_id
+                   FROM game_platform_identifiers gpi
+                   JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+                   WHERE gpi.identifier_type = ?
+                   ORDER BY gpi.identifier_value""",
+                (db_module.STEAM_APP_ID,),
+            )
+            games = await db.execute_fetchall(
+                "SELECT id FROM games WHERE lower(name) = 'gatekeeper'"
+            )
+
+        by_appid = {row["identifier_value"]: row for row in rows}
+        self.assertEqual(by_appid["1196630"]["platform_id"], platform_id)
+        self.assertEqual(by_appid["1196630"]["game_id"], game_id)
+        self.assertNotEqual(by_appid["2242530"]["game_id"], game_id)
+        self.assertEqual(len(games), 2)
 
 
 if __name__ == "__main__":

@@ -1,16 +1,26 @@
-"""GOG owned games sync via lgogdownloader CLI.
+"""GOG owned games sync.
+
+Primary backend: GOG's own account listing (``embed.gog.com``
+``/account/getFilteredProducts``, the endpoint lgogdownloader itself reads),
+authenticated with the lgogdownloader session via ``gog_session.py``. It
+carries the real catalog title AND the stable per-item **product id**, so GOG
+is no longer an identifier-less store: a re-sync resolves by
+``gog_product_id`` first and a catalog rename is a rename, not a fork.
+
+Fallback backend: ``lgogdownloader --list``, whose output is one slug per line
+(ANSI color codes and optional ``[N]`` update indicators). Slugs title-case
+into degraded names ("Legacy Of Kain Defiance", "Mount Blade") and carry no
+product id, so that path keeps resolving by title only. It exists because the
+account API can fail on auth/network/payload, and losing the sync entirely is
+worse than a degraded one. ``--list j`` (JSON mode) is not an option: it
+crashes on lgogdownloader 3.12.
 
 One-time local setup:
   1. Install lgogdownloader (apt install lgogdownloader)
   2. Run: lgogdownloader --login
   3. Mount ~/.config/lgogdownloader/ into Docker (see deploy.md)
 
-Playtime is not available from lgogdownloader output.
-
-Note: lgogdownloader --list j (JSON mode) crashes on lgogdownloader 3.12, so we use
-plain --list which outputs one slug per line with ANSI color codes and optional [N]
-update indicators. Slugs are converted to title-cased strings for fuzzy matching
-against existing game names.
+Playtime is not available from either backend.
 """
 
 import asyncio
@@ -18,17 +28,35 @@ import logging
 import os
 import re
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
+
 from gamelib_mcp.data.db import (
+    GOG_PRODUCT_ID,
+    adopt_platform_identifier,
+    get_db,
+    get_game_by_identifier,
+    get_manual_overrides,
     get_platform_game_by_normalized_name,
     load_fuzzy_candidates,
     upsert_game_alias,
     upsert_game_platform,
     upsert_game_platform_enrichment,
+    upsert_game_platform_identifier,
+)
+from gamelib_mcp.data.gog_session import (
+    authenticated_get_json,
+    load_gog_session,
+    missing_session_error,
+    stale_session_message,
 )
 from gamelib_mcp.data.igdb import PLATFORM_TO_IGDB, resolve_and_link_game
-from gamelib_mcp.data.title_normalization import prepare_catalog_title
+from gamelib_mcp.data.title_normalization import (
+    normalize_search_text,
+    prepare_catalog_title,
+)
 
 _ROMAN_RE = re.compile(r"\b([IiVvXx]{2,})\b")
 _ORDINAL_RE = re.compile(r"(\d+)(St|Nd|Rd|Th)\b")
@@ -108,17 +136,131 @@ def _has_auth_files(config_path: Path) -> bool:
     )
 
 
-async def sync_gog() -> dict:
-    """
-    Sync GOG library into game_platforms via lgogdownloader --list.
+_ACCOUNT_PRODUCTS_URL = "https://embed.gog.com/account/getFilteredProducts"
+# GOG serves 50 products a page, so this cap sits an order of magnitude past
+# any real library — it exists so a malformed totalPages cannot spin forever.
+_MAX_LISTING_PAGES = 200
+_LISTING_TIMEOUT_SECONDS = 30
 
-    Silent skip conditions:
-    - lgogdownloader binary not in PATH
-    - lgogdownloader config dir does not exist (no session stored)
+_LISTING_AUTH_ERROR = stale_session_message("account-listing")
 
-    Returns: {"added": int, "matched": int, "skipped": int} plus sync failure
-    metadata when the CLI cannot run.
+
+@dataclass(frozen=True)
+class GogProduct:
+    """One owned catalog item as GOG's account listing reports it."""
+
+    product_id: str
+    title: str
+    slug: str
+
+
+def _listing_page_products(payload: dict, page: int) -> list:
+    """The ``products`` list of one listing page, or raise on a malformed page.
+
+    A missing or non-list ``products`` (an error envelope, a schema change)
+    must NOT read as an empty library: the sync would then report a
+    successful ``account_api`` run over nothing, hiding the outage. Raising
+    sends ``sync_gog`` down the CLI fallback with the error on record.
     """
+    raw = payload.get("products")
+    if not isinstance(raw, list):
+        raise RuntimeError(
+            f"Unexpected GOG listing payload on page {page}: "
+            f"products is {type(raw).__name__}, not a list"
+        )
+    return raw
+
+
+def _parse_listing_products(raw: list) -> list[GogProduct]:
+    """Owned games on one listing page; movies and non-game rows dropped."""
+    products: list[GogProduct] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        # Absent flags mean "unknown", not "not a game" — only an explicit
+        # isGame=false / isMovie=true disqualifies a row.
+        if item.get("isGame") is False or item.get("isMovie") is True:
+            continue
+        product_id = item.get("id")
+        title = item.get("title")
+        if product_id is None or product_id == "":
+            continue
+        if not isinstance(title, str) or not title.strip():
+            continue
+        slug = item.get("slug")
+        products.append(
+            GogProduct(
+                product_id=str(product_id),
+                title=title.strip(),
+                slug=slug.strip() if isinstance(slug, str) else "",
+            )
+        )
+    return products
+
+
+async def fetch_gog_library_products(
+    *, transport: httpx.AsyncBaseTransport | None = None
+) -> list[GogProduct]:
+    """Owned GOG products from the account listing lgogdownloader itself reads.
+
+    Auth reuses the lgogdownloader session (``gog_session``): bearer token
+    first, cookie jar on a 401/403 or an HTML login bounce. Raises RuntimeError
+    with the re-login advice when no session is stored or neither credential
+    authenticates; transport/HTTP/parse failures propagate. The caller treats
+    every one of those as "fall back to the CLI listing".
+    ``transport`` exists for tests (httpx.MockTransport).
+    """
+    # Credentials are read from disk ONCE per fetch and a rejected bearer
+    # token is remembered on the session object, so a multi-page listing does
+    # not re-parse the token file and re-try the dead token on every page.
+    session = load_gog_session()
+    if session.token is None and session.cookies is None:
+        raise missing_session_error()
+
+    products: list[GogProduct] = []
+    seen: set[str] = set()
+    async with httpx.AsyncClient(
+        follow_redirects=True, timeout=_LISTING_TIMEOUT_SECONDS, transport=transport
+    ) as client:
+        total_pages = 1
+        page = 1
+        while page <= min(total_pages, _MAX_LISTING_PAGES):
+            payload = await authenticated_get_json(
+                client,
+                _ACCOUNT_PRODUCTS_URL,
+                {
+                    "hiddenFlag": 0,
+                    "isUpdated": 0,
+                    "mediaType": 1,
+                    "sortBy": "title",
+                    "system": "",
+                    "page": page,
+                },
+                session=session,
+            )
+            if payload is None:
+                raise RuntimeError(_LISTING_AUTH_ERROR)
+            raw_products = _listing_page_products(payload, page)
+            for product in _parse_listing_products(raw_products):
+                if product.product_id in seen:
+                    continue
+                seen.add(product.product_id)
+                products.append(product)
+            reported = payload.get("totalPages")
+            if isinstance(reported, int) and reported > 0:
+                total_pages = reported
+            page += 1
+    return products
+
+
+def _short_error(exc: Exception) -> str:
+    """One short line describing a listing failure, for the sync result."""
+    text = str(exc).strip() or exc.__class__.__name__
+    return text.splitlines()[0][:200]
+
+
+def _check_preconditions() -> dict | None:
+    """The skip/failure result when GOG cannot be synced at all, else None."""
     if not shutil.which(_LGOGDOWNLOADER_BIN):
         logger.info("lgogdownloader not in PATH — skipping GOG sync")
         return {
@@ -154,7 +296,183 @@ async def sync_gog() -> dict:
             "error_summary": f"lgogdownloader session files missing in {config_path}; run lgogdownloader --login",
             "error_classification": "missing_configuration",
         }
+    return None
 
+
+async def sync_gog() -> dict:
+    """
+    Sync GOG library into game_platforms.
+
+    Primary backend is GOG's account listing (product ids + real catalog
+    titles); any failure there — auth, network, unexpected payload — logs a
+    warning and falls back to ``lgogdownloader --list`` unchanged, because a
+    degraded sync beats no sync.
+
+    Silent skip conditions:
+    - lgogdownloader binary not in PATH
+    - lgogdownloader config dir does not exist (no session stored)
+    - no session files in the config dir
+
+    Returns: {"added", "matched", "skipped", "listing_backend"}, plus
+    "renamed" on the account-API path and "listing_error" when it fell back,
+    plus sync failure metadata when the CLI cannot run either.
+    """
+    precondition = _check_preconditions()
+    if precondition is not None:
+        return precondition
+
+    try:
+        products = await fetch_gog_library_products()
+    except Exception as exc:
+        logger.warning(
+            "GOG account listing unavailable (%s) — falling back to lgogdownloader --list",
+            exc,
+        )
+        result = await _sync_from_lgogdownloader()
+        result["listing_backend"] = "lgogdownloader"
+        result["listing_error"] = _short_error(exc)
+        return result
+
+    return await _sync_from_account_listing(products)
+
+
+async def _rename_to_catalog_title(game_id: int, catalog_title: str, slug_title: str | None) -> bool:
+    """Rewrite a row's name to the GOG catalog title where that is safe.
+
+    Two rows qualify: one still carrying the legacy slug title this sync used
+    to store ("Legacy Of Kain Defiance"), and a GOG-only row, whose name has
+    no other platform's source behind it. A name the user set by hand
+    (``manual_overrides``) is never touched.
+    """
+    async with get_db() as db:
+        row = await db.execute_fetchone("SELECT name FROM games WHERE id = ?", (game_id,))
+        if row is None:
+            return False
+        current = row["name"] or ""
+        if current == catalog_title:
+            return False
+        if "name" in await get_manual_overrides(db, game_id):
+            return False
+        if not (slug_title and current.casefold() == slug_title.casefold()):
+            other_platform = await db.execute_fetchone(
+                "SELECT 1 FROM game_platforms WHERE game_id = ? AND platform != ? LIMIT 1",
+                (game_id, "gog"),
+            )
+            if other_platform is not None:
+                return False
+        await db.execute(
+            "UPDATE games SET name = ?, name_normalized = ? WHERE id = ?",
+            (catalog_title, normalize_search_text(catalog_title), game_id),
+        )
+        await db.commit()
+    return True
+
+
+async def _sync_from_account_listing(products: list[GogProduct]) -> dict:
+    """Resolve account-listing products identifier-first and write them."""
+    added = matched = skipped = renamed = 0
+    candidates = await load_fuzzy_candidates()
+    igdb_platform_id = PLATFORM_TO_IGDB.get("gog")
+
+    for product in products:
+        prepared_title = prepare_catalog_title(product.title)
+        if prepared_title is None:
+            skipped += 1
+            continue
+        # The name this sync stored before the account listing existed — the
+        # only key a legacy row can be found by.
+        slug_title = _slug_to_title(product.slug) if product.slug else None
+        legacy_title = slug_title if slug_title and slug_title != prepared_title else None
+
+        igdb_game = None
+        existing = await get_game_by_identifier(GOG_PRODUCT_ID, product.product_id)
+        if existing is not None:
+            game_id = existing["id"]
+            matched += 1
+        else:
+            # Identifier miss: adopt onto an identifier-less gog row of the
+            # same name rather than letting the fuzzy fallback's
+            # exclude_platform guard fork a stranded duplicate. The legacy
+            # slug title is tried too, so the first account-API run adopts
+            # every row the CLI path created.
+            adopted = await adopt_platform_identifier(
+                name=prepared_title,
+                platform="gog",
+                identifier_type=GOG_PRODUCT_ID,
+                identifier_value=product.product_id,
+            )
+            if adopted is None and legacy_title:
+                adopted = await adopt_platform_identifier(
+                    name=legacy_title,
+                    platform="gog",
+                    identifier_type=GOG_PRODUCT_ID,
+                    identifier_value=product.product_id,
+                )
+            if adopted is not None:
+                game_id = adopted
+                matched += 1
+            else:
+                # Adoption refused for one of two reasons, and neither may be
+                # second-guessed by name here: several identifier-less
+                # same-name gog rows (AMBIGUOUS — picking the oldest would file
+                # the product onto an arbitrary sibling), or a same-name row
+                # that already carries a DIFFERENT product id (a distinct GOG
+                # product, "Alone in the Dark" 2008 vs 2024 — attaching a
+                # second id is the within-platform collapse the identity rules
+                # forbid). Normal resolution's exclude-platform guard mints
+                # instead; a visible extra row is merge_games-repairable, a
+                # silent misfile is not.
+                game_id, igdb_game = await resolve_and_link_game(
+                    prepared_title, igdb_platform_id, candidates, platform="gog"
+                )
+                if game_id in candidates:
+                    matched += 1
+                else:
+                    candidates[game_id] = prepared_title
+                    added += 1
+
+        if await _rename_to_catalog_title(game_id, prepared_title, slug_title):
+            renamed += 1
+
+        if product.title != prepared_title:
+            await upsert_game_alias(
+                game_id,
+                product.title,
+                alias_type="edition",
+                source="gog",
+                source_key=product.product_id,
+            )
+
+        platform_id = await upsert_game_platform(
+            game_id=game_id,
+            platform="gog",
+            playtime_minutes=None,
+            owned=1,
+            from_source=True,
+        )
+        await upsert_game_platform_identifier(platform_id, GOG_PRODUCT_ID, product.product_id)
+
+        if igdb_game is not None and igdb_platform_id in igdb_game.platform_release_dates:
+            await upsert_game_platform_enrichment(
+                platform_id,
+                platform_release_date=igdb_game.platform_release_dates[igdb_platform_id],
+            )
+
+    logger.info(
+        "GOG sync (account API): added=%d matched=%d skipped=%d renamed=%d",
+        added, matched, skipped, renamed,
+    )
+    return {
+        "added": added,
+        "matched": matched,
+        "skipped": skipped,
+        "renamed": renamed,
+        "listing_backend": "account_api",
+    }
+
+
+async def _sync_from_lgogdownloader() -> dict:
+    """The legacy slug listing: no product ids, so the title is the only key."""
     try:
         proc = await asyncio.create_subprocess_exec(
             _LGOGDOWNLOADER_BIN,
@@ -207,13 +525,13 @@ async def sync_gog() -> dict:
             continue
         igdb_platform_id = PLATFORM_TO_IGDB.get("gog")
 
-        # GOG has no per-item store id, so the title IS the stable key: a
-        # same-normalized-name row that already owns gog is this exact catalog
-        # item re-syncing. Match it directly — re-running the title through
-        # IGDB can land on a *different* same-named IGDB candidate whose
-        # conflicting release year makes the fuzzy fallback refuse the
-        # existing row and fork a duplicate (observed in prod: "Agony",
-        # "Sigma Theory", "Under The Moon" pairs).
+        # This backend reports no product id, so the title is the only stable
+        # key it has: a same-normalized-name row that already owns gog is this
+        # exact catalog item re-syncing. Match it directly — re-running the
+        # title through IGDB can land on a *different* same-named IGDB
+        # candidate whose conflicting release year makes the fuzzy fallback
+        # refuse the existing row and fork a duplicate (observed in prod:
+        # "Agony", "Sigma Theory", "Under The Moon" pairs).
         existing = await get_platform_game_by_normalized_name(prepared_title, "gog")
         if existing is not None:
             game_id = existing["id"]

@@ -51,8 +51,10 @@ from bs4 import BeautifulSoup, Tag
 
 from .db import (
     delete_stale_wishlist_entries,
+    delete_unreferenced_games,
     extract_best_fuzzy_key,
     get_db,
+    stale_wishlist_game_ids,
     upsert_game,
     upsert_wishlist_entry,
 )
@@ -155,13 +157,23 @@ async def sync_dekudeals_wishlist() -> dict:
 
     # Only reached once _fetch_wishlist_items has succeeded, so an empty/partial
     # items list here genuinely reflects the current upstream wishlist.
+    # Read the rows about to go BEFORE the delete — afterwards nothing says
+    # which games they pointed at.
+    dropping = await stale_wishlist_game_ids("switch2", "dekudeals", resolved_game_ids)
     removed = await delete_stale_wishlist_entries("switch2", "dekudeals", resolved_game_ids)
+    # A switch2 wishlist title is usually a Nintendo exclusive with no games
+    # row of its own until this sync minted one, so un-wishlisting it leaves
+    # pure residue behind unless it is collected here. Only rows bare in every
+    # other respect (no ownership, rating, verdict, history, child, manual
+    # edit) are deleted.
+    orphans_removed = len(await delete_unreferenced_games(dropping))
 
     return {
         "added": added,
         "matched": matched,
         "skipped": skipped,
         "removed": removed,
+        "orphans_removed": orphans_removed,
         "total_scraped": len(items),
     }
 

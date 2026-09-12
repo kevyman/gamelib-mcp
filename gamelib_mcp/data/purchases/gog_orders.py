@@ -2,7 +2,8 @@
 
 Reads the order history behind https://www.gog.com/account/settings/orders via
 the paginated ``embed.gog.com`` JSON endpoint. Auth reuses the lgogdownloader
-session that ``data/gog.py`` already depends on (same config dir): a
+session that ``data/gog.py`` already depends on (same config dir), loaded by
+``data/gog_session.py`` and shared with the library listing: a
 ``galaxy_tokens.json`` access token is preferred (sent as a Bearer header),
 falling back to a Netscape-format ``cookies.txt`` jar for gog.com domains.
 Neither present → the same "run lgogdownloader --login" advice as gog.py.
@@ -22,12 +23,20 @@ Record building:
 - store_identifier is the product id when present.
 """
 
-import json
 import logging
 import re
 from datetime import UTC, datetime
 
 import httpx
+
+from gamelib_mcp.data.gog_session import (
+    browser_headers,
+    load_access_token,
+    load_cookie_jar,
+    looks_like_login_html,
+    missing_session_error,
+    stale_session_message,
+)
 
 from . import PurchaseRecord, normalize_purchase_date
 
@@ -40,92 +49,19 @@ _ORDERS_URL = "https://embed.gog.com/account/settings/orders/data"
 # Hard cap on pagination — 50 pages of orders is beyond any plausible history.
 _MAX_PAGES = 50
 
-_TOKENS_FILENAME = "galaxy_tokens.json"
-_COOKIE_JAR_FILENAME = "cookies.txt"
-
 # Longest symbols first so "zł" never half-matches.
 _CURRENCY_SYMBOLS = (("zł", "PLN"), ("€", "EUR"), ("£", "GBP"), ("$", "USD"))
 
-_LOGIN_ADVICE = "run lgogdownloader --login"
+_AUTH_ERROR = stale_session_message("order-history")
 
-_AUTH_ERROR = (
-    "GOG order-history request was not authenticated (lgogdownloader session "
-    f"expired) — {_LOGIN_ADVICE} again to refresh it."
-)
+# Session loading is shared with the library listing (data/gog_session.py);
+# these aliases keep the historical module-local names importable/patchable.
+_load_access_token = load_access_token
+_load_cookie_jar = load_cookie_jar
+_looks_like_login_html = looks_like_login_html
+_missing_session_error = missing_session_error
 
 _MONEY_RE = re.compile(r"(\d+(?:[.,]\d{1,2})?)")
-
-
-def _missing_session_error() -> RuntimeError:
-    # Deliberately matches data/gog.py's unconfigured phrasing.
-    from gamelib_mcp.data.gog import _config_dir
-
-    return RuntimeError(
-        f"lgogdownloader session files missing in {_config_dir()}; "
-        f"{_LOGIN_ADVICE}"
-    )
-
-
-def _load_access_token() -> str | None:
-    """Pull an access_token out of lgogdownloader's galaxy_tokens.json.
-
-    The file is either a flat token object or keyed by OAuth client id with
-    token objects as values — both shapes are accepted.
-    """
-    from gamelib_mcp.data.gog import _config_dir
-
-    path = _config_dir() / _TOKENS_FILENAME
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except FileNotFoundError:
-        return None
-    except Exception as exc:
-        logger.warning("Failed to load GOG tokens from %s: %s", path, exc)
-        return None
-
-    if not isinstance(raw, dict):
-        return None
-    token = raw.get("access_token")
-    if isinstance(token, str) and token:
-        return token
-    for value in raw.values():
-        if isinstance(value, dict):
-            token = value.get("access_token")
-            if isinstance(token, str) and token:
-                return token
-    return None
-
-
-def _load_cookie_jar() -> dict[str, str] | None:
-    """Parse gog.com name/value pairs from a curl/Netscape cookies.txt jar."""
-    from gamelib_mcp.data.gog import _config_dir
-
-    path = _config_dir() / _COOKIE_JAR_FILENAME
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except FileNotFoundError:
-        return None
-    except Exception as exc:
-        logger.warning("Failed to load GOG cookie jar from %s: %s", path, exc)
-        return None
-
-    cookies: dict[str, str] = {}
-    for line in lines:
-        line = line.strip()
-        # #HttpOnly_ lines are real cookies; every other #-line is a comment.
-        if line.startswith("#HttpOnly_"):
-            line = line[len("#HttpOnly_"):]
-        elif not line or line.startswith("#"):
-            continue
-        fields = line.split("\t")
-        if len(fields) < 7:
-            continue
-        domain, name, value = fields[0], fields[5], fields[6]
-        if "gog.com" in domain.lower() and name:
-            cookies[name] = value
-    return cookies or None
 
 
 def _parse_money(value: object) -> float | None:
@@ -296,11 +232,6 @@ def parse_order(order: dict) -> tuple[list[PurchaseRecord], list[dict]]:
     return records, skipped
 
 
-def _looks_like_login_html(response: httpx.Response) -> bool:
-    content_type = response.headers.get("content-type", "")
-    return "text/html" in content_type or response.text.lstrip()[:1] == "<"
-
-
 async def _fetch_pages(
     client: httpx.AsyncClient, headers: dict[str, str]
 ) -> list[dict] | None:
@@ -350,12 +281,7 @@ async def fetch_gog_purchases(
     if token is None and cookies is None:
         raise _missing_session_error()
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0"
-        ),
-        "Accept": "application/json",
-    }
+    headers = browser_headers()
 
     async with httpx.AsyncClient(
         follow_redirects=True, timeout=30, transport=transport

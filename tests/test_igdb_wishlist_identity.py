@@ -65,7 +65,7 @@ class IGDBWishlistIdentityTests(ToolDBTestCase):
                 self.assertEqual(processed, 1)
                 row = await db_module.get_game_by_name_exact("Dispatch")
                 self.assertEqual(row["igdb_id"], correct.igdb_id)
-                external.assert_awaited_once_with(["2525340"])
+                external.assert_awaited_once_with(["2525340", "292030"])
                 name_search.assert_not_awaited()
                 async with db_module.get_db() as db:
                     count = await db.execute_fetchone("SELECT COUNT(*) AS n FROM game_platforms")

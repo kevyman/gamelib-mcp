@@ -820,6 +820,29 @@ async def clear_fulfilled_wishlist_entries(
         return cursor.rowcount
 
 
+async def stale_wishlist_game_ids(
+    platform: str,
+    source: str,
+    keep_game_ids: Iterable[int],
+) -> list[int]:
+    """The game_ids ``delete_stale_wishlist_entries`` would remove for these args.
+
+    The one definition of the removal predicate — (platform, source) rows
+    whose game_id is not in ``keep_game_ids`` — read BEFORE the delete so the
+    caller can garbage-collect the games rows that just lost their last
+    reference (``delete_unreferenced_games``). Keep it and the DELETE below in
+    step; a wishlist entry this says goes but the delete keeps would GC a
+    still-referenced row.
+    """
+    keep = set(keep_game_ids)
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            "SELECT game_id FROM game_wishlist WHERE platform = ? AND source = ?",
+            (platform, source),
+        )
+    return [row["game_id"] for row in rows if row["game_id"] not in keep]
+
+
 async def delete_stale_wishlist_entries(
     platform: str,
     source: str,
@@ -1242,6 +1265,7 @@ async def bulk_upsert_steam_library(
             """CREATE TEMP TABLE IF NOT EXISTS temp_steam_library_sync (
                    appid INTEGER PRIMARY KEY,
                    name TEXT NOT NULL,
+                   name_normalized TEXT NOT NULL,
                    playtime_minutes INTEGER,
                    playtime_2weeks_minutes INTEGER,
                    rtime_last_played INTEGER,
@@ -1268,10 +1292,12 @@ async def bulk_upsert_steam_library(
             await db.execute("DELETE FROM temp_steam_library_sync")
             await db.executemany(
                 """INSERT INTO temp_steam_library_sync
-                   (appid, name, playtime_minutes, playtime_2weeks_minutes, rtime_last_played, row_order)
-                   VALUES (?, ?, ?, ?, ?, ?)
+                   (appid, name, name_normalized, playtime_minutes,
+                    playtime_2weeks_minutes, rtime_last_played, row_order)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(appid) DO UPDATE SET
                        name = excluded.name,
+                       name_normalized = excluded.name_normalized,
                        playtime_minutes = excluded.playtime_minutes,
                        playtime_2weeks_minutes = excluded.playtime_2weeks_minutes,
                        rtime_last_played = excluded.rtime_last_played,
@@ -1280,6 +1306,7 @@ async def bulk_upsert_steam_library(
                     (
                         row["appid"],
                         row["name"],
+                        normalize_search_text(row["name"]),
                         row.get("playtime_minutes"),
                         row.get("playtime_2weeks_minutes"),
                         row.get("rtime_last_played"),
@@ -1341,6 +1368,57 @@ async def bulk_upsert_steam_library(
                            AND {_APPID_ADOPTION_SQL.format(t="t2")}
                                = {_APPID_ADOPTION_SQL.format(t="t")}
                      )"""
+            )
+
+            # Pass 1c — adopt an existing same-name game that already OWNS a
+            # Steam row carrying no steam_appid identifier at all. This is the
+            # Steam counterpart of adopt_platform_identifier (~line 939, used
+            # by the Epic/PSN/Nintendo syncs): a purchase import mints owned
+            # platform rows without a store id, and pass 2's steam-row guard
+            # then refuses them forever, so every later sync forked a second
+            # row for the same game (observed in prod 2026-08-04: a Humble
+            # Choice import minted five identifier-less Steam rows — "Pile
+            # Up!", "Decktamer", "Conquest Dark", "Gatekeeper", "Like a
+            # Dragon: Infinite Wealth" — and the next sync duplicated all
+            # five). Safe against the anti-collapse rule because pass 1
+            # already claimed every appid that HAS an identifier row: a
+            # candidate here has no steam_appid, so adopting it can never
+            # steal an identified row from another appid (Dead Space 2008 vs
+            # 2023 both keep theirs). Guarded exactly like pass 2 — only the
+            # lowest row_order among same-name temp rows may claim, lowest
+            # game id wins — so two appids never collapse onto one game. The
+            # identifier INSERT below then attaches the appid to that existing
+            # platform row, and the platform upsert stamps last_seen_in_source
+            # while leaving its acquisition columns untouched. Names compare
+            # under normalize_search_text like every other adoption path: a
+            # purchase-minted row spells the title the way the receipt did
+            # ("Q.U.B.E" vs Steam's "Q.U.B.E."), and a case-only comparison
+            # would fork the twin this pass exists to prevent.
+            await db.execute(
+                """UPDATE temp_steam_library_sync AS t
+                   SET resolved_game_id = (
+                       SELECT g.id
+                       FROM games g
+                       JOIN game_platforms gp
+                         ON gp.game_id = g.id AND gp.platform = 'steam'
+                       WHERE COALESCE(g.name_normalized, '') = t.name_normalized
+                         AND t.name_normalized != ''
+                         AND NOT EXISTS (
+                             SELECT 1 FROM game_platform_identifiers gpi
+                             WHERE gpi.game_platform_id = gp.id
+                               AND gpi.identifier_type = ?
+                         )
+                       ORDER BY g.id
+                       LIMIT 1
+                   )
+                   WHERE t.resolved_game_id IS NULL
+                     AND t.row_order = (
+                         SELECT MIN(t2.row_order)
+                         FROM temp_steam_library_sync t2
+                         WHERE t2.resolved_game_id IS NULL
+                           AND t2.name_normalized = t.name_normalized
+                     )""",
+                (STEAM_APP_ID,),
             )
 
             await db.execute(

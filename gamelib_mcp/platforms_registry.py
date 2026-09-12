@@ -34,6 +34,12 @@ class PlatformSpec:
     sync: tuple[str, str] | None = None
     # (module_path, attr) of the wishlist sync coroutine, if any.
     wishlist_sync: tuple[str, str] | None = None
+    # Whether this platform's OWNERSHIP source enumerates nested content
+    # (DLC/expansions) as items of its own. False means a nested row here can
+    # never carry a sync stamp, however genuinely owned it is — so "no sync
+    # ever returned this row" says nothing about it (see check_library's
+    # spend.unconfirmed_ownership).
+    source_lists_nested: bool = False
     # The name the integration inspector uses where it differs (switch2 is
     # synced as "switch2" but inspected as "nintendo").
     inspector_name: str | None = None
@@ -42,22 +48,29 @@ class PlatformSpec:
 
 
 PLATFORMS: tuple[PlatformSpec, ...] = (
+    # Steam's GetOwnedGames never enumerates DLC, so source_lists_nested stays
+    # False here.
     PlatformSpec(
         "steam",
         sync=("gamelib_mcp.data.steam_xml", "fetch_library"),
         wishlist_sync=("gamelib_mcp.data.steam_wishlist", "fetch_wishlist"),
         inspector_attr="inspect_steam",
     ),
+    # Epic's launcher catalog lists add-ons as their own entries, so a nested
+    # Epic row CAN be confirmed by a sync.
     PlatformSpec(
         "epic",
         sync=("gamelib_mcp.data.epic", "sync_epic"),
+        source_lists_nested=True,
         inspector_attr="inspect_epic",
     ),
+    # GOG's product listing is per base product (DLC ships inside it).
     PlatformSpec(
         "gog",
         sync=("gamelib_mcp.data.gog", "sync_gog"),
         inspector_attr="inspect_gog",
     ),
+    # Nintendo's VGCS feed is per title, never per add-on.
     PlatformSpec(
         "switch2",
         aliases=("nintendo", "switch"),
@@ -68,6 +81,7 @@ PLATFORMS: tuple[PlatformSpec, ...] = (
         inspector_name="nintendo",
         inspector_attr="inspect_nintendo",
     ),
+    # PSN's title list is games only — DLC never appears in it.
     PlatformSpec(
         "ps5",
         sync=("gamelib_mcp.data.psn", "sync_psn"),
@@ -97,6 +111,13 @@ SYNCABLE_PLATFORMS: frozenset[str] = frozenset(spec.name for spec in PLATFORMS i
 
 # Every platform a game can be recorded against in the library (post-alias).
 LIBRARY_PLATFORMS: frozenset[str] = frozenset(spec.name for spec in PLATFORMS if spec.library)
+
+# Platforms whose ownership source enumerates DLC/expansions as their own
+# items. Everywhere else a nested row is structurally unconfirmable — no sync
+# can ever stamp last_seen_in_source on it.
+NESTED_LISTING_PLATFORMS: frozenset[str] = frozenset(
+    spec.name for spec in PLATFORMS if spec.source_lists_nested
+)
 
 # Platforms with an automated wishlist sync backend. PSN has no public
 # wishlist API — use add_game_to_platform(owned=False) for it instead.
