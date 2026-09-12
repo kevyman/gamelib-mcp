@@ -1098,9 +1098,10 @@ async def update_game(
 
         # Repinning igdb_id corrects a wrong match: the stored igdb_cached_at (and any
         # series/cover/platform metadata from the old match) still describes the wrong
-        # game, and claim_game_ids_for_igdb only revisits rows with igdb_cached_at
-        # NULL — so the corrected id would never re-fetch. Invalidate the IGDB cache so
-        # the backfill re-fetches under the pinned id. A rename already did this via
+        # game, and claim_game_ids_for_igdb revisits only rows that were never checked
+        # OR are unlinked and stamped by an older IGDB_RESOLVER_VERSION — a row that
+        # HAS a link matches neither arm, so the corrected id would never re-fetch.
+        # Invalidate the IGDB cache so the backfill re-fetches under the pinned id. A rename already did this via
         # invalidate_name_derived_enrichment above, so skip the double work.
         if "igdb_id" in fields and "igdb" not in enrichment_invalidated:
             await invalidate_igdb_match_enrichment(resolved_id)

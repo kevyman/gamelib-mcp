@@ -15,6 +15,7 @@ from conftest import (
 )
 
 from gamelib_mcp.data import db as db_module
+from gamelib_mcp.data.igdb import IGDB_RESOLVER_VERSION
 
 
 class LoadPlatformsForGamesTests(ToolDBTestCase):
@@ -140,17 +141,99 @@ class ClaimRoundTripTests(ToolDBTestCase):
         gid = await seed_game("Portal")
         past = "1970-01-01T00:00:00+00:00"
 
-        first = await db_module.claim_game_ids_for_igdb(limit=5, stale_before=past)
+        first = await db_module.claim_game_ids_for_igdb(
+            limit=5, stale_before=past, resolver_version=IGDB_RESOLVER_VERSION
+        )
         self.assertIn(gid, first)
 
         # Already claimed -> not returned again.
-        second = await db_module.claim_game_ids_for_igdb(limit=5, stale_before=past)
+        second = await db_module.claim_game_ids_for_igdb(
+            limit=5, stale_before=past, resolver_version=IGDB_RESOLVER_VERSION
+        )
         self.assertEqual(second, [])
 
         # After releasing the claim, it can be claimed once more.
         await db_module.release_game_claim(gid, "igdb_claimed_at")
-        third = await db_module.claim_game_ids_for_igdb(limit=5, stale_before=past)
+        third = await db_module.claim_game_ids_for_igdb(
+            limit=5, stale_before=past, resolver_version=IGDB_RESOLVER_VERSION
+        )
         self.assertIn(gid, third)
+
+
+class ResolverVersionClaimTests(ToolDBTestCase):
+    """A no-match stamp is only permanent while the resolver stands still."""
+
+    _STAMP = "2026-01-01T00:00:00+00:00"
+    _PAST = "1970-01-01T00:00:00+00:00"
+
+    async def _stamp(self, game_id: int, *, version: int | None, igdb_id: int | None = None):
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET igdb_cached_at = ?, igdb_resolver_version = ?, "
+                "igdb_id = ? WHERE id = ?",
+                (self._STAMP, version, igdb_id, game_id),
+            )
+            await db.commit()
+
+    async def test_a_stale_no_match_is_claimable_and_a_current_one_is_not(self):
+        stale = await seed_game("Stale No Match")
+        current = await seed_game("Current No Match")
+        await self._stamp(stale, version=1)
+        await self._stamp(current, version=2)
+
+        claimed = await db_module.claim_game_ids_for_igdb(
+            limit=10, stale_before=self._PAST, resolver_version=2
+        )
+
+        self.assertIn(stale, claimed)
+        self.assertNotIn(current, claimed)
+
+    async def test_a_no_match_predating_the_column_is_claimable(self):
+        unversioned = await seed_game("Unversioned No Match")
+        await self._stamp(unversioned, version=None)
+
+        claimed = await db_module.claim_game_ids_for_igdb(
+            limit=10, stale_before=self._PAST, resolver_version=2
+        )
+
+        self.assertIn(unversioned, claimed)
+
+    async def test_a_linked_row_is_never_reclaimed_by_a_version_bump(self):
+        linked = await seed_game("Linked Long Ago")
+        await self._stamp(linked, version=1, igdb_id=4242)
+
+        claimed = await db_module.claim_game_ids_for_igdb(
+            limit=10, stale_before=self._PAST, resolver_version=2
+        )
+
+        self.assertNotIn(linked, claimed)
+
+    async def test_never_checked_rows_are_claimed_before_stale_no_matches(self):
+        # A large stale backlog must drain BEHIND new rows, never starve them.
+        stale_a = await seed_game("Stale A")
+        stale_b = await seed_game("Stale B")
+        fresh = await seed_game("Never Checked")
+        await self._stamp(stale_a, version=1)
+        await self._stamp(stale_b, version=1)
+
+        claimed = await db_module.claim_game_ids_for_igdb(
+            limit=10, stale_before=self._PAST, resolver_version=2
+        )
+
+        self.assertEqual(claimed[0], fresh)
+        self.assertEqual(sorted(claimed[1:]), sorted([stale_a, stale_b]))
+
+    async def test_the_game_ids_scope_still_narrows_the_claim(self):
+        wanted = await seed_game("Wanted")
+        other = await seed_game("Other")
+        await self._stamp(wanted, version=1)
+
+        claimed = await db_module.claim_game_ids_for_igdb(
+            limit=10, stale_before=self._PAST, game_ids=[wanted], resolver_version=2
+        )
+
+        self.assertEqual(claimed, [wanted])
+        self.assertNotIn(other, claimed)
 
 
 class SeedPlatformProviderAliasTests(ToolDBTestCase):

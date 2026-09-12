@@ -20,6 +20,7 @@ from conftest import (
 from fastmcp.exceptions import ToolError
 
 from gamelib_mcp.data import db as db_module
+from gamelib_mcp.data.igdb import IGDB_RESOLVER_VERSION
 from gamelib_mcp.data.title_normalization import normalize_search_text
 from gamelib_mcp.tools import detail, game_media
 from gamelib_mcp.tools.platforms import update_game
@@ -473,19 +474,54 @@ class GetGameDetailEnrichmentReportTests(ToolDBTestCase):
         self.enrich_game.assert_not_awaited()
         self.get_protondb.assert_not_awaited()
 
-    async def test_a_checked_but_unmatched_row_reports_no_match_without_fetching(self):
-        gid = await make_steam_game("Obscure Thing", 424242)
+    async def _stamp_no_match(self, game_id: int, resolver_version: int | None) -> None:
         async with db_module.get_db() as db:
             await db.execute(
-                "UPDATE games SET igdb_cached_at = ? WHERE id = ?",
-                (datetime.now(UTC).isoformat(), gid),
+                "UPDATE games SET igdb_cached_at = ?, igdb_resolver_version = ? WHERE id = ?",
+                (datetime.now(UTC).isoformat(), resolver_version, game_id),
             )
             await db.commit()
+
+    async def test_a_checked_but_unmatched_row_reports_no_match_without_fetching(self):
+        # "Checked" only silences the fetch while the stamp is CURRENT — a
+        # no-match this generation of the resolver wrote cannot have moved.
+        gid = await make_steam_game("Obscure Thing", 424242)
+        await self._stamp_no_match(gid, IGDB_RESOLVER_VERSION)
 
         result = await detail.get_game_detail(game_id=gid)
 
         self.assertEqual(result["enrichment"], {"igdb": "no_match"})
         self.backfill.assert_not_awaited()
+
+    async def test_a_stale_no_match_takes_the_scoped_link_path(self):
+        # Stamped by an older resolver generation: the matcher has changed
+        # since, the claim accepts the row again, and detail must re-ask
+        # rather than reporting a no_match that is no longer evidence.
+        gid = await make_steam_game("Stale No Match", 434343)
+        await self._stamp_no_match(gid, IGDB_RESOLVER_VERSION - 1)
+
+        async def _link_it(limit, *, game_ids):
+            await self._link(game_ids[0], 9191)
+            return 1
+
+        self.backfill.side_effect = _link_it
+        with patch.object(detail, "igdb_credentials_configured", lambda: True):
+            result = await detail.get_game_detail(game_id=gid)
+
+        self.backfill.assert_awaited_once_with(limit=1, game_ids=[gid])
+        self.assertNotIn("enrichment", result)
+
+    async def test_a_no_match_predating_the_version_column_is_stale(self):
+        # Every row migrated in as version 1; a NULL version is a stamp from
+        # before the column existed, which is older still.
+        gid = await make_steam_game("Unversioned No Match", 444444)
+        await self._stamp_no_match(gid, None)
+
+        with patch.object(detail, "igdb_credentials_configured", lambda: True):
+            result = await detail.get_game_detail(game_id=gid)
+
+        self.backfill.assert_awaited_once_with(limit=1, game_ids=[gid])
+        self.assertEqual(result["enrichment"], {"igdb": "unresolved"})
 
     async def test_an_unlinked_row_runs_the_backfill_scoped_to_itself(self):
         gid = await make_steam_game("Never Linked", 515151)

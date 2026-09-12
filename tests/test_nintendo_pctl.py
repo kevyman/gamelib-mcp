@@ -17,7 +17,7 @@ from gamelib_mcp.data import nintendo as nintendo_module
 from gamelib_mcp.data import nintendo_pctl
 
 
-async def _no_igdb(name, platform_id):
+async def _no_igdb(name, platform_id, **kwargs):
     """Force resolve_and_link_game down its offline create-by-name path."""
     return
 

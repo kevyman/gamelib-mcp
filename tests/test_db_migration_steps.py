@@ -101,9 +101,91 @@ class SeedableVersionSetTests(unittest.TestCase):
         )
 
     def test_no_ddl_constant_claims_a_version_beyond_the_current_schema(self):
-        # A stray _V41_SCHEMA_DDL would mean the DDL moved ahead of
+        # A stray _V43_SCHEMA_DDL would mean the DDL moved ahead of
         # SCHEMA_VERSION and fresh installs are being stamped a version behind.
         self.assertLessEqual(max(seedable_versions()), db_module.SCHEMA_VERSION)
+
+
+class V42ResolverVersionBackfillTests(unittest.IsolatedAsyncioTestCase):
+    """v41 -> v42 records WHICH resolver generation stamped each IGDB check.
+
+    Every stamp that exists at migration time was written by the pre-versioned
+    resolver, so it is generation 1 by definition — linked rows included, since
+    "carries a stamp" and "carries a version" must stay the same set. A row
+    that was never checked keeps NULL, which is what it is.
+    """
+
+    _STAMP = "2026-09-12T14:21:00+00:00"
+
+    async def asyncSetUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._previous_url = os.environ.get("DATABASE_URL")
+
+    async def asyncTearDown(self) -> None:
+        db_module._DB_READY_PATH = None
+        db_module._FTS_READY_PATH = None
+        if self._previous_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = self._previous_url
+        self._tmpdir.cleanup()
+
+    async def test_existing_stamps_become_version_one_and_unchecked_rows_stay_null(self):
+        path = Path(self._tmpdir.name) / "v41-resolver-version.sqlite"
+        _seed_version(path, 41)
+
+        rows = (
+            # (name, igdb_id, igdb_cached_at, expected igdb_resolver_version)
+            ("Stamped No Match", None, self._STAMP, 1),
+            ("Stamped And Linked", 3227, self._STAMP, 1),
+            ("Never Checked", None, None, None),
+            ("Linked Without A Stamp", 7504, None, None),
+        )
+        conn = sqlite3.connect(path)
+        try:
+            required = _required_games_columns(conn)
+            columns = ["name", "igdb_id", "igdb_cached_at",
+                       *(name for name, _ in required)]
+            placeholders = ", ".join("?" * len(columns))
+            for name, igdb_id, stamp, _expected in rows:
+                conn.execute(
+                    f"INSERT INTO games ({', '.join(columns)}) VALUES ({placeholders})",
+                    [
+                        name,
+                        igdb_id,
+                        stamp,
+                        *(0 if kind in ("INTEGER", "REAL") else "x" for _, kind in required),
+                    ],
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        os.environ["DATABASE_URL"] = f"file:{path}"
+        db_module._DB_READY_PATH = None
+        db_module._FTS_READY_PATH = None
+        try:
+            await db_module.init_db()
+        finally:
+            db_module._DB_READY_PATH = None
+            db_module._FTS_READY_PATH = None
+
+        conn = sqlite3.connect(path)
+        try:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            versions = dict(
+                conn.execute(
+                    "SELECT name, igdb_resolver_version FROM games WHERE name != ?",
+                    (_PROBE_NAME,),
+                )
+            )
+        finally:
+            conn.close()
+
+        self.assertEqual(version, db_module.SCHEMA_VERSION)
+        for name, _igdb_id, _stamp, expected in rows:
+            with self.subTest(name=name):
+                self.assertEqual(versions[name], expected)
 
 
 class V41AmpersandReclaimTests(unittest.IsolatedAsyncioTestCase):
@@ -111,8 +193,11 @@ class V41AmpersandReclaimTests(unittest.IsolatedAsyncioTestCase):
 
     The pre-fix resolver compared titles through a normalization that dropped
     "&", so "Rabbit and Steel" (Steam) could never match "Rabbit & Steel"
-    (IGDB) and the row was stamped "checked, no match" — permanently, since
-    claim_game_ids_for_igdb only takes rows whose igdb_cached_at IS NULL.
+    (IGDB) and the row was stamped "checked, no match" — permanently at the
+    time, since claim_game_ids_for_igdb then took only rows whose
+    igdb_cached_at IS NULL. v42 retired that shape: the claim now also takes a
+    row that is unlinked and stamped by an older IGDB_RESOLVER_VERSION, so a
+    matcher fix re-queues itself and v41 was the last hand-written re-claim.
     """
 
     _STAMP = "2026-09-12T14:21:00+00:00"
