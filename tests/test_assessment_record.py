@@ -1786,8 +1786,6 @@ _MEDIA_PAYLOAD = {
         "screenshots_truncated": False,
         "short_description": "A tiny bug with a nail.",
     },
-    "similar_raw": None,
-    "similar_count": None,
     "igdb_id": None,
 }
 
@@ -2015,8 +2013,6 @@ class EvaluationPackageTests(ToolDBTestCase):
         game_id = await seed_game("Outage Probe")
         empty_handed = {
             "media": None,
-            "similar_raw": None,
-            "similar_count": None,
             "pedigree_raw": None,
             "igdb_id": None,
             "errors": ["steam: fetch failed"],
@@ -2027,52 +2023,52 @@ class EvaluationPackageTests(ToolDBTestCase):
         self.assertIsNone(package["media"])
         self.assertEqual(package["errors"], ["media: steam: fetch failed"])
 
-    async def test_similar_games_are_annotated_against_the_library(self):
-        game_id = await seed_game("Similarity Probe")
-        owned_unplayed = await seed_game("Owned Unplayed")
-        await add_platform(owned_unplayed, "steam", playtime_minutes=0)
-        async with db_module.get_db() as db:
-            await db.execute(
-                "UPDATE games SET igdb_id = 101 WHERE id = ?", (owned_unplayed,)
-            )
-            await db.commit()
+    async def test_the_similar_row_is_the_library_not_a_provider(self):
+        # The row is tools/game_media.py's similar_in_library: owned games that
+        # share this one's tags. No provider answer is involved, so the media
+        # payload below says nothing about it.
+        tags = ["metroidvania", "souls-like", "hand-drawn"]
+        game_id = await seed_game("Similarity Probe", tags=tags)
+        await add_platform(game_id, "steam", playtime_minutes=0)
+        neighbours = []
+        for index in range(3):
+            neighbour = await seed_game(f"Neighbour {index}", tags=tags)
+            await add_platform(neighbour, "steam", playtime_minutes=0)
+            neighbours.append(neighbour)
 
-        payload = {
-            **_MEDIA_PAYLOAD,
-            "similar_raw": [
-                {
-                    "igdb_id": 101,
-                    "name": "Owned Unplayed",
-                    "release_year": 2016,
-                    "cover_image_id": "abc",
-                },
-                {
-                    "igdb_id": 202,
-                    "name": "Unknown Neighbour",
-                    "release_year": None,
-                    "cover_image_id": None,
-                },
-            ],
-            "similar_count": 9,
-        }
-        with self._media(payload):
+        with self._media(_MEDIA_PAYLOAD):
             result = await record_assessment(game_id=game_id, verdict="skip")
 
         similar = result["package"]["similar"]
-        self.assertEqual(similar["count"], 9)
-        self.assertTrue(similar["truncated"])
-        owned_entry, unknown_entry = similar["items"]
-        self.assertTrue(owned_entry["owned"])
-        self.assertTrue(owned_entry["unplayed"])
+        self.assertEqual(similar["count"], 3)
+        self.assertFalse(similar["truncated"])
         self.assertEqual(
-            owned_entry["cover_url"],
-            "https://images.igdb.com/igdb/image/upload/t_cover_big/abc.jpg",
+            sorted(item["game_id"] for item in similar["items"]), sorted(neighbours)
         )
-        self.assertFalse(unknown_entry["owned"])
-        self.assertFalse(unknown_entry["unplayed"])
-        self.assertIsNone(unknown_entry["cover_url"])
+        first = similar["items"][0]
+        self.assertTrue(first["owned"])
+        self.assertGreater(first["similarity"], 0)
+        self.assertEqual(sorted(first["shared_tags"]), sorted(tags))
 
-    async def test_the_pedigree_block_is_annotated_like_the_similar_row(self):
+    async def test_a_failing_similar_lookup_is_reported_not_raised(self):
+        # The package decorates a verdict that is already committed: a broken
+        # library query costs the row and names itself in `errors`.
+        game_id = await seed_game("Similar Outage")
+
+        with (
+            self._media(None),
+            patch(
+                "gamelib_mcp.tools.assessment.similar_in_library",
+                AsyncMock(side_effect=RuntimeError("no db")),
+            ),
+        ):
+            result = await record_assessment(game_id=game_id, verdict="skip")
+
+        package = result["package"]
+        self.assertIsNone(package["similar"])
+        self.assertIn("similar: lookup failed", package["errors"])
+
+    async def test_the_pedigree_block_is_annotated_against_the_library(self):
         # Same shared layer (tools/game_media.py) the detail card goes through,
         # so the card and the package render identical keys.
         game_id = await seed_game("Pedigree Package")

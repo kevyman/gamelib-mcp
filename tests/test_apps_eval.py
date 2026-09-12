@@ -310,7 +310,7 @@ class EvalCardLayoutTests(unittest.TestCase):
         self.assertNotIn("media.screenshots_truncated", apps_eval.EVAL_CARD_HTML)
         self.assertNotIn("media.screenshot_count", apps_eval.EVAL_CARD_HTML)
         self.assertNotIn('" more"', apps_eval.EVAL_CARD_HTML.split('section(parent, "Media")')[1]
-                         .split('section(parent, "Similar games")')[0])
+                         .split('section(parent, "Similar in your library")')[0])
 
     def test_screenshots_open_an_edge_to_edge_carousel(self) -> None:
         for marker in (
@@ -343,8 +343,8 @@ class EvalCardLayoutTests(unittest.TestCase):
         self.assertIn("} catch (e) {\n        btn.remove();", apps_eval.EVAL_CARD_HTML)
 
     def test_similar_comparisons_moved_into_the_lineage_panel(self) -> None:
-        # Model-authored "similar" note-cards no longer fold into IGDB's strip:
-        # mixing the two is what made the live Similar section confusing.
+        # Model-authored "similar" note-cards no longer fold into the library
+        # strip: mixing the two is what made the live Similar section confusing.
         self.assertIn("function lineageNode(parent, pkg, comps)", apps_eval.EVAL_CARD_HTML)
         self.assertIn('onlySimilar ? "Also similar" : "Other comparisons"',
                       apps_eval.EVAL_CARD_HTML)

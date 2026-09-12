@@ -275,6 +275,16 @@ SIMILAR_CSS = r"""  .sim {
     overflow: hidden;
   }
   .sim-year { font-size: 10.5px; font-weight: 650; color: var(--muted); }
+  /* The "why": the shared tags that put this cover in the row. One line —
+     it is a reason, not a tag cloud, and a wrapped second line pushes the
+     strip's cards out of alignment. */
+  .sim-why {
+    font-size: 10.5px;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 """
 
 # ---- Overlay / carousel / toast CSS -----------------------------------------
@@ -820,35 +830,39 @@ OWNERSHIP_TAGS_JS = r"""  function ownershipTags(item) {
   }
 """
 
-# IGDB's similar games as a strip of mini covers with ownership.
+# The owned games most like this one (tools/game_media.py's similar_in_library)
+# as a strip of mini covers, each with the shared tags that put it there.
 SIMILAR_NODE_JS = r"""  function similarNode(parent, similar) {
     var items = list(similar.items).filter(function (i) { return i && i.name; });
     if (!items.length) return;
-    var box = section(parent, "Similar games");
+    var box = section(parent, "Similar in your library");
     var strip = el("div", "strip");
-    // Server-side the items arrive owned-first (tools/game_media.py), so the
-    // claim below is visible without scrolling the row.
     items.forEach(function (item) {
       var card = el("div", "sim");
       card.appendChild(coverNode(item));
       var body = el("div", "sim-body");
       body.appendChild(el("div", "sim-name", item.name || "?"));
       if (item.release_year) body.appendChild(el("div", "sim-year", String(item.release_year)));
+      // The "why" under the year: the tags this game and that one share.
+      var why = list(item.shared_tags).filter(Boolean);
+      if (why.length) body.appendChild(el("div", "sim-why", why.join(" · ")));
       var tags = ownershipTags(item);
       if (tags) body.appendChild(tags);
       card.appendChild(body);
       strip.appendChild(card);
     });
-    var total = num(similar.count);
-    if (similar.truncated && total != null && total > items.length) {
-      strip.appendChild(el("span", "more-chip", "+" + (total - items.length) + " more"));
-    }
+    // No "+N more" chip: the extras are not in the payload, and there is
+    // nothing to click through to.
     box.appendChild(strip);
-    var owned = items.filter(function (i) { return i.owned; }).length;
-    // Ownership is annotated only for the SHOWN games — the true total
-    // belongs to the "+N more" chip above, never to this denominator.
-    box.appendChild(el("div", "note",
-      "You own " + owned + " of the " + items.length + " most similar"));
+    var total = num(similar.count);
+    // The count is "owned games clearing the shared-tag bar", so it is a
+    // denominator the row can honestly claim — every one of them is his.
+    var note = (similar.truncated && total != null && total > items.length)
+      ? "The " + items.length + " of your " + total + " games most like this one"
+      : "Your " + items.length + " games most like this one";
+    var unplayed = items.filter(function (i) { return i.unplayed; }).length;
+    if (unplayed) note += " · " + unplayed + " unplayed";
+    box.appendChild(el("div", "note", note));
   }
 """
 

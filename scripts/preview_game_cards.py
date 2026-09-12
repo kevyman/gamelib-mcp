@@ -29,7 +29,8 @@ _STEAM_SHOTS = "https://shared.akamai.steamstatic.com/store_item_assets/steam/ap
 # Contract-exact media/similar blocks (the get_game_detail(media=True) keys,
 # which are tools/game_media.py's output verbatim). --media asks the real tool
 # for the real thing; these exist so the hero, the screenshot strip and the
-# similar row are reachable with no network and no IGDB credentials.
+# similar row are reachable with no network, no IGDB credentials and no
+# tagged library.
 SAMPLE_MEDIA: dict[str, Any] = {
     "source": "steam",
     "trailer": {
@@ -50,10 +51,13 @@ SAMPLE_MEDIA: dict[str, Any] = {
     "short_description": "Battle beyond the Underworld using dark sorcery.",
 }
 
-# Owned-first, exactly as tools/game_media.py serves the annotated row.
+# Exactly as tools/game_media.py's similar_in_library serves the row: every
+# item is owned (the pool IS the library), ranked by tag cosine, each carrying
+# the shared tags that put it there.
 SAMPLE_SIMILAR: dict[str, Any] = {
     "items": [
         {
+            "game_id": 4101,
             "igdb_id": 113112,
             "name": "Hades",
             "release_year": 2020,
@@ -62,8 +66,11 @@ SAMPLE_SIMILAR: dict[str, Any] = {
             "unplayed": False,
             "my_rating": 9,
             "playtime_hours": 132.4,
+            "similarity": 0.71,
+            "shared_tags": ["roguelike", "action roguelike", "hack and slash"],
         },
         {
+            "game_id": 4102,
             "igdb_id": 25311,
             "name": "Dead Cells",
             "release_year": 2018,
@@ -72,8 +79,11 @@ SAMPLE_SIMILAR: dict[str, Any] = {
             "unplayed": False,
             "my_rating": 6,
             "playtime_hours": 2.8,
+            "similarity": 0.64,
+            "shared_tags": ["roguelike", "action roguelike", "pixel graphics"],
         },
         {
+            "game_id": 4103,
             "igdb_id": 26192,
             "name": "Wizard of Legend",
             "release_year": 2018,
@@ -82,19 +92,24 @@ SAMPLE_SIMILAR: dict[str, Any] = {
             "unplayed": True,
             "my_rating": None,
             "playtime_hours": 0.0,
+            "similarity": 0.58,
+            "shared_tags": ["roguelike", "hack and slash", "co-op"],
         },
         {
+            "game_id": 4104,
             "igdb_id": 119171,
             "name": "Returnal",
             "release_year": 2021,
             "cover_url": None,
-            "owned": False,
+            "owned": True,
             "unplayed": False,
             "my_rating": None,
-            "playtime_hours": None,
+            "playtime_hours": 11.5,
+            "similarity": 0.41,
+            "shared_tags": ["roguelike", "bullet hell", "third person"],
         },
     ],
-    "count": 8,
+    "count": 12,
     "truncated": True,
 }
 

@@ -31,7 +31,7 @@ from .batch import (
     count_status,
 )
 from .common import cover_url
-from .game_media import game_media_context
+from .game_media import game_media_context, similar_in_library
 from .search import (
     NORMALIZED_NAME_SQL,
     build_name_match,
@@ -70,13 +70,13 @@ async def get_game_detail(
     have filled.
 
     media=True adds the neutral game representation (tools/game_media.py) as
-    optional `media`, `similar` and `pedigree` keys — trailer, screenshots,
-    IGDB's similar games annotated with what the library owns, and the
-    developer's previous games annotated the same way. Off by default: it is
-    card decoration, costs a provider round trip on a cache miss, and nothing
-    in the response depends on it. Single mode only (the bulk path never asks
-    for it), and every key is simply ABSENT when nothing resolved or the
-    lookup failed — never null placeholders, and never a failed call.
+    optional `media`, `similar` and `pedigree` keys — trailer, screenshots, the
+    owned games most like this one by shared tags, and the developer's previous
+    games annotated with what the library owns. Off by default: it is card
+    decoration, costs a provider round trip on a cache miss, and nothing in the
+    response depends on it. Single mode only (the bulk path never asks for it),
+    and every key is simply ABSENT when nothing resolved or the lookup failed —
+    never null placeholders, and never a failed call.
 
     Can resolve to a wishlist-only title (wishlisted but not owned anywhere) —
     check owned/wishlisted, not is_primary_library_item, which is a
@@ -335,10 +335,10 @@ async def get_game_detail(
             result["assessment_count"] = assessment_count
             result["assessments_truncated"] = assessment_count > len(assessments)
 
-    # Trailer / screenshots / similar-games-you-own, for a client rendering a
-    # card. Bounded and best-effort in both directions: the lookup can't hold
-    # the response open past its budget, and a provider failure costs the two
-    # keys, not the call.
+    # Trailer / screenshots / studio pedigree, for a client rendering a card.
+    # Bounded and best-effort in both directions: the lookup can't hold the
+    # response open past its budget, and a provider failure costs the two keys,
+    # not the call.
     if media:
         try:
             context = await asyncio.wait_for(
@@ -356,9 +356,23 @@ async def get_game_detail(
                 exc_info=True,
             )
         else:
-            for key in ("media", "similar", "pedigree"):
+            for key in ("media", "pedigree"):
                 if context[key] is not None:
                     result[key] = context[key]
+
+        # The similar row is library-internal (one DB query, no provider, no
+        # budget to blow), so it is attached OUTSIDE the block above: a hanging
+        # or failing IGDB/Steam fetch must not cost the neighbours, which are
+        # the one part of the card that is always answerable.
+        try:
+            similar_block = await similar_in_library(row["id"])
+        except Exception:
+            logger.warning(
+                "Similar-in-library lookup failed for game %s", game_id, exc_info=True
+            )
+        else:
+            if similar_block is not None:
+                result["similar"] = similar_block
 
     return result
 

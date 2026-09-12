@@ -31,8 +31,8 @@ A detail card whose payload carries ``media`` (get_game_detail(media=True) —
 which is what that upgrade call asks for) also renders the neutral game
 representation: a media panel leading the stack (one 16:9 viewer plus one
 thumb strip, trailer first, screenshots opening an edge-to-edge carousel
-lightbox), a similar-games row annotated with what he owns, and a "From the
-studio" strip (the developer, and their previous games against his
+lightbox), a "similar in your library" row (the owned games sharing this
+one's tags), and a "From the studio" strip (the developer, and their previous games against his
 library — header line alone for a studio too big for six posters to describe).
 The viewer and
 carousel mirror the evaluation card's implementations (apps_eval.py) rather
@@ -695,8 +695,8 @@ GAME_CARDS_HTML = (
 
     if (window.__PREVIEW_DATA__) { note.remove(); return; }
     // media:true is what turns the upgraded card into the full game
-    // representation — trailer, screenshots, similar games he owns. The grid
-    // payload carries none of that.
+    // representation — trailer, screenshots, the owned games most like it.
+    // The grid payload carries none of that.
     // 30s, not callTool's 15s default: a cold click-through runs the full
     // lazy enrichment AND the media lookup's own 8s budget server-side, and a
     // response that loses the race is discarded — the overlay would sit on
@@ -873,8 +873,9 @@ GAME_CARDS_HTML = (
     + "\n"
     + apps_shared.OWNERSHIP_TAGS_JS
     + r"""
-  /* IGDB's similar games, already annotated server-side with what he owns —
-     the point of the row is the ownership stickers, not the neighbours. */
+  /* The owned games most like this one, ranked server-side by shared tags
+     (tools/game_media.py's similar_in_library) — every cover here is his, and
+     each carries the tags that put it in the row. */
 """
     + apps_shared.SIMILAR_NODE_JS
     + r"""

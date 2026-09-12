@@ -53,7 +53,7 @@ from .common import (
 )
 from .deals import _at_history_low, _fetched_at_is_stale
 from .detail import get_game_detail
-from .game_media import media_context
+from .game_media import media_context, similar_in_library
 from .history import get_play_history
 from .ratings import get_taste_profile
 from .search import NORMALIZED_NAME_SQL, build_name_match, fuzzy_fallback_game_ids
@@ -1605,8 +1605,9 @@ async def void_assessment(assessment_id: int) -> dict[str, Any]:
 PACKAGE_TIMEOUT_SECONDS = 10
 _PACKAGE_MEDIA_TIMEOUT_SECONDS = 8
 PACKAGE_PAST_CAP = 5
-# The similar-games cap lives with the block it caps (tools/game_media.py):
-# the same row renders on the detail card.
+# The similar-in-library block (its caps, its scoring, its query) lives with
+# the row it builds (tools/game_media.py): the same row renders on the detail
+# card, and it is a library lookup rather than anything this module fetches.
 
 # The stored Metascore. It hangs off the PLATFORM row (migration v11 moved it
 # out of `games` into game_platform_enrichment), so it needs the same shape as
@@ -1825,12 +1826,26 @@ async def _build_package(
         logger.warning("Package media fetch failed for game %s", game_id, exc_info=True)
         errors.append("media: fetch failed")
 
-    # The media block and its similar-games row are the neutral game
-    # representation get_game_detail(media=True) also serves — shaped in
-    # tools/game_media.py so both renderers get the same keys. The FETCH stays
-    # here, under this module's own budget and errors bookkeeping: the package
-    # decorates a committed verdict and must degrade, not raise.
+    # The media and pedigree blocks are the neutral game representation
+    # get_game_detail(media=True) also serves — shaped in tools/game_media.py so
+    # both renderers get the same keys. The FETCH stays here, under this
+    # module's own budget and errors bookkeeping: the package decorates a
+    # committed verdict and must degrade, not raise.
     media_context_block = await media_context(media_payload)
+
+    # The similar row is the library's own tag similarity, not a provider
+    # answer: one DB query, outside the media budget, so a dead IGDB costs the
+    # trailer and never the neighbours.
+    try:
+        similar_block = await similar_in_library(game_id)
+    except Exception:
+        logger.warning(
+            "Package similar-in-library lookup failed for game %s",
+            game_id,
+            exc_info=True,
+        )
+        errors.append("similar: lookup failed")
+        similar_block = None
 
     past_items = [
         {
@@ -1916,7 +1931,7 @@ async def _build_package(
             }
         ),
         "media": media_context_block["media"],
-        "similar": media_context_block["similar"],
+        "similar": similar_block,
         "pedigree": media_context_block["pedigree"],
         "past": (
             {
