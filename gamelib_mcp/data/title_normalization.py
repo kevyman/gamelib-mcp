@@ -112,6 +112,14 @@ _ROMAN_TOKEN_TO_ARABIC = {
     "ix": "9",
 }
 
+# Whole-token spelling pairs that name one title. "vs." tokenizes to "vs"
+# already, so the only spelling left to fold is the written-out word: Steam
+# ships "Marvel vs. Capcom" while other catalogs hold "Marvel versus Capcom".
+# Folded as a WHOLE token, never a substring, so "Reversus" is untouched.
+_SPELLING_TOKEN_ALIASES = {
+    "versus": "vs",
+}
+
 # Spelled-out numbers folded to digits ("Left 4 Dead" / "Left Four Dead").
 _NUMBER_WORD_TO_DIGITS = {
     "zero": "0",
@@ -136,7 +144,8 @@ def match_key(value: str) -> str:
     normalizations that let "&" (#184) and the Humble folding mismatch through.
     It folds, in order: trademark glyphs, diacritics and case; apostrophes
     (joined, never split); dotted acronyms; the ampersand/"and" spelling;
-    Roman numerals ii-ix and the number words zero-ten, per whole token.
+    Roman numerals ii-ix, the number words zero-ten and the "versus"/"vs"
+    spelling, per whole token.
 
     What it deliberately does NOT fold: "x" and a lone "i" (see
     _ROMAN_TOKEN_TO_ARABIC), because "Mega Man X" is not "Mega Man 10".
@@ -157,7 +166,10 @@ def match_key(value: str) -> str:
     tokens = []
     for token in re.findall(r"[a-z0-9]+", folded):
         tokens.append(
-            _ROMAN_TOKEN_TO_ARABIC.get(token) or _NUMBER_WORD_TO_DIGITS.get(token) or token
+            _ROMAN_TOKEN_TO_ARABIC.get(token)
+            or _NUMBER_WORD_TO_DIGITS.get(token)
+            or _SPELLING_TOKEN_ALIASES.get(token)
+            or token
         )
     return " ".join(tokens)
 
@@ -165,7 +177,13 @@ def match_key(value: str) -> str:
 def normalize_catalog_title(name: str) -> str:
     cleaned = _ascii_fold(name)
     cleaned = cleaned.replace("™", "").replace("®", "")
-    cleaned = re.sub(r"\(TM\)|\(R\)|\bTM\b|\bR\b", "", cleaned)
+    # The bare-word arms are guarded against a neighbouring period: "F.E.A.R."
+    # and "S.T.A.L.K.E.R." carry a lone "R" between dots, and stripping it left
+    # "F.E.A.." — a title that then compared equal to nothing, silently, in
+    # every consumer of normalize_edition_comparison_title (the IGDB gate, the
+    # PSN SKU fold, the acquisition edition probe). A real trademark marker is
+    # never dot-adjacent; "(R)" and "(TM)" above still catch the common form.
+    cleaned = re.sub(r"\(TM\)|\(R\)|(?<!\.)\bTM\b(?!\.)|(?<!\.)\bR\b(?!\.)", "", cleaned)
     cleaned = re.sub(r"(?<=[A-Za-z])TM(?=[:\s]|$)", "", cleaned)
     cleaned = cleaned.replace("–", "-").replace("—", "-")
     cleaned = re.sub(r"\(\s*(\d{4})\s*\)$", "", cleaned)
@@ -323,9 +341,13 @@ _COMPARISON_QUALIFIER = (
     r"(?:game of the (?:year|century)|goty|complete|ultimate|deluxe|premium"
     r"|gold|platinum|definitive|standard|enhanced|legendary|anniversary"
     r"|collector'?s|remastered|redux|classic|uncut|uncensored|unrated"
-    r"|digital)\+?"
+    r"|digital|day one|launch)\+?"
 )
-_COMPARISON_EDITION_PATTERNS = (
+# STRICT patterns: a KNOWN edition word (or a trailing year), nothing else.
+# What separates these from the generic tail below is evidence — every phrase
+# here is one a storefront actually uses to repackage the same game, so an
+# equality reached through them is an edition relationship and not a guess.
+_STRICT_COMPARISON_EDITION_PATTERNS = (
     # Qualifier-anchored tail: a known edition word, up to two words riding
     # along, and an optional "Edition" ("… Ultimate Sith Edition", "…: The
     # Complete Edition", "… Ultimate Box", "Cities XL Platinum"). Anchoring on
@@ -336,19 +358,55 @@ _COMPARISON_EDITION_PATTERNS = (
         r"(?:\s+edition)?\s*$",
         re.IGNORECASE,
     ),
+    # Trailing release-year marker ("Mass Effect (2007)").
+    re.compile(r"\s*\(\s*\d{4}\s*\)\s*$"),
+)
+
+_COMPARISON_EDITION_PATTERNS = (
+    *_STRICT_COMPARISON_EDITION_PATTERNS,
     # Generic tail for SKU words no list can enumerate ("STRAFE: Millennium
     # Edition", "DARK SOULS: Prepare To Die Edition"). Runs AFTER the
     # qualifier-anchored rule, which has already claimed the cases where a
     # known edition word starts the tail — otherwise leftmost matching here
     # would cut a title short ("… The Force | Unleashed Ultimate Sith
-    # Edition"). Over-stripping is bounded by how this is used: a suffix is
-    # only ever called an edition when BOTH names collapse to the same title,
-    # so a genuinely different SKU ("Sacred 2 Gold" vs "Sacred 2: Fallen
-    # Angel") still reads as a mismatch.
+    # Edition"). It is a GUESS: the words it eats are arbitrary, so
+    # "Minecraft: Education Edition" collapses onto "Minecraft" just as
+    # readily as a real SKU does. Over-stripping is bounded by how this is
+    # used — a suffix is only ever called an edition when BOTH names collapse
+    # to the same title, so a genuinely different SKU ("Sacred 2 Gold" vs
+    # "Sacred 2: Fallen Angel") still reads as a mismatch — and any caller
+    # that LINKS rather than reports must tell the two strips apart
+    # (igdb.py's gate ranks a generic-tail equality below a strict one and
+    # demands year evidence for it).
     re.compile(r"[\s:–—-]+(?:the\s+)?(?:[\w'&.]+\s+){0,3}edition\s*$", re.IGNORECASE),
-    # Trailing release-year marker ("Mass Effect (2007)").
-    re.compile(r"\s*\(\s*\d{4}\s*\)\s*$"),
 )
+
+
+def _strip_edition_suffixes(name: str, patterns: tuple[re.Pattern[str], ...]) -> str:
+    """Loop ``normalize_catalog_title`` with ``patterns`` until stable."""
+    cleaned = name
+    previous = None
+    while cleaned != previous:
+        previous = cleaned
+        cleaned = normalize_catalog_title(cleaned)
+        for pattern in patterns:
+            cleaned = pattern.sub("", cleaned)
+    return cleaned
+
+
+def normalize_strict_edition_title(name: str) -> str:
+    """``normalize_edition_comparison_title`` without the generic SKU guess.
+
+    Same loop, KNOWN edition phrases only (`_STRICT_COMPARISON_EDITION_PATTERNS`):
+    "Watch Dogs: Day One Edition" and "Nioh 2 - The Complete Edition" still
+    collapse onto their base games, while "Minecraft: Education Edition" keeps
+    its tail — "Education" is not an edition word, it is a different product.
+    Use this wherever an equality DECIDES something (igdb.py's resolver gate
+    ranks a strict equality above a generic-tail one); the full form stays for
+    report/dedup callers that only ever describe a relationship.
+    """
+    normalized = match_key(_strip_edition_suffixes(name, _STRICT_COMPARISON_EDITION_PATTERNS))
+    return normalized or match_key(name)
 
 
 def strip_comparison_edition_suffixes(name: str) -> str:
@@ -363,14 +421,7 @@ def strip_comparison_edition_suffixes(name: str) -> str:
     ``normalize_search_text`` for the prefilter, then confirm the hit with
     ``normalize_edition_comparison_title``.
     """
-    cleaned = name
-    previous = None
-    while cleaned != previous:
-        previous = cleaned
-        cleaned = normalize_catalog_title(cleaned)
-        for pattern in _COMPARISON_EDITION_PATTERNS:
-            cleaned = pattern.sub("", cleaned)
-    return cleaned
+    return _strip_edition_suffixes(name, _COMPARISON_EDITION_PATTERNS)
 
 
 def normalize_edition_comparison_title(name: str) -> str:
@@ -386,6 +437,12 @@ def normalize_edition_comparison_title(name: str) -> str:
     that IS just an edition phrase would strip to nothing, so the original's
     normalization is returned in that case rather than an empty string that
     would compare equal to every other fully-stripped name.
+
+    Includes the GENERIC "<up to 3 words> Edition" tail, which is a guess:
+    "Minecraft: Education Edition" collapses onto "Minecraft" just as readily
+    as a real SKU does. Fine for describing a relationship; a caller that
+    LINKS on the answer wants ``normalize_strict_edition_title`` (or must add
+    its own evidence, as igdb.py's resolver gate does with the release year).
     """
     normalized = match_key(strip_comparison_edition_suffixes(name))
     return normalized or match_key(name)
