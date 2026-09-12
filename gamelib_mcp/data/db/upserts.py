@@ -1043,6 +1043,83 @@ async def upsert_game_platform_identifier(
 
 
 @retry_on_write_contention
+async def upsert_game_aliases(
+    game_id: int,
+    aliases: Iterable[str],
+    *,
+    alias_type: str = "edition",
+    source: str | None = None,
+    source_key: str | None = None,
+    prune_stale_source_keys: bool = False,
+) -> None:
+    """Seed several aliases for one game in ONE connection and ONE commit.
+
+    ``upsert_game_alias`` opens a connection, reads and commits per alias;
+    IGDB hands back up to ``ALTERNATIVE_NAME_CAP`` alternative names per
+    record and that runs inside the enrichment loop, so the per-alias shape
+    meant a dozen connections and a dozen commits for one game. Batching
+    mirrors ``upsert_game_series_links``.
+
+    ``prune_stale_source_keys`` first deletes this game's aliases from the
+    SAME ``source`` carrying a DIFFERENT ``source_key`` — the rows a re-link
+    leaves behind when the external mapping re-points a row at another IGDB
+    record (or a drift reset does), which would otherwise keep the wrong
+    record's spellings forever. It runs even when ``aliases`` is empty, since
+    "the new record has no alternative names" is exactly a case where the old
+    ones must still go, and it needs both ``source`` and ``source_key`` (there
+    is nothing to compare against otherwise). Aliases from other sources — a
+    hand-added edition alias, another provider's name — are never touched.
+    """
+    prepared: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for alias in aliases:
+        alias_normalized = normalize_search_text(alias)
+        if not alias_normalized or alias_normalized in seen:
+            continue
+        seen.add(alias_normalized)
+        prepared.append((alias, alias_normalized))
+
+    prune = prune_stale_source_keys and source is not None and source_key is not None
+    if not prepared and not prune:
+        return
+
+    async with get_db() as db:
+        if prune:
+            await db.execute(
+                """DELETE FROM game_aliases
+                   WHERE game_id = ?
+                     AND COALESCE(source, '') = ?
+                     AND COALESCE(source_key, '') != ?""",
+                (game_id, source, source_key),
+            )
+        for alias, alias_normalized in prepared:
+            row = await db.execute_fetchone(
+                """SELECT id FROM game_aliases
+                   WHERE game_id = ?
+                     AND alias_normalized = ?
+                     AND alias_type = ?
+                     AND COALESCE(source, '') = COALESCE(?, '')
+                     AND COALESCE(source_key, '') = COALESCE(?, '')
+                   LIMIT 1""",
+                (game_id, alias_normalized, alias_type, source, source_key),
+            )
+            if row is None:
+                await db.execute(
+                    """INSERT INTO game_aliases
+                       (game_id, alias, alias_normalized, alias_type, source, source_key)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (game_id, alias, alias_normalized, alias_type, source, source_key),
+                )
+            else:
+                await db.execute(
+                    """UPDATE game_aliases
+                       SET alias = ?, source = ?, source_key = ?
+                       WHERE id = ?""",
+                    (alias, source, source_key, row["id"]),
+                )
+        await db.commit()
+
+
 async def upsert_game_alias(
     game_id: int,
     alias: str,
@@ -1051,36 +1128,14 @@ async def upsert_game_alias(
     source: str | None = None,
     source_key: str | None = None,
 ) -> None:
-    alias_normalized = normalize_search_text(alias)
-    if not alias_normalized:
-        return
-
-    async with get_db() as db:
-        row = await db.execute_fetchone(
-            """SELECT id FROM game_aliases
-               WHERE game_id = ?
-                 AND alias_normalized = ?
-                 AND alias_type = ?
-                 AND COALESCE(source, '') = COALESCE(?, '')
-                 AND COALESCE(source_key, '') = COALESCE(?, '')
-               LIMIT 1""",
-            (game_id, alias_normalized, alias_type, source, source_key),
-        )
-        if row is None:
-            await db.execute(
-                """INSERT INTO game_aliases
-                   (game_id, alias, alias_normalized, alias_type, source, source_key)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (game_id, alias, alias_normalized, alias_type, source, source_key),
-            )
-        else:
-            await db.execute(
-                """UPDATE game_aliases
-                   SET alias = ?, source = ?, source_key = ?
-                   WHERE id = ?""",
-                (alias, source, source_key, row["id"]),
-            )
-        await db.commit()
+    """One alias, one round trip — the batch above with a single entry."""
+    await upsert_game_aliases(
+        game_id,
+        [alias],
+        alias_type=alias_type,
+        source=source,
+        source_key=source_key,
+    )
 
 
 async def seed_platform_provider_alias(

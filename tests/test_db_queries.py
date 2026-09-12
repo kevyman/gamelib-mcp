@@ -5,6 +5,8 @@ These exercise load_platforms_for_games (queries.py) and a claim round-trip
 after the package split.
 """
 
+import contextlib
+
 from conftest import (
     ToolDBTestCase,
     add_enrichment,
@@ -223,6 +225,24 @@ class ResolverVersionClaimTests(ToolDBTestCase):
         self.assertEqual(claimed[0], fresh)
         self.assertEqual(sorted(claimed[1:]), sorted([stale_a, stale_b]))
 
+    async def test_a_generation_two_no_match_is_claimable_by_generation_three(self):
+        # The contract from #185, exercised on the first bump that uses it:
+        # generation 3 changed matching rules (alternative names, GOG external
+        # ids, "versus", the broader edition strip), so every generation-2
+        # no-match re-queues itself with no migration.
+        self.assertGreaterEqual(IGDB_RESOLVER_VERSION, 3)
+        stale = await seed_game("Checked By Generation Two")
+        linked = await seed_game("Linked By Generation Two")
+        await self._stamp(stale, version=2)
+        await self._stamp(linked, version=2, igdb_id=4242)
+
+        claimed = await db_module.claim_game_ids_for_igdb(
+            limit=10, stale_before=self._PAST, resolver_version=IGDB_RESOLVER_VERSION
+        )
+
+        self.assertIn(stale, claimed)
+        self.assertNotIn(linked, claimed)
+
     async def test_the_game_ids_scope_still_narrows_the_claim(self):
         wanted = await seed_game("Wanted")
         other = await seed_game("Other")
@@ -283,3 +303,135 @@ class SeedPlatformProviderAliasTests(ToolDBTestCase):
         async with db_module.get_db() as db:
             count = await db.execute_fetchone("SELECT COUNT(*) AS c FROM game_aliases")
         self.assertEqual(count["c"], 0)
+
+
+class _CommitCountingConnection:
+    """Delegating wrapper that counts commits on one connection."""
+
+    def __init__(self, conn, counters: dict):
+        self._conn = conn
+        self._counters = counters
+
+    async def commit(self):
+        self._counters["commits"] += 1
+        return await self._conn.commit()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+class UpsertGameAliasesBatchTests(ToolDBTestCase):
+    """upsert_game_aliases — N aliases, one connection, one commit.
+
+    IGDB hands back up to ALTERNATIVE_NAME_CAP alternative names per record
+    and _apply_igdb_metadata runs inside the enrichment loop, so the per-alias
+    shape meant a dozen connections and a dozen commits for one game.
+    """
+
+    async def _aliases(self, game_id: int) -> list[dict]:
+        async with db_module.get_db() as db:
+            rows = await db.execute_fetchall(
+                "SELECT alias, alias_type, source, source_key FROM game_aliases "
+                "WHERE game_id = ? ORDER BY id",
+                (game_id,),
+            )
+        return [dict(r) for r in rows]
+
+    @contextlib.contextmanager
+    def _counting_db(self, counters: dict):
+        from gamelib_mcp.data.db import upserts as upserts_module
+
+        real_get_db = db_module.get_db
+
+        @contextlib.asynccontextmanager
+        async def counting_get_db():
+            counters["opens"] += 1
+            async with real_get_db() as conn:
+                yield _CommitCountingConnection(conn, counters)
+
+        original = upserts_module.get_db
+        upserts_module.get_db = counting_get_db
+        try:
+            yield
+        finally:
+            upserts_module.get_db = original
+
+    async def test_many_aliases_take_one_connection_and_one_commit(self) -> None:
+        game_id = await seed_game("Grand Theft Auto V")
+        counters = {"opens": 0, "commits": 0}
+
+        with self._counting_db(counters):
+            await db_module.upsert_game_aliases(
+                game_id,
+                [f"Alt {i}" for i in range(8)],
+                alias_type="alternative_name",
+                source="igdb",
+                source_key="1020",
+            )
+
+        self.assertEqual(counters["opens"], 1)
+        self.assertEqual(counters["commits"], 1)
+        self.assertEqual(len(await self._aliases(game_id)), 8)
+
+    async def test_re_running_is_idempotent_and_deduplicates_within_a_call(self) -> None:
+        game_id = await seed_game("Grand Theft Auto V")
+
+        for _ in range(2):
+            await db_module.upsert_game_aliases(
+                game_id,
+                ["GTA V", "gta  v", "GTA 5", ""],
+                alias_type="alternative_name",
+                source="igdb",
+                source_key="1020",
+            )
+
+        # "gta  v" normalizes onto "GTA V" — the first spelling wins, the
+        # empty string is dropped, and the second run adds nothing.
+        aliases = await self._aliases(game_id)
+        self.assertEqual([a["alias"] for a in aliases], ["GTA V", "GTA 5"])
+
+    async def test_pruning_drops_only_this_sources_other_keys(self) -> None:
+        game_id = await seed_game("Re-linked Row")
+        await db_module.upsert_game_alias(game_id, "Hand Added", alias_type="edition")
+        await db_module.upsert_game_alias(
+            game_id, "Other Provider", alias_type="provider_name", source="metacritic"
+        )
+        await db_module.upsert_game_aliases(
+            game_id,
+            ["Old Spelling"],
+            alias_type="alternative_name",
+            source="igdb",
+            source_key="111",
+        )
+
+        # A record with NO alternative names must still prune — that is
+        # exactly the re-link the stale rows would survive otherwise.
+        await db_module.upsert_game_aliases(
+            game_id,
+            [],
+            alias_type="alternative_name",
+            source="igdb",
+            source_key="222",
+            prune_stale_source_keys=True,
+        )
+
+        aliases = await self._aliases(game_id)
+        self.assertEqual(
+            [(a["alias"], a["source"]) for a in aliases],
+            [("Hand Added", None), ("Other Provider", "metacritic")],
+        )
+
+    async def test_without_the_flag_nothing_is_pruned(self) -> None:
+        game_id = await seed_game("Untouched Row")
+        await db_module.upsert_game_aliases(
+            game_id, ["Old"], alias_type="alternative_name", source="igdb",
+            source_key="111",
+        )
+        await db_module.upsert_game_aliases(
+            game_id, ["New"], alias_type="alternative_name", source="igdb",
+            source_key="222",
+        )
+
+        self.assertEqual(
+            [a["alias"] for a in await self._aliases(game_id)], ["Old", "New"]
+        )

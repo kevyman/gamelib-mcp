@@ -269,7 +269,7 @@ class IGDBRetryTests(unittest.IsolatedAsyncioTestCase):
             await igdb.search_game("Portal 2")
 
         query = post_mock.await_args.args[0]
-        self.assertIn("fields id, name, category, game_type, first_release_date", query)
+        self.assertIn("fields id, name, alternative_names.name, category, game_type", query)
         self.assertIn("parent_game.id, parent_game.name", query)
         self.assertIn("version_parent.id, version_parent.name", query)
         self.assertNotIn("category !=", query)
@@ -1346,6 +1346,13 @@ class ResolveGameZeroResultLadderTests(unittest.IsolatedAsyncioTestCase):
         # title would reject it — "2026" reads as a sequel number in
         # titles_conflict_on_identity. Identity-preserving variants must gate
         # against the variant itself.
+        #
+        # "2026 Edition" is a GENERIC tail though (no edition-word list holds
+        # "2026"), so the rung vouches for identity and nothing more: the
+        # match is tier-3 strength and the row's own release year has to agree
+        # with the candidate's. Without that evidence the same call refuses —
+        # this is the shape "Minecraft: Education Edition" also has, and there
+        # the older record is a different product entirely.
         base_game = igdb.IGDBGame(
             igdb_id=27159,
             name="Sea of Thieves",
@@ -1363,10 +1370,16 @@ class ResolveGameZeroResultLadderTests(unittest.IsolatedAsyncioTestCase):
             patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
             patch("gamelib_mcp.data.igdb.search_game", AsyncMock(side_effect=fake_search_game)),
         ):
-            result = await igdb.resolve_game("Sea of Thieves: 2026 Edition", None)
+            result = await igdb.resolve_game(
+                "Sea of Thieves: 2026 Edition",
+                None,
+                reference_release_date="2018-03-20",
+            )
+            unevidenced = await igdb.resolve_game("Sea of Thieves: 2026 Edition", None)
 
         self.assertIsNotNone(result)
         self.assertEqual(result.igdb_id, 27159)
+        self.assertIsNone(unevidenced)
 
     async def test_gate_rejected_nonempty_results_fall_through_to_ladder(self) -> None:
         # P2 regression: the initial search for "Sea of Thieves: 2026
@@ -1393,7 +1406,11 @@ class ResolveGameZeroResultLadderTests(unittest.IsolatedAsyncioTestCase):
             patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
             patch("gamelib_mcp.data.igdb.search_game", AsyncMock(side_effect=fake_search_game)),
         ):
-            result = await igdb.resolve_game("Sea of Thieves: 2026 Edition", None)
+            result = await igdb.resolve_game(
+                "Sea of Thieves: 2026 Edition",
+                None,
+                reference_release_date="2018-03-20",
+            )
 
         self.assertIsNotNone(result)
         self.assertEqual(result.igdb_id, 27159)
@@ -2376,18 +2393,21 @@ class IGDBBackfillExternalGamesTests(unittest.IsolatedAsyncioTestCase):
             {"id": 8, "name": "B", "igdb_id": None, "manual_overrides": None, "steam_appid": "2"},
         ]
 
+        boom = RuntimeError("IGDB down")
+
         with (
             self._creds_env(),
             patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7, 8])),
             patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=rows)),
             patch(
                 "gamelib_mcp.data.igdb.resolve_steam_appids_to_igdb",
-                AsyncMock(side_effect=RuntimeError("IGDB down")),
+                AsyncMock(side_effect=boom),
             ),
             patch("gamelib_mcp.data.igdb.fetch_game_by_id", AsyncMock()) as fetch_by_id,
             patch("gamelib_mcp.data.igdb._resolve_game_with_status", AsyncMock()) as resolve_game,
             patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
             patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()) as release_claim,
+            patch("gamelib_mcp.data.igdb.provider_health") as health,
             self.assertLogs("gamelib_mcp.data.igdb", level="WARNING") as logs,
         ):
             count = await igdb.backfill_missing_games(limit=2)
@@ -2398,6 +2418,9 @@ class IGDBBackfillExternalGamesTests(unittest.IsolatedAsyncioTestCase):
         mark_checked.assert_not_awaited()
         self.assertEqual(release_claim.await_count, 2)
         self.assertTrue(any("external_games lookup failed" in line for line in logs.output))
+        # Logged is not enough: the pass returns "rows resolved", so a dead
+        # external_games endpoint is invisible unless it is also counted.
+        health.record_failure.assert_called_once_with("igdb", boom)
 
 
 class IGDBCanaryTests(unittest.IsolatedAsyncioTestCase):
@@ -2759,3 +2782,338 @@ class GetIgdbChildrenCachedTests(unittest.IsolatedAsyncioTestCase):
             result2 = await igdb.get_igdb_children_cached(42)
 
         self.assertEqual(result2, [])
+
+
+class AlternativeNameParsingTests(unittest.TestCase):
+    """``alternative_names`` off the wire: cleaned, deduplicated, capped."""
+
+    def _item(self, alternative_names) -> dict:
+        return {
+            "id": 1020,
+            "name": "Grand Theft Auto V",
+            "category": 0,
+            "alternative_names": alternative_names,
+        }
+
+    def test_alternative_names_are_parsed_stripped_and_ordered(self) -> None:
+        parsed = igdb._parse_igdb_item(
+            self._item([{"name": "  GTA V  "}, {"name": "GTA 5"}])
+        )
+        self.assertEqual(parsed.alternative_names, ["GTA V", "GTA 5"])
+
+    def test_the_primary_name_and_duplicates_are_dropped(self) -> None:
+        parsed = igdb._parse_igdb_item(
+            self._item(
+                [
+                    {"name": "Grand Theft Auto V"},
+                    {"name": "grand theft auto v"},
+                    {"name": "GTA V"},
+                    {"name": "gta v"},
+                    {"name": ""},
+                    {"name": None},
+                    "not a dict",
+                ]
+            )
+        )
+        self.assertEqual(parsed.alternative_names, ["GTA V"])
+
+    def test_alternative_names_are_capped(self) -> None:
+        parsed = igdb._parse_igdb_item(
+            self._item([{"name": f"Alt {i}"} for i in range(30)])
+        )
+        self.assertEqual(len(parsed.alternative_names), igdb.ALTERNATIVE_NAME_CAP)
+        self.assertEqual(parsed.alternative_names[0], "Alt 0")
+
+    def test_a_record_without_alternative_names_parses_to_an_empty_list(self) -> None:
+        parsed = igdb._parse_igdb_item({"id": 5, "name": "Hades", "category": 0})
+        self.assertEqual(parsed.alternative_names, [])
+
+    def test_both_query_builders_request_alternative_names(self) -> None:
+        self.assertIn(
+            "alternative_names.name", igdb._build_search_game_query("Hades", 6)
+        )
+        self.assertIn(
+            "alternative_names.name", igdb._build_exact_name_query("Hades", 6)
+        )
+        # _FETCH_BY_ID_FIELDS backs both the exact-name and by-id fetches.
+        self.assertIn("alternative_names.name", igdb._FETCH_BY_ID_FIELDS)
+
+
+class ResolveExternalIdsTests(unittest.IsolatedAsyncioTestCase):
+    """One external_games helper, one category per store."""
+
+    def _env(self):
+        return patch.dict(
+            "os.environ",
+            {"TWITCH_CLIENT_ID": "client", "TWITCH_CLIENT_SECRET": "secret"},
+            clear=True,
+        )
+
+    async def _capture(self, coro_factory) -> dict:
+        captured: dict = {}
+
+        async def fake_post(query, headers, url=None):
+            captured["query"] = query
+            captured["url"] = url
+            return [{"game": 7, "uid": "1207658930"}]
+
+        with (
+            self._env(),
+            patch("gamelib_mcp.data.igdb._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.igdb._post_igdb_games", side_effect=fake_post),
+        ):
+            captured["result"] = await coro_factory()
+        return captured
+
+    async def test_gog_lookups_send_category_five(self) -> None:
+        captured = await self._capture(
+            lambda: igdb.resolve_external_ids_to_igdb(
+                igdb.IGDB_EXTERNAL_CATEGORY_GOG, ["1207658930"]
+            )
+        )
+        self.assertIn("where category = 5 & uid = (\"1207658930\")", captured["query"])
+        self.assertEqual(captured["url"], igdb._IGDB_EXTERNAL_GAMES_URL)
+        self.assertEqual(captured["result"], {"1207658930": 7})
+
+    async def test_the_steam_wrapper_still_sends_category_one(self) -> None:
+        captured = await self._capture(
+            lambda: igdb.resolve_steam_appids_to_igdb(["1207658930"])
+        )
+        self.assertIn("where category = 1 &", captured["query"])
+        self.assertEqual(captured["result"], {"1207658930": 7})
+
+    async def test_category_constants(self) -> None:
+        self.assertEqual(igdb.IGDB_EXTERNAL_CATEGORY_STEAM, 1)
+        self.assertEqual(igdb.IGDB_EXTERNAL_CATEGORY_GOG, 5)
+
+    async def test_no_uids_short_circuits_without_a_request(self) -> None:
+        with (
+            self._env(),
+            patch(
+                "gamelib_mcp.data.igdb._post_igdb_games",
+                AsyncMock(side_effect=AssertionError("should not post")),
+            ),
+        ):
+            self.assertEqual(
+                await igdb.resolve_external_ids_to_igdb(
+                    igdb.IGDB_EXTERNAL_CATEGORY_GOG, []
+                ),
+                {},
+            )
+
+
+class IGDBBackfillGogExternalGamesTests(unittest.IsolatedAsyncioTestCase):
+    """GOG product ids resolve through external_games exactly like Steam appids.
+
+    107 of the library's 131 GOG-identified rows were unlinked while name
+    resolution was the only path open to them; IGDB maps GOG ids (category 5)
+    just as authoritatively as Steam appids.
+    """
+
+    def setUp(self) -> None:
+        igdb._consecutive_backfill_misses = 0
+
+    def tearDown(self) -> None:
+        igdb._consecutive_backfill_misses = 0
+
+    def _creds_env(self):
+        return patch.dict(
+            "os.environ",
+            {"TWITCH_CLIENT_ID": "cid", "TWITCH_CLIENT_SECRET": "secret"},
+            clear=False,
+        )
+
+    def _game(self, igdb_id: int, name: str) -> "igdb.IGDBGame":
+        return igdb.IGDBGame(
+            igdb_id=igdb_id,
+            name=name,
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2015-05-19",
+            platforms=[6],
+        )
+
+    async def test_a_gog_only_row_links_through_the_gog_mapping(self) -> None:
+        row = {
+            "id": 7,
+            "name": "The Witcher 3: Wild Hunt",
+            "igdb_id": None,
+            "manual_overrides": None,
+            "steam_appid": None,
+            "gog_product_id": "1207664663",
+        }
+        fetched = self._game(1942, "The Witcher 3: Wild Hunt")
+
+        with (
+            self._creds_env(),
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[row])),
+            patch(
+                "gamelib_mcp.data.igdb.resolve_steam_appids_to_igdb", AsyncMock(return_value={})
+            ) as steam_batch,
+            patch(
+                "gamelib_mcp.data.igdb.resolve_external_ids_to_igdb",
+                AsyncMock(return_value={"1207664663": 1942}),
+            ) as gog_batch,
+            patch("gamelib_mcp.data.igdb.fetch_game_by_id", AsyncMock(return_value=fetched)) as fetch_by_id,
+            patch("gamelib_mcp.data.igdb._resolve_game_with_status", AsyncMock()) as resolve_game,
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock()),
+            patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
+            patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
+        ):
+            count = await igdb.backfill_missing_games(limit=1)
+
+        self.assertEqual(count, 1)
+        steam_batch.assert_not_awaited()  # no appid to ask about
+        gog_batch.assert_awaited_once_with(
+            igdb.IGDB_EXTERNAL_CATEGORY_GOG, ["1207664663"]
+        )
+        fetch_by_id.assert_awaited_once_with(1942, suppress_errors=False)
+        resolve_game.assert_not_awaited()
+        apply_metadata.assert_awaited_once_with(7, fetched)
+
+    async def test_a_steam_mapped_row_is_never_asked_about_on_gog(self) -> None:
+        rows = [
+            {
+                "id": 7,
+                "name": "Layers of Fear",
+                "igdb_id": None,
+                "manual_overrides": None,
+                "steam_appid": "391720",
+                "gog_product_id": "1450867339",
+            },
+            {
+                "id": 8,
+                "name": "The Witcher 3: Wild Hunt",
+                "igdb_id": None,
+                "manual_overrides": None,
+                "steam_appid": "292030",
+                "gog_product_id": "1207664663",
+            },
+        ]
+        steam_hit = self._game(111, "Layers of Fear")
+        gog_hit = self._game(1942, "The Witcher 3: Wild Hunt")
+
+        async def fake_fetch_by_id(igdb_id, *, suppress_errors=True):
+            return {111: steam_hit, 1942: gog_hit}[igdb_id]
+
+        with (
+            self._creds_env(),
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7, 8])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=rows)),
+            patch(
+                "gamelib_mcp.data.igdb.resolve_steam_appids_to_igdb",
+                AsyncMock(return_value={"391720": 111}),
+            ),
+            patch(
+                "gamelib_mcp.data.igdb.resolve_external_ids_to_igdb",
+                AsyncMock(return_value={"1207664663": 1942}),
+            ) as gog_batch,
+            patch("gamelib_mcp.data.igdb.fetch_game_by_id", AsyncMock(side_effect=fake_fetch_by_id)),
+            patch("gamelib_mcp.data.igdb._resolve_game_with_status", AsyncMock()) as resolve_game,
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock()),
+            patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
+            patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
+        ):
+            count = await igdb.backfill_missing_games(limit=2)
+
+        self.assertEqual(count, 2)
+        # Only the row Steam could not map is in the GOG batch.
+        gog_batch.assert_awaited_once_with(
+            igdb.IGDB_EXTERNAL_CATEGORY_GOG, ["1207664663"]
+        )
+        resolve_game.assert_not_awaited()
+        self.assertEqual(
+            [call.args for call in apply_metadata.await_args_list],
+            [(7, steam_hit), (8, gog_hit)],
+        )
+
+    async def test_the_name_agreement_guard_applies_to_the_gog_path(self) -> None:
+        # Same shape as the FTL incident, one store over: the mapping's record
+        # disagrees with the row's name while the stored link agrees.
+        row = {
+            "id": 7,
+            "name": "FTL: Faster Than Light",
+            "igdb_id": 3075,
+            "manual_overrides": None,
+            "steam_appid": None,
+            "gog_product_id": "1207666843",
+        }
+        junk = self._game(178437, "Faster than light?")
+        stored = self._game(3075, "FTL: Faster Than Light")
+
+        async def fake_fetch_by_id(igdb_id, *, suppress_errors=True):
+            return {178437: junk, 3075: stored}[igdb_id]
+
+        with (
+            self._creds_env(),
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=[row])),
+            patch("gamelib_mcp.data.igdb.resolve_steam_appids_to_igdb", AsyncMock(return_value={})),
+            patch(
+                "gamelib_mcp.data.igdb.resolve_external_ids_to_igdb",
+                AsyncMock(return_value={"1207666843": 178437}),
+            ),
+            patch("gamelib_mcp.data.igdb.fetch_game_by_id", AsyncMock(side_effect=fake_fetch_by_id)),
+            patch("gamelib_mcp.data.igdb._resolve_game_with_status", AsyncMock()) as resolve_game,
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock()),
+            patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
+            patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
+            self.assertLogs("gamelib_mcp.data.igdb", level="INFO") as logs,
+        ):
+            await igdb.backfill_missing_games(limit=1)
+
+        apply_metadata.assert_awaited_once_with(7, stored)
+        resolve_game.assert_not_awaited()
+        self.assertTrue(any("keeping stored igdb_id" in line for line in logs.output))
+        self.assertTrue(any("gog_product_id=1207666843" in line for line in logs.output))
+
+    async def test_a_gog_batch_failure_leaves_the_whole_pass_retryable(self) -> None:
+        rows = [
+            {
+                "id": 7,
+                "name": "A",
+                "igdb_id": None,
+                "manual_overrides": None,
+                "steam_appid": None,
+                "gog_product_id": "1",
+            },
+            {
+                "id": 8,
+                "name": "B",
+                "igdb_id": None,
+                "manual_overrides": None,
+                "steam_appid": None,
+                "gog_product_id": "2",
+            },
+        ]
+
+        boom = RuntimeError("IGDB down")
+
+        with (
+            self._creds_env(),
+            patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7, 8])),
+            patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=rows)),
+            patch("gamelib_mcp.data.igdb.resolve_steam_appids_to_igdb", AsyncMock(return_value={})),
+            patch(
+                "gamelib_mcp.data.igdb.resolve_external_ids_to_igdb",
+                AsyncMock(side_effect=boom),
+            ),
+            patch("gamelib_mcp.data.igdb.fetch_game_by_id", AsyncMock()) as fetch_by_id,
+            patch("gamelib_mcp.data.igdb._resolve_game_with_status", AsyncMock()) as resolve_game,
+            patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()) as release_claim,
+            patch("gamelib_mcp.data.igdb.provider_health") as health,
+            self.assertLogs("gamelib_mcp.data.igdb", level="WARNING") as logs,
+        ):
+            count = await igdb.backfill_missing_games(limit=2)
+
+        self.assertEqual(count, 0)
+        fetch_by_id.assert_not_awaited()
+        resolve_game.assert_not_awaited()
+        mark_checked.assert_not_awaited()
+        self.assertEqual(release_claim.await_count, 2)
+        self.assertTrue(any("GOG lookup failed" in line for line in logs.output))
+        health.record_failure.assert_called_once_with("igdb", boom)

@@ -647,6 +647,149 @@ class ApplyIgdbMetadataAliasSeedTests(ToolDBTestCase):
         self.assertEqual(await self._read_aliases(game_id), [])
 
 
+class ApplyIgdbMetadataAlternativeNameAliasTests(ToolDBTestCase):
+    """IGDB's alternative names land in game_aliases, for LIBRARY-side search.
+
+    The resolver reads alternative names off the IGDB record directly; these
+    rows exist so that searching or matching the library by the abbreviation
+    ("GTA V") finds the game, the same job the provider_name alias does for a
+    fuller title.
+    """
+
+    async def _read_aliases(self, game_id: int) -> list[dict]:
+        async with db_module.get_db() as db:
+            rows = await db.execute_fetchall(
+                "SELECT alias, alias_type, source, source_key FROM game_aliases "
+                "WHERE game_id = ? ORDER BY id",
+                (game_id,),
+            )
+        return [dict(r) for r in rows]
+
+    def _record(self, alternative_names: list[str]) -> igdb.IGDBGame:
+        return igdb.IGDBGame(
+            igdb_id=1020,
+            name="Grand Theft Auto V",
+            category=0,
+            first_release_date=None,
+            alternative_names=alternative_names,
+        )
+
+    async def test_alternative_names_are_persisted_as_aliases(self) -> None:
+        game_id = await seed_game("Grand Theft Auto V")
+
+        await igdb._apply_igdb_metadata(game_id, self._record(["GTA V", "GTA 5"]))
+
+        aliases = await self._read_aliases(game_id)
+        self.assertEqual(
+            [(a["alias"], a["alias_type"]) for a in aliases],
+            [("GTA V", "alternative_name"), ("GTA 5", "alternative_name")],
+        )
+        self.assertEqual({a["source"] for a in aliases}, {"igdb"})
+        self.assertEqual({a["source_key"] for a in aliases}, {"1020"})
+
+    async def test_re_running_is_idempotent(self) -> None:
+        game_id = await seed_game("Grand Theft Auto V")
+
+        await igdb._apply_igdb_metadata(game_id, self._record(["GTA V", "GTA 5"]))
+        await igdb._apply_igdb_metadata(game_id, self._record(["GTA V", "GTA 5"]))
+
+        self.assertEqual(len(await self._read_aliases(game_id)), 2)
+
+    async def test_an_alias_equal_to_the_row_name_is_skipped(self) -> None:
+        # It adds no information, exactly like the provider_name seed above.
+        game_id = await seed_game("Grand Theft Auto V")
+
+        await igdb._apply_igdb_metadata(
+            game_id, self._record(["grand theft auto v", "GTA V"])
+        )
+
+        aliases = await self._read_aliases(game_id)
+        self.assertEqual([a["alias"] for a in aliases], ["GTA V"])
+
+    async def test_a_re_link_drops_the_previous_records_aliases(self) -> None:
+        # The external mapping (Steam or GOG) re-points a row at a different
+        # IGDB record; the old record's spellings are simply wrong from then
+        # on, and an add-only seed would keep them forever.
+        game_id = await seed_game("Re-linked Row")
+        await db_module.upsert_game_alias(
+            game_id, "Hand Added Edition", alias_type="edition"
+        )
+        await db_module.upsert_game_alias(
+            game_id, "Another Provider", alias_type="provider_name", source="metacritic"
+        )
+
+        await igdb._apply_igdb_metadata(
+            game_id,
+            igdb.IGDBGame(
+                igdb_id=111,
+                name="Record One",
+                category=0,
+                first_release_date=None,
+                alternative_names=["R1 Alt"],
+            ),
+        )
+        await igdb._apply_igdb_metadata(
+            game_id,
+            igdb.IGDBGame(
+                igdb_id=222,
+                name="Record Two",
+                category=0,
+                first_release_date=None,
+                alternative_names=["R2 Alt"],
+            ),
+        )
+
+        aliases = await self._read_aliases(game_id)
+        self.assertEqual(
+            [(a["alias"], a["source"], a["source_key"]) for a in aliases],
+            [
+                ("Hand Added Edition", None, None),
+                ("Another Provider", "metacritic", None),
+                ("Record Two", "igdb", "222"),
+                ("R2 Alt", "igdb", "222"),
+            ],
+        )
+
+    async def test_a_re_link_to_a_record_without_alternative_names_still_prunes(
+        self,
+    ) -> None:
+        game_id = await seed_game("Re-linked Row")
+        await igdb._apply_igdb_metadata(
+            game_id,
+            igdb.IGDBGame(
+                igdb_id=111,
+                name="Record One",
+                category=0,
+                first_release_date=None,
+                alternative_names=["R1 Alt"],
+            ),
+        )
+
+        await igdb._apply_igdb_metadata(
+            game_id,
+            igdb.IGDBGame(
+                igdb_id=222, name="Re-linked Row", category=0, first_release_date=None
+            ),
+        )
+
+        self.assertEqual(await self._read_aliases(game_id), [])
+
+    async def test_a_pinned_igdb_id_persists_no_alternative_names(self) -> None:
+        # Same rule as the provider name: a record the user did not pin must
+        # not leave its spellings behind on the row.
+        game_id = await seed_game("Grand Theft Auto V")
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET manual_overrides = ? WHERE id = ?",
+                (json.dumps(["igdb_id"]), game_id),
+            )
+            await db.commit()
+
+        await igdb._apply_igdb_metadata(game_id, self._record(["GTA V"]))
+
+        self.assertEqual(await self._read_aliases(game_id), [])
+
+
 class ApplyIgdbMetadataTagUnionTests(ToolDBTestCase):
     async def test_igdb_tags_union_into_existing_steam_tags(self) -> None:
         # Existing (SteamSpy) tags must be kept, IGDB tags appended canonicalized,

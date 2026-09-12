@@ -9,7 +9,7 @@ import re
 import sqlite3
 import time
 from collections import deque
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -48,8 +48,10 @@ from .title_normalization import (
     is_non_game_title,
     match_key,
     normalize_catalog_title,
+    normalize_edition_comparison_title,
     normalize_search_text,
     normalize_series_gap_title,
+    normalize_strict_edition_title,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,9 +70,19 @@ MERGED_TAG_CAP = 30
 # into a link. Every row an older generation stamped with NO link is then
 # automatically re-queued by claim_game_ids_for_igdb; LINKED rows are never
 # touched by a bump (their version is not even read). Nothing else needs to
-# happen: no migration, no SQL guess at which titles moved. Generations 1 and 2
-# are the pre- and post-``match_key``/year-tiebreak resolvers respectively.
-IGDB_RESOLVER_VERSION = 2
+# happen: no migration, no SQL guess at which titles moved.
+#
+# Generations:
+#   1 — the pre-``match_key`` resolver (six ad-hoc normalizations).
+#   2 — one ``match_key`` + the year-aware tiebreak in _select_best_match.
+#   3 — IGDB ``alternative_names`` read by the gate (abbreviations and
+#       regional titles: "GTA V" -> "Grand Theft Auto V"); GOG product ids
+#       resolved through external_games alongside Steam appids; "versus"
+#       folded to "vs" in match_key; and the gate's edition-stripped tier
+#       widened from ``normalize_series_gap_title`` to
+#       ``normalize_edition_comparison_title`` ("Watch Dogs: Day One Edition"
+#       reaches "Watch Dogs"), which the year rules make safe.
+IGDB_RESOLVER_VERSION = 3
 
 
 def _merge_igdb_tags(existing: list[str], igdb_tags: list[str]) -> list[str]:
@@ -97,8 +109,12 @@ _TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 _IGDB_GAMES_URL = "https://api.igdb.com/v4/games"
 _IGDB_EXTERNAL_GAMES_URL = "https://api.igdb.com/v4/external_games"
 
-# IGDB external_games.category for storefront identifier lookups.
+# IGDB external_games.category for storefront identifier lookups. IGDB has
+# deprecated `category` in favour of `external_game_source` but still serves
+# and accepts it, and the whole external_games path here has always used it;
+# migrating is a separate change, not a side effect of adding a second store.
 IGDB_EXTERNAL_CATEGORY_STEAM = 1
+IGDB_EXTERNAL_CATEGORY_GOG = 5
 
 
 def igdb_credentials_configured() -> bool:
@@ -323,6 +339,14 @@ def _get_fallback_title_lock(name: str) -> asyncio.Lock:
     return lock
 
 
+# How many IGDB alternative names one record contributes to the gate and to
+# the persisted aliases. IGDB holds dozens for some franchises (every regional
+# and marketing spelling); a handful is what carries the abbreviation ("GTA V")
+# and the regional title, and the rest is noise in both the gate and the alias
+# table.
+ALTERNATIVE_NAME_CAP = 12
+
+
 @dataclass
 class IGDBGame:
     igdb_id: int
@@ -346,6 +370,33 @@ class IGDBGame:
     is_primary_library_item: bool = True
     alias_for_parent: bool = False
     cover_image_id: str | None = None  # images.igdb.com URL slug
+    # IGDB's own alternative spellings for this record — abbreviations ("GTA
+    # V"), regional titles, subtitle variants. Never includes the primary
+    # ``name``. The resolver gate reads them (an abbreviation exists NOWHERE
+    # else, so no normalization rule could ever bridge it) and
+    # ``_apply_igdb_metadata`` persists them as library-side aliases.
+    alternative_names: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # The alternative-name contract is enforced HERE and nowhere else:
+        # stripped, case-insensitively deduplicated, never the primary name,
+        # capped at ALTERNATIVE_NAME_CAP. Doing it in the dataclass means a
+        # hand-built record (tests, a future caller that isn't the parser) is
+        # bounded exactly like a parsed one, and no consumer has to re-apply
+        # the cap — the gate and the alias writer both read the field raw.
+        primary = (self.name or "").strip().casefold()
+        seen = {primary} if primary else set()
+        cleaned: list[str] = []
+        for alt in self.alternative_names:
+            value = (alt or "").strip()
+            key = value.casefold()
+            if not value or key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(value)
+            if len(cleaned) >= ALTERNATIVE_NAME_CAP:
+                break
+        self.alternative_names = cleaned
 
 
 async def _get_token() -> str:
@@ -499,7 +550,8 @@ def _build_search_game_query(
             filters.append(f"platforms = ({','.join(str(i) for i in ids)})")
     clauses = [
         (
-            "fields id, name, category, game_type, first_release_date, "
+            "fields id, name, alternative_names.name, category, game_type, "
+            "first_release_date, "
             "genres.name, themes.name, keywords.name, "
             "collections.id, collections.name, franchises.id, franchises.name, "
             "parent_game.id, parent_game.name, "
@@ -518,6 +570,19 @@ def _build_search_game_query(
     return " ".join(clauses)
 
 
+def _parse_alternative_names(item: dict) -> list[str]:
+    """The raw ``alternative_names`` strings off one IGDB item.
+
+    Extraction only — stripping, deduplication, dropping the primary name and
+    the cap all happen once, in ``IGDBGame.__post_init__``.
+    """
+    return [
+        entry["name"]
+        for entry in item.get("alternative_names") or []
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+    ]
+
+
 def _parse_igdb_item(item: dict) -> IGDBGame:
     """Convert a raw IGDB `games` endpoint item into an ``IGDBGame``.
 
@@ -534,6 +599,7 @@ def _parse_igdb_item(item: dict) -> IGDBGame:
     effective_category = category if category is not None else game_type
 
     genres = [g["name"] for g in item.get("genres") or []]
+    alternative_names = _parse_alternative_names(item)
     themes = [t["name"] for t in item.get("themes") or []]
     keywords = [k["name"] for k in item.get("keywords") or []]
     tags = list(dict.fromkeys(themes + keywords))[:30]  # deduplicate, cap at 30
@@ -598,6 +664,7 @@ def _parse_igdb_item(item: dict) -> IGDBGame:
             if isinstance(item.get("cover"), dict)
             else None
         ),
+        alternative_names=alternative_names,
     )
 
 
@@ -708,7 +775,8 @@ async def fetch_games_by_exact_name(
 
 
 _FETCH_BY_ID_FIELDS = (
-    "fields id, name, category, game_type, first_release_date, "
+    "fields id, name, alternative_names.name, category, game_type, "
+    "first_release_date, "
     "genres.name, themes.name, keywords.name, "
     "collections.id, collections.name, franchises.id, franchises.name, "
     "parent_game.id, parent_game.name, "
@@ -834,13 +902,22 @@ def _igdb_name_agrees(library_name: str, igdb_name: str) -> bool:
     Edition" agrees with "Nioh 2" while "FTL: Faster Than Light" does not
     agree with "Faster than light?".
     """
-    from .title_normalization import normalize_edition_comparison_title
-
     if normalize_series_gap_title(library_name) == normalize_series_gap_title(igdb_name):
         return True
     return normalize_edition_comparison_title(
         library_name
     ) == normalize_edition_comparison_title(igdb_name)
+
+
+def _candidate_names(game: IGDBGame) -> list[str]:
+    """Every spelling IGDB holds for a candidate, primary name first.
+
+    An abbreviation ("GTA V" for "Grand Theft Auto V") or a regional title is
+    written down in no normalization rule and in no storefront field — IGDB's
+    ``alternative_names`` is the only place it exists, so the gate has to read
+    them or those rows can never link.
+    """
+    return [game.name, *game.alternative_names]
 
 
 def _candidate_year(game: IGDBGame) -> int | None:
@@ -859,6 +936,7 @@ def _select_best_match(
     *,
     allow_inconclusive_fallback: bool,
     reference_year: int | None = None,
+    generic_edition_query: bool = False,
 ) -> IGDBGame | None:
     """Pick the best candidate from `results` for query `name`, or None.
 
@@ -866,6 +944,16 @@ def _select_best_match(
     Chronicles" must not resolve to "Xenoblade Chronicles 2". Candidates whose
     sequel/version identity conflicts with the query are dropped before
     ranking.
+
+    A candidate is compared under EVERY name IGDB holds for it — its primary
+    title and its ``alternative_names`` — because an abbreviation ("GTA V" for
+    "Grand Theft Auto V") or a regional title exists nowhere else and no
+    normalization rule could invent it. The names are filtered one by one:
+    those that conflict with the query on identity are discarded, a candidate
+    is dropped only when every one of its spellings conflicts, and the gate
+    (and tier 1) then ask whether ANY surviving spelling matches. So an
+    alternative name can never smuggle in a sequel the primary name would have
+    refused.
 
     `allow_inconclusive_fallback` controls what happens when the fuzzy match
     is inconclusive (score below cutoff for every candidate): the original,
@@ -876,8 +964,17 @@ def _select_best_match(
     was the only one returned.
 
     Whatever the selection path, the final candidate must clear the strict
-    name gate: its edition-stripped normalized title has to EQUAL the
-    query's. Fuzzy scores and relevance fallbacks only ever rank candidates;
+    name gate: one of its edition-stripped normalized names has to EQUAL the
+    query's. The strip is ``normalize_edition_comparison_title`` — the broad
+    one, which peels a qualifier-anchored tail and the generic "<up to 3
+    words> Edition" tail, so "Watch Dogs: Day One Edition" reaches "Watch
+    Dogs". It is safe here only because the year rules below guard every
+    edition fold (a tier-2 match is a lone one-sided window or a symmetric ±2),
+    and because it never strips a subtitle that is not an edition phrase:
+    "Halo: The Master Chief Collection" is still not "Halo" and "Persona 5
+    Royal" is still not "Persona 5".
+
+    Fuzzy scores and relevance fallbacks only ever rank candidates;
     they can no longer accept one whose name actually differs. This is what
     stops the observed prod disasters — "Borderlands GOTY" enriched as "The
     Tower on the Borderland", "PAYDAY 2" as "Payday 2 VR", "Tales from the
@@ -898,10 +995,25 @@ def _select_best_match(
     ``reference_year`` is the library row's own release year (see
     ``_resolve_game_with_status``), and it arbitrates the case the name gate
     cannot: two IGDB records that genuinely share a title. The gate-passing
-    candidates split into TIER 1 (``match_key`` equality — the exact title, no
-    edition stripping) and TIER 2 (equal only once an edition suffix is
-    stripped); tier 1 is considered alone whenever it is non-empty, so a
-    remake marketed as an edition can never outrank the real thing.
+    candidates split into five bands, ranked by how much the equality is
+    worth, and the FIRST non-empty band is considered alone:
+
+      1a  ``match_key`` equality on the candidate's own PRIMARY name — the
+          exact title, no stripping.
+      1b  the same, reached through one of its alternative names.
+      2a  equality under ``normalize_strict_edition_title`` on the primary
+          name — a KNOWN edition phrase was stripped ("Game of the Year
+          Edition", "Day One Edition").
+      2b  the same, through an alternative name.
+      3   equality only under the full ``normalize_edition_comparison_title``,
+          i.e. the generic "<up to 3 words> Edition" tail did it.
+
+    Tier 1 before tier 2 keeps a remake marketed as an edition from
+    outranking the real thing; primary before alternative keeps a coinciding
+    working title ("Titan" for "Overwatch") from outranking a record that owns
+    the name. Tier 3 is last because it is a GUESS: the generic tail eats
+    arbitrary words, so "Minecraft: Education Edition" collapses onto
+    "Minecraft" exactly like a real SKU would, and it is a different product.
 
     Within the chosen tier, with a known reference year: candidates within ±1
     year win in ranked order (platform and region releases drift by months).
@@ -919,14 +1031,29 @@ def _select_best_match(
     With no reference year, two or more distinct candidates whose known years
     disagree by more than a year are refused rather than ranked: that is the
     "Dead Space 2008 vs 2023" shape, and IGDB's own ordering is not evidence.
+
+    TIER 3 does not get any of that. Nothing vouches for its edition reading,
+    so the year has to: without a reference year it refuses outright, and with
+    one it accepts only inside a SYMMETRIC ±1 window (ties refused like tier
+    1). The one-sided "an edition cannot predate its own game" rule is
+    deliberately not extended to it — that rule assumes the suffix really is
+    an edition, which is the very thing in question. ``generic_edition_query``
+    says the QUERY is already a ladder rung that peeled such a tail, so
+    whatever it matches is tier-3 strength however exactly it matches.
     """
     from .db import extract_best_fuzzy_key, titles_conflict_on_identity
 
-    choices = {
-        i: g.name
+    # A candidate speaks with every name IGDB holds for it: the primary title
+    # plus its alternative names. Names that CONFLICT with the query on
+    # sequel/version identity are dropped one by one rather than sinking the
+    # whole candidate — an "Alan Wake II" alternative name sitting beside a
+    # primary the query agrees with must not disqualify the record — and a
+    # candidate is dropped entirely only when EVERY spelling conflicts.
+    compatible_names = {
+        i: [n for n in _candidate_names(g) if not titles_conflict_on_identity(name, n)]
         for i, g in enumerate(results)
-        if not titles_conflict_on_identity(name, g.name)
     }
+    choices = {i: g.name for i, g in enumerate(results) if compatible_names[i]}
     if not choices:
         # Every candidate disagrees on the sequel number — a confident wrong match
         # is worse than none. Let the caller fall back to the normalized name.
@@ -936,10 +1063,14 @@ def _select_best_match(
     # library identity) over IGDB's relevance ranking. This is what rescues
     # e.g. "Persona 3 Reload": the base game's title is an exact match while
     # every DLC/cosmetic pack's title has a longer suffix, so it wins even
-    # though IGDB's own relevance model ranked it below all of them.
+    # though IGDB's own relevance model ranked it below all of them. An
+    # alternative name counts as an exact title too — "GTA V" is the whole
+    # reason the query reached the "Grand Theft Auto V" record.
     normalized_query = match_key(name)
     exact_matches = [
-        i for i in choices if match_key(results[i].name) == normalized_query
+        i
+        for i in choices
+        if any(match_key(n) == normalized_query for n in compatible_names[i])
     ]
     selected_idx: int | None
     if exact_matches:
@@ -963,11 +1094,30 @@ def _select_best_match(
         key=lambda i: (not results[i].is_primary_library_item, i),
     )
     ordered = ([selected_idx] if selected_idx is not None else []) + rest
-    gate_target = normalize_series_gap_title(name)
-    passing = [
-        idx for idx in ordered
-        if normalize_series_gap_title(results[idx].name) == gate_target
-    ]
+    gate_target = normalize_edition_comparison_title(name)
+    passing: list[int] = []
+    matched_spelling: dict[int, str] = {}
+    for idx in ordered:
+        for candidate_name in compatible_names[idx]:
+            if normalize_edition_comparison_title(candidate_name) == gate_target:
+                passing.append(idx)
+                matched_spelling[idx] = candidate_name
+                break
+
+    def _accept(idx: int) -> IGDBGame:
+        """Return the chosen candidate, naming the spelling that carried it."""
+        game = results[idx]
+        spelling = matched_spelling.get(idx)
+        if spelling is not None and spelling != game.name:
+            logger.info(
+                "IGDB name-match gate accepted %r via IGDB alternative name %r "
+                "(igdb_id=%s primary name=%r)",
+                name,
+                spelling,
+                game.igdb_id,
+                game.name,
+            )
+        return game
 
     if not passing:
         if selected_idx is not None:
@@ -980,12 +1130,131 @@ def _select_best_match(
             )
         return None
 
-    # Tier 1 = the exact title (no edition stripping); tier 2 = everything the
-    # edition strip had to fold. Tier 1 is considered ALONE when non-empty.
-    tier_one = [idx for idx in passing if match_key(results[idx].name) == normalized_query]
-    tier = tier_one or passing
-    is_tier_one = bool(tier_one)
+    # HOW the equality was reached decides how much it is worth. Two axes:
+    #
+    #   * WHICH NAME matched — a record's own primary title is stronger
+    #     evidence than a spelling it merely also answers to. Alternative
+    #     names carry working titles, acronyms and regional names that
+    #     legitimately coincide with another record's primary ("Titan" is
+    #     Blizzard's working title for "Overwatch" AND a 2019 game of its
+    #     own), so ranking them equally dragged a clean exact-title match into
+    #     a same-name ambiguity refusal.
+    #   * WHICH STRIP was needed — no strip at all (the exact title), a KNOWN
+    #     edition phrase (`normalize_strict_edition_title`), or the generic
+    #     "<up to 3 words> Edition" tail, which eats arbitrary words and is a
+    #     guess: "Minecraft: Education Edition" collapses onto "Minecraft"
+    #     exactly like a real SKU would, and the lone-tier-2 rule would then
+    #     accept the older record and link a different product.
+    #
+    # Bands, first non-empty considered ALONE: 1a exact/primary, 1b
+    # exact/alternative, 2a strict-edition/primary, 2b strict-edition/
+    # alternative, 3 generic tail (either name). Tier 3 is year-gated below.
+    strict_target = normalize_strict_edition_title(name)
+    strict_spelling: dict[int, str] = {}
+    for idx in passing:
+        for candidate_name in compatible_names[idx]:
+            if normalize_strict_edition_title(candidate_name) == strict_target:
+                strict_spelling[idx] = candidate_name
+                break
+
+    tier_1a = [
+        idx
+        for idx in passing
+        if results[idx].name in compatible_names[idx]
+        and match_key(results[idx].name) == normalized_query
+    ]
+    tier_1b = [
+        idx
+        for idx in passing
+        if idx not in tier_1a
+        and any(match_key(n) == normalized_query for n in compatible_names[idx])
+    ]
+    rest = [idx for idx in passing if idx not in tier_1a and idx not in tier_1b]
+    tier_2a = [idx for idx in rest if strict_spelling.get(idx) == results[idx].name]
+    tier_2b = [idx for idx in rest if idx not in tier_2a and idx in strict_spelling]
+    tier_3 = [idx for idx in rest if idx not in strict_spelling]
+    if generic_edition_query:
+        # ``name`` is not the library row's title: it is a ladder rung that
+        # already peeled a tail the STRICT strip does not recognize (see
+        # _resolve_game_with_status). The rung vouches for identity — that is
+        # why it gates against itself — but not for the edition reading, so
+        # every match it produces is tier-3 strength however exactly it
+        # matches the rung's own string.
+        tier, tier_kind = passing, "generic"
+    else:
+        tier, tier_kind = next(
+            (band, kind)
+            for band, kind in (
+                (tier_1a, "exact"),
+                (tier_1b, "exact"),
+                (tier_2a, "edition"),
+                (tier_2b, "edition"),
+                (tier_3, "generic"),
+            )
+            if band
+        )
+    is_tier_one = tier_kind == "exact"
     distinct_ids = {results[idx].igdb_id for idx in tier}
+
+    def _closest_within_a_year(band: list[int], year_reference: int) -> tuple[int | None, list[int]]:
+        """The single closest candidate within ±1 year, and the whole window.
+
+        The index is None when the window is empty OR when two DISTINCT
+        records tie at the best distance — list position is not evidence, and
+        picking by it would flip the link on a re-fetch. The window itself is
+        returned for the caller's log line.
+        """
+        distances = {
+            idx: abs(year - year_reference)
+            for idx in band
+            if (year := _candidate_year(results[idx])) is not None
+        }
+        window = sorted(
+            (idx for idx, distance in distances.items() if distance <= 1),
+            key=lambda idx: (distances[idx], idx),
+        )
+        if not window:
+            return None, window
+        best = window[0]
+        tied_ids = {
+            results[idx].igdb_id for idx in window if distances[idx] == distances[best]
+        }
+        return (None if len(tied_ids) > 1 else best), window
+
+    if tier_kind == "generic":
+        # Only the generic tail folded these together, so the "edition"
+        # reading is unevidenced: it needs the year to vouch for it, and only
+        # a SYMMETRIC ±1 window — tier 2's one-sided "an edition cannot
+        # predate its own game" rule assumes the suffix really is an edition,
+        # which is exactly what is in question here.
+        if reference_year is None:
+            logger.info(
+                "IGDB gate refused %r: generic edition tail, no year evidence "
+                "(candidates=%s)",
+                name,
+                _year_debug(results, tier),
+            )
+            return None
+        best_idx, window = _closest_within_a_year(tier, reference_year)
+        if not window:
+            logger.info(
+                "IGDB gate refused %r (reference_year=%s): generic edition tail, "
+                "year conflict (candidates=%s)",
+                name,
+                reference_year,
+                _year_debug(results, tier),
+            )
+            return None
+        if best_idx is None:
+            logger.info(
+                "IGDB year tiebreak refused %r (reference_year=%s): several "
+                "generic-edition candidates equally close in year (candidates=%s)",
+                name,
+                reference_year,
+                _year_debug(results, window),
+            )
+            return None
+        return _accept(best_idx)
 
     if reference_year is None:
         known = {
@@ -998,11 +1267,11 @@ def _select_best_match(
                 "IGDB year tiebreak refused %r: same-name candidates, no reference "
                 "year (tier=%s candidates=%s)",
                 name,
-                1 if is_tier_one else 2,
+                1 if is_tier_one else 2,  # tier 3 returned above
                 _year_debug(results, tier),
             )
             return None
-        return results[tier[0]]
+        return _accept(tier[0])
 
     # Inside the window, DISTANCE decides, never provider order: with a 2023
     # row and candidates from 2022 and 2023, the 2023 record wins whichever
@@ -1010,23 +1279,9 @@ def _select_best_match(
     # equally plausible, and picking between them by list position would
     # flip the link on a re-fetch — refuse instead (AGENTS.md: reject
     # release-year conflicts; never let ordering stand in for evidence).
-    distances = {
-        idx: abs(year - reference_year)
-        for idx in tier
-        if (year := _candidate_year(results[idx])) is not None
-    }
-    within_one = sorted(
-        (idx for idx, distance in distances.items() if distance <= 1),
-        key=lambda idx: (distances[idx], idx),
-    )
+    best_idx, within_one = _closest_within_a_year(tier, reference_year)
     if within_one:
-        best = within_one[0]
-        tied_ids = {
-            results[idx].igdb_id
-            for idx in within_one
-            if distances[idx] == distances[best]
-        }
-        if len(tied_ids) > 1:
+        if best_idx is None:
             logger.info(
                 "IGDB year tiebreak refused %r (reference_year=%s): several candidates "
                 "equally close in year (candidates=%s)",
@@ -1035,14 +1290,14 @@ def _select_best_match(
                 _year_debug(results, within_one),
             )
             return None
-        return results[best]
+        return _accept(best_idx)
 
     if is_tier_one:
         if len(distinct_ids) == 1:
             # A lone exact-title candidate: a re-release's store date can sit
             # years off the library row's, and the title itself vouches. An
             # unknown IGDB year lands here too, and must never block.
-            return results[tier[0]]
+            return _accept(tier[0])
         logger.info(
             "IGDB year tiebreak refused %r (reference_year=%s): several exact-title "
             "candidates, none within a year (candidates=%s)",
@@ -1064,7 +1319,7 @@ def _select_best_match(
         # a lone tier-1 candidate.
         lone_year = _candidate_year(results[tier[0]])
         if lone_year is None or lone_year - reference_year <= 2:
-            return results[tier[0]]
+            return _accept(tier[0])
         logger.info(
             "IGDB year tiebreak refused %r (reference_year=%s): the only "
             "edition-stripped match is more than two years newer (candidates=%s)",
@@ -1080,7 +1335,7 @@ def _select_best_match(
         and abs(year - reference_year) <= 2
     ]
     if within_two:
-        return results[within_two[0]]
+        return _accept(within_two[0])
     logger.info(
         "IGDB year tiebreak refused %r (reference_year=%s): several "
         "edition-stripped matches, none within two years (candidates=%s)",
@@ -1271,12 +1526,23 @@ async def _resolve_game_with_status(
         # transformation already vouches for series identity, and the original
         # may carry an edition number ("… 2026 Edition") that would wrongly
         # read as a sequel marker against the base game's title.
+        #
+        # What such a rung does NOT vouch for is the edition reading itself
+        # when the tail it peeled is one no edition-word list recognizes
+        # ("Minecraft: Education Edition" -> "Minecraft"). Gating against the
+        # rung would otherwise turn that guess into a tier-1 exact title and
+        # walk straight past the year evidence _select_best_match demands of a
+        # generic edition tail, linking a different product outright.
         gate_name = variant if identity_preserving else name
+        generic_edition_rung = identity_preserving and normalize_strict_edition_title(
+            name
+        ) != normalize_strict_edition_title(variant)
         match = _select_best_match(
             gate_name,
             variant_results,
             allow_inconclusive_fallback=False,
             reference_year=reference_year,
+            generic_edition_query=generic_edition_rung,
         )
         if match is not None:
             return _ResolveOutcome(game=match, saw_candidates=True)
@@ -1729,6 +1995,38 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
             source_key=str(igdb_game.igdb_id),
         )
 
+    # IGDB's alternative names are the abbreviations and regional titles the
+    # user (and a storefront purchase record) actually type — "GTA V" for
+    # "Grand Theft Auto V". Persisted as aliases they make LIBRARY-side search
+    # and name matching find the row; they are deliberately NOT fed back into
+    # the resolver, which reads them from the IGDB record directly. Gated on
+    # the same pinned-igdb_id override as the provider name above: a link the
+    # user pinned by hand must not accumulate aliases from whatever record a
+    # name resolution happened to return.
+    #
+    # One batched call, because this runs inside the enrichment loop and a
+    # record can carry a dozen names. It also PRUNES this game's other
+    # igdb-sourced aliases: when the external mapping (Steam or GOG) re-points
+    # a row at a different record, the previous record's spellings are simply
+    # wrong and must not linger. The prune runs even when the new record has
+    # no alternative names at all, which is why the call is unconditional.
+    if "igdb_id" not in overrides:
+        from .db import upsert_game_aliases
+
+        stored_name_key = normalize_search_text(row["name"])
+        await upsert_game_aliases(
+            game_id,
+            [
+                alt
+                for alt in igdb_game.alternative_names
+                if normalize_search_text(alt) != stored_name_key
+            ],
+            alias_type="alternative_name",
+            source="igdb",
+            source_key=str(igdb_game.igdb_id),
+            prune_stale_source_keys=True,
+        )
+
     if igdb_game.series:
         from .db import upsert_game_series_links
 
@@ -1860,6 +2158,66 @@ def _row_value(row: sqlite3.Row | Mapping[str, Any], key: str) -> Any:
         return None
 
 
+async def _link_via_external_mapping(
+    *,
+    game_id: int,
+    row_name: str,
+    existing_igdb_id: int | None,
+    external_igdb_id: int,
+    identifier_label: str,
+    identifier_value: Any,
+) -> IGDBGame | None:
+    """Fetch the record IGDB's external_games maps a store id to, guard included.
+
+    Shared by the Steam-appid and GOG-product-id batches: the mapping is
+    authoritative for both, and so is the reason it cannot be trusted blindly.
+    Returns the record to apply, or None when the mapped id does not resolve
+    (the caller then falls through to the stored link / name resolution).
+    """
+    if existing_igdb_id and existing_igdb_id != external_igdb_id:
+        logger.info(
+            "IGDB backfill re-linking game_id=%s name=%r: stored igdb_id=%s "
+            "but external_games maps %s=%s to igdb_id=%s",
+            game_id,
+            row_name,
+            existing_igdb_id,
+            identifier_label,
+            identifier_value,
+            external_igdb_id,
+        )
+    fetched = await fetch_game_by_id(external_igdb_id, suppress_errors=False)
+    if fetched is None:
+        return None
+    if (
+        existing_igdb_id
+        and existing_igdb_id != external_igdb_id
+        and not _igdb_name_agrees(row_name, fetched.name)
+    ):
+        # The mapping is authoritative but not infallible: prod Steam appid
+        # 212680 maps to 178437 ("Faster than light?"), a junk duplicate, and
+        # this branch replaced the row's correct link to 3075 ("FTL: Faster
+        # Than Light") with it. Only override a stored link the name VOUCHES
+        # for when the mapping's own record vouches too; the extra fetch costs
+        # one call in the rare case where the two disagree AND the new name
+        # doesn't match.
+        stored = await fetch_game_by_id(existing_igdb_id, suppress_errors=False)
+        if stored is not None and _igdb_name_agrees(row_name, stored.name):
+            logger.info(
+                "IGDB backfill keeping stored igdb_id=%s for game_id=%s "
+                "name=%r: external_games maps %s=%s to %s (%r), whose name "
+                "does not match while the stored link's does",
+                existing_igdb_id,
+                game_id,
+                row_name,
+                identifier_label,
+                identifier_value,
+                external_igdb_id,
+                fetched.name,
+            )
+            return stored
+    return fetched
+
+
 async def backfill_missing_games(
     limit: int = 10, *, game_ids: Iterable[int] | None = None
 ) -> int:
@@ -1870,10 +2228,12 @@ async def backfill_missing_games(
     rather than leaving an unlinked row waiting for the background drain.
 
     Resolution order per row:
-      1. ``external_games`` (authoritative Steam appid -> IGDB game mapping,
-         batched once per pass). This also *self-corrects* a stored igdb_id
-         that disagrees with what the appid actually is (wrong-edition links
-         like Layers of Fear 2016 pointing at the 2023 remake).
+      1. ``external_games`` (the authoritative store id -> IGDB game mapping):
+         the Steam appid first, then — only for rows the Steam batch did not
+         map — the GOG product id, each batched once per pass. This also
+         *self-corrects* a stored igdb_id that disagrees with what the store id
+         actually is (wrong-edition links like Layers of Fear 2016 pointing at
+         the 2023 remake).
       2. Fetch by the stored igdb_id (never re-resolve a known link by name).
       3. Name search (``resolve_game``).
 
@@ -1910,27 +2270,58 @@ async def backfill_missing_games(
     rows = await load_games_for_igdb_backfill(claimed_ids)
     rows_by_id = {row["id"]: row for row in rows}
 
-    # One authoritative external_games batch per pass for every claimed row
-    # with a Steam appid. An operational failure here aborts the whole pass
-    # (all rows stay retryable) rather than degrading to name search, which
-    # could mass-produce wrong or missing links during an outage.
-    appids = [
-        str(_row_value(row, "steam_appid"))
-        for row in rows
-        if _row_value(row, "steam_appid")
-    ]
-    external_by_appid: dict[str, int] = {}
-    if appids and igdb_credentials_configured():
+    # One authoritative external_games batch per store per pass, in
+    # precedence order: a row the Steam batch mapped is never asked about on
+    # GOG, because a Steam mapping already answers the question. An
+    # operational failure of ANY batch aborts the whole pass (all rows stay
+    # retryable) rather than degrading to name search, which could
+    # mass-produce wrong or missing links during an outage. The fetchers are
+    # read from the module at call time (not bound in a module-level table) so
+    # each store's entry point stays independently patchable.
+    external_sources: tuple[
+        tuple[str, str, Callable[[list[str]], Awaitable[dict[str, int]]]], ...
+    ] = (
+        ("steam_appid", "external_games", resolve_steam_appids_to_igdb),
+        (
+            "gog_product_id",
+            "external_games GOG",
+            lambda uids: resolve_external_ids_to_igdb(IGDB_EXTERNAL_CATEGORY_GOG, uids),
+        ),
+    )
+    external_by_source: dict[str, dict[str, int]] = {}
+    externally_mapped_ids: set[int] = set()
+    for column, log_label, fetch_mapping in external_sources:
+        pending_rows = [
+            row
+            for row in rows
+            if row["id"] not in externally_mapped_ids and _row_value(row, column)
+        ]
+        uids = [str(_row_value(row, column)) for row in pending_rows]
+        if not uids or not igdb_credentials_configured():
+            continue
         try:
-            external_by_appid = await resolve_steam_appids_to_igdb(appids)
+            mapping = await fetch_mapping(uids)
         except Exception as exc:
+            # Logged AND counted: the pass returns "rows resolved", so an
+            # aborted pass is indistinguishable from an empty queue in that
+            # number — provider_health is where a dead external_games endpoint
+            # becomes visible (same contract as the per-row failure handler
+            # below).
+            provider_health.record_failure("igdb", exc)
             logger.warning(
-                "IGDB external_games lookup failed; leaving backfill pass retryable: %s",
+                "IGDB %s lookup failed; leaving backfill pass retryable: %s",
+                log_label,
                 exc,
             )
             for game_id in claimed_ids:
                 await release_game_claim(game_id, "igdb_claimed_at")
             return 0
+        external_by_source[column] = mapping
+        externally_mapped_ids.update(
+            row["id"]
+            for row in pending_rows
+            if str(_row_value(row, column)) in mapping
+        )
 
     processed = 0
     pending_no_match: list[int] = []
@@ -1948,59 +2339,35 @@ async def backfill_missing_games(
             existing_igdb_id = row["igdb_id"]
             overrides = _decode_manual_overrides(_row_value(row, "manual_overrides"))
 
-            appid = _row_value(row, "steam_appid")
-            external_igdb_id = external_by_appid.get(str(appid)) if appid else None
+            # Authoritative store mapping first, in the same precedence the
+            # batches above used — Steam, then GOG for a row Steam did not
+            # map. When it disagrees with the stored igdb_id, re-resolve
+            # instead of trusting the stored link (name-based resolution
+            # attached wrong editions in the past). Column-level
+            # manual_overrides are still honored inside _apply_igdb_metadata;
+            # an explicit igdb_id override pins the stored link entirely.
+            external_igdb_id: int | None = None
+            identifier_label = ""
+            identifier_value: Any = None
+            for column, _label, _fetcher in external_sources:
+                uid = _row_value(row, column)
+                mapped = (
+                    external_by_source.get(column, {}).get(str(uid)) if uid else None
+                )
+                if mapped is not None:
+                    external_igdb_id = mapped
+                    identifier_label = column
+                    identifier_value = uid
+                    break
             if external_igdb_id is not None and "igdb_id" not in overrides:
-                # Authoritative store mapping first. When it disagrees with the
-                # stored igdb_id, re-resolve instead of trusting the stored link
-                # (name-based resolution attached wrong editions in the past).
-                # Column-level manual_overrides are still honored inside
-                # _apply_igdb_metadata; an explicit igdb_id override pins the
-                # stored link entirely.
-                if existing_igdb_id and existing_igdb_id != external_igdb_id:
-                    logger.info(
-                        "IGDB backfill re-linking game_id=%s name=%r: stored igdb_id=%s "
-                        "but external_games maps steam_appid=%s to igdb_id=%s",
-                        game_id,
-                        row["name"],
-                        existing_igdb_id,
-                        appid,
-                        external_igdb_id,
-                    )
-                fetched = await fetch_game_by_id(external_igdb_id, suppress_errors=False)
-                if fetched is not None:
-                    igdb_game = fetched
-                    if (
-                        existing_igdb_id
-                        and existing_igdb_id != external_igdb_id
-                        and not _igdb_name_agrees(row["name"], fetched.name)
-                    ):
-                        # The mapping is authoritative but not infallible: prod
-                        # Steam appid 212680 maps to 178437 ("Faster than
-                        # light?"), a junk duplicate, and this branch replaced
-                        # the row's correct link to 3075 ("FTL: Faster Than
-                        # Light") with it. Only override a stored link the name
-                        # VOUCHES for when the mapping's own record vouches too;
-                        # the extra fetch costs one call in the rare case where
-                        # the two disagree AND the new name doesn't match.
-                        stored = await fetch_game_by_id(
-                            existing_igdb_id, suppress_errors=False
-                        )
-                        if stored is not None and _igdb_name_agrees(
-                            row["name"], stored.name
-                        ):
-                            logger.info(
-                                "IGDB backfill keeping stored igdb_id=%s for game_id=%s "
-                                "name=%r: external_games maps steam_appid=%s to %s (%r), "
-                                "whose name does not match while the stored link's does",
-                                existing_igdb_id,
-                                game_id,
-                                row["name"],
-                                appid,
-                                external_igdb_id,
-                                fetched.name,
-                            )
-                            igdb_game = stored
+                igdb_game = await _link_via_external_mapping(
+                    game_id=game_id,
+                    row_name=row["name"],
+                    existing_igdb_id=existing_igdb_id,
+                    external_igdb_id=external_igdb_id,
+                    identifier_label=identifier_label,
+                    identifier_value=identifier_value,
+                )
 
             if igdb_game is None and existing_igdb_id:
                 # Row already has a matched igdb_id (e.g. from an earlier pass) —
@@ -2151,19 +2518,24 @@ def _chunked(items: list[_ChunkItem], size: int) -> Iterator[list[_ChunkItem]]:
         yield items[start : start + size]
 
 
-async def resolve_steam_appids_to_igdb(appids: list[str]) -> dict[str, int]:
-    """Map Steam appids to the IGDB game id IGDB associates with each.
+async def resolve_external_ids_to_igdb(category: int, uids: list[str]) -> dict[str, int]:
+    """Map one storefront's product ids to the IGDB game id IGDB associates with each.
 
     Uses IGDB's external_games endpoint (the authoritative store→game mapping) so a
-    caller can tell whether a Steam platform row really belongs to the game its
-    library row claims to be. Returns {appid: igdb_game_id} for appids IGDB knows;
-    unknown appids are simply omitted. Returns {} if IGDB is unconfigured.
+    caller can tell whether a platform row really belongs to the game its library
+    row claims to be. Returns {uid: igdb_game_id} for uids IGDB knows; unknown uids
+    are simply omitted. Returns {} if IGDB is unconfigured.
+
+    ``category`` is an ``IGDB_EXTERNAL_CATEGORY_*`` constant — Steam (1) and GOG
+    (5) are the two stores whose uid format is verified against prod data. Other
+    stores are deliberately absent: an Epic/PSN/Xbox uid format we have not
+    confirmed would silently map nothing, or worse, map the wrong thing.
     """
     client_id = os.environ.get("TWITCH_CLIENT_ID")
-    if not client_id or not igdb_credentials_configured() or not appids:
+    if not client_id or not igdb_credentials_configured() or not uids:
         return {}
 
-    unique = [str(a) for a in dict.fromkeys(appids)]
+    unique = [str(a) for a in dict.fromkeys(uids)]
     token = await _get_token()
     headers = _igdb_headers(client_id, token)
 
@@ -2172,7 +2544,7 @@ async def resolve_steam_appids_to_igdb(appids: list[str]) -> dict[str, int]:
         uid_list = ", ".join(f'"{_escape_igdb_search_term(a)}"' for a in chunk)
         query = (
             f"fields game, uid; "
-            f"where category = {IGDB_EXTERNAL_CATEGORY_STEAM} & uid = ({uid_list}); "
+            f"where category = {category} & uid = ({uid_list}); "
             f"limit 500;"
         )
         rows = await _post_igdb_games(query, headers, url=_IGDB_EXTERNAL_GAMES_URL)
@@ -2182,6 +2554,16 @@ async def resolve_steam_appids_to_igdb(appids: list[str]) -> dict[str, int]:
             if uid is not None and game is not None:
                 result[str(uid)] = game
     return result
+
+
+async def resolve_steam_appids_to_igdb(appids: list[str]) -> dict[str, int]:
+    """Map Steam appids to IGDB game ids (``resolve_external_ids_to_igdb``, category 1).
+
+    Kept as its own name because it is what every caller outside this module
+    asks for — the drift audit, the split/merge checks, the wishlist identity
+    probe — and because "Steam appid" is a stronger contract than "some uid".
+    """
+    return await resolve_external_ids_to_igdb(IGDB_EXTERNAL_CATEGORY_STEAM, appids)
 
 
 @dataclass(frozen=True)
