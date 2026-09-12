@@ -76,6 +76,92 @@ def normalize_search_text(value: str) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", folded))
 
 
+# Storefronts and IGDB disagree about the ampersand: Steam ships "Rabbit and
+# Steel" while IGDB holds "Rabbit & Steel", and a tokenizer that keeps only
+# [a-z0-9]+ runs drops "&" entirely ("rabbit steel") while "and" survives
+# ("rabbit and steel") — two spellings of one title that could never compare
+# equal. Folding the ampersand into the word before tokenizing makes them meet.
+_AMPERSAND_RE = re.compile(r"\s*&\s*")
+_AND_WORD_RE = re.compile(r"\band\b", re.IGNORECASE)
+
+# Apostrophes are REMOVED, not treated as separators: "Death's Door" and
+# "Deaths Door" are one title, and splitting on the glyph ("death s door")
+# leaves a stray token that matches neither spelling. Curly quotes and the
+# backtick spelling included — NFKD leaves all of them alone.
+_APOSTROPHE_TABLE = str.maketrans("", "", "'’‘`")
+
+# A run of two or more single-letter-plus-dot groups is an acronym spelled out
+# with periods ("F.E.A.R.", "Q.U.B.E. 2", "S.T.A.L.K.E.R.") — join the letters
+# so it meets the undotted spelling stores use. The optional trailing letter
+# covers a dropped final dot ("F.E.A.R"). The lookbehind is what keeps an
+# ordinary abbreviation out of it: in "Mr. Driller" the only letter+dot group
+# is preceded by a letter, so there is no run to join and it stays "mr driller".
+_DOTTED_ACRONYM_RE = re.compile(r"(?<![a-z0-9])(?:[a-z]\.){2,}[a-z]?")
+
+# Roman numerals folded to Arabic as WHOLE tokens, so "Hades II" and "Hades 2"
+# are one title. Deliberately excludes "x" and "i": "Mega Man X" is a different
+# game from "Mega Man 10", and a lone "I" is too ambiguous to read as a number.
+_ROMAN_TOKEN_TO_ARABIC = {
+    "ii": "2",
+    "iii": "3",
+    "iv": "4",
+    "v": "5",
+    "vi": "6",
+    "vii": "7",
+    "viii": "8",
+    "ix": "9",
+}
+
+# Spelled-out numbers folded to digits ("Left 4 Dead" / "Left Four Dead").
+_NUMBER_WORD_TO_DIGITS = {
+    "zero": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+    "ten": "10",
+}
+
+
+def match_key(value: str) -> str:
+    """The one canonical key for "are these two strings the same title?".
+
+    Every comparison-only normalizer in this module ends here, and so does the
+    IGDB resolver's name gate — one key instead of the six near-identical
+    normalizations that let "&" (#184) and the Humble folding mismatch through.
+    It folds, in order: trademark glyphs, diacritics and case; apostrophes
+    (joined, never split); dotted acronyms; the ampersand/"and" spelling;
+    Roman numerals ii-ix and the number words zero-ten, per whole token.
+
+    What it deliberately does NOT fold: "x" and a lone "i" (see
+    _ROMAN_TOKEN_TO_ARABIC), because "Mega Man X" is not "Mega Man 10".
+
+    This is not ``normalize_search_text``: that one backs
+    ``games.name_normalized`` and the FTS index (changing it would need a
+    stored-column rebuild), and it is a SEARCH key — word order preserved,
+    nothing reinterpreted. This one is an IDENTITY key and may reinterpret
+    freely, because nothing is stored under it.
+    """
+    # NFKD would otherwise expand ™ to a literal "TM" glued onto the word.
+    cleaned = value.replace("™", " ").replace("®", " ")
+    folded = _ascii_fold(cleaned).casefold()
+    folded = folded.translate(_APOSTROPHE_TABLE)
+    folded = _DOTTED_ACRONYM_RE.sub(lambda m: m.group(0).replace(".", ""), folded)
+    folded = _AMPERSAND_RE.sub(" and ", folded)
+
+    tokens = []
+    for token in re.findall(r"[a-z0-9]+", folded):
+        tokens.append(
+            _ROMAN_TOKEN_TO_ARABIC.get(token) or _NUMBER_WORD_TO_DIGITS.get(token) or token
+        )
+    return " ".join(tokens)
+
+
 def normalize_catalog_title(name: str) -> str:
     cleaned = _ascii_fold(name)
     cleaned = cleaned.replace("™", "").replace("®", "")
@@ -265,19 +351,17 @@ _COMPARISON_EDITION_PATTERNS = (
 )
 
 
-def normalize_edition_comparison_title(name: str) -> str:
-    """Normalize a title for "same game, different edition?" comparisons.
+def strip_comparison_edition_suffixes(name: str) -> str:
+    """``normalize_edition_comparison_title``'s stripping, without the key.
 
-    Loops normalize_catalog_title together with the comparison-only edition
-    patterns above until stable, then hands off to normalize_search_text. Run
-    BOTH sides through it: "Nioh 2 - The Complete Edition" and "Nioh 2" both
-    collapse to "nioh 2", and "Sid Meier's Civilization III: Complete" meets
-    "Sid Meier's Civilization III: Game of the Year Edition" in the middle.
-
-    Deliberately over-eager compared with normalize_purchase_title — a title
-    that IS just an edition phrase would strip to nothing, so the original's
-    normalization is returned in that case rather than an empty string that
-    would compare equal to every other fully-stripped name.
+    The raw title with every comparison-only edition/SKU tail peeled off, still
+    in display form. Exposed for the one caller that must prefilter in SQL
+    against ``games.name_normalized`` (acquisition.py's edition-sibling probe):
+    that column is built from ``normalize_search_text``, so comparing it with
+    the ``match_key`` this function's caller returns would silently miss every
+    apostrophe/ampersand/numeral title. Normalize this with
+    ``normalize_search_text`` for the prefilter, then confirm the hit with
+    ``normalize_edition_comparison_title``.
     """
     cleaned = name
     previous = None
@@ -286,8 +370,25 @@ def normalize_edition_comparison_title(name: str) -> str:
         cleaned = normalize_catalog_title(cleaned)
         for pattern in _COMPARISON_EDITION_PATTERNS:
             cleaned = pattern.sub("", cleaned)
-    normalized = normalize_search_text(cleaned)
-    return normalized or normalize_search_text(name)
+    return cleaned
+
+
+def normalize_edition_comparison_title(name: str) -> str:
+    """Normalize a title for "same game, different edition?" comparisons.
+
+    Loops normalize_catalog_title together with the comparison-only edition
+    patterns above until stable, then hands off to ``match_key``. Run BOTH
+    sides through it: "Nioh 2 - The Complete Edition" and "Nioh 2" both
+    collapse to "nioh 2", and "Sid Meier's Civilization III: Complete" meets
+    "Sid Meier's Civilization III: Game of the Year Edition" in the middle.
+
+    Deliberately over-eager compared with normalize_purchase_title — a title
+    that IS just an edition phrase would strip to nothing, so the original's
+    normalization is returned in that case rather than an empty string that
+    would compare equal to every other fully-stripped name.
+    """
+    normalized = match_key(strip_comparison_edition_suffixes(name))
+    return normalized or match_key(name)
 
 
 def is_edition_variant_of(name: str, other: str) -> bool:
@@ -297,7 +398,7 @@ def is_edition_variant_of(name: str, other: str) -> bool:
     raw titles differ (otherwise every equal pair would report as an edition
     relationship).
     """
-    if normalize_search_text(name) == normalize_search_text(other):
+    if match_key(name) == match_key(other):
         return False
     return normalize_edition_comparison_title(name) == normalize_edition_comparison_title(
         other
@@ -336,33 +437,7 @@ def normalize_same_product_sku_title(name: str) -> str:
         previous = cleaned
         for pattern in _SAME_PRODUCT_SKU_PATTERNS:
             cleaned = pattern.sub("", cleaned)
-    return normalize_search_text(cleaned)
-
-
-# Storefronts and IGDB disagree about the ampersand: Steam ships "Rabbit and
-# Steel" while IGDB holds "Rabbit & Steel", and normalize_search_text keeps
-# only [a-z0-9]+ runs, so "&" simply vanishes ("rabbit steel") while "and"
-# survives ("rabbit and steel") — two spellings of one title that can never
-# compare equal. Folding the ampersand into the word before the hand-off makes
-# them meet. Deliberately NOT done inside normalize_search_text itself: that
-# one backs games.name_normalized (library identity), and changing it would
-# need a stored-column rebuild.
-_AMPERSAND_RE = re.compile(r"\s*&\s*")
-_AND_WORD_RE = re.compile(r"\band\b", re.IGNORECASE)
-
-
-def normalize_folded_text(value: str) -> str:
-    """``normalize_search_text`` plus the ampersand fold — the tail every
-    edition-stripping comparator below ends with.
-
-    Exposed for the one caller that needs that comparison WITHOUT the edition
-    stripping: humble.py's ``base_title`` asks "is this half of a folded pair
-    ALREADY the edition-stripped form?", which means comparing an unstripped
-    title against a stripped one. Doing that with ``normalize_search_text``
-    answers "no" for every "&" title, because the stripped side has been
-    ampersand-folded and the unstripped side has not.
-    """
-    return normalize_search_text(_AMPERSAND_RE.sub(" and ", value))
+    return match_key(cleaned)
 
 
 def ampersand_alternate(name: str) -> str | None:
@@ -388,13 +463,10 @@ def normalize_series_gap_title(name: str) -> str:
     """Normalize a title for discover_series_gaps have/gap exclusion matching.
 
     Loops off a trailing edition marker (so "Game of the Year Enhanced
-    Edition" fully collapses), folds a standalone ampersand into the word
-    "and" (see _AMPERSAND_RE: "Rabbit & Steel" and "Rabbit and Steel" are one
-    game), then hands off to normalize_search_text for case-folding and
-    punctuation-insensitive comparison — which, since it extracts only
-    [a-z0-9]+ runs, already treats any apostrophe variant (straight or curly)
-    as a separator, so "Marvel's" and "Marvel’s" normalize identically with
-    no separate unicode-apostrophe step needed.
+    Edition" fully collapses), then hands off to ``match_key`` — which folds
+    case, diacritics, punctuation, apostrophes, the ampersand/"and" spelling,
+    dotted acronyms and numeral spellings, so every one of those variations is
+    decided in one place rather than here.
     """
     cleaned = name
     previous = None
@@ -402,4 +474,4 @@ def normalize_series_gap_title(name: str) -> str:
         previous = cleaned
         for pattern in _SERIES_GAP_EDITION_PATTERNS:
             cleaned = pattern.sub("", cleaned)
-    return normalize_folded_text(cleaned)
+    return match_key(cleaned)

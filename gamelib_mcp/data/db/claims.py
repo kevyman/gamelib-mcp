@@ -79,7 +79,8 @@ async def invalidate_name_derived_enrichment(
     async with get_db() as db:
         # IGDB — name-matched; drives series and shared cross-platform metadata.
         await db.execute(
-            "UPDATE games SET igdb_cached_at = NULL, igdb_claimed_at = NULL WHERE id = ?",
+            "UPDATE games SET igdb_cached_at = NULL, igdb_claimed_at = NULL, "
+            "igdb_resolver_version = NULL WHERE id = ?",
             (game_id,),
         )
         # Drop existing IGDB series memberships too: upsert_game_series_links is
@@ -131,7 +132,8 @@ async def invalidate_igdb_match_enrichment(game_id: int) -> None:
     """
     async with get_db() as db:
         await db.execute(
-            "UPDATE games SET igdb_cached_at = NULL, igdb_claimed_at = NULL WHERE id = ?",
+            "UPDATE games SET igdb_cached_at = NULL, igdb_claimed_at = NULL, "
+            "igdb_resolver_version = NULL WHERE id = ?",
             (game_id,),
         )
         await db.execute(
@@ -164,34 +166,56 @@ async def _claim_ids(
 
 
 async def claim_game_ids_for_igdb(
-    limit: int, stale_before: str, game_ids: Iterable[int] | None = None
+    limit: int,
+    stale_before: str,
+    game_ids: Iterable[int] | None = None,
+    *,
+    resolver_version: int,
 ) -> list[int]:
     """Claim up to ``limit`` unlinked games for the IGDB backfill.
 
     ``game_ids`` narrows the claim to those rows (still subject to every other
     condition) — the scoped path ``get_game_detail`` uses to link the one row
     it was asked about instead of waiting for the background drain.
+
+    Claimable is "never checked" OR "checked, no match, by an OLDER resolver
+    generation" (``resolver_version`` is the caller's current
+    ``igdb.IGDB_RESOLVER_VERSION``; it is a required parameter rather than an
+    import because this package sits underneath igdb.py, and it carries no
+    default because a forgotten argument would silently re-claim every stale
+    no-match on every pass). That second arm is what
+    makes a no-match stamp temporary: a matcher improvement re-queues every row
+    it could newly resolve without a bespoke migration — the shape v10, v28 and
+    v41 each had to hand-write. A LINKED row is never re-claimed by a bump.
+
+    Never-checked rows sort FIRST (``igdb_cached_at IS NOT NULL`` ascending) so
+    a large backlog of stale no-matches drains behind new rows rather than
+    starving them; ``is_farmed``/``id`` order the rest exactly as before.
     """
     scope = list(dict.fromkeys(game_ids)) if game_ids is not None else None
     if scope is not None and not scope:
         return []
     scope_sql = f" AND id IN ({','.join('?' for _ in scope)})" if scope else ""
     scope_params = tuple(scope or ())
+    claimable = (
+        "(igdb_cached_at IS NULL"
+        " OR (igdb_id IS NULL AND COALESCE(igdb_resolver_version, 0) < ?))"
+    )
     return await _claim_ids(
         f"""SELECT id
            FROM games
-           WHERE igdb_cached_at IS NULL
+           WHERE {claimable}
              AND (igdb_claimed_at IS NULL OR igdb_claimed_at < ?)
              {scope_sql}
-           ORDER BY is_farmed ASC, id
+           ORDER BY (igdb_cached_at IS NOT NULL), is_farmed ASC, id
            LIMIT ?""",
-        (stale_before, *scope_params, limit),
-        """UPDATE games
+        (resolver_version, stale_before, *scope_params, limit),
+        f"""UPDATE games
            SET igdb_claimed_at = ?
            WHERE id = ?
-             AND igdb_cached_at IS NULL
+             AND {claimable}
              AND (igdb_claimed_at IS NULL OR igdb_claimed_at < ?)""",
-        lambda now, game_id: (now, game_id, stale_before),
+        lambda now, game_id: (now, game_id, resolver_version, stale_before),
     )
 
 
@@ -358,7 +382,8 @@ async def load_games_for_igdb_backfill(game_ids: Iterable[int]) -> list[aiosqlit
     wishlist-/assessment-only row has no ownership to hang one on. IGDB links
     by appid through external_games, so the fallbacks are exactly what lets
     such a row get linked at all. manual_overrides lets the backfill honor a
-    pinned igdb_id without a per-row lookup.
+    pinned igdb_id without a per-row lookup, and release_date is the reference
+    year the resolver uses to tell two same-named IGDB records apart.
     """
     ids = list(dict.fromkeys(game_ids))
     if not ids:
@@ -367,7 +392,7 @@ async def load_games_for_igdb_backfill(game_ids: Iterable[int]) -> list[aiosqlit
     placeholders = ",".join("?" for _ in ids)
     async with get_db() as db:
         return await db.execute_fetchall(
-            f"""SELECT g.id, g.name, g.igdb_id, g.manual_overrides,
+            f"""SELECT g.id, g.name, g.igdb_id, g.release_date, g.manual_overrides,
                        COALESCE((SELECT gpi.identifier_value
                         FROM game_platforms gp
                         JOIN game_platform_identifiers gpi

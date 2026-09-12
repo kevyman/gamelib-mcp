@@ -864,14 +864,17 @@ class HumbleParserTests(unittest.TestCase):
     def test_the_base_title_survives_an_ampersand_pair_listed_suffix_first(self):
         # Same fold as the Life is Strange 2 case, on a title carrying an "&".
         # The edition key that decides which half is folded is
-        # normalize_series_gap_title (which folds "&" into "and"), so
-        # base_title has to ask its question with the SAME normalization —
-        # comparing normalize_search_text against it made both halves look
-        # suffixed and the survivor fell back to payload order, which lists
-        # the Deluxe Edition key first.
+        # normalize_series_gap_title (which ends in match_key), so base_title
+        # has to ask its question with the SAME normalization — comparing
+        # normalize_search_text against it made both halves look suffixed and
+        # the survivor fell back to payload order, which lists the Deluxe
+        # Edition key first. Every variation match_key folds is the same trap:
+        # an apostrophe or a numeral spelling would reopen it just as widely.
         for base, suffixed in (
             ("Salt & Sanctuary", "Salt & Sanctuary: Deluxe Edition"),
             ("Salt Sanctuary", "Salt Sanctuary: Deluxe Edition"),
+            ("Salt's Sanctuary", "Salt's Sanctuary: Deluxe Edition"),
+            ("Salt II Sanctuary", "Salt II Sanctuary: Deluxe Edition"),
         ):
             with self.subTest(base=base):
                 order = {

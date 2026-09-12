@@ -6,6 +6,7 @@ from conftest import ToolDBTestCase, add_assessment, add_platform, seed_game
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import igdb
+from gamelib_mcp.data.igdb import IGDB_RESOLVER_VERSION
 
 
 class IGDBWishlistIdentityTests(ToolDBTestCase):
@@ -121,14 +122,19 @@ class IGDBWishlistIdentityTests(ToolDBTestCase):
         other = await seed_game("Other")
 
         claimed = await db_module.claim_game_ids_for_igdb(
-            limit=10, stale_before="1970-01-01T00:00:00+00:00", game_ids=[wanted]
+            limit=10,
+            stale_before="1970-01-01T00:00:00+00:00",
+            game_ids=[wanted],
+            resolver_version=IGDB_RESOLVER_VERSION,
         )
 
         self.assertEqual(claimed, [wanted])
         # …and the row it left alone is still claimable.
         self.assertEqual(
             await db_module.claim_game_ids_for_igdb(
-                limit=10, stale_before="1970-01-01T00:00:00+00:00"
+                limit=10,
+                stale_before="1970-01-01T00:00:00+00:00",
+                resolver_version=IGDB_RESOLVER_VERSION,
             ),
             [other],
         )

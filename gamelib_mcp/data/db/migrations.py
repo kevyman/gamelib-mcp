@@ -40,7 +40,7 @@ from .schema import (
     _V2_SCHEMA_DDL,
     _V10_SCHEMA_DDL,
     _V22_SCHEMA_DDL,
-    _V41_SCHEMA_DDL,
+    _V42_SCHEMA_DDL,
 )
 
 
@@ -1908,6 +1908,41 @@ async def _migrate_v40_to_v41(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v41_to_v42(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Add games.igdb_resolver_version and stamp existing checks as version 1.
+
+    v41 was the third one-off re-queue migration (after v10 and v28) written
+    because a "checked, no match" stamp is permanent: claim_game_ids_for_igdb
+    only takes igdb_cached_at IS NULL, so every improvement to the name matcher
+    needed a bespoke SQL guess at which titles it might now resolve. This column
+    retires that pattern — the claim takes any unlinked row stamped by an older
+    resolver generation, so the next matching change is a constant bump
+    (igdb.py::IGDB_RESOLVER_VERSION) and the stale no-matches drain themselves.
+
+    The backfill is deliberately blunt: every row that already carries an
+    igdb_cached_at was stamped by the pre-versioned resolver, which is version
+    1 by definition. That includes LINKED rows — their version is simply never
+    read (the claim only looks at it when igdb_id IS NULL), and writing it
+    anyway keeps "has a stamp" and "has a version" the same set. Rows that were
+    never checked keep NULL, which is exactly what they are.
+    """
+    if progress is not None:
+        progress("Migrating to v42: record which resolver generation stamped each IGDB check.")
+
+    columns = await _table_columns(db, "games")
+    if columns and "igdb_resolver_version" not in columns:
+        await db.execute("ALTER TABLE games ADD COLUMN igdb_resolver_version INTEGER")
+
+    if columns:
+        await db.execute(
+            "UPDATE games SET igdb_resolver_version = 1 "
+            "WHERE igdb_cached_at IS NOT NULL AND igdb_resolver_version IS NULL"
+        )
+
+    await _set_user_version(db, 42)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1944,7 +1979,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V41_SCHEMA_DDL)
+    await db.executescript(_V42_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -2106,6 +2141,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (38, _migrate_v38_to_v39),
     (39, _migrate_v39_to_v40),
     (40, _migrate_v40_to_v41),
+    (41, _migrate_v41_to_v42),
 )
 
 
@@ -2179,7 +2215,7 @@ async def _run_migrations(
         )
 
     if detected_state == "fresh":
-        await db.executescript(_V41_SCHEMA_DDL)
+        await db.executescript(_V42_SCHEMA_DDL)
         fts_enabled = await _sync_fts_index(db)
         await _sync_query_views(db)
         await _set_user_version(db, SCHEMA_VERSION)
@@ -2217,7 +2253,7 @@ async def _run_migrations(
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V41_SCHEMA_DDL)
+    await db.executescript(_V42_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION

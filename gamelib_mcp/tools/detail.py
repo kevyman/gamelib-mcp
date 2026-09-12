@@ -25,6 +25,7 @@ from ..data.hltb import get_hltb
 # Imported at module level (not lazily) so tests can patch them on this module;
 # data/igdb.py imports only data/*, so this edge adds no cycle.
 from ..data.igdb import (
+    IGDB_RESOLVER_VERSION,
     backfill_missing_games,
     get_igdb_children_cached,
     igdb_credentials_configured,
@@ -234,9 +235,18 @@ async def get_game_detail(
         # only the background backfill ever tried, and a row nothing else
         # points at can wait there for a long time. Scope one pass to this row.
         if row["igdb_id"] is None:
-            if row["igdb_cached_at"] is not None:
-                # Checked before and IGDB had no confident answer; re-asking
-                # on every detail call would just re-spend the rate budget.
+            stamped_version = row["igdb_resolver_version"]
+            if (
+                row["igdb_cached_at"] is not None
+                and stamped_version is not None
+                and stamped_version >= IGDB_RESOLVER_VERSION
+            ):
+                # Checked before, by THIS generation of the resolver, and IGDB
+                # had no confident answer; re-asking on every detail call would
+                # just re-spend the rate budget. A stamp from an older
+                # generation is stale — the claim accepts it again, so the row
+                # takes the scoped-link path below exactly like a never-checked
+                # one (no stamp clearing needed).
                 skipped["igdb"] = "no_match"
             elif not igdb_credentials_configured():
                 skipped["igdb"] = "unconfigured"

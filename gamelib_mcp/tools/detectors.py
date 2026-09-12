@@ -1358,6 +1358,7 @@ async def revalidate_igdb_matches(
                            igdb_platforms = NULL,
                            igdb_cached_at = NULL,
                            igdb_claimed_at = NULL,
+                           igdb_resolver_version = NULL,
                            cover_image_id = CASE
                                WHEN manual_overrides IS NOT NULL
                                     AND 'cover_image_id' IN (

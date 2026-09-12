@@ -1162,6 +1162,26 @@ _V40_SCHEMA_DDL = _V39_SCHEMA_DDL.replace(
 # fresh database a version behind or drop out of that sweep.
 _V41_SCHEMA_DDL = _V40_SCHEMA_DDL
 
+
+# v42 adds games.igdb_resolver_version: which generation of the name resolver
+# wrote this row's igdb_cached_at stamp (see igdb.py::IGDB_RESOLVER_VERSION).
+#
+# A "checked, no match" stamp used to be permanent — the background claim only
+# takes igdb_cached_at IS NULL — so every improvement to the matcher needed its
+# own bespoke re-queue migration (v10, v28, v41) naming the titles it might now
+# resolve. Recording the resolver generation makes that structural: a no-match
+# stamped by an older generation is claimable again, automatically, and the
+# next matching change costs a constant bump instead of a migration.
+#
+# NULL means "no stamp, or a stamp from before this column existed" — the v42
+# data step backfills 1 for every row that already carries an igdb_cached_at
+# (linked rows included; their version is simply never consulted). Rows that
+# were never checked stay NULL, which is what they are.
+_V42_SCHEMA_DDL = _V41_SCHEMA_DDL.replace(
+    "        igdb_claimed_at  TEXT,\n",
+    "        igdb_claimed_at  TEXT,\n        igdb_resolver_version INTEGER,\n",
+)
+
 # Semantic views backing query_library()/get_db_schema() — NOT part of the
 # versioned schema chain (like _FTS_DDL below). Dropped and recreated on every
 # migrate_db run via _sync_query_views so a view definition change deploys on

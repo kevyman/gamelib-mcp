@@ -2070,6 +2070,97 @@ class IGDBBackfillCircuitBreakerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(igdb._consecutive_backfill_misses, 1)
 
 
+class IGDBBackfillReferenceYearTests(unittest.IsolatedAsyncioTestCase):
+    """The backfill's same-name tiebreak, including the year a title carries."""
+
+    def setUp(self) -> None:
+        igdb._consecutive_backfill_misses = 0
+
+    def tearDown(self) -> None:
+        igdb._consecutive_backfill_misses = 0
+
+    @staticmethod
+    def _candidate(igdb_id: int, name: str, year: int) -> "igdb.IGDBGame":
+        return igdb.IGDBGame(
+            igdb_id=igdb_id,
+            name=name,
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date=f"{year}-05-11",
+            platforms=[6],
+        )
+
+    async def _backfill(self, row: dict, candidates: list["igdb.IGDBGame"]):
+        async def fake_search(name, igdb_platform_id=None, *, suppress_errors=True):
+            return list(candidates)
+
+        async def fake_exact(name, igdb_platform_id=None, *, suppress_errors=True):
+            return [c for c in candidates if c.name.casefold() == name.casefold()]
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"TWITCH_CLIENT_ID": "cid", "TWITCH_CLIENT_SECRET": "secret"},
+                clear=False,
+            ),
+            patch(
+                "gamelib_mcp.data.igdb.claim_game_ids_for_igdb",
+                AsyncMock(return_value=[row["id"]]),
+            ),
+            patch(
+                "gamelib_mcp.data.igdb.load_games_for_igdb_backfill",
+                AsyncMock(return_value=[row]),
+            ),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(side_effect=fake_search)),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_games_by_exact_name",
+                AsyncMock(side_effect=fake_exact),
+            ),
+            patch("gamelib_mcp.data.igdb.choose_igdb_platform_hint", AsyncMock(return_value=None)),
+            patch("gamelib_mcp.data.igdb._apply_igdb_metadata", AsyncMock()) as apply_metadata,
+            patch("gamelib_mcp.data.igdb.upsert_backfill_platform_release_dates", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()),
+            patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()),
+        ):
+            await igdb.backfill_missing_games(limit=1)
+        return apply_metadata
+
+    async def test_a_title_carrying_its_year_resolves_a_same_name_pair(self) -> None:
+        # The query the backfill sends is normalize_catalog_title's output,
+        # which DROPS the trailing "(YYYY)" — so the year has to be read off
+        # the raw row name or this row (no stored release_date, two real
+        # "Prey" games) refuses itself forever.
+        row = {
+            "id": 9,
+            "name": "Prey (2017)",
+            "igdb_id": None,
+            "release_date": None,
+            "manual_overrides": None,
+            "steam_appid": None,
+        }
+        candidates = [self._candidate(2, "Prey", 2006), self._candidate(3, "Prey", 2017)]
+
+        apply_metadata = await self._backfill(row, candidates)
+
+        apply_metadata.assert_awaited_once()
+        self.assertEqual(apply_metadata.await_args.args[1].igdb_id, 3)
+
+    async def test_a_stored_release_date_outranks_the_titles_own_year(self) -> None:
+        row = {
+            "id": 9,
+            "name": "Prey (2017)",
+            "igdb_id": None,
+            "release_date": "2006-07-11",
+            "manual_overrides": None,
+            "steam_appid": None,
+        }
+        candidates = [self._candidate(2, "Prey", 2006), self._candidate(3, "Prey", 2017)]
+
+        apply_metadata = await self._backfill(row, candidates)
+
+        apply_metadata.assert_awaited_once()
+        self.assertEqual(apply_metadata.await_args.args[1].igdb_id, 2)
+
+
 class IGDBBackfillExternalGamesTests(unittest.IsolatedAsyncioTestCase):
     """external_games (Steam appid -> IGDB id) is authoritative and comes first."""
 

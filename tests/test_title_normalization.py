@@ -340,3 +340,91 @@ class AmpersandSpellingTests(unittest.TestCase):
         for title in ("Hollow Knight", "Sandstorm", "Andor", "Bandit"):
             with self.subTest(title=title):
                 self.assertIsNone(ampersand_alternate(title))
+
+
+class SequelIdentityTokenTests(unittest.TestCase):
+    """data/db/fuzzy.py's number-identity guard, now keyed on match_key."""
+
+    def test_a_letter_x_is_not_the_number_ten(self) -> None:
+        # The map used to fold "x" -> "10", which made "Mega Man X" and "Mega
+        # Man 10" share one identity — two entirely separate games.
+        from gamelib_mcp.data.db.fuzzy import titles_conflict_on_identity
+
+        self.assertTrue(titles_conflict_on_identity("Mega Man X", "Mega Man 10"))
+        self.assertTrue(titles_conflict_on_identity("Mega Man 10", "Mega Man X"))
+        # And "Mega Man X" is still the same game as itself, however written.
+        self.assertFalse(titles_conflict_on_identity("Mega Man X", "MEGA MAN X"))
+
+    def test_roman_and_spelled_out_numbers_share_one_identity(self) -> None:
+        from gamelib_mcp.data.db.fuzzy import titles_conflict_on_identity
+
+        for a, b in (
+            ("Final Fantasy VII", "Final Fantasy 7"),
+            ("Hades II", "Hades 2"),
+            ("Left Four Dead", "Left 4 Dead"),
+        ):
+            with self.subTest(a=a, b=b):
+                self.assertFalse(titles_conflict_on_identity(a, b))
+
+    def test_sequel_numbers_still_conflict(self) -> None:
+        from gamelib_mcp.data.db.fuzzy import titles_conflict_on_identity
+
+        for a, b in (
+            ("Xenoblade Chronicles", "Xenoblade Chronicles 2"),
+            ("Final Fantasy VII", "Final Fantasy VIII"),
+            ("Left 4 Dead", "Left 4 Dead 2"),
+        ):
+            with self.subTest(a=a, b=b):
+                self.assertTrue(titles_conflict_on_identity(a, b))
+
+    def test_platform_tags_are_still_ignored(self) -> None:
+        from gamelib_mcp.data.db.fuzzy import titles_conflict_on_identity
+
+        self.assertFalse(titles_conflict_on_identity("God of War PS5", "God of War PS4"))
+
+    def test_an_edition_suffix_never_manufactures_a_series_number(self) -> None:
+        # Identity tokens come from match_key, which folds spelled-out numbers
+        # to digits — so "Day One Edition" started reading as a "1" and dropped
+        # the base game before the IGDB name gate ever saw it. The widest
+        # edition strip runs first for exactly this reason.
+        from gamelib_mcp.data.db.fuzzy import titles_conflict_on_identity
+
+        for decorated, base in (
+            ("Watch Dogs: Day One Edition", "Watch Dogs"),
+            ("Sea of Thieves: 2026 Edition", "Sea of Thieves"),
+            ("Dead Space (2023)", "Dead Space"),
+            ("Deus Ex: Game of the Year Edition", "Deus Ex"),
+        ):
+            with self.subTest(decorated=decorated):
+                self.assertFalse(titles_conflict_on_identity(decorated, base))
+                self.assertFalse(titles_conflict_on_identity(base, decorated))
+
+
+class MatchKeyContractTests(unittest.TestCase):
+    """The single identity key — see tests/test_title_matching_corpus.py."""
+
+    def test_every_comparison_normalizer_ends_in_the_match_key(self) -> None:
+        from gamelib_mcp.data.title_normalization import (
+            match_key,
+            normalize_edition_comparison_title,
+            normalize_same_product_sku_title,
+            normalize_series_gap_title,
+        )
+
+        # One title with every fold the key performs, carrying no edition or
+        # SKU suffix — so each comparator's stripping is a no-op and what is
+        # left is purely its text normalization.
+        # (The acronym is Q.U.B.E. and not F.E.A.R. on purpose:
+        # normalize_catalog_title, which two of these three loop over, strips a
+        # standalone "R" as a registered-mark glyph — a long-standing quirk this
+        # key deliberately does not reach into.)
+        title = "Marvel’s Q.U.B.E. ™ II & Four"
+        expected = match_key(title)
+        self.assertEqual(expected, "marvels qube 2 and 4")
+        for comparator in (
+            normalize_series_gap_title,
+            normalize_edition_comparison_title,
+            normalize_same_product_sku_title,
+        ):
+            with self.subTest(comparator=comparator.__name__):
+                self.assertEqual(comparator(title), expected)

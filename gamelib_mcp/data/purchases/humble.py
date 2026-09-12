@@ -93,7 +93,7 @@ import httpx
 from gamelib_mcp.data.content import classify_title_override, match_addon_name
 from gamelib_mcp.data.db import default_data_dir
 from gamelib_mcp.data.title_normalization import (
-    normalize_folded_text,
+    match_key,
     normalize_same_product_sku_title,
     normalize_search_text,
     normalize_series_gap_title,
@@ -468,16 +468,17 @@ def _order_games(
 
         ``shared`` is ``normalize_series_gap_title(prior.title)``, so the
         comparison must use that function's own text normalization
-        (``normalize_folded_text``) and not ``normalize_search_text``: the two
-        disagree about "&", and comparing across them made every ampersand
-        title fail both halves of the test and fall back to payload order
+        (``match_key``) and not ``normalize_search_text``: the two disagree
+        about "&" (and about apostrophes, dotted acronyms and numeral
+        spellings), and comparing across them made every ampersand title
+        fail both halves of the test and fall back to payload order
         ("Salt & Sanctuary: Deluxe Edition" listed first kept the suffix).
         The edition stripping is deliberately NOT applied here — being
         unchanged by it is exactly what identifies the base-named half.
         """
         if (
-            normalize_folded_text(new_title) == shared
-            and normalize_folded_text(prior_title) != shared
+            match_key(new_title) == shared
+            and match_key(prior_title) != shared
         ):
             return new_title
         return prior_title
