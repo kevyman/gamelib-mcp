@@ -97,27 +97,47 @@ rebuild — which is also why anything that PREFILTERS in SQL against
 exists for acquisition.py's edition-sibling probe, which otherwise silently
 dropped every apostrophe/ampersand/numeral title).
 
-**The gate's edition strip.** The strict name gate in `_select_best_match`
-compares under `normalize_edition_comparison_title` — the BROAD strip
-(qualifier-anchored tails, the generic "<up to 3 words> Edition" tail, a
-trailing "(YYYY)"), not the narrow `normalize_series_gap_title` it used through
-generation 2. That narrow list enumerates edition words, so a SKU name nobody
-listed never met its base game: "Watch Dogs: Day One Edition", "DARK SOULS:
-Prepare To Die Edition" and "Marvel's Midnight Suns Digital+ Edition" all sat
-unlinked beside records IGDB holds. The broad strip is safe here only because
-the year tiebreak below now guards every edition fold — a tier-2 match is
-either a lone candidate inside the one-sided window or several inside ±2 — and
-because it is anchored, not greedy: a subtitle that is not an edition phrase
-survives ("Halo: The Master Chief Collection" is still not "Halo", "Star Wars:
-The Force Unleashed" is still not "Star Wars", "Persona 5 Royal" is still not
-"Persona 5"), and two differently-decorated SKUs still miss each other
-("Sacred 2 Gold" collapses to "Sacred 2" while "Sacred 2: Fallen Angel" keeps
-its subtitle — the honest answer for two different products). A title that IS
-just an edition phrase cannot match everything: the normalizer returns the RAW
-key when stripping empties the title, so ": Complete Edition" compares as
-"complete edition", never as "". `normalize_series_gap_title` stays where it
-was for `discover_series_gaps` and for `_igdb_name_agrees`, which already tries
-BOTH strips in sequence and so needed no change.
+**The gate's edition strip, and the five bands.** The gate in
+`_select_best_match` admits a candidate under `normalize_edition_comparison_title`
+— the BROAD strip (qualifier-anchored tails, the generic "<up to 3 words>
+Edition" tail, a trailing "(YYYY)"), not the narrow `normalize_series_gap_title`
+it used through generation 2. That narrow list enumerates edition words, so a
+SKU name nobody listed never met its base game: "Watch Dogs: Day One Edition",
+"DARK SOULS: Prepare To Die Edition" and "Marvel's Midnight Suns Digital+
+Edition" all sat unlinked beside records IGDB holds. It stays anchored, not
+greedy: a subtitle that is not an edition phrase survives ("Halo: The Master
+Chief Collection" is still not "Halo", "Star Wars: The Force Unleashed" is
+still not "Star Wars", "Persona 5 Royal" is still not "Persona 5"), and two
+differently-decorated SKUs still miss each other ("Sacred 2 Gold" collapses to
+"Sacred 2" while "Sacred 2: Fallen Angel" keeps its subtitle — the honest
+answer for two different products). A title that IS just an edition phrase
+cannot match everything either: the normalizer returns the RAW key when
+stripping empties the title, so ": Complete Edition" compares as "complete
+edition", never as "".
+
+Passing the gate is not being accepted. The gate-passing candidates rank into
+five bands, first non-empty considered alone: **1a** `match_key` equality on
+the candidate's own primary name, **1b** the same through an alternative name,
+**2a** equality under `normalize_strict_edition_title` (the KNOWN edition
+phrases only) on the primary name, **2b** the same through an alternative
+name, **3** equality only under the full strip — i.e. the generic tail did it.
+Tier 3 is last because it is a guess: the generic rule eats arbitrary words, so
+"Minecraft: Education Edition" collapses onto "Minecraft" exactly like a real
+SKU does, and the lone-tier-2 rule (an edition cannot predate its own game)
+would then have accepted the 2011 record for a 2016 product. So **tier 3 is
+year-gated**: no reference year refuses outright, and with one only a
+SYMMETRIC ±1 window accepts (ties refused, same as tier 1). Tier 2 keeps the
+one-sided window a phrase-vouched edition deserves ("Deus Ex: Game of the Year
+Edition", store date 2013, still reaches "Deus Ex" from 2000). The same
+discipline reaches the query ladder: its edition rung still gates against its
+own stripped query (that is what lets "Sea of Thieves: 2026 Edition" past the
+"2026-is-a-sequel-number" identity check), but when the tail it peeled is not
+a known phrase the rung is marked `generic_edition_query` and everything it
+matches is tier-3 strength — otherwise the rung would launder a guess into an
+exact title and skip the year evidence entirely.
+`normalize_series_gap_title` stays where it was for `discover_series_gaps` and
+for `_igdb_name_agrees`, which already tries BOTH strips in sequence and so
+needed no change.
 
 **Year tiebreak.** No name key can separate two IGDB records that genuinely
 share a title, so `_select_best_match` takes the library row's own release year
@@ -157,7 +177,8 @@ so every resolver improvement needed its own hand-written re-queue migration
 guessing at the affected titles — v10, v28 and v41, of which v41 was the last.
 Generation 2 was one `match_key` plus the year-aware tiebreak; generation 3 is
 alternative names in the gate, GOG external ids, the "versus" fold and the
-broader edition strip — four matching changes, one constant, no migration.
+broader (but tier-ranked and year-gated) edition strip — four matching
+changes, one constant, no migration.
 
 The backfill gets the Steam appid from platform identifiers first, then the
 Steam wishlist's `store_identifier`. Wishlist-only games have no platform row,

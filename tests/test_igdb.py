@@ -1346,6 +1346,13 @@ class ResolveGameZeroResultLadderTests(unittest.IsolatedAsyncioTestCase):
         # title would reject it — "2026" reads as a sequel number in
         # titles_conflict_on_identity. Identity-preserving variants must gate
         # against the variant itself.
+        #
+        # "2026 Edition" is a GENERIC tail though (no edition-word list holds
+        # "2026"), so the rung vouches for identity and nothing more: the
+        # match is tier-3 strength and the row's own release year has to agree
+        # with the candidate's. Without that evidence the same call refuses —
+        # this is the shape "Minecraft: Education Edition" also has, and there
+        # the older record is a different product entirely.
         base_game = igdb.IGDBGame(
             igdb_id=27159,
             name="Sea of Thieves",
@@ -1363,10 +1370,16 @@ class ResolveGameZeroResultLadderTests(unittest.IsolatedAsyncioTestCase):
             patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
             patch("gamelib_mcp.data.igdb.search_game", AsyncMock(side_effect=fake_search_game)),
         ):
-            result = await igdb.resolve_game("Sea of Thieves: 2026 Edition", None)
+            result = await igdb.resolve_game(
+                "Sea of Thieves: 2026 Edition",
+                None,
+                reference_release_date="2018-03-20",
+            )
+            unevidenced = await igdb.resolve_game("Sea of Thieves: 2026 Edition", None)
 
         self.assertIsNotNone(result)
         self.assertEqual(result.igdb_id, 27159)
+        self.assertIsNone(unevidenced)
 
     async def test_gate_rejected_nonempty_results_fall_through_to_ladder(self) -> None:
         # P2 regression: the initial search for "Sea of Thieves: 2026
@@ -1393,7 +1406,11 @@ class ResolveGameZeroResultLadderTests(unittest.IsolatedAsyncioTestCase):
             patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
             patch("gamelib_mcp.data.igdb.search_game", AsyncMock(side_effect=fake_search_game)),
         ):
-            result = await igdb.resolve_game("Sea of Thieves: 2026 Edition", None)
+            result = await igdb.resolve_game(
+                "Sea of Thieves: 2026 Edition",
+                None,
+                reference_release_date="2018-03-20",
+            )
 
         self.assertIsNotNone(result)
         self.assertEqual(result.igdb_id, 27159)
@@ -2376,18 +2393,21 @@ class IGDBBackfillExternalGamesTests(unittest.IsolatedAsyncioTestCase):
             {"id": 8, "name": "B", "igdb_id": None, "manual_overrides": None, "steam_appid": "2"},
         ]
 
+        boom = RuntimeError("IGDB down")
+
         with (
             self._creds_env(),
             patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7, 8])),
             patch("gamelib_mcp.data.igdb.load_games_for_igdb_backfill", AsyncMock(return_value=rows)),
             patch(
                 "gamelib_mcp.data.igdb.resolve_steam_appids_to_igdb",
-                AsyncMock(side_effect=RuntimeError("IGDB down")),
+                AsyncMock(side_effect=boom),
             ),
             patch("gamelib_mcp.data.igdb.fetch_game_by_id", AsyncMock()) as fetch_by_id,
             patch("gamelib_mcp.data.igdb._resolve_game_with_status", AsyncMock()) as resolve_game,
             patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
             patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()) as release_claim,
+            patch("gamelib_mcp.data.igdb.provider_health") as health,
             self.assertLogs("gamelib_mcp.data.igdb", level="WARNING") as logs,
         ):
             count = await igdb.backfill_missing_games(limit=2)
@@ -2398,6 +2418,9 @@ class IGDBBackfillExternalGamesTests(unittest.IsolatedAsyncioTestCase):
         mark_checked.assert_not_awaited()
         self.assertEqual(release_claim.await_count, 2)
         self.assertTrue(any("external_games lookup failed" in line for line in logs.output))
+        # Logged is not enough: the pass returns "rows resolved", so a dead
+        # external_games endpoint is invisible unless it is also counted.
+        health.record_failure.assert_called_once_with("igdb", boom)
 
 
 class IGDBCanaryTests(unittest.IsolatedAsyncioTestCase):
@@ -3067,6 +3090,8 @@ class IGDBBackfillGogExternalGamesTests(unittest.IsolatedAsyncioTestCase):
             },
         ]
 
+        boom = RuntimeError("IGDB down")
+
         with (
             self._creds_env(),
             patch("gamelib_mcp.data.igdb.claim_game_ids_for_igdb", AsyncMock(return_value=[7, 8])),
@@ -3074,12 +3099,13 @@ class IGDBBackfillGogExternalGamesTests(unittest.IsolatedAsyncioTestCase):
             patch("gamelib_mcp.data.igdb.resolve_steam_appids_to_igdb", AsyncMock(return_value={})),
             patch(
                 "gamelib_mcp.data.igdb.resolve_external_ids_to_igdb",
-                AsyncMock(side_effect=RuntimeError("IGDB down")),
+                AsyncMock(side_effect=boom),
             ),
             patch("gamelib_mcp.data.igdb.fetch_game_by_id", AsyncMock()) as fetch_by_id,
             patch("gamelib_mcp.data.igdb._resolve_game_with_status", AsyncMock()) as resolve_game,
             patch("gamelib_mcp.data.igdb.mark_igdb_checked", AsyncMock()) as mark_checked,
             patch("gamelib_mcp.data.igdb.release_game_claim", AsyncMock()) as release_claim,
+            patch("gamelib_mcp.data.igdb.provider_health") as health,
             self.assertLogs("gamelib_mcp.data.igdb", level="WARNING") as logs,
         ):
             count = await igdb.backfill_missing_games(limit=2)
@@ -3090,3 +3116,4 @@ class IGDBBackfillGogExternalGamesTests(unittest.IsolatedAsyncioTestCase):
         mark_checked.assert_not_awaited()
         self.assertEqual(release_claim.await_count, 2)
         self.assertTrue(any("GOG lookup failed" in line for line in logs.output))
+        health.record_failure.assert_called_once_with("igdb", boom)

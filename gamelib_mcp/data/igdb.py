@@ -51,6 +51,7 @@ from .title_normalization import (
     normalize_edition_comparison_title,
     normalize_search_text,
     normalize_series_gap_title,
+    normalize_strict_edition_title,
 )
 
 logger = logging.getLogger(__name__)
@@ -935,6 +936,7 @@ def _select_best_match(
     *,
     allow_inconclusive_fallback: bool,
     reference_year: int | None = None,
+    generic_edition_query: bool = False,
 ) -> IGDBGame | None:
     """Pick the best candidate from `results` for query `name`, or None.
 
@@ -993,10 +995,25 @@ def _select_best_match(
     ``reference_year`` is the library row's own release year (see
     ``_resolve_game_with_status``), and it arbitrates the case the name gate
     cannot: two IGDB records that genuinely share a title. The gate-passing
-    candidates split into TIER 1 (``match_key`` equality — the exact title, no
-    edition stripping) and TIER 2 (equal only once an edition suffix is
-    stripped); tier 1 is considered alone whenever it is non-empty, so a
-    remake marketed as an edition can never outrank the real thing.
+    candidates split into five bands, ranked by how much the equality is
+    worth, and the FIRST non-empty band is considered alone:
+
+      1a  ``match_key`` equality on the candidate's own PRIMARY name — the
+          exact title, no stripping.
+      1b  the same, reached through one of its alternative names.
+      2a  equality under ``normalize_strict_edition_title`` on the primary
+          name — a KNOWN edition phrase was stripped ("Game of the Year
+          Edition", "Day One Edition").
+      2b  the same, through an alternative name.
+      3   equality only under the full ``normalize_edition_comparison_title``,
+          i.e. the generic "<up to 3 words> Edition" tail did it.
+
+    Tier 1 before tier 2 keeps a remake marketed as an edition from
+    outranking the real thing; primary before alternative keeps a coinciding
+    working title ("Titan" for "Overwatch") from outranking a record that owns
+    the name. Tier 3 is last because it is a GUESS: the generic tail eats
+    arbitrary words, so "Minecraft: Education Edition" collapses onto
+    "Minecraft" exactly like a real SKU would, and it is a different product.
 
     Within the chosen tier, with a known reference year: candidates within ±1
     year win in ranked order (platform and region releases drift by months).
@@ -1014,6 +1031,15 @@ def _select_best_match(
     With no reference year, two or more distinct candidates whose known years
     disagree by more than a year are refused rather than ranked: that is the
     "Dead Space 2008 vs 2023" shape, and IGDB's own ordering is not evidence.
+
+    TIER 3 does not get any of that. Nothing vouches for its edition reading,
+    so the year has to: without a reference year it refuses outright, and with
+    one it accepts only inside a SYMMETRIC ±1 window (ties refused like tier
+    1). The one-sided "an edition cannot predate its own game" rule is
+    deliberately not extended to it — that rule assumes the suffix really is
+    an edition, which is the very thing in question. ``generic_edition_query``
+    says the QUERY is already a ladder rung that peeled such a tail, so
+    whatever it matches is tier-3 strength however exactly it matches.
     """
     from .db import extract_best_fuzzy_key, titles_conflict_on_identity
 
@@ -1104,24 +1130,37 @@ def _select_best_match(
             )
         return None
 
-    # Tier 1 = the exact title (no edition stripping); tier 2 = everything the
-    # edition strip had to fold. Each splits again on WHICH name matched,
-    # because a record's own primary name is stronger evidence than a
-    # spelling it merely also answers to: alternative names carry working
-    # titles, acronyms and regional names that legitimately coincide with
-    # another record's primary title ("Titan" is Blizzard's working title for
-    # "Overwatch" AND a 2019 game of its own). Ranked 1a (primary, exact), 1b
-    # (alternative name, exact), 2a (primary, edition-stripped), 2b
-    # (alternative name, edition-stripped); the first non-empty band is
-    # considered ALONE, so a coinciding alternative name can no longer drag a
-    # real exact-title match into a same-name ambiguity refusal.
-    def _primary_is_compatible(idx: int) -> bool:
-        return results[idx].name in compatible_names[idx]
+    # HOW the equality was reached decides how much it is worth. Two axes:
+    #
+    #   * WHICH NAME matched — a record's own primary title is stronger
+    #     evidence than a spelling it merely also answers to. Alternative
+    #     names carry working titles, acronyms and regional names that
+    #     legitimately coincide with another record's primary ("Titan" is
+    #     Blizzard's working title for "Overwatch" AND a 2019 game of its
+    #     own), so ranking them equally dragged a clean exact-title match into
+    #     a same-name ambiguity refusal.
+    #   * WHICH STRIP was needed — no strip at all (the exact title), a KNOWN
+    #     edition phrase (`normalize_strict_edition_title`), or the generic
+    #     "<up to 3 words> Edition" tail, which eats arbitrary words and is a
+    #     guess: "Minecraft: Education Edition" collapses onto "Minecraft"
+    #     exactly like a real SKU would, and the lone-tier-2 rule would then
+    #     accept the older record and link a different product.
+    #
+    # Bands, first non-empty considered ALONE: 1a exact/primary, 1b
+    # exact/alternative, 2a strict-edition/primary, 2b strict-edition/
+    # alternative, 3 generic tail (either name). Tier 3 is year-gated below.
+    strict_target = normalize_strict_edition_title(name)
+    strict_spelling: dict[int, str] = {}
+    for idx in passing:
+        for candidate_name in compatible_names[idx]:
+            if normalize_strict_edition_title(candidate_name) == strict_target:
+                strict_spelling[idx] = candidate_name
+                break
 
     tier_1a = [
         idx
         for idx in passing
-        if _primary_is_compatible(idx)
+        if results[idx].name in compatible_names[idx]
         and match_key(results[idx].name) == normalized_query
     ]
     tier_1b = [
@@ -1130,29 +1169,92 @@ def _select_best_match(
         if idx not in tier_1a
         and any(match_key(n) == normalized_query for n in compatible_names[idx])
     ]
-    tier_2a = [
-        idx
-        for idx in passing
-        if idx not in tier_1a
-        and idx not in tier_1b
-        and matched_spelling[idx] == results[idx].name
-    ]
-    tier_2b = [
-        idx
-        for idx in passing
-        if idx not in tier_1a and idx not in tier_1b and idx not in tier_2a
-    ]
-    tier, is_tier_one = next(
-        (band, exact)
-        for band, exact in (
-            (tier_1a, True),
-            (tier_1b, True),
-            (tier_2a, False),
-            (tier_2b, False),
+    rest = [idx for idx in passing if idx not in tier_1a and idx not in tier_1b]
+    tier_2a = [idx for idx in rest if strict_spelling.get(idx) == results[idx].name]
+    tier_2b = [idx for idx in rest if idx not in tier_2a and idx in strict_spelling]
+    tier_3 = [idx for idx in rest if idx not in strict_spelling]
+    if generic_edition_query:
+        # ``name`` is not the library row's title: it is a ladder rung that
+        # already peeled a tail the STRICT strip does not recognize (see
+        # _resolve_game_with_status). The rung vouches for identity — that is
+        # why it gates against itself — but not for the edition reading, so
+        # every match it produces is tier-3 strength however exactly it
+        # matches the rung's own string.
+        tier, tier_kind = passing, "generic"
+    else:
+        tier, tier_kind = next(
+            (band, kind)
+            for band, kind in (
+                (tier_1a, "exact"),
+                (tier_1b, "exact"),
+                (tier_2a, "edition"),
+                (tier_2b, "edition"),
+                (tier_3, "generic"),
+            )
+            if band
         )
-        if band
-    )
+    is_tier_one = tier_kind == "exact"
     distinct_ids = {results[idx].igdb_id for idx in tier}
+
+    def _closest_within_a_year(band: list[int], year_reference: int) -> tuple[int | None, list[int]]:
+        """The single closest candidate within ±1 year, and the whole window.
+
+        The index is None when the window is empty OR when two DISTINCT
+        records tie at the best distance — list position is not evidence, and
+        picking by it would flip the link on a re-fetch. The window itself is
+        returned for the caller's log line.
+        """
+        distances = {
+            idx: abs(year - year_reference)
+            for idx in band
+            if (year := _candidate_year(results[idx])) is not None
+        }
+        window = sorted(
+            (idx for idx, distance in distances.items() if distance <= 1),
+            key=lambda idx: (distances[idx], idx),
+        )
+        if not window:
+            return None, window
+        best = window[0]
+        tied_ids = {
+            results[idx].igdb_id for idx in window if distances[idx] == distances[best]
+        }
+        return (None if len(tied_ids) > 1 else best), window
+
+    if tier_kind == "generic":
+        # Only the generic tail folded these together, so the "edition"
+        # reading is unevidenced: it needs the year to vouch for it, and only
+        # a SYMMETRIC ±1 window — tier 2's one-sided "an edition cannot
+        # predate its own game" rule assumes the suffix really is an edition,
+        # which is exactly what is in question here.
+        if reference_year is None:
+            logger.info(
+                "IGDB gate refused %r: generic edition tail, no year evidence "
+                "(candidates=%s)",
+                name,
+                _year_debug(results, tier),
+            )
+            return None
+        best_idx, window = _closest_within_a_year(tier, reference_year)
+        if not window:
+            logger.info(
+                "IGDB gate refused %r (reference_year=%s): generic edition tail, "
+                "year conflict (candidates=%s)",
+                name,
+                reference_year,
+                _year_debug(results, tier),
+            )
+            return None
+        if best_idx is None:
+            logger.info(
+                "IGDB year tiebreak refused %r (reference_year=%s): several "
+                "generic-edition candidates equally close in year (candidates=%s)",
+                name,
+                reference_year,
+                _year_debug(results, window),
+            )
+            return None
+        return _accept(best_idx)
 
     if reference_year is None:
         known = {
@@ -1165,7 +1267,7 @@ def _select_best_match(
                 "IGDB year tiebreak refused %r: same-name candidates, no reference "
                 "year (tier=%s candidates=%s)",
                 name,
-                1 if is_tier_one else 2,
+                1 if is_tier_one else 2,  # tier 3 returned above
                 _year_debug(results, tier),
             )
             return None
@@ -1177,23 +1279,9 @@ def _select_best_match(
     # equally plausible, and picking between them by list position would
     # flip the link on a re-fetch — refuse instead (AGENTS.md: reject
     # release-year conflicts; never let ordering stand in for evidence).
-    distances = {
-        idx: abs(year - reference_year)
-        for idx in tier
-        if (year := _candidate_year(results[idx])) is not None
-    }
-    within_one = sorted(
-        (idx for idx, distance in distances.items() if distance <= 1),
-        key=lambda idx: (distances[idx], idx),
-    )
+    best_idx, within_one = _closest_within_a_year(tier, reference_year)
     if within_one:
-        best = within_one[0]
-        tied_ids = {
-            results[idx].igdb_id
-            for idx in within_one
-            if distances[idx] == distances[best]
-        }
-        if len(tied_ids) > 1:
+        if best_idx is None:
             logger.info(
                 "IGDB year tiebreak refused %r (reference_year=%s): several candidates "
                 "equally close in year (candidates=%s)",
@@ -1202,7 +1290,7 @@ def _select_best_match(
                 _year_debug(results, within_one),
             )
             return None
-        return _accept(best)
+        return _accept(best_idx)
 
     if is_tier_one:
         if len(distinct_ids) == 1:
@@ -1438,12 +1526,23 @@ async def _resolve_game_with_status(
         # transformation already vouches for series identity, and the original
         # may carry an edition number ("… 2026 Edition") that would wrongly
         # read as a sequel marker against the base game's title.
+        #
+        # What such a rung does NOT vouch for is the edition reading itself
+        # when the tail it peeled is one no edition-word list recognizes
+        # ("Minecraft: Education Edition" -> "Minecraft"). Gating against the
+        # rung would otherwise turn that guess into a tier-1 exact title and
+        # walk straight past the year evidence _select_best_match demands of a
+        # generic edition tail, linking a different product outright.
         gate_name = variant if identity_preserving else name
+        generic_edition_rung = identity_preserving and normalize_strict_edition_title(
+            name
+        ) != normalize_strict_edition_title(variant)
         match = _select_best_match(
             gate_name,
             variant_results,
             allow_inconclusive_fallback=False,
             reference_year=reference_year,
+            generic_edition_query=generic_edition_rung,
         )
         if match is not None:
             return _ResolveOutcome(game=match, saw_candidates=True)
@@ -2203,6 +2302,12 @@ async def backfill_missing_games(
         try:
             mapping = await fetch_mapping(uids)
         except Exception as exc:
+            # Logged AND counted: the pass returns "rows resolved", so an
+            # aborted pass is indistinguishable from an empty queue in that
+            # number — provider_health is where a dead external_games endpoint
+            # becomes visible (same contract as the per-row failure handler
+            # below).
+            provider_health.record_failure("igdb", exc)
             logger.warning(
                 "IGDB %s lookup failed; leaving backfill pass retryable: %s",
                 log_label,

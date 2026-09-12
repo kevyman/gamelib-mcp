@@ -28,17 +28,25 @@ from gamelib_mcp.data.igdb import _generate_resolve_query_variants
 from gamelib_mcp.data.title_normalization import (
     match_key,
     normalize_edition_comparison_title,
+    normalize_strict_edition_title,
 )
 
 
 def _gate_accepts(query: str, candidate: str) -> bool:
     """Would the resolver's name gate accept ``candidate`` for ``query``?
 
-    Mirrors _select_best_match's two conditions (no sequel/version identity
-    conflict AND edition-stripped equality), applied to the query itself and to
-    every identity-preserving ladder rung — the transformations that are
-    allowed to vouch for identity, so their hits are gated against the rung
-    rather than the original ("Sea of Thieves: 2026 Edition").
+    Mirrors _select_best_match's two GATE conditions (no sequel/version
+    identity conflict AND edition-stripped equality under the full strip),
+    applied to the query itself and to every identity-preserving ladder rung —
+    the transformations that are allowed to vouch for identity, so their hits
+    are gated against the rung rather than the original ("Sea of Thieves: 2026
+    Edition").
+
+    It answers "is this a candidate at all", not "is it accepted": what the
+    resolver then does with a gate-passing candidate — the 1a/1b/2a/2b/3 tier
+    bands and the year rules, including tier 3 refusing a generic edition tail
+    with no year evidence — is the RESOLVER layer's business, and the classes
+    below are where those outcomes are pinned.
     """
     gates = [query] + [
         variant
@@ -97,14 +105,25 @@ EDITION_PAIRS: tuple[tuple[str, str, str], ...] = (
     ("ps5 marker", "God of War (PS5)", "God of War"),
     ("switch marker", "Hollow Knight for Nintendo Switch", "Hollow Knight"),
     ("switch 2 edition", "Hollow Knight - Nintendo Switch 2 Edition", "Hollow Knight"),
-    ("year edition", "Sea of Thieves: 2026 Edition", "Sea of Thieves"),
     # Generation 3: the gate's edition-stripped tier is
-    # normalize_edition_comparison_title, whose generic "<up to 3 words>
-    # Edition" tail reaches SKU names no curated list enumerates. Under the
-    # narrow series-gap strip these three never met their base game.
-    ("named edition", "Watch Dogs: Day One Edition", "Watch Dogs"),
-    ("named edition", "DARK SOULS: Prepare To Die Edition", "Dark Souls"),
+    # normalize_strict_edition_title, and these two tails are KNOWN edition
+    # phrases ("day one" was added to the qualifier list; "digital+" carries
+    # the SKU decoration) — so they meet their base game on the strength of
+    # the phrase alone, no year evidence needed.
+    ("day one", "Watch Dogs: Day One Edition", "Watch Dogs"),
     ("decorated qualifier", "Marvel's Midnight Suns Digital+ Edition", "Marvel's Midnight Suns"),
+)
+
+# Tails only the GENERIC "<up to 3 words> Edition" rule can strip: the gate
+# accepts them (both names collapse to the same title) but nothing vouches for
+# the tail BEING an edition phrase — "Education" reads exactly like "Prepare To
+# Die" to the pattern. The resolver therefore ranks them tier 3 and demands a
+# reference year within ±1; the fourth field is the base game's year, and the
+# refusals live in GenericEditionTailTests below.
+GENERIC_EDITION_PAIRS: tuple[tuple[str, str, str, int], ...] = (
+    ("named edition", "DARK SOULS: Prepare To Die Edition", "Dark Souls", 2011),
+    ("year edition", "Sea of Thieves: 2026 Edition", "Sea of Thieves", 2018),
+    ("sku word", "STRAFE: Millennium Edition", "STRAFE", 2017),
 )
 
 # Different games that a looser key would collapse. Symmetric: neither
@@ -194,6 +213,14 @@ class NameGateCorpusTests(unittest.TestCase):
 
     def test_edition_suffixes_are_stripped_off_the_query(self) -> None:
         for label, decorated, base in EDITION_PAIRS:
+            with self.subTest(label=label, query=decorated, candidate=base):
+                self.assertTrue(_gate_accepts(decorated, base))
+
+    def test_the_gate_also_accepts_generic_edition_tails(self) -> None:
+        # The GATE is the full strip — these pairs do collapse together. What
+        # separates them from the table above is what the resolver then does
+        # with the match (tier 3, year-gated), not whether it is a candidate.
+        for label, decorated, base, _year in GENERIC_EDITION_PAIRS:
             with self.subTest(label=label, query=decorated, candidate=base):
                 self.assertTrue(_gate_accepts(decorated, base))
 
@@ -447,6 +474,46 @@ class SameNameYearTiebreakTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("none within a year" in line for line in logs.output))
 
 
+class StrictEditionStripTests(unittest.TestCase):
+    """Which tails are KNOWN edition phrases, stated directly.
+
+    The strict form is what separates tier 2 (accept on the phrase) from tier
+    3 (accept only on year evidence) in the resolver, so the membership of
+    `_COMPARISON_QUALIFIER` is load-bearing rather than cosmetic.
+    """
+
+    def test_known_edition_phrases_collapse_onto_the_base_title(self) -> None:
+        for decorated, base in (
+            ("Watch Dogs: Day One Edition", "Watch Dogs"),
+            ("Battlefield 1 Launch Edition", "Battlefield 1"),
+            ("Deus Ex: Game of the Year Edition", "Deus Ex"),
+            ("Marvel's Midnight Suns Digital+ Edition", "Marvel's Midnight Suns"),
+            ("Mass Effect (2007)", "Mass Effect"),
+        ):
+            with self.subTest(decorated=decorated):
+                self.assertEqual(
+                    normalize_strict_edition_title(decorated),
+                    normalize_strict_edition_title(base),
+                )
+
+    def test_an_unlisted_tail_is_not_an_edition_phrase(self) -> None:
+        for decorated, base in (
+            ("Minecraft: Education Edition", "Minecraft"),
+            ("DARK SOULS: Prepare To Die Edition", "Dark Souls"),
+            ("STRAFE: Millennium Edition", "STRAFE"),
+        ):
+            with self.subTest(decorated=decorated):
+                # The full strip folds them; only the strict one keeps them apart.
+                self.assertEqual(
+                    normalize_edition_comparison_title(decorated),
+                    normalize_edition_comparison_title(base),
+                )
+                self.assertNotEqual(
+                    normalize_strict_edition_title(decorated),
+                    normalize_strict_edition_title(base),
+                )
+
+
 class EditionStripFallbackTests(unittest.TestCase):
     """The broad strip's escape hatch, pinned.
 
@@ -678,3 +745,91 @@ class AlternativeNameContractTests(unittest.TestCase):
         self.assertEqual(len(game.alternative_names), igdb.ALTERNATIVE_NAME_CAP)
         self.assertEqual(game.alternative_names[0], "GTA V")
         self.assertNotIn("Grand Theft Auto V", game.alternative_names)
+
+
+class GenericEditionTailTests(unittest.IsolatedAsyncioTestCase):
+    """Tier 3: an edition reading nothing vouches for, so the year must.
+
+    The generic "<up to 3 words> Edition" rule eats arbitrary words, so it
+    cannot tell a real SKU ("DARK SOULS: Prepare To Die Edition") from a
+    different product wearing the same shape ("Minecraft: Education Edition",
+    which is not an edition of Minecraft at all). Both reach the base game's
+    title, and the resolver refuses to call either an edition without a
+    reference year inside ±1 — symmetric, because tier 2's one-sided "an
+    edition cannot predate its own game" rule assumes the suffix really is an
+    edition, which is the very thing in question here.
+    """
+
+    async def _resolve(self, query, candidates, *, reference_release_date=None):
+        return await ResolverCorpusTests._resolve(
+            self, query, candidates, reference_release_date=reference_release_date
+        )
+
+    async def test_a_generic_tail_resolves_when_the_year_agrees(self) -> None:
+        for label, decorated, base, year in GENERIC_EDITION_PAIRS:
+            with self.subTest(label=label, query=decorated, igdb_name=base):
+                match = await self._resolve(
+                    decorated,
+                    [_game(90, base, year)],
+                    reference_release_date=f"{year + 1}-03-01",
+                )
+                self.assertIsNotNone(match)
+                self.assertEqual(match.igdb_id, 90)
+
+    async def test_a_generic_tail_is_refused_without_year_evidence(self) -> None:
+        for label, decorated, base, year in GENERIC_EDITION_PAIRS:
+            with self.subTest(label=label, query=decorated, igdb_name=base):
+                with self.assertLogs("gamelib_mcp.data.igdb", level="INFO") as logs:
+                    match = await self._resolve(decorated, [_game(90, base, year)])
+                self.assertIsNone(match)
+                self.assertTrue(
+                    any("no year evidence" in line for line in logs.output)
+                )
+
+    async def test_a_different_product_wearing_the_same_shape_is_refused(self) -> None:
+        # "Minecraft: Education Edition" (2016) is its own product; the lone
+        # tier-2 rule would have accepted the 2011 "Minecraft" outright,
+        # because an older record reads as "the game this is an edition of".
+        with self.assertLogs("gamelib_mcp.data.igdb", level="INFO") as logs:
+            match = await self._resolve(
+                "Minecraft: Education Edition",
+                [_game(91, "Minecraft", 2011)],
+                reference_release_date="2016-11-01",
+            )
+        self.assertIsNone(match)
+        self.assertTrue(any("year conflict" in line for line in logs.output))
+
+        with self.assertLogs("gamelib_mcp.data.igdb", level="INFO") as logs:
+            match = await self._resolve(
+                "Minecraft: Education Edition", [_game(91, "Minecraft", 2011)]
+            )
+        self.assertIsNone(match)
+        self.assertTrue(any("no year evidence" in line for line in logs.output))
+
+    async def test_a_known_edition_phrase_needs_no_year_evidence(self) -> None:
+        # The contrast that makes the rule legible: "Day One Edition" is a
+        # phrase storefronts use, so tier 2 takes it on the phrase alone —
+        # including the one-sided window a real edition deserves.
+        match = await self._resolve(
+            "Watch Dogs: Day One Edition", [_game(92, "Watch Dogs", 2014)]
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(match.igdb_id, 92)
+
+        match = await self._resolve(
+            "Deus Ex: Game of the Year Edition",
+            [_game(93, "Deus Ex", 2000)],
+            reference_release_date="2013-02-01",
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(match.igdb_id, 93)
+
+    async def test_several_generic_candidates_in_the_window_refuse_a_tie(self) -> None:
+        with self.assertLogs("gamelib_mcp.data.igdb", level="INFO") as logs:
+            match = await self._resolve(
+                "DARK SOULS: Prepare To Die Edition",
+                [_game(94, "Dark Souls", 2011), _game(95, "Dark Souls", 2011)],
+                reference_release_date="2012-08-23",
+            )
+        self.assertIsNone(match)
+        self.assertTrue(any("equally close in year" in line for line in logs.output))
