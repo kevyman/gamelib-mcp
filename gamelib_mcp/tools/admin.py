@@ -463,8 +463,9 @@ async def merge_games(
     primary base game — the remediation path for phantom edition parents.
     Games-level enrichment the source carries (IGDB link, tags, cover, HLTB,
     release date, …) fills the target's NULL columns — target wins wherever it
-    already has a value, manually overridden columns are never touched — and
-    the columns actually filled come back as game_fields_filled.
+    already has a value, a column the target pinned by hand is never touched,
+    and a copied value the SOURCE pinned by hand stays pinned on the target —
+    reported as game_fields_filled and game_overrides_carried.
 
     Use this to consolidate PSN/localized duplicate rows that were ingested
     before the English title resolver existed. After merging, the source
@@ -870,9 +871,14 @@ async def merge_games(
         # the cover and the HLTB times silently. Fill each TARGET column that is
         # NULL from the source; the target always wins when it already has a
         # value (the merge's keep-target rule, same as the acquisition fill
-        # above). manual_overrides itself is never copied — it describes the
-        # source row's edit history — and a column the TARGET pinned by hand is
-        # left alone, exactly as every sync/enrichment writer does.
+        # above). A column the TARGET pinned by hand is left alone, exactly as
+        # every sync/enrichment writer does. A value the SOURCE pinned by hand
+        # travels WITH its pin: the copy would otherwise land unprotected and
+        # the next sync/enrichment pass could overwrite the user's edit.
+        # Everything else in the source's manual_overrides describes columns
+        # that were not copied and dies with the row.
+        import json
+
         from ..data.db import get_manual_overrides
 
         fill_columns = (
@@ -899,6 +905,7 @@ async def merge_games(
             f"SELECT {enrichment_cols} FROM games WHERE id = ?", (target_game_id,)
         )
         target_overrides = await get_manual_overrides(db, target_game_id)
+        source_overrides = await get_manual_overrides(db, source_game_id)
         game_updates: dict[str, object] = {
             column: source_game[column]
             for column in fill_columns
@@ -931,10 +938,15 @@ async def merge_games(
         ):
             game_updates["is_farmed"] = 1
         game_fields_filled = sorted(game_updates)
+        game_overrides_carried = sorted(set(game_updates) & source_overrides)
         if game_updates and not dry_run:
             if adopt_igdb:
                 await db.execute(
                     "UPDATE games SET igdb_id = NULL WHERE id = ?", (source_game_id,)
+                )
+            if game_overrides_carried:
+                game_updates["manual_overrides"] = json.dumps(
+                    sorted(target_overrides | set(game_overrides_carried))
                 )
             fill_sql = ", ".join(f"{column} = ?" for column in game_updates)
             await db.execute(
@@ -976,6 +988,7 @@ async def merge_games(
         "children_reparented": children_reparented,
         "target_promoted_to_primary": target_promoted_to_primary,
         "game_fields_filled": game_fields_filled,
+        "game_overrides_carried": game_overrides_carried,
         "source_deleted": not dry_run,
     }
 

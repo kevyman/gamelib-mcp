@@ -969,7 +969,7 @@ class MergeGamesTests(ToolDBTestCase):
             "assessments_transferred", "assessments_dropped",
             "assessment_instead_links_repointed",
             "children_reparented", "target_promoted_to_primary",
-            "game_fields_filled",
+            "game_fields_filled", "game_overrides_carried",
             "source_deleted",
         }
         self.assertEqual(set(result.keys()), expected_keys)

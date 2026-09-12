@@ -28,7 +28,6 @@ import logging
 import os
 import re
 import shutil
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -155,12 +154,26 @@ class GogProduct:
     slug: str
 
 
-def _parse_listing_page(payload: dict) -> list[GogProduct]:
-    """Owned games on one listing page; movies and non-game rows dropped."""
-    products: list[GogProduct] = []
+def _listing_page_products(payload: dict, page: int) -> list:
+    """The ``products`` list of one listing page, or raise on a malformed page.
+
+    A missing or non-list ``products`` (an error envelope, a schema change)
+    must NOT read as an empty library: the sync would then report a
+    successful ``account_api`` run over nothing, hiding the outage. Raising
+    sends ``sync_gog`` down the CLI fallback with the error on record.
+    """
     raw = payload.get("products")
     if not isinstance(raw, list):
-        return products
+        raise RuntimeError(
+            f"Unexpected GOG listing payload on page {page}: "
+            f"products is {type(raw).__name__}, not a list"
+        )
+    return raw
+
+
+def _parse_listing_products(raw: list) -> list[GogProduct]:
+    """Owned games on one listing page; movies and non-game rows dropped."""
+    products: list[GogProduct] = []
     for item in raw:
         if not isinstance(item, dict):
             continue
@@ -227,7 +240,8 @@ async def fetch_gog_library_products(
             )
             if payload is None:
                 raise RuntimeError(_LISTING_AUTH_ERROR)
-            for product in _parse_listing_page(payload):
+            raw_products = _listing_page_products(payload, page)
+            for product in _parse_listing_products(raw_products):
                 if product.product_id in seen:
                     continue
                 seen.add(product.product_id)
@@ -354,30 +368,6 @@ async def _rename_to_catalog_title(game_id: int, catalog_title: str, slug_title:
     return True
 
 
-async def _identifierless_gog_row(name: str) -> sqlite3.Row | None:
-    """The oldest same-normalized-name games row owning a gog platform row
-    that carries NO gog_product_id — the only shape the account-listing name
-    fallback may attach to (see the caller for why)."""
-    normalized = normalize_search_text(name)
-    if not normalized:
-        return None
-    async with get_db() as db:
-        return await db.execute_fetchone(
-            """SELECT g.*
-               FROM games g
-               JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'gog'
-               WHERE COALESCE(g.name_normalized, '') = ?
-                 AND NOT EXISTS (
-                     SELECT 1 FROM game_platform_identifiers gpi
-                     WHERE gpi.game_platform_id = gp.id
-                       AND gpi.identifier_type = ?
-                 )
-               ORDER BY g.id
-               LIMIT 1""",
-            (normalized, GOG_PRODUCT_ID),
-        )
-
-
 async def _sync_from_account_listing(products: list[GogProduct]) -> dict:
     """Resolve account-listing products identifier-first and write them."""
     added = matched = skipped = renamed = 0
@@ -422,29 +412,24 @@ async def _sync_from_account_listing(products: list[GogProduct]) -> dict:
                 game_id = adopted
                 matched += 1
             else:
-                # Adoption refused only when the same-name gog rows were
-                # AMBIGUOUS (several identifier-less ones) — the one other
-                # reason, a same-name row that already carries a DIFFERENT
-                # product id, must NOT be matched here: that is a distinct GOG
-                # product ("Alone in the Dark" 2008 vs 2024), and attaching a
-                # second id would be the within-platform name collapse the
-                # identity rules forbid. So the fallback accepts only a row
-                # whose gog platform row has no product id at all.
-                row = await _identifierless_gog_row(prepared_title)
-                if row is None and legacy_title:
-                    row = await _identifierless_gog_row(legacy_title)
-                if row is not None:
-                    game_id = row["id"]
+                # Adoption refused for one of two reasons, and neither may be
+                # second-guessed by name here: several identifier-less
+                # same-name gog rows (AMBIGUOUS — picking the oldest would file
+                # the product onto an arbitrary sibling), or a same-name row
+                # that already carries a DIFFERENT product id (a distinct GOG
+                # product, "Alone in the Dark" 2008 vs 2024 — attaching a
+                # second id is the within-platform collapse the identity rules
+                # forbid). Normal resolution's exclude-platform guard mints
+                # instead; a visible extra row is merge_games-repairable, a
+                # silent misfile is not.
+                game_id, igdb_game = await resolve_and_link_game(
+                    prepared_title, igdb_platform_id, candidates, platform="gog"
+                )
+                if game_id in candidates:
                     matched += 1
                 else:
-                    game_id, igdb_game = await resolve_and_link_game(
-                        prepared_title, igdb_platform_id, candidates, platform="gog"
-                    )
-                    if game_id in candidates:
-                        matched += 1
-                    else:
-                        candidates[game_id] = prepared_title
-                        added += 1
+                    candidates[game_id] = prepared_title
+                    added += 1
 
         if await _rename_to_catalog_title(game_id, prepared_title, slug_title):
             renamed += 1

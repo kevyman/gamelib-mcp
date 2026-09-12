@@ -184,6 +184,51 @@ class MergeGamesEnrichmentTests(ToolDBTestCase):
         self.assertIsNone(merged["tags"])
         self.assertEqual(json.loads(merged["genres"]), ["Indie"])
 
+    async def test_source_manual_override_travels_with_the_copied_value(self) -> None:
+        """A value the SOURCE pinned by hand stays pinned on the target.
+
+        Copying the value without its manual_overrides entry would leave the
+        user's edit unprotected: the next sync or enrichment pass could
+        overwrite it, which is exactly what the pin exists to prevent.
+        """
+        source = await seed_game("Decktamer (duplicate)")
+        await db_module.apply_manual_game_fields(
+            source, {"release_date": "2024-05-16", "completion_status": "playing"}
+        )
+        target = await seed_game("Decktamer")
+        await db_module.apply_manual_game_fields(target, {"sort_name": "Decktamer"})
+
+        result = await admin.merge_games(source, target)
+
+        self.assertEqual(
+            result["game_overrides_carried"], ["completion_status", "release_date"]
+        )
+        merged = await read_game(target)
+        self.assertEqual(merged["release_date"], "2024-05-16")
+        self.assertEqual(merged["completion_status"], "playing")
+        async with db_module.get_db() as db:
+            overrides = await db_module.get_manual_overrides(db, target)
+        # The target's own pin survives beside the carried ones.
+        self.assertEqual(overrides, {"completion_status", "release_date", "sort_name"})
+
+    async def test_source_override_on_an_uncopied_column_is_not_carried(self) -> None:
+        """Target wins on conflict, so the source's pin on that column dies
+        with the source row — carrying it would pin the TARGET's value as if
+        the user had set it."""
+        source = await seed_game("Decktamer (duplicate)")
+        await db_module.apply_manual_game_fields(source, {"release_date": "2024-05-16"})
+        target = await seed_game("Decktamer")
+        await set_game_columns(target, release_date="2024-05-17")
+
+        preview = await admin.merge_games(source, target, dry_run=True)
+        result = await admin.merge_games(source, target)
+
+        self.assertEqual(preview["game_overrides_carried"], [])
+        self.assertEqual(result["game_overrides_carried"], [])
+        self.assertEqual((await read_game(target))["release_date"], "2024-05-17")
+        async with db_module.get_db() as db:
+            self.assertEqual(await db_module.get_manual_overrides(db, target), set())
+
     async def test_is_farmed_is_or_merged(self) -> None:
         source = await seed_game("Farmed duplicate", is_farmed=1)
         target = await seed_game("Farmed", is_farmed=0)

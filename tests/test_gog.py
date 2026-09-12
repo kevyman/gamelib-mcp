@@ -440,6 +440,21 @@ class FetchLibraryProductsTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_malformed_page_raises_instead_of_reading_as_empty(self) -> None:
+        """An error envelope / schema change is a provider failure, not an
+        empty library — it must reach sync_gog as an exception so the run
+        falls back to the CLI and records the error."""
+        for payload in ({"error": "temporarily unavailable"}, {"products": None}):
+            with self.subTest(payload=payload):
+                transport, _ = _listing_transport([payload])
+                with _gog_session_dir(), self.assertRaisesRegex(RuntimeError, "products"):
+                    await gog.fetch_gog_library_products(transport=transport)
+
+    async def test_empty_products_list_is_an_empty_library(self) -> None:
+        transport, _ = _listing_transport([{"products": [], "totalPages": 1}])
+        with _gog_session_dir():
+            self.assertEqual(await gog.fetch_gog_library_products(transport=transport), [])
+
     async def test_missing_session_raises_relogin_advice(self) -> None:
         transport, _ = _listing_transport([{"products": [], "totalPages": 1}])
         with (
@@ -547,6 +562,41 @@ class AccountListingSyncTests(ToolDBTestCase):
             )
         self.assertEqual(len(rows), 2)
 
+    async def test_ambiguous_same_name_rows_are_never_adopted_by_age(self) -> None:
+        """Two identifier-less same-name gog rows make adoption AMBIGUOUS.
+
+        adopt_platform_identifier refuses on purpose; the sync must not break
+        the tie itself (the oldest row is an arbitrary sibling). Normal
+        resolution mints instead — a visible extra row merge_games can fold,
+        rather than a product silently filed onto the wrong twin.
+        """
+        first = await seed_game("Alone in the Dark")
+        await add_platform(first, "gog", from_source=True)
+        second = await db_module.upsert_game(
+            None, "Alone in the Dark", match_existing_by_name=False
+        )
+        await add_platform(second, "gog", from_source=True)
+
+        async def _mint_fresh(name, igdb_platform_id, candidates, **kwargs):
+            return await db_module.upsert_game(None, name, match_existing_by_name=False), None
+
+        resolver = AsyncMock(side_effect=_mint_fresh)
+        result, mock_resolve = await self._run_sync(
+            [_product(2000000002, "Alone in the Dark", "alone_in_the_dark")],
+            resolve=resolver,
+        )
+
+        self.assertEqual(result["added"], 1)
+        mock_resolve.assert_awaited_once()
+        self.assertEqual(mock_resolve.await_args.kwargs.get("platform"), "gog")
+        self.assertEqual(await _identifiers_for_game(first), [])
+        self.assertEqual(await _identifiers_for_game(second), [])
+        async with db_module.get_db() as db:
+            rows = await db.execute_fetchall(
+                "SELECT id FROM games WHERE name = ? ORDER BY id", ("Alone in the Dark",)
+            )
+        self.assertEqual(len(rows), 3)
+
     async def test_credentials_are_read_once_across_listing_pages(self) -> None:
         transport, seen = _listing_transport(
             [
@@ -652,11 +702,10 @@ class AccountListingSyncTests(ToolDBTestCase):
 
 
 class ListingFallbackTests(unittest.TestCase):
-    def test_401_listing_falls_back_to_lgogdownloader(self) -> None:
+    def _sync_with_listing(self, transport: httpx.MockTransport) -> tuple[dict, AsyncMock]:
         mock_proc = MagicMock()
         mock_proc.returncode = 0
         mock_proc.communicate = AsyncMock(return_value=(b"cyberpunk_2077\n", b""))
-        transport = httpx.MockTransport(lambda request: httpx.Response(401, json={}))
 
         real_fetch = gog.fetch_gog_library_products
 
@@ -674,6 +723,11 @@ class ListingFallbackTests(unittest.TestCase):
             patch("gamelib_mcp.data.gog.load_fuzzy_candidates", AsyncMock(return_value={})),
         ):
             result = asyncio.run(gog.sync_gog())
+        return result, mock_resolve
+
+    def test_401_listing_falls_back_to_lgogdownloader(self) -> None:
+        transport = httpx.MockTransport(lambda request: httpx.Response(401, json={}))
+        result, mock_resolve = self._sync_with_listing(transport)
 
         self.assertEqual(result["listing_backend"], "lgogdownloader")
         self.assertIn("not authenticated", result["listing_error"])
@@ -686,6 +740,23 @@ class ListingFallbackTests(unittest.TestCase):
             ("Cyberpunk 2077", igdb.PLATFORM_TO_IGDB["gog"]),
         )
         self.assertEqual(mock_resolve.await_args.kwargs, {})
+
+    def test_malformed_listing_payload_falls_back_to_lgogdownloader(self) -> None:
+        """A 200 whose body has no products list is an outage on record, not a
+        successful sync of an empty library."""
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={"error": "temporarily unavailable"},
+                headers={"content-type": "application/json"},
+            )
+        )
+        result, mock_resolve = self._sync_with_listing(transport)
+
+        self.assertEqual(result["listing_backend"], "lgogdownloader")
+        self.assertIn("products", result["listing_error"])
+        self.assertEqual(result["added"], 1)
+        mock_resolve.assert_awaited_once()
 
 
 if __name__ == "__main__":
