@@ -154,7 +154,13 @@ async def detect_collapsed_games() -> dict:
                       COUNT(DISTINCT CASE WHEN gpi.is_primary = 1
                                           THEN gpi.identifier_value END)
                           AS primary_count,
-                      GROUP_CONCAT(DISTINCT gpi.identifier_value) AS identifier_values
+                      GROUP_CONCAT(DISTINCT gpi.identifier_value) AS identifier_values,
+                      GROUP_CONCAT(DISTINCT CASE WHEN gpi.is_primary = 1
+                                                 THEN gpi.identifier_value END)
+                          AS primary_values,
+                      GROUP_CONCAT(DISTINCT CASE WHEN gpi.is_primary = 0
+                                                 THEN gpi.identifier_value END)
+                          AS secondary_values
                FROM games g
                JOIN game_platforms gp ON gp.game_id = g.id
                JOIN game_platform_identifiers gpi ON gpi.game_platform_id = gp.id
@@ -174,6 +180,11 @@ async def detect_collapsed_games() -> dict:
             "identifier_count": row["identifier_count"],
             "primary_count": row["primary_count"],
             "identifier_values": (row["identifier_values"] or "").split(","),
+            # Split by is_primary so a caller can suggest carving off the
+            # secondaries: GROUP_CONCAT's order says nothing about which
+            # identifier the sync considers the row's own.
+            "primary_values": [v for v in (row["primary_values"] or "").split(",") if v],
+            "secondary_values": [v for v in (row["secondary_values"] or "").split(",") if v],
         }
         for row in rows
     ]

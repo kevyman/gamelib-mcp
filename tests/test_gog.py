@@ -30,10 +30,10 @@ except ModuleNotFoundError:
     aiosqlite.connect = connect
     sys.modules["aiosqlite"] = aiosqlite
 
-from conftest import ToolDBTestCase, add_platform, seed_game
+from conftest import ToolDBTestCase, add_identifier, add_platform, seed_game
 
 from gamelib_mcp.data import db as db_module
-from gamelib_mcp.data import gog, igdb
+from gamelib_mcp.data import gog, gog_session, igdb
 
 
 @contextlib.contextmanager
@@ -511,6 +511,60 @@ class AccountListingSyncTests(ToolDBTestCase):
             await _identifiers_for_game(game_id),
             [(db_module.GOG_PRODUCT_ID, "1207658930")],
         )
+
+    async def test_same_name_row_with_a_different_product_id_is_not_collapsed(self) -> None:
+        """Two GOG products sharing a title are two rows (anti-collapse).
+
+        Adoption refuses a same-name gog row that already carries a product
+        id; the name fallback must refuse it too, or the second product's id
+        lands on the first row as a "secondary" and two games share one row.
+        """
+        older = await seed_game("Alone in the Dark")
+        older_platform = await add_platform(older, "gog", from_source=True)
+        await add_identifier(older_platform, db_module.GOG_PRODUCT_ID, "1000000001")
+
+        # The real resolver refuses a row already owning gog and mints; the
+        # stub does the same explicitly (seed_game would name-match onto the
+        # older row, which is exactly what the sync must not do).
+        async def _mint_fresh(name, igdb_platform_id, candidates, **kwargs):
+            return await db_module.upsert_game(None, name, match_existing_by_name=False), None
+
+        resolver = AsyncMock(side_effect=_mint_fresh)
+        result, mock_resolve = await self._run_sync(
+            [_product(2000000002, "Alone in the Dark", "alone_in_the_dark_2024")],
+            resolve=resolver,
+        )
+
+        self.assertEqual(result["added"], 1)
+        mock_resolve.assert_awaited_once()
+        self.assertEqual(
+            await _identifiers_for_game(older),
+            [(db_module.GOG_PRODUCT_ID, "1000000001")],
+        )
+        async with db_module.get_db() as db:
+            rows = await db.execute_fetchall(
+                "SELECT id FROM games WHERE name = ? ORDER BY id", ("Alone in the Dark",)
+            )
+        self.assertEqual(len(rows), 2)
+
+    async def test_credentials_are_read_once_across_listing_pages(self) -> None:
+        transport, seen = _listing_transport(
+            [
+                {"page": 1, "totalPages": 2, "products": [_product(1, "A", "a")]},
+                {"page": 2, "totalPages": 2, "products": [_product(2, "B", "b")]},
+            ]
+        )
+        with (
+            _gog_session_dir(),
+            patch(
+                "gamelib_mcp.data.gog_session.load_access_token",
+                wraps=gog_session.load_access_token,
+            ) as token_loader,
+        ):
+            products = await gog.fetch_gog_library_products(transport=transport)
+        self.assertEqual([p.product_id for p in products], ["1", "2"])
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(token_loader.call_count, 1)
 
     async def test_legacy_slug_row_is_adopted_and_renamed(self) -> None:
         # Exactly what the lgogdownloader backend used to store: the slug

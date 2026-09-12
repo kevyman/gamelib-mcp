@@ -244,6 +244,17 @@ async def _run_identity_same_store_collapse(
     for c in result["candidates"]:
         primary_count = c.get("primary_count") or 0
         secondary_count = c["identifier_count"] - primary_count
+        # What the suggested split carves off. The fold shape has exactly one
+        # identifier the sync considers the row's own; the suggestion must
+        # move the OTHERS, never that one — GROUP_CONCAT order is arbitrary,
+        # so "everything but the first" could split off the live appid and
+        # leave the row with only its retired edition. With two primaries
+        # nothing marks the survivor, so all but the first stay the offer.
+        split_values = (
+            c["identifier_values"][1:]
+            if primary_count >= 2
+            else (c.get("secondary_values") or c["identifier_values"][1:])
+        )
         if primary_count >= 2:
             severity = "error"
             message = (
@@ -274,6 +285,7 @@ async def _run_identity_same_store_collapse(
                     "platform": c["platform"],
                     "identifier_type": c["identifier_type"],
                     "identifier_values": c["identifier_values"],
+                    "primary_values": c.get("primary_values", []),
                     "primary_count": primary_count,
                 },
                 suggested_action={
@@ -281,7 +293,7 @@ async def _run_identity_same_store_collapse(
                     "args": {
                         "source_game_id": c["game_id"],
                         "platform": c["platform"],
-                        "identifier_values": c["identifier_values"][1:],
+                        "identifier_values": split_values,
                     },
                     "note": (
                         "review which identifier belongs to which game before "

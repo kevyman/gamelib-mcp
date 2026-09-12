@@ -28,6 +28,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,8 +49,7 @@ from gamelib_mcp.data.db import (
 )
 from gamelib_mcp.data.gog_session import (
     authenticated_get_json,
-    load_access_token,
-    load_cookie_jar,
+    load_gog_session,
     missing_session_error,
     stale_session_message,
 )
@@ -197,7 +197,11 @@ async def fetch_gog_library_products(
     every one of those as "fall back to the CLI listing".
     ``transport`` exists for tests (httpx.MockTransport).
     """
-    if load_access_token() is None and load_cookie_jar() is None:
+    # Credentials are read from disk ONCE per fetch and a rejected bearer
+    # token is remembered on the session object, so a multi-page listing does
+    # not re-parse the token file and re-try the dead token on every page.
+    session = load_gog_session()
+    if session.token is None and session.cookies is None:
         raise missing_session_error()
 
     products: list[GogProduct] = []
@@ -219,6 +223,7 @@ async def fetch_gog_library_products(
                     "system": "",
                     "page": page,
                 },
+                session=session,
             )
             if payload is None:
                 raise RuntimeError(_LISTING_AUTH_ERROR)
@@ -349,6 +354,30 @@ async def _rename_to_catalog_title(game_id: int, catalog_title: str, slug_title:
     return True
 
 
+async def _identifierless_gog_row(name: str) -> sqlite3.Row | None:
+    """The oldest same-normalized-name games row owning a gog platform row
+    that carries NO gog_product_id — the only shape the account-listing name
+    fallback may attach to (see the caller for why)."""
+    normalized = normalize_search_text(name)
+    if not normalized:
+        return None
+    async with get_db() as db:
+        return await db.execute_fetchone(
+            """SELECT g.*
+               FROM games g
+               JOIN game_platforms gp ON gp.game_id = g.id AND gp.platform = 'gog'
+               WHERE COALESCE(g.name_normalized, '') = ?
+                 AND NOT EXISTS (
+                     SELECT 1 FROM game_platform_identifiers gpi
+                     WHERE gpi.game_platform_id = gp.id
+                       AND gpi.identifier_type = ?
+                 )
+               ORDER BY g.id
+               LIMIT 1""",
+            (normalized, GOG_PRODUCT_ID),
+        )
+
+
 async def _sync_from_account_listing(products: list[GogProduct]) -> dict:
     """Resolve account-listing products identifier-first and write them."""
     added = matched = skipped = renamed = 0
@@ -393,13 +422,17 @@ async def _sync_from_account_listing(products: list[GogProduct]) -> dict:
                 game_id = adopted
                 matched += 1
             else:
-                # A same-name gog-owning row that adoption refused (it already
-                # carries a product id of its own, or was ambiguous) is still
-                # this catalog item re-syncing far more often than it is a new
-                # game — match it before minting anything.
-                row = await get_platform_game_by_normalized_name(prepared_title, "gog")
+                # Adoption refused only when the same-name gog rows were
+                # AMBIGUOUS (several identifier-less ones) — the one other
+                # reason, a same-name row that already carries a DIFFERENT
+                # product id, must NOT be matched here: that is a distinct GOG
+                # product ("Alone in the Dark" 2008 vs 2024), and attaching a
+                # second id would be the within-platform name collapse the
+                # identity rules forbid. So the fallback accepts only a row
+                # whose gog platform row has no product id at all.
+                row = await _identifierless_gog_row(prepared_title)
                 if row is None and legacy_title:
-                    row = await get_platform_game_by_normalized_name(legacy_title, "gog")
+                    row = await _identifierless_gog_row(legacy_title)
                 if row is not None:
                     game_id = row["id"]
                     matched += 1

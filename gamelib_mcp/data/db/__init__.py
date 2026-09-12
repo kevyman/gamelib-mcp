@@ -638,6 +638,7 @@ from .upserts import (
     set_platform_acquisition,
     set_platform_ownership,
     set_steam_delisted,
+    stale_wishlist_game_ids,
     stamp_wishlist_alerts,
     upsert_game,
     upsert_game_alias,

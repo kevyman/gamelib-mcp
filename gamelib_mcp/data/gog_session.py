@@ -14,6 +14,7 @@ without a cycle.
 
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -117,8 +118,31 @@ def looks_like_login_html(response: httpx.Response) -> bool:
     return "text/html" in content_type or response.text.lstrip()[:1] == "<"
 
 
+@dataclass
+class GogSession:
+    """The lgogdownloader credentials, read from disk once per fetch.
+
+    ``token_rejected`` is set the first time the bearer token comes back
+    unauthenticated, so a paginated fetch stops re-trying the dead token (and
+    re-logging the fallback) on every page.
+    """
+
+    token: str | None
+    cookies: dict[str, str] | None
+    token_rejected: bool = False
+
+
+def load_gog_session() -> GogSession:
+    """Read both credentials from the lgogdownloader config dir once."""
+    return GogSession(token=load_access_token(), cookies=load_cookie_jar())
+
+
 async def authenticated_get_json(
-    client: httpx.AsyncClient, url: str, params: dict[str, Any]
+    client: httpx.AsyncClient,
+    url: str,
+    params: dict[str, Any],
+    *,
+    session: GogSession | None = None,
 ) -> dict | None:
     """GET a GOG JSON endpoint as the logged-in account.
 
@@ -126,22 +150,27 @@ async def authenticated_get_json(
     Returns the decoded object, or None when neither credential authenticates
     (including when neither is stored) — callers decide which error that is.
     Any other transport/HTTP error propagates, and a non-object payload raises.
+
+    ``session`` carries credentials a caller loaded once (``load_gog_session``)
+    and remembers a rejected token across calls; without it the files are
+    read for this one request.
     """
+    if session is None:
+        session = load_gog_session()
     headers = browser_headers()
-    token = load_access_token()
-    if token is not None:
+    if session.token is not None and not session.token_rejected:
         payload = await _get_json_once(
-            client, url, params, {**headers, "Authorization": f"Bearer {token}"}
+            client, url, params, {**headers, "Authorization": f"Bearer {session.token}"}
         )
         if payload is not None:
             return payload
+        session.token_rejected = True
+        if session.cookies is not None:
+            logger.info("GOG bearer token rejected — retrying with cookie jar")
 
-    cookies = load_cookie_jar()
-    if cookies is None:
+    if session.cookies is None:
         return None
-    if token is not None:
-        logger.info("GOG bearer token rejected — retrying with cookie jar")
-    client.cookies.update(cookies)
+    client.cookies.update(session.cookies)
     return await _get_json_once(client, url, params, headers)
 
 

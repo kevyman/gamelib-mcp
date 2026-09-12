@@ -21,6 +21,7 @@ import httpx
 from gamelib_mcp.data.content import (
     CONTENT_BASE_GAME,
     CONTENT_DLC,
+    NESTED_CONTENT_TYPES,
     ContentClassification,
 )
 from gamelib_mcp.data.db import (
@@ -282,6 +283,16 @@ def _main_game_artifact_ids(main_game: dict[str, Any]) -> list[str]:
         if app_id and str(app_id) not in artifact_ids:
             artifact_ids.append(str(app_id))
     return artifact_ids
+
+
+def _is_parentless_nested(row: Any) -> bool:
+    """True for a nested row (dlc/expansion/…) that has no parent link yet."""
+    try:
+        content_type = row["content_type"]
+        parent_game_id = row["parent_game_id"]
+    except (KeyError, IndexError, TypeError):
+        return False
+    return content_type in NESTED_CONTENT_TYPES and parent_game_id is None
 
 
 def _is_default_classification(row: Any) -> bool:
@@ -620,10 +631,16 @@ async def sync_epic() -> dict:
         if existing is not None:
             game_id = existing["id"]
             matched += 1
-            # Only a row still at the untouched default is reclassified, and
-            # even then the shared writer's guards (parent-must-stay-primary,
-            # substance, edition-ownership, manual overrides) have the last word.
-            if _is_default_classification(existing):
+            # A row still at the untouched default is reclassified; so is a
+            # row already nested but PARENTLESS once its base item resolves —
+            # a giveaway DLC routinely arrives before its base game, and the
+            # first sync after the base is claimed is when the link becomes
+            # possible. Either way the shared writer's guards
+            # (parent-must-stay-primary, substance, edition-ownership, manual
+            # overrides) have the last word.
+            if _is_default_classification(existing) or (
+                parent_game_id is not None and _is_parentless_nested(existing)
+            ):
                 await apply_content_classification(
                     game_id,
                     ContentClassification(

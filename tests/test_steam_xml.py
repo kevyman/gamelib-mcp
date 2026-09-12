@@ -249,6 +249,28 @@ class SteamBulkUpsertTests(ToolDBTestCase):
         self.assertEqual(platform_row["library_updated_at"], synced_at)
         self.assertEqual(identifier_count_row["count"], 1)
 
+    async def test_adoption_compares_normalized_names_not_spelling(self) -> None:
+        """Pass 1c keys on name_normalized: a receipt's punctuation must not fork."""
+        synced_at = "2026-08-05T12:00:00+00:00"
+        game_id = await seed_game("Q.U.B.E")
+        platform_id = await add_platform(game_id, "steam")
+
+        await db_module.bulk_upsert_steam_library(
+            [{"appid": 203730, "name": "Q.U.B.E."}], synced_at=synced_at
+        )
+
+        async with db_module.get_db() as db:
+            games = await db.execute_fetchall(
+                "SELECT id FROM games WHERE name_normalized = 'q u b e' OR name_normalized = 'qube'"
+            )
+            identifier = await db.execute_fetchone(
+                """SELECT game_platform_id FROM game_platform_identifiers
+                   WHERE identifier_type = ? AND identifier_value = '203730'""",
+                (db_module.STEAM_APP_ID,),
+            )
+        self.assertEqual([row["id"] for row in games], [game_id])
+        self.assertEqual(identifier["game_platform_id"], platform_id)
+
     async def test_identifier_less_steam_row_adopts_the_appid_instead_of_forking(
         self,
     ) -> None:

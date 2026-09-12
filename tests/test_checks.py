@@ -351,6 +351,32 @@ async def _insert_duplicate_game(name: str) -> int:
         return cursor.lastrowid
 
 
+class SameStoreCollapseSplitSuggestionTests(ToolDBTestCase):
+    async def test_fold_shape_suggests_splitting_only_the_secondaries(self):
+        """GROUP_CONCAT order is arbitrary; the primary appid must never be
+        the one the suggestion carves off."""
+        game_id = await seed_game("Alan Wake")
+        platform_id = await add_platform(game_id, "steam")
+        async with db_module.get_db() as db:
+            # Secondary inserted FIRST so it sorts first in the concatenation.
+            await db.execute(
+                """INSERT INTO game_platform_identifiers
+                   (game_platform_id, identifier_type, identifier_value, is_primary)
+                   VALUES (?, ?, '108727', 0), (?, ?, '108710', 1)""",
+                (platform_id, db_module.STEAM_APP_ID, platform_id, db_module.STEAM_APP_ID),
+            )
+            await db.commit()
+
+        result = await checks.run_library_checks(checks=["identity.same_store_collapse"])
+        self.assertEqual(len(result["findings"]), 1)
+        finding = result["findings"][0]
+        self.assertEqual(finding["severity"], "notice")
+        self.assertEqual(finding["evidence"]["primary_values"], ["108710"])
+        self.assertEqual(
+            finding["suggested_action"]["args"]["identifier_values"], ["108727"]
+        )
+
+
 class IdentityStrandedDuplicateTests(ToolDBTestCase):
     async def test_reports_and_suggests_merge(self):
         identified = await make_steam_game("Real English", 100)

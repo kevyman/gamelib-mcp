@@ -820,6 +820,29 @@ async def clear_fulfilled_wishlist_entries(
         return cursor.rowcount
 
 
+async def stale_wishlist_game_ids(
+    platform: str,
+    source: str,
+    keep_game_ids: Iterable[int],
+) -> list[int]:
+    """The game_ids ``delete_stale_wishlist_entries`` would remove for these args.
+
+    The one definition of the removal predicate — (platform, source) rows
+    whose game_id is not in ``keep_game_ids`` — read BEFORE the delete so the
+    caller can garbage-collect the games rows that just lost their last
+    reference (``delete_unreferenced_games``). Keep it and the DELETE below in
+    step; a wishlist entry this says goes but the delete keeps would GC a
+    still-referenced row.
+    """
+    keep = set(keep_game_ids)
+    async with get_db() as db:
+        rows = await db.execute_fetchall(
+            "SELECT game_id FROM game_wishlist WHERE platform = ? AND source = ?",
+            (platform, source),
+        )
+    return [row["game_id"] for row in rows if row["game_id"] not in keep]
+
+
 async def delete_stale_wishlist_entries(
     platform: str,
     source: str,
@@ -1242,6 +1265,7 @@ async def bulk_upsert_steam_library(
             """CREATE TEMP TABLE IF NOT EXISTS temp_steam_library_sync (
                    appid INTEGER PRIMARY KEY,
                    name TEXT NOT NULL,
+                   name_normalized TEXT NOT NULL,
                    playtime_minutes INTEGER,
                    playtime_2weeks_minutes INTEGER,
                    rtime_last_played INTEGER,
@@ -1268,10 +1292,12 @@ async def bulk_upsert_steam_library(
             await db.execute("DELETE FROM temp_steam_library_sync")
             await db.executemany(
                 """INSERT INTO temp_steam_library_sync
-                   (appid, name, playtime_minutes, playtime_2weeks_minutes, rtime_last_played, row_order)
-                   VALUES (?, ?, ?, ?, ?, ?)
+                   (appid, name, name_normalized, playtime_minutes,
+                    playtime_2weeks_minutes, rtime_last_played, row_order)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(appid) DO UPDATE SET
                        name = excluded.name,
+                       name_normalized = excluded.name_normalized,
                        playtime_minutes = excluded.playtime_minutes,
                        playtime_2weeks_minutes = excluded.playtime_2weeks_minutes,
                        rtime_last_played = excluded.rtime_last_played,
@@ -1280,6 +1306,7 @@ async def bulk_upsert_steam_library(
                     (
                         row["appid"],
                         row["name"],
+                        normalize_search_text(row["name"]),
                         row.get("playtime_minutes"),
                         row.get("playtime_2weeks_minutes"),
                         row.get("rtime_last_played"),
@@ -1362,7 +1389,11 @@ async def bulk_upsert_steam_library(
             # game id wins — so two appids never collapse onto one game. The
             # identifier INSERT below then attaches the appid to that existing
             # platform row, and the platform upsert stamps last_seen_in_source
-            # while leaving its acquisition columns untouched.
+            # while leaving its acquisition columns untouched. Names compare
+            # under normalize_search_text like every other adoption path: a
+            # purchase-minted row spells the title the way the receipt did
+            # ("Q.U.B.E" vs Steam's "Q.U.B.E."), and a case-only comparison
+            # would fork the twin this pass exists to prevent.
             await db.execute(
                 """UPDATE temp_steam_library_sync AS t
                    SET resolved_game_id = (
@@ -1370,7 +1401,8 @@ async def bulk_upsert_steam_library(
                        FROM games g
                        JOIN game_platforms gp
                          ON gp.game_id = g.id AND gp.platform = 'steam'
-                       WHERE lower(g.name) = lower(t.name)
+                       WHERE COALESCE(g.name_normalized, '') = t.name_normalized
+                         AND t.name_normalized != ''
                          AND NOT EXISTS (
                              SELECT 1 FROM game_platform_identifiers gpi
                              WHERE gpi.game_platform_id = gp.id
@@ -1384,7 +1416,7 @@ async def bulk_upsert_steam_library(
                          SELECT MIN(t2.row_order)
                          FROM temp_steam_library_sync t2
                          WHERE t2.resolved_game_id IS NULL
-                           AND lower(t2.name) = lower(t.name)
+                           AND t2.name_normalized = t.name_normalized
                      )""",
                 (STEAM_APP_ID,),
             )

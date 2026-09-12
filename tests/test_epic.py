@@ -611,6 +611,43 @@ class SyncEpicTests(unittest.TestCase):
         self.assertEqual(call.kwargs["source"], "epic")
         self.assertEqual(call.kwargs["parent_game_id"], 42)
 
+    def test_existing_parentless_dlc_row_is_reparented_once_its_base_resolves(self) -> None:
+        """A giveaway DLC that arrived before its base game links up later."""
+        games = [
+            {
+                "app_title": "Control",
+                "asset_infos": {"Windows": {"asset_id": "artifact-control"}},
+                "metadata": {"id": "cat-control"},
+            },
+            {
+                "app_title": "Ultra HD Texture Pack",
+                "asset_infos": {"Windows": {"asset_id": "artifact-dlc"}},
+                "metadata": {
+                    "id": "cat-dlc",
+                    "mainGameItem": {"id": "cat-control", "title": "Control"},
+                },
+            },
+        ]
+
+        result, _, _, _ = self._run_sync(
+            games,
+            identifier_rows={
+                "artifact-dlc": {
+                    "id": 7,
+                    "content_type": "dlc",
+                    "is_primary_library_item": 0,
+                    "parent_game_id": None,
+                }
+            },
+        )
+
+        self.assertEqual(result, {"added": 1, "matched": 1, "skipped": 0, "dlc": 1})
+        self.mocks["classify"].assert_awaited_once()
+        call = self.mocks["classify"].await_args
+        self.assertEqual(call.args[0], 7)
+        self.assertEqual(call.args[1].content_type, "dlc")
+        self.assertEqual(call.kwargs["parent_game_id"], 42)
+
     def test_existing_non_default_row_is_not_reclassified(self) -> None:
         games = [
             {

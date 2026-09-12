@@ -77,9 +77,9 @@ from .db import (
     delete_unreferenced_games,
     exact_name_steam_conflict,
     get_assessed_game_id_by_appid,
-    get_db,
     get_game_by_identifier,
     get_wishlist_game_id_by_store_identifier,
+    stale_wishlist_game_ids,
     upsert_game,
     upsert_wishlist_entry,
 )
@@ -529,7 +529,7 @@ async def fetch_wishlist() -> dict:
         # nothing left to say which games they pointed at. The guard above is
         # untouched — a partial fetch never reaches here, so the GC can only
         # ever see genuinely un-wishlisted rows.
-        dropping = await _wishlist_game_ids_not_kept("steam", "steam", resolved_game_ids)
+        dropping = await stale_wishlist_game_ids("steam", "steam", resolved_game_ids)
         removed = await delete_stale_wishlist_entries("steam", "steam", resolved_game_ids)
         # A removed wishlist entry used to leave its games row behind with
         # nothing pointing at it (check_library's ownership.orphan residue).
@@ -552,19 +552,3 @@ async def fetch_wishlist() -> dict:
         "orphans_removed": orphans_removed,
     }
 
-
-async def _wishlist_game_ids_not_kept(
-    platform: str, source: str, keep_game_ids: set[int]
-) -> list[int]:
-    """game_ids of this (platform, source)'s wishlist rows outside keep_game_ids.
-
-    Exactly the set ``delete_stale_wishlist_entries`` is about to delete, read
-    first so the orphan GC knows which games rows just lost their last
-    reference.
-    """
-    async with get_db() as db:
-        rows = await db.execute_fetchall(
-            "SELECT game_id FROM game_wishlist WHERE platform = ? AND source = ?",
-            (platform, source),
-        )
-    return [row["game_id"] for row in rows if row["game_id"] not in keep_game_ids]
