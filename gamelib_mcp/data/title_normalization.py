@@ -230,6 +230,23 @@ _PURCHASE_SKU_PATTERNS = (
     # Store-state markers on old bundle keys ("GRAV (Early Access)",
     # "Streamline Early Access") — with or without the parentheses.
     re.compile(r"\s*\(?Early Access\)?\s*$", re.IGNORECASE),
+    # Prime Gaming / Luna giveaway markers on GOG and Epic order titles
+    # ("Dishonored - Definitive Edition - Amazon Prime", "Fallout 2 - Amazon
+    # Luna", "Batman: Arkham Knight (Amazon Prime)"). The importer minted a
+    # phantom "X - Amazon Prime" row beside the real one for every such order.
+    # Anchored on the two-word marker, never a bare "Prime": "Metroid Prime
+    # Remastered" must keep its title word.
+    re.compile(
+        r"[\s:–—-]+\(?(?:Amazon\s+(?:Prime|Luna)(?:\s+Gaming)?|Prime\s+Gaming)\)?\s*$",
+        re.IGNORECASE,
+    ),
+    # Trailing parenthesised platform tag on a purchase line ("Factorio
+    # (Steam)", "Cuphead (Epic Games Store)") — which store delivered the key,
+    # never part of the game's name.
+    re.compile(
+        r"\s*\((?:Steam|GOG|Epic(?:\s+Games(?:\s+Store)?)?|PC)\)\s*$",
+        re.IGNORECASE,
+    ),
     # Package-kind tails from the licenses/history pages.
     re.compile(
         r"[\s:–—-]+(?:Base Game|Store|Steam Store and Retail Key|Retail(?: Key)?|Standard)\s*$",

@@ -82,7 +82,14 @@ MERGED_TAG_CAP = 30
 #       widened from ``normalize_series_gap_title`` to
 #       ``normalize_edition_comparison_title`` ("Watch Dogs: Day One Edition"
 #       reaches "Watch Dogs"), which the year rules make safe.
-IGDB_RESOLVER_VERSION = 3
+#   4 — the external_games store mapping moved off the retired `category`
+#       filter onto `external_game_source` (the deprecated field had stopped
+#       matching, so the authoritative store->game step silently returned
+#       nothing), and the exact-name lookup became case-insensitive
+#       (``name ~ "..."`` — library rows carry storefront casing, "DARK SOULS
+#       III" vs IGDB's "Dark Souls III"). Both turn refusals into links, so
+#       every generation-3 no-match re-queues.
+IGDB_RESOLVER_VERSION = 4
 
 
 def _merge_igdb_tags(existing: list[str], igdb_tags: list[str]) -> list[str]:
@@ -109,12 +116,23 @@ _TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 _IGDB_GAMES_URL = "https://api.igdb.com/v4/games"
 _IGDB_EXTERNAL_GAMES_URL = "https://api.igdb.com/v4/external_games"
 
-# IGDB external_games.category for storefront identifier lookups. IGDB has
-# deprecated `category` in favour of `external_game_source` but still serves
-# and accepts it, and the whole external_games path here has always used it;
-# migrating is a separate change, not a side effect of adding a second store.
-IGDB_EXTERNAL_CATEGORY_STEAM = 1
-IGDB_EXTERNAL_CATEGORY_GOG = 5
+# IGDB external_games.external_game_source for storefront identifier lookups.
+# IGDB deprecated external_games.`category` in favour of `external_game_source`
+# (migration window Feb 18 -> Aug 31; the old field names are removed after it)
+# — same numeric enum, so Steam is still 1 and GOG still 5. The old field had
+# already stopped answering in prod: a backfill stamped 904 owned rows
+# "checked, no match" while 448 of them carried a Steam appid IGDB certainly
+# maps, and the drift audit found zero store-authoritative links across 46
+# mismatches. Every external_games query in this module filters on
+# `external_game_source`; the deprecated field name is referenced nowhere.
+IGDB_EXTERNAL_SOURCE_STEAM = 1
+IGDB_EXTERNAL_SOURCE_GOG = 5
+
+# Long-standing public names for the same two values, kept because callers
+# outside this module (and the tests) spell them this way. They are
+# external_game_source values, not the retired `category` ones.
+IGDB_EXTERNAL_CATEGORY_STEAM = IGDB_EXTERNAL_SOURCE_STEAM
+IGDB_EXTERNAL_CATEGORY_GOG = IGDB_EXTERNAL_SOURCE_GOG
 
 
 def igdb_credentials_configured() -> bool:
@@ -717,9 +735,18 @@ async def search_game(
 def _build_exact_name_query(
     name: str, igdb_platform_id: int | tuple[int, ...] | None = None
 ) -> str:
-    """An equality lookup on games.name — no search index involved."""
+    """A case-insensitive equality lookup on games.name — no search index.
+
+    Apicalypse's ``=`` on a string is CASE-SENSITIVE, and library rows carry
+    storefront casing that IGDB does not ("DARK SOULS III" on Steam vs IGDB's
+    "Dark Souls III", "Ori and the Blind Forest" vs "Ori and the Blind
+    Forest"), so the equality rung refused titles IGDB demonstrably holds.
+    ``~`` is the case-insensitive comparison; with no ``*`` wildcards it is
+    still EQUALITY, not a contains match, so the rung keeps its "cannot match a
+    different title by construction" property.
+    """
     escaped_name = _escape_igdb_search_term(name)
-    filters = [f'name = "{escaped_name}"']
+    filters = [f'name ~ "{escaped_name}"']
     if igdb_platform_id is not None:
         ids = igdb_platform_id if isinstance(igdb_platform_id, tuple) else (igdb_platform_id,)
         if len(ids) == 1:
@@ -1550,6 +1577,102 @@ async def _resolve_game_with_status(
     return _ResolveOutcome(game=None, saw_candidates=saw_candidates)
 
 
+def igdb_game_from_record(record: dict) -> IGDBGame:
+    """An ``IGDBGame`` from one ``fetch_igdb_game_records`` entry — no network.
+
+    Only the fields that decide a name match are carried across (id, name,
+    alternative names, release year, category/game_type); everything else keeps
+    its dataclass default, because the only consumer is
+    ``resolver_would_accept``, which reads exactly those. ``record`` may carry
+    its own id under ``id`` or ``igdb_id``; a record taken straight out of the
+    ``{igdb_id: record}`` mapping has neither, and 0 is harmless here (the id
+    is only logged and deduplicated on).
+    """
+    category = record.get("category")
+    game_type = record.get("game_type")
+    raw_id = record.get("id") if record.get("id") is not None else record.get("igdb_id")
+    alternative_names = [
+        str(name) for name in (record.get("alternative_names") or []) if name
+    ]
+    return IGDBGame(
+        igdb_id=int(raw_id or 0),
+        name=str(record.get("name") or ""),
+        category=int(category if category is not None else (game_type or 0)),
+        first_release_date=record.get("first_release_date"),
+        game_type=game_type,
+        alternative_names=alternative_names,
+    )
+
+
+def resolver_would_accept(
+    library_name: str,
+    game: IGDBGame,
+    *,
+    reference_release_date: str | None = None,
+) -> bool:
+    """Offered exactly this record, would the name resolver link it to this row?
+
+    Pure and offline: it replays the SELECTION half of
+    ``_resolve_game_with_status`` — the gate, the tiers, the year rules, then
+    every rung of the query ladder with that rung's own gate name and
+    ``generic_edition_query`` flag — against a one-candidate result list. It
+    deliberately does NOT replay the QUERIES: whether IGDB's search index or
+    the exact-name filter would have surfaced this record is a different
+    question (and a network one).
+
+    So a True answer means "the resolver's rules accept this pairing", which is
+    what an audit needs to tell a resolver refusal apart from a retrieval miss;
+    a False answer means no rung of the ladder would have taken it, however it
+    was found.
+    """
+    reference_year = _reference_year_for(library_name, reference_release_date)
+    if (
+        _select_best_match(
+            library_name,
+            [game],
+            allow_inconclusive_fallback=True,
+            reference_year=reference_year,
+        )
+        is not None
+    ):
+        return True
+
+    tried = {library_name.casefold()}
+    for variant, identity_preserving in _generate_resolve_query_variants(library_name):
+        if variant.casefold() in tried:
+            continue
+        tried.add(variant.casefold())
+        gate_name = variant if identity_preserving else library_name
+        generic_edition_query = identity_preserving and normalize_strict_edition_title(
+            library_name
+        ) != normalize_strict_edition_title(variant)
+        if (
+            _select_best_match(
+                gate_name,
+                [game],
+                allow_inconclusive_fallback=False,
+                reference_year=reference_year,
+                generic_edition_query=generic_edition_query,
+            )
+            is not None
+        ):
+            return True
+
+    # The exact-name rung's ampersand retry ("Rabbit and Steel" ->
+    # "Rabbit & Steel"), gated against the alternate spelling like the
+    # identity-preserving variant it is.
+    alternate = ampersand_alternate(library_name)
+    return alternate is not None and (
+        _select_best_match(
+            alternate,
+            [game],
+            allow_inconclusive_fallback=False,
+            reference_year=reference_year,
+        )
+        is not None
+    )
+
+
 async def resolve_game(
     name: str,
     igdb_platform_id: int | tuple[int, ...] | None,
@@ -2112,6 +2235,17 @@ _consecutive_backfill_misses = 0
 # than an outage.
 _CANARY_TITLE = "The Witcher 3: Wild Hunt"
 
+# The same idea one endpoint over. A store mapping that answers HTTP 200 with
+# an empty body is indistinguishable from "IGDB knows none of these uids", and
+# that is exactly how the retired `external_games.category` filter failed: 904
+# owned rows were stamped "checked, no match" while the authoritative step
+# quietly mapped nothing. So every batch carries a uid IGDB certainly maps
+# (Steam appid 292030 — The Witcher 3: Wild Hunt) and an empty answer that
+# ALSO loses the canary is read as an outage, not as an answer. Keyed by the
+# library column the batch is built from; a column with no canary is exempt
+# (GOG product ids have no equally certain reference uid here).
+_EXTERNAL_MAPPING_CANARY_UIDS = {"steam_appid": "292030"}
+
 
 async def _igdb_canary_alive() -> bool:
     """One search for a certainly-existing title: is IGDB search actually up?
@@ -2138,6 +2272,27 @@ async def _igdb_canary_alive() -> bool:
         logger.warning("IGDB canary search returned no candidates for %r", _CANARY_TITLE)
         return False
     return True
+
+
+async def _describe_igdb_id_holder(igdb_id: int) -> str:
+    """"id=N name='X'" for the row already linked to ``igdb_id``, for a log line.
+
+    A duplicate-igdb_id IntegrityError is only diagnosable if the log says WHICH
+    row is holding the link — otherwise the operator has the losing row and a
+    bare id, and has to go query prod to find out whether it is a real
+    duplicate, an over-merge, or a wrong link that should be reset. Never
+    raises: this runs inside an exception handler, and a failure to describe
+    must not replace the warning with a crash.
+    """
+    try:
+        from .db import get_game_by_igdb_id
+
+        holder = await get_game_by_igdb_id(igdb_id)
+    except Exception as exc:  # pragma: no cover - defensive
+        return f"unknown (lookup failed: {exc})"
+    if holder is None:
+        return "no row (constraint came from elsewhere)"
+    return f"id={holder['id']} name={holder['name']!r}"
 
 
 def _decode_manual_overrides(raw: str | None) -> set[str]:
@@ -2238,7 +2393,12 @@ async def backfill_missing_games(
       3. Name search (``resolve_game``).
 
     Operational hygiene: any operational failure (missing credentials, request
-    failure) leaves the row retryable — never marked "checked". A search that
+    failure) leaves the row retryable — never marked "checked". A store-mapping
+    batch that maps NOTHING and also loses its canary uid
+    (``_EXTERNAL_MAPPING_CANARY_UIDS``) counts as exactly such a failure: an
+    empty mapping is otherwise indistinguishable from "IGDB knows none of these
+    ids", which is how a retired filter field silently stamped 904 owned rows
+    "no match". A search that
     returned candidates which were ALL gate/identity-rejected is committed as
     checked immediately (the API answered; refusing to guess is a genuine
     no-match) and resets the breaker. Zero-candidate no-matches are buffered
@@ -2285,7 +2445,7 @@ async def backfill_missing_games(
         (
             "gog_product_id",
             "external_games GOG",
-            lambda uids: resolve_external_ids_to_igdb(IGDB_EXTERNAL_CATEGORY_GOG, uids),
+            lambda uids: resolve_external_ids_to_igdb(IGDB_EXTERNAL_SOURCE_GOG, uids),
         ),
     )
     external_by_source: dict[str, dict[str, int]] = {}
@@ -2299,8 +2459,16 @@ async def backfill_missing_games(
         uids = [str(_row_value(row, column)) for row in pending_rows]
         if not uids or not igdb_credentials_configured():
             continue
+        # Ride a certainly-mapped uid along so an empty answer can be told
+        # apart from a broken mapping (see _EXTERNAL_MAPPING_CANARY_UIDS). It
+        # is appended only when the batch does not already ask about it, and
+        # stripped before anything reads the mapping — the canary must never
+        # link a row.
+        canary_uid = _EXTERNAL_MAPPING_CANARY_UIDS.get(column)
+        appended_canary = canary_uid is not None and canary_uid not in uids
+        request_uids = [*uids, canary_uid] if appended_canary and canary_uid else uids
         try:
-            mapping = await fetch_mapping(uids)
+            mapping = await fetch_mapping(request_uids)
         except Exception as exc:
             # Logged AND counted: the pass returns "rows resolved", so an
             # aborted pass is indistinguishable from an empty queue in that
@@ -2316,6 +2484,35 @@ async def backfill_missing_games(
             for game_id in claimed_ids:
                 await release_game_claim(game_id, "igdb_claimed_at")
             return 0
+        canary_seen = canary_uid is None or canary_uid in mapping
+        if appended_canary:
+            mapping = {uid: game for uid, game in mapping.items() if uid != canary_uid}
+        if not canary_seen and not any(uid in mapping for uid in uids):
+            # A silent wrong-field / dead-endpoint answer: HTTP 200, nothing
+            # mapped, not even the title IGDB certainly holds. Treated exactly
+            # like a raised fetch failure — count it, log it, leave every claim
+            # retryable — because the alternative is stamping this whole batch
+            # "checked, no match" off an answer that never actually looked.
+            message = (
+                f"IGDB {log_label} mapping returned nothing for {len(uids)} uids "
+                f"AND lost its canary uid {canary_uid!r} — treating as an outage"
+            )
+            provider_health.record_failure("igdb", message)
+            logger.warning(
+                "%s; leaving backfill pass retryable",
+                message,
+            )
+            for game_id in claimed_ids:
+                await release_game_claim(game_id, "igdb_claimed_at")
+            return 0
+        if not canary_seen:
+            # Real uids mapped, so the endpoint answers — the canary itself may
+            # simply have moved (IGDB re-points store rows). Not an outage.
+            logger.info(
+                "IGDB %s mapping is missing canary uid %r but mapped real uids; continuing",
+                log_label,
+                canary_uid,
+            )
         external_by_source[column] = mapping
         externally_mapped_ids.update(
             row["id"]
@@ -2407,10 +2604,12 @@ async def backfill_missing_games(
                     await upsert_backfill_platform_release_dates(game_id, igdb_game)
                 except sqlite3.IntegrityError:
                     logger.warning(
-                        "IGDB backfill skipped duplicate igdb_id for game_id=%s name=%r igdb_id=%s",
+                        "IGDB backfill skipped duplicate igdb_id for game_id=%s name=%r "
+                        "igdb_id=%s (already held by %s)",
                         game_id,
                         row["name"],
                         igdb_game.igdb_id,
+                        await _describe_igdb_id_holder(igdb_game.igdb_id),
                     )
                     await mark_igdb_checked(game_id)
                 provider_health.record_success("igdb")
@@ -2518,7 +2717,7 @@ def _chunked(items: list[_ChunkItem], size: int) -> Iterator[list[_ChunkItem]]:
         yield items[start : start + size]
 
 
-async def resolve_external_ids_to_igdb(category: int, uids: list[str]) -> dict[str, int]:
+async def resolve_external_ids_to_igdb(source: int, uids: list[str]) -> dict[str, int]:
     """Map one storefront's product ids to the IGDB game id IGDB associates with each.
 
     Uses IGDB's external_games endpoint (the authoritative store→game mapping) so a
@@ -2526,10 +2725,14 @@ async def resolve_external_ids_to_igdb(category: int, uids: list[str]) -> dict[s
     row claims to be. Returns {uid: igdb_game_id} for uids IGDB knows; unknown uids
     are simply omitted. Returns {} if IGDB is unconfigured.
 
-    ``category`` is an ``IGDB_EXTERNAL_CATEGORY_*`` constant — Steam (1) and GOG
-    (5) are the two stores whose uid format is verified against prod data. Other
-    stores are deliberately absent: an Epic/PSN/Xbox uid format we have not
-    confirmed would silently map nothing, or worse, map the wrong thing.
+    ``source`` is an ``IGDB_EXTERNAL_SOURCE_*`` value (Steam 1, GOG 5) and is
+    filtered on ``external_game_source``, the field that replaced the
+    deprecated ``category`` — filtering on the old name matched nothing and
+    took the authoritative step out of the resolver without any error to see.
+    Those two stores are the ones whose uid format is verified against prod
+    data; other stores are deliberately absent: an Epic/PSN/Xbox uid format we
+    have not confirmed would silently map nothing, or worse, map the wrong
+    thing.
     """
     client_id = os.environ.get("TWITCH_CLIENT_ID")
     if not client_id or not igdb_credentials_configured() or not uids:
@@ -2544,7 +2747,7 @@ async def resolve_external_ids_to_igdb(category: int, uids: list[str]) -> dict[s
         uid_list = ", ".join(f'"{_escape_igdb_search_term(a)}"' for a in chunk)
         query = (
             f"fields game, uid; "
-            f"where category = {category} & uid = ({uid_list}); "
+            f"where external_game_source = {source} & uid = ({uid_list}); "
             f"limit 500;"
         )
         rows = await _post_igdb_games(query, headers, url=_IGDB_EXTERNAL_GAMES_URL)
@@ -2557,13 +2760,13 @@ async def resolve_external_ids_to_igdb(category: int, uids: list[str]) -> dict[s
 
 
 async def resolve_steam_appids_to_igdb(appids: list[str]) -> dict[str, int]:
-    """Map Steam appids to IGDB game ids (``resolve_external_ids_to_igdb``, category 1).
+    """Map Steam appids to IGDB game ids (``resolve_external_ids_to_igdb``, source 1).
 
     Kept as its own name because it is what every caller outside this module
     asks for — the drift audit, the split/merge checks, the wishlist identity
     probe — and because "Steam appid" is a stronger contract than "some uid".
     """
-    return await resolve_external_ids_to_igdb(IGDB_EXTERNAL_CATEGORY_STEAM, appids)
+    return await resolve_external_ids_to_igdb(IGDB_EXTERNAL_SOURCE_STEAM, appids)
 
 
 @dataclass(frozen=True)
@@ -2749,8 +2952,10 @@ async def fetch_member_steam_appids(member_igdb_ids: list[int]) -> dict[int, lis
     whatever either side is called.
 
     Returns {member_igdb_id: [steam appid strings]} — only members with at
-    least one Steam listing appear. Raises IGDBRequestFailure on API failure;
-    returns {} for an empty input or when IGDB is unconfigured.
+    least one Steam listing appear. Filters on ``external_game_source`` (the
+    field that replaced the deprecated ``category``, same numeric values).
+    Raises IGDBRequestFailure on API failure; returns {} for an empty input or
+    when IGDB is unconfigured.
     """
     client_id = os.environ.get("TWITCH_CLIENT_ID")
     ids = [i for i in dict.fromkeys(member_igdb_ids) if i is not None]
@@ -2766,7 +2971,8 @@ async def fetch_member_steam_appids(member_igdb_ids: list[int]) -> dict[int, lis
             id_list = ", ".join(str(i) for i in chunk)
             query = (
                 f"fields game, uid; "
-                f"where category = {IGDB_EXTERNAL_CATEGORY_STEAM} & game = ({id_list}); "
+                f"where external_game_source = {IGDB_EXTERNAL_SOURCE_STEAM} "
+                f"& game = ({id_list}); "
                 f"limit 500;"
             )
             rows = await _post_igdb_games(query, headers, url=_IGDB_EXTERNAL_GAMES_URL)
@@ -2802,8 +3008,14 @@ async def fetch_igdb_game_records(igdb_ids: list[int]) -> dict[int, dict]:
     content classification is attributable to this (mismatched) IGDB link and
     should be reset along with it. Each record carries ``name``, ``category``,
     ``game_type``, ``parent_igdb_id``, ``parent_name``,
-    ``version_parent_igdb_id``, ``version_parent_name`` (absent IGDB fields
-    are None).
+    ``version_parent_igdb_id``, ``version_parent_name``,
+    ``first_release_date`` (ISO ``YYYY-MM-DD``) and ``alternative_names``
+    (absent IGDB fields are None / an empty list).
+
+    The last two exist so a caller holding only a record can ask
+    ``resolver_would_accept`` whether the name resolver would have linked it:
+    the gate reads alternative names and the tiebreak reads the year, so a
+    record without them answers a different question than the resolver does.
     """
     client_id = os.environ.get("TWITCH_CLIENT_ID")
     ids = [i for i in dict.fromkeys(igdb_ids) if i is not None]
@@ -2817,7 +3029,8 @@ async def fetch_igdb_game_records(igdb_ids: list[int]) -> dict[int, dict]:
     for chunk in _chunked(ids, 100):
         id_list = ", ".join(str(i) for i in chunk)
         query = (
-            "fields id, name, category, game_type, parent_game.id, "
+            "fields id, name, alternative_names.name, first_release_date, "
+            "category, game_type, parent_game.id, "
             "parent_game.name, version_parent.id, version_parent.name; "
             f"where id = ({id_list}); limit 500;"
         )
@@ -2833,6 +3046,8 @@ async def fetch_igdb_game_records(igdb_ids: list[int]) -> dict[int, dict]:
             )
             records[row["id"]] = {
                 "name": row["name"],
+                "alternative_names": _parse_alternative_names(row),
+                "first_release_date": _unix_to_iso(row.get("first_release_date")),
                 "category": row.get("category"),
                 "game_type": row.get("game_type"),
                 "parent_igdb_id": parent.get("id"),

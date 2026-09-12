@@ -461,6 +461,11 @@ async def merge_games(
     Children nested under the source are re-pointed at the target, and a nested
     target that absorbs its own parent (or inherits children) is promoted to a
     primary base game — the remediation path for phantom edition parents.
+    Games-level enrichment the source carries (IGDB link, tags, cover, HLTB,
+    release date, …) fills the target's NULL columns — target wins wherever it
+    already has a value, a column the target pinned by hand is never touched,
+    and a copied value the SOURCE pinned by hand stays pinned on the target —
+    reported as game_fields_filled and game_overrides_carried.
 
     Use this to consolidate PSN/localized duplicate rows that were ingested
     before the English title resolver existed. After merging, the source
@@ -859,6 +864,96 @@ async def merge_games(
                     (target_game_id,),
                 )
 
+        # games-level enrichment — everything the source row carries in its OWN
+        # columns dies with the DELETE below (no FK, no cascade, nothing to
+        # re-point). Merging the duplicate that happened to win the IGDB match
+        # into its identifier-bearing twin therefore dropped the link, the tags,
+        # the cover and the HLTB times silently. Fill each TARGET column that is
+        # NULL from the source; the target always wins when it already has a
+        # value (the merge's keep-target rule, same as the acquisition fill
+        # above). A column the TARGET pinned by hand is left alone, exactly as
+        # every sync/enrichment writer does. A value the SOURCE pinned by hand
+        # travels WITH its pin: the copy would otherwise land unprotected and
+        # the next sync/enrichment pass could overwrite the user's edit.
+        # Everything else in the source's manual_overrides describes columns
+        # that were not copied and dies with the row.
+        import json
+
+        from ..data.db import get_manual_overrides
+
+        fill_columns = (
+            "release_date",
+            "genres",
+            "tags",
+            "features",
+            "short_description",
+            "sort_name",
+            "hltb_main",
+            "hltb_extra",
+            "hltb_complete",
+            "hltb_cached_at",
+            "igdb_platforms",
+            "cover_image_id",
+            "completion_status",
+        )
+        igdb_columns = ("igdb_id", "igdb_cached_at", "igdb_resolver_version")
+        enrichment_cols = ", ".join((*fill_columns, *igdb_columns, "is_farmed"))
+        source_game = await db.execute_fetchone(
+            f"SELECT {enrichment_cols} FROM games WHERE id = ?", (source_game_id,)
+        )
+        target_game = await db.execute_fetchone(
+            f"SELECT {enrichment_cols} FROM games WHERE id = ?", (target_game_id,)
+        )
+        target_overrides = await get_manual_overrides(db, target_game_id)
+        source_overrides = await get_manual_overrides(db, source_game_id)
+        game_updates: dict[str, object] = {
+            column: source_game[column]
+            for column in fill_columns
+            if column not in target_overrides
+            and target_game[column] is None
+            and source_game[column] is not None
+        }
+        # The IGDB link travels as ONE unit: an igdb_id without its cached_at
+        # and resolver_version reads as a fresh resolution to backfill_missing_
+        # games, which would never revisit it. games.igdb_id is UNIQUE, so the
+        # source has to give the id up before the target can take it (the source
+        # row is deleted moments later either way). igdb_claimed_at stays NULL —
+        # it is a live enrichment lease, not a property of the link.
+        adopt_igdb = (
+            "igdb_id" not in target_overrides
+            and target_game["igdb_id"] is None
+            and source_game["igdb_id"] is not None
+        )
+        if adopt_igdb:
+            game_updates.update(
+                {column: source_game[column] for column in igdb_columns}
+            )
+        # is_farmed is a NOT NULL flag defaulting to 0, so the NULL-fill rule
+        # can never carry it: OR-merge instead — a game farmed for cards on
+        # either row was farmed.
+        if (
+            "is_farmed" not in target_overrides
+            and source_game["is_farmed"]
+            and not target_game["is_farmed"]
+        ):
+            game_updates["is_farmed"] = 1
+        game_fields_filled = sorted(game_updates)
+        game_overrides_carried = sorted(set(game_updates) & source_overrides)
+        if game_updates and not dry_run:
+            if adopt_igdb:
+                await db.execute(
+                    "UPDATE games SET igdb_id = NULL WHERE id = ?", (source_game_id,)
+                )
+            if game_overrides_carried:
+                game_updates["manual_overrides"] = json.dumps(
+                    sorted(target_overrides | set(game_overrides_carried))
+                )
+            fill_sql = ", ".join(f"{column} = ?" for column in game_updates)
+            await db.execute(
+                f"UPDATE games SET {fill_sql} WHERE id = ?",
+                (*game_updates.values(), target_game_id),
+            )
+
         if not dry_run:
             await db.execute("DELETE FROM game_aliases WHERE game_id = ?", (source_game_id,))
             await db.execute("DELETE FROM games WHERE id = ?", (source_game_id,))
@@ -892,6 +987,8 @@ async def merge_games(
         "assessment_instead_links_repointed": assessment_instead_links_repointed,
         "children_reparented": children_reparented,
         "target_promoted_to_primary": target_promoted_to_primary,
+        "game_fields_filled": game_fields_filled,
+        "game_overrides_carried": game_overrides_carried,
         "source_deleted": not dry_run,
     }
 

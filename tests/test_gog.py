@@ -1,10 +1,15 @@
 import asyncio
+import contextlib
+import json
+import os
 import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
 
 try:
     import aiosqlite  # type: ignore
@@ -25,7 +30,59 @@ except ModuleNotFoundError:
     aiosqlite.connect = connect
     sys.modules["aiosqlite"] = aiosqlite
 
-from gamelib_mcp.data import gog, igdb
+from conftest import ToolDBTestCase, add_identifier, add_platform, seed_game
+
+from gamelib_mcp.data import db as db_module
+from gamelib_mcp.data import gog, gog_session, igdb
+
+
+@contextlib.contextmanager
+def _gog_session_dir(token: str = "tok123"):
+    """A temp lgogdownloader config dir holding a galaxy_tokens.json session."""
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, "galaxy_tokens.json"), "w", encoding="utf-8") as f:
+            json.dump({"access_token": token}, f)
+        with patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": tmp}, clear=False):
+            yield Path(tmp)
+
+
+def _product(product_id, title, slug, **extra) -> dict:
+    return {"id": product_id, "title": title, "slug": slug, "isGame": True, **extra}
+
+
+def _listing_transport(pages: list[dict]):
+    """MockTransport serving the account listing page by page, plus the log of
+    (query params, Authorization header) each request carried."""
+    seen: list[tuple[dict, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        seen.append((params, request.headers.get("Authorization")))
+        return httpx.Response(
+            200,
+            json=pages[int(params["page"]) - 1],
+            headers={"content-type": "application/json"},
+        )
+
+    return httpx.MockTransport(handler), seen
+
+
+async def _identifiers_for_game(game_id: int) -> list[tuple[str, str]]:
+    async with db_module.get_db() as db:
+        rows = await db.execute_fetchall(
+            """SELECT gpi.identifier_type, gpi.identifier_value
+               FROM game_platform_identifiers gpi
+               JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+               WHERE gp.game_id = ? AND gp.platform = 'gog'""",
+            (game_id,),
+        )
+    return [(row["identifier_type"], row["identifier_value"]) for row in rows]
+
+
+async def _game_name(game_id: int) -> str:
+    async with db_module.get_db() as db:
+        row = await db.execute_fetchone("SELECT name FROM games WHERE id = ?", (game_id,))
+    return row["name"]
 
 
 class ParseOutputTests(unittest.TestCase):
@@ -311,12 +368,395 @@ class SyncGogSyncTests(unittest.TestCase):
         ):
             result = asyncio.run(gog.sync_gog())
 
-        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 1})
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(result["matched"], 0)
+        self.assertEqual(result["skipped"], 1)
+        # No stored session in this temp config dir, so the account listing
+        # never gets off the ground and the CLI backend carries the sync.
+        self.assertEqual(result["listing_backend"], "lgogdownloader")
+        self.assertIn("lgogdownloader --login", result["listing_error"])
         mock_resolve.assert_awaited_once()
         self.assertEqual(
             mock_resolve.await_args.args[:2],
             ("Quake II Quad Damage", igdb.PLATFORM_TO_IGDB["gog"]),
         )
+
+
+class FetchLibraryProductsTests(unittest.IsolatedAsyncioTestCase):
+    """The account listing (the endpoint lgogdownloader itself reads)."""
+
+    async def test_paginates_and_filters_non_games(self) -> None:
+        pages = [
+            {
+                "page": 1,
+                "totalPages": 2,
+                "products": [
+                    _product(
+                        1207658930,
+                        "Legacy of Kain: Defiance",
+                        "legacy_of_kain_defiance",
+                        dlcCount=0,
+                    ),
+                    # A movie in the same account library must never become a game.
+                    _product(
+                        2001,
+                        "Double Fine Adventure",
+                        "double_fine_adventure",
+                        isGame=False,
+                        isMovie=True,
+                    ),
+                ],
+            },
+            {
+                "page": 2,
+                "totalPages": 2,
+                "products": [
+                    _product("1449802253", "Spells & Secrets", "spells_secrets"),
+                ],
+            },
+        ]
+        transport, seen = _listing_transport(pages)
+
+        with _gog_session_dir():
+            products = await gog.fetch_gog_library_products(transport=transport)
+
+        self.assertEqual(
+            [(p.product_id, p.title, p.slug) for p in products],
+            [
+                ("1207658930", "Legacy of Kain: Defiance", "legacy_of_kain_defiance"),
+                ("1449802253", "Spells & Secrets", "spells_secrets"),
+            ],
+        )
+        self.assertEqual([params["page"] for params, _ in seen], ["1", "2"])
+        self.assertEqual([auth for _, auth in seen], ["Bearer tok123"] * 2)
+        self.assertEqual(
+            {k: v for k, v in seen[0][0].items() if k != "page"},
+            {
+                "hiddenFlag": "0",
+                "isUpdated": "0",
+                "mediaType": "1",
+                "sortBy": "title",
+                "system": "",
+            },
+        )
+
+    async def test_malformed_page_raises_instead_of_reading_as_empty(self) -> None:
+        """An error envelope / schema change is a provider failure, not an
+        empty library — it must reach sync_gog as an exception so the run
+        falls back to the CLI and records the error."""
+        for payload in ({"error": "temporarily unavailable"}, {"products": None}):
+            with self.subTest(payload=payload):
+                transport, _ = _listing_transport([payload])
+                with _gog_session_dir(), self.assertRaisesRegex(RuntimeError, "products"):
+                    await gog.fetch_gog_library_products(transport=transport)
+
+    async def test_empty_products_list_is_an_empty_library(self) -> None:
+        transport, _ = _listing_transport([{"products": [], "totalPages": 1}])
+        with _gog_session_dir():
+            self.assertEqual(await gog.fetch_gog_library_products(transport=transport), [])
+
+    async def test_missing_session_raises_relogin_advice(self) -> None:
+        transport, _ = _listing_transport([{"products": [], "totalPages": 1}])
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict("os.environ", {"LGOGDOWNLOADER_CONFIG_PATH": tmp}, clear=False),
+            self.assertRaisesRegex(RuntimeError, "lgogdownloader --login"),
+        ):
+            await gog.fetch_gog_library_products(transport=transport)
+
+    async def test_rejected_session_raises_relogin_advice(self) -> None:
+        transport = httpx.MockTransport(lambda request: httpx.Response(401, json={}))
+        with (
+            _gog_session_dir(),
+            self.assertRaisesRegex(RuntimeError, "lgogdownloader --login"),
+        ):
+            await gog.fetch_gog_library_products(transport=transport)
+
+
+class AccountListingSyncTests(ToolDBTestCase):
+    """sync_gog over the account listing: identifier-first, rename-aware."""
+
+    async def _run_sync(self, products: list[dict], *, resolve=None):
+        transport, _ = _listing_transport(
+            [{"page": 1, "totalPages": 1, "products": products}]
+        )
+
+        real_fetch = gog.fetch_gog_library_products
+
+        async def _fetch():
+            return await real_fetch(transport=transport)
+
+        mock_resolve = resolve or AsyncMock(
+            side_effect=AssertionError("a resolved row must not be re-resolved via IGDB")
+        )
+        with (
+            _gog_session_dir(),
+            patch("gamelib_mcp.data.gog.shutil.which", return_value="/usr/bin/lgogdownloader"),
+            patch("gamelib_mcp.data.gog.fetch_gog_library_products", _fetch),
+            patch("gamelib_mcp.data.gog.resolve_and_link_game", mock_resolve),
+        ):
+            result = await gog.sync_gog()
+        return result, mock_resolve
+
+    @staticmethod
+    def _minting_resolver() -> AsyncMock:
+        async def _mint(name, igdb_platform_id, candidates, **kwargs):
+            return await seed_game(name), None
+
+        return AsyncMock(side_effect=_mint)
+
+    async def test_new_product_records_gog_product_id(self) -> None:
+        resolver = self._minting_resolver()
+        result, mock_resolve = await self._run_sync(
+            [_product(1207658930, "Legacy of Kain: Defiance", "legacy_of_kain_defiance")],
+            resolve=resolver,
+        )
+
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(result["listing_backend"], "account_api")
+        self.assertNotIn("listing_error", result)
+        # The fuzzy fallback must refuse a row already owning gog (anti-collapse).
+        self.assertEqual(mock_resolve.await_args.kwargs.get("platform"), "gog")
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT id FROM games WHERE name = ?", ("Legacy of Kain: Defiance",)
+            )
+        game_id = row["id"]
+        self.assertEqual(
+            await _identifiers_for_game(game_id),
+            [(db_module.GOG_PRODUCT_ID, "1207658930")],
+        )
+
+    async def test_same_name_row_with_a_different_product_id_is_not_collapsed(self) -> None:
+        """Two GOG products sharing a title are two rows (anti-collapse).
+
+        Adoption refuses a same-name gog row that already carries a product
+        id; the name fallback must refuse it too, or the second product's id
+        lands on the first row as a "secondary" and two games share one row.
+        """
+        older = await seed_game("Alone in the Dark")
+        older_platform = await add_platform(older, "gog", from_source=True)
+        await add_identifier(older_platform, db_module.GOG_PRODUCT_ID, "1000000001")
+
+        # The real resolver refuses a row already owning gog and mints; the
+        # stub does the same explicitly (seed_game would name-match onto the
+        # older row, which is exactly what the sync must not do).
+        async def _mint_fresh(name, igdb_platform_id, candidates, **kwargs):
+            return await db_module.upsert_game(None, name, match_existing_by_name=False), None
+
+        resolver = AsyncMock(side_effect=_mint_fresh)
+        result, mock_resolve = await self._run_sync(
+            [_product(2000000002, "Alone in the Dark", "alone_in_the_dark_2024")],
+            resolve=resolver,
+        )
+
+        self.assertEqual(result["added"], 1)
+        mock_resolve.assert_awaited_once()
+        self.assertEqual(
+            await _identifiers_for_game(older),
+            [(db_module.GOG_PRODUCT_ID, "1000000001")],
+        )
+        async with db_module.get_db() as db:
+            rows = await db.execute_fetchall(
+                "SELECT id FROM games WHERE name = ? ORDER BY id", ("Alone in the Dark",)
+            )
+        self.assertEqual(len(rows), 2)
+
+    async def test_ambiguous_same_name_rows_are_never_adopted_by_age(self) -> None:
+        """Two identifier-less same-name gog rows make adoption AMBIGUOUS.
+
+        adopt_platform_identifier refuses on purpose; the sync must not break
+        the tie itself (the oldest row is an arbitrary sibling). Normal
+        resolution mints instead — a visible extra row merge_games can fold,
+        rather than a product silently filed onto the wrong twin.
+        """
+        first = await seed_game("Alone in the Dark")
+        await add_platform(first, "gog", from_source=True)
+        second = await db_module.upsert_game(
+            None, "Alone in the Dark", match_existing_by_name=False
+        )
+        await add_platform(second, "gog", from_source=True)
+
+        async def _mint_fresh(name, igdb_platform_id, candidates, **kwargs):
+            return await db_module.upsert_game(None, name, match_existing_by_name=False), None
+
+        resolver = AsyncMock(side_effect=_mint_fresh)
+        result, mock_resolve = await self._run_sync(
+            [_product(2000000002, "Alone in the Dark", "alone_in_the_dark")],
+            resolve=resolver,
+        )
+
+        self.assertEqual(result["added"], 1)
+        mock_resolve.assert_awaited_once()
+        self.assertEqual(mock_resolve.await_args.kwargs.get("platform"), "gog")
+        self.assertEqual(await _identifiers_for_game(first), [])
+        self.assertEqual(await _identifiers_for_game(second), [])
+        async with db_module.get_db() as db:
+            rows = await db.execute_fetchall(
+                "SELECT id FROM games WHERE name = ? ORDER BY id", ("Alone in the Dark",)
+            )
+        self.assertEqual(len(rows), 3)
+
+    async def test_credentials_are_read_once_across_listing_pages(self) -> None:
+        transport, seen = _listing_transport(
+            [
+                {"page": 1, "totalPages": 2, "products": [_product(1, "A", "a")]},
+                {"page": 2, "totalPages": 2, "products": [_product(2, "B", "b")]},
+            ]
+        )
+        with (
+            _gog_session_dir(),
+            patch(
+                "gamelib_mcp.data.gog_session.load_access_token",
+                wraps=gog_session.load_access_token,
+            ) as token_loader,
+        ):
+            products = await gog.fetch_gog_library_products(transport=transport)
+        self.assertEqual([p.product_id for p in products], ["1", "2"])
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(token_loader.call_count, 1)
+
+    async def test_legacy_slug_row_is_adopted_and_renamed(self) -> None:
+        # Exactly what the lgogdownloader backend used to store: the slug
+        # title-cased, with no product id anywhere.
+        game_id = await seed_game("Legacy Of Kain Defiance")
+        await add_platform(game_id, "gog", from_source=True)
+
+        result, mock_resolve = await self._run_sync(
+            [_product(1207658930, "Legacy of Kain: Defiance", "legacy_of_kain_defiance")]
+        )
+
+        mock_resolve.assert_not_awaited()
+        self.assertEqual(result["matched"], 1)
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["renamed"], 1)
+        self.assertEqual(await _game_name(game_id), "Legacy of Kain: Defiance")
+        self.assertEqual(
+            await _identifiers_for_game(game_id),
+            [(db_module.GOG_PRODUCT_ID, "1207658930")],
+        )
+
+    async def test_slug_title_adoption_when_catalog_title_normalizes_differently(self) -> None:
+        # "beyond_good_and_evil" title-cases to "Beyond Good And Evil", which
+        # normalizes differently from the catalog's "Beyond Good & Evil" — only
+        # the legacy-slug adoption attempt can find this row.
+        game_id = await seed_game("Beyond Good And Evil")
+        await add_platform(game_id, "gog", from_source=True)
+
+        result, mock_resolve = await self._run_sync(
+            [_product(1207658930, "Beyond Good & Evil", "beyond_good_and_evil")]
+        )
+
+        mock_resolve.assert_not_awaited()
+        self.assertEqual(result["matched"], 1)
+        self.assertEqual(result["renamed"], 1)
+        self.assertEqual(await _game_name(game_id), "Beyond Good & Evil")
+        self.assertEqual(
+            await _identifiers_for_game(game_id),
+            [(db_module.GOG_PRODUCT_ID, "1207658930")],
+        )
+
+    async def test_gog_only_row_takes_the_catalog_title(self) -> None:
+        game_id = await seed_game("Legacy of Kain - Defiance")
+        await add_platform(game_id, "gog", from_source=True)
+
+        result, _ = await self._run_sync(
+            [_product(1207658930, "Legacy of Kain: Defiance", "legacy_of_kain_defiance")]
+        )
+
+        self.assertEqual(result["renamed"], 1)
+        self.assertEqual(await _game_name(game_id), "Legacy of Kain: Defiance")
+
+    async def test_row_owning_another_platform_is_not_renamed(self) -> None:
+        # The name of a multi-platform row answers to more than GOG's catalog,
+        # and this row's stored name is not the legacy slug title either.
+        game_id = await seed_game("Legacy of Kain - Defiance")
+        await add_platform(game_id, "gog", from_source=True)
+        await add_platform(game_id, "steam", from_source=True)
+
+        result, _ = await self._run_sync(
+            [_product(1207658930, "Legacy of Kain: Defiance", "legacy_of_kain_defiance")]
+        )
+
+        self.assertEqual(result["matched"], 1)
+        self.assertEqual(result["renamed"], 0)
+        self.assertEqual(await _game_name(game_id), "Legacy of Kain - Defiance")
+        self.assertEqual(
+            await _identifiers_for_game(game_id),
+            [(db_module.GOG_PRODUCT_ID, "1207658930")],
+        )
+
+    async def test_manual_name_override_is_never_renamed(self) -> None:
+        game_id = await seed_game("Legacy Of Kain Defiance")
+        await add_platform(game_id, "gog", from_source=True)
+        # A hand-set spelling that still normalizes onto the catalog title, so
+        # the row is found and only the override stops the rename.
+        await db_module.apply_manual_game_fields(game_id, {"name": "Legacy of Kain - Defiance"})
+
+        result, _ = await self._run_sync(
+            [_product(1207658930, "Legacy of Kain: Defiance", "legacy_of_kain_defiance")]
+        )
+
+        self.assertEqual(result["renamed"], 0)
+        self.assertEqual(await _game_name(game_id), "Legacy of Kain - Defiance")
+
+
+class ListingFallbackTests(unittest.TestCase):
+    def _sync_with_listing(self, transport: httpx.MockTransport) -> tuple[dict, AsyncMock]:
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(return_value=(b"cyberpunk_2077\n", b""))
+
+        real_fetch = gog.fetch_gog_library_products
+
+        async def _fetch():
+            return await real_fetch(transport=transport)
+
+        mock_resolve = AsyncMock(return_value=(42, None))
+        with (
+            _gog_session_dir(),
+            patch("gamelib_mcp.data.gog.shutil.which", return_value="/usr/bin/lgogdownloader"),
+            patch("gamelib_mcp.data.gog.fetch_gog_library_products", _fetch),
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)),
+            patch("gamelib_mcp.data.gog.resolve_and_link_game", mock_resolve),
+            patch("gamelib_mcp.data.gog.upsert_game_platform", AsyncMock(return_value=1)),
+            patch("gamelib_mcp.data.gog.load_fuzzy_candidates", AsyncMock(return_value={})),
+        ):
+            result = asyncio.run(gog.sync_gog())
+        return result, mock_resolve
+
+    def test_401_listing_falls_back_to_lgogdownloader(self) -> None:
+        transport = httpx.MockTransport(lambda request: httpx.Response(401, json={}))
+        result, mock_resolve = self._sync_with_listing(transport)
+
+        self.assertEqual(result["listing_backend"], "lgogdownloader")
+        self.assertIn("not authenticated", result["listing_error"])
+        self.assertEqual(result["added"], 1)
+        self.assertNotIn("renamed", result)
+        mock_resolve.assert_awaited_once()
+        # The CLI backend keeps its old call shape (no platform kwarg).
+        self.assertEqual(
+            mock_resolve.await_args.args[:2],
+            ("Cyberpunk 2077", igdb.PLATFORM_TO_IGDB["gog"]),
+        )
+        self.assertEqual(mock_resolve.await_args.kwargs, {})
+
+    def test_malformed_listing_payload_falls_back_to_lgogdownloader(self) -> None:
+        """A 200 whose body has no products list is an outage on record, not a
+        successful sync of an empty library."""
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={"error": "temporarily unavailable"},
+                headers={"content-type": "application/json"},
+            )
+        )
+        result, mock_resolve = self._sync_with_listing(transport)
+
+        self.assertEqual(result["listing_backend"], "lgogdownloader")
+        self.assertIn("products", result["listing_error"])
+        self.assertEqual(result["added"], 1)
+        mock_resolve.assert_awaited_once()
 
 
 if __name__ == "__main__":

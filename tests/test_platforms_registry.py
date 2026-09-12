@@ -26,6 +26,18 @@ class RegistryDerivationTests(unittest.TestCase):
         )
         self.assertEqual(reg.INSPECTOR_PLATFORM_ALIASES, {"switch2": "nintendo"})
 
+    def test_only_epic_lists_nested_content(self):
+        # Epic's catalog lists add-ons as their own entries; Steam's
+        # GetOwnedGames omits DLC, GOG lists per base product, PSN's title list
+        # is games only, and Nintendo's VGCS feed is per title. That is what
+        # makes a missing sync stamp meaningless on a nested row anywhere but
+        # Epic (check_library's spend.unconfirmed_ownership).
+        self.assertEqual(reg.NESTED_LISTING_PLATFORMS, frozenset({"epic"}))
+        self.assertTrue(reg.PLATFORMS_BY_NAME["epic"].source_lists_nested)
+        for name in ("steam", "gog", "ps5", "switch2", "xbox"):
+            with self.subTest(platform=name):
+                self.assertFalse(reg.PLATFORMS_BY_NAME[name].source_lists_nested)
+
     def test_consumers_reexport_the_registry_objects(self):
         self.assertIs(common.PLATFORM_ALIASES, reg.PLATFORM_ALIASES)
         self.assertIs(common.SYNCABLE_PLATFORMS, reg.SYNCABLE_PLATFORMS)

@@ -366,8 +366,14 @@ class FetchSteamWishlistTests(ToolDBTestCase):
             # wishlist reported every unchanged row as "added".
             resync = await steam_wishlist.fetch_wishlist()
 
-        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 0, "removed": 0})
-        self.assertEqual(resync, {"added": 0, "matched": 1, "skipped": 0, "removed": 0})
+        self.assertEqual(
+            result,
+            {"added": 1, "matched": 0, "skipped": 0, "removed": 0, "orphans_removed": 0},
+        )
+        self.assertEqual(
+            resync,
+            {"added": 0, "matched": 1, "skipped": 0, "removed": 0, "orphans_removed": 0},
+        )
         async with db_module.get_db() as db:
             gp_row = await db.execute_fetchone(
                 "SELECT owned, playtime_minutes FROM game_platforms WHERE game_id = ?", (game_id,)
@@ -405,7 +411,10 @@ class FetchSteamWishlistTests(ToolDBTestCase):
         ):
             result = await steam_wishlist.fetch_wishlist()
 
-        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 0, "removed": 0})
+        self.assertEqual(
+            result,
+            {"added": 1, "matched": 0, "skipped": 0, "removed": 0, "orphans_removed": 0},
+        )
         async with db_module.get_db() as db:
             game = await db.execute_fetchone("SELECT id FROM games WHERE name = 'New Game'")
             self.assertIsNotNone(game)
@@ -456,7 +465,10 @@ class FetchSteamWishlistTests(ToolDBTestCase):
         ):
             result = await steam_wishlist.fetch_wishlist()
 
-        self.assertEqual(result, {"added": 0, "matched": 1, "skipped": 0, "removed": 0})
+        self.assertEqual(
+            result,
+            {"added": 0, "matched": 1, "skipped": 0, "removed": 0, "orphans_removed": 0},
+        )
         async with db_module.get_db() as db:
             rows = await db.execute_fetchall(
                 "SELECT id FROM game_wishlist WHERE game_id = ?", (game_id,)
@@ -1109,7 +1121,17 @@ class DekuDealsWishlistTests(ToolDBTestCase):
         ):
             result = await dekudeals.sync_dekudeals_wishlist()
 
-        self.assertEqual(result, {"added": 1, "matched": 0, "skipped": 0, "removed": 0, "total_scraped": 1})
+        self.assertEqual(
+            result,
+            {
+                "added": 1,
+                "matched": 0,
+                "skipped": 0,
+                "removed": 0,
+                "orphans_removed": 0,
+                "total_scraped": 1,
+            },
+        )
         async with db_module.get_db() as db:
             game = await db.execute_fetchone("SELECT id FROM games WHERE name = 'Pikmin 4'")
             self.assertIsNotNone(game)

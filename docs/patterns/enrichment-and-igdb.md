@@ -14,19 +14,27 @@ on 2026-09-01.
 
 **IGDB linking order**: `backfill_missing_games` resolves via `external_games` (store id → game, authoritative) first — the Steam appid, then the GOG product id for a row Steam did not map — then the stored igdb_id, then name resolution. The mapping self-corrects wrong-edition links, but it is not infallible — prod appid 212680 maps to a junk duplicate (178437 "Faster than light?") and once replaced FTL's correct link to 3075 — so it only overrides a STORED link whose IGDB name matches the library row when the mapping's own record matches too (`_igdb_name_agrees`). A manual `igdb_id` override outranks everything.
 
-**Two store batches, one mapping.** `resolve_external_ids_to_igdb(category,
+**Two store batches, one mapping.** `resolve_external_ids_to_igdb(source,
 uids)` is the one external_games helper; `resolve_steam_appids_to_igdb` is a
-thin wrapper on category 1 and `IGDB_EXTERNAL_CATEGORY_GOG = 5` is the second
-store. GOG earns its own batch because it is the platform whose sync has no
+thin wrapper on `IGDB_EXTERNAL_SOURCE_STEAM = 1` and `IGDB_EXTERNAL_SOURCE_GOG = 5`
+is the second store. GOG earns its own batch because it is the platform whose sync has no
 per-item store id, so its rows arrive with decorated names and name resolution
 serves them worst: 107 of the library's 131 GOG-identified rows were unlinked
 while IGDB had mapped their product ids all along. The GOG batch asks only
 about rows the Steam batch left unmapped (a Steam mapping already answers
 authoritatively), and an operational failure of either batch aborts the pass
 and leaves every claim retryable — degrading to name search during an outage
-would mass-produce wrong links. Both batches filter on `external_games.category`,
-which IGDB has deprecated in favour of `external_game_source` but still serves
-and accepts; migrating is its own change, not a side effect of adding a store.
+would mass-produce wrong links. Both batches filter on `external_games.external_game_source`. They used to
+filter on `category`, which IGDB deprecated (migration window Feb 18 → Aug 31,
+old names removed after) — and on 2026-09-12 that filter silently mapped
+almost nothing: 904 owned rows, Baldur's Gate 3 included, were stamped no-match
+in one pass while the drift audit found zero store-authoritative links. Because
+an empty mapping is indistinguishable from "IGDB does not know these ids", the
+Steam batch now carries a canary uid (`_EXTERNAL_MAPPING_CANARY_UIDS`, The
+Witcher 3 = 292030): a mapping that lacks the canary AND maps no real uid is
+treated exactly like a raised fetcher error — provider_health failure, every
+claim released, nothing stamped. Generation 4 of the resolver re-queued the
+v3 stamps.
 Epic/PSN/Xbox are deliberately absent: their uid formats are unverified here,
 and an unverified format maps nothing at best and the wrong game at worst. The
 Steam-only drift audit (`detectors.revalidate_igdb_matches`) is unchanged.
@@ -165,6 +173,15 @@ refused rather than ranked ("Dead Space" 2008 and 2023 — IGDB's own ordering i
 not evidence). Every refusal logs at info with the candidates' ids and years.
 The exact-name equality path hands its ambiguity to the same selector once a
 year exists, and keeps its flat refusal when none does.
+
+**The drift audit replays the resolver.** `revalidate_igdb_matches` no longer
+judges a stored link by its own name test: it rebuilds the IGDB record
+(`igdb_game_from_record`, names + alternative names + year) and asks
+`resolver_would_accept(row_name, record, reference_release_date)` — the gate,
+the tiers, the year rules and every ladder rung, offline. A link the resolver
+would make today is not drift, whatever the names look like ("Demonicon" ↔
+"The Dark Eye: Demonicon" was one of ~40 correct links the old test flagged
+for reset); only a pairing no rung accepts is `wrong_entity`.
 
 **Resolver version.** `igdb.IGDB_RESOLVER_VERSION` is stamped onto
 `games.igdb_resolver_version` beside every `igdb_cached_at`, and

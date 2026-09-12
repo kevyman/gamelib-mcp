@@ -572,6 +572,7 @@ from .fuzzy import (
     load_fuzzy_candidates,
     titles_conflict_on_identity,
 )
+from .gc import delete_unreferenced_games
 from .history import record_play_history_snapshots
 
 # _ensure_db_initialized and migrate_db above call _run_migrations by that
@@ -637,6 +638,7 @@ from .upserts import (
     set_platform_acquisition,
     set_platform_ownership,
     set_steam_delisted,
+    stale_wishlist_game_ids,
     stamp_wishlist_alerts,
     upsert_game,
     upsert_game_alias,

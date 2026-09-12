@@ -137,11 +137,26 @@ def test_compilation_version_parent_stays_primary_base_game():
     assert result.is_primary_library_item is True
 
 
-def test_non_compilation_bundle_still_nested():
+def test_parentless_bundle_is_a_primary_compilation():
     from gamelib_mcp.data import content
 
-    # A genuine bundle without a "+" compilation title is unaffected.
+    # An IGDB bundle record with no parent is a purchasable compilation
+    # ("The Orange Box", "UFO 50", "Fallout Classic"): it is the ownership
+    # unit, so it stays a primary library item rather than a parentless
+    # nested row nothing can reach.
     result = content.classify_igdb_game(title="The Orange Box", category=3)
+
+    assert result.content_type == content.CONTENT_BASE_GAME
+    assert result.is_primary_library_item is True
+
+
+def test_bundle_with_a_parent_still_nests():
+    from gamelib_mcp.data import content
+
+    result = content.classify_igdb_game(
+        title="Mass Effect 2 DLC Bundle", category=3, parent_name="Mass Effect 2"
+    )
 
     assert result.content_type == content.CONTENT_BUNDLE
     assert result.is_primary_library_item is False
+    assert result.parent_name == "Mass Effect 2"
