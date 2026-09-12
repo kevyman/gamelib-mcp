@@ -285,6 +285,29 @@ class SameNameYearTiebreakTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(match)
         self.assertTrue(any("no reference year" in line for line in logs.output))
 
+    async def test_inside_the_window_distance_decides_not_provider_order(self) -> None:
+        # Reference 2023, candidates 2022 and 2023: the exact-year record wins
+        # whichever IGDB listed first — provider order is never evidence.
+        near, exact = _game(7, "Dead Space", 2022), _game(8, "Dead Space", 2023)
+        for order in ([near, exact], [exact, near]):
+            with self.subTest(order=[g.igdb_id for g in order]):
+                match = await self._resolve(
+                    "Dead Space", order, reference_release_date="2023-01-27"
+                )
+                self.assertIsNotNone(match)
+                self.assertEqual(match.igdb_id, 8)
+
+    async def test_two_records_equally_close_in_year_are_refused(self) -> None:
+        # Same title, same year, two distinct records: equally plausible, and
+        # picking by list position would flip the link on the next fetch.
+        twins = [_game(9, "Dead Space", 2023), _game(10, "Dead Space", 2023)]
+        with self.assertLogs("gamelib_mcp.data.igdb", level="INFO") as logs:
+            match = await self._resolve(
+                "Dead Space", twins, reference_release_date="2023-01-27"
+            )
+        self.assertIsNone(match)
+        self.assertTrue(any("equally close in year" in line for line in logs.output))
+
     async def test_a_title_carrying_its_own_year_resolves_the_ambiguity(self) -> None:
         # "Prey (2017)" — the library row's name is the only evidence there is.
         candidates = [_game(2, "Prey", 2006), _game(3, "Prey", 2017)]

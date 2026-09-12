@@ -1004,13 +1004,38 @@ def _select_best_match(
             return None
         return results[tier[0]]
 
-    within_one = [
-        idx for idx in tier
+    # Inside the window, DISTANCE decides, never provider order: with a 2023
+    # row and candidates from 2022 and 2023, the 2023 record wins whichever
+    # IGDB listed first. Two distinct records at the same best distance are
+    # equally plausible, and picking between them by list position would
+    # flip the link on a re-fetch — refuse instead (AGENTS.md: reject
+    # release-year conflicts; never let ordering stand in for evidence).
+    distances = {
+        idx: abs(year - reference_year)
+        for idx in tier
         if (year := _candidate_year(results[idx])) is not None
-        and abs(year - reference_year) <= 1
-    ]
+    }
+    within_one = sorted(
+        (idx for idx, distance in distances.items() if distance <= 1),
+        key=lambda idx: (distances[idx], idx),
+    )
     if within_one:
-        return results[within_one[0]]
+        best = within_one[0]
+        tied_ids = {
+            results[idx].igdb_id
+            for idx in within_one
+            if distances[idx] == distances[best]
+        }
+        if len(tied_ids) > 1:
+            logger.info(
+                "IGDB year tiebreak refused %r (reference_year=%s): several candidates "
+                "equally close in year (candidates=%s)",
+                name,
+                reference_year,
+                _year_debug(results, within_one),
+            )
+            return None
+        return results[best]
 
     if is_tier_one:
         if len(distinct_ids) == 1:
