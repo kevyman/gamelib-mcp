@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 from conftest import (
+    DEADLOCK_TIMEOUT,
     ToolDBTestCase,
     add_platform,
     add_rating,
@@ -19,6 +20,7 @@ from conftest import (
 from fastmcp.exceptions import ToolError
 
 from gamelib_mcp.data import db as db_module
+from gamelib_mcp.data.title_normalization import normalize_search_text
 from gamelib_mcp.tools import detail, game_media
 from gamelib_mcp.tools.platforms import update_game
 
@@ -421,8 +423,6 @@ _MEDIA_PAYLOAD = {
         "screenshots_truncated": False,
         "short_description": "A tiny bug with a nail.",
     },
-    "similar_raw": None,
-    "similar_count": None,
     "igdb_id": None,
 }
 
@@ -433,7 +433,9 @@ class GetGameDetailMediaTests(ToolDBTestCase):
     The one provider call is patched at tools/game_media.py's own binding —
     the seam both this path and record_assessment's package resolve through.
     media=False needs no patch at all, which is the point: the default costs
-    nothing and reaches nothing.
+    nothing and reaches nothing. The `similar` row is NOT behind that seam: it
+    is the library's own tag similarity (`similar_in_library`), so the tests
+    below seed real tagged games rather than mocking a provider answer.
     """
 
     def _media(self, payload=_MEDIA_PAYLOAD, **kwargs):
@@ -441,6 +443,19 @@ class GetGameDetailMediaTests(ToolDBTestCase):
             "gamelib_mcp.tools.game_media.get_game_media",
             AsyncMock(return_value=payload, **kwargs),
         )
+
+    async def _owned(
+        self,
+        name: str,
+        tags: list[str],
+        *,
+        playtime: int | None = 0,
+        platform: str = "steam",
+    ) -> int:
+        """An owned, primary, tagged library row — one member of the pool."""
+        game_id = await seed_game(name, tags=tags)
+        await add_platform(game_id, platform, playtime_minutes=playtime)
+        return game_id
 
     async def test_media_off_by_default_adds_no_keys_and_fetches_nothing(self):
         gid = await make_steam_game("Hollow Knight", 367520, playtime_minutes=120)
@@ -457,122 +472,265 @@ class GetGameDetailMediaTests(ToolDBTestCase):
             result = await detail.get_game_detail(game_id=gid, media=True)
 
         self.assertEqual(result["media"], _MEDIA_PAYLOAD["media"])
-        # Nothing similar came back, so that key stays absent rather than null.
+        # An untagged game has no neighbours to name, so that key stays absent
+        # rather than null.
         self.assertNotIn("similar", result)
 
-    async def test_similar_games_are_annotated_against_the_library(self):
-        gid = await seed_game("Similarity Probe")
-        owned_unplayed = await seed_game("Owned Unplayed")
-        await add_platform(owned_unplayed, "steam", playtime_minutes=0)
-        rated = await seed_game("Rated Neighbour")
-        await add_platform(rated, "steam", playtime_minutes=600)
-        await add_rating(rated, "manual", 8.0, 8.0)
-        untracked = await seed_game("Untracked Neighbour")
-        await add_platform(untracked, "gog", playtime_minutes=None)
+    async def test_ranking_prefers_rare_shared_tags_over_ubiquitous_ones(self):
+        # IDF is the whole point: agreeing on "metroidvania" says far more than
+        # agreeing on "action"/"indie"/"adventure", which half the library
+        # carries. The fillers below are what MAKES those three ubiquitous —
+        # without them every tag is equally rare and the ranking is arbitrary.
+        gid = await self._owned(
+            "Similarity Probe",
+            ["action", "indie", "adventure",
+             "metroidvania", "souls-like", "hand-drawn", "atmospheric"],
+        )
+        rare = await self._owned(
+            "Rare Neighbour",
+            ["metroidvania", "souls-like", "hand-drawn", "atmospheric", "action"],
+        )
+        common = await self._owned("Common Neighbour", ["action", "indie", "adventure"])
+        for index in range(6):
+            await self._owned(f"Filler {index}", ["action", "indie", "adventure", "casual"])
+
+        block = await game_media.similar_in_library(gid)
+
+        assert block is not None
+        names = [item["name"] for item in block["items"]]
+        self.assertEqual(names[0], "Rare Neighbour")
+        self.assertLess(names.index("Rare Neighbour"), names.index("Common Neighbour"))
+        top, = [i for i in block["items"] if i["game_id"] == rare]
+        self.assertGreater(top["similarity"], 0)
+        self.assertLessEqual(top["similarity"], 1)
+        # Four tags shared, three shown: the "why" is a reason, not a dump.
+        self.assertEqual(len(top["shared_tags"]), game_media.SIMILAR_WHY_CAP)
+        self.assertLessEqual(
+            set(top["shared_tags"]),
+            {"metroidvania", "souls-like", "hand-drawn", "atmospheric", "action"},
+        )
+        other, = [i for i in block["items"] if i["game_id"] == common]
+        self.assertEqual(
+            sorted(other["shared_tags"]), ["action", "adventure", "indie"]
+        )
+        self.assertGreater(top["similarity"], other["similarity"])
+
+    async def test_three_generic_shared_tags_do_not_clear_the_similarity_floor(self):
+        # The shared-tag gate alone qualifies half the real library (1853
+        # neighbours for Hollow Knight), which makes the card's own count
+        # meaningless. A game whose tag set is mostly about something ELSE is
+        # not a neighbour just because both are tagged action/indie/adventure.
+        gid = await self._owned(
+            "Similarity Probe",
+            ["action", "indie", "adventure", "metroidvania", "souls-like"],
+        )
+        twin = await self._owned(
+            "Near Twin", ["action", "indie", "adventure", "metroidvania", "souls-like"]
+        )
+        diluted = await self._owned(
+            "Diluted Neighbour",
+            ["shooter", "multiplayer", "fps", "competitive", "military", "racing",
+             "action", "indie", "adventure"],
+        )
+        for index in range(6):
+            await self._owned(f"Filler {index}", ["action", "indie", "adventure", "casual"])
+
+        block = await game_media.similar_in_library(gid)
+
+        assert block is not None
+        ids = [item["game_id"] for item in block["items"]]
+        self.assertIn(twin, ids)
+        self.assertNotIn(diluted, ids)
+        # The floor lands before the count, so the card never claims a
+        # denominator it would not stand behind.
+        self.assertEqual(block["count"], len(ids))
+        self.assertTrue(
+            all(item["similarity"] >= game_media.SIMILAR_MIN_SIMILARITY
+                for item in block["items"])
+        )
+
+    async def test_two_shared_tags_do_not_qualify(self):
+        gid = await self._owned(
+            "Similarity Probe", ["metroidvania", "souls-like", "hand-drawn", "action"]
+        )
+        await self._owned("Two Tags Only", ["metroidvania", "souls-like", "racing"])
+        await self._owned("Three Tags", ["metroidvania", "souls-like", "action", "rpg"])
+
+        block = await game_media.similar_in_library(gid)
+
+        assert block is not None
+        self.assertEqual([item["name"] for item in block["items"]], ["Three Tags"])
+        self.assertEqual(block["count"], 1)
+        self.assertFalse(block["truncated"])
+
+    async def test_the_same_game_twice_is_never_a_neighbour(self):
+        tags = ["metroidvania", "souls-like", "hand-drawn", "atmospheric"]
+        gid = await self._owned("Similarity Probe", tags)
+        keeper = await self._owned("Genuine Neighbour", tags)
+
+        # A duplicate row of the SOURCE (a collapse that never happened): the
+        # same name, so it scores ~1.0 and would lead the row.
+        async with db_module.get_db() as db:
+            cursor = await db.execute(
+                "INSERT INTO games (name, name_normalized, tags) VALUES (?, ?, ?)",
+                ("Similarity Probe", normalize_search_text("Similarity Probe"),
+                 json.dumps(tags)),
+            )
+            duplicate = cursor.lastrowid
+            await db.commit()
+        await add_platform(duplicate, "gog", playtime_minutes=10)
+
+        parent = await self._owned("Parent Edition", tags)
+        child = await self._owned("Source DLC", tags)
+        dlc = await self._owned("Someone Else DLC", tags)
         async with db_module.get_db() as db:
             await db.execute(
-                "UPDATE games SET igdb_id = 101 WHERE id = ?", (owned_unplayed,)
+                "UPDATE games SET parent_game_id = ? WHERE id = ?", (parent, gid)
             )
-            await db.execute("UPDATE games SET igdb_id = 202 WHERE id = ?", (rated,))
-            await db.execute("UPDATE games SET igdb_id = 404 WHERE id = ?", (untracked,))
+            await db.execute(
+                "UPDATE games SET parent_game_id = ? WHERE id = ?", (gid, child)
+            )
+            await db.execute(
+                "UPDATE games SET is_primary_library_item = 0 WHERE id = ?", (dlc,)
+            )
             await db.commit()
 
-        payload = {
-            **_MEDIA_PAYLOAD,
-            "similar_raw": [
-                {
-                    "igdb_id": 101,
-                    "name": "Owned Unplayed",
-                    "release_year": 2016,
-                    "cover_image_id": "abc",
-                },
-                {
-                    "igdb_id": 202,
-                    "name": "Rated Neighbour",
-                    "release_year": 2019,
-                    "cover_image_id": None,
-                },
-                {
-                    "igdb_id": 303,
-                    "name": "Unknown Neighbour",
-                    "release_year": None,
-                    "cover_image_id": None,
-                },
-                {
-                    "igdb_id": 404,
-                    "name": "Untracked Neighbour",
-                    "release_year": 2020,
-                    "cover_image_id": None,
-                },
-            ],
-            "similar_count": 11,
-        }
-        with self._media(payload):
-            result = await detail.get_game_detail(game_id=gid, media=True)
-
-        similar = result["similar"]
-        self.assertEqual(similar["count"], 11)
-        self.assertTrue(similar["truncated"])
-        # Owned first, IGDB's order kept inside each half: the unowned
-        # "Unknown Neighbour" sat second in the raw list and lands last.
-        unplayed, rated_entry, untracked_entry, unknown = similar["items"]
-        self.assertEqual(
-            [item["name"] for item in similar["items"]],
-            [
-                "Owned Unplayed",
-                "Rated Neighbour",
-                "Untracked Neighbour",
-                "Unknown Neighbour",
-            ],
-        )
-        self.assertTrue(unplayed["owned"])
-        self.assertTrue(unplayed["unplayed"])
-        self.assertEqual(
-            unplayed["cover_url"],
-            "https://images.igdb.com/igdb/image/upload/t_cover_big/abc.jpg",
-        )
-        self.assertEqual(rated_entry["my_rating"], 8.0)
-        self.assertEqual(rated_entry["playtime_hours"], 10.0)
-        self.assertFalse(rated_entry["unplayed"])
-        self.assertFalse(unknown["owned"])
-        self.assertIsNone(unknown["cover_url"])
-        # NULL playtime (GOG, manual adds) is UNKNOWN, not an authoritative
-        # zero — the three-state convention: only a known 0 earns "unplayed".
-        self.assertTrue(untracked_entry["owned"])
-        self.assertFalse(untracked_entry["unplayed"])
-        self.assertIsNone(untracked_entry["playtime_hours"])
-
-    async def test_owned_similar_games_sort_first_after_the_cap(self):
-        # The row's claim is "you own X of these", so the owned covers lead —
-        # but the sort happens AFTER the 8-item cap, so the strip is still
-        # IGDB's 8 most similar and count/truncated keep their meaning.
-        owned = await seed_game("Owned Neighbour")
-        await add_platform(owned, "steam", playtime_minutes=60)
+        # Wishlist-only: a games row with tags and no platform row at all.
+        wishlisted = await seed_game("Wishlist Only", tags=tags)
         async with db_module.get_db() as db:
-            await db.execute("UPDATE games SET igdb_id = 909 WHERE id = ?", (owned,))
+            await db.execute(
+                """INSERT INTO game_wishlist (game_id, platform, source, wishlisted_at)
+                   VALUES (?, ?, ?, ?)""",
+                (wishlisted, "steam", "manual", datetime.now(UTC).isoformat()),
+            )
             await db.commit()
+        # An owned=0 stub: a platform row that is not ownership.
+        stub = await seed_game("Unowned Stub", tags=tags)
+        await add_platform(stub, "steam", playtime_minutes=0, owned=0)
 
-        raw = [
-            {"igdb_id": 500 + i, "name": f"Stranger {i}", "release_year": 2020,
-             "cover_image_id": None}
-            for i in range(8)
-        ]
-        # Owned, but only just inside the cap; and one owned entry BEYOND it.
-        raw[7] = {"igdb_id": 909, "name": "Owned Neighbour", "release_year": 2018,
-                  "cover_image_id": None}
-        raw.append({"igdb_id": 909, "name": "Beyond The Cap", "release_year": 2017,
-                    "cover_image_id": None})
+        block = await game_media.similar_in_library(gid)
 
-        block = await game_media.annotate_similar_games(raw, 12)
+        assert block is not None
+        self.assertEqual([item["game_id"] for item in block["items"]], [keeper])
+        self.assertEqual(block["count"], 1)
 
-        names = [item["name"] for item in block["items"]]
-        self.assertEqual(len(names), 8)
-        self.assertEqual(names[0], "Owned Neighbour")
-        # The other seven keep IGDB's own order behind it.
-        self.assertEqual(names[1:], [f"Stranger {i}" for i in range(7)])
-        self.assertNotIn("Beyond The Cap", names)   # sorting never reaches past the cap
+    async def test_the_row_is_capped_at_eight_with_the_true_total(self):
+        tags = ["metroidvania", "souls-like", "hand-drawn", "atmospheric"]
+        gid = await self._owned("Similarity Probe", tags)
+        for index in range(12):
+            await self._owned(f"Neighbour {index:02d}", tags)
+
+        block = await game_media.similar_in_library(gid)
+
+        assert block is not None
+        self.assertEqual(len(block["items"]), game_media.SIMILAR_ITEM_CAP)
         self.assertEqual(block["count"], 12)
         self.assertTrue(block["truncated"])
+
+    async def test_items_carry_ownership_rating_playtime_and_cover(self):
+        tags = ["metroidvania", "souls-like", "hand-drawn"]
+        gid = await self._owned("Similarity Probe", tags)
+        unplayed = await self._owned("Owned Unplayed", tags, playtime=0)
+        unknown = await self._owned("Unknown Playtime", tags, platform="gog",
+                                    playtime=None)
+        rated = await self._owned("Rated Neighbour", tags, playtime=600)
+        await add_rating(rated, "backloggd", 7.0, 7.0)
+        await add_rating(rated, "manual", 9.0, 9.0)
+        capsule = await make_steam_game("Capsule Cover", 4242, playtime_minutes=30,
+                                        tags=tags)
+        slug = await make_steam_game("Slug Cover", 4343, playtime_minutes=30, tags=tags)
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET cover_image_id = 'co1' WHERE id = ?", (slug,)
+            )
+            await db.commit()
+
+        block = await game_media.similar_in_library(gid)
+
+        assert block is not None
+        by_id = {item["game_id"]: item for item in block["items"]}
+        self.assertTrue(all(item["owned"] for item in block["items"]))
+        self.assertTrue(by_id[unplayed]["unplayed"])
+        # NULL playtime (GOG, manual adds) is UNKNOWN, not an authoritative
+        # zero — the three-state convention: only a known 0 earns "unplayed".
+        self.assertFalse(by_id[unknown]["unplayed"])
+        self.assertIsNone(by_id[unknown]["playtime_hours"])
+        self.assertEqual(by_id[rated]["my_rating"], 9.0)
+        self.assertEqual(by_id[rated]["playtime_hours"], 10.0)
+        self.assertFalse(by_id[rated]["unplayed"])
+        self.assertEqual(
+            by_id[slug]["cover_url"],
+            "https://images.igdb.com/igdb/image/upload/t_cover_big/co1.jpg",
+        )
+        self.assertEqual(
+            by_id[capsule]["cover_url"],
+            "https://cdn.cloudflare.steamstatic.com/steam/apps/4242/library_600x900.jpg",
+        )
+
+    async def test_tags_past_the_prominence_window_never_count(self):
+        # games.tags is vote-ranked, and past the head of that list the tags
+        # describe the store page rather than the game — on BOTH sides.
+        window = game_media.SIMILAR_TAG_WINDOW
+        source_tags = [f"src{index:02d}" for index in range(window)] + ["outside"]
+        gid = await self._owned("Similarity Probe", source_tags)
+        await self._owned("Control", ["src00", "src01", "src02"])
+        # Shares three tags, but one of them is the source's out-of-window tag.
+        await self._owned("Source Side", ["outside", "src00", "src01"])
+        # Shares three tags, all of them past ITS OWN window.
+        await self._owned(
+            "Candidate Side",
+            [f"pad{index:02d}" for index in range(window)] + ["src00", "src01", "src02"],
+        )
+
+        block = await game_media.similar_in_library(gid)
+
+        assert block is not None
+        self.assertEqual([item["name"] for item in block["items"]], ["Control"])
+
+    async def test_too_little_tag_evidence_is_none_not_a_guess(self):
+        tags = ["metroidvania", "souls-like"]
+        gid = await self._owned("Thin Evidence", tags)
+        await self._owned("Would-Be Neighbour", [*tags, "hand-drawn"])
+
+        self.assertIsNone(await game_media.similar_in_library(gid))
+
+        with self._media(None):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+        self.assertNotIn("similar", result)
+
+    async def test_detail_serves_the_similar_row_when_the_provider_fails(self):
+        tags = ["metroidvania", "souls-like", "hand-drawn"]
+        gid = await self._owned("Similarity Probe", tags)
+        neighbour = await self._owned("Genuine Neighbour", tags)
+
+        with self._media(None, side_effect=RuntimeError("provider down")):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        self.assertNotIn("media", result)
+        self.assertEqual([i["game_id"] for i in result["similar"]["items"]], [neighbour])
+
+    async def test_detail_serves_the_similar_row_when_the_provider_hangs(self):
+        # An event nothing ever sets, so the only thing that ends the fetch is
+        # the wait_for budget — no wall-clock sleep, no liveness guess. The
+        # similar row is a DB read outside that budget and must survive it.
+        tags = ["metroidvania", "souls-like", "hand-drawn"]
+        gid = await self._owned("Similarity Probe", tags)
+        neighbour = await self._owned("Genuine Neighbour", tags)
+        never = asyncio.Event()
+
+        async def hang(**kwargs):
+            await never.wait()
+
+        with (
+            patch.object(detail, "DETAIL_MEDIA_TIMEOUT_SECONDS", 0.05),
+            patch("gamelib_mcp.tools.game_media.get_game_media", hang),
+        ):
+            result = await asyncio.wait_for(
+                detail.get_game_detail(game_id=gid, media=True), DEADLOCK_TIMEOUT
+            )
+
+        self.assertNotIn("media", result)
+        self.assertEqual([i["game_id"] for i in result["similar"]["items"]], [neighbour])
 
     async def test_identity_passed_is_the_appid_igdb_id_and_name(self):
         gid = await make_steam_game("Identity Order", 4242)

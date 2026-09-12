@@ -193,9 +193,9 @@ class ContentTypeBadgeTests(unittest.TestCase):
 
     def test_media_sections_render_from_the_detail_payload(self) -> None:
         # The detail card grows a media panel (one viewer + one thumb strip)
-        # and a similar-games row when get_game_detail(media=True) supplies
-        # them. Source-presence style, like the badge tests above — there is no
-        # headless-DOM harness.
+        # and a "similar in your library" row when get_game_detail(media=True)
+        # supplies them. Source-presence style, like the badge tests above —
+        # there is no headless-DOM harness.
         for marker in (
             'var media = game.media || {};',      # detailCard reads the block
             'mediaNode(stack, media, game.name)',
@@ -206,7 +206,11 @@ class ContentTypeBadgeTests(unittest.TestCase):
             'select(0);',                         # trailer first when there is one
             'if (game.similar) similarNode(stack, game.similar)',
             'el("div", "sim-name", item.name || "?")',
-            '"You own " + owned + " of the " + items.length + " most similar"',
+            'section(parent, "Similar in your library")',
+            'el("div", "sim-why", why.join(" · "))',
+            '"Your " + items.length + " games most like this one"',
+            '"The " + items.length + " of your " + total + " games most like this one"',
+            'note += " · " + unplayed + " unplayed"',
         ):
             self.assertIn(marker, apps.GAME_CARDS_HTML)
 

@@ -9,14 +9,14 @@ title, verdict stamp, the score chips and the authored craft note), the pitch
 panel (one-liner, elevator pitch, why-care eyebrow lines), the media panel (one
 viewer plus one thumb strip, trailer first, screenshots opening an edge-to-edge
 carousel), for-you-if / not-for-you-if, the anchors it rests on, lineage,
-IGDB's similar games, the "from the studio" pedigree strip, and one closing
+the owned games most like it, the "from the studio" pedigree strip, and one closing
 "the call" panel holding time, price, flags and past verdicts.
 Clients that don't speak the Apps extension ignore the tool metadata and see
 the normal JSON, so attaching ``EVAL_CARD_APP`` to a tool is purely additive.
 
 Every section of the package is optional: an unowned candidate with no appid
-and no IGDB match gets a media-less, similar-less card, and each block is
-skipped rather than rendered empty.
+and no IGDB match gets a media-less card (and an untagged one no similar
+row), and each block is skipped rather than rendered empty.
 
 Visual language is the game-cards widget's "toybox" (see apps.py): thick ink
 borders, hard offset shadows, chunky type, pastel stickers, the same CSS
@@ -422,7 +422,7 @@ EVAL_CARD_HTML = (
   .wc-hype { background: var(--p2); }
   .wc-moment { background: var(--p4); }
 
-  /* ---- similar games ---- */
+  /* ---- similar in your library ---- */
 """
     + apps_shared.SIMILAR_CSS
     + r"""
@@ -901,8 +901,8 @@ EVAL_CARD_HTML = (
     return col;
   }
   /* Every comparison lives here, "similar" included: folding the authored
-     similar-notes into the IGDB strip below mixed two different things (his
-     model's reading vs. IGDB's neighbours) and read as one confused list. */
+     similar-notes into the strip below mixed two different things (his model's
+     reading vs. his library's tag neighbours) and read as one confused list. */
   function lineageNode(parent, pkg, comps) {
     var callouts = comps.filter(function (c) { return CALLOUT_HEADS[c.relation]; });
     var ancestors = comps.filter(function (c) { return c.relation === "ancestor"; });
@@ -940,8 +940,8 @@ EVAL_CARD_HTML = (
     }
 
     if (loose.length) {
-      // Labelled, because these note-cards now sit above IGDB's own similar
-      // strip and the two must not read as one list.
+      // Labelled, because these note-cards now sit above the library's own
+      // similar strip and the two must not read as one list.
       var onlySimilar = loose.every(function (c) { return c.relation === "similar"; });
       var head = el("div", "lin-head", onlySimilar ? "Also similar" : "Other comparisons");
       head.style.marginTop = (callouts.length || ancestors.length || descendants.length)
@@ -954,7 +954,7 @@ EVAL_CARD_HTML = (
     }
   }
 
-  /* ---------- 7. similar games (IGDB only) ---------- */
+  /* ---------- 7. similar in your library (tag similarity) ---------- */
 """
     + apps_shared.SIMILAR_NODE_JS
     + r"""

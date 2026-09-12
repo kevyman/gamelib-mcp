@@ -10,6 +10,36 @@ derivation, the k ≈ 61 finding and the IDF reasoning moved here on 2026-09-01.
 
 **Tag affinity**: `recompute_tag_affinity` (after ratings changes and enrichment passes) builds per-tag scores from explicit ratings **plus** a 0.3-weight playtime pseudo-rating (owned, non-farmed, unrated, ≥2h; log-scaled, capped 9.5). Scores are mean-centered and shrunk: `affinity = Σw·(score − μ) / (Σw + k)` — signed, so ubiquitous at-the-mean tags land near zero. **`k` is estimated from the data every recompute, never hand-picked**: it is the variance ratio `σ²_within/σ²_between` from a weighted one-way ANOVA over the (tag, signal) observations (`estimate_shrinkage_weight`), recorded with its components in the `tag_affinity_scale` meta key. A hardcoded `k=2.0` made affinity *inversely* correlated with evidence — a tag on one 10/10 game kept its full deviation while a tag on fifty regressed to the mean, so IGDB one-off nouns ("cow", "zebra") outranked `3d platformer`. On the real library k ≈ 61, because a game carries ~15 tags and each tag's marginal effect is estimated against every other tag's contribution as noise; that is the finding, not an estimator bug. **Consequence: `affinity_score` has no fixed scale** (it compresses as k grows) — compare tags to each other or to `strong_affinity_cut()` (the affinity of the 10th best-supported tag), never to a constant, and never damp it again by `game_count`. `AFFINITY_FORMULA_VERSION` + the meta record let `init_db` rebuild a table left on a previous scale, so a formula change needs no schema migration. `discover_games` scores a game as IDF-weighted mean affinity over **all** its tags (unrated = neutral dilution; IDF via the `gl_ln` SQL function), damped by `_MATCH_PRIOR`. IDF is deliberately **kept** — shrinkage already stops rarity from buying a big affinity, and without IDF the library-wide tags ("exploration", 134 games) would drive every recommendation — but its `df` is floored at `_IDF_DF_FLOOR`, since a tag on one library game is unmeasured rather than maximally informative. Vibe filters only match tags within the first `VIBE_TAG_PROMINENCE_CUTOFF` entries of the vote-ranked tag list — GTA V's low-vote "racing" tag doesn't make it a racing game.
 
+## Similar in your library
+
+**`similar_in_library`** (`tools/game_media.py`) is the row under the game cards
+and the evaluation card, and it is the same vocabulary asked a different
+question: not "what here would he like?" but "what here is like THIS?". For a
+source game it scores every owned primary library item by cosine similarity
+between two tag vectors — the tag's IDF (`gl_ln(1 + N/max(df, 5))`, the same
+formula and the same `_IDF_DF_FLOOR` reasoning as `discover_games`, with `N` and
+`df` over the owned-primary pool) times a prominence decay
+`p(rank) = 1/(1 + rank/8)` over the first 20 entries of each side's vote-ranked
+`games.tags` (the same "past the head of the list the tags describe the store
+page" reason as `VIBE_TAG_PROMINENCE_CUTOFF`). A candidate qualifies on two gates, not one: ≥3
+shared windowed tags **and** a cosine ≥ `SIMILAR_MIN_SIMILARITY` (0.40). The
+floor is not cosmetic — the shared-tag gate alone qualified 1853 neighbours for
+Hollow Knight and 1562 for Stardew Valley on the live library (half of it shares
+three generic tags), which makes the count the card reads out meaningless. At
+0.40 Hollow Knight keeps 71 (weakest: Sundered, Shadow Complex, Yoku's Island
+Express) and Stardew Valley 23 (weakest: Unpacking), while 0.30 already admits
+Jedi: Fallen Order and The Escapists 2. The floor is applied BEFORE the count
+and the cap, so `count` is "neighbours that cleared the bar". The source needs
+≥3 windowed tags of its own or the block is `None` rather than a guess. Excluded from the neighbours: the source itself,
+its parent, its children, and any row naming the same game (exact name or
+`name_normalized`) — a duplicate row scores near-perfectly and is not a
+neighbour. Items carry `similarity` and the top-3 `shared_tags` by contribution
+as the "why", capped at 8 with the true `count`/`truncated`. Affinity is not
+involved anywhere here: this is what the games have in common, not what he
+likes. This REPLACED IGDB's `similar_games` field, which was unreliable enough
+that the row often failed to describe the game it sat under; the field is no
+longer fetched at all (`data/media.py`).
+
 ## Tag vocabulary
 
 **Tag vocabulary**: `games.tags` comes from SteamSpy community tags, not Steam genres — `steam_store.enrich_game` only *seeds* tags when null (`COALESCE`), never clobbers. IGDB themes/keywords are *unioned* in (capped at `MERGED_TAG_CAP`). All tag writers and readers run through `data/tag_synonyms.py::canonical_tag` (lowercase + synonym map; miss → plain lowercase to match SQL `lower()` joins). `STEAM_FEATURE_FLAGS` + `FEATURE_FLAG_PREFIXES` (`data/tags.py`) quarantine capability/distribution metadata out of the taste vocabulary — exact flags ("save anytime", "kickstarter") plus open-ended IGDB keyword families ("previously on - *", "available on - *", expo/award tags) that mint one keyword per storefront or event.
