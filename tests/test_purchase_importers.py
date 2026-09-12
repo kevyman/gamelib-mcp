@@ -861,6 +861,56 @@ class HumbleParserTests(unittest.TestCase):
         self.assertEqual([r.price_paid for r in records], [5.38, 5.37])
         self.assertEqual(sum(r.price_paid for r in records), 10.75)
 
+    def test_the_base_title_survives_an_ampersand_pair_listed_suffix_first(self):
+        # Same fold as the Life is Strange 2 case, on a title carrying an "&".
+        # The edition key that decides which half is folded is
+        # normalize_series_gap_title (which folds "&" into "and"), so
+        # base_title has to ask its question with the SAME normalization —
+        # comparing normalize_search_text against it made both halves look
+        # suffixed and the survivor fell back to payload order, which lists
+        # the Deluxe Edition key first.
+        for base, suffixed in (
+            ("Salt & Sanctuary", "Salt & Sanctuary: Deluxe Edition"),
+            ("Salt Sanctuary", "Salt Sanctuary: Deluxe Edition"),
+        ):
+            with self.subTest(base=base):
+                order = {
+                    "product": {
+                        "human_name": "June 2019 Humble Choice",
+                        "category": "subscriptioncontent",
+                    },
+                    "amount_spent": 10.00,
+                    "currency": "USD",
+                    "created": "2019-06-04T00:00:00",
+                    "tpkd_dict": {
+                        "all_tpks": [
+                            {
+                                "human_name": suffixed,
+                                "key_type": "steam",
+                                "machine_name": "saltsanctuary_deluxeedition_choice_steam",
+                                "redeemed_key_val": "AAAAA-BBBBB-CCCCC",
+                            }
+                        ]
+                    },
+                    "subproducts": [
+                        {
+                            "human_name": base,
+                            "machine_name": "saltsanctuary",
+                            "downloads": [{"platform": "windows"}],
+                        }
+                    ],
+                }
+
+                records, _ = humble_module.records_from_orders([order])
+
+                # One game, and it keeps the un-suffixed title — which
+                # exact-matches a base-named library row at rank 0 and
+                # prefix-matches an edition-named one.
+                self.assertEqual(
+                    [(r.title, r.platform) for r in records], [(base, "steam")]
+                )
+                self.assertEqual([r.price_paid for r in records], [10.00])
+
     def test_edition_dedupe_keeps_separately_sold_re_releases_apart(self):
         # The edition key must use the CURATED phrase list, not
         # normalize_edition_comparison_title — that one strips a qualifier

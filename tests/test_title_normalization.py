@@ -1,10 +1,12 @@
 import unittest
 
 from gamelib_mcp.data.title_normalization import (
+    ampersand_alternate,
     is_edition_variant_of,
     normalize_edition_comparison_title,
     normalize_purchase_title,
     normalize_search_text,
+    normalize_series_gap_title,
     prepare_catalog_title,
 )
 
@@ -291,3 +293,50 @@ class EditionComparisonTitleTests(unittest.TestCase):
     def test_fully_stripped_title_falls_back_to_the_original(self) -> None:
         # Returning "" would make every fully-stripped title compare equal.
         self.assertEqual(normalize_edition_comparison_title("(2007)"), "2007")
+
+
+class AmpersandSpellingTests(unittest.TestCase):
+    """"&" and "and" are one title (Steam vs IGDB spell it differently)."""
+
+    def test_series_gap_title_folds_the_ampersand_into_the_word(self) -> None:
+        # Prod: Steam titles appid 2132850 "Rabbit and Steel", IGDB holds
+        # "Rabbit & Steel". normalize_search_text drops the "&" outright, so
+        # without the fold the two could never compare equal and the strict
+        # name gate rejected the correct candidate.
+        self.assertEqual(
+            normalize_series_gap_title("Rabbit & Steel"),
+            normalize_series_gap_title("Rabbit and Steel"),
+        )
+        self.assertEqual(normalize_series_gap_title("Rabbit & Steel"), "rabbit and steel")
+
+    def test_the_fold_survives_edition_stripping(self) -> None:
+        self.assertEqual(
+            normalize_series_gap_title("Salt & Sanctuary: Definitive Edition"),
+            normalize_series_gap_title("Salt and Sanctuary"),
+        )
+
+    def test_normalize_search_text_is_deliberately_unchanged(self) -> None:
+        # It backs games.name_normalized (library identity) — changing it
+        # would need a stored-column rebuild.
+        self.assertEqual(normalize_search_text("Rabbit & Steel"), "rabbit steel")
+
+    def test_alternate_swaps_an_ampersand_for_the_word(self) -> None:
+        self.assertEqual(ampersand_alternate("Rabbit & Steel"), "Rabbit and Steel")
+        self.assertEqual(ampersand_alternate("Salt & Sanctuary"), "Salt and Sanctuary")
+
+    def test_alternate_swaps_the_word_for_an_ampersand(self) -> None:
+        self.assertEqual(ampersand_alternate("Rabbit and Steel"), "Rabbit & Steel")
+        # Only the standalone word, never one riding inside another.
+        self.assertEqual(ampersand_alternate("Sand and Sea"), "Sand & Sea")
+
+    def test_alternate_never_applies_both_directions(self) -> None:
+        # A title carrying both keeps its "and" — the ampersand form wins and
+        # the result differs from the input in exactly one way.
+        self.assertEqual(
+            ampersand_alternate("Chip & Dale and Friends"), "Chip and Dale and Friends"
+        )
+
+    def test_alternate_is_none_without_either_token(self) -> None:
+        for title in ("Hollow Knight", "Sandstorm", "Andor", "Bandit"):
+            with self.subTest(title=title):
+                self.assertIsNone(ampersand_alternate(title))

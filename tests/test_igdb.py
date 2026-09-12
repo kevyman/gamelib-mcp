@@ -993,6 +993,127 @@ class ResolveGameIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.is_primary_library_item)
 
 
+class AmpersandSpellingTests(unittest.IsolatedAsyncioTestCase):
+    """Steam's "and" and IGDB's "&" are one title.
+
+    Prod: Steam titles appid 2132850 "Rabbit and Steel", IGDB holds "Rabbit &
+    Steel", external_games has no mapping for the appid — so linking fell to
+    name resolution, where the strict gate compared "rabbit and steel" with
+    "rabbit steel" (normalize_search_text keeps only [a-z0-9]+ runs, so the
+    "&" vanished) and rejected the correct candidate.
+    """
+
+    def _game(self, igdb_id: int, name: str) -> "igdb.IGDBGame":
+        return igdb.IGDBGame(
+            igdb_id=igdb_id,
+            name=name,
+            category=igdb.CATEGORY_MAIN_GAME,
+            first_release_date="2024-04-25",
+        )
+
+    def test_name_gate_accepts_the_other_spelling_both_ways(self) -> None:
+        match = igdb._select_best_match(
+            "Rabbit and Steel",
+            [self._game(281652, "Rabbit & Steel")],
+            allow_inconclusive_fallback=False,
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(match.igdb_id, 281652)
+
+        reverse = igdb._select_best_match(
+            "Rabbit & Steel",
+            [self._game(281652, "Rabbit and Steel")],
+            allow_inconclusive_fallback=False,
+        )
+        self.assertIsNotNone(reverse)
+        self.assertEqual(reverse.igdb_id, 281652)
+
+    def test_name_agrees_on_the_pair(self) -> None:
+        # What stops the backfill treating an external_games/stored link as a
+        # different game (it goes through normalize_series_gap_title).
+        self.assertTrue(igdb._igdb_name_agrees("Rabbit and Steel", "Rabbit & Steel"))
+        self.assertTrue(igdb._igdb_name_agrees("Rabbit & Steel", "Rabbit and Steel"))
+
+    def test_the_swap_leads_the_query_ladder_in_both_directions(self) -> None:
+        self.assertEqual(
+            igdb._generate_resolve_query_variants("Rabbit and Steel")[0],
+            ("Rabbit & Steel", True),
+        )
+        self.assertEqual(
+            igdb._generate_resolve_query_variants("Salt & Sanctuary")[0],
+            ("Salt and Sanctuary", True),
+        )
+
+    def test_a_title_with_neither_token_gets_no_such_rung(self) -> None:
+        for title in ("Hollow Knight", "Sandstorm"):
+            with self.subTest(title=title):
+                queries = [v for v, _ in igdb._generate_resolve_query_variants(title)]
+                self.assertEqual(
+                    [q for q in queries if "&" in q or " and " in q.casefold()], []
+                )
+
+    async def test_exact_name_lookup_retries_the_other_spelling(self) -> None:
+        real = self._game(281652, "Rabbit & Steel")
+
+        async def fake_exact(name, igdb_platform_id=None, *, suppress_errors=True):
+            return [real] if name == "Rabbit & Steel" else []
+
+        exact = AsyncMock(side_effect=fake_exact)
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(return_value=[])),
+            patch("gamelib_mcp.data.igdb.fetch_games_by_exact_name", exact),
+        ):
+            outcome = await igdb._resolve_game_with_status("Rabbit and Steel", None)
+
+        self.assertIsNotNone(outcome.game)
+        self.assertEqual(outcome.game.igdb_id, 281652)
+        self.assertIn(
+            "Rabbit & Steel", [call.args[0] for call in exact.await_args_list]
+        )
+
+    async def test_an_ambiguous_alternate_spelling_is_still_refused(self) -> None:
+        # Two real games sharing the alternate spelling is the same guess the
+        # stored spelling's ambiguity refuses.
+        ambiguous = [self._game(1, "Rabbit & Steel"), self._game(2, "Rabbit & Steel")]
+
+        async def fake_exact(name, igdb_platform_id=None, *, suppress_errors=True):
+            return ambiguous if name == "Rabbit & Steel" else []
+
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(return_value=[])),
+            patch(
+                "gamelib_mcp.data.igdb.fetch_games_by_exact_name",
+                AsyncMock(side_effect=fake_exact),
+            ),
+        ):
+            outcome = await igdb._resolve_game_with_status("Rabbit and Steel", None)
+
+        self.assertIsNone(outcome.game)
+
+    async def test_a_hit_on_the_stored_spelling_is_never_second_guessed(self) -> None:
+        # The alternate lookup runs ONLY when the stored spelling matched
+        # nothing — an ambiguity there stays a refusal, not a respelling.
+        stored_spelling = [self._game(1, "Rabbit and Steel"), self._game(2, "Rabbit and Steel")]
+        exact = AsyncMock(
+            side_effect=lambda name, igdb_platform_id=None, *, suppress_errors=True: (
+                stored_spelling if name == "Rabbit and Steel" else [self._game(3, "Rabbit & Steel")]
+            )
+        )
+        with (
+            patch.dict("os.environ", {"TWITCH_CLIENT_ID": "x"}),
+            patch("gamelib_mcp.data.igdb.search_game", AsyncMock(return_value=[])),
+            patch("gamelib_mcp.data.igdb.fetch_games_by_exact_name", exact),
+        ):
+            outcome = await igdb._resolve_game_with_status("Rabbit and Steel", None)
+
+        self.assertIsNone(outcome.game)
+        self.assertNotIn(
+            "Rabbit & Steel", [call.args[0] for call in exact.await_args_list]
+        )
+
+
 class ResolveGameZeroResultLadderTests(unittest.IsolatedAsyncioTestCase):
     """resolve_game's zero-result fallback ladder (Fix 4)."""
 

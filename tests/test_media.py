@@ -822,6 +822,86 @@ class NameResolutionTests(ToolDBTestCase):
         cached = json.loads(await get_meta("game_media_name:not a real game"))
         self.assertIsNone(cached["payload"])
 
+    async def test_the_other_ampersand_spelling_is_tried_once(self):
+        # Steam titles it "Rabbit and Steel", IGDB holds "Rabbit & Steel" —
+        # an equality filter cannot bridge a spelling, so the resolver retries
+        # the alternate once.
+        async def fake_exact(name, *, suppress_errors=True):
+            if name == "Rabbit & Steel":
+                return [
+                    IGDBGame(
+                        igdb_id=281652,
+                        name="Rabbit & Steel",
+                        category=0,
+                        first_release_date="2024-04-25",
+                    )
+                ]
+            return []
+
+        lookup = AsyncMock(side_effect=fake_exact)
+        post = AsyncMock(return_value=_igdb_payload())
+        with (
+            patch.dict(os.environ, _IGDB_ENV, clear=False),
+            patch("gamelib_mcp.data.media.fetch_games_by_exact_name", lookup),
+            patch("gamelib_mcp.data.media._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.media._post_igdb_games", post),
+        ):
+            result = await media.get_game_media(name="Rabbit and Steel")
+
+        assert result is not None
+        self.assertEqual(result["igdb_id"], 281652)
+        self.assertEqual(
+            [call.args[0] for call in lookup.await_args_list],
+            ["Rabbit and Steel", "Rabbit & Steel"],
+        )
+        # The mapping is cached under the ORIGINAL name, not the alternate.
+        self.assertIsNotNone(await get_meta("game_media_name:rabbit and steel"))
+
+    async def test_the_stored_spelling_wins_when_both_resolve(self):
+        async def fake_exact(name, *, suppress_errors=True):
+            return [
+                IGDBGame(
+                    igdb_id=1 if name == "Rabbit and Steel" else 2,
+                    name=name,
+                    category=0,
+                    first_release_date=None,
+                )
+            ]
+
+        lookup = AsyncMock(side_effect=fake_exact)
+        with (
+            patch.dict(os.environ, _IGDB_ENV, clear=False),
+            patch("gamelib_mcp.data.media.fetch_games_by_exact_name", lookup),
+            patch("gamelib_mcp.data.media._get_token", AsyncMock(return_value="token")),
+            patch("gamelib_mcp.data.media._post_igdb_games", AsyncMock(return_value=_igdb_payload())),
+        ):
+            result = await media.get_game_media(name="Rabbit and Steel")
+
+        assert result is not None
+        self.assertEqual(result["igdb_id"], 1)
+        self.assertEqual(lookup.await_count, 1)
+
+    async def test_an_ambiguous_alternate_spelling_refuses_to_guess(self):
+        async def fake_exact(name, *, suppress_errors=True):
+            if name == "Rabbit & Steel":
+                return [
+                    IGDBGame(igdb_id=1, name=name, category=0, first_release_date=None),
+                    IGDBGame(igdb_id=2, name=name, category=0, first_release_date=None),
+                ]
+            return []
+
+        post = AsyncMock()
+        with (
+            patch.dict(os.environ, _IGDB_ENV, clear=False),
+            patch(
+                "gamelib_mcp.data.media.fetch_games_by_exact_name",
+                AsyncMock(side_effect=fake_exact),
+            ),
+            patch("gamelib_mcp.data.media._post_igdb_games", post),
+        ):
+            self.assertIsNone(await media.get_game_media(name="Rabbit and Steel"))
+        post.assert_not_awaited()
+
     async def test_a_lookup_failure_is_not_cached(self):
         lookup = AsyncMock(side_effect=IGDBRequestFailure("boom"))
         with (

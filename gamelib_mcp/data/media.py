@@ -39,6 +39,7 @@ from .igdb import (
     igdb_credentials_configured,
 )
 from .steam_store import fetch_store_appdetails
+from .title_normalization import ampersand_alternate
 
 logger = logging.getLogger(__name__)
 
@@ -590,23 +591,42 @@ async def _resolve_igdb_id_by_name(
     guess must not become a stored link.
     """
 
+    async def unique_match(query: str) -> tuple[int | None, bool]:
+        """One equality lookup: (unique igdb_id or None, was it ambiguous)."""
+        try:
+            matches = await fetch_games_by_exact_name(query, suppress_errors=False)
+        except IGDBRequestFailure as exc:
+            raise _MediaFetchError(
+                f"IGDB exact-name lookup failed for {query!r}"
+            ) from exc
+        distinct = {game.igdb_id for game in matches}
+        if len(distinct) == 1:
+            return distinct.pop(), False
+        if len(distinct) > 1:
+            logger.info(
+                "IGDB media name lookup for %r is ambiguous (%s) — refusing to guess",
+                query,
+                sorted(distinct),
+            )
+            return None, True
+        return None, False
+
     async def fetch() -> dict | None:
         if not igdb_credentials_configured():
             return None
-        try:
-            matches = await fetch_games_by_exact_name(name, suppress_errors=False)
-        except IGDBRequestFailure as exc:
-            raise _MediaFetchError(f"IGDB exact-name lookup failed for {name!r}") from exc
-        distinct = {game.igdb_id for game in matches}
-        if len(distinct) != 1:
-            if len(distinct) > 1:
-                logger.info(
-                    "IGDB media name lookup for %r is ambiguous (%s) — refusing to guess",
-                    name,
-                    sorted(distinct),
-                )
+        igdb_id, ambiguous = await unique_match(name)
+        if igdb_id is None and not ambiguous:
+            # Steam and IGDB spell the ampersand differently ("Rabbit and
+            # Steel" / "Rabbit & Steel") and an equality filter cannot bridge
+            # that. One extra lookup for the other spelling, same
+            # unique-or-refuse rule — and only when the stored spelling found
+            # nothing, so an ambiguity is never resolved by respelling it.
+            alternate = ampersand_alternate(name)
+            if alternate is not None:
+                igdb_id, _ = await unique_match(alternate)
+        if igdb_id is None:
             return None
-        return {"igdb_id": distinct.pop()}
+        return {"igdb_id": igdb_id}
 
     payload = await _cached(
         _name_cache_key(name), fetch, ttl=NAME_CACHE_TTL, label=f"name {name!r}"

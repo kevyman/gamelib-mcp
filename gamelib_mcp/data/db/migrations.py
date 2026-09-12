@@ -5,7 +5,7 @@ of ``__init__.py`` and none of it is reachable outside ``migrate_db``. What
 lives here is shape detection for pre-``user_version`` databases
 (``_detect_schema_state``), the pre-migration snapshot
 (``_snapshot_before_migration``), the ``_MIGRATION_STEPS`` chain (legacy -> v1
-plus v1 -> v2 … v39 -> v40) and the reconciliation tail that runs after it
+plus v1 -> v2 … v40 -> v41) and the reconciliation tail that runs after it
 (``_run_migrations``).
 
 The façade keeps the layer this depends on — ``SCHEMA_VERSION``,
@@ -40,7 +40,7 @@ from .schema import (
     _V2_SCHEMA_DDL,
     _V10_SCHEMA_DDL,
     _V22_SCHEMA_DDL,
-    _V40_SCHEMA_DDL,
+    _V41_SCHEMA_DDL,
 )
 
 
@@ -1860,6 +1860,54 @@ async def _migrate_v39_to_v40(db: aiosqlite.Connection, progress: _Progress | No
     await db.commit()
 
 
+async def _migrate_v40_to_v41(db: aiosqlite.Connection, progress: _Progress | None) -> None:
+    """Re-claim IGDB no-match stamps on ampersand/"and" titles (data only).
+
+    The name resolver used to compare titles through a normalization that
+    dropped "&" outright, so Steam's "Rabbit and Steel" and IGDB's "Rabbit &
+    Steel" could never compare equal and the correct candidate was refused by
+    the strict name gate. The row was then stamped "checked, no match"
+    (igdb_cached_at set, igdb_id NULL) — and that stamp is permanent, because
+    claim_game_ids_for_igdb only takes rows with igdb_cached_at IS NULL and
+    nothing re-asks. Now that the gate folds "&" into the word, those stamps
+    are stale: NULL them so the background backfill asks once more. Precedent:
+    v10 did exactly this after IGDB series data started being fetched.
+
+    Deliberately narrow. Only rows the fix can actually change are re-claimed:
+    a LINKED row (igdb_id set) keeps its link and its stamp, a never-checked
+    row (stamp already NULL) is already claimable, and a no-match on a title
+    carrying neither "&" nor a standalone "and" is untouched — re-asking for
+    those would spend the IGDB rate budget on answers that cannot have moved.
+    """
+    if progress is not None:
+        progress(
+            "Migrating to v41: re-queue IGDB lookups for ampersand/\"and\" titles."
+        )
+
+    # The SQL side only prefilters (LIKE cannot express a word boundary); the
+    # decision is the resolver's own ampersand_alternate, so exactly the rows
+    # the new ladder can respell are requeued — "Rock-and-Roll" included,
+    # "Sandstorm"/"Andor" excluded — and the two can never drift apart.
+    from ..title_normalization import ampersand_alternate
+
+    candidates = await db.execute_fetchall(
+        """
+        SELECT id, name FROM games
+         WHERE igdb_id IS NULL
+           AND igdb_cached_at IS NOT NULL
+           AND (name LIKE '%&%' OR lower(name) LIKE '%and%')
+        """
+    )
+    requeue = [row[0] for row in candidates if ampersand_alternate(row[1]) is not None]
+    if requeue:
+        await db.executemany(
+            "UPDATE games SET igdb_cached_at = NULL, igdb_claimed_at = NULL WHERE id = ?",
+            [(game_id,) for game_id in requeue],
+        )
+    await _set_user_version(db, 41)
+    await db.commit()
+
+
 async def _repair_identifier_primary_flags(db: aiosqlite.Connection) -> None:
     # Only fix groups that have MORE THAN ONE primary row; leave zero-primary and
     # single-primary groups untouched.
@@ -1896,7 +1944,7 @@ async def _rebuild_table_from_current_schema(db: aiosqlite.Connection, table: st
     await db.execute("PRAGMA legacy_alter_table=ON")
     await db.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
     await db.execute("PRAGMA legacy_alter_table=OFF")
-    await db.executescript(_V40_SCHEMA_DDL)
+    await db.executescript(_V41_SCHEMA_DDL)
 
     old_cols = await _table_columns(db, old_table)
     new_cols = await _table_columns(db, table)
@@ -2057,6 +2105,7 @@ _MIGRATION_STEPS: tuple[tuple[int, _MigrationStep], ...] = (
     (37, _migrate_v37_to_v38),
     (38, _migrate_v38_to_v39),
     (39, _migrate_v39_to_v40),
+    (40, _migrate_v40_to_v41),
 )
 
 
@@ -2130,7 +2179,7 @@ async def _run_migrations(
         )
 
     if detected_state == "fresh":
-        await db.executescript(_V40_SCHEMA_DDL)
+        await db.executescript(_V41_SCHEMA_DDL)
         fts_enabled = await _sync_fts_index(db)
         await _sync_query_views(db)
         await _set_user_version(db, SCHEMA_VERSION)
@@ -2168,7 +2217,7 @@ async def _run_migrations(
     await _repair_game_foreign_keys(db)
     await db.execute("DROP INDEX IF EXISTS idx_game_platform_identifiers_lookup")
     await _repair_identifier_primary_flags(db)
-    await db.executescript(_V40_SCHEMA_DDL)
+    await db.executescript(_V41_SCHEMA_DDL)
     if version != SCHEMA_VERSION:
         await _set_user_version(db, SCHEMA_VERSION)
         version = SCHEMA_VERSION

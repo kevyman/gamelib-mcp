@@ -1153,6 +1153,15 @@ _V40_SCHEMA_DDL = _V39_SCHEMA_DDL.replace(
     "        UNIQUE(game_id, platform)",
 )
 
+
+# v41 changes no table, column or index: it is a DATA step (re-claiming IGDB
+# no-match stamps on ampersand/"and" titles, see _migrate_v40_to_v41). The
+# snapshot still gets its own name because a fresh install executes the DDL
+# for the CURRENT version and the migration tests seed from every
+# _V{N}_SCHEMA_DDL they find — a version without one would either stamp a
+# fresh database a version behind or drop out of that sweep.
+_V41_SCHEMA_DDL = _V40_SCHEMA_DDL
+
 # Semantic views backing query_library()/get_db_schema() — NOT part of the
 # versioned schema chain (like _FTS_DDL below). Dropped and recreated on every
 # migrate_db run via _sync_query_views so a view definition change deploys on
