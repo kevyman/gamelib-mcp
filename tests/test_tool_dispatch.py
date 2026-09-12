@@ -430,6 +430,18 @@ class SetAcquisitionSingleModeGuardTests(ToolDBTestCase):
         self.assertIn("only supported with items", str(ctx.exception))
 
 
+# The similar row (tools/game_media.py::similar_in_library) ranks OWNED library
+# rows by shared tags, so a cap test seeds real neighbours instead of handing a
+# provider list over.
+_SIMILAR_TAGS = ["metroidvania", "souls-like", "hand-drawn"]
+
+
+async def _seed_similar_neighbours(count: int) -> None:
+    for index in range(count):
+        neighbour = await seed_game(f"Tag Neighbour {index:02d}", tags=_SIMILAR_TAGS)
+        await add_platform(neighbour, "steam", playtime_minutes=0)
+
+
 class ResponseSizeGuardTests(ToolDBTestCase):
     """No read response may contain a list that grows without bound.
 
@@ -581,12 +593,14 @@ class ResponseSizeGuardTests(ToolDBTestCase):
         self.assertTrue(assessment["anchors_truncated"])
 
     async def test_detail_media_lists_are_capped(self):
-        # get_game_detail(media=True) serves the same two growing lists the
-        # evaluation package does — screenshots capped in data/media.py,
-        # similar games in tools/game_media.py — each with its true total and
-        # a truncation flag.
-        gid = await seed_game("Media Detail", tags=["bulk tag"])
+        # get_game_detail(media=True) serves the same growing lists the
+        # evaluation package does — screenshots capped in data/media.py, the
+        # similar row and the pedigree in tools/game_media.py — each with its
+        # true total and a truncation flag. The similar row is a LIBRARY query,
+        # so its 12 candidates are seeded rather than handed over by a provider.
+        gid = await seed_game("Media Detail", tags=_SIMILAR_TAGS)
         await add_platform(gid, "steam", playtime_minutes=30)
+        await _seed_similar_neighbours(12)
         media = {
             "media": {
                 "source": "igdb",
@@ -596,16 +610,6 @@ class ResponseSizeGuardTests(ToolDBTestCase):
                 "screenshots_truncated": True,
                 "short_description": "x",
             },
-            "similar_raw": [
-                {
-                    "igdb_id": 900 + i,
-                    "name": f"Similar {i}",
-                    "release_year": 2020,
-                    "cover_image_id": None,
-                }
-                for i in range(12)
-            ],
-            "similar_count": 12,
             # The studio's previous games are capped in data/media.py and again
             # in tools/game_media.py; a raw block over the cap proves the second
             # gate holds for a payload that arrived over it.
@@ -666,11 +670,12 @@ class ResponseSizeGuardTests(ToolDBTestCase):
 
     async def test_evaluation_package_lists_are_capped(self):
         # record_assessment's package is a WRITE response, but it carries the
-        # same shapes: media and similar games grow with the source, past
-        # verdicts with how often the game was re-assessed, anchors and
-        # comparisons with what the caller cited.
-        gid = await seed_game("Packaged", tags=["bulk tag"])
+        # same shapes: media grows with the source and the similar row with the
+        # library, past verdicts with how often the game was re-assessed,
+        # anchors and comparisons with what the caller cited.
+        gid = await seed_game("Packaged", tags=_SIMILAR_TAGS)
         await add_platform(gid, "steam", playtime_minutes=30)
+        await _seed_similar_neighbours(12)
         anchors = [await seed_game(f"Anchor {i}") for i in range(8)]
         for day in range(1, 9):
             await record_assessment(
@@ -688,16 +693,6 @@ class ResponseSizeGuardTests(ToolDBTestCase):
                 "screenshots_truncated": True,
                 "short_description": "x",
             },
-            "similar_raw": [
-                {
-                    "igdb_id": 900 + i,
-                    "name": f"Similar {i}",
-                    "release_year": 2020,
-                    "cover_image_id": None,
-                }
-                for i in range(12)
-            ],
-            "similar_count": 12,
             # The studio's previous games are capped in data/media.py and again
             # in tools/game_media.py; a raw block over the cap proves the second
             # gate holds for a payload that arrived over it.

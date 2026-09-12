@@ -310,8 +310,8 @@ async def get_game_detail(
 
     media=True (single-game mode only) additionally fetches how the game
     presents itself, for rendering a card: a trailer, up to 8 screenshots, the
-    short description, up to 8 IGDB-similar games and the developer's pedigree
-    (up to 6 earlier games), each similar/pedigree entry annotated with what he
+    short description, the up-to-8 owned games most like it (shared tags) and
+    the developer's pedigree (up to 6 earlier games), annotated with what he
     owns, played and rated. Keys are absent when nothing resolves; results cache
     about 7 days. Leave it off when you only need the facts above — it costs a
     provider round trip on a cold cache.

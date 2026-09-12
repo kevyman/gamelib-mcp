@@ -1,4 +1,4 @@
-"""On-demand trailer / screenshot / similar-games media, meta-KV cached.
+"""On-demand trailer / screenshot / pedigree media, meta-KV cached.
 
 Nothing else in the codebase fetches media: enrichment stores text and scores,
 and the 7-day store cache predates the media filter groups entirely. Evaluation
@@ -8,9 +8,11 @@ meta-KV cache, rather than new columns on ``games``.
 
 Steam wins whenever an appid is known and the source is never mixed: a card
 showing Steam screenshots under an IGDB trailer describes two different
-builds of a game. The IGDB path also carries ``similar_games`` and the
-developer PEDIGREE (who made this, and what they shipped before it), neither of
-which the Steam payload has an equivalent for.
+builds of a game. The IGDB path additionally carries the developer PEDIGREE
+(who made this, and what they shipped before it), which the Steam payload has
+no equivalent for. IGDB's own ``similar_games`` field is deliberately NOT
+fetched: it was unreliable enough to be worth replacing, and the cards' similar
+row is now computed from the library itself (tools/game_media.py).
 
 Everything here is best-effort. ``get_game_media`` never raises for a fetch
 failure — the verdict it decorates matters, the trailer does not — and an
@@ -45,7 +47,6 @@ logger = logging.getLogger(__name__)
 # have: the "+N more" chip was unclickable (the extra images were never in the
 # payload), so it went, and a couple more real screenshots took its place.
 SCREENSHOT_CAP = 8
-SIMILAR_CAP = 8
 PREVIOUS_GAMES_CAP = 6
 SUMMARY_MAX_CHARS = 500
 
@@ -93,8 +94,6 @@ _YOUTUBE_POSTER_URL = "https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
 _IGDB_MEDIA_FIELDS = (
     "fields name, summary, first_release_date, hypes, "
     "screenshots.image_id, videos.video_id, videos.name, "
-    "similar_games.id, similar_games.name, similar_games.cover.image_id, "
-    "similar_games.first_release_date, "
     "involved_companies.company.id, involved_companies.company.name, "
     "involved_companies.company.start_date, involved_companies.company.country, "
     "involved_companies.developer, involved_companies.publisher, "
@@ -140,7 +139,7 @@ _FETCH_FAILED: Any = object()
 # 2026-08) refetches instead of rendering half a card for seven days is to ask
 # a question the old entries are not the answer to. Bump this whenever the
 # cached payload grows a member a renderer depends on.
-MEDIA_CACHE_VERSION = "v2"
+MEDIA_CACHE_VERSION = "v3"
 
 
 def _cache_key(kind: str, identity: str | int) -> str:
@@ -316,8 +315,6 @@ async def _fetch_steam_media(appid: int) -> dict | None:
             "screenshots_truncated": len(screenshots) > SCREENSHOT_CAP,
             "short_description": description,
         },
-        "similar_raw": None,
-        "similar_count": None,
         "pedigree_raw": None,
         "igdb_id": None,
     }
@@ -367,20 +364,6 @@ def _critic_score(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return round(value)
-
-
-def _igdb_similar(similar_games: list | None) -> tuple[list[dict], int]:
-    entries = [
-        {
-            "igdb_id": game.get("id"),
-            "name": game.get("name"),
-            "release_year": _release_year(game.get("first_release_date")),
-            "cover_image_id": _cover_image_id(game),
-        }
-        for game in (similar_games or [])
-        if isinstance(game, dict) and game.get("id") is not None
-    ]
-    return entries[:SIMILAR_CAP], len(entries)
 
 
 # ── Pedigree (who made this, and what else they made) ────────────────────────
@@ -569,16 +552,9 @@ async def _fetch_igdb_media(igdb_id: int) -> dict | None:
     trailer = _igdb_trailer(item.get("videos"))
     summary = item.get("summary")
     description = _truncate(summary, SUMMARY_MAX_CHARS) if summary else None
-    similar, similar_count = _igdb_similar(item.get("similar_games"))
     pedigree, catalog_failed = await _igdb_pedigree(item, igdb_id)
 
-    if (
-        not screenshots
-        and trailer is None
-        and description is None
-        and not similar
-        and pedigree is None
-    ):
+    if not screenshots and trailer is None and description is None and pedigree is None:
         return None
 
     payload: dict[str, Any] = {
@@ -590,8 +566,6 @@ async def _fetch_igdb_media(igdb_id: int) -> dict | None:
             "screenshots_truncated": len(screenshots) > SCREENSHOT_CAP,
             "short_description": description,
         },
-        "similar_raw": similar or None,
-        "similar_count": similar_count or None,
         "pedigree_raw": pedigree,
         "igdb_id": igdb_id,
     }
@@ -657,15 +631,13 @@ async def get_game_media(
     igdb_id: int | None = None,
     name: str | None = None,
 ) -> dict | None:
-    """Media for one game: ``{"media", "similar_raw", "similar_count",
-    "pedigree_raw", "igdb_id", "errors"}``.
+    """Media for one game: ``{"media", "pedigree_raw", "igdb_id", "errors"}``.
 
     Identity order is Steam appid, then IGDB id, then an exact-name IGDB
-    resolution. The MEDIA block is whole-source, never mixed — but similar
-    games and pedigree exist only on IGDB, so a Steam-sourced result still
-    borrows both from the game's IGDB record when one is reachable; otherwise
-    the most common candidates (Steam appids) would never get a similar row or
-    a studio strip at all.
+    resolution. The MEDIA block is whole-source, never mixed — but the PEDIGREE
+    exists only on IGDB, so a Steam-sourced result still borrows it from the
+    game's IGDB record when one is reachable; otherwise the most common
+    candidates (Steam appids) would never get a studio strip at all.
 
     Never raises for a provider failure, but does not hide one either:
     ``errors`` names each source whose fetch FAILED (as opposed to genuinely
@@ -722,8 +694,6 @@ async def get_game_media(
         merged = (
             {
                 **steam_payload,
-                "similar_raw": igdb_payload.get("similar_raw"),
-                "similar_count": igdb_payload.get("similar_count"),
                 "pedigree_raw": igdb_payload.get("pedigree_raw"),
                 "igdb_id": igdb_payload.get("igdb_id"),
             }
@@ -739,8 +709,6 @@ async def get_game_media(
         # legitimately earns. Assembled fresh, never cached.
         return {
             "media": None,
-            "similar_raw": None,
-            "similar_count": None,
             "pedigree_raw": None,
             "igdb_id": resolved_igdb_id if resolved_igdb_id is not None else igdb_id,
             "errors": errors,

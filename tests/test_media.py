@@ -1,4 +1,4 @@
-"""data/media.py — on-demand trailer/screenshot/similar-games/pedigree fetching.
+"""data/media.py — on-demand trailer/screenshot/pedigree fetching.
 
 No real HTTP: the Steam path mocks ``fetch_store_appdetails`` and serves the
 trailer HEAD check through an httpx.MockTransport, and the IGDB path mocks
@@ -70,7 +70,7 @@ def _head_transport(status_code: int = 200):
     return factory, seen
 
 
-def _igdb_payload(*, videos: list | None = None, similar: int = 0) -> list[dict]:
+def _igdb_payload(*, videos: list | None = None) -> list[dict]:
     return [
         {
             "id": 1520,
@@ -82,15 +82,6 @@ def _igdb_payload(*, videos: list | None = None, similar: int = 0) -> list[dict]
             else [
                 {"video_id": "aaa", "name": "Gameplay"},
                 {"video_id": "bbb", "name": "Launch Trailer"},
-            ],
-            "similar_games": [
-                {
-                    "id": 100 + index,
-                    "name": f"Similar {index}",
-                    "first_release_date": 1451606400,  # 2016-01-01
-                    "cover": {"image_id": f"cover{index}"},
-                }
-                for index in range(similar)
             ],
         }
     ]
@@ -138,7 +129,6 @@ def _pedigree_game(
             "summary": "Explore a ruined kingdom.",
             "screenshots": [{"image_id": "sc1"}],
             "videos": [],
-            "similar_games": [],
             "involved_companies": involved,
             "hypes": hypes,
             "first_release_date": first_release_date,
@@ -220,7 +210,6 @@ class SteamMediaTests(ToolDBTestCase):
         # Exactly one HEAD, against the 480 rendition.
         self.assertEqual([r.method for r in seen], ["HEAD"])
         self.assertTrue(str(seen[0].url).endswith("movie480.mp4"))
-        self.assertIsNone(result["similar_raw"])
 
     async def test_trailer_head_404_drops_only_the_trailer(self):
         # The constructed mp4 is undocumented legacy surface; when Valve drops
@@ -396,8 +385,7 @@ class SteamMediaTests(ToolDBTestCase):
         stale = {"media": {"source": "steam", "trailer": None, "screenshots": [],
                            "screenshot_count": 0, "screenshots_truncated": False,
                            "short_description": "old but true"},
-                 "similar_raw": None, "similar_count": None, "igdb_id": None,
-                 "pedigree_raw": None}
+                 "igdb_id": None, "pedigree_raw": None}
         await set_meta(
             media._cache_key("steam", 88),
             json.dumps({
@@ -413,33 +401,6 @@ class SteamMediaTests(ToolDBTestCase):
         self.assertEqual(result["media"]["short_description"], "old but true")
         # Stale-served is a successful answer, not a reported failure.
         self.assertEqual(result["errors"], [])
-
-    async def test_steam_media_borrows_similar_games_from_igdb(self):
-        # Similar games exist only on IGDB. A Steam-sourced result still
-        # reaches over for them when the game's IGDB record is reachable —
-        # otherwise the most common candidates (Steam appids) would never get
-        # a similar row. The MEDIA block itself stays whole-source Steam.
-        factory, _ = _head_transport()
-        with (
-            patch.object(
-                media, "fetch_store_appdetails", AsyncMock(return_value=_appdetails())
-            ),
-            patch("gamelib_mcp.data.media.httpx.AsyncClient", factory),
-            patch.dict(os.environ, _IGDB_ENV, clear=False),
-            patch("gamelib_mcp.data.media._get_token", AsyncMock(return_value="token")),
-            patch(
-                "gamelib_mcp.data.media._post_igdb_games",
-                AsyncMock(return_value=_igdb_payload(similar=3)),
-            ),
-        ):
-            result = await media.get_game_media(steam_appid=367520, igdb_id=1520)
-
-        assert result is not None
-        self.assertEqual(result["media"]["source"], "steam")
-        self.assertEqual(result["media"]["trailer"]["kind"], "mp4")
-        self.assertEqual(len(result["similar_raw"]), 3)
-        self.assertEqual(result["similar_count"], 3)
-        self.assertEqual(result["igdb_id"], 1520)
 
 
 class IGDBMediaTests(ToolDBTestCase):
@@ -493,25 +454,6 @@ class IGDBMediaTests(ToolDBTestCase):
 
         assert result is not None
         self.assertEqual(result["media"]["trailer"]["video_id"], "zzz")
-
-    async def test_similar_games_are_capped_with_the_true_count(self):
-        post = AsyncMock(return_value=_igdb_payload(similar=12))
-        env, token, posted = self._patched_igdb(post)
-        with env, token, posted:
-            result = await media.get_game_media(igdb_id=1520)
-
-        assert result is not None
-        self.assertEqual(len(result["similar_raw"]), media.SIMILAR_CAP)
-        self.assertEqual(result["similar_count"], 12)
-        self.assertEqual(
-            result["similar_raw"][0],
-            {
-                "igdb_id": 100,
-                "name": "Similar 0",
-                "release_year": 2016,
-                "cover_image_id": "cover0",
-            },
-        )
 
     async def test_unconfigured_igdb_is_a_miss_not_an_error(self):
         with patch.dict(os.environ, {}, clear=False):
@@ -779,7 +721,7 @@ class PedigreeTests(ToolDBTestCase):
         self.assertEqual(pedigree["previous_games"], [])
         self.assertEqual(pedigree["catalog_size"], 0)
 
-    async def test_a_steam_result_borrows_the_pedigree_like_similar_games(self):
+    async def test_a_steam_result_borrows_the_pedigree_from_igdb(self):
         # Pedigree is IGDB-only, and Steam appids are the commonest candidate —
         # without the borrow they would never get a studio strip at all.
         factory, _ = _head_transport()
@@ -813,8 +755,6 @@ class PedigreeTests(ToolDBTestCase):
                     "fetched_at": datetime.now(UTC).isoformat(),
                     "payload": {
                         "media": {"source": "igdb"},
-                        "similar_raw": None,
-                        "similar_count": None,
                         "igdb_id": 1520,
                     },
                 }
@@ -923,8 +863,6 @@ class MediaCacheTests(ToolDBTestCase):
                 "screenshots_truncated": False,
                 "short_description": description,
             },
-            "similar_raw": None,
-            "similar_count": None,
             "pedigree_raw": None,
             "igdb_id": None,
         }
