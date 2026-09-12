@@ -339,15 +339,62 @@ def normalize_same_product_sku_title(name: str) -> str:
     return normalize_search_text(cleaned)
 
 
+# Storefronts and IGDB disagree about the ampersand: Steam ships "Rabbit and
+# Steel" while IGDB holds "Rabbit & Steel", and normalize_search_text keeps
+# only [a-z0-9]+ runs, so "&" simply vanishes ("rabbit steel") while "and"
+# survives ("rabbit and steel") — two spellings of one title that can never
+# compare equal. Folding the ampersand into the word before the hand-off makes
+# them meet. Deliberately NOT done inside normalize_search_text itself: that
+# one backs games.name_normalized (library identity), and changing it would
+# need a stored-column rebuild.
+_AMPERSAND_RE = re.compile(r"\s*&\s*")
+_AND_WORD_RE = re.compile(r"\band\b", re.IGNORECASE)
+
+
+def normalize_folded_text(value: str) -> str:
+    """``normalize_search_text`` plus the ampersand fold — the tail every
+    edition-stripping comparator below ends with.
+
+    Exposed for the one caller that needs that comparison WITHOUT the edition
+    stripping: humble.py's ``base_title`` asks "is this half of a folded pair
+    ALREADY the edition-stripped form?", which means comparing an unstripped
+    title against a stripped one. Doing that with ``normalize_search_text``
+    answers "no" for every "&" title, because the stripped side has been
+    ampersand-folded and the unstripped side has not.
+    """
+    return normalize_search_text(_AMPERSAND_RE.sub(" and ", value))
+
+
+def ampersand_alternate(name: str) -> str | None:
+    """The other spelling of an ampersand/"and" title, or None.
+
+    "Rabbit & Steel" -> "Rabbit and Steel" and "Rabbit and Steel" ->
+    "Rabbit & Steel"; only the first applicable direction, never both, so the
+    result always differs from the input in exactly one way. None when the
+    title carries neither token (or the swap changes nothing) — a caller uses
+    this as ONE extra exact-name query, not as a normalization.
+    """
+    if "&" in name:
+        alternate = _AMPERSAND_RE.sub(" and ", name).strip()
+    elif _AND_WORD_RE.search(name):
+        alternate = _AND_WORD_RE.sub("&", name)
+    else:
+        return None
+    alternate = re.sub(r"\s+", " ", alternate).strip()
+    return alternate if alternate and alternate != name else None
+
+
 def normalize_series_gap_title(name: str) -> str:
     """Normalize a title for discover_series_gaps have/gap exclusion matching.
 
     Loops off a trailing edition marker (so "Game of the Year Enhanced
-    Edition" fully collapses), then hands off to normalize_search_text for
-    case-folding and punctuation-insensitive comparison — which, since it
-    extracts only [a-z0-9]+ runs, already treats any apostrophe variant
-    (straight or curly) as a separator, so "Marvel's" and "Marvel’s"
-    normalize identically with no separate unicode-apostrophe step needed.
+    Edition" fully collapses), folds a standalone ampersand into the word
+    "and" (see _AMPERSAND_RE: "Rabbit & Steel" and "Rabbit and Steel" are one
+    game), then hands off to normalize_search_text for case-folding and
+    punctuation-insensitive comparison — which, since it extracts only
+    [a-z0-9]+ runs, already treats any apostrophe variant (straight or curly)
+    as a separator, so "Marvel's" and "Marvel’s" normalize identically with
+    no separate unicode-apostrophe step needed.
     """
     cleaned = name
     previous = None
@@ -355,4 +402,4 @@ def normalize_series_gap_title(name: str) -> str:
         previous = cleaned
         for pattern in _SERIES_GAP_EDITION_PATTERNS:
             cleaned = pattern.sub("", cleaned)
-    return normalize_search_text(cleaned)
+    return normalize_folded_text(cleaned)

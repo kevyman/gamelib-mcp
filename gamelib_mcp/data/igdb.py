@@ -44,6 +44,7 @@ from .db import (
 from .tag_synonyms import canonical_tag
 from .tags import is_feature_flag
 from .title_normalization import (
+    ampersand_alternate,
     is_non_game_title,
     normalize_catalog_title,
     normalize_search_text,
@@ -781,6 +782,13 @@ def _generate_resolve_query_variants(name: str) -> list[tuple[str, bool]]:
     game. It stays in the ladder purely as a query widener — a search for
     "Forest" can still surface "The Forest" — but its hits must clear the gate
     against the ORIGINAL title, article included.
+
+    The ampersand swap leads the ladder and IS identity-preserving: the two
+    spellings name one game (Steam "Rabbit and Steel" / IGDB "Rabbit & Steel"),
+    and gating against the VARIANT is what lets IGDB's spelling through — the
+    gate compares edition-stripped titles, and while it now folds "&" into
+    "and" on both sides, gating the rung against its own query keeps the rung
+    meaningful for a search that only answers to the alternate spelling.
     """
     variants: list[tuple[str, bool]] = []
     seen = {name.casefold()}
@@ -792,6 +800,7 @@ def _generate_resolve_query_variants(name: str) -> list[tuple[str, bool]]:
             seen.add(key)
             variants.append((candidate, identity_preserving))
 
+    _add(ampersand_alternate(name), identity_preserving=True)
     _add(normalize_catalog_title(name), identity_preserving=True)
     _add(_LADDER_TRAILING_EDITION_PATTERN.sub("", name).strip(), identity_preserving=True)
     _add(_LADDER_LEADING_THE_PATTERN.sub("", name).strip(), identity_preserving=False)
@@ -985,30 +994,52 @@ async def _resolve_game_with_status(
     # the same mistake as accepting "Forest" for "The Forest". The platform
     # filter runs first because it usually resolves the ambiguity on its own
     # (a stub duplicate carries no platforms).
-    for platform_filter in (igdb_platform_id, None):
-        exact = await fetch_games_by_exact_name(
-            name, platform_filter, suppress_errors=suppress_errors
-        )
-        if not exact:
-            continue
-        saw_candidates = True
-        distinct = {game.igdb_id: game for game in exact}
-        if len(distinct) > 1:
-            logger.info(
-                "IGDB exact-name lookup for %r is ambiguous (%s) — refusing to guess",
-                name,
-                sorted(distinct),
+    async def _exact_name_pass(query: str) -> tuple[IGDBGame | None, bool]:
+        """One equality lookup (platform-filtered, then not): (match, saw_any)."""
+        saw_any = False
+        for platform_filter in (igdb_platform_id, None):
+            exact = await fetch_games_by_exact_name(
+                query, platform_filter, suppress_errors=suppress_errors
             )
+            if not exact:
+                continue
+            saw_any = True
+            distinct = {game.igdb_id: game for game in exact}
+            if len(distinct) > 1:
+                logger.info(
+                    "IGDB exact-name lookup for %r is ambiguous (%s) — refusing to guess",
+                    query,
+                    sorted(distinct),
+                )
+                break
+            match = _select_best_match(
+                query, list(distinct.values()), allow_inconclusive_fallback=False
+            )
+            if match is not None:
+                return match, True
+            # A single exact-name hit that still fails the identity/name gate is
+            # a genuine no — fall through rather than re-asking for the same
+            # title without the platform filter.
             break
-        match = _select_best_match(
-            name, list(distinct.values()), allow_inconclusive_fallback=False
-        )
-        if match is not None:
-            return _ResolveOutcome(game=match, saw_candidates=True)
-        # A single exact-name hit that still fails the identity/name gate is a
-        # genuine no — fall through to the ladder rather than re-asking for the
-        # same title without the platform filter.
-        break
+        return None, saw_any
+
+    exact_match, exact_saw = await _exact_name_pass(name)
+    saw_candidates = saw_candidates or exact_saw
+    if exact_match is not None:
+        return _ResolveOutcome(game=exact_match, saw_candidates=True)
+
+    # The stores disagree with IGDB about the ampersand ("Rabbit and Steel" on
+    # Steam, "Rabbit & Steel" on IGDB), and an equality filter cannot bridge a
+    # spelling. One extra lookup for the other spelling, under the same
+    # refusal rules — only when the stored spelling matched NOTHING, so a real
+    # hit (or an ambiguity) on the stored name is never second-guessed.
+    if not exact_saw:
+        alternate = ampersand_alternate(name)
+        if alternate is not None:
+            alt_match, alt_saw = await _exact_name_pass(alternate)
+            saw_candidates = saw_candidates or alt_saw
+            if alt_match is not None:
+                return _ResolveOutcome(game=alt_match, saw_candidates=True)
 
     # Zero results even without a platform filter — or nothing accepted from
     # the original query: work through a ladder of alternate query strings

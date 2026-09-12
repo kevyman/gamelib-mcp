@@ -1,6 +1,6 @@
 """Every seedable schema version must migrate to current WITHOUT losing rows.
 
-``_MIGRATION_STEPS`` registers 39 transitions. ``tests/test_db_migration.py``
+``_MIGRATION_STEPS`` registers 40 transitions. ``tests/test_db_migration.py``
 covers the ones with interesting data semantics, and the rest are exercised
 only as "the chain ran and did not raise" — from v1, so a step that drops and
 recreates a table in the middle of the chain would still pass while silently
@@ -104,6 +104,106 @@ class SeedableVersionSetTests(unittest.TestCase):
         # A stray _V41_SCHEMA_DDL would mean the DDL moved ahead of
         # SCHEMA_VERSION and fresh installs are being stamped a version behind.
         self.assertLessEqual(max(seedable_versions()), db_module.SCHEMA_VERSION)
+
+
+class V41AmpersandReclaimTests(unittest.IsolatedAsyncioTestCase):
+    """v40 -> v41 re-claims IGDB no-match stamps the ampersand fix can move.
+
+    The pre-fix resolver compared titles through a normalization that dropped
+    "&", so "Rabbit and Steel" (Steam) could never match "Rabbit & Steel"
+    (IGDB) and the row was stamped "checked, no match" — permanently, since
+    claim_game_ids_for_igdb only takes rows whose igdb_cached_at IS NULL.
+    """
+
+    _STAMP = "2026-09-12T14:21:00+00:00"
+
+    async def asyncSetUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._previous_url = os.environ.get("DATABASE_URL")
+
+    async def asyncTearDown(self) -> None:
+        db_module._DB_READY_PATH = None
+        db_module._FTS_READY_PATH = None
+        if self._previous_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = self._previous_url
+        self._tmpdir.cleanup()
+
+    async def test_only_stale_ampersand_no_matches_are_requeued(self):
+        path = Path(self._tmpdir.name) / "v40-ampersand.sqlite"
+        _seed_version(path, 40)
+
+        rows = (
+            # (name, igdb_id, expectation)
+            ("Rabbit and Steel", None, None),
+            ("Salt & Sanctuary", None, None),
+            ("Hollow Knight", None, self._STAMP),
+            ("Rabbit & Steel", 281652, self._STAMP),
+            # Punctuation-delimited "and": the resolver's ampersand_alternate
+            # sees it (\band\b), so the migration must requeue it too.
+            ("Rock-and-Roll Racing", None, None),
+            # "and" inside a word is not the word, in the resolver or here.
+            ("Sandstorm", None, self._STAMP),
+        )
+        conn = sqlite3.connect(path)
+        try:
+            required = _required_games_columns(conn)
+            columns = ["name", "igdb_id", "igdb_cached_at", "igdb_claimed_at",
+                       *(name for name, _ in required)]
+            placeholders = ", ".join("?" * len(columns))
+            for name, igdb_id, _expected in rows:
+                conn.execute(
+                    f"INSERT INTO games ({', '.join(columns)}) VALUES ({placeholders})",
+                    [
+                        name,
+                        igdb_id,
+                        self._STAMP,
+                        self._STAMP,
+                        *(0 if kind in ("INTEGER", "REAL") else "x" for _, kind in required),
+                    ],
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        os.environ["DATABASE_URL"] = f"file:{path}"
+        db_module._DB_READY_PATH = None
+        db_module._FTS_READY_PATH = None
+        try:
+            await db_module.init_db()
+        finally:
+            db_module._DB_READY_PATH = None
+            db_module._FTS_READY_PATH = None
+
+        conn = sqlite3.connect(path)
+        try:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            stamps = dict(
+                conn.execute(
+                    "SELECT name, igdb_cached_at FROM games WHERE name != ?",
+                    (_PROBE_NAME,),
+                )
+            )
+            claims = dict(
+                conn.execute(
+                    "SELECT name, igdb_claimed_at FROM games WHERE name != ?",
+                    (_PROBE_NAME,),
+                )
+            )
+        finally:
+            conn.close()
+
+        self.assertEqual(version, db_module.SCHEMA_VERSION)
+        for name, _igdb_id, expected in rows:
+            with self.subTest(name=name):
+                self.assertEqual(stamps[name], expected)
+        # The claim stamp goes with it, or the row would wait out the stale
+        # claim window before the background backfill could take it.
+        self.assertIsNone(claims["Rabbit and Steel"])
+        self.assertIsNone(claims["Salt & Sanctuary"])
+        # A linked row keeps BOTH — nothing about its link is stale.
+        self.assertEqual(claims["Rabbit & Steel"], self._STAMP)
 
 
 class MigrationStepDataPreservationTests(unittest.IsolatedAsyncioTestCase):
