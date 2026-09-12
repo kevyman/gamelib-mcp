@@ -640,6 +640,7 @@ from .upserts import (
     stamp_wishlist_alerts,
     upsert_game,
     upsert_game_alias,
+    upsert_game_aliases,
     upsert_game_platform,
     upsert_game_platform_enrichment,
     upsert_game_platform_identifier,

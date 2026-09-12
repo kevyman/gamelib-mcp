@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import aiosqlite
 
 from . import (
+    GOG_PRODUCT_ID,
     STEAM_APP_ID,
     get_db,
 )
@@ -372,7 +373,7 @@ async def claim_game_platform_ids_for_metacritic(limit: int, stale_before: str) 
 
 
 async def load_games_for_igdb_backfill(game_ids: Iterable[int]) -> list[aiosqlite.Row]:
-    """Rows for the IGDB backfill: identity + steam_appid + manual_overrides.
+    """Rows for the IGDB backfill: identity + store ids + manual_overrides.
 
     steam_appid feeds the external_games-first resolution (the authoritative
     appid -> IGDB mapping). The effective-appid chain: a platform identifier
@@ -384,6 +385,14 @@ async def load_games_for_igdb_backfill(game_ids: Iterable[int]) -> list[aiosqlit
     such a row get linked at all. manual_overrides lets the backfill honor a
     pinned igdb_id without a per-row lookup, and release_date is the reference
     year the resolver uses to tell two same-named IGDB records apart.
+
+    gog_product_id is the same mapping for the other store IGDB's
+    external_games covers with a verified uid format (category 5). It has no
+    wishlist/assessment fallback — those tables only ever hold Steam appids —
+    so it is simply the row's primary GOG identifier, if it has one. GOG is
+    also the platform with no per-item store id in its own sync, which is why
+    107 of the library's 131 GOG-identified rows sat unlinked while name
+    resolution was the only path open to them.
     """
     ids = list(dict.fromkeys(game_ids))
     if not ids:
@@ -408,11 +417,19 @@ async def load_games_for_igdb_backfill(game_ids: Iterable[int]) -> list[aiosqlit
                         FROM game_assessments a
                         WHERE a.game_id = g.id AND a.steam_appid IS NOT NULL
                         ORDER BY a.assessed_at DESC, a.id DESC
-                        LIMIT 1)) AS steam_appid
+                        LIMIT 1)) AS steam_appid,
+                       (SELECT gpi.identifier_value
+                        FROM game_platforms gp
+                        JOIN game_platform_identifiers gpi
+                          ON gpi.game_platform_id = gp.id
+                         AND gpi.identifier_type = ?
+                        WHERE gp.game_id = g.id
+                        ORDER BY gpi.is_primary DESC, gpi.id ASC
+                        LIMIT 1) AS gog_product_id
                 FROM games g
                 WHERE g.id IN ({placeholders})
                 ORDER BY g.id""",
-            [STEAM_APP_ID, *ids],
+            [STEAM_APP_ID, GOG_PRODUCT_ID, *ids],
         )
 
 

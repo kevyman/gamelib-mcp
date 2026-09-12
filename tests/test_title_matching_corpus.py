@@ -3,7 +3,7 @@
 Two layers, both table-driven:
 
 1. The KEY layer exercises the comparators directly (``match_key``,
-   ``normalize_series_gap_title``, ``titles_conflict_on_identity``) through
+   ``normalize_edition_comparison_title``, ``titles_conflict_on_identity``) through
    ``_gate_accepts``, which is the resolver's acceptance surface minus the
    network: the identity check and the edition-stripped equality gate, tried
    against the query and against each identity-preserving rung of the query
@@ -27,7 +27,7 @@ from gamelib_mcp.data.db.fuzzy import titles_conflict_on_identity
 from gamelib_mcp.data.igdb import _generate_resolve_query_variants
 from gamelib_mcp.data.title_normalization import (
     match_key,
-    normalize_series_gap_title,
+    normalize_edition_comparison_title,
 )
 
 
@@ -47,7 +47,8 @@ def _gate_accepts(query: str, candidate: str) -> bool:
     ]
     return any(
         not titles_conflict_on_identity(gate, candidate)
-        and normalize_series_gap_title(gate) == normalize_series_gap_title(candidate)
+        and normalize_edition_comparison_title(gate)
+        == normalize_edition_comparison_title(candidate)
         for gate in gates
     )
 
@@ -80,6 +81,8 @@ SPELLING_PAIRS: tuple[tuple[str, str, str], ...] = (
     ("diacritics", "Pokémon Legends: Arceus", "Pokemon Legends: Arceus"),
     ("trademark", "Sekiro™: Shadows Die Twice", "Sekiro: Shadows Die Twice"),
     ("registered", "DOOM® Eternal", "DOOM Eternal"),
+    ("versus", "Marvel vs. Capcom", "Marvel versus Capcom"),
+    ("versus", "Marvel vs Capcom 3", "Marvel Versus Capcom 3"),
 )
 
 # A decorated library title and the base game IGDB actually holds. Directional:
@@ -95,6 +98,13 @@ EDITION_PAIRS: tuple[tuple[str, str, str], ...] = (
     ("switch marker", "Hollow Knight for Nintendo Switch", "Hollow Knight"),
     ("switch 2 edition", "Hollow Knight - Nintendo Switch 2 Edition", "Hollow Knight"),
     ("year edition", "Sea of Thieves: 2026 Edition", "Sea of Thieves"),
+    # Generation 3: the gate's edition-stripped tier is
+    # normalize_edition_comparison_title, whose generic "<up to 3 words>
+    # Edition" tail reaches SKU names no curated list enumerates. Under the
+    # narrow series-gap strip these three never met their base game.
+    ("named edition", "Watch Dogs: Day One Edition", "Watch Dogs"),
+    ("named edition", "DARK SOULS: Prepare To Die Edition", "Dark Souls"),
+    ("decorated qualifier", "Marvel's Midnight Suns Digital+ Edition", "Marvel's Midnight Suns"),
 )
 
 # Different games that a looser key would collapse. Symmetric: neither
@@ -112,6 +122,16 @@ DISTINCT_PAIRS: tuple[tuple[str, str, str], ...] = (
     ("episode", "Half-Life 2", "Half-Life 2: Episode One"),
     ("same series", "Ori and the Blind Forest", "Ori and the Will of the Wisps"),
     ("numbered sequel", "Star Wars: Battlefront", "Star Wars Battlefront II"),
+    # The broader strip's boundary: a subtitle is not an edition suffix, and a
+    # differently-decorated SKU is not the same product.
+    ("collection", "Halo", "Halo: The Master Chief Collection"),
+    ("subtitle", "Star Wars", "Star Wars: The Force Unleashed"),
+    ("re-release subtitle", "Persona 5", "Persona 5 Royal"),
+    # Both sides strip, and differently: "Sacred 2 Gold" collapses to "Sacred
+    # 2" (a known qualifier) while "Sacred 2: Fallen Angel" keeps its subtitle,
+    # so the two never meet — which is the honest answer for two different
+    # products.
+    ("different products", "Sacred 2: Fallen Angel", "Sacred 2 Gold"),
 )
 
 
@@ -147,6 +167,12 @@ class MatchKeyTests(unittest.TestCase):
         # A two-letter group is an abbreviation, not an acronym run.
         self.assertEqual(match_key("Mr. Driller"), "mr driller")
 
+    def test_versus_folds_to_vs_as_a_whole_token(self) -> None:
+        self.assertEqual(match_key("Marvel vs. Capcom"), "marvel vs capcom")
+        self.assertEqual(match_key("Marvel versus Capcom"), "marvel vs capcom")
+        # A whole token, never a substring: "Reversus" is not "Revs".
+        self.assertEqual(match_key("Reversus"), "reversus")
+
     def test_normalize_search_text_is_left_alone(self) -> None:
         # It backs games.name_normalized and the FTS index: folding identity
         # variation into it would need a stored-column rebuild.
@@ -180,7 +206,12 @@ class NameGateCorpusTests(unittest.TestCase):
 
 
 def _game(
-    igdb_id: int, name: str, year: int | None = None, *, primary: bool = True
+    igdb_id: int,
+    name: str,
+    year: int | None = None,
+    *,
+    primary: bool = True,
+    alt: list[str] | None = None,
 ) -> igdb.IGDBGame:
     return igdb.IGDBGame(
         igdb_id=igdb_id,
@@ -188,6 +219,7 @@ def _game(
         category=igdb.CATEGORY_MAIN_GAME,
         first_release_date=f"{year}-06-01" if year is not None else None,
         is_primary_library_item=primary,
+        alternative_names=list(alt or []),
     )
 
 
@@ -413,3 +445,236 @@ class SameNameYearTiebreakTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertIsNone(match)
         self.assertTrue(any("none within a year" in line for line in logs.output))
+
+
+class EditionStripFallbackTests(unittest.TestCase):
+    """The broad strip's escape hatch, pinned.
+
+    ``normalize_edition_comparison_title`` returns the RAW key when stripping
+    empties a title, so a row whose whole name is an edition phrase collapses
+    to itself rather than to "" — which would otherwise compare equal to every
+    other fully-stripped name and match the entire catalog.
+    """
+
+    def test_a_title_that_is_only_an_edition_phrase_matches_nothing(self) -> None:
+        for phrase in (
+            "Definitive Edition",
+            "The Complete Edition",
+            ": Complete Edition",
+            "Game of the Year Edition",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertNotEqual(normalize_edition_comparison_title(phrase), "")
+                self.assertFalse(_gate_accepts(phrase, "Hollow Knight"))
+                self.assertFalse(_gate_accepts("Hollow Knight", phrase))
+
+
+class AlternativeNameResolverTests(unittest.IsolatedAsyncioTestCase):
+    """IGDB's alternative names, through the real resolver.
+
+    An abbreviation or a regional title is written down nowhere else: no
+    normalization rule can turn "GTA V" into "Grand Theft Auto V", so the gate
+    either reads IGDB's own spellings or those rows never link.
+    """
+
+    async def _resolve(self, query, candidates, *, reference_release_date=None):
+        return await ResolverCorpusTests._resolve(
+            self, query, candidates, reference_release_date=reference_release_date
+        )
+
+    async def test_an_abbreviation_resolves_to_the_full_title(self) -> None:
+        candidate = _game(
+            1020, "Grand Theft Auto V", 2013, alt=["GTA V", "GTA 5"]
+        )
+        with self.assertLogs("gamelib_mcp.data.igdb", level="INFO") as logs:
+            match = await self._resolve("GTA V", [candidate])
+
+        self.assertIsNotNone(match)
+        self.assertEqual(match.igdb_id, 1020)
+        # The log names the spelling that carried the match.
+        self.assertTrue(
+            any("via IGDB alternative name 'GTA V'" in line for line in logs.output)
+        )
+
+    async def test_the_ampersand_pair_resolves_through_an_alternative_name(self) -> None:
+        for query, primary in (
+            ("Rabbit and Steel", "Rabbit & Steel"),
+            ("Rabbit & Steel", "Rabbit and Steel"),
+        ):
+            with self.subTest(query=query, igdb_name=primary):
+                match = await self._resolve(
+                    query, [_game(1040, primary, 2024, alt=[query])]
+                )
+                self.assertIsNotNone(match)
+                self.assertEqual(match.igdb_id, 1040)
+
+    async def test_a_regional_primary_is_reached_only_by_its_alternative_name(self) -> None:
+        # IGDB holds the Japanese title as the record's name; the library row
+        # carries the western one. Nothing but the alternative name bridges it.
+        with_alt = _game(1050, "Ryu ga Gotoku 0", 2015, alt=["Yakuza 0"])
+        without_alt = _game(1050, "Ryu ga Gotoku 0", 2015)
+
+        match = await self._resolve("Yakuza 0", [with_alt])
+        self.assertIsNotNone(match)
+        self.assertEqual(match.igdb_id, 1050)
+
+        self.assertIsNone(await self._resolve("Yakuza 0", [without_alt]))
+
+    async def test_a_conflicting_alternative_name_does_not_sink_a_matching_primary(self) -> None:
+        # The names are filtered one by one: "Alan Wake II" conflicts and is
+        # discarded, the primary still vouches for the record.
+        match = await self._resolve(
+            "Alan Wake", [_game(1060, "Alan Wake", 2010, alt=["Alan Wake II"])]
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(match.igdb_id, 1060)
+
+    async def test_a_candidate_whose_every_name_conflicts_is_refused(self) -> None:
+        # "Alan Wake 2" and its "Alan Wake II" spelling are the same sequel;
+        # an alternative name must never smuggle in what the primary refused.
+        self.assertIsNone(
+            await self._resolve(
+                "Alan Wake", [_game(1070, "Alan Wake 2", 2023, alt=["Alan Wake II"])]
+            )
+        )
+
+    async def test_the_year_tiebreak_still_applies_to_an_alternative_name_match(self) -> None:
+        candidates = [
+            _game(1020, "Grand Theft Auto V", 2013, alt=["GTA V"]),
+            _game(1021, "Grand Theft Auto V", 2022, alt=["GTA V"]),
+        ]
+
+        with self.assertLogs("gamelib_mcp.data.igdb", level="INFO") as logs:
+            self.assertIsNone(await self._resolve("GTA V", candidates))
+        self.assertTrue(any("no reference year" in line for line in logs.output))
+
+        match = await self._resolve(
+            "GTA V", candidates, reference_release_date="2013-09-17"
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(match.igdb_id, 1020)
+
+
+class NamedEditionYearTests(unittest.IsolatedAsyncioTestCase):
+    """The broader tier-2 strip, under the year rules that make it safe."""
+
+    async def _resolve(self, query, candidates, *, reference_release_date=None):
+        return await ResolverCorpusTests._resolve(
+            self, query, candidates, reference_release_date=reference_release_date
+        )
+
+    async def test_a_named_edition_reaches_its_base_game_at_the_same_year(self) -> None:
+        match = await self._resolve(
+            "Watch Dogs: Day One Edition",
+            [_game(1080, "Watch Dogs", 2014)],
+            reference_release_date="2014-05-27",
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(match.igdb_id, 1080)
+
+    async def test_a_named_edition_cannot_absorb_a_much_newer_record(self) -> None:
+        # The tier-2 one-sided window is what keeps the broader strip honest:
+        # a 2014 row may reach an older or same-age record, never a 2023 one.
+        with self.assertLogs("gamelib_mcp.data.igdb", level="INFO") as logs:
+            match = await self._resolve(
+                "Watch Dogs: Day One Edition",
+                [_game(1081, "Watch Dogs", 2023)],
+                reference_release_date="2014-05-27",
+            )
+        self.assertIsNone(match)
+        self.assertTrue(any("two years newer" in line for line in logs.output))
+
+
+class PrimaryOverAlternativeNameTierTests(unittest.IsolatedAsyncioTestCase):
+    """A record's OWN name outranks a spelling it merely also answers to.
+
+    Alternative names carry working titles, acronyms and regional names that
+    legitimately coincide with another record's primary title — "Titan" is
+    Blizzard's working title for "Overwatch" and also a 2019 game of its own.
+    Ranking them equally turned a clean exact-title match into a same-name
+    ambiguity refusal, which generation 2 (blind to alternative names) linked
+    correctly.
+    """
+
+    async def _resolve(self, query, candidates, *, reference_release_date=None):
+        return await ResolverCorpusTests._resolve(
+            self, query, candidates, reference_release_date=reference_release_date
+        )
+
+    def _titan_pair(self) -> tuple[igdb.IGDBGame, igdb.IGDBGame]:
+        return (
+            _game(1200, "Titan", 2019),
+            _game(1201, "Overwatch", 2016, alt=["Titan"]),
+        )
+
+    async def test_a_primary_exact_match_wins_over_an_alt_name_coincidence(self) -> None:
+        own, borrowed = self._titan_pair()
+        for order in ([own, borrowed], [borrowed, own]):
+            for reference in (None, "2019-03-26"):
+                with self.subTest(
+                    order=[g.igdb_id for g in order], reference=reference
+                ):
+                    match = await self._resolve(
+                        "Titan", order, reference_release_date=reference
+                    )
+                    self.assertIsNotNone(match)
+                    self.assertEqual(match.igdb_id, 1200)
+
+    async def test_an_alt_name_still_resolves_when_no_primary_matches(self) -> None:
+        # The 1b band is not decoration: with no primary-name match it is the
+        # whole answer, and "GTA V" has no other way in.
+        match = await self._resolve(
+            "GTA V", [_game(1020, "Grand Theft Auto V", 2013, alt=["GTA V", "GTA 5"])]
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(match.igdb_id, 1020)
+
+    async def test_two_alt_only_records_keep_the_ordinary_year_rules(self) -> None:
+        # Nothing promotes one alt-name match over another, so the same-name
+        # year rules decide — refusing without a reference year, resolving with.
+        candidates = [
+            _game(1201, "Overwatch", 2016, alt=["Titan"]),
+            _game(1202, "Prometheus", 2021, alt=["Titan"]),
+        ]
+
+        with self.assertLogs("gamelib_mcp.data.igdb", level="INFO") as logs:
+            self.assertIsNone(await self._resolve("Titan", candidates))
+        self.assertTrue(any("no reference year" in line for line in logs.output))
+
+        match = await self._resolve(
+            "Titan", candidates, reference_release_date="2016-05-24"
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(match.igdb_id, 1201)
+
+    async def test_the_same_precedence_applies_to_edition_stripped_matches(self) -> None:
+        # Tier 2 splits the same way: an edition-stripped match on the
+        # candidate's own name outranks one carried by an alternative name.
+        own = _game(1210, "Watch Dogs: Complete Edition", 2014)
+        borrowed = _game(1211, "Some Other Game", 2021, alt=["Watch Dogs: Gold Edition"])
+        for order in ([own, borrowed], [borrowed, own]):
+            with self.subTest(order=[g.igdb_id for g in order]):
+                match = await self._resolve("Watch Dogs", order)
+                self.assertIsNotNone(match)
+                self.assertEqual(match.igdb_id, 1210)
+
+
+class AlternativeNameContractTests(unittest.TestCase):
+    """The cap and cleanup live in the dataclass, so every record obeys them."""
+
+    def test_a_hand_built_record_is_cleaned_and_capped(self) -> None:
+        game = _game(
+            1300,
+            "Grand Theft Auto V",
+            2013,
+            alt=[
+                "  GTA V  ",
+                "gta v",
+                "Grand Theft Auto V",
+                "",
+                *[f"Alt {i}" for i in range(30)],
+            ],
+        )
+        self.assertEqual(len(game.alternative_names), igdb.ALTERNATIVE_NAME_CAP)
+        self.assertEqual(game.alternative_names[0], "GTA V")
+        self.assertNotIn("Grand Theft Auto V", game.alternative_names)

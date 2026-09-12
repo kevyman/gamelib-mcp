@@ -117,6 +117,33 @@ class IGDBWishlistIdentityTests(ToolDBTestCase):
 
         self.assertEqual(rows[0]["steam_appid"], "200")
 
+    async def test_the_gog_product_id_is_loaded_for_the_backfill(self) -> None:
+        # IGDB maps GOG product ids through external_games (category 5) exactly
+        # as it maps Steam appids, and GOG rows are the ones name resolution
+        # serves worst — 107 of 131 GOG-identified rows were unlinked.
+        game_id = await seed_game("The Witcher 3: Wild Hunt")
+        platform_id = await add_platform(game_id, "gog")
+        await db_module.upsert_game_platform_identifier(
+            platform_id, db_module.GOG_PRODUCT_ID, "1207664663"
+        )
+
+        rows = await db_module.load_games_for_igdb_backfill([game_id])
+
+        self.assertEqual(rows[0]["gog_product_id"], "1207664663")
+        self.assertIsNone(rows[0]["steam_appid"])
+
+    async def test_a_row_without_a_gog_identifier_loads_none(self) -> None:
+        game_id = await seed_game("Steam Only")
+        platform_id = await add_platform(game_id, "steam")
+        await db_module.upsert_game_platform_identifier(
+            platform_id, db_module.STEAM_APP_ID, "100"
+        )
+
+        rows = await db_module.load_games_for_igdb_backfill([game_id])
+
+        self.assertIsNone(rows[0]["gog_product_id"])
+        self.assertEqual(rows[0]["steam_appid"], "100")
+
     async def test_scoped_claim_claims_only_the_named_rows(self) -> None:
         wanted = await seed_game("Wanted")
         other = await seed_game("Other")

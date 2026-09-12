@@ -112,6 +112,14 @@ _ROMAN_TOKEN_TO_ARABIC = {
     "ix": "9",
 }
 
+# Whole-token spelling pairs that name one title. "vs." tokenizes to "vs"
+# already, so the only spelling left to fold is the written-out word: Steam
+# ships "Marvel vs. Capcom" while other catalogs hold "Marvel versus Capcom".
+# Folded as a WHOLE token, never a substring, so "Reversus" is untouched.
+_SPELLING_TOKEN_ALIASES = {
+    "versus": "vs",
+}
+
 # Spelled-out numbers folded to digits ("Left 4 Dead" / "Left Four Dead").
 _NUMBER_WORD_TO_DIGITS = {
     "zero": "0",
@@ -136,7 +144,8 @@ def match_key(value: str) -> str:
     normalizations that let "&" (#184) and the Humble folding mismatch through.
     It folds, in order: trademark glyphs, diacritics and case; apostrophes
     (joined, never split); dotted acronyms; the ampersand/"and" spelling;
-    Roman numerals ii-ix and the number words zero-ten, per whole token.
+    Roman numerals ii-ix, the number words zero-ten and the "versus"/"vs"
+    spelling, per whole token.
 
     What it deliberately does NOT fold: "x" and a lone "i" (see
     _ROMAN_TOKEN_TO_ARABIC), because "Mega Man X" is not "Mega Man 10".
@@ -157,7 +166,10 @@ def match_key(value: str) -> str:
     tokens = []
     for token in re.findall(r"[a-z0-9]+", folded):
         tokens.append(
-            _ROMAN_TOKEN_TO_ARABIC.get(token) or _NUMBER_WORD_TO_DIGITS.get(token) or token
+            _ROMAN_TOKEN_TO_ARABIC.get(token)
+            or _NUMBER_WORD_TO_DIGITS.get(token)
+            or _SPELLING_TOKEN_ALIASES.get(token)
+            or token
         )
     return " ".join(tokens)
 
@@ -165,7 +177,13 @@ def match_key(value: str) -> str:
 def normalize_catalog_title(name: str) -> str:
     cleaned = _ascii_fold(name)
     cleaned = cleaned.replace("™", "").replace("®", "")
-    cleaned = re.sub(r"\(TM\)|\(R\)|\bTM\b|\bR\b", "", cleaned)
+    # The bare-word arms are guarded against a neighbouring period: "F.E.A.R."
+    # and "S.T.A.L.K.E.R." carry a lone "R" between dots, and stripping it left
+    # "F.E.A.." — a title that then compared equal to nothing, silently, in
+    # every consumer of normalize_edition_comparison_title (the IGDB gate, the
+    # PSN SKU fold, the acquisition edition probe). A real trademark marker is
+    # never dot-adjacent; "(R)" and "(TM)" above still catch the common form.
+    cleaned = re.sub(r"\(TM\)|\(R\)|(?<!\.)\bTM\b(?!\.)|(?<!\.)\bR\b(?!\.)", "", cleaned)
     cleaned = re.sub(r"(?<=[A-Za-z])TM(?=[:\s]|$)", "", cleaned)
     cleaned = cleaned.replace("–", "-").replace("—", "-")
     cleaned = re.sub(r"\(\s*(\d{4})\s*\)$", "", cleaned)
