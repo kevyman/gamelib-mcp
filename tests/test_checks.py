@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, patch
 
 from conftest import (
     ToolDBTestCase,
+    add_assessment,
     add_identifier,
     add_platform,
     make_steam_game,
@@ -373,6 +374,67 @@ class OwnershipOrphanAndPhantomParentTests(ToolDBTestCase):
         result = await checks.run_library_checks(checks=["ownership.orphan"])
         self.assertEqual(result["checks_run"], ["ownership.orphan"])
         self.assertTrue(all(f["check"] == "ownership.orphan" for f in result["findings"]))
+
+
+class OwnershipUnidentifiedCandidateTests(ToolDBTestCase):
+    async def test_reports_an_assessment_only_row_with_no_appid_and_no_igdb_id(self):
+        game_id = await seed_game("Hand Typed Candidate")
+        await add_assessment(game_id, assessed_at="2026-03-01T00:00:00+00:00")
+
+        result = await checks.run_library_checks(
+            checks=["ownership.unidentified_candidate", "ownership.orphan"]
+        )
+        findings = [
+            f
+            for f in result["findings"]
+            if f["check"] == "ownership.unidentified_candidate"
+        ]
+        self.assertEqual([f["game_id"] for f in findings], [game_id])
+        _assert_envelope(self, findings[0])
+        self.assertEqual(findings[0]["severity"], "notice")
+        self.assertIn("without a Steam appid or IGDB id", findings[0]["message"])
+        self.assertEqual(
+            findings[0]["suggested_action"]["tool"], "record_assessment"
+        )
+        self.assertEqual(
+            findings[0]["suggested_action"]["args"],
+            {"game_id": game_id, "appid": None},
+        )
+        self.assertEqual(
+            findings[0]["evidence"],
+            {"assessment_count": 1, "last_assessed_at": "2026-03-01T00:00:00+00:00"},
+        )
+        # It is still an assessment-only row, never an orphan.
+        self.assertEqual(
+            [f for f in result["findings"] if f["check"] == "ownership.orphan"], []
+        )
+        self.assertEqual(
+            result["summary"]["ownership.unidentified_candidate"][
+                "unidentified_candidate_count"
+            ],
+            1,
+        )
+
+    async def test_an_assessment_only_row_with_an_appid_is_not_reported(self):
+        identified = await seed_game("Blue Prince")
+        await add_assessment(identified, steam_appid=2132850)
+        # …nor is one that is unidentified by appid but linked to IGDB.
+        linked = await seed_game("Linked Candidate")
+        await add_assessment(linked)
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = 42 WHERE id = ?", (linked,))
+            await db.commit()
+
+        result = await checks.run_library_checks(
+            checks=["ownership.unidentified_candidate"]
+        )
+        self.assertEqual(result["findings"], [])
+        self.assertEqual(
+            result["summary"]["ownership.unidentified_candidate"][
+                "assessment_only_count"
+            ],
+            2,
+        )
 
 
 class NestingMisclassifiedTests(ToolDBTestCase):

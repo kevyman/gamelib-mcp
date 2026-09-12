@@ -166,6 +166,10 @@ async def detect_collapsed_games() -> dict:
     return {"collapsed_count": len(candidates), "candidates": candidates}
 
 
+# Like every other growing list in a response: a cap, the true total, a flag.
+_UNIDENTIFIED_CANDIDATE_CAP = 25
+
+
 async def detect_orphan_games() -> dict:
     """Find primary-library games rows with no ownership and no wishlist entry.
 
@@ -180,7 +184,12 @@ async def detect_orphan_games() -> dict:
       ``record_assessment`` mints for a candidate that was evaluated but
       neither bought nor wishlisted (a "skip" verdict is exactly this shape).
       Counted in ``assessment_only_count``, never an orphan: deleting it would
-      erase the recorded verdict the calibration report reads.
+      erase the recorded verdict the calibration report reads. The subset of
+      those carrying NO identity at all — no ``steam_appid`` on any of their
+      assessments and no ``igdb_id`` — is listed separately as
+      ``unidentified_candidates`` (capped at 25 with the true count and a
+      truncation flag): unlike its identified siblings such a row cannot be
+      resolved by appid and nothing can enrich it, so it needs a hand.
     * a true orphan (no ``game_platforms`` row AND no ``game_wishlist`` row) —
       e.g. a wishlist entry that was later removed upstream
       (``delete_stale_wishlist_entries``) without ever being owned, leaving the
@@ -222,6 +231,13 @@ async def detect_orphan_games() -> dict:
             """SELECT g.id AS game_id, g.name, g.igdb_id,
                       EXISTS (SELECT 1 FROM game_assessments a
                               WHERE a.game_id = g.id) AS has_assessment,
+                      (SELECT COUNT(*) FROM game_assessments a
+                        WHERE a.game_id = g.id) AS assessment_count,
+                      (SELECT MAX(a.assessed_at) FROM game_assessments a
+                        WHERE a.game_id = g.id) AS last_assessed_at,
+                      EXISTS (SELECT 1 FROM game_assessments a
+                              WHERE a.game_id = g.id
+                                AND a.steam_appid IS NOT NULL) AS has_assessed_appid,
                       (SELECT COUNT(*) FROM games c WHERE c.parent_game_id = g.id)
                           AS child_count,
                       (SELECT COUNT(*) FROM games c
@@ -245,6 +261,7 @@ async def detect_orphan_games() -> dict:
 
     orphans = []
     phantom_parents = []
+    unidentified: list[dict] = []
     assessment_only_count = 0
     for row in orphan_rows:
         if row["child_count"]:
@@ -266,6 +283,19 @@ async def detect_orphan_games() -> dict:
             # A recorded verdict is what points at this row; it is no more an
             # orphan than a wishlist entry is. Counted, never listed.
             assessment_only_count += 1
+            # …but one with neither a Steam appid on any of its assessments nor
+            # an igdb_id carries no identity any resolver can use: it cannot be
+            # found by appid, and neither the Steam nor the IGDB path can
+            # enrich it. That is a dead end a human has to name.
+            if not row["has_assessed_appid"] and row["igdb_id"] is None:
+                unidentified.append(
+                    {
+                        "game_id": row["game_id"],
+                        "name": row["name"],
+                        "assessment_count": row["assessment_count"],
+                        "last_assessed_at": row["last_assessed_at"],
+                    }
+                )
         else:
             orphans.append(
                 {
@@ -282,6 +312,11 @@ async def detect_orphan_games() -> dict:
         "phantom_parent_count": len(phantom_parents),
         "wishlist_only_count": wishlist_only_row["c"] if wishlist_only_row else 0,
         "assessment_only_count": assessment_only_count,
+        "unidentified_candidates": unidentified[:_UNIDENTIFIED_CANDIDATE_CAP],
+        "unidentified_candidate_count": len(unidentified),
+        "unidentified_candidates_truncated": (
+            len(unidentified) > _UNIDENTIFIED_CANDIDATE_CAP
+        ),
         "license_audit": {
             "configured": is_license_audit_configured(),
             # None = the audit has never run; run audit_steam_licenses first.

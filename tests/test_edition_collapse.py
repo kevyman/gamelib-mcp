@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 
 from conftest import (
     ToolDBTestCase,
+    add_assessment,
     add_platform,
     make_steam_game,
     seed_game,
@@ -203,3 +204,93 @@ class DetectCollapsedGamesTests(ToolDBTestCase):
         result = await detectors.detect_collapsed_games()
         self.assertEqual(result["collapsed_count"], 0)
         self.assertEqual(result["candidates"], [])
+
+
+class SteamBulkAppidAdoptionTests(ToolDBTestCase):
+    """Buying a game he had only wishlisted or assessed adopts THAT row.
+
+    The Steam sync's only other adopter is the exact-name step, so whenever
+    Steam's name differed from the stored one (an edition suffix, a rename, a
+    typo in a hand-recorded candidate) the purchase minted a twin and stranded
+    the wishlist entry and the recorded verdict on the old row.
+    """
+
+    async def test_adopts_an_assessment_minted_row_under_a_different_name(self):
+        game_id = await seed_game("Blue Prince")
+        await add_assessment(game_id, steam_appid=2132850)
+
+        await db_module.bulk_upsert_steam_library(
+            [{"appid": 2132850, "name": "Blue Prince Deluxe Edition"}],
+            _now(),
+        )
+
+        self.assertEqual(await _game_count(), 1)
+        self.assertEqual(await _steam_appids_by_game(), {game_id: ["2132850"]})
+        async with db_module.get_db() as db:
+            row = await db.execute_fetchone(
+                "SELECT name FROM games WHERE id = ?", (game_id,)
+            )
+            platform = await db.execute_fetchone(
+                """SELECT owned, last_seen_in_source FROM game_platforms
+                   WHERE game_id = ? AND platform = 'steam'""",
+                (game_id,),
+            )
+        # Downstream steps treat it exactly like a name-adopted row: the store
+        # name wins, the platform row is owned and stamped by the source.
+        self.assertEqual(row["name"], "Blue Prince Deluxe Edition")
+        self.assertEqual(platform["owned"], 1)
+        self.assertIsNotNone(platform["last_seen_in_source"])
+
+    async def test_adopts_a_wishlist_only_row_by_store_identifier(self):
+        game_id = await seed_game("Wishlisted Thing")
+        await db_module.upsert_wishlist_entry(
+            game_id, "steam", source="steam", store_identifier="909090"
+        )
+
+        await db_module.bulk_upsert_steam_library(
+            [{"appid": 909090, "name": "Wishlisted Thing: Definitive"}],
+            _now(),
+        )
+
+        self.assertEqual(await _game_count(), 1)
+        self.assertEqual(await _steam_appids_by_game(), {game_id: ["909090"]})
+
+    async def test_never_adopts_a_row_that_already_owns_steam(self):
+        # A stale assessment appid on a row that owns Steam under a DIFFERENT
+        # appid is the anti-collapse case the name step guards too: Dead Space
+        # 2008 must not swallow the 2023 remake.
+        owned = await make_steam_game("Dead Space", 17470)
+        await add_assessment(owned, steam_appid=1693980)
+
+        await db_module.bulk_upsert_steam_library(
+            [{"appid": 1693980, "name": "Dead Space"}], _now()
+        )
+
+        self.assertEqual(await _game_count(), 2)
+        appids = await _steam_appids_by_game()
+        self.assertEqual(appids[owned], ["17470"])
+        self.assertEqual(len(appids), 2)
+
+    async def test_two_appids_never_collapse_onto_one_candidate(self):
+        # Two assessments of the same row under different appids (a re-record
+        # after correcting the appid): only the lowest row_order may claim it,
+        # mirroring the name step's MIN(row_order) dedupe.
+        game_id = await seed_game("Twice Assessed")
+        await add_assessment(game_id, steam_appid=111, assessed_at="2026-01-01")
+        await add_assessment(game_id, steam_appid=222, assessed_at="2026-01-02")
+
+        await db_module.bulk_upsert_steam_library(
+            [
+                {"appid": 111, "name": "Twice Assessed"},
+                {"appid": 222, "name": "Twice Assessed II"},
+            ],
+            _now(),
+        )
+
+        self.assertEqual(await _game_count(), 2)
+        appids = await _steam_appids_by_game()
+        self.assertEqual(
+            sorted(value for values in appids.values() for value in values),
+            ["111", "222"],
+        )
+        self.assertTrue(all(len(values) == 1 for values in appids.values()))

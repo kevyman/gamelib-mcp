@@ -243,8 +243,10 @@ class GameDetailResponse(GameSummary):
     total: int | None = None
     ok: int | None = None
     errors: int | None = None
-    # "skipped" whenever lazy provider fetches were not run (always in bulk).
-    enrichment: str | None = None
+    # Bulk: the string "skipped" (lazy provider fetches never run there).
+    # Single: {provider: reason} for providers a STRUCTURAL reason skipped,
+    # absent when none were.
+    enrichment: str | dict[str, str] | None = None
 
 
 

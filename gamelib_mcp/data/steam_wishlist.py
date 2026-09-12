@@ -15,7 +15,10 @@ from before); (2) the wishlist's OWN store_identifier — a re-synced item
 resolves this way with ZERO network calls, since a prior sync already recorded
 which game_id it belongs to (`get_wishlist_game_id_by_store_identifier`), so
 name resolution (and the ~160-per-run rate-gated store lookups it used to cost
-every single sync) is now first-sync-only; (3) only when both miss, a name
+every single sync) is now first-sync-only; (3) the appid a recorded assessment
+carries (``get_assessed_game_id_by_appid``) — the same ownership-free shape one
+table over, so wishlisting a just-assessed candidate adopts its row instead of
+minting a second one; (4) only when all three miss, a name
 lookup (steam_store.fetch_app_name, falling back to steamspy.fetch_steamspy_name
 for delisted apps appdetails no longer serves), guarded against attaching onto
 a row that already owns steam under a DIFFERENT appid (see the collision guard
@@ -72,6 +75,7 @@ from .db import (
     STEAM_APP_ID,
     delete_stale_wishlist_entries,
     exact_name_steam_conflict,
+    get_assessed_game_id_by_appid,
     get_game_by_identifier,
     get_wishlist_game_id_by_store_identifier,
     upsert_game,
@@ -435,7 +439,15 @@ async def fetch_wishlist() -> dict:
             #   2. this wishlist's OWN store_identifier from a prior sync —
             #      zero network calls, and the reason a re-sync no longer
             #      re-fetches ~160 store names every run.
-            #   3. a name lookup (store, then SteamSpy for delisted apps),
+            #   3. the appid a recorded assessment carries — the third
+            #      ownership-free shape (record_assessment mints a row for an
+            #      evaluated-but-unbought candidate and stores the appid on the
+            #      assessment, since there is no game_platforms row to hang an
+            #      identifier on). Wishlisting what he just assessed is the
+            #      normal next step, and without this the sync minted a second
+            #      row beside the verdict. Guarded inside the query: a game
+            #      that already owns steam is never returned.
+            #   4. a name lookup (store, then SteamSpy for delisted apps),
             #      guarded against attaching onto a row that already owns
             #      steam under a DIFFERENT appid (see below).
             existing = await get_game_by_identifier(STEAM_APP_ID, str(appid))
@@ -443,6 +455,8 @@ async def fetch_wishlist() -> dict:
                 game_id = existing["id"]
             else:
                 game_id = await get_wishlist_game_id_by_store_identifier("steam", str(appid))
+            if game_id is None:
+                game_id = await get_assessed_game_id_by_appid(appid)
 
             if game_id is None:
                 raw_name = await fetch_app_name(appid, client=client)

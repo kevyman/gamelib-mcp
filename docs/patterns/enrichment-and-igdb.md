@@ -20,6 +20,9 @@ so omitting that fallback sends an exact store identity through name matching
 and can attach metadata for another game with the same title. Only a wishlist
 row with `platform = 'steam'` supplies this fallback, regardless of its source
 (synced, manual, or assessment); other stores' identifiers are not Steam appids.
+Third and last comes the newest `game_assessments.steam_appid` — the same
+ownership-free shape one table over, since `record_assessment` mints a row for
+an unowned candidate and puts the appid there for exactly the same reason.
 This does not create an ownership row or requeue already-cached enrichment.
 
 ## Series gap analysis
