@@ -94,16 +94,43 @@ def like_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-# Correlated subquery selecting a game's primary Steam appid, for use inside a
-# query where the games table is aliased ``g``.
+# Correlated subquery selecting a game's EFFECTIVE Steam appid, for use inside
+# a query where the games table is aliased ``g``. Same chain as
+# data/db/queries.py::get_steam_appid_for_game: the identifier row first, then
+# the Steam wishlist's store_identifier, then the newest assessment's
+# steam_appid. Identifier rows hang off game_platforms — always real ownership
+# — so a wishlist-only or assessment-only row has nowhere to carry one, and
+# without the fallbacks such a row reports a null appid and renders no cover.
+# COALESCE short-circuits, so an owned row never runs the fallback arms. The
+# result is an IDENTITY, never evidence of Steam ownership: every reader here
+# (library/discover/ratings list items, the package annotation, the media
+# lookup) uses it for the appid field, the store capsule URL or a provider
+# lookup, and ownership is read from OWNED_SQL instead.
 STEAM_APPID_SQL = f"""
-(
-    SELECT CAST(gpi.identifier_value AS INTEGER)
-    FROM game_platform_identifiers gpi
-    JOIN game_platforms sgp ON sgp.id = gpi.game_platform_id
-    WHERE sgp.game_id = g.id AND gpi.identifier_type = '{STEAM_APP_ID}'
-    ORDER BY gpi.is_primary DESC, gpi.id ASC
-    LIMIT 1
+COALESCE(
+    (
+        SELECT CAST(gpi.identifier_value AS INTEGER)
+        FROM game_platform_identifiers gpi
+        JOIN game_platforms sgp ON sgp.id = gpi.game_platform_id
+        WHERE sgp.game_id = g.id AND gpi.identifier_type = '{STEAM_APP_ID}'
+        ORDER BY gpi.is_primary DESC, gpi.id ASC
+        LIMIT 1
+    ),
+    (
+        SELECT CAST(sw.store_identifier AS INTEGER)
+        FROM game_wishlist sw
+        WHERE sw.game_id = g.id AND sw.platform = 'steam'
+          AND CAST(sw.store_identifier AS INTEGER) > 0
+        ORDER BY sw.id ASC
+        LIMIT 1
+    ),
+    (
+        SELECT sa.steam_appid
+        FROM game_assessments sa
+        WHERE sa.game_id = g.id AND sa.steam_appid IS NOT NULL
+        ORDER BY sa.assessed_at DESC, sa.id DESC
+        LIMIT 1
+    )
 )
 """
 

@@ -349,6 +349,55 @@ async def _run_ownership_orphan(*, apply: bool, options: dict[str, Any]) -> Chec
     return findings, extras
 
 
+async def _run_ownership_unidentified_candidate(
+    *, apply: bool, options: dict[str, Any]
+) -> CheckOutcome:
+    """Assessment-only rows carrying no identity anything can resolve.
+
+    ``record_assessment`` mints a games row for an unowned candidate and puts
+    the Steam appid on the assessment, since there is no game_platforms row to
+    hang an identifier on. That is a complete, resolvable shape — every
+    Steam-appid reader now goes through the identifier -> wishlist ->
+    assessment chain. Recorded WITHOUT an appid it is not: nothing can find the
+    row by appid, the Steam/ProtonDB caches have no key, and IGDB has no
+    external_games mapping to link by, so the row stays nameless art and an
+    empty card forever. Report-only — the fix is a human re-recording it with
+    the appid, pinning an igdb_id, or merging it into the real row.
+    """
+    result = await detect_orphan_games()
+    findings = [
+        _finding(
+            "ownership.unidentified_candidate",
+            "notice",
+            f"'{c['name']}' was recorded by record_assessment without a Steam "
+            "appid or IGDB id — unresolvable by appid and unenrichable",
+            game_id=c["game_id"],
+            name=c["name"],
+            evidence={
+                "assessment_count": c["assessment_count"],
+                "last_assessed_at": c["last_assessed_at"],
+            },
+            suggested_action={
+                "tool": "record_assessment",
+                "args": {"game_id": c["game_id"], "appid": None},
+                "note": (
+                    "re-record with appid=<Steam appid> (same UTC day replaces, "
+                    "a later day appends), or update_game(igdb_id=...), or "
+                    "merge_games into the real row"
+                ),
+            },
+        )
+        for c in result["unidentified_candidates"]
+    ]
+    return findings, {
+        "unidentified_candidate_count": result["unidentified_candidate_count"],
+        "unidentified_candidates_truncated": result[
+            "unidentified_candidates_truncated"
+        ],
+        "assessment_only_count": result["assessment_only_count"],
+    }
+
+
 async def _run_nesting_phantom_parent(*, apply: bool, options: dict[str, Any]) -> CheckOutcome:
     result = await detect_orphan_games()
     findings = []
@@ -1845,6 +1894,18 @@ CHECKS: dict[str, CheckSpec] = {
             writes_on_apply=False,
             default_severity="warning",
             runner=_run_ownership_orphan,
+        ),
+        _spec(
+            "ownership.unidentified_candidate",
+            description=(
+                "An assessment-only row recorded with no Steam appid and no "
+                "igdb_id — unresolvable by appid and unenrichable until a "
+                "human names it"
+            ),
+            network=None,
+            writes_on_apply=False,
+            default_severity="notice",
+            runner=_run_ownership_unidentified_candidate,
         ),
         _spec(
             "nesting.phantom_parent",

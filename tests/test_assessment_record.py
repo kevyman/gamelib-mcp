@@ -22,7 +22,7 @@ from fastmcp.exceptions import ToolError
 
 from gamelib_mcp import main
 from gamelib_mcp.data import db as db_module
-from gamelib_mcp.tools import admin, deals, detectors, platforms
+from gamelib_mcp.tools import admin, deals, detail, detectors, platforms
 from gamelib_mcp.tools.assessment import (
     _ordinal_near_miss,
     _sequel_near_miss,
@@ -31,6 +31,7 @@ from gamelib_mcp.tools.assessment import (
     record_assessments_batch,
     void_assessment,
 )
+from gamelib_mcp.tools.common import cover_url
 
 # Every single-item recording now assembles a package, whose one network step
 # is the media fetch. Neutralized for the whole module so no test reaches a
@@ -1789,6 +1790,110 @@ _MEDIA_PAYLOAD = {
     "igdb_id": None,
 }
 
+_IGDB_UNRESOLVED_NOTE = (
+    "igdb: unresolved — no igdb_id stored and no unique exact-name match; "
+    "pedigree unavailable until the IGDB backfill links this row"
+)
+_SIMILAR_SKIPPED_NOTE = (
+    "similar: skipped — fewer than 3 tags on this row (not enriched yet)"
+)
+
+
+class AssessedAppidIsAnIdentityTests(ToolDBTestCase):
+    """The appid on an assessment row resolves like any other Steam identity.
+
+    A minted candidate owns nothing, so there is no game_platforms row to hang
+    a steam_appid identifier on — every reader resolves through the chain
+    (identifier -> wishlist store_identifier -> newest assessment) instead.
+    Before that, get_game_detail(appid=...) answered "not found" for a row
+    record_assessment had just created, and the same row's own detail came back
+    with a null appid and no cover.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._patchers = [
+            patch.object(detail, "enrich_game", AsyncMock(return_value=None)),
+            patch.object(detail, "get_protondb", AsyncMock(return_value=None)),
+            patch.object(detail, "get_hltb", AsyncMock(return_value=None)),
+            patch.object(detail, "backfill_missing_games", AsyncMock(return_value=0)),
+            patch.object(detail, "igdb_credentials_configured", lambda: False),
+        ]
+        for p in self._patchers:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        super().tearDown()
+
+    async def test_a_minted_row_is_found_by_its_appid(self):
+        recorded = await record_assessment(
+            name="Blue Prince", appid=2132850, verdict="wishlist_for_sale"
+        )
+
+        found = await detail.get_game_detail(appid=2132850)
+
+        self.assertEqual(found["game_id"], recorded["game_id"])
+        self.assertEqual(found["name"], "Blue Prince")
+
+    async def test_a_minted_rows_detail_carries_the_appid_and_a_cover(self):
+        recorded = await record_assessment(
+            name="Blue Prince", appid=2132850, verdict="wishlist_for_sale"
+        )
+
+        result = await detail.get_game_detail(game_id=recorded["game_id"])
+
+        self.assertEqual(result["appid"], 2132850)
+        self.assertEqual(result["steam_appid"], 2132850)
+        self.assertEqual(result["cover_url"], cover_url(None, 2132850))
+        # …and it says why the card is otherwise bare: the Steam caches hang
+        # off an ownership row this candidate does not have, and IGDB is
+        # unconfigured here.
+        self.assertEqual(
+            result["enrichment"],
+            {
+                "steam_store": "no_steam_platform_row",
+                "protondb": "no_steam_platform_row",
+                "igdb": "unconfigured",
+            },
+        )
+
+    async def test_a_wishlist_only_row_resolves_by_its_store_identifier(self):
+        game_id = await seed_game("Wishlisted Candidate")
+        await db_module.upsert_wishlist_entry(
+            game_id, "steam", source="steam", store_identifier="909090"
+        )
+
+        result = await record_assessment(appid=909090, verdict="skip")
+
+        self.assertFalse(result["created"])
+        self.assertEqual(result["game_id"], game_id)
+        self.assertEqual(result["resolution"]["mode"], "by_wishlist_appid")
+        self.assertEqual(result["resolution"]["matched_name"], "Wishlisted Candidate")
+
+    async def test_a_row_owning_steam_is_never_matched_by_a_stale_assessed_appid(self):
+        # Dead Space 2008 owns appid 17470; an assessment of the 2023 remake
+        # was filed onto it by game_id (a misfile, or a merge). Asking for the
+        # remake's appid must not hand back the original.
+        owned = await make_steam_game("Dead Space", 17470)
+        await record_assessment(game_id=owned, appid=1693980, verdict="skip")
+
+        self.assertIsNone(
+            await db_module.resolve_game_id_by_steam_appid(1693980)
+        )
+        self.assertIsNone(await db_module.get_assessed_game_id_by_appid(1693980))
+        # Its own appid still resolves, and reads back as the effective one.
+        self.assertEqual(
+            await db_module.resolve_game_id_by_steam_appid(17470),
+            (owned, "identifier"),
+        )
+        self.assertEqual(await db_module.get_steam_appid_for_game(owned), 17470)
+
+        with self.assertRaisesRegex(ToolError, "Game not found in library"):
+            await detail.get_game_detail(appid=1693980)
+
+
 _PACKAGE_KEYS = {
     "game",
     "verdict",
@@ -1853,7 +1958,11 @@ class EvaluationPackageTests(ToolDBTestCase):
 
         package = result["package"]
         self.assertEqual(set(package), _PACKAGE_KEYS)
-        self.assertEqual(package["errors"], [])
+        # Nothing FAILED; the two entries are the structural SKIP notes this
+        # untagged, IGDB-unlinked row earns (see the errors tests below).
+        self.assertEqual(
+            package["errors"], [_IGDB_UNRESOLVED_NOTE, _SIMILAR_SKIPPED_NOTE]
+        )
         self.assertEqual(
             package["game"],
             {
@@ -2021,7 +2130,8 @@ class EvaluationPackageTests(ToolDBTestCase):
             result = await record_assessment(game_id=game_id, verdict="skip")
         package = result["package"]
         self.assertIsNone(package["media"])
-        self.assertEqual(package["errors"], ["media: steam: fetch failed"])
+        # Relayed verbatim, ahead of this bare row's structural SKIP notes.
+        self.assertEqual(package["errors"][0], "media: steam: fetch failed")
 
     async def test_the_similar_row_is_the_library_not_a_provider(self):
         # The row is tools/game_media.py's similar_in_library: owned games that
@@ -2176,7 +2286,10 @@ class EvaluationPackageTests(ToolDBTestCase):
         (row,) = await _assessment_rows(game_id)
         self.assertEqual(row["verdict"], "skip")
         package = result["package"]
-        self.assertEqual(package["errors"], ["media: fetch failed"])
+        # The bare seeded row also carries the two structural SKIP notes (no
+        # igdb link, too few tags for a similar row); the media failure is the
+        # one this test is about.
+        self.assertIn("media: fetch failed", package["errors"])
         self.assertIsNone(package["media"])
         self.assertEqual(package["summary"], "still recorded")
 
@@ -2207,6 +2320,54 @@ class EvaluationPackageTests(ToolDBTestCase):
         self.assertNotIn("package", result)
         self.assertNotIn("package", result["results"][0])
 
+    async def test_a_bare_minted_row_says_why_igdb_and_similar_are_empty(self):
+        # The evaluation card renders both blocks empty for an unowned
+        # candidate, which reads as a bug. These are SKIP notes, not failures:
+        # nothing was tried because there was nothing to try it with.
+        with self._media(None):
+            result = await record_assessment(
+                name="Fresh Candidate", appid=2132850, verdict="wishlist_for_sale"
+            )
+
+        self.assertTrue(result["created"])
+        errors = result["package"]["errors"]
+        self.assertIn(_IGDB_UNRESOLVED_NOTE, errors)
+        self.assertIn(_SIMILAR_SKIPPED_NOTE, errors)
+
+    async def test_an_owned_tagged_linked_game_carries_neither_note(self):
+        game_id = await make_steam_game(
+            "Hollow Knight",
+            367520,
+            tags=["metroidvania", "souls-like", "hand-drawn"],
+        )
+        async with db_module.get_db() as db:
+            await db.execute("UPDATE games SET igdb_id = 3227 WHERE id = ?", (game_id,))
+            await db.commit()
+
+        with self._media(None):
+            result = await record_assessment(game_id=game_id, verdict="buy_now")
+
+        errors = result["package"]["errors"]
+        self.assertNotIn(_IGDB_UNRESOLVED_NOTE, errors)
+        # Enough tags and simply no qualifying neighbour is a legitimate empty
+        # answer, and stays silent.
+        self.assertIsNone(result["package"]["similar"])
+        self.assertNotIn(_SIMILAR_SKIPPED_NOTE, errors)
+
+    async def test_a_name_resolved_igdb_id_silences_the_unresolved_note(self):
+        # data/media.py resolves an IGDB id by exact name for display and
+        # deliberately never writes it back, so the games row stays unlinked —
+        # but the pedigree it unlocked IS on the card, so there is nothing to
+        # report.
+        game_id = await seed_game(
+            "Name Resolved", tags=["puzzle", "roguelike", "deckbuilder"]
+        )
+        with self._media({"media": None, "pedigree_raw": None, "igdb_id": 4242,
+                          "errors": []}):
+            result = await record_assessment(game_id=game_id, verdict="skip")
+
+        self.assertEqual(result["package"]["errors"], [])
+
     async def test_media_identity_prefers_the_appid_then_igdb_then_the_name(self):
         game_id = await seed_game("Identity Order")
         async with db_module.get_db() as db:
@@ -2220,13 +2381,18 @@ class EvaluationPackageTests(ToolDBTestCase):
             {"steam_appid": 4242, "igdb_id": 777, "name": "Identity Order"},
         )
 
+        # The SECOND recording passes no appid, and the row still owns nothing
+        # — but the first assessment recorded 4242, and the annotation query
+        # resolves through the effective-appid chain (identifier -> wishlist
+        # store_identifier -> newest assessment), so the media lookup keeps the
+        # identity the candidate was assessed under instead of losing it.
         with self._media(None) as fetch:
             await record_assessment(
                 game_id=game_id, verdict="skip", assessed_at="2026-01-02"
             )
         self.assertEqual(
             fetch.await_args.kwargs,
-            {"steam_appid": None, "igdb_id": 777, "name": "Identity Order"},
+            {"steam_appid": 4242, "igdb_id": 777, "name": "Identity Order"},
         )
 
 

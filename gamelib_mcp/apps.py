@@ -303,6 +303,11 @@ GAME_CARDS_HTML = (
     transform: rotate(-1.5deg);
     margin: 4px 6px 8px 2px;
   }
+  /* On the detail card the h1 sits right beside the plate and already says
+     the name, so the plate stamped with it reads as a duplicate title. The
+     gradient stays (it is the art stand-in); only the lettering goes. Grid
+     cards have no heading beside the cover and keep theirs. */
+  .detail .cover-fallback { color: transparent; text-shadow: none; }
   .detail-info { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
   .detail-info h1 { font-size: 20px; font-weight: 800; line-height: 1.15; letter-spacing: -0.01em; }
   .sub { font-size: 12.5px; font-weight: 650; color: var(--muted); }
@@ -954,6 +959,21 @@ GAME_CARDS_HTML = (
       var pills = el("div", "pills");
       tags.forEach(function (t) { pills.appendChild(el("span", "pill", t)); });
       info.appendChild(pills);
+    }
+
+    // A never-enriched row (an assessment-minted candidate, a fresh wishlist
+    // entry) fills nothing but the title, which renders as a card that looks
+    // broken. Say so, and — when the response explained which providers were
+    // skipped and why (get_game_detail's `enrichment`) — say that too.
+    if (info.childNodes.length === 1) {
+      var emptyText = "No details fetched yet";
+      var why = game.enrichment;
+      if (why && typeof why === "object") {
+        var parts = [];
+        Object.keys(why).forEach(function (k) { parts.push(k + ": " + why[k]); });
+        if (parts.length) emptyText += " — " + parts.join(", ");
+      }
+      info.appendChild(el("div", "sub empty-state", emptyText));
     }
 
     box.appendChild(info);

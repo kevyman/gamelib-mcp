@@ -365,21 +365,64 @@ async def get_platform_game_by_normalized_name(
         )
 
 
-async def get_steam_appid_for_game(game_id: int) -> int | None:
+async def _has_steam_identifier_row(game_id: int) -> bool:
+    """True when some platform row of this game carries a steam_appid identifier.
+
+    The gate on both fallback arms of the effective-appid chain below: a game
+    that already owns Steam under identifier Y must never be handed back for a
+    stale wishlist/assessment appid X (a merge, or a candidate later bought
+    under a different SKU, leaves exactly that shape behind).
+    """
     async with get_db() as db:
         row = await db.execute_fetchone(
-            """SELECT gpi.identifier_value
+            """SELECT 1
                FROM game_platform_identifiers gpi
                JOIN game_platforms gp ON gp.id = gpi.game_platform_id
                WHERE gp.game_id = ? AND gpi.identifier_type = ?
-               ORDER BY gpi.is_primary DESC, gpi.id ASC
                LIMIT 1""",
             (game_id, STEAM_APP_ID),
         )
-    if row is None:
+    return row is not None
+
+
+async def get_steam_appid_for_game(game_id: int) -> int | None:
+    """This game's EFFECTIVE Steam appid: identifier row, wishlist, assessment.
+
+    Identifier rows hang off ``game_platforms``, which is always a real
+    ownership relationship, so a row that is only wishlisted or only assessed
+    has nowhere to put one — its appid rides on ``game_wishlist.store_identifier``
+    or ``game_assessments.steam_appid`` instead. Both fallbacks are the same
+    shape ``load_games_for_igdb_backfill`` already uses for the wishlist, and
+    COALESCE short-circuits, so an owned row costs nothing extra. Ownership is
+    never inferred from the result — it is an identity, not a platform row.
+    """
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            """SELECT COALESCE(
+                   (SELECT gpi.identifier_value
+                    FROM game_platform_identifiers gpi
+                    JOIN game_platforms gp ON gp.id = gpi.game_platform_id
+                    WHERE gp.game_id = ? AND gpi.identifier_type = ?
+                    ORDER BY gpi.is_primary DESC, gpi.id ASC
+                    LIMIT 1),
+                   (SELECT w.store_identifier
+                    FROM game_wishlist w
+                    WHERE w.game_id = ? AND w.platform = 'steam'
+                      AND CAST(w.store_identifier AS INTEGER) > 0
+                    ORDER BY w.id ASC
+                    LIMIT 1),
+                   (SELECT a.steam_appid
+                    FROM game_assessments a
+                    WHERE a.game_id = ? AND a.steam_appid IS NOT NULL
+                    ORDER BY a.assessed_at DESC, a.id DESC
+                    LIMIT 1)
+               ) AS steam_appid""",
+            (game_id, STEAM_APP_ID, game_id, game_id),
+        )
+    if row is None or row["steam_appid"] is None:
         return None
     try:
-        return int(row["identifier_value"])
+        return int(row["steam_appid"])
     except (TypeError, ValueError):
         return None
 
@@ -892,14 +935,55 @@ async def get_assessed_game_id_by_appid(appid: int) -> int | None:
     answered ``not_found`` and a second appid-only recording asked for a name
     it already knew. Newest assessment wins the rare duplicate-appid case;
     resolution through a real identifier row still outranks this (callers try
-    ``get_game_by_appid`` first).
+    ``get_game_by_appid`` first, or the whole chain via
+    ``resolve_game_id_by_steam_appid``).
+
+    A game that already carries a steam_appid identifier row on ANY of its
+    platform rows is never returned here, whatever appid that row holds: once
+    the game owns Steam its identity is the identifier, and a stale assessment
+    appid (a merge, or a candidate bought under a different SKU) must not
+    resolve onto it.
     """
     async with get_db() as db:
         row = await db.execute_fetchone(
-            """SELECT game_id FROM game_assessments
-               WHERE steam_appid = ?
-               ORDER BY assessed_at DESC, id DESC
+            """SELECT a.game_id FROM game_assessments a
+               WHERE a.steam_appid = ?
+                 AND NOT EXISTS (
+                     SELECT 1
+                     FROM game_platforms gp
+                     JOIN game_platform_identifiers gpi
+                       ON gpi.game_platform_id = gp.id
+                      AND gpi.identifier_type = ?
+                     WHERE gp.game_id = a.game_id
+                 )
+               ORDER BY a.assessed_at DESC, a.id DESC
                LIMIT 1""",
-            (appid,),
+            (appid, STEAM_APP_ID),
         )
     return row["game_id"] if row else None
+
+
+async def resolve_game_id_by_steam_appid(appid: int) -> tuple[int, str] | None:
+    """The one effective-Steam-appid chain, as a READ-side resolver.
+
+    Returns ``(game_id, source)`` with source one of "identifier" (a real
+    ``game_platform_identifiers`` row), "wishlist" (``game_wishlist.store_identifier``
+    for an unowned wishlist item) or "assessment" (``game_assessments.steam_appid``
+    for a candidate ``record_assessment`` minted). Both fallback arms exist
+    because identifiers hang off ``game_platforms``, which is always real
+    ownership — an unowned row has nowhere to carry one — and both are skipped
+    for a game that already has a steam_appid identifier row, so a merged or
+    later-bought row is never matched by a stale appid.
+    """
+    row = await get_game_by_identifier(STEAM_APP_ID, str(appid))
+    if row is not None:
+        return row["id"], "identifier"
+
+    wishlist_id = await get_wishlist_game_id_by_store_identifier("steam", str(appid))
+    if wishlist_id is not None and not await _has_steam_identifier_row(wishlist_id):
+        return wishlist_id, "wishlist"
+
+    assessed_id = await get_assessed_game_id_by_appid(appid)
+    if assessed_id is not None:
+        return assessed_id, "assessment"
+    return None

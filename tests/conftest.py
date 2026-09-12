@@ -408,6 +408,35 @@ async def add_rating(
         await db.commit()
 
 
+async def add_assessment(
+    game_id: int,
+    *,
+    verdict: str = "skip",
+    steam_appid: int | None = None,
+    assessed_at: str | None = None,
+) -> int:
+    """Insert a recorded verdict directly, returning its id.
+
+    The write path (``record_assessment``) assembles a card package and would
+    need its media provider patched; tests that only care about the row the
+    appid rides on write it straight in.
+    """
+    async with db_module.get_db() as db:
+        cursor = await db.execute(
+            """INSERT INTO game_assessments
+               (game_id, assessed_at, verdict, steam_appid)
+               VALUES (?, ?, ?, ?)""",
+            (
+                game_id,
+                assessed_at or datetime.now(UTC).isoformat(),
+                verdict,
+                steam_appid,
+            ),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
 async def set_tag_affinity(
     tag: str,
     affinity_score: float,

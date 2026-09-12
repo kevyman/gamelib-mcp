@@ -178,6 +178,27 @@ class ContentTypeBadgeTests(unittest.TestCase):
         )
         self.assertIn('el("div", "sub parent-sub", "part of " + pName)', apps.GAME_CARDS_HTML)
 
+    def test_detail_cover_plate_drops_the_duplicate_title(self) -> None:
+        # The h1 sits right beside the plate on the detail card, so stamping
+        # the name onto the art stand-in reads as a doubled title. The gradient
+        # stays; grid cards (no heading beside the cover) keep their lettering.
+        self.assertIn(
+            ".detail .cover-fallback { color: transparent; text-shadow: none; }",
+            apps.GAME_CARDS_HTML,
+        )
+
+    def test_detail_card_has_an_empty_state_with_the_skip_reasons(self) -> None:
+        # A never-enriched row (an assessment-minted candidate) fills nothing
+        # but the title; say so, and relay get_game_detail's `enrichment`
+        # {provider: reason} map when it explains why.
+        for marker in (
+            'var emptyText = "No details fetched yet";',
+            "var why = game.enrichment;",
+            'parts.push(k + ": " + why[k]);',
+            'el("div", "sub empty-state", emptyText)',
+        ):
+            self.assertIn(marker, apps.GAME_CARDS_HTML)
+
     def test_parent_name_supports_both_grid_and_detail_shapes(self) -> None:
         # Grid/search rows carry a flat parent_name; get_game_detail carries
         # parent: {game_id, name} on nested rows. parentName() must read both.

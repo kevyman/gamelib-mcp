@@ -1141,6 +1141,38 @@ async def upsert_steam_platform_data(game_platform_id: int, **fields: object) ->
         await db.commit()
 
 
+# The wishlist/assessment adoption candidate for one temp_steam_library_sync
+# row, correlated on ``{t}.appid``. Wishlist first, then the newest assessment
+# — the same precedence as the read-side chain in data/db/queries.py
+# (``get_steam_appid_for_game`` / ``resolve_game_id_by_steam_appid``). Both
+# arms refuse a row that already owns Steam: that row's identity is its
+# identifier, and a stale appid must never re-point it.
+_APPID_ADOPTION_SQL = """COALESCE(
+                       (SELECT w.game_id
+                        FROM game_wishlist w
+                        JOIN games gw ON gw.id = w.game_id
+                        WHERE w.platform = 'steam'
+                          AND w.store_identifier = CAST({t}.appid AS TEXT)
+                          AND gw.is_primary_library_item = 1
+                          AND NOT EXISTS (
+                              SELECT 1 FROM game_platforms gp_excl
+                              WHERE gp_excl.game_id = gw.id
+                                AND gp_excl.platform = 'steam')
+                        ORDER BY w.id ASC
+                        LIMIT 1),
+                       (SELECT a.game_id
+                        FROM game_assessments a
+                        JOIN games ga ON ga.id = a.game_id
+                        WHERE a.steam_appid = {t}.appid
+                          AND ga.is_primary_library_item = 1
+                          AND NOT EXISTS (
+                              SELECT 1 FROM game_platforms gp_excl
+                              WHERE gp_excl.game_id = ga.id
+                                AND gp_excl.platform = 'steam')
+                        ORDER BY a.assessed_at DESC, a.id DESC
+                        LIMIT 1))"""
+
+
 @retry_on_write_contention
 async def bulk_upsert_steam_library(
     rows: list[dict],
@@ -1227,6 +1259,33 @@ async def bulk_upsert_steam_library(
                        LIMIT 1
                    )""",
                 (STEAM_APP_ID,),
+            )
+
+            # Pass 1b — adopt an ownership-free row that already carries this
+            # appid somewhere other than an identifier row: a Steam wishlist
+            # entry's store_identifier, or the steam_appid a recorded
+            # assessment carries. Both are the same shape for the same reason —
+            # identifier rows hang off game_platforms, which is always real
+            # ownership, so a row that is only wishlisted or only assessed has
+            # nowhere to put one. Buying such a game used to MINT a second row
+            # beside it whenever Steam's name differed from the stored one
+            # (the name step is the only other adopter), stranding the verdict
+            # and the wishlist entry on the old row. Guarded exactly like the
+            # name step: only a PRIMARY row with no Steam platform row at all
+            # may be claimed, and only the lowest row_order may claim any one
+            # candidate, so two appids never collapse onto the same game.
+            await db.execute(
+                f"""UPDATE temp_steam_library_sync AS t
+                   SET resolved_game_id = {_APPID_ADOPTION_SQL.format(t="t")}
+                   WHERE t.resolved_game_id IS NULL
+                     AND {_APPID_ADOPTION_SQL.format(t="t")} IS NOT NULL
+                     AND t.row_order = (
+                         SELECT MIN(t2.row_order)
+                         FROM temp_steam_library_sync t2
+                         WHERE t2.resolved_game_id IS NULL
+                           AND {_APPID_ADOPTION_SQL.format(t="t2")}
+                               = {_APPID_ADOPTION_SQL.format(t="t")}
+                     )"""
             )
 
             await db.execute(

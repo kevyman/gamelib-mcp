@@ -9,7 +9,7 @@ import re
 import sqlite3
 import time
 from collections import deque
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -1596,8 +1596,14 @@ def _row_value(row: sqlite3.Row | Mapping[str, Any], key: str) -> Any:
         return None
 
 
-async def backfill_missing_games(limit: int = 10) -> int:
+async def backfill_missing_games(
+    limit: int = 10, *, game_ids: Iterable[int] | None = None
+) -> int:
     """Resolve claimed games to IGDB and persist their metadata.
+
+    ``game_ids`` narrows the claim to those rows (nothing else changes): the
+    scoped pass ``get_game_detail`` runs for the one row it was asked about,
+    rather than leaving an unlinked row waiting for the background drain.
 
     Resolution order per row:
       1. ``external_games`` (authoritative Steam appid -> IGDB game mapping,
@@ -1628,11 +1634,13 @@ async def backfill_missing_games(limit: int = 10) -> int:
     global _consecutive_backfill_misses
 
     stale_before = _claim_cutoff_iso()
-    game_ids = await claim_game_ids_for_igdb(limit=limit, stale_before=stale_before)
-    if not game_ids:
+    claimed_ids = await claim_game_ids_for_igdb(
+        limit=limit, stale_before=stale_before, game_ids=game_ids
+    )
+    if not claimed_ids:
         return 0
 
-    rows = await load_games_for_igdb_backfill(game_ids)
+    rows = await load_games_for_igdb_backfill(claimed_ids)
     rows_by_id = {row["id"]: row for row in rows}
 
     # One authoritative external_games batch per pass for every claimed row
@@ -1653,7 +1661,7 @@ async def backfill_missing_games(limit: int = 10) -> int:
                 "IGDB external_games lookup failed; leaving backfill pass retryable: %s",
                 exc,
             )
-            for game_id in game_ids:
+            for game_id in claimed_ids:
                 await release_game_claim(game_id, "igdb_claimed_at")
             return 0
 
@@ -1662,7 +1670,7 @@ async def backfill_missing_games(limit: int = 10) -> int:
     breaker_tripped = False
     next_index = 0
 
-    for next_index, game_id in enumerate(game_ids, start=1):
+    for next_index, game_id in enumerate(claimed_ids, start=1):
         row = rows_by_id.get(game_id)
         try:
             if row is None:
@@ -1821,7 +1829,7 @@ async def backfill_missing_games(limit: int = 10) -> int:
                             _consecutive_backfill_misses,
                             _CANARY_TITLE,
                             len(pending_no_match),
-                            len(game_ids) - next_index,
+                            len(claimed_ids) - next_index,
                         )
         except IGDBRequestFailure as exc:
             # backfill_missing_games returns "rows resolved", so an operational
@@ -1842,7 +1850,7 @@ async def backfill_missing_games(limit: int = 10) -> int:
     if breaker_tripped:
         # Rows never reached after the trip still hold fresh claims; release
         # them so the next healthy pass can pick them up immediately.
-        for game_id in game_ids[next_index:]:
+        for game_id in claimed_ids[next_index:]:
             await release_game_claim(game_id, "igdb_claimed_at")
     else:
         for miss_id in pending_no_match:
