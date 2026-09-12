@@ -39,7 +39,7 @@ thing in bulk in a single call — see [ADR 0004](docs/adr/0004-consolidated-too
 | `add_game_to_platform` / `update_game` / `set_playtime` / `set_acquisition` | Manual ownership, metadata, playtime pins, and purchase records |
 | `merge_games` / `split_game` / `delete_game` | Identity repair |
 | `import_purchases` / `split_bundle_acquisition` | Storefront purchase history and bundle price splits |
-| `create_session_ingest_link` | Mint a single-use browser link for connecting a store/account session outside the chat — cookie pastes (Nintendo/Epic/Humble/Steam) and the Nintendo Parental Controls sign-in that enables Switch playtime |
+| `create_session_ingest_link` | Mint a single-use browser link for connecting a store/account session outside the chat — cookie pastes (Nintendo/Epic/Humble/Steam), single-value tokens (PSN/Xbox), and the Nintendo Parental Controls sign-in that enables Switch playtime |
 | `get_integration_status` | Per-platform integration health |
 | `get_scrape_config` / `manage_scrape_config` | Inspect or heal the declarative scrape config |
 | `get_assessment_context` / `record_assessment` / `void_assessment` | Game-quality evaluation: the library-grounded context for a verdict, recording the verdict's components (rendered as an evaluation card), and hard-deleting a misfiled one |
@@ -95,8 +95,8 @@ All configuration is via environment variables. Production starts from [.env.exa
 | `LIBRARY_REFRESH_INTERVAL_HOURS` | no | Hours between background library refreshes (default `24`); `0` or negative disables the periodic loop, which also stops deal alerts |
 | `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET` | optional | IGDB enrichment ([dev.twitch.tv/console](https://dev.twitch.tv/console)) |
 | `BACKLOGGD_USER` | optional | Backloggd username for rating sync |
-| `PSN_NPSSO` | optional | PSN NPSSO cookie for PlayStation sync |
-| `OPENXBL_API_KEY` | optional | Personal key from [xbl.io/console](https://xbl.io/console) for Xbox sync (ownership via title history, playtime best-effort) |
+| `PSN_NPSSO_FILE` | optional | PSN NPSSO token for PlayStation sync (populate via `create_session_ingest_link(provider="psn")`); bare `PSN_NPSSO` in the env still works as a legacy fallback |
+| `OPENXBL_API_KEY_FILE` | optional | Personal key from [xbl.io/console](https://xbl.io/console) for Xbox sync, ownership via title history and playtime best-effort (populate via `create_session_ingest_link(provider="xbox")`); bare `OPENXBL_API_KEY` in the env still works as a legacy fallback |
 | `OPENXBL_XUID` | optional | Xbox account to inspect; defaults to the API key owner's own account |
 | `NINTENDO_COOKIES_FILE` | optional | Switch digital ownership (populate via `create_session_ingest_link(provider="nintendo")`) |
 | `NINTENDO_PCTL_SESSION_FILE` | optional | Switch playtime via Parental Controls (populate via `create_session_ingest_link(provider="nintendo_pctl")`) |

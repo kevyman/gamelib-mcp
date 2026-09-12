@@ -106,8 +106,8 @@ class MintIngestLinkTests(SessionIngestTestCase):
         self.assertTrue(result["url"].startswith("http://localhost:9999/ingest/"))
 
     def test_unknown_provider_rejected(self) -> None:
-        with self.assertRaisesRegex(ToolError, "Unknown provider 'psn'"):
-            session_ingest.mint_ingest_link("psn")
+        with self.assertRaisesRegex(ToolError, "Unknown provider 'gog'"):
+            session_ingest.mint_ingest_link("gog")
 
     def test_pending_links_capped(self) -> None:
         for _ in range(session_ingest._MAX_PENDING_LINKS + 3):
@@ -378,6 +378,158 @@ class NintendoPctlIngestTests(SessionIngestTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("expired", response.body.decode())
         self.assertFalse(os.path.exists(self.token_path))
+
+
+class PsnXboxIngestTests(SessionIngestTestCase):
+    """PSN and Xbox are single-token providers, not cookie exports.
+
+    Both credentials used to be env vars, which meant an SSH ``.env`` edit and a
+    container recreate every time Sony's ~2-month NPSSO lapsed. They now arrive
+    through the same single-use paste form as every cookie, so the value never
+    passes through the chat — and, like every other provider, never comes back
+    out on the response page.
+    """
+
+    NPSSO = "a" * 64
+    XBOX_KEY = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+
+    def setUp(self) -> None:
+        super().setUp()
+        tmp = self._tmp_dir()
+        self.npsso_path = os.path.join(tmp, "psn_npsso.json")
+        self.xbox_path = os.path.join(tmp, "openxbl_api_key.json")
+        env = patch.dict(
+            os.environ,
+            {
+                "PSN_NPSSO_FILE": self.npsso_path,
+                "OPENXBL_API_KEY_FILE": self.xbox_path,
+            },
+        )
+        env.start()
+        self.addCleanup(env.stop)
+
+    def _tmp_dir(self) -> str:
+        tmp = tempfile.mkdtemp(prefix="token-ingest-test-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return tmp
+
+    def _mint(self, provider: str) -> str:
+        with patch.dict(os.environ, {"MCP_PUBLIC_BASE_URL": "https://gamelib.example"}):
+            return session_ingest.mint_ingest_link(provider)["url"].rsplit("/", 1)[1]
+
+    def _assert_private(self, path: str) -> None:
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    async def test_psn_form_renders(self) -> None:
+        nonce = self._mint("psn")
+        response = await session_ingest.handle_ingest_request(_get_request(nonce))
+        self.assertEqual(response.status_code, 200)
+        body = response.body.decode()
+        self.assertIn("PlayStation Network", body)
+        self.assertIn('name="payload"', body)
+
+    async def test_xbox_form_renders(self) -> None:
+        nonce = self._mint("xbox")
+        response = await session_ingest.handle_ingest_request(_get_request(nonce))
+        self.assertEqual(response.status_code, 200)
+        body = response.body.decode()
+        self.assertIn("Xbox (OpenXBL)", body)
+        self.assertIn('name="payload"', body)
+
+    async def _post_psn(self, body: bytes) -> object:
+        nonce = self._mint("psn")
+        response = await session_ingest.handle_ingest_request(_post_request(nonce, body))
+        return nonce, response
+
+    async def test_psn_bare_token_is_saved(self) -> None:
+        nonce, response = await self._post_psn(_raw_body(self.NPSSO))
+        self.assertEqual(response.status_code, 200)
+        body = response.body.decode()
+        self.assertIn("saved your session to", body)
+        self.assertNotIn(self.NPSSO, body)
+        with open(self.npsso_path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"npsso": self.NPSSO})
+        self._assert_private(self.npsso_path)
+        self.assertNotIn(nonce, session_ingest._ingest_links)
+
+    async def test_psn_ssocookie_page_body_is_saved(self) -> None:
+        # What the ssocookie page actually shows, pasted whole.
+        nonce, response = await self._post_psn(_form_body({"npsso": self.NPSSO}))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(self.NPSSO, response.body.decode())
+        with open(self.npsso_path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"npsso": self.NPSSO})
+        self.assertNotIn(nonce, session_ingest._ingest_links)
+
+    async def test_psn_cookie_editor_export_is_saved(self) -> None:
+        export = [
+            {"name": "npsso", "value": self.NPSSO, "domain": "sony.com"},
+            {"name": "JSESSIONID", "value": "irrelevant"},
+        ]
+        nonce, response = await self._post_psn(_form_body(export))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(self.NPSSO, response.body.decode())
+        with open(self.npsso_path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"npsso": self.NPSSO})
+        self.assertNotIn(nonce, session_ingest._ingest_links)
+
+    async def test_psn_wrong_length_token_rejected_without_echo(self) -> None:
+        short = "b" * 63
+        nonce, response = await self._post_psn(_raw_body(short))
+        self.assertEqual(response.status_code, 400)
+        body = response.body.decode()
+        self.assertIn("64 letters", body)
+        self.assertNotIn(short, body)
+        self.assertFalse(os.path.exists(self.npsso_path))
+        # Fixable mistake: the link stays live so the user can paste again.
+        self.assertIn(nonce, session_ingest._ingest_links)
+
+    async def test_psn_export_without_npsso_names_the_cookies_found(self) -> None:
+        export = {"JSESSIONID": "sekrit-session", "b_id": "sekrit-b"}
+        nonce, response = await self._post_psn(_form_body(export))
+        self.assertEqual(response.status_code, 400)
+        body = response.body.decode()
+        self.assertIn("JSESSIONID", body)
+        self.assertIn("b_id", body)
+        # Names are not secrets; values are.
+        self.assertNotIn("sekrit-session", body)
+        self.assertNotIn("sekrit-b", body)
+        self.assertFalse(os.path.exists(self.npsso_path))
+        self.assertIn(nonce, session_ingest._ingest_links)
+
+    async def _post_xbox(self, body: bytes) -> object:
+        nonce = self._mint("xbox")
+        response = await session_ingest.handle_ingest_request(_post_request(nonce, body))
+        return nonce, response
+
+    async def test_xbox_bare_key_is_saved(self) -> None:
+        nonce, response = await self._post_xbox(_raw_body(self.XBOX_KEY))
+        self.assertEqual(response.status_code, 200)
+        body = response.body.decode()
+        self.assertIn("saved your session to", body)
+        self.assertNotIn(self.XBOX_KEY, body)
+        with open(self.xbox_path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"api_key": self.XBOX_KEY})
+        self._assert_private(self.xbox_path)
+        self.assertNotIn(nonce, session_ingest._ingest_links)
+
+    async def test_xbox_json_object_is_saved(self) -> None:
+        nonce, response = await self._post_xbox(_form_body({"api_key": self.XBOX_KEY}))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(self.XBOX_KEY, response.body.decode())
+        with open(self.xbox_path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"api_key": self.XBOX_KEY})
+        self.assertNotIn(nonce, session_ingest._ingest_links)
+
+    async def test_xbox_key_with_whitespace_rejected_without_echo(self) -> None:
+        pasted = "not a key"
+        nonce, response = await self._post_xbox(_raw_body(pasted))
+        self.assertEqual(response.status_code, 400)
+        body = response.body.decode()
+        self.assertIn("OpenXBL API key", body)
+        self.assertNotIn(pasted, body)
+        self.assertFalse(os.path.exists(self.xbox_path))
+        self.assertIn(nonce, session_ingest._ingest_links)
 
 
 class IngestMiddlewareTests(unittest.IsolatedAsyncioTestCase):
