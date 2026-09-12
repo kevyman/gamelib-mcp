@@ -1884,18 +1884,26 @@ async def _migrate_v40_to_v41(db: aiosqlite.Connection, progress: _Progress | No
             "Migrating to v41: re-queue IGDB lookups for ampersand/\"and\" titles."
         )
 
-    # ' ' || lower(name) || ' ' LIKE '% and %' is the whole-word test: it keeps
-    # "Sand and Sea" and rejects "Sandstorm"/"Andor", which a bare '%and%'
-    # would sweep in.
-    await db.execute(
+    # The SQL side only prefilters (LIKE cannot express a word boundary); the
+    # decision is the resolver's own ampersand_alternate, so exactly the rows
+    # the new ladder can respell are requeued — "Rock-and-Roll" included,
+    # "Sandstorm"/"Andor" excluded — and the two can never drift apart.
+    from ..title_normalization import ampersand_alternate
+
+    candidates = await db.execute_fetchall(
         """
-        UPDATE games
-           SET igdb_cached_at = NULL, igdb_claimed_at = NULL
+        SELECT id, name FROM games
          WHERE igdb_id IS NULL
            AND igdb_cached_at IS NOT NULL
-           AND (name LIKE '%&%' OR ' ' || lower(name) || ' ' LIKE '% and %')
+           AND (name LIKE '%&%' OR lower(name) LIKE '%and%')
         """
     )
+    requeue = [row[0] for row in candidates if ampersand_alternate(row[1]) is not None]
+    if requeue:
+        await db.executemany(
+            "UPDATE games SET igdb_cached_at = NULL, igdb_claimed_at = NULL WHERE id = ?",
+            [(game_id,) for game_id in requeue],
+        )
     await _set_user_version(db, 41)
     await db.commit()
 

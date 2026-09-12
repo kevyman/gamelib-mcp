@@ -140,6 +140,11 @@ class V41AmpersandReclaimTests(unittest.IsolatedAsyncioTestCase):
             ("Salt & Sanctuary", None, None),
             ("Hollow Knight", None, self._STAMP),
             ("Rabbit & Steel", 281652, self._STAMP),
+            # Punctuation-delimited "and": the resolver's ampersand_alternate
+            # sees it (\band\b), so the migration must requeue it too.
+            ("Rock-and-Roll Racing", None, None),
+            # "and" inside a word is not the word, in the resolver or here.
+            ("Sandstorm", None, self._STAMP),
         )
         conn = sqlite3.connect(path)
         try:
