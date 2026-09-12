@@ -55,6 +55,7 @@ from ..data.title_normalization import (
     normalize_edition_comparison_title,
     normalize_purchase_title,
     normalize_search_text,
+    strip_comparison_edition_suffixes,
 )
 from .common import (
     LIBRARY_PLATFORMS,
@@ -572,10 +573,19 @@ async def _existing_edition_sibling(create_name: str) -> dict | None:
     Two probes, both cheap: names that could differ only by an edition suffix
     (one normalized name is a prefix of the other, then confirmed with
     normalize_edition_comparison_title), and an exact alias hit.
+
+    The SQL prefilter and the confirmation deliberately use DIFFERENT keys.
+    games.name_normalized and game_aliases.alias_normalized are both built from
+    normalize_search_text, so a prefilter must speak that language; the
+    confirmation uses the match key, which is strictly more permissive. Mixing
+    the two — prefiltering with the match key — silently drops every title
+    whose apostrophe, ampersand or numeral the two normalizations spell
+    differently ("Marvel's Midnight Suns").
     """
     target = normalize_edition_comparison_title(create_name)
     search_name = normalize_search_text(create_name)
-    if not target:
+    prefilter = normalize_search_text(strip_comparison_edition_suffixes(create_name))
+    if not target or not prefilter:
         return None
     async with get_db() as db:
         candidates = await db.execute_fetchall(
@@ -584,7 +594,7 @@ async def _existing_edition_sibling(create_name: str) -> dict | None:
                   OR name_normalized LIKE ? || ' %'
                   OR ? LIKE name_normalized || ' %'
                ORDER BY id""",
-            (target, target, target),
+            (prefilter, prefilter, prefilter),
         )
         for candidate in candidates:
             if normalize_edition_comparison_title(candidate["name"]) == target:
@@ -595,7 +605,7 @@ async def _existing_edition_sibling(create_name: str) -> dict | None:
                FROM game_aliases a JOIN games g ON g.id = a.game_id
                WHERE a.alias_normalized IN (?, ?)
                ORDER BY a.game_id LIMIT 1""",
-            (search_name, target),
+            (search_name, prefilter),
         )
     if alias is not None:
         return {"game_id": alias["game_id"], "name": alias["name"], "reason": "alias"}

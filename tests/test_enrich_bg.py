@@ -11,6 +11,7 @@ from conftest import DEADLOCK_TIMEOUT, ToolDBTestCase
 
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data import enrich_bg, provider_health
+from gamelib_mcp.data.igdb import IGDB_RESOLVER_VERSION
 
 
 class EnrichmentClaimTests(ToolDBTestCase):
@@ -22,8 +23,12 @@ class EnrichmentClaimTests(ToolDBTestCase):
 
     async def test_claim_helper_prevents_double_claim(self) -> None:
         game_id = await db_module.upsert_game(appid=None, name="Portal")
-        first = await db_module.claim_game_ids_for_igdb(limit=1, stale_before="1970-01-01T00:00:00+00:00")
-        second = await db_module.claim_game_ids_for_igdb(limit=1, stale_before="1970-01-01T00:00:00+00:00")
+        first = await db_module.claim_game_ids_for_igdb(
+            limit=1, stale_before="1970-01-01T00:00:00+00:00", resolver_version=IGDB_RESOLVER_VERSION
+        )
+        second = await db_module.claim_game_ids_for_igdb(
+            limit=1, stale_before="1970-01-01T00:00:00+00:00", resolver_version=IGDB_RESOLVER_VERSION
+        )
 
         self.assertEqual(first, [game_id])
         self.assertEqual(second, [])
@@ -136,6 +141,7 @@ class EnrichmentClaimTests(ToolDBTestCase):
         claimed = await db_module.claim_game_ids_for_igdb(
             limit=2,
             stale_before="1970-01-01T00:00:00+00:00",
+            resolver_version=IGDB_RESOLVER_VERSION,
         )
 
         self.assertEqual(claimed, [regular_id, farmed_id])

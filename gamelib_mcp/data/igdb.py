@@ -46,6 +46,7 @@ from .tags import is_feature_flag
 from .title_normalization import (
     ampersand_alternate,
     is_non_game_title,
+    match_key,
     normalize_catalog_title,
     normalize_search_text,
     normalize_series_gap_title,
@@ -59,6 +60,17 @@ _ChunkItem = TypeVar("_ChunkItem")
 # get_game_detail and tag_affinity. Existing (SteamSpy, vote-ranked) tags are kept
 # preferentially; IGDB fills the remaining slots.
 MERGED_TAG_CAP = 30
+
+# Which generation of the name resolver wrote a row's igdb_cached_at stamp.
+#
+# CONTRACT: bump this whenever a MATCHING rule changes — the match key, the
+# name gate, the tiebreak, the query ladder, anything that could turn a refusal
+# into a link. Every row an older generation stamped with NO link is then
+# automatically re-queued by claim_game_ids_for_igdb; LINKED rows are never
+# touched by a bump (their version is not even read). Nothing else needs to
+# happen: no migration, no SQL guess at which titles moved. Generations 1 and 2
+# are the pre- and post-``match_key``/year-tiebreak resolvers respectively.
+IGDB_RESOLVER_VERSION = 2
 
 
 def _merge_igdb_tags(existing: list[str], igdb_tags: list[str]) -> list[str]:
@@ -831,11 +843,22 @@ def _igdb_name_agrees(library_name: str, igdb_name: str) -> bool:
     ) == normalize_edition_comparison_title(igdb_name)
 
 
+def _candidate_year(game: IGDBGame) -> int | None:
+    """Release year of an IGDB candidate, or None when IGDB has no date."""
+    head = (game.first_release_date or "").strip()[:4]
+    return int(head) if head.isdigit() else None
+
+
+def _year_debug(results: list[IGDBGame], indexes: list[int]) -> list[tuple[int, int | None]]:
+    return [(results[i].igdb_id, _candidate_year(results[i])) for i in indexes]
+
+
 def _select_best_match(
     name: str,
     results: list[IGDBGame],
     *,
     allow_inconclusive_fallback: bool,
+    reference_year: int | None = None,
 ) -> IGDBGame | None:
     """Pick the best candidate from `results` for query `name`, or None.
 
@@ -871,6 +894,31 @@ def _select_best_match(
     edition-stripped-normalized equality with the query — it cannot land on a
     different game. Only when NO candidate passes does the query store no
     match at all (row stays unenriched; logged at info).
+
+    ``reference_year`` is the library row's own release year (see
+    ``_resolve_game_with_status``), and it arbitrates the case the name gate
+    cannot: two IGDB records that genuinely share a title. The gate-passing
+    candidates split into TIER 1 (``match_key`` equality — the exact title, no
+    edition stripping) and TIER 2 (equal only once an edition suffix is
+    stripped); tier 1 is considered alone whenever it is non-empty, so a
+    remake marketed as an edition can never outrank the real thing.
+
+    Within the chosen tier, with a known reference year: candidates within ±1
+    year win in ranked order (platform and region releases drift by months).
+    With none inside that window, a LONE tier-1 candidate is still accepted —
+    a re-release carries a later store date and the exact title vouches for it
+    — while SEVERAL tier-1 candidates refuse, because that is the same-name
+    case with no evidence to pick by. A LONE tier-2 candidate gets a ONE-SIDED
+    window: an edition cannot predate its own game, so an older or same-age
+    candidate is the original and is accepted however far back it sits, and
+    only a candidate more than two years NEWER than the row is refused — which
+    is what keeps "Mafia" (2002) off "Mafia: Definitive Edition" (2020) while
+    letting "Deus Ex: Game of the Year Edition" (store date 2013) reach "Deus
+    Ex" (2000). SEVERAL tier-2 candidates keep the symmetric ±2 window.
+
+    With no reference year, two or more distinct candidates whose known years
+    disagree by more than a year are refused rather than ranked: that is the
+    "Dead Space 2008 vs 2023" shape, and IGDB's own ordering is not evidence.
     """
     from .db import extract_best_fuzzy_key, titles_conflict_on_identity
 
@@ -889,9 +937,9 @@ def _select_best_match(
     # e.g. "Persona 3 Reload": the base game's title is an exact match while
     # every DLC/cosmetic pack's title has a longer suffix, so it wins even
     # though IGDB's own relevance model ranked it below all of them.
-    normalized_query = normalize_search_text(name)
+    normalized_query = match_key(name)
     exact_matches = [
-        i for i in choices if normalize_search_text(results[i].name) == normalized_query
+        i for i in choices if match_key(results[i].name) == normalized_query
     ]
     selected_idx: int | None
     if exact_matches:
@@ -916,18 +964,105 @@ def _select_best_match(
     )
     ordered = ([selected_idx] if selected_idx is not None else []) + rest
     gate_target = normalize_series_gap_title(name)
-    for idx in ordered:
-        if normalize_series_gap_title(results[idx].name) == gate_target:
-            return results[idx]
+    passing = [
+        idx for idx in ordered
+        if normalize_series_gap_title(results[idx].name) == gate_target
+    ]
 
-    if selected_idx is not None:
+    if not passing:
+        if selected_idx is not None:
+            logger.info(
+                "IGDB name-match gate rejected %r -> %r (igdb_id=%s): "
+                "edition-stripped titles differ on every candidate; leaving unmatched",
+                name,
+                results[selected_idx].name,
+                results[selected_idx].igdb_id,
+            )
+        return None
+
+    # Tier 1 = the exact title (no edition stripping); tier 2 = everything the
+    # edition strip had to fold. Tier 1 is considered ALONE when non-empty.
+    tier_one = [idx for idx in passing if match_key(results[idx].name) == normalized_query]
+    tier = tier_one or passing
+    is_tier_one = bool(tier_one)
+    distinct_ids = {results[idx].igdb_id for idx in tier}
+
+    if reference_year is None:
+        known = {
+            results[idx].igdb_id: year
+            for idx in tier
+            if (year := _candidate_year(results[idx])) is not None
+        }
+        if len(known) > 1 and max(known.values()) - min(known.values()) > 1:
+            logger.info(
+                "IGDB year tiebreak refused %r: same-name candidates, no reference "
+                "year (tier=%s candidates=%s)",
+                name,
+                1 if is_tier_one else 2,
+                _year_debug(results, tier),
+            )
+            return None
+        return results[tier[0]]
+
+    within_one = [
+        idx for idx in tier
+        if (year := _candidate_year(results[idx])) is not None
+        and abs(year - reference_year) <= 1
+    ]
+    if within_one:
+        return results[within_one[0]]
+
+    if is_tier_one:
+        if len(distinct_ids) == 1:
+            # A lone exact-title candidate: a re-release's store date can sit
+            # years off the library row's, and the title itself vouches. An
+            # unknown IGDB year lands here too, and must never block.
+            return results[tier[0]]
         logger.info(
-            "IGDB name-match gate rejected %r -> %r (igdb_id=%s): "
-            "edition-stripped titles differ on every candidate; leaving unmatched",
+            "IGDB year tiebreak refused %r (reference_year=%s): several exact-title "
+            "candidates, none within a year (candidates=%s)",
             name,
-            results[selected_idx].name,
-            results[selected_idx].igdb_id,
+            reference_year,
+            _year_debug(results, tier),
         )
+        return None
+
+    if len(distinct_ids) == 1:
+        # One edition-stripped match, and the window is ONE-SIDED: an edition
+        # cannot predate the game it is an edition of, so a candidate that is
+        # older than the row (or the same age) IS the original — the row's year
+        # is just the store's re-listing date ("Deus Ex: Game of the Year
+        # Edition" bought in 2013, IGDB's "Deus Ex" from 2000). Only a
+        # candidate NEWER than the row by more than two years is a later
+        # product that would absorb the original ("Mafia" 2002 ->
+        # "Mafia: Definitive Edition" 2020). An unknown IGDB year accepts, like
+        # a lone tier-1 candidate.
+        lone_year = _candidate_year(results[tier[0]])
+        if lone_year is None or lone_year - reference_year <= 2:
+            return results[tier[0]]
+        logger.info(
+            "IGDB year tiebreak refused %r (reference_year=%s): the only "
+            "edition-stripped match is more than two years newer (candidates=%s)",
+            name,
+            reference_year,
+            _year_debug(results, tier),
+        )
+        return None
+
+    within_two = [
+        idx for idx in tier
+        if (year := _candidate_year(results[idx])) is not None
+        and abs(year - reference_year) <= 2
+    ]
+    if within_two:
+        return results[within_two[0]]
+    logger.info(
+        "IGDB year tiebreak refused %r (reference_year=%s): several "
+        "edition-stripped matches, none within two years (candidates=%s)",
+        name,
+        reference_year,
+        _year_debug(results, tier),
+    )
     return None
 
 
@@ -946,16 +1081,49 @@ class _ResolveOutcome:
     saw_candidates: bool
 
 
+_TRAILING_YEAR_RE = re.compile(r"\(\s*(\d{4})\s*\)\s*$")
+
+
+def _trailing_year(name: str) -> int | None:
+    """The year a title disambiguates itself with ("Prey (2017)"), or None.
+
+    Must be read off the RAW name: every catalog/edition normalization drops
+    the marker, so a caller that strips before asking gets nothing.
+    """
+    match = _TRAILING_YEAR_RE.search(name.strip())
+    return int(match.group(1)) if match else None
+
+
+def _reference_year_for(name: str, reference_release_date: str | None) -> int | None:
+    """The library row's release year, for the same-name tiebreak.
+
+    The stored release date first; failing that, a trailing "(YYYY)" the title
+    itself carries.
+    """
+    head = (reference_release_date or "").strip()[:4]
+    if head.isdigit():
+        return int(head)
+    return _trailing_year(name)
+
+
 async def _resolve_game_with_status(
     name: str,
     igdb_platform_id: int | tuple[int, ...] | None,
     *,
     suppress_errors: bool = True,
+    reference_release_date: str | None = None,
 ) -> _ResolveOutcome:
     """resolve_game's implementation, reporting whether any query returned candidates.
 
     Internal: only the backfill needs the status. Everything else should keep
     calling the public ``resolve_game``.
+
+    ``reference_release_date`` is the library row's own release date. It is the
+    only evidence that separates two IGDB records sharing a title (Dead Space
+    2008 vs the 2023 remake) and the only thing that stops a remake marketed as
+    an edition from absorbing the original ("Mafia" 2002 vs "Mafia: Definitive
+    Edition" 2020) — see ``_select_best_match``. Absent, a title's own trailing
+    "(YYYY)" is used instead.
     """
     if not os.environ.get("TWITCH_CLIENT_ID"):
         if not suppress_errors:
@@ -963,6 +1131,8 @@ async def _resolve_game_with_status(
                 f"IGDB credentials not configured; cannot resolve {name!r}"
             )
         return _ResolveOutcome(game=None, saw_candidates=False)
+
+    reference_year = _reference_year_for(name, reference_release_date)
 
     saw_candidates = False
     results = await search_game(name, igdb_platform_id, suppress_errors=suppress_errors)
@@ -972,7 +1142,12 @@ async def _resolve_game_with_status(
 
     if results:
         saw_candidates = True
-        match = _select_best_match(name, results, allow_inconclusive_fallback=True)
+        match = _select_best_match(
+            name,
+            results,
+            allow_inconclusive_fallback=True,
+            reference_year=reference_year,
+        )
         if match is not None:
             return _ResolveOutcome(game=match, saw_candidates=True)
         # Non-empty results, but every candidate was rejected (identity
@@ -1005,7 +1180,11 @@ async def _resolve_game_with_status(
                 continue
             saw_any = True
             distinct = {game.igdb_id: game for game in exact}
-            if len(distinct) > 1:
+            if len(distinct) > 1 and reference_year is None:
+                # Nothing to arbitrate with: two real games share the name and
+                # IGDB's ordering is not evidence. With a reference year the
+                # ambiguity is handed to _select_best_match, which resolves it
+                # when the years do and refuses when they don't.
                 logger.info(
                     "IGDB exact-name lookup for %r is ambiguous (%s) — refusing to guess",
                     query,
@@ -1013,7 +1192,10 @@ async def _resolve_game_with_status(
                 )
                 break
             match = _select_best_match(
-                query, list(distinct.values()), allow_inconclusive_fallback=False
+                query,
+                list(distinct.values()),
+                allow_inconclusive_fallback=False,
+                reference_year=reference_year,
             )
             if match is not None:
                 return match, True
@@ -1065,7 +1247,12 @@ async def _resolve_game_with_status(
         # may carry an edition number ("… 2026 Edition") that would wrongly
         # read as a sequel marker against the base game's title.
         gate_name = variant if identity_preserving else name
-        match = _select_best_match(gate_name, variant_results, allow_inconclusive_fallback=False)
+        match = _select_best_match(
+            gate_name,
+            variant_results,
+            allow_inconclusive_fallback=False,
+            reference_year=reference_year,
+        )
         if match is not None:
             return _ResolveOutcome(game=match, saw_candidates=True)
 
@@ -1077,6 +1264,7 @@ async def resolve_game(
     igdb_platform_id: int | tuple[int, ...] | None,
     *,
     suppress_errors: bool = True,
+    reference_release_date: str | None = None,
 ) -> IGDBGame | None:
     """
     Find the best IGDB match for a game name + platform. Returns None if not
@@ -1084,9 +1272,15 @@ async def resolve_game(
     is True; with ``suppress_errors=False`` they raise ``IGDBRequestFailure``
     so a caller that records "checked, no match" can never mistake an
     operational outage for a genuine miss.
+
+    ``reference_release_date`` is the library row's release date, used to
+    separate two IGDB records that share a title (see ``_select_best_match``).
     """
     outcome = await _resolve_game_with_status(
-        name, igdb_platform_id, suppress_errors=suppress_errors
+        name,
+        igdb_platform_id,
+        suppress_errors=suppress_errors,
+        reference_release_date=reference_release_date,
     )
     return outcome.game
 
@@ -1097,6 +1291,7 @@ async def resolve_and_link_game(
     candidates: dict[int, str],
     *,
     platform: str | None = None,
+    reference_release_date: str | None = None,
 ) -> tuple[int, "IGDBGame | None"]:
     """
     Resolve a game to its canonical games row via IGDB, creating a new row if needed.
@@ -1113,10 +1308,15 @@ async def resolve_and_link_game(
     given, the title→existing-row fuzzy fallback refuses to attach onto a row that
     already owns that platform, so two distinct same-platform store entries with the
     same name stay separate instead of collapsing.
+
+    ``reference_release_date`` is passed straight through to ``resolve_game``
+    as the same-name year tiebreak.
     """
     from .db import find_game_by_name_fuzzy, get_db, get_game_by_igdb_id
 
-    igdb_game = await resolve_game(name, igdb_platform_id)
+    igdb_game = await resolve_game(
+        name, igdb_platform_id, reference_release_date=reference_release_date
+    )
     if igdb_game is not None:
         async with _get_igdb_link_lock(igdb_game.igdb_id):
             if igdb_game.alias_for_parent and (igdb_game.parent_igdb_id or igdb_game.parent_name):
@@ -1316,7 +1516,10 @@ async def _apply_igdb_metadata(game_id: int, igdb_game: IGDBGame) -> None:
             return
 
         overrides = await get_manual_overrides(db, game_id)
-        updates: dict = {"igdb_cached_at": now}
+        updates: dict = {
+            "igdb_cached_at": now,
+            "igdb_resolver_version": IGDB_RESOLVER_VERSION,
+        }
         # igdb_id can be pinned by hand (update_game) when auto-matching picked
         # the wrong title; honor that override so a later fetch doesn't relink it.
         if "igdb_id" not in overrides:
@@ -1549,13 +1752,18 @@ async def upsert_backfill_platform_release_dates(game_id: int, igdb_game: IGDBGa
 
 
 async def mark_igdb_checked(game_id: int) -> None:
+    """Stamp a row "checked", recording WHICH resolver generation checked it.
+
+    The version is what makes a no-match stamp temporary: a later generation
+    re-claims the row without a migration (see IGDB_RESOLVER_VERSION).
+    """
     from .db import get_db
 
     checked_at = datetime.now(UTC).isoformat()
     async with get_db() as db:
         await db.execute(
-            "UPDATE games SET igdb_cached_at = ? WHERE id = ?",
-            (checked_at, game_id),
+            "UPDATE games SET igdb_cached_at = ?, igdb_resolver_version = ? WHERE id = ?",
+            (checked_at, IGDB_RESOLVER_VERSION, game_id),
         )
         await db.commit()
 
@@ -1666,7 +1874,10 @@ async def backfill_missing_games(
 
     stale_before = _claim_cutoff_iso()
     claimed_ids = await claim_game_ids_for_igdb(
-        limit=limit, stale_before=stale_before, game_ids=game_ids
+        limit=limit,
+        stale_before=stale_before,
+        game_ids=game_ids,
+        resolver_version=IGDB_RESOLVER_VERSION,
     )
     if not claimed_ids:
         return 0
@@ -1780,10 +1991,21 @@ async def backfill_missing_games(
             if igdb_game is None:
                 platform_hint = await choose_igdb_platform_hint(game_id)
                 resolved_via_search = True
+                # The year has to be read off the RAW name here: the query is
+                # normalize_catalog_title's output, which drops a trailing
+                # "(YYYY)" — so a row named "Prey (2017)" with no stored
+                # release_date would hand the resolver no reference at all and
+                # its two same-named candidates would refuse each other.
+                reference_release_date = _row_value(row, "release_date")
+                if not reference_release_date:
+                    titled_year = _trailing_year(row["name"])
+                    if titled_year is not None:
+                        reference_release_date = f"{titled_year:04d}-01-01"
                 outcome = await _resolve_game_with_status(
                     normalize_catalog_title(row["name"]),
                     platform_hint,
                     suppress_errors=False,
+                    reference_release_date=reference_release_date,
                 )
                 igdb_game = outcome.game
                 search_saw_candidates = outcome.saw_candidates

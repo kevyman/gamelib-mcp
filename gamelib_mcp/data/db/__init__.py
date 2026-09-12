@@ -137,7 +137,7 @@ XBOX_TITLE_ID = "xbox_title_id"
 # module load time, so this package must never import back from nintendo.py.
 # Must stay in sync with that constant's value.
 NINTENDO_TITLE_ID_TYPE = "nintendo_title_id"
-SCHEMA_VERSION = 41
+SCHEMA_VERSION = 42
 
 
 def normalize_identifier_value(identifier_type: str, value: str) -> str:
@@ -342,6 +342,7 @@ from .schema import (
     _V39_SCHEMA_DDL,
     _V40_SCHEMA_DDL,
     _V41_SCHEMA_DDL,
+    _V42_SCHEMA_DDL,
 )
 
 
