@@ -534,6 +534,38 @@ class GetGameDetailEnrichmentReportTests(ToolDBTestCase):
         never.set()
         await asyncio.wait_for(task, timeout=DEADLOCK_TIMEOUT)
 
+    async def test_a_link_that_fails_after_the_wait_is_logged_not_swallowed(self):
+        # Once the caller has moved on with "link_pending", nobody awaits the
+        # shielded task; a failure then must still reach the log rather than
+        # asyncio's never-retrieved handler (a background task dying silently).
+        gid = await make_steam_game("Late Failure", 545454)
+        release = asyncio.Event()
+
+        async def _fail_late(limit, *, game_ids):
+            await release.wait()
+            raise RuntimeError("database is locked")
+
+        self.backfill.side_effect = _fail_late
+        with (
+            patch.object(detail, "igdb_credentials_configured", lambda: True),
+            patch.object(detail, "DETAIL_IGDB_LINK_TIMEOUT_SECONDS", 0.05),
+        ):
+            result = await detail.get_game_detail(game_id=gid)
+        self.assertEqual(result["enrichment"], {"igdb": "link_pending"})
+
+        (task,) = [t for t in detail._PENDING_IGDB_LINKS]
+        with self.assertLogs(detail.logger, level="WARNING") as logs:
+            release.set()
+            with self.assertRaises(RuntimeError):
+                await asyncio.wait_for(task, timeout=DEADLOCK_TIMEOUT)
+            # Done-callbacks run on the loop after the task settles.
+            await asyncio.sleep(0)
+        self.assertTrue(
+            any("Backgrounded IGDB link task failed" in line for line in logs.output)
+        )
+        self.assertTrue(any("database is locked" in line for line in logs.output))
+        self.assertNotIn(task, detail._PENDING_IGDB_LINKS)
+
 
 _MEDIA_PAYLOAD = {
     "media": {

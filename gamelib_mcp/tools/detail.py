@@ -71,6 +71,27 @@ DETAIL_IGDB_LINK_TIMEOUT_SECONDS = 20
 _PENDING_IGDB_LINKS: set[asyncio.Task] = set()
 
 
+def _settle_igdb_link(task: asyncio.Task) -> None:
+    """Done-callback for a backgrounded link: drop the reference, but LOOK first.
+
+    Once the caller has gone (it got "link_pending"), nothing awaits this task,
+    so an exception raised after the wait — a DB error mid-write, say — would
+    reach only asyncio's "Task exception was never retrieved" handler at
+    garbage-collection time. A background task must not die silently: retrieve
+    the exception here and log it through the same path a synchronous failure
+    takes.
+    """
+    _PENDING_IGDB_LINKS.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning(
+            "Backgrounded IGDB link task failed after the detail call returned",
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+
+
 async def _link_igdb_scoped(game_id: int) -> str | None:
     """Run the IGDB backfill for this one row, bounded; report what happened.
 
@@ -80,7 +101,7 @@ async def _link_igdb_scoped(game_id: int) -> str | None:
     """
     task = asyncio.create_task(backfill_missing_games(limit=1, game_ids=[game_id]))
     _PENDING_IGDB_LINKS.add(task)
-    task.add_done_callback(_PENDING_IGDB_LINKS.discard)
+    task.add_done_callback(_settle_igdb_link)
     try:
         await asyncio.wait_for(
             asyncio.shield(task), timeout=DETAIL_IGDB_LINK_TIMEOUT_SECONDS
