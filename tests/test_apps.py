@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from fastmcp import Client, FastMCP
@@ -128,14 +129,19 @@ class GameCardsResourceTests(unittest.IsolatedAsyncioTestCase):
             ):
                 with self.subTest(widget=name, color=hex_color):
                     self.assertNotIn(hex_color, lowered)
-        # (b) the three tier classes map to the --gl-good/ok/bad tokens, which
-        # are the host's success/warning/danger tokens;
+        # (b) the Binder chip: the tier is the 1px border and the mono value,
+        # never a fill — the ground is the card surface. The tier classes only
+        # re-point the tier tokens, which are the host's success / warning /
+        # danger tokens.
+        chip = apps_shared.CHIP_CSS.split("  .chip {", 1)[1].split("}", 1)[0]
+        self.assertIn("border: 1px solid var(--gl-tier);", chip)
+        self.assertIn("background: var(--gl-surface);", chip)
+        value = apps_shared.CHIP_CSS.split("  .chip b {", 1)[1].split("}", 1)[0]
+        self.assertIn("color: var(--gl-tier-text);", value)
+        self.assertIn("font-family: var(--gl-mono);", value)
         for tier in ("good", "ok", "bad"):
-            self.assertIn(
-                f".chip.tier-{tier} {{ background: var(--gl-{tier}-bg); "
-                f"border-color: var(--gl-{tier}-edge); color: var(--gl-{tier}); }}",
-                apps_shared.CHIP_CSS,
-            )
+            self.assertIn(f".tier-{tier} {{ --gl-tier: var(--gl-{tier}-edge); --gl-tier-text: var(--gl-{tier});",
+                          apps_shared.TOKENS_CSS)
         for token, host in (("good", "success"), ("ok", "warning"), ("bad", "danger")):
             self.assertIn(f"--gl-{token}: var(--color-text-{host},", apps_shared.TOKENS_CSS)
         # (c) every chip has a text label: scoreChip always writes the label
@@ -154,10 +160,11 @@ class GameCardsResourceTests(unittest.IsolatedAsyncioTestCase):
         body = apps_shared.SCORE_CHIP_JS[start:]
         self.assertIn("if (!desc) return null;", body)
         self.assertIn('label: "Steam", value: phrase, tier: steamTier(desc),', body)
-        # The detail card renders Steam through it (phrase + meter); the grid
-        # renders the phrase without the meter (GridModeTests pins that rule).
+        # Both cards render Steam through it, phrase + meter: the detail card
+        # with the store link, the grid card with its brand heard, not drawn.
         self.assertIn("steamChip(game.steam_review_desc,\n", apps.GAME_CARDS_HTML)
-        self.assertIn("steamChip(game.steam_review_desc, null, { meter: false })", apps.GAME_CARDS_HTML)
+        self.assertIn("var steam = steamChip(game.steam_review_desc, null);", apps.GAME_CARDS_HTML)
+        self.assertNotIn("{ meter: false }", widget_js(apps.GAME_CARDS_HTML).replace(apps_shared.SCORE_CHIP_JS, ""))
         self.assertNotIn("gridSteamChip", apps.GAME_CARDS_HTML)
         self.assertNotIn("steamBadge", apps.GAME_CARDS_HTML)
 
@@ -238,21 +245,24 @@ class ContentTypeBadgeTests(unittest.TestCase):
             self.assertNotIn(primary_type, label_map_src)
 
     def test_grid_card_renders_type_chip_and_parent_subtitle(self) -> None:
-        self.assertIn('el("span", "type-chip", typeLabel)', apps.GAME_CARDS_HTML)
+        # The nested-content type is a quiet lozenge on the plate's sub line
+        # (no tier color), on the grid card and the detail card alike.
+        self.assertIn('return typeLabel ? el("span", "loz type-loz", typeLabel) : null;', apps.GAME_CARDS_HTML)
+        self.assertEqual(apps.GAME_CARDS_HTML.count("var type = typeLoz(game);"), 2)
         self.assertIn('el("div", "parent-sub", "⤷ " + pName)', apps.GAME_CARDS_HTML)
 
     def test_detail_card_renders_content_badge_and_parent_subtitle(self) -> None:
-        self.assertIn(
-            'el("span", "chip content-badge", typeLabel)', apps.GAME_CARDS_HTML
-        )
-        self.assertIn('el("div", "sub parent-sub", "part of " + pName)', apps.GAME_CARDS_HTML)
+        panel = js_function(apps.GAME_CARDS_HTML, "function identityPanel(game, media)")
+        self.assertIn("if (type) sub.appendChild(type);", panel)
+        self.assertIn('el("div", "parent-sub", "part of " + pName)', panel)
+        self.assertNotIn("content-badge", apps.GAME_CARDS_HTML)
 
     def test_detail_cover_plate_drops_the_duplicate_title(self) -> None:
-        # The h1 sits right beside the plate on the detail card, so stamping
-        # the name onto the art stand-in reads as a doubled title. The gradient
-        # stays; grid cards (no heading beside the cover) keep their lettering.
+        # The plate's title sits right under the art on the detail card, so
+        # stamping the name onto the art stand-in reads as a doubled title. The
+        # gradient stays; grid cards keep their lettering.
         self.assertIn(
-            ".detail .cover-fallback { color: transparent; text-shadow: none; }",
+            ".dt-card .cover-fallback { color: transparent; text-shadow: none; }",
             apps.GAME_CARDS_HTML,
         )
 
@@ -265,8 +275,8 @@ class ContentTypeBadgeTests(unittest.TestCase):
             'var emptyText = "No details fetched yet";',
             "var reasons = enrichmentReasons(game.enrichment);",
             'return source + ": " + reason;',
-            'emptyText += " — " + reasons.join(" · ");',
-            "notice(body, emptyText);",
+            'emptyText += " — " + reasons.join("; ");',
+            "notice(flow, emptyText);",
             'var ENRICH_SOURCES = { steam_store: "Steam", protondb: "ProtonDB", igdb: "IGDB" };',
             'no_steam_appid: "no app id",',
             'no_match: "no match",',
@@ -289,28 +299,33 @@ class ContentTypeBadgeTests(unittest.TestCase):
         self.assertNotIn("innerHTML", apps.GAME_CARDS_HTML)
 
     def test_media_sections_render_from_the_detail_payload(self) -> None:
-        # The detail card grows a media panel (one viewer + one thumb strip)
-        # and a "similar in your library" row when get_game_detail(media=True)
-        # supplies them. Source-presence style, like the badge tests above —
-        # there is no headless-DOM harness.
+        # Under the big card: the media reel (one viewer + one thumb strip,
+        # the shared block) and the IN YOUR LIBRARY strip of mini cards when
+        # get_game_detail(media=True) supplies them.
         for marker in (
             'var media = game.media || {};',      # detailCard reads the block
-            'stack.appendChild(identityPanel(game, media));',
-            'mediaNode(stack, media, game.name)',
-            'relatedBlock(stack, game);',
+            'stack.appendChild(panel.frame);',
+            'mediaNode(flow, media, game.name)',
+            'similarStrip(flow, game.similar);',
+            'relatedBlock(flow, actions, game);',
             'section(parent, "Media")',
             'var viewer = el("div", "hero viewer")',
             'el("div", "strip thumbs")',
             'btn.classList.toggle("sel", i === j)',
             'select(0);',                         # trailer first when there is one
-            'if (similar) similarNode(parent, game.similar);',
-            'el("div", "sim-name", item.name || "?")',
-            'section(parent, "Similar in your library")',
-            '"Your " + plural(items.length, "game") + " most like this one"',
-            '"The " + items.length + " of your " + plural(total, "game") + " most like this one"',
-            'note += " · " + unplayed + " unplayed"',
         ):
             self.assertIn(marker, apps.GAME_CARDS_HTML)
+        strip = js_function(apps.GAME_CARDS_HTML, "function similarStrip(parent, similar)")
+        for marker in (
+            '.filter(function (i) { return i && i.name; }).slice(0, 8);',   # bounded: <=8 minis
+            'var sec = eyebrowSection(parent, "In your library");',
+            'var strip = el("div", "strip ministrip");',
+            'tier: rating != null ? ratingTier(rating) : "none",',
+            # two lines of separate spans, never "9/10 · 50h"
+            'lines: [[rating != null ? rating + "/10" : null, hours != null && hours > 0 ? hoursLabel(hours) : null],',
+            'mini.title = "Shares: " + why.join(", ");',
+        ):
+            self.assertIn(marker, strip)
 
     def test_similar_cards_carry_no_truncated_tag_line(self) -> None:
         # Spec §1.5: a mini card is cover, name, year and ONE chip row. The
@@ -361,39 +376,49 @@ class ContentTypeBadgeTests(unittest.TestCase):
         self.assertIn('plural(size, "game", ped.catalog_truncated)', apps.GAME_CARDS_HTML)
 
     def test_pedigree_strip_renders_from_the_detail_payload(self) -> None:
-        # "From the studio": header line, optional publisher line, the poster
-        # row, and the track-record footer. Source-presence style, like the
-        # media markers above.
+        # FROM THE STUDIO: the eyebrow and a strip of minis of what the studio
+        # shipped before; the studio, publisher and track record moved into
+        # the full breakdown.
+        strip = js_function(apps.GAME_CARDS_HTML, "function studioStrip(parent, ped)")
         for marker in (
-            "if (studio) pedigreeNode(parent, game.pedigree);",
-            'section(parent, "From the studio")',
-            'el("div", "ped-head", headline)',
-            'el("div", "ped-pub", "published by " + ped.publisher_name)',
+            "var items = list(ped.previous_games).filter(function (i) { return i && i.name; }).slice(0, 8);",
+            'var sec = eyebrowSection(parent, "From the studio");',
+            "lines: [[item.release_year ? String(item.release_year) : null, score],",
+        ):
+            self.assertIn(marker, strip)
+        self.assertIn("studioStrip(flow, game.pedigree);", apps.GAME_CARDS_HTML)
+        breakdown = js_function(apps.GAME_CARDS_HTML, "function breakdownNode(game)")
+        for marker in (
+            'box.appendChild(abilityNode("Studio", facts.join(", ")));',
+            'if (ped.publisher_name) box.appendChild(abilityNode("Publisher", ped.publisher_name));',
             '"You\'ve played " + (num(record.played_count) || 0) + " of "',
             '" — avg " + avg + "/10."',
         ):
-            self.assertIn(marker, apps.GAME_CARDS_HTML)
+            self.assertIn(marker, breakdown)
 
     def test_pedigree_badge_prefers_his_rating_over_the_critic_score(self) -> None:
-        # One badge per poster: his own rating wins the slot, the critic score
-        # only stands in when he hasn't rated it, and an owned-but-unrated game
-        # still gets its ownership sticker.
-        start = apps.GAME_CARDS_HTML.index("function pedigreeBadges(item)")
-        end = apps.GAME_CARDS_HTML.index("function pedigreeNode(", start)
-        badges = apps.GAME_CARDS_HTML[start:end]
-        self.assertIn('if (item.owned && rating != null) {', badges)
-        self.assertIn("chips.push(youChip(rating));", badges)
-        self.assertIn('} else if (critic != null && critic >= 0) {', badges)
-        self.assertIn("chips.push(criticsChip(critic));", badges)
-        self.assertIn('if (item.owned && rating == null) chips.push(scoreChip({ label: "Owned" }));', badges)
+        # One score per studio mini: his own rating wins the slot (and the
+        # mini's tier), the critic score only stands in when he hasn't rated it.
+        strip = js_function(apps.GAME_CARDS_HTML, "function studioStrip(parent, ped)")
+        self.assertIn("var rating = item.owned ? num(item.my_rating) : null;", strip)
+        self.assertIn('var score = rating != null ? rating + "/10" : realScore(critic) ? "Critics " '
+                      "+ Math.round(critic) : null;", strip)
+        self.assertIn('tier: rating != null ? ratingTier(rating) : "none",', strip)
+        self.assertIn('[item.owned ? "in your library" : null]', strip)
 
     def test_the_damper_branch_renders_the_header_line_alone(self) -> None:
-        # previous_games is empty under the big-studio damper: the header (and
-        # the publisher line) render, and the function returns before the strip.
-        start = apps.GAME_CARDS_HTML.index("function pedigreeNode(parent, ped)")
-        end = apps.GAME_CARDS_HTML.index('var strip = el("div", "strip ped-strip")', start)
-        head = apps.GAME_CARDS_HTML[start:end]
-        self.assertIn("if (!items.length) return;", head)
+        # previous_games is empty under the big-studio damper: the eyebrow and
+        # a notice saying why (or that nothing earlier resolved), no strip.
+        strip = js_function(apps.GAME_CARDS_HTML, "function studioStrip(parent, ped)")
+        empty = strip[strip.index("if (!items.length) {"):strip.index('var strip = el("div", "strip ministrip");')]
+        for marker in (
+            "if (ped.big_catalog && size) {",
+            'notice(sec, "No earlier games picked: " + studio + " has "',
+            '+ plural(size, "game", ped.catalog_truncated) + " on IGDB");',
+            'notice(sec, [{ what: "from the studio", source: "IGDB: no earlier games resolved" }]);',
+            "return;",
+        ):
+            self.assertIn(marker, empty)
 
     def test_hype_counts_are_never_rendered(self) -> None:
         # `hypes` rides in the payload for completeness; this card does not
@@ -447,20 +472,19 @@ class ContentTypeBadgeTests(unittest.TestCase):
             self.assertIn(marker, apps.GAME_CARDS_HTML)
 
     def test_rank_badge_is_a_quiet_hash_number(self) -> None:
-        # "#1", not "№ 01": 12px caption weight, muted on the surface, no tilt.
+        # The rank is the plate's card number, "No. 1" — mono cap, muted, the
+        # global position (offset + index), and only when the payload carries
+        # an offset. No CSS counter, no tilt.
+        card = js_function(apps.GAME_CARDS_HTML, "function gridCard(game, ctx)")
+        self.assertIn('if (typeof c.offset === "number" && typeof c.index === "number") {', card)
+        self.assertIn('sub.appendChild(el("span", "card-no", "No. " + (c.offset + c.index + 1)));', card)
+        grid = js_function(apps.GAME_CARDS_HTML, "function renderGrid(data)")
+        self.assertIn('offset: typeof data.offset === "number" ? data.offset : null', grid)
         css = widget_css(apps.GAME_CARDS_HTML)
-        self.assertIn('content: "#" counter(rank);', css)
+        self.assertNotIn("counter(rank)", css)
         self.assertNotIn("№", apps.GAME_CARDS_HTML)
-        start = css.index(".grid.ranked .cover-wrap::before {")
-        rule = css[start:css.index("}", start)]
-        for decl in (
-            "font-size: var(--gl-cap);",
-            "font-weight: var(--gl-strong);",
-            "background: var(--gl-surface);",
-            "color: var(--gl-muted);",
-        ):
-            self.assertIn(decl, rule)
-        self.assertNotIn("rotate", rule)
+        self.assertIn("font-family: var(--gl-mono);", apps_shared.PLATE_CSS.split(".card-no {", 1)[1].split("}", 1)[0])
+        self.assertIn(".gc-card .card-no { margin-left: auto; }", css)
 
     def test_platform_ids_and_hours_render_through_the_shared_helpers(self) -> None:
         for marker in (
@@ -505,7 +529,8 @@ def js_function(html: str, signature: str) -> str:
 
 
 class GridModeTests(unittest.TestCase):
-    """Spec 2026-10-03 §2.1.1–§2.1.4: header line, card body, footer, card tap."""
+    """The Binder grid (spec 2026-10-04 §1.3, §2 Phase 2A): set line, card
+    frame / badge / ribbon / plate / chips / tags, footer, card tap."""
 
     HTML = apps.GAME_CARDS_HTML
 
@@ -524,26 +549,30 @@ class GridModeTests(unittest.TestCase):
                 self.assertNotIn(gone, self.HTML)
 
     def test_header_line_reads_the_tool_input(self) -> None:
+        # The set line: "<b>8 of 2090</b>" then one lozenge per facet — the
+        # sort, each vibe, "unplayed", "≤ 10h" — never a middot string.
         head = js_function(self.HTML, "function headerParts(data)")
         for marker in (
-            'var SORT_LABELS = { match: "taste match", critic: "critic score", value: "value" };',
-            '? shown + " of " + plural(total, "game")',          # "12 of 143 games"
+            '? shown + " of " + total',                          # "8 of 2090"
             ': plural(shown, "game");',
-            'parts.push("sorted by " + (SORT_LABELS[args.sort_by] || SORT_LABELS.match));',
-            # every filter says what it filters
-            'parts.push("vibe: " + vibes.join(" + "));',
-            'if (args.unplayed_only !== false) parts.push("unplayed only");',
-            'parts.push("≤ " + maxHours + "h to beat");',
-            'parts.push("critics ≥ " + minScore);',
-            'parts.push("ProtonDB " + String(args.protondb_min_tier).toLowerCase() + "+");',
+            "facets.push(SORT_LABELS[args.sort_by] || SORT_LABELS.match);",
+            "list(args.vibes).filter(Boolean).forEach(function (v) { facets.push(String(v)); });",
+            'if (args.unplayed_only !== false) facets.push("unplayed");',
+            'if (maxHours != null) facets.push("≤ " + maxHours + "h");',
+            'if (minScore != null) facets.push("critics ≥ " + minScore);',
+            'facets.push("ProtonDB " + String(args.protondb_min_tier).toLowerCase() + "+");',
         ):
-            self.assertIn(marker, self.HTML if marker.startswith("var SORT") else head)
+            self.assertIn(marker, head)
+        self.assertIn('var SORT_LABELS = { match: "taste match", critic: "critic score", value: "value" };',
+                      self.HTML)
         # get_game_detail's arguments never produce discover filters.
         self.assertIn("if (args && !isDetailArgs(args)) {", head)
-        # The count is the emphasised part; the rest is the muted caption.
-        self.assertIn('head.appendChild(el("b", null, parts.count));', self.HTML)
+        line = js_function(self.HTML, "function headerLine(data)")
+        self.assertIn('head.appendChild(el("b", null, parts.count));', line)
+        self.assertIn('parts.facets.forEach(function (facet) { head.appendChild(el("span", "loz", facet)); });',
+                      line)
         css = widget_css(self.HTML)
-        self.assertIn(".grid-head b { color: var(--gl-text); font-weight: var(--gl-strong); }", css)
+        self.assertIn("  .grid-head > .loz { text-transform: none; letter-spacing: 0;", css)
         # Tool input arriving after the result redraws the grid (a hook, not
         # a reassigned shared function).
         self.assertIn("hooks.afterToolInput = function () {", self.HTML)
@@ -551,101 +580,197 @@ class GridModeTests(unittest.TestCase):
         self.assertIn('else if (view === "grid" && gridData) render(gridData);', self.HTML)
 
     def test_match_bar_leads_the_card_body(self) -> None:
-        card = js_function(self.HTML, "function gridCard(game)")
-        self.assertIn("body.appendChild(matchBar(game.match_percent));", card)
-        self.assertNotIn('"% match"', card)
+        # The card body, in order: grain → art (cover, badge, ribbon) → plate
+        # (title-s, sub spans) → one chip row → the matched tags. The match is
+        # the badge now; there is no match bar on a card.
+        card = js_function(self.HTML, "function gridCard(game, ctx)")
+        self.assertNotIn("matchBar(", card)
         order = [
-            "body.appendChild(title);",
-            "body.appendChild(matchBar(game.match_percent));",
-            'body.appendChild(el("div", "meta", metaBits.join(" · ")));',
-            "body.appendChild(scores);",
-            'body.appendChild(el("div", "tagline", why.join(" · ")));',
+            "var card = gcFrame(",
+            "art.appendChild(coverNode(game));",
+            "art.appendChild(badge);",
+            'art.appendChild(ribbonNode(b.text, "good", null, "s art"));',
+            "card.appendChild(art);",
+            'plate.appendChild(el("div", "plate-title-s", game.name));',
+            "if (sub.childNodes.length) plate.appendChild(sub);",
+            "card.appendChild(plate);",
+            "card.appendChild(row);",
+            'card.appendChild(el("div", "gc-nochip", "No critic scores"));',
+            "card.appendChild(tags);",
         ]
         positions = [card.index(marker) for marker in order]
         self.assertEqual(positions, sorted(positions))
-        # Matched tags are one muted text line, at most three, no pills.
+        frame = js_function(self.HTML, "function gcFrame(tag, cls, tier)")
+        self.assertIn("var grain = grainNode();", frame)
+        self.assertIn("if (grain) frame.appendChild(grain);", frame)
+        # Matched tags: at most three gap-separated spans with a 4px diamond
+        # bullet drawn by CSS — never a " · " join, never pills.
         self.assertIn("var why = matchedTagNames(game).slice(0, 3);", card)
+        self.assertIn('why.forEach(function (t) { tags.appendChild(el("span", null, t)); });', card)
+        css = widget_css(self.HTML)
+        bullet = css.split("  .gc-tags > span::before {", 1)[1].split("}", 1)[0]
+        for decl in ("width: 4px;", "height: 4px;", "transform: rotate(45deg);"):
+            self.assertIn(decl, bullet)
         self.assertNotIn('"pill"', self.HTML)
-        self.assertNotIn(".pill {", widget_css(self.HTML))
+        self.assertNotIn(".pill {", css)
 
     def test_cover_carries_only_rank_metacritic_and_type_chip(self) -> None:
-        card = js_function(self.HTML, "function gridCard(game)")
-        self.assertEqual(card.count("cover.appendChild("), 2)
-        self.assertIn('cls: "corner" }', card)
-        self.assertIn('bits.push({ part: "corner", label: "Metacritic",',
-                      js_function(self.HTML, "function cardBits(game)"))
-        self.assertIn('if (typeLabel) cover.appendChild(el("span", "type-chip", typeLabel));', card)
-        self.assertIn(".cover-wrap .type-chip { position: absolute; left: 6px; bottom: 6px;",
-                      widget_css(self.HTML))
+        # The art carries the badge (top left) and, only for TOP MATCH or
+        # CRITICS' PICK, the slim ribbon on its bottom edge — nothing else.
+        card = js_function(self.HTML, "function gridCard(game, ctx)")
+        self.assertEqual(card.count("art.appendChild("), 3)
+        self.assertIn('badge.classList.add("badge-on-art");', card)
+        bits = js_function(self.HTML, "function cardBits(game, ctx)")
+        # the badge: the match when sorted by match, else the critic score
+        self.assertIn('if (pct != null && sort === "match") {', bits)
+        self.assertIn('bits.push({ part: "badge", value: pct, suffix: "%", tag: "Match",', bits)
+        self.assertIn('tier: pct >= TOP_MATCH ? "good" : pct >= 50 ? "ok" : "none", text: pct + "% match" });',
+                      bits)
+        self.assertIn('var name = mc != null ? "Metacritic" : "OpenCritic";', bits)
+        self.assertIn("tier: criticTier(game)", bits)
+        # the ribbon: TOP MATCH on the first card of an offset-0 match page
+        # at >=70, else CRITICS' PICK at Metacritic >=85, else none
+        self.assertIn("var CRITICS_PICK = 85;", self.HTML)
+        self.assertIn("var TOP_MATCH = 70;", self.HTML)
+        self.assertIn('if (pct != null && pct >= TOP_MATCH && sort === "match" && c.index === 0 '
+                      '&& c.offset === 0) {', bits)
+        self.assertIn('bits.push({ part: "ribbon", text: "Top match" });', bits)
+        self.assertIn('} else if (mc != null && mc >= CRITICS_PICK) {', bits)
+        self.assertIn('bits.push({ part: "ribbon", text: "Critics\' pick" });', bits)
+        # the frame is the badge's tier
+        self.assertIn('gcFrame(tappable ? "button" : "div", "frame-s gc-card", badgeBit ? badgeBit.tier : "none");',
+                      card)
+        self.assertNotIn("type-chip", self.HTML)
+        self.assertNotIn('cls: "corner"', self.HTML)
 
     def test_grid_steam_chip_is_phrase_only_on_a_line_of_its_own(self) -> None:
-        # One steamChip; the grid asks for its {meter: false} form.
-        chip = js_function(apps_shared.SCORE_CHIP_JS, "function steamChip(desc, url, opts)")
-        self.assertIn('label: "Steam", value: phrase, tier: steamTier(desc),', chip)
-        self.assertIn("var compact = !!opts && opts.meter === false;", chip)
-        self.assertIn("meter: compact || step == null ? null :", chip)   # the meter stays on the detail card
-        self.assertIn('cls: compact && words >= 2 ? "steam-line" : "",', chip)
-        # A real space after the label: the only break point between "Steam"
-        # and the phrase ("Overwhelmingly" ran out of the chip at 360px).
-        self.assertIn('if (compact) chip.insertBefore(document.createTextNode(" "), chip.querySelector("b"));',
-                      chip)
+        # One chip row of at most two: Metacritic / OpenCritic drawn as MC /
+        # OC (the full name in the title and the aria-label) — skipping the
+        # one the badge already shows — or the Steam phrase with its meter,
+        # its brand an .sr-only label. "No critic scores" when there is none.
+        bits = js_function(self.HTML, "function cardBits(game, ctx)")
+        for marker in (
+            'if (mc != null && badgeSource !== "mc") {',
+            'chips.push({ part: "chip", label: "MC", value: mc, tier: mcTier(mc), title: "Metacritic",',
+            'text: "Metacritic " + mc });',
+            'chips.push({ part: "chip", label: "OC", value: oc, tier: ocTier(oc, game.opencritic_tier),',
+            'steam.classList.add("gc-steam");',
+            'if (steamLbl) steamLbl.classList.add("sr-only");',
+            "return bits.concat(chips.slice(0, 2));",
+        ):
+            self.assertIn(marker, bits)
+        card = js_function(self.HTML, "function gridCard(game, ctx)")
+        self.assertIn("var chip = scoreChip({ label: b.label, value: b.value, tier: b.tier, title: b.title });",
+                      card)
+        self.assertIn('chip.setAttribute("aria-label", b.text);', card)
+        self.assertIn('} else if (!badgeBit || badgeBit.tag === "Match") {', card)
         css = widget_css(self.HTML)
-        start = css.index("  .card .chip.steam-line {")
-        rule = css[start:css.index("}", start)]
-        for decl in ("display: block;", "flex-basis: 100%;", "white-space: normal;",
-                     "overflow: visible;", "overflow-wrap: anywhere;"):
-            self.assertIn(decl, rule)
+        self.assertIn(".gc-card .chip.gc-steam b { order: -1; }", css)
+        sr = css.split("  .sr-only {", 1)[1].split("}", 1)[0]
+        for decl in ("position: absolute;", "width: 1px;", "clip-path: inset(50%);"):
+            self.assertIn(decl, sr)
 
     def test_grid_hours_say_what_they_are(self) -> None:
-        bits = js_function(self.HTML, "function cardBits(game)")
-        self.assertIn('if (hltb) bits.push({ part: "meta", text: hltb + " to beat" });', bits)
-        card = js_function(self.HTML, "function gridCard(game)")
-        self.assertIn('var metaBits = partsOf("meta").map(function (b) { return b.text; });', card)
+        # The plate shows the figure ("2.3h", "~4h"); its title and the
+        # card's label say which it is.
+        bits = js_function(self.HTML, "function cardBits(game, ctx)")
+        self.assertIn('if (played) bits.push({ part: "hours", value: played, title: "Your playtime", '
+                      'text: played + " played" });', bits)
+        self.assertIn('else if (hltb) bits.push({ part: "hours", value: hltb, title: "HowLongToBeat, main story", '
+                      'text: hltb + " to beat" });', bits)
+        card = js_function(self.HTML, "function gridCard(game, ctx)")
+        self.assertIn("span.title = b.title;", card)
+        self.assertIn('partsOf("platform").forEach(function (b) { sub.appendChild(el("span", "loz", b.text)); });',
+                      card)
 
     def test_the_card_is_named_by_its_title_and_what_it_shows(self) -> None:
-        card = js_function(self.HTML, "function gridCard(game)")
-        self.assertIn("var bits = cardBits(game);", card)
+        card = js_function(self.HTML, "function gridCard(game, ctx)")
+        self.assertIn("var bits = cardBits(game, c);", card)
         self.assertIn('card.setAttribute("aria-label", cardLabel(game, bits));', card)
         self.assertNotIn('"aria-labelledby"', self.HTML)        # aria-label must win
-        self.assertIn('card.setAttribute("role", "button");', card)
-        self.assertIn('if (ev.key === "Enter" || ev.key === " ") {', card)
+        # the card IS the tap target: a <button class="frame frame-s …">, so
+        # Enter and Space come from the element, not a key handler
+        self.assertIn('card.type = "button";', card)
+        self.assertIn('card.addEventListener("click", function () { selectGame(game); });', card)
+        self.assertNotIn('card.setAttribute("role", "button");', card)
         self.assertNotIn("Show details for", self.HTML)
 
     def test_show_next_button_only_when_has_more(self) -> None:
-        actions = js_function(self.HTML, "function gridActions(data)")
+        more = js_function(self.HTML, "function showNextButton(data)")
         for marker in (
-            "if (data.has_more && shown) {",
+            "if (!data.has_more || !shown) return null;",
             "var limit = num(args.limit) || shown;",
             'var idle = "Show next " + count;',
             'el("button", "btn act-more", idle)',
             'sendMessage("Show the next " + count + " recommendations (offset " + next + ")");',
             'more.textContent = "Asked the chat for the next " + count + "…";',
             # a lost message stays retryable: the button comes back after 8s
-            "more.disabled = false;\n          more.textContent = idle;\n        }, 8000);",
-            "if (canFullscreen()) {",
-            'el("button", "btn act-expand", "Open full screen")',
+            "more.disabled = false;\n        more.textContent = idle;\n      }, 8000);",
+        ):
+            self.assertIn(marker, more)
+        actions = js_function(self.HTML, "function gridActions(data)")
+        for marker in (
+            "var more = showNextButton(data);",
+            "if (canFullscreen() && data.results.length) {",
+            'el("button", "btn primary act-expand", "Open full screen")',   # the primary pill
             'requestDisplayMode("fullscreen");',
         ):
             self.assertIn(marker, actions)
-        # At most two actions: exactly these two buttons are ever built.
-        self.assertEqual(actions.count('el("button"'), 2)
+        # At most two actions: the secondary "Show next" and the primary.
+        self.assertEqual(actions.count('el("button"') + more.count('el("button"'), 2)
         css = widget_css(self.HTML)
         self.assertIn('html[data-display-mode="fullscreen"] .act-expand { display: none; }', css)
         self.assertIn("justify-content: flex-end;", css)
-        self.assertIn("@media (max-width: 419px) {\n    .actions { flex-direction: column; }\n"
-                      "    .actions .btn { width: 100%; }", css)
+        self.assertIn(".actions > .btn, .grid-head > .btn, .topbar > .btn { white-space: nowrap; }", css)
+        self.assertNotIn(".actions { flex-direction: column; }", css)
 
     def test_fullscreen_grid_widens_and_sticks_the_header(self) -> None:
+        # Two columns on a phone, three from 560px, four in fullscreen; the
+        # set line sticks and carries "Show next N" on its right.
         css = widget_css(self.HTML)
-        self.assertIn(
-            'html[data-display-mode="fullscreen"] .grid { grid-template-columns: '
-            "repeat(auto-fill, minmax(160px, 1fr)); }",
-            css,
-        )
+        self.assertIn(".grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }", css)
+        wide = css.split("  @media (min-width: 560px) {\n    .grid {", 1)[1].split("\n  }", 1)[0]
+        self.assertIn("grid-template-columns: repeat(3, minmax(0, 1fr));", wide)
+        self.assertIn('html[data-display-mode="fullscreen"] .grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }',
+                      wide)
         start = css.index('html[data-display-mode="fullscreen"] .grid-head, .topbar {')
         rule = css[start:css.index("}", start)]
         self.assertIn("position: sticky;", rule)
         self.assertIn("background: var(--gl-surface);", rule)
+        self.assertIn(".grid-head > .btn { margin-left: auto; }", css)
+        grid = js_function(self.HTML, "function renderGrid(data)")
+        self.assertIn('if (gridMode === "fullscreen") {\n      var more = showNextButton(data);\n'
+                      "      if (more) head.appendChild(more);", grid)
+        # a display-mode change lays the grid out again
+        self.assertIn('else if (view === "grid" && gridData && currentDisplayMode() !== gridMode) render(gridData);',
+                      js_function(self.HTML, "function hostContextChanged(ctx)"))
+
+    def test_cards_are_dealt_in_once_per_payload(self) -> None:
+        # M2: each card dealt 40ms apart (dealIn caps the stagger); a redraw of
+        # the same payload keeps them still; a skeleton resolves into the view
+        # (M5). No other motion is local.
+        grid = js_function(self.HTML, "function renderGrid(data)")
+        self.assertIn("var fresh = dealtData !== data;", grid)
+        self.assertIn("if (fresh) dealIn(card, i);", grid)
+        render = js_function(self.HTML, "function render(data)")
+        self.assertIn("gcResolve(skel, node);", render)
+        resolve = js_function(self.HTML, "function gcResolve(skel, node)")
+        self.assertIn("resolveSkeleton(skel, function () { return node; });", resolve)
+        self.assertIn('node.classList.remove("deal");', resolve)
+        local = widget_css(self.HTML)
+        for name, block in shared_blocks():
+            local = local.replace(block, "")
+        self.assertNotIn("animation", local)
+        self.assertNotIn("@keyframes", local)
+        # the one local transition is the lightbox's own (out of scope)
+        self.assertEqual(re.findall(r"transition:[^;]*", local), ["transition: transform 0.19s ease"])
+
+    def test_render_code_joins_nothing_with_middots(self) -> None:
+        # Separate spans with a gap, never " · " strings: the module's own
+        # code carries no middot at all (an aria-label would be the only
+        # allowed place, and none needs one).
+        source = (Path(apps.__file__)).read_text()
+        self.assertNotIn("·", source)
 
     def test_card_tap_updates_model_context_then_fullscreen_or_chat(self) -> None:
         tap = js_function(self.HTML, "function selectGame(game)")
@@ -667,12 +792,16 @@ class GridModeTests(unittest.TestCase):
     def test_the_drill_in_shows_a_skeleton_then_the_live_detail(self) -> None:
         drill = js_function(self.HTML, "function openDrill(game, before)")
         for marker in (
-            'el("button", "btn", "← Back to results")',
+            # the top bar: a secondary pill with a chevron glyph
+            'var back = el("button", "btn");',
+            'var glyph = iconNode("0 0 20 20", BACK_GLYPH);',
+            'back.appendChild(el("span", null, "Back to results"));',
             'back.addEventListener("click", backToResults);',
-            'el("div", "topbar-title", game.name)',
             'holder.appendChild(skeleton("detail"));',
             'callTool("get_game_detail", { game_id: game.game_id, media: true }, 30000)',
             "if (seq !== drillSeq) return;",
+            # the skeleton resolves into the card (M5)
+            "gcResolve(skel, detailCard(data));",
             # the failure names its cause, then says what is on screen
             'if (res === TIMED_OUT) { fill(game, "The library didn\'t answer in 30s."); return; }',
             # the drill-in's call is get_game_detail, not the grid's own tool
@@ -681,6 +810,8 @@ class GridModeTests(unittest.TestCase):
             'if (failure) notice(holder, failure + " Showing what the list had.");',
         ):
             self.assertIn(marker, drill)
+        self.assertNotIn("←", drill)
+        self.assertIn('var BACK_GLYPH = [["path", { d: "m12.5 4.5-5.5 5.5 5.5 5.5" }]];', self.HTML)
         # the shared toolErrorText (TOOL_RESULT_JS), not a local copy
         self.assertEqual(self.HTML.count("function toolErrorText("), 1)
         self.assertIn("function toolErrorText(result, name)", apps_shared.TOOL_RESULT_JS)
@@ -690,6 +821,7 @@ class GridModeTests(unittest.TestCase):
         back = js_function(self.HTML, "function backToResults()")
         self.assertIn("if (gridData) render(gridData);", back)
         self.assertIn('if (restore !== "fullscreen") requestDisplayMode("inline");', back)
+        self.assertIn('var cards = root.querySelectorAll(".gc-card");', back)
         # The host's own close button ends the drill-in too.
         self.assertIn(
             'if (view === "drill" && currentDisplayMode() !== "fullscreen" && gridData) render(gridData);',
@@ -704,7 +836,8 @@ NODE = shutil.which("node")
 _TAP_SHIM = r"""
 var messages = [], drilled = [], requests = [];
 var view = "grid", gridData = { results: [] }, lastSelectedId = null, mode = "inline";
-function render() {}
+var gridMode = "inline", renders = 0;
+function render() { renders += 1; }
 function updateModelContext() {}
 function sendMessage(text) { messages.push(text); }
 function openDrill(game, before) { drilled.push([game.name, before]); view = "drill"; }
@@ -744,6 +877,14 @@ _TAP_PROBE = r"""
   mode = "fullscreen";
   hostContextChanged({ displayMode: "fullscreen" });
   out.granted = { drilled: drilled.slice(), messages: messages.slice() };
+
+  // No tap pending: a grid whose display mode changed is laid out again
+  // (once), and a context change that keeps the mode redraws nothing.
+  view = "grid"; mode = "fullscreen"; gridMode = "inline"; renders = 0;
+  hostContextChanged({ displayMode: "fullscreen" });
+  gridMode = "fullscreen";
+  hostContextChanged({ theme: "dark" });
+  out.relayout = renders;
   console.log(JSON.stringify(out));
 })();
 """
@@ -777,6 +918,9 @@ class CardTapBehaviourTests(unittest.TestCase):
     def test_a_granted_answer_drills_in_once(self) -> None:
         self.assertEqual(self.out["granted"], {"drilled": [["Noita", "inline"]], "messages": []})
 
+    def test_a_display_mode_change_lays_the_grid_out_again(self) -> None:
+        self.assertEqual(self.out["relayout"], 1)
+
 
 # The card's accessible name is executed against the real gridCard in
 # tests/test_apps_shared.py::CardLabelBehaviourTests (item 14: the label is
@@ -784,64 +928,148 @@ class CardTapBehaviourTests(unittest.TestCase):
 
 
 class DetailModeTests(unittest.TestCase):
-    """Spec 2026-10-03 §2.1.5–§2.1.6: identity panel, disclosure, carousel rows."""
+    """The Binder detail card (spec 2026-10-04 §1.3, §2 Phase 2A): the big
+    frame, then the ground — description, review, awards, tags, reel, strips,
+    actions."""
 
     HTML = apps.GAME_CARDS_HTML
 
     def test_identity_panel_leads_the_stack(self) -> None:
+        # the card, then the ground: what it is like, the reel, the strips,
+        # the actions (Full breakdown + the store link)
         card = js_function(self.HTML, "function detailCard(game)")
-        order = ["identityPanel(game, media)", "mediaNode(stack, media, game.name)",
-                 "relatedBlock(stack, game)"]
+        order = ["var panel = identityPanel(game, media);", "stack.appendChild(panel.frame);",
+                 "dealIn(panel.frame, 0);", "var flow = groundNode(game, media);",
+                 "mediaNode(flow, media, game.name)", "similarStrip(flow, game.similar);",
+                 "studioStrip(flow, game.pedigree);", "relatedBlock(flow, actions, game);",
+                 "var store = storeLink(game);", "stack.appendChild(flow);"]
         positions = [card.index(marker) for marker in order]
+        self.assertEqual(positions, sorted(positions))
+        ground = js_function(self.HTML, "function groundNode(game, media)")
+        order = ['var desc = el("p", "desc", description);', "flow.appendChild(flavorNode(String(review), true));",
+                 'abil.appendChild(abilityNode("Award", text));', "flow.appendChild(tagLine(tags));"]
+        positions = [ground.index(marker) for marker in order]
         self.assertEqual(positions, sorted(positions))
 
     def test_identity_panel_cover_widths(self) -> None:
+        # The frame body: art (cover at full card width, badge, art-edge
+        # ribbon) → plate → stats. From 560px the card is 300px with the
+        # ground beside it.
+        panel = js_function(self.HTML, "function identityPanel(game, media)")
+        order = ['var frame = gcFrame("article", "dt-card", detailTier(game));',
+                 "art.appendChild(coverNode(game));", "if (badge) art.appendChild(badge);",
+                 "if (ribbon) art.appendChild(ribbon);", "frame.appendChild(art);",
+                 'row.appendChild(el("h2", "plate-title", game.name));',
+                 'row.appendChild(el("span", "card-no", "No. " + game.game_id));',
+                 "frame.appendChild(plate);", "if (stats) frame.appendChild(stats);"]
+        positions = [panel.index(marker) for marker in order]
+        self.assertEqual(positions, sorted(positions))
         css = widget_css(self.HTML)
-        self.assertIn("grid-template-columns: 120px minmax(0, 1fr);", css)
-        self.assertIn("@media (max-width: 559px) {\n    .detail {\n"
-                      "      grid-template-columns: 84px minmax(0, 1fr);", css)
+        wide = css.split("  @media (min-width: 560px) {\n    .detail-stack {", 1)[1].split("}", 1)[0]
+        self.assertIn("grid-template-columns: 300px minmax(0, 1fr);", wide)
+
+    def test_frame_tier_badge_and_ribbon_rules(self) -> None:
+        tier = js_function(self.HTML, "function detailTier(game)")
+        self.assertIn("return mine != null ? ratingTier(mine) : criticTier(game);", tier)
+        critic = js_function(self.HTML, "function criticTier(game)")
+        self.assertIn("if (realScore(game.metacritic_score)) return mcTier(game.metacritic_score);", critic)
+        self.assertIn("if (realScore(game.opencritic_score)) return ocTier(game.opencritic_score, "
+                      "game.opencritic_tier);", critic)
+        self.assertIn('return "none";', critic)
+        badge = js_function(self.HTML, "function detailBadge(game)")
+        self.assertIn('badgeNode({ value: mine, suffix: "/10", tag: "Your rating", tier: ratingTier(mine) });', badge)
+        self.assertIn('tag: "Metacritic",', badge)
+        ribbon = js_function(self.HTML, "function statusRibbon(game)")
+        for marker in (
+            'if (status) return ribbonNode(label("status", game.completion_status), status[1], note, "art");',
+            'if (hours === 0 && game.owned) return ribbonNode("Unplayed", "none", null, "art");',
+            "return null;",
+        ):
+            self.assertIn(marker, ribbon)
 
     def test_time_to_beat_and_protondb_chips(self) -> None:
-        panel = js_function(self.HTML, "function identityPanel(game, media)")
-        self.assertIn('label: "Time to beat", value: hltb, title: "HowLongToBeat, main story",', panel)
+        # The chip row (chipRow keeps three): Metacritic, OpenCritic, Steam
+        # phrase + meter, ProtonDB. Time to beat is the LENGTH stat row.
+        chips = js_function(self.HTML, "function detailChips(game)")
+        self.assertIn("tier: protonTier(game.protondb_tier),", chips)
+        self.assertIn("return chipRow(chips);", chips)
         self.assertNotIn('label: "HLTB"', self.HTML)
-        self.assertIn("tier: protonTier(game.protondb_tier),", panel)
+        self.assertNotIn('label: "Time to beat"', self.HTML)
+
+    def test_stat_rows(self) -> None:
+        stats = js_function(self.HTML, "function detailStats(game)")
+        order = [
+            'stats.appendChild(statRow({ label: "Played", value: hoursLabel(hours), key: true }));',
+            'if (last) stats.appendChild(statRow({ label: "Last", value: last }));',
+            'if (length) stats.appendChild(statRow({ label: "Length", note: "main story", value: length }));',
+            "if (paid) stats.appendChild(paid);",
+            "if (chips) stats.appendChild(chips);",
+            'var rating = statRow({ label: "Rating", value: pipsNode(mine, 10, tier) });',
+        ]
+        positions = [stats.index(marker) for marker in order]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("if (hours != null && hours > 0) {", stats)
+        paid = js_function(self.HTML, "function paidRow(game)")
+        self.assertIn('value: amount === 0 ? "Free" : money(amount, row.price_currency),', paid)
+        self.assertIn('label("purchase_source", row.purchase_source)', paid)
 
     def test_your_rating_is_a_tiered_chip(self) -> None:
-        panel = js_function(self.HTML, "function identityPanel(game, media)")
-        self.assertIn('label: "Your rating", value: mine + "/10", tier: ratingTier(mine),', panel)
-        self.assertNotIn("mine >= 7", panel)
+        # His rating is the badge and the ten RATING pips, both in its tier —
+        # no "Your rating" chip any more.
+        stats = js_function(self.HTML, "function detailStats(game)")
+        self.assertIn('rating.classList.add("tier-" + tier);', stats)
+        self.assertNotIn('label: "Your rating"', self.HTML)
+        self.assertNotIn("mine >= 7", self.HTML)
         self.assertNotIn("My rating: ", self.HTML)
 
     def test_description_clamps_to_three_lines_with_a_more_toggle(self) -> None:
         css = widget_css(self.HTML)
         start = css.index("  .desc {")
         self.assertIn("-webkit-line-clamp: 3;", css[start:css.index("}", start)])
-        panel = js_function(self.HTML, "function identityPanel(game, media)")
+        start = css.index("  .more-toggle {")
+        self.assertIn("min-height: 44px;", css[start:css.index("}", start)])
+        ground = js_function(self.HTML, "function groundNode(game, media)")
         for marker in (
             'var more = el("button", "more-toggle", "More");',
             'more.textContent = open ? "Less" : "More";',
             'more.setAttribute("aria-expanded", open ? "true" : "false");',
             "if (desc.scrollHeight > desc.clientHeight + 1) {",
         ):
-            self.assertIn(marker, panel)
+            self.assertIn(marker, ground)
 
     def test_tags_are_one_muted_line_of_at_most_eight(self) -> None:
-        panel = js_function(self.HTML, "function identityPanel(game, media)")
-        self.assertIn("var tags = (game.tags || []).filter(Boolean).slice(0, 8);", panel)
-        self.assertIn('body.appendChild(el("div", "tagline", tags.join(" · ")));', panel)
+        ground = js_function(self.HTML, "function groundNode(game, media)")
+        self.assertIn("var tags = list(game.tags).filter(Boolean).slice(0, 8);", ground)
+        line = js_function(self.HTML, "function tagLine(tags, cls)")
+        self.assertIn('tags.forEach(function (t) { line.appendChild(el("span", null, t)); });', line)
+
+    def test_award_lines_come_from_the_game_awards_features_only(self) -> None:
+        self.assertIn("var AWARD_RE = /^the game awards - (.+) - (winner|nominee)$/i;", self.HTML)
+        lines = js_function(self.HTML, "function awardLines(features)")
+        self.assertIn('lines.push("The Game Awards — " + listed + ", winner");', lines)
+        self.assertIn('if (nominated.length) lines.push("Nominee for " + names(nominated).join(", "));', lines)
+        self.assertIn(".slice(0, 3)", lines)
 
     def test_similar_and_studio_sit_behind_fullscreen_or_a_disclosure(self) -> None:
-        block = js_function(self.HTML, "function relatedBlock(stack, game)")
+        # The strips are inline now; what sits behind "Full breakdown" is the
+        # rest — studio, publisher, track record, the three lengths, genres.
+        block = js_function(self.HTML, "function relatedBlock(flow, actions, game)")
         for marker in (
-            '[similar ? "Similar games you own" : null, studio ? "From the studio" : null]',
-            'if (currentDisplayMode() === "fullscreen") { build(stack); return; }',
+            "var node = breakdownNode(game);",
+            "if (!node) return;",
+            'if (currentDisplayMode() === "fullscreen") {',
             # the shared control (apps_shared.DISCLOSURE_JS), no local copy
-            "fullscreenOrDisclosure(stack, text, build);",
+            'fullscreenOrDisclosure(actions, "Full breakdown", build);',
         ):
             self.assertIn(marker, block)
         self.assertNotIn("requestDisplayMode", block)
         self.assertNotIn("chev-out", self.HTML)
+        css = widget_css(self.HTML)
+        self.assertIn("  .dt-actions > .disclosure {", css)
+        self.assertIn("  .dt-actions > .disclosure-body { flex-basis: 100%; order: 3; margin-top: 4px; }", css)
+        store = js_function(self.HTML, "function storeLink(game)")
+        self.assertIn('var url = "https://store.steampowered.com/app/" + appid + "/";', store)
+        self.assertIn("openLink(url);", store)
 
     def test_carousel_rows_snap_and_peek(self) -> None:
         css = widget_css(self.HTML)
@@ -854,7 +1082,401 @@ class DetailModeTests(unittest.TestCase):
             "scroll-padding-right: calc(4px + var(--gl-safe-right, 0px));",
         ):
             self.assertIn(decl, rule)
-        self.assertIn(".sim { width: 120px; scroll-snap-align: start; }", css)
+        # the minis ride on the shared .strip.ministrip (MINI_CSS)
+        self.assertIn('el("div", "strip ministrip")', self.HTML)
+        self.assertNotIn(".sim { width: 120px;", css)
+
+
+
+
+_SAMPLES = Path(__file__).resolve().parent.parent / "scripts" / "preview_samples"
+
+
+def _sample(name: str) -> dict:
+    payload = json.loads((_SAMPLES / name).read_text())
+    payload.pop("_note", None)
+    return payload
+
+
+def run_cards(probe: str) -> dict:
+    """test_apps_shared.run_widget for the game cards, from a file: the probes
+    here carry whole saved payloads, past the OS limit on one argv string."""
+    import tempfile
+
+    from test_apps_shared import MINI_DOM
+
+    tail = '  startWidget("gamelib-game-cards");\n})();'
+    script = apps.GAME_CARDS_HTML.split("<script>\n", 1)[1].split("</script>", 1)[0]
+    assert script.count(tail) == 1
+    script = script.replace(tail, tail.split("\n")[0] + "\n" + probe + "\n})();")
+    assert NODE is not None
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "probe.js"
+        path.write_text(MINI_DOM + script)
+        proc = subprocess.run([NODE, str(path)], capture_output=True, text=True, timeout=60, check=False)
+    if proc.returncode != 0:
+        raise AssertionError(proc.stderr)
+    return json.loads(proc.stdout)
+
+
+# Readers for the rendered DOM (run under test_apps_shared.MINI_DOM).
+_DOM_READERS = r"""
+  function q(n, s) { return n.querySelector(s); }
+  function txt(n) { return n ? n.textContent : null; }
+  function kids(n) { return n ? n.children : []; }
+  function cls(n) { return n.getAttribute("class") || n.className; }
+  function card(c) {
+    var badge = q(c, ".badge"), ribbon = q(c, ".ribbon");
+    return {
+      tag: c.tagName, cls: c.className, label: c.getAttribute("aria-label"),
+      deal: c.classList.contains("deal"), i: c.style["--i"] === undefined ? null : c.style["--i"],
+      kids: kids(c).map(cls),
+      badge: badge ? [txt(q(badge, ".badge-num")), txt(q(badge, ".badge-suffix")), txt(q(badge, ".badge-tag")),
+                      badge.className] : null,
+      ribbon: ribbon ? [txt(ribbon), ribbon.className] : null,
+      title: txt(q(c, ".plate-title-s")),
+      sub: kids(q(c, ".sub")).map(function (s) { return [s.className, s.textContent, s.title || null]; }),
+      chips: c.querySelectorAll(".chip").map(function (ch) {
+        return [txt(q(ch, ".lbl")), txt(q(ch, "b")), ch.getAttribute("aria-label"), ch.className];
+      }),
+      nochip: txt(q(c, ".gc-nochip")),
+      tags: kids(q(c, ".gc-tags")).map(txt),
+    };
+  }
+"""
+
+_GRID_PROBE = _DOM_READERS + r"""
+  (function () {
+    applyHostContext({ displayMode: MODE, availableDisplayModes: ["inline", "fullscreen"] });
+    lastToolInput = INPUT;
+    render(PAYLOAD);
+    var page = root.firstElementChild;
+    var head = q(page, ".grid-head");
+    var actions = q(page, ".grid-actions");
+    var out = {
+      page: page.className,
+      head: kids(head).map(function (n) { return [n.tagName, n.className, n.textContent]; }),
+      cards: page.querySelectorAll(".gc-card").map(card),
+      actions: actions ? kids(actions).map(function (n) { return [n.className, n.textContent]; }) : null,
+      text: page.textContent,
+    };
+    // a redraw of the same payload (Back, a late tool input) deals nothing
+    render(PAYLOAD);
+    out.redrawDeals = root.querySelectorAll(".deal").length;
+    console.log(JSON.stringify(out));
+  })();
+"""
+
+_RESOLVE_PROBE = r"""
+  (async function () {
+    var out = {};
+    answer("ui/initialize", { hostCapabilities: {}, hostContext: {} });
+    await tick();
+    host({ jsonrpc: "2.0", method: "ui/notifications/tool-input", params: { arguments: { sort_by: "match", limit: 8 } } });
+    out.skeleton = root.children.map(function (n) { return n.className; });
+    host({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: PAYLOAD } });
+    out.resolving = root.children.map(function (n) { return n.className; });
+    out.cardsDealt = root.querySelectorAll(".gc-card").filter(function (c) { return c.classList.contains("deal"); }).length;
+    out.dealAt = root.firstElementChild.style["--deal-at"] || null;
+    flushTimers();
+    out.resolved = root.children.map(function (n) { return n.className; });
+    console.log(JSON.stringify(out));
+  })();
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class GridCardBehaviourTests(unittest.TestCase):
+    """The grid, executed on the saved discover_games payload: the set line,
+    each card's frame tier / badge / ribbon / plate / chips / tags, the deal."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        payload = _sample("discover_taste_match.json")
+
+        def run(mode: str, tool_input: dict, data: dict) -> dict:
+            return run_cards("  var MODE = " + json.dumps(mode) + ";\n  var INPUT = "
+                              + json.dumps(tool_input) + ";\n  var PAYLOAD = " + json.dumps(data) + ";\n"
+                              + _GRID_PROBE)
+
+        cls.match = run("inline", {"sort_by": "match", "limit": 8, "vibes": ["cozy"], "max_hltb_hours": 10},
+                        payload)
+        cls.critic = run("inline", {"sort_by": "critic", "limit": 8}, payload)
+        cls.full = run("fullscreen", {"sort_by": "match", "limit": 8}, payload)
+        hades = {"game_id": 1, "name": "Hades II", "match_percent": 100, "hltb_main": 26.5,
+                 "suggested_platform": "steam", "playtime_hours": 2.3, "metacritic_score": 93,
+                 "opencritic_score": 91, "steam_review_desc": "Overwhelmingly Positive",
+                 "matched_tags": ["roguelike"]}
+        steam_only = {"game_id": 2, "name": "Noita", "match_percent": 55, "steam_review_desc": "Very Positive",
+                      "metacritic_score": -1}
+        cls.extra = run("inline", {"sort_by": "match"},
+                        {"results": [hades, steam_only], "offset": 20, "total_matches": 22, "has_more": False})
+        cls.resolve = run_cards("  var PAYLOAD = " + json.dumps(payload) + ";\n" + _RESOLVE_PROBE)
+
+    def test_the_set_line_is_the_count_and_facet_lozenges(self) -> None:
+        self.assertEqual(self.match["head"], [
+            ["B", "", "8 of 2090"], ["SPAN", "loz", "taste match"], ["SPAN", "loz", "cozy"],
+            ["SPAN", "loz", "unplayed"], ["SPAN", "loz", "≤ 10h"],
+        ])
+        self.assertNotIn("·", self.match["text"])
+
+    def test_frame_tier_follows_the_match_or_the_critic_sort(self) -> None:
+        tiers = [c["cls"].replace(" deal", "") for c in self.match["cards"]]
+        self.assertEqual(tiers, ["frame frame-s gc-card tier-good", "frame frame-s gc-card tier-ok",
+                                 "frame frame-s gc-card tier-ok", "frame frame-s gc-card tier-ok",
+                                 "frame frame-s gc-card tier-ok", "frame frame-s gc-card tier-none",
+                                 "frame frame-s gc-card tier-none", "frame frame-s gc-card tier-none"])
+        self.assertTrue(all(c["tag"] == "BUTTON" for c in self.match["cards"]))
+        # sorted by critics: the Metacritic (OpenCritic fallback) tier; none without one
+        critic = [c["cls"].replace(" deal", "").rsplit(" ", 1)[1] for c in self.critic["cards"]]
+        self.assertEqual(critic, ["tier-good", "tier-none", "tier-ok", "tier-ok", "tier-ok", "tier-none",
+                                  "tier-ok", "tier-good"])
+
+    def test_the_badge_is_the_match_or_the_critic_score(self) -> None:
+        cards = self.match["cards"]
+        self.assertEqual(cards[0]["badge"], ["73", "%", "Match", "badge tier-good badge-on-art"])
+        self.assertEqual(cards[7]["badge"], ["47", "%", "Match", "badge tier-none badge-on-art"])
+        critic = self.critic["cards"]
+        self.assertEqual(critic[0]["badge"], ["82", None, "Metacritic", "badge tier-good badge-on-art"])
+        self.assertIsNone(critic[1]["badge"])                     # no critic score at all
+
+    def test_ribbons_only_for_top_match_and_critics_pick(self) -> None:
+        ribbons = [c["ribbon"] for c in self.match["cards"]]
+        self.assertEqual(ribbons[0], ["Top match", "ribbon ribbon-s ribbon-art tier-good"])
+        self.assertEqual(ribbons[7], ["Critics' pick", "ribbon ribbon-s ribbon-art tier-good"])   # MC 88
+        self.assertEqual(ribbons[1:7], [None] * 6)
+        # not the first card of the first page: no TOP MATCH; MC 93 >= 85 still picks
+        self.assertEqual(self.extra["cards"][0]["ribbon"][0], "Critics' pick")
+        self.assertIsNone(self.critic["cards"][0]["ribbon"])     # sorted by critics: MC 82 < 85
+
+    def test_the_plate_sub_line_is_separate_spans(self) -> None:
+        cards = self.match["cards"]
+        self.assertEqual(cards[0]["title"], "The Spirit and the Mouse")
+        self.assertEqual(cards[0]["sub"], [["", "~4.2h", "HowLongToBeat, main story"],
+                                           ["loz", "Epic Games", None], ["card-no", "No. 1", None]])
+        self.assertEqual(cards[6]["sub"], [["loz", "Switch 2", None], ["card-no", "No. 7", None]])
+        # played hours win over the estimate; numbering is global (offset 20)
+        self.assertEqual(self.extra["cards"][0]["sub"], [["", "2.3h", "Your playtime"], ["loz", "Steam", None],
+                                                         ["card-no", "No. 21", None]])
+
+    def test_one_chip_row_of_at_most_two_abbreviated_chips(self) -> None:
+        cards = self.match["cards"]
+        self.assertEqual([c[:3] for c in cards[0]["chips"]],
+                         [["MC", "82", "Metacritic 82"], ["OC", "75", "OpenCritic 75"]])
+        self.assertEqual(cards[2]["chips"][1][:2], ["Steam", "Very positive"])
+        self.assertIn("gc-steam", cards[2]["chips"][1][3])
+        self.assertEqual(cards[1]["chips"], [])
+        self.assertEqual(cards[1]["nochip"], "No critic scores")
+        self.assertTrue(all(len(c["chips"]) <= 2 for c in self.match["cards"] + self.extra["cards"]))
+        # three scores, two chips: the Steam phrase is the one left out
+        self.assertEqual([c[0] for c in self.extra["cards"][0]["chips"]], ["MC", "OC"])
+        # sorted by critics the badge shows Metacritic, so the row skips it
+        self.assertEqual([c[0] for c in self.critic["cards"][0]["chips"]], ["OC"])
+
+    def test_matched_tags_are_separate_words(self) -> None:
+        self.assertEqual(self.match["cards"][0]["tags"], ["emotional", "narrative", "exploration"])
+
+    def test_the_label_is_what_the_card_shows_with_full_names(self) -> None:
+        self.assertEqual(
+            self.extra["cards"][0]["label"],
+            "Hades II: 100% match, Critics' pick, 2.3h played, Steam, Metacritic 93, OpenCritic 91")
+        self.assertEqual(self.extra["cards"][1]["label"], "Noita: 55% match, Steam Very positive")
+        self.assertEqual(self.match["cards"][0]["label"],
+                         "The Spirit and the Mouse: 73% match, Top match, ~4.2h to beat, Epic Games, "
+                         "Metacritic 82, OpenCritic 75")
+
+    def test_cards_deal_in_with_a_capped_stagger_once(self) -> None:
+        cards = self.match["cards"]
+        self.assertTrue(all(c["deal"] for c in cards))
+        self.assertEqual([c["i"] for c in cards], ["0", "1", "2", "3", "4", "5", "5", "5"])
+        self.assertEqual(self.match["redrawDeals"], 0)
+        # the grain is every frame's first child
+        self.assertTrue(all(c["kids"][0] == "grain" for c in cards))
+
+    def test_footer_inline_set_line_in_fullscreen(self) -> None:
+        self.assertEqual(self.match["actions"], [["btn act-more", "Show next 8"],
+                                                 ["btn primary act-expand", "Open full screen"]])
+        self.assertIsNone(self.full["actions"])
+        self.assertEqual(self.full["head"][-1], ["BUTTON", "btn act-more", "Show next 8"])
+
+    def test_the_startup_skeleton_resolves_into_the_grid(self) -> None:
+        out = self.resolve
+        self.assertEqual(out["skeleton"], ["skel skel-grid"])
+        self.assertEqual(out["resolving"], ["grid-page", "skel skel-grid leaving"])
+        self.assertEqual(out["cardsDealt"], 8)
+        self.assertEqual(out["dealAt"], "60ms")
+        self.assertEqual(out["resolved"], ["grid-page"])
+
+
+_DETAIL_PROBE = _DOM_READERS + r"""
+  (function () {
+    function detail(game) {
+      root.textContent = "";
+      render(game);
+      var stack = root.firstElementChild;
+      var frame = stack.children[0];
+      var flow = stack.children[1];
+      var badge = q(frame, ".badge"), ribbon = q(frame, ".ribbon"), pips = q(frame, ".pips");
+      var stats = q(frame, ".stats");
+      return {
+        frame: [frame.tagName, frame.className, frame.classList.contains("deal")],
+        frameKids: kids(frame).map(cls),
+        artKids: kids(q(frame, ".art")).map(cls),
+        badge: badge ? [txt(q(badge, ".badge-num")), txt(q(badge, ".badge-suffix")), txt(q(badge, ".badge-tag")),
+                        badge.className] : null,
+        ribbon: ribbon ? [txt(q(ribbon, ".ribbon-text")), txt(q(ribbon, ".ribbon-note")), ribbon.className] : null,
+        plate: [txt(q(frame, ".plate-title")), txt(q(frame, ".card-no"))],
+        sub: kids(q(frame, ".sub")).map(function (s) { return [s.className, s.textContent]; }),
+        stats: kids(stats).map(function (r) {
+          if (!r.classList.contains("stat")) return ["chips"].concat(r.children.map(function (c) { return txt(q(c, ".lbl")); }));
+          var note = txt(q(r, ".stat-note"));
+          var name = txt(q(r, ".stat-label"));
+          return [note ? name.slice(0, name.length - note.length) : name, note, txt(q(r, ".stat-val")),
+                  r.classList.contains("is-key")];
+        }),
+        pips: pips ? [pips.children.filter(function (p) { return p.className === "on"; }).length,
+                      pips.children.filter(function (p) { return p.className === "half"; }).length,
+                      pips.children.length, pips.className] : null,
+        flow: kids(flow).map(cls),
+        awards: flow.querySelectorAll(".ability").map(txt),
+        flavor: txt(q(flow, ".flavor")),
+        tags: kids(q(flow, ".tagline")).map(txt),
+        eyebrows: flow.querySelectorAll(".section-title").map(txt),
+        minis: flow.querySelectorAll(".mini").map(function (m) {
+          return [m.className, txt(q(m, ".mini-name"))].concat(m.querySelectorAll(".mini-meta").map(function (l) {
+            return l.children.map(txt);
+          }));
+        }),
+        notices: flow.querySelectorAll(".notice").map(txt),
+        actions: kids(q(flow, ".dt-actions")).map(function (n) { return [n.className, n.textContent]; }),
+        text: stack.textContent,
+      };
+    }
+    console.log(JSON.stringify({ ghost: detail(GHOST), unrated: detail(UNRATED), unknown: detail(UNKNOWN),
+                                 bare: detail({ game_id: 9, name: "Mystery", enrichment: { igdb: "no_match" } }) }));
+  })();
+"""
+
+_DRILL_PROBE = r"""
+  (async function () {
+    var out = {};
+    applyHostContext({ displayMode: "fullscreen", availableDisplayModes: ["inline", "fullscreen"] });
+    openDrill({ game_id: 2333, name: "Ghost of Tsushima" }, "inline");
+    var bar = root.children[0], holder = root.children[1];
+    out.bar = [bar.className, bar.children.map(function (n) { return n.className; }),
+               bar.children[0].children.map(function (n) { return n.tagName; }), bar.children[0].textContent];
+    out.before = holder.children.map(function (n) { return n.className; });
+    answer("tools/call", { structuredContent: GHOST });
+    await tick(); await tick();
+    out.during = holder.children.map(function (n) { return n.className; });
+    out.frame = holder.children[0].children[0].className;
+    flushTimers();
+    out.after = holder.children.map(function (n) { return n.className; });
+    console.log(JSON.stringify(out));
+  })();
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class DetailCardBehaviourTests(unittest.TestCase):
+    """The detail card, executed on the saved get_game_detail payload."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        ghost = _sample("detail_ghost_of_tsushima.json")
+        unrated = {"game_id": 7, "name": "Before I Forget", "metacritic_score": 88, "playtime_hours": 0,
+                   "owned": True, "platforms": [{"platform": "steam", "owned": True, "price_paid": 4.99,
+                                                 "price_currency": "EUR", "purchase_source": "humble"}],
+                   "features": ["the game awards - best debut indie game - winner",
+                                "the game awards - games for impact - winner",
+                                "golden joystick awards - best indie game - winner"]}
+        unknown = {"game_id": 8, "name": "Abandoned Thing", "completion_status": "abandoned",
+                   "my_rating": {"normalized_score": 4.5}, "playtime_hours": None}
+        probe = ("  var GHOST = " + json.dumps(ghost) + ";\n  var UNRATED = " + json.dumps(unrated)
+                 + ";\n  var UNKNOWN = " + json.dumps(unknown) + ";\n")
+        cls.out = run_cards(probe + _DETAIL_PROBE)
+        cls.drill = run_cards("  var GHOST = " + json.dumps(ghost) + ";\n" + _DRILL_PROBE)
+
+    def test_the_big_frame_is_tiered_by_his_rating_and_dealt_in(self) -> None:
+        ghost = self.out["ghost"]
+        self.assertEqual(ghost["frame"], ["ARTICLE", "frame dt-card tier-good deal", True])
+        self.assertEqual(ghost["frameKids"], ["grain", "art", "plate", "stats"])
+        self.assertEqual(ghost["artKids"], ["cover-wrap", "badge tier-good badge-on-art",
+                                            "ribbon ribbon-art tier-good has-note"])
+        self.assertEqual(ghost["badge"], ["8", "/10", "Your rating", "badge tier-good badge-on-art"])
+        # unrated: the critic tier and the Metacritic badge
+        self.assertEqual(self.out["unrated"]["frame"][1], "frame dt-card tier-good deal")
+        self.assertEqual(self.out["unrated"]["badge"][:3], ["88", None, "Metacritic"])
+        # rated 4.5: bad
+        self.assertEqual(self.out["unknown"]["frame"][1], "frame dt-card tier-bad deal")
+        self.assertEqual(self.out["bare"]["frame"][1], "frame dt-card tier-none deal")
+
+    def test_the_status_ribbon(self) -> None:
+        self.assertEqual(self.out["ghost"]["ribbon"], ["Completed", "82h", "ribbon ribbon-art tier-good has-note"])
+        self.assertEqual(self.out["unrated"]["ribbon"], ["Unplayed", None, "ribbon ribbon-art tier-none"])
+        self.assertEqual(self.out["unknown"]["ribbon"], ["Abandoned", None, "ribbon ribbon-art tier-bad"])
+        self.assertIsNone(self.out["bare"]["ribbon"])              # unknown state: nothing
+
+    def test_the_plate(self) -> None:
+        ghost = self.out["ghost"]
+        self.assertEqual(ghost["plate"], ["Ghost of Tsushima", "No. 2333"])
+        self.assertEqual(ghost["sub"], [["", "Sucker Punch Productions"], ["", "2020"], ["loz", "PS5"]])
+
+    def test_the_stat_rows_and_pips(self) -> None:
+        self.assertEqual(self.out["ghost"]["stats"], [
+            ["Played", None, "82h", True],
+            ["Last", None, "Sep 2022", False],
+            ["Length", "main story", "~25h", False],
+            ["Paid", "free giveaway", "Free", False],
+            ["chips", "Metacritic", "OpenCritic"],
+            ["Rating", None, "", False],
+        ])
+        self.assertEqual(self.out["ghost"]["pips"], [8, 0, 10, "pips tier-good"])
+        self.assertEqual(self.out["unknown"]["pips"], [4, 1, 10, "pips tier-bad"])
+        self.assertEqual(self.out["unrated"]["stats"],
+                         [["Paid", "Humble", "€4.99", False], ["chips", "Metacritic"]])
+        self.assertIsNone(self.out["unrated"]["pips"])
+
+    def test_the_ground_in_order(self) -> None:
+        ghost = self.out["ghost"]
+        self.assertEqual(ghost["flow"], ["desc", "more-toggle", "flavor flavor-quote", "dt-abil", "tagline",
+                                         "notice", "panel reel", "dt-sec", "dt-sec", "actions dt-actions"])
+        self.assertTrue(ghost["flavor"].startswith("Absolutely beautiful and well made."))
+        self.assertEqual(len(ghost["tags"]), 8)
+        self.assertEqual(ghost["eyebrows"], ["Media", "In your library", "From the studio"])
+
+    def test_award_lines(self) -> None:
+        self.assertEqual(self.out["ghost"]["awards"], [
+            "AwardThe Game Awards — Best Art Direction, winner",
+            "AwardNominee for Game of the Year, Best Game Direction, Best Narrative",
+        ])
+        # The Game Awards only; two wins read as a list
+        self.assertEqual(self.out["unrated"]["awards"],
+                         ["AwardThe Game Awards — Best Debut Indie Game and Games for Impact, winner"])
+        self.assertEqual(self.out["bare"]["awards"], [])
+
+    def test_the_library_and_studio_strips(self) -> None:
+        minis = self.out["ghost"]["minis"]
+        self.assertEqual(minis[0], ["mini tier-good", "Marvel's Spider-Man", ["9/10", "50h"]])
+        self.assertEqual(minis[2], ["mini tier-none", "Marvel's Spider-Man 2", ["25h"]])
+        self.assertEqual(minis[4][2], ["unplayed"])
+        self.assertEqual(self.out["ghost"]["notices"][-1],
+                         "No earlier games picked: Sucker Punch Productions has 30+ games on IGDB")
+
+    def test_actions_and_the_empty_state(self) -> None:
+        self.assertEqual(self.out["ghost"]["actions"][0][1], "Full breakdown▾")
+        self.assertEqual(self.out["bare"]["notices"], ["No details fetched yet — IGDB: no match"])
+        for key in ("ghost", "unrated", "unknown", "bare"):
+            with self.subTest(card=key):
+                self.assertNotIn("·", self.out[key]["text"])
+
+    def test_the_drill_in_resolves_its_skeleton(self) -> None:
+        drill = self.drill
+        self.assertEqual(drill["bar"], ["topbar", ["btn"], ["svg", "SPAN"], "Back to results"])
+        self.assertEqual(drill["before"], ["skel skel-detail"])
+        self.assertEqual(drill["during"], ["detail-stack", "skel skel-detail leaving"])
+        self.assertEqual(drill["frame"], "frame dt-card tier-good deal")
+        self.assertEqual(drill["after"], ["detail-stack"])
 
 
 class PreviewScriptTests(unittest.TestCase):
@@ -981,17 +1603,13 @@ class DesignSystemTests(unittest.TestCase):
         )
 
     def test_no_hex_color_outside_the_token_layer(self) -> None:
-        # Raw colors (hex, rgb/rgba, hsl) are allowed in exactly three places:
-        # (a) TOKENS_CSS, (b) the cover plate — its name-seeded gradient
-        # (coverNode) and its ink text — and (c) the verdict stamp rule. The
-        # plate's ink and the stamp are built from tokens today, so (b) and
-        # (c) are allowances, not uses.
-        # TODO(Binder Phase 2B): the ribbon replaces the stamp; drop (c) when
-        # apps_eval.py's .stamp CSS goes.
+        # Raw colors (hex, rgb/rgba, hsl) are allowed in exactly two places:
+        # (a) TOKENS_CSS and (b) the cover plate — its name-seeded gradient
+        # (coverNode) and its ink text. The plate's ink is built from tokens
+        # today, so that half of (b) is an allowance, not a use.
         raw = r"#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\("
         for name, html in WIDGETS:
             css = widget_css(html).replace(apps_shared.TOKENS_CSS, "")
-            css = re.sub(r"[^{}]*\.stamp[^{}]*\{[^{}]*\}", "", css)          # (c)
             css = re.sub(r"[^{}]*\.cover-fallback[^{}]*\{[^{}]*\}", "", css)  # (b) ink
             js = widget_js(html).replace(apps_shared.COVER_NODE_JS, "")       # (b) gradient
             with self.subTest(widget=name):
@@ -1077,11 +1695,9 @@ class DesignSystemTests(unittest.TestCase):
         # The only rotate()s: the deal-in's -1deg, the 45deg pip diamond and
         # the disclosure chevron's 180deg flip. The hover tilt's rotateX/Y
         # live in the fine-pointer hover query only (BinderComponentTests).
-        # TODO(Binder Phase 2B): the -3deg verdict stamp goes with the stamp;
-        # until then its rules are set aside here like the color allow-list.
         allowed = {"rotate(-1deg)", "rotate(45deg)", "rotate(180deg)"}
         for name, html in WIDGETS:
-            css = re.sub(r"[^{}]*\.stamp[^{}]*\{[^{}]*\}", "", widget_css(html))
+            css = widget_css(html)
             with self.subTest(widget=name):
                 found = set(re.findall(r"rotate\([^)]*\)", css))
                 self.assertTrue(found <= allowed, found)
@@ -1286,9 +1902,10 @@ class SharedComponentTests(unittest.TestCase):
         self.assertIn("font-family: var(--gl-font);", word)
         self.assertIn("font-weight: var(--gl-strong);", word)
         self.assertIn(".chip .meter-fill { display: block; height: 100%; background: var(--gl-tier-text); }", css)
-        # tier color reaches the border and the value only: no tinted fill
-        self.assertIn(".chip.tier-good, .chip.tier-ok, .chip.tier-bad { background: var(--gl-surface); "
-                      "border-color: var(--gl-tier); color: var(--gl-text-2); }", css)
+        # tier color reaches the border and the value only, through the
+        # .tier-* custom properties: no per-tier chip rule, no tinted fill
+        self.assertNotRegex(css, r"\.chip\.tier-")
+        self.assertNotRegex(css, r"var\(--gl-(good|ok|bad)-bg\)")
         js = apps_shared.SCORE_CHIP_JS
         self.assertIn('chip.appendChild(el("b", isFigure(value) ? null : "word", value));', js)
         self.assertIn("return /\\d/.test(t) && !/\\s/.test(t);", js)

@@ -10,8 +10,8 @@ lands in both widgets at once instead of being hand-ported (and forgotten).
 Splice, never reformat: the constants carry their own indentation and trailing
 newline, and a widget's HTML is the literal chunks and these constants
 concatenated in order. What is deliberately NOT here is anything the two
-widgets genuinely disagree on — the grid's cover plates, each lightbox's placement,
-the evaluation card's verdict stamp — that stays local to its widget.
+widgets genuinely disagree on — each card's layout and ground, each lightbox's
+placement — that stays local to its widget.
 ``tests/test_apps_eval.py::WidgetDriftTests`` fails if a block of any size
 worth sharing reappears in both files instead.
 
@@ -133,11 +133,10 @@ PROVIDER_LABELS: dict[str, str] = {
 
 # ---- Design tokens, reset, accessibility ------------------------------------
 # The ONE place a color/radius/shadow/font value is written. Widget CSS uses
-# the --gl-* names only. Raw color values appear in exactly three places:
-# this block, the cover plate (its gradient is generated per name in
-# coverNode; its ink is the --gl-plate-* tokens below) and, until Phase 2B of
-# the Binder spec retires it, the verdict stamp rule (apps_eval.py, built from
-# tokens). tests/test_apps.py::DesignSystemTests pins that.
+# the --gl-* names only. Raw color values appear in exactly two places: this
+# block and the cover plate (its gradient is generated per name in coverNode;
+# its ink is the --gl-plate-* tokens below). tests/test_apps.py::
+# DesignSystemTests pins that.
 _TOKENS_LAYER_CSS = r"""  :root {
     color-scheme: light dark;
     --gl-text: var(--color-text-primary, light-dark(#141413, #FAF9F5));
@@ -202,8 +201,7 @@ _TOKENS_LAYER_CSS = r"""  :root {
     /* Theming exception — the media stage. A media stage is dark in both
        themes by design — it frames video and screenshots — so the stage, its
        veil and scrim, the type on it and the glyph shadow never follow the
-       host theme. (The other two exceptions: the verdict stamp, and the cover
-       plate's ink below.) The plain --gl-shadow-ink value is the fallback;
+       host theme. (The other exception: the cover plate's ink below.) The plain --gl-shadow-ink value is the fallback;
        @supports below derives it from --gl-stage. */
     --gl-stage: #0d0b07;
     --gl-stage-veil: rgba(12, 10, 6, 0.32);
@@ -375,7 +373,7 @@ RESET_CSS = r"""  * { box-sizing: border-box; margin: 0; padding: 0; }
 # 24 + 2x4 = 32 on a pointer; on touch the chips grow to a 32px visual height
 # so 32 + 2x6 = 44 is met by the chip's own height plus the extension, not by
 # overlapping the next row. The host element must be a containing block
-# (positioned, or transformed like the stamp); .btn and .disclosure are made
+# (positioned or transformed); .btn and .disclosure are made
 # relative in CONTROLS_CSS, a tappable .frame in FRAME_CSS and a mini card's
 # link or button in MINI_CSS. The old grid cards and media thumbs carry no
 # extension: their overflow: hidden would clip it, and both are far past 44px
@@ -388,7 +386,6 @@ A11Y_CSS = r"""  :focus-visible { outline: 2px solid var(--gl-text); outline-off
   .frame:focus-visible, .btn:focus-visible, a.art:focus-visible { outline-offset: 3px; }
   a.chip::after, .btn::after, .disclosure::after, .fs-btn::after,
   .car-nav::after, .overlay-close::after, .hero-pill::after,
-  .stamp[role="button"]::after, button.stamp::after,
   .frame[role="button"]::after, button.frame::after, .mini a::after, .mini button::after {
     content: "";
     position: absolute;
@@ -399,7 +396,6 @@ A11Y_CSS = r"""  :focus-visible { outline: 2px solid var(--gl-text); outline-off
   html.touch a.chip::after, html.touch .btn::after, html.touch .disclosure::after,
   html.touch .fs-btn::after, html.touch .car-nav::after,
   html.touch .overlay-close::after, html.touch .hero-pill::after,
-  html.touch .stamp[role="button"]::after, html.touch button.stamp::after,
   html.touch .frame[role="button"]::after, html.touch button.frame::after,
   html.touch .mini a::after, html.touch .mini button::after {
     inset: -6px;
@@ -508,14 +504,6 @@ CHIP_CSS = r"""  .chips { display: flex; gap: 8px 6px; flex-wrap: wrap; align-it
     line-height: var(--gl-cap-lh);
   }
   .chip .aux { color: var(--gl-muted); white-space: nowrap; }
-  /* TODO(Binder Phase 2A): tests/test_apps.py::GameCardsResourceTests still
-     pins these three fill rules verbatim; the Binder chip has no tier fill, so
-     the rule right after them resets it. Drop all four when that pin is
-     rewritten to the border/value rule. */
-  .chip.tier-good { background: var(--gl-good-bg); border-color: var(--gl-good-edge); color: var(--gl-good); }
-  .chip.tier-ok { background: var(--gl-ok-bg); border-color: var(--gl-ok-edge); color: var(--gl-ok); }
-  .chip.tier-bad { background: var(--gl-bad-bg); border-color: var(--gl-bad-edge); color: var(--gl-bad); }
-  .chip.tier-good, .chip.tier-ok, .chip.tier-bad { background: var(--gl-surface); border-color: var(--gl-tier); color: var(--gl-text-2); }
   .chip .meter {
     position: relative;
     width: 28px;
@@ -1812,7 +1800,7 @@ COVER_HUE_JS = r"""  function coverHue(name) {
 """
 
 # Cover art with the gradient-plate fallback on a missing/broken image;
-# ``coverPlate`` is the plate alone (the evaluation card's anchor covers).
+# ``coverPlate`` is the plate alone (coverNode's fallback).
 COVER_NODE_JS = r"""  function coverPlate(name, cls, text) {
     var hue = coverHue(name || "?");
     var plate = el("div", cls, text);

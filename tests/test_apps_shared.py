@@ -46,8 +46,6 @@ def css_rule(css: str, selector: str, exact: bool = False) -> str:
 INTERACTIVE = (
     "a.chip", ".btn", ".disclosure", ".fs-btn", ".car-nav",
     ".overlay-close", ".hero-pill",
-    # TODO(Binder Phase 2B): the stamp goes; drop its two entries with it.
-    '.stamp[role="button"]', "button.stamp",
     # The Binder: a tappable card frame, and a mini card's link or button.
     '.frame[role="button"]', "button.frame", ".mini a", ".mini button",
 )
@@ -196,8 +194,7 @@ class SharedCssHygieneTests(unittest.TestCase):
         # plate's ink and every Binder ink — rarity stops, ribbon fills, the
         # deep plate, specular, sheen — are tokens there); a cover-plate rule
         # is the documented exception (MINI_CSS hides the plate's lettering in
-        # a 48px mini). tests/test_apps.py pins the whole widget CSS, stamp
-        # included.
+        # a 48px mini). tests/test_apps.py pins the whole widget CSS.
         for name, css in shared_css_blocks():
             if name == "TOKENS_CSS":
                 continue
@@ -654,17 +651,25 @@ class ImageFallbackTests(unittest.TestCase):
     """Item 6 (F1): no broken-image glyph, no alt text over the stage."""
 
     def test_every_img_element_has_an_error_fallback(self) -> None:
-        sites = 0
+        # The rule: EVERY <img> the widgets create is a named
+        # ``var x = document.createElement("img");`` whose onerror swaps in a
+        # fallback before its src is set. No other way to make one exists —
+        # no el("img"), no <img> markup, no anonymous createElement.
         for name, source in _WIDGET_SOURCES.items():
-            for match in re.finditer(r'var (\w+) = document\.createElement\("img"\);', source):
-                sites += 1
+            sites = list(re.finditer(r'var (\w+) = document\.createElement\("img"\);', source))
+            with self.subTest(module=name, check="every creation is a named site"):
+                self.assertEqual(len(sites), source.count('createElement("img")'))
+                self.assertNotIn('el("img"', source)
+                self.assertNotRegex(source, r"<img[\s>]")
+            for match in sites:
                 var = match.group(1)
                 # the handler is attached before src is set, within the builder
                 window = source[match.end():match.end() + 2000]
                 with self.subTest(module=name, var=var, at=match.start()):
                     self.assertRegex(window, rf"\b{var}\.onerror = function")
                     self.assertLess(window.index(f"{var}.onerror"), window.index(f"{var}.src"))
-        self.assertGreaterEqual(sites, 6)   # cover, poster, stage, thumb, carousel, anchor
+        # the scan is not vacuous: the shared cover builder is one such site
+        self.assertRegex(apps_shared.COVER_NODE_JS, r'var img = document\.createElement\("img"\);')
 
     def test_the_fallbacks_are_the_neutral_tiles(self) -> None:
         self.assertIn('el("span", "thumb-text", text)', apps_shared.MEDIA_PANEL_JS)
@@ -672,7 +677,14 @@ class ImageFallbackTests(unittest.TestCase):
         self.assertIn('el("div", "hero-missing below-badge", missingText || "Trailer")', apps_shared.HERO_MEDIA_JS)
         self.assertIn('var missing = el("div", "hero-missing", "Screenshot unavailable");',
                       apps_shared.CAROUSEL_STAGE_JS)
-        self.assertIn('coverPlate(a.name, "anchor-cover")', apps_eval.EVAL_CARD_HTML)
+        # Anchors (and every other strip entry) are mini cards, whose art is
+        # coverNode — so a missing or broken anchor cover is the shared plate.
+        self.assertIn("ministrip(box, anchors, function (a) {", apps_eval.EVAL_CARD_HTML)
+        self.assertIn("strip.appendChild(miniCard(toMini(item)));", apps_eval.EVAL_CARD_HTML)
+        self.assertIn("art.appendChild(coverNode({ name: o.name, cover_url: o.cover_url }));",
+                      apps_shared.MINI_JS)
+        self.assertIn('var fallback = coverPlate(game.name, "cover-fallback", game.name || "?");',
+                      apps_shared.COVER_NODE_JS)
 
 
 # Just enough DOM for the media builders: parent links, replaceChild, remove.
@@ -1358,67 +1370,10 @@ class FullscreenOrDisclosureTests(unittest.TestCase):
                 self.assertNotIn('requestDisplayMode("fullscreen").then', source)
 
 
-_CARD_PROBE = r"""
-  (function () {
-    function chipText(chip) {
-      return chip.childNodes.filter(function (c) {
-        return c.nodeType === 1 && (c.classList.contains("lbl") || c.tagName === "B");
-      }).map(function (c) { return c.textContent; }).join(" ");
-    }
-    function visible(card) {
-      var bits = [];
-      findAll(card, function (n) { return n.classList.contains("match"); }).forEach(function (m) {
-        bits.push(m.children[0].textContent);
-      });
-      findAll(card, function (n) { return n.classList.contains("meta"); }).forEach(function (m) {
-        bits = bits.concat(m.textContent.split(" · "));
-      });
-      findAll(card, function (n) { return n.classList.contains("chip"); }).forEach(function (c) {
-        bits.push(chipText(c));
-      });
-      return bits;
-    }
-    var games = {
-      full: { game_id: 1, name: "Hades II", match_percent: 100, hltb_main: 26.5, suggested_platform: "steam",
-              playtime_hours: 2.3, metacritic_score: 93, opencritic_score: 91,
-              steam_review_desc: "Overwhelmingly Positive" },
-      sparse: { game_id: 2, name: "Noita", match_percent: 74.4, metacritic_score: -1 },
-      bare: { game_id: 3, name: "Mystery" },
-    };
-    var out = {};
-    Object.keys(games).forEach(function (k) {
-      var card = gridCard(games[k]);
-      out[k] = { label: card.getAttribute("aria-label"), visible: visible(card) };
-    });
-    console.log(JSON.stringify(out));
-  })();
-"""
 
-
-@unittest.skipUnless(NODE, "node is not installed")
-class CardLabelBehaviourTests(unittest.TestCase):
-    """Item 14, executed: a grid card's accessible name IS what it shows."""
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.out = run_widget("game-cards", _CARD_PROBE)
-
-    def test_the_label_is_the_title_then_the_visible_bits(self) -> None:
-        for key in ("full", "sparse", "bare"):
-            with self.subTest(card=key):
-                out = self.out[key]
-                name = out["label"].split(": ", 1)[0]
-                expected = name + (": " + ", ".join(out["visible"]) if out["visible"] else "")
-                self.assertEqual(out["label"], expected)
-
-    def test_the_label_reads_match_meta_and_scores_in_order(self) -> None:
-        self.assertEqual(
-            self.out["full"]["label"],
-            "Hades II: 100% match, ~27h to beat, Steam, 2.3h played, Metacritic 93, OpenCritic 91, "
-            "Steam Overwhelmingly positive",
-        )
-        self.assertEqual(self.out["sparse"]["label"], "Noita: 74% match")
-        self.assertEqual(self.out["bare"]["label"], "Mystery")
+# A grid card's accessible name == its visible bits is pinned by
+# tests/test_apps.py::GridCardBehaviourTests (the Binder card replaced the
+# match-bar/meta-line card this file used to probe).
 
 
 _NUMBERS_PROBE = r"""

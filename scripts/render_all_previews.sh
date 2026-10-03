@@ -40,7 +40,7 @@ game_cards() {  # game_cards NAME KIND ARGS...
   if [[ "$kind" == full ]]; then fullscreen+=("$HTML/$name.html"); else inline+=("$HTML/$name.html"); fi
 }
 
-for n in 0 1 2 3 4; do
+for n in 0 1 2 3 4 5; do
   for theme in light dark; do
     eval_card "eval$n-$theme" inline "$n" --theme "$theme"
   done
@@ -48,6 +48,8 @@ done
 eval_card eval0-dark-fullscreen full 0 --theme dark --fullscreen
 eval_card eval1-dark-fullscreen full 1 --theme dark --fullscreen
 eval_card eval0-dark-expanded inline 0 --theme dark --expanded
+eval_card eval5-dark-fullscreen full 5 --theme dark --fullscreen
+eval_card eval5-dark-expanded inline 5 --theme dark --expanded
 
 for theme in light dark; do
   game_cards "grid-$theme" inline --from-json "$SAMPLES/discover_taste_match.json" --theme "$theme"
