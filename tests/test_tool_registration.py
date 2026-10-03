@@ -387,7 +387,7 @@ class SchemaBudgetTests(unittest.IsolatedAsyncioTestCase):
     MAX_TOTAL_DESCRIPTION_CHARS = 49_600  # achieved 47,215 (2026-10-03)
     # No single tool may hold a disproportionate share of that budget.
     MAX_TOOL_DESCRIPTION_CHARS = 2_890  # largest: get_stats, 2,755
-    MAX_TOOL_PAYLOAD_BYTES = 9_970  # largest: get_stats, 9,496 (unchanged)
+    MAX_TOOL_PAYLOAD_BYTES = 9_970  # largest: get_stats, 9,496
 
     async def _serialized(self) -> dict[str, tuple[int, int]]:
         """Per tool: (serialized payload bytes, description chars)."""

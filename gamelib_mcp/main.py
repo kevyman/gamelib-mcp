@@ -1117,7 +1117,8 @@ async def record_assessment(
 
     Identity: game_id, Steam appid or name — at least one — plus `verdict`
     (required). PREFER game_id once get_assessment_context resolved the
-    candidate, and when correcting. `name` is matched EXACTLY (case-insensitive)
+    candidate, and when correcting or re-recording. `name` is matched EXACTLY
+    (case-insensitive)
     or MINTED (created=true, normal for an unowned title) — never fuzzily; pass
     name= alongside an appid-only candidate, since a row cannot be minted
     without a title. `resolution` reports mode ("by_id", "by_appid",
@@ -1389,8 +1390,10 @@ async def update_game(
     farmed) — one game, or many via `items`. Returns the fields updated and
     cleared plus the row's manual_overrides.
 
-    Resolve with game_id or name (partial/fuzzy), then set any subset. Every
-    edited field becomes a manual override that syncs and enrichment skip;
+    Resolve with game_id or name (partial/fuzzy), then set any subset (name,
+    release date, genres, description, HLTB times, tags, IGDB link, is_farmed,
+    completion_status). Every edited field becomes a manual override that
+    syncs and enrichment skip;
     clear_overrides hands columns back to sync, keeping the current value.
     Editing tags recomputes the taste profile.
 
