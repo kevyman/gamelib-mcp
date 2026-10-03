@@ -42,7 +42,8 @@ plate, the stat block (PLAYED, LAST, LENGTH, PAID, the score chips, RATING
 pips) — then the ground: the 3-line description, his review as a quote, The
 Game Awards lines, the tags, the media reel (one 16:9 viewer plus one thumb
 strip, trailer first, screenshots opening a lightbox), IN YOUR LIBRARY and
-FROM THE STUDIO strips of mini cards, and the actions ("Full breakdown" —
+FROM THE STUDIO strips of mini cards, any enrichment notice ("Not fetched —
+Steam: no app id"), and the actions ("Full breakdown" —
 fullscreen on a host that has it, an in-place disclosure otherwise — and the
 store link when one is derivable). The media blocks live in apps_shared.py and
 are spliced verbatim into both this widget and the evaluation card
@@ -167,16 +168,6 @@ GAME_CARDS_HTML = (
     transform: rotate(45deg);
     background: var(--gl-border-strong);
   }
-  /* Heard, not drawn: the Steam chip's brand on a small card, the reel's
-     "Media" eyebrow (the stage says what it is). */
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-  }
 
   /* ---- grid mode ---- */
   /* The set line: what this binder page IS — the count, then the facets as
@@ -230,7 +221,6 @@ GAME_CARDS_HTML = (
     gap: 8px;
     margin-top: 16px;
   }
-  .actions > .btn, .grid-head > .btn, .topbar > .btn { white-space: nowrap; }
   /* On a phone the two pills share the row (the mock-up); wider, they keep
      their own width at the right. */
   @media (max-width: 559px) {
@@ -267,8 +257,7 @@ GAME_CARDS_HTML = (
   .dt-flow > .tagline { padding-top: 14px; }
   .dt-flow > .panel { background: none; border: 0; box-shadow: none; padding: 0; border-radius: 0; }
   .dt-abil { display: flex; flex-direction: column; gap: 10px; }
-  .dt-sec > .section-title { margin-bottom: 10px; }
-  .dt-sec > .notice { padding: 0; }
+  .eyebrow-sec > .notice { padding: 0; }
   .desc {
     color: var(--gl-text);
     display: -webkit-box;
@@ -300,7 +289,6 @@ GAME_CARDS_HTML = (
     background: var(--gl-inverse-bg);
     color: var(--gl-inverse-text);
     border-color: transparent;
-    white-space: nowrap;
   }
   .dt-actions > .disclosure-body { flex-basis: 100%; order: 3; margin-top: 4px; }
   .dt-break { display: flex; flex-direction: column; gap: 12px; }
@@ -441,14 +429,6 @@ GAME_CARDS_HTML = (
     if (game.parent && game.parent.name) return game.parent.name;
     if (game.parent_name) return game.parent_name;
     return null;
-  }
-  /* A Binder card's opening: the frame (a <button> when the whole card is
-     the tap target) in its tier, the grain as its first child. */
-  function gcFrame(tag, cls, tier) {
-    var frame = el(tag, "frame " + cls + " tier-" + (tier || "none"));
-    var grain = grainNode();
-    if (grain) frame.appendChild(grain);
-    return frame;
   }
   /* The critic tier of a game: Metacritic, else OpenCritic, else none. */
   function criticTier(game) {
@@ -593,7 +573,8 @@ GAME_CARDS_HTML = (
     if (played) bits.push({ part: "hours", value: played, title: "Your playtime", text: played + " played" });
     else if (hltb) bits.push({ part: "hours", value: hltb, title: "HowLongToBeat, main story", text: hltb + " to beat" });
     if (game.suggested_platform) {
-      bits.push({ part: "platform", text: label("platform", game.suggested_platform) });
+      bits.push({ part: "platform", text: label("platform", game.suggested_platform),
+        short: label("platform_short", game.suggested_platform) });
     }
     var chips = [];
     if (mc != null && badgeSource !== "mc") {
@@ -630,7 +611,7 @@ GAME_CARDS_HTML = (
     // critics or value) the critic tier the badge shows.
     // A card with no game_id has nothing to open: a plain frame, not a button.
     var tappable = game.game_id != null;
-    var card = gcFrame(tappable ? "button" : "div", "frame-s gc-card", badgeBit ? badgeBit.tier : "none");
+    var card = frameNode(tappable ? "button" : "div", "frame-s gc-card", badgeBit ? badgeBit.tier : "none");
     if (tappable) {
       card.type = "button";
       card.setAttribute("data-game-id", String(game.game_id));
@@ -664,7 +645,7 @@ GAME_CARDS_HTML = (
       span.title = b.title;
       sub.appendChild(span);
     });
-    partsOf("platform").forEach(function (b) { sub.appendChild(el("span", "loz", b.text)); });
+    partsOf("platform").forEach(function (b) { sub.appendChild(el("span", "loz", b.short)); });
     var type = typeLoz(game);
     if (type) sub.appendChild(type);
     // Rank only when the payload is explicitly rank-ordered: discover_games
@@ -951,13 +932,6 @@ GAME_CARDS_HTML = (
     });
   }
 
-  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  /* "2022-09-21" → "Sep 2022"; anything else → null (unknown, no row). */
-  function monthYear(iso) {
-    var m = /^(\d{4})-(\d{2})/.exec(String(iso || ""));
-    var month = m ? MONTHS[Number(m[2]) - 1] : null;
-    return month ? month + " " + m[1] : null;
-  }
   function myRating(game) {
     return game.my_rating ? num(game.my_rating.normalized_score) : null;
   }
@@ -1072,7 +1046,7 @@ GAME_CARDS_HTML = (
      width with the badge and the status ribbon, the plate, the stat block.
      Returns {frame, filled}: filled is false for a never-enriched row. */
   function identityPanel(game, media) {
-    var frame = gcFrame("article", "dt-card", detailTier(game));
+    var frame = frameNode("article", "dt-card", detailTier(game));
     var art = el("div", "art");
     art.appendChild(coverNode(game));
     var badge = detailBadge(game);
@@ -1094,7 +1068,7 @@ GAME_CARDS_HTML = (
     if (studio) sub.appendChild(el("span", null, studio));
     if (game.release_date) sub.appendChild(el("span", null, String(game.release_date).slice(0, 4)));
     ownedPlatforms(game).forEach(function (p) {
-      sub.appendChild(el("span", "loz", label("platform", p.platform)));
+      sub.appendChild(el("span", "loz", label("platform_short", p.platform)));
     });
     var type = typeLoz(game);
     if (type) sub.appendChild(type);
@@ -1199,12 +1173,6 @@ GAME_CARDS_HTML = (
   /* ---------- detail: library + studio strips ---------- */
   /* A mini's tier is his rating of that game (none when unrated); its two
      lines are separate spans ("9/10" "50h", then the status). */
-  function eyebrowSection(parent, title) {
-    var sec = el("div", "dt-sec");
-    sec.appendChild(el("div", "section-title", title));
-    parent.appendChild(sec);
-    return sec;
-  }
   function similarStrip(parent, similar) {
     var items = list(similar && similar.items).filter(function (i) { return i && i.name; }).slice(0, 8);
     if (!items.length) return;
@@ -1309,8 +1277,7 @@ GAME_CARDS_HTML = (
     var node = breakdownNode(game);
     if (!node) return;
     if (currentDisplayMode() === "fullscreen") {
-      var sec = el("div", "dt-sec");
-      sec.appendChild(el("div", "section-title", "Full breakdown"));
+      var sec = eyebrowSection(flow, "Full breakdown");
       sec.appendChild(node);
       flow.insertBefore(sec, actions);
       return;
@@ -1352,14 +1319,17 @@ GAME_CARDS_HTML = (
     // A never-enriched row (an assessment-minted candidate, a fresh wishlist
     // entry) fills nothing but the title, which renders as a card that looks
     // broken. Say so, and — when the response explained which providers were
-    // skipped and why (get_game_detail's `enrichment`) — say that too.
+    // skipped and why (get_game_detail's `enrichment`) — say that too. The
+    // notice is bookkeeping, not copy: it reads last, just before the
+    // actions row, never between the description and the strips.
     var reasons = enrichmentReasons(game.enrichment);
+    var noticeText = null;
     if (!panel.filled && !flow.childNodes.length) {
       var emptyText = "No details fetched yet";
       if (reasons.length) emptyText += " — " + reasons.join("; ");
-      notice(flow, emptyText);
+      noticeText = emptyText;
     } else if (reasons.length) {
-      notice(flow, "Not fetched — " + reasons.join("; "));
+      noticeText = "Not fetched — " + reasons.join("; ");
     }
     var count = flow.childNodes.length;
     mediaNode(flow, media, game.name);
@@ -1374,6 +1344,7 @@ GAME_CARDS_HTML = (
     var actions = el("div", "actions dt-actions");
     flow.appendChild(actions);
     relatedBlock(flow, actions, game);
+    if (noticeText) flow.insertBefore(notice(flow, noticeText), actions);
     var store = storeLink(game);
     if (store) actions.appendChild(store);
     if (!actions.childNodes.length) flow.removeChild(actions);

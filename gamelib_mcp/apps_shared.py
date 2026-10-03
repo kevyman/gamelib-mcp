@@ -54,15 +54,32 @@ _PLATFORM_DISPLAY: dict[str, str] = {
 }
 
 
+# The lozenge form ("EPIC", not "EPIC GAMES"): the plate's sub line is one row
+# beside "No. N", so a lozenge carries the shortest unambiguous name. The full
+# names above stay for prose and aria-labels.
+_PLATFORM_SHORT_DISPLAY: dict[str, str] = {
+    "steam": "Steam",
+    "epic": "Epic",
+    "gog": "GOG",
+    "switch2": "Switch 2",
+    "ps5": "PS5",
+    "xbox": "Xbox",
+    "itchio": "itch.io",
+    "ea": "EA",
+    "ubisoft": "Ubisoft",
+    "other": "Other",
+}
+
+
 def _humanize(raw: str) -> str:
     """Python twin of the JS ``humanize``: underscores out, words title-cased."""
     return " ".join(word[:1].upper() + word[1:] for word in raw.replace("_", " ").split())
 
 
-def _platform_labels() -> dict[str, str]:
+def _platform_labels(display: dict[str, str]) -> dict[str, str]:
     labels: dict[str, str] = {}
     for spec in PLATFORMS:
-        text = _PLATFORM_DISPLAY.get(spec.name, _humanize(spec.name))
+        text = display.get(spec.name, _humanize(spec.name))
         labels[spec.name] = text
         # Aliases ("nintendo", "origin", "uplay") are accepted inputs, not wire
         # values — mapped anyway so a stray one still reads as its platform.
@@ -71,7 +88,8 @@ def _platform_labels() -> dict[str, str]:
     return labels
 
 
-PLATFORM_LABELS: dict[str, str] = _platform_labels()
+PLATFORM_LABELS: dict[str, str] = _platform_labels(_PLATFORM_DISPLAY)
+PLATFORM_SHORT_LABELS: dict[str, str] = _platform_labels(_PLATFORM_SHORT_DISPLAY)
 
 # record_assessment's verdict Literal (main.py) == tools/assessment.py's
 # ASSESSMENT_VERDICTS; a test pins all three together.
@@ -201,8 +219,9 @@ _TOKENS_LAYER_CSS = r"""  :root {
     /* Theming exception — the media stage. A media stage is dark in both
        themes by design — it frames video and screenshots — so the stage, its
        veil and scrim, the type on it and the glyph shadow never follow the
-       host theme. (The other exception: the cover plate's ink below.) The plain --gl-shadow-ink value is the fallback;
-       @supports below derives it from --gl-stage. */
+       host theme. (The other exception: the cover plate's ink below.) The
+       plain --gl-shadow-ink value is the fallback; @supports below derives it
+       from --gl-stage. */
     --gl-stage: #0d0b07;
     --gl-stage-veil: rgba(12, 10, 6, 0.32);
     --gl-scrim: rgba(12, 10, 6, 0.5);
@@ -401,6 +420,16 @@ A11Y_CSS = r"""  :focus-visible { outline: 2px solid var(--gl-text); outline-off
     inset: -6px;
   }
   html.touch .chips a.chip::after { inset: -6px -4px; }
+  /* Heard, not drawn (a small card's Steam brand, the reel's "Media"
+     eyebrow: the stage says what it is). */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
       animation: none !important;
@@ -621,9 +650,12 @@ CONTROLS_CSS = r"""  .btn, .disclosure {
   }
   .btn.primary { background: var(--gl-inverse-bg); color: var(--gl-inverse-text); border-color: transparent; }
   html.touch .btn, html.touch .disclosure { min-height: 44px; }
+  /* A pill's label never wraps: in an action row, on the set line, in the
+     drill-in's top bar. */
+  .actions > .btn, .actions > .disclosure, .grid-head > .btn, .topbar > .btn { white-space: nowrap; }
   .disclosure { width: 100%; }
-  /* A full-width toggle whose label can run long ("Similar games you own ·
-     From the studio"): body size keeps it on one line at 360px. */
+  /* A full-width toggle whose label can run long ("Similar games you own
+     and From the studio"): body size keeps it on one line at 360px. */
   .disclosure { font-size: var(--gl-body); }
   .disclosure .chev { transition: transform 0.15s ease; }
   .disclosure[aria-expanded="true"] .chev { transform: rotate(180deg); }
@@ -882,7 +914,7 @@ TAG_CSS = r"""  .tags, html.touch .tags { gap: 4px; }
 """
 
 # "From the studio" header and publisher lines.
-PEDIGREE_CSS = r"""  .ped-head { font-weight: var(--gl-strong); }
+PEDIGREE_CSS = r"""  .ped-head { display: flex; flex-wrap: wrap; gap: 2px 10px; font-weight: var(--gl-strong); }
   .ped-pub { font-size: var(--gl-cap); line-height: var(--gl-cap-lh); color: var(--gl-muted); margin-top: 2px; }
   .ped-strip { margin-top: 8px; }
 """
@@ -1288,6 +1320,13 @@ DOM_HELPERS_JS = r"""  var root = document.getElementById("root");
     parent.appendChild(box);
     return box;
   }
+  /* The Binder's ground: an eyebrow over content, never a boxed panel. */
+  function eyebrowSection(parent, text) {
+    var sec = el("section", "eyebrow-sec");
+    sec.appendChild(el("div", "section-title", text));
+    parent.appendChild(sec);
+    return sec;
+  }
 
   function list(v) { return Array.isArray(v) ? v : []; }
   function num(v) {
@@ -1303,12 +1342,13 @@ DOM_HELPERS_JS = r"""  var root = document.getElementById("root");
 LABELS_JS = (
     "  /* ---------- labels (generated: platforms_registry, verdict literals, purchase sources) ---------- */\n"
     "  var PLATFORM_LABELS = " + json.dumps(PLATFORM_LABELS, sort_keys=True) + ";\n"
+    "  var PLATFORM_SHORT_LABELS = " + json.dumps(PLATFORM_SHORT_LABELS, sort_keys=True) + ";\n"
     "  var VERDICT_LABELS = " + json.dumps(VERDICT_LABELS) + ";\n"
     "  var PROVIDER_LABELS = " + json.dumps(PROVIDER_LABELS, sort_keys=True) + ";\n"
     "  var PURCHASE_SOURCE_LABELS = " + json.dumps(PURCHASE_SOURCE_LABELS, sort_keys=True) + ";\n"
     + r"""  var LABEL_MAPS = {
-    platform: PLATFORM_LABELS, verdict: VERDICT_LABELS, provider: PROVIDER_LABELS,
-    purchase_source: PURCHASE_SOURCE_LABELS,
+    platform: PLATFORM_LABELS, platform_short: PLATFORM_SHORT_LABELS,
+    verdict: VERDICT_LABELS, provider: PROVIDER_LABELS, purchase_source: PURCHASE_SOURCE_LABELS,
   };
   function humanize(raw) {
     return String(raw).replace(/_+/g, " ").trim().replace(/\s+/g, " ")
@@ -1362,6 +1402,14 @@ NUMBERS_JS = r"""  /* ---------- numbers ---------- */
      ("1+ games" stays plural). */
   function plural(n, word, truncated) {
     return n + (truncated ? "+" : "") + " " + word + (n === 1 && !truncated ? "" : "s");
+  }
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  /* "2022-09-21" (or a full timestamp) → "Sep 2022"; anything else → null
+     (unknown: the caller shows no row, or its own word). */
+  function monthYear(iso) {
+    var m = /^(\d{4})-(\d{2})/.exec(String(iso || ""));
+    var month = m ? MONTHS[Number(m[2]) - 1] : null;
+    return month ? month + " " + m[1] : null;
   }
 """
 
@@ -2251,6 +2299,10 @@ MINI_CSS = r"""  .mini { position: relative; display: flex; align-items: flex-st
   }
   .strip.ministrip { gap: 12px; }
   .ministrip > * { flex: 0 0 min(232px, 74%); }
+  .ministrip > :only-child { flex-basis: 100%; }
+  /* Pips at mini size: 6px diamonds on a 10px line. */
+  .mini .pips { gap: 5px; height: 10px; padding: 0 1px; }
+  .mini .pips > span { width: 6px; height: 6px; }
 """
 
 # Motion (docs/specs/assets/binder/MOTION.md, durations table). Compositor
@@ -2402,6 +2454,14 @@ GRAIN_JS = r"""  /* ---------- the Binder: builders ---------- */
       ]),
       svgEl("rect", { width: "100%", height: "100%", filter: "url(#gl-grain-f)" }),
     ]);
+  }
+  /* A card's opening: the .frame (a <button> when the whole card is the tap
+     target) in its tier, the grain as its first child. */
+  function frameNode(tag, cls, tier) {
+    var frame = el(tag, "frame " + cls + " tier-" + (tier || "none"));
+    var grain = grainNode();
+    if (grain) frame.appendChild(grain);
+    return frame;
   }
 """
 
@@ -3043,13 +3103,14 @@ SIMILAR_NODE_JS = r"""  function similarTags(item) {
       ? "The " + items.length + " of your " + plural(total, "game") + " most like this one"
       : "Your " + plural(items.length, "game") + " most like this one";
     var unplayed = items.filter(function (i) { return i.unplayed; }).length;
-    if (unplayed) note += " · " + unplayed + " unplayed";
+    if (unplayed) note += ", " + unplayed + " unplayed";
     box.appendChild(el("div", "note", note));
   }
 """
 
-# "From the studio": the headline, the per-poster badge and the strip with its
-# track-record footer (``plural`` lives in NUMBERS_JS).
+# "From the studio": the headline (its parts — studio, "est. 2018", "5 games" —
+# as gap-separated spans, never a joined string), the per-poster badge and the
+# strip with its track-record footer (``plural`` lives in NUMBERS_JS).
 PEDIGREE_JS = r"""  function pedigreeHeadline(ped) {
     var dev = ped.developer || {};
     var names = list(ped.developer_names).filter(Boolean);
@@ -3060,7 +3121,15 @@ PEDIGREE_JS = r"""  function pedigreeHeadline(ped) {
     if (founded != null) parts.push("est. " + founded);
     var size = num(ped.catalog_size);
     if (size) parts.push(plural(size, "game", ped.catalog_truncated));
-    return parts.join(" · ");
+    return parts;
+  }
+  /* The headline as a div of spans (PEDIGREE_CSS gaps them), or null. */
+  function pedigreeHead(ped) {
+    var parts = pedigreeHeadline(ped);
+    if (!parts.length) return null;
+    var head = el("div", "ped-head");
+    parts.forEach(function (part) { head.appendChild(el("span", null, part)); });
+    return head;
   }
   /* ONE score per poster: his own rating ("You 8/10") outranks the critic
      score ("Critics 84"), which only stands in when he hasn't rated it. An
@@ -3079,11 +3148,11 @@ PEDIGREE_JS = r"""  function pedigreeHeadline(ped) {
   }
   function pedigreeNode(parent, ped) {
     if (!ped) return;
-    var headline = pedigreeHeadline(ped);
+    var head = pedigreeHead(ped);
     var items = list(ped.previous_games).filter(function (i) { return i && i.name; });
-    if (!headline && !items.length) return;
+    if (!head && !items.length) return;
     var box = section(parent, "From the studio");
-    if (headline) box.appendChild(el("div", "ped-head", headline));
+    if (head) box.appendChild(head);
     // The publisher is a line of text, never a poster row: a publisher's back
     // catalogue is a distribution list, not a body of work.
     if (ped.publisher_name) {

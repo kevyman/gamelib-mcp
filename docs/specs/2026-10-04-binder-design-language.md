@@ -1,7 +1,6 @@
 # Spec: "The Binder" — one card design language for both MCP Apps widgets (2026-10-04)
 
-Status: approved by the owner on the mock-ups (Design canvas, page "The
-Binder"); implemented in phases by executors; the main session verifies.
+Status: implemented 2026-10-04 (phases 1A–3); the mock-ups remain the visual reference.
 Supersedes the *visual* rules of `2026-10-03-widget-ux-redesign.md` §1.1
 (token table stays), §1.2 (type scale — amended below) and §1.5 (restyle
 pass). Everything structural from that spec (tiering, hand-back paths,

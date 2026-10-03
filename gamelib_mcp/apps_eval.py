@@ -197,19 +197,8 @@ EVAL_CARD_HTML = (
   }
   /* Sections are eyebrow + content on the ground, never boxed panels. */
   .eval .panel { background: none; border: 0; box-shadow: none; padding: 0; }
-  .ministrip > :only-child { flex-basis: 100%; }
-  .mini .pips { gap: 5px; height: 10px; padding: 0 1px; }
-  .mini .pips > span { width: 6px; height: 6px; }
 
   /* ---- the reel: one stage, thumbs 3-up (4-up from 560px), the rest scroll ---- */
-  .media-slot .section-title {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-  }
   .media-slot > .panel { position: relative; }
   .media-slot .thumbs { gap: 6px; }
   .media-slot .thumb { flex: 0 0 calc((100% - 12px) / 3); }
@@ -222,7 +211,7 @@ EVAL_CARD_HTML = (
   .ev-lin-col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
   .ev-lin-head { font-size: var(--gl-cap); line-height: var(--gl-cap-lh); font-weight: var(--gl-strong); color: var(--gl-text-2); }
   .ev-note { margin-top: 6px; font-size: var(--gl-cap); line-height: var(--gl-cap-lh); color: var(--gl-text-2); }
-  .ev-ped-head { display: flex; flex-wrap: wrap; gap: 2px 10px; margin-bottom: 10px; font-weight: var(--gl-strong); }
+  .eyebrow-sec > .ped-head { margin-bottom: 10px; }
   .ev-past { width: 100%; border-collapse: collapse; font-size: var(--gl-cap); line-height: var(--gl-cap-lh); }
   .ev-past th {
     padding: 0 10px 6px 0;
@@ -255,7 +244,6 @@ EVAL_CARD_HTML = (
     width: auto;
     min-width: 0;
     font-size: var(--gl-h);
-    white-space: nowrap;
   }
   .eval > .disclosure-body { margin-top: 0; gap: 24px; }
   .ev-side, .fs-breakdown { display: none; }
@@ -464,13 +452,6 @@ EVAL_CARD_HTML = (
     var s = String(Math.round(n));
     return "No. " + (s.length < 3 ? ("00" + s).slice(-3) : s);
   }
-  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  /* "2026-10-03T13:04:42Z" → "3 Oct 2026" (the stored UTC day). */
-  function dateLabel(iso) {
-    var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ""));
-    if (!m || !MONTHS[Number(m[2]) - 1]) return null;
-    return Number(m[3]) + " " + MONTHS[Number(m[2]) - 1] + " " + m[1];
-  }
   function capFirst(text) {
     var t = String(text);
     return t.charAt(0).toUpperCase() + t.slice(1);
@@ -508,7 +489,7 @@ EVAL_CARD_HTML = (
     if (dev.name) sub.appendChild(el("span", null, String(dev.name)));
     if (game.release_year) sub.appendChild(el("span", null, String(game.release_year)));
     var platform = price.platform || list(own.platforms).filter(Boolean)[0];
-    if (platform) sub.appendChild(el("span", "loz", label("platform", platform)));
+    if (platform) sub.appendChild(el("span", "loz", label("platform_short", platform)));
     if (sub.childNodes.length) plate.appendChild(sub);
     return plate;
   }
@@ -627,14 +608,12 @@ EVAL_CARD_HTML = (
     }
     return pkg.verdict === "try_demo" ? "try first" : null;
   }
-  function frameNode(pkg, no) {
+  function cardNode(pkg, no) {
     var game = pkg.game || {};
     var tier = verdictTier(pkg.verdict);
     var verdict = label("verdict", pkg.verdict);
-    var frame = el("article", "frame tier-" + tier + " ev-card");
+    var frame = frameNode("article", "ev-card", tier);
     frame.setAttribute("aria-label", (game.name || "Unknown game") + (verdict ? ": " + verdict : ""));
-    var grain = grainNode();
-    if (grain) frame.appendChild(grain);
 
     var art = el("div", "art");
     art.appendChild(coverNode(game));
@@ -727,6 +706,8 @@ EVAL_CARD_HTML = (
     var slot = el("div", "media-slot");
     mediaNode(slot, media, gameName);
     if (!slot.childNodes.length) return;
+    var title = slot.querySelector(".section-title");
+    if (title) title.classList.add("sr-only");
     if (slot.querySelector(".thumbs")) slot.classList.add("has-thumbs");
     parent.appendChild(slot);
   }
@@ -842,7 +823,7 @@ EVAL_CARD_HTML = (
     var ped = pkg.pedigree;
     if (key === "hltb") return num(time.hltb_main_hours) != null || num(time.hltb_extra_hours) != null;
     if (key === "igdb" || key === "studio" || key === "pedigree") {
-      return !!(ped && (pedigreeHeadline(ped) || named(ped.previous_games).length));
+      return !!(ped && (pedigreeHeadline(ped).length || named(ped.previous_games).length));
     }
     if (key === "media") {
       return !!(trailerEntry(media) || list(media.screenshots).some(function (s) {
@@ -879,12 +860,6 @@ EVAL_CARD_HTML = (
 
   function named(v) { return list(v).filter(function (i) { return i && i.name; }); }
   /* ---------- breakdown sections ---------- */
-  function bdSection(parent, title) {
-    var box = el("section", "ev-bd-sec");
-    box.appendChild(el("div", "section-title", title));
-    parent.appendChild(box);
-    return box;
-  }
   /* For you if / not for you if, as two trait columns (one when one-sided). */
   function forYouNode(parent, pres) {
     var yes = list(pres.for_you_if).filter(Boolean);
@@ -899,7 +874,7 @@ EVAL_CARD_HTML = (
   /* The anchors the verdict rests on: his own games, his rating as pips. */
   function anchorsNode(parent, anchors) {
     if (!anchors.length) return;
-    var box = bdSection(parent, "Grounded in your history");
+    var box = eyebrowSection(parent, "Grounded in your history");
     ministrip(box, anchors, function (a) {
       return { name: a.name, cover_url: a.cover_url, tier: ratedTier(a.rating),
         lines: [[ratingPips(a.rating) || "unrated"], playedParts(a.playtime_hours, a.completion_status)] };
@@ -943,7 +918,7 @@ EVAL_CARD_HTML = (
       pair.appendChild(column);
     });
     if (pair.childNodes.length === 1) pair.classList.add("ev-one");
-    bdSection(parent, "Lineage").appendChild(pair);
+    eyebrowSection(parent, "Lineage").appendChild(pair);
   }
   /* From the studio: the headline (names, founding year, catalogue size —
      under the big-studio damper it is all that renders), what they shipped
@@ -959,15 +934,11 @@ EVAL_CARD_HTML = (
   }
   function studioNode(parent, ped) {
     if (!ped) return;
-    var headline = pedigreeHeadline(ped);
+    var head = pedigreeHead(ped);
     var items = named(ped.previous_games);
-    if (!headline && !items.length) return;
-    var box = bdSection(parent, "From the studio");
-    if (headline) {
-      var head = el("div", "ev-ped-head");
-      headline.split(" · ").forEach(function (part) { head.appendChild(el("span", null, part)); });
-      box.appendChild(head);
-    }
+    if (!head && !items.length) return;
+    var box = eyebrowSection(parent, "From the studio");
+    if (head) box.appendChild(head);
     if (!items.length) return;
     ministrip(box, items, function (item) {
       return { name: item.name, cover_url: item.cover_url,
@@ -1007,7 +978,7 @@ EVAL_CARD_HTML = (
     items.forEach(function (p) {
       var tr = el("tr");
       if (p.summary) tr.title = String(p.summary);
-      tr.appendChild(el("td", null, dateLabel(p.assessed_at) || "earlier"));
+      tr.appendChild(el("td", null, monthYear(p.assessed_at) || "earlier"));
       var verdict = el("td");
       if (p.verdict) verdict.appendChild(ribbonNode(label("verdict", p.verdict), verdictTier(p.verdict), null, "s"));
       tr.appendChild(verdict);
@@ -1023,7 +994,7 @@ EVAL_CARD_HTML = (
       body.appendChild(tr);
     });
     table.appendChild(body);
-    var box = bdSection(parent, "Past verdicts");
+    var box = eyebrowSection(parent, "Past verdicts");
     box.appendChild(table);
     var total = num(past.count);
     if (past.truncated && total != null && total > items.length) {
@@ -1043,7 +1014,7 @@ EVAL_CARD_HTML = (
       || list(pres.not_for_you_if).filter(Boolean).length
       || named(pkg.anchors).length
       || named(pkg.comparisons).length
-      || (ped && (pedigreeHeadline(ped) || named(ped.previous_games).length))
+      || (ped && (pedigreeHeadline(ped).length || named(ped.previous_games).length))
       || list((pkg.past || {}).items).length);
   }
   function breakdownNode(parent, pkg, withLibrary) {
@@ -1123,7 +1094,7 @@ EVAL_CARD_HTML = (
     var ped = pkg.pedigree || {};
     var line = el("div", "ev-prov");
     if (ped.publisher_name) line.appendChild(el("span", null, "Published by " + ped.publisher_name));
-    var when = dateLabel(data.assessed_at);
+    var when = monthYear(data.assessed_at);
     if (when) line.appendChild(el("span", null, "assessed " + when));
     return line.childNodes.length ? line : null;
   }
@@ -1136,7 +1107,7 @@ EVAL_CARD_HTML = (
     var top = el("div", "ev-top");
     var left = el("div", "ev-left");
     var cardwrap = el("div", "ev-cardwrap");
-    var frame = frameNode(pkg, cardNo(data.assessment_id != null ? data.assessment_id : game.game_id));
+    var frame = cardNode(pkg, cardNo(data.assessment_id != null ? data.assessment_id : game.game_id));
     cardwrap.appendChild(frame);
     left.appendChild(cardwrap);
     // Fullscreen only: the candidate line and the provenance under the card.
@@ -1177,10 +1148,8 @@ EVAL_CARD_HTML = (
      (a plain ribbon, no tier). */
   function noteCard(opts) {
     var wrap = el("div", "eval ev-notes");
-    var frame = el("article", "frame frame-s tier-" + opts.tier + " ev-nc" + (opts.voided ? " ev-void" : ""));
+    var frame = frameNode("article", "frame-s ev-nc" + (opts.voided ? " ev-void" : ""), opts.tier);
     frame.setAttribute("aria-label", (opts.name || "Unknown game") + ": " + opts.ribbon);
-    var grain = grainNode();
-    if (grain) frame.appendChild(grain);
     var art = el("div", "art");
     art.appendChild(coverNode({ name: opts.name }));
     frame.appendChild(art);
@@ -1193,7 +1162,7 @@ EVAL_CARD_HTML = (
     return { node: wrap, frame: frame };
   }
   function recordedCard(data) {
-    var when = dateLabel(data.assessed_at);
+    var when = monthYear(data.assessed_at);
     return noteCard({
       name: data.name, tier: verdictTier(data.verdict), ribbon: label("verdict", data.verdict),
       caption: "Recorded" + (when ? " " + when : ""),
@@ -1203,7 +1172,7 @@ EVAL_CARD_HTML = (
      was recorded — not the day of the void, which it does not carry. */
   function voidCard(data) {
     var no = cardNo(data.assessment_id);
-    var when = dateLabel(data.assessed_at);
+    var when = monthYear(data.assessed_at);
     return noteCard({
       name: data.name, tier: "none", ribbon: "Voided", voided: true,
       caption: "Verdict" + (no ? " " + no : "") + (when ? " of " + when : "") + " voided",

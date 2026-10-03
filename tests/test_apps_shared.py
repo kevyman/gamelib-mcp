@@ -819,6 +819,89 @@ class OneCopyHelperTests(unittest.TestCase):
                 self.assertNotIn("gridSteamChip", _WIDGET_SOURCES[module])
                 self.assertNotIn(">= 7 ?", _WIDGET_SOURCES[module])     # ratingTier's thresholds
 
+    def test_binder_glue_lives_once_in_the_shared_blocks(self) -> None:
+        # Folded out of both widgets (spec 2026-10-04 §2 Phase 3): the card
+        # frame opener, the month-year date, the eyebrow section, the
+        # visually-hidden label, the pill no-wrap and the mini-size pips.
+        homes = {
+            "function frameNode(tag, cls, tier) {": apps_shared.GRAIN_JS,
+            "function monthYear(iso) {": apps_shared.NUMBERS_JS,
+            "var MONTHS = [": apps_shared.NUMBERS_JS,
+            "function eyebrowSection(parent, text) {": apps_shared.DOM_HELPERS_JS,
+            "function pedigreeHead(ped) {": apps_shared.PEDIGREE_JS,
+            "  .sr-only {": apps_shared.A11Y_CSS,
+            ".actions > .btn, .actions > .disclosure, .grid-head > .btn, .topbar > .btn "
+            "{ white-space: nowrap; }": apps_shared.CONTROLS_CSS,
+            ".ministrip > :only-child { flex-basis: 100%; }": apps_shared.MINI_CSS,
+            ".mini .pips { gap: 5px; height: 10px; padding: 0 1px; }": apps_shared.MINI_CSS,
+        }
+        frame = apps_shared.GRAIN_JS.split("function frameNode(", 1)[1]
+        self.assertIn("var grain = grainNode();", frame)
+        self.assertIn("if (grain) frame.appendChild(grain);", frame)
+        for name, html in (("game-cards", apps.GAME_CARDS_HTML), ("eval-card", apps_eval.EVAL_CARD_HTML)):
+            for marker, block in homes.items():
+                with self.subTest(widget=name, marker=marker):
+                    self.assertIn(marker, block)
+                    self.assertEqual(html.count(marker), 1)
+            with self.subTest(widget=name, check="both widgets build frames through it"):
+                self.assertIn('frameNode("article", ', html)
+                self.assertGreaterEqual(html.count("eyebrowSection(parent, "), 2)
+        for module in ("apps.py", "apps_eval.py"):
+            source = _WIDGET_SOURCES[module]
+            with self.subTest(module=module):
+                for gone in ("function gcFrame(", "function dateLabel(", "function bdSection(",
+                             "var MONTHS", "grainNode()", ".sr-only {", "white-space: nowrap; }"):
+                    self.assertNotIn(gone, source)
+
+
+# Every quoted JS string, comments stripped first (a comment's apostrophe
+# would otherwise open a phantom string). A ``//`` only starts a comment
+# after whitespace or at a line start, so "https://" inside a string stays.
+_JS_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+_JS_LINE_COMMENT = re.compile(r"(^|\s)//[^\n]*", re.MULTILINE)
+_JS_STRING = re.compile(r'"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)*\'')
+
+
+def _middot_strings(js: str) -> list[str]:
+    """The lines holding a quoted string with a middot, minus aria-labels."""
+    code = _JS_LINE_COMMENT.sub(r"\1", _JS_BLOCK_COMMENT.sub("", js))
+    found = []
+    for line in code.splitlines():
+        if "aria-label" in line:
+            continue
+        if any("\u00b7" in s for s in _JS_STRING.findall(line)):
+            found.append(line.strip())
+    return found
+
+
+class NoMiddotJoinTests(unittest.TestCase):
+    """The Binder separates parts with gap-separated spans, never " · "
+    strings — the one allowed place is an aria-label's composition."""
+
+    def test_no_shared_js_constant_carries_a_middot_string(self) -> None:
+        for name, value in shared_blocks():
+            if name.endswith("_JS"):
+                with self.subTest(block=name):
+                    self.assertEqual(_middot_strings(value), [])
+
+    def test_no_widget_render_code_carries_a_middot_string(self) -> None:
+        for name, html in (("game-cards", apps.GAME_CARDS_HTML), ("eval-card", apps_eval.EVAL_CARD_HTML)):
+            script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+            with self.subTest(widget=name):
+                self.assertEqual(_middot_strings(script), [])
+
+    def test_the_scan_sees_a_middot_and_spares_an_aria_label(self) -> None:
+        self.assertEqual(_middot_strings('  var t = a + " \u00b7 " + b;\n'), ['var t = a + " \u00b7 " + b;'])
+        self.assertEqual(_middot_strings('  n.setAttribute("aria-label", a + " \u00b7 " + b);\n'), [])
+        self.assertEqual(_middot_strings("  /* a \u00b7 b, it's a comment */\n  // x \u00b7 y\n"), [])
+
+    def test_the_pedigree_headline_is_parts(self) -> None:
+        js = apps_shared.PEDIGREE_JS
+        self.assertIn("    return parts;\n", js)
+        self.assertNotIn("parts.join(", js)
+        self.assertIn('parts.forEach(function (part) { head.appendChild(el("span", null, part)); });', js)
+        self.assertIn(".ped-head { display: flex; flex-wrap: wrap; gap: 2px 10px;", apps_shared.PEDIGREE_CSS)
+
 
 class LightboxChromeTests(unittest.TestCase):
     """A4: one focus trap, one ✕, one key router — in both widgets."""
@@ -1384,6 +1467,7 @@ _NUMBERS_PROBE = r"""
       }),
       one: compactCount(1, "review"),
       many: compactCount(9950, "review"),
+      months: ["2022-09-21", "2026-10-03T13:04:42Z", "2026-13-01", "", null, "Sep 2022"].map(monthYear),
     }));
   })();
 """
@@ -1420,6 +1504,11 @@ class NumberBehaviourTests(unittest.TestCase):
                          ["1M", "10k", "1k", "999", "1k", "1.5k", "114k", "2.5M", "0"])
         self.assertEqual(self.numbers["one"], "1 review")
         self.assertEqual(self.numbers["many"], "10k reviews")
+
+    def test_month_year_is_the_one_date_label(self) -> None:
+        # the detail card's LAST row and the evaluation card's provenance,
+        # ledger and note-card captions all read "Sep 2022"; junk is null
+        self.assertEqual(self.numbers["months"], ["Sep 2022", "Oct 2026", None, None, None, None])
 
     def test_positive_pct_is_already_a_percentage(self) -> None:
         # stored 0-100 (tools/assessment.py's _check_range): 1 is 1%, never 100%

@@ -276,7 +276,9 @@ class ContentTypeBadgeTests(unittest.TestCase):
             "var reasons = enrichmentReasons(game.enrichment);",
             'return source + ": " + reason;',
             'emptyText += " — " + reasons.join("; ");',
-            "notice(flow, emptyText);",
+            "noticeText = emptyText;",
+            # bookkeeping reads last: just before the actions row
+            "if (noticeText) flow.insertBefore(notice(flow, noticeText), actions);",
             'var ENRICH_SOURCES = { steam_store: "Steam", protondb: "ProtonDB", igdb: "IGDB" };',
             'no_steam_appid: "no app id",',
             'no_match: "no match",',
@@ -489,7 +491,7 @@ class ContentTypeBadgeTests(unittest.TestCase):
     def test_platform_ids_and_hours_render_through_the_shared_helpers(self) -> None:
         for marker in (
             'label("platform", game.suggested_platform)',
-            'label("platform", p.platform)',
+            'label("platform_short", p.platform)',
             "hoursLabel(game.hltb_main, true)",
             'label("tier", game.protondb_tier)',
         ):
@@ -586,7 +588,7 @@ class GridModeTests(unittest.TestCase):
         card = js_function(self.HTML, "function gridCard(game, ctx)")
         self.assertNotIn("matchBar(", card)
         order = [
-            "var card = gcFrame(",
+            "var card = frameNode(",
             "art.appendChild(coverNode(game));",
             "art.appendChild(badge);",
             'art.appendChild(ribbonNode(b.text, "good", null, "s art"));',
@@ -600,7 +602,7 @@ class GridModeTests(unittest.TestCase):
         ]
         positions = [card.index(marker) for marker in order]
         self.assertEqual(positions, sorted(positions))
-        frame = js_function(self.HTML, "function gcFrame(tag, cls, tier)")
+        frame = js_function(self.HTML, "function frameNode(tag, cls, tier)")
         self.assertIn("var grain = grainNode();", frame)
         self.assertIn("if (grain) frame.appendChild(grain);", frame)
         # Matched tags: at most three gap-separated spans with a 4px diamond
@@ -638,7 +640,7 @@ class GridModeTests(unittest.TestCase):
         self.assertIn('} else if (mc != null && mc >= CRITICS_PICK) {', bits)
         self.assertIn('bits.push({ part: "ribbon", text: "Critics\' pick" });', bits)
         # the frame is the badge's tier
-        self.assertIn('gcFrame(tappable ? "button" : "div", "frame-s gc-card", badgeBit ? badgeBit.tier : "none");',
+        self.assertIn('frameNode(tappable ? "button" : "div", "frame-s gc-card", badgeBit ? badgeBit.tier : "none");',
                       card)
         self.assertNotIn("type-chip", self.HTML)
         self.assertNotIn('cls: "corner"', self.HTML)
@@ -680,7 +682,7 @@ class GridModeTests(unittest.TestCase):
                       'text: hltb + " to beat" });', bits)
         card = js_function(self.HTML, "function gridCard(game, ctx)")
         self.assertIn("span.title = b.title;", card)
-        self.assertIn('partsOf("platform").forEach(function (b) { sub.appendChild(el("span", "loz", b.text)); });',
+        self.assertIn('partsOf("platform").forEach(function (b) { sub.appendChild(el("span", "loz", b.short)); });',
                       card)
 
     def test_the_card_is_named_by_its_title_and_what_it_shows(self) -> None:
@@ -721,7 +723,8 @@ class GridModeTests(unittest.TestCase):
         css = widget_css(self.HTML)
         self.assertIn('html[data-display-mode="fullscreen"] .act-expand { display: none; }', css)
         self.assertIn("justify-content: flex-end;", css)
-        self.assertIn(".actions > .btn, .grid-head > .btn, .topbar > .btn { white-space: nowrap; }", css)
+        self.assertIn(".actions > .btn, .actions > .disclosure, .grid-head > .btn, .topbar > .btn "
+                      "{ white-space: nowrap; }", css)
         self.assertNotIn(".actions { flex-direction: column; }", css)
 
     def test_fullscreen_grid_widens_and_sticks_the_header(self) -> None:
@@ -956,7 +959,7 @@ class DetailModeTests(unittest.TestCase):
         # ribbon) → plate → stats. From 560px the card is 300px with the
         # ground beside it.
         panel = js_function(self.HTML, "function identityPanel(game, media)")
-        order = ['var frame = gcFrame("article", "dt-card", detailTier(game));',
+        order = ['var frame = frameNode("article", "dt-card", detailTier(game));',
                  "art.appendChild(coverNode(game));", "if (badge) art.appendChild(badge);",
                  "if (ribbon) art.appendChild(ribbon);", "frame.appendChild(art);",
                  'row.appendChild(el("h2", "plate-title", game.name));',
@@ -1253,7 +1256,7 @@ class GridCardBehaviourTests(unittest.TestCase):
         cards = self.match["cards"]
         self.assertEqual(cards[0]["title"], "The Spirit and the Mouse")
         self.assertEqual(cards[0]["sub"], [["", "~4.2h", "HowLongToBeat, main story"],
-                                           ["loz", "Epic Games", None], ["card-no", "No. 1", None]])
+                                           ["loz", "Epic", None], ["card-no", "No. 1", None]])
         self.assertEqual(cards[6]["sub"], [["loz", "Switch 2", None], ["card-no", "No. 7", None]])
         # played hours win over the estimate; numbering is global (offset 20)
         self.assertEqual(self.extra["cards"][0]["sub"], [["", "2.3h", "Your playtime"], ["loz", "Steam", None],
@@ -1439,8 +1442,10 @@ class DetailCardBehaviourTests(unittest.TestCase):
 
     def test_the_ground_in_order(self) -> None:
         ghost = self.out["ghost"]
+        # the enrichment notice is bookkeeping: after FROM THE STUDIO, just
+        # before the actions row, never in the middle of the copy
         self.assertEqual(ghost["flow"], ["desc", "more-toggle", "flavor flavor-quote", "dt-abil", "tagline",
-                                         "notice", "panel reel", "dt-sec", "dt-sec", "actions dt-actions"])
+                                         "panel reel", "eyebrow-sec", "eyebrow-sec", "notice", "actions dt-actions"])
         self.assertTrue(ghost["flavor"].startswith("Absolutely beautiful and well made."))
         self.assertEqual(len(ghost["tags"]), 8)
         self.assertEqual(ghost["eyebrows"], ["Media", "In your library", "From the studio"])
@@ -1460,8 +1465,10 @@ class DetailCardBehaviourTests(unittest.TestCase):
         self.assertEqual(minis[0], ["mini tier-good", "Marvel's Spider-Man", ["9/10", "50h"]])
         self.assertEqual(minis[2], ["mini tier-none", "Marvel's Spider-Man 2", ["25h"]])
         self.assertEqual(minis[4][2], ["unplayed"])
-        self.assertEqual(self.out["ghost"]["notices"][-1],
-                         "No earlier games picked: Sucker Punch Productions has 30+ games on IGDB")
+        self.assertEqual(self.out["ghost"]["notices"], [
+            "No earlier games picked: Sucker Punch Productions has 30+ games on IGDB",
+            "Not fetched — Steam: no app id; ProtonDB: no app id",
+        ])
 
     def test_actions_and_the_empty_state(self) -> None:
         self.assertEqual(self.out["ghost"]["actions"][0][1], "Full breakdown▾")
@@ -1790,6 +1797,46 @@ class LabelTests(unittest.IsolatedAsyncioTestCase):
                 "other": "Other",
             },
         )
+
+    def test_every_registry_platform_has_a_short_lozenge_label(self) -> None:
+        # Lozenges sit on the plate's one-row sub line beside "No. N", so they
+        # carry the short form ("Epic", not "Epic Games"); full names stay for
+        # prose and aria-labels. Generated from the same registry walk, so an
+        # alias reads as its platform in both maps.
+        from gamelib_mcp.platforms_registry import PLATFORMS
+
+        names = {spec.name for spec in PLATFORMS}
+        self.assertEqual(names, set(apps_shared._PLATFORM_SHORT_DISPLAY))
+        self.assertEqual(
+            {name: apps_shared.PLATFORM_SHORT_LABELS[name] for name in names},
+            {
+                "steam": "Steam", "epic": "Epic", "gog": "GOG",
+                "switch2": "Switch 2", "ps5": "PS5", "xbox": "Xbox",
+                "itchio": "itch.io", "ea": "EA", "ubisoft": "Ubisoft",
+                "other": "Other",
+            },
+        )
+        self.assertEqual(set(apps_shared.PLATFORM_SHORT_LABELS), set(apps_shared.PLATFORM_LABELS))
+        for spec in PLATFORMS:
+            for alias in spec.aliases:
+                with self.subTest(alias=alias):
+                    self.assertEqual(apps_shared.PLATFORM_SHORT_LABELS[alias],
+                                     apps_shared.PLATFORM_SHORT_LABELS[spec.name])
+        self.assertIn("var PLATFORM_SHORT_LABELS = ", apps_shared.LABELS_JS)
+        self.assertIn("platform_short: PLATFORM_SHORT_LABELS,", apps_shared.LABELS_JS)
+
+    def test_every_platform_lozenge_uses_the_short_label(self) -> None:
+        # grid sub (via the bit's short form), detail plate, eval plate
+        self.assertIn('short: label("platform_short", game.suggested_platform) });', apps.GAME_CARDS_HTML)
+        self.assertIn('sub.appendChild(el("span", "loz", b.short));', apps.GAME_CARDS_HTML)
+        self.assertIn('sub.appendChild(el("span", "loz", label("platform_short", p.platform)));',
+                      apps.GAME_CARDS_HTML)
+        self.assertIn('sub.appendChild(el("span", "loz", label("platform_short", platform)));',
+                      apps_eval.EVAL_CARD_HTML)
+        for name, html in WIDGETS:
+            with self.subTest(widget=name):
+                self.assertNotRegex(html, r'el\("span", "loz", label\("platform",')
+                self.assertNotIn('el("span", "loz", b.text)', html)
 
     async def test_every_verdict_literal_has_an_explicit_label(self) -> None:
         from gamelib_mcp import main
