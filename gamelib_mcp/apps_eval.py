@@ -421,7 +421,7 @@ EVAL_CARD_HTML = (
       grid-template-columns: repeat(3, minmax(0, 1fr));
       align-content: start;
       gap: 6px;
-      margin-top: 0;
+      margin-top: -4px;             /* cells level with the stage; the ring keeps its 4px */
       contain: size;
       overflow-x: hidden;
       overflow-y: auto;
@@ -485,13 +485,14 @@ EVAL_CARD_HTML = (
     + apps_shared.FULLSCREEN_BUTTON_JS
     + r"""
   /* ---------- screenshot carousel (lightbox) ---------- */
-  var overlayState = null; // { node, trigger, keydown }
+  var overlayState = null; // { node, trigger, keydown, focusin }
 
   function closeOverlay() {
     if (!overlayState) return;
     var s = overlayState;
     overlayState = null;
     document.removeEventListener("keydown", s.keydown, true);
+    document.removeEventListener("focusin", s.focusin, true);
     s.node.classList.remove("open");
     setTimeout(function () { s.node.remove(); }, 200);
     if (s.trigger && s.trigger.focus) s.trigger.focus({ preventScroll: true });
@@ -519,8 +520,10 @@ EVAL_CARD_HTML = (
       if (ev.target === overlay) closeOverlay();
     });
     var keydown = lightboxKeys(panel, function (delta) { show(index + delta); }, closeOverlay);
+    var focusin = focusGuard(panel);
     document.addEventListener("keydown", keydown, true);
-    overlayState = { node: overlay, trigger: trigger, keydown: keydown };
+    document.addEventListener("focusin", focusin, true);
+    overlayState = { node: overlay, trigger: trigger, keydown: keydown, focusin: focusin };
 
     document.body.appendChild(overlay);
 
@@ -625,15 +628,15 @@ EVAL_CARD_HTML = (
     "coin flip": "ok",
     "probable miss": "bad",
   };
-  /* craft.adjusted is a 0..1 sample-adjusted share; positive_pct is the raw
-     review percentage (0..100) and only stands in when there's no adjusted
-     figure. */
+  /* The stored ranges (tools/assessment.py's _check_range): craft.adjusted
+     is a 0..1 sample-adjusted share, rescaled here; positive_pct is the raw
+     review percentage, already 0..100, so 1 means 1% — never rescaled. It
+     only stands in when there's no adjusted figure. */
   function craftPercent(craft) {
     var adjusted = num(craft.adjusted);
     if (adjusted != null) return Math.round(adjusted * 100);
     var raw = num(craft.positive_pct);
-    if (raw == null) return null;
-    return Math.round(raw <= 1 ? raw * 100 : raw);
+    return raw == null ? null : Math.round(raw);
   }
   function scoreChips(pkg) {
     var craft = pkg.craft || {};
@@ -647,7 +650,7 @@ EVAL_CARD_HTML = (
         label: "Reviews", value: pct + "% positive", tier: craftTier(pct), meter: pct,
         aux: count,
         title: "Sample-adjusted share of positive reviews"
-          + (rawPct != null ? " (raw " + Math.round(rawPct <= 1 ? rawPct * 100 : rawPct) + "% positive)" : "")
+          + (rawPct != null ? " (raw " + Math.round(rawPct) + "% positive)" : "")
           + (count ? ", from " + count : ""),
       }));
     }
@@ -1104,26 +1107,12 @@ EVAL_CARD_HTML = (
       wrap.appendChild(row);
       return null;
     }
-    var d = disclosure(row, "Full breakdown", function (body) { breakdownNode(body, pkg); });
+    // The shared control. On a fullscreen grant there is nothing to open in
+    // place: syncDisplayMode builds the breakdown under the card.
+    var d = fullscreenOrDisclosure(row, "Full breakdown", function (body) { breakdownNode(body, pkg); },
+      function () {});
     d.button.classList.add("act-breakdown");
     if (appid) storeButton(row, appid);
-    var inPlace = false;                            // the host refused once: stay in place
-    var asking = false;
-    // Capture on the row, so the disclosure's own click handler only runs
-    // when fullscreen is off the table.
-    row.addEventListener("click", function (ev) {
-      if (!d.button.contains(ev.target)) return;
-      if (inPlace || !canFullscreen() || d.button.getAttribute("aria-expanded") === "true") return;
-      ev.stopPropagation();
-      if (asking) return;
-      asking = true;
-      requestDisplayMode("fullscreen").then(function (mode) {
-        asking = false;
-        if (mode === "fullscreen") return;          // syncDisplayMode builds the breakdown
-        inPlace = true;
-        d.button.click();
-      });
-    }, true);
     wrap.appendChild(row);
     return d.body;
   }

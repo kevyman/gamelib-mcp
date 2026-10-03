@@ -548,7 +548,7 @@ class GridModeTests(unittest.TestCase):
         # a reassigned shared function).
         self.assertIn("hooks.afterToolInput = function () {", self.HTML)
         self.assertNotIn("handleToolInput = function", self.HTML)
-        self.assertIn("if (gotResult && view === \"grid\" && gridData) render(gridData);", self.HTML)
+        self.assertIn('else if (view === "grid" && gridData) render(gridData);', self.HTML)
 
     def test_match_bar_leads_the_card_body(self) -> None:
         card = js_function(self.HTML, "function gridCard(game)")
@@ -571,7 +571,9 @@ class GridModeTests(unittest.TestCase):
     def test_cover_carries_only_rank_metacritic_and_type_chip(self) -> None:
         card = js_function(self.HTML, "function gridCard(game)")
         self.assertEqual(card.count("cover.appendChild("), 2)
-        self.assertIn('cls: "corner",', card)
+        self.assertIn('cls: "corner" }', card)
+        self.assertIn('bits.push({ part: "corner", label: "Metacritic",',
+                      js_function(self.HTML, "function cardBits(game)"))
         self.assertIn('if (typeLabel) cover.appendChild(el("span", "type-chip", typeLabel));', card)
         self.assertIn(".cover-wrap .type-chip { position: absolute; left: 6px; bottom: 6px;",
                       widget_css(self.HTML))
@@ -595,12 +597,15 @@ class GridModeTests(unittest.TestCase):
             self.assertIn(decl, rule)
 
     def test_grid_hours_say_what_they_are(self) -> None:
+        bits = js_function(self.HTML, "function cardBits(game)")
+        self.assertIn('if (hltb) bits.push({ part: "meta", text: hltb + " to beat" });', bits)
         card = js_function(self.HTML, "function gridCard(game)")
-        self.assertIn('if (hltb) metaBits.push(hltb + " to beat");', card)
+        self.assertIn('var metaBits = partsOf("meta").map(function (b) { return b.text; });', card)
 
     def test_the_card_is_named_by_its_title_and_what_it_shows(self) -> None:
         card = js_function(self.HTML, "function gridCard(game)")
-        self.assertIn('card.setAttribute("aria-label", cardLabel(game));', card)
+        self.assertIn("var bits = cardBits(game);", card)
+        self.assertIn('card.setAttribute("aria-label", cardLabel(game, bits));', card)
         self.assertNotIn('"aria-labelledby"', self.HTML)        # aria-label must win
         self.assertIn('card.setAttribute("role", "button");', card)
         self.assertIn('if (ev.key === "Enter" || ev.key === " ") {', card)
@@ -670,14 +675,15 @@ class GridModeTests(unittest.TestCase):
             "if (seq !== drillSeq) return;",
             # the failure names its cause, then says what is on screen
             'if (res === TIMED_OUT) { fill(game, "The library didn\'t answer in 30s."); return; }',
-            "if (res && res.isError) { fill(game, toolErrorText(res)); return; }",
+            # the drill-in's call is get_game_detail, not the grid's own tool
+            'if (res && res.isError) { fill(game, toolErrorText(res, "get_game_detail")); return; }',
             'else if (res === undefined) fill(game, "The host didn\'t run the lookup.");',
             'if (failure) notice(holder, failure + " Showing what the list had.");',
         ):
             self.assertIn(marker, drill)
         # the shared toolErrorText (TOOL_RESULT_JS), not a local copy
         self.assertEqual(self.HTML.count("function toolErrorText("), 1)
-        self.assertIn("function toolErrorText(result)", apps_shared.TOOL_RESULT_JS)
+        self.assertIn("function toolErrorText(result, name)", apps_shared.TOOL_RESULT_JS)
         call = js_function(self.HTML, "function callTool(name, args, timeoutMs)")
         self.assertIn('request("tools/call", { name: name, arguments: args }, ms + 1000)', call)
         self.assertIn("resolve(TIMED_OUT); }, ms);", call)
@@ -772,45 +778,9 @@ class CardTapBehaviourTests(unittest.TestCase):
         self.assertEqual(self.out["granted"], {"drilled": [["Noita", "inline"]], "messages": []})
 
 
-_LABEL_PROBE = r"""
-function realScore(n) { return n != null && n >= 0; }
-console.log(JSON.stringify({
-  full: cardLabel({ name: "Hades II", match_percent: 100, hltb_main: 26.5, suggested_platform: "steam",
-                    metacritic_score: 93, opencritic_score: 91, steam_review_desc: "Overwhelmingly Positive" }),
-  sparse: cardLabel({ name: "Noita", match_percent: 74.4, metacritic_score: -1 }),
-  bare: cardLabel({ name: "Mystery" }),
-}));
-"""
-
-
-@unittest.skipUnless(NODE, "node is not installed")
-class CardLabelBehaviourTests(unittest.TestCase):
-    """A1, executed: the card's accessible name carries what the card shows."""
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        html = apps.GAME_CARDS_HTML
-        fn = js_function(html, "function cardLabel(game)")
-        script = (
-            "function num(v) { if (v === null || v === undefined || v === '') return null;"
-            " var n = Number(v); return isFinite(n) ? n : null; }\n"
-            + apps_shared.LABELS_JS + apps_shared.NUMBERS_JS + fn + _LABEL_PROBE)
-        assert NODE is not None
-        proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=60, check=False)
-        if proc.returncode != 0:
-            raise AssertionError(proc.stderr)
-        cls.out = json.loads(proc.stdout)
-
-    def test_the_label_reads_title_match_hours_platform_and_scores(self) -> None:
-        self.assertEqual(
-            self.out["full"],
-            "Hades II: 100% match, 27h to beat, Steam, Metacritic 93, OpenCritic 91, "
-            "Steam overwhelmingly positive",
-        )
-
-    def test_only_the_parts_present_are_read(self) -> None:
-        self.assertEqual(self.out["sparse"], "Noita: 74% match")
-        self.assertEqual(self.out["bare"], "Mystery")
+# The card's accessible name is executed against the real gridCard in
+# tests/test_apps_shared.py::CardLabelBehaviourTests (item 14: the label is
+# built from the same bits the card renders).
 
 
 class DetailModeTests(unittest.TestCase):
@@ -866,12 +836,12 @@ class DetailModeTests(unittest.TestCase):
         for marker in (
             '[similar ? "Similar games you own" : null, studio ? "From the studio" : null]',
             'if (currentDisplayMode() === "fullscreen") { build(stack); return; }',
-            "if (!canFullscreen()) { disclosure(stack, text, build); return; }",
-            'requestDisplayMode("fullscreen").then(function (mode) {',
-            'if (mode === "fullscreen") build(wrap);',
-            "else disclosure(wrap, text, build).button.click();",
+            # the shared control (apps_shared.DISCLOSURE_JS), no local copy
+            "fullscreenOrDisclosure(stack, text, build);",
         ):
             self.assertIn(marker, block)
+        self.assertNotIn("requestDisplayMode", block)
+        self.assertNotIn("chev-out", self.HTML)
 
     def test_carousel_rows_snap_and_peek(self) -> None:
         css = widget_css(self.HTML)
@@ -880,8 +850,8 @@ class DetailModeTests(unittest.TestCase):
         for decl in (
             "scroll-snap-type: x mandatory;",
             "overscroll-behavior-x: contain;",
-            "scroll-padding-left: calc(2px + var(--gl-safe-left, 0px));",
-            "scroll-padding-right: calc(2px + var(--gl-safe-right, 0px));",
+            "scroll-padding-left: calc(4px + var(--gl-safe-left, 0px));",
+            "scroll-padding-right: calc(4px + var(--gl-safe-right, 0px));",
         ):
             self.assertIn(decl, rule)
         self.assertIn(".sim { width: 120px; scroll-snap-align: start; }", css)
@@ -1043,7 +1013,9 @@ class BridgeProtocolTests(unittest.TestCase):
             'appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },',
             "appInfo: { name: appName,",
             "clientInfo: { name: appName,",
-            "applyHostContext(res && res.hostContext);",
+            "applyHostContext(res.hostContext);",
+            # initialized only answers a real ui/initialize result
+            'if (!res || typeof res !== "object") return;',
             "if (window.__PREVIEW_HOST_CONTEXT__) applyHostContext(window.__PREVIEW_HOST_CONTEXT__);",
             "showSkeleton();",
         ):
@@ -1190,7 +1162,8 @@ class SharedComponentTests(unittest.TestCase):
         # grid: the header line, then 4 cards of cover / title / match bar / chips
         self.assertIn('wrap.appendChild(sk("sk-head"));', js)
         self.assertIn("for (var c = 0; c < 4; c++) {", js)
-        grid = js[js.index('if (kind === "grid") {'):js.index("return wrap;")]
+        start = js.index('if (kind === "grid") {')
+        grid = js[start:js.index("return wrap;", start)]
         order = ['sk("sk-cover")', 'sk("sk-line")', 'sk("sk-bar")', "chips(body, 2);"]
         self.assertEqual([grid.index(m) for m in order], sorted(grid.index(m) for m in order))
         # eval: header (cover, title, stamp), score chips, the facts row, the
@@ -1207,7 +1180,12 @@ class SharedComponentTests(unittest.TestCase):
         self.assertIn(".sk-media { aspect-ratio: 16 / 9;", apps_shared.SKELETON_CSS)
         self.assertIn(".skel-eval .sk-media-row { display: grid; grid-template-columns: minmax(0, 1fr) 296px; }",
                       apps_shared.SKELETON_CSS)
+        # neutral: one panel of cover, three lines and a chip row
+        neutral = js[js.index('if (kind === "neutral") {'):js.index('if (kind === "grid") {')]
+        self.assertIn('line.appendChild(sk("sk-thumb"));', neutral)
+        self.assertIn("lines(text, 3);\n      chips(text, 3);", neutral)
         self.assertIn("function skeletonKind()", apps.GAME_CARDS_HTML)
+        self.assertIn('if (!lastToolInput) return "neutral";', apps.GAME_CARDS_HTML)
         self.assertIn('function skeletonKind() { return "eval"; }', apps_eval.EVAL_CARD_HTML)
 
     def test_display_mode_requests_resolve_to_the_granted_mode(self) -> None:

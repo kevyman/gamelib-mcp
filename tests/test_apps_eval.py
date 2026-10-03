@@ -369,13 +369,13 @@ class EvalCardLayoutTests(unittest.TestCase):
         )
         actions = self._function("actionsNode", "syncDisplayMode")
         self.assertEqual(actions.count('el("div", "actions")'), 1)
-        self.assertEqual(actions.count("disclosure(row,"), 1)
+        self.assertEqual(actions.count("fullscreenOrDisclosure(row,"), 1)
         # Two storeButton calls, on mutually exclusive branches (store alone,
         # or store after the breakdown) — so the row never exceeds two.
         self.assertEqual(actions.count("storeButton(row, appid);"), 2)
         self.assertNotIn("row.appendChild(", actions)
         self.assertIn(
-            'disclosure(row, "Full breakdown", function (body) { breakdownNode(body, pkg); });',
+            'fullscreenOrDisclosure(row, "Full breakdown", function (body) { breakdownNode(body, pkg); },',
             actions,
         )
 
@@ -383,12 +383,12 @@ class EvalCardLayoutTests(unittest.TestCase):
         actions = self._function("actionsNode", "syncDisplayMode")
         # Second, after "Full breakdown", and only when an appid resolved.
         self.assertLess(
-            actions.index('disclosure(row, "Full breakdown"'),
+            actions.index('fullscreenOrDisclosure(row, "Full breakdown"'),
             actions.index("if (appid) storeButton(row, appid);"),
         )
         # No breakdown: the row is the store button alone (evalCard only
         # reaches this branch when an appid exists).
-        alone = actions[actions.index("if (!more) {"):actions.index("var d = disclosure(")]
+        alone = actions[actions.index("if (!more) {"):actions.index("var d = fullscreenOrDisclosure(")]
         self.assertIn("storeButton(row, appid);", alone)
         self.assertIn("return null;", alone)
 
@@ -412,17 +412,18 @@ class EvalCardLayoutTests(unittest.TestCase):
         self.assertIn(".actions .act-store { width: 100%; }", phone)
 
     def test_full_breakdown_requests_fullscreen_and_falls_back_in_place(self) -> None:
+        # The shared control (apps_shared.DISCLOSURE_JS, executed in
+        # tests/test_apps_shared.py::FullscreenOrDisclosureTests) asks for
+        # fullscreen and falls back in place; on a grant the card's own
+        # no-op hands over to syncDisplayMode.
         actions = self._function("actionsNode", "syncDisplayMode")
-        for marker in (
-            'if (inPlace || !canFullscreen() || d.button.getAttribute("aria-expanded") === "true") return;',
-            "ev.stopPropagation();",
-            'requestDisplayMode("fullscreen").then(function (mode) {',
-            'if (mode === "fullscreen") return;',
-            "inPlace = true;",
-            "d.button.click();",
-            "}, true);",                    # capture: runs before the disclosure's own handler
-        ):
-            self.assertIn(marker, actions)
+        self.assertIn(
+            'fullscreenOrDisclosure(row, "Full breakdown", function (body) { breakdownNode(body, pkg); },\n'
+            "      function () {});",
+            actions,
+        )
+        for gone in ("requestDisplayMode", "inPlace", "d.button.click();", "}, true);"):
+            self.assertNotIn(gone, actions)
         # Fullscreen: the inline card stays, the breakdown builds once below
         # it, CSS swaps the action row out, and size reports go quiet.
         html = apps_eval.EVAL_CARD_HTML
@@ -653,6 +654,7 @@ function disclosure(parent, text) {
   parent.appendChild(body);
   return { button: btn, body: body };
 }
+function fullscreenOrDisclosure(parent, text) { return disclosure(parent, text); }
 function openLink(url) { opened.push(url); }
 function canFullscreen() { return false; }
 function breakdownNode() {}

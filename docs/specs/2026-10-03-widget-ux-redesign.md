@@ -64,7 +64,7 @@ Baseline measurements (before): evaluation card 2,400px tall at 760px and
    |---|---|
    | page text | `--color-text-primary` (`light-dark(#141413,#FAF9F5)`) |
    | secondary text | `--color-text-secondary` (`light-dark(#3D3D3A,#C2C0B6)`) |
-   | caption/muted | `--color-text-tertiary` (`light-dark(#73726C,#9C9A92)`) |
+   | caption/muted | `--color-text-tertiary` (`light-dark(#6B6A64,#9C9A92)`, ≥4.5:1 on inset and surface) |
    | panel surface | `--color-background-primary` (`light-dark(#FFFFFF,#30302E)`) |
    | inset surface (skeleton, meter track, chip bg) | `--color-background-secondary` (`light-dark(#F5F4ED,#262624)`) |
    | panel border | `--color-border-tertiary` (`light-dark(rgba(31,30,29,.15),rgba(222,220,209,.15))`) |
@@ -158,7 +158,9 @@ unit-tested through the HTML markers.
   `ocTier` (mighty/strong good, fair ok, weak bad; score fallback 84/75/65),
   `steamTier` (the nine phrases → good ≥ "positive", ok = mixed, bad below),
   `craftTier` (≥75/50). **Color encodes quality only; brand is the label
-  text.** The Steam chip shows the phrase ("Very positive") beside a 28×4px
+  text.** Status chips keep their outcome colour (Completed/Evergreen good,
+  Abandoned bad) because a completion status is evidence quality for fit:
+  finished = positive, abandoned = negative. The Steam chip shows the phrase ("Very positive") beside a 28×4px
   meter; the meter never appears without the phrase. Remove the brand hex
   palette and replace `test_rating_chips_use_source_brand_colors` with a
   test that (a) no brand hex remains, (b) the three tier classes map to the

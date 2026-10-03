@@ -1043,8 +1043,8 @@ async def get_assessment_context(
     past_assessments: up to 5 newest (with the assessment_id void_assessment
     takes); both capped with count/truncated. pace is the last 30 days.
     fit.suggested_call is a starting point anchors override. deal is the
-    cheapest CACHED price, only when identity resolved — never fetched here
-    (live: get_wishlist(with_prices=True)). When past_assessments is present,
+    cheapest CACHED price, only when identity resolved AND a price is cached —
+    never fetched here (live: get_wishlist(with_prices=True)). When past_assessments is present,
     LEAD with the prior verdict and what changed since.
 
     game_resolution="not_found" (no game block) is normal for an unowned
@@ -1118,9 +1118,10 @@ async def record_assessment(
     Identity: game_id, Steam appid or name — at least one — plus `verdict`
     (required). PREFER game_id once get_assessment_context resolved the
     candidate, and when correcting or re-recording. `name` is matched EXACTLY
-    (case-insensitive) or MINTED (created=true, normal for an unowned title) — never fuzzily; pass
-    name= alongside an appid-only candidate, since a row cannot be minted
-    without a title. `resolution` reports mode ("by_id", "by_appid",
+    (case-insensitive) or MINTED (created=true, normal for an unowned title) —
+    never fuzzily; a typo that mints a phantom row is repairable with
+    merge_games. Pass name= alongside an appid-only candidate, since a row
+    cannot be minted without a title. `resolution` reports mode ("by_id", "by_appid",
     "by_assessed_appid", "exact", "minted"), the `query` and `matched_name` (the
     row written to): whenever mode is not "by_id", check matched_name IS the
     candidate; if not, void_assessment(assessment_id=...) then re-record with
@@ -1483,10 +1484,10 @@ async def set_acquisition(
     share and bundle_name groups it in get_stats(report="spending").
 
     purchase_source: steam, gog, epic, eshop, psn, xbox, humble, fanatical,
-    itchio, ea, ubisoft, physical, gift, free, subscription, other (aliases like
-    "Humble Bundle", "PS Store", "Game Pass" normalize). "free" = a giveaway
-    kept forever; "subscription" = claimed through a membership whose access may
-    lapse.
+    itchio, ea, ubisoft, key_reseller, physical, gift, free, subscription, other;
+    store and vendor names normalize onto it ("Humble Bundle", "PS Store",
+    "Game Pass", "Kinguin" → key_reseller). "free" = a giveaway kept forever;
+    "subscription" = claimed through a membership whose access may lapse.
 
     clear lists columns to reset to NULL; a column can't be set and cleared in
     one call. It is also a per-item key — the only way to preview a clear

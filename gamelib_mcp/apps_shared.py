@@ -10,7 +10,7 @@ lands in both widgets at once instead of being hand-ported (and forgotten).
 Splice, never reformat: the constants carry their own indentation and trailing
 newline, and a widget's HTML is the literal chunks and these constants
 concatenated in order. What is deliberately NOT here is anything the two
-widgets genuinely disagree on — the grid's cover plates, its stacking overlay,
+widgets genuinely disagree on — the grid's cover plates, each lightbox's placement,
 the evaluation card's verdict stamp — that stays local to its widget.
 ``tests/test_apps_eval.py::WidgetDriftTests`` fails if a block of any size
 worth sharing reappears in both files instead.
@@ -138,7 +138,10 @@ _TOKENS_LAYER_CSS = r"""  :root {
     color-scheme: light dark;
     --gl-text: var(--color-text-primary, light-dark(#141413, #FAF9F5));
     --gl-text-2: var(--color-text-secondary, light-dark(#3D3D3A, #C2C0B6));
-    --gl-muted: var(--color-text-tertiary, light-dark(#73726C, #9C9A92));
+    /* Muted text clears 4.5:1 on both surfaces it sits on: light #6B6A64 is
+       4.9:1 on the inset and 5.4:1 on white; dark #9C9A92 is 5.4:1 on the
+       inset and 4.7:1 on the surface. */
+    --gl-muted: var(--color-text-tertiary, light-dark(#6B6A64, #9C9A92));
     --gl-surface: var(--color-background-primary, light-dark(#FFFFFF, #30302E));
     --gl-inset: var(--color-background-secondary, light-dark(#F5F4ED, #262624));
     --gl-border: var(--color-border-tertiary, light-dark(rgba(31, 30, 29, 0.15), rgba(222, 220, 209, 0.15)));
@@ -427,7 +430,7 @@ MATCH_BAR_CSS = r"""  .match { display: flex; flex-direction: column; gap: 4px; 
 SKELETON_CSS = r"""  .skel { display: flex; flex-direction: column; gap: 12px; max-width: 760px; }
   .skel-grid { max-width: none; gap: 10px; }
   .skel-eval { margin: 0 auto; width: 100%; }
-  .skel-detail { max-width: 720px; }
+  .skel-detail, .skel-neutral { max-width: 720px; }
   .sk-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(142px, 1fr)); gap: 12px; }
   .sk-card, .sk-panel {
     background: var(--gl-surface);
@@ -589,20 +592,26 @@ HERO_CSS = r"""  .hero {
 """
 
 # Sideways-scrolling strip shared by thumbs, similar games and pedigree.
+# The 4px padding on top and both sides is the focus ring's reach (2px ring +
+# 2px offset): a scroll container clips at its padding box, so anything less
+# shaves the ring off a focused thumb or card. The matching negative inline
+# margin keeps the items flush with the panel's content edge — the ring draws
+# into the panel's own padding.
 STRIP_CSS = r"""  .strip {
     display: flex;
     gap: 10px;
     overflow-x: auto;
-    padding: 2px 2px 6px;
+    margin-inline: -4px;
+    padding: 4px 4px 6px;
     scrollbar-width: thin;
     scroll-snap-type: x proximity;
-    scroll-padding-inline: calc(2px + var(--gl-safe-left)) calc(2px + var(--gl-safe-right));
+    scroll-padding-inline: calc(4px + var(--gl-safe-left)) calc(4px + var(--gl-safe-right));
     overscroll-behavior-x: contain;
   }
   .strip > * { scroll-snap-align: start; }
   /* Trailing spacer: the last item can scroll fully into view (clear of the
      safe area) instead of ending flush against a clipped edge. */
-  .strip::after { content: ""; flex: 0 0 max(2px, var(--gl-safe-right)); }
+  .strip::after { content: ""; flex: 0 0 max(4px, var(--gl-safe-right)); }
 """
 
 # The click-to-enlarge screenshot button filling the stage.
@@ -639,7 +648,7 @@ MEDIA_STRIP_CSS = r"""  .fs-btn {
     align-items: center;
     justify-content: center;
   }
-  .thumbs { margin-top: 10px; }
+  .thumbs { margin-top: 8px; }
   .thumb {
     position: relative;
     flex: none;
@@ -904,6 +913,7 @@ BRIDGE_JS = r"""(function () {
   var BASE_GUTTER = 12;
   var tornDown = false;               // set by teardown(); the view is gone
   var hostFontsCss = null;            // the fonts string last injected
+  var safeInsets = { top: 0, right: 0, bottom: 0, left: 0 };
   function mediaQueryMatches(query) {
     try { return !!(window.matchMedia && window.matchMedia(query).matches); } catch (e) { return false; }
   }
@@ -952,15 +962,22 @@ BRIDGE_JS = r"""(function () {
       }
       fonts.textContent = styles.css.fonts;
     }
+    /* Merged per side, like the rest: only a side sent as a number changes;
+       an absent side keeps the inset it had. */
     var insets = ctx.safeAreaInsets;
     if (insets && typeof insets === "object") {
       [["top", "Top"], ["right", "Right"], ["bottom", "Bottom"], ["left", "Left"]].forEach(function (side) {
-        var extra = Math.max(0, Number(insets[side[0]]) || 0);
+        var sent = insets[side[0]];
+        if (typeof sent === "number" && isFinite(sent)) safeInsets[side[0]] = Math.max(0, sent);
+        var extra = safeInsets[side[0]];
         document.body.style["padding" + side[1]] = (BASE_GUTTER + extra) + "px";
         if (side[0] === "left" || side[0] === "right") {
           docEl.style.setProperty("--gl-safe-" + side[0], extra + "px");
         }
       });
+      hostContext.safeAreaInsets = {
+        top: safeInsets.top, right: safeInsets.right, bottom: safeInsets.bottom, left: safeInsets.left,
+      };
     }
     var device = ctx.deviceCapabilities;
     if (device && typeof device === "object") {
@@ -1017,6 +1034,7 @@ EXTERNAL_LINK_JS = r"""  /* External links. The sandbox usually lacks allow-popu
 # structuredContent-or-text result unwrapping, the error text of an isError
 # result, plus the tool-input and tool-cancelled handlers the bridge routes to.
 TOOL_RESULT_JS = r"""  var lastToolInput = null;
+  var lastToolMeta = null;
   var gotResult = false;
   function resultData(result) {
     var data = result && result.structuredContent;
@@ -1034,14 +1052,26 @@ TOOL_RESULT_JS = r"""  var lastToolInput = null;
     }
     return false;
   }
-  /* A tool error names its own cause: the result's text, at most 160 chars,
-     ending as a sentence so a follow-up ("Showing what the list had.") can
-     come after it. */
-  function toolErrorText(result) {
+  /* The tool this view belongs to: the host's toolInfo when it sent one,
+     else a name riding on the tool-input's _meta; null when neither says. */
+  function toolName() {
+    var info = hostContext.toolInfo;
+    var name = info && info.tool && info.tool.name;
+    if (!name && lastToolMeta) name = lastToolMeta.toolName || lastToolMeta.name;
+    return typeof name === "string" && name ? name : null;
+  }
+  /* A tool error names its source and its own cause — "get_game_detail
+     failed: Game not found." (or "The tool failed: …" when no name is known)
+     — at most 160 chars, ending as a sentence so a follow-up ("Showing what
+     the list had.") can come after it. `name` overrides the view's own tool
+     (the drill-in's app-initiated call is a different tool). */
+  function toolErrorText(result, name) {
     var text = (list(result && result.content).find(function (c) {
       return c && c.type === "text";
     }) || {}).text;
-    text = String(text || "The tool reported an error").replace(/\s+/g, " ").trim();
+    var source = name || toolName();
+    text = (source ? source + " failed: " : "The tool failed: ")
+      + String(text || "it reported an error").replace(/\s+/g, " ").trim();
     if (text.length > 160) text = text.slice(0, 159).trim() + "…";
     return /[.!?…]$/.test(text) ? text : text + ".";
   }
@@ -1059,10 +1089,12 @@ TOOL_RESULT_JS = r"""  var lastToolInput = null;
     reportSize();
   }
   /* The arguments arrive before the result: keep them (the grid's header
-     line is built from them) and pick the matching skeleton. */
+     line is built from them). The widget's afterToolInput hook swaps the
+     neutral startup skeleton for its own shape. */
   function handleToolInput(params) {
     lastToolInput = (params && params.arguments) || {};
-    if (!gotResult) showSkeleton();
+    var meta = params && params._meta;
+    lastToolMeta = meta && typeof meta === "object" ? meta : null;
     hooks.afterToolInput(lastToolInput);
   }
   /* Content already on screen stays (with the notice under it); only a
@@ -1138,14 +1170,19 @@ NUMBERS_JS = r"""  /* ---------- numbers ---------- */
     if (n == null) return null;
     return (estimate ? "~" : "") + (n >= 10 ? Math.round(n) : Math.round(n * 10) / 10) + "h";
   }
-  /* "114k reviews": a count always carries its noun. */
+  /* "114k reviews": a count always carries its noun. The unit follows the
+     ROUNDED value, so a count never reads "1000k" or "10.0k": 999,600 → 1M,
+     9,950 → 10k, 1,049 → 1k, 999 → 999. */
   function compactCount(v, word) {
     var n = num(v);
     if (n == null) return null;
-    var text = n >= 1000000 ? (Math.round(n / 100000) / 10) + "M"
-      : n >= 10000 ? Math.round(n / 1000) + "k"
-      : n >= 1000 ? (Math.round(n / 100) / 10) + "k"
-      : String(Math.round(n));
+    var r = Math.round(n);
+    var k = Math.round(r / 1000);                   // whole thousands
+    var k1 = Math.round(r / 100) / 10;              // thousands, one decimal
+    var text = r >= 1000000 || k >= 1000 ? (Math.round(r / 100000) / 10) + "M"
+      : r >= 10000 || k1 >= 10 ? k + "k"
+      : r >= 1000 ? k1 + "k"
+      : String(r);
     return word ? text + " " + word + (n === 1 ? "" : "s") : text;
   }
   var CURRENCY_SIGNS = { EUR: "€", USD: "$", GBP: "£" };
@@ -1324,7 +1361,8 @@ SKELETON_JS = r"""  /* Each placeholder is the real layout in grey: grid = heade
      (cover, title, match bar, one chip row); eval = header panel (cover,
      title, stamp, score chips, the facts row), the pitch's two lines, the
      media stage; detail = identity panel (cover, title + 3 lines, chip row)
-     and the media stage. */
+     and the media stage. neutral = one panel (cover, three lines, a chip
+     row): the startup shape, before the tool input says which tool ran. */
   function skeleton(kind) {
     function sk(cls) { return el("div", "sk " + cls); }
     function lines(parent, n) {
@@ -1351,6 +1389,18 @@ SKELETON_JS = r"""  /* Each placeholder is the real layout in grey: grid = heade
     wrap.setAttribute("role", "status");
     wrap.setAttribute("aria-busy", "true");
     wrap.setAttribute("aria-label", "Loading");
+    if (kind === "neutral") {
+      var box = el("div", "sk-panel");
+      var line = el("div", "sk-row");
+      line.appendChild(sk("sk-thumb"));
+      var text = el("div", "sk-col");
+      lines(text, 3);
+      chips(text, 3);
+      line.appendChild(text);
+      box.appendChild(line);
+      wrap.appendChild(box);
+      return wrap;
+    }
     if (kind === "grid") {
       wrap.appendChild(sk("sk-head"));
       var cards = el("div", "sk-cards");
@@ -1440,10 +1490,14 @@ MODEL_CONTEXT_JS = r"""  /* Fire-and-forget: request() resolves undefined on met
   }
 """
 
-# The in-place "Full breakdown ▾" fallback when fullscreen is unavailable:
-# content is built on first open only.
+# The in-place "Full breakdown ▾" disclosure (content built on first open
+# only), and the ONE "open it big" control both widgets use on top of it:
+# fullscreen where the host offers it, the disclosure in place where it
+# doesn't or refuses.
 DISCLOSURE_JS = r"""  var disclosureSeq = 0;
-  function disclosure(parent, text, buildFn) {
+  /* intercept(), when given, runs on a click that would OPEN the body; a
+     true return means it took the click (setOpen opens it later, or not). */
+  function disclosure(parent, text, buildFn, intercept) {
     var btn = el("button", "disclosure");
     btn.type = "button";
     btn.setAttribute("aria-expanded", "false");
@@ -1456,16 +1510,46 @@ DISCLOSURE_JS = r"""  var disclosureSeq = 0;
     body.hidden = true;
     btn.setAttribute("aria-controls", body.id);
     var built = false;
-    btn.addEventListener("click", function () {
-      var open = btn.getAttribute("aria-expanded") !== "true";
+    function setOpen(open) {
       if (open && !built) { built = true; buildFn(body); }
       body.hidden = !open;
       btn.setAttribute("aria-expanded", open ? "true" : "false");
       reportSize();
+    }
+    btn.addEventListener("click", function () {
+      var open = btn.getAttribute("aria-expanded") !== "true";
+      if (open && intercept && intercept()) return;
+      setOpen(open);
     });
     parent.appendChild(btn);
     parent.appendChild(body);
-    return { button: btn, body: body };
+    return { button: btn, body: body, setOpen: setOpen };
+  }
+  /* The button that opens a block "big": on a host offering fullscreen (and
+     not in it already) a click asks for fullscreen — ⤢ says so — and on a
+     grant hands over to onFullscreen (the evaluation card builds its
+     breakdown under the card) or, without one, opens the block in place.
+     No fullscreen on offer, or a refusal, opens the disclosure in place, and
+     after a refusal every later click stays in place. */
+  function fullscreenOrDisclosure(parent, text, build, onFullscreen) {
+    var inPlace = false;
+    var asking = false;
+    var d = disclosure(parent, text, build, function () {
+      if (inPlace || !canFullscreen() || currentDisplayMode() === "fullscreen") return false;
+      if (asking) return true;
+      asking = true;
+      requestDisplayMode("fullscreen").then(function (mode) {
+        asking = false;
+        if (mode === "fullscreen" && onFullscreen) { onFullscreen(); return; }
+        if (mode !== "fullscreen") inPlace = true;
+        chev.textContent = "▾";
+        d.setOpen(true);
+      });
+      return true;
+    });
+    var chev = d.button.querySelector(".chev");
+    if (canFullscreen() && currentDisplayMode() !== "fullscreen") chev.textContent = "⤢";
+    return d;
   }
 """
 
@@ -1585,19 +1669,39 @@ NAV_BUTTON_JS = r"""  function navButton(cls, glyph, ariaText, onClick) {
 # The screenshot lightbox's dialog chrome — the panel's dialog semantics, the
 # ✕, the focus trap and the key routing — ONE implementation both widgets'
 # ``openCarousel`` call (each keeps its own overlay slot and placement).
-LIGHTBOX_CHROME_JS = r"""  /* Tab and Shift+Tab cycle through the dialog's buttons and never leave it. */
+LIGHTBOX_CHROME_JS = r"""  /* Everything in the dialog Tab can reach, in document order. */
+  var FOCUSABLE = 'button, [href], [tabindex]:not([tabindex="-1"])';
+  function focusables(panel) {
+    return Array.prototype.filter.call(panel.querySelectorAll(FOCUSABLE), function (n) {
+      return !n.disabled && !n.hidden;
+    });
+  }
+  /* Tab and Shift+Tab cycle through every focusable in the dialog, wrapping
+     at both ends; from anywhere else (the panel itself, or outside) Tab
+     lands on the first and Shift+Tab on the last. */
   function keepFocusInside(ev, panel) {
-    var buttons = panel.querySelectorAll("button");
-    if (!buttons.length) return;
-    var first = buttons[0];
-    var last = buttons[buttons.length - 1];
-    if (ev.shiftKey && (document.activeElement === first || document.activeElement === panel)) {
+    var items = focusables(panel);
+    if (!items.length) { ev.preventDefault(); panel.focus(); return; }
+    var first = items[0];
+    var last = items[items.length - 1];
+    var inside = items.indexOf(document.activeElement) >= 0;
+    if (ev.shiftKey && (!inside || document.activeElement === first)) {
       ev.preventDefault();
       last.focus();
-    } else if (!ev.shiftKey && document.activeElement === last) {
+    } else if (!ev.shiftKey && (!inside || document.activeElement === last)) {
       ev.preventDefault();
       first.focus();
     }
+  }
+  /* A document focusin listener for while the dialog is open: focus that
+     lands outside it (a click on the page behind, a host-sent focus) is
+     pulled back to the dialog's first focusable. */
+  function focusGuard(panel) {
+    return function (ev) {
+      if (!ev.target || panel === ev.target || panel.contains(ev.target)) return;
+      var first = focusables(panel)[0] || panel;
+      first.focus({ preventScroll: true });
+    };
   }
   /* A modal dialog panel holding its ✕ (a type=button, labelled). */
   function lightboxPanel(cls, gameName, onClose) {
@@ -1627,8 +1731,8 @@ LIGHTBOX_CHROME_JS = r"""  /* Tab and Shift+Tab cycle through the dialog's butto
 
 # The lightbox stage: image, arrows, counter, wrapping ``show(i)`` and the
 # pointer drag/swipe. Spliced INSIDE each widget's own ``openCarousel``,
-# which owns the overlay lifecycle (a stack in apps.py, one slot in
-# apps_eval.py) — it closes over ``shots``, ``index``, ``panel`` and
+# which owns the overlay lifecycle (one slot in each widget, placed its own
+# way) — it closes over ``shots``, ``index``, ``panel`` and
 # ``gameName`` there.
 CAROUSEL_STAGE_JS = r"""    var stage = el("div", "car-stage");
     var img = document.createElement("img");
@@ -2081,6 +2185,11 @@ SIZING_JS = r"""  /* ---------- sizing ---------- */
 # (declaring both display modes; appInfo per the ext-apps SDK schema, with
 # clientInfo kept as the legacy alias the published spec example used).
 INIT_JS = r"""  /* ---------- startup ---------- */
+  /* The first skeleton is the widget's skeletonKind() with no tool input yet:
+     the neutral panel for the game cards (which tool ran is still unknown),
+     the evaluation card's own shape (it serves one tool). initialized goes
+     out only after a real ui/initialize answer; on an error or a timeout the
+     widget stays quiet and still renders whatever tool-result arrives. */
   function startWidget(appName) {
     document.documentElement.setAttribute("data-display-mode", "inline");
     if (window.__PREVIEW_HOST_CONTEXT__) applyHostContext(window.__PREVIEW_HOST_CONTEXT__);
@@ -2095,8 +2204,9 @@ INIT_JS = r"""  /* ---------- startup ---------- */
       appInfo: { name: appName, version: "1.0" },
       clientInfo: { name: appName, version: "1.0" },
     }).then(function (res) {
-      hostCaps = (res && res.hostCapabilities) || {};
-      applyHostContext(res && res.hostContext);
+      if (!res || typeof res !== "object") return;
+      hostCaps = res.hostCapabilities || {};
+      applyHostContext(res.hostContext);
       notify("ui/notifications/initialized");
     });
   }

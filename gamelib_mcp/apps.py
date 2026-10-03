@@ -370,8 +370,6 @@ GAME_CARDS_HTML = (
   /* The detail view is a column stack: the identity panel, the media reel,
      then the similar-games and studio rows. */
   .detail-stack { display: flex; flex-direction: column; gap: 12px; max-width: 720px; }
-  .related { display: flex; flex-direction: column; gap: 12px; }
-  .disclosure .chev-out { font-weight: var(--gl-regular); }
 
   /* Hero trailer — mp4 with a poster fallback, or a click-to-load embed. */
 """
@@ -401,8 +399,8 @@ GAME_CARDS_HTML = (
   .strip:not(.thumbs) {
     scroll-snap-type: x mandatory;
     overscroll-behavior-x: contain;
-    scroll-padding-left: calc(2px + var(--gl-safe-left, 0px));
-    scroll-padding-right: calc(2px + var(--gl-safe-right, 0px));
+    scroll-padding-left: calc(4px + var(--gl-safe-left, 0px));
+    scroll-padding-right: calc(4px + var(--gl-safe-right, 0px));
   }
   .sim { width: 120px; scroll-snap-align: start; }
 
@@ -587,34 +585,55 @@ GAME_CARDS_HTML = (
   }
 
   /* ---------- grid: cards ---------- */
-  /* What a screen reader hears for a card: the game, then what the card
-     shows — "Hades II: 100% match, 27h to beat, Steam, Metacritic 93,
-     OpenCritic 91, Steam Overwhelmingly positive" — from the parts present. */
-  function cardLabel(game) {
+  /* Everything a card shows besides its title, cover art and tags, in
+     reading order: the match ("100% match"), the meta line's parts ("~27h to
+     beat", "Steam", "2.3h played"), then the scores ("Metacritic 93",
+     "OpenCritic 91", "Steam Overwhelmingly positive"). gridCard renders
+     these and cardLabel reads them, so what is heard is what is shown. */
+  function cardBits(game) {
     var bits = [];
     if (game.match_percent != null) {
-      bits.push(Math.max(0, Math.min(100, Math.round(num(game.match_percent) || 0))) + "% match");
+      var pct = Math.max(0, Math.min(100, Math.round(num(game.match_percent) || 0)));
+      bits.push({ part: "match", text: pct + "% match" });
     }
-    var hours = hoursLabel(game.hltb_main);
-    if (hours) bits.push(hours + " to beat");
-    if (game.suggested_platform) bits.push(label("platform", game.suggested_platform));
-    if (realScore(game.metacritic_score)) bits.push("Metacritic " + Math.round(game.metacritic_score));
-    if (realScore(game.opencritic_score)) bits.push("OpenCritic " + Math.round(game.opencritic_score));
-    if (game.steam_review_desc) bits.push("Steam " + String(game.steam_review_desc).toLowerCase());
+    var hltb = hoursLabel(game.hltb_main, true);
+    if (hltb) bits.push({ part: "meta", text: hltb + " to beat" });
+    if (game.suggested_platform) bits.push({ part: "meta", text: label("platform", game.suggested_platform) });
+    var played = num(game.playtime_hours) > 0 ? hoursLabel(game.playtime_hours) : null;
+    if (played) bits.push({ part: "meta", text: played + " played" });
+    if (realScore(game.metacritic_score)) {
+      var mc = Math.round(game.metacritic_score);
+      bits.push({ part: "corner", label: "Metacritic", value: mc, tier: mcTier(game.metacritic_score),
+                  text: "Metacritic " + mc });
+    }
+    if (realScore(game.opencritic_score)) {
+      var oc = Math.round(game.opencritic_score);
+      bits.push({ part: "score", label: "OpenCritic", value: oc,
+                  tier: ocTier(game.opencritic_score, game.opencritic_tier), text: "OpenCritic " + oc });
+    }
+    var steam = steamChip(game.steam_review_desc, null, { meter: false });
+    if (steam) bits.push({ part: "steam", chip: steam, text: steam.textContent });
+    return bits;
+  }
+  /* What a screen reader hears for a card: the game, then cardBits. */
+  function cardLabel(game, bits) {
+    var text = (bits || cardBits(game)).map(function (b) { return b.text; });
     var name = game.name || "Untitled game";
-    return bits.length ? name + ": " + bits.join(", ") : name;
+    return text.length ? name + ": " + text.join(", ") : name;
   }
 
   function gridCard(game) {
     var card = el("div", "card");
     var title = el("div", "title", game.name);
+    var bits = cardBits(game);
+    function partsOf(part) { return bits.filter(function (b) { return b.part === part; }); }
     if (game.game_id != null) {
       card.tabIndex = 0;
       card.setAttribute("role", "button");
       card.setAttribute("data-game-id", String(game.game_id));
       // Named by the game and what the card shows (no aria-labelledby: the
       // label must carry the scores, not the title alone).
-      card.setAttribute("aria-label", cardLabel(game));
+      card.setAttribute("aria-label", cardLabel(game, bits));
       card.addEventListener("click", function () { selectGame(game); });
       card.addEventListener("keydown", function (ev) {
         if (ev.key === "Enter" || ev.key === " ") {
@@ -627,12 +646,9 @@ GAME_CARDS_HTML = (
     // The cover chip is always Metacritic (the fullest-coverage source in
     // this library) so the corner never switches identity between sources;
     // the chip row below carries the others rather than repeating it.
-    if (realScore(game.metacritic_score)) {
-      cover.appendChild(scoreChip({
-        label: "Metacritic", value: Math.round(game.metacritic_score),
-        tier: mcTier(game.metacritic_score), cls: "corner",
-      }));
-    }
+    partsOf("corner").forEach(function (b) {
+      cover.appendChild(scoreChip({ label: b.label, value: b.value, tier: b.tier, cls: "corner" }));
+    });
     var typeLabel = contentTypeLabel(game);
     if (typeLabel) cover.appendChild(el("span", "type-chip", typeLabel));
     card.appendChild(cover);
@@ -642,26 +658,17 @@ GAME_CARDS_HTML = (
     var pName = parentName(game);
     if (pName) body.appendChild(el("div", "parent-sub", "⤷ " + pName));
     // The lead signal: how well this fits his taste.
-    if (game.match_percent != null) body.appendChild(matchBar(game.match_percent));
+    if (partsOf("match").length) body.appendChild(matchBar(game.match_percent));
 
     // One line of text, so a wrap breaks between words, never before a "·".
-    var metaBits = [];
-    var hltb = hoursLabel(game.hltb_main, true);
-    if (hltb) metaBits.push(hltb + " to beat");
-    if (game.suggested_platform) metaBits.push(label("platform", game.suggested_platform));
-    var played = num(game.playtime_hours) > 0 ? hoursLabel(game.playtime_hours) : null;
-    if (played) metaBits.push(played + " played");
+    var metaBits = partsOf("meta").map(function (b) { return b.text; });
     if (metaBits.length) body.appendChild(el("div", "meta", metaBits.join(" · ")));
 
     var scores = el("div", "chips");
-    if (realScore(game.opencritic_score)) {
-      scores.appendChild(scoreChip({
-        label: "OpenCritic", value: Math.round(game.opencritic_score),
-        tier: ocTier(game.opencritic_score, game.opencritic_tier),
-      }));
-    }
-    var steam = steamChip(game.steam_review_desc, null, { meter: false });
-    if (steam) scores.appendChild(steam);
+    partsOf("score").forEach(function (b) {
+      scores.appendChild(scoreChip({ label: b.label, value: b.value, tier: b.tier }));
+    });
+    partsOf("steam").forEach(function (b) { scores.appendChild(b.chip); });
     if (scores.childNodes.length) body.appendChild(scores);
 
     var why = matchedTagNames(game).slice(0, 3);
@@ -764,7 +771,7 @@ GAME_CARDS_HTML = (
     // 8s budget server-side, and a response that loses the race is dropped.
     callTool("get_game_detail", { game_id: game.game_id, media: true }, 30000).then(function (res) {
       if (res === TIMED_OUT) { fill(game, "The library didn't answer in 30s."); return; }
-      if (res && res.isError) { fill(game, toolErrorText(res)); return; }
+      if (res && res.isError) { fill(game, toolErrorText(res, "get_game_detail")); return; }
       var data = resultData(res);
       if (data && data.name) fill(data, null);
       else if (res === undefined) fill(game, "The host didn't run the lookup.");
@@ -805,6 +812,7 @@ GAME_CARDS_HTML = (
     if (!current) return;
     lightbox = null;
     document.removeEventListener("keydown", current.onKey, true);
+    document.removeEventListener("focusin", current.onFocus, true);
     current.overlay.classList.remove("open");
     setTimeout(function () { current.overlay.remove(); }, 200);
     if (current.trigger && current.trigger.focus) current.trigger.focus({ preventScroll: true });
@@ -825,8 +833,10 @@ GAME_CARDS_HTML = (
       if (ev.target === overlay) closeLightbox();
     });
     var onKey = lightboxKeys(panel, function (delta) { show(index + delta); }, closeLightbox);
+    var onFocus = focusGuard(panel);
     document.addEventListener("keydown", onKey, true);
-    lightbox = { overlay: overlay, trigger: trigger, onKey: onKey };
+    document.addEventListener("focusin", onFocus, true);
+    lightbox = { overlay: overlay, trigger: trigger, onKey: onKey, onFocus: onFocus };
     document.body.appendChild(overlay);
 
     // Viewport coordinates (the overlay is fixed): start at the stage that
@@ -1020,26 +1030,9 @@ GAME_CARDS_HTML = (
       .filter(Boolean).join(" · ");
     // Already fullscreen: everything expanded, no control at all.
     if (currentDisplayMode() === "fullscreen") { build(stack); return; }
-    // No fullscreen on this host: the in-place disclosure.
-    if (!canFullscreen()) { disclosure(stack, text, build); return; }
-    // A fullscreen host: the control opens the big view with the rows
-    // expanded; if the host refuses after all, it opens in place instead.
-    var wrap = el("div", "related");
-    var btn = el("button", "disclosure");
-    btn.type = "button";
-    btn.appendChild(el("span", null, text));
-    var icon = el("span", "chev-out", "⤢");
-    icon.setAttribute("aria-hidden", "true");
-    btn.appendChild(icon);
-    btn.addEventListener("click", function () {
-      requestDisplayMode("fullscreen").then(function (mode) {
-        wrap.textContent = "";
-        if (mode === "fullscreen") build(wrap);
-        else disclosure(wrap, text, build).button.click();
-      });
-    });
-    wrap.appendChild(btn);
-    stack.appendChild(wrap);
+    // Otherwise the shared control: fullscreen with the rows open where the
+    // host offers it, the in-place disclosure where it doesn't or refuses.
+    fullscreenOrDisclosure(stack, text, build);
   }
 
   function detailCard(game) {
@@ -1052,10 +1045,15 @@ GAME_CARDS_HTML = (
     return stack;
   }
 
-  /* get_game_detail is called with a name / game_id / appid; discover_games
-     never is — so the arguments tell us which shape to sketch. */
+  /* Neutral until the tool input arrives; then get_game_detail sketches the
+     detail card and every list tool the grid. The tool's name decides when
+     the host says it; otherwise the arguments do — get_game_detail is called
+     with a name / game_id / appid, discover_games never is. */
   function skeletonKind() {
-    var args = lastToolInput || {};
+    if (!lastToolInput) return "neutral";
+    var tool = toolName();
+    if (tool) return tool === "get_game_detail" ? "detail" : "grid";
+    var args = lastToolInput;
     return args.name || args.game_id != null || args.appid != null ? "detail" : "grid";
   }
 
@@ -1080,10 +1078,13 @@ GAME_CARDS_HTML = (
     + apps_shared.SIZING_JS
     + apps_shared.INIT_JS
     + r"""
-  /* Tool input can land after the result: the grid's header line and its
-     "Show next" count are built from it, so redraw the grid when it does. */
+  /* Before the result, the input swaps the neutral skeleton for the shape
+     of the tool that ran. It can also land after the result: the grid's
+     header line and its "Show next" count are built from it, so redraw the
+     grid when it does. */
   hooks.afterToolInput = function () {
-    if (gotResult && view === "grid" && gridData) render(gridData);
+    if (!gotResult) showSkeleton();
+    else if (view === "grid" && gridData) render(gridData);
   };
   hooks.afterHostContext = hostContextChanged;
 

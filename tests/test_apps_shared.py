@@ -105,6 +105,8 @@ class HostContextTests(unittest.TestCase):
 
     def test_safe_area_insets_drive_the_strip_scroll_padding(self) -> None:
         self.assertIn('docEl.style.setProperty("--gl-safe-" + side[0], extra + "px");', apps_shared.BRIDGE_JS)
+        self.assertIn('if (typeof sent === "number" && isFinite(sent)) safeInsets[side[0]] = Math.max(0, sent);',
+                      apps_shared.BRIDGE_JS)
         self.assertIn("--gl-safe-left: 0px;", apps_shared.TOKENS_CSS)
         self.assertIn("--gl-safe-right: 0px;", apps_shared.TOKENS_CSS)
 
@@ -208,12 +210,14 @@ class SharedCssHygieneTests(unittest.TestCase):
         strip = css_rule(apps_shared.STRIP_CSS, ".strip", exact=True)
         for decl in (
             "scroll-snap-type: x proximity;",
-            "scroll-padding-inline: calc(2px + var(--gl-safe-left)) calc(2px + var(--gl-safe-right));",
+            # 4px: the focus ring's reach (2px ring + 2px offset), never clipped
+            "padding: 4px 4px 6px;",
+            "scroll-padding-inline: calc(4px + var(--gl-safe-left)) calc(4px + var(--gl-safe-right));",
             "overscroll-behavior-x: contain;",
         ):
             self.assertIn(decl, strip)
         self.assertIn(".strip > * { scroll-snap-align: start; }", apps_shared.STRIP_CSS)
-        self.assertIn('.strip::after { content: ""; flex: 0 0 max(2px, var(--gl-safe-right)); }',
+        self.assertIn('.strip::after { content: ""; flex: 0 0 max(4px, var(--gl-safe-right)); }',
                       apps_shared.STRIP_CSS)
 
 
@@ -392,6 +396,28 @@ PROBE = r"""
   rootNode.textContent = "";
   handleToolResult({ isError: true, content: [{ type: "text", text: new Array(60).join("too long ") }] });
   out.longError = rootNode.childNodes[0].textContent;
+  /* Item 6: the error names its tool — the host's toolInfo, else the
+     tool-input's _meta. */
+  rootNode.textContent = "";
+  handleToolInput({ arguments: {}, _meta: { toolName: "discover_games" } });
+  handleToolResult({ isError: true, content: [{ type: "text", text: "IGDB is down" }] });
+  out.metaNamedError = rootNode.childNodes[0].textContent;
+  rootNode.textContent = "";
+  applyHostContext({ toolInfo: { tool: { name: "get_game_detail" } } });
+  handleToolResult({ isError: true, content: [{ type: "text", text: "Game not found: 'Hadess'" }] });
+  out.namedError = rootNode.childNodes[0].textContent;
+  out.overriddenError = toolErrorText({ content: [{ type: "text", text: "x" }] }, "record_assessment");
+  hostContext.toolInfo = undefined; lastToolMeta = null; lastToolInput = null;
+
+  /* Safe-area insets merge per side: an absent side keeps its value. */
+  applyHostContext({ safeAreaInsets: { top: 10, left: 5, right: 3 } });
+  applyHostContext({ safeAreaInsets: { left: 8, bottom: "7" } });
+  out.insets = {
+    top: document.body.style.paddingTop, left: document.body.style.paddingLeft,
+    right: document.body.style.paddingRight, bottom: document.body.style.paddingBottom,
+    safeLeft: props["--gl-safe-left"], safeRight: props["--gl-safe-right"],
+    stored: hostContext.safeAreaInsets,
+  };
 
   /* B3: a host ping is answered with an empty result. */
   posted = [];
@@ -480,9 +506,25 @@ class BridgeBehaviourTests(unittest.TestCase):
         self.assertEqual(sorted(self.out["removedAfterNull"]), ["--color-text-danger", "--color-text-warning"])
 
     def test_an_errored_result_shows_its_own_text(self) -> None:
-        self.assertEqual(self.out["afterError"], ["notice:Game not found: 'Hadess'."])
+        self.assertEqual(self.out["afterError"], ["notice:The tool failed: Game not found: 'Hadess'."])
         self.assertLessEqual(len(self.out["longError"]), 160)
         self.assertTrue(self.out["longError"].endswith("…"))
+
+    def test_an_errored_result_names_its_tool_when_known(self) -> None:
+        self.assertEqual(self.out["namedError"], "get_game_detail failed: Game not found: 'Hadess'.")
+        self.assertEqual(self.out["metaNamedError"], "discover_games failed: IGDB is down.")
+        self.assertEqual(self.out["overriddenError"], "record_assessment failed: x.")
+
+    def test_safe_area_insets_merge_per_side(self) -> None:
+        insets = self.out["insets"]
+        # top and right were only in the first update; left changed; a
+        # non-number bottom is ignored (it keeps 0).
+        self.assertEqual(
+            {k: insets[k] for k in ("top", "left", "right", "bottom")},
+            {"top": "22px", "left": "20px", "right": "15px", "bottom": "12px"},
+        )
+        self.assertEqual((insets["safeLeft"], insets["safeRight"]), ("8px", "3px"))
+        self.assertEqual(insets["stored"], {"top": 10, "right": 3, "bottom": 0, "left": 8})
 
     def test_a_host_ping_gets_an_empty_result(self) -> None:
         self.assertEqual(self.out["pingAnswer"], {"jsonrpc": "2.0", "id": 77, "result": {}})
@@ -710,6 +752,10 @@ class LightboxChromeTests(unittest.TestCase):
                 self.assertEqual(html.count('el("button", "overlay-close"'), 1)
                 self.assertIn("lightboxKeys(panel, function (delta) { show(index + delta); }", html)
                 self.assertIn('document.addEventListener("keydown", ', html)
+                # the focusin guard is installed with the dialog and removed with it
+                self.assertEqual(html.count('document.addEventListener("focusin", '), 1)
+                self.assertEqual(html.count('document.removeEventListener("focusin", '), 1)
+                self.assertIn("= focusGuard(panel);", html)
         for module in ("apps.py", "apps_eval.py"):
             with self.subTest(module=module):
                 self.assertNotIn("function keepFocusInside(", _WIDGET_SOURCES[module])
@@ -724,6 +770,7 @@ class LightboxChromeTests(unittest.TestCase):
             'closer.setAttribute("aria-label", "Close screenshots");',
             'if (ev.key === "Escape") { ev.preventDefault(); onClose(); }',
             'else if (ev.key === "Tab") keepFocusInside(ev, panel);',
+            "var FOCUSABLE = 'button, [href], [tabindex]:not([tabindex=\"-1\"])';",
         ):
             self.assertIn(marker, js)
 
@@ -756,6 +803,598 @@ class SplicedVerbatimTests(unittest.TestCase):
             with self.subTest(block=name):
                 self.assertIn(block, apps.GAME_CARDS_HTML)
                 self.assertIn(block, apps_eval.EVAL_CARD_HTML)
+
+
+# ---- whole-widget runs ------------------------------------------------------
+# A small DOM (elements, text nodes, a selector subset, capture/bubble event
+# dispatch, focus with focusin) wide enough to run a WHOLE widget script under
+# Node: the probe is spliced inside the widget's IIFE right after its
+# startWidget() call, so it sees every widget function and the shared state.
+MINI_DOM = r"""
+var posted = [];
+var timerSeq = 0, timers = {};
+function setTimeout(fn) { timerSeq += 1; timers[timerSeq] = fn; return timerSeq; }
+function clearTimeout(id) { delete timers[id]; }
+function flushTimers() {
+  Object.keys(timers).forEach(function (id) { var f = timers[id]; delete timers[id]; if (f) f(); });
+}
+function requestAnimationFrame(fn) { return setTimeout(fn); }
+function tick() { return new Promise(function (r) { setImmediate(r); }); }
+
+function makeStyle() {
+  return { setProperty: function (k, v) { this[k] = v; }, removeProperty: function (k) { delete this[k]; } };
+}
+function TextNode(t) { this.nodeType = 3; this._text = String(t); this.parentNode = null; this.listeners = []; }
+Object.defineProperty(TextNode.prototype, "textContent", { get: function () { return this._text; } });
+function El(tag) {
+  this.nodeType = 1; this.tagName = String(tag).toUpperCase(); this.childNodes = []; this.parentNode = null;
+  this.className = ""; this.attrs = {}; this.style = makeStyle(); this.dataset = {}; this.listeners = [];
+  this._text = ""; this.hidden = false; this.disabled = false;
+}
+Object.defineProperty(El.prototype, "textContent", {
+  get: function () { return this._text + this.childNodes.map(function (c) { return c.textContent; }).join(""); },
+  set: function (v) {
+    this.childNodes.forEach(function (c) { c.parentNode = null; });
+    this.childNodes = []; this._text = String(v);
+  },
+});
+["id", "href", "type", "title"].forEach(function (name) {
+  Object.defineProperty(El.prototype, name, {
+    get: function () { return this.attrs[name] || ""; },
+    set: function (v) { this.attrs[name] = String(v); },
+  });
+});
+Object.defineProperty(El.prototype, "tabIndex", {
+  get: function () { return this.attrs.tabindex === undefined ? -1 : Number(this.attrs.tabindex); },
+  set: function (v) { this.attrs.tabindex = String(v); },
+});
+Object.defineProperty(El.prototype, "children", {
+  get: function () { return this.childNodes.filter(function (c) { return c.nodeType === 1; }); },
+});
+Object.defineProperty(El.prototype, "firstElementChild", { get: function () { return this.children[0] || null; } });
+Object.defineProperty(El.prototype, "nextElementSibling", {
+  get: function () {
+    if (!this.parentNode) return null;
+    var kids = this.parentNode.children;
+    return kids[kids.indexOf(this) + 1] || null;
+  },
+});
+Object.defineProperty(El.prototype, "classList", {
+  get: function () {
+    var node = this;
+    function names() { return node.className.split(/\s+/).filter(Boolean); }
+    return {
+      contains: function (c) { return names().indexOf(c) >= 0; },
+      add: function (c) { if (names().indexOf(c) < 0) node.className = names().concat([c]).join(" "); },
+      remove: function (c) { node.className = names().filter(function (n) { return n !== c; }).join(" "); },
+      toggle: function (c, on) {
+        var has = names().indexOf(c) >= 0;
+        var want = on === undefined ? !has : !!on;
+        if (want && !has) this.add(c);
+        if (!want && has) this.remove(c);
+        return want;
+      },
+    };
+  },
+});
+El.prototype.setAttribute = function (k, v) { this.attrs[k] = String(v); };
+El.prototype.getAttribute = function (k) { return this.attrs[k] === undefined ? null : this.attrs[k]; };
+El.prototype.hasAttribute = function (k) { return this.attrs[k] !== undefined; };
+El.prototype.removeAttribute = function (k) { delete this.attrs[k]; };
+function detach(c) {
+  if (c.parentNode) {
+    var kids = c.parentNode.childNodes;
+    kids.splice(kids.indexOf(c), 1);
+    c.parentNode = null;
+  }
+}
+El.prototype.appendChild = function (c) { detach(c); c.parentNode = this; this.childNodes.push(c); return c; };
+El.prototype.insertBefore = function (c, ref) {
+  if (!ref) return this.appendChild(c);
+  detach(c); c.parentNode = this; this.childNodes.splice(this.childNodes.indexOf(ref), 0, c); return c;
+};
+El.prototype.removeChild = function (c) { detach(c); return c; };
+El.prototype.replaceChild = function (n, o) {
+  detach(n); var i = this.childNodes.indexOf(o); this.childNodes[i] = n; n.parentNode = this; o.parentNode = null;
+  return o;
+};
+El.prototype.remove = function () { detach(this); };
+TextNode.prototype.remove = El.prototype.remove;
+El.prototype.contains = function (n) {
+  for (; n; n = n.parentNode) if (n === this) return true;
+  return false;
+};
+/* The selector subset the widgets use: tag, .class, [attr], [attr="v"],
+   :not([attr="v"]) — compound only, comma lists allowed. */
+function matchesCompound(node, sel) {
+  var m = /^([a-zA-Z][\w-]*)?((?:\.[\w-]+)*)((?:\[[^\]]+\])*)((?::not\(\[[^\]]+\]\))*)$/.exec(sel);
+  if (!m) throw new Error("unsupported selector: " + sel);
+  if (m[1] && node.tagName !== m[1].toUpperCase()) return false;
+  var classes = m[2].split(".").filter(Boolean);
+  for (var i = 0; i < classes.length; i++) if (!node.classList.contains(classes[i])) return false;
+  function attrOk(tok) {
+    var a = /^\[([\w-]+)(?:="([^"]*)")?\]$/.exec(tok);
+    if (!a) throw new Error("unsupported attribute selector: " + tok);
+    var v = node.getAttribute(a[1]);
+    return a[2] === undefined ? v !== null : v === a[2];
+  }
+  var attrs = m[3].match(/\[[^\]]+\]/g) || [];
+  for (var j = 0; j < attrs.length; j++) if (!attrOk(attrs[j])) return false;
+  var nots = m[4].match(/\[[^\]]+\]/g) || [];
+  for (var k = 0; k < nots.length; k++) if (attrOk(nots[k])) return false;
+  return true;
+}
+El.prototype.matches = function (sel) {
+  var node = this;
+  return sel.split(",").some(function (s) { return matchesCompound(node, s.trim()); });
+};
+El.prototype.querySelectorAll = function (sel) {
+  var found = [];
+  (function walk(n) {
+    n.children.forEach(function (c) { if (c.matches(sel)) found.push(c); walk(c); });
+  })(this);
+  return found;
+};
+El.prototype.querySelector = function (sel) { return this.querySelectorAll(sel)[0] || null; };
+function addListener(type, fn, opts) {
+  var capture = opts === true || !!(opts && opts.capture);
+  this.listeners.push({ type: type, fn: fn, capture: capture });
+}
+function removeListener(type, fn, opts) {
+  var capture = opts === true || !!(opts && opts.capture);
+  this.listeners = this.listeners.filter(function (l) {
+    return !(l.type === type && l.fn === fn && l.capture === capture);
+  });
+}
+El.prototype.addEventListener = addListener;
+El.prototype.removeEventListener = removeListener;
+El.prototype.getBoundingClientRect = function () { return { top: 0, left: 0, width: 0, height: 0 }; };
+El.prototype.offsetHeight = 0; El.prototype.scrollHeight = 0; El.prototype.clientHeight = 0;
+El.prototype.focus = function () { document.activeElement = this; dispatch(this, "focusin"); };
+El.prototype.click = function () { return dispatch(this, "click"); };
+
+function dispatch(target, type, init) {
+  var ev = {
+    type: type, target: target, defaultPrevented: false, _stop: false, _stopNow: false,
+    preventDefault: function () { this.defaultPrevented = true; },
+    stopPropagation: function () { this._stop = true; },
+    stopImmediatePropagation: function () { this._stop = true; this._stopNow = true; },
+  };
+  Object.keys(init || {}).forEach(function (k) { ev[k] = init[k]; });
+  var path = [];
+  for (var n = target; n; n = n.parentNode) path.push(n);
+  if (path[path.length - 1] === document.documentElement) path.push(document);
+  function run(node, phase) {
+    node.listeners.slice().forEach(function (l) {
+      if (ev._stopNow || l.type !== type) return;
+      if (phase !== null && l.capture !== phase) return;
+      l.fn.call(node, ev);
+    });
+  }
+  for (var i = path.length - 1; i >= 1 && !ev._stop; i--) run(path[i], true);
+  if (!ev._stop) run(target, null);
+  for (var j = 1; j < path.length && !ev._stop; j++) run(path[j], false);
+  return ev;
+}
+
+var htmlEl = new El("html"), headEl = new El("head"), bodyEl = new El("body"), rootEl = new El("div");
+rootEl.id = "root";
+htmlEl.appendChild(headEl); htmlEl.appendChild(bodyEl); bodyEl.appendChild(rootEl);
+htmlEl.scrollWidth = 760; htmlEl.scrollHeight = 900;
+var document = {
+  documentElement: htmlEl, head: headEl, body: bodyEl, activeElement: bodyEl, listeners: [],
+  fullscreenEnabled: false,
+  createElement: function (t) { return new El(t); },
+  createTextNode: function (t) { return new TextNode(t); },
+  getElementById: function (id) { return htmlEl.querySelector("[id=\"" + id + "\"]"); },
+  querySelector: function (s) { return htmlEl.querySelector(s); },
+  querySelectorAll: function (s) { return htmlEl.querySelectorAll(s); },
+  addEventListener: addListener, removeEventListener: removeListener,
+};
+var winListeners = {};
+var hostFrame = { postMessage: function (m) { posted.push(m); } };
+var window = {
+  parent: hostFrame,
+  addEventListener: function (k, f) { winListeners[k] = f; },
+  matchMedia: function () { return { matches: false }; },
+  scrollTo: function () {}, innerHeight: 800, scrollY: 0,
+};
+function host(msg) { winListeners.message({ source: hostFrame, data: msg }); }
+function sent(method) { return posted.filter(function (m) { return m.method === method; }); }
+function answer(method, result, error) {
+  var req = sent(method).slice(-1)[0];
+  host(error ? { jsonrpc: "2.0", id: req.id, error: error } : { jsonrpc: "2.0", id: req.id, result: result });
+}
+function findAll(node, pred, acc) {
+  acc = acc || [];
+  (node.children || []).forEach(function (c) { if (pred(c)) acc.push(c); findAll(c, pred, acc); });
+  return acc;
+}
+"""
+
+_WIDGET_TAILS = {
+    "game-cards": ('  startWidget("gamelib-game-cards");\n})();', apps.GAME_CARDS_HTML),
+    "eval-card": ('  startWidget("gamelib-eval-card");\n})();', apps_eval.EVAL_CARD_HTML),
+}
+
+
+def run_widget(widget: str, probe: str) -> dict:
+    """Run one widget's whole script under MINI_DOM with ``probe`` spliced in
+    after startWidget(); the probe prints one JSON object."""
+    tail, html = _WIDGET_TAILS[widget]
+    script = html.split("<script>\n", 1)[1].split("</script>", 1)[0]
+    assert script.count(tail) == 1, widget
+    script = script.replace(tail, tail.split("\n")[0] + "\n" + probe + "\n})();")
+    assert NODE is not None
+    proc = subprocess.run([NODE, "-e", MINI_DOM + script], capture_output=True, text=True,
+                          timeout=60, check=False)
+    if proc.returncode != 0:
+        raise AssertionError(proc.stderr)
+    return json.loads(proc.stdout)
+
+
+_STARTUP_PROBE = r"""
+  (async function () {
+    var out = {};
+    var first = root.firstElementChild;
+    out.before = first ? first.className : null;
+    out.beforePanels = first ? findAll(first, function (n) { return n.classList.contains("sk-panel"); }).length : 0;
+    out.beforeLines = first ? findAll(first, function (n) { return n.classList.contains("sk-line"); }).length : 0;
+    out.beforeChips = first ? findAll(first, function (n) { return n.classList.contains("sk-chip"); }).length : 0;
+    out.beforeCovers = first ? findAll(first, function (n) { return n.classList.contains("sk-thumb"); }).length : 0;
+    if (MODE === "error") answer("ui/initialize", null, { code: -32603, message: "nope" });
+    else if (MODE === "timeout") flushTimers();
+    else answer("ui/initialize", { hostCapabilities: {}, hostContext: { theme: "dark" } });
+    await tick();
+    out.initialized = sent("ui/notifications/initialized").length;
+    out.theme = document.documentElement.dataset.theme || null;
+    if (INPUT) host({ jsonrpc: "2.0", method: "ui/notifications/tool-input", params: INPUT });
+    out.afterInput = root.firstElementChild ? root.firstElementChild.className : null;
+    host({ jsonrpc: "2.0", method: "ui/notifications/tool-result",
+           params: { structuredContent: { nothing: true } } });
+    out.afterResult = root.textContent;
+    console.log(JSON.stringify(out));
+  })();
+"""
+
+
+def _startup(widget: str, mode: str, tool_input: dict | None) -> dict:
+    probe = ("  var MODE = " + json.dumps(mode) + ";\n  var INPUT = " + json.dumps(tool_input) + ";\n"
+             + _STARTUP_PROBE)
+    return run_widget(widget, probe)
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class StartupBehaviourTests(unittest.TestCase):
+    """Item 6 + bridge: the neutral skeleton, its swap, and the handshake."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.detail = _startup("game-cards", "ok", {"arguments": {"name": "Hades II", "media": True}})
+        cls.grid = _startup("game-cards", "error", {"arguments": {"vibes": ["roguelike"], "limit": 12}})
+        cls.named = _startup("game-cards", "timeout",
+                             {"arguments": {}, "_meta": {"toolName": "get_game_detail"}})
+        cls.evaluation = _startup("eval-card", "ok", None)
+
+    def test_the_neutral_skeleton_is_up_before_any_tool_input(self) -> None:
+        out = self.detail
+        self.assertEqual(out["before"], "skel skel-neutral")
+        # one panel: a cover block, three lines and a chip row
+        self.assertEqual((out["beforePanels"], out["beforeCovers"], out["beforeLines"], out["beforeChips"]),
+                         (1, 1, 3, 3))
+
+    def test_a_detail_tool_input_swaps_in_the_detail_skeleton(self) -> None:
+        self.assertEqual(self.detail["afterInput"], "skel skel-detail")
+
+    def test_a_list_tool_input_swaps_in_the_grid_skeleton(self) -> None:
+        self.assertEqual(self.grid["before"], "skel skel-neutral")
+        self.assertEqual(self.grid["afterInput"], "skel skel-grid")
+
+    def test_the_tool_name_decides_the_shape_when_known(self) -> None:
+        # empty arguments would read as the grid; the name says detail
+        self.assertEqual(self.named["afterInput"], "skel skel-detail")
+
+    def test_the_evaluation_card_skips_the_neutral_stage(self) -> None:
+        self.assertEqual(self.evaluation["before"], "skel skel-eval")
+
+    def test_initialized_follows_only_a_real_initialize_answer(self) -> None:
+        self.assertEqual(self.detail["initialized"], 1)
+        self.assertEqual(self.detail["theme"], "dark")
+        self.assertEqual(self.evaluation["initialized"], 1)
+        self.assertEqual(self.grid["initialized"], 0)          # an error answer
+        self.assertEqual(self.named["initialized"], 0)         # no answer within the timeout
+
+    def test_a_result_still_renders_after_a_failed_handshake(self) -> None:
+        for out in (self.grid, self.named, self.detail):
+            self.assertEqual(out["afterResult"], "Nothing to display.")
+        self.assertEqual(self.evaluation["afterResult"], "Nothing to display.")
+
+
+_FOCUS_PROBE = r"""
+  (function () {
+    var out = {};
+    function name() { var a = document.activeElement; return a.getAttribute("aria-label") || a.textContent; }
+    function key(k, shift) {
+      return dispatch(document.activeElement, "keydown", { key: k, shiftKey: !!shift }).defaultPrevented;
+    }
+    var trigger = document.body.appendChild(el("button", "thumb", "trigger"));
+    var outside = document.body.appendChild(el("button", "outside", "outside"));
+    var shots = [{ full: "https://x/1.jpg" }, { full: "https://x/2.jpg" }];
+    openCarousel(shots, 0, "Hades II", trigger);
+    var panel = document.querySelector('[role="dialog"]');
+    out.opened = name();
+    out.shiftTabFromFirst = [key("Tab", true), name()];
+    out.tabFromLast = [key("Tab"), name()];
+    document.querySelector(".car-prev").focus();
+    out.tabFromMiddle = [key("Tab"), name()];
+    // Every focusable counts, not only buttons: a link and a tabindex=0 node.
+    var link = panel.appendChild(el("a", "credit", "credit")); link.href = "https://x";
+    var stop = panel.appendChild(el("span", "stop", "stop")); stop.tabIndex = 0;
+    var skipped = panel.appendChild(el("span", "skipped", "skipped")); skipped.tabIndex = -1;
+    document.querySelector(".overlay-close").focus();
+    out.shiftTabToLastFocusable = [key("Tab", true), name()];
+    out.tabFromNewLast = [key("Tab"), name()];
+    panel.focus();
+    out.tabFromPanel = [key("Tab"), name()];
+    // focus that lands outside while the dialog is open is pulled back in
+    outside.focus();
+    out.afterOutsideFocus = name();
+    // closed: no trap, focus back on the trigger, and outside focus stays put
+    key("Escape");
+    out.afterClose = name();
+    outside.focus();
+    out.outsideAfterClose = name();
+    console.log(JSON.stringify(out));
+  })();
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class FocusTrapBehaviourTests(unittest.TestCase):
+    """Bridge item 6, executed in both widgets: the lightbox keeps focus."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.outs = {widget: run_widget(widget, _FOCUS_PROBE) for widget in _WIDGET_TAILS}
+
+    def test_tab_wraps_at_both_ends(self) -> None:
+        for widget, out in self.outs.items():
+            with self.subTest(widget=widget):
+                self.assertEqual(out["opened"], "Close screenshots")
+                self.assertEqual(out["shiftTabFromFirst"], [True, "Next screenshot"])
+                self.assertEqual(out["tabFromLast"], [True, "Close screenshots"])
+                self.assertEqual(out["tabFromMiddle"], [False, "Previous screenshot"])   # the browser's move
+                self.assertEqual(out["tabFromPanel"], [True, "Close screenshots"])
+
+    def test_links_and_tabindex_nodes_are_in_the_cycle(self) -> None:
+        for widget, out in self.outs.items():
+            with self.subTest(widget=widget):
+                # the last focusable is the tabindex=0 span; tabindex=-1 is skipped
+                self.assertEqual(out["shiftTabToLastFocusable"], [True, "stop"])
+                self.assertEqual(out["tabFromNewLast"], [True, "Close screenshots"])
+
+    def test_focus_outside_is_pulled_back_while_open(self) -> None:
+        for widget, out in self.outs.items():
+            with self.subTest(widget=widget):
+                self.assertEqual(out["afterOutsideFocus"], "Close screenshots")
+                self.assertEqual(out["afterClose"], "trigger")
+                self.assertEqual(out["outsideAfterClose"], "outside")
+
+
+_FULLSCREEN_PROBE = r"""
+  (async function () {
+    var out = {};
+    function requests() { return sent("ui/request-display-mode").length; }
+    function make(modes, onFullscreen) {
+      applyHostContext({ availableDisplayModes: modes, displayMode: "inline" });
+      var parent = el("div");
+      var built = { n: 0 };
+      var d = fullscreenOrDisclosure(parent, "Rows", function (body) {
+        built.n += 1;
+        body.appendChild(el("div", "row"));
+      }, onFullscreen);
+      return { d: d, built: built, parent: parent,
+               state: function () {
+                 return { expanded: d.button.getAttribute("aria-expanded"), hidden: d.body.hidden,
+                          built: built.n, glyph: d.button.querySelector(".chev").textContent };
+               } };
+    }
+    // (a) no fullscreen on offer: the disclosure opens in place, no request
+    var a = make(["inline"]);
+    var before = requests();
+    out.noFsGlyph = a.state().glyph;
+    a.d.button.click();
+    out.noFs = [a.state(), requests() - before];
+    // (b) offered, then refused: one request (a second click while asking
+    // adds none), then in place — and later clicks stay in place
+    var b = make(["inline", "fullscreen"]);
+    before = requests();
+    out.offeredGlyph = b.state().glyph;
+    b.d.button.click(); b.d.button.click();
+    out.asking = [b.state(), requests() - before];
+    answer("ui/request-display-mode", null, { code: -1, message: "denied" });
+    await tick(); await tick();
+    out.refused = b.state();
+    b.d.button.click();                                   // collapse
+    b.d.button.click();                                   // reopen: no new request
+    out.afterRefusal = [b.state(), requests() - before];
+    // (c) granted, no handler: the block opens in place
+    var c = make(["inline", "fullscreen"]);
+    c.d.button.click();
+    answer("ui/request-display-mode", { mode: "fullscreen" });
+    await tick(); await tick();
+    out.grantedInPlace = c.state();
+    // (d) granted with a handler: the handler runs, nothing opens in place
+    var handed = [];
+    var d = make(["inline", "fullscreen"], function () { handed.push("fullscreen"); });
+    d.d.button.click();
+    answer("ui/request-display-mode", { mode: "fullscreen" });
+    await tick(); await tick();
+    out.grantedHandler = [d.state(), handed];
+    console.log(JSON.stringify(out));
+  })();
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class FullscreenOrDisclosureTests(unittest.TestCase):
+    """Item 13, executed: the one fullscreen-or-in-place control."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.out = run_widget("game-cards", _FULLSCREEN_PROBE)
+
+    def test_without_fullscreen_it_is_a_plain_disclosure(self) -> None:
+        self.assertEqual(self.out["noFsGlyph"], "▾")
+        self.assertEqual(self.out["noFs"],
+                         [{"expanded": "true", "hidden": False, "built": 1, "glyph": "▾"}, 0])
+
+    def test_a_refusal_opens_in_place_and_stays_in_place(self) -> None:
+        self.assertEqual(self.out["offeredGlyph"], "⤢")
+        self.assertEqual(self.out["asking"],
+                         [{"expanded": "false", "hidden": True, "built": 0, "glyph": "⤢"}, 1])
+        self.assertEqual(self.out["refused"], {"expanded": "true", "hidden": False, "built": 1, "glyph": "▾"})
+        # built once, and no second fullscreen request
+        self.assertEqual(self.out["afterRefusal"],
+                         [{"expanded": "true", "hidden": False, "built": 1, "glyph": "▾"}, 1])
+
+    def test_a_grant_opens_in_place_or_hands_over(self) -> None:
+        self.assertEqual(self.out["grantedInPlace"],
+                         {"expanded": "true", "hidden": False, "built": 1, "glyph": "▾"})
+        self.assertEqual(self.out["grantedHandler"],
+                         [{"expanded": "false", "hidden": True, "built": 0, "glyph": "⤢"}, ["fullscreen"]])
+
+    def test_both_widgets_use_it_and_keep_no_mechanism_of_their_own(self) -> None:
+        self.assertIn("function fullscreenOrDisclosure(parent, text, build, onFullscreen) {",
+                      apps_shared.DISCLOSURE_JS)
+        for module in ("apps.py", "apps_eval.py"):
+            with self.subTest(module=module):
+                source = _WIDGET_SOURCES[module]
+                self.assertIn("fullscreenOrDisclosure(", source)
+                self.assertNotIn("disclosure(stack, text, build)", source)
+                self.assertNotIn(".button.click()", source)
+                self.assertNotIn("var inPlace = ", source)
+                self.assertNotIn('requestDisplayMode("fullscreen").then', source)
+
+
+_CARD_PROBE = r"""
+  (function () {
+    function chipText(chip) {
+      return chip.childNodes.filter(function (c) {
+        return c.nodeType === 1 && (c.classList.contains("lbl") || c.tagName === "B");
+      }).map(function (c) { return c.textContent; }).join(" ");
+    }
+    function visible(card) {
+      var bits = [];
+      findAll(card, function (n) { return n.classList.contains("match"); }).forEach(function (m) {
+        bits.push(m.children[0].textContent);
+      });
+      findAll(card, function (n) { return n.classList.contains("meta"); }).forEach(function (m) {
+        bits = bits.concat(m.textContent.split(" · "));
+      });
+      findAll(card, function (n) { return n.classList.contains("chip"); }).forEach(function (c) {
+        bits.push(chipText(c));
+      });
+      return bits;
+    }
+    var games = {
+      full: { game_id: 1, name: "Hades II", match_percent: 100, hltb_main: 26.5, suggested_platform: "steam",
+              playtime_hours: 2.3, metacritic_score: 93, opencritic_score: 91,
+              steam_review_desc: "Overwhelmingly Positive" },
+      sparse: { game_id: 2, name: "Noita", match_percent: 74.4, metacritic_score: -1 },
+      bare: { game_id: 3, name: "Mystery" },
+    };
+    var out = {};
+    Object.keys(games).forEach(function (k) {
+      var card = gridCard(games[k]);
+      out[k] = { label: card.getAttribute("aria-label"), visible: visible(card) };
+    });
+    console.log(JSON.stringify(out));
+  })();
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class CardLabelBehaviourTests(unittest.TestCase):
+    """Item 14, executed: a grid card's accessible name IS what it shows."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.out = run_widget("game-cards", _CARD_PROBE)
+
+    def test_the_label_is_the_title_then_the_visible_bits(self) -> None:
+        for key in ("full", "sparse", "bare"):
+            with self.subTest(card=key):
+                out = self.out[key]
+                name = out["label"].split(": ", 1)[0]
+                expected = name + (": " + ", ".join(out["visible"]) if out["visible"] else "")
+                self.assertEqual(out["label"], expected)
+
+    def test_the_label_reads_match_meta_and_scores_in_order(self) -> None:
+        self.assertEqual(
+            self.out["full"]["label"],
+            "Hades II: 100% match, ~27h to beat, Steam, 2.3h played, Metacritic 93, OpenCritic 91, "
+            "Steam Overwhelmingly positive",
+        )
+        self.assertEqual(self.out["sparse"]["label"], "Noita: 74% match")
+        self.assertEqual(self.out["bare"]["label"], "Mystery")
+
+
+_NUMBERS_PROBE = r"""
+  (function () {
+    console.log(JSON.stringify({
+      counts: [999600, 9950, 1049, 999, 999.6, 1500, 114000, 2500000, 0].map(function (n) {
+        return compactCount(n);
+      }),
+      one: compactCount(1, "review"),
+      many: compactCount(9950, "review"),
+    }));
+  })();
+"""
+
+_CRAFT_PROBE = r"""
+  (function () {
+    function chips(craft) {
+      var row = scoreChips({ craft: craft });
+      return row ? row.children.map(function (c) {
+        return [c.children[0].textContent, (c.querySelector("b") || {}).textContent, c.title];
+      }) : null;
+    }
+    console.log(JSON.stringify({
+      rawOne: chips({ positive_pct: 1, review_count: 120 }),
+      rawHigh: chips({ positive_pct: 93 }),
+      adjusted: chips({ adjusted: 0.88, positive_pct: 91, review_count: 114000 }),
+      adjustedOne: chips({ adjusted: 1 }),
+    }));
+  })();
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class NumberBehaviourTests(unittest.TestCase):
+    """Items 7-8, executed: compactCount's units and the craft percentages."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.numbers = run_widget("game-cards", _NUMBERS_PROBE)
+        cls.craft = run_widget("eval-card", _CRAFT_PROBE)
+
+    def test_compact_count_picks_the_unit_from_the_rounded_value(self) -> None:
+        self.assertEqual(self.numbers["counts"],
+                         ["1M", "10k", "1k", "999", "1k", "1.5k", "114k", "2.5M", "0"])
+        self.assertEqual(self.numbers["one"], "1 review")
+        self.assertEqual(self.numbers["many"], "10k reviews")
+
+    def test_positive_pct_is_already_a_percentage(self) -> None:
+        # stored 0-100 (tools/assessment.py's _check_range): 1 is 1%, never 100%
+        self.assertEqual(self.craft["rawOne"][0][:2], ["Reviews", "1% positive"])
+        self.assertIn("(raw 1% positive)", self.craft["rawOne"][0][2])
+        self.assertEqual(self.craft["rawHigh"][0][:2], ["Reviews", "93% positive"])
+
+    def test_adjusted_is_a_fraction_rescaled(self) -> None:
+        self.assertEqual(self.craft["adjusted"][0][:2], ["Reviews", "88% positive"])
+        self.assertIn("(raw 91% positive), from 114k reviews", self.craft["adjusted"][0][2])
+        self.assertEqual(self.craft["adjustedOne"][0][:2], ["Reviews", "100% positive"])
 
 
 if __name__ == "__main__":
