@@ -96,6 +96,7 @@ class EvalCardCSPTests(unittest.TestCase):
                 "https://shared.akamai.steamstatic.com",
                 "https://shared.cloudflare.steamstatic.com",
                 "https://i.ytimg.com",
+                "https://assets.claude.ai",   # the host's own font files
             ],
         )
 
@@ -130,14 +131,37 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
         self.assertNotIn("innerHTML", apps_eval.EVAL_CARD_HTML)
 
     def test_every_verdict_has_a_stamp_label_and_color(self) -> None:
-        for verdict, label, cls in (
-            ("buy_now", "BUY NOW", "stamp-good"),
-            ("wishlist_for_sale", "WISHLIST FOR SALE", "stamp-ok"),
-            ("try_demo", "TRY THE DEMO", "stamp-p1"),
-            ("play_what_you_own", "PLAY WHAT YOU OWN", "stamp-p4"),
-            ("skip", "SKIP", "stamp-bad"),
+        # The words come from the shared, registry-checked VERDICT_LABELS (the
+        # stamp uppercases them in CSS); this map only picks the tier fill.
+        for verdict, cls in (
+            ("buy_now", "stamp-good"),
+            ("wishlist_for_sale", "stamp-ok"),
+            ("try_demo", "stamp-plain"),
+            ("play_what_you_own", "stamp-plain"),
+            ("skip", "stamp-bad"),
         ):
-            self.assertIn(f'{verdict}: ["{label}", "{cls}"]', apps_eval.EVAL_CARD_HTML)
+            self.assertIn(f'{verdict}: "{cls}"', apps_eval.EVAL_CARD_HTML)
+            self.assertIn(verdict, apps_shared.VERDICT_LABELS)
+        self.assertIn('var text = label("verdict", verdict);', apps_eval.EVAL_CARD_HTML)
+        for tier in ("good", "ok", "bad"):
+            self.assertIn(
+                f".stamp-{tier} {{ background: var(--gl-{tier}); color: var(--gl-surface); }}",
+                apps_eval.EVAL_CARD_HTML,
+            )
+
+    def test_the_stamp_keeps_its_brand_shape(self) -> None:
+        # One of the two deliberate brand elements left (spec §1.5): strong
+        # 2px border, hard 3px shadow, -3deg tilt.
+        css = apps_eval.EVAL_CARD_HTML.split("<style>")[1].split("</style>")[0]
+        start = css.index("  .stamp {")
+        rule = css[start:css.index("}", start)]
+        for decl in (
+            "border: 2px solid var(--gl-border-strong);",
+            "box-shadow: 3px 3px 0 var(--gl-border-strong);",
+            "transform: rotate(-3deg);",
+            "text-transform: uppercase;",
+        ):
+            self.assertIn(decl, rule)
 
     def test_render_branches_cover_the_whole_response_contract(self) -> None:
         # package -> full card, verdict -> note, else empty. There is no
@@ -146,7 +170,7 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
         for marker in (
             "if (data && data.package)",
             "else if (data && data.verdict)",
-            '"Recorded: "',
+            '"Recorded: " + label("verdict", data.verdict)',
             '"Nothing to display."',
         ):
             self.assertIn(marker, apps_eval.EVAL_CARD_HTML)
@@ -193,11 +217,13 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
         # The eval card is the only one that renders why_care (it is authored
         # content, not a neutral fact about the game), and it sits directly
         # under the elevator pitch — both inside the one pitch panel.
+        # Mixed-case words, uppercased by the eyebrow style (screen readers
+        # then read "People", not P-E-O-P-L-E).
         for kind, label, cls in (
-            ("people", "PEOPLE", "wc-people"),
-            ("studio", "STUDIO", "wc-studio"),
-            ("anticipation", "HYPE", "wc-hype"),
-            ("moment", "MOMENT", "wc-moment"),
+            ("people", "People", "wc-people"),
+            ("studio", "Studio", "wc-studio"),
+            ("anticipation", "Hype", "wc-hype"),
+            ("moment", "Moment", "wc-moment"),
         ):
             self.assertIn(f'{kind}: ["{label}", "{cls}"]', apps_eval.EVAL_CARD_HTML)
         self.assertIn(
@@ -229,8 +255,10 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
             'el("span", "an-state" + (state[2] ? " " + state[2] : ""), state[0])',
             apps_eval.EVAL_CARD_HTML,
         )
-        self.assertIn(".an-state.an-good { background: var(--good)", apps_eval.EVAL_CARD_HTML)
-        self.assertIn(".an-state.an-bad { background: var(--bad)", apps_eval.EVAL_CARD_HTML)
+        self.assertIn(".an-state.an-good { background: var(--gl-good-bg)", apps_eval.EVAL_CARD_HTML)
+        self.assertIn(".an-state.an-bad { background: var(--gl-bad-bg)", apps_eval.EVAL_CARD_HTML)
+        self.assertIn("  .anchor {\n", apps_eval.EVAL_CARD_HTML)
+        self.assertIn("    background: var(--gl-inset);\n    font-variant-numeric", apps_eval.EVAL_CARD_HTML)
         # …and the pill itself no longer paints an opinion.
         self.assertNotIn("an-warn", apps_eval.EVAL_CARD_HTML)
 
@@ -271,17 +299,40 @@ class EvalCardLayoutTests(unittest.TestCase):
         self.assertNotIn("Craft & fit", apps_eval.EVAL_CARD_HTML)
         self.assertNotIn("scoresNode", apps_eval.EVAL_CARD_HTML)
 
-    def test_metacritic_renders_as_its_own_branded_square(self) -> None:
-        # Same source-brand mapping as the game-cards widget: square box,
-        # green/yellow/red at the games thresholds.
-        self.assertIn(
-            'function mcTier(n) { return n >= 75 ? "mc-hi" : n >= 50 ? "mc-mid" : "mc-lo"; }',
-            apps_eval.EVAL_CARD_HTML,
-        )
-        self.assertIn('el("span", "chip mc " + mcTier(mc))', apps_eval.EVAL_CARD_HTML)
-        self.assertIn("num(craft.metacritic_score)", apps_eval.EVAL_CARD_HTML)
+    def test_every_score_renders_through_the_shared_chip(self) -> None:
+        # Spec §1.3: one chip, tier color, the source as label text — the
+        # Metacritic brand square (and its #6c3/#fc3/#f00) is gone.
+        for marker in (
+            'scoreChip({ label: "Metacritic", value: Math.round(mc), tier: mcTier(mc) })',
+            'scoreChip({ label: "OpenCritic", value: Math.round(oc), tier: ocTier(oc) })',
+            'label: "Craft", value: pct + "%", tier: craftTier(pct), meter: pct,',
+            'aux: compactCount(craft.review_count, "review"),',
+            'label: "Trend", value: traj[0], tier: traj[1],',
+            'label: "Fit", value: fit.charAt(0).toUpperCase() + fit.slice(1),',
+            "num(craft.metacritic_score)",
+        ):
+            self.assertIn(marker, apps_eval.EVAL_CARD_HTML)
         for hex_color in ("#6c3", "#fc3", "#f00"):
-            self.assertIn(hex_color, apps_eval.EVAL_CARD_HTML)
+            self.assertNotIn(hex_color, apps_eval.EVAL_CARD_HTML.lower())
+        self.assertNotIn('" · n="', apps_eval.EVAL_CARD_HTML)
+        # Local tier helpers would drift from the shared ones.
+        self.assertEqual(apps_eval.EVAL_CARD_HTML.count("function mcTier("), 1)
+        self.assertEqual(apps_eval.EVAL_CARD_HTML.count("function hoursLabel("), 1)
+        self.assertEqual(apps_eval.EVAL_CARD_HTML.count("function money("), 1)
+
+    def test_facts_flags_and_past_verdicts_read_as_words(self) -> None:
+        # Platform ids and stored verdict literals go through label(); flags
+        # are danger-tier chips; failures are one named notice.
+        for marker in (
+            '" on " + label("platform", price.platform)',
+            'if (p.verdict) parts.push(label("verdict", p.verdict));',
+            'scoreChip({ label: String(f), tier: "bad", cls: "flag" })',
+            '.map(function (p) { return label("platform", p); });',
+            "var node = notice(parent, errors.map(errorItem));",
+        ):
+            self.assertIn(marker, apps_eval.EVAL_CARD_HTML)
+        self.assertNotIn("some data unavailable", apps_eval.EVAL_CARD_HTML)
+        self.assertNotIn("parts.push(String(p.verdict))", apps_eval.EVAL_CARD_HTML)
 
     def test_the_craft_note_renders_under_the_chips(self) -> None:
         self.assertIn(
@@ -367,17 +418,18 @@ class EvalCardLayoutTests(unittest.TestCase):
         self.assertIn('"their " + plural(items.length, "previous game")',
                       apps_eval.EVAL_CARD_HTML)
 
-    def test_sticker_like_pills_tilt_like_the_game_cards_widget(self) -> None:
-        # Toybox language: stickers tilt, data chips (score meter, pace/price)
-        # stay straight so the numbers stay legible.
-        for marker in (
-            ".tag:nth-child(2n) { transform: rotate(",
-            ".flag:nth-child(2n) { transform: rotate(",
-            ".tl-chip:nth-child(2n) { transform: rotate(",
-            ".anchor:nth-child(2n) { transform: rotate(",
-            ".wc-line:nth-child(2n) .wc-eyebrow { transform: rotate(",
+    def test_stickers_no_longer_tilt(self) -> None:
+        # The toybox tilt is gone with the host-token restyle (spec §1.5):
+        # nothing rotates but the verdict stamp (and the shared disclosure
+        # chevron). tests/test_apps.py::DesignSystemTests pins the whole CSS.
+        for gone in (
+            ".tag:nth-child(2n)",
+            ".flag:nth-child(2n)",
+            ".tl-chip:nth-child(2n)",
+            ".anchor:nth-child(2n)",
+            ".wc-line:nth-child(2n)",
         ):
-            self.assertIn(marker, apps_eval.EVAL_CARD_HTML)
+            self.assertNotIn(gone, apps_eval.EVAL_CARD_HTML)
 
 
 class SharedBlockTests(unittest.TestCase):
@@ -397,10 +449,9 @@ class WidgetDriftTests(unittest.TestCase):
     fallback — and a fix applied to one was easy to forget in the other. What
     is left in apps.py and apps_eval.py is each widget's own layout; anything
     substantial they agree on belongs in apps_shared.py, where one edit reaches
-    both. The longest identical run today is 15 non-blank lines (the tail of
-    the initialize handshake, the document's closing tags, and the
-    content-hash comment under them), so the cap leaves room for a small block
-    to be ported deliberately before this fires.
+    both. The longest identical run today is 13 non-blank lines (the document
+    head and the shared token/reset/component splices under it), so the cap
+    leaves room for a small block to be ported deliberately before this fires.
     """
 
     MAX_IDENTICAL_LINES = 20

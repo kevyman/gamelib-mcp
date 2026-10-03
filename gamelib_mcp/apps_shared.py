@@ -10,55 +10,185 @@ lands in both widgets at once instead of being hand-ported (and forgotten).
 Splice, never reformat: the constants carry their own indentation and trailing
 newline, and a widget's HTML is the literal chunks and these constants
 concatenated in order. What is deliberately NOT here is anything the two
-widgets genuinely disagree on — the grid's larger cover plates, apps.py's
-Steam review-meter palette, its stacking overlay — that stays local to its
-widget. ``tests/test_apps_eval.py::WidgetDriftTests`` fails if a block of any
-size worth sharing reappears in both files instead.
+widgets genuinely disagree on — the grid's cover plates, its stacking overlay,
+the evaluation card's verdict stamp — that stays local to its widget.
+``tests/test_apps_eval.py::WidgetDriftTests`` fails if a block of any size
+worth sharing reappears in both files instead.
+
+Design system (docs/specs/2026-10-03-widget-ux-redesign.md §1): every color,
+radius, border width, shadow and font is a ``--gl-*`` custom property defined
+ONCE in ``TOKENS_CSS`` as ``var(<host token>, <fallback>)``. The host's
+``hostContext.styles.variables`` (Claude's theme tokens) win when present; the
+``light-dark()`` fallbacks keep ChatGPT, Goose and the offline preview
+rendering, and follow ``hostContext.theme`` (via ``color-scheme``) or, with no
+host at all, ``prefers-color-scheme``. Widget CSS references ``--gl-*`` names
+only. Type is three sizes (16 / 14 / 12px) in two weights (400 / 600);
+nothing renders below 12px.
 """
 
-# ---- Palette, reset and the cover block -------------------------------------
-# The light-scheme custom properties both widgets are built on.
-PALETTE_LIGHT_CSS = r"""  :root {
-    --bg: #f5efe2;
-    --card: #fffdf6;
-    --ink: #17140e;
-    --shadow-c: #17140e;
-    --muted: #6d6553;
-    --good: #1a7f37;
-    --ok: #96650a;
-    --bad: #b3223c;
-    --p1: #cfe6ff;
-    --p2: #ffe0b8;
-    --p3: #d8f2c4;
-    --p4: #ffd6e7;
+import json
+
+from .platforms_registry import PLATFORMS
+
+# ---- Labels (generated) -----------------------------------------------------
+# Every platform field on the wire (suggested_platform, platforms[].platform,
+# ownership.platforms, price.platform) is a registry name; the widgets render
+# these labels instead of the raw id. tests/test_apps.py::LabelTests fails when
+# a registry name or a record_assessment verdict literal has no explicit entry.
+_PLATFORM_DISPLAY: dict[str, str] = {
+    "steam": "Steam",
+    "epic": "Epic Games",
+    "gog": "GOG",
+    "switch2": "Switch 2",
+    "ps5": "PS5",
+    "xbox": "Xbox",
+    "itchio": "itch.io",
+    "ea": "EA app",
+    "ubisoft": "Ubisoft Connect",
+    "other": "Other",
+}
+
+
+def _humanize(raw: str) -> str:
+    """Python twin of the JS ``humanize``: underscores out, words title-cased."""
+    return " ".join(word[:1].upper() + word[1:] for word in raw.replace("_", " ").split())
+
+
+def _platform_labels() -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for spec in PLATFORMS:
+        text = _PLATFORM_DISPLAY.get(spec.name, _humanize(spec.name))
+        labels[spec.name] = text
+        # Aliases ("nintendo", "origin", "uplay") are accepted inputs, not wire
+        # values — mapped anyway so a stray one still reads as its platform.
+        for alias in spec.aliases:
+            labels.setdefault(alias, text)
+    return labels
+
+
+PLATFORM_LABELS: dict[str, str] = _platform_labels()
+
+# record_assessment's verdict Literal (main.py) == tools/assessment.py's
+# ASSESSMENT_VERDICTS; a test pins all three together.
+VERDICT_LABELS: dict[str, str] = {
+    "buy_now": "Buy now",
+    "wishlist_for_sale": "Wishlist for a sale",
+    "try_demo": "Try the demo",
+    "skip": "Skip",
+    "play_what_you_own": "Play what you own",
+}
+
+# Provider prefixes as they appear in error strings and enrichment reasons.
+PROVIDER_LABELS: dict[str, str] = {
+    "steam": "Steam",
+    "igdb": "IGDB",
+    "hltb": "HowLongToBeat",
+    "opencritic": "OpenCritic",
+    "metacritic": "Metacritic",
+    "protondb": "ProtonDB",
+    "youtube": "YouTube",
+    "itad": "IsThereAnyDeal",
+    "steamspy": "SteamSpy",
+    "backloggd": "Backloggd",
+}
+
+# ---- Design tokens, reset, accessibility ------------------------------------
+# The ONE place a color/radius/shadow/font value is written. Widget CSS uses
+# the --gl-* names only. The stage/scrim values are the media-viewer black,
+# which stays black in both schemes.
+TOKENS_CSS = r"""  :root {
+    color-scheme: light dark;
+    --gl-text: var(--color-text-primary, light-dark(#141413, #FAF9F5));
+    --gl-text-2: var(--color-text-secondary, light-dark(#3D3D3A, #C2C0B6));
+    --gl-muted: var(--color-text-tertiary, light-dark(#73726C, #9C9A92));
+    --gl-surface: var(--color-background-primary, light-dark(#FFFFFF, #30302E));
+    --gl-inset: var(--color-background-secondary, light-dark(#F5F4ED, #262624));
+    --gl-border: var(--color-border-tertiary, light-dark(rgba(31, 30, 29, 0.15), rgba(222, 220, 209, 0.15)));
+    --gl-border-strong: var(--color-border-primary, light-dark(rgba(31, 30, 29, 0.4), rgba(222, 220, 209, 0.4)));
+    --gl-good: var(--color-text-success, light-dark(#265B19, #7AB948));
+    --gl-ok: var(--color-text-warning, light-dark(#5A4815, #D1A041));
+    --gl-bad: var(--color-text-danger, light-dark(#7F2C28, #EE8884));
+    --gl-good-bg: var(--color-background-success, light-dark(#E9F1DC, #1B4614));
+    --gl-ok-bg: var(--color-background-warning, light-dark(#F6EEDF, #483A0F));
+    --gl-bad-bg: var(--color-background-danger, light-dark(#F7ECEC, #602A28));
+    --gl-good-edge: var(--color-border-success, light-dark(#437426, #599130));
+    --gl-ok-edge: var(--color-border-warning, light-dark(#805C1F, #A87829));
+    --gl-bad-edge: var(--color-border-danger, light-dark(#A73D39, #CD5C58));
+    --gl-inverse-bg: var(--color-background-inverse, light-dark(#141413, #FAF9F5));
+    --gl-inverse-text: var(--color-text-inverse, light-dark(#FFFFFF, #141413));
+    --gl-stage: #0d0b07;
+    --gl-stage-veil: rgba(12, 10, 6, 0.32);
+    --gl-scrim: rgba(12, 10, 6, 0.5);
+    --gl-on-stage: #ffffff;
+    --gl-on-stage-dim: rgba(255, 255, 255, 0.78);
+    --gl-r-xs: var(--border-radius-xs, 4px);
+    --gl-r-sm: var(--border-radius-sm, 6px);
+    --gl-r-md: var(--border-radius-md, 8px);
+    --gl-r-lg: var(--border-radius-lg, 10px);
+    --gl-r-full: var(--border-radius-full, 9999px);
+    --gl-bw: var(--border-width-regular, 0.5px);
+    --gl-shadow: var(--shadow-sm, 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1));
+    --gl-shadow-md: var(--shadow-md, 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1));
+    --gl-font: var(--font-sans, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
+    --gl-title: var(--font-heading-lg-size, 20px);
+    --gl-h: var(--font-heading-md-size, 16px);
+    --gl-body: var(--font-text-sm-size, 14px);
+    --gl-cap: var(--font-text-xs-size, 12px);
+    --gl-title-lh: var(--font-heading-lg-line-height, 1.25);
+    --gl-h-lh: var(--font-heading-md-line-height, 1.4);
+    --gl-body-lh: var(--font-text-sm-line-height, 1.4);
+    --gl-cap-lh: var(--font-text-xs-line-height, 1.4);
+    --gl-regular: var(--font-weight-normal, 400);
+    --gl-strong: var(--font-weight-semibold, 600);
   }
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
 """
 
-# The dark-scheme overrides, WITHOUT the wrapping
-# ``@media (prefers-color-scheme: dark) { :root { … } }`` — the game-cards widget
-# appends three Steam review-meter variables of its own inside the same block.
-PALETTE_DARK_VARS = r"""      --bg: #191610;
-      --card: #241f15;
-      --ink: #ece5d3;
-      --shadow-c: #000000;
-      --muted: #a89d86;
-      --good: #7ee2a0;
-      --ok: #ffd66b;
-      --bad: #ff9eb0;
-      --p1: #274a68;
-      --p2: #6d4d1e;
-      --p3: #3d5c2a;
-      --p4: #6e3350;
-"""
-
-# Box-sizing reset plus the body type/background.
+# Box-sizing reset, the transparent page and the body type. The 12px gutter is
+# the base the bridge adds safe-area insets to.
 RESET_CSS = r"""  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: transparent; }
   body {
-    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    background: var(--bg);
-    color: var(--ink);
-    padding: 16px;
+    font-family: var(--gl-font);
+    font-size: var(--gl-body);
+    line-height: var(--gl-body-lh);
+    font-weight: var(--gl-regular);
+    color: var(--gl-text);
+    padding: 12px;
     -webkit-font-smoothing: antialiased;
+    -webkit-text-size-adjust: 100%;
+  }
+  button { font: inherit; color: inherit; }
+"""
+
+# Focus rings, hit areas (≥32px, ≥44px on touch — the ::after grows the
+# target, never the visual) and reduced motion.
+A11Y_CSS = r"""  :focus-visible { outline: 2px solid var(--gl-border-strong); outline-offset: 2px; }
+  :focus:not(:focus-visible) { outline: none; }
+  a.chip::after, .hero-pill::after, .fs-btn::after, .car-nav::after, .overlay-close::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: max(100%, 32px);
+    height: max(100%, 32px);
+    transform: translate(-50%, -50%);
+  }
+  html.touch a.chip::after, html.touch .hero-pill::after, html.touch .fs-btn::after,
+  html.touch .car-nav::after, html.touch .overlay-close::after {
+    width: max(100%, 44px);
+    height: max(100%, 44px);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation: none !important;
+      transition: none !important;
+      scroll-behavior: auto !important;
+    }
+    .card:hover, .thumb:hover, .play-badge:hover span, .play-badge:focus-visible span {
+      transform: none !important;
+    }
   }
 """
 
@@ -75,15 +205,172 @@ COVER_CSS = r"""  .cover-wrap { position: relative; aspect-ratio: 2 / 3; }
   }
 """
 
+# Panel surface, section eyebrow, footnote and the empty state.
+PANEL_CSS = r"""  .panel {
+    background: var(--gl-surface);
+    border: var(--gl-bw) solid var(--gl-border);
+    border-radius: var(--gl-r-md);
+    box-shadow: var(--gl-shadow);
+    padding: 14px;
+  }
+  .section-title {
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    font-weight: var(--gl-strong);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--gl-muted);
+    margin-bottom: 8px;
+  }
+  .note {
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    color: var(--gl-muted);
+    margin-top: 8px;
+    font-variant-numeric: tabular-nums;
+  }
+  .empty {
+    color: var(--gl-muted);
+    padding: 20px;
+    text-align: center;
+  }
+"""
+
+# ---- Components CSS: chip, match bar, skeleton, controls, notice -----------
+# The ONE chip for every score. Color encodes quality tier only; the brand is
+# the label text.
+CHIP_CSS = r"""  .chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .chip {
+    position: relative;
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: 6px;
+    row-gap: 0;
+    max-width: 100%;
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    font-weight: var(--gl-regular);
+    padding: 3px 8px;
+    border-radius: var(--gl-r-sm);
+    border: var(--gl-bw) solid var(--gl-border);
+    background: var(--gl-inset);
+    color: var(--gl-text);
+    font-variant-numeric: tabular-nums;
+    text-decoration: none;
+  }
+  .chip .lbl { color: var(--gl-text-2); white-space: nowrap; }
+  .chip b { font-weight: var(--gl-strong); }
+  .chip .aux { color: var(--gl-text-2); white-space: nowrap; }
+  .chip.tier-good { background: var(--gl-good-bg); border-color: var(--gl-good-edge); color: var(--gl-good); }
+  .chip.tier-ok { background: var(--gl-ok-bg); border-color: var(--gl-ok-edge); color: var(--gl-ok); }
+  .chip.tier-bad { background: var(--gl-bad-bg); border-color: var(--gl-bad-edge); color: var(--gl-bad); }
+  .chip.tier-none { background: var(--gl-inset); color: var(--gl-text); }
+  .chip.tier-good .lbl, .chip.tier-ok .lbl, .chip.tier-bad .lbl,
+  .chip.tier-good .aux, .chip.tier-ok .aux, .chip.tier-bad .aux { color: inherit; }
+  .chip .meter {
+    width: 28px;
+    height: 4px;
+    border-radius: var(--gl-r-full);
+    background: color-mix(in srgb, currentColor 22%, transparent);
+    overflow: hidden;
+    flex: none;
+  }
+  .chip .meter-fill { display: block; height: 100%; background: currentColor; }
+  .chip .ext { color: inherit; }
+  a.chip { cursor: pointer; }
+  a.chip:hover { border-color: var(--gl-border-strong); }
+"""
+
+# Labelled 4px taste-match bar.
+MATCH_BAR_CSS = r"""  .match { display: flex; flex-direction: column; gap: 4px; font-size: var(--gl-cap); line-height: var(--gl-cap-lh); }
+  .match b { font-weight: var(--gl-strong); font-variant-numeric: tabular-nums; }
+  .match .track {
+    display: block;
+    height: 4px;
+    border-radius: var(--gl-r-full);
+    background: var(--gl-inset);
+    overflow: hidden;
+  }
+  .match .fill { display: block; height: 100%; background: var(--gl-inverse-bg); }
+"""
+
+# Loading placeholders in each widget's shape; the pulse only runs when the
+# viewer allows motion.
+SKELETON_CSS = r"""  .skel { display: flex; flex-direction: column; gap: 12px; max-width: 760px; }
+  .skel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(142px, 1fr)); gap: 12px; max-width: none; }
+  .sk-card, .sk-panel {
+    background: var(--gl-surface);
+    border: var(--gl-bw) solid var(--gl-border);
+    border-radius: var(--gl-r-md);
+    box-shadow: var(--gl-shadow);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .sk-card { padding-bottom: 12px; }
+  .sk-card .sk-line { margin: 0 12px; }
+  .sk-panel { padding: 14px; }
+  .sk-row { display: flex; gap: 14px; align-items: flex-start; }
+  .sk-col { flex: 1; display: flex; flex-direction: column; gap: 8px; padding-top: 4px; }
+  .sk { background: var(--gl-inset); border-radius: var(--gl-r-sm); }
+  .sk-cover { aspect-ratio: 2 / 3; border-radius: 0; }
+  .sk-thumb { flex: 0 0 84px; aspect-ratio: 2 / 3; }
+  .sk-line { height: 12px; }
+  .sk-line.short { width: 55%; }
+  .sk-line.wide { height: 16px; width: 70%; }
+  .sk-chips { display: flex; gap: 6px; }
+  .sk-chip { width: 76px; height: 22px; }
+  @media (prefers-reduced-motion: no-preference) {
+    .sk { animation: gl-pulse 1.6s ease-in-out infinite; }
+  }
+  @keyframes gl-pulse { 50% { opacity: 0.5; } }
+"""
+
+# Buttons, the disclosure toggle and the muted failure notice.
+CONTROLS_CSS = r"""  .btn, .disclosure {
+    min-height: 40px;
+    padding: 0 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    border-radius: var(--gl-r-md);
+    border: var(--gl-bw) solid var(--gl-border-strong);
+    background: var(--gl-surface);
+    color: var(--gl-text);
+    font-size: var(--gl-body);
+    font-weight: var(--gl-strong);
+    cursor: pointer;
+  }
+  .btn.primary { background: var(--gl-inverse-bg); color: var(--gl-inverse-text); border-color: transparent; }
+  html.touch .btn, html.touch .disclosure { min-height: 44px; }
+  .disclosure { width: 100%; }
+  .disclosure .chev { transition: transform 0.15s ease; }
+  .disclosure[aria-expanded="true"] .chev { transform: rotate(180deg); }
+  .disclosure-body { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+  .disclosure-body[hidden] { display: none; }
+  .notice {
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    color: var(--gl-muted);
+    text-align: center;
+    padding: 4px 0;
+  }
+"""
+
+# All component CSS in splice order (one line per widget, not five).
+COMPONENTS_CSS = CHIP_CSS + MATCH_BAR_CSS + SKELETON_CSS + CONTROLS_CSS
+
 # ---- Media CSS: hero stage, strips, thumbs ----------------------------------
 # The 16:9 trailer/screenshot stage, its poster, play badge and link pill.
 HERO_CSS = r"""  .hero {
     position: relative;
-    border: 2px solid var(--ink);
-    border-radius: 14px;
-    box-shadow: 5px 5px 0 var(--shadow-c);
+    border: var(--gl-bw) solid var(--gl-border);
+    border-radius: var(--gl-r-md);
     overflow: hidden;
-    background: #0d0b07;
+    background: var(--gl-stage);
     aspect-ratio: 16 / 9;
   }
   .hero-media {
@@ -92,7 +379,7 @@ HERO_CSS = r"""  .hero {
     height: 100%;
     border: 0;
     object-fit: cover;
-    background: #0d0b07;
+    background: var(--gl-stage);
   }
   .play-badge {
     position: absolute;
@@ -100,26 +387,24 @@ HERO_CSS = r"""  .hero {
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(12, 10, 6, 0.3);
+    background: var(--gl-stage-veil);
     border: 0;
     padding: 0;
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
   }
   .play-badge span {
-    width: 62px;
-    height: 62px;
-    border-radius: 999px;
-    border: 3px solid var(--ink);
-    background: var(--card);
-    color: var(--ink);
-    box-shadow: 3px 3px 0 var(--shadow-c);
+    width: 56px;
+    height: 56px;
+    border-radius: var(--gl-r-full);
+    background: var(--gl-surface);
+    color: var(--gl-text);
+    box-shadow: var(--gl-shadow-md);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 20px;
-    font-weight: 900;
-    padding-left: 5px;
+    font-size: var(--gl-title);
+    padding-left: 4px;
     transition: transform 0.12s ease;
   }
   .play-badge:hover span, .play-badge:focus-visible span { transform: scale(1.06); }
@@ -128,14 +413,15 @@ HERO_CSS = r"""  .hero {
     right: 10px;
     bottom: 10px;
     z-index: 2;
-    font-size: 10.5px;
-    font-weight: 800;
-    padding: 3px 9px;
-    border-radius: 999px;
-    border: 2px solid var(--ink);
-    background: var(--card);
-    color: var(--ink);
-    box-shadow: 2px 2px 0 var(--shadow-c);
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    font-weight: var(--gl-strong);
+    padding: 4px 10px;
+    border-radius: var(--gl-r-full);
+    border: var(--gl-bw) solid var(--gl-border);
+    background: var(--gl-surface);
+    color: var(--gl-text);
+    box-shadow: var(--gl-shadow);
     cursor: pointer;
   }
   .hero-missing {
@@ -144,9 +430,8 @@ HERO_CSS = r"""  .hero {
     justify-content: center;
     width: 100%;
     height: 100%;
-    color: var(--muted);
-    font-size: 12px;
-    font-weight: 650;
+    color: var(--gl-on-stage-dim);
+    font-size: var(--gl-cap);
   }
 """
 
@@ -168,7 +453,7 @@ SHOT_BTN_CSS = r"""  .shot-btn {
     height: 100%;
     padding: 0;
     border: 0;
-    background: #0d0b07;
+    background: var(--gl-stage);
     cursor: zoom-in;
     -webkit-tap-highlight-color: transparent;
   }
@@ -180,14 +465,15 @@ MEDIA_STRIP_CSS = r"""  .fs-btn {
     right: 10px;
     top: 10px;
     z-index: 3;
-    width: 30px;
-    height: 30px;
-    border-radius: 8px;
-    border: 2px solid var(--ink);
-    background: var(--card);
-    color: var(--ink);
-    font: 800 13px/1 system-ui, sans-serif;
-    box-shadow: 2px 2px 0 var(--shadow-c);
+    width: 32px;
+    height: 32px;
+    border-radius: var(--gl-r-sm);
+    border: var(--gl-bw) solid var(--gl-border);
+    background: var(--gl-surface);
+    color: var(--gl-text);
+    font-size: var(--gl-h);
+    line-height: 1;
+    box-shadow: var(--gl-shadow);
     cursor: pointer;
     display: flex;
     align-items: center;
@@ -198,29 +484,26 @@ MEDIA_STRIP_CSS = r"""  .fs-btn {
     position: relative;
     flex: none;
     padding: 0;
-    border: 2px solid var(--ink);
-    border-radius: 9px;
+    border: var(--gl-bw) solid var(--gl-border);
+    border-radius: var(--gl-r-sm);
     overflow: hidden;
-    background: var(--card);
-    box-shadow: 2px 2px 0 var(--shadow-c);
+    background: var(--gl-inset);
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
     transition: transform 0.12s ease;
   }
   .thumb img { display: block; width: 116px; height: 66px; object-fit: cover; }
-  .thumb:hover { transform: translate(-1px, -1px); }
-  .thumb:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
-  .thumb.sel { border-color: var(--ink); box-shadow: 0 0 0 3px var(--ink); }
+  html:not(.no-hover) .thumb:hover { transform: translateY(-1px); }
+  .thumb.sel { box-shadow: 0 0 0 2px var(--gl-text); }
   .thumb-play {
     position: absolute;
     inset: 0;
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(12, 10, 6, 0.34);
-    color: #ffffff;
-    font-size: 17px;
-    font-weight: 900;
+    background: var(--gl-stage-veil);
+    color: var(--gl-on-stage);
+    font-size: var(--gl-h);
     text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
   }
   .thumb-text {
@@ -229,62 +512,63 @@ MEDIA_STRIP_CSS = r"""  .fs-btn {
     justify-content: center;
     width: 116px;
     height: 66px;
-    font-size: 11px;
-    font-weight: 800;
-    color: var(--ink);
-    background: var(--p2);
+    font-size: var(--gl-cap);
+    font-weight: var(--gl-strong);
+    color: var(--gl-text-2);
+    background: var(--gl-inset);
   }
 """
 
-# The "+N more" chip closing a truncated strip.
-MORE_CHIP_CSS = r"""  .more-chip {
-    flex: none;
-    align-self: center;
-    font-size: 11px;
-    font-weight: 800;
-    padding: 4px 10px;
-    border-radius: 999px;
-    border: 1.5px solid var(--ink);
-    background: var(--p2);
-    white-space: nowrap;
-  }
-"""
-
-# ---- Similar-games CSS ------------------------------------------------------
-# Mini cover cards used by both the similar row and the pedigree row.
+# ---- Similar-games / pedigree / tags CSS ------------------------------------
+# Mini cover cards used by both the similar row and the pedigree row: cover,
+# name, year and one chip row — nothing else.
 SIMILAR_CSS = r"""  .sim {
     flex: none;
-    width: 108px;
-    border: 2px solid var(--ink);
-    border-radius: 11px;
-    background: var(--card);
-    box-shadow: 3px 3px 0 var(--shadow-c);
+    width: 112px;
+    border: var(--gl-bw) solid var(--gl-border);
+    border-radius: var(--gl-r-md);
+    background: var(--gl-surface);
     overflow: hidden;
     display: flex;
     flex-direction: column;
   }
-  .sim .cover-wrap { border-bottom: 2px solid var(--ink); }
-  .sim-body { padding: 7px 8px 8px; display: flex; flex-direction: column; gap: 4px; }
+  .sim .cover-wrap { border-bottom: var(--gl-bw) solid var(--gl-border); }
+  .sim-body { padding: 8px; display: flex; flex-direction: column; gap: 4px; }
   .sim-name {
-    font-size: 11.5px;
-    font-weight: 800;
-    line-height: 1.25;
+    font-size: var(--gl-cap);
+    font-weight: var(--gl-strong);
+    line-height: var(--gl-cap-lh);
     display: -webkit-box;
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
-  .sim-year { font-size: 10.5px; font-weight: 650; color: var(--muted); }
-  /* The "why": the shared tags that put this cover in the row. One line —
-     it is a reason, not a tag cloud, and a wrapped second line pushes the
-     strip's cards out of alignment. */
-  .sim-why {
-    font-size: 10.5px;
-    color: var(--muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
+  .sim-year { font-size: var(--gl-cap); line-height: var(--gl-cap-lh); color: var(--gl-muted); font-variant-numeric: tabular-nums; }
+"""
+
+# Small neutral stickers (owned / unplayed / a rating / hours). Not scores, so
+# no tier color: his own rating is the one emphasised (weight, not hue).
+TAG_CSS = r"""  .tags { display: flex; gap: 4px; flex-wrap: wrap; }
+  .tag {
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    padding: 0 6px;
+    border-radius: var(--gl-r-xs);
+    border: var(--gl-bw) solid var(--gl-border);
+    background: var(--gl-inset);
+    color: var(--gl-text-2);
     white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }
+  .tag.owned, .tag.rated { color: var(--gl-text); }
+  .tag.rated { font-weight: var(--gl-strong); }
+  .tag.critic, .tag.unplayed { color: var(--gl-muted); }
+"""
+
+# "From the studio" header and publisher lines.
+PEDIGREE_CSS = r"""  .ped-head { font-weight: var(--gl-strong); }
+  .ped-pub { font-size: var(--gl-cap); line-height: var(--gl-cap-lh); color: var(--gl-muted); margin-top: 2px; }
+  .ped-strip { margin-top: 8px; }
 """
 
 # ---- Overlay / carousel / toast CSS -----------------------------------------
@@ -295,7 +579,7 @@ OVERLAY_CSS = r"""  .overlay {
     left: 0;
     right: 0;
     z-index: 10;
-    background: rgba(12, 10, 6, 0.5);
+    background: var(--gl-scrim);
     opacity: 0;
     transition: opacity 0.16s ease;
   }
@@ -308,7 +592,7 @@ CAROUSEL_CSS = r"""  .car-stage {
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #0d0b07;
+    background: var(--gl-stage);
     /* Holds the frame open while the full-res image loads (and if it never
        does) — a zero-height stage would swallow the arrows and the close. */
     min-height: 180px;
@@ -316,24 +600,24 @@ CAROUSEL_CSS = r"""  .car-stage {
     touch-action: pan-y;
   }
   .car-img { display: block; width: 100%; max-height: 74vh; object-fit: contain; }
-  .car-nav {
+  .car-nav, .overlay-close {
     position: absolute;
-    top: 50%;
     z-index: 2;
-    transform: translateY(-50%);
-    width: 38px;
-    height: 38px;
-    border-radius: 999px;
-    border: 2px solid var(--ink);
-    background: var(--card);
-    color: var(--ink);
-    font: 900 19px/1 system-ui, sans-serif;
-    box-shadow: 2px 2px 0 var(--shadow-c);
+    width: 36px;
+    height: 36px;
+    border-radius: var(--gl-r-full);
+    border: var(--gl-bw) solid var(--gl-border);
+    background: var(--gl-surface);
+    color: var(--gl-text);
+    font-size: var(--gl-h);
+    line-height: 1;
+    box-shadow: var(--gl-shadow-md);
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
   }
+  .car-nav { top: 50%; transform: translateY(-50%); }
   .car-prev { left: 10px; }
   .car-next { right: 10px; }
   .car-count {
@@ -342,36 +626,20 @@ CAROUSEL_CSS = r"""  .car-stage {
     bottom: 10px;
     z-index: 2;
     transform: translateX(-50%);
-    font-size: 11px;
-    font-weight: 800;
-    padding: 3px 10px;
-    border-radius: 999px;
-    border: 2px solid var(--ink);
-    background: var(--card);
-    color: var(--ink);
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    font-weight: var(--gl-strong);
+    padding: 2px 10px;
+    border-radius: var(--gl-r-full);
+    background: var(--gl-surface);
+    color: var(--gl-text);
+    font-variant-numeric: tabular-nums;
   }
   .carousel .fs-btn { right: 56px; }
-  .overlay-close {
-    position: absolute;
-    top: 10px;
-    right: 10px;
-    z-index: 2;
-    width: 36px;
-    height: 36px;
-    border-radius: 999px;
-    border: 2px solid var(--ink);
-    background: var(--card);
-    color: var(--ink);
-    font: 800 16px/1 system-ui, sans-serif;
-    box-shadow: 2px 2px 0 var(--shadow-c);
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
+  .overlay-close { top: 10px; right: 10px; }
 """
 
-# The bottom toast that explains a host-blocked link.
+# The bottom toast that explains a host-blocked link; the URL is selectable.
 TOAST_CSS = r"""  .toast {
     position: fixed;
     left: 50%;
@@ -379,24 +647,34 @@ TOAST_CSS = r"""  .toast {
     z-index: 20;
     transform: translateX(-50%) translateY(8px);
     max-width: calc(100% - 28px);
-    padding: 8px 12px;
-    background: var(--card);
-    border: 2px solid var(--ink);
-    border-radius: 10px;
-    box-shadow: 3px 3px 0 var(--shadow-c);
-    font-size: 11.5px;
-    font-weight: 650;
+    padding: 10px 14px;
+    background: var(--gl-surface);
+    color: var(--gl-text);
+    border: var(--gl-bw) solid var(--gl-border-strong);
+    border-radius: var(--gl-r-md);
+    box-shadow: var(--gl-shadow-md);
     text-align: center;
     opacity: 0;
     pointer-events: none;
     transition: opacity 0.15s ease, transform 0.15s ease;
   }
-  .toast.show { opacity: 1; transform: translateX(-50%); }
+  .toast.show { opacity: 1; transform: translateX(-50%); pointer-events: auto; }
+  .toast-url {
+    margin-top: 4px;
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    color: var(--gl-text-2);
+    overflow-wrap: anywhere;
+    user-select: all;
+    -webkit-user-select: all;
+  }
 """
 
 # ---- The host bridge and its link-out fallback ------------------------------
-# The hand-rolled MCP Apps postMessage bridge: request/notify plus the
-# message listener. Opens the IIFE both widgets live inside.
+# The hand-rolled MCP Apps postMessage bridge (spec 2026-01-26): request/
+# notify, the inbound notification router, and the hostContext store with
+# applyHostContext (theme, token variables, host fonts, safe areas, touch /
+# hover, display mode). Opens the IIFE both widgets live inside.
 BRIDGE_JS = r"""(function () {
   "use strict";
 
@@ -422,15 +700,70 @@ BRIDGE_JS = r"""(function () {
       if (cb) { delete pending[m.id]; cb(m.error ? undefined : m.result); }
       return;
     }
-    if (m.method === "ui/notifications/tool-result") {
-      handleToolResult(m.params);
-      return;
+    switch (m.method) {
+      case "ui/notifications/tool-result": handleToolResult(m.params); return;
+      case "ui/notifications/tool-input": handleToolInput(m.params); return;
+      case "ui/notifications/tool-input-partial": return;        // streaming args: ignored
+      case "ui/notifications/tool-cancelled": handleToolCancelled(m.params); return;
+      case "ui/notifications/host-context-changed": applyHostContext(m.params); return;
+      case "ui/resource-teardown":
+        teardown();
+        if (m.id !== undefined) post({ jsonrpc: "2.0", id: m.id, result: {} });
+        return;
     }
     if (m.id !== undefined) {                                    // unknown host request
       post({ jsonrpc: "2.0", id: m.id,
              error: { code: -32601, message: "Method not found" } });
     }
   });
+
+  /* ---------- host context: theme, tokens, fonts, safe areas ---------- */
+  /* Called with ui/initialize's hostContext and with every
+     host-context-changed payload. Updates are partial: merge, never replace. */
+  var hostContext = {};
+  var BASE_GUTTER = 12;
+  function applyHostContext(ctx) {
+    if (!ctx || typeof ctx !== "object") return;
+    Object.keys(ctx).forEach(function (k) { hostContext[k] = ctx[k]; });
+    var docEl = document.documentElement;
+    if (ctx.theme === "light" || ctx.theme === "dark") {
+      docEl.dataset.theme = ctx.theme;
+      docEl.style.colorScheme = ctx.theme;
+    }
+    var styles = ctx.styles || {};
+    var vars = styles.variables;
+    if (vars && typeof vars === "object") {
+      Object.keys(vars).forEach(function (name) {
+        var value = vars[name];
+        if (name.indexOf("--") === 0 && value !== null && value !== undefined && value !== "") {
+          docEl.style.setProperty(name, String(value));
+        }
+      });
+    }
+    if (styles.css && typeof styles.css.fonts === "string") {
+      var fonts = document.getElementById("host-fonts");
+      if (!fonts) {
+        fonts = document.createElement("style");
+        fonts.id = "host-fonts";
+        document.head.appendChild(fonts);
+      }
+      fonts.textContent = styles.css.fonts;
+    }
+    var insets = ctx.safeAreaInsets;
+    if (insets && typeof insets === "object") {
+      [["top", "Top"], ["right", "Right"], ["bottom", "Bottom"], ["left", "Left"]].forEach(function (side) {
+        var extra = Math.max(0, Number(insets[side[0]]) || 0);
+        document.body.style["padding" + side[1]] = (BASE_GUTTER + extra) + "px";
+      });
+    }
+    var device = ctx.deviceCapabilities;
+    if (device && typeof device === "object") {
+      docEl.classList.toggle("touch", !!device.touch);
+      docEl.classList.toggle("no-hover", device.hover === false);
+    }
+    if (ctx.displayMode) docEl.setAttribute("data-display-mode", String(ctx.displayMode));
+    reportSize();
+  }
 """
 
 # Link-out through the host, because the widget sandbox usually blocks
@@ -452,22 +785,31 @@ EXTERNAL_LINK_JS = r"""  /* External links. The sandbox usually lacks allow-popu
       request("ui/open-link", { url: url }),
       new Promise(function (resolve) { setTimeout(function () { resolve("timeout"); }, 2500); }),
     ]).then(function (res) {
-      if (res === undefined) flashLinkHint(); // explicit host error
+      if (res === undefined) flashLinkHint(url); // explicit host error
     });
   }
   var hintTimer = null;
-  function flashLinkHint() {
+  function flashLinkHint(url) {
     var t = document.querySelector(".toast");
-    if (!t) t = document.body.appendChild(el("div", "toast",
-      "This host blocked the link — right-click the pill and choose “Open in new tab”."));
+    if (!t) {
+      t = el("div", "toast");
+      t.setAttribute("role", "status");
+      document.body.appendChild(t);
+    }
+    t.textContent = "";
+    t.appendChild(el("div", null, "This host blocked the link."));
+    if (url) t.appendChild(el("div", "toast-url", url));
     t.classList.add("show");
     clearTimeout(hintTimer);
-    hintTimer = setTimeout(function () { t.classList.remove("show"); }, 3200);
+    hintTimer = setTimeout(function () { t.classList.remove("show"); }, 6000);
   }
 """
 
-# structuredContent-or-text result unwrapping and the result notification.
-TOOL_RESULT_JS = r"""  function resultData(result) {
+# structuredContent-or-text result unwrapping, plus the tool-input and
+# tool-cancelled handlers the bridge routes to.
+TOOL_RESULT_JS = r"""  var lastToolInput = null;
+  var gotResult = false;
+  function resultData(result) {
     var data = result && result.structuredContent;
     if (!data && result && result.content) {
       var text = (result.content.find(function (c) { return c.type === "text"; }) || {}).text;
@@ -476,8 +818,21 @@ TOOL_RESULT_JS = r"""  function resultData(result) {
     return data;
   }
   function handleToolResult(result) {
+    gotResult = true;
     var data = resultData(result);
     if (data) render(data);
+  }
+  /* The arguments arrive before the result: keep them (Phase B builds the
+     grid's header line from them) and pick the matching skeleton. */
+  function handleToolInput(params) {
+    lastToolInput = (params && params.arguments) || {};
+    if (!gotResult) showSkeleton();
+  }
+  function handleToolCancelled() {
+    gotResult = true;                               // keeps the skeleton out
+    root.textContent = "";
+    notice(root, "Cancelled");
+    reportSize();
   }
 """
 
@@ -499,6 +854,316 @@ DOM_HELPERS_JS = r"""  var root = document.getElementById("root");
     return isFinite(n) ? n : null;
   }
 """
+
+# ---- Shared components JS ---------------------------------------------------
+# Raw ids never render: ``label(kind, raw)`` maps registry names, verdict
+# literals and provider prefixes, and humanizes anything unknown.
+LABELS_JS = (
+    "  /* ---------- labels (generated from platforms_registry + verdict literals) ---------- */\n"
+    "  var PLATFORM_LABELS = " + json.dumps(PLATFORM_LABELS, sort_keys=True) + ";\n"
+    "  var VERDICT_LABELS = " + json.dumps(VERDICT_LABELS) + ";\n"
+    "  var PROVIDER_LABELS = " + json.dumps(PROVIDER_LABELS, sort_keys=True) + ";\n"
+    + r"""  var LABEL_MAPS = { platform: PLATFORM_LABELS, verdict: VERDICT_LABELS, provider: PROVIDER_LABELS };
+  function humanize(raw) {
+    return String(raw).replace(/_+/g, " ").trim().replace(/\s+/g, " ")
+      .replace(/(^|\s)(\S)/g, function (all, space, ch) { return space + ch.toUpperCase(); });
+  }
+  function label(kind, raw) {
+    if (raw === null || raw === undefined || raw === "") return "";
+    var key = String(raw);
+    var map = LABEL_MAPS[kind] || {};
+    if (Object.prototype.hasOwnProperty.call(map, key)) return map[key];
+    var lower = key.toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(map, lower)) return map[lower];
+    return humanize(key);
+  }
+"""
+)
+
+# Hours, counts, money, plurals — one copy of each.
+NUMBERS_JS = r"""  /* ---------- numbers ---------- */
+  /* "27h", "2.3h"; the "~" marks an estimate (HLTB), never a measured total. */
+  function hoursLabel(h, estimate) {
+    var n = num(h);
+    if (n == null) return null;
+    return (estimate ? "~" : "") + (n >= 10 ? Math.round(n) : Math.round(n * 10) / 10) + "h";
+  }
+  /* "114k reviews": a count always carries its noun. */
+  function compactCount(v, word) {
+    var n = num(v);
+    if (n == null) return null;
+    var text = n >= 1000000 ? (Math.round(n / 100000) / 10) + "M"
+      : n >= 10000 ? Math.round(n / 1000) + "k"
+      : n >= 1000 ? (Math.round(n / 100) / 10) + "k"
+      : String(Math.round(n));
+    return word ? text + " " + word + (n === 1 ? "" : "s") : text;
+  }
+  var CURRENCY_SIGNS = { EUR: "€", USD: "$", GBP: "£" };
+  function money(amount, currency) {
+    var n = num(amount);
+    if (n == null) return null;
+    var code = String(currency || "").toUpperCase();
+    var value = n.toFixed(2);
+    if (CURRENCY_SIGNS[code]) return CURRENCY_SIGNS[code] + value;
+    return code ? value + " " + code : value;
+  }
+  /* A count is singular only when it is exactly one AND not a floor
+     ("1+ games" stays plural). */
+  function plural(n, word, truncated) {
+    return n + (truncated ? "+" : "") + " " + word + (n === 1 && !truncated ? "" : "s");
+  }
+"""
+
+# The one score chip, its tier functions, and the Steam chip built on it.
+SCORE_CHIP_JS = r"""  /* ---------- score chip ---------- */
+  /* Providers use negative sentinels for "no score yet" — never show those. */
+  function realScore(n) { return n != null && n >= 0; }
+  /* Metacritic's games thresholds: good >=75, ok 50-74, bad <50. */
+  function mcTier(n) { return n >= 75 ? "good" : n >= 50 ? "ok" : "bad"; }
+  /* OpenCritic: the real tier when the payload has one, else the score
+     approximation (mighty 84 / strong 75 / fair 65 / weak). */
+  function ocTier(n, tierName) {
+    var t = String(tierName || "").toLowerCase();
+    if (["mighty", "strong", "fair", "weak"].indexOf(t) < 0) {
+      t = n >= 84 ? "mighty" : n >= 75 ? "strong" : n >= 65 ? "fair" : "weak";
+    }
+    return t === "mighty" || t === "strong" ? "good" : t === "fair" ? "ok" : "bad";
+  }
+  /* Steam's nine summary phrases, most-specific first, as 1..9 steps. */
+  var STEAM_STEPS = [
+    ["overwhelmingly positive", 9], ["very positive", 8], ["mostly positive", 6],
+    ["positive", 7], ["mixed", 5], ["overwhelmingly negative", 1],
+    ["very negative", 2], ["mostly negative", 4], ["negative", 3],
+  ];
+  function steamStep(desc) {
+    var d = String(desc || "").toLowerCase();
+    for (var i = 0; i < STEAM_STEPS.length; i++) {
+      if (d.indexOf(STEAM_STEPS[i][0]) >= 0) return STEAM_STEPS[i][1];
+    }
+    return null;
+  }
+  function steamTier(desc) {
+    var s = steamStep(desc);
+    return s == null ? "none" : s >= 6 ? "good" : s === 5 ? "ok" : "bad";
+  }
+  function craftTier(pct) { return pct >= 75 ? "good" : pct >= 50 ? "ok" : "bad"; }
+  /* {label, value, tier, title, url, meter (0-100), aux, cls} → one chip.
+     Color is the quality tier only; the brand is the label text. */
+  function scoreChip(opts) {
+    var tier = opts.tier || "none";
+    var chip = el(opts.url ? "a" : "span", "chip tier-" + tier + (opts.cls ? " " + opts.cls : ""));
+    chip.appendChild(el("span", "lbl", opts.label));
+    // label → meter → value: when a narrow card wraps the chip, the meter
+    // stays on the label's line and the value takes the next one whole.
+    var pct = num(opts.meter);
+    if (pct != null) {
+      var meter = el("span", "meter");
+      meter.setAttribute("aria-hidden", "true");
+      var fill = el("span", "meter-fill");
+      fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+      meter.appendChild(fill);
+      chip.appendChild(meter);
+    }
+    if (opts.value !== undefined && opts.value !== null && opts.value !== "") {
+      chip.appendChild(el("b", null, String(opts.value)));
+    }
+    if (opts.aux) chip.appendChild(el("span", "aux", opts.aux));
+    if (opts.title) chip.title = opts.title;
+    if (opts.url) {
+      chip.href = opts.url;
+      chip.setAttribute("data-link", "");
+      var ext = el("span", "ext", "↗");
+      ext.setAttribute("aria-hidden", "true");
+      chip.appendChild(ext);
+      chip.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        openLink(opts.url);
+      });
+    }
+    return chip;
+  }
+  /* The phrase always rides with the meter — the meter alone says nothing. */
+  function steamChip(desc, url) {
+    if (!desc) return null;
+    var step = steamStep(desc);
+    var phrase = String(desc).toLowerCase();
+    phrase = phrase.charAt(0).toUpperCase() + phrase.slice(1);
+    return scoreChip({
+      label: "Steam", value: phrase, tier: steamTier(desc),
+      meter: step == null ? null : Math.round((step / 9) * 100),
+      title: step == null ? "Steam reviews" : "Steam reviews: " + step + " of 9 on Steam's scale",
+      url: url,
+    });
+  }
+"""
+
+# The labelled taste-match bar.
+MATCH_BAR_JS = r"""  function matchBar(percent) {
+    var p = Math.max(0, Math.min(100, Math.round(num(percent) || 0)));
+    var wrap = el("div", "match");
+    wrap.setAttribute("role", "meter");
+    wrap.setAttribute("aria-valuemin", "0");
+    wrap.setAttribute("aria-valuemax", "100");
+    wrap.setAttribute("aria-valuenow", String(p));
+    wrap.setAttribute("aria-label", "Taste match");
+    wrap.appendChild(el("b", null, p + "% match"));
+    var track = el("span", "track");
+    var fill = el("span", "fill");
+    fill.style.width = p + "%";
+    track.appendChild(fill);
+    wrap.appendChild(track);
+    return wrap;
+  }
+"""
+
+# Shape-matched loading placeholders. ``showSkeleton`` asks the widget's own
+# ``skeletonKind()`` which shape to draw.
+SKELETON_JS = r"""  function skeleton(kind) {
+    function sk(cls) { return el("div", "sk " + cls); }
+    function lines(parent, n) {
+      for (var i = 0; i < n; i++) parent.appendChild(sk("sk-line" + (i === n - 1 ? " short" : "")));
+    }
+    var wrap = el("div", "skel" + (kind === "grid" ? " skel-grid" : ""));
+    wrap.setAttribute("role", "status");
+    wrap.setAttribute("aria-busy", "true");
+    wrap.setAttribute("aria-label", "Loading");
+    if (kind === "grid") {
+      for (var c = 0; c < 4; c++) {
+        var card = el("div", "sk-card");
+        card.appendChild(sk("sk-cover"));
+        lines(card, 2);
+        wrap.appendChild(card);
+      }
+      return wrap;
+    }
+    var panel = el("div", "sk-panel");
+    var row = el("div", "sk-row");
+    row.appendChild(sk("sk-thumb"));
+    var col = el("div", "sk-col");
+    col.appendChild(sk("sk-line wide"));
+    lines(col, kind === "detail" ? 4 : 1);
+    row.appendChild(col);
+    panel.appendChild(row);
+    if (kind === "eval") {
+      var chips = el("div", "sk-chips");
+      for (var k = 0; k < 3; k++) chips.appendChild(sk("sk-chip"));
+      panel.appendChild(chips);
+      lines(panel, 2);
+    }
+    wrap.appendChild(panel);
+    return wrap;
+  }
+  function showSkeleton() {
+    root.textContent = "";
+    root.appendChild(skeleton(skeletonKind()));
+    reportSize();
+  }
+"""
+
+# Host display modes: request, the granted answer, and canFullscreen().
+DISPLAY_MODE_JS = r"""  /* ---------- display mode ---------- */
+  function currentDisplayMode() { return hostContext.displayMode || "inline"; }
+  function canFullscreen() {
+    var modes = hostContext.availableDisplayModes;
+    return Array.isArray(modes) && modes.indexOf("fullscreen") >= 0;
+  }
+  /* Resolves to the mode the host GRANTED; on an error or a 2.5s silence it
+     resolves to the mode we are still in. */
+  function requestDisplayMode(mode) {
+    var before = currentDisplayMode();
+    return Promise.race([
+      request("ui/request-display-mode", { mode: mode }),
+      new Promise(function (resolve) { setTimeout(function () { resolve(undefined); }, 2500); }),
+    ]).then(function (res) {
+      var granted = res && res.mode ? String(res.mode) : before;
+      hostContext.displayMode = granted;
+      document.documentElement.setAttribute("data-display-mode", granted);
+      reportSize();
+      return granted;
+    });
+  }
+"""
+
+# Telling the model what the user did, and speaking as the user.
+MODEL_CONTEXT_JS = r"""  /* Fire-and-forget: request() resolves undefined on method-not-found. */
+  function updateModelContext(text, structured) {
+    var params = { content: [{ type: "text", text: String(text) }] };
+    if (structured) params.structuredContent = structured;
+    request("ui/update-model-context", params);
+  }
+  function sendMessage(text) {
+    request("ui/message", { role: "user", content: { type: "text", text: String(text) } });
+  }
+"""
+
+# The in-place "Full breakdown ▾" fallback when fullscreen is unavailable:
+# content is built on first open only.
+DISCLOSURE_JS = r"""  var disclosureSeq = 0;
+  function disclosure(parent, text, buildFn) {
+    var btn = el("button", "disclosure");
+    btn.type = "button";
+    btn.setAttribute("aria-expanded", "false");
+    btn.appendChild(el("span", null, text));
+    var chev = el("span", "chev", "▾");
+    chev.setAttribute("aria-hidden", "true");
+    btn.appendChild(chev);
+    var body = el("div", "disclosure-body");
+    body.id = "disclosure-" + (++disclosureSeq);
+    body.hidden = true;
+    btn.setAttribute("aria-controls", body.id);
+    var built = false;
+    btn.addEventListener("click", function () {
+      var open = btn.getAttribute("aria-expanded") !== "true";
+      if (open && !built) { built = true; buildFn(body); }
+      body.hidden = !open;
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
+      reportSize();
+    });
+    parent.appendChild(btn);
+    parent.appendChild(body);
+    return { button: btn, body: body };
+  }
+"""
+
+# The one muted failure line: "Couldn't load: trailer (Steam), studio (IGDB)".
+NOTICE_JS = r"""  function notice(parent, items) {
+    var text;
+    if (typeof items === "string") {
+      text = items;
+    } else {
+      var seen = {};
+      var parts = list(items).map(function (it) {
+        if (!it) return null;
+        if (typeof it === "string") return it;
+        return it.what + (it.source ? " (" + it.source + ")" : "");
+      }).filter(function (p) {
+        if (!p || seen[p]) return false;
+        seen[p] = true;
+        return true;
+      });
+      if (!parts.length) return null;
+      text = "Couldn't load: " + parts.join(", ");
+    }
+    var node = el("div", "notice", text);
+    node.setAttribute("role", "status");
+    parent.appendChild(node);
+    return node;
+  }
+"""
+
+# All component JS in splice order (one line per widget, not seven).
+COMPONENTS_JS = (
+    LABELS_JS
+    + NUMBERS_JS
+    + SCORE_CHIP_JS
+    + MATCH_BAR_JS
+    + SKELETON_JS
+    + DISPLAY_MODE_JS
+    + MODEL_CONTEXT_JS
+    + DISCLOSURE_JS
+    + NOTICE_JS
+)
 
 # Name-seeded hue for the gradient plate used when there is no art.
 COVER_HUE_JS = r"""  function coverHue(name) {
@@ -555,9 +1220,9 @@ FULLSCREEN_BUTTON_JS = r"""  function fullscreenButton(target) {
 """
 
 # One carousel arrow.
-NAV_BUTTON_JS = r"""  function navButton(cls, glyph, label, onClick) {
+NAV_BUTTON_JS = r"""  function navButton(cls, glyph, ariaText, onClick) {
     var btn = el("button", "car-nav " + cls, glyph);
-    btn.setAttribute("aria-label", label);
+    btn.setAttribute("aria-label", ariaText);
     btn.addEventListener("click", function (ev) {
       ev.stopPropagation();
       onClick();
@@ -612,14 +1277,16 @@ CAROUSEL_STAGE_JS = r"""    var stage = el("div", "car-stage");
 # ---- Trailer hero + the media panel (one viewer, one thumb strip) -----------
 # The trailer stage: play badge, link pill, poster, the Steam mp4 with its
 # per-<source> error fallback, and the click-to-load youtube-nocookie embed.
-HERO_MEDIA_JS = r"""  function playBadge(label) {
+HERO_MEDIA_JS = r"""  function playBadge(ariaText) {
     var btn = el("button", "play-badge");
-    btn.setAttribute("aria-label", label);
-    btn.appendChild(el("span", null, "▶"));
+    btn.setAttribute("aria-label", ariaText);
+    var glyph = el("span", null, "▶");
+    glyph.setAttribute("aria-hidden", "true");
+    btn.appendChild(glyph);
     return btn;
   }
-  function linkPill(hero, label, url) {
-    var pill = el("button", "hero-pill", label);
+  function linkPill(hero, text, url) {
+    var pill = el("button", "hero-pill", text);
     pill.addEventListener("click", function (ev) {
       ev.stopPropagation();
       openLink(url);
@@ -695,11 +1362,11 @@ HERO_MEDIA_JS = r"""  function playBadge(label) {
       hero.appendChild(frame);
       // A CSP-blocked nested frame is not detectable from JS, so keep the
       // link-out route visible even after the embed is swapped in.
-      linkPill(hero, "watch ↗", watchUrl);
+      linkPill(hero, "Watch on YouTube ↗", watchUrl);
       reportSize();
     });
     hero.appendChild(badge);
-    linkPill(hero, "watch ↗", watchUrl);
+    linkPill(hero, "Watch on YouTube ↗", watchUrl);
   }
 """
 
@@ -734,9 +1401,9 @@ MEDIA_PANEL_JS = r"""  function trailerEntry(media) {
       youtubeHero(viewer, entry.trailer);           // the embed handles its own
       return;
     }
-    var label = shotLabel(gameName, entry.index);
+    var shotText = shotLabel(gameName, entry.index);
     var btn = el("button", "shot-btn");
-    btn.setAttribute("aria-label", "Enlarge " + label);
+    btn.setAttribute("aria-label", "Enlarge " + shotText);
     var img = document.createElement("img");
     img.className = "hero-media";
     img.alt = "";                                   // the button carries the label
@@ -768,7 +1435,7 @@ MEDIA_PANEL_JS = r"""  function trailerEntry(media) {
       poster.src = entry.trailer.poster;
       btn.appendChild(poster);
     } else {
-      btn.appendChild(el("span", "thumb-text", "TRAILER"));
+      btn.appendChild(el("span", "thumb-text", "Trailer"));
     }
     btn.appendChild(el("span", "thumb-play", "▶"));
     return btn;
@@ -823,7 +1490,7 @@ OWNERSHIP_TAGS_JS = r"""  function ownershipTags(item) {
     if (item.owned) tags.appendChild(el("span", "tag owned", "owned"));
     if (item.unplayed) tags.appendChild(el("span", "tag unplayed", "unplayed"));
     var rating = num(item.my_rating);
-    if (rating != null) tags.appendChild(el("span", "tag", rating + "/10"));
+    if (rating != null) tags.appendChild(el("span", "tag rated", rating + "/10"));
     var hours = hoursLabel(item.playtime_hours);
     if (hours) tags.appendChild(el("span", "tag", hours));
     return tags.childNodes.length ? tags : null;
@@ -831,8 +1498,19 @@ OWNERSHIP_TAGS_JS = r"""  function ownershipTags(item) {
 """
 
 # The owned games most like this one (tools/game_media.py's similar_in_library)
-# as a strip of mini covers, each with the shared tags that put it there.
-SIMILAR_NODE_JS = r"""  function similarNode(parent, similar) {
+# as a strip of mini covers. Each card is cover, name, year and ONE chip row:
+# every item is owned (the pool IS the library), so the row carries his rating,
+# else "unplayed", then hours — at most two.
+SIMILAR_NODE_JS = r"""  function similarTags(item) {
+    var tags = el("div", "tags");
+    var rating = num(item.my_rating);
+    if (rating != null) tags.appendChild(el("span", "tag rated", rating + "/10"));
+    else if (item.unplayed) tags.appendChild(el("span", "tag unplayed", "unplayed"));
+    var hours = num(item.playtime_hours) > 0 ? hoursLabel(item.playtime_hours) : null;
+    if (hours) tags.appendChild(el("span", "tag", hours));
+    return tags.childNodes.length ? tags : null;
+  }
+  function similarNode(parent, similar) {
     var items = list(similar.items).filter(function (i) { return i && i.name; });
     if (!items.length) return;
     var box = section(parent, "Similar in your library");
@@ -843,10 +1521,9 @@ SIMILAR_NODE_JS = r"""  function similarNode(parent, similar) {
       var body = el("div", "sim-body");
       body.appendChild(el("div", "sim-name", item.name || "?"));
       if (item.release_year) body.appendChild(el("div", "sim-year", String(item.release_year)));
-      // The "why" under the year: the tags this game and that one share.
       var why = list(item.shared_tags).filter(Boolean);
-      if (why.length) body.appendChild(el("div", "sim-why", why.join(" · ")));
-      var tags = ownershipTags(item);
+      if (why.length) card.title = "Shares: " + why.join(", ");
+      var tags = similarTags(item);
       if (tags) body.appendChild(tags);
       card.appendChild(body);
       strip.appendChild(card);
@@ -858,21 +1535,17 @@ SIMILAR_NODE_JS = r"""  function similarNode(parent, similar) {
     // The count is "owned games clearing the shared-tag bar", so it is a
     // denominator the row can honestly claim — every one of them is his.
     var note = (similar.truncated && total != null && total > items.length)
-      ? "The " + items.length + " of your " + total + " games most like this one"
-      : "Your " + items.length + " games most like this one";
+      ? "The " + items.length + " of your " + plural(total, "game") + " most like this one"
+      : "Your " + plural(items.length, "game") + " most like this one";
     var unplayed = items.filter(function (i) { return i.unplayed; }).length;
     if (unplayed) note += " · " + unplayed + " unplayed";
     box.appendChild(el("div", "note", note));
   }
 """
 
-# "From the studio": the ``plural`` helper (a count is singular only when
-# it is exactly one AND not a floor), the headline, the per-poster badge
-# and the strip with its track-record footer.
-PEDIGREE_JS = r"""  function plural(n, word, truncated) {
-    return n + (truncated ? "+" : "") + " " + word + (n === 1 && !truncated ? "" : "s");
-  }
-  function pedigreeHeadline(ped) {
+# "From the studio": the headline, the per-poster badge and the strip with its
+# track-record footer (``plural`` lives in NUMBERS_JS).
+PEDIGREE_JS = r"""  function pedigreeHeadline(ped) {
     var dev = ped.developer || {};
     var names = list(ped.developer_names).filter(Boolean);
     var parts = [];
@@ -882,7 +1555,7 @@ PEDIGREE_JS = r"""  function plural(n, word, truncated) {
     if (founded != null) parts.push("est. " + founded);
     var size = num(ped.catalog_size);
     if (size) parts.push(plural(size, "game", ped.catalog_truncated));
-    return parts.join("  ·  ");
+    return parts.join(" · ");
   }
   /* ONE badge per poster: his own rating outranks the critic score, which
      only stands in when he hasn't rated it. An owned game he never rated
@@ -894,7 +1567,7 @@ PEDIGREE_JS = r"""  function plural(n, word, truncated) {
     if (item.owned && rating != null) {
       tags.appendChild(el("span", "tag rated", rating + "/10"));
     } else if (critic != null && critic >= 0) {
-      tags.appendChild(el("span", "tag critic", String(Math.round(critic))));
+      tags.appendChild(el("span", "tag critic", "critics " + Math.round(critic)));
     }
     if (item.owned && rating == null) tags.appendChild(el("span", "tag owned", "owned"));
     return tags.childNodes.length ? tags : null;
@@ -940,8 +1613,9 @@ PEDIGREE_JS = r"""  function plural(n, word, truncated) {
   }
 """
 
-# ---- Size reporting ---------------------------------------------------------
-# Debounced, change-only ui/notifications/size-changed reporting.
+# ---- Size reporting + teardown ----------------------------------------------
+# Debounced, change-only ui/notifications/size-changed reporting; teardown()
+# stops every timer and the observer when the host tears the view down.
 SIZING_JS = r"""  /* ---------- sizing ---------- */
   var sizeTimer = null;
   var lastSize = "";
@@ -959,5 +1633,39 @@ SIZING_JS = r"""  /* ---------- sizing ---------- */
       notify("ui/notifications/size-changed", { width: w, height: h });
     }, 120);
   }
-  if (window.ResizeObserver) new ResizeObserver(reportSize).observe(document.body);
+  var resizeObserver = null;
+  if (window.ResizeObserver) {
+    resizeObserver = new ResizeObserver(reportSize);
+    resizeObserver.observe(document.body);
+  }
+  function teardown() {
+    clearTimeout(sizeTimer);
+    clearTimeout(hintTimer);
+    if (resizeObserver) resizeObserver.disconnect();
+  }
+"""
+
+# Startup: the preview globals, the skeleton, and the ui/initialize handshake
+# (declaring both display modes; appInfo per the ext-apps SDK schema, with
+# clientInfo kept as the legacy alias the published spec example used).
+INIT_JS = r"""  /* ---------- startup ---------- */
+  function startWidget(appName) {
+    document.documentElement.setAttribute("data-display-mode", "inline");
+    if (window.__PREVIEW_HOST_CONTEXT__) applyHostContext(window.__PREVIEW_HOST_CONTEXT__);
+    if (window.__PREVIEW_DATA__) {
+      render(window.__PREVIEW_DATA__);
+      return;
+    }
+    showSkeleton();
+    request("ui/initialize", {
+      protocolVersion: "2026-01-26",
+      appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+      appInfo: { name: appName, version: "1.0" },
+      clientInfo: { name: appName, version: "1.0" },
+    }).then(function (res) {
+      hostCaps = (res && res.hostCapabilities) || {};
+      applyHostContext(res && res.hostContext);
+      notify("ui/notifications/initialized");
+    });
+  }
 """

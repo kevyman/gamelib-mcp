@@ -15,15 +15,23 @@ Usage:
     python scripts/preview_eval_card.py            # sample 0
     python scripts/preview_eval_card.py 1 -o eval.html
     python scripts/preview_eval_card.py --list
+    python scripts/preview_eval_card.py 0 --theme dark [--touch]   # Claude's tokens
+
+--theme simulates a host: the page gets window.__PREVIEW_HOST_CONTEXT__ with
+Claude's style variables (scripts/preview_host_context.py), as a real
+ui/initialize would deliver them. Without it the widget's own fallbacks and
+prefers-color-scheme decide.
 """
 
 import argparse
-import json
 import sys
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from preview_host_context import host_context, inject
 
 from gamelib_mcp.apps_eval import EVAL_CARD_HTML
 
@@ -619,14 +627,10 @@ SAMPLES: list[tuple[str, dict[str, Any]]] = [
 ]
 
 
-def build_html(data: dict[str, Any]) -> str:
-    """Inject a payload as the widget's preview global."""
-    preview_globals = "window.__PREVIEW_DATA__ = " + json.dumps(data) + ";"
-    return EVAL_CARD_HTML.replace(
-        "<script>",
-        "<script>" + preview_globals + "</script>\n<script>",
-        1,
-    )
+def build_html(data: dict[str, Any], theme: str | None = None, touch: bool = False) -> str:
+    """Inject a payload (and, with a theme, a simulated hostContext)."""
+    context = host_context(theme, touch=touch) if theme else None
+    return inject(EVAL_CARD_HTML, data, context)
 
 
 def main() -> None:
@@ -636,8 +640,15 @@ def main() -> None:
         help="sample payload index (default: 0)",
     )
     parser.add_argument("--list", action="store_true", help="list the sample payloads and exit")
+    parser.add_argument(
+        "--theme", choices=["light", "dark"], default=None,
+        help="simulate a host: inject Claude's style variables as __PREVIEW_HOST_CONTEXT__",
+    )
+    parser.add_argument("--touch", action="store_true", help="with --theme: a touch device")
     parser.add_argument("-o", "--out", type=Path, help="output path (default: stdout)")
     args = parser.parse_args()
+    if args.touch and not args.theme:
+        parser.error("--touch is part of the simulated host; pass --theme")
 
     if args.list:
         for i, (label, _) in enumerate(SAMPLES):
@@ -645,7 +656,7 @@ def main() -> None:
         return
 
     label, data = SAMPLES[args.sample]
-    html = build_html(data)
+    html = build_html(data, args.theme, args.touch)
     if args.out:
         args.out.write_text(html)
         print(f"wrote {args.out} ({label})", file=sys.stderr)

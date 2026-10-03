@@ -11,16 +11,24 @@ Usage:
     python scripts/preview_game_cards.py detail --name "Hades" --media        # live
     python scripts/preview_game_cards.py detail --name "Hades" --sample-media  # offline
     python scripts/preview_game_cards.py detail --name "Hades" --sample-media --big-studio
+    python scripts/preview_game_cards.py grid --theme dark [--touch]  # Claude's tokens
+
+--theme simulates a host: the page gets window.__PREVIEW_HOST_CONTEXT__ with
+Claude's style variables (scripts/preview_host_context.py), as a real
+ui/initialize would deliver them. Without it the widget's own fallbacks and
+prefers-color-scheme decide.
 """
 
 import argparse
 import asyncio
-import json
 import sys
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from preview_host_context import host_context, inject
 
 from gamelib_mcp.apps import GAME_CARDS_HTML
 
@@ -245,8 +253,15 @@ def main() -> None:
         help="with --sample-media: use the big-catalog pedigree sample, whose "
              "damper renders the studio header line and no poster row",
     )
+    parser.add_argument(
+        "--theme", choices=["light", "dark"], default=None,
+        help="simulate a host: inject Claude's style variables as __PREVIEW_HOST_CONTEXT__",
+    )
+    parser.add_argument("--touch", action="store_true", help="with --theme: a touch device")
     parser.add_argument("-o", "--out", type=Path, help="output path (default: stdout)")
     args = parser.parse_args()
+    if args.touch and not args.theme:
+        parser.error("--touch is part of the simulated host; pass --theme")
     if args.mode == "detail" and not args.name:
         parser.error("detail mode requires --name")
     if args.mode == "grid" and (args.media or args.sample_media):
@@ -255,14 +270,9 @@ def main() -> None:
         parser.error("--big-studio selects between the sample pedigrees; pass --sample-media")
 
     data = asyncio.run(_build_data(args))
-    preview_globals = "window.__PREVIEW_DATA__ = " + json.dumps(data) + ";"
-    if args.open is not None:
-        preview_globals += f" window.__PREVIEW_OPEN_INDEX__ = {args.open};"
-    html = GAME_CARDS_HTML.replace(
-        "<script>",
-        "<script>" + preview_globals + "</script>\n<script>",
-        1,
-    )
+    extra = f" window.__PREVIEW_OPEN_INDEX__ = {args.open};" if args.open is not None else ""
+    context = host_context(args.theme, touch=args.touch) if args.theme else None
+    html = inject(GAME_CARDS_HTML, data, context, extra)
     if args.out:
         args.out.write_text(html)
         print(f"wrote {args.out}", file=sys.stderr)

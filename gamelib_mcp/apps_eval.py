@@ -18,11 +18,13 @@ Every section of the package is optional: an unowned candidate with no appid
 and no IGDB match gets a media-less card (and an untagged one no similar
 row), and each block is skipped rather than rendered empty.
 
-Visual language is the game-cards widget's "toybox" (see apps.py): thick ink
-borders, hard offset shadows, chunky type, pastel stickers, the same CSS
-custom-property palette and dark scheme. The verdict is a big rotated stamp
-in that same language — buy_now green, wishlist_for_sale amber, try_demo
-blue, play_what_you_own pink, skip red.
+Visual language: the host's theme, through the shared ``--gl-*`` token layer
+(see apps_shared.py and apps.py) on a transparent page. Every score is the
+shared chip — color is the quality tier, the source is the label text. The
+one deliberate piece of brand left is the verdict stamp: 2px strong border, a
+hard 3px shadow, a −3° tilt, filled with its tier (buy_now good,
+wishlist_for_sale ok, skip bad, try_demo / play_what_you_own plain), its text
+from ``label("verdict", …)``.
 
 Media routing follows the 2026-08-28 spike (docs/plans/…-evaluation-package
 -design.md): a Steam trailer is a plain ``<video controls preload="none">``
@@ -33,14 +35,15 @@ YouTube bytes before the click) plus a link-out pill, because a CSP-blocked
 nested frame is not detectable from JS.
 
 The HTML is deliberately dependency-free: the host↔iframe bridge is the
-~40-line JSON-RPC postMessage handshake from the MCP Apps spec
-(ui/initialize → ui/notifications/initialized → ui/notifications/tool-result)
-rather than @modelcontextprotocol/ext-apps, so nothing is fetched from a CDN
-and the CSP only has to allow the media hosts below.
+hand-rolled JSON-RPC postMessage handshake from the MCP Apps spec
+(ui/initialize → ui/notifications/initialized → tool-input / tool-result,
+host-context-changed) rather than @modelcontextprotocol/ext-apps, so nothing
+is fetched from a CDN and the CSP only has to allow the media hosts below.
 
 For local visual iteration outside any MCP host, the widget renders
-``window.__PREVIEW_DATA__`` when present instead of waiting on the bridge —
-see scripts/preview_eval_card.py.
+``window.__PREVIEW_DATA__`` when present instead of waiting on the bridge, and
+applies ``window.__PREVIEW_HOST_CONTEXT__`` as if the host had sent it — see
+scripts/preview_eval_card.py.
 """
 
 import hashlib
@@ -55,8 +58,9 @@ from . import apps_shared
 # while frame_domains feeds frame-src — the spike confirmed both, and
 # `["https://www.youtube.com"]` is the spec's own frameDomains example.
 # Covers: IGDB art, Steam capsules (cdn.*), Steam screenshots and movie
-# posters (shared.*, which is where appdetails actually serves them), and
-# YouTube thumbnails for IGDB trailers. Everything else stays deny-by-default.
+# posters (shared.*, which is where appdetails actually serves them),
+# YouTube thumbnails for IGDB trailers, and assets.claude.ai for the host
+# fonts. Everything else stays deny-by-default.
 _EVAL_CARD_CSP = ResourceCSP(
     resource_domains=[
         "https://images.igdb.com",
@@ -65,6 +69,7 @@ _EVAL_CARD_CSP = ResourceCSP(
         "https://shared.akamai.steamstatic.com",
         "https://shared.cloudflare.steamstatic.com",
         "https://i.ytimg.com",
+        "https://assets.claude.ai",
     ],
     frame_domains=["https://www.youtube-nocookie.com"],
 )
@@ -75,46 +80,20 @@ EVAL_CARD_HTML = (
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <style>
 """
-    + apps_shared.PALETTE_LIGHT_CSS
-    + r"""  @media (prefers-color-scheme: dark) {
-    :root {
-"""
-    + apps_shared.PALETTE_DARK_VARS
-    + r"""    }
-  }
-"""
+    + apps_shared.TOKENS_CSS
     + apps_shared.RESET_CSS
+    + apps_shared.A11Y_CSS
+    + apps_shared.PANEL_CSS
+    + apps_shared.COMPONENTS_CSS
     + r"""  .eval {
     max-width: 760px;
     margin: 0 auto;
     display: flex;
     flex-direction: column;
-    gap: 16px;
-  }
-  .panel {
-    background: var(--card);
-    border: 2px solid var(--ink);
-    border-radius: 14px;
-    box-shadow: 5px 5px 0 var(--shadow-c);
-    padding: 16px;
-  }
-  .section-title {
-    font-size: 10.5px;
-    font-weight: 800;
-    letter-spacing: 0.07em;
-    text-transform: uppercase;
-    color: var(--muted);
-    margin-bottom: 9px;
-  }
-  .note { font-size: 11.5px; font-weight: 650; color: var(--muted); margin-top: 8px; }
-  .empty {
-    color: var(--muted);
-    font-size: 13px;
-    font-weight: 650;
-    padding: 20px;
-    text-align: center;
+    gap: 12px;
   }
 
   /* ---- shared cover block (same shape as the game-cards widget) ---- */
@@ -124,9 +103,9 @@ EVAL_CARD_HTML = (
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 12px;
-    font-weight: 800;
-    line-height: 1.3;
+    font-size: var(--gl-cap);
+    font-weight: var(--gl-strong);
+    line-height: var(--gl-cap-lh);
     color: rgba(255, 255, 255, 0.92);
     text-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
     padding: 8px;
@@ -142,7 +121,6 @@ EVAL_CARD_HTML = (
   /* ---- media panel: one viewer + one thumb strip (the Steam shape) ---- */
   /* The trailer and the screenshots are the same reel, so they share one
      16:9 stage and one strip; clicking a thumb swaps the stage in place. */
-  .viewer { box-shadow: 3px 3px 0 var(--shadow-c); }
 """
     + apps_shared.SHOT_BTN_CSS
     + r"""  /* Best-effort fullscreen. The button is only rendered where the API exists
@@ -153,148 +131,74 @@ EVAL_CARD_HTML = (
     + apps_shared.MEDIA_STRIP_CSS
     + r"""
   /* ---- header ---- */
-  .head { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  .head { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
   .head .cover-wrap {
-    flex: 0 0 104px;
-    border: 2px solid var(--ink);
-    border-radius: 10px;
+    flex: 0 0 96px;
+    border: var(--gl-bw) solid var(--gl-border);
+    border-radius: var(--gl-r-sm);
     overflow: hidden;
-    box-shadow: 4px 4px 0 var(--shadow-c);
-    transform: rotate(-1.5deg);
-    margin: 4px 6px 8px 2px;
   }
-  .head-info { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+  .head-info { flex: 1 1 200px; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
   .head-info h1 {
-    font-size: 21px;
-    font-weight: 800;
-    line-height: 1.15;
-    letter-spacing: -0.01em;
+    font-size: var(--gl-h);
+    line-height: var(--gl-h-lh);
+    font-weight: var(--gl-strong);
     overflow-wrap: anywhere;
   }
-  .sub { font-size: 12.5px; font-weight: 650; color: var(--muted); }
-  /* The score chips live INSIDE the header now: two lonely chips in a panel of
+  .sub {
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    color: var(--gl-text-2);
+    font-variant-numeric: tabular-nums;
+  }
+  /* The score chips live INSIDE the header: two lonely chips in a panel of
      their own ("CRAFT & FIT") was the first thing the owner called out. */
-  .head-chips { margin-top: 13px; }
+  .head-chips { margin-top: 12px; }
   /* One model-authored line of craft context under the chips — the spread, the
      recurring knock, the review-bomb caveat a number can't carry. */
-  .craft-note {
-    margin-top: 8px;
-    font-size: 11.5px;
-    font-weight: 650;
-    line-height: 1.45;
-    color: var(--muted);
-  }
-  .one-liner { font-size: 14px; font-weight: 700; line-height: 1.45; }
+  .craft-note { margin-top: 8px; color: var(--gl-text-2); }
+  .one-liner { font-weight: var(--gl-strong); }
   .pitch {
-    margin-top: 10px;
-    font-size: 13px;
-    line-height: 1.55;
-    font-style: italic;
-    background: var(--p1);
-    border: 2px solid var(--ink);
-    border-left-width: 6px;
-    border-radius: 0 12px 12px 0;
-    padding: 10px 13px;
+    margin-top: 8px;
+    color: var(--gl-text-2);
+    border-left: 2px solid var(--gl-border-strong);
+    padding: 2px 0 2px 12px;
   }
   .pitch:first-child { margin-top: 0; }
+  /* The verdict stamp — the card's one deliberate piece of brand: strong 2px
+     border, hard 3px shadow, a -3deg tilt, filled with the verdict's tier. */
   .stamp {
     flex: 0 0 auto;
     align-self: flex-start;
-    margin: 4px 2px 0 0;
-    font-size: 15px;
-    font-weight: 900;
-    letter-spacing: 0.03em;
-    line-height: 1.1;
+    margin: 4px 4px 0 0;
+    font-size: var(--gl-body);
+    font-weight: var(--gl-strong);
+    letter-spacing: 0.04em;
+    line-height: 1.15;
+    text-transform: uppercase;
     text-align: center;
     max-width: 168px;
-    padding: 9px 13px;
-    border: 3px solid var(--ink);
-    border-radius: 12px;
-    box-shadow: 4px 4px 0 var(--shadow-c);
-    transform: rotate(-3.5deg);
+    padding: 8px 12px;
+    border: 2px solid var(--gl-border-strong);
+    border-radius: var(--gl-r-md);
+    box-shadow: 3px 3px 0 var(--gl-border-strong);
+    transform: rotate(-3deg);
   }
-  .stamp-good { background: var(--good); color: var(--card); }
-  .stamp-ok { background: var(--ok); color: var(--card); }
-  .stamp-bad { background: var(--bad); color: var(--card); }
-  .stamp-p1 { background: var(--p1); color: var(--ink); }
-  .stamp-p4 { background: var(--p4); color: var(--ink); }
-
-  /* ---- chips / strips ---- */
-  .chips { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
-  .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    font-size: 11.5px;
-    font-weight: 750;
-    padding: 3px 10px;
-    border-radius: 999px;
-    border: 1.5px solid var(--ink);
-    background: var(--card);
-    color: var(--ink);
-    white-space: nowrap;
-  }
-  .chip .lbl { font-size: 9.5px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); }
-  .chip.oc { font-weight: 800; }
-  /* On a brand-coloured chip the muted label colour is unreadable (dark-scheme
-     beige on Metacritic green) — inherit the chip's own text colour instead. */
-  .chip.oc .lbl, .chip.mc .lbl { color: inherit; opacity: 0.7; }
-  /* Metacritic's metascore is a square box in its own green/yellow/red at the
-     games thresholds (75/50) — same brand mapping as the game-cards widget. */
-  .chip.mc { font-weight: 800; border-radius: 5px; }
-  .mc-hi { background: #6c3; color: #17140e; }
-  .mc-mid { background: #fc3; color: #17140e; }
-  .mc-lo { background: #f00; color: #17140e; }
-  .oc-mighty { background: #fc430a; color: #17140e; }
-  .oc-strong { background: #9e00b4; color: #ffffff; }
-  .oc-fair { background: #4aa1ce; color: #17140e; }
-  .oc-weak { background: #80b06a; color: #17140e; }
-  .fit-good { background: var(--good); color: var(--card); }
-  .fit-ok { background: var(--p3); }
-  .fit-mid { background: var(--p2); }
-  .fit-bad { background: var(--bad); color: var(--card); }
-  .traj-good { color: var(--good); }
-  .traj-flat { color: var(--muted); }
-  .traj-bad { color: var(--bad); }
-  .meter {
-    width: 64px;
-    height: 8px;
-    border: 1.5px solid var(--ink);
-    border-radius: 999px;
-    background: var(--card);
-    overflow: hidden;
-    display: inline-block;
-    flex: none;
-  }
-  .meter-fill { display: block; height: 100%; background: var(--muted); }
-  .craft-hi .meter-fill { background: var(--good); }
-  .craft-mid .meter-fill { background: var(--ok); }
-  .craft-lo .meter-fill { background: var(--bad); }
-  .flag {
-    font-size: 11.5px;
-    font-weight: 750;
-    padding: 3px 10px;
-    border-radius: 999px;
-    border: 1.5px solid var(--ink);
-    background: var(--bad);
-    color: var(--card);
-    transform: rotate(-1deg);
-  }
-  .flag:nth-child(2n) { transform: rotate(1.2deg); }
+  .stamp-good { background: var(--gl-good); color: var(--gl-surface); }
+  .stamp-ok { background: var(--gl-ok); color: var(--gl-surface); }
+  .stamp-bad { background: var(--gl-bad); color: var(--gl-surface); }
+  .stamp-plain { background: var(--gl-surface); color: var(--gl-text); }
 """
     + apps_shared.STRIP_CSS
-    + apps_shared.MORE_CHIP_CSS
     + r"""
   /* ---- for you / not for you ---- */
   .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-  .col-title { font-size: 12px; font-weight: 800; margin-bottom: 6px; }
-  .col.yes .col-title { color: var(--good); }
-  .col.no .col-title { color: var(--bad); }
+  .col-title { font-weight: var(--gl-strong); margin-bottom: 6px; }
+  .col.yes .col-title, .col.yes .tick { color: var(--gl-good); }
+  .col.no .col-title, .col.no .tick { color: var(--gl-bad); }
   .bullets { list-style: none; display: flex; flex-direction: column; gap: 6px; }
-  .bullets li { display: flex; gap: 7px; font-size: 12.5px; line-height: 1.45; }
-  .tick { font-weight: 900; flex: none; }
-  .col.yes .tick { color: var(--p3); -webkit-text-stroke: 0.6px var(--ink); }
-  .col.no .tick { color: var(--p4); -webkit-text-stroke: 0.6px var(--ink); }
+  .bullets li { display: flex; gap: 8px; }
+  .tick { font-weight: var(--gl-strong); flex: none; }
 
   /* ---- anchors ---- */
   /* Deliberately NEUTRAL pills: an anchor is evidence, and the live card lit
@@ -304,146 +208,109 @@ EVAL_CARD_HTML = (
   .anchor {
     display: inline-flex;
     align-items: center;
-    gap: 7px;
-    font-size: 11.5px;
-    font-weight: 700;
-    padding: 3px 10px 3px 3px;
-    border-radius: 999px;
-    border: 1.5px solid var(--ink);
-    background: var(--card);
-    box-shadow: 2px 2px 0 var(--shadow-c);
-    transform: rotate(-0.8deg);
+    gap: 6px;
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    font-weight: var(--gl-strong);
+    padding: 3px 8px 3px 3px;
+    border-radius: var(--gl-r-sm);
+    border: var(--gl-bw) solid var(--gl-border);
+    background: var(--gl-inset);
+    font-variant-numeric: tabular-nums;
   }
-  .anchor:nth-child(2n) { transform: rotate(0.9deg); }
-  .anchor.no-cover { padding-left: 10px; }
+  .anchor.no-cover { padding-left: 8px; }
   .anchor-cover {
     width: 20px;
     height: 30px;
-    border-radius: 999px;
+    border-radius: var(--gl-r-xs);
     object-fit: cover;
-    border: 1.5px solid var(--ink);
     flex: none;
   }
-  .anchor .dim { color: var(--muted); font-weight: 650; }
+  .anchor .dim { color: var(--gl-text-2); font-weight: var(--gl-regular); }
   .an-state {
     flex: none;
-    font-size: 10px;
-    font-weight: 900;
-    line-height: 1.4;
-    padding: 0 6px;
-    border-radius: 999px;
-    border: 1.5px solid var(--ink);
-    background: var(--card);
-    color: var(--muted);
+    font-weight: var(--gl-strong);
+    padding: 0 5px;
+    border-radius: var(--gl-r-xs);
+    border: var(--gl-bw) solid var(--gl-border);
+    background: var(--gl-surface);
+    color: var(--gl-muted);
   }
-  .an-state.an-good { background: var(--good); color: var(--card); }
-  .an-state.an-bad { background: var(--bad); color: var(--card); }
+  .an-state.an-good { background: var(--gl-good-bg); color: var(--gl-good); border-color: var(--gl-good-edge); }
+  .an-state.an-bad { background: var(--gl-bad-bg); color: var(--gl-bad); border-color: var(--gl-bad-edge); }
 
   /* ---- lineage / comparisons ---- */
   .callout {
     display: flex;
     flex-direction: column;
-    gap: 3px;
-    border: 2px solid var(--ink);
-    border-radius: 12px;
-    background: var(--p2);
-    box-shadow: 3px 3px 0 var(--shadow-c);
+    gap: 4px;
+    border: var(--gl-bw) solid var(--gl-border-strong);
+    border-radius: var(--gl-r-md);
+    background: var(--gl-inset);
     padding: 10px 12px;
     margin-bottom: 10px;
   }
-  .callout-head { font-size: 12.5px; font-weight: 800; }
-  .callout-note { font-size: 12px; line-height: 1.45; }
+  .callout-head { font-weight: var(--gl-strong); }
+  .callout-note { color: var(--gl-text-2); }
   .lineage { display: flex; gap: 10px; align-items: stretch; flex-wrap: wrap; }
-  .lin-col { flex: 1 1 150px; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+  .lin-col { flex: 1 1 150px; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
   .lin-head {
-    font-size: 9.5px;
-    font-weight: 800;
-    letter-spacing: 0.06em;
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    font-weight: var(--gl-strong);
+    letter-spacing: 0.04em;
     text-transform: uppercase;
-    color: var(--muted);
+    color: var(--gl-muted);
   }
-  .lin-arrow { align-self: center; font-size: 17px; font-weight: 900; color: var(--muted); }
+  .lin-arrow { align-self: center; font-size: var(--gl-h); color: var(--gl-muted); }
   .comp {
-    border: 1.5px solid var(--ink);
-    border-radius: 10px;
-    background: var(--card);
-    padding: 7px 9px;
+    border: var(--gl-bw) solid var(--gl-border);
+    border-radius: var(--gl-r-md);
+    background: var(--gl-surface);
+    padding: 8px 10px;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 4px;
   }
-  .comp-name { font-size: 12.5px; font-weight: 800; line-height: 1.25; overflow-wrap: anywhere; }
-  .comp-note { font-size: 11.5px; line-height: 1.4; color: var(--muted); }
-  .comp.this-game { background: var(--p1); border-width: 2px; box-shadow: 3px 3px 0 var(--shadow-c); }
-  .tags { display: flex; gap: 5px; flex-wrap: wrap; }
-  /* Sticker-like, so they tilt like the game-cards widget's pills; the data
-     chips (score meter, pace/price) stay straight for legibility. */
-  .tag {
-    font-size: 9.5px;
-    font-weight: 800;
-    padding: 1px 7px;
-    border-radius: 999px;
-    border: 1.5px solid var(--ink);
-    background: var(--p3);
-    white-space: nowrap;
-    transform: rotate(-1.2deg);
-  }
-  .tag:nth-child(2n) { transform: rotate(1.1deg); }
-  .tag:nth-child(3n) { transform: rotate(-0.7deg); }
-  .tag.owned { background: var(--good); color: var(--card); }
-  .tag.unplayed { background: var(--p2); }
-  /* Pedigree badges: HIS rating wins the one slot, the critic score only
-     stands in when he has none — the studio strip is about his history. */
-  .tag.rated { background: var(--good); color: var(--card); }
-  .tag.critic { background: var(--card); color: var(--muted); }
-
-  /* ---- "From the studio" (pedigree) ---- */
-  .ped-head { font-size: 12.5px; font-weight: 800; line-height: 1.35; }
-  .ped-pub { font-size: 11.5px; font-weight: 650; color: var(--muted); margin-top: 3px; }
-  .ped-strip { margin-top: 9px; }
-
+  .comp-name { font-weight: var(--gl-strong); line-height: var(--gl-h-lh); overflow-wrap: anywhere; }
+  .comp-note { font-size: var(--gl-cap); line-height: var(--gl-cap-lh); color: var(--gl-text-2); }
+  .comp.this-game { background: var(--gl-inset); border-color: var(--gl-border-strong); }
+"""
+    + apps_shared.TAG_CSS
+    + apps_shared.PEDIGREE_CSS
+    + r"""
   /* ---- why care (model-authored eyebrow lines) ---- */
-  .why-care { display: flex; flex-direction: column; gap: 7px; margin-top: 12px; }
-  .wc-line { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; line-height: 1.45; }
+  .why-care { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+  .wc-line { display: flex; gap: 10px; align-items: baseline; }
   .wc-eyebrow {
-    flex: none;
-    font-size: 9.5px;
-    font-weight: 800;
-    letter-spacing: 0.06em;
-    padding: 2px 8px;
-    border-radius: 999px;
-    border: 1.5px solid var(--ink);
-    white-space: nowrap;
-    transform: rotate(-1.4deg);
+    flex: 0 0 64px;
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    font-weight: var(--gl-strong);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--gl-muted);
   }
-  .wc-line:nth-child(2n) .wc-eyebrow { transform: rotate(1.2deg); }
-  .wc-people { background: var(--p1); }
-  .wc-studio { background: var(--p3); }
-  .wc-hype { background: var(--p2); }
-  .wc-moment { background: var(--p4); }
 
   /* ---- similar in your library ---- */
 """
     + apps_shared.SIMILAR_CSS
     + r"""
-  /* ---- past verdicts / errors ---- */
-  .timeline { display: flex; gap: 7px; flex-wrap: wrap; }
+  /* ---- past verdicts ---- */
+  .timeline { display: flex; gap: 6px; flex-wrap: wrap; }
   .tl-chip {
-    font-size: 11px;
-    font-weight: 700;
-    padding: 3px 9px;
-    border-radius: 999px;
-    border: 1.5px dashed var(--ink);
-    background: var(--card);
-    color: var(--muted);
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    padding: 3px 8px;
+    border-radius: var(--gl-r-sm);
+    border: var(--gl-bw) dashed var(--gl-border-strong);
+    color: var(--gl-text-2);
     white-space: nowrap;
-    transform: rotate(-0.9deg);
+    font-variant-numeric: tabular-nums;
   }
-  .tl-chip:nth-child(2n) { transform: rotate(0.8deg); }
-  .errfoot { font-size: 11px; font-weight: 650; color: var(--muted); text-align: center; }
-  .note-card { display: flex; gap: 12px; align-items: center; max-width: 560px; margin: 0 auto; }
-  .note-text { font-size: 14px; font-weight: 750; line-height: 1.4; overflow-wrap: anywhere; }
-  .note-card .stamp { font-size: 12px; max-width: 130px; padding: 7px 10px; margin: 0; }
+  .note-card { display: flex; gap: 14px; align-items: center; max-width: 560px; margin: 0 auto; }
+  .note-text { font-weight: var(--gl-strong); overflow-wrap: anywhere; }
+  .note-card .stamp { font-size: var(--gl-cap); max-width: 130px; padding: 6px 10px; margin: 0; }
 
   /* ---- click-to-enlarge overlay ---- */
   /* Anchored near the clicked thumbnail rather than centered in the (possibly
@@ -455,13 +322,13 @@ EVAL_CARD_HTML = (
     + r"""  .overlay-panel {
     position: absolute;
     left: 50%;
-    width: calc(100% - 28px);
+    width: calc(100% - 24px);
     max-width: 900px;
-    border: 2px solid var(--ink);
-    border-radius: 14px;
-    background: var(--card);
+    border: var(--gl-bw) solid var(--gl-border);
+    border-radius: var(--gl-r-lg);
+    background: var(--gl-surface);
     overflow: hidden;
-    transform: translateX(-50%) scale(0.93) translateY(12px);
+    transform: translateX(-50%) scale(0.97) translateY(8px);
     transition: transform 0.19s ease;
   }
   .overlay.open .overlay-panel { transform: translateX(-50%); }
@@ -474,7 +341,7 @@ EVAL_CARD_HTML = (
     border-radius: 0;
     border-left: 0;
     border-right: 0;
-    background: #0d0b07;
+    background: var(--gl-stage);
     transform: translateY(14px);
   }
   .overlay.open .overlay-panel.carousel { transform: none; }
@@ -482,9 +349,8 @@ EVAL_CARD_HTML = (
     + apps_shared.CAROUSEL_CSS
     + apps_shared.TOAST_CSS
     + r"""
-  @media (max-width: 560px) {
-    body { padding: 12px; }
-    .stamp { font-size: 13px; }
+  @media (min-width: 560px) {
+    .head-info h1 { font-size: var(--gl-title); line-height: var(--gl-title-lh); }
   }
   @media (max-width: 480px) {
     .two-col { grid-template-columns: 1fr; }
@@ -493,15 +359,10 @@ EVAL_CARD_HTML = (
     /* Narrow phone: smaller thumbs so several fit before scrolling. */
     .thumb img, .thumb-text { width: 96px; height: 55px; }
   }
-  @media (prefers-reduced-motion: reduce) {
-    .overlay, .overlay-panel, .thumb, .play-badge span { transition: none; }
-    .thumb:hover { transform: none; }
-    .play-badge:hover span, .play-badge:focus-visible span { transform: none; }
-  }
 </style>
 </head>
 <body>
-<div id="root"><div class="empty">Waiting for the evaluation…</div></div>
+<div id="root"></div>
 <script>
 """
     + apps_shared.BRIDGE_JS
@@ -511,35 +372,13 @@ EVAL_CARD_HTML = (
   /* ---------- small helpers ---------- */
 """
     + apps_shared.DOM_HELPERS_JS
+    + apps_shared.COMPONENTS_JS
     + apps_shared.COVER_HUE_JS
     + r"""  /* Same cover block as the game-cards widget: real art when we have it, a
      name-seeded gradient plate when we don't. */
 """
     + apps_shared.COVER_NODE_JS
-    + r"""  function hoursLabel(h) {
-    var n = num(h);
-    if (n == null) return null;
-    return (n >= 10 ? Math.round(n) : Math.round(n * 10) / 10) + "h";
-  }
-  var CURRENCY_SIGNS = { EUR: "€", USD: "$", GBP: "£", JPY: "¥" };
-  function money(amount, currency) {
-    var n = num(amount);
-    if (n == null) return null;
-    var code = String(currency || "").toUpperCase();
-    var sign = CURRENCY_SIGNS[code];
-    var value = n.toFixed(2);
-    if (sign) return sign + value;
-    return code ? code + " " + value : value;
-  }
-  function compactCount(v) {
-    var n = num(v);
-    if (n == null) return null;
-    if (n >= 1000000) return (Math.round(n / 100000) / 10) + "M";
-    if (n >= 10000) return Math.round(n / 1000) + "k";
-    if (n >= 1000) return (Math.round(n / 100) / 10) + "k";
-    return String(Math.round(n));
-  }
-  function section(parent, title) {
+    + r"""  function section(parent, title) {
     var box = el("section", "panel");
     if (title) box.appendChild(el("div", "section-title", title));
     parent.appendChild(box);
@@ -633,20 +472,20 @@ EVAL_CARD_HTML = (
     + apps_shared.MEDIA_PANEL_JS
     + r"""
   /* ---------- 2. header + verdict stamp ---------- */
-  var VERDICTS = {
-    buy_now: ["BUY NOW", "stamp-good"],
-    wishlist_for_sale: ["WISHLIST FOR SALE", "stamp-ok"],
-    try_demo: ["TRY THE DEMO", "stamp-p1"],
-    play_what_you_own: ["PLAY WHAT YOU OWN", "stamp-p4"],
-    skip: ["SKIP", "stamp-bad"],
+  /* The stamp's text is label("verdict", …); this map only picks its fill. */
+  var VERDICT_STAMPS = {
+    buy_now: "stamp-good",
+    wishlist_for_sale: "stamp-ok",
+    try_demo: "stamp-plain",
+    play_what_you_own: "stamp-plain",
+    skip: "stamp-bad",
   };
   function stampNode(verdict) {
     if (!verdict) return null;
-    var known = VERDICTS[verdict];
-    var label = known ? known[0] : String(verdict).replace(/_/g, " ").toUpperCase();
-    var stamp = el("div", "stamp " + (known ? known[1] : "stamp-p1"), label);
+    var text = label("verdict", verdict);
+    var stamp = el("div", "stamp " + (VERDICT_STAMPS[verdict] || "stamp-plain"), text);
     stamp.setAttribute("role", "img");
-    stamp.setAttribute("aria-label", "Verdict: " + label);
+    stamp.setAttribute("aria-label", "Verdict: " + text);
     return stamp;
   }
   function headerNode(pkg) {
@@ -662,15 +501,16 @@ EVAL_CARD_HTML = (
     info.appendChild(el("h1", null, game.name || "Unknown game"));
     var bits = [];
     if (game.release_year) bits.push(String(game.release_year));
-    var platforms = list(own.platforms).filter(Boolean);
-    if (platforms.length) bits.push(platforms.join(" · "));
+    var platforms = list(own.platforms).filter(Boolean)
+      .map(function (p) { return label("platform", p); });
+    if (platforms.length) bits.push(platforms.join(", "));
     // Positive hours only: hoursLabel(0) is the truthy string "0h", and
     // "0h played" would contradict the card's own unplayed badges (zero is
     // authoritative NOT-played; null is unknown and says nothing).
     var played = own.playtime_hours > 0 ? hoursLabel(own.playtime_hours) : null;
     if (played) bits.push(played + " played");
     if (own.wishlisted && !own.owned) bits.push("wishlisted");
-    if (bits.length) info.appendChild(el("div", "sub", bits.join("  ·  ")));
+    if (bits.length) info.appendChild(el("div", "sub", bits.join(" · ")));
     head.appendChild(info);
 
     var stamp = stampNode(pkg.verdict);
@@ -700,13 +540,13 @@ EVAL_CARD_HTML = (
 
   /* why_care: up to three model-authored lines answering "why look at this at
      all" — the editorial counterpart to the server-fetched pedigree strip
-     below. Chip per kind, one line each, no paragraphs; absent when the
+     below. An eyebrow per kind, one line each, no paragraphs; absent when the
      recording client authored none. */
   var WHY_CARE_KINDS = {
-    people: ["PEOPLE", "wc-people"],
-    studio: ["STUDIO", "wc-studio"],
-    anticipation: ["HYPE", "wc-hype"],
-    moment: ["MOMENT", "wc-moment"],
+    people: ["People", "wc-people"],
+    studio: ["Studio", "wc-studio"],
+    anticipation: ["Hype", "wc-hype"],
+    moment: ["Moment", "wc-moment"],
   };
   function whyCareNode(parent, pres) {
     var entries = list(pres.why_care).filter(function (e) { return e && e.text; });
@@ -716,7 +556,7 @@ EVAL_CARD_HTML = (
       var known = WHY_CARE_KINDS[entry.kind];
       var line = el("div", "wc-line");
       line.appendChild(el("span", "wc-eyebrow " + (known ? known[1] : "wc-studio"),
-        known ? known[0] : String(entry.kind || "why").toUpperCase()));
+        known ? known[0] : humanize(entry.kind || "why")));
       line.appendChild(el("span", null, String(entry.text)));
       wrap.appendChild(line);
     });
@@ -724,23 +564,17 @@ EVAL_CARD_HTML = (
   }
 
   /* ---------- 3. the score chips (rendered inside the header) ---------- */
-  /* OpenCritic tiers are percentile-based; approximate from the score, with
-     the tier palette from their own stylesheet (same mapping as apps.py). */
-  function ocTier(n) {
-    return "oc-" + (n >= 84 ? "mighty" : n >= 75 ? "strong" : n >= 65 ? "fair" : "weak");
-  }
-  /* Metacritic's games thresholds: green >=75, yellow 50-74, red <50. */
-  function mcTier(n) { return n >= 75 ? "mc-hi" : n >= 50 ? "mc-mid" : "mc-lo"; }
+  /* Every one is the shared scoreChip: tier color, source as label text. */
   var TRAJECTORIES = {
-    improving: ["↗", "improving", "traj-good"],
-    stable: ["→", "stable", "traj-flat"],
-    regressing: ["↘", "regressing", "traj-bad"],
+    improving: ["↗ Improving", "good"],
+    stable: ["→ Stable", "none"],
+    regressing: ["↘ Regressing", "bad"],
   };
   var FIT_CLASSES = {
-    "strong fit": "fit-good",
-    "probable fit": "fit-ok",
-    "coin flip": "fit-mid",
-    "probable miss": "fit-bad",
+    "strong fit": "good",
+    "probable fit": "good",
+    "coin flip": "ok",
+    "probable miss": "bad",
   };
   /* craft.adjusted is a 0..1 sample-adjusted share; positive_pct is the raw
      review percentage (0..100) and only stands in when there's no adjusted
@@ -758,54 +592,39 @@ EVAL_CARD_HTML = (
 
     var pct = craftPercent(craft);
     if (pct != null) {
-      var tier = pct >= 75 ? "craft-hi" : pct >= 50 ? "craft-mid" : "craft-lo";
-      var chip = el("span", "chip " + tier);
-      chip.appendChild(el("span", "lbl", "craft"));
-      var meter = el("span", "meter");
-      var fill = el("span", "meter-fill");
-      fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
-      meter.appendChild(fill);
-      chip.appendChild(meter);
-      var n = compactCount(craft.review_count);
-      chip.appendChild(el("span", null, pct + "%" + (n ? " · n=" + n : "")));
       var rawPct = num(craft.positive_pct);
-      chip.title = "Sample-adjusted review share"
-        + (rawPct != null ? " (raw " + Math.round(rawPct <= 1 ? rawPct * 100 : rawPct) + "% positive)" : "");
-      row.appendChild(chip);
+      row.appendChild(scoreChip({
+        label: "Craft", value: pct + "%", tier: craftTier(pct), meter: pct,
+        aux: compactCount(craft.review_count, "review"),
+        title: "Sample-adjusted review share"
+          + (rawPct != null ? " (raw " + Math.round(rawPct <= 1 ? rawPct * 100 : rawPct) + "% positive)" : ""),
+      }));
     }
 
     var traj = TRAJECTORIES[craft.trajectory];
     if (traj) {
-      var tChip = el("span", "chip " + traj[2]);
-      tChip.appendChild(el("span", null, traj[0] + " " + traj[1]));
-      tChip.title = "Recent review trajectory";
-      row.appendChild(tChip);
+      row.appendChild(scoreChip({
+        label: "Trend", value: traj[0], tier: traj[1], title: "Recent review trajectory",
+      }));
     }
 
     // Providers use negative sentinels for "no score yet" — never show those.
     var mc = num(craft.metacritic_score);
-    if (mc != null && mc >= 0) {
-      var mcChip = el("span", "chip mc " + mcTier(mc));
-      mcChip.appendChild(el("span", "lbl", "MC"));
-      mcChip.appendChild(el("span", null, String(Math.round(mc))));
-      mcChip.title = "Metacritic";
-      row.appendChild(mcChip);
+    if (realScore(mc)) {
+      row.appendChild(scoreChip({ label: "Metacritic", value: Math.round(mc), tier: mcTier(mc) }));
     }
 
     var oc = num(craft.opencritic_score);
-    if (oc != null && oc >= 0) {
-      var ocChip = el("span", "chip oc " + ocTier(oc));
-      ocChip.appendChild(el("span", "lbl", "OC"));
-      ocChip.appendChild(el("span", null, String(Math.round(oc))));
-      ocChip.title = "OpenCritic";
-      row.appendChild(ocChip);
+    if (realScore(oc)) {
+      row.appendChild(scoreChip({ label: "OpenCritic", value: Math.round(oc), tier: ocTier(oc) }));
     }
 
     if (pkg.fit_call) {
-      var fitChip = el("span", "chip " + (FIT_CLASSES[pkg.fit_call] || ""));
-      fitChip.appendChild(el("span", "lbl", "fit"));
-      fitChip.appendChild(el("span", null, String(pkg.fit_call)));
-      row.appendChild(fitChip);
+      var fit = String(pkg.fit_call);
+      row.appendChild(scoreChip({
+        label: "Fit", value: fit.charAt(0).toUpperCase() + fit.slice(1),
+        tier: FIT_CLASSES[pkg.fit_call] || "none",
+      }));
     }
 
     return row.childNodes.length ? row : null;
@@ -872,6 +691,7 @@ EVAL_CARD_HTML = (
       if (state) {
         var glyph = el("span", "an-state" + (state[2] ? " " + state[2] : ""), state[0]);
         glyph.title = state[1];
+        glyph.setAttribute("aria-label", state[1]);
         chip.appendChild(glyph);
       }
       chips.appendChild(chip);
@@ -948,7 +768,8 @@ EVAL_CARD_HTML = (
         ? "12px" : "0";
       box.appendChild(head);
       var rest = el("div", "chips");
-      rest.style.marginTop = "7px";
+      rest.style.marginTop = "6px";
+      rest.style.alignItems = "stretch";
       loose.forEach(function (c) { rest.appendChild(comparisonNode(c)); });
       box.appendChild(rest);
     }
@@ -962,22 +783,16 @@ EVAL_CARD_HTML = (
   /* Server-fetched and library-annotated (tools/game_media.py): who made this,
      and what they shipped BEFORE it. Under the big-studio damper, or with
      nothing released earlier, only the header line renders — six arbitrary
-     posters out of a 500-game catalogue say nothing about this game. Mirrors
-     the detail card's implementation (apps.py) by hand, like every other block
-     these two widgets share. */
-  /* "1 games" was on the live card. A count is only singular when it is
-     exactly one AND not a floor ("1+ games" stays plural). */
+     posters out of a 500-game catalogue say nothing about this game. Spliced
+     from apps_shared.py, verbatim in the detail card too. */
 """
     + apps_shared.PEDIGREE_JS
     + r"""
   /* ---------- 9. the call: time, price, flags, past verdicts ---------- */
   /* One closing panel instead of three: three boxes holding a chip apiece was
-     the other half of the "too busy" complaint. */
-  function factChip(row, label, value) {
-    var chip = el("span", "chip");
-    chip.appendChild(el("span", "lbl", label));
-    chip.appendChild(el("span", null, value));
-    row.appendChild(chip);
+     the other half of the "too busy" complaint. Facts are tier-less chips. */
+  function factChip(row, name, value) {
+    row.appendChild(scoreChip({ label: name, value: value }));
   }
   function factChips(pkg) {
     var time = pkg.time || {};
@@ -985,29 +800,30 @@ EVAL_CARD_HTML = (
     var own = pkg.ownership || {};
     var row = el("div", "chips");
 
-    var main = hoursLabel(time.hltb_main_hours);
+    var main = hoursLabel(time.hltb_main_hours, true);
     var extra = hoursLabel(time.hltb_extra_hours);
-    if (main && extra) factChip(row, "HLTB", "~" + main + " / " + extra);
-    else if (main) factChip(row, "HLTB", "~" + main);
+    if (main && extra) factChip(row, "HLTB", main + " / " + extra);
+    else if (main) factChip(row, "HLTB", main);
     else if (extra) factChip(row, "HLTB", "~" + extra + " to complete");
 
     var weekly = num(time.recent_weekly_minutes);
     if (weekly != null && weekly > 0) {
-      factChip(row, "pace", "your last 30 days: ~" + hoursLabel(weekly / 60) + "/wk");
+      factChip(row, "Pace", "your last 30 days: " + hoursLabel(weekly / 60, true) + "/wk");
     }
 
     var seen = money(price.seen, price.currency);
     if (seen) {
-      factChip(row, "price", "seen at " + seen + (price.platform ? " on " + price.platform : ""));
+      factChip(row, "Price", "seen at " + seen
+        + (price.platform ? " on " + label("platform", price.platform) : ""));
     }
     var target = money(price.target, price.currency);
-    if (target) factChip(row, "target", target);
+    if (target) factChip(row, "Target", target);
 
     var paid = money(own.price_paid, own.price_currency);
     if (paid) {
       var how = own.bundle_name ? " in " + own.bundle_name
         : own.purchase_source ? " via " + own.purchase_source : "";
-      factChip(row, "owned", "paid " + paid + how);
+      factChip(row, "Owned", "paid " + paid + how);
     }
 
     return row.childNodes.length ? row : null;
@@ -1017,7 +833,9 @@ EVAL_CARD_HTML = (
     if (!flags.length) return null;
     var chips = el("div", "chips");
     chips.style.marginTop = "10px";
-    flags.forEach(function (f) { chips.appendChild(el("span", "flag", String(f))); });
+    flags.forEach(function (f) {
+      chips.appendChild(scoreChip({ label: String(f), tier: "bad", cls: "flag" }));
+    });
     return chips;
   }
   function pastRow(past) {
@@ -1031,9 +849,7 @@ EVAL_CARD_HTML = (
     items.forEach(function (p) {
       var parts = [];
       if (p.assessed_at) parts.push(String(p.assessed_at).slice(0, 10));
-      // The stored verdict value, not a prettified one: the timeline is a
-      // record of what was filed, and it reads next to the current stamp.
-      if (p.verdict) parts.push(String(p.verdict));
+      if (p.verdict) parts.push(label("verdict", p.verdict));
       var seen = money(p.price_seen, p.price_currency);
       if (seen) parts.push(seen);
       var chip = el("span", "tl-chip", parts.join(" · ") || "earlier verdict");
@@ -1059,12 +875,27 @@ EVAL_CARD_HTML = (
       box.appendChild(row);
     });
   }
+  /* package.errors are "<block>: <reason>" strings ("media: steam: …",
+     "igdb: unresolved — …"). The notice names WHAT is missing and from WHERE;
+     the raw strings stay in the tooltip. */
+  var ERROR_WHAT = {
+    media: "media", pace: "your pace", similar: "similar games",
+    igdb: "studio", steam: "store data", package: "evaluation details",
+  };
+  function errorItem(text) {
+    var parts = String(text).split(":");
+    var key = parts[0].trim().toLowerCase();
+    var next = parts.length > 2 ? parts[1].trim().toLowerCase() : "";
+    var has = Object.prototype.hasOwnProperty;
+    var source = has.call(PROVIDER_LABELS, key) ? PROVIDER_LABELS[key]
+      : has.call(PROVIDER_LABELS, next) ? PROVIDER_LABELS[next] : "";
+    return { what: ERROR_WHAT[key] || humanize(key).toLowerCase(), source: source };
+  }
   function errorsNode(parent, errors) {
     if (!errors.length) return;
     // Deliberately quiet: a missing trailer is not an incident.
-    var note = el("div", "errfoot", "some data unavailable");
-    note.title = errors.join("; ");
-    parent.appendChild(note);
+    var node = notice(parent, errors.map(errorItem));
+    if (node) node.title = errors.join("; ");
   }
 
   /* ---------- card assembly ---------- */
@@ -1103,13 +934,15 @@ EVAL_CARD_HTML = (
     return wrap;
   }
 
+  function skeletonKind() { return "eval"; }
+
   function render(data) {
     root.textContent = "";
     var name = data && data.name ? " — " + data.name : "";
     if (data && data.package) {
       root.appendChild(evalCard(data.package));
     } else if (data && data.verdict) {
-      root.appendChild(noteCard("Recorded: " + data.verdict + name, data.verdict));
+      root.appendChild(noteCard("Recorded: " + label("verdict", data.verdict) + name, data.verdict));
     } else {
       root.appendChild(el("div", "empty", "Nothing to display."));
     }
@@ -1118,24 +951,8 @@ EVAL_CARD_HTML = (
 
 """
     + apps_shared.SIZING_JS
-    + r"""
-  /* ---------- startup ---------- */
-  if (window.__PREVIEW_DATA__) {
-    render(window.__PREVIEW_DATA__);
-  } else {
-    request("ui/initialize", {
-      protocolVersion: "2026-01-26",
-      appCapabilities: {},
-      // appInfo per the ext-apps SDK schema (required there); clientInfo kept
-      // as a legacy alias — the published 2026-01-26 spec example used it,
-      // and schema-validating hosts strip unknown keys.
-      appInfo: { name: "gamelib-eval-card", version: "1.0" },
-      clientInfo: { name: "gamelib-eval-card", version: "1.0" },
-    }).then(function (res) {
-      hostCaps = (res && res.hostCapabilities) || {};
-      notify("ui/notifications/initialized");
-    });
-  }
+    + apps_shared.INIT_JS
+    + r"""  startWidget("gamelib-eval-card");
 })();
 </script>
 </body>
@@ -1159,11 +976,13 @@ EVAL_CARD_APP = AppConfig(resource_uri=EVAL_CARD_URI)
 def register_eval_app(mcp: Any) -> None:
     """Register the evaluation-card UI resource on the FastMCP app."""
 
+    # prefersBorder=False: the card paints its own panels on a transparent
+    # page, so a host-drawn frame around it would double the border.
     @mcp.resource(
         EVAL_CARD_URI,
         name="eval_card_view",
         description="Evaluation-package card UI for assessment results (MCP Apps).",
-        app=AppConfig(csp=_EVAL_CARD_CSP),
+        app=AppConfig(csp=_EVAL_CARD_CSP, prefers_border=False),
     )
     def eval_card_view() -> str:
         return EVAL_CARD_HTML

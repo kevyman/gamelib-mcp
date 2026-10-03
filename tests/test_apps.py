@@ -1,12 +1,18 @@
-"""Tests for the MCP Apps game-cards widget and cover-art plumbing."""
+"""Tests for the MCP Apps game-cards widget and cover-art plumbing.
+
+Also home of the shared design-system tests (the token layer, type scale,
+bridge protocol and shared components in apps_shared.py): each one asserts
+against BOTH widgets, since both splice the same blocks.
+"""
 
 import hashlib
+import re
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from fastmcp import Client, FastMCP
 
-from gamelib_mcp import apps, apps_shared
+from gamelib_mcp import apps, apps_eval, apps_shared
 from gamelib_mcp.data import igdb
 from gamelib_mcp.tools.common import cover_url
 
@@ -18,6 +24,19 @@ def shared_blocks() -> list[tuple[str, str]]:
         for name, value in sorted(vars(apps_shared).items())
         if name.isupper() and not name.startswith("_") and isinstance(value, str)
     ]
+
+
+WIDGETS = (("game-cards", apps.GAME_CARDS_HTML), ("eval-card", apps_eval.EVAL_CARD_HTML))
+
+
+def widget_css(html: str) -> str:
+    """The document's own stylesheet."""
+    return html.split("<style>", 1)[1].split("</style>", 1)[0]
+
+
+def widget_js(html: str) -> str:
+    """The document's own script."""
+    return html.split("<script>", 1)[1].split("</script>", 1)[0]
 
 
 class CoverUrlTests(unittest.TestCase):
@@ -93,17 +112,49 @@ class GameCardsResourceTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertIn(marker, html)
 
-    def test_rating_chips_use_source_brand_colors(self) -> None:
-        # Verified against the sites' own stylesheets: OpenCritic tier
-        # variables, Steam's .game_review_summary rules, Metacritic's classic
-        # metascore box colors. Locks the research so a restyle can't silently
-        # drift off-brand.
-        for hex_color in (
-            "#fc430a", "#9e00b4", "#4aa1ce", "#80b06a",  # OpenCritic tiers
-            "#66c0f4", "#b9a074", "#c85e2d",             # Steam summary text
-            "#6c3", "#fc3", "#f00",                      # Metacritic metascore
-        ):
-            self.assertIn(hex_color, apps.GAME_CARDS_HTML)
+    def test_score_chips_encode_quality_tier_not_brand(self) -> None:
+        # Replaces the old brand-palette pin (spec 2026-10-03 §1.3): color is
+        # the quality tier only, the source is the label text.
+        # (a) none of the brand hexes survive, in either widget;
+        for name, html in WIDGETS:
+            lowered = html.lower()
+            for hex_color in (
+                "#fc430a", "#9e00b4", "#4aa1ce", "#80b06a",  # OpenCritic tiers
+                "#66c0f4", "#b9a074", "#c85e2d",             # Steam summary text
+                "#6c3;", "#fc3;", "#f00;",                   # Metacritic metascore
+            ):
+                with self.subTest(widget=name, color=hex_color):
+                    self.assertNotIn(hex_color, lowered)
+        # (b) the three tier classes map to the --gl-good/ok/bad tokens, which
+        # are the host's success/warning/danger tokens;
+        for tier in ("good", "ok", "bad"):
+            self.assertIn(
+                f".chip.tier-{tier} {{ background: var(--gl-{tier}-bg); "
+                f"border-color: var(--gl-{tier}-edge); color: var(--gl-{tier}); }}",
+                apps_shared.CHIP_CSS,
+            )
+        for token, host in (("good", "success"), ("ok", "warning"), ("bad", "danger")):
+            self.assertIn(f"--gl-{token}: var(--color-text-{host},", apps_shared.TOKENS_CSS)
+        # (c) every chip has a text label: scoreChip always writes the label
+        # first, and every call site in both widgets passes one.
+        self.assertIn('chip.appendChild(el("span", "lbl", opts.label));', apps_shared.SCORE_CHIP_JS)
+        for name, html in WIDGETS:
+            js = widget_js(html)
+            calls = len(re.findall(r"scoreChip\(\{", js))
+            labelled = len(re.findall(r"scoreChip\(\{\s*label: ", js))
+            with self.subTest(widget=name):
+                self.assertGreater(calls, 0)
+                self.assertEqual(calls, labelled)
+
+    def test_steam_chip_never_shows_the_meter_without_the_phrase(self) -> None:
+        start = apps_shared.SCORE_CHIP_JS.index("function steamChip(desc, url)")
+        body = apps_shared.SCORE_CHIP_JS[start:]
+        self.assertIn("if (!desc) return null;", body)
+        self.assertIn('label: "Steam", value: phrase, tier: steamTier(desc),', body)
+        # The grid and the detail card both render Steam through it.
+        self.assertIn("steamChip(game.steam_review_desc)", apps.GAME_CARDS_HTML)
+        self.assertIn("steamChip(game.steam_review_desc,", apps.GAME_CARDS_HTML)
+        self.assertNotIn("steamBadge", apps.GAME_CARDS_HTML)
 
     def test_csp_allows_exactly_the_cover_and_media_hosts(self) -> None:
         # Covers + the media hosts a get_game_detail(media=True) card needs:
@@ -118,8 +169,21 @@ class GameCardsResourceTests(unittest.IsolatedAsyncioTestCase):
                 "https://shared.akamai.steamstatic.com",
                 "https://shared.cloudflare.steamstatic.com",
                 "https://i.ytimg.com",
+                "https://assets.claude.ai",   # the host's own font files
             ],
         )
+
+    async def test_both_resources_prefer_no_host_border(self) -> None:
+        # The widgets paint their own panels on a transparent page; a host
+        # frame around them would double every border.
+        mcp = FastMCP("test")
+        apps.register_apps(mcp)
+        apps_eval.register_eval_app(mcp)
+        async with Client(mcp) as client:
+            resources = {str(r.uri): r for r in await client.list_resources()}
+        for uri in (apps.GAME_CARDS_URI, apps_eval.EVAL_CARD_URI):
+            with self.subTest(uri=uri):
+                self.assertIs(resources[uri].meta["ui"]["prefersBorder"], False)
 
     def test_csp_frames_only_the_privacy_mode_youtube_host(self) -> None:
         # frame_domains feeds frame-src; the trailer embed is the only nested
@@ -174,7 +238,7 @@ class ContentTypeBadgeTests(unittest.TestCase):
 
     def test_detail_card_renders_content_badge_and_parent_subtitle(self) -> None:
         self.assertIn(
-            'el("span", "badge content-badge", typeLabel)', apps.GAME_CARDS_HTML
+            'el("span", "chip content-badge", typeLabel)', apps.GAME_CARDS_HTML
         )
         self.assertIn('el("div", "sub parent-sub", "part of " + pName)', apps.GAME_CARDS_HTML)
 
@@ -228,12 +292,26 @@ class ContentTypeBadgeTests(unittest.TestCase):
             'if (game.similar) similarNode(stack, game.similar)',
             'el("div", "sim-name", item.name || "?")',
             'section(parent, "Similar in your library")',
-            'el("div", "sim-why", why.join(" · "))',
-            '"Your " + items.length + " games most like this one"',
-            '"The " + items.length + " of your " + total + " games most like this one"',
+            '"Your " + plural(items.length, "game") + " most like this one"',
+            '"The " + items.length + " of your " + plural(total, "game") + " most like this one"',
             'note += " · " + unplayed + " unplayed"',
         ):
             self.assertIn(marker, apps.GAME_CARDS_HTML)
+
+    def test_similar_cards_carry_no_truncated_tag_line(self) -> None:
+        # Spec §1.5: a mini card is cover, name, year and ONE chip row. The
+        # 10px one-line "why" (shared tags, ellipsized) is gone; the shared
+        # tags survive only as the card's tooltip.
+        for name, html in WIDGETS:
+            with self.subTest(widget=name):
+                self.assertNotIn("sim-why", html)
+                self.assertIn('card.title = "Shares: " + why.join(", ");', html)
+        start = apps_shared.SIMILAR_NODE_JS.index("function similarTags(item)")
+        end = apps_shared.SIMILAR_NODE_JS.index("function similarNode(", start)
+        tags = apps_shared.SIMILAR_NODE_JS[start:end]
+        # rating-or-unplayed, then hours: at most two stickers.
+        self.assertEqual(tags.count("tags.appendChild("), 3)
+        self.assertIn("else if (item.unplayed)", tags)
 
     def test_the_dead_more_chip_is_gone_from_the_media_block(self) -> None:
         # Ported from the evaluation card: "+N more" was unclickable, because
@@ -336,6 +414,34 @@ class ContentTypeBadgeTests(unittest.TestCase):
         ):
             self.assertIn(marker, apps.GAME_CARDS_HTML)
 
+    def test_rank_badge_is_a_quiet_hash_number(self) -> None:
+        # "#1", not "№ 01": 12px caption weight, muted on the surface, no tilt.
+        css = widget_css(apps.GAME_CARDS_HTML)
+        self.assertIn('content: "#" counter(rank);', css)
+        self.assertNotIn("№", apps.GAME_CARDS_HTML)
+        start = css.index(".grid.ranked .cover-wrap::before {")
+        rule = css[start:css.index("}", start)]
+        for decl in (
+            "font-size: var(--gl-cap);",
+            "font-weight: var(--gl-strong);",
+            "background: var(--gl-surface);",
+            "color: var(--gl-muted);",
+        ):
+            self.assertIn(decl, rule)
+        self.assertNotIn("rotate", rule)
+
+    def test_platform_ids_and_hours_render_through_the_shared_helpers(self) -> None:
+        for marker in (
+            'label("platform", game.suggested_platform)',
+            'label("platform", p.platform)',
+            "hoursLabel(game.hltb_main, true)",
+            'label("tier", game.protondb_tier)',
+        ):
+            self.assertIn(marker, apps.GAME_CARDS_HTML)
+        # No local copies left to drift from apps_shared.NUMBERS_JS.
+        self.assertEqual(apps.GAME_CARDS_HTML.count("function hoursLabel("), 1)
+        self.assertNotIn('game.playtime_hours + "h played"', apps.GAME_CARDS_HTML)
+
     def test_grid_overlay_upgrade_call_requests_media(self) -> None:
         self.assertIn(
             # 30s, not callTool's 15s default: a cold click-through runs full
@@ -359,6 +465,269 @@ class ContentTypeBadgeTests(unittest.TestCase):
         self.assertEqual(apps.GAME_CARDS_URI, expected)
 
 
+class DesignSystemTests(unittest.TestCase):
+    """Spec 2026-10-03 §1.1–§1.2: host theming, type scale, touch, focus."""
+
+    def test_documents_declare_both_schemes_and_paint_no_page(self) -> None:
+        for name, html in WIDGETS:
+            with self.subTest(widget=name):
+                self.assertIn('<meta name="color-scheme" content="light dark">', html)
+                self.assertIn("html, body { background: transparent; }", widget_css(html))
+
+    def test_tokens_resolve_to_host_variables_with_claude_fallbacks(self) -> None:
+        for marker in (
+            "--gl-text: var(--color-text-primary, light-dark(#141413, #FAF9F5));",
+            "--gl-surface: var(--color-background-primary, light-dark(#FFFFFF, #30302E));",
+            "--gl-inset: var(--color-background-secondary, light-dark(#F5F4ED, #262624));",
+            "--gl-r-md: var(--border-radius-md, 8px);",
+            "--gl-bw: var(--border-width-regular, 0.5px);",
+            "--gl-font: var(--font-sans, system-ui,",
+            # theme without variables still flips the light-dark() fallbacks
+            ':root[data-theme="dark"] { color-scheme: dark; }',
+        ):
+            self.assertIn(marker, apps_shared.TOKENS_CSS)
+
+    def test_no_hex_color_outside_the_token_layer(self) -> None:
+        # Every structural color is a --gl-* token; the only hexes left are
+        # the fallbacks in TOKENS_CSS itself (the stamp and the cover plates
+        # are built from tokens and hsl()).
+        for name, html in WIDGETS:
+            css = widget_css(html).replace(apps_shared.TOKENS_CSS, "")
+            js = widget_js(html)
+            with self.subTest(widget=name):
+                self.assertEqual(re.findall(r"#[0-9a-fA-F]{3,8}\b", css), [])
+                self.assertEqual(re.findall(r"[\"']#[0-9a-fA-F]{3,8}[\"']", js), [])
+
+    def test_three_sizes_two_weights_nothing_below_12px(self) -> None:
+        sizes = {"var(--gl-cap)", "var(--gl-body)", "var(--gl-h)", "var(--gl-title)"}
+        weights = {"var(--gl-regular)", "var(--gl-strong)"}
+        for name, html in WIDGETS:
+            css = widget_css(html)
+            with self.subTest(widget=name):
+                self.assertTrue(set(re.findall(r"font-size:\s*([^;}]+)", css)) <= sizes)
+                self.assertTrue(set(re.findall(r"font-weight:\s*([^;}]+)", css)) <= weights)
+                # the shorthand would smuggle a size past the check above
+                self.assertEqual(re.findall(r"(?<![-\w])font:(?!\s*inherit)", css), [])
+        for token, px in (("cap", 12), ("body", 14), ("h", 16), ("title", 20)):
+            self.assertRegex(apps_shared.TOKENS_CSS, rf"--gl-{token}: var\(--font-[a-z-]+-size, {px}px\);")
+
+    def test_focus_rings_hit_areas_and_reduced_motion(self) -> None:
+        self.assertIn(
+            ":focus-visible { outline: 2px solid var(--gl-border-strong); outline-offset: 2px; }",
+            apps_shared.A11Y_CSS,
+        )
+        self.assertIn("width: max(100%, 32px);", apps_shared.A11Y_CSS)
+        self.assertIn("width: max(100%, 44px);", apps_shared.A11Y_CSS)
+        self.assertIn("@media (prefers-reduced-motion: reduce)", apps_shared.A11Y_CSS)
+        self.assertIn("html.touch .btn, html.touch .disclosure { min-height: 44px; }",
+                      apps_shared.CONTROLS_CSS)
+        self.assertIn("min-height: 40px;", apps_shared.CONTROLS_CSS)
+        # the skeleton only pulses when motion is allowed
+        self.assertIn("@media (prefers-reduced-motion: no-preference)", apps_shared.SKELETON_CSS)
+
+    def test_nothing_tilts_but_the_verdict_stamp(self) -> None:
+        # The toybox stickers are gone. The stamp keeps its -3deg; the only
+        # other rotate() is the disclosure chevron flipping when open.
+        for name, html in WIDGETS:
+            with self.subTest(widget=name):
+                found = sorted(re.findall(r"rotate\([^)]*\)", widget_css(html)))
+                allowed = ["rotate(180deg)", "rotate(-3deg)"]
+                self.assertTrue(set(found) <= set(allowed), found)
+        self.assertIn("transform: rotate(-3deg);", widget_css(apps_eval.EVAL_CARD_HTML))
+
+    def test_numbers_sit_in_tabular_figures(self) -> None:
+        for block in (apps_shared.CHIP_CSS, apps_shared.TAG_CSS, apps_shared.PANEL_CSS):
+            self.assertIn("font-variant-numeric: tabular-nums;", block)
+
+
+class BridgeProtocolTests(unittest.TestCase):
+    """Spec §1.1.4–§1.1.5 and §1.4: the hand-rolled bridge's new surface."""
+
+    def test_every_inbound_notification_is_routed(self) -> None:
+        for marker in (
+            'case "ui/notifications/tool-result": handleToolResult(m.params); return;',
+            'case "ui/notifications/tool-input": handleToolInput(m.params); return;',
+            'case "ui/notifications/tool-input-partial": return;',
+            'case "ui/notifications/tool-cancelled": handleToolCancelled(m.params); return;',
+            'case "ui/notifications/host-context-changed": applyHostContext(m.params); return;',
+            'case "ui/resource-teardown":',
+            "post({ jsonrpc: \"2.0\", id: m.id, result: {} });",
+            "error: { code: -32601, message: \"Method not found\" } });",
+        ):
+            self.assertIn(marker, apps_shared.BRIDGE_JS)
+        self.assertIn("lastToolInput = (params && params.arguments) || {};", apps_shared.TOOL_RESULT_JS)
+        self.assertIn('notice(root, "Cancelled");', apps_shared.TOOL_RESULT_JS)
+        self.assertIn("if (resizeObserver) resizeObserver.disconnect();", apps_shared.SIZING_JS)
+
+    def test_host_context_is_merged_and_applied(self) -> None:
+        for marker in (
+            "Object.keys(ctx).forEach(function (k) { hostContext[k] = ctx[k]; });",
+            "docEl.dataset.theme = ctx.theme;",
+            "docEl.style.colorScheme = ctx.theme;",
+            "docEl.style.setProperty(name, String(value));",
+            'fonts.id = "host-fonts";',
+            "fonts.textContent = styles.css.fonts;",
+            'document.body.style["padding" + side[1]] = (BASE_GUTTER + extra) + "px";',
+            'docEl.classList.toggle("touch", !!device.touch);',
+            'docEl.classList.toggle("no-hover", device.hover === false);',
+            'docEl.setAttribute("data-display-mode", String(ctx.displayMode));',
+        ):
+            self.assertIn(marker, apps_shared.BRIDGE_JS)
+
+    def test_initialize_declares_display_modes_and_applies_the_answer(self) -> None:
+        for marker in (
+            'appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },',
+            "appInfo: { name: appName,",
+            "clientInfo: { name: appName,",
+            "applyHostContext(res && res.hostContext);",
+            "if (window.__PREVIEW_HOST_CONTEXT__) applyHostContext(window.__PREVIEW_HOST_CONTEXT__);",
+            "showSkeleton();",
+        ):
+            self.assertIn(marker, apps_shared.INIT_JS)
+        self.assertIn('startWidget("gamelib-game-cards");', apps.GAME_CARDS_HTML)
+        self.assertIn('startWidget("gamelib-eval-card");', apps_eval.EVAL_CARD_HTML)
+
+    def test_blocked_link_toast_shows_the_url_without_instructions(self) -> None:
+        self.assertIn('"This host blocked the link."', apps_shared.EXTERNAL_LINK_JS)
+        self.assertIn('t.appendChild(el("div", "toast-url", url));', apps_shared.EXTERNAL_LINK_JS)
+        self.assertIn("user-select: all;", apps_shared.TOAST_CSS)
+        for name, html in WIDGETS:
+            with self.subTest(widget=name):
+                self.assertNotIn("right-click", html)
+
+
+class LabelTests(unittest.IsolatedAsyncioTestCase):
+    """Spec §1.3 LABELS_JS: no raw identifier ever renders."""
+
+    def test_every_registry_platform_has_an_explicit_label(self) -> None:
+        from gamelib_mcp.platforms_registry import PLATFORMS
+
+        names = {spec.name for spec in PLATFORMS}
+        self.assertEqual(names, set(apps_shared._PLATFORM_DISPLAY))
+        self.assertEqual(
+            {name: apps_shared.PLATFORM_LABELS[name] for name in names},
+            {
+                "steam": "Steam", "epic": "Epic Games", "gog": "GOG",
+                "switch2": "Switch 2", "ps5": "PS5", "xbox": "Xbox",
+                "itchio": "itch.io", "ea": "EA app", "ubisoft": "Ubisoft Connect",
+                "other": "Other",
+            },
+        )
+
+    async def test_every_verdict_literal_has_an_explicit_label(self) -> None:
+        from gamelib_mcp import main
+        from gamelib_mcp.tools.assessment import ASSESSMENT_VERDICTS
+
+        tools = {t.name: t for t in await main.mcp.list_tools()}
+        verdict = tools["record_assessment"].parameters["properties"]["verdict"]
+        enum = next(o["enum"] for o in verdict["anyOf"] if "enum" in o)
+        self.assertEqual(set(enum), set(ASSESSMENT_VERDICTS))
+        self.assertEqual(
+            apps_shared.VERDICT_LABELS,
+            {
+                "buy_now": "Buy now",
+                "wishlist_for_sale": "Wishlist for a sale",
+                "try_demo": "Try the demo",
+                "skip": "Skip",
+                "play_what_you_own": "Play what you own",
+            },
+        )
+        self.assertEqual(set(apps_shared.VERDICT_LABELS), set(enum))
+
+    def test_the_maps_ride_in_both_widgets_with_a_humanizing_fallback(self) -> None:
+        self.assertIn('"switch2": "Switch 2"', apps_shared.LABELS_JS)
+        self.assertIn('"play_what_you_own": "Play what you own"', apps_shared.LABELS_JS)
+        # Unknown values degrade to a title-cased, underscore-stripped form.
+        self.assertIn("return humanize(key);", apps_shared.LABELS_JS)
+        self.assertIn('replace(/_+/g, " ")', apps_shared.LABELS_JS)
+        self.assertEqual(apps_shared._humanize("steam_deck"), "Steam Deck")
+        for name, html in WIDGETS:
+            with self.subTest(widget=name):
+                self.assertIn(apps_shared.LABELS_JS, html)
+
+
+class SharedComponentTests(unittest.TestCase):
+    """Spec §1.3: the components Phase B consumes, pinned through their markers."""
+
+    def test_numbers_helpers(self) -> None:
+        js = apps_shared.NUMBERS_JS
+        self.assertIn('return (estimate ? "~" : "") + (n >= 10 ? Math.round(n)', js)
+        self.assertIn('return word ? text + " " + word + (n === 1 ? "" : "s") : text;', js)
+        self.assertIn('var CURRENCY_SIGNS = { EUR: "€", USD: "$", GBP: "£" };', js)
+        self.assertIn('return code ? value + " " + code : value;', js)
+        for name, html in WIDGETS:
+            with self.subTest(widget=name):
+                # "114k reviews", never the old "93% · n=114k".
+                self.assertEqual(re.findall(r"[\"' ]n=", widget_js(html)), [])
+
+    def test_tier_functions(self) -> None:
+        js = apps_shared.SCORE_CHIP_JS
+        self.assertIn('function mcTier(n) { return n >= 75 ? "good" : n >= 50 ? "ok" : "bad"; }', js)
+        self.assertIn('t = n >= 84 ? "mighty" : n >= 75 ? "strong" : n >= 65 ? "fair" : "weak";', js)
+        self.assertIn('return s == null ? "none" : s >= 6 ? "good" : s === 5 ? "ok" : "bad";', js)
+        self.assertIn('function craftTier(pct) { return pct >= 75 ? "good" : pct >= 50 ? "ok" : "bad"; }', js)
+
+    def test_match_bar(self) -> None:
+        js = apps_shared.MATCH_BAR_JS
+        for marker in (
+            'wrap.setAttribute("role", "meter");',
+            'wrap.setAttribute("aria-valuenow", String(p));',
+            'wrap.appendChild(el("b", null, p + "% match"));',
+            'fill.style.width = p + "%";',
+        ):
+            self.assertIn(marker, js)
+        self.assertIn(".match .fill { display: block; height: 100%; background: var(--gl-inverse-bg); }",
+                      apps_shared.MATCH_BAR_CSS)
+        self.assertIn("height: 4px;", apps_shared.MATCH_BAR_CSS)
+
+    def test_skeleton_shapes(self) -> None:
+        js = apps_shared.SKELETON_JS
+        self.assertIn('if (kind === "grid") {', js)
+        self.assertIn("for (var c = 0; c < 4; c++) {", js)          # 4 cards
+        self.assertIn('lines(col, kind === "detail" ? 4 : 1);', js)  # detail: 4 lines
+        self.assertIn("for (var k = 0; k < 3; k++) chips.appendChild", js)  # eval: 3 chips
+        self.assertIn('wrap.setAttribute("aria-busy", "true");', js)
+        self.assertIn("function skeletonKind()", apps.GAME_CARDS_HTML)
+        self.assertIn('function skeletonKind() { return "eval"; }', apps_eval.EVAL_CARD_HTML)
+
+    def test_display_mode_requests_resolve_to_the_granted_mode(self) -> None:
+        js = apps_shared.DISPLAY_MODE_JS
+        for marker in (
+            'request("ui/request-display-mode", { mode: mode })',
+            "setTimeout(function () { resolve(undefined); }, 2500);",
+            "var granted = res && res.mode ? String(res.mode) : before;",
+            'return Array.isArray(modes) && modes.indexOf("fullscreen") >= 0;',
+            'document.documentElement.setAttribute("data-display-mode", granted);',
+        ):
+            self.assertIn(marker, js)
+
+    def test_model_context_and_message(self) -> None:
+        js = apps_shared.MODEL_CONTEXT_JS
+        self.assertIn('var params = { content: [{ type: "text", text: String(text) }] };', js)
+        self.assertIn("if (structured) params.structuredContent = structured;", js)
+        self.assertIn('request("ui/update-model-context", params);', js)
+        self.assertIn('request("ui/message", { role: "user", content: { type: "text", text: String(text) } });', js)
+
+    def test_disclosure_builds_once_and_reports_state(self) -> None:
+        js = apps_shared.DISCLOSURE_JS
+        for marker in (
+            'btn.setAttribute("aria-expanded", "false");',
+            "if (open && !built) { built = true; buildFn(body); }",
+            'btn.setAttribute("aria-expanded", open ? "true" : "false");',
+            "reportSize();",
+        ):
+            self.assertIn(marker, js)
+        self.assertIn(".disclosure { width: 100%; }", apps_shared.CONTROLS_CSS)
+
+    def test_notice_names_what_failed_and_where(self) -> None:
+        js = apps_shared.NOTICE_JS
+        self.assertIn('return it.what + (it.source ? " (" + it.source + ")" : "");', js)
+        self.assertIn('text = "Couldn\'t load: " + parts.join(", ");', js)
+        for name, html in WIDGETS:
+            with self.subTest(widget=name):
+                self.assertNotIn("some data unavailable", html)
+
+
 class SharedBlockTests(unittest.TestCase):
     """apps_shared.py is spliced in, never paraphrased.
 
@@ -378,8 +747,14 @@ class SharedBlockTests(unittest.TestCase):
         # above pass vacuously.
         names = [name for name, _ in shared_blocks()]
         self.assertGreater(len(names), 20)
-        for expected in ("BRIDGE_JS", "HERO_MEDIA_JS", "MEDIA_PANEL_JS", "CAROUSEL_STAGE_JS"):
+        for expected in (
+            "BRIDGE_JS", "HERO_MEDIA_JS", "MEDIA_PANEL_JS", "CAROUSEL_STAGE_JS",
+            "TOKENS_CSS", "CHIP_CSS", "SKELETON_CSS", "LABELS_JS", "NUMBERS_JS",
+            "SCORE_CHIP_JS", "MATCH_BAR_JS", "SKELETON_JS", "DISPLAY_MODE_JS",
+            "MODEL_CONTEXT_JS", "DISCLOSURE_JS", "NOTICE_JS",
+        ):
             self.assertIn(expected, names)
+
 
 if __name__ == "__main__":
     unittest.main()
