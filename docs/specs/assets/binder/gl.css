@@ -1,0 +1,275 @@
+/* gl.css — "The Binder": shared widget design language (DESIGN-LANGUAGE.md).
+   Inline verbatim; boards add layout only. Class names are the contract.
+
+   .gl-grain — paste this exact element as the FIRST child of every .gl-card
+   (identical filter ids across cards are harmless: same filter):
+   <svg class="gl-grain" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><filter id="gl-grain-f"><feTurbulence type="fractalNoise" baseFrequency=".9" numOctaves="2" stitchTiles="stitch"></feTurbulence><feColorMatrix type="saturate" values="0"></feColorMatrix></filter><rect width="100%" height="100%" filter="url(#gl-grain-f)"></rect></svg>
+
+   Tier classes (.tier-good|ok|bad|none) work on ANY component: they set
+   --gl-tier (edge/ring), --gl-tier-text (value/pip), --gl-tier-fill (ribbon),
+   --gl-rarity (card border). */
+
+/* ---------- tokens: dark (default) ---------- */
+:root, [data-theme="dark"] {
+  color-scheme: dark;
+  --gl-ground: #262624; /* chat ground — never painted by the widget; mocks only */
+  --gl-surface: var(--color-background-primary, #30302E);
+  --gl-inset: var(--color-background-secondary, #262624);
+  --gl-deep: #141413;
+  --gl-text: var(--color-text-primary, #FAF9F5);
+  --gl-text-2: var(--color-text-secondary, #C2C0B6);
+  --gl-muted: var(--color-text-tertiary, #9C9A92);
+  --gl-border: var(--color-border-tertiary, rgba(222,220,209,.15));
+  --gl-border-strong: var(--color-border-primary, rgba(222,220,209,.4));
+  --gl-keyline: rgba(250,249,245,.14);
+  --gl-good: var(--color-text-success, #7AB948);
+  --gl-ok: var(--color-text-warning, #D1A041);
+  --gl-bad: var(--color-text-danger, #EE8884);
+  --gl-good-bg: var(--color-background-success, #1B4614);
+  --gl-ok-bg: var(--color-background-warning, #483A0F);
+  --gl-bad-bg: var(--color-background-danger, #602A28);
+  --gl-good-edge: #7AB948; --gl-ok-edge: #D1A041; --gl-bad-edge: #EE8884;
+  --gl-inverse-bg: var(--color-background-inverse, #FAF9F5);
+  --gl-inverse-text: var(--color-text-inverse, #141413);
+  --gl-grain-opacity: .06;
+  --gl-rarity-good: conic-gradient(from 210deg, #437426, #7AB948 9%, #A8D98A 21%, #437426 32%, #7AB948 44%, #A8D98A 57%, #437426 68%, #7AB948 80%, #A8D98A 91%, #437426);
+  --gl-rarity-ok: conic-gradient(from 210deg, #8A6A24, #D1A041 9%, #F0D08A 21%, #8A6A24 32%, #D1A041 44%, #F0D08A 57%, #8A6A24 68%, #D1A041 80%, #F0D08A 91%, #8A6A24);
+  --gl-rarity-bad: conic-gradient(from 210deg, #602A28, #EE8884 9%, #A73D39 21%, #602A28 32%, #EE8884 44%, #A73D39 57%, #602A28 68%, #EE8884 80%, #A73D39 91%, #602A28);
+  /* theme-invariant */
+  --gl-ribbon-good: #7AB948; --gl-ribbon-ok: #D1A041; --gl-ribbon-bad: #EE8884; --gl-ribbon-none: #C2C0B6;
+  --gl-ribbon-ink: #141413; --gl-plate-ink: rgba(255,255,255,.92); --gl-deep-ink: #FAF9F5;
+  --gl-font: var(--font-sans, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
+  --gl-mono: var(--font-mono, ui-monospace, Menlo, Consolas, monospace);
+  --gl-serif: ui-serif, Georgia, "Times New Roman", serif;
+  --gl-tier: var(--gl-border-strong); --gl-tier-text: var(--gl-text-2);
+  --gl-tier-fill: var(--gl-ribbon-none); --gl-rarity: none;
+}
+/* ---------- tokens: light (explicit attribute, then OS preference) ---------- */
+[data-theme="light"] {
+  color-scheme: light;
+  --gl-ground: #FAF9F5;
+  --gl-surface: var(--color-background-primary, #FFFFFF);
+  --gl-inset: var(--color-background-secondary, #F5F4ED);
+  --gl-text: var(--color-text-primary, #141413);
+  --gl-text-2: var(--color-text-secondary, #3D3D3A);
+  --gl-muted: var(--color-text-tertiary, #73726C);
+  --gl-border: var(--color-border-tertiary, rgba(31,30,29,.15));
+  --gl-border-strong: var(--color-border-primary, rgba(31,30,29,.4));
+  --gl-keyline: rgba(20,20,19,.12);
+  --gl-good: var(--color-text-success, #265B19);
+  --gl-ok: var(--color-text-warning, #5A4815);
+  --gl-bad: var(--color-text-danger, #7F2C28);
+  --gl-good-bg: var(--color-background-success, #E9F1DC);
+  --gl-ok-bg: var(--color-background-warning, #F6EEDF);
+  --gl-bad-bg: var(--color-background-danger, #F7ECEC);
+  --gl-good-edge: #437426; --gl-ok-edge: #B8891F; --gl-bad-edge: #A73D39;
+  --gl-inverse-bg: var(--color-background-inverse, #141413);
+  --gl-inverse-text: var(--color-text-inverse, #FFFFFF);
+  --gl-grain-opacity: .035;
+  --gl-rarity-good: conic-gradient(from 210deg, #265B19, #437426 9%, #7AB948 21%, #265B19 32%, #437426 44%, #7AB948 57%, #265B19 68%, #437426 80%, #7AB948 91%, #265B19);
+  --gl-rarity-ok: conic-gradient(from 210deg, #805C1F, #B8891F 9%, #D1A041 21%, #805C1F 32%, #B8891F 44%, #D1A041 57%, #805C1F 68%, #B8891F 80%, #D1A041 91%, #805C1F);
+  --gl-rarity-bad: conic-gradient(from 210deg, #7F2C28, #A73D39 9%, #EE8884 21%, #7F2C28 32%, #A73D39 44%, #EE8884 57%, #7F2C28 68%, #A73D39 80%, #EE8884 91%, #7F2C28);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --gl-ground: #FAF9F5;
+    --gl-surface: var(--color-background-primary, #FFFFFF);
+    --gl-inset: var(--color-background-secondary, #F5F4ED);
+    --gl-text: var(--color-text-primary, #141413);
+    --gl-text-2: var(--color-text-secondary, #3D3D3A);
+    --gl-muted: var(--color-text-tertiary, #73726C);
+    --gl-border: var(--color-border-tertiary, rgba(31,30,29,.15));
+    --gl-border-strong: var(--color-border-primary, rgba(31,30,29,.4));
+    --gl-keyline: rgba(20,20,19,.12);
+    --gl-good: var(--color-text-success, #265B19);
+    --gl-ok: var(--color-text-warning, #5A4815);
+    --gl-bad: var(--color-text-danger, #7F2C28);
+    --gl-good-bg: var(--color-background-success, #E9F1DC);
+    --gl-ok-bg: var(--color-background-warning, #F6EEDF);
+    --gl-bad-bg: var(--color-background-danger, #F7ECEC);
+    --gl-good-edge: #437426; --gl-ok-edge: #B8891F; --gl-bad-edge: #A73D39;
+    --gl-inverse-bg: var(--color-background-inverse, #141413);
+    --gl-inverse-text: var(--color-text-inverse, #FFFFFF);
+    --gl-grain-opacity: .035;
+    --gl-rarity-good: conic-gradient(from 210deg, #265B19, #437426 9%, #7AB948 21%, #265B19 32%, #437426 44%, #7AB948 57%, #265B19 68%, #437426 80%, #7AB948 91%, #265B19);
+    --gl-rarity-ok: conic-gradient(from 210deg, #805C1F, #B8891F 9%, #D1A041 21%, #805C1F 32%, #B8891F 44%, #D1A041 57%, #805C1F 68%, #B8891F 80%, #D1A041 91%, #805C1F);
+    --gl-rarity-bad: conic-gradient(from 210deg, #7F2C28, #A73D39 9%, #EE8884 21%, #7F2C28 32%, #A73D39 44%, #EE8884 57%, #7F2C28 68%, #A73D39 80%, #EE8884 91%, #7F2C28);
+  }
+}
+
+/* ---------- tiers (set the four tier props; any component reads them) ---------- */
+.tier-good { --gl-tier: var(--gl-good-edge); --gl-tier-text: var(--gl-good); --gl-tier-fill: var(--gl-ribbon-good); --gl-rarity: var(--gl-rarity-good); }
+.tier-ok   { --gl-tier: var(--gl-ok-edge);   --gl-tier-text: var(--gl-ok);   --gl-tier-fill: var(--gl-ribbon-ok);   --gl-rarity: var(--gl-rarity-ok); }
+.tier-bad  { --gl-tier: var(--gl-bad-edge);  --gl-tier-text: var(--gl-bad);  --gl-tier-fill: var(--gl-ribbon-bad);  --gl-rarity: var(--gl-rarity-bad); }
+.tier-none { --gl-tier: var(--gl-border-strong); --gl-tier-text: var(--gl-text-2); --gl-tier-fill: var(--gl-ribbon-none); --gl-rarity: none; }
+
+/* ---------- root + type scale (§2) ---------- */
+.gl { font-family: var(--gl-font); font-size: 14px; line-height: 1.4; color: var(--gl-text); font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased; }
+.gl, .gl *, .gl *::before, .gl *::after { box-sizing: border-box; }
+.gl-display { font-size: 28px; font-weight: 800; line-height: 1.25; letter-spacing: -.02em; }
+.gl-title   { font-size: 20px; font-weight: 800; line-height: 1.25; letter-spacing: -.025em; }
+.gl-title-s { font-size: 16px; font-weight: 800; line-height: 1.25; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.gl-h       { font-size: 16px; font-weight: 600; line-height: 1.4; }
+.gl-body    { font-size: 14px; font-weight: 400; line-height: 1.5; color: var(--gl-text-2); }
+.gl-cap     { font-size: 12px; line-height: 1.4; color: var(--gl-muted); }
+.gl-label, .gl-ability > b, .gl-stat__label { font-size: 12px; font-weight: 600; line-height: 1.4; letter-spacing: .06em; text-transform: uppercase; }
+.gl-num     { font-family: var(--gl-mono); font-size: 16px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.gl-num-l   { font-family: var(--gl-mono); font-size: 20px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+.gl-flavor  { font-family: var(--gl-serif); font-style: italic; font-size: 14px; line-height: 1.5; color: var(--gl-text-2); margin: 0; }
+.gl-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* ---------- 1 card frame ---------- */
+.gl-card { --gl-frame: 6px; position: relative; display: flex; flex-direction: column; border: var(--gl-frame) solid transparent; border-radius: 14px; color: var(--gl-text);
+  background: linear-gradient(var(--gl-surface), var(--gl-surface)) padding-box, var(--gl-rarity) border-box; }
+.gl-card--s { --gl-frame: 4px; border-radius: 12px; }
+/* common: plain 1px hairline + 2px inner keyline, same footprint as tiered */
+.gl-card.tier-none { background: var(--gl-surface); border-color: var(--gl-surface); box-shadow: 0 0 0 1px var(--gl-border), inset 0 0 0 2px var(--gl-border); }
+button.gl-card, a.gl-card { font: inherit; text-align: left; text-decoration: none; padding: 0; cursor: pointer; width: 100%; }
+.gl-grain { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: calc(14px - var(--gl-frame)); overflow: hidden; opacity: var(--gl-grain-opacity); mix-blend-mode: overlay; pointer-events: none; }
+:is(.gl-card, .gl-btn, .gl-mini, .gl-thumb, .gl-play, a.gl-art):focus-visible { outline: 2px solid var(--gl-border-strong); outline-offset: 3px; }
+
+/* ---------- 2 art window ---------- */
+.gl-art { position: relative; display: block; aspect-ratio: 2 / 3; overflow: hidden; border-radius: 8px; background: var(--gl-inset); }
+.gl-art--hero { aspect-ratio: 16 / 9; }
+.gl-card > .gl-art { border-radius: calc(14px - var(--gl-frame)) calc(14px - var(--gl-frame)) 0 0; }
+.gl-art > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.gl-art::before { content: ""; position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 1px var(--gl-keyline); pointer-events: none; z-index: 1; }
+.gl-art::after { content: ""; position: absolute; inset: 0 -24px; pointer-events: none; z-index: 1;
+  background: linear-gradient(235deg, transparent calc(30% - .5px), rgba(255,255,255,.12) calc(30% - .5px) calc(30% + .5px), transparent calc(30% + .5px)); }
+.gl-art--plate { --gl-plate-h: 30; display: flex; align-items: center; justify-content: center; padding: 12px; text-align: center; color: var(--gl-plate-ink);
+  background: linear-gradient(160deg, hsl(var(--gl-plate-h) 45% 38%), hsl(calc(var(--gl-plate-h) + 40) 50% 22%)); }
+
+/* ---------- 3 badge ---------- */
+.gl-badge { position: relative; z-index: 2; width: 52px; height: 52px; flex: none; display: flex; align-items: center; justify-content: center; border-radius: 9999px;
+  background: var(--gl-inverse-bg); color: var(--gl-inverse-text); box-shadow: 0 0 0 2px var(--gl-tier);
+  font-family: var(--gl-mono); font-size: 20px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+.gl-badge--on-art { position: absolute; top: 10px; left: 10px; }
+.gl-badge--on-art .gl-badge__tag { left: -4px; transform: none; } /* never clipped by the art edge */
+.gl-badge--low { top: auto; bottom: 22px; } /* art whose lettering sits at the top: badge drops to bottom-left */
+.gl-badge__suffix { font-size: 12px; font-weight: 500; margin-left: 1px; align-self: center; padding-top: 4px; }
+.gl-badge__tag { position: absolute; top: calc(100% - 6px); left: 50%; transform: translateX(-50%); white-space: nowrap; padding: 0 6px; border-radius: 3px;
+  background: var(--gl-deep); color: var(--gl-deep-ink); font-family: var(--gl-font); font-size: 12px; font-weight: 600; line-height: 18px; letter-spacing: .06em; text-transform: uppercase; }
+
+/* ---------- 4 title plate + 5 lozenge ---------- */
+.gl-plate { position: relative; padding: 10px 12px 8px; border-bottom: 1px solid var(--gl-border); }
+.gl-plate__row { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
+.gl-plate__row > :first-child { min-width: 0; margin: 0; }
+.gl-no { flex: none; font-family: var(--gl-mono); font-size: 12px; color: var(--gl-muted); white-space: nowrap; }
+.gl-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 4px; font-size: 12px; line-height: 20px; color: var(--gl-muted); }
+.gl-loz { display: inline-flex; align-items: center; height: 20px; padding: 0 6px; border: 1px solid var(--gl-border); border-radius: 4px; background: var(--gl-inset); color: var(--gl-text-2);
+  font-size: 12px; font-weight: 600; line-height: 1; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
+
+/* ---------- 6 stat block ---------- */
+.gl-stats { display: flex; flex-direction: column; padding: 6px 12px 0; margin: 0; }
+.gl-stat { display: flex; align-items: baseline; min-height: 24px; line-height: 24px; }
+.gl-stat__label { color: var(--gl-muted); white-space: nowrap; }
+.gl-stat__note { margin-left: 6px; font-size: 12px; font-weight: 400; color: var(--gl-muted); letter-spacing: 0; text-transform: none; white-space: nowrap; }
+.gl-stat__lead { flex: 1; min-width: 12px; margin: 0 8px; border-bottom: 1px dotted var(--gl-muted); opacity: .7; align-self: flex-end; transform: translateY(-7px); }
+.gl-stat__val { font-family: var(--gl-mono); font-size: 16px; font-weight: 500; color: var(--gl-text-2); white-space: nowrap; display: inline-flex; align-items: center; gap: 8px; }
+.gl-stat.is-key .gl-stat__label { color: var(--gl-text-2); }
+.gl-stat.is-key .gl-stat__val { color: var(--gl-text); font-weight: 700; }
+.gl-stat__val .gl-chip { font-family: var(--gl-font); }
+
+/* ---------- 7 pips (diamonds; 4px visual gap between tips) ---------- */
+.gl-pips { display: inline-flex; align-items: center; gap: 7px; height: 12px; padding: 0 2px; }
+.gl-pips > span { width: 8px; height: 8px; flex: none; transform: rotate(45deg); background: var(--gl-border); }
+.gl-pips > .on { background: var(--gl-tier-text); }
+.gl-pips > .half { background: linear-gradient(45deg, var(--gl-tier-text) 50%, var(--gl-border) 50%); }
+.gl-pips__word { font-family: var(--gl-font); font-size: 14px; font-weight: 700; color: var(--gl-tier-text); }
+
+/* ---------- 8 ribbon ---------- */
+.gl-ribbon { position: relative; z-index: 3; display: flex; align-items: center; justify-content: center; gap: 12px; height: 40px; padding: 0 18px;
+  background: var(--gl-tier-fill); color: var(--gl-ribbon-ink); font-size: 14px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; white-space: nowrap;
+  clip-path: polygon(0 0, 100% 0, calc(100% - 10px) 50%, 100% 100%, 0 100%, 10px 50%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.35), inset 0 -1px 0 rgba(0,0,0,.22); }
+.gl-ribbon:has(> :nth-child(2)) { justify-content: space-between; gap: 10px; letter-spacing: .08em; } /* verdict + note: tighten to fit 340px */
+.gl-ribbon__note { font-family: var(--gl-mono); font-size: 12px; font-weight: 700; letter-spacing: 0; text-transform: none; }
+.gl-ribbon--s { height: 24px; padding: 0 16px; font-size: 12px; letter-spacing: .08em; clip-path: polygon(0 0, 100% 0, calc(100% - 7px) 50%, 100% 100%, 0 100%, 7px 50%); }
+.gl-ribbon--straddle { position: absolute; left: calc(-20px - var(--gl-frame)); right: calc(-20px - var(--gl-frame)); bottom: calc(-20px - var(--gl-frame)); }
+.gl-ribbon--art { position: absolute; left: 0; right: 0; bottom: 0; }
+
+/* ---------- 9 traits ---------- */
+.gl-traits { display: flex; flex-direction: column; }
+.gl-traits__head { padding-bottom: 6px; color: var(--gl-tier-text); }
+.gl-trait { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; border-top: 1px solid var(--gl-border); font-size: 14px; line-height: 20px; color: var(--gl-text); }
+.gl-trait:last-child { border-bottom: 1px solid var(--gl-border); }
+.gl-trait > svg { flex: none; width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; }
+.gl-trait--plus > svg { color: var(--gl-good); }
+.gl-trait--minus > svg { color: var(--gl-bad); }
+
+/* ---------- 10 ability run-in + 11 flavor ---------- */
+.gl-ability { margin: 0; font-size: 14px; line-height: 1.5; color: var(--gl-text-2); }
+.gl-ability > b { color: var(--gl-text); margin-right: 6px; }
+.gl-flavor--quote { position: relative; padding-left: 22px; }
+.gl-flavor--quote::before { content: "\201C"; position: absolute; left: 0; top: -6px; font-family: var(--gl-serif); font-style: normal; font-size: 28px; line-height: 1; color: var(--gl-muted); }
+
+/* ---------- 12 score chip ---------- */
+.gl-chip { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 7px; border: 1px solid var(--gl-tier); border-radius: 4px; white-space: nowrap; font-size: 12px; color: var(--gl-text-2); }
+.gl-chip__val { font-family: var(--gl-mono); font-size: 16px; font-weight: 500; line-height: 1; color: var(--gl-tier-text); }
+.gl-chip__word { font-weight: 600; color: var(--gl-tier-text); }
+.gl-chip__meter { position: relative; width: 28px; height: 4px; background: var(--gl-border); overflow: hidden; }
+.gl-chip__meter > span { position: absolute; inset: 0 auto 0 0; background: var(--gl-tier-text); }
+.gl-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* ---------- 13 mini card + strip ---------- */
+.gl-mini { display: flex; align-items: flex-start; gap: 10px; min-height: 64px; color: var(--gl-text); text-decoration: none; }
+.gl-mini__art { flex: none; width: 48px; height: 64px; border: 2px solid var(--gl-tier); border-radius: 6px; overflow: hidden; background: var(--gl-inset); }
+.gl-mini__art > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.gl-mini__name { font-size: 14px; font-weight: 600; line-height: 1.35; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.gl-mini__meta { display: flex; flex-wrap: wrap; gap: 0 8px; font-size: 12px; line-height: 1.4; color: var(--gl-muted); }
+.gl-mini__meta .v { font-family: var(--gl-mono); color: var(--gl-text-2); }
+.gl-strip { display: flex; gap: 12px; overflow-x: auto; scroll-snap-type: x mandatory; scroll-padding-inline: max(12px, var(--gl-safe-left, 0px)); scrollbar-width: none; overscroll-behavior-x: contain; }
+.gl-strip > * { flex: 0 0 min(232px, 74%); scroll-snap-align: start; }
+
+/* ---------- 14 reel ---------- */
+.gl-reel { display: flex; flex-direction: column; gap: 6px; container-type: inline-size; }
+.gl-play { position: absolute; right: 10px; bottom: 10px; z-index: 2; width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; border-radius: 9999px;
+  background: #FAF9F5; color: #141413; box-shadow: 0 0 0 1px rgba(20,20,19,.35); } /* on art: theme-invariant */
+.gl-play > svg { width: 16px; height: 16px; margin-left: 3px; fill: currentColor; }
+.gl-thumbs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.gl-thumbs > :nth-child(n+4) { display: none; }
+@container (min-width: 560px) { .gl-thumbs { grid-template-columns: repeat(4, minmax(0, 1fr)); } .gl-thumbs > :nth-child(4) { display: block; } }
+.gl-thumb { position: relative; display: block; aspect-ratio: 16 / 9; padding: 0; border: 0; border-radius: 4px; overflow: hidden; background: var(--gl-inset); cursor: pointer; box-shadow: inset 0 0 0 1px var(--gl-keyline); }
+.gl-thumb > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.gl-thumb.is-active { outline: 2px solid var(--gl-inverse-bg); outline-offset: -2px; }
+
+/* ---------- 15 buttons ---------- */
+.gl-actions { display: flex; gap: 10px; }
+.gl-actions > .gl-btn { flex: 1 1 auto; min-width: 0; }
+.gl-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 44px; padding: 0 18px; border-radius: 9999px; border: 1px solid transparent;
+  font: inherit; font-size: 16px; font-weight: 600; line-height: 1; text-decoration: none; white-space: nowrap; cursor: pointer; }
+.gl-btn > svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.gl-btn--primary { background: var(--gl-inverse-bg); color: var(--gl-inverse-text); }
+.gl-btn--secondary { background: transparent; color: var(--gl-text); border-color: var(--gl-border-strong); }
+@media (pointer: fine) { .gl-btn { height: 40px; } }
+
+/* ---------- 16 set line ---------- */
+.gl-set { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.gl-set > b { font-size: 16px; font-weight: 600; margin-right: 4px; }
+.gl-set > .gl-loz { text-transform: none; letter-spacing: 0; } /* facets keep their wording ("≤ 10h") */
+
+/* ---------- 17 skeleton ---------- */
+.gl-skel__block { background: var(--gl-inset); border-radius: 4px; }
+.gl-skel__art { aspect-ratio: 2 / 3; border-radius: 8px 8px 0 0; }
+.gl-skel__art--hero { aspect-ratio: 16 / 9; }
+.gl-skel__line { height: 12px; margin: 10px 14px 0; }
+.gl-skel__line:last-child { margin-bottom: 14px; }
+
+/* ---------- 18 notice + 19 eyebrow ---------- */
+.gl-notice { display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 1.4; color: var(--gl-muted); }
+.gl-notice > svg { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+.gl-eyebrow { display: block; margin: 0 0 10px; color: var(--gl-muted); }
+
+/* ---------- motion (only when allowed) ---------- */
+@media (prefers-reduced-motion: no-preference) {
+  :is(button, a).gl-card { transition: transform .2s ease; }
+  :is(button, a).gl-card .gl-art::after { transition: transform .2s ease; }
+  @media (hover: hover) {
+    :is(button, a).gl-card:hover { transform: translateY(-2px); }
+    :is(button, a).gl-card:hover .gl-art::after { transform: translateX(-20px); }
+  }
+  :is(button, a).gl-card:active { transform: translateY(0); }
+  .gl-skel .gl-skel__block { animation: gl-pulse 1.6s ease-in-out infinite; }
+  @keyframes gl-pulse { 50% { opacity: .45; } }
+}

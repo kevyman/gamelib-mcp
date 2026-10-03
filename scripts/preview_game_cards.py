@@ -14,6 +14,8 @@ Usage:
     python scripts/preview_game_cards.py grid --theme dark [--touch]  # Claude's tokens
     python scripts/preview_game_cards.py grid --theme light --display fullscreen
     python scripts/preview_game_cards.py detail --name "Hades" --sample-media --display fullscreen
+    python scripts/preview_game_cards.py --from-json scripts/preview_samples/discover_taste_match.json
+    python scripts/preview_game_cards.py --from-json scripts/preview_samples/detail_ghost_of_tsushima.json --theme dark
 
 --theme simulates a host: the page gets window.__PREVIEW_HOST_CONTEXT__ with
 Claude's style variables (scripts/preview_host_context.py), as a real
@@ -25,6 +27,14 @@ availableDisplayModes in the simulated hostContext): the grid widens and its
 header line sticks, and the detail card renders its similar/studio rows
 expanded. Tapping a grid card in a fullscreen preview drills into the card's
 own data (there is no host to answer the live get_game_detail call).
+
+--from-json renders a saved tool payload instead of running the tool (no
+database): a top-level ``results`` key means a discover_games response (grid),
+anything else a get_game_detail one (detail). A top-level ``_note`` (the
+sample's provenance, see scripts/preview_samples/README.md) is dropped before
+injection. --tool-input sets the simulated tool-input notification as JSON;
+without it the grid gets --sort and the payload's own result count as its
+limit, and the detail card its payload's name and whether it carries media.
 """
 
 import argparse
@@ -239,7 +249,18 @@ async def _build_data(args: argparse.Namespace) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["grid", "detail"])
+    parser.add_argument(
+        "mode", nargs="?", choices=["grid", "detail"],
+        help="which tool to run (inferred from the payload with --from-json)",
+    )
+    parser.add_argument(
+        "--from-json", type=Path, metavar="PATH",
+        help="render a saved discover_games / get_game_detail payload (no database)",
+    )
+    parser.add_argument(
+        "--tool-input", metavar="JSON",
+        help="with --from-json: the simulated tool-input arguments, as a JSON object",
+    )
     parser.add_argument("--name", help="game name for detail mode")
     parser.add_argument("--vibes", nargs="*", help="vibe filters for grid mode")
     parser.add_argument("--sort", default="match", choices=["match", "critic", "value"])
@@ -271,14 +292,30 @@ def main() -> None:
     args = parser.parse_args()
     if args.touch and not args.theme:
         parser.error("--touch is part of the simulated host; pass --theme")
-    if args.mode == "detail" and not args.name:
+    saved: dict[str, Any] | None = None
+    if args.from_json:
+        if args.media or args.sample_media or args.name or args.vibes:
+            parser.error("--from-json renders the saved payload as-is; drop the tool arguments")
+        saved = json.loads(args.from_json.read_text())
+        if not isinstance(saved, dict):
+            parser.error(f"{args.from_json}: expected a JSON object")
+        saved.pop("_note", None)
+        shape = "grid" if "results" in saved else "detail"
+        if args.mode and args.mode != shape:
+            parser.error(f"{args.from_json} is a {shape} payload, not {args.mode}")
+        args.mode = shape
+    elif args.tool_input:
+        parser.error("--tool-input applies to --from-json only")
+    elif args.mode is None:
+        parser.error("pass a mode (grid/detail) or --from-json PATH")
+    if args.mode == "detail" and not args.name and saved is None:
         parser.error("detail mode requires --name")
     if args.mode == "grid" and (args.media or args.sample_media):
         parser.error("--media/--sample-media apply to detail mode only")
     if args.big_studio and not args.sample_media:
         parser.error("--big-studio selects between the sample pedigrees; pass --sample-media")
 
-    data = asyncio.run(_build_data(args))
+    data = saved if saved is not None else asyncio.run(_build_data(args))
     context: dict[str, Any] | None = (
         host_context(args.theme, touch=args.touch) if args.theme else None
     )
@@ -289,10 +326,17 @@ def main() -> None:
         context["availableDisplayModes"] = ["inline", "fullscreen"]
     # The arguments as a host's tool-input notification would carry them
     # (the grid's header line and its "Show next" count read these).
-    if args.mode == "grid":
-        tool_input: dict[str, Any] = {"sort_by": args.sort, "limit": args.limit}
+    if args.tool_input:
+        tool_input: dict[str, Any] = json.loads(args.tool_input)
+        if not isinstance(tool_input, dict):
+            parser.error("--tool-input must be a JSON object")
+    elif args.mode == "grid":
+        limit = len(saved["results"]) if saved is not None else args.limit
+        tool_input = {"sort_by": args.sort, "limit": limit}
         if args.vibes:
             tool_input["vibes"] = args.vibes
+    elif saved is not None:
+        tool_input = {"name": saved.get("name"), "media": "media" in saved}
     else:
         tool_input = {"name": args.name, "media": args.media}
     extra = " window.__PREVIEW_TOOL_INPUT__ = " + json.dumps(tool_input) + ";"
