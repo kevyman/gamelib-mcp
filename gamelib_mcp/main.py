@@ -422,68 +422,54 @@ async def get_stats(
     offset: int = 0,
 ) -> GetStatsResponse:
     """
-    One library-wide aggregate report, selected by `report`.
+    Call for one library-wide rollup, selected by `report`; for a filtered LIST
+    of games use get_library_stats. Returns only the selected report's keys, and
+    a parameter that belongs to another report is an error, not ignored.
 
-    These are rollups; for a filtered LIST of games use get_library_stats. Only
-    the selected report's keys come back, and passing a parameter that belongs
-    to another report is an error rather than silently ignored.
+    "backlog" (no parameters) — completion-status counts, weekly pace, years to
+    clear, top unplayed, and unplayed_spend (per currency, plus the top 5).
 
-    "backlog" (no parameters) — playing/completed/abandoned/evergreen counts,
-    weekly pace, years to clear, top unplayed highlights, and unplayed_spend
-    (money on owned games never played, per currency plus the top 5).
+    "platforms" (limit) — per platform, owned_games (primary items) vs
+    owned_addons. overlap_games (owned on 2+ platforms) is CAPPED at limit
+    (default 25, max 200), with true total overlap_count and flag
+    overlap_truncated.
 
-    "platforms" (limit) — ownership per platform, splitting owned_games (primary
-    items) from owned_addons. overlap_games (owned on 2+ platforms) is CAPPED at
-    limit (default 25, max 200) because it is the only field here that grows
-    with the library; overlap_count is the true total and overlap_truncated the
-    flag.
+    "taste" (no parameters) — the tag affinity profile; run
+    sync(targets=["ratings"]) first if it may be stale. Scores are signed
+    (positive = above your average, negative = avoided) and shrunk, with NO
+    absolute scale: compare them to each other or to shrinkage.strong_affinity,
+    never to a fixed number, and never re-weight by game_count. rate_next: up to
+    10 owned unrated games whose ratings would teach the profile most, with
+    `reasons` (rate_next_candidates/_truncated).
 
-    "taste" (no parameters) — the tag affinity profile behind recommendations;
-    run sync(targets=["ratings"]) first if it may be stale. Scores are signed
-    and mean-centered (positive = rated/played above your own average, near zero
-    = neutral, negative = actively avoided) and shrunk by an evidence prior
-    estimated from the library, so they have NO absolute scale: read them
-    against each other or against shrinkage.strong_affinity, never against a
-    fixed number, and never re-weight them by game_count. rate_next lists up to
-    10 owned unrated games (rate_next_candidates/_truncated) whose ratings would teach
-    the profile most, each with the `reasons` it was picked.
-
-    "spending" (year, platform, purchase_source) — spending from recorded
-    acquisitions (set_acquisition) over owned rows, DLC/editions included. year
-    matches acquired_at's year and drops rows without one; purchase_source uses
-    set_acquisition's vocabulary and aliases. Monetary aggregates are grouped
-    PER CURRENCY and NEVER summed across currencies. by_family rolls each base
-    game together with its owned DLC; cost_per_hour excludes free games from
-    worst_value.
+    "spending" (year, platform, purchase_source) — recorded acquisitions over
+    owned rows, DLC/editions included. year matches acquired_at's year (rows
+    without one drop); purchase_source takes set_acquisition's vocabulary and
+    aliases. Money is PER CURRENCY, NEVER summed across currencies; by_family
+    rolls owned DLC into its base game; cost_per_hour's worst_value excludes
+    free games.
 
     "series" (counting_mode, kind, min_games, platform, include_games, limit,
-    offset — the only paginated report) — series ranked by how many you own,
-    grouped by IGDB series rather than guessed franchise names. "collection" is
-    the tight series (Assassin's Creed), "franchise" the broad umbrella (Star
-    Wars); both share one ranking, so a game can count toward both.
-    counting_mode sets what a count means: "entries" (every owned item including
-    DLC/editions/bundles), "distinct_games" (default — primary items only) or
-    "base_games_only" (also excludes remasters/remakes/expansions/ports); every
-    result reports all three. include_games adds each series' member list.
+    offset) — IGDB series ranked by how many you own. kind "collection" is the
+    tight series, "franchise" the broad umbrella; one shared ranking, so a game
+    can count toward both. counting_mode: "entries" (every owned item incl.
+    DLC/editions/bundles), "distinct_games" (default, primary items only) or
+    "base_games_only" (also drops remasters/remakes/expansions/ports); every
+    result reports all three. include_games adds member lists.
 
-    "assessments" (limit, offset, verdict) — browse recorded verdicts
-    (record_assessment), newest first, each with the assessment_id
-    void_assessment takes and the declared skill/skill_version/model (null when
-    the recorder stated none). Paginated like "series" (limit default 25, max
-    200).
+    "assessments" (limit, offset, verdict) — recorded verdicts newest first,
+    each with the assessment_id void_assessment takes and the declared
+    skill/skill_version/model (null = not stated). limit default 25, max 200.
 
-    "calibration" (limit) — how those verdicts held up, for judging the
-    assessment methodology, NEVER as a recommendation input. by_verdict counts
-    each game once (its most recent assessment with that verdict) and reports
-    the funnel: unowned at the time, owned now, played past 2h, average rating
-    since. by_methodology and by_model regroup those same rows by the DECLARED
-    provenance, one entry per (skill, skill_version) pair and per model, with
-    the same funnel. A verdict that declared nothing is its own bucket with null
-    keys, and nothing is stamped server-side, so null means the recorder didn't
-    say. Money is reported PER CURRENCY. play_what_you_own_follow_through counts
-    whether the game pointed at instead has been played since — a platform
-    reporting no last_played is unknown_count, counted on neither side. Every
-    list is capped at limit with its true count and a truncated flag.
+    "calibration" (limit) — how verdicts held up, to judge methodology — NEVER a
+    recommendation input. by_verdict counts each game once (its latest
+    assessment with that verdict) through the funnel: unowned then, owned now,
+    played past 2h, average rating since; by_methodology (per skill +
+    skill_version) and by_model regroup the same rows, undeclared provenance
+    being its own null bucket. Money per currency.
+    play_what_you_own_follow_through: was the game pointed at played since (no
+    last_played = unknown_count, neither side). Every list is capped at limit
+    with its true count and a truncated flag.
     """
     # A parameter that belongs to another report is a caller error, not
     # something to drop on the floor: silently ignoring year= on report="series"
@@ -837,17 +823,13 @@ async def check_library(
     unsuppress: list[dict] | None = None,
 ) -> CheckLibraryResponse:
     """
-    Run data-integrity checks over the library and report findings for repair.
+    Call to audit library data integrity before a repair. Returns findings, each
+    with a `check` id, `severity` (notice/warning/error) and, where a repair is
+    known, a `suggested_action` naming an existing tool, plus a per-check
+    summary. Report-only except the three apply-gated checks below.
 
-    Report-only philosophy: every finding names a `check` id, a `severity`
-    (notice/warning/error) and — where a repair is known — a `suggested_action`
-    pointing at an existing tool (merge_games / update_game / split_game /
-    delete_game / set_acquisition / check_library itself). Nothing here mutates
-    library data except the three apply-gated checks below.
-
-    Registered check ids, by category — call list_checks=True for the full
-    catalog (each check's description, network needs, option keys, severity)
-    rather than growing this list into prose:
+    Check ids (list_checks=True returns only the catalog: each id's description,
+    network needs, option keys, severity):
     - completion: completion.unclassified
     - enrich: enrich.coverage
     - extid: extid.igdb_drift
@@ -865,33 +847,26 @@ async def check_library(
     - sync: sync.platform_error, sync.staleness
     - wishlist: wishlist.already_owned
 
-    Three facts you need before calling, which the catalog also carries:
-    - WRITES (only when its id is listed in `apply`, and only these three):
-      playtime.farming sets is_farmed=1; extid.igdb_drift clears a wrong igdb_id
-      + its cover; ownership.license_gap mints owned rows from the Steam license
-      list. Every other check is permanently report-only.
-    - NETWORK (skipped unless named in `checks` or include_network=True, and
-      reported in checks_skipped when unconfigured): extid.igdb_drift and
-      identity.cross_store_collapse need IGDB; ownership.license_gap needs a
-      stored Steam session.
-    - OPTIONS (per-check, via options={"<id>": {...}}) exist for
-      playtime.farming, sync.staleness, sync.platform_error,
-      ownership.unseen_in_source, extid.igdb_drift and nesting.misclassified,
-      plus a `limit` on several; list_checks names each one's keys.
+    - WRITES only when listed in `apply`, and only these: playtime.farming sets
+      is_farmed=1; extid.igdb_drift clears a wrong igdb_id + cover;
+      ownership.license_gap mints owned rows from the Steam license list.
+    - NETWORK (skipped unless named in `checks` or include_network=True;
+      unconfigured → checks_skipped): extid.igdb_drift and
+      identity.cross_store_collapse need IGDB; ownership.license_gap a stored
+      Steam session.
+    - OPTIONS via options={"<id>": {...}} for playtime.farming, sync.*,
+      ownership.unseen_in_source, extid.igdb_drift, nesting.misclassified, plus
+      `limit` on several.
 
-    Selection: `checks` accepts full ids and/or category prefixes ("identity",
-    "nesting.misclassified"); None (default) selects every OFFLINE check.
-    include_network widens only that DEFAULT selection — when `checks` is given,
-    the run set is exactly what it names. limit_per_check caps findings per
-    check id (0 = uncapped), flagged in summary[check_id].truncated. `apply` is
-    a subset of the three writing ids above; an applied check must also be
-    selected to run, and any other id there is an error, as is an unknown option
-    key or id. One check raising never fails the call — it lands in `errors`.
+    `checks` takes ids and/or category prefixes; None (default) = every OFFLINE
+    check, and include_network widens only that default. limit_per_check caps
+    findings per id (0 = uncapped; summary[id].truncated). An applied check must
+    also be selected; any other id in `apply`, an unknown id or option key is an
+    error. One check raising lands in `errors`, never failing the call.
 
-    `suppress`/`unsuppress` take lists of {"check", "game_id"} to add to or
-    remove from a library-wide muted list (tool config, not library data),
-    post-filtering every future run's findings. list_checks=True returns only
-    the catalog and runs nothing else.
+    suppress/unsuppress take [{"check", "game_id"}] to add to or remove from a
+    library-wide muted list (tool config, not library data) that filters every
+    future run.
     """
     from .tools.checks import run_library_checks
 
@@ -1044,62 +1019,42 @@ async def get_assessment_context(
     early_access: bool = False,
 ) -> AssessmentContextResponse:
     """
-    Gather everything needed to assess ONE named game candidate — owned or not
-    — in a single pure-DB call: craft score, taste fit, anchor games, play pace
-    and ownership context. This is the mechanical layer of a quality/purchase
-    assessment; apply judgment (genre calibration, anchor reasoning, the
-    verdict) on top of the blocks it returns. No network. How to read and weigh
-    them: get_skill(skill="game-quality").
+    Call once per named game candidate — owned or not — before judging its
+    quality or purchase case. Returns pure-DB blocks (craft, fit, anchors, pace,
+    game, deal, past_assessments, resolution), each absent when its inputs are
+    missing; no network. How to read and weigh them:
+    get_skill(skill="game-quality").
 
     Identity (game_id, Steam appid, or name — partial/fuzzy, like
     get_game_detail) is optional: omit it for an unowned or unreleased candidate
-    and pass `tags` instead. `tags` are the candidate's Steam tags IN STEAM'S
-    DISPLAY ORDER (the first 4 are treated as the core loop); when omitted, the
-    resolved row's stored tags are used. At least one of identity or tags is
-    required.
+    and pass `tags`. At least one of identity or tags is required. `tags` are
+    the candidate's Steam tags IN STEAM'S DISPLAY ORDER (first 4 = core loop);
+    omitted, the resolved row's stored tags are used.
 
-    Steam review numbers come from the caller (web-search SteamDB or the store
-    page) because the server stores no review counts: pass steam_positive_pct +
-    steam_total_reviews (all-time, both together) and optionally
-    steam_recent_positive_pct + steam_recent_total_reviews (both together,
-    all-time pair required), plus early_access=True to discount the craft band
-    one step. Percentages accept 88 or 0.88.
+    Steam review numbers come from you (web-search SteamDB or the store page;
+    the server stores no counts): steam_positive_pct + steam_total_reviews
+    (all-time, both together), optionally steam_recent_positive_pct +
+    steam_recent_total_reviews (both together, all-time pair required).
+    Percentages accept 88 or 0.88. early_access=True discounts the craft band
+    one step. Without them craft is source="server_cache" (the cached 1-9 enum,
+    no adjusted score; `limitations` says so).
 
-    Each block is absent when its inputs are missing. `craft` is
-    source="caller" when computed from numbers you passed and "server_cache"
-    when only the library's cached Steam summary exists — that cache holds the
-    1-9 review-score enum and no counts, so no adjusted score is computed and
-    `limitations` says so. `fit` crosses the candidate's tags against the taste
-    profile; its suggested_call is a starting point that anchors override, never
-    the answer. `anchors` is up to 8 owned, primary, non-farmed games sharing
-    the core tags, with rating, playtime and completion_status — the anchor
-    evidence for the fit call, capped with count/truncated. `pace` is the
-    last-30-day play summary. `game` is a compact ownership subset, present only
-    when identity resolves.
+    anchors: up to 8 owned, primary, non-farmed games sharing the core tags;
+    past_assessments: up to 5 newest (with the assessment_id void_assessment
+    takes); both capped with count/truncated. pace is the last 30 days.
+    fit.suggested_call is a starting point anchors override. deal is the
+    cheapest CACHED price, only when identity resolved — never fetched here
+    (live: get_wishlist(with_prices=True)). When past_assessments is present,
+    LEAD with the prior verdict and what changed since.
 
-    CHECK that game.name is actually the candidate: a partial/fuzzy match can
-    land on a sibling title. game_resolution="not_found" (no game block) simply
-    means the library doesn't know the game — normal for an unowned candidate;
-    the other blocks still come back. `resolution` reports mode ("by_id",
-    "by_appid", "by_assessed_appid", "exact", "partial", "fuzzy", "none"), the
-    `query` used and, when resolved, `matched_name` — DIFF it against the
-    candidate whenever mode is not exact/by_id. A sequel-shaped near miss is
-    rejected outright: a trailing ordinal added ("Alan Wake 2" against a library
-    "Alan Wake", either direction) or ordinals disagreeing in place ("Final
-    Fantasy VIII" against "VII") answers not_found with `rejected_near_miss`
-    naming the refused row, so pass game_id if that row really was the game you
-    meant.
-
-    `deal` appears when identity resolved AND a price is already cached for it:
-    the cheapest cached row with cut_pct, ITAD's history_low, at_history_low,
-    deal_ends_at and its own fetched_at/stale — cache only, since this call
-    never fetches prices (use get_wishlist(with_prices=True) for a live one).
-
-    `past_assessments` appears only when identity resolved AND this game was
-    assessed before (record_assessment) — up to 5 newest verdicts with the
-    assessment_id void_assessment takes, capped with count/truncated. When it is
-    present, LEAD with the prior verdict and what has changed since (price,
-    patches, review trajectory) instead of re-deriving the call blind.
+    game_resolution="not_found" (no game block) is normal for an unowned
+    candidate; the other blocks still come back. `resolution` gives mode
+    ("by_id", "by_appid", "by_assessed_appid", "exact", "partial", "fuzzy",
+    "none"), the `query` and matched_name — DIFF matched_name against the
+    candidate whenever mode is not exact/by_id. A sequel-shaped near miss (a
+    trailing ordinal added either way, "Alan Wake 2" vs "Alan Wake", or ordinals
+    disagreeing, "VIII" vs "VII") answers not_found with `rejected_near_miss`
+    naming the refused row; pass game_id if that row was meant.
     """
     from .tools.assessment import get_assessment_context as _assess
     return await _assess(
@@ -1154,61 +1109,46 @@ async def record_assessment(
     items: list[dict] | None = None,
 ) -> RecordAssessmentResponse:
     """
-    Log a game-quality verdict and the components behind it — one game, or many
-    in one call.
+    Call at the END of a game-quality assessment, after delivering the verdict,
+    to log it and its components — one game, or many via `items`. Returns the
+    stored row (assessment_id, created, replaced, repeat_ask) with a
+    `resolution` block and, for a single game, the evaluation card's `package`.
+    Mention the recording in one line; never re-explain the verdict.
 
-    Call this at the END of an assessment, after delivering the verdict, so the
-    call can be compared later against what was actually bought, played and
-    rated (get_stats(report="calibration")) and so a repeat ask starts from what
-    was already decided. Recording is silent bookkeeping: mention it in one
-    line, never re-explain the verdict.
-
-    Identity: game_id, Steam appid or name — at least one; `verdict` is required
-    too. PREFER game_id when get_assessment_context already resolved the
-    candidate, and when correcting or re-recording. Unlike the read tools,
-    `name` here is matched EXACTLY (case-insensitively) or MINTED — never
-    partially or fuzzily: a loose write silently files the verdict onto a
-    near-miss sibling ("Alan Wake 2" onto "Alan Wake") with created=false, while
-    a typo that mints a phantom row is visible and repairable with merge_games.
-    A candidate the library has never seen therefore gets a games row minted
-    (created=true), which is normal for an unowned title; pass name= as well
-    when only an appid is known, since a row cannot be minted without a title.
-
-    The response's `resolution` block reports mode ("by_id", "by_appid",
-    "by_assessed_appid", "exact", "minted"), the `query` used, and
-    `matched_name` — the row actually written to. Whenever mode is not "by_id",
-    check matched_name IS the candidate; if it is not,
-    void_assessment(assessment_id=...) deletes that row, then re-record with
+    Identity: game_id, Steam appid or name — at least one — plus `verdict`
+    (required). PREFER game_id once get_assessment_context resolved the
+    candidate, and when correcting. `name` is matched EXACTLY (case-insensitive)
+    or MINTED (created=true, normal for an unowned title) — never fuzzily; pass
+    name= alongside an appid-only candidate, since a row cannot be minted
+    without a title. `resolution` reports mode ("by_id", "by_appid",
+    "by_assessed_appid", "exact", "minted"), the `query` and `matched_name` (the
+    row written to): whenever mode is not "by_id", check matched_name IS the
+    candidate; if not, void_assessment(assessment_id=...) then re-record with
     game_id.
 
-    Everything besides identity and verdict is optional and should mirror the
-    verdict block you just delivered: summary, the craft numbers, fit_call,
-    anchors_cited, flags, price seen and target, instead_game_id, steam_appid,
-    context, the DECLARED skill/skill_version/model, and the evaluation card's
-    presentation fields (elevator_pitch, craft_note, for_you_if, not_for_you_if,
-    comparisons, why_care). assessed_at backfills a past verdict; it defaults to
-    now. Over-cap lists are rejected and long text truncated. Field-level
-    authoring rules and caps: get_skill(skill="game-quality",
-    path="recording.md").
+    Everything else is optional and mirrors the delivered verdict block:
+    summary, the craft numbers, fit_call, anchors_cited, flags, price
+    seen/target, instead_game_id, steam_appid, context, the DECLARED
+    skill/skill_version/model, and the card's presentation fields
+    (elevator_pitch, craft_note, for_you_if, not_for_you_if, comparisons,
+    why_care). assessed_at backfills a past verdict (default now). Over-cap
+    lists are rejected, long text truncated. Field rules and caps:
+    get_skill(skill="game-quality", path="recording.md").
 
-    A single-game recording also answers with `package` — the evaluation card's
-    payload, assembled best-effort from the library, media providers and IGDB.
-    Anything that failed or timed out is named in package.errors and the rest
-    still comes back; the verdict is recorded either way. Not returned for
-    `items` or voids.
+    `package` is best-effort (library, media providers, IGDB): failed or
+    timed-out parts are named in package.errors, and the verdict is recorded
+    either way. Not returned for `items`.
 
-    At most one assessment per game per UTC day: re-recording the same day
-    REPLACES that day's row (replaced=true) rather than appending, so refining a
-    call mid-conversation is safe. A later day appends, and repeat_ask reports
-    how many prior verdicts exist plus the last one's date and call.
+    One assessment per game per UTC day: a same-day re-record REPLACES that row
+    (replaced=true); a later day appends, and repeat_ask gives the prior count
+    plus the last date and call.
 
-    This NEVER writes the wishlist and never affects recommendations: a
-    wishlist_for_sale verdict on a game that isn't wishlisted comes back with
-    suggested_action naming the add_game_to_platform call to offer, and recorded
-    verdicts deliberately do not feed the taste profile or discover_games.
+    NEVER writes the wishlist or feeds recommendations: a wishlist_for_sale
+    verdict on an unwishlisted game returns a suggested_action naming the
+    add_game_to_platform call to offer.
 
-    `items` (max 200) — a list of these same keys — records several at once,
-    status ok/error per item in input order; one bad item never fails the rest.
+    `items` (max 200, same keys) records several; per-item status ok/error in
+    input order, and one bad item never fails the rest.
     """
     from .tools.assessment import record_assessment as _record
     from .tools.assessment import record_assessments_batch as _many
@@ -1338,67 +1278,54 @@ async def add_game_to_platform(
     dry_run: bool = False,
 ) -> AddGameToPlatformResponse:
     """
-    Manually add a game to a platform — one game, or many in one call.
+    Call to record a game the syncs don't cover (physical copies, unreported
+    digital titles, itch.io), a wishlist entry, or a correction to an existing
+    platform row — one game, or many via `items`. Returns the row written
+    (game_id, created, platform, owned, acquisition, wishlist_source,
+    store_push).
 
-    For physical copies, unreported digital titles, itch.io purchases and other
-    games that are not synced automatically — and, via delisted/unowned_at
-    below, to correct a platform row that already exists. Provide exactly one of
-    name or game_id: name matches an existing game by EXACT name or CREATES a
-    new entry, so a typo mints a phantom row instead of erroring, while game_id
-    targets an existing row and never creates anything (unknown id = error) —
-    prefer game_id when correcting. platform accepts steam, epic, gog, nintendo,
-    switch2, ps5, itchio, xbox or other.
+    Exactly one of name or game_id: name matches an EXACT name or CREATES a new
+    game (a typo mints a phantom row rather than erroring); game_id targets an
+    existing row and never creates (unknown id = error) — prefer it when
+    correcting. platform: steam, epic, gog, nintendo, switch2, ps5, itchio, xbox
+    or other.
 
-    identifier_type/identifier_value store an external ID. With owned=False only
-    identifier_type='steam_appid' (and platform='steam') is accepted, landing on
-    the wishlist entry's store_identifier so prices resolve immediately.
-    acquired_at, price_paid, price_currency, purchase_source and bundle_name
-    record the acquisition on the new ownership row in the same call — same
-    vocabulary as set_acquisition; they require owned=True. Either call also
-    clears a matching wishlist entry now fulfilled.
+    identifier_type/identifier_value store an external ID; with owned=False only
+    identifier_type='steam_appid' (platform='steam') is accepted, landing on the
+    wishlist entry so prices resolve. acquired_at, price_paid, price_currency,
+    purchase_source and bundle_name record the acquisition in the same call
+    (set_acquisition's vocabulary; owned=True only). Either call clears a
+    matching wishlist entry now fulfilled.
 
-    owned=False records a WISHLIST entry instead of an owned copy — useful for
-    PSN, which has no wishlist API. wishlist_source (owned=False only) labels
-    its origin: "manual" (default) or "assessment" (a promotion out of a
-    game-quality "wishlist for sale" verdict), so it never blurs into
-    hand-curated entries; sync-reserved sources ("steam", "dekudeals") are
-    rejected. New rows only — an already-wishlisted game keeps its stored
-    source.
+    owned=False records a WISHLIST entry instead (e.g. PSN, which has no
+    wishlist API). wishlist_source (owned=False only): "manual" (default) or
+    "assessment" (promoted from a "wishlist for sale" verdict);
+    "steam"/"dekudeals" are rejected, and an already-wishlisted game keeps its
+    stored source.
 
-    push_to_store=True (owned=False only) additionally pushes the add to the
-    REAL store wishlist using the stored web session
-    (create_session_ingest_link(provider="steam_refresh")) — steam only, and it
-    needs an appid, passed via identifier_type='steam_appid' or already on file.
-    A failed push still records the local entry, with the error in
-    store_push.error. switch2 has no wishlist write API, so store_push returns a
-    DekuDeals search link instead. Never pushes unless explicitly asked; dry_run
-    never pushes.
+    push_to_store=True (owned=False only; only when asked) also adds it to the
+    REAL Steam wishlist via the stored session
+    (create_session_ingest_link(provider="steam_refresh")), needing an appid
+    passed or on file. A failed push still records locally (store_push.error);
+    switch2 gets a DekuDeals search link instead; dry_run never pushes.
 
-    delisted (owned=True only) corrects the ownership row's delisted flag — True
-    when the store page is gone and ownership comes from the account license
-    list, False when the game is still listed. It is the only manual write path
-    for that column and it PINS the value as a manual override, so neither the
-    Steam sync nor a later license audit flips it back; release it with
+    delisted (owned=True only; the column's only manual write path) sets the
+    flag (True = store page gone, ownership from the license list) and PINS it
+    against syncs and license audits; release with
     set_playtime(clear=["delisted"]).
 
-    unowned_at (owned=True only) records that ownership ENDED — a refund, a
-    revoked key, a lapsed subscription title. Pass the date it ended: the
-    EXISTING ownership row flips to owned=0 and keeps its acquisition history,
-    identifiers and playtime, so it drops out of every aggregate (all filter
-    owned=1) without delete_game's collateral damage. It requires a row that
-    already exists — this never mints one — and it is NOT owned=False, which
-    records a wishlist entry. The flag is pinned as a manual override so a
-    source that keeps listing the title can't re-own it; unowned_at="none"
-    undoes the whole thing.
+    unowned_at="YYYY-MM-DD" (owned=True only) records that ownership ENDED
+    (refund, revoked key, lapsed subscription): the EXISTING row flips to
+    owned=0 keeping acquisition, identifiers and playtime, and leaves every
+    aggregate. Never mints a row, and is not owned=False (a wishlist entry).
+    Pinned so a source can't re-own it; unowned_at="none" undoes it.
 
-    `items` (max 200) — a list taking exactly the parameters above — adds many;
-    created then counts items that minted a brand-new game, and per-item status
-    is ok/error in input order.
+    `items` (max 200, the same parameters): created counts newly minted games;
+    per-item status ok/error in input order.
 
-    dry_run=True runs the identical validation without writing. Preview statuses
-    are computed against the current database, so in `items` mode a
-    to-be-created game reports game_id null and cross-item interactions are not
-    simulated.
+    dry_run=True validates without writing, against the current database: in
+    `items` mode a to-be-created game reports game_id null and cross-item
+    effects are not simulated.
     """
     from .tools.platforms import (
         add_game_to_platform as _add,
@@ -1810,62 +1737,50 @@ async def import_purchases(
     create_missing: bool = True,
 ) -> ImportPurchasesResponse:
     """
-    Import purchase history (dates, prices, bundles) from storefront accounts.
+    Call to backfill acquisition dates, prices and bundles from storefront
+    purchase histories. Returns per-source status, counters and the capped
+    created_details / unmatched / skipped / bundles_needing_split lists.
 
-    Fetches each source's purchase history and records it through the same
-    machinery as set_acquisition's items mode: by default only missing (NULL)
-    acquisition fields are filled, so re-running never clobbers values set by
-    hand (overwrite=True replaces them). Records carrying a store identifier
-    (GOG product ids, Steam appids) match identifier-first, so a renamed or
-    localized library title still resolves; name-based tiers are the fallback.
+    Writes through set_acquisition's items machinery: only missing (NULL)
+    acquisition fields are filled unless overwrite=True. Records carrying a
+    store identifier (GOG product id, Steam appid) match identifier-first, then
+    by name.
 
-    A purchase is a definitive ownership signal, so create_missing defaults
-    True: a single-game purchase matching no library game is created as an owned
-    game. A record whose content_type is nested matches by exact name only and
-    is minted nested, linked to a resolved parent — so a DLC never becomes a
-    phantom base game nor attaches its spend onto the base row. Because a bad
-    mint is a duplicate a human must clean up, two classes are refused outright
-    into create_refused_details (counted as unmatched): a nested record that
-    resolves no parent, and a title that is only an edition/alias variant of an
-    existing row ("STRAFE: Millennium Edition" beside "STRAFE: Gold Edition").
-    create_missing=False routes every miss to unmatched. dry_run=True previews
-    the converted items plus a would_create list, without writing.
+    create_missing (default True) mints an owned game for a single-game purchase
+    matching nothing; a nested-content record matches by exact name only and is
+    minted nested under a resolved parent. Refused into create_refused_details
+    (counted unmatched): a nested record with no resolvable parent, and an
+    edition/alias variant of an existing row. create_missing=False routes every
+    miss to unmatched. dry_run=True previews the converted items plus
+    would_create, without writing.
 
-    sources defaults to all registered importers. Each needs its own stored
-    session, minted with create_session_ingest_link:
-    - "epic" → epic (provider "epic", separate from the Legendary launcher
-      session that syncs ownership). Giveaway claims become price-0 "free".
-    - "eshop" → switch2 (provider "nintendo"). Free downloads get price 0.
-    - "gog" → gog (no ingest link: it reuses the lgogdownloader session — run
-      `lgogdownloader --login` if it errors). An order total with no per-product
-      prices is split evenly.
+    sources defaults to every importer; each needs its own stored session from
+    create_session_ingest_link:
+    - "epic" → epic (provider "epic", not the Legendary launcher session).
+      Giveaways → price-0 "free".
+    - "eshop" → switch2 (provider "nintendo"). Free downloads → price 0.
+    - "gog" → gog (no link; reuses lgogdownloader — run `lgogdownloader --login`
+      on error). Order totals without per-product prices split evenly.
     - "humble" → steam/gog/other by key type (provider "humble"). Bundle prices
-      split evenly; Humble Choice items get purchase_source "subscription", with
-      game-less plan payments attributed across the zero-priced monthly drops
-      they funded. Ebook/audio/video items are excluded to skipped.
+      split evenly; Humble Choice → purchase_source "subscription", plan
+      payments spread over the monthly drops; ebook/audio/video → skipped.
     - "steam" → steam (provider "steam_refresh"; legacy "steam_store"). Cart
-      totals split evenly; Complimentary and Gift/Guest Pass licenses become
-      price-0 "free"/"gift".
-    Refunds, consumables, in-game currency and gifts bought for someone else are
-    skipped everywhere.
+      totals split evenly; Complimentary and Gift/Guest Pass → price-0
+      "free"/"gift".
+    Refunds, consumables, in-game currency and gifts for others are skipped.
 
-    Multi-game bundles can't attach to a single library row, so instead of
-    landing in unmatched they are diverted to each source's
-    bundles_needing_split list, whose keys line up with
-    split_bundle_acquisition's parameters — look up each bundle's constituents
-    and pass it there; nothing is written for a bundle here. One order often
-    carries a key per platform, so entries sharing a name, date, price and
-    source collapse into ONE, with `platforms` listing them all.
-    already_recorded=True means a previous split already wrote this bundle_name
-    on any platform — skip it, since every import re-surfaces every bundle. DLC
-    bundles for one game land here too — split them onto the base game, not
-    invented per-DLC rows.
+    Multi-game bundles write nothing: they land in bundles_needing_split, whose
+    keys match split_bundle_acquisition's parameters — look up the constituents
+    and pass each bundle there. Entries sharing name, date, price and source
+    collapse into one, `platforms` listing every key's platform.
+    already_recorded=True means a prior split wrote this bundle_name — skip it.
+    DLC bundles for one game land here too; split them onto the base game, not
+    per-DLC rows.
 
-    Sources run concurrently; one source's auth/network failure (status "error",
-    nothing written for it) never blocks the others. created_details, unmatched,
-    skipped and bundles_needing_split are each CAPPED at 200 entries per source,
-    with <list>_count the true total and <list>_truncated the flag; the counters
-    and totals always report the true numbers.
+    Sources run concurrently; a failing source (status "error", nothing written)
+    never blocks the others. The four lists are CAPPED at 200 per source with
+    <list>_count the true total and <list>_truncated the flag; counters always
+    report true totals.
     """
     from .tools.acquisition import import_purchases as _import_purchases
     return await _import_purchases(

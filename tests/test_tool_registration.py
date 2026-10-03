@@ -369,9 +369,12 @@ class SchemaBudgetTests(unittest.IsolatedAsyncioTestCase):
     The 2026-09-01 amendment trimmed descriptions to 53,258 chars / 146,434
     payload bytes and moved record_assessment's field-level authoring rules
     into skills/game-quality/recording.md (ADR 0006: methodology lives with
-    the skill, not on the wire). These caps sit ~8% above that, so ordinary
-    editing is free and a new tool or a docstring that grows back into prose
-    fails here instead of silently costing every turn.
+    the skill, not on the wire). The 2026-10-03 widget-UX pass (spec §2.3)
+    rewrote the six largest descriptions as when-to-call / what-comes-back /
+    call-time rules only, moving rationale to skills/ and docs/patterns/:
+    48,799 chars / 142,994 payload bytes. These caps sit ~5% above that, so
+    ordinary editing is free and a new tool or a docstring that grows back into
+    prose fails here instead of silently costing every turn.
 
     Output schemas are inside the payload cap but have no cap of their own:
     whether hosts forward outputSchema to the model is unmeasured (see the
@@ -379,12 +382,12 @@ class SchemaBudgetTests(unittest.IsolatedAsyncioTestCase):
     """
 
     # Whole serialized tools/list payload, json.dumps(separators=(",", ":")).
-    MAX_TOTAL_PAYLOAD_BYTES = 158_000  # achieved 146,434
+    MAX_TOTAL_PAYLOAD_BYTES = 150_000  # achieved 142,994 (2026-10-03)
     # Sum of every tool description (chars, as the model reads them).
-    MAX_TOTAL_DESCRIPTION_CHARS = 57_000  # achieved 53,258
+    MAX_TOTAL_DESCRIPTION_CHARS = 51_200  # achieved 48,799 (2026-10-03)
     # No single tool may hold a disproportionate share of that budget.
-    MAX_TOOL_DESCRIPTION_CHARS = 3_900  # largest: get_stats, 3,575
-    MAX_TOOL_PAYLOAD_BYTES = 11_000  # largest: get_stats, 10,045
+    MAX_TOOL_DESCRIPTION_CHARS = 3_160  # largest: set_acquisition, 3,011
+    MAX_TOOL_PAYLOAD_BYTES = 9_970  # largest: get_stats, 9,496
 
     async def _serialized(self) -> dict[str, tuple[int, int]]:
         """Per tool: (serialized payload bytes, description chars)."""
