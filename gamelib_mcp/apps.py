@@ -99,6 +99,7 @@ GAME_CARDS_HTML = (
     + apps_shared.A11Y_CSS
     + apps_shared.PANEL_CSS
     + apps_shared.COMPONENTS_CSS
+    + apps_shared.BINDER_CSS
     + r"""
   /* ---- shared cover block ---- */
 """
@@ -470,6 +471,7 @@ GAME_CARDS_HTML = (
 """
     + apps_shared.DOM_HELPERS_JS
     + apps_shared.COMPONENTS_JS
+    + apps_shared.BINDER_JS
     + "\n"
     + apps_shared.COVER_HUE_JS
     + "\n"

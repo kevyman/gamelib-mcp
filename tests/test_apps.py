@@ -910,7 +910,8 @@ class PreviewScriptTests(unittest.TestCase):
 
 
 class DesignSystemTests(unittest.TestCase):
-    """Spec 2026-10-03 §1.1–§1.2: host theming, type scale, touch, focus."""
+    """Spec 2026-10-03 §1.1–§1.2 as amended by the Binder (2026-10-04 §1.1):
+    host theming, the four-size / three-weight type scale, touch, focus."""
 
     def test_documents_declare_both_schemes_and_paint_no_page(self) -> None:
         for name, html in WIDGETS:
@@ -931,18 +932,68 @@ class DesignSystemTests(unittest.TestCase):
         ):
             self.assertIn(marker, apps_shared.TOKENS_CSS)
 
+    def test_the_binder_tokens_are_ported_from_the_reference_sheet(self) -> None:
+        # §1.1: every new token, light-dark() where the theme matters, a plain
+        # value where it doesn't (docs/specs/assets/binder/gl.css).
+        tokens = apps_shared.TOKENS_CSS
+        for marker in (
+            "--gl-keyline: light-dark(rgba(20, 20, 19, 0.12), rgba(250, 249, 245, 0.14));",
+            "--gl-deep: #141413;",
+            "--gl-deep-ink: #FAF9F5;",
+            "--gl-ribbon-ink: #141413;",
+            "--gl-ribbon-good: #7AB948;",
+            "--gl-ribbon-ok: #D1A041;",
+            "--gl-ribbon-bad: #EE8884;",
+            "--gl-ribbon-none: #C2C0B6;",
+            "--gl-mono: var(--font-mono, ui-monospace, Menlo, Consolas, monospace);",
+            '--gl-serif: ui-serif, Georgia, "Times New Roman", serif;',
+            "--gl-title: max(12px, var(--font-heading-lg-size, 20px));",
+            "--gl-heavy: 800;",
+            # the brushed-metal stops: dark hues, light-token lightness under light
+            "--gl-rarity-good-1: light-dark(#265B19, #437426);",
+            "--gl-rarity-ok-3: light-dark(#D1A041, #F0D08A);",
+            "--gl-rarity-bad-2: light-dark(#A73D39, #EE8884);",
+            "--gl-rarity-good: conic-gradient(from 210deg, var(--gl-rarity-good-1), var(--gl-rarity-good-2) 9%,",
+            # what every component reads, defaulting to "common"
+            "--gl-tier: var(--gl-border-strong);",
+            "--gl-tier-text: var(--gl-text-2);",
+            "--gl-tier-fill: var(--gl-ribbon-none);",
+            "--gl-rarity: none;",
+        ):
+            self.assertIn(marker, tokens)
+        # The grain opacity is a number, which light-dark() cannot carry: it
+        # follows the same light / dark selection as the plain fallback.
+        self.assertIn(":root { --gl-grain-opacity: 0.035; }", tokens)
+        self.assertIn(':root:not([data-theme="light"]) { --gl-grain-opacity: 0.06; }', tokens)
+        self.assertIn(':root[data-theme="dark"] { --gl-grain-opacity: 0.06; }', tokens)
+        self.assertNotRegex(tokens, r"--gl-grain-opacity: light-dark\(")
+        # The tier classes only re-point the four tier tokens.
+        for tier, fill in (("good", "good"), ("ok", "ok"), ("bad", "bad")):
+            self.assertIn(
+                f".tier-{tier} {{ --gl-tier: var(--gl-{tier}-edge); --gl-tier-text: var(--gl-{tier}); "
+                f"--gl-tier-fill: var(--gl-ribbon-{fill}); --gl-rarity: var(--gl-rarity-{tier}); }}",
+                tokens,
+            )
+        self.assertIn(
+            ".tier-none { --gl-tier: var(--gl-border-strong); --gl-tier-text: var(--gl-text-2); "
+            "--gl-tier-fill: var(--gl-ribbon-none); --gl-rarity: none; }",
+            tokens,
+        )
+
     def test_no_hex_color_outside_the_token_layer(self) -> None:
         # Raw colors (hex, rgb/rgba, hsl) are allowed in exactly three places:
-        # (a) TOKENS_CSS, (b) the verdict stamp rule, (c) the cover plate —
-        # its name-seeded gradient (coverNode) and its ink text — and nothing
-        # else. The stamp and the plate's ink are built from tokens today, so
-        # (b) and (c) are allowances, not uses.
+        # (a) TOKENS_CSS, (b) the cover plate — its name-seeded gradient
+        # (coverNode) and its ink text — and (c) the verdict stamp rule. The
+        # plate's ink and the stamp are built from tokens today, so (b) and
+        # (c) are allowances, not uses.
+        # TODO(Binder Phase 2B): the ribbon replaces the stamp; drop (c) when
+        # apps_eval.py's .stamp CSS goes.
         raw = r"#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\("
         for name, html in WIDGETS:
             css = widget_css(html).replace(apps_shared.TOKENS_CSS, "")
-            css = re.sub(r"[^{}]*\.stamp[^{}]*\{[^{}]*\}", "", css)          # (b)
-            css = re.sub(r"[^{}]*\.cover-fallback[^{}]*\{[^{}]*\}", "", css)  # (c) ink
-            js = widget_js(html).replace(apps_shared.COVER_NODE_JS, "")       # (c) gradient
+            css = re.sub(r"[^{}]*\.stamp[^{}]*\{[^{}]*\}", "", css)          # (c)
+            css = re.sub(r"[^{}]*\.cover-fallback[^{}]*\{[^{}]*\}", "", css)  # (b) ink
+            js = widget_js(html).replace(apps_shared.COVER_NODE_JS, "")       # (b) gradient
             with self.subTest(widget=name):
                 self.assertEqual(re.findall(raw, css), [])
                 self.assertEqual(re.findall(r"[\"']#[0-9a-fA-F]{3,8}[\"']|rgba?\(|hsla?\(", js), [])
@@ -963,13 +1014,14 @@ class DesignSystemTests(unittest.TestCase):
                       "--gl-on-stage-dim:", "--gl-shadow-ink:"):
             self.assertIn(token, group)
 
-    def test_three_sizes_two_weights_nothing_below_12px(self) -> None:
-        # Exactly three size tokens exist, and nothing else sets a size.
+    def test_four_sizes_three_weights_nothing_below_12px(self) -> None:
+        # Exactly four size tokens exist (cap 12, body 14, h 16, title 20),
+        # and nothing else sets a size; three weights (regular 400, strong
+        # 600, heavy 800), which the mono numerals share.
         defined = re.findall(r"--gl-([a-z0-9-]+): max\(12px,", apps_shared.TOKENS_CSS)
-        self.assertEqual(sorted(defined), ["body", "cap", "h"])
-        self.assertNotIn("--gl-title", apps_shared.TOKENS_CSS)
-        sizes = {"var(--gl-cap)", "var(--gl-body)", "var(--gl-h)"}
-        weights = {"var(--gl-regular)", "var(--gl-strong)"}
+        self.assertEqual(sorted(defined), ["body", "cap", "h", "title"])
+        sizes = {"var(--gl-cap)", "var(--gl-body)", "var(--gl-h)", "var(--gl-title)"}
+        weights = {"var(--gl-regular)", "var(--gl-strong)", "var(--gl-heavy)"}
         for name, html in WIDGETS:
             css = widget_css(html)
             with self.subTest(widget=name):
@@ -977,39 +1029,74 @@ class DesignSystemTests(unittest.TestCase):
                 self.assertTrue(set(re.findall(r"font-weight:\s*([^;}]+)", css)) <= weights)
                 # the shorthand would smuggle a size past the check above
                 self.assertEqual(re.findall(r"(?<![-\w])font:(?!\s*inherit)", css), [])
-        for token, px in (("cap", 12), ("body", 14), ("h", 16)):
+        for token, px in (("cap", 12), ("body", 14), ("h", 16), ("title", 20)):
             self.assertRegex(
                 apps_shared.TOKENS_CSS,
                 rf"--gl-{token}: max\(12px, var\(--font-[a-z-]+-size, {px}px\)\);",
             )
+        for token, value in (("regular", "var(--font-weight-normal, 400)"),
+                             ("strong", "var(--font-weight-semibold, 600)"), ("heavy", "800")):
+            self.assertIn(f"--gl-{token}: {value};", apps_shared.TOKENS_CSS)
+        # the heavy weight is the Binder's titles, badge numbers and ribbons
+        for block, selector in ((apps_shared.PLATE_CSS, ".plate-title"),
+                                (apps_shared.BADGE_CSS, ".badge"),
+                                (apps_shared.RIBBON_CSS, ".ribbon")):
+            rule = block.split(selector + " {", 1)[1].split("}", 1)[0]
+            self.assertIn("font-weight: var(--gl-heavy);", rule)
 
     def test_focus_rings_hit_areas_and_reduced_motion(self) -> None:
         self.assertIn(
             ":focus-visible { outline: 2px solid var(--gl-text); outline-offset: 2px; }",
             apps_shared.A11Y_CSS,
         )
+        # gl.css takes the ring 3px out on the card and the pill; the color
+        # stays the text color (its 0.4-alpha border-strong misses 3:1).
+        self.assertIn(
+            ".frame:focus-visible, .btn:focus-visible, a.art:focus-visible { outline-offset: 3px; }",
+            apps_shared.A11Y_CSS,
+        )
+        self.assertNotIn("outline: 2px solid var(--gl-border-strong)", "".join(
+            widget_css(html) for _, html in WIDGETS))
         self.assertIn("inset: -4px;", apps_shared.A11Y_CSS)    # 32px on pointer devices
         self.assertIn("inset: -6px;", apps_shared.A11Y_CSS)    # 44px on touch
         self.assertIn("@media (prefers-reduced-motion: reduce)", apps_shared.A11Y_CSS)
+        # Binder pills: 40px on a pointer, 44px on touch
         self.assertIn("html.touch .btn, html.touch .disclosure { min-height: 44px; }",
                       apps_shared.CONTROLS_CSS)
         self.assertIn("min-height: 40px;", apps_shared.CONTROLS_CSS)
+        self.assertIn("border-radius: var(--gl-r-full);",
+                      apps_shared.CONTROLS_CSS.split(".btn, .disclosure {", 1)[1].split("}", 1)[0])
         # the skeleton only pulses when motion is allowed
-        self.assertIn("@media (prefers-reduced-motion: no-preference)", apps_shared.SKELETON_CSS)
+        skeleton = apps_shared.SKELETON_CSS
+        motion = skeleton[skeleton.index("@media (prefers-reduced-motion: no-preference)"):]
+        self.assertIn(".sk { animation: skel-pulse 1600ms ease-in-out infinite; }", motion)
+        self.assertEqual(skeleton.count("animation"), 1)
+        self.assertNotIn("@keyframes", skeleton)               # the pulse is MOTION_CSS's
 
-    def test_nothing_tilts_but_the_verdict_stamp(self) -> None:
-        # The toybox stickers are gone. The stamp keeps its -3deg; the only
-        # other rotate() is the disclosure chevron flipping when open.
+    def test_rotations_are_the_deal_the_pips_and_the_chevron(self) -> None:
+        # The only rotate()s: the deal-in's -1deg, the 45deg pip diamond and
+        # the disclosure chevron's 180deg flip. The hover tilt's rotateX/Y
+        # live in the fine-pointer hover query only (BinderComponentTests).
+        # TODO(Binder Phase 2B): the -3deg verdict stamp goes with the stamp;
+        # until then its rules are set aside here like the color allow-list.
+        allowed = {"rotate(-1deg)", "rotate(45deg)", "rotate(180deg)"}
         for name, html in WIDGETS:
+            css = re.sub(r"[^{}]*\.stamp[^{}]*\{[^{}]*\}", "", widget_css(html))
             with self.subTest(widget=name):
-                found = sorted(re.findall(r"rotate\([^)]*\)", widget_css(html)))
-                allowed = ["rotate(180deg)", "rotate(-3deg)"]
-                self.assertTrue(set(found) <= set(allowed), found)
-        self.assertIn("transform: rotate(-3deg);", widget_css(apps_eval.EVAL_CARD_HTML))
+                found = set(re.findall(r"rotate\([^)]*\)", css))
+                self.assertTrue(found <= allowed, found)
+                self.assertEqual(found, allowed)
+        self.assertIn("@keyframes deal { from { opacity: 0; transform: translateY(12px) rotate(-1deg); } }",
+                      apps_shared.MOTION_CSS)
 
     def test_numbers_sit_in_tabular_figures(self) -> None:
-        for block in (apps_shared.CHIP_CSS, apps_shared.TAG_CSS, apps_shared.PANEL_CSS):
+        for block in (apps_shared.CHIP_CSS, apps_shared.TAG_CSS, apps_shared.PANEL_CSS,
+                      apps_shared.BADGE_CSS):
             self.assertIn("font-variant-numeric: tabular-nums;", block)
+        # stat values, badge numbers, card numbers and chip figures are mono
+        for block in (apps_shared.STATS_CSS, apps_shared.BADGE_CSS, apps_shared.PLATE_CSS,
+                      apps_shared.CHIP_CSS, apps_shared.RIBBON_CSS):
+            self.assertIn("font-family: var(--gl-mono);", block)
 
 
 class BridgeProtocolTests(unittest.TestCase):
@@ -1181,6 +1268,31 @@ class SharedComponentTests(unittest.TestCase):
         self.assertIn(".tags .chip { padding: 1px 6px;", apps_shared.TAG_CSS)
         self.assertIn("html.touch .tags .chip { min-height: 0; }", apps_shared.TAG_CSS)
 
+    def test_the_chip_is_a_tier_border_and_a_mono_figure(self) -> None:
+        # The Binder chip (gl.css §12): 1px border in the tier edge, radius 4,
+        # the surface as its ground (no tier fill, and readable on art); a
+        # figure ("83", "25h") in the mono numerals in the tier's text color,
+        # a phrase ("Very positive") a b.word in the label face.
+        css = apps_shared.CHIP_CSS
+        chip = css.split("  .chip {\n", 1)[1].split("}", 1)[0]
+        for decl in ("border: 1px solid var(--gl-tier);", "border-radius: var(--gl-r-xs);",
+                     "background: var(--gl-surface);", "min-height: 24px;"):
+            self.assertIn(decl, chip)
+        value = css.split("  .chip b {\n", 1)[1].split("}", 1)[0]
+        for decl in ("font-family: var(--gl-mono);", "font-size: var(--gl-h);",
+                     "color: var(--gl-tier-text);"):
+            self.assertIn(decl, value)
+        word = css.split("  .chip b.word {\n", 1)[1].split("}", 1)[0]
+        self.assertIn("font-family: var(--gl-font);", word)
+        self.assertIn("font-weight: var(--gl-strong);", word)
+        self.assertIn(".chip .meter-fill { display: block; height: 100%; background: var(--gl-tier-text); }", css)
+        # tier color reaches the border and the value only: no tinted fill
+        self.assertIn(".chip.tier-good, .chip.tier-ok, .chip.tier-bad { background: var(--gl-surface); "
+                      "border-color: var(--gl-tier); color: var(--gl-text-2); }", css)
+        js = apps_shared.SCORE_CHIP_JS
+        self.assertIn('chip.appendChild(el("b", isFigure(value) ? null : "word", value));', js)
+        self.assertIn("return /\\d/.test(t) && !/\\s/.test(t);", js)
+
     def test_match_bar(self) -> None:
         js = apps_shared.MATCH_BAR_JS
         for marker in (
@@ -1222,6 +1334,18 @@ class SharedComponentTests(unittest.TestCase):
         neutral = js[js.index('if (kind === "neutral") {'):js.index('if (kind === "grid") {')]
         self.assertIn('line.appendChild(sk("sk-thumb"));', neutral)
         self.assertIn("lines(text, 3);\n      chips(text, 3);", neutral)
+        # Binder look (gl.css §17): every card and panel is a common frame —
+        # 1px hairline, the surface-colored frame, a 2px inner keyline —
+        # holding inset blocks.
+        frame = apps_shared.SKELETON_CSS.split("  .sk-card, .sk-panel {\n", 1)[1].split("}", 1)[0]
+        for decl in ("border: var(--gl-frame) solid var(--gl-surface);",
+                     "border-radius: var(--gl-r-card);",
+                     "box-shadow: 0 0 0 1px var(--gl-border), inset 0 0 0 2px var(--gl-border);"):
+            self.assertIn(decl, frame)
+        self.assertIn(".sk-card { border-width: 4px; border-radius: var(--gl-r-card-s); padding: 2px; }",
+                      apps_shared.SKELETON_CSS)
+        self.assertIn(".sk { background: var(--gl-inset); border-radius: var(--gl-r-xs); }",
+                      apps_shared.SKELETON_CSS)
         self.assertIn("function skeletonKind()", apps.GAME_CARDS_HTML)
         self.assertIn('if (!lastToolInput) return "neutral";', apps.GAME_CARDS_HTML)
         self.assertIn('function skeletonKind() { return "eval"; }', apps_eval.EVAL_CARD_HTML)
@@ -1262,6 +1386,17 @@ class SharedComponentTests(unittest.TestCase):
         js = apps_shared.NOTICE_JS
         self.assertIn('return it.what + (it.source ? " (" + it.source + ")" : "");', js)
         self.assertIn('text = "Couldn\'t load: " + parts.join(", ");', js)
+        # gl.css §18: led by the 16px outlined "!", built with createElementNS
+        # (svgEl), the text in its own span.
+        self.assertIn('var NOTICE_ICON = [["circle", { cx: 8, cy: 8, r: 6.5 }], '
+                      '["path", { d: "M8 4.8v3.8M8 11.1v.1" }]];', js)
+        self.assertIn('var icon = iconNode("0 0 16 16", NOTICE_ICON);', js)
+        self.assertIn('node.appendChild(el("span", null, text));', js)
+        self.assertIn("var node = document.createElementNS(SVG_NS, tag);", js)
+        notice = apps_shared.CONTROLS_CSS.split("  .notice {\n", 1)[1].split("}", 1)[0]
+        self.assertIn("display: flex;", notice)
+        self.assertIn("gap: 6px;", notice)
+        self.assertIn("  .notice > svg {\n    width: 16px;\n    height: 16px;", apps_shared.CONTROLS_CSS)
         for name, html in WIDGETS:
             with self.subTest(widget=name):
                 self.assertNotIn("some data unavailable", html)

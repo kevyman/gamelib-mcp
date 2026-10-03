@@ -95,6 +95,7 @@ EVAL_CARD_HTML = (
     + apps_shared.A11Y_CSS
     + apps_shared.PANEL_CSS
     + apps_shared.COMPONENTS_CSS
+    + apps_shared.BINDER_CSS
     + r"""  .eval {
     max-width: 760px;
     margin: 0 auto;
@@ -469,6 +470,7 @@ EVAL_CARD_HTML = (
 """
     + apps_shared.DOM_HELPERS_JS
     + apps_shared.COMPONENTS_JS
+    + apps_shared.BINDER_JS
     + apps_shared.COVER_HUE_JS
     + r"""  /* Same cover block as the game-cards widget: real art when we have it, a
      name-seeded gradient plate when we don't. */
