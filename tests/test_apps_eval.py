@@ -3,11 +3,15 @@
 Same approach as tests/test_apps.py: there is no headless-DOM harness for the
 widget JS, so these assert the module's registration/CSP contract and the
 presence of the render call-sites and host-quirk workarounds that the layout
-depends on, rather than executing the script.
+depends on, rather than executing the script — except the action row, whose
+three small builders also run under Node (``ActionRowBehaviourTests``).
 """
 
 import difflib
 import hashlib
+import json
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -96,6 +100,7 @@ class EvalCardCSPTests(unittest.TestCase):
                 "https://shared.akamai.steamstatic.com",
                 "https://shared.cloudflare.steamstatic.com",
                 "https://i.ytimg.com",
+                "https://assets.claude.ai",   # the host's own font files
             ],
         )
 
@@ -112,9 +117,13 @@ class EvalCardCSPTests(unittest.TestCase):
     def test_embed_url_uses_the_allowlisted_nocookie_host(self) -> None:
         # A src the CSP doesn't cover renders as a silently blank frame.
         self.assertIn(
-            'https://www.youtube-nocookie.com/embed/" + encodeURIComponent(trailer.video_id)',
+            'frame.src = "https://www.youtube-nocookie.com/embed/" + videoId;',
             apps_eval.EVAL_CARD_HTML,
         )
+        # encoded once; the watch link carries the same encoded id (B4)
+        self.assertIn("var videoId = encodeURIComponent(trailer.video_id);", apps_eval.EVAL_CARD_HTML)
+        self.assertIn('var watchUrl = "https://www.youtube.com/watch?v=" + videoId;', apps_eval.EVAL_CARD_HTML)
+        self.assertEqual(apps_eval.EVAL_CARD_HTML.count("encodeURIComponent(trailer.video_id)"), 1)
         self.assertNotIn("https://www.youtube.com/embed/", apps_eval.EVAL_CARD_HTML)
 
 
@@ -130,14 +139,37 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
         self.assertNotIn("innerHTML", apps_eval.EVAL_CARD_HTML)
 
     def test_every_verdict_has_a_stamp_label_and_color(self) -> None:
-        for verdict, label, cls in (
-            ("buy_now", "BUY NOW", "stamp-good"),
-            ("wishlist_for_sale", "WISHLIST FOR SALE", "stamp-ok"),
-            ("try_demo", "TRY THE DEMO", "stamp-p1"),
-            ("play_what_you_own", "PLAY WHAT YOU OWN", "stamp-p4"),
-            ("skip", "SKIP", "stamp-bad"),
+        # The words come from the shared, registry-checked VERDICT_LABELS (the
+        # stamp uppercases them in CSS); this map only picks the tier fill.
+        for verdict, cls in (
+            ("buy_now", "stamp-good"),
+            ("wishlist_for_sale", "stamp-ok"),
+            ("try_demo", "stamp-plain"),
+            ("play_what_you_own", "stamp-plain"),
+            ("skip", "stamp-bad"),
         ):
-            self.assertIn(f'{verdict}: ["{label}", "{cls}"]', apps_eval.EVAL_CARD_HTML)
+            self.assertIn(f'{verdict}: "{cls}"', apps_eval.EVAL_CARD_HTML)
+            self.assertIn(verdict, apps_shared.VERDICT_LABELS)
+        self.assertIn('var text = label("verdict", verdict);', apps_eval.EVAL_CARD_HTML)
+        for tier in ("good", "ok", "bad"):
+            self.assertIn(
+                f".stamp-{tier} {{ background: var(--gl-{tier}); color: var(--gl-surface); }}",
+                apps_eval.EVAL_CARD_HTML,
+            )
+
+    def test_the_stamp_keeps_its_brand_shape(self) -> None:
+        # One of the two deliberate brand elements left (spec §1.5): strong
+        # 2px border, hard 3px shadow, -3deg tilt.
+        css = apps_eval.EVAL_CARD_HTML.split("<style>")[1].split("</style>")[0]
+        start = css.index("  .stamp {")
+        rule = css[start:css.index("}", start)]
+        for decl in (
+            "border: 2px solid var(--gl-border-strong);",
+            "box-shadow: 3px 3px 0 var(--gl-border-strong);",
+            "transform: rotate(-3deg);",
+            "text-transform: uppercase;",
+        ):
+            self.assertIn(decl, rule)
 
     def test_render_branches_cover_the_whole_response_contract(self) -> None:
         # package -> full card, verdict -> note, else empty. There is no
@@ -146,11 +178,21 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
         for marker in (
             "if (data && data.package)",
             "else if (data && data.verdict)",
-            '"Recorded: "',
+            '"Recorded — " + label("verdict", data.verdict) + name',
             '"Nothing to display."',
         ):
             self.assertIn(marker, apps_eval.EVAL_CARD_HTML)
         self.assertNotIn("data.voided", apps_eval.EVAL_CARD_HTML)
+
+    def test_the_note_card_reads_as_words(self) -> None:
+        # "Recorded — Play what you own · Slay the Spire II", stamp beside it:
+        # the verdict goes through label(), never the raw literal.
+        self.assertIn('var name = data && data.name ? " · " + data.name : "";',
+                      apps_eval.EVAL_CARD_HTML)
+        self.assertNotIn('"Recorded: "', apps_eval.EVAL_CARD_HTML)
+        start = apps_eval.EVAL_CARD_HTML.index("function noteCard(text, verdict)")
+        body = apps_eval.EVAL_CARD_HTML[start:apps_eval.EVAL_CARD_HTML.index("function render(", start)]
+        self.assertIn("var stamp = verdict ? stampNode(verdict) : null;", body)
 
     def test_trailer_falls_back_when_the_media_element_fails(self) -> None:
         # Valve's constructed mp4 URLs are undocumented legacy surface and a
@@ -162,7 +204,7 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
 
     def test_pedigree_strip_renders_from_the_package(self) -> None:
         for marker in (
-            "pedigreeNode(wrap, pkg.pedigree)",
+            "pedigreeNode(parent, pkg.pedigree)",
             'section(parent, "From the studio")',
             'el("div", "ped-head", headline)',
             'el("div", "ped-pub", "published by " + ped.publisher_name)',
@@ -178,9 +220,9 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
         end = apps_eval.EVAL_CARD_HTML.index("function pedigreeNode(", start)
         badges = apps_eval.EVAL_CARD_HTML[start:end]
         self.assertIn("if (item.owned && rating != null) {", badges)
-        self.assertIn('el("span", "tag rated", rating + "/10")', badges)
+        self.assertIn("chips.push(youChip(rating));", badges)
         self.assertIn("} else if (critic != null && critic >= 0) {", badges)
-        self.assertIn("if (item.owned && rating == null) tags.appendChild", badges)
+        self.assertIn("chips.push(criticsChip(critic));", badges)
 
     def test_the_damper_branch_renders_the_header_line_alone(self) -> None:
         start = apps_eval.EVAL_CARD_HTML.index("function pedigreeNode(parent, ped)")
@@ -193,11 +235,13 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
         # The eval card is the only one that renders why_care (it is authored
         # content, not a neutral fact about the game), and it sits directly
         # under the elevator pitch — both inside the one pitch panel.
+        # Mixed-case words, uppercased by the eyebrow style (screen readers
+        # then read "People", not P-E-O-P-L-E).
         for kind, label, cls in (
-            ("people", "PEOPLE", "wc-people"),
-            ("studio", "STUDIO", "wc-studio"),
-            ("anticipation", "HYPE", "wc-hype"),
-            ("moment", "MOMENT", "wc-moment"),
+            ("people", "People", "wc-people"),
+            ("studio", "Studio", "wc-studio"),
+            ("anticipation", "Hype", "wc-hype"),
+            ("moment", "Moment", "wc-moment"),
         ):
             self.assertIn(f'{kind}: ["{label}", "{cls}"]', apps_eval.EVAL_CARD_HTML)
         self.assertIn(
@@ -213,26 +257,22 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
         # not argue from popularity, so no renderer may read it.
         self.assertNotIn("hypes", apps_eval.EVAL_CARD_HTML)
 
-    def test_anchor_pills_are_neutral_and_only_the_status_is_coloured(self) -> None:
+    def test_anchor_cards_are_neutral_and_carry_the_shared_chips(self) -> None:
         # The live card lit up "Cyberpunk 2077 6.6h" — a game he bounced off —
-        # in endorsement green. The pill is card-coloured now; the completion
-        # glyph carries good/bad, and an unstatused anchor carries neither.
-        for verdictish, cls in (
-            ("completed", "an-good"),
-            ("evergreen", "an-good"),
-            ("abandoned", "an-bad"),
-        ):
-            self.assertIn(f'"{cls}"', apps_eval.EVAL_CARD_HTML)
-            self.assertIn(f"{verdictish}: [", apps_eval.EVAL_CARD_HTML)
-        self.assertIn('playing: ["▶", "playing", ""]', apps_eval.EVAL_CARD_HTML)
+        # in endorsement green. The card stays neutral; its chips are the
+        # shared library chips ("You 6/10", "Played 6.6h", "Status
+        # Abandoned"), each tiered by what it says.
+        html = apps_eval.EVAL_CARD_HTML
         self.assertIn(
-            'el("span", "an-state" + (state[2] ? " " + state[2] : ""), state[0])',
-            apps_eval.EVAL_CARD_HTML,
+            "var chips = chipRow([youChip(a.rating), playedChip(hours, hours === 0),\n"
+            "        statusChip(a.completion_status)]);",
+            html,
         )
-        self.assertIn(".an-state.an-good { background: var(--good)", apps_eval.EVAL_CARD_HTML)
-        self.assertIn(".an-state.an-bad { background: var(--bad)", apps_eval.EVAL_CARD_HTML)
-        # …and the pill itself no longer paints an opinion.
-        self.assertNotIn("an-warn", apps_eval.EVAL_CARD_HTML)
+        self.assertIn("  .anchor {\n", html)
+        self.assertIn("    background: var(--gl-inset);\n    font-variant-numeric", html)
+        # the glyph pills and their local colors are gone
+        for gone in ("an-state", "an-good", "an-bad", "an-warn", "COMPLETION"):
+            self.assertNotIn(gone, html)
 
 
 class EvalCardLayoutTests(unittest.TestCase):
@@ -242,27 +282,159 @@ class EvalCardLayoutTests(unittest.TestCase):
     and the panels they build, in the order the card assembles them.
     """
 
+    @staticmethod
+    def _function(name: str, until: str) -> str:
+        html = apps_eval.EVAL_CARD_HTML
+        start = html.index(f"function {name}(")
+        return html[start:html.index(f"function {until}(", start)]
+
     def test_panels_assemble_in_the_reading_order(self) -> None:
-        start = apps_eval.EVAL_CARD_HTML.index("function evalCard(pkg)")
-        end = apps_eval.EVAL_CARD_HTML.index("function noteCard(", start)
-        body = apps_eval.EVAL_CARD_HTML[start:end]
+        # Spec §2.2: inline header (identity, scores, the call) → the verdict
+        # in words → media → the action row → the failure notice; the
+        # breakdown bodies (in place, and fullscreen) come after all of it.
+        body = self._function("evalCard", "noteCard")
+        order = [
+            "inlineCard(wrap, pkg)",
+            "actionsNode(wrap, pkg, more, appid)",
+            "errorsNode(wrap,",
+            "wrap.appendChild(inPlaceBody)",
+            'el("div", "fs-breakdown")',
+        ]
+        positions = [body.index(marker) for marker in order]
+        self.assertEqual(positions, sorted(positions))
+        inline = self._function("inlineCard", "evalCard")
         order = [
             "headerNode(pkg)",
             "pitchNode(wrap, pkg)",
-            "mediaNode(wrap, pkg.media || {}, game.name)",
-            "forYouNode(wrap, pkg.presentation || {})",
-            "anchorsNode(wrap,",
-            "lineageNode(wrap, pkg, comps)",
-            "similarNode(wrap, pkg.similar || {})",
-            "pedigreeNode(wrap, pkg.pedigree)",
-            "closingNode(wrap, pkg)",
-            "errorsNode(wrap,",
+            "mediaSlot(wrap, pkg.media || {}, (pkg.game || {}).name)",
         ]
-        positions = []
-        for marker in order:
-            self.assertIn(marker, body)
-            positions.append(body.index(marker))
+        positions = [inline.index(marker) for marker in order]
         self.assertEqual(positions, sorted(positions))
+
+    def test_the_call_sits_under_the_scores_before_the_pitch(self) -> None:
+        # The facts block used to close the card ~2,400px down; it is now
+        # inside the header panel, after the score row and craft note and
+        # before the summary/pitch panel is even built.
+        header = self._function("headerNode", "craftPercent")
+        order = [
+            "head.appendChild(coverNode(game))",
+            "var stamp = stampNode(pkg.verdict);",
+            "var chips = scoreChips(pkg);",
+            'el("div", "craft-note", pres.craft_note)',
+            "var call = callNode(pkg);",
+        ]
+        positions = [header.index(marker) for marker in order]
+        self.assertEqual(positions, sorted(positions))
+        call = self._function("callNode", "pitchNode")
+        self.assertIn("factChips(pkg, row);", call)
+        self.assertIn('scoreChip({ label: String(f), tier: "bad", cls: "flag" })', call)
+        self.assertIn('el("span", "call-label", "The call")', call)
+
+    def test_the_breakdown_stays_out_of_the_inline_tier(self) -> None:
+        # The height budget (≤900px at 760 with media, ≤1,300px at 360) holds
+        # only because the evidence sections are one click away: none of them
+        # may be called from the inline builders.
+        inline = (
+            self._function("inlineCard", "evalCard")
+            + self._function("headerNode", "craftPercent")
+            + self._function("pitchNode", "whyCareNode")
+        )
+        breakdown = self._function("breakdownNode", "actionsNode")
+        sections = (
+            "forYouNode(",
+            "anchorsNode(",
+            "lineageNode(",
+            "similarNode(",
+            "pedigreeNode(",
+            "pastNode(",
+            "errorDetailNode(",
+        )
+        for section_call in sections:
+            self.assertNotIn(section_call, inline)
+            self.assertIn(section_call, breakdown)
+        # …and the order inside the breakdown is the spec's.
+        positions = [breakdown.index(c) for c in sections]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_at_most_two_actions_and_none_without_either(self) -> None:
+        # One action row, built only when there is something to disclose or a
+        # store page to open; it holds the disclosure button and, at most, the
+        # store button — never a third action.
+        body = self._function("evalCard", "noteCard")
+        self.assertIn("var more = hasBreakdown(pkg);", body)
+        self.assertIn("var appid = storeAppid(pkg);", body)
+        self.assertIn(
+            "var inPlaceBody = more || appid ? actionsNode(wrap, pkg, more, appid) : null;",
+            body,
+        )
+        actions = self._function("actionsNode", "syncDisplayMode")
+        self.assertEqual(actions.count('el("div", "actions")'), 1)
+        self.assertEqual(actions.count("fullscreenOrDisclosure(row,"), 1)
+        # Two storeButton calls, on mutually exclusive branches (store alone,
+        # or store after the breakdown) — so the row never exceeds two.
+        self.assertEqual(actions.count("storeButton(row, appid);"), 2)
+        self.assertNotIn("row.appendChild(", actions)
+        self.assertIn(
+            'fullscreenOrDisclosure(row, "Full breakdown", function (body) { breakdownNode(body, pkg); },',
+            actions,
+        )
+
+    def test_store_button_follows_the_breakdown_only_with_an_appid(self) -> None:
+        actions = self._function("actionsNode", "syncDisplayMode")
+        # Second, after "Full breakdown", and only when an appid resolved.
+        self.assertLess(
+            actions.index('fullscreenOrDisclosure(row, "Full breakdown"'),
+            actions.index("if (appid) storeButton(row, appid);"),
+        )
+        # No breakdown: the row is the store button alone (evalCard only
+        # reaches this branch when an appid exists).
+        alone = actions[actions.index("if (!more) {"):actions.index("var d = fullscreenOrDisclosure(")]
+        self.assertIn("storeButton(row, appid);", alone)
+        self.assertIn("return null;", alone)
+
+    def test_store_button_is_a_secondary_btn_opening_the_steam_page(self) -> None:
+        button = self._function("storeButton", "actionsNode")
+        self.assertIn('el("button", "btn act-store", "Store page ↗")', button)
+        self.assertNotIn("primary", button)
+        self.assertIn(
+            'openLink("https://store.steampowered.com/app/" + appid + "/");', button
+        )
+        # Only a positive integer appid yields a button; anything else is null.
+        appid = self._function("storeAppid", "storeButton")
+        self.assertIn("var appid = (pkg.game || {}).steam_appid;", appid)
+        for guard in ('typeof appid === "number"', "appid > 0", "Math.floor(appid) === appid"):
+            self.assertIn(guard, appid)
+        # Below 420px the two buttons stack full-width.
+        html = apps_eval.EVAL_CARD_HTML
+        phone = html[html.index("@media (max-width: 419px) {"):]
+        phone = phone[:phone.index("\n  }\n")]
+        self.assertIn(".actions { flex-direction: column; }", phone)
+        self.assertIn(".actions .act-store { width: 100%; }", phone)
+
+    def test_full_breakdown_requests_fullscreen_and_falls_back_in_place(self) -> None:
+        # The shared control (apps_shared.DISCLOSURE_JS, executed in
+        # tests/test_apps_shared.py::FullscreenOrDisclosureTests) asks for
+        # fullscreen and falls back in place; on a grant the card's own
+        # no-op hands over to syncDisplayMode.
+        actions = self._function("actionsNode", "syncDisplayMode")
+        self.assertIn(
+            'fullscreenOrDisclosure(row, "Full breakdown", function (body) { breakdownNode(body, pkg); },\n'
+            "      function () {});",
+            actions,
+        )
+        for gone in ("requestDisplayMode", "inPlace", "d.button.click();", "}, true);"):
+            self.assertNotIn(gone, actions)
+        # Fullscreen: the inline card stays, the breakdown builds once below
+        # it, CSS swaps the action row out, and size reports go quiet.
+        html = apps_eval.EVAL_CARD_HTML
+        for marker in (
+            'html[data-display-mode="fullscreen"] .fs-breakdown { display: flex; }',
+            'html[data-display-mode="fullscreen"] .actions .act-breakdown,',
+            'if (fs && !fs.built && currentDisplayMode() === "fullscreen") {',
+            'attributeFilter: ["data-display-mode"]',
+            'hooks.shouldReportSize = function () { return currentDisplayMode() !== "fullscreen"; };',
+        ):
+            self.assertIn(marker, html)
 
     def test_the_score_chips_live_in_the_header_panel(self) -> None:
         # The standalone "CRAFT & FIT" panel is gone — it held two chips.
@@ -271,23 +443,54 @@ class EvalCardLayoutTests(unittest.TestCase):
         self.assertNotIn("Craft & fit", apps_eval.EVAL_CARD_HTML)
         self.assertNotIn("scoresNode", apps_eval.EVAL_CARD_HTML)
 
-    def test_metacritic_renders_as_its_own_branded_square(self) -> None:
-        # Same source-brand mapping as the game-cards widget: square box,
-        # green/yellow/red at the games thresholds.
-        self.assertIn(
-            'function mcTier(n) { return n >= 75 ? "mc-hi" : n >= 50 ? "mc-mid" : "mc-lo"; }',
-            apps_eval.EVAL_CARD_HTML,
-        )
-        self.assertIn('el("span", "chip mc " + mcTier(mc))', apps_eval.EVAL_CARD_HTML)
-        self.assertIn("num(craft.metacritic_score)", apps_eval.EVAL_CARD_HTML)
+    def test_every_score_renders_through_the_shared_chip(self) -> None:
+        # Spec §1.3: one chip, tier color, the source as label text — the
+        # Metacritic brand square (and its #6c3/#fc3/#f00) is gone.
+        for marker in (
+            'scoreChip({ label: "Metacritic", value: Math.round(mc), tier: mcTier(mc) })',
+            'scoreChip({ label: "OpenCritic", value: Math.round(oc), tier: ocTier(oc) })',
+            # "Reviews ▬ 93% positive 114k reviews" — the sample-adjusted
+            # wording lives in the tooltip
+            'label: "Reviews", value: pct + "% positive", tier: craftTier(pct), meter: pct,',
+            'var count = compactCount(craft.review_count, "review");',
+            "aux: count,",
+            'title: "Sample-adjusted share of positive reviews"',
+            'label: "Trend", value: traj[0], tier: traj[1],',
+            # "Fit Strong", not "Fit Strong fit"
+            'var fit = String(pkg.fit_call).replace(/\\s+fit$/i, "");',
+            'label: "Fit", value: fit.charAt(0).toUpperCase() + fit.slice(1),',
+            "num(craft.metacritic_score)",
+        ):
+            self.assertIn(marker, apps_eval.EVAL_CARD_HTML)
         for hex_color in ("#6c3", "#fc3", "#f00"):
-            self.assertIn(hex_color, apps_eval.EVAL_CARD_HTML)
+            self.assertNotIn(hex_color, apps_eval.EVAL_CARD_HTML.lower())
+        self.assertNotIn('" · n="', apps_eval.EVAL_CARD_HTML)
+        # Local tier helpers would drift from the shared ones.
+        self.assertEqual(apps_eval.EVAL_CARD_HTML.count("function mcTier("), 1)
+        self.assertEqual(apps_eval.EVAL_CARD_HTML.count("function hoursLabel("), 1)
+        self.assertEqual(apps_eval.EVAL_CARD_HTML.count("function money("), 1)
+
+    def test_facts_flags_and_past_verdicts_read_as_words(self) -> None:
+        # Platform ids and stored verdict literals go through label(); flags
+        # are danger-tier chips; failures are one named notice.
+        for marker in (
+            '" on " + label("platform", price.platform)',
+            'if (p.verdict) parts.push(label("verdict", p.verdict));',
+            'scoreChip({ label: String(f), tier: "bad", cls: "flag" })',
+            '.map(function (p) { return label("platform", p); });',
+            "var node = notice(parent, errors.map(errorItem));",
+        ):
+            self.assertIn(marker, apps_eval.EVAL_CARD_HTML)
+        self.assertNotIn("some data unavailable", apps_eval.EVAL_CARD_HTML)
+        self.assertNotIn("parts.push(String(p.verdict))", apps_eval.EVAL_CARD_HTML)
 
     def test_the_craft_note_renders_under_the_chips(self) -> None:
         self.assertIn(
-            'if (pres.craft_note) box.appendChild(el("div", "craft-note", pres.craft_note));',
+            'if (pres.craft_note) head.appendChild(el("div", "craft-note", pres.craft_note));',
             apps_eval.EVAL_CARD_HTML,
         )
+        self.assertIn('"cover info stamp" "cover scores scores" "cover note note"',
+                      apps_eval.EVAL_CARD_HTML)
 
     def test_media_is_one_viewer_and_one_thumb_strip(self) -> None:
         for marker in (
@@ -315,15 +518,17 @@ class EvalCardLayoutTests(unittest.TestCase):
     def test_screenshots_open_an_edge_to_edge_carousel(self) -> None:
         for marker in (
             "openCarousel(shots, entry.index, gameName, btn)",
-            'el("div", "overlay-panel carousel")',
             ".overlay-panel.carousel {",
             "width: 100%;",
             'navButton("car-prev", "‹"',
             'navButton("car-next", "›"',
             'counter.textContent = (index + 1) + " / " + shots.length;',
-            'if (ev.key === "Escape") closeOverlay();',
-            'else if (ev.key === "ArrowLeft") show(index - 1);',
-            'else if (ev.key === "ArrowRight") show(index + 1);',
+            # the shared dialog chrome: ✕, focus trap, Escape and arrows
+            'var chrome = lightboxPanel("overlay-panel carousel", gameName, closeOverlay);',
+            "var keydown = lightboxKeys(panel, function (delta) { show(index + delta); }, closeOverlay);",
+            'document.addEventListener("keydown", keydown, true);',
+            'document.removeEventListener("keydown", s.keydown, true);',
+            "chrome.closer.focus({ preventScroll: true });",
             'stage.addEventListener("pointerup"',
             "if (Math.abs(dx) > 40) show(index + (dx < 0 ? 1 : -1));",
         ):
@@ -351,10 +556,18 @@ class EvalCardLayoutTests(unittest.TestCase):
         self.assertNotIn("foldSimilar", apps_eval.EVAL_CARD_HTML)
         self.assertIn("function similarNode(parent, similar)", apps_eval.EVAL_CARD_HTML)
 
-    def test_the_closing_panel_merges_time_price_flags_and_past(self) -> None:
-        self.assertIn('section(parent, "The call")', apps_eval.EVAL_CARD_HTML)
-        for gone in ("Time & price", '"Flags"', "Past verdicts"):
+    def test_the_call_is_one_row_and_past_verdicts_moved_to_the_breakdown(self) -> None:
+        # The closing "The call" panel is gone: its facts and flags are one
+        # chip row in the header, and past verdicts are a breakdown section.
+        self.assertNotIn('section(parent, "The call")', apps_eval.EVAL_CARD_HTML)
+        self.assertIn('section(parent, "Past verdicts")', apps_eval.EVAL_CARD_HTML)
+        for gone in ("Time & price", '"Flags"', "closingNode"):
             self.assertNotIn(gone, apps_eval.EVAL_CARD_HTML)
+
+    def test_the_stamp_stacks_under_the_title_on_a_phone(self) -> None:
+        css = apps_eval.EVAL_CARD_HTML.split("<style>")[1].split("</style>")[0]
+        narrow = css[css.index("@media (max-width: 419px)"):]
+        self.assertIn('"cover info" "cover stamp" "scores scores" "note note"', narrow)
 
     def test_counts_are_pluralized(self) -> None:
         # "Rebel Wolves · est. 2022 · 1 games" shipped to the phone.
@@ -367,17 +580,292 @@ class EvalCardLayoutTests(unittest.TestCase):
         self.assertIn('"their " + plural(items.length, "previous game")',
                       apps_eval.EVAL_CARD_HTML)
 
-    def test_sticker_like_pills_tilt_like_the_game_cards_widget(self) -> None:
-        # Toybox language: stickers tilt, data chips (score meter, pace/price)
-        # stay straight so the numbers stay legible.
-        for marker in (
-            ".tag:nth-child(2n) { transform: rotate(",
-            ".flag:nth-child(2n) { transform: rotate(",
-            ".tl-chip:nth-child(2n) { transform: rotate(",
-            ".anchor:nth-child(2n) { transform: rotate(",
-            ".wc-line:nth-child(2n) .wc-eyebrow { transform: rotate(",
+    def test_stickers_no_longer_tilt(self) -> None:
+        # The toybox tilt is gone with the host-token restyle (spec §1.5):
+        # nothing rotates but the verdict stamp (and the shared disclosure
+        # chevron). tests/test_apps.py::DesignSystemTests pins the whole CSS.
+        for gone in (
+            ".tag:nth-child(2n)",
+            ".flag:nth-child(2n)",
+            ".tl-chip:nth-child(2n)",
+            ".anchor:nth-child(2n)",
+            ".wc-line:nth-child(2n)",
         ):
-            self.assertIn(marker, apps_eval.EVAL_CARD_HTML)
+            self.assertNotIn(gone, apps_eval.EVAL_CARD_HTML)
+
+    def test_the_store_button_stays_in_fullscreen(self) -> None:
+        # Fullscreen drops the breakdown button (fullscreen IS the breakdown)
+        # but keeps a row holding the store link; a row without one goes.
+        css = apps_eval.EVAL_CARD_HTML.split("<style>")[1].split("</style>")[0]
+        self.assertIn(
+            'html[data-display-mode="fullscreen"] .actions:not(.has-store),\n'
+            '  html[data-display-mode="fullscreen"] .actions .act-breakdown,\n'
+            '  html[data-display-mode="fullscreen"] .eval > .disclosure-body { display: none; }',
+            css,
+        )
+        self.assertNotIn('html[data-display-mode="fullscreen"] .actions,', css)
+        self.assertIn('row.classList.add("has-store");', self._function("storeButton", "actionsNode"))
+
+    def test_the_call_reads_in_words(self) -> None:
+        facts = self._function("factChips", "callNode")
+        for marker in (
+            # "42h with extras", never the cryptic "42h full"
+            'factChip(row, "Time to beat", main, extra ? extra + " with extras" : null, hltbTitle);',
+            'else if (extra) factChip(row, "Time to beat", "~" + extra, "with extras", hltbTitle);',
+            'factChip(row, "Your pace", hoursLabel(weekly / 60, true) + "/wk", "last 30 days",',
+            '" via " + label("purchase_source", own.purchase_source)',
+        ):
+            self.assertIn(marker, facts)
+        self.assertNotIn('"HLTB"', apps_eval.EVAL_CARD_HTML)
+        self.assertNotIn('" full"', apps_eval.EVAL_CARD_HTML)
+        self.assertNotIn('"Pace"', apps_eval.EVAL_CARD_HTML)
+        # Below 420px "THE CALL" is a label above its chips, not an eyebrow
+        # sharing a line with one chip.
+        css = apps_eval.EVAL_CARD_HTML.split("<style>")[1].split("</style>")[0]
+        phone = css[css.index("@media (max-width: 419px) {"):]
+        phone = phone[:phone.index("\n  }\n")]
+        self.assertIn(".call .call-label { flex-basis: 100%; margin-right: 0; }", phone)
+
+    def test_an_error_whose_data_is_present_is_suppressed(self) -> None:
+        body = self._function("evalCard", "noteCard")
+        self.assertIn("errorsNode(wrap, packageErrors(pkg));", body)
+        self.assertIn("errorDetailNode(parent, packageErrors(pkg));",
+                      self._function("breakdownNode", "storeAppid"))
+
+
+NODE = shutil.which("node")
+
+# Just enough DOM and bridge for the action-row builders: el/disclosure build
+# plain records, openLink records the URL it was asked to open.
+_ACTION_ROW_SHIM = r"""
+var opened = [];
+function el(tag, cls, text) {
+  var n = { tag: tag, className: cls || "", text: text || "", children: [], handlers: {},
+            classList: { add: function (c) { n.className += " " + c; } },
+            addEventListener: function (k, f) { n.handlers[k] = f; },
+            appendChild: function (c) { n.children.push(c); return c; } };
+  return n;
+}
+function disclosure(parent, text) {
+  var btn = el("button", "disclosure", text);
+  btn.contains = function (t) { return t === btn; };
+  var body = el("div", "disclosure-body");
+  parent.appendChild(btn);
+  parent.appendChild(body);
+  return { button: btn, body: body };
+}
+function fullscreenOrDisclosure(parent, text) { return disclosure(parent, text); }
+function openLink(url) { opened.push(url); }
+function canFullscreen() { return false; }
+function breakdownNode() {}
+"""
+
+_ACTION_ROW_PROBE = r"""
+function labels(game, more) {
+  var wrap = el("div", "eval");
+  var pkg = { game: game };
+  var appid = storeAppid(pkg);
+  if (!(more || appid)) return null;
+  var body = actionsNode(wrap, pkg, more, appid);
+  var row = wrap.children[0];
+  // evalCard moves the in-place body out of the row; mirror that.
+  var kids = row.children.filter(function (c) { return c !== body; });
+  return kids.map(function (c) { return c.text; });
+}
+var out = {
+  both: labels({ steam_appid: 1145350 }, true),
+  breakdownOnly: labels({}, true),
+  storeOnly: labels({ steam_appid: 1145350 }, false),
+  neither: labels({ steam_appid: null }, false),
+  rejected: [0, -5, 1.5, "1145350", true, NaN].map(function (v) { return storeAppid({ game: { steam_appid: v } }); }),
+};
+var wrap = el("div", "eval");
+actionsNode(wrap, { game: { steam_appid: 1145350 } }, true, 1145350);
+wrap.children[0].children[2].handlers.click();
+out.opened = opened;
+out.storeRowClass = wrap.children[0].className;
+var bare = el("div", "eval");
+actionsNode(bare, { game: {} }, true, null);
+out.bareRowClass = bare.children[0].className;
+console.log(JSON.stringify(out));
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class ActionRowBehaviourTests(unittest.TestCase):
+    """The action row's builders, executed: ≤2 actions, store link by appid."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        html = apps_eval.EVAL_CARD_HTML
+        start = html.index("function storeAppid(")
+        builders = html[start:html.index("function syncDisplayMode(", start)]
+        assert NODE is not None
+        proc = subprocess.run(
+            [NODE, "-e", _ACTION_ROW_SHIM + builders + _ACTION_ROW_PROBE],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        if proc.returncode != 0:
+            raise AssertionError(proc.stderr)
+        cls.out = json.loads(proc.stdout)
+
+    def test_store_button_is_second_after_the_breakdown(self) -> None:
+        self.assertEqual(self.out["both"], ["Full breakdown", "Store page ↗"])
+
+    def test_no_appid_means_no_store_button(self) -> None:
+        self.assertEqual(self.out["breakdownOnly"], ["Full breakdown"])
+
+    def test_store_button_alone_without_breakdown_content(self) -> None:
+        self.assertEqual(self.out["storeOnly"], ["Store page ↗"])
+
+    def test_no_row_without_either(self) -> None:
+        self.assertIsNone(self.out["neither"])
+
+    def test_only_a_positive_integer_appid_counts(self) -> None:
+        self.assertEqual(self.out["rejected"], [None] * 6)
+
+    def test_a_row_with_the_store_button_is_marked_for_fullscreen(self) -> None:
+        self.assertIn("has-store", self.out["storeRowClass"].split())
+        self.assertNotIn("has-store", self.out["bareRowClass"].split())
+
+    def test_store_button_opens_the_steam_store_page(self) -> None:
+        self.assertEqual(
+            self.out["opened"], ["https://store.steampowered.com/app/1145350/"]
+        )
+
+
+_ERRORS_PROBE = r"""
+var pkg = {
+  time: { hltb_main_hours: 18 },
+  media: { trailer: { kind: "youtube", video_id: "x" }, screenshots: [] },
+  pedigree: { developer: { name: "Retro" }, previous_games: [] },
+  errors: ["hltb: completionist time unavailable", "media: steam: no trailer",
+           "igdb: unresolved", "pace: unavailable", "", null],
+};
+var bare = { errors: ["hltb: down", "media: fetch failed", "igdb: unresolved"] };
+console.log(JSON.stringify({ full: packageErrors(pkg), bare: packageErrors(bare) }));
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class ErrorSuppressionBehaviourTests(unittest.TestCase):
+    """K4: an error entry whose data is on the card anyway is dropped."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        html = apps_eval.EVAL_CARD_HTML
+        start = html.index("function errorHasData(")
+        errors = html[start:html.index("function errorsNode(", start)]
+        named = html[html.index("function named(v)"):]
+        named = named[:named.index("\n") + 1]
+        script = (
+            "function num(v) { if (v === null || v === undefined || v === '') return null;"
+            " var n = Number(v); return isFinite(n) ? n : null; }\n"
+            "function list(v) { return Array.isArray(v) ? v : []; }\n"
+            "function plural(n, w) { return n + ' ' + w + 's'; }\n"
+            + apps_shared.MEDIA_PANEL_JS + apps_shared.PEDIGREE_JS + named + errors + _ERRORS_PROBE
+        )
+        assert NODE is not None
+        proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True,
+                              timeout=60, check=False)
+        if proc.returncode != 0:
+            raise AssertionError(proc.stderr)
+        cls.out = json.loads(proc.stdout)
+
+    def test_present_data_silences_its_error(self) -> None:
+        self.assertEqual(self.out["full"], ["pace: unavailable"])
+
+    def test_missing_data_keeps_its_error(self) -> None:
+        self.assertEqual(self.out["bare"], ["hltb: down", "media: fetch failed", "igdb: unresolved"])
+
+
+_ERROR_LABEL_SHIM = r"""
+function El(tag, cls, text) { this.tag = tag; this.className = cls || ""; this.text = text || ""; this.kids = []; this.attrs = {}; }
+El.prototype.appendChild = function (c) { this.kids.push(c); return c; };
+El.prototype.setAttribute = function (k, v) { this.attrs[k] = v; };
+Object.defineProperty(El.prototype, "textContent", {
+  get: function () { return this.text + this.kids.map(function (k) { return k.textContent; }).join(""); },
+});
+function el(tag, cls, text) { return new El(tag, cls, text); }
+var document = { createElement: function (t) { return new El(t); } };
+function list(v) { return Array.isArray(v) ? v : []; }
+function section(parent, title) { var b = el("section", "panel"); parent.appendChild(b); return b; }
+"""
+
+_ERROR_LABEL_PROBE = r"""
+function item(t) { return errorItem(t); }
+var out = {
+  similar: item("similar: lookup failed"),
+  anchors: item("anchors: lookup failed"),
+  pedigree: item("pedigree: unavailable"),
+  studio: item("studio: unavailable"),
+  igdb: item("igdb: unresolved — no igdb_id stored"),
+  mediaSteam: item("media: steam: fetch failed"),
+  mediaIgdb: item("media: igdb: name resolution failed"),
+  mediaBare: item("media: fetch failed"),
+  unknown: item("weird_block: boom"),
+};
+var p = el("div");
+out.notice = notice(p, ["similar: lookup failed", "media: steam: fetch failed", "weird_block: boom"]
+  .map(errorItem)).textContent;
+var detail = el("div");
+errorDetailNode(detail, ["media: steam: fetch failed", "igdb_resolver: " + new Array(40).join("slow ")]);
+out.detail = detail.kids[0].kids[0].kids.map(function (li) { return li.textContent; });
+console.log(JSON.stringify(out));
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class ErrorLabelBehaviourTests(unittest.TestCase):
+    """F2/F4, executed: every failure names what and where, in words."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        html = apps_eval.EVAL_CARD_HTML
+        start = html.index("  var ERROR_BLOCKS = {")
+        mapping = html[start:html.index("  function errorHasData(", start)]
+        detail = html[html.index("  function errorDetailNode("):html.index("  function named(v)")]
+        detail = detail[:detail.index("\n  }\n") + 4]
+        script = (_ERROR_LABEL_SHIM + apps_shared.LABELS_JS + apps_shared.NOTICE_JS
+                  + mapping + detail + _ERROR_LABEL_PROBE)
+        assert NODE is not None
+        proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True,
+                              timeout=60, check=False)
+        if proc.returncode != 0:
+            raise AssertionError(proc.stderr)
+        cls.out = json.loads(proc.stdout)
+
+    def test_library_blocks_say_library(self) -> None:
+        self.assertEqual(self.out["similar"], {"what": "similar games", "source": "library",
+                                               "why": "lookup failed"})
+        self.assertEqual(self.out["anchors"]["what"], "your history")
+        self.assertEqual(self.out["anchors"]["source"], "library")
+
+    def test_studio_blocks_say_igdb(self) -> None:
+        for key in ("pedigree", "studio", "igdb"):
+            with self.subTest(key=key):
+                self.assertEqual((self.out[key]["what"], self.out[key]["source"]), ("studio", "IGDB"))
+
+    def test_media_takes_its_source_from_the_reason_prefix(self) -> None:
+        self.assertEqual(self.out["mediaSteam"], {"what": "media", "source": "Steam", "why": "fetch failed"})
+        self.assertEqual(self.out["mediaIgdb"]["source"], "IGDB")
+        self.assertEqual(self.out["mediaBare"], {"what": "media", "source": "", "why": "fetch failed"})
+
+    def test_an_unknown_block_is_humanized_without_a_source(self) -> None:
+        self.assertEqual(self.out["unknown"], {"what": "weird block", "source": "", "why": "boom"})
+
+    def test_the_notice_names_what_and_where(self) -> None:
+        self.assertEqual(self.out["notice"],
+                         "Couldn't load: similar games (library), media (Steam), weird block")
+
+    def test_the_detail_humanizes_the_key_and_caps_the_reason(self) -> None:
+        media, long_one = self.out["detail"]
+        self.assertEqual(media, "Media (Steam) — fetch failed")
+        self.assertTrue(long_one.startswith("Igdb resolver — slow slow"))
+        self.assertNotIn("_", long_one)
+        reason = long_one.split(" — ", 1)[1]
+        self.assertLessEqual(len(reason), 120)
+        self.assertTrue(reason.endswith("…"))
 
 
 class SharedBlockTests(unittest.TestCase):
@@ -397,10 +885,9 @@ class WidgetDriftTests(unittest.TestCase):
     fallback — and a fix applied to one was easy to forget in the other. What
     is left in apps.py and apps_eval.py is each widget's own layout; anything
     substantial they agree on belongs in apps_shared.py, where one edit reaches
-    both. The longest identical run today is 15 non-blank lines (the tail of
-    the initialize handshake, the document's closing tags, and the
-    content-hash comment under them), so the cap leaves room for a small block
-    to be ported deliberately before this fires.
+    both. The longest identical run today is 13 non-blank lines (the document
+    head and the shared token/reset/component splices under it), so the cap
+    leaves room for a small block to be ported deliberately before this fires.
     """
 
     MAX_IDENTICAL_LINES = 20

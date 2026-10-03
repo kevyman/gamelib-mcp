@@ -9,6 +9,7 @@ import json
 import unittest
 
 from gamelib_mcp import main
+from gamelib_mcp.data.purchases import PURCHASE_SOURCES
 
 EXPECTED_TOOLS = {
     # --- reads ---------------------------------------------------------------
@@ -342,6 +343,16 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(check_id=check_id):
                 self.assertIn(check_id, description)
 
+    async def test_set_acquisition_lists_the_whole_purchase_source_vocabulary(self):
+        # The description is the only place a caller learns the closed
+        # vocabulary; a value missing there (key_reseller was) is a value no
+        # caller sends, and vendor names must be said to normalize onto it.
+        description = (await self._tools())["set_acquisition"].description
+        for source in sorted(PURCHASE_SOURCES):
+            with self.subTest(source=source):
+                self.assertRegex(description, rf"\b{source}\b")
+        self.assertIn("vendor names normalize onto it", description)
+
     def test_server_instructions_include_discovery_workflow(self):
         instructions = main.mcp.instructions
         self.assertIn('sync(targets=["ratings"])', instructions)
@@ -369,9 +380,12 @@ class SchemaBudgetTests(unittest.IsolatedAsyncioTestCase):
     The 2026-09-01 amendment trimmed descriptions to 53,258 chars / 146,434
     payload bytes and moved record_assessment's field-level authoring rules
     into skills/game-quality/recording.md (ADR 0006: methodology lives with
-    the skill, not on the wire). These caps sit ~8% above that, so ordinary
-    editing is free and a new tool or a docstring that grows back into prose
-    fails here instead of silently costing every turn.
+    the skill, not on the wire). The 2026-10-03 widget-UX pass (spec §2.3)
+    rewrote the eight largest descriptions as when-to-call / what-comes-back /
+    call-time rules only, moving rationale to skills/ and docs/patterns/:
+    47,420 chars / 141,562 payload bytes. These caps sit ~5% above that, so
+    ordinary editing is free and a new tool or a docstring that grows back into
+    prose fails here instead of silently costing every turn.
 
     Output schemas are inside the payload cap but have no cap of their own:
     whether hosts forward outputSchema to the model is unmeasured (see the
@@ -379,12 +393,12 @@ class SchemaBudgetTests(unittest.IsolatedAsyncioTestCase):
     """
 
     # Whole serialized tools/list payload, json.dumps(separators=(",", ":")).
-    MAX_TOTAL_PAYLOAD_BYTES = 158_000  # achieved 146,434
+    MAX_TOTAL_PAYLOAD_BYTES = 148_400  # achieved 141,562 (2026-10-03)
     # Sum of every tool description (chars, as the model reads them).
-    MAX_TOTAL_DESCRIPTION_CHARS = 57_000  # achieved 53,258
+    MAX_TOTAL_DESCRIPTION_CHARS = 49_600  # achieved 47,420 (2026-10-03)
     # No single tool may hold a disproportionate share of that budget.
-    MAX_TOOL_DESCRIPTION_CHARS = 3_900  # largest: get_stats, 3,575
-    MAX_TOOL_PAYLOAD_BYTES = 11_000  # largest: get_stats, 10,045
+    MAX_TOOL_DESCRIPTION_CHARS = 2_890  # largest: get_stats, 2,755
+    MAX_TOOL_PAYLOAD_BYTES = 9_970  # largest: get_stats, 9,496
 
     async def _serialized(self) -> dict[str, tuple[int, int]]:
         """Per tool: (serialized payload bytes, description chars)."""
