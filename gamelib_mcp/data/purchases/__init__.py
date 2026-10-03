@@ -3,7 +3,8 @@
 Each importer module exposes a zero-argument coroutine
 ``async def fetch_x() -> tuple[list[PurchaseRecord], list[dict]]`` returning
 ``(records, skipped)``: ``records`` are importable purchases normalized to the
-acquisition vocabulary (``tools/acquisition.py``), ``skipped`` is a list of
+acquisition vocabulary (``PURCHASE_SOURCES`` below; normalization in
+``tools/acquisition.py``), ``skipped`` is a list of
 ``{"title"/"description", "reason"}`` dicts for rows deliberately not imported
 (refunds, consumables, non-game items). Fetchers RAISE on auth/network/parse
 failure — the ``import_purchases`` orchestrator catches per source, so one
@@ -25,6 +26,23 @@ from dataclasses import dataclass
 
 from gamelib_mcp.data.db import GOG_PRODUCT_ID, STEAM_APP_ID
 
+# Closed vocabulary for purchase_source. Two deliberately distinct no-cost
+# sources: "free" = a no-strings giveaway (e.g. an Epic weekly free game) —
+# yours forever; "subscription" = claimed via a paid membership (Game Pass,
+# PS+ monthly, Humble Choice) — access may lapse with the subscription.
+# "key_reseller" covers third-party key shops (GAMIVO, Kinguin, G2A, Green Man
+# Gaming, IndieGala, CDKeys, …) — a real acquisition channel that would
+# otherwise collapse into the unanalysable "other" bucket; per-vendor aliases
+# (tools/acquisition.py SOURCE_ALIASES) map onto it so provenance survives
+# normalization. Kept here, beside the importers' other vocabulary and free of
+# importer-module imports, so the widgets (apps_shared.py) can read it cheaply.
+PURCHASE_SOURCES = frozenset({
+    "steam", "gog", "epic", "eshop", "psn", "xbox",
+    "humble", "fanatical", "itchio", "ea", "ubisoft",
+    "key_reseller",
+    "physical", "gift", "free", "subscription", "other",
+})
+
 
 @dataclass(frozen=True)
 class PurchaseRecord:
@@ -33,7 +51,7 @@ class PurchaseRecord:
     title: str
     # Library platform the purchase lands on (e.g. "switch2", "steam").
     platform: str
-    # Value from the tools.acquisition PURCHASE_SOURCES vocabulary.
+    # Value from the PURCHASE_SOURCES vocabulary above.
     purchase_source: str
     acquired_at: str | None  # YYYY-MM-DD
     price_paid: float | None

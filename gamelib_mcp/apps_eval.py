@@ -4,13 +4,20 @@ One `ui://` resource renders `record_assessment` results: the full
 evaluation package when the response carries one, and a compact note card for
 the bookkeeping-only responses (a plain recorded verdict, or a void).
 
-The package layout reads top to bottom as one argument: a header panel (cover,
-title, verdict stamp, the score chips and the authored craft note), the pitch
-panel (one-liner, elevator pitch, why-care eyebrow lines), the media panel (one
-viewer plus one thumb strip, trailer first, screenshots opening an edge-to-edge
-carousel), for-you-if / not-for-you-if, the anchors it rests on, lineage,
-the owned games most like it, the "from the studio" pedigree strip, and one closing
-"the call" panel holding time, price, flags and past verdicts.
+The package card is tiered (spec 2026-10-03 §2.2). INLINE, always rendered
+and budgeted at ≤900px tall at 760px wide: one header panel (cover, title, sub
+line, verdict stamp, the score chips, the authored craft note, then "the
+call" — HLTB, pace, price seen, target, paid and the flags — directly under
+the scores), the verdict in words (summary, elevator pitch, why-care eyebrow
+lines), the media panel (one viewer plus one thumb strip, trailer first,
+screenshots opening an edge-to-edge carousel), one action row ("Full
+breakdown", plus "Store page ↗" when the package carries a Steam app id)
+and a single notice naming what failed to load. The FULL
+BREAKDOWN — for-you-if / not-for-you-if, the anchors it rests on, lineage,
+the owned games most like it, the "from the studio" pedigree strip, past
+verdicts and the failure detail — opens fullscreen where the host offers it
+(the inline card stays on top, the host's close button is the way back) and
+as an in-place disclosure where it doesn't.
 Clients that don't speak the Apps extension ignore the tool metadata and see
 the normal JSON, so attaching ``EVAL_CARD_APP`` to a tool is purely additive.
 
@@ -18,11 +25,13 @@ Every section of the package is optional: an unowned candidate with no appid
 and no IGDB match gets a media-less card (and an untagged one no similar
 row), and each block is skipped rather than rendered empty.
 
-Visual language is the game-cards widget's "toybox" (see apps.py): thick ink
-borders, hard offset shadows, chunky type, pastel stickers, the same CSS
-custom-property palette and dark scheme. The verdict is a big rotated stamp
-in that same language — buy_now green, wishlist_for_sale amber, try_demo
-blue, play_what_you_own pink, skip red.
+Visual language: the host's theme, through the shared ``--gl-*`` token layer
+(see apps_shared.py and apps.py) on a transparent page. Every score is the
+shared chip — color is the quality tier, the source is the label text. The
+one deliberate piece of brand left is the verdict stamp: 2px strong border, a
+hard 3px shadow, a −3° tilt, filled with its tier (buy_now good,
+wishlist_for_sale ok, skip bad, try_demo / play_what_you_own plain), its text
+from ``label("verdict", …)``.
 
 Media routing follows the 2026-08-28 spike (docs/plans/…-evaluation-package
 -design.md): a Steam trailer is a plain ``<video controls preload="none">``
@@ -33,14 +42,15 @@ YouTube bytes before the click) plus a link-out pill, because a CSP-blocked
 nested frame is not detectable from JS.
 
 The HTML is deliberately dependency-free: the host↔iframe bridge is the
-~40-line JSON-RPC postMessage handshake from the MCP Apps spec
-(ui/initialize → ui/notifications/initialized → ui/notifications/tool-result)
-rather than @modelcontextprotocol/ext-apps, so nothing is fetched from a CDN
-and the CSP only has to allow the media hosts below.
+hand-rolled JSON-RPC postMessage handshake from the MCP Apps spec
+(ui/initialize → ui/notifications/initialized → tool-input / tool-result,
+host-context-changed) rather than @modelcontextprotocol/ext-apps, so nothing
+is fetched from a CDN and the CSP only has to allow the media hosts below.
 
 For local visual iteration outside any MCP host, the widget renders
-``window.__PREVIEW_DATA__`` when present instead of waiting on the bridge —
-see scripts/preview_eval_card.py.
+``window.__PREVIEW_DATA__`` when present instead of waiting on the bridge, and
+applies ``window.__PREVIEW_HOST_CONTEXT__`` as if the host had sent it — see
+scripts/preview_eval_card.py.
 """
 
 import hashlib
@@ -55,8 +65,9 @@ from . import apps_shared
 # while frame_domains feeds frame-src — the spike confirmed both, and
 # `["https://www.youtube.com"]` is the spec's own frameDomains example.
 # Covers: IGDB art, Steam capsules (cdn.*), Steam screenshots and movie
-# posters (shared.*, which is where appdetails actually serves them), and
-# YouTube thumbnails for IGDB trailers. Everything else stays deny-by-default.
+# posters (shared.*, which is where appdetails actually serves them),
+# YouTube thumbnails for IGDB trailers, and assets.claude.ai for the host
+# fonts. Everything else stays deny-by-default.
 _EVAL_CARD_CSP = ResourceCSP(
     resource_domains=[
         "https://images.igdb.com",
@@ -65,6 +76,7 @@ _EVAL_CARD_CSP = ResourceCSP(
         "https://shared.akamai.steamstatic.com",
         "https://shared.cloudflare.steamstatic.com",
         "https://i.ytimg.com",
+        "https://assets.claude.ai",
     ],
     frame_domains=["https://www.youtube-nocookie.com"],
 )
@@ -75,46 +87,20 @@ EVAL_CARD_HTML = (
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <style>
 """
-    + apps_shared.PALETTE_LIGHT_CSS
-    + r"""  @media (prefers-color-scheme: dark) {
-    :root {
-"""
-    + apps_shared.PALETTE_DARK_VARS
-    + r"""    }
-  }
-"""
+    + apps_shared.TOKENS_CSS
     + apps_shared.RESET_CSS
+    + apps_shared.A11Y_CSS
+    + apps_shared.PANEL_CSS
+    + apps_shared.COMPONENTS_CSS
     + r"""  .eval {
     max-width: 760px;
     margin: 0 auto;
     display: flex;
     flex-direction: column;
-    gap: 16px;
-  }
-  .panel {
-    background: var(--card);
-    border: 2px solid var(--ink);
-    border-radius: 14px;
-    box-shadow: 5px 5px 0 var(--shadow-c);
-    padding: 16px;
-  }
-  .section-title {
-    font-size: 10.5px;
-    font-weight: 800;
-    letter-spacing: 0.07em;
-    text-transform: uppercase;
-    color: var(--muted);
-    margin-bottom: 9px;
-  }
-  .note { font-size: 11.5px; font-weight: 650; color: var(--muted); margin-top: 8px; }
-  .empty {
-    color: var(--muted);
-    font-size: 13px;
-    font-weight: 650;
-    padding: 20px;
-    text-align: center;
+    gap: 12px;
   }
 
   /* ---- shared cover block (same shape as the game-cards widget) ---- */
@@ -124,11 +110,11 @@ EVAL_CARD_HTML = (
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 12px;
-    font-weight: 800;
-    line-height: 1.3;
-    color: rgba(255, 255, 255, 0.92);
-    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+    font-size: var(--gl-cap);
+    font-weight: var(--gl-strong);
+    line-height: var(--gl-cap-lh);
+    color: var(--gl-plate-ink);
+    text-shadow: 0 1px 3px var(--gl-plate-shadow);
     padding: 8px;
     text-align: center;
     overflow: hidden;
@@ -142,7 +128,6 @@ EVAL_CARD_HTML = (
   /* ---- media panel: one viewer + one thumb strip (the Steam shape) ---- */
   /* The trailer and the screenshots are the same reel, so they share one
      16:9 stage and one strip; clicking a thumb swaps the stage in place. */
-  .viewer { box-shadow: 3px 3px 0 var(--shadow-c); }
 """
     + apps_shared.SHOT_BTN_CSS
     + r"""  /* Best-effort fullscreen. The button is only rendered where the API exists
@@ -152,298 +137,234 @@ EVAL_CARD_HTML = (
 """
     + apps_shared.MEDIA_STRIP_CSS
     + r"""
-  /* ---- header ---- */
-  .head { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
-  .head .cover-wrap {
-    flex: 0 0 104px;
-    border: 2px solid var(--ink);
-    border-radius: 10px;
-    overflow: hidden;
-    box-shadow: 4px 4px 0 var(--shadow-c);
-    transform: rotate(-1.5deg);
-    margin: 4px 6px 8px 2px;
+  /* ---- header: cover | title + sub | stamp, the score row under the title ---- */
+  /* Grid areas, so the stamp keeps the top-right corner on a wide card and
+     drops under the title on a phone (below 420px) without ever covering it,
+     and the score row fills the space beside the cover instead of starting
+     under it. */
+  .head {
+    display: grid;
+    grid-template-columns: 84px minmax(0, 1fr) auto;
+    grid-template-areas: "cover info stamp" "cover scores scores" "cover note note";
+    grid-template-rows: auto auto 1fr;
+    column-gap: 14px;
+    row-gap: 10px;
+    align-items: start;
   }
-  .head-info { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+  .head .cover-wrap {
+    grid-area: cover;
+    border: var(--gl-bw) solid var(--gl-border);
+    border-radius: var(--gl-r-sm);
+    overflow: hidden;
+  }
+  .head-info { grid-area: info; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .head .stamp { grid-area: stamp; }
   .head-info h1 {
-    font-size: 21px;
-    font-weight: 800;
-    line-height: 1.15;
+    font-size: var(--gl-h);
+    line-height: var(--gl-h-lh);
+    font-weight: var(--gl-strong);
     letter-spacing: -0.01em;
     overflow-wrap: anywhere;
   }
-  .sub { font-size: 12.5px; font-weight: 650; color: var(--muted); }
-  /* The score chips live INSIDE the header now: two lonely chips in a panel of
+  .sub {
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    color: var(--gl-text-2);
+    font-variant-numeric: tabular-nums;
+  }
+  /* The score chips live INSIDE the header: two lonely chips in a panel of
      their own ("CRAFT & FIT") was the first thing the owner called out. */
-  .head-chips { margin-top: 13px; }
+  .head-chips { grid-area: scores; }
   /* One model-authored line of craft context under the chips — the spread, the
      recurring knock, the review-bomb caveat a number can't carry. */
-  .craft-note {
-    margin-top: 8px;
-    font-size: 11.5px;
-    font-weight: 650;
-    line-height: 1.45;
-    color: var(--muted);
+  .craft-note { grid-area: note; color: var(--gl-text-2); }
+  /* The call: hours and money, directly under the scores. */
+  .call {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: var(--gl-bw) solid var(--gl-border);
   }
-  .one-liner { font-size: 14px; font-weight: 700; line-height: 1.45; }
+  .call-label {
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    font-weight: var(--gl-strong);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--gl-muted);
+    margin-right: 2px;
+  }
+  .one-liner { font-weight: var(--gl-strong); }
   .pitch {
-    margin-top: 10px;
-    font-size: 13px;
-    line-height: 1.55;
-    font-style: italic;
-    background: var(--p1);
-    border: 2px solid var(--ink);
-    border-left-width: 6px;
-    border-radius: 0 12px 12px 0;
-    padding: 10px 13px;
+    margin-top: 8px;
+    color: var(--gl-text-2);
+    border-left: 2px solid var(--gl-border-strong);
+    padding: 2px 0 2px 12px;
   }
   .pitch:first-child { margin-top: 0; }
+  /* The verdict stamp — the card's one deliberate piece of brand: strong 2px
+     border, hard 3px shadow, a -3deg tilt, filled with the verdict's tier. */
   .stamp {
     flex: 0 0 auto;
     align-self: flex-start;
-    margin: 4px 2px 0 0;
-    font-size: 15px;
-    font-weight: 900;
-    letter-spacing: 0.03em;
-    line-height: 1.1;
+    margin: 4px 4px 0 0;
+    font-size: var(--gl-body);
+    font-weight: var(--gl-strong);
+    letter-spacing: 0.04em;
+    line-height: 1.15;
+    text-transform: uppercase;
     text-align: center;
     max-width: 168px;
-    padding: 9px 13px;
-    border: 3px solid var(--ink);
-    border-radius: 12px;
-    box-shadow: 4px 4px 0 var(--shadow-c);
-    transform: rotate(-3.5deg);
+    padding: 8px 12px;
+    border: 2px solid var(--gl-border-strong);
+    border-radius: var(--gl-r-md);
+    box-shadow: 3px 3px 0 var(--gl-border-strong);
+    transform: rotate(-3deg);
   }
-  .stamp-good { background: var(--good); color: var(--card); }
-  .stamp-ok { background: var(--ok); color: var(--card); }
-  .stamp-bad { background: var(--bad); color: var(--card); }
-  .stamp-p1 { background: var(--p1); color: var(--ink); }
-  .stamp-p4 { background: var(--p4); color: var(--ink); }
-
-  /* ---- chips / strips ---- */
-  .chips { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
-  .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    font-size: 11.5px;
-    font-weight: 750;
-    padding: 3px 10px;
-    border-radius: 999px;
-    border: 1.5px solid var(--ink);
-    background: var(--card);
-    color: var(--ink);
-    white-space: nowrap;
-  }
-  .chip .lbl { font-size: 9.5px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); }
-  .chip.oc { font-weight: 800; }
-  /* On a brand-coloured chip the muted label colour is unreadable (dark-scheme
-     beige on Metacritic green) — inherit the chip's own text colour instead. */
-  .chip.oc .lbl, .chip.mc .lbl { color: inherit; opacity: 0.7; }
-  /* Metacritic's metascore is a square box in its own green/yellow/red at the
-     games thresholds (75/50) — same brand mapping as the game-cards widget. */
-  .chip.mc { font-weight: 800; border-radius: 5px; }
-  .mc-hi { background: #6c3; color: #17140e; }
-  .mc-mid { background: #fc3; color: #17140e; }
-  .mc-lo { background: #f00; color: #17140e; }
-  .oc-mighty { background: #fc430a; color: #17140e; }
-  .oc-strong { background: #9e00b4; color: #ffffff; }
-  .oc-fair { background: #4aa1ce; color: #17140e; }
-  .oc-weak { background: #80b06a; color: #17140e; }
-  .fit-good { background: var(--good); color: var(--card); }
-  .fit-ok { background: var(--p3); }
-  .fit-mid { background: var(--p2); }
-  .fit-bad { background: var(--bad); color: var(--card); }
-  .traj-good { color: var(--good); }
-  .traj-flat { color: var(--muted); }
-  .traj-bad { color: var(--bad); }
-  .meter {
-    width: 64px;
-    height: 8px;
-    border: 1.5px solid var(--ink);
-    border-radius: 999px;
-    background: var(--card);
-    overflow: hidden;
-    display: inline-block;
-    flex: none;
-  }
-  .meter-fill { display: block; height: 100%; background: var(--muted); }
-  .craft-hi .meter-fill { background: var(--good); }
-  .craft-mid .meter-fill { background: var(--ok); }
-  .craft-lo .meter-fill { background: var(--bad); }
-  .flag {
-    font-size: 11.5px;
-    font-weight: 750;
-    padding: 3px 10px;
-    border-radius: 999px;
-    border: 1.5px solid var(--ink);
-    background: var(--bad);
-    color: var(--card);
-    transform: rotate(-1deg);
-  }
-  .flag:nth-child(2n) { transform: rotate(1.2deg); }
+  .stamp-good { background: var(--gl-good); color: var(--gl-surface); }
+  .stamp-ok { background: var(--gl-ok); color: var(--gl-surface); }
+  .stamp-bad { background: var(--gl-bad); color: var(--gl-surface); }
+  .stamp-plain { background: var(--gl-surface); color: var(--gl-text); }
 """
     + apps_shared.STRIP_CSS
-    + apps_shared.MORE_CHIP_CSS
     + r"""
   /* ---- for you / not for you ---- */
   .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-  .col-title { font-size: 12px; font-weight: 800; margin-bottom: 6px; }
-  .col.yes .col-title { color: var(--good); }
-  .col.no .col-title { color: var(--bad); }
+  .col-title { font-weight: var(--gl-strong); margin-bottom: 6px; }
+  .col.yes .col-title, .col.yes .tick { color: var(--gl-good); }
+  .col.no .col-title, .col.no .tick { color: var(--gl-bad); }
   .bullets { list-style: none; display: flex; flex-direction: column; gap: 6px; }
-  .bullets li { display: flex; gap: 7px; font-size: 12.5px; line-height: 1.45; }
-  .tick { font-weight: 900; flex: none; }
-  .col.yes .tick { color: var(--p3); -webkit-text-stroke: 0.6px var(--ink); }
-  .col.no .tick { color: var(--p4); -webkit-text-stroke: 0.6px var(--ink); }
+  .bullets li { display: flex; gap: 8px; }
+  .tick { font-weight: var(--gl-strong); flex: none; }
 
   /* ---- anchors ---- */
-  /* Deliberately NEUTRAL pills: an anchor is evidence, and the live card lit
+  /* Deliberately NEUTRAL cards: an anchor is evidence, and the live card lit
      up "Cyberpunk 2077 6.6h" — a game he bounced off — in endorsement green.
-     The STATUS glyph carries the colour instead: completed/evergreen good,
-     abandoned bad, everything else plain. */
+     The card is plain; its chips are the shared ones ("You 6/10", "Played
+     6.6h", "Status Abandoned"), each colored by what it says. */
+  .anchors { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
   .anchor {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    font-size: 11.5px;
-    font-weight: 700;
-    padding: 3px 10px 3px 3px;
-    border-radius: 999px;
-    border: 1.5px solid var(--ink);
-    background: var(--card);
-    box-shadow: 2px 2px 0 var(--shadow-c);
-    transform: rotate(-0.8deg);
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px 8px 6px 6px;
+    border-radius: var(--gl-r-sm);
+    border: var(--gl-bw) solid var(--gl-border);
+    background: var(--gl-inset);
+    font-variant-numeric: tabular-nums;
+    min-width: 0;
   }
-  .anchor:nth-child(2n) { transform: rotate(0.9deg); }
-  .anchor.no-cover { padding-left: 10px; }
+  .anchor.no-cover { padding-left: 8px; }
   .anchor-cover {
-    width: 20px;
-    height: 30px;
-    border-radius: 999px;
+    width: 32px;
+    height: 48px;
+    border-radius: var(--gl-r-xs);
     object-fit: cover;
-    border: 1.5px solid var(--ink);
     flex: none;
   }
-  .anchor .dim { color: var(--muted); font-weight: 650; }
-  .an-state {
-    flex: none;
-    font-size: 10px;
-    font-weight: 900;
-    line-height: 1.4;
-    padding: 0 6px;
-    border-radius: 999px;
-    border: 1.5px solid var(--ink);
-    background: var(--card);
-    color: var(--muted);
-  }
-  .an-state.an-good { background: var(--good); color: var(--card); }
-  .an-state.an-bad { background: var(--bad); color: var(--card); }
+  .anchor-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .anchor-name { font-weight: var(--gl-strong); overflow-wrap: anywhere; }
+  .anchor .chip.tier-none { background: var(--gl-surface); }
 
   /* ---- lineage / comparisons ---- */
   .callout {
     display: flex;
     flex-direction: column;
-    gap: 3px;
-    border: 2px solid var(--ink);
-    border-radius: 12px;
-    background: var(--p2);
-    box-shadow: 3px 3px 0 var(--shadow-c);
+    gap: 4px;
+    border: var(--gl-bw) solid var(--gl-border-strong);
+    border-radius: var(--gl-r-md);
+    background: var(--gl-inset);
     padding: 10px 12px;
     margin-bottom: 10px;
   }
-  .callout-head { font-size: 12.5px; font-weight: 800; }
-  .callout-note { font-size: 12px; line-height: 1.45; }
+  .callout-head { font-weight: var(--gl-strong); }
+  .callout-note { color: var(--gl-text-2); }
   .lineage { display: flex; gap: 10px; align-items: stretch; flex-wrap: wrap; }
-  .lin-col { flex: 1 1 150px; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+  .lin-col { flex: 1 1 150px; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
   .lin-head {
-    font-size: 9.5px;
-    font-weight: 800;
-    letter-spacing: 0.06em;
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    font-weight: var(--gl-strong);
+    letter-spacing: 0.04em;
     text-transform: uppercase;
-    color: var(--muted);
+    color: var(--gl-muted);
   }
-  .lin-arrow { align-self: center; font-size: 17px; font-weight: 900; color: var(--muted); }
+  .lin-arrow { align-self: center; font-size: var(--gl-h); color: var(--gl-muted); }
   .comp {
-    border: 1.5px solid var(--ink);
-    border-radius: 10px;
-    background: var(--card);
-    padding: 7px 9px;
+    border: var(--gl-bw) solid var(--gl-border);
+    border-radius: var(--gl-r-md);
+    background: var(--gl-surface);
+    padding: 8px 10px;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 4px;
   }
-  .comp-name { font-size: 12.5px; font-weight: 800; line-height: 1.25; overflow-wrap: anywhere; }
-  .comp-note { font-size: 11.5px; line-height: 1.4; color: var(--muted); }
-  .comp.this-game { background: var(--p1); border-width: 2px; box-shadow: 3px 3px 0 var(--shadow-c); }
-  .tags { display: flex; gap: 5px; flex-wrap: wrap; }
-  /* Sticker-like, so they tilt like the game-cards widget's pills; the data
-     chips (score meter, pace/price) stay straight for legibility. */
-  .tag {
-    font-size: 9.5px;
-    font-weight: 800;
-    padding: 1px 7px;
-    border-radius: 999px;
-    border: 1.5px solid var(--ink);
-    background: var(--p3);
-    white-space: nowrap;
-    transform: rotate(-1.2deg);
-  }
-  .tag:nth-child(2n) { transform: rotate(1.1deg); }
-  .tag:nth-child(3n) { transform: rotate(-0.7deg); }
-  .tag.owned { background: var(--good); color: var(--card); }
-  .tag.unplayed { background: var(--p2); }
-  /* Pedigree badges: HIS rating wins the one slot, the critic score only
-     stands in when he has none — the studio strip is about his history. */
-  .tag.rated { background: var(--good); color: var(--card); }
-  .tag.critic { background: var(--card); color: var(--muted); }
-
-  /* ---- "From the studio" (pedigree) ---- */
-  .ped-head { font-size: 12.5px; font-weight: 800; line-height: 1.35; }
-  .ped-pub { font-size: 11.5px; font-weight: 650; color: var(--muted); margin-top: 3px; }
-  .ped-strip { margin-top: 9px; }
-
+  .comp-name { font-weight: var(--gl-strong); line-height: var(--gl-h-lh); overflow-wrap: anywhere; }
+  .comp-note { font-size: var(--gl-cap); line-height: var(--gl-cap-lh); color: var(--gl-text-2); }
+  .comp.this-game { background: var(--gl-inset); border-color: var(--gl-border-strong); }
+"""
+    + apps_shared.TAG_CSS
+    + apps_shared.PEDIGREE_CSS
+    + r"""
   /* ---- why care (model-authored eyebrow lines) ---- */
-  .why-care { display: flex; flex-direction: column; gap: 7px; margin-top: 12px; }
-  .wc-line { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; line-height: 1.45; }
+  .why-care { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+  .wc-line { display: flex; gap: 10px; align-items: baseline; }
   .wc-eyebrow {
-    flex: none;
-    font-size: 9.5px;
-    font-weight: 800;
-    letter-spacing: 0.06em;
-    padding: 2px 8px;
-    border-radius: 999px;
-    border: 1.5px solid var(--ink);
-    white-space: nowrap;
-    transform: rotate(-1.4deg);
+    flex: 0 0 64px;
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    font-weight: var(--gl-strong);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--gl-muted);
   }
-  .wc-line:nth-child(2n) .wc-eyebrow { transform: rotate(1.2deg); }
-  .wc-people { background: var(--p1); }
-  .wc-studio { background: var(--p3); }
-  .wc-hype { background: var(--p2); }
-  .wc-moment { background: var(--p4); }
 
   /* ---- similar in your library ---- */
 """
     + apps_shared.SIMILAR_CSS
     + r"""
-  /* ---- past verdicts / errors ---- */
-  .timeline { display: flex; gap: 7px; flex-wrap: wrap; }
+  /* ---- past verdicts ---- */
+  .timeline { display: flex; gap: 6px; flex-wrap: wrap; }
   .tl-chip {
-    font-size: 11px;
-    font-weight: 700;
-    padding: 3px 9px;
-    border-radius: 999px;
-    border: 1.5px dashed var(--ink);
-    background: var(--card);
-    color: var(--muted);
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    padding: 3px 8px;
+    border-radius: var(--gl-r-sm);
+    border: var(--gl-bw) dashed var(--gl-border-strong);
+    color: var(--gl-text-2);
     white-space: nowrap;
-    transform: rotate(-0.9deg);
+    font-variant-numeric: tabular-nums;
   }
-  .tl-chip:nth-child(2n) { transform: rotate(0.8deg); }
-  .errfoot { font-size: 11px; font-weight: 650; color: var(--muted); text-align: center; }
-  .note-card { display: flex; gap: 12px; align-items: center; max-width: 560px; margin: 0 auto; }
-  .note-text { font-size: 14px; font-weight: 750; line-height: 1.4; overflow-wrap: anywhere; }
-  .note-card .stamp { font-size: 12px; max-width: 130px; padding: 7px 10px; margin: 0; }
+  .err-list { list-style: none; display: flex; flex-direction: column; gap: 4px; color: var(--gl-text-2); }
+  .err-list b { font-weight: var(--gl-strong); color: var(--gl-text); }
+
+  /* ---- action row, in-place breakdown, fullscreen breakdown ---- */
+  .actions { display: flex; gap: 8px; }
+  /* The secondary store link sizes to its label; the breakdown takes the rest. */
+  .actions .act-store { flex: none; }
+  .eval > .disclosure-body { margin-top: 0; }
+  /* The stage is self-evident inline; its eyebrow stays for screen readers. */
+  .media-slot .section-title {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .media-slot > .panel { position: relative; }
+  .fs-breakdown { display: none; flex-direction: column; gap: 12px; }
+  html[data-display-mode="fullscreen"] .fs-breakdown { display: flex; }
+  /* Fullscreen IS the breakdown, so its button goes — but the store link
+     stays: fullscreen is exactly where he has decided to read everything,
+     and the next step from there is the store page. */
+  html[data-display-mode="fullscreen"] .actions:not(.has-store),
+  html[data-display-mode="fullscreen"] .actions .act-breakdown,
+  html[data-display-mode="fullscreen"] .eval > .disclosure-body { display: none; }
+  html[data-display-mode="fullscreen"] .actions { justify-content: flex-end; }
+
+  .note-card { display: flex; gap: 14px; align-items: center; max-width: 560px; margin: 0 auto; }
+  .note-text { font-weight: var(--gl-strong); overflow-wrap: anywhere; }
+  .note-card .stamp { font-size: var(--gl-cap); max-width: 130px; padding: 6px 10px; margin: 0; }
 
   /* ---- click-to-enlarge overlay ---- */
   /* Anchored near the clicked thumbnail rather than centered in the (possibly
@@ -455,13 +376,13 @@ EVAL_CARD_HTML = (
     + r"""  .overlay-panel {
     position: absolute;
     left: 50%;
-    width: calc(100% - 28px);
+    width: calc(100% - 24px);
     max-width: 900px;
-    border: 2px solid var(--ink);
-    border-radius: 14px;
-    background: var(--card);
+    border: var(--gl-bw) solid var(--gl-border);
+    border-radius: var(--gl-r-lg);
+    background: var(--gl-surface);
     overflow: hidden;
-    transform: translateX(-50%) scale(0.93) translateY(12px);
+    transform: translateX(-50%) scale(0.97) translateY(8px);
     transition: transform 0.19s ease;
   }
   .overlay.open .overlay-panel { transform: translateX(-50%); }
@@ -474,7 +395,7 @@ EVAL_CARD_HTML = (
     border-radius: 0;
     border-left: 0;
     border-right: 0;
-    background: #0d0b07;
+    background: var(--gl-stage);
     transform: translateY(14px);
   }
   .overlay.open .overlay-panel.carousel { transform: none; }
@@ -482,26 +403,62 @@ EVAL_CARD_HTML = (
     + apps_shared.CAROUSEL_CSS
     + apps_shared.TOAST_CSS
     + r"""
-  @media (max-width: 560px) {
-    body { padding: 12px; }
-    .stamp { font-size: 13px; }
+  /* Wide card: the thumbs stand beside the stage as a 3-column grid (the
+     Steam store layout) instead of under it — the strip under a full-width
+     16:9 stage cost ~160px of the inline budget, and the trailer plus eight
+     screenshots fill the 3x3 grid exactly. contain: size keeps the column
+     from growing the row, so the stage sets the height and any overflow
+     scrolls inside it. */
+  @media (min-width: 600px) {
+    .media-slot.has-thumbs > .panel {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 296px;
+      column-gap: 10px;
+    }
+    .media-slot.has-thumbs .section-title { grid-column: 1 / -1; }
+    .media-slot.has-thumbs .thumbs {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      align-content: start;
+      gap: 6px;
+      margin-top: -4px;             /* cells level with the stage; the ring keeps its 4px */
+      contain: size;
+      overflow-x: hidden;
+      overflow-y: auto;
+    }
+    .media-slot.has-thumbs .thumb img, .media-slot.has-thumbs .thumb-text {
+      width: 100%;
+      height: auto;
+      aspect-ratio: 16 / 9;
+    }
+    /* The grid scrolls vertically: no sideways snap, and no trailing spacer
+       (it would wrap into a stray grid cell). */
+    .media-slot.has-thumbs .thumbs { scroll-snap-type: none; }
+    .media-slot.has-thumbs .thumbs::after { content: none; }
+  }
+  @media (max-width: 419px) {
+    .actions { flex-direction: column; }
+    .actions .act-store { width: 100%; }
+    /* "THE CALL" becomes a label above its chips instead of an eyebrow
+       sharing a first line with one lonely chip. */
+    .call .call-label { flex-basis: 100%; margin-right: 0; }
+    .head {
+      grid-template-columns: 84px minmax(0, 1fr);
+      grid-template-areas: "cover info" "cover stamp" "scores scores" "note note";
+      grid-template-rows: auto 1fr auto auto;
+    }
+    .head .stamp { justify-self: start; }
   }
   @media (max-width: 480px) {
     .two-col { grid-template-columns: 1fr; }
     .lin-arrow { display: none; }
-    .head .cover-wrap { flex-basis: 84px; }
     /* Narrow phone: smaller thumbs so several fit before scrolling. */
     .thumb img, .thumb-text { width: 96px; height: 55px; }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .overlay, .overlay-panel, .thumb, .play-badge span { transition: none; }
-    .thumb:hover { transform: none; }
-    .play-badge:hover span, .play-badge:focus-visible span { transform: none; }
   }
 </style>
 </head>
 <body>
-<div id="root"><div class="empty">Waiting for the evaluation…</div></div>
+<div id="root"></div>
 <script>
 """
     + apps_shared.BRIDGE_JS
@@ -511,41 +468,13 @@ EVAL_CARD_HTML = (
   /* ---------- small helpers ---------- */
 """
     + apps_shared.DOM_HELPERS_JS
+    + apps_shared.COMPONENTS_JS
     + apps_shared.COVER_HUE_JS
     + r"""  /* Same cover block as the game-cards widget: real art when we have it, a
      name-seeded gradient plate when we don't. */
 """
     + apps_shared.COVER_NODE_JS
-    + r"""  function hoursLabel(h) {
-    var n = num(h);
-    if (n == null) return null;
-    return (n >= 10 ? Math.round(n) : Math.round(n * 10) / 10) + "h";
-  }
-  var CURRENCY_SIGNS = { EUR: "€", USD: "$", GBP: "£", JPY: "¥" };
-  function money(amount, currency) {
-    var n = num(amount);
-    if (n == null) return null;
-    var code = String(currency || "").toUpperCase();
-    var sign = CURRENCY_SIGNS[code];
-    var value = n.toFixed(2);
-    if (sign) return sign + value;
-    return code ? code + " " + value : value;
-  }
-  function compactCount(v) {
-    var n = num(v);
-    if (n == null) return null;
-    if (n >= 1000000) return (Math.round(n / 100000) / 10) + "M";
-    if (n >= 10000) return Math.round(n / 1000) + "k";
-    if (n >= 1000) return (Math.round(n / 100) / 10) + "k";
-    return String(Math.round(n));
-  }
-  function section(parent, title) {
-    var box = el("section", "panel");
-    if (title) box.appendChild(el("div", "section-title", title));
-    parent.appendChild(box);
-    return box;
-  }
-
+    + r"""
   /* ---------- best-effort fullscreen ---------- */
   /* A widget iframe is usually sandboxed, and many hosts don't grant
      allow="fullscreen" — there the API is either absent or the request is
@@ -556,37 +485,32 @@ EVAL_CARD_HTML = (
     + apps_shared.FULLSCREEN_BUTTON_JS
     + r"""
   /* ---------- screenshot carousel (lightbox) ---------- */
-  var overlayState = null; // { node, trigger, keydown }
+  var overlayState = null; // { node, trigger, keydown, focusin }
 
   function closeOverlay() {
     if (!overlayState) return;
     var s = overlayState;
     overlayState = null;
-    document.removeEventListener("keydown", s.keydown);
+    document.removeEventListener("keydown", s.keydown, true);
+    document.removeEventListener("focusin", s.focusin, true);
     s.node.classList.remove("open");
     setTimeout(function () { s.node.remove(); }, 200);
-    if (s.trigger && s.trigger.focus) s.trigger.focus();
+    if (s.trigger && s.trigger.focus) s.trigger.focus({ preventScroll: true });
   }
 
 """
     + apps_shared.NAV_BUTTON_JS
+    + apps_shared.LIGHTBOX_CHROME_JS
     + r"""
   /* Edge-to-edge, and every way through the set a phone or a keyboard would
-     try: drag/swipe, the two arrow buttons, and the arrow keys. */
+     try: drag/swipe, the two arrow buttons, and the arrow keys. The dialog
+     chrome — ✕, focus trap, Escape and arrow routing — is the shared one. */
   function openCarousel(shots, startIndex, gameName, trigger) {
     closeOverlay();
     var index = startIndex;
     var overlay = el("div", "overlay");
-    var panel = el("div", "overlay-panel carousel");
-    panel.setAttribute("role", "dialog");
-    panel.setAttribute("aria-modal", "true");
-    panel.setAttribute("aria-label", (gameName ? gameName + " " : "") + "screenshots");
-    panel.tabIndex = -1;
-
-    var close = el("button", "overlay-close", "✕");
-    close.setAttribute("aria-label", "Close screenshots");
-    close.addEventListener("click", closeOverlay);
-    panel.appendChild(close);
+    var chrome = lightboxPanel("overlay-panel carousel", gameName, closeOverlay);
+    var panel = chrome.panel;
 
 """
     + apps_shared.CAROUSEL_STAGE_JS
@@ -595,13 +519,11 @@ EVAL_CARD_HTML = (
     overlay.addEventListener("click", function (ev) {
       if (ev.target === overlay) closeOverlay();
     });
-    var keydown = function (ev) {
-      if (ev.key === "Escape") closeOverlay();
-      else if (ev.key === "ArrowLeft") show(index - 1);
-      else if (ev.key === "ArrowRight") show(index + 1);
-    };
-    document.addEventListener("keydown", keydown);
-    overlayState = { node: overlay, trigger: trigger, keydown: keydown };
+    var keydown = lightboxKeys(panel, function (delta) { show(index + delta); }, closeOverlay);
+    var focusin = focusGuard(panel);
+    document.addEventListener("keydown", keydown, true);
+    document.addEventListener("focusin", focusin, true);
+    overlayState = { node: overlay, trigger: trigger, keydown: keydown, focusin: focusin };
 
     document.body.appendChild(overlay);
 
@@ -618,10 +540,10 @@ EVAL_CARD_HTML = (
     position();
     img.addEventListener("load", position); // full-size art changes the height
     requestAnimationFrame(function () { overlay.classList.add("open"); });
-    panel.focus({ preventScroll: true });
+    chrome.closer.focus({ preventScroll: true });
   }
 
-  /* ---------- 1. media: one viewer + one thumb strip ---------- */
+  /* ---------- media: one viewer + one thumb strip ---------- */
 """
     + apps_shared.HERO_MEDIA_JS
     + r"""
@@ -632,23 +554,27 @@ EVAL_CARD_HTML = (
 """
     + apps_shared.MEDIA_PANEL_JS
     + r"""
-  /* ---------- 2. header + verdict stamp ---------- */
-  var VERDICTS = {
-    buy_now: ["BUY NOW", "stamp-good"],
-    wishlist_for_sale: ["WISHLIST FOR SALE", "stamp-ok"],
-    try_demo: ["TRY THE DEMO", "stamp-p1"],
-    play_what_you_own: ["PLAY WHAT YOU OWN", "stamp-p4"],
-    skip: ["SKIP", "stamp-bad"],
+  /* ---------- 2. header: identity, scores, the call ---------- */
+  /* The stamp's text is label("verdict", …); this map only picks its fill. */
+  var VERDICT_STAMPS = {
+    buy_now: "stamp-good",
+    wishlist_for_sale: "stamp-ok",
+    try_demo: "stamp-plain",
+    play_what_you_own: "stamp-plain",
+    skip: "stamp-bad",
   };
   function stampNode(verdict) {
     if (!verdict) return null;
-    var known = VERDICTS[verdict];
-    var label = known ? known[0] : String(verdict).replace(/_/g, " ").toUpperCase();
-    var stamp = el("div", "stamp " + (known ? known[1] : "stamp-p1"), label);
+    var text = label("verdict", verdict);
+    var stamp = el("div", "stamp " + (VERDICT_STAMPS[verdict] || "stamp-plain"), text);
     stamp.setAttribute("role", "img");
-    stamp.setAttribute("aria-label", "Verdict: " + label);
+    stamp.setAttribute("aria-label", "Verdict: " + text);
     return stamp;
   }
+  /* Everything the verdict rests on sits in this one panel, in the order it
+     is read: what the game is (cover, title, stamp), how good it is (scores,
+     craft note), and what it costs in hours and money (the call — which used
+     to close the card 2,400px down and is now the third thing on it). */
   function headerNode(pkg) {
     var game = pkg.game || {};
     var own = pkg.ownership || {};
@@ -662,31 +588,157 @@ EVAL_CARD_HTML = (
     info.appendChild(el("h1", null, game.name || "Unknown game"));
     var bits = [];
     if (game.release_year) bits.push(String(game.release_year));
-    var platforms = list(own.platforms).filter(Boolean);
-    if (platforms.length) bits.push(platforms.join(" · "));
+    var platforms = list(own.platforms).filter(Boolean)
+      .map(function (p) { return label("platform", p); });
+    if (platforms.length) bits.push(platforms.join(", "));
     // Positive hours only: hoursLabel(0) is the truthy string "0h", and
     // "0h played" would contradict the card's own unplayed badges (zero is
     // authoritative NOT-played; null is unknown and says nothing).
     var played = own.playtime_hours > 0 ? hoursLabel(own.playtime_hours) : null;
     if (played) bits.push(played + " played");
     if (own.wishlisted && !own.owned) bits.push("wishlisted");
-    if (bits.length) info.appendChild(el("div", "sub", bits.join("  ·  ")));
+    if (bits.length) info.appendChild(el("div", "sub", bits.join(" · ")));
     head.appendChild(info);
 
     var stamp = stampNode(pkg.verdict);
     if (stamp) head.appendChild(stamp);
+
+    // The score row and the craft note are grid areas of .head: beside the
+    // cover on a wide card, full width under it on a phone.
+    var chips = scoreChips(pkg);
+    if (chips) head.appendChild(chips);
+    if (pres.craft_note) head.appendChild(el("div", "craft-note", pres.craft_note));
     box.appendChild(head);
 
-    // The scores belong to the identity block, not to a panel of their own:
-    // "CRAFT & FIT" held two chips and a lot of air on the live card.
-    var chips = scoreChips(pkg);
-    if (chips) box.appendChild(chips);
-    if (pres.craft_note) box.appendChild(el("div", "craft-note", pres.craft_note));
+    var call = callNode(pkg);
+    if (call) box.appendChild(call);
     return box;
   }
 
-  /* The verdict in words: the one-liner, the authored pitch, and the why-care
-     eyebrow — one panel, because they are one argument. */
+  /* ---------- the score chips (a grid area of the header) ---------- */
+  /* Every one is the shared scoreChip: tier color, source as label text. */
+  var TRAJECTORIES = {
+    improving: ["↗ Improving", "good"],
+    stable: ["→ Stable", "none"],
+    regressing: ["↘ Regressing", "bad"],
+  };
+  var FIT_CLASSES = {
+    "strong fit": "good",
+    "probable fit": "good",
+    "coin flip": "ok",
+    "probable miss": "bad",
+  };
+  /* The stored ranges (tools/assessment.py's _check_range): craft.adjusted
+     is a 0..1 sample-adjusted share, rescaled here; positive_pct is the raw
+     review percentage, already 0..100, so 1 means 1% — never rescaled. It
+     only stands in when there's no adjusted figure. */
+  function craftPercent(craft) {
+    var adjusted = num(craft.adjusted);
+    if (adjusted != null) return Math.round(adjusted * 100);
+    var raw = num(craft.positive_pct);
+    return raw == null ? null : Math.round(raw);
+  }
+  function scoreChips(pkg) {
+    var craft = pkg.craft || {};
+    var row = el("div", "chips head-chips");
+
+    var pct = craftPercent(craft);
+    if (pct != null) {
+      var rawPct = num(craft.positive_pct);
+      var count = compactCount(craft.review_count, "review");      // "114k reviews"
+      row.appendChild(scoreChip({
+        label: "Reviews", value: pct + "% positive", tier: craftTier(pct), meter: pct,
+        aux: count,
+        title: "Sample-adjusted share of positive reviews"
+          + (rawPct != null ? " (raw " + Math.round(rawPct) + "% positive)" : "")
+          + (count ? ", from " + count : ""),
+      }));
+    }
+
+    var traj = TRAJECTORIES[craft.trajectory];
+    if (traj) {
+      row.appendChild(scoreChip({
+        label: "Trend", value: traj[0], tier: traj[1], title: "Recent review trajectory",
+      }));
+    }
+
+    // Providers use negative sentinels for "no score yet" — never show those.
+    var mc = num(craft.metacritic_score);
+    if (realScore(mc)) {
+      row.appendChild(scoreChip({ label: "Metacritic", value: Math.round(mc), tier: mcTier(mc) }));
+    }
+
+    var oc = num(craft.opencritic_score);
+    if (realScore(oc)) {
+      row.appendChild(scoreChip({ label: "OpenCritic", value: Math.round(oc), tier: ocTier(oc) }));
+    }
+
+    if (pkg.fit_call) {
+      // "strong fit" → Fit "Strong": the label already says fit.
+      var fit = String(pkg.fit_call).replace(/\s+fit$/i, "");
+      row.appendChild(scoreChip({
+        label: "Fit", value: fit.charAt(0).toUpperCase() + fit.slice(1),
+        tier: FIT_CLASSES[pkg.fit_call] || "none", title: "How well it fits your taste",
+      }));
+    }
+
+    return row.childNodes.length ? row : null;
+  }
+
+  /* ---------- 3. the call: time, price, flags ---------- */
+  /* Facts are tier-less chips and the flags are danger chips in the same
+     row; the eyebrow rides inline, so the block costs no line of its own. */
+  function factChip(row, name, value, aux, title) {
+    row.appendChild(scoreChip({ label: name, value: value, aux: aux, title: title }));
+  }
+  function factChips(pkg, row) {
+    var time = pkg.time || {};
+    var price = pkg.price || {};
+    var own = pkg.ownership || {};
+
+    var main = hoursLabel(time.hltb_main_hours, true);
+    var extra = hoursLabel(time.hltb_extra_hours);
+    var hltbTitle = "HowLongToBeat: main story, and main + extras";
+    if (main) factChip(row, "Time to beat", main, extra ? extra + " with extras" : null, hltbTitle);
+    else if (extra) factChip(row, "Time to beat", "~" + extra, "with extras", hltbTitle);
+
+    var weekly = num(time.recent_weekly_minutes);
+    if (weekly != null && weekly > 0) {
+      factChip(row, "Your pace", hoursLabel(weekly / 60, true) + "/wk", "last 30 days",
+        "Your average weekly playtime over the last 30 days");
+    }
+
+    var seen = money(price.seen, price.currency);
+    if (seen) {
+      factChip(row, "Price", "seen at " + seen
+        + (price.platform ? " on " + label("platform", price.platform) : ""));
+    }
+    var target = money(price.target, price.currency);
+    if (target) factChip(row, "Target", target);
+
+    var paid = money(own.price_paid, own.price_currency);
+    if (paid) {
+      var how = own.bundle_name ? " in " + own.bundle_name
+        : own.purchase_source ? " via " + label("purchase_source", own.purchase_source) : "";
+      factChip(row, "Owned", "paid " + paid + how);
+    }
+  }
+  function callNode(pkg) {
+    var row = el("div", "chips");
+    factChips(pkg, row);
+    list(pkg.flags).filter(Boolean).forEach(function (f) {
+      row.appendChild(scoreChip({ label: String(f), tier: "bad", cls: "flag" }));
+    });
+    if (!row.childNodes.length) return null;
+    row.insertBefore(el("span", "call-label", "The call"), row.firstChild);
+    var call = el("div", "call");
+    call.appendChild(row);
+    return call;
+  }
+
+  /* ---------- 4. the verdict in words ---------- */
+  /* The one-liner, the authored pitch, and the why-care eyebrow — one panel,
+     because they are one argument. */
   function pitchNode(parent, pkg) {
     var pres = pkg.presentation || {};
     var hasWhyCare = list(pres.why_care).filter(function (e) { return e && e.text; }).length;
@@ -699,14 +751,14 @@ EVAL_CARD_HTML = (
   }
 
   /* why_care: up to three model-authored lines answering "why look at this at
-     all" — the editorial counterpart to the server-fetched pedigree strip
-     below. Chip per kind, one line each, no paragraphs; absent when the
-     recording client authored none. */
+     all" — the editorial counterpart to the server-fetched pedigree strip in
+     the breakdown. An eyebrow per kind, one line each, no paragraphs; absent
+     when the recording client authored none. */
   var WHY_CARE_KINDS = {
-    people: ["PEOPLE", "wc-people"],
-    studio: ["STUDIO", "wc-studio"],
-    anticipation: ["HYPE", "wc-hype"],
-    moment: ["MOMENT", "wc-moment"],
+    people: ["People", "wc-people"],
+    studio: ["Studio", "wc-studio"],
+    anticipation: ["Hype", "wc-hype"],
+    moment: ["Moment", "wc-moment"],
   };
   function whyCareNode(parent, pres) {
     var entries = list(pres.why_care).filter(function (e) { return e && e.text; });
@@ -716,102 +768,25 @@ EVAL_CARD_HTML = (
       var known = WHY_CARE_KINDS[entry.kind];
       var line = el("div", "wc-line");
       line.appendChild(el("span", "wc-eyebrow " + (known ? known[1] : "wc-studio"),
-        known ? known[0] : String(entry.kind || "why").toUpperCase()));
+        known ? known[0] : humanize(entry.kind || "why")));
       line.appendChild(el("span", null, String(entry.text)));
       wrap.appendChild(line);
     });
     parent.appendChild(wrap);
   }
 
-  /* ---------- 3. the score chips (rendered inside the header) ---------- */
-  /* OpenCritic tiers are percentile-based; approximate from the score, with
-     the tier palette from their own stylesheet (same mapping as apps.py). */
-  function ocTier(n) {
-    return "oc-" + (n >= 84 ? "mighty" : n >= 75 ? "strong" : n >= 65 ? "fair" : "weak");
-  }
-  /* Metacritic's games thresholds: green >=75, yellow 50-74, red <50. */
-  function mcTier(n) { return n >= 75 ? "mc-hi" : n >= 50 ? "mc-mid" : "mc-lo"; }
-  var TRAJECTORIES = {
-    improving: ["↗", "improving", "traj-good"],
-    stable: ["→", "stable", "traj-flat"],
-    regressing: ["↘", "regressing", "traj-bad"],
-  };
-  var FIT_CLASSES = {
-    "strong fit": "fit-good",
-    "probable fit": "fit-ok",
-    "coin flip": "fit-mid",
-    "probable miss": "fit-bad",
-  };
-  /* craft.adjusted is a 0..1 sample-adjusted share; positive_pct is the raw
-     review percentage (0..100) and only stands in when there's no adjusted
-     figure. */
-  function craftPercent(craft) {
-    var adjusted = num(craft.adjusted);
-    if (adjusted != null) return Math.round(adjusted * 100);
-    var raw = num(craft.positive_pct);
-    if (raw == null) return null;
-    return Math.round(raw <= 1 ? raw * 100 : raw);
-  }
-  function scoreChips(pkg) {
-    var craft = pkg.craft || {};
-    var row = el("div", "chips head-chips");
-
-    var pct = craftPercent(craft);
-    if (pct != null) {
-      var tier = pct >= 75 ? "craft-hi" : pct >= 50 ? "craft-mid" : "craft-lo";
-      var chip = el("span", "chip " + tier);
-      chip.appendChild(el("span", "lbl", "craft"));
-      var meter = el("span", "meter");
-      var fill = el("span", "meter-fill");
-      fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
-      meter.appendChild(fill);
-      chip.appendChild(meter);
-      var n = compactCount(craft.review_count);
-      chip.appendChild(el("span", null, pct + "%" + (n ? " · n=" + n : "")));
-      var rawPct = num(craft.positive_pct);
-      chip.title = "Sample-adjusted review share"
-        + (rawPct != null ? " (raw " + Math.round(rawPct <= 1 ? rawPct * 100 : rawPct) + "% positive)" : "");
-      row.appendChild(chip);
-    }
-
-    var traj = TRAJECTORIES[craft.trajectory];
-    if (traj) {
-      var tChip = el("span", "chip " + traj[2]);
-      tChip.appendChild(el("span", null, traj[0] + " " + traj[1]));
-      tChip.title = "Recent review trajectory";
-      row.appendChild(tChip);
-    }
-
-    // Providers use negative sentinels for "no score yet" — never show those.
-    var mc = num(craft.metacritic_score);
-    if (mc != null && mc >= 0) {
-      var mcChip = el("span", "chip mc " + mcTier(mc));
-      mcChip.appendChild(el("span", "lbl", "MC"));
-      mcChip.appendChild(el("span", null, String(Math.round(mc))));
-      mcChip.title = "Metacritic";
-      row.appendChild(mcChip);
-    }
-
-    var oc = num(craft.opencritic_score);
-    if (oc != null && oc >= 0) {
-      var ocChip = el("span", "chip oc " + ocTier(oc));
-      ocChip.appendChild(el("span", "lbl", "OC"));
-      ocChip.appendChild(el("span", null, String(Math.round(oc))));
-      ocChip.title = "OpenCritic";
-      row.appendChild(ocChip);
-    }
-
-    if (pkg.fit_call) {
-      var fitChip = el("span", "chip " + (FIT_CLASSES[pkg.fit_call] || ""));
-      fitChip.appendChild(el("span", "lbl", "fit"));
-      fitChip.appendChild(el("span", null, String(pkg.fit_call)));
-      row.appendChild(fitChip);
-    }
-
-    return row.childNodes.length ? row : null;
+  /* ---------- 5. media (one viewer + one thumb strip) ---------- */
+  /* The shared mediaNode builds the panel; the slot lets the card lay it out
+     (thumbs beside the stage on a wide card) without touching shared code. */
+  function mediaSlot(parent, media, gameName) {
+    var slot = el("div", "media-slot");
+    mediaNode(slot, media, gameName);
+    if (!slot.childNodes.length) return;
+    if (slot.querySelector(".thumbs")) slot.classList.add("has-thumbs");
+    parent.appendChild(slot);
   }
 
-  /* ---------- 4. for you / not for you ---------- */
+  /* ---------- breakdown: for you / not for you ---------- */
   function bulletColumn(title, items, kind) {
     var col = el("div", "col " + kind);
     col.appendChild(el("div", "col-title", title));
@@ -838,48 +813,42 @@ EVAL_CARD_HTML = (
     box.appendChild(cols);
   }
 
-  /* ---------- 5. anchors ---------- */
-  /* The PILL is neutral — an anchor is evidence, and half of them are
-     negative ("Cyberpunk 2077, 6.6h"). Only the status glyph is coloured:
-     completed/evergreen good, abandoned bad, anything else plain. */
-  var COMPLETION = {
-    completed: ["✓", "completed", "an-good"],
-    evergreen: ["∞", "evergreen", "an-good"],
-    playing: ["▶", "playing", ""],
-    abandoned: ["⚠", "abandoned", "an-bad"],
-  };
+  /* ---------- breakdown: anchors ---------- */
+  /* The card is neutral — an anchor is evidence, and half of them are
+     negative ("Cyberpunk 2077, 6.6h"). Its chips are the shared library
+     chips: his rating, his hours, and the completion status (Completed /
+     Evergreen good, Abandoned bad, Playing plain). */
   function anchorsNode(parent, anchors) {
     if (!anchors.length) return;
     var box = section(parent, "Grounded in your history");
-    var chips = el("div", "chips");
+    var grid = el("div", "anchors");
     anchors.forEach(function (a) {
-      var state = COMPLETION[a.completion_status];
-      var chip = el("div", "anchor" + (a.cover_url ? "" : " no-cover"));
+      var card = el("div", "anchor" + (a.cover_url ? "" : " no-cover"));
       if (a.cover_url) {
         var img = document.createElement("img");
         img.className = "anchor-cover";
         img.alt = "";
         img.loading = "lazy";
-        img.onerror = function () { img.remove(); chip.classList.add("no-cover"); };
+        // Broken art gives way to the name-seeded plate, same size.
+        img.onerror = function () {
+          if (img.parentNode) img.parentNode.replaceChild(coverPlate(a.name, "anchor-cover"), img);
+        };
         img.src = a.cover_url;
-        chip.appendChild(img);
+        card.appendChild(img);
       }
-      chip.appendChild(el("span", null, a.name || "?"));
-      var rating = num(a.rating);
-      if (rating != null) chip.appendChild(el("span", "dim", rating + "/10"));
-      var hours = hoursLabel(a.playtime_hours);
-      if (hours) chip.appendChild(el("span", "dim", hours));
-      if (state) {
-        var glyph = el("span", "an-state" + (state[2] ? " " + state[2] : ""), state[0]);
-        glyph.title = state[1];
-        chip.appendChild(glyph);
-      }
-      chips.appendChild(chip);
+      var body = el("div", "anchor-body");
+      body.appendChild(el("div", "anchor-name", a.name || "?"));
+      var hours = num(a.playtime_hours);
+      var chips = chipRow([youChip(a.rating), playedChip(hours, hours === 0),
+        statusChip(a.completion_status)]);
+      if (chips) body.appendChild(chips);
+      card.appendChild(body);
+      grid.appendChild(card);
     });
-    box.appendChild(chips);
+    box.appendChild(grid);
   }
 
-  /* ---------- 6. lineage / comparisons ---------- */
+  /* ---------- breakdown: lineage / comparisons ---------- */
   var CALLOUT_HEADS = {
     better_version: "A better version exists",
     cheaper_substitute: "Cheaper substitute",
@@ -940,7 +909,7 @@ EVAL_CARD_HTML = (
     }
 
     if (loose.length) {
-      // Labelled, because these note-cards now sit above the library's own
+      // Labelled, because these note-cards sit above the library's own
       // similar strip and the two must not read as one list.
       var onlySimilar = loose.every(function (c) { return c.relation === "similar"; });
       var head = el("div", "lin-head", onlySimilar ? "Also similar" : "Other comparisons");
@@ -948,78 +917,27 @@ EVAL_CARD_HTML = (
         ? "12px" : "0";
       box.appendChild(head);
       var rest = el("div", "chips");
-      rest.style.marginTop = "7px";
+      rest.style.marginTop = "6px";
+      rest.style.alignItems = "stretch";
       loose.forEach(function (c) { rest.appendChild(comparisonNode(c)); });
       box.appendChild(rest);
     }
   }
 
-  /* ---------- 7. similar in your library (tag similarity) ---------- */
+  /* ---------- breakdown: similar in your library (tag similarity) ---------- */
 """
     + apps_shared.SIMILAR_NODE_JS
     + r"""
-  /* ---------- 8. from the studio (pedigree) ---------- */
+  /* ---------- breakdown: from the studio (pedigree) ---------- */
   /* Server-fetched and library-annotated (tools/game_media.py): who made this,
      and what they shipped BEFORE it. Under the big-studio damper, or with
      nothing released earlier, only the header line renders — six arbitrary
-     posters out of a 500-game catalogue say nothing about this game. Mirrors
-     the detail card's implementation (apps.py) by hand, like every other block
-     these two widgets share. */
-  /* "1 games" was on the live card. A count is only singular when it is
-     exactly one AND not a floor ("1+ games" stays plural). */
+     posters out of a 500-game catalogue say nothing about this game. Spliced
+     from apps_shared.py, verbatim in the detail card too. */
 """
     + apps_shared.PEDIGREE_JS
     + r"""
-  /* ---------- 9. the call: time, price, flags, past verdicts ---------- */
-  /* One closing panel instead of three: three boxes holding a chip apiece was
-     the other half of the "too busy" complaint. */
-  function factChip(row, label, value) {
-    var chip = el("span", "chip");
-    chip.appendChild(el("span", "lbl", label));
-    chip.appendChild(el("span", null, value));
-    row.appendChild(chip);
-  }
-  function factChips(pkg) {
-    var time = pkg.time || {};
-    var price = pkg.price || {};
-    var own = pkg.ownership || {};
-    var row = el("div", "chips");
-
-    var main = hoursLabel(time.hltb_main_hours);
-    var extra = hoursLabel(time.hltb_extra_hours);
-    if (main && extra) factChip(row, "HLTB", "~" + main + " / " + extra);
-    else if (main) factChip(row, "HLTB", "~" + main);
-    else if (extra) factChip(row, "HLTB", "~" + extra + " to complete");
-
-    var weekly = num(time.recent_weekly_minutes);
-    if (weekly != null && weekly > 0) {
-      factChip(row, "pace", "your last 30 days: ~" + hoursLabel(weekly / 60) + "/wk");
-    }
-
-    var seen = money(price.seen, price.currency);
-    if (seen) {
-      factChip(row, "price", "seen at " + seen + (price.platform ? " on " + price.platform : ""));
-    }
-    var target = money(price.target, price.currency);
-    if (target) factChip(row, "target", target);
-
-    var paid = money(own.price_paid, own.price_currency);
-    if (paid) {
-      var how = own.bundle_name ? " in " + own.bundle_name
-        : own.purchase_source ? " via " + own.purchase_source : "";
-      factChip(row, "owned", "paid " + paid + how);
-    }
-
-    return row.childNodes.length ? row : null;
-  }
-
-  function flagsRow(flags) {
-    if (!flags.length) return null;
-    var chips = el("div", "chips");
-    chips.style.marginTop = "10px";
-    flags.forEach(function (f) { chips.appendChild(el("span", "flag", String(f))); });
-    return chips;
-  }
+  /* ---------- breakdown: past verdicts ---------- */
   function pastRow(past) {
     var items = list(past.items).slice();
     if (!items.length) return null;
@@ -1027,13 +945,10 @@ EVAL_CARD_HTML = (
       return String(b.assessed_at || "").localeCompare(String(a.assessed_at || ""));
     });
     var line = el("div", "timeline");
-    line.style.marginTop = "10px";
     items.forEach(function (p) {
       var parts = [];
       if (p.assessed_at) parts.push(String(p.assessed_at).slice(0, 10));
-      // The stored verdict value, not a prettified one: the timeline is a
-      // record of what was filed, and it reads next to the current stamp.
-      if (p.verdict) parts.push(String(p.verdict));
+      if (p.verdict) parts.push(label("verdict", p.verdict));
       var seen = money(p.price_seen, p.price_currency);
       if (seen) parts.push(seen);
       var chip = el("span", "tl-chip", parts.join(" · ") || "earlier verdict");
@@ -1046,48 +961,198 @@ EVAL_CARD_HTML = (
     }
     return line;
   }
-  function closingNode(parent, pkg) {
-    var facts = factChips(pkg);
-    var flags = flagsRow(list(pkg.flags).filter(Boolean));
-    var past = pastRow(pkg.past || {});
-    if (!facts && !flags && !past) return;
-    var box = section(parent, "The call");
-    if (facts) box.appendChild(facts);
-    [flags, past].forEach(function (row) {
-      if (!row) return;
-      if (!box.querySelector(".chips, .timeline")) row.style.marginTop = "0";
-      box.appendChild(row);
-    });
+  function pastNode(parent, past) {
+    var line = pastRow(past);
+    if (line) section(parent, "Past verdicts").appendChild(line);
+  }
+
+  /* ---------- 7. what failed: one notice inline, the detail in the breakdown ---------- */
+  /* package.errors are "<block>: <reason>" strings ("media: steam: …",
+     "igdb: unresolved — …"). The notice names WHAT is missing and from WHERE
+     ("Couldn't load: similar games (library)"); the reasons stay in its
+     tooltip and in the breakdown's last section. Each known block maps to
+     [what, where]; "media" takes its source from the provider prefix of its
+     reason, and an unknown block is its humanized key with no source. */
+  var ERROR_BLOCKS = {
+    media: ["media", null],
+    similar: ["similar games", "library"],
+    anchors: ["your history", "library"],
+    pace: ["your pace", "library"],
+    pedigree: ["studio", "IGDB"],
+    studio: ["studio", "IGDB"],
+    igdb: ["studio", "IGDB"],
+    steam: ["store data", "Steam"],
+    hltb: ["time to beat", "HowLongToBeat"],
+    package: ["evaluation details", null],
+  };
+  var ERROR_REASON_CAP = 120;
+  function errorItem(text) {
+    var raw = String(text);
+    var cut = raw.indexOf(":");
+    var key = (cut < 0 ? raw : raw.slice(0, cut)).trim().toLowerCase();
+    var why = cut < 0 ? "" : raw.slice(cut + 1).trim();
+    var has = Object.prototype.hasOwnProperty;
+    var known = has.call(ERROR_BLOCKS, key) ? ERROR_BLOCKS[key] : null;
+    var source = known ? known[1] : null;
+    if (key === "media") {
+      // "media: steam: fetch failed" → (Steam), and the reason loses the prefix.
+      var sub = why.indexOf(":");
+      var prefix = sub < 0 ? "" : why.slice(0, sub).trim().toLowerCase();
+      if (has.call(PROVIDER_LABELS, prefix)) {
+        source = PROVIDER_LABELS[prefix];
+        why = why.slice(sub + 1).trim();
+      }
+    }
+    if (why.length > ERROR_REASON_CAP) why = why.slice(0, ERROR_REASON_CAP - 1).trim() + "…";
+    return {
+      what: known ? known[0] : humanize(key || "details").toLowerCase(),
+      source: source || "",
+      why: why,
+    };
+  }
+  /* An error whose data is on the card anyway says nothing true: "couldn't
+     load time to beat" beside "~18h" reads as a contradiction. Drop it. */
+  function errorHasData(text, pkg) {
+    var key = String(text).split(":")[0].trim().toLowerCase();
+    var time = pkg.time || {};
+    var media = pkg.media || {};
+    var ped = pkg.pedigree;
+    if (key === "hltb") return num(time.hltb_main_hours) != null || num(time.hltb_extra_hours) != null;
+    if (key === "igdb" || key === "studio" || key === "pedigree") {
+      return !!(ped && (pedigreeHeadline(ped) || named(ped.previous_games).length));
+    }
+    if (key === "media") {
+      return !!(trailerEntry(media) || list(media.screenshots).some(function (s) {
+        return s && (s.thumb || s.full);
+      }));
+    }
+    return false;
+  }
+  function packageErrors(pkg) {
+    return list(pkg.errors).filter(function (e) { return e && !errorHasData(e, pkg); });
   }
   function errorsNode(parent, errors) {
     if (!errors.length) return;
     // Deliberately quiet: a missing trailer is not an incident.
-    var note = el("div", "errfoot", "some data unavailable");
-    note.title = errors.join("; ");
-    parent.appendChild(note);
+    var node = notice(parent, errors.map(errorItem));
+    if (node) node.title = errors.join("; ");
+  }
+  function errorDetailNode(parent, errors) {
+    if (!errors.length) return;
+    var box = section(parent, "Couldn't load");
+    var ul = el("ul", "err-list");
+    // "Media (Steam) — fetch failed": the block in words, never its key,
+    // then the server's own reason, capped.
+    errors.forEach(function (text) {
+      var item = errorItem(text);
+      var li = document.createElement("li");
+      li.appendChild(el("b", null, item.what.charAt(0).toUpperCase() + item.what.slice(1)
+        + (item.source ? " (" + item.source + ")" : "")));
+      if (item.why) li.appendChild(el("span", null, " — " + item.why));
+      ul.appendChild(li);
+    });
+    box.appendChild(ul);
+  }
+
+  /* ---------- the full breakdown (fullscreen, or a disclosure in place) ---------- */
+  /* Everything that argues FOR the verdict rather than stating it. Kept out
+     of the inline card on purpose: inline, the card is the verdict and its
+     facts (≤900px at 760); the evidence is one click further. */
+  function named(v) { return list(v).filter(function (i) { return i && i.name; }); }
+  function hasBreakdown(pkg) {
+    var pres = pkg.presentation || {};
+    var ped = pkg.pedigree;
+    return !!(list(pres.for_you_if).filter(Boolean).length
+      || list(pres.not_for_you_if).filter(Boolean).length
+      || named(pkg.anchors).length
+      || named(pkg.comparisons).length
+      || named((pkg.similar || {}).items).length
+      || (ped && (pedigreeHeadline(ped) || named(ped.previous_games).length))
+      || list((pkg.past || {}).items).length);
+  }
+  function breakdownNode(parent, pkg) {
+    forYouNode(parent, pkg.presentation || {});
+    anchorsNode(parent, named(pkg.anchors));
+    lineageNode(parent, pkg, named(pkg.comparisons));
+    similarNode(parent, pkg.similar || {});
+    pedigreeNode(parent, pkg.pedigree);
+    pastNode(parent, pkg.past || {});
+    errorDetailNode(parent, packageErrors(pkg));
+  }
+
+  /* ---------- 6. the action row ---------- */
+  /* At most two actions: "Full breakdown" — fullscreen where the host offers
+     it, the shared disclosure in place where it doesn't (or refuses) — when
+     there is breakdown content, then the secondary "Store page ↗" when the
+     package carries a Steam app id. Either alone renders alone; neither
+     renders no row. */
+  function storeAppid(pkg) {
+    var appid = (pkg.game || {}).steam_appid;
+    return typeof appid === "number" && isFinite(appid) && appid > 0 && Math.floor(appid) === appid
+      ? appid : null;
+  }
+  function storeButton(row, appid) {
+    var btn = el("button", "btn act-store", "Store page ↗");
+    btn.type = "button";
+    row.classList.add("has-store");               // keeps the row up in fullscreen
+    btn.addEventListener("click", function () {
+      openLink("https://store.steampowered.com/app/" + appid + "/");
+    });
+    row.appendChild(btn);
+  }
+  function actionsNode(wrap, pkg, more, appid) {
+    var row = el("div", "actions");
+    if (!more) {
+      storeButton(row, appid);
+      wrap.appendChild(row);
+      return null;
+    }
+    // The shared control. On a fullscreen grant there is nothing to open in
+    // place: syncDisplayMode builds the breakdown under the card.
+    var d = fullscreenOrDisclosure(row, "Full breakdown", function (body) { breakdownNode(body, pkg); },
+      function () {});
+    d.button.classList.add("act-breakdown");
+    if (appid) storeButton(row, appid);
+    wrap.appendChild(row);
+    return d.body;
+  }
+
+  /* ---------- fullscreen ---------- */
+  /* Fullscreen keeps the inline card on top and puts the breakdown under it;
+     CSS on html[data-display-mode] swaps the action row out and the
+     breakdown in, so a host-initiated switch — or the host's own close
+     button, the only way back — needs no re-render. The breakdown is built
+     on first entry only. */
+  var fullscreenBreakdown = null;                   // { node, pkg, built }
+  function syncDisplayMode() {
+    var fs = fullscreenBreakdown;
+    if (fs && !fs.built && currentDisplayMode() === "fullscreen") {
+      fs.built = true;
+      breakdownNode(fs.node, fs.pkg);
+    }
   }
 
   /* ---------- card assembly ---------- */
-  /* Read top to bottom: what it is (header + scores), what it says (pitch),
-     what it looks like (media), whether it is for HIM (for-you, anchors),
-     where it comes from (lineage, similar, studio), and the call. */
-  function evalCard(pkg) {
-    var wrap = el("div", "eval");
-    var game = pkg.game || {};
-
+  /* The inline tier, top to bottom: the header panel (identity, stamp,
+     scores, craft note, the call), the verdict in words, the media. */
+  function inlineCard(wrap, pkg) {
     wrap.appendChild(headerNode(pkg));
     pitchNode(wrap, pkg);
-    mediaNode(wrap, pkg.media || {}, game.name);
-    forYouNode(wrap, pkg.presentation || {});
-    anchorsNode(wrap, list(pkg.anchors).filter(function (a) { return a && a.name; }));
-
-    var comps = list(pkg.comparisons).filter(function (c) { return c && c.name; });
-    lineageNode(wrap, pkg, comps);
-    similarNode(wrap, pkg.similar || {});
-    pedigreeNode(wrap, pkg.pedigree);
-
-    closingNode(wrap, pkg);
-    errorsNode(wrap, list(pkg.errors).filter(Boolean));
+    mediaSlot(wrap, pkg.media || {}, (pkg.game || {}).name);
+  }
+  function evalCard(pkg) {
+    var wrap = el("div", "eval");
+    inlineCard(wrap, pkg);
+    var more = hasBreakdown(pkg);
+    var appid = storeAppid(pkg);
+    var inPlaceBody = more || appid ? actionsNode(wrap, pkg, more, appid) : null;
+    errorsNode(wrap, packageErrors(pkg));
+    if (inPlaceBody) wrap.appendChild(inPlaceBody);
+    if (more) {
+      var fs = el("div", "fs-breakdown");
+      wrap.appendChild(fs);
+      fullscreenBreakdown = { node: fs, pkg: pkg, built: false };
+    }
     return wrap;
   }
 
@@ -1103,13 +1168,17 @@ EVAL_CARD_HTML = (
     return wrap;
   }
 
+  function skeletonKind() { return "eval"; }
+
   function render(data) {
     root.textContent = "";
-    var name = data && data.name ? " — " + data.name : "";
+    fullscreenBreakdown = null;
+    var name = data && data.name ? " · " + data.name : "";
     if (data && data.package) {
       root.appendChild(evalCard(data.package));
+      syncDisplayMode();
     } else if (data && data.verdict) {
-      root.appendChild(noteCard("Recorded: " + data.verdict + name, data.verdict));
+      root.appendChild(noteCard("Recorded — " + label("verdict", data.verdict) + name, data.verdict));
     } else {
       root.appendChild(el("div", "empty", "Nothing to display."));
     }
@@ -1118,24 +1187,20 @@ EVAL_CARD_HTML = (
 
 """
     + apps_shared.SIZING_JS
+    + apps_shared.INIT_JS
     + r"""
-  /* ---------- startup ---------- */
-  if (window.__PREVIEW_DATA__) {
-    render(window.__PREVIEW_DATA__);
-  } else {
-    request("ui/initialize", {
-      protocolVersion: "2026-01-26",
-      appCapabilities: {},
-      // appInfo per the ext-apps SDK schema (required there); clientInfo kept
-      // as a legacy alias — the published 2026-01-26 spec example used it,
-      // and schema-validating hosts strip unknown keys.
-      appInfo: { name: "gamelib-eval-card", version: "1.0" },
-      clientInfo: { name: "gamelib-eval-card", version: "1.0" },
-    }).then(function (res) {
-      hostCaps = (res && res.hostCapabilities) || {};
-      notify("ui/notifications/initialized");
-    });
+  /* Fullscreen hands the frame's size to the host, so size-changed stays
+     quiet there; leaving it re-announces the inline height even when it
+     matches the last one sent. */
+  hooks.shouldReportSize = function () { return currentDisplayMode() !== "fullscreen"; };
+  if (window.MutationObserver) {
+    new MutationObserver(function () {
+      if (currentDisplayMode() !== "fullscreen") lastSize = "";
+      syncDisplayMode();
+    }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-display-mode"] });
   }
+
+  startWidget("gamelib-eval-card");
 })();
 </script>
 </body>
@@ -1159,11 +1224,13 @@ EVAL_CARD_APP = AppConfig(resource_uri=EVAL_CARD_URI)
 def register_eval_app(mcp: Any) -> None:
     """Register the evaluation-card UI resource on the FastMCP app."""
 
+    # prefersBorder=False: the card paints its own panels on a transparent
+    # page, so a host-drawn frame around it would double the border.
     @mcp.resource(
         EVAL_CARD_URI,
         name="eval_card_view",
         description="Evaluation-package card UI for assessment results (MCP Apps).",
-        app=AppConfig(csp=_EVAL_CARD_CSP),
+        app=AppConfig(csp=_EVAL_CARD_CSP, prefers_border=False),
     )
     def eval_card_view() -> str:
         return EVAL_CARD_HTML

@@ -11,6 +11,20 @@ Usage:
     python scripts/preview_game_cards.py detail --name "Hades" --media        # live
     python scripts/preview_game_cards.py detail --name "Hades" --sample-media  # offline
     python scripts/preview_game_cards.py detail --name "Hades" --sample-media --big-studio
+    python scripts/preview_game_cards.py grid --theme dark [--touch]  # Claude's tokens
+    python scripts/preview_game_cards.py grid --theme light --display fullscreen
+    python scripts/preview_game_cards.py detail --name "Hades" --sample-media --display fullscreen
+
+--theme simulates a host: the page gets window.__PREVIEW_HOST_CONTEXT__ with
+Claude's style variables (scripts/preview_host_context.py), as a real
+ui/initialize would deliver them. Without it the widget's own fallbacks and
+prefers-color-scheme decide.
+
+--display fullscreen simulates the host's fullscreen mode (displayMode plus
+availableDisplayModes in the simulated hostContext): the grid widens and its
+header line sticks, and the detail card renders its similar/studio rows
+expanded. Tapping a grid card in a fullscreen preview drills into the card's
+own data (there is no host to answer the live get_game_detail call).
 """
 
 import argparse
@@ -21,6 +35,9 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from preview_host_context import host_context, inject
 
 from gamelib_mcp.apps import GAME_CARDS_HTML
 
@@ -228,8 +245,8 @@ def main() -> None:
     parser.add_argument("--sort", default="match", choices=["match", "critic", "value"])
     parser.add_argument("--limit", type=int, default=12)
     parser.add_argument(
-        "--open", type=int, default=None, metavar="N",
-        help="grid mode: auto-open the detail overlay for card N (0-based)",
+        "--display", choices=["inline", "fullscreen"], default="inline",
+        help="simulated host display mode (fullscreen: the wide grid / expanded detail)",
     )
     parser.add_argument(
         "--media", action="store_true",
@@ -245,8 +262,15 @@ def main() -> None:
         help="with --sample-media: use the big-catalog pedigree sample, whose "
              "damper renders the studio header line and no poster row",
     )
+    parser.add_argument(
+        "--theme", choices=["light", "dark"], default=None,
+        help="simulate a host: inject Claude's style variables as __PREVIEW_HOST_CONTEXT__",
+    )
+    parser.add_argument("--touch", action="store_true", help="with --theme: a touch device")
     parser.add_argument("-o", "--out", type=Path, help="output path (default: stdout)")
     args = parser.parse_args()
+    if args.touch and not args.theme:
+        parser.error("--touch is part of the simulated host; pass --theme")
     if args.mode == "detail" and not args.name:
         parser.error("detail mode requires --name")
     if args.mode == "grid" and (args.media or args.sample_media):
@@ -255,14 +279,24 @@ def main() -> None:
         parser.error("--big-studio selects between the sample pedigrees; pass --sample-media")
 
     data = asyncio.run(_build_data(args))
-    preview_globals = "window.__PREVIEW_DATA__ = " + json.dumps(data) + ";"
-    if args.open is not None:
-        preview_globals += f" window.__PREVIEW_OPEN_INDEX__ = {args.open};"
-    html = GAME_CARDS_HTML.replace(
-        "<script>",
-        "<script>" + preview_globals + "</script>\n<script>",
-        1,
+    context: dict[str, Any] | None = (
+        host_context(args.theme, touch=args.touch) if args.theme else None
     )
+    if args.display == "fullscreen":
+        # A fullscreen host necessarily offers the mode it is in.
+        context = context or {}
+        context["displayMode"] = "fullscreen"
+        context["availableDisplayModes"] = ["inline", "fullscreen"]
+    # The arguments as a host's tool-input notification would carry them
+    # (the grid's header line and its "Show next" count read these).
+    if args.mode == "grid":
+        tool_input: dict[str, Any] = {"sort_by": args.sort, "limit": args.limit}
+        if args.vibes:
+            tool_input["vibes"] = args.vibes
+    else:
+        tool_input = {"name": args.name, "media": args.media}
+    extra = " window.__PREVIEW_TOOL_INPUT__ = " + json.dumps(tool_input) + ";"
+    html = inject(GAME_CARDS_HTML, data, context, extra)
     if args.out:
         args.out.write_text(html)
         print(f"wrote {args.out}", file=sys.stderr)

@@ -1973,6 +1973,7 @@ class EvaluationPackageTests(ToolDBTestCase):
                     "https://cdn.cloudflare.steamstatic.com/steam/apps/"
                     "367520/library_600x900.jpg"
                 ),
+                "steam_appid": 367520,
             },
         )
         self.assertEqual(package["verdict"], "buy_now")
@@ -2041,6 +2042,21 @@ class EvaluationPackageTests(ToolDBTestCase):
             result["package"]["game"]["cover_url"],
             "https://cdn.cloudflare.steamstatic.com/steam/apps/424242/library_600x900.jpg",
         )
+        # The store link resolves through the same chain: no identifier row,
+        # so the just-committed assessment's appid carries it.
+        self.assertEqual(result["package"]["game"]["steam_appid"], 424242)
+
+    async def test_the_store_appid_comes_from_the_identifier_row_or_is_null(self):
+        # The card's "Store page" link: an owned Steam row's identifier
+        # resolves it; a row with no appid anywhere carries an explicit null.
+        steam_id = await make_steam_game("Linked", 367520)
+        bare_id = await seed_game("Unlinked")
+        with self._media(None):
+            linked = await record_assessment(game_id=steam_id, verdict="buy_now")
+            bare = await record_assessment(game_id=bare_id, verdict="skip")
+        self.assertEqual(linked["package"]["game"]["steam_appid"], 367520)
+        self.assertIn("steam_appid", bare["package"]["game"])
+        self.assertIsNone(bare["package"]["game"]["steam_appid"])
 
     async def test_a_candidate_with_no_appid_anywhere_keeps_a_null_cover(self):
         game_id = await seed_game("Coverless")
