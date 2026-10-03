@@ -1002,8 +1002,8 @@ class BridgeProtocolTests(unittest.TestCase):
             'fonts.id = "host-fonts";',
             "fonts.textContent = styles.css.fonts;",
             'document.body.style["padding" + side[1]] = (BASE_GUTTER + extra) + "px";',
-            'docEl.classList.toggle("touch", !!device.touch);',
-            'docEl.classList.toggle("no-hover", device.hover === false);',
+            'docEl.classList.toggle("touch", deviceCaps.touch);',
+            'docEl.classList.toggle("no-hover", deviceCaps.hover === false);',
             'docEl.setAttribute("data-display-mode", String(ctx.displayMode));',
         ):
             self.assertIn(marker, apps_shared.BRIDGE_JS)

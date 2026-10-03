@@ -914,6 +914,7 @@ BRIDGE_JS = r"""(function () {
   var tornDown = false;               // set by teardown(); the view is gone
   var hostFontsCss = null;            // the fonts string last injected
   var safeInsets = { top: 0, right: 0, bottom: 0, left: 0 };
+  var deviceCaps = {};   // merged across partial deviceCapabilities updates
   function mediaQueryMatches(query) {
     try { return !!(window.matchMedia && window.matchMedia(query).matches); } catch (e) { return false; }
   }
@@ -981,8 +982,14 @@ BRIDGE_JS = r"""(function () {
     }
     var device = ctx.deviceCapabilities;
     if (device && typeof device === "object") {
-      docEl.classList.toggle("touch", !!device.touch);
-      docEl.classList.toggle("no-hover", device.hover === false);
+      // host-context-changed may carry only the changed key ({hover: false}):
+      // merge into the remembered capabilities, then apply the merged view,
+      // so an omitted `touch` never shrinks the 44px hit areas back down.
+      if (typeof device.touch === "boolean") deviceCaps.touch = device.touch;
+      if (typeof device.hover === "boolean") deviceCaps.hover = device.hover;
+      hostContext.deviceCapabilities = { touch: deviceCaps.touch, hover: deviceCaps.hover };
+      if (typeof deviceCaps.touch === "boolean") docEl.classList.toggle("touch", deviceCaps.touch);
+      if (typeof deviceCaps.hover === "boolean") docEl.classList.toggle("no-hover", deviceCaps.hover === false);
     } else if (!hostContext.deviceCapabilities) {
       applyInputFallback();
     }

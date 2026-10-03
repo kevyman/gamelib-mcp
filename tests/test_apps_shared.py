@@ -98,7 +98,7 @@ class HostContextTests(unittest.TestCase):
         self.assertIn('docEl.classList.toggle("touch", mediaQueryMatches("(pointer: coarse)"));', js)
         self.assertIn('docEl.classList.toggle("no-hover", mediaQueryMatches("(hover: none)"));', js)
         # the host's answer wins whenever it sent one
-        self.assertIn('docEl.classList.toggle("touch", !!device.touch);', js)
+        self.assertIn('docEl.classList.toggle("touch", deviceCaps.touch);', js)
         self.assertIn("} else if (!hostContext.deviceCapabilities) {", js)
         # and the fallback runs before any host context arrives
         self.assertIn("\n  applyInputFallback();\n", js)
@@ -351,6 +351,10 @@ PROBE = r"""
   out.hostTouch = classes.touch;
   applyHostContext({ theme: "dark" });
   out.touchAfterPartial = classes.touch;
+  applyHostContext({ deviceCapabilities: { touch: true } });
+  applyHostContext({ deviceCapabilities: { hover: false } });   // partial: no `touch` key
+  out.touchAfterHoverOnly = classes.touch; out.noHoverAfterHoverOnly = classes["no-hover"];
+  out.mergedCaps = hostContext.deviceCapabilities;
   out.themeDark = docEl.dataset.theme;
   applyHostContext({ theme: "sepia" });
   out.themeAfterUnknown = docEl.dataset.theme === undefined ? null : docEl.dataset.theme;
@@ -540,6 +544,13 @@ class BridgeBehaviourTests(unittest.TestCase):
     def test_host_device_capabilities_win_and_survive_partial_updates(self) -> None:
         self.assertFalse(self.out["hostTouch"])
         self.assertFalse(self.out["touchAfterPartial"])
+
+    def test_a_partial_device_update_keeps_the_touch_state(self) -> None:
+        # Codex review on #191: {deviceCapabilities: {hover: false}} after
+        # touch: true must not drop html.touch (and the 44px hit areas).
+        self.assertTrue(self.out["touchAfterHoverOnly"])
+        self.assertTrue(self.out["noHoverAfterHoverOnly"])
+        self.assertEqual(self.out["mergedCaps"], {"touch": True, "hover": False})
 
     def test_notice_string_list_and_missing_what(self) -> None:
         self.assertEqual(
