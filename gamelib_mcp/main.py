@@ -1385,20 +1385,18 @@ async def update_game(
     dry_run: bool = False,
 ) -> UpdateGameResponse:
     """
-    Call to correct or override a game's metadata by hand (including marking it
+    Call to correct or override a game's metadata by hand (incl. marking it
     farmed) — one game, or many via `items`. Returns the fields updated and
     cleared plus the row's manual_overrides.
 
     Resolve with game_id or name (partial/fuzzy), then set any subset (name,
     release date, genres, description, HLTB times, tags, IGDB link, is_farmed,
     completion_status). Every edited field becomes a manual override that
-    syncs and enrichment skip;
-    clear_overrides hands columns back to sync, keeping the current value.
-    Editing tags recomputes the taste profile.
+    syncs and enrichment skip; clear_overrides hands columns back to sync,
+    keeping the current value. Tag edits recompute the taste profile.
 
     completion_status: playing | completed | abandoned | evergreen (endless
-    games with no completion, e.g. MMOs, sandboxes), or 'none' to reset to
-    inference. content_type fixes a wrong DLC/bundle/edition classification: it
+    games, e.g. MMOs, sandboxes), or 'none' to reset to inference. content_type fixes a wrong DLC/bundle/edition classification: it
     re-derives is_primary_library_item (whether the game shows in
     stats/series/discover) and detaches a wrong parent when promoting to a
     primary type.
@@ -1421,9 +1419,9 @@ async def update_game(
     status="error" and never aborts the rest; a tags edit recomputes affinity
     ONCE after the loop.
 
-    dry_run=True runs the same guards without writing, against the current
-    database: in `items` mode an item depending on an earlier item's write may
-    preview ok yet error in the wet run.
+    dry_run=True runs the same guards without writing: in `items` mode an item
+    depending on an earlier item's write may preview ok yet error in the wet
+    run.
     """
     from .tools.platforms import update_game as _update
     from .tools.platforms import update_games_batch as _many

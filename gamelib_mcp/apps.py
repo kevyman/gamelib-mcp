@@ -240,8 +240,8 @@ GAME_CARDS_HTML = (
      two-word phrase gets a line of its own. */
   .card .chip { padding: 3px 6px; }
   /* Text flow, not flex, and never clipped: the phrase wraps between its
-     words inside the chip ("Steam Overwhelmingly / positive"). gridSteamChip
-     puts a real space after the label — without it there is no break point
+     words inside the chip ("Steam Overwhelmingly / positive"). steamChip's
+     {meter: false} form puts a real space after the label — without it there is no break point
      between "Steam" and the phrase, and "Overwhelmingly" ran out of the chip
      at 360px. */
   .card .chip.steam-line {
@@ -472,14 +472,7 @@ GAME_CARDS_HTML = (
 """
     + apps_shared.DOM_HELPERS_JS
     + apps_shared.COMPONENTS_JS
-    + r"""  function section(parent, title) {
-    var box = el("section", "panel");
-    if (title) box.appendChild(el("div", "section-title", title));
-    parent.appendChild(box);
-    return box;
-  }
-
-"""
+    + "\n"
     + apps_shared.COVER_HUE_JS
     + "\n"
     + apps_shared.COVER_NODE_JS
@@ -535,15 +528,18 @@ GAME_CARDS_HTML = (
     var args = lastToolInput;
     if (args && !isDetailArgs(args)) {
       parts.push("sorted by " + (SORT_LABELS[args.sort_by] || SORT_LABELS.match));
+      // Each filter says what it filters: "vibe: roguelike", "≤ 30h to beat".
       var vibes = list(args.vibes).filter(Boolean);
-      if (vibes.length) parts.push(vibes.join(" + "));
+      if (vibes.length) parts.push("vibe: " + vibes.join(" + "));
       // discover_games defaults unplayed_only to true: absent means on.
       if (args.unplayed_only !== false) parts.push("unplayed only");
       var maxHours = num(args.max_hltb_hours);
-      if (maxHours != null) parts.push("≤ " + maxHours + "h");
+      if (maxHours != null) parts.push("≤ " + maxHours + "h to beat");
       var minScore = num(args.min_score);
       if (minScore != null) parts.push("critics ≥ " + minScore);
-      if (args.protondb_min_tier) parts.push("ProtonDB " + label("tier", args.protondb_min_tier) + "+");
+      if (args.protondb_min_tier) {
+        parts.push("ProtonDB " + String(args.protondb_min_tier).toLowerCase() + "+");
+      }
     }
     return { count: count, parts: parts };
   }
@@ -591,34 +587,34 @@ GAME_CARDS_HTML = (
   }
 
   /* ---------- grid: cards ---------- */
-  /* Label and phrase only — no meter in a 150px card; a phrase of two or more
-     words takes a line of its own (.steam-line) rather than folding. */
-  function gridSteamChip(desc) {
-    if (!desc) return null;
-    var phrase = String(desc).toLowerCase();
-    phrase = phrase.charAt(0).toUpperCase() + phrase.slice(1);
-    var words = phrase.split(/\s+/).filter(Boolean).length;
-    var chip = scoreChip({
-      label: "Steam", value: phrase, tier: steamTier(desc), title: "Steam reviews",
-      cls: words >= 2 ? "steam-line" : "",
-    });
-    // The break point between label and phrase (see .chip.steam-line).
-    chip.insertBefore(document.createTextNode(" "), chip.querySelector("b"));
-    return chip;
+  /* What a screen reader hears for a card: the game, then what the card
+     shows — "Hades II: 100% match, 27h to beat, Steam, Metacritic 93,
+     OpenCritic 91, Steam Overwhelmingly positive" — from the parts present. */
+  function cardLabel(game) {
+    var bits = [];
+    if (game.match_percent != null) {
+      bits.push(Math.max(0, Math.min(100, Math.round(num(game.match_percent) || 0))) + "% match");
+    }
+    var hours = hoursLabel(game.hltb_main);
+    if (hours) bits.push(hours + " to beat");
+    if (game.suggested_platform) bits.push(label("platform", game.suggested_platform));
+    if (realScore(game.metacritic_score)) bits.push("Metacritic " + Math.round(game.metacritic_score));
+    if (realScore(game.opencritic_score)) bits.push("OpenCritic " + Math.round(game.opencritic_score));
+    if (game.steam_review_desc) bits.push("Steam " + String(game.steam_review_desc).toLowerCase());
+    var name = game.name || "Untitled game";
+    return bits.length ? name + ": " + bits.join(", ") : name;
   }
 
-  var cardSeq = 0;
   function gridCard(game) {
     var card = el("div", "card");
     var title = el("div", "title", game.name);
-    title.id = "card-title-" + (++cardSeq);
     if (game.game_id != null) {
       card.tabIndex = 0;
       card.setAttribute("role", "button");
       card.setAttribute("data-game-id", String(game.game_id));
-      // Named by its own title, so a screen reader hears the game, not a
-      // generic "show details" label.
-      card.setAttribute("aria-labelledby", title.id);
+      // Named by the game and what the card shows (no aria-labelledby: the
+      // label must carry the scores, not the title alone).
+      card.setAttribute("aria-label", cardLabel(game));
       card.addEventListener("click", function () { selectGame(game); });
       card.addEventListener("keydown", function (ev) {
         if (ev.key === "Enter" || ev.key === " ") {
@@ -664,7 +660,7 @@ GAME_CARDS_HTML = (
         tier: ocTier(game.opencritic_score, game.opencritic_tier),
       }));
     }
-    var steam = gridSteamChip(game.steam_review_desc);
+    var steam = steamChip(game.steam_review_desc, null, { meter: false });
     if (steam) scores.appendChild(steam);
     if (scores.childNodes.length) body.appendChild(scores);
 
@@ -697,7 +693,12 @@ GAME_CARDS_HTML = (
 
   /* ---------- card tap: hand back to the conversation ---------- */
   /* The selection always reaches the model. Then: fullscreen + a live detail
-     drill-in where the host offers fullscreen, else a chat message. */
+     drill-in where the host offers fullscreen, else a chat message — and
+     never both. While the fullscreen request is open the tap is PENDING: a
+     grant (the answer, or a host-context-changed to fullscreen that beats
+     it) drills in; another mode, or 8s of silence, sends the message. The
+     first of those to land settles it and the others are ignored. */
+  var pendingSelection = null;                      // { game, before } while asking
   function selectGame(game) {
     lastSelectedId = game.game_id;
     updateModelContext(
@@ -707,11 +708,26 @@ GAME_CARDS_HTML = (
       sendMessage("Show me " + game.name);
       return;
     }
-    var before = currentDisplayMode();
-    requestDisplayMode("fullscreen").then(function (mode) {
-      if (mode === "fullscreen") openDrill(game, before);
-      else sendMessage("Show me " + game.name);  // the host said no after all
+    var selection = { game: game, before: currentDisplayMode() };
+    pendingSelection = selection;
+    requestDisplayMode("fullscreen", 8000).then(function (mode) {
+      if (pendingSelection !== selection) return;   // a late grant (or a newer tap) won
+      pendingSelection = null;
+      if (mode === "fullscreen") openDrill(game, selection.before);
+      else sendMessage("Show me " + game.name);     // refused, or no answer in 8s
     });
+  }
+  /* hooks.afterHostContext: the host can grant fullscreen by context change
+     before (or instead of) answering the request; leaving fullscreen through
+     its own close button ends a drill-in. */
+  function hostContextChanged(ctx) {
+    if (pendingSelection && ctx && ctx.displayMode === "fullscreen") {
+      var selection = pendingSelection;
+      pendingSelection = null;
+      openDrill(selection.game, selection.before);
+      return;
+    }
+    if (view === "drill" && currentDisplayMode() !== "fullscreen" && gridData) render(gridData);
   }
 
   function openDrill(game, before) {
@@ -755,14 +771,6 @@ GAME_CARDS_HTML = (
       else fill(game, "The details came back unreadable.");
     });
   }
-  /* A tool error names its own cause: the result's text, at most 120 chars,
-     ending as a sentence so "Showing what the list had." can follow it. */
-  function toolErrorText(res) {
-    var text = (list(res.content).find(function (c) { return c && c.type === "text"; }) || {}).text;
-    text = String(text || "The lookup failed").replace(/\s+/g, " ").trim();
-    if (text.length > 120) text = text.slice(0, 119).trim() + "…";
-    return /[.!?…]$/.test(text) ? text : text + ".";
-  }
 
   function backToResults() {
     var restore = modeBeforeDrill;
@@ -785,11 +793,12 @@ GAME_CARDS_HTML = (
     + apps_shared.FULLSCREEN_BUTTON_JS
     + "\n"
     + apps_shared.NAV_BUTTON_JS
+    + apps_shared.LIGHTBOX_CHROME_JS
     + r"""
   /* ---------- screenshot lightbox ---------- */
   /* The detail card's own media viewer (not navigation): one slot, fixed over
      the iframe, closed by ✕, Escape or the backdrop; Tab stays inside it and
-     focus returns to the stage that opened it. */
+     focus returns to the stage that opened it (the chrome is shared). */
   var lightbox = null;
   function closeLightbox() {
     var current = lightbox;
@@ -800,33 +809,13 @@ GAME_CARDS_HTML = (
     setTimeout(function () { current.overlay.remove(); }, 200);
     if (current.trigger && current.trigger.focus) current.trigger.focus({ preventScroll: true });
   }
-  function keepFocusInside(ev, panel) {
-    var buttons = panel.querySelectorAll("button");
-    if (!buttons.length) return;
-    var first = buttons[0];
-    var last = buttons[buttons.length - 1];
-    if (ev.shiftKey && document.activeElement === first) {
-      ev.preventDefault();
-      last.focus();
-    } else if (!ev.shiftKey && document.activeElement === last) {
-      ev.preventDefault();
-      first.focus();
-    }
-  }
   function openCarousel(shots, startIndex, gameName, trigger) {
     closeLightbox();
     var index = startIndex;
     var overlay = el("div", "overlay lightbox");
-    var panel = el("div", "lightbox-panel carousel");
-    panel.setAttribute("role", "dialog");
-    panel.setAttribute("aria-modal", "true");
-    panel.setAttribute("aria-label", (gameName ? gameName + " " : "") + "screenshots");
-    panel.tabIndex = -1;
-    var closer = el("button", "overlay-close", "✕");
-    closer.type = "button";
-    closer.setAttribute("aria-label", "Close screenshots");
-    closer.addEventListener("click", closeLightbox);
-    panel.appendChild(closer);
+    var chrome = lightboxPanel("lightbox-panel carousel", gameName, closeLightbox);
+    var panel = chrome.panel;
+    var closer = chrome.closer;
 
 """
     + apps_shared.CAROUSEL_STAGE_JS
@@ -835,12 +824,7 @@ GAME_CARDS_HTML = (
     overlay.addEventListener("click", function (ev) {
       if (ev.target === overlay) closeLightbox();
     });
-    var onKey = function (ev) {
-      if (ev.key === "Escape") { ev.preventDefault(); closeLightbox(); }
-      else if (ev.key === "ArrowLeft") show(index - 1);
-      else if (ev.key === "ArrowRight") show(index + 1);
-      else if (ev.key === "Tab") keepFocusInside(ev, panel);
-    };
+    var onKey = lightboxKeys(panel, function (delta) { show(index + delta); }, closeLightbox);
     document.addEventListener("keydown", onKey, true);
     lightbox = { overlay: overlay, trigger: trigger, onKey: onKey };
     document.body.appendChild(overlay);
@@ -965,8 +949,7 @@ GAME_CARDS_HTML = (
     var mine = game.my_rating ? num(game.my_rating.normalized_score) : null;
     if (mine != null) {
       badges.appendChild(scoreChip({
-        label: "Your rating", value: mine + "/10",
-        tier: mine >= 7 ? "good" : mine >= 5 ? "ok" : "bad",
+        label: "Your rating", value: mine + "/10", tier: ratingTier(mine),
       }));
     }
     if (badges.childNodes.length) body.appendChild(badges);
@@ -1099,17 +1082,10 @@ GAME_CARDS_HTML = (
     + r"""
   /* Tool input can land after the result: the grid's header line and its
      "Show next" count are built from it, so redraw the grid when it does. */
-  var baseToolInput = handleToolInput;
-  handleToolInput = function (params) {
-    baseToolInput(params);
+  hooks.afterToolInput = function () {
     if (gotResult && view === "grid" && gridData) render(gridData);
   };
-  /* The host leaving fullscreen (its own close button) ends a drill-in. */
-  var baseApplyHostContext = applyHostContext;
-  applyHostContext = function (ctx) {
-    baseApplyHostContext(ctx);
-    if (view === "drill" && currentDisplayMode() !== "fullscreen" && gridData) render(gridData);
-  };
+  hooks.afterHostContext = hostContextChanged;
 
   // Preview only: the arguments the preview script called the tool with, so
   // the header line can be judged offline.

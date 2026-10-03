@@ -117,9 +117,13 @@ class EvalCardCSPTests(unittest.TestCase):
     def test_embed_url_uses_the_allowlisted_nocookie_host(self) -> None:
         # A src the CSP doesn't cover renders as a silently blank frame.
         self.assertIn(
-            'https://www.youtube-nocookie.com/embed/" + encodeURIComponent(trailer.video_id)',
+            'frame.src = "https://www.youtube-nocookie.com/embed/" + videoId;',
             apps_eval.EVAL_CARD_HTML,
         )
+        # encoded once; the watch link carries the same encoded id (B4)
+        self.assertIn("var videoId = encodeURIComponent(trailer.video_id);", apps_eval.EVAL_CARD_HTML)
+        self.assertIn('var watchUrl = "https://www.youtube.com/watch?v=" + videoId;', apps_eval.EVAL_CARD_HTML)
+        self.assertEqual(apps_eval.EVAL_CARD_HTML.count("encodeURIComponent(trailer.video_id)"), 1)
         self.assertNotIn("https://www.youtube.com/embed/", apps_eval.EVAL_CARD_HTML)
 
 
@@ -427,8 +431,7 @@ class EvalCardLayoutTests(unittest.TestCase):
             'html[data-display-mode="fullscreen"] .actions .act-breakdown,',
             'if (fs && !fs.built && currentDisplayMode() === "fullscreen") {',
             'attributeFilter: ["data-display-mode"]',
-            'if (currentDisplayMode() !== "fullscreen") reportInlineSize();',
-            "resizeObserver = new ResizeObserver(function () { reportSize(); });",
+            'hooks.shouldReportSize = function () { return currentDisplayMode() !== "fullscreen"; };',
         ):
             self.assertIn(marker, html)
 
@@ -445,10 +448,10 @@ class EvalCardLayoutTests(unittest.TestCase):
         for marker in (
             'scoreChip({ label: "Metacritic", value: Math.round(mc), tier: mcTier(mc) })',
             'scoreChip({ label: "OpenCritic", value: Math.round(oc), tier: ocTier(oc) })',
-            # "Reviews ▬ 93% positive 114k" — the sample-adjusted wording
-            # lives in the tooltip
+            # "Reviews ▬ 93% positive 114k reviews" — the sample-adjusted
+            # wording lives in the tooltip
             'label: "Reviews", value: pct + "% positive", tier: craftTier(pct), meter: pct,',
-            "var count = compactCount(craft.review_count);",
+            'var count = compactCount(craft.review_count, "review");',
             "aux: count,",
             'title: "Sample-adjusted share of positive reviews"',
             'label: "Trend", value: traj[0], tier: traj[1],',
@@ -514,15 +517,17 @@ class EvalCardLayoutTests(unittest.TestCase):
     def test_screenshots_open_an_edge_to_edge_carousel(self) -> None:
         for marker in (
             "openCarousel(shots, entry.index, gameName, btn)",
-            'el("div", "overlay-panel carousel")',
             ".overlay-panel.carousel {",
             "width: 100%;",
             'navButton("car-prev", "‹"',
             'navButton("car-next", "›"',
             'counter.textContent = (index + 1) + " / " + shots.length;',
-            'if (ev.key === "Escape") closeOverlay();',
-            'else if (ev.key === "ArrowLeft") show(index - 1);',
-            'else if (ev.key === "ArrowRight") show(index + 1);',
+            # the shared dialog chrome: ✕, focus trap, Escape and arrows
+            'var chrome = lightboxPanel("overlay-panel carousel", gameName, closeOverlay);',
+            "var keydown = lightboxKeys(panel, function (delta) { show(index + delta); }, closeOverlay);",
+            'document.addEventListener("keydown", keydown, true);',
+            'document.removeEventListener("keydown", s.keydown, true);',
+            "chrome.closer.focus({ preventScroll: true });",
             'stage.addEventListener("pointerup"',
             "if (Math.abs(dx) > 40) show(index + (dx < 0 ? 1 : -1));",
         ):
@@ -603,13 +608,15 @@ class EvalCardLayoutTests(unittest.TestCase):
     def test_the_call_reads_in_words(self) -> None:
         facts = self._function("factChips", "callNode")
         for marker in (
-            'factChip(row, "Time to beat", main, extra ? extra + " full" : null, hltbTitle);',
-            'else if (extra) factChip(row, "Time to beat", "~" + extra, "full", hltbTitle);',
+            # "42h with extras", never the cryptic "42h full"
+            'factChip(row, "Time to beat", main, extra ? extra + " with extras" : null, hltbTitle);',
+            'else if (extra) factChip(row, "Time to beat", "~" + extra, "with extras", hltbTitle);',
             'factChip(row, "Your pace", hoursLabel(weekly / 60, true) + "/wk", "last 30 days",',
             '" via " + label("purchase_source", own.purchase_source)',
         ):
             self.assertIn(marker, facts)
         self.assertNotIn('"HLTB"', apps_eval.EVAL_CARD_HTML)
+        self.assertNotIn('" full"', apps_eval.EVAL_CARD_HTML)
         self.assertNotIn('"Pace"', apps_eval.EVAL_CARD_HTML)
         # Below 420px "THE CALL" is a label above its chips, not an eyebrow
         # sharing a line with one chip.
@@ -768,6 +775,95 @@ class ErrorSuppressionBehaviourTests(unittest.TestCase):
 
     def test_missing_data_keeps_its_error(self) -> None:
         self.assertEqual(self.out["bare"], ["hltb: down", "media: fetch failed", "igdb: unresolved"])
+
+
+_ERROR_LABEL_SHIM = r"""
+function El(tag, cls, text) { this.tag = tag; this.className = cls || ""; this.text = text || ""; this.kids = []; this.attrs = {}; }
+El.prototype.appendChild = function (c) { this.kids.push(c); return c; };
+El.prototype.setAttribute = function (k, v) { this.attrs[k] = v; };
+Object.defineProperty(El.prototype, "textContent", {
+  get: function () { return this.text + this.kids.map(function (k) { return k.textContent; }).join(""); },
+});
+function el(tag, cls, text) { return new El(tag, cls, text); }
+var document = { createElement: function (t) { return new El(t); } };
+function list(v) { return Array.isArray(v) ? v : []; }
+function section(parent, title) { var b = el("section", "panel"); parent.appendChild(b); return b; }
+"""
+
+_ERROR_LABEL_PROBE = r"""
+function item(t) { return errorItem(t); }
+var out = {
+  similar: item("similar: lookup failed"),
+  anchors: item("anchors: lookup failed"),
+  pedigree: item("pedigree: unavailable"),
+  studio: item("studio: unavailable"),
+  igdb: item("igdb: unresolved — no igdb_id stored"),
+  mediaSteam: item("media: steam: fetch failed"),
+  mediaIgdb: item("media: igdb: name resolution failed"),
+  mediaBare: item("media: fetch failed"),
+  unknown: item("weird_block: boom"),
+};
+var p = el("div");
+out.notice = notice(p, ["similar: lookup failed", "media: steam: fetch failed", "weird_block: boom"]
+  .map(errorItem)).textContent;
+var detail = el("div");
+errorDetailNode(detail, ["media: steam: fetch failed", "igdb_resolver: " + new Array(40).join("slow ")]);
+out.detail = detail.kids[0].kids[0].kids.map(function (li) { return li.textContent; });
+console.log(JSON.stringify(out));
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class ErrorLabelBehaviourTests(unittest.TestCase):
+    """F2/F4, executed: every failure names what and where, in words."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        html = apps_eval.EVAL_CARD_HTML
+        start = html.index("  var ERROR_BLOCKS = {")
+        mapping = html[start:html.index("  function errorHasData(", start)]
+        detail = html[html.index("  function errorDetailNode("):html.index("  function named(v)")]
+        detail = detail[:detail.index("\n  }\n") + 4]
+        script = (_ERROR_LABEL_SHIM + apps_shared.LABELS_JS + apps_shared.NOTICE_JS
+                  + mapping + detail + _ERROR_LABEL_PROBE)
+        assert NODE is not None
+        proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True,
+                              timeout=60, check=False)
+        if proc.returncode != 0:
+            raise AssertionError(proc.stderr)
+        cls.out = json.loads(proc.stdout)
+
+    def test_library_blocks_say_library(self) -> None:
+        self.assertEqual(self.out["similar"], {"what": "similar games", "source": "library",
+                                               "why": "lookup failed"})
+        self.assertEqual(self.out["anchors"]["what"], "your history")
+        self.assertEqual(self.out["anchors"]["source"], "library")
+
+    def test_studio_blocks_say_igdb(self) -> None:
+        for key in ("pedigree", "studio", "igdb"):
+            with self.subTest(key=key):
+                self.assertEqual((self.out[key]["what"], self.out[key]["source"]), ("studio", "IGDB"))
+
+    def test_media_takes_its_source_from_the_reason_prefix(self) -> None:
+        self.assertEqual(self.out["mediaSteam"], {"what": "media", "source": "Steam", "why": "fetch failed"})
+        self.assertEqual(self.out["mediaIgdb"]["source"], "IGDB")
+        self.assertEqual(self.out["mediaBare"], {"what": "media", "source": "", "why": "fetch failed"})
+
+    def test_an_unknown_block_is_humanized_without_a_source(self) -> None:
+        self.assertEqual(self.out["unknown"], {"what": "weird block", "source": "", "why": "boom"})
+
+    def test_the_notice_names_what_and_where(self) -> None:
+        self.assertEqual(self.out["notice"],
+                         "Couldn't load: similar games (library), media (Steam), weird block")
+
+    def test_the_detail_humanizes_the_key_and_caps_the_reason(self) -> None:
+        media, long_one = self.out["detail"]
+        self.assertEqual(media, "Media (Steam) — fetch failed")
+        self.assertTrue(long_one.startswith("Igdb resolver — slow slow"))
+        self.assertNotIn("_", long_one)
+        reason = long_one.split(" — ", 1)[1]
+        self.assertLessEqual(len(reason), 120)
+        self.assertTrue(reason.endswith("…"))
 
 
 class SharedBlockTests(unittest.TestCase):

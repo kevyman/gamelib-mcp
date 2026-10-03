@@ -474,13 +474,7 @@ EVAL_CARD_HTML = (
      name-seeded gradient plate when we don't. */
 """
     + apps_shared.COVER_NODE_JS
-    + r"""  function section(parent, title) {
-    var box = el("section", "panel");
-    if (title) box.appendChild(el("div", "section-title", title));
-    parent.appendChild(box);
-    return box;
-  }
-
+    + r"""
   /* ---------- best-effort fullscreen ---------- */
   /* A widget iframe is usually sandboxed, and many hosts don't grant
      allow="fullscreen" — there the API is either absent or the request is
@@ -497,31 +491,25 @@ EVAL_CARD_HTML = (
     if (!overlayState) return;
     var s = overlayState;
     overlayState = null;
-    document.removeEventListener("keydown", s.keydown);
+    document.removeEventListener("keydown", s.keydown, true);
     s.node.classList.remove("open");
     setTimeout(function () { s.node.remove(); }, 200);
-    if (s.trigger && s.trigger.focus) s.trigger.focus();
+    if (s.trigger && s.trigger.focus) s.trigger.focus({ preventScroll: true });
   }
 
 """
     + apps_shared.NAV_BUTTON_JS
+    + apps_shared.LIGHTBOX_CHROME_JS
     + r"""
   /* Edge-to-edge, and every way through the set a phone or a keyboard would
-     try: drag/swipe, the two arrow buttons, and the arrow keys. */
+     try: drag/swipe, the two arrow buttons, and the arrow keys. The dialog
+     chrome — ✕, focus trap, Escape and arrow routing — is the shared one. */
   function openCarousel(shots, startIndex, gameName, trigger) {
     closeOverlay();
     var index = startIndex;
     var overlay = el("div", "overlay");
-    var panel = el("div", "overlay-panel carousel");
-    panel.setAttribute("role", "dialog");
-    panel.setAttribute("aria-modal", "true");
-    panel.setAttribute("aria-label", (gameName ? gameName + " " : "") + "screenshots");
-    panel.tabIndex = -1;
-
-    var close = el("button", "overlay-close", "✕");
-    close.setAttribute("aria-label", "Close screenshots");
-    close.addEventListener("click", closeOverlay);
-    panel.appendChild(close);
+    var chrome = lightboxPanel("overlay-panel carousel", gameName, closeOverlay);
+    var panel = chrome.panel;
 
 """
     + apps_shared.CAROUSEL_STAGE_JS
@@ -530,12 +518,8 @@ EVAL_CARD_HTML = (
     overlay.addEventListener("click", function (ev) {
       if (ev.target === overlay) closeOverlay();
     });
-    var keydown = function (ev) {
-      if (ev.key === "Escape") closeOverlay();
-      else if (ev.key === "ArrowLeft") show(index - 1);
-      else if (ev.key === "ArrowRight") show(index + 1);
-    };
-    document.addEventListener("keydown", keydown);
+    var keydown = lightboxKeys(panel, function (delta) { show(index + delta); }, closeOverlay);
+    document.addEventListener("keydown", keydown, true);
     overlayState = { node: overlay, trigger: trigger, keydown: keydown };
 
     document.body.appendChild(overlay);
@@ -553,7 +537,7 @@ EVAL_CARD_HTML = (
     position();
     img.addEventListener("load", position); // full-size art changes the height
     requestAnimationFrame(function () { overlay.classList.add("open"); });
-    panel.focus({ preventScroll: true });
+    chrome.closer.focus({ preventScroll: true });
   }
 
   /* ---------- media: one viewer + one thumb strip ---------- */
@@ -658,13 +642,13 @@ EVAL_CARD_HTML = (
     var pct = craftPercent(craft);
     if (pct != null) {
       var rawPct = num(craft.positive_pct);
-      var count = compactCount(craft.review_count);
+      var count = compactCount(craft.review_count, "review");      // "114k reviews"
       row.appendChild(scoreChip({
         label: "Reviews", value: pct + "% positive", tier: craftTier(pct), meter: pct,
         aux: count,
         title: "Sample-adjusted share of positive reviews"
           + (rawPct != null ? " (raw " + Math.round(rawPct <= 1 ? rawPct * 100 : rawPct) + "% positive)" : "")
-          + (count ? ", from " + compactCount(craft.review_count, "review") : ""),
+          + (count ? ", from " + count : ""),
       }));
     }
 
@@ -711,9 +695,9 @@ EVAL_CARD_HTML = (
 
     var main = hoursLabel(time.hltb_main_hours, true);
     var extra = hoursLabel(time.hltb_extra_hours);
-    var hltbTitle = "HowLongToBeat: main story, and main + extras (full)";
-    if (main) factChip(row, "Time to beat", main, extra ? extra + " full" : null, hltbTitle);
-    else if (extra) factChip(row, "Time to beat", "~" + extra, "full", hltbTitle);
+    var hltbTitle = "HowLongToBeat: main story, and main + extras";
+    if (main) factChip(row, "Time to beat", main, extra ? extra + " with extras" : null, hltbTitle);
+    else if (extra) factChip(row, "Time to beat", "~" + extra, "with extras", hltbTitle);
 
     var weekly = num(time.recent_weekly_minutes);
     if (weekly != null && weekly > 0) {
@@ -842,7 +826,10 @@ EVAL_CARD_HTML = (
         img.className = "anchor-cover";
         img.alt = "";
         img.loading = "lazy";
-        img.onerror = function () { img.remove(); card.classList.add("no-cover"); };
+        // Broken art gives way to the name-seeded plate, same size.
+        img.onerror = function () {
+          if (img.parentNode) img.parentNode.replaceChild(coverPlate(a.name, "anchor-cover"), img);
+        };
         img.src = a.cover_url;
         card.appendChild(img);
       }
@@ -978,20 +965,47 @@ EVAL_CARD_HTML = (
 
   /* ---------- 7. what failed: one notice inline, the detail in the breakdown ---------- */
   /* package.errors are "<block>: <reason>" strings ("media: steam: …",
-     "igdb: unresolved — …"). The notice names WHAT is missing and from WHERE;
-     the raw reasons stay in its tooltip and in the breakdown's last section. */
-  var ERROR_WHAT = {
-    media: "media", pace: "your pace", similar: "similar games",
-    igdb: "studio", steam: "store data", package: "evaluation details", hltb: "time to beat",
+     "igdb: unresolved — …"). The notice names WHAT is missing and from WHERE
+     ("Couldn't load: similar games (library)"); the reasons stay in its
+     tooltip and in the breakdown's last section. Each known block maps to
+     [what, where]; "media" takes its source from the provider prefix of its
+     reason, and an unknown block is its humanized key with no source. */
+  var ERROR_BLOCKS = {
+    media: ["media", null],
+    similar: ["similar games", "library"],
+    anchors: ["your history", "library"],
+    pace: ["your pace", "library"],
+    pedigree: ["studio", "IGDB"],
+    studio: ["studio", "IGDB"],
+    igdb: ["studio", "IGDB"],
+    steam: ["store data", "Steam"],
+    hltb: ["time to beat", "HowLongToBeat"],
+    package: ["evaluation details", null],
   };
+  var ERROR_REASON_CAP = 120;
   function errorItem(text) {
-    var parts = String(text).split(":");
-    var key = parts[0].trim().toLowerCase();
-    var next = parts.length > 2 ? parts[1].trim().toLowerCase() : "";
+    var raw = String(text);
+    var cut = raw.indexOf(":");
+    var key = (cut < 0 ? raw : raw.slice(0, cut)).trim().toLowerCase();
+    var why = cut < 0 ? "" : raw.slice(cut + 1).trim();
     var has = Object.prototype.hasOwnProperty;
-    var source = has.call(PROVIDER_LABELS, key) ? PROVIDER_LABELS[key]
-      : has.call(PROVIDER_LABELS, next) ? PROVIDER_LABELS[next] : "";
-    return { what: ERROR_WHAT[key] || humanize(key).toLowerCase(), source: source };
+    var known = has.call(ERROR_BLOCKS, key) ? ERROR_BLOCKS[key] : null;
+    var source = known ? known[1] : null;
+    if (key === "media") {
+      // "media: steam: fetch failed" → (Steam), and the reason loses the prefix.
+      var sub = why.indexOf(":");
+      var prefix = sub < 0 ? "" : why.slice(0, sub).trim().toLowerCase();
+      if (has.call(PROVIDER_LABELS, prefix)) {
+        source = PROVIDER_LABELS[prefix];
+        why = why.slice(sub + 1).trim();
+      }
+    }
+    if (why.length > ERROR_REASON_CAP) why = why.slice(0, ERROR_REASON_CAP - 1).trim() + "…";
+    return {
+      what: known ? known[0] : humanize(key || "details").toLowerCase(),
+      source: source || "",
+      why: why,
+    };
   }
   /* An error whose data is on the card anyway says nothing true: "couldn't
      load time to beat" beside "~18h" reads as a contradiction. Drop it. */
@@ -1024,13 +1038,14 @@ EVAL_CARD_HTML = (
     if (!errors.length) return;
     var box = section(parent, "Couldn't load");
     var ul = el("ul", "err-list");
+    // "Media (Steam) — fetch failed": the block in words, never its key,
+    // then the server's own reason, capped.
     errors.forEach(function (text) {
       var item = errorItem(text);
       var li = document.createElement("li");
       li.appendChild(el("b", null, item.what.charAt(0).toUpperCase() + item.what.slice(1)
         + (item.source ? " (" + item.source + ")" : "")));
-      var why = String(text).split(":").slice(1).join(":").trim();
-      if (why) li.appendChild(el("span", null, " — " + why));
+      if (item.why) li.appendChild(el("span", null, " — " + item.why));
       ul.appendChild(li);
     });
     box.appendChild(ul);
@@ -1187,17 +1202,8 @@ EVAL_CARD_HTML = (
     + r"""
   /* Fullscreen hands the frame's size to the host, so size-changed stays
      quiet there; leaving it re-announces the inline height even when it
-     matches the last one sent. The shared observer captured the inline
-     reporter by reference, so it is re-armed on the wrapper. */
-  var reportInlineSize = reportSize;
-  reportSize = function () {
-    if (currentDisplayMode() !== "fullscreen") reportInlineSize();
-  };
-  if (resizeObserver) {
-    resizeObserver.disconnect();
-    resizeObserver = new ResizeObserver(function () { reportSize(); });
-    resizeObserver.observe(document.body);
-  }
+     matches the last one sent. */
+  hooks.shouldReportSize = function () { return currentDisplayMode() !== "fullscreen"; };
   if (window.MutationObserver) {
     new MutationObserver(function () {
       if (currentDisplayMode() !== "fullscreen") lastSize = "";

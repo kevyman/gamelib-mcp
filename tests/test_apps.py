@@ -6,7 +6,10 @@ against BOTH widgets, since both splice the same blocks.
 """
 
 import hashlib
+import json
 import re
+import shutil
+import subprocess
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -147,14 +150,15 @@ class GameCardsResourceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(calls, labelled)
 
     def test_steam_chip_never_shows_the_meter_without_the_phrase(self) -> None:
-        start = apps_shared.SCORE_CHIP_JS.index("function steamChip(desc, url)")
+        start = apps_shared.SCORE_CHIP_JS.index("function steamChip(desc, url, opts)")
         body = apps_shared.SCORE_CHIP_JS[start:]
         self.assertIn("if (!desc) return null;", body)
         self.assertIn('label: "Steam", value: phrase, tier: steamTier(desc),', body)
         # The detail card renders Steam through it (phrase + meter); the grid
         # renders the phrase without the meter (GridModeTests pins that rule).
-        self.assertIn("steamChip(game.steam_review_desc,", apps.GAME_CARDS_HTML)
-        self.assertIn("gridSteamChip(game.steam_review_desc)", apps.GAME_CARDS_HTML)
+        self.assertIn("steamChip(game.steam_review_desc,\n", apps.GAME_CARDS_HTML)
+        self.assertIn("steamChip(game.steam_review_desc, null, { meter: false })", apps.GAME_CARDS_HTML)
+        self.assertNotIn("gridSteamChip", apps.GAME_CARDS_HTML)
         self.assertNotIn("steamBadge", apps.GAME_CARDS_HTML)
 
     def test_csp_allows_exactly_the_cover_and_media_hosts(self) -> None:
@@ -424,12 +428,11 @@ class ContentTypeBadgeTests(unittest.TestCase):
         self.assertIn(".overlay.lightbox { position: fixed; inset: 0; }", css)
         for marker in (
             'var overlay = el("div", "overlay lightbox");',
-            'panel.setAttribute("role", "dialog");',
-            'panel.setAttribute("aria-modal", "true");',
-            'closer.addEventListener("click", closeLightbox);',
+            # the dialog chrome (role, ✕, trap, keys) is the shared one
+            'var chrome = lightboxPanel("lightbox-panel carousel", gameName, closeLightbox);',
+            "var onKey = lightboxKeys(panel, function (delta) { show(index + delta); }, closeLightbox);",
+            'document.addEventListener("keydown", onKey, true);',
             "if (ev.target === overlay) closeLightbox();",
-            'if (ev.key === "Escape") { ev.preventDefault(); closeLightbox(); }',
-            'else if (ev.key === "Tab") keepFocusInside(ev, panel);',
             "closer.focus({ preventScroll: true });",
             "current.trigger.focus({ preventScroll: true });",
         ):
@@ -438,7 +441,7 @@ class ContentTypeBadgeTests(unittest.TestCase):
             'navButton("car-prev", "‹"',
             'navButton("car-next", "›"',
             'counter.textContent = (index + 1) + " / " + shots.length;',
-            'if (ev.key === "ArrowLeft") show(index - 1);',
+            'else if (ev.key === "ArrowLeft") { ev.preventDefault(); step(-1); }',
             'stage.addEventListener("pointerup"',
         ):
             self.assertIn(marker, apps.GAME_CARDS_HTML)
@@ -527,10 +530,12 @@ class GridModeTests(unittest.TestCase):
             '? shown + " of " + plural(total, "game")',          # "12 of 143 games"
             ': plural(shown, "game");',
             'parts.push("sorted by " + (SORT_LABELS[args.sort_by] || SORT_LABELS.match));',
-            'parts.push(vibes.join(" + "));',
+            # every filter says what it filters
+            'parts.push("vibe: " + vibes.join(" + "));',
             'if (args.unplayed_only !== false) parts.push("unplayed only");',
-            'parts.push("≤ " + maxHours + "h");',
+            'parts.push("≤ " + maxHours + "h to beat");',
             'parts.push("critics ≥ " + minScore);',
+            'parts.push("ProtonDB " + String(args.protondb_min_tier).toLowerCase() + "+");',
         ):
             self.assertIn(marker, self.HTML if marker.startswith("var SORT") else head)
         # get_game_detail's arguments never produce discover filters.
@@ -539,8 +544,10 @@ class GridModeTests(unittest.TestCase):
         self.assertIn('head.appendChild(el("b", null, parts.count));', self.HTML)
         css = widget_css(self.HTML)
         self.assertIn(".grid-head b { color: var(--gl-text); font-weight: var(--gl-strong); }", css)
-        # Tool input arriving after the result redraws the grid.
-        self.assertIn("handleToolInput = function (params) {", self.HTML)
+        # Tool input arriving after the result redraws the grid (a hook, not
+        # a reassigned shared function).
+        self.assertIn("hooks.afterToolInput = function () {", self.HTML)
+        self.assertNotIn("handleToolInput = function", self.HTML)
         self.assertIn("if (gotResult && view === \"grid\" && gridData) render(gridData);", self.HTML)
 
     def test_match_bar_leads_the_card_body(self) -> None:
@@ -570,13 +577,16 @@ class GridModeTests(unittest.TestCase):
                       widget_css(self.HTML))
 
     def test_grid_steam_chip_is_phrase_only_on_a_line_of_its_own(self) -> None:
-        chip = js_function(self.HTML, "function gridSteamChip(desc)")
+        # One steamChip; the grid asks for its {meter: false} form.
+        chip = js_function(apps_shared.SCORE_CHIP_JS, "function steamChip(desc, url, opts)")
         self.assertIn('label: "Steam", value: phrase, tier: steamTier(desc),', chip)
-        self.assertNotIn("meter", chip)                     # the meter stays on the detail card
-        self.assertIn('cls: words >= 2 ? "steam-line" : "",', chip)
+        self.assertIn("var compact = !!opts && opts.meter === false;", chip)
+        self.assertIn("meter: compact || step == null ? null :", chip)   # the meter stays on the detail card
+        self.assertIn('cls: compact && words >= 2 ? "steam-line" : "",', chip)
         # A real space after the label: the only break point between "Steam"
         # and the phrase ("Overwhelmingly" ran out of the chip at 360px).
-        self.assertIn('chip.insertBefore(document.createTextNode(" "), chip.querySelector("b"));', chip)
+        self.assertIn('if (compact) chip.insertBefore(document.createTextNode(" "), chip.querySelector("b"));',
+                      chip)
         css = widget_css(self.HTML)
         start = css.index("  .card .chip.steam-line {")
         rule = css[start:css.index("}", start)]
@@ -588,10 +598,10 @@ class GridModeTests(unittest.TestCase):
         card = js_function(self.HTML, "function gridCard(game)")
         self.assertIn('if (hltb) metaBits.push(hltb + " to beat");', card)
 
-    def test_the_card_is_named_by_its_title(self) -> None:
+    def test_the_card_is_named_by_its_title_and_what_it_shows(self) -> None:
         card = js_function(self.HTML, "function gridCard(game)")
-        self.assertIn('title.id = "card-title-" + (++cardSeq);', card)
-        self.assertIn('card.setAttribute("aria-labelledby", title.id);', card)
+        self.assertIn('card.setAttribute("aria-label", cardLabel(game));', card)
+        self.assertNotIn('"aria-labelledby"', self.HTML)        # aria-label must win
         self.assertIn('card.setAttribute("role", "button");', card)
         self.assertIn('if (ev.key === "Enter" || ev.key === " ") {', card)
         self.assertNotIn("Show details for", self.HTML)
@@ -642,8 +652,11 @@ class GridModeTests(unittest.TestCase):
         # The model hears about it before anything else happens.
         self.assertLess(tap.index("updateModelContext("), tap.index("canFullscreen()"))
         self.assertIn('if (!canFullscreen()) {\n      sendMessage("Show me " + game.name);', tap)
-        self.assertIn('requestDisplayMode("fullscreen").then(function (mode) {', tap)
-        self.assertIn('if (mode === "fullscreen") openDrill(game, before);', tap)
+        # 8s, and the tap stays pending so a late grant can still drill in
+        self.assertIn("pendingSelection = selection;", tap)
+        self.assertIn('requestDisplayMode("fullscreen", 8000).then(function (mode) {', tap)
+        self.assertIn("if (pendingSelection !== selection) return;", tap)
+        self.assertIn('if (mode === "fullscreen") openDrill(game, selection.before);', tap)
         self.assertIn('else sendMessage("Show me " + game.name);', tap)
 
     def test_the_drill_in_shows_a_skeleton_then_the_live_detail(self) -> None:
@@ -662,8 +675,9 @@ class GridModeTests(unittest.TestCase):
             'if (failure) notice(holder, failure + " Showing what the list had.");',
         ):
             self.assertIn(marker, drill)
-        err = js_function(self.HTML, "function toolErrorText(res)")
-        self.assertIn('if (text.length > 120) text = text.slice(0, 119).trim() + "…";', err)
+        # the shared toolErrorText (TOOL_RESULT_JS), not a local copy
+        self.assertEqual(self.HTML.count("function toolErrorText("), 1)
+        self.assertIn("function toolErrorText(result)", apps_shared.TOOL_RESULT_JS)
         call = js_function(self.HTML, "function callTool(name, args, timeoutMs)")
         self.assertIn('request("tools/call", { name: name, arguments: args }, ms + 1000)', call)
         self.assertIn("resolve(TIMED_OUT); }, ms);", call)
@@ -673,8 +687,130 @@ class GridModeTests(unittest.TestCase):
         # The host's own close button ends the drill-in too.
         self.assertIn(
             'if (view === "drill" && currentDisplayMode() !== "fullscreen" && gridData) render(gridData);',
-            self.HTML,
+            js_function(self.HTML, "function hostContextChanged(ctx)"),
         )
+
+
+NODE = shutil.which("node")
+
+# The card-tap state machine with everything around it stubbed: requests are
+# promises the probe resolves by hand, in the order the host would answer.
+_TAP_SHIM = r"""
+var messages = [], drilled = [], requests = [];
+var view = "grid", gridData = { results: [] }, lastSelectedId = null, mode = "inline";
+function render() {}
+function updateModelContext() {}
+function sendMessage(text) { messages.push(text); }
+function openDrill(game, before) { drilled.push([game.name, before]); view = "drill"; }
+function currentDisplayMode() { return mode; }
+function canFullscreen() { return true; }
+function requestDisplayMode(m, timeoutMs) {
+  return new Promise(function (resolve) { requests.push({ mode: m, timeoutMs: timeoutMs, resolve: resolve }); });
+}
+function tick() { return new Promise(function (r) { setTimeout(r, 0); }); }
+"""
+
+_TAP_PROBE = r"""
+(async function () {
+  var out = {};
+  // Late grant: the host flips to fullscreen by context change, then the
+  // request times out (resolving to the mode we are in by then).
+  selectGame({ game_id: 1, name: "Hades II" });
+  out.timeout = requests[0].timeoutMs;
+  mode = "fullscreen";
+  hostContextChanged({ displayMode: "fullscreen" });
+  requests[0].resolve("fullscreen");
+  await tick();
+  out.lateGrant = { drilled: drilled.slice(), messages: messages.slice() };
+
+  // Silence for 8s: the chat fallback, once.
+  drilled = []; messages = []; mode = "inline"; view = "grid";
+  selectGame({ game_id: 2, name: "Dead Cells" });
+  requests[1].resolve("inline");
+  await tick();
+  out.timedOut = { drilled: drilled.slice(), messages: messages.slice() };
+
+  // A grant in the answer, then the matching context change: one drill.
+  drilled = []; messages = [];
+  selectGame({ game_id: 3, name: "Noita" });
+  requests[2].resolve("fullscreen");
+  await tick();
+  mode = "fullscreen";
+  hostContextChanged({ displayMode: "fullscreen" });
+  out.granted = { drilled: drilled.slice(), messages: messages.slice() };
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class CardTapBehaviourTests(unittest.TestCase):
+    """B2, executed: never the chat fallback while fullscreen may be granted."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        html = apps.GAME_CARDS_HTML
+        start = html.index("  var pendingSelection = null;")
+        machine = html[start:html.index("  function openDrill(game, before) {", start)]
+        assert NODE is not None
+        proc = subprocess.run([NODE, "-e", _TAP_SHIM + machine + _TAP_PROBE],
+                              capture_output=True, text=True, timeout=60, check=False)
+        if proc.returncode != 0:
+            raise AssertionError(proc.stderr)
+        cls.out = json.loads(proc.stdout)
+
+    def test_the_request_waits_eight_seconds(self) -> None:
+        self.assertEqual(self.out["timeout"], 8000)
+
+    def test_a_late_grant_drills_in_and_sends_no_message(self) -> None:
+        self.assertEqual(self.out["lateGrant"], {"drilled": [["Hades II", "inline"]], "messages": []})
+
+    def test_silence_falls_back_to_the_chat_once(self) -> None:
+        self.assertEqual(self.out["timedOut"], {"drilled": [], "messages": ["Show me Dead Cells"]})
+
+    def test_a_granted_answer_drills_in_once(self) -> None:
+        self.assertEqual(self.out["granted"], {"drilled": [["Noita", "inline"]], "messages": []})
+
+
+_LABEL_PROBE = r"""
+function realScore(n) { return n != null && n >= 0; }
+console.log(JSON.stringify({
+  full: cardLabel({ name: "Hades II", match_percent: 100, hltb_main: 26.5, suggested_platform: "steam",
+                    metacritic_score: 93, opencritic_score: 91, steam_review_desc: "Overwhelmingly Positive" }),
+  sparse: cardLabel({ name: "Noita", match_percent: 74.4, metacritic_score: -1 }),
+  bare: cardLabel({ name: "Mystery" }),
+}));
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class CardLabelBehaviourTests(unittest.TestCase):
+    """A1, executed: the card's accessible name carries what the card shows."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        html = apps.GAME_CARDS_HTML
+        fn = js_function(html, "function cardLabel(game)")
+        script = (
+            "function num(v) { if (v === null || v === undefined || v === '') return null;"
+            " var n = Number(v); return isFinite(n) ? n : null; }\n"
+            + apps_shared.LABELS_JS + apps_shared.NUMBERS_JS + fn + _LABEL_PROBE)
+        assert NODE is not None
+        proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=60, check=False)
+        if proc.returncode != 0:
+            raise AssertionError(proc.stderr)
+        cls.out = json.loads(proc.stdout)
+
+    def test_the_label_reads_title_match_hours_platform_and_scores(self) -> None:
+        self.assertEqual(
+            self.out["full"],
+            "Hades II: 100% match, 27h to beat, Steam, Metacritic 93, OpenCritic 91, "
+            "Steam overwhelmingly positive",
+        )
+
+    def test_only_the_parts_present_are_read(self) -> None:
+        self.assertEqual(self.out["sparse"], "Noita: 74% match")
+        self.assertEqual(self.out["bare"], "Mystery")
 
 
 class DetailModeTests(unittest.TestCase):
@@ -703,8 +839,8 @@ class DetailModeTests(unittest.TestCase):
 
     def test_your_rating_is_a_tiered_chip(self) -> None:
         panel = js_function(self.HTML, "function identityPanel(game, media)")
-        self.assertIn('label: "Your rating", value: mine + "/10",', panel)
-        self.assertIn('tier: mine >= 7 ? "good" : mine >= 5 ? "ok" : "bad",', panel)
+        self.assertIn('label: "Your rating", value: mine + "/10", tier: ratingTier(mine),', panel)
+        self.assertNotIn("mine >= 7", panel)
         self.assertNotIn("My rating: ", self.HTML)
 
     def test_description_clamps_to_three_lines_with_a_more_toggle(self) -> None:
@@ -1078,8 +1214,10 @@ class SharedComponentTests(unittest.TestCase):
         js = apps_shared.DISPLAY_MODE_JS
         for marker in (
             'request("ui/request-display-mode", { mode: mode })',
-            "setTimeout(function () { resolve(undefined); }, 2500);",
-            "var granted = res && res.mode ? String(res.mode) : before;",
+            # silence resolves to the mode we are in BY THEN (a context change
+            # that arrived meanwhile is the truth)
+            "var granted = res && res.mode ? String(res.mode) : currentDisplayMode();",
+            "setTimeout(function () { resolve(undefined); }, timeoutMs || 2500);",
             'return Array.isArray(modes) && modes.indexOf("fullscreen") >= 0;',
             'document.documentElement.setAttribute("data-display-mode", granted);',
         ):

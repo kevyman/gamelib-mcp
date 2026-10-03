@@ -39,7 +39,12 @@ from ..data.db import (
     upsert_game_platform,
     upsert_game_platform_identifier,
 )
-from ..data.purchases import IDENTIFIER_TYPES, PURCHASE_IMPORTERS, PurchaseRecord
+from ..data.purchases import (
+    IDENTIFIER_TYPES,
+    PURCHASE_IMPORTERS,
+    PURCHASE_SOURCES,
+    PurchaseRecord,
+)
 
 # The importer dict is resolved at call time; the imports below keep the
 # fetchers bound on this module so tests can patch
@@ -69,20 +74,10 @@ from .search import (
     fuzzy_fallback_game_ids,
 )
 
-# Closed vocabulary for purchase_source. Two deliberately distinct no-cost
-# sources: "free" = a no-strings giveaway (e.g. an Epic weekly free game) —
-# yours forever; "subscription" = claimed via a paid membership (Game Pass,
-# PS+ monthly, Humble Choice) — access may lapse with the subscription.
-# "key_reseller" covers third-party key shops (GAMIVO, Kinguin, G2A, Green Man
-# Gaming, IndieGala, CDKeys, …) — a real acquisition channel that would
-# otherwise collapse into the unanalysable "other" bucket; per-vendor aliases
-# below map onto it so provenance survives normalization.
-PURCHASE_SOURCES = frozenset({
-    "steam", "gog", "epic", "eshop", "psn", "xbox",
-    "humble", "fanatical", "itchio", "ea", "ubisoft",
-    "key_reseller",
-    "physical", "gift", "free", "subscription", "other",
-})
+# PURCHASE_SOURCES (the closed purchase_source vocabulary) lives in
+# data/purchases/__init__.py next to the importers' other vocabulary, so the
+# widgets can read it without importing this module; re-exported here under
+# the same name for every existing importer of it.
 
 # Common storefront spellings → canonical source. Keys are compared after
 # strip().lower(), so entries here stay lowercase.

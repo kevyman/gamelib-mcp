@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import unittest
+from pathlib import Path
 
 from gamelib_mcp import apps, apps_eval, apps_shared
 
@@ -20,7 +21,7 @@ def shared_css_blocks() -> list[tuple[str, str]]:
     return [
         (name, value)
         for name, value in sorted(vars(apps_shared).items())
-        if name.endswith("_CSS") and isinstance(value, str)
+        if name.endswith("_CSS") and not name.startswith("_") and isinstance(value, str)
     ]
 
 
@@ -43,10 +44,13 @@ def css_rule(css: str, selector: str, exact: bool = False) -> str:
 
 
 INTERACTIVE = (
-    "a.chip", ".btn", ".disclosure", ".thumb", ".fs-btn", ".car-nav",
-    ".overlay-close", '.card[role="button"]', ".hero-pill",
+    "a.chip", ".btn", ".disclosure", ".fs-btn", ".car-nav",
+    ".overlay-close", ".hero-pill",
     '.stamp[role="button"]', "button.stamp",
 )
+# Large enough on their own, and their overflow: hidden would clip an
+# extension anyway — so they carry none (an inert rule is a false promise).
+NO_EXTENSION = ('.card[role="button"]', ".thumb")
 
 
 class HostContextTests(unittest.TestCase):
@@ -63,12 +67,20 @@ class HostContextTests(unittest.TestCase):
         self.assertEqual(js.count('fonts.id = "host-fonts";'), 1)
         self.assertIn('var fonts = document.getElementById("host-fonts");', js)
 
-    def test_stale_host_variables_are_removed(self) -> None:
+    def test_partial_variable_updates_merge_instead_of_wiping_the_theme(self) -> None:
         js = apps_shared.BRIDGE_JS
-        self.assertIn('var HOST_TOKEN_PREFIXES = ["--color-", "--font-", "--border-", "--shadow-"];', js)
-        self.assertIn("nextVars[name] = true;", js)
-        self.assertIn("if (isHostToken(name)) docEl.style.removeProperty(name);", js)
-        self.assertIn("appliedHostVars = nextVars;", js)
+        # Only an explicit null / "" removes a variable; absence keeps it.
+        self.assertIn('if (value === null || value === "") docEl.style.removeProperty(name);', js)
+        self.assertIn("else if (value !== undefined) docEl.style.setProperty(name, String(value));", js)
+        for gone in ("appliedHostVars", "HOST_TOKEN_PREFIXES", "isHostToken", "nextVars"):
+            self.assertNotIn(gone, js)
+
+    def test_a_host_ping_is_answered(self) -> None:
+        self.assertIn(
+            'case "ping":                                               // liveness check\n'
+            '        if (m.id !== undefined) post({ jsonrpc: "2.0", id: m.id, result: {} });',
+            apps_shared.BRIDGE_JS,
+        )
 
     def test_size_tokens_are_clamped_at_12px(self) -> None:
         css = apps_shared.TOKENS_CSS
@@ -132,6 +144,10 @@ class HitAreaTests(unittest.TestCase):
             with self.subTest(cls=cls):
                 self.assertIn(f"{cls}::after", "a.chip::after, .btn::after" + base_selectors)
                 self.assertIn(f"html.touch {cls}::after", "html.touch a.chip::after" + touch_selectors)
+        for cls in NO_EXTENSION:
+            with self.subTest(cls=cls):
+                self.assertNotIn(f"{cls}::after", css)
+        self.assertNotIn('.card[role="button"] {', css)       # no containing-block rule left for it
 
     def test_chip_rows_keep_extensions_within_half_the_gap(self) -> None:
         a11y, chips = apps_shared.A11Y_CSS, apps_shared.CHIP_CSS
@@ -142,13 +158,13 @@ class HitAreaTests(unittest.TestCase):
         self.assertIn("html.touch .chips { gap: 12px 8px; }", chips)
         self.assertIn("html.touch .chips a.chip::after { inset: -6px -4px; }", a11y)
         self.assertIn("html.touch .chip, html.touch .hero-pill { min-height: 32px; }", a11y)
+        # pointer: a link chip is >=24px tall, so 24 + 2 x 4 = 32px
+        self.assertIn("a.chip { cursor: pointer; min-height: 24px; }", chips)
 
     def test_extension_hosts_are_containing_blocks(self) -> None:
         self.assertIn("position: relative;", css_rule(apps_shared.CONTROLS_CSS, ".btn, .disclosure", exact=True))
         self.assertIn("position: relative;", css_rule(apps_shared.CHIP_CSS, ".chip", exact=True))
-        # a clickable card holds link chips: its extension sits behind them
-        self.assertIn('.card[role="button"] { position: relative; z-index: 0; }', apps_shared.A11Y_CSS)
-        self.assertIn('.card[role="button"]::after { z-index: -1; }', apps_shared.A11Y_CSS)
+        self.assertIn("position: absolute;", css_rule(apps_shared.HERO_CSS, ".hero-pill", exact=True))
 
     def test_reduced_motion_wildcard(self) -> None:
         css = apps_shared.A11Y_CSS
@@ -207,15 +223,20 @@ class LifecycleTests(unittest.TestCase):
     def test_teardown_flag_guards_report_size_and_host_context(self) -> None:
         sizing = apps_shared.SIZING_JS
         self.assertIn("tornDown = true;", sizing)
-        self.assertIn("if (tornDown || window.__PREVIEW_DATA__) return;", sizing)
+        self.assertIn("if (tornDown || window.__PREVIEW_DATA__ || !hooks.shouldReportSize()) return;", sizing)
         self.assertIn("sizeTimer = null;", sizing)
         self.assertIn('if (tornDown || !ctx || typeof ctx !== "object") return;', apps_shared.BRIDGE_JS)
 
     def test_unparseable_result_replaces_the_skeleton_with_a_notice(self) -> None:
         js = apps_shared.TOOL_RESULT_JS
-        self.assertIn('notice(root, "Couldn\'t read the result");', js)
         body = js.split("function handleToolResult(result) {", 1)[1].split("\n  }\n", 1)[0]
         self.assertIn("if (!rootShowsContent()) root.textContent = \"\";", body)
+        # an errored result says its own cause; only an unreadable one says so
+        self.assertIn(
+            'notice(root, result && result.isError ? toolErrorText(result) : "Couldn\'t read the result");',
+            body,
+        )
+        self.assertIn('if (text.length > 160) text = text.slice(0, 159).trim() + "…";', js)
 
     def test_cancel_after_render_keeps_the_content(self) -> None:
         js = apps_shared.TOOL_RESULT_JS
@@ -307,12 +328,18 @@ PROBE = r"""
   var out = {};
   out.fallbackTouch = classes.touch; out.fallbackNoHover = classes["no-hover"];
 
-  applyHostContext({ styles: { variables: { "--color-text-primary": "#111", "--font-sans": "X" },
-                               css: { fonts: "@font-face{a}" } } });
+  /* B1: initialize with ten variables, then a partial update with one. */
+  var initial = {};
+  ["text-primary", "text-secondary", "text-tertiary", "background-primary",
+   "background-secondary", "border-primary", "border-tertiary", "text-success",
+   "text-warning", "text-danger"].forEach(function (n, i) { initial["--color-" + n] = "#00" + i; });
+  applyHostContext({ styles: { variables: initial, css: { fonts: "@font-face{a}" } } });
   applyHostContext({ styles: { variables: { "--color-text-primary": "#222" },
                                css: { fonts: "@font-face{a}" } } });
   out.fontNodes = fontNodes.length; out.fontText = fontNodes[0].textContent;
-  out.props = props; out.removed = removed;
+  out.propsAfterPartial = JSON.parse(JSON.stringify(props)); out.removedAfterPartial = removed.slice();
+  applyHostContext({ styles: { variables: { "--color-text-danger": null, "--color-text-warning": "" } } });
+  out.propsAfterNull = Object.keys(props).length; out.removedAfterNull = removed.slice();
   applyHostContext({ styles: { css: { fonts: "@font-face{b}" } } });
   out.fontText2 = fontNodes[0].textContent; out.fontNodes2 = fontNodes.length;
   out.fontWrites = fontNodes[0].writes;
@@ -357,6 +384,37 @@ PROBE = r"""
   rootNode.textContent = ""; var card = new FakeNode("div"); card.className = "card"; rootNode.appendChild(card);
   handleToolCancelled();
   out.afterCancel = rootNode.childNodes.map(function (n) { return n.className; });
+
+  /* F3: an errored tool result shows its own text, capped at 160 chars. */
+  rootNode.textContent = ""; var sk2 = new FakeNode("div"); sk2.className = "skel"; rootNode.appendChild(sk2);
+  handleToolResult({ isError: true, content: [{ type: "text", text: "Game not found: 'Hadess'" }] });
+  out.afterError = rootNode.childNodes.map(function (n) { return n.className + ":" + n.textContent; });
+  rootNode.textContent = "";
+  handleToolResult({ isError: true, content: [{ type: "text", text: new Array(60).join("too long ") }] });
+  out.longError = rootNode.childNodes[0].textContent;
+
+  /* B3: a host ping is answered with an empty result. */
+  posted = [];
+  listeners.message({ source: hostFrame, data: { jsonrpc: "2.0", id: 77, method: "ping" } });
+  out.pingAnswer = posted[0];
+
+  /* B5: the hooks are called at their points. */
+  var calls = [];
+  hooks.afterToolInput = function (args) { calls.push(["input", args]); };
+  hooks.afterToolResult = function (data) { calls.push(["result", data]); };
+  hooks.afterHostContext = function (ctx) { calls.push(["context", ctx.displayMode]); };
+  handleToolInput({ arguments: { vibes: ["roguelike"] } });
+  handleToolResult({ structuredContent: { results: [] } });
+  applyHostContext({ displayMode: "fullscreen" });
+  out.hookCalls = calls;
+  flush(); posted = [];
+  hooks.shouldReportSize = function () { return false; };
+  docEl.scrollHeight = 999;
+  reportSize(); flush();
+  out.postedWhileSuppressed = posted.length;
+  hooks.shouldReportSize = function () { return true; };
+  reportSize(); flush();
+  out.postedWhenAllowed = posted.map(function (m) { return m.method; });
 
   flush(); posted = [];
   reportSize(); teardown(); flush();
@@ -410,10 +468,32 @@ class BridgeBehaviourTests(unittest.TestCase):
         # two identical payloads + one change = two writes, not three
         self.assertEqual(self.out["fontWrites"], 2)
 
-    def test_stale_variables_removed_and_fresh_ones_kept(self) -> None:
-        self.assertEqual(self.out["props"].get("--color-text-primary"), "#222")
-        self.assertNotIn("--font-sans", self.out["props"])
-        self.assertEqual(self.out["removed"], ["--font-sans"])
+    def test_a_partial_variable_update_keeps_the_rest_of_the_theme(self) -> None:
+        props = self.out["propsAfterPartial"]
+        self.assertEqual(len(props), 10)                     # 10 remain…
+        self.assertEqual(props["--color-text-primary"], "#222")  # …1 updated
+        self.assertEqual(props["--color-text-danger"], "#009")
+        self.assertEqual(self.out["removedAfterPartial"], [])
+
+    def test_only_an_explicit_null_or_empty_value_removes_a_variable(self) -> None:
+        self.assertEqual(self.out["propsAfterNull"], 8)
+        self.assertEqual(sorted(self.out["removedAfterNull"]), ["--color-text-danger", "--color-text-warning"])
+
+    def test_an_errored_result_shows_its_own_text(self) -> None:
+        self.assertEqual(self.out["afterError"], ["notice:Game not found: 'Hadess'."])
+        self.assertLessEqual(len(self.out["longError"]), 160)
+        self.assertTrue(self.out["longError"].endswith("…"))
+
+    def test_a_host_ping_gets_an_empty_result(self) -> None:
+        self.assertEqual(self.out["pingAnswer"], {"jsonrpc": "2.0", "id": 77, "result": {}})
+
+    def test_hooks_run_at_their_points(self) -> None:
+        self.assertEqual(
+            self.out["hookCalls"],
+            [["input", {"vibes": ["roguelike"]}], ["result", {"results": []}], ["context", "fullscreen"]],
+        )
+        self.assertEqual(self.out["postedWhileSuppressed"], 0)
+        self.assertEqual(self.out["postedWhenAllowed"], ["ui/notifications/size-changed"])
 
     def test_host_device_capabilities_win_and_survive_partial_updates(self) -> None:
         self.assertFalse(self.out["hostTouch"])
@@ -453,6 +533,219 @@ class BridgeBehaviourTests(unittest.TestCase):
     def test_nothing_reported_or_applied_after_teardown(self) -> None:
         self.assertEqual(self.out["postedAfterTeardown"], 0)
         self.assertNotEqual(self.out["themeAfterTeardown"], "light")
+
+
+_WIDGET_SOURCES = {
+    name: (Path(apps_shared.__file__).parent / name).read_text()
+    for name in ("apps_shared.py", "apps.py", "apps_eval.py")
+}
+
+
+class ImageFallbackTests(unittest.TestCase):
+    """Item 6 (F1): no broken-image glyph, no alt text over the stage."""
+
+    def test_every_img_element_has_an_error_fallback(self) -> None:
+        sites = 0
+        for name, source in _WIDGET_SOURCES.items():
+            for match in re.finditer(r'var (\w+) = document\.createElement\("img"\);', source):
+                sites += 1
+                var = match.group(1)
+                # the handler is attached before src is set, within the builder
+                window = source[match.end():match.end() + 2000]
+                with self.subTest(module=name, var=var, at=match.start()):
+                    self.assertRegex(window, rf"\b{var}\.onerror = function")
+                    self.assertLess(window.index(f"{var}.onerror"), window.index(f"{var}.src"))
+        self.assertGreaterEqual(sites, 6)   # cover, poster, stage, thumb, carousel, anchor
+
+    def test_the_fallbacks_are_the_neutral_tiles(self) -> None:
+        self.assertIn('el("span", "thumb-text", text)', apps_shared.MEDIA_PANEL_JS)
+        self.assertIn('el("div", "hero-missing", "Screenshot unavailable")', apps_shared.MEDIA_PANEL_JS)
+        self.assertIn('el("div", "hero-missing below-badge", missingText || "Trailer")', apps_shared.HERO_MEDIA_JS)
+        self.assertIn('var missing = el("div", "hero-missing", "Screenshot unavailable");',
+                      apps_shared.CAROUSEL_STAGE_JS)
+        self.assertIn('coverPlate(a.name, "anchor-cover")', apps_eval.EVAL_CARD_HTML)
+
+
+# Just enough DOM for the media builders: parent links, replaceChild, remove.
+_MEDIA_SHIM = r"""
+function FakeNode(tag) {
+  this.tagName = tag; this.childNodes = []; this.className = ""; this.attrs = {};
+  this.style = {}; this.parentNode = null; this._text = "";
+}
+Object.defineProperty(FakeNode.prototype, "textContent", {
+  get: function () { return this._text + this.childNodes.map(function (c) { return c.textContent; }).join(""); },
+  set: function (v) { this._text = String(v); this.childNodes = []; },
+});
+FakeNode.prototype.setAttribute = function (k, v) { this.attrs[k] = String(v); };
+FakeNode.prototype.addEventListener = function () {};
+FakeNode.prototype.appendChild = function (c) { c.parentNode = this; this.childNodes.push(c); return c; };
+FakeNode.prototype.replaceChild = function (n, o) {
+  var i = this.childNodes.indexOf(o); this.childNodes[i] = n; n.parentNode = this; o.parentNode = null; return o;
+};
+FakeNode.prototype.remove = function () {
+  if (!this.parentNode) return;
+  var kids = this.parentNode.childNodes; kids.splice(kids.indexOf(this), 1); this.parentNode = null;
+};
+var document = { createElement: function (t) { return new FakeNode(t); } };
+function el(tag, cls, text) {
+  var n = new FakeNode(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n;
+}
+function list(v) { return Array.isArray(v) ? v : []; }
+function openLink() {} function reportSize() {} function openCarousel() {}
+function fullscreenButton() { return el("button", "fs-btn"); }
+function shape(n) {
+  return { tag: n.tagName, cls: n.className, text: n._text,
+           kids: n.childNodes.map(shape) };
+}
+"""
+
+_MEDIA_PROBE = r"""
+var out = {};
+var thumb = thumbNode({ kind: "shot", shot: { thumb: "https://x/1.jpg" }, index: 2 }, "Hades II");
+thumb.childNodes[0].onerror();
+out.thumb = shape(thumb);
+var trailerThumb = thumbNode({ kind: "mp4", trailer: { poster: "https://x/p.jpg" } }, "Hades II");
+trailerThumb.childNodes[0].onerror();
+out.trailerThumb = shape(trailerThumb);
+var hero = el("div", "hero");
+hero.appendChild(posterNode("https://x/poster.jpg", "Trailer thumbnail", "Trailer unavailable here"));
+hero.childNodes[0].onerror();
+out.poster = shape(hero);
+var viewer = el("div", "hero viewer");
+showEntry(viewer, { kind: "shot", shot: { full: "https://x/2.jpg" }, index: 0 }, [], "Hades II");
+viewer.childNodes[0].childNodes[0].onerror();
+out.stage = shape(viewer);
+console.log(JSON.stringify(out));
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class ImageFallbackBehaviourTests(unittest.TestCase):
+    """F1, executed: a failed thumb, poster and stage image become text tiles."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        assert NODE is not None
+        proc = subprocess.run(
+            [NODE, "-e", _MEDIA_SHIM + apps_shared.HERO_MEDIA_JS + apps_shared.MEDIA_PANEL_JS + _MEDIA_PROBE],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        if proc.returncode != 0:
+            raise AssertionError(proc.stderr)
+        cls.out = json.loads(proc.stdout)
+
+    def test_a_failed_screenshot_thumb_becomes_a_text_tile(self) -> None:
+        self.assertEqual(self.out["thumb"]["kids"], [{"tag": "span", "cls": "thumb-text",
+                                                       "text": "Screenshot 3", "kids": []}])
+
+    def test_a_failed_trailer_thumb_becomes_one_text_tile(self) -> None:
+        # the tile carries its own ▶; the overlay glyph would sit on the word
+        self.assertEqual([k["cls"] for k in self.out["trailerThumb"]["kids"]], ["thumb-text"])
+        self.assertEqual(self.out["trailerThumb"]["kids"][0]["text"], "▶ Trailer")
+
+    def test_a_failed_poster_shows_the_stage_line(self) -> None:
+        self.assertEqual(self.out["poster"]["kids"], [{"tag": "div", "cls": "hero-missing below-badge",
+                                                       "text": "Trailer unavailable here", "kids": []}])
+
+    def test_a_failed_stage_screenshot_drops_its_fullscreen_button(self) -> None:
+        stage = self.out["stage"]["kids"]
+        self.assertEqual([k["cls"] for k in stage], ["shot-btn"])
+        self.assertEqual(stage[0]["kids"][0]["cls"], "hero-missing")
+
+
+class HookTests(unittest.TestCase):
+    """B5: widgets assign hooks; they never reassign a shared function."""
+
+    def test_no_widget_reassigns_a_shared_function(self) -> None:
+        shared_names = set()
+        for _name, block in shared_blocks():
+            shared_names |= set(re.findall(r"\bfunction (\w+)\(", block))
+        self.assertIn("applyHostContext", shared_names)
+        self.assertIn("reportSize", shared_names)
+        for module in ("apps.py", "apps_eval.py"):
+            source = _WIDGET_SOURCES[module]
+            with self.subTest(module=module):
+                reassigned = [
+                    name for name in re.findall(r"(?<![.\w])(\w+)\s*=\s*function\b", source)
+                    if name in shared_names
+                ]
+                self.assertEqual(reassigned, [])
+                self.assertNotIn("new ResizeObserver", source)
+
+    def test_the_hooks_are_declared_once_and_called_by_the_shared_code(self) -> None:
+        self.assertIn("var hooks = {", apps_shared.BRIDGE_JS)
+        self.assertIn("hooks.afterHostContext(ctx);", apps_shared.BRIDGE_JS)
+        self.assertIn("hooks.afterToolInput(lastToolInput);", apps_shared.TOOL_RESULT_JS)
+        self.assertIn("hooks.afterToolResult(data);", apps_shared.TOOL_RESULT_JS)
+        self.assertIn("!hooks.shouldReportSize()", apps_shared.SIZING_JS)
+        self.assertIn("hooks.afterToolInput = function () {", apps.GAME_CARDS_HTML)
+        self.assertIn("hooks.afterHostContext = hostContextChanged;", apps.GAME_CARDS_HTML)
+        self.assertIn("hooks.shouldReportSize = function () {", apps_eval.EVAL_CARD_HTML)
+
+
+class OneCopyHelperTests(unittest.TestCase):
+    """D2: one section(), one steamChip, one rating tier — no local twins."""
+
+    def test_helpers_live_once_in_the_shared_blocks(self) -> None:
+        self.assertIn("function section(parent, title) {", apps_shared.DOM_HELPERS_JS)
+        for name, html in (("game-cards", apps.GAME_CARDS_HTML), ("eval-card", apps_eval.EVAL_CARD_HTML)):
+            with self.subTest(widget=name):
+                self.assertEqual(html.count("function section("), 1)
+                self.assertEqual(html.count("function steamChip("), 1)
+        for module in ("apps.py", "apps_eval.py"):
+            with self.subTest(module=module):
+                self.assertNotIn("function section(", _WIDGET_SOURCES[module])
+                self.assertNotIn("gridSteamChip", _WIDGET_SOURCES[module])
+                self.assertNotIn(">= 7 ?", _WIDGET_SOURCES[module])     # ratingTier's thresholds
+
+
+class LightboxChromeTests(unittest.TestCase):
+    """A4: one focus trap, one ✕, one key router — in both widgets."""
+
+    def test_both_widgets_carry_the_shared_trap_and_no_second_copy(self) -> None:
+        for name, html in (("game-cards", apps.GAME_CARDS_HTML), ("eval-card", apps_eval.EVAL_CARD_HTML)):
+            with self.subTest(widget=name):
+                self.assertIn(apps_shared.LIGHTBOX_CHROME_JS, html)
+                self.assertEqual(html.count("function keepFocusInside("), 1)
+                self.assertEqual(html.count('el("button", "overlay-close"'), 1)
+                self.assertIn("lightboxKeys(panel, function (delta) { show(index + delta); }", html)
+                self.assertIn('document.addEventListener("keydown", ', html)
+        for module in ("apps.py", "apps_eval.py"):
+            with self.subTest(module=module):
+                self.assertNotIn("function keepFocusInside(", _WIDGET_SOURCES[module])
+                self.assertNotIn('panel.setAttribute("role", "dialog")', _WIDGET_SOURCES[module])
+
+    def test_the_chrome_is_a_labelled_modal_with_a_typed_close(self) -> None:
+        js = apps_shared.LIGHTBOX_CHROME_JS
+        for marker in (
+            'panel.setAttribute("role", "dialog");',
+            'panel.setAttribute("aria-modal", "true");',
+            'closer.type = "button";',
+            'closer.setAttribute("aria-label", "Close screenshots");',
+            'if (ev.key === "Escape") { ev.preventDefault(); onClose(); }',
+            'else if (ev.key === "Tab") keepFocusInside(ev, panel);',
+        ):
+            self.assertIn(marker, js)
+
+
+class PlainColorFallbackTests(unittest.TestCase):
+    """B6: a theme for WebViews without light-dark()."""
+
+    def test_every_color_token_is_redeclared_with_plain_values(self) -> None:
+        tokens = apps_shared.TOKENS_CSS
+        layer, fallback = tokens.split("@supports not (color: light-dark(red, blue)) {", 1)
+        names = re.findall(r"^    (--gl-[a-z0-9-]+): var\([^,]+, light-dark\(", layer, re.MULTILINE)
+        self.assertGreaterEqual(len(names), 18)
+        light = fallback.split("@media (prefers-color-scheme: dark)", 1)[0]
+        dark_media = fallback.split('[data-theme="light"])', 1)[1].split("}", 1)[0]
+        dark_theme = fallback.split(':root[data-theme="dark"] {', 1)[1].split("}", 1)[0]
+        for name in names:
+            with self.subTest(token=name):
+                for part in (light, dark_media, dark_theme):
+                    self.assertRegex(part, rf"{name}: var\(--[a-z-]+, [^;]+\);")
+        self.assertNotIn("light-dark(", fallback)
+        self.assertIn("--gl-text: var(--color-text-primary, #141413);", light)
+        self.assertIn("--gl-text: var(--color-text-primary, #FAF9F5);", dark_media)
 
 
 class SplicedVerbatimTests(unittest.TestCase):

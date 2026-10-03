@@ -27,9 +27,10 @@ nothing renders below 12px.
 """
 
 import json
+import re
 
+from .data.purchases import PURCHASE_SOURCES
 from .platforms_registry import PLATFORMS
-from .tools.acquisition import PURCHASE_SOURCES
 
 # ---- Labels (generated) -----------------------------------------------------
 # Every platform field on the wire (suggested_platform, platforms[].platform,
@@ -79,8 +80,8 @@ VERDICT_LABELS: dict[str, str] = {
     "play_what_you_own": "Play what you own",
 }
 
-# ownership.purchase_source is tools/acquisition.py's closed PURCHASE_SOURCES
-# vocabulary. The card reads it as "paid €12.00 via <label>", so the labels
+# ownership.purchase_source is the closed PURCHASE_SOURCES vocabulary
+# (data/purchases/__init__.py). The card reads it as "paid €12.00 via <label>", so the labels
 # are phrased to follow "via"; tests/test_apps.py::LabelTests fails when a
 # vocabulary value has no explicit entry (unknown ones would humanize).
 _PURCHASE_SOURCE_DISPLAY: dict[str, str] = {
@@ -133,7 +134,7 @@ PROVIDER_LABELS: dict[str, str] = {
 # this block, the verdict stamp rule (apps_eval.py, built from tokens) and the
 # cover plate (its gradient is generated per name in coverNode; its ink is the
 # --gl-plate-* tokens below). tests/test_apps.py::DesignSystemTests pins that.
-TOKENS_CSS = r"""  :root {
+_TOKENS_LAYER_CSS = r"""  :root {
     color-scheme: light dark;
     --gl-text: var(--color-text-primary, light-dark(#141413, #FAF9F5));
     --gl-text-2: var(--color-text-secondary, light-dark(#3D3D3A, #C2C0B6));
@@ -201,6 +202,58 @@ TOKENS_CSS = r"""  :root {
   :root[data-theme="dark"] { color-scheme: dark; }
 """
 
+_LIGHT_DARK_TOKEN = re.compile(
+    r"^    (--gl-[a-z0-9-]+): var\((--[a-z0-9-]+), light-dark\((.+)\)\);$",
+    re.MULTILINE,
+)
+
+
+def _split_pair(args: str) -> tuple[str, str]:
+    """``"rgba(1, 2, 3, 0.1), #FFF"`` → the two top-level arguments."""
+    depth = 0
+    for i, ch in enumerate(args):
+        depth += ch == "("
+        depth -= ch == ")"
+        if ch == "," and depth == 0:
+            return args[:i].strip(), args[i + 1:].strip()
+    raise ValueError(f"light-dark() needs two arguments: {args!r}")
+
+
+def _plain_color_fallback(layer: str) -> str:
+    """The color tokens again as plain values, for WebViews without light-dark().
+
+    Generated from the layer above, so the two can never drift: every
+    ``--gl-*: var(<host token>, light-dark(L, D))`` becomes ``var(<host
+    token>, L)`` by default and ``var(<host token>, D)`` under a dark
+    ``prefers-color-scheme`` (unless the host forced light) or a host dark
+    theme. Host variables still win either way.
+    """
+    tokens = [
+        (name, host, *_split_pair(pair)) for name, host, pair in _LIGHT_DARK_TOKEN.findall(layer)
+    ]
+
+    def block(indent: str, pick: int) -> str:
+        return "".join(
+            f"{indent}{name}: var({host}, {(light, dark)[pick]});\n"
+            for name, host, light, dark in tokens
+        )
+
+    return (
+        "  /* Older WebViews without light-dark(): the same color tokens as plain\n"
+        "     values (generated from the layer above) — light by default, dark\n"
+        "     under a dark prefers-color-scheme or a host dark theme. */\n"
+        "  @supports not (color: light-dark(red, blue)) {\n"
+        "    :root {\n" + block("      ", 0) + "    }\n"
+        "    @media (prefers-color-scheme: dark) {\n"
+        "      :root:not([data-theme=\"light\"]) {\n" + block("        ", 1) + "      }\n"
+        "    }\n"
+        "    :root[data-theme=\"dark\"] {\n" + block("      ", 1) + "    }\n"
+        "  }\n"
+    )
+
+
+TOKENS_CSS = _TOKENS_LAYER_CSS + _plain_color_fallback(_TOKENS_LAYER_CSS)
+
 # Box-sizing reset, the transparent page and the body type. The 12px gutter is
 # the base the bridge adds safe-area insets to.
 RESET_CSS = r"""  * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -222,36 +275,33 @@ RESET_CSS = r"""  * { box-sizing: border-box; margin: 0; padding: 0; }
 # solid ring well past 3:1 against the surface in either theme (the 0.4-alpha
 # border token was not).
 #
-# Hit-area rule: every interactive element carries an invisible ::after that
-# extends its tap target past its visual box — >=32px on pointer devices, >=44px
-# on html.touch — and the extension NEVER reaches a sibling's own box. A chip
-# row's gap is therefore at least twice the extension on that axis
+# Hit-area rule: every small interactive element carries an invisible ::after
+# that extends its tap target past its visual box — >=32px on pointer devices,
+# >=44px on html.touch — and the extension NEVER reaches a sibling's own box.
+# A chip row's gap is therefore at least twice the extension on that axis
 # (.chips: 8px rows / 6px columns against -4px / -3px; on touch 12px / 8px
-# against -6px / -4px), and on touch the chips themselves grow to a 32px
-# visual height so 32 + 2x6 = 44 is met by the chip's own height plus the
-# extension, not by overlapping the next row. The host element must be a
-# containing block (positioned, or transformed like the stamp); .btn,
-# .disclosure and role=button cards are made relative here. A role=button card
-# can hold link chips, so its extension sits BEHIND its children (z-index -1
-# inside the card's own stacking context) and never steals their taps.
+# against -6px / -4px). Link chips are at least 24px tall (CHIP_CSS), so
+# 24 + 2x4 = 32 on a pointer; on touch the chips grow to a 32px visual height
+# so 32 + 2x6 = 44 is met by the chip's own height plus the extension, not by
+# overlapping the next row. The host element must be a containing block
+# (positioned, or transformed like the stamp); .btn and .disclosure are made
+# relative in CONTROLS_CSS. Grid cards and media thumbs carry no extension:
+# their overflow: hidden would clip it, and both are far past 44px already.
 A11Y_CSS = r"""  :focus-visible { outline: 2px solid var(--gl-text); outline-offset: 2px; }
   :focus:not(:focus-visible) { outline: none; }
-  .card[role="button"] { position: relative; z-index: 0; }
-  a.chip::after, .btn::after, .disclosure::after, .thumb::after, .fs-btn::after,
-  .car-nav::after, .overlay-close::after, .card[role="button"]::after, .hero-pill::after,
+  a.chip::after, .btn::after, .disclosure::after, .fs-btn::after,
+  .car-nav::after, .overlay-close::after, .hero-pill::after,
   .stamp[role="button"]::after, button.stamp::after {
     content: "";
     position: absolute;
     inset: -4px;
   }
-  .card[role="button"]::after { z-index: -1; }
   .chips a.chip::after { inset: -4px -3px; }
   html.touch .chip, html.touch .hero-pill { min-height: 32px; }
   html.touch a.chip::after, html.touch .btn::after, html.touch .disclosure::after,
-  html.touch .thumb::after, html.touch .fs-btn::after, html.touch .car-nav::after,
-  html.touch .overlay-close::after, html.touch .card[role="button"]::after,
-  html.touch .hero-pill::after, html.touch .stamp[role="button"]::after,
-  html.touch button.stamp::after {
+  html.touch .fs-btn::after, html.touch .car-nav::after,
+  html.touch .overlay-close::after, html.touch .hero-pill::after,
+  html.touch .stamp[role="button"]::after, html.touch button.stamp::after {
     inset: -6px;
   }
   html.touch .chips a.chip::after { inset: -6px -4px; }
@@ -354,7 +404,8 @@ CHIP_CSS = r"""  .chips { display: flex; gap: 8px 6px; flex-wrap: wrap; align-it
   }
   .chip .meter-fill { display: block; height: 100%; background: currentColor; }
   .chip .ext { color: inherit; }
-  a.chip { cursor: pointer; }
+  /* 24px + the -4px extension = a 32px target on a pointer (A11Y_CSS). */
+  a.chip { cursor: pointer; min-height: 24px; }
   a.chip:hover { border-color: var(--gl-border-strong); }
 """
 
@@ -529,7 +580,12 @@ HERO_CSS = r"""  .hero {
     height: 100%;
     color: var(--gl-on-stage-dim);
     font-size: var(--gl-cap);
+    text-align: center;
+    padding: 0 12px;
   }
+  /* Under a centered play badge the line drops below it instead of being
+     covered by it. */
+  .hero-missing.below-badge { padding-top: 100px; }
 """
 
 # Sideways-scrolling strip shared by thumbs, similar games and pedigree.
@@ -768,9 +824,22 @@ TOAST_CSS = r"""  .toast {
 # The hand-rolled MCP Apps postMessage bridge (spec 2026-01-26): request/
 # notify, the inbound notification router, and the hostContext store with
 # applyHostContext (theme, token variables, host fonts, safe areas, touch /
-# hover, display mode). Opens the IIFE both widgets live inside.
+# hover, display mode). Opens the IIFE both widgets live inside, and declares
+# the hooks a widget assigns instead of reassigning a shared function.
 BRIDGE_JS = r"""(function () {
   "use strict";
+
+  /* ---------- widget hooks ---------- */
+  /* The shared blocks call these at fixed points; a widget ASSIGNS the ones
+     it needs (hooks.afterHostContext = …) rather than wrapping a shared
+     function, so every shared caller — the router, the observer, a timer —
+     reaches the widget's logic. */
+  var hooks = {
+    afterToolInput: function () {},             // (args) after lastToolInput is stored
+    afterToolResult: function () {},            // (data) after render(data)
+    afterHostContext: function () {},           // (ctx) after a host context is applied
+    shouldReportSize: function () { return true; },
+  };
 
   /* ---------- MCP Apps bridge (spec 2026-01-26, hand-rolled) ---------- */
   var nextId = 1;
@@ -818,6 +887,9 @@ BRIDGE_JS = r"""(function () {
         teardown();
         if (m.id !== undefined) post({ jsonrpc: "2.0", id: m.id, result: {} });
         return;
+      case "ping":                                               // liveness check
+        if (m.id !== undefined) post({ jsonrpc: "2.0", id: m.id, result: {} });
+        return;
     }
     if (m.id !== undefined) {                                    // unknown host request
       post({ jsonrpc: "2.0", id: m.id,
@@ -832,11 +904,6 @@ BRIDGE_JS = r"""(function () {
   var BASE_GUTTER = 12;
   var tornDown = false;               // set by teardown(); the view is gone
   var hostFontsCss = null;            // the fonts string last injected
-  var appliedHostVars = {};           // custom properties we set from styles.variables
-  var HOST_TOKEN_PREFIXES = ["--color-", "--font-", "--border-", "--shadow-"];
-  function isHostToken(name) {
-    return HOST_TOKEN_PREFIXES.some(function (p) { return name.indexOf(p) === 0; });
-  }
   function mediaQueryMatches(query) {
     try { return !!(window.matchMedia && window.matchMedia(query).matches); } catch (e) { return false; }
   }
@@ -863,23 +930,15 @@ BRIDGE_JS = r"""(function () {
     var styles = ctx.styles || {};
     var vars = styles.variables;
     if (vars && typeof vars === "object") {
-      /* A variables map is the host's whole current set (a theme switch sends
-         a fresh one): a token we set earlier that it no longer carries is
-         removed so the --gl-* fallback shows instead of a stale value. */
-      var nextVars = {};
+      /* Merged like the rest of the context: a partial update (one changed
+         token) must not wipe the theme. A variable goes only when the host
+         explicitly sets it to null or "", and the --gl-* fallback then shows. */
       Object.keys(vars).forEach(function (name) {
+        if (name.indexOf("--") !== 0) return;
         var value = vars[name];
-        if (name.indexOf("--") === 0 && value !== null && value !== undefined && value !== "") {
-          docEl.style.setProperty(name, String(value));
-          nextVars[name] = true;
-        }
+        if (value === null || value === "") docEl.style.removeProperty(name);
+        else if (value !== undefined) docEl.style.setProperty(name, String(value));
       });
-      Object.keys(appliedHostVars).forEach(function (name) {
-        if (nextVars[name]) return;
-        if (isHostToken(name)) docEl.style.removeProperty(name);
-        else nextVars[name] = true;
-      });
-      appliedHostVars = nextVars;
     }
     /* One <style id="host-fonts">, rewritten only when the string changes:
        re-injecting identical @font-face rules re-triggers font loading. */
@@ -911,6 +970,7 @@ BRIDGE_JS = r"""(function () {
       applyInputFallback();
     }
     if (ctx.displayMode) docEl.setAttribute("data-display-mode", String(ctx.displayMode));
+    hooks.afterHostContext(ctx);
     reportSize();
   }
 """
@@ -954,8 +1014,8 @@ EXTERNAL_LINK_JS = r"""  /* External links. The sandbox usually lacks allow-popu
   }
 """
 
-# structuredContent-or-text result unwrapping, plus the tool-input and
-# tool-cancelled handlers the bridge routes to.
+# structuredContent-or-text result unwrapping, the error text of an isError
+# result, plus the tool-input and tool-cancelled handlers the bridge routes to.
 TOOL_RESULT_JS = r"""  var lastToolInput = null;
   var gotResult = false;
   function resultData(result) {
@@ -974,23 +1034,36 @@ TOOL_RESULT_JS = r"""  var lastToolInput = null;
     }
     return false;
   }
+  /* A tool error names its own cause: the result's text, at most 160 chars,
+     ending as a sentence so a follow-up ("Showing what the list had.") can
+     come after it. */
+  function toolErrorText(result) {
+    var text = (list(result && result.content).find(function (c) {
+      return c && c.type === "text";
+    }) || {}).text;
+    text = String(text || "The tool reported an error").replace(/\s+/g, " ").trim();
+    if (text.length > 160) text = text.slice(0, 159).trim() + "…";
+    return /[.!?…]$/.test(text) ? text : text + ".";
+  }
   function handleToolResult(result) {
     gotResult = true;
-    var data = resultData(result);
+    var data = result && result.isError ? null : resultData(result);
     if (data) {
       render(data);
+      hooks.afterToolResult(data);
       return;
     }
-    // Never leave the skeleton pulsing forever over a result we can't read.
+    // Never leave the skeleton pulsing forever over a result we can't show.
     if (!rootShowsContent()) root.textContent = "";
-    notice(root, "Couldn't read the result");
+    notice(root, result && result.isError ? toolErrorText(result) : "Couldn't read the result");
     reportSize();
   }
-  /* The arguments arrive before the result: keep them (Phase B builds the
-     grid's header line from them) and pick the matching skeleton. */
+  /* The arguments arrive before the result: keep them (the grid's header
+     line is built from them) and pick the matching skeleton. */
   function handleToolInput(params) {
     lastToolInput = (params && params.arguments) || {};
     if (!gotResult) showSkeleton();
+    hooks.afterToolInput(lastToolInput);
   }
   /* Content already on screen stays (with the notice under it); only a
      skeleton — nothing real yet — is replaced. */
@@ -1003,7 +1076,7 @@ TOOL_RESULT_JS = r"""  var lastToolInput = null;
 """
 
 # ---- DOM + cover helpers ----------------------------------------------------
-# ``root``/``el``/``list``/``num`` — the whole DOM helper vocabulary.
+# ``root``/``el``/``section``/``list``/``num`` — the whole DOM helper vocabulary.
 DOM_HELPERS_JS = r"""  var root = document.getElementById("root");
 
   function el(tag, cls, text) {
@@ -1011,6 +1084,13 @@ DOM_HELPERS_JS = r"""  var root = document.getElementById("root");
     if (cls) node.className = cls;
     if (text !== undefined && text !== null) node.textContent = text;
     return node;
+  }
+  /* A panel with an eyebrow title, appended to parent. */
+  function section(parent, title) {
+    var box = el("section", "panel");
+    if (title) box.appendChild(el("div", "section-title", title));
+    parent.appendChild(box);
+    return box;
   }
 
   function list(v) { return Array.isArray(v) ? v : []; }
@@ -1197,18 +1277,25 @@ SCORE_CHIP_JS = r"""  /* ---------- score chip ---------- */
     chips.filter(Boolean).slice(0, 3).forEach(function (c) { row.appendChild(c); });
     return row.childNodes.length ? row : null;
   }
-  /* The phrase always rides with the meter — the meter alone says nothing. */
-  function steamChip(desc, url) {
+  /* The phrase always rides with the meter — the meter alone says nothing.
+     opts.meter === false (a 150px grid card): label and phrase only, a phrase
+     of two or more words on a line of its own (.steam-line, styled by the
+     grid), with a real space after the label as its break point. */
+  function steamChip(desc, url, opts) {
     if (!desc) return null;
+    var compact = !!opts && opts.meter === false;
     var step = steamStep(desc);
     var phrase = String(desc).toLowerCase();
     phrase = phrase.charAt(0).toUpperCase() + phrase.slice(1);
-    return scoreChip({
+    var words = phrase.split(/\s+/).filter(Boolean).length;
+    var chip = scoreChip({
       label: "Steam", value: phrase, tier: steamTier(desc),
-      meter: step == null ? null : Math.round((step / 9) * 100),
+      meter: compact || step == null ? null : Math.round((step / 9) * 100),
       title: step == null ? "Steam reviews" : "Steam reviews: " + step + " of 9 on Steam's scale",
-      url: url,
+      url: url, cls: compact && words >= 2 ? "steam-line" : "",
     });
+    if (compact) chip.insertBefore(document.createTextNode(" "), chip.querySelector("b"));
+    return chip;
   }
 """
 
@@ -1320,15 +1407,18 @@ DISPLAY_MODE_JS = r"""  /* ---------- display mode ---------- */
     var modes = hostContext.availableDisplayModes;
     return Array.isArray(modes) && modes.indexOf("fullscreen") >= 0;
   }
-  /* Resolves to the mode the host GRANTED; on an error or a 2.5s silence it
-     resolves to the mode we are still in. */
-  function requestDisplayMode(mode) {
-    var before = currentDisplayMode();
+  /* Resolves to the mode the host GRANTED; on an error or a silence of
+     timeoutMs (default 2.5s) it resolves to the mode we are in by then — a
+     host-context-changed that arrived meanwhile is the truth, not the mode
+     we started from. */
+  function requestDisplayMode(mode, timeoutMs) {
     return Promise.race([
       request("ui/request-display-mode", { mode: mode }),
-      new Promise(function (resolve) { setTimeout(function () { resolve(undefined); }, 2500); }),
+      new Promise(function (resolve) {
+        setTimeout(function () { resolve(undefined); }, timeoutMs || 2500);
+      }),
     ]).then(function (res) {
-      var granted = res && res.mode ? String(res.mode) : before;
+      var granted = res && res.mode ? String(res.mode) : currentDisplayMode();
       hostContext.displayMode = granted;
       document.documentElement.setAttribute("data-display-mode", granted);
       reportSize();
@@ -1428,13 +1518,18 @@ COVER_HUE_JS = r"""  function coverHue(name) {
   }
 """
 
-# Cover art with the gradient-plate fallback on a missing/broken image.
-COVER_NODE_JS = r"""  function coverNode(game) {
-    var wrap = el("div", "cover-wrap");
-    var hue = coverHue(game.name || "?");
-    var fallback = el("div", "cover-fallback", game.name || "?");
-    fallback.style.background =
+# Cover art with the gradient-plate fallback on a missing/broken image;
+# ``coverPlate`` is the plate alone (the evaluation card's anchor covers).
+COVER_NODE_JS = r"""  function coverPlate(name, cls, text) {
+    var hue = coverHue(name || "?");
+    var plate = el("div", cls, text);
+    plate.style.background =
       "linear-gradient(160deg, hsl(" + hue + ",45%,38%), hsl(" + ((hue + 40) % 360) + ",50%,22%))";
+    return plate;
+  }
+  function coverNode(game) {
+    var wrap = el("div", "cover-wrap");
+    var fallback = coverPlate(game.name, "cover-fallback", game.name || "?");
     if (game.cover_url) {
       var img = document.createElement("img");
       img.alt = game.name ? "Cover art for " + game.name : "";
@@ -1477,12 +1572,56 @@ FULLSCREEN_BUTTON_JS = r"""  function fullscreenButton(target) {
 # One carousel arrow.
 NAV_BUTTON_JS = r"""  function navButton(cls, glyph, ariaText, onClick) {
     var btn = el("button", "car-nav " + cls, glyph);
+    btn.type = "button";
     btn.setAttribute("aria-label", ariaText);
     btn.addEventListener("click", function (ev) {
       ev.stopPropagation();
       onClick();
     });
     return btn;
+  }
+"""
+
+# The screenshot lightbox's dialog chrome — the panel's dialog semantics, the
+# ✕, the focus trap and the key routing — ONE implementation both widgets'
+# ``openCarousel`` call (each keeps its own overlay slot and placement).
+LIGHTBOX_CHROME_JS = r"""  /* Tab and Shift+Tab cycle through the dialog's buttons and never leave it. */
+  function keepFocusInside(ev, panel) {
+    var buttons = panel.querySelectorAll("button");
+    if (!buttons.length) return;
+    var first = buttons[0];
+    var last = buttons[buttons.length - 1];
+    if (ev.shiftKey && (document.activeElement === first || document.activeElement === panel)) {
+      ev.preventDefault();
+      last.focus();
+    } else if (!ev.shiftKey && document.activeElement === last) {
+      ev.preventDefault();
+      first.focus();
+    }
+  }
+  /* A modal dialog panel holding its ✕ (a type=button, labelled). */
+  function lightboxPanel(cls, gameName, onClose) {
+    var panel = el("div", cls);
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-modal", "true");
+    panel.setAttribute("aria-label", (gameName ? gameName + " " : "") + "screenshots");
+    panel.tabIndex = -1;
+    var closer = el("button", "overlay-close", "✕");
+    closer.type = "button";
+    closer.setAttribute("aria-label", "Close screenshots");
+    closer.addEventListener("click", onClose);
+    panel.appendChild(closer);
+    return { panel: panel, closer: closer };
+  }
+  /* Escape closes, the arrow keys step through the set, Tab stays inside.
+     Installed on document in the capture phase while the dialog is open. */
+  function lightboxKeys(panel, step, onClose) {
+    return function (ev) {
+      if (ev.key === "Escape") { ev.preventDefault(); onClose(); }
+      else if (ev.key === "ArrowLeft") { ev.preventDefault(); step(-1); }
+      else if (ev.key === "ArrowRight") { ev.preventDefault(); step(1); }
+      else if (ev.key === "Tab") keepFocusInside(ev, panel);
+    };
   }
 """
 
@@ -1494,7 +1633,16 @@ NAV_BUTTON_JS = r"""  function navButton(cls, glyph, ariaText, onClick) {
 CAROUSEL_STAGE_JS = r"""    var stage = el("div", "car-stage");
     var img = document.createElement("img");
     img.className = "car-img";
+    // A failed full-size image hides itself behind the neutral line instead
+    // of painting a broken glyph and its alt text over the stage.
+    var missing = el("div", "hero-missing", "Screenshot unavailable");
+    missing.style.display = "none";
+    img.onerror = function () {
+      img.style.display = "none";
+      missing.style.display = "";
+    };
     stage.appendChild(img);
+    stage.appendChild(missing);
     var counter = el("div", "car-count", "");
     if (shots.length > 1) {
       stage.appendChild(navButton("car-prev", "‹", "Previous screenshot",
@@ -1510,6 +1658,8 @@ CAROUSEL_STAGE_JS = r"""    var stage = el("div", "car-stage");
     function show(i) {
       index = ((i % shots.length) + shots.length) % shots.length;   // wraps
       var shot = shots[index];
+      img.style.display = "";
+      missing.style.display = "none";
       img.src = shot.full || shot.thumb;
       img.alt = (gameName ? gameName + " " : "") + "screenshot " + (index + 1);
       counter.textContent = (index + 1) + " / " + shots.length;
@@ -1549,10 +1699,16 @@ HERO_MEDIA_JS = r"""  function playBadge(ariaText) {
     hero.appendChild(pill);
     return pill;
   }
-  function posterNode(url, alt) {
+  /* A poster that fails to load gives way to the neutral stage line —
+     never a broken-image glyph with its alt text painted over the stage. */
+  function posterNode(url, alt, missingText) {
     var img = document.createElement("img");
     img.className = "hero-media";
     img.alt = alt || "";
+    img.onerror = function () {
+      var missing = el("div", "hero-missing below-badge", missingText || "Trailer");
+      if (img.parentNode) img.parentNode.replaceChild(missing, img);
+    };
     img.src = url;
     return img;
   }
@@ -1589,9 +1745,10 @@ HERO_MEDIA_JS = r"""  function playBadge(ariaText) {
   function posterFallback(hero, trailer) {
     hero.textContent = "";
     if (trailer.poster) {
-      hero.appendChild(posterNode(trailer.poster, trailer.name || "Trailer thumbnail"));
+      hero.appendChild(posterNode(trailer.poster, trailer.name || "Trailer thumbnail",
+        "Trailer unavailable here"));
     } else {
-      hero.appendChild(el("div", "hero-missing", "Trailer unavailable here"));
+      hero.appendChild(el("div", "hero-missing below-badge", "Trailer unavailable here"));
     }
     var url = trailer.hq_url || trailer.url;
     var badge = playBadge("Open the trailer" + (trailer.name ? ": " + trailer.name : ""));
@@ -1600,17 +1757,20 @@ HERO_MEDIA_JS = r"""  function playBadge(ariaText) {
   }
   function youtubeHero(hero, trailer) {
     if (trailer.poster) {
-      hero.appendChild(posterNode(trailer.poster, trailer.name || "Trailer thumbnail"));
+      hero.appendChild(posterNode(trailer.poster, trailer.name || "Trailer thumbnail",
+        trailer.name || "Trailer"));
     } else {
-      hero.appendChild(el("div", "hero-missing", trailer.name || "Trailer"));
+      hero.appendChild(el("div", "hero-missing below-badge", trailer.name || "Trailer"));
     }
-    var watchUrl = "https://www.youtube.com/watch?v=" + trailer.video_id;
+    // Encoded once: the embed and the watch link carry the same id.
+    var videoId = encodeURIComponent(trailer.video_id);
+    var watchUrl = "https://www.youtube.com/watch?v=" + videoId;
     var badge = playBadge("Play trailer" + (trailer.name ? ": " + trailer.name : ""));
     badge.addEventListener("click", function () {
       // Lazy by design: nothing is fetched from YouTube until this click.
       var frame = document.createElement("iframe");
       frame.className = "hero-media";
-      frame.src = "https://www.youtube-nocookie.com/embed/" + encodeURIComponent(trailer.video_id);
+      frame.src = "https://www.youtube-nocookie.com/embed/" + videoId;
       frame.setAttribute("allowfullscreen", "");
       frame.setAttribute("title", trailer.name || "Trailer");
       hero.textContent = "";
@@ -1662,37 +1822,52 @@ MEDIA_PANEL_JS = r"""  function trailerEntry(media) {
     var img = document.createElement("img");
     img.className = "hero-media";
     img.alt = "";                                   // the button carries the label
+    var fs = null;
+    img.onerror = function () {
+      var missing = el("div", "hero-missing", "Screenshot unavailable");
+      if (img.parentNode) img.parentNode.replaceChild(missing, img);
+      if (fs) fs.remove();                          // nothing left to enlarge
+    };
     img.src = entry.shot.full || entry.shot.thumb;
     btn.appendChild(img);
     btn.addEventListener("click", function () {
       openCarousel(shots, entry.index, gameName, btn);
     });
     viewer.appendChild(btn);
-    var fs = fullscreenButton(img);
+    fs = fullscreenButton(img);
     if (fs) viewer.appendChild(fs);
+  }
+  /* A thumb image that fails shows the strip's neutral text tile instead
+     (which carries its own ▶, so the overlay glyph goes with the image). */
+  function thumbImage(btn, url, text) {
+    var img = document.createElement("img");
+    img.alt = "";
+    img.loading = "lazy";
+    img.onerror = function () {
+      if (!img.parentNode) return;
+      img.parentNode.replaceChild(el("span", "thumb-text", text), img);
+      Array.prototype.slice.call(btn.childNodes).forEach(function (n) {
+        if (n.className === "thumb-play") n.remove();
+      });
+    };
+    img.src = url;
+    btn.appendChild(img);
   }
   function thumbNode(entry, gameName) {
     var btn = el("button", "thumb");
+    btn.type = "button";
     if (entry.kind === "shot") {
       btn.setAttribute("aria-label", "Show " + shotLabel(gameName, entry.index));
-      var img = document.createElement("img");
-      img.alt = "";
-      img.loading = "lazy";
-      img.src = entry.shot.thumb || entry.shot.full;
-      btn.appendChild(img);
+      thumbImage(btn, entry.shot.thumb || entry.shot.full, "Screenshot " + (entry.index + 1));
       return btn;
     }
     btn.setAttribute("aria-label", "Show the trailer");
     if (entry.trailer.poster) {
-      var poster = document.createElement("img");
-      poster.alt = "";
-      poster.loading = "lazy";
-      poster.src = entry.trailer.poster;
-      btn.appendChild(poster);
+      thumbImage(btn, entry.trailer.poster, "▶ Trailer");
+      btn.appendChild(el("span", "thumb-play", "▶"));
     } else {
-      btn.appendChild(el("span", "thumb-text", "Trailer"));
+      btn.appendChild(el("span", "thumb-text", "▶ Trailer"));
     }
-    btn.appendChild(el("span", "thumb-play", "▶"));
     return btn;
   }
   function mediaNode(parent, media, gameName) {
@@ -1871,11 +2046,11 @@ SIZING_JS = r"""  /* ---------- sizing ---------- */
   var sizeTimer = null;
   var lastSize = "";
   function reportSize() {
-    if (tornDown || window.__PREVIEW_DATA__) return;
+    if (tornDown || window.__PREVIEW_DATA__ || !hooks.shouldReportSize()) return;
     clearTimeout(sizeTimer);
     sizeTimer = setTimeout(function () {
       sizeTimer = null;
-      if (tornDown) return;
+      if (tornDown || !hooks.shouldReportSize()) return;
       // Only notify on real changes: some hosts (Android app) get confused
       // by a stream of identical/oscillating size notifications.
       var w = Math.ceil(document.documentElement.scrollWidth);

@@ -245,7 +245,7 @@ Grid mode:
    thing on the cover besides the rank badge and the DLC type chip.
 3. **Footer actions** (≤2, bottom): when `has_more`, a secondary button
    "Show next {limit}" → `sendMessage("Show the next {limit} recommendations
-   (offset {offset+limit})")`; and when `canFullscreen()`, an "Expand"
+   (offset {offset+limit})")`; and when `canFullscreen()`, an "Open full screen"
    button → `requestDisplayMode("fullscreen")`. In fullscreen the grid uses
    `minmax(160px, 1fr)` and the host's close button returns.
 4. **Card tap** (replaces the overlay entirely — delete `openOverlay`,
