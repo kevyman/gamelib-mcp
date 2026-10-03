@@ -59,6 +59,7 @@ SAMPLE_FULL_STEAM: dict[str, Any] = {
             "name": "Hades II",
             "release_year": 2025,
             "cover_url": "https://images.igdb.com/igdb/image/upload/t_cover_big/co7fzt.jpg",
+            "steam_appid": 1145350,
         },
         "verdict": "buy_now",
         "summary": "The rare sequel that is denser than the original without losing its pace.",

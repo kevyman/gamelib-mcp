@@ -11,7 +11,8 @@ call" — HLTB, pace, price seen, target, paid and the flags — directly under
 the scores), the verdict in words (summary, elevator pitch, why-care eyebrow
 lines), the media panel (one viewer plus one thumb strip, trailer first,
 screenshots opening an edge-to-edge carousel), one action row ("Full
-breakdown") and a single notice naming what failed to load. The FULL
+breakdown", plus "Store page ↗" when the package carries a Steam app id)
+and a single notice naming what failed to load. The FULL
 BREAKDOWN — for-you-if / not-for-you-if, the anchors it rests on, lineage,
 the owned games most like it, the "from the studio" pedigree strip, past
 verdicts and the failure detail — opens fullscreen where the host offers it
@@ -347,6 +348,8 @@ EVAL_CARD_HTML = (
 
   /* ---- action row, in-place breakdown, fullscreen breakdown ---- */
   .actions { display: flex; gap: 8px; }
+  /* The secondary store link sizes to its label; the breakdown takes the rest. */
+  .actions .act-store { flex: none; }
   .eval > .disclosure-body { margin-top: 0; }
   /* The stage is self-evident inline; its eyebrow stays for screen readers. */
   .media-slot .section-title {
@@ -441,6 +444,8 @@ EVAL_CARD_HTML = (
     .media-slot.has-thumbs .thumbs::after { content: none; }
   }
   @media (max-width: 419px) {
+    .actions { flex-direction: column; }
+    .actions .act-store { width: 100%; }
     .head {
       grid-template-columns: 84px minmax(0, 1fr);
       grid-template-areas: "cover info" "cover stamp" "scores scores" "note note";
@@ -1047,14 +1052,34 @@ EVAL_CARD_HTML = (
   }
 
   /* ---------- 6. the action row ---------- */
-  /* One action: "Full breakdown" — fullscreen where the host offers it, the
-     shared disclosure in place where it doesn't (or refuses). The spec's
-     second action, "Store page ↗", needs a Steam app id and the package
-     carries none, so it is left out rather than guessed from an art URL. */
-  function actionsNode(wrap, pkg) {
+  /* At most two actions: "Full breakdown" — fullscreen where the host offers
+     it, the shared disclosure in place where it doesn't (or refuses) — when
+     there is breakdown content, then the secondary "Store page ↗" when the
+     package carries a Steam app id. Either alone renders alone; neither
+     renders no row. */
+  function storeAppid(pkg) {
+    var appid = (pkg.game || {}).steam_appid;
+    return typeof appid === "number" && isFinite(appid) && appid > 0 && Math.floor(appid) === appid
+      ? appid : null;
+  }
+  function storeButton(row, appid) {
+    var btn = el("button", "btn act-store", "Store page ↗");
+    btn.type = "button";
+    btn.addEventListener("click", function () {
+      openLink("https://store.steampowered.com/app/" + appid + "/");
+    });
+    row.appendChild(btn);
+  }
+  function actionsNode(wrap, pkg, more, appid) {
     var row = el("div", "actions");
+    if (!more) {
+      storeButton(row, appid);
+      wrap.appendChild(row);
+      return null;
+    }
     var d = disclosure(row, "Full breakdown", function (body) { breakdownNode(body, pkg); });
     d.button.classList.add("act-breakdown");
+    if (appid) storeButton(row, appid);
     var inPlace = false;                            // the host refused once: stay in place
     var asking = false;
     // Capture on the row, so the disclosure's own click handler only runs
@@ -1103,7 +1128,8 @@ EVAL_CARD_HTML = (
     var wrap = el("div", "eval");
     inlineCard(wrap, pkg);
     var more = hasBreakdown(pkg);
-    var inPlaceBody = more ? actionsNode(wrap, pkg) : null;
+    var appid = storeAppid(pkg);
+    var inPlaceBody = more || appid ? actionsNode(wrap, pkg, more, appid) : null;
     errorsNode(wrap, list(pkg.errors).filter(Boolean));
     if (inPlaceBody) wrap.appendChild(inPlaceBody);
     if (more) {

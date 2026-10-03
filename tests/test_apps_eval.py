@@ -3,11 +3,15 @@
 Same approach as tests/test_apps.py: there is no headless-DOM harness for the
 widget JS, so these assert the module's registration/CSP contract and the
 presence of the render call-sites and host-quirk workarounds that the layout
-depends on, rather than executing the script.
+depends on, rather than executing the script — except the action row, whose
+three small builders also run under Node (``ActionRowBehaviourTests``).
 """
 
 import difflib
 import hashlib
+import json
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -293,7 +297,7 @@ class EvalCardLayoutTests(unittest.TestCase):
         body = self._function("evalCard", "noteCard")
         order = [
             "inlineCard(wrap, pkg)",
-            "actionsNode(wrap, pkg)",
+            "actionsNode(wrap, pkg, more, appid)",
             "errorsNode(wrap,",
             "wrap.appendChild(inPlaceBody)",
             'el("div", "fs-breakdown")',
@@ -354,21 +358,60 @@ class EvalCardLayoutTests(unittest.TestCase):
         positions = [breakdown.index(c) for c in sections]
         self.assertEqual(positions, sorted(positions))
 
-    def test_at_most_two_actions_and_none_without_a_breakdown(self) -> None:
-        # One action row, built only when there is something to disclose; it
-        # holds the disclosure button and nothing else (the store-page action
-        # needs a Steam app id, which the package does not carry).
+    def test_at_most_two_actions_and_none_without_either(self) -> None:
+        # One action row, built only when there is something to disclose or a
+        # store page to open; it holds the disclosure button and, at most, the
+        # store button — never a third action.
         body = self._function("evalCard", "noteCard")
         self.assertIn("var more = hasBreakdown(pkg);", body)
-        self.assertIn("var inPlaceBody = more ? actionsNode(wrap, pkg) : null;", body)
+        self.assertIn("var appid = storeAppid(pkg);", body)
+        self.assertIn(
+            "var inPlaceBody = more || appid ? actionsNode(wrap, pkg, more, appid) : null;",
+            body,
+        )
         actions = self._function("actionsNode", "syncDisplayMode")
         self.assertEqual(actions.count('el("div", "actions")'), 1)
-        self.assertLessEqual(actions.count("row.appendChild(") + actions.count("disclosure(row,"), 2)
+        self.assertEqual(actions.count("disclosure(row,"), 1)
+        # Two storeButton calls, on mutually exclusive branches (store alone,
+        # or store after the breakdown) — so the row never exceeds two.
+        self.assertEqual(actions.count("storeButton(row, appid);"), 2)
+        self.assertNotIn("row.appendChild(", actions)
         self.assertIn(
             'disclosure(row, "Full breakdown", function (body) { breakdownNode(body, pkg); });',
             actions,
         )
-        self.assertNotIn("steam_appid", apps_eval.EVAL_CARD_HTML)
+
+    def test_store_button_follows_the_breakdown_only_with_an_appid(self) -> None:
+        actions = self._function("actionsNode", "syncDisplayMode")
+        # Second, after "Full breakdown", and only when an appid resolved.
+        self.assertLess(
+            actions.index('disclosure(row, "Full breakdown"'),
+            actions.index("if (appid) storeButton(row, appid);"),
+        )
+        # No breakdown: the row is the store button alone (evalCard only
+        # reaches this branch when an appid exists).
+        alone = actions[actions.index("if (!more) {"):actions.index("var d = disclosure(")]
+        self.assertIn("storeButton(row, appid);", alone)
+        self.assertIn("return null;", alone)
+
+    def test_store_button_is_a_secondary_btn_opening_the_steam_page(self) -> None:
+        button = self._function("storeButton", "actionsNode")
+        self.assertIn('el("button", "btn act-store", "Store page ↗")', button)
+        self.assertNotIn("primary", button)
+        self.assertIn(
+            'openLink("https://store.steampowered.com/app/" + appid + "/");', button
+        )
+        # Only a positive integer appid yields a button; anything else is null.
+        appid = self._function("storeAppid", "storeButton")
+        self.assertIn("var appid = (pkg.game || {}).steam_appid;", appid)
+        for guard in ('typeof appid === "number"', "appid > 0", "Math.floor(appid) === appid"):
+            self.assertIn(guard, appid)
+        # Below 420px the two buttons stack full-width.
+        html = apps_eval.EVAL_CARD_HTML
+        phone = html[html.index("@media (max-width: 419px) {"):]
+        phone = phone[:phone.index("\n  }\n")]
+        self.assertIn(".actions { flex-direction: column; }", phone)
+        self.assertIn(".actions .act-store { width: 100%; }", phone)
 
     def test_full_breakdown_requests_fullscreen_and_falls_back_in_place(self) -> None:
         actions = self._function("actionsNode", "syncDisplayMode")
@@ -543,6 +586,98 @@ class EvalCardLayoutTests(unittest.TestCase):
             ".wc-line:nth-child(2n)",
         ):
             self.assertNotIn(gone, apps_eval.EVAL_CARD_HTML)
+
+
+NODE = shutil.which("node")
+
+# Just enough DOM and bridge for the action-row builders: el/disclosure build
+# plain records, openLink records the URL it was asked to open.
+_ACTION_ROW_SHIM = r"""
+var opened = [];
+function el(tag, cls, text) {
+  var n = { tag: tag, className: cls || "", text: text || "", children: [], handlers: {},
+            classList: { add: function (c) { n.className += " " + c; } },
+            addEventListener: function (k, f) { n.handlers[k] = f; },
+            appendChild: function (c) { n.children.push(c); return c; } };
+  return n;
+}
+function disclosure(parent, text) {
+  var btn = el("button", "disclosure", text);
+  btn.contains = function (t) { return t === btn; };
+  var body = el("div", "disclosure-body");
+  parent.appendChild(btn);
+  parent.appendChild(body);
+  return { button: btn, body: body };
+}
+function openLink(url) { opened.push(url); }
+function canFullscreen() { return false; }
+function breakdownNode() {}
+"""
+
+_ACTION_ROW_PROBE = r"""
+function labels(game, more) {
+  var wrap = el("div", "eval");
+  var pkg = { game: game };
+  var appid = storeAppid(pkg);
+  if (!(more || appid)) return null;
+  var body = actionsNode(wrap, pkg, more, appid);
+  var row = wrap.children[0];
+  // evalCard moves the in-place body out of the row; mirror that.
+  var kids = row.children.filter(function (c) { return c !== body; });
+  return kids.map(function (c) { return c.text; });
+}
+var out = {
+  both: labels({ steam_appid: 1145350 }, true),
+  breakdownOnly: labels({}, true),
+  storeOnly: labels({ steam_appid: 1145350 }, false),
+  neither: labels({ steam_appid: null }, false),
+  rejected: [0, -5, 1.5, "1145350", true, NaN].map(function (v) { return storeAppid({ game: { steam_appid: v } }); }),
+};
+var wrap = el("div", "eval");
+actionsNode(wrap, { game: { steam_appid: 1145350 } }, true, 1145350);
+wrap.children[0].children[2].handlers.click();
+out.opened = opened;
+console.log(JSON.stringify(out));
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class ActionRowBehaviourTests(unittest.TestCase):
+    """The action row's builders, executed: ≤2 actions, store link by appid."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        html = apps_eval.EVAL_CARD_HTML
+        start = html.index("function storeAppid(")
+        builders = html[start:html.index("function syncDisplayMode(", start)]
+        assert NODE is not None
+        proc = subprocess.run(
+            [NODE, "-e", _ACTION_ROW_SHIM + builders + _ACTION_ROW_PROBE],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        if proc.returncode != 0:
+            raise AssertionError(proc.stderr)
+        cls.out = json.loads(proc.stdout)
+
+    def test_store_button_is_second_after_the_breakdown(self) -> None:
+        self.assertEqual(self.out["both"], ["Full breakdown", "Store page ↗"])
+
+    def test_no_appid_means_no_store_button(self) -> None:
+        self.assertEqual(self.out["breakdownOnly"], ["Full breakdown"])
+
+    def test_store_button_alone_without_breakdown_content(self) -> None:
+        self.assertEqual(self.out["storeOnly"], ["Store page ↗"])
+
+    def test_no_row_without_either(self) -> None:
+        self.assertIsNone(self.out["neither"])
+
+    def test_only_a_positive_integer_appid_counts(self) -> None:
+        self.assertEqual(self.out["rejected"], [None] * 6)
+
+    def test_store_button_opens_the_steam_store_page(self) -> None:
+        self.assertEqual(
+            self.out["opened"], ["https://store.steampowered.com/app/1145350/"]
+        )
 
 
 class SharedBlockTests(unittest.TestCase):

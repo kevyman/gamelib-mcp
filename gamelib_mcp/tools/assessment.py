@@ -32,6 +32,7 @@ from ..data.db import (
     fts_ready,
     get_db,
     get_game_by_appid,
+    get_steam_appid_for_game,
     load_cheapest_cached_price,
     load_recent_assessments,
     resolve_game_id_by_steam_appid,
@@ -1879,6 +1880,12 @@ async def _build_package(
                 "on this row (not enriched yet)"
             )
 
+    # The card's "Store page" link. The one effective-appid chain (identifier
+    # row → Steam wishlist store_identifier → newest assessment), read after
+    # the commit so a candidate's just-recorded appid counts. An identity, not
+    # ownership evidence; null when nothing resolves, like the block's others.
+    store_appid = await get_steam_appid_for_game(game_id)
+
     past_items = [
         {
             "assessed_at": past["assessed_at"],
@@ -1904,6 +1911,7 @@ async def _build_package(
                 (cover_url(row["cover_image_id"], row["steam_appid"]) if row else None)
                 or cover_url(None, media_appid)
             ),
+            "steam_appid": store_appid,
         },
         "verdict": values["verdict"],
         "summary": values["summary"],
