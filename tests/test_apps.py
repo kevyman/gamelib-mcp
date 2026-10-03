@@ -870,6 +870,44 @@ class PreviewScriptTests(unittest.TestCase):
         self.assertIn("if (window.__PREVIEW_TOOL_INPUT__) lastToolInput = window.__PREVIEW_TOOL_INPUT__;",
                       apps.GAME_CARDS_HTML)
 
+    def _render_from_json(self, sample: str, *extra: str) -> tuple[dict, str]:
+        import sys
+        import tempfile
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        payload_path = root / "scripts" / "preview_samples" / sample
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "preview.html"
+            # No DATABASE_URL and no tool code: --from-json must not touch a DB.
+            subprocess.run(
+                [sys.executable, str(root / "scripts" / "preview_game_cards.py"),
+                 "--from-json", str(payload_path), "-o", str(out), *extra],
+                check=True, capture_output=True, text=True, timeout=60,
+                env={"PATH": "/usr/bin:/bin", "DATABASE_URL": str(Path(tmp) / "absent" / "no.db")},
+            )
+            html = out.read_text()
+        return json.loads(payload_path.read_text()), html
+
+    def test_from_json_renders_a_saved_grid_payload(self) -> None:
+        payload, html = self._render_from_json("discover_taste_match.json", "--theme", "dark")
+        self.assertIn('<div id="root"></div>', html)
+        self.assertIn("window.__PREVIEW_DATA__ = ", html)
+        self.assertIn(json.dumps(payload["results"][0]["name"]), html)
+        self.assertIn("window.__PREVIEW_HOST_CONTEXT__ = ", html)
+        self.assertIn('window.__PREVIEW_TOOL_INPUT__ = {"sort_by": "match", "limit": 8};', html)
+        self.assertNotIn('"_note"', html)
+
+    def test_from_json_renders_a_saved_detail_payload(self) -> None:
+        payload, html = self._render_from_json(
+            "detail_ghost_of_tsushima.json", "--display", "fullscreen",
+            "--tool-input", '{"game_id": 2333, "media": true}',
+        )
+        self.assertIn('<div id="root"></div>', html)
+        self.assertIn(json.dumps(payload["name"]), html)
+        self.assertIn('"displayMode": "fullscreen"', html)
+        self.assertIn('window.__PREVIEW_TOOL_INPUT__ = {"game_id": 2333, "media": true};', html)
+
 
 class DesignSystemTests(unittest.TestCase):
     """Spec 2026-10-03 §1.1–§1.2: host theming, type scale, touch, focus."""
