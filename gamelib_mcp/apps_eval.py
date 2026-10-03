@@ -145,7 +145,7 @@ EVAL_CARD_HTML = (
   /* ---- the card: frame (verdict tier), art + badge, plate, stats, ribbon ---- */
   /* 300px wide, or narrower so the straddling ribbon's 20px overhang on each
      side still fits the page; the wrap's bottom padding is the ribbon's
-     20px below the frame (plus its own stamp room). */
+     20px below the frame (plus room for its settle). */
   .ev-top { display: flex; flex-direction: column; gap: 14px; }
   .ev-left { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
   .ev-cardwrap { padding: 4px 0 26px; }
@@ -161,7 +161,6 @@ EVAL_CARD_HTML = (
     + apps_shared.STRIP_CSS
     + apps_shared.TAG_CSS
     + apps_shared.PEDIGREE_CSS
-    + apps_shared.SIMILAR_CSS
     + r"""
   /* ---- the ground: candidate line, summary, traits, pitch, abilities ---- */
   .ev-flow { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
@@ -205,7 +204,7 @@ EVAL_CARD_HTML = (
   .media-slot .thumb img, .media-slot .thumb-text { width: 100%; height: auto; aspect-ratio: 16 / 9; }
 
   /* ---- breakdown: trait columns, minis, lineage, the past-verdict ledger ---- */
-  .ev-bd { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+  .ev-bd > .disclosure-inner { gap: 24px; }
   .ev-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
   .ev-pair.ev-one { grid-template-columns: minmax(0, 1fr); }
   .ev-lin-col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
@@ -245,7 +244,7 @@ EVAL_CARD_HTML = (
     min-width: 0;
     font-size: var(--gl-h);
   }
-  .eval > .disclosure-body { margin-top: 0; gap: 24px; }
+  .eval > .disclosure-body { margin-top: 0; }
   .ev-side, .fs-breakdown { display: none; }
   .fs-breakdown { flex-direction: column; gap: 24px; }
   html[data-display-mode="fullscreen"] .fs-breakdown { display: flex; }
@@ -276,6 +275,16 @@ EVAL_CARD_HTML = (
   .ev-nc .cover-fallback { color: transparent; text-shadow: none; }
   .ev-nc-body { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
   .ev-nc-cap { font-size: var(--gl-cap); line-height: var(--gl-cap-lh); color: var(--gl-muted); }
+  .ev-nc-body > .sub {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 8px;
+    font-size: var(--gl-cap);
+    line-height: 20px;
+    color: var(--gl-muted);
+  }
+  .ev-nc-body > .sub > .v { font-family: var(--gl-mono); color: var(--gl-text-2); }
   .ev-void .ribbon { background: var(--gl-inset); color: var(--gl-text); box-shadow: none; }
 
   /* ---- click-to-enlarge overlay ---- */
@@ -713,25 +722,15 @@ EVAL_CARD_HTML = (
   }
 
   /* ---------- 4. mini-card strips: library, history, studio ---------- */
-  /* Every item is his (the pool IS the library): the year and his rating or
-     hours ("unplayed" when never launched), then how alike it is and why. */
-  function similarLines(item) {
-    var rating = num(item.my_rating);
-    var hours = num(item.playtime_hours);
-    var first = [item.release_year ? String(item.release_year) : null,
-      rating != null ? rating + "/10" : hours != null && hours > 0 ? hoursLabel(hours)
-        : item.unplayed ? "unplayed" : null];
-    var second = [];
+  /* Every mini reads the shared miniLines format; a library item's
+     similarity and shared tags are its hover text. */
+  function similarTitle(item) {
     var sim = num(item.similarity);
-    if (sim != null) {
-      var alike = el("span");
-      alike.appendChild(el("span", "v", Math.round(sim * 100) + "%"));
-      alike.appendChild(el("span", null, " similar"));
-      second.push(alike);
-    }
     var why = list(item.shared_tags).filter(Boolean).slice(0, 3);
-    if (why.length) second.push(why.join(", "));
-    return [first, second];
+    var parts = [];
+    if (sim != null) parts.push(Math.round(sim * 100) + "% similar");
+    if (why.length) parts.push("shares " + why.join(", "));
+    return parts.length ? parts.join("; ") : null;
   }
   var STRIP_CAP = 8;
   function ministrip(box, items, toMini) {
@@ -746,28 +745,13 @@ EVAL_CARD_HTML = (
     box.appendChild(el("div", "section-title", "In your library"));
     ministrip(box, items, function (item) {
       return { name: item.name, cover_url: item.cover_url, tier: ratedTier(item.my_rating),
-        lines: similarLines(item) };
+        title: similarTitle(item),
+        lines: miniLines({ rating: item.my_rating, hours: item.playtime_hours, status: item.completion_status,
+          unplayed: item.unplayed, year: item.release_year, platform: item.platform }) };
     });
     parent.appendChild(box);
   }
-  /* His rating as ten pips, then hours and how it ended ("50h completed",
-     "25.3h played", "unplayed"). */
-  var STATUS_WORDS = {
-    completed: "completed", evergreen: "evergreen", abandoned: "abandoned", playing: "playing",
-  };
-  function ratingPips(rating) {
-    var n = num(rating);
-    return n == null ? null : pipsNode(n, 10, ratingTier(n));
-  }
-  function playedParts(hours, status) {
-    var n = num(hours);
-    var known = Object.prototype.hasOwnProperty.call(STATUS_WORDS, status);
-    var word = known ? STATUS_WORDS[status] : n != null && n > 0 ? "played" : n === 0 ? "unplayed" : null;
-    return [n != null && n > 0 ? hoursLabel(n) : null, word];
-  }
 """
-    + apps_shared.OWNERSHIP_TAGS_JS
-    + apps_shared.SIMILAR_NODE_JS
     + apps_shared.PEDIGREE_JS
     + r"""
   /* ---------- 6. what failed: one notice inline, the detail in the breakdown ---------- */
@@ -877,7 +861,8 @@ EVAL_CARD_HTML = (
     var box = eyebrowSection(parent, "Grounded in your history");
     ministrip(box, anchors, function (a) {
       return { name: a.name, cover_url: a.cover_url, tier: ratedTier(a.rating),
-        lines: [[ratingPips(a.rating) || "unrated"], playedParts(a.playtime_hours, a.completion_status)] };
+        lines: miniLines({ rating: a.rating, hours: a.playtime_hours, status: a.completion_status,
+          year: a.release_year, platform: a.platform }) };
     });
   }
   /* Lineage: a column per relation (Ancestors, Descendants, the call-outs,
@@ -889,14 +874,6 @@ EVAL_CARD_HTML = (
     ["cheaper_substitute", "Cheaper substitute"],
     ["similar", "Similar"],
   ];
-  function comparisonLines(c) {
-    var rating = num(c.my_rating);
-    var hours = num(c.playtime_hours);
-    var owned = c.owned ? "owned" : c.owned === false ? "not owned" : null;
-    var how = rating != null ? rating + "/10" : hours != null && hours > 0 ? hoursLabel(hours)
-      : c.owned && hours === 0 ? "unplayed" : null;
-    return [[owned], [how]];
-  }
   function lineageNode(parent, comps) {
     if (!comps.length) return;
     var known = LINEAGE_COLUMNS.map(function (col) { return col[0]; });
@@ -911,7 +888,9 @@ EVAL_CARD_HTML = (
       column.appendChild(el("div", "ev-lin-head", col[1]));
       entries.forEach(function (c) {
         var item = el("div", "ev-lin-item");
-        item.appendChild(miniCard({ name: c.name, tier: ratedTier(c.my_rating), lines: comparisonLines(c) }));
+        item.appendChild(miniCard({ name: c.name, tier: ratedTier(c.my_rating),
+          lines: miniLines({ rating: c.my_rating, hours: c.playtime_hours, owned: c.owned,
+            year: c.release_year, platform: c.platform }) }));
         if (c.note) item.appendChild(el("p", "ev-note", String(c.note)));
         column.appendChild(item);
       });
@@ -923,15 +902,6 @@ EVAL_CARD_HTML = (
   /* From the studio: the headline (names, founding year, catalogue size —
      under the big-studio damper it is all that renders), what they shipped
      before as minis, and his track record with them. */
-  function studioLines(item) {
-    var rating = item.owned ? num(item.my_rating) : null;
-    var critic = num(item.critic_score);
-    var first = rating != null ? [ratingPips(rating)]
-      : [item.release_year ? String(item.release_year) : null, item.owned ? "unrated" : "not owned"];
-    var second = item.owned ? playedParts(item.playtime_hours, null)
-      : [realScore(critic) ? "critics " + Math.round(critic) : null];
-    return [first, second];
-  }
   function studioNode(parent, ped) {
     if (!ped) return;
     var head = pedigreeHead(ped);
@@ -942,7 +912,9 @@ EVAL_CARD_HTML = (
     if (!items.length) return;
     ministrip(box, items, function (item) {
       return { name: item.name, cover_url: item.cover_url,
-        tier: item.owned ? ratedTier(item.my_rating) : "none", lines: studioLines(item) };
+        tier: item.owned ? ratedTier(item.my_rating) : "none",
+        lines: miniLines({ rating: item.owned ? item.my_rating : null, hours: item.owned ? item.playtime_hours : null,
+          owned: !!item.owned, year: item.release_year, platform: item.platform }) };
     });
     var record = ped.library_track_record;
     if (record) {
@@ -978,7 +950,7 @@ EVAL_CARD_HTML = (
     items.forEach(function (p) {
       var tr = el("tr");
       if (p.summary) tr.title = String(p.summary);
-      tr.appendChild(el("td", null, monthYear(p.assessed_at) || "earlier"));
+      tr.appendChild(el("td", null, dayMonthYear(p.assessed_at) || "earlier"));
       var verdict = el("td");
       if (p.verdict) verdict.appendChild(ribbonNode(label("verdict", p.verdict), verdictTier(p.verdict), null, "s"));
       tr.appendChild(verdict);
@@ -1094,7 +1066,7 @@ EVAL_CARD_HTML = (
     var ped = pkg.pedigree || {};
     var line = el("div", "ev-prov");
     if (ped.publisher_name) line.appendChild(el("span", null, "Published by " + ped.publisher_name));
-    var when = monthYear(data.assessed_at);
+    var when = dayMonthYear(data.assessed_at);
     if (when) line.appendChild(el("span", null, "assessed " + when));
     return line.childNodes.length ? line : null;
   }
@@ -1146,6 +1118,20 @@ EVAL_CARD_HTML = (
   /* The bookkeeping-only responses, as a small horizontal card: a recorded
      verdict without a package (its ribbon in the verdict's tier), and a void
      (a plain ribbon, no tier). */
+  /* The note card's sub line — hours played and the platform lozenge — only
+     from what the response carries; today's record / void responses carry
+     neither, so nothing is invented and no line renders. */
+  function noteSub(data) {
+    var line = el("div", "sub");
+    var hours = num(data.playtime_hours);
+    if (hours != null && hours > 0) {
+      line.appendChild(el("span", "v", hoursLabel(hours)));
+      line.appendChild(el("span", null, "played"));
+    }
+    var platform = data.platform || list(data.platforms).filter(Boolean)[0];
+    if (platform) line.appendChild(el("span", "loz", label("platform_short", platform)));
+    return line.childNodes.length ? line : null;
+  }
   function noteCard(opts) {
     var wrap = el("div", "eval ev-notes");
     var frame = frameNode("article", "frame-s ev-nc" + (opts.voided ? " ev-void" : ""), opts.tier);
@@ -1155,6 +1141,8 @@ EVAL_CARD_HTML = (
     frame.appendChild(art);
     var body = el("div", "ev-nc-body");
     body.appendChild(el("h2", "plate-title-s", opts.name || "Unknown game"));
+    var sub = noteSub(opts.facts || {});
+    if (sub) body.appendChild(sub);
     body.appendChild(ribbonNode(opts.ribbon, opts.tier, null, "s"));
     frame.appendChild(body);
     wrap.appendChild(frame);
@@ -1162,29 +1150,40 @@ EVAL_CARD_HTML = (
     return { node: wrap, frame: frame };
   }
   function recordedCard(data) {
-    var when = monthYear(data.assessed_at);
+    var when = dayMonthYear(data.assessed_at);
     return noteCard({
       name: data.name, tier: verdictTier(data.verdict), ribbon: label("verdict", data.verdict),
-      caption: "Recorded" + (when ? " " + when : ""),
+      caption: "Recorded" + (when ? " " + when : ""), facts: data,
     });
   }
   /* The void response names the verdict it deleted and the day that verdict
      was recorded — not the day of the void, which it does not carry. */
   function voidCard(data) {
     var no = cardNo(data.assessment_id);
-    var when = monthYear(data.assessed_at);
+    var when = dayMonthYear(data.assessed_at);
     return noteCard({
-      name: data.name, tier: "none", ribbon: "Voided", voided: true,
+      name: data.name, tier: "none", ribbon: "Voided", voided: true, facts: data,
       caption: "Verdict" + (no ? " " + no : "") + (when ? " of " + when : "") + " voided",
     });
   }
 
   function skeletonKind() { return "eval"; }
 
-  /* M1 + M5: the card is dealt in once per render — out of the skeleton on
+  /* M1 + M5: the card is dealt in once per PAYLOAD — out of the skeleton on
      the first result (the ground is in place at once; only the frame moves),
-     directly otherwise. */
-  function place(built) {
+     directly otherwise. A host re-delivering the same tool-result, or a
+     re-render of it, redraws the card still: the deal is keyed on what the
+     card IS (game, assessment, verdict, and which kind of response). */
+  var dealtKey = null;
+  function renderKey(data, kind) {
+    var pkg = data.package || {};
+    var game = pkg.game || {};
+    var gameId = game.game_id != null ? game.game_id : data.game_id;
+    return [kind, gameId, data.assessment_id, pkg.verdict || data.verdict].join("|");
+  }
+  function place(built, key) {
+    var fresh = key !== dealtKey;
+    dealtKey = key;
     var first = root.firstElementChild;
     var skel = first && !first.nextElementSibling && first.classList.contains("skel") ? first : null;
     if (skel) {
@@ -1194,19 +1193,20 @@ EVAL_CARD_HTML = (
       root.textContent = "";
       root.appendChild(built.node);
     }
-    dealIn(built.frame, 0);
+    if (fresh) dealIn(built.frame, 0);
   }
 
   function render(data) {
     fullscreenBreakdown = null;
     if (data && data.package) {
-      place(evalCard(data.package, data));
+      place(evalCard(data.package, data), renderKey(data, "package"));
       syncDisplayMode();
     } else if (data && data.voided) {
-      place(voidCard(data));
+      place(voidCard(data), renderKey(data, "voided"));
     } else if (data && data.verdict) {
-      place(recordedCard(data));
+      place(recordedCard(data), renderKey(data, "recorded"));
     } else {
+      dealtKey = null;
       root.textContent = "";
       root.appendChild(el("div", "empty", "Nothing to display."));
     }

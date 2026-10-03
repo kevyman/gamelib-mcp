@@ -133,7 +133,7 @@ GAME_CARDS_HTML = (
     overflow-wrap: anywhere;
   }
   /* The detail card's plate sits right under the art and already says the
-     name, so the art stand-in stamped with it reads as a duplicate title. The
+     name, so the art stand-in lettered with it reads as a duplicate title. The
      gradient stays; grid cards (title-s under a small cover) keep theirs. */
   .dt-card .cover-fallback { color: transparent; text-shadow: none; }
 
@@ -162,11 +162,11 @@ GAME_CARDS_HTML = (
   .gc-tags > span::before {
     content: "";
     display: inline-block;
-    width: 4px;
-    height: 4px;
-    margin: 0 6px 2px 1px;
+    width: 6px;
+    height: 6px;
+    margin: 0 7px 1px 1px;
     transform: rotate(45deg);
-    background: var(--gl-border-strong);
+    background: var(--gl-muted);
   }
 
   /* ---- grid mode ---- */
@@ -197,9 +197,12 @@ GAME_CARDS_HTML = (
   }
   .gc-card { -webkit-tap-highlight-color: transparent; }
   .gc-card .plate { border: 0; padding: 8px 8px 0; }
-  .gc-card .plate .sub { gap: 4px 6px; }
-  .gc-card .sub > .loz { padding: 0 5px; }
-  .gc-card .card-no { margin-left: auto; }
+  /* One row, always: the hours and the lozenge give way (ellipsis) before
+     "No. N" would wrap onto a line of its own. */
+  .gc-card .plate .sub { gap: 4px 6px; flex-wrap: nowrap; }
+  .gc-card .sub > span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .gc-card .sub > .loz { padding: 0 5px; display: block; line-height: 18px; }
+  .gc-card .card-no { margin-left: auto; flex-shrink: 0; overflow: visible; }
   .gc-chips { padding: 8px 8px 0; }
   .gc-nochip {
     padding: 8px 8px 0;
@@ -320,10 +323,6 @@ GAME_CARDS_HTML = (
      left sitting there doing nothing. */
 """
     + apps_shared.MEDIA_STRIP_CSS
-    + r"""
-  /* Similar games and the studio strip: mini cover cards. */
-"""
-    + apps_shared.SIMILAR_CSS
     + apps_shared.TAG_CSS
     + apps_shared.PEDIGREE_CSS
     + r"""  /* Mini-card strips (similar, studio): cards that snap card by card, the
@@ -441,7 +440,7 @@ GAME_CARDS_HTML = (
   var view = "none";              // "grid" | "detail" | "drill" | "none"
   var gridData = null;            // the grid payload Back returns to
   var gridMode = null;            // the display mode the grid was laid out for
-  var dealtData = null;           // the payload whose cards were dealt in
+  var dealtKey = null;            // the page (offset + game ids) whose cards were dealt in
   var drillSeq = 0;               // invalidates a superseded detail fetch
   var modeBeforeDrill = "inline";
   var lastSelectedId = null;
@@ -682,16 +681,24 @@ GAME_CARDS_HTML = (
     return card;
   }
 
+  function gridKey(data) {
+    var ids = list(data.results).map(function (g) { return g && g.game_id != null ? g.game_id : g && g.name; });
+    return (typeof data.offset === "number" ? data.offset : "") + ":" + ids.join(",");
+  }
   function renderGrid(data) {
     var page = el("div", "grid-page");
     var head = headerLine(data);
     page.appendChild(head);
     gridMode = currentDisplayMode();
-    // Deal the cards in once per payload: a redraw of the same page (the
-    // tool input landing late, Back from a drill-in, a display-mode change)
-    // keeps them still.
-    var fresh = dealtData !== data;
-    dealtData = data;
+    // Deal the cards in once per PAGE: a redraw of the same page (the tool
+    // input landing late, Back from a drill-in, a display-mode change, or a
+    // host re-delivering the same result as a new object) keeps them still.
+    // The key is what the page shows — its offset and its game ids — never
+    // the payload object's identity.
+    var key = gridKey(data);
+    var fresh = dealtKey !== key;
+    dealtKey = key;
+    if (fresh) fadeIn(head);
     if (!data.results.length) {
       var none = el("div", "empty");
       none.appendChild(el("span", null, "No games match."));
@@ -895,13 +902,6 @@ GAME_CARDS_HTML = (
      stage opens the lightbox. */
 """
     + apps_shared.MEDIA_PANEL_JS
-    + "\n"
-    + apps_shared.OWNERSHIP_TAGS_JS
-    + r"""
-  /* The owned games most like this one, ranked server-side by shared tags
-     (tools/game_media.py's similar_in_library) — every cover here is his. */
-"""
-    + apps_shared.SIMILAR_NODE_JS
     + r"""
   /* The studio behind the game and what it shipped BEFORE it — server-fetched
      and library-annotated (tools/game_media.py). Under the big-studio damper,
@@ -913,23 +913,51 @@ GAME_CARDS_HTML = (
   /* ---------- detail: the big card ---------- */
   /* get_game_detail's `enrichment` is {provider: reason} for providers that
      were skipped for a structural reason — said in words, never as ids. */
+  /* In plain words, one sentence: what is missing and why ("No Steam page
+     for this game, so Steam reviews and ProtonDB are unavailable"). The
+     providers sharing a reason are named together; a reason that names its
+     own provider ("No IGDB match for this game") needs no "so" clause. */
   var ENRICH_SOURCES = { steam_store: "Steam", protondb: "ProtonDB", igdb: "IGDB" };
+  var ENRICH_MISSING = { steam_store: "Steam reviews", protondb: "ProtonDB", igdb: "IGDB details" };
   var ENRICH_REASONS = {
-    no_steam_appid: "no app id",
-    no_steam_platform_row: "not owned on Steam",
-    unconfigured: "not configured",
-    no_match: "no match",
-    unresolved: "unresolved",
-    link_pending: "still linking",
-    failed: "lookup failed",
+    no_steam_appid: "No Steam page for this game",
+    no_steam_platform_row: "Not owned on Steam",
+    unconfigured: "{src} is not configured",
+    no_match: "No {src} match for this game",
+    unresolved: "{src} has not matched this game yet",
+    link_pending: "{src} is still linking this game",
+    failed: "The {src} lookup failed",
   };
+  function andList(items) {
+    return items.length < 2 ? items.join("") : items.slice(0, -1).join(", ") + " and " + items[items.length - 1];
+  }
   function enrichmentReasons(why) {
     if (!why || typeof why !== "object") return [];
-    return Object.keys(why).map(function (k) {
+    var groups = [];
+    var byCause = {};
+    Object.keys(why).forEach(function (k) {
       var source = ENRICH_SOURCES[k] || label("provider", k);
-      var reason = ENRICH_REASONS[why[k]] || humanize(why[k]).toLowerCase();
-      return source + ": " + reason;
+      var known = Object.prototype.hasOwnProperty.call(ENRICH_REASONS, why[k]);
+      var template = known ? ENRICH_REASONS[why[k]] : "{src}: " + humanize(why[k]).toLowerCase();
+      var cause = template.replace("{src}", source);
+      if (!byCause[cause]) {
+        byCause[cause] = { cause: cause, named: template.indexOf("{src}") >= 0, missing: [] };
+        groups.push(byCause[cause]);
+      }
+      byCause[cause].missing.push(ENRICH_MISSING[k] || source);
     });
+    return groups.map(function (g) {
+      if (g.named) return g.cause;
+      return g.cause + ", so " + andList(g.missing) + (g.missing.length > 1 ? " are" : " is") + " unavailable";
+    });
+  }
+  /* Mid-sentence, a clause opening on a plain word drops its capital; a
+     provider name ("IGDB", "ProtonDB") keeps its own. */
+  function midSentence(text) {
+    return /^(No|Not|The) /.test(text) ? text.charAt(0).toLowerCase() + text.slice(1) : text;
+  }
+  function enrichmentSentence(reasons) {
+    return reasons.map(function (r, i) { return i ? midSentence(r) : r; }).join("; ");
   }
 
   function myRating(game) {
@@ -1171,8 +1199,9 @@ GAME_CARDS_HTML = (
   }
 
   /* ---------- detail: library + studio strips ---------- */
-  /* A mini's tier is his rating of that game (none when unrated); its two
-     lines are separate spans ("9/10" "50h", then the status). */
+  /* A mini's tier is his rating of that game (none when unrated); its lines
+     are the shared miniLines format (pips, then "50h" "completed", then the
+     year). */
   function similarStrip(parent, similar) {
     var items = list(similar && similar.items).filter(function (i) { return i && i.name; }).slice(0, 8);
     if (!items.length) return;
@@ -1180,18 +1209,14 @@ GAME_CARDS_HTML = (
     var strip = el("div", "strip ministrip");
     items.forEach(function (item) {
       var rating = num(item.my_rating);
-      var hours = num(item.playtime_hours);
-      var state = item.completion_status ? label("status", item.completion_status).toLowerCase()
-        : item.unplayed ? "unplayed" : null;
-      var mini = miniCard({
+      var why = list(item.shared_tags).filter(Boolean);
+      strip.appendChild(miniCard({
         name: item.name, cover_url: item.cover_url,
         tier: rating != null ? ratingTier(rating) : "none",
-        lines: [[rating != null ? rating + "/10" : null, hours != null && hours > 0 ? hoursLabel(hours) : null],
-                [state]],
-      });
-      var why = list(item.shared_tags).filter(Boolean);
-      if (why.length) mini.title = "Shares: " + why.join(", ");
-      strip.appendChild(mini);
+        title: why.length ? "Shares: " + why.join(", ") : null,
+        lines: miniLines({ rating: rating, hours: item.playtime_hours, status: item.completion_status,
+          unplayed: item.unplayed, year: item.release_year, platform: item.platform }),
+      }));
     });
     sec.appendChild(strip);
   }
@@ -1216,13 +1241,11 @@ GAME_CARDS_HTML = (
     var strip = el("div", "strip ministrip");
     items.forEach(function (item) {
       var rating = item.owned ? num(item.my_rating) : null;
-      var critic = num(item.critic_score);
-      var score = rating != null ? rating + "/10" : realScore(critic) ? "Critics " + Math.round(critic) : null;
       strip.appendChild(miniCard({
         name: item.name, cover_url: item.cover_url,
         tier: rating != null ? ratingTier(rating) : "none",
-        lines: [[item.release_year ? String(item.release_year) : null, score],
-                [item.owned ? "in your library" : null]],
+        lines: miniLines({ rating: rating, hours: item.owned ? item.playtime_hours : null,
+          owned: !!item.owned, year: item.release_year, platform: item.platform }),
       }));
     });
     sec.appendChild(strip);
@@ -1326,10 +1349,10 @@ GAME_CARDS_HTML = (
     var noticeText = null;
     if (!panel.filled && !flow.childNodes.length) {
       var emptyText = "No details fetched yet";
-      if (reasons.length) emptyText += " — " + reasons.join("; ");
+      if (reasons.length) emptyText += ": " + midSentence(enrichmentSentence(reasons));
       noticeText = emptyText;
     } else if (reasons.length) {
-      noticeText = "Not fetched — " + reasons.join("; ");
+      noticeText = enrichmentSentence(reasons);
     }
     var count = flow.childNodes.length;
     mediaNode(flow, media, game.name);

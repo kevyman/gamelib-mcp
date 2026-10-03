@@ -208,7 +208,7 @@ _TOKENS_LAYER_CSS = r"""  :root {
     --gl-ribbon-none: #C2C0B6;
     --gl-ribbon-hi: rgba(255, 255, 255, 0.35);
     --gl-ribbon-lo: rgba(0, 0, 0, 0.22);
-    --gl-specular: rgba(255, 255, 255, 0.12);
+    --gl-specular: rgba(255, 255, 255, 0.08);
     --gl-sheen: rgba(255, 255, 255, 0.16);
     --gl-play-ring: rgba(20, 20, 19, 0.35);
     /* What every component reads; a .tier-* class (below) re-points them. */
@@ -393,8 +393,8 @@ RESET_CSS = r"""  * { box-sizing: border-box; margin: 0; padding: 0; }
 # so 32 + 2x6 = 44 is met by the chip's own height plus the extension, not by
 # overlapping the next row. The host element must be a containing block
 # (positioned or transformed); .btn and .disclosure are made
-# relative in CONTROLS_CSS, a tappable .frame in FRAME_CSS and a mini card's
-# link or button in MINI_CSS. The old grid cards and media thumbs carry no
+# relative in CONTROLS_CSS, a tappable button.frame in FRAME_CSS and a mini
+# card's .mini-hit in MINI_CSS. The old grid cards and media thumbs carry no
 # extension: their overflow: hidden would clip it, and both are far past 44px
 # already. The Binder's card and pill take the ring 3px out (gl.css) in the
 # same text color — the reference sheet's 0.4-alpha border-strong ring is the
@@ -405,7 +405,7 @@ A11Y_CSS = r"""  :focus-visible { outline: 2px solid var(--gl-text); outline-off
   .frame:focus-visible, .btn:focus-visible, a.art:focus-visible { outline-offset: 3px; }
   a.chip::after, .btn::after, .disclosure::after, .fs-btn::after,
   .car-nav::after, .overlay-close::after, .hero-pill::after,
-  .frame[role="button"]::after, button.frame::after, .mini a::after, .mini button::after {
+  button.frame::after, .mini-hit::after {
     content: "";
     position: absolute;
     inset: -4px;
@@ -415,8 +415,7 @@ A11Y_CSS = r"""  :focus-visible { outline: 2px solid var(--gl-text); outline-off
   html.touch a.chip::after, html.touch .btn::after, html.touch .disclosure::after,
   html.touch .fs-btn::after, html.touch .car-nav::after,
   html.touch .overlay-close::after, html.touch .hero-pill::after,
-  html.touch .frame[role="button"]::after, html.touch button.frame::after,
-  html.touch .mini a::after, html.touch .mini button::after {
+  html.touch button.frame::after, html.touch .mini-hit::after {
     inset: -6px;
   }
   html.touch .chips a.chip::after { inset: -6px -4px; }
@@ -542,10 +541,13 @@ CHIP_CSS = r"""  .chips { display: flex; gap: 8px 6px; flex-wrap: wrap; align-it
     flex: none;
   }
   .chip .meter-fill { display: block; height: 100%; background: var(--gl-tier-text); }
-  .chip .ext { color: var(--gl-muted); }
   /* 24px + the -4px extension = a 32px target on a pointer (A11Y_CSS). */
   a.chip { cursor: pointer; min-height: 24px; }
   a.chip:hover { background: var(--gl-inset); }
+  a.chip:hover > .lbl, a.chip:hover > b, a.chip:focus-visible > .lbl, a.chip:focus-visible > b {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
 """
 
 # Labelled 4px taste-match bar.
@@ -598,7 +600,7 @@ SKELETON_CSS = r"""  .skel { display: flex; flex-direction: column; gap: 12px; m
   .sk-chips { display: flex; gap: 6px; flex-wrap: wrap; }
   .sk-chip { width: 76px; height: 24px; }
   .sk-card .sk-chip { width: 64px; }
-  .sk-stamp { flex: 0 0 96px; height: 40px; }
+  .sk-ribbon { flex: 0 0 96px; height: 40px; }
   .sk-facts { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--gl-border); }
   .sk-media { aspect-ratio: 16 / 9; border-radius: var(--gl-r-md); }
   .sk-media-row { display: flex; flex-direction: column; gap: 10px; }
@@ -659,8 +661,12 @@ CONTROLS_CSS = r"""  .btn, .disclosure {
   .disclosure { font-size: var(--gl-body); }
   .disclosure .chev { transition: transform 0.15s ease; }
   .disclosure[aria-expanded="true"] .chev { transform: rotate(180deg); }
-  .disclosure-body { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+  /* One grid row so opening can grow 0fr → 1fr (MOTION_CSS); the content
+     column is the inner block. */
+  .disclosure-body { display: grid; grid-template-rows: 1fr; margin-top: 12px; }
   .disclosure-body[hidden] { display: none; }
+  .disclosure-inner { display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; }
+  .disclosure-body.opening > .disclosure-inner { overflow: hidden; }
   .notice {
     display: flex;
     align-items: center;
@@ -877,37 +883,10 @@ MEDIA_STRIP_CSS = r"""  .fs-btn {
   }
 """
 
-# ---- Similar-games / pedigree / tags CSS ------------------------------------
-# Mini cover cards used by both the similar row and the pedigree row: cover,
-# name, year and one chip row — nothing else.
-SIMILAR_CSS = r"""  .sim {
-    flex: none;
-    width: 112px;
-    border: var(--gl-bw) solid var(--gl-border);
-    border-radius: var(--gl-r-md);
-    background: var(--gl-surface);
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-  }
-  .sim .cover-wrap { border-bottom: var(--gl-bw) solid var(--gl-border); }
-  .sim-body { padding: 8px; display: flex; flex-direction: column; gap: 4px; }
-  .sim-name {
-    font-size: var(--gl-cap);
-    font-weight: var(--gl-strong);
-    line-height: var(--gl-cap-lh);
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-  .sim-year { font-size: var(--gl-cap); line-height: var(--gl-cap-lh); color: var(--gl-muted); font-variant-numeric: tabular-nums; }
-"""
-
-# The chip row on a small card (similar, studio, lineage, anchors): the same
-# scoreChip as every other score ("You 9/10", "Critics 84", "Played 132h",
-# "Status Completed"), just tighter — at most three per card. These chips are
-# not links, so the touch rule that grows tappable chips to 32px is undone.
+# ---- Tag chip rows, pedigree CSS --------------------------------------------
+# A tight chip row (chipRow: the detail card's score chips): the same
+# scoreChip as every other score, just tighter — at most three. These chips
+# are not links, so the touch rule that grows tappable chips to 32px is undone.
 TAG_CSS = r"""  .tags, html.touch .tags { gap: 4px; }
   .tags .chip { padding: 1px 6px; column-gap: 4px; font-variant-numeric: tabular-nums; }
   html.touch .tags .chip { min-height: 0; }
@@ -915,8 +894,6 @@ TAG_CSS = r"""  .tags, html.touch .tags { gap: 4px; }
 
 # "From the studio" header and publisher lines.
 PEDIGREE_CSS = r"""  .ped-head { display: flex; flex-wrap: wrap; gap: 2px 10px; font-weight: var(--gl-strong); }
-  .ped-pub { font-size: var(--gl-cap); line-height: var(--gl-cap-lh); color: var(--gl-muted); margin-top: 2px; }
-  .ped-strip { margin-top: 8px; }
 """
 
 # ---- Overlay / carousel / toast CSS -----------------------------------------
@@ -1404,12 +1381,19 @@ NUMBERS_JS = r"""  /* ---------- numbers ---------- */
     return n + (truncated ? "+" : "") + " " + word + (n === 1 && !truncated ? "" : "s");
   }
   var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  /* "2022-09-21" (or a full timestamp) → "Sep 2022"; anything else → null
-     (unknown: the caller shows no row, or its own word). */
+  /* "2022-09-21" (or a full timestamp) → "Sep 2022" — the detail card's
+     LAST row; anything else → null (unknown: the caller shows no row). */
   function monthYear(iso) {
     var m = /^(\d{4})-(\d{2})/.exec(String(iso || ""));
     var month = m ? MONTHS[Number(m[2]) - 1] : null;
     return month ? month + " " + m[1] : null;
+  }
+  /* "2026-10-03T13:04:42Z" → "3 Oct 2026" (the stored UTC day): the day an
+     assessment was made matters, so provenance, ledger and captions keep it. */
+  function dayMonthYear(iso) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ""));
+    var month = m ? MONTHS[Number(m[2]) - 1] : null;
+    return month ? Number(m[3]) + " " + month + " " + m[1] : null;
   }
 """
 
@@ -1486,11 +1470,13 @@ SCORE_CHIP_JS = r"""  /* ---------- score chip ---------- */
     if (opts.aux) chip.appendChild(el("span", "aux", opts.aux));
     if (opts.title) chip.title = opts.title;
     if (opts.url) {
+      /* A link chip carries no glyph (the external mark is for the pills
+         that leave the host); it says where it goes in its name and
+         underlines on hover / focus. */
       chip.href = opts.url;
       chip.setAttribute("data-link", "");
-      var ext = el("span", "ext", "↗");
-      ext.setAttribute("aria-hidden", "true");
-      chip.appendChild(ext);
+      var named = [opts.label, opts.value].filter(function (p) { return p !== undefined && p !== null && p !== ""; });
+      chip.setAttribute("aria-label", named.join(" ") + ", opens " + (opts.site || opts.label));
       chip.addEventListener("click", function (ev) {
         ev.preventDefault();
         ev.stopPropagation();
@@ -1498,26 +1484,6 @@ SCORE_CHIP_JS = r"""  /* ---------- score chip ---------- */
       });
     }
     return chip;
-  }
-  /* The library chips on a small card (similar, studio, lineage, anchors) are
-     the same chip as every score: "You 9/10", "Critics 84", "Played 132h",
-     "Unplayed", "Status Completed". chipRow keeps at most three. */
-  function youChip(rating) {
-    var n = num(rating);
-    if (n == null) return null;
-    return scoreChip({ label: "You", value: n + "/10", tier: ratingTier(n), title: "Your rating" });
-  }
-  function criticsChip(score) {
-    var n = num(score);
-    if (!realScore(n)) return null;
-    return scoreChip({ label: "Critics", value: Math.round(n), tier: mcTier(n), title: "Critic score" });
-  }
-  function playedChip(hours, unplayed) {
-    var n = num(hours);
-    if (n != null && n > 0) {
-      return scoreChip({ label: "Played", value: hoursLabel(n), title: "Your playtime" });
-    }
-    return unplayed ? scoreChip({ label: "Unplayed", title: "In your library, never played" }) : null;
   }
   var STATUS_CHIPS = {
     completed: ["Completed", "good"],
@@ -1579,7 +1545,7 @@ MATCH_BAR_JS = r"""  function matchBar(percent) {
 # ``skeletonKind()`` which shape to draw.
 SKELETON_JS = r"""  /* Each placeholder is the real layout in grey: grid = header line + cards
      (cover, title, match bar, one chip row); eval = header panel (cover,
-     title, stamp, score chips, the facts row), the pitch's two lines, the
+     title, ribbon, score chips, the facts row), the pitch's two lines, the
      media stage; detail = identity panel (cover, title + 3 lines, chip row)
      and the media stage. neutral = one panel (cover, three lines, a chip
      row): the startup shape, before the tool input says which tool ran. */
@@ -1646,7 +1612,7 @@ SKELETON_JS = r"""  /* Each placeholder is the real layout in grey: grid = heade
     if (kind === "eval") {
       chips(col, 3);
       row.appendChild(col);
-      row.appendChild(sk("sk-stamp"));
+      row.appendChild(sk("sk-ribbon"));
       panel.appendChild(row);
       chips(panel, 3, "sk-facts");
       wrap.appendChild(panel);
@@ -1715,6 +1681,12 @@ MODEL_CONTEXT_JS = r"""  /* Fire-and-forget: request() resolves undefined on met
 # fullscreen where the host offers it, the disclosure in place where it
 # doesn't or refuses.
 DISCLOSURE_JS = r"""  var disclosureSeq = 0;
+  /* The one layout animation MOTION.md allows: opening grows the body's
+     single grid row 0fr → 1fr over 240ms (MOTION_CSS, motion-allowed only)
+     while .disclosure-inner clips; the size is reported once it has landed —
+     at once under reduced motion, where the open is instant. buildFn fills
+     the inner block. */
+  var DISCLOSE_MS = 240;
   /* intercept(), when given, runs on a click that would OPEN the body; a
      true return means it took the click (setOpen opens it later, or not). */
   function disclosure(parent, text, buildFn, intercept) {
@@ -1728,13 +1700,28 @@ DISCLOSURE_JS = r"""  var disclosureSeq = 0;
     var body = el("div", "disclosure-body");
     body.id = "disclosure-" + (++disclosureSeq);
     body.hidden = true;
+    var inner = el("div", "disclosure-inner");
+    body.appendChild(inner);
     btn.setAttribute("aria-controls", body.id);
     var built = false;
+    var opening = null;
+    function landed() {
+      if (opening !== null) { clearTimeout(opening); opening = null; }
+      body.classList.remove("opening");
+      reportSize();
+    }
+    body.addEventListener("animationend", function (ev) { if (ev.target === body && opening !== null) landed(); });
     function setOpen(open) {
-      if (open && !built) { built = true; buildFn(body); }
+      if (open && !built) { built = true; buildFn(inner); }
+      var appearing = open && body.hidden;
       body.hidden = !open;
       btn.setAttribute("aria-expanded", open ? "true" : "false");
-      reportSize();
+      if (appearing && !mediaQueryMatches("(prefers-reduced-motion: reduce)")) {
+        body.classList.add("opening");
+        opening = setTimeout(landed, DISCLOSE_MS);
+        return;
+      }
+      landed();
     }
     btn.addEventListener("click", function () {
       var open = btn.getAttribute("aria-expanded") !== "true";
@@ -1743,7 +1730,7 @@ DISCLOSURE_JS = r"""  var disclosureSeq = 0;
     });
     parent.appendChild(btn);
     parent.appendChild(body);
-    return { button: btn, body: body, setOpen: setOpen };
+    return { button: btn, body: body, inner: inner, setOpen: setOpen };
   }
   /* The button that opens a block "big": on a host offering fullscreen (and
      not in it already) a click asks for fullscreen — ⤢ says so — and on a
@@ -1903,8 +1890,7 @@ FRAME_CSS = r"""  .frame {
     border-color: var(--gl-surface);
     box-shadow: 0 0 0 1px var(--gl-border), inset 0 0 0 2px var(--gl-border);
   }
-  button.frame, a.frame { width: 100%; padding: 0; text-align: left; text-decoration: none; cursor: pointer; }
-  .frame[role="button"] { cursor: pointer; }
+  button.frame { width: 100%; padding: 0; text-align: left; text-decoration: none; cursor: pointer; }
   .grain {
     position: absolute;
     inset: 0;
@@ -1920,8 +1906,9 @@ FRAME_CSS = r"""  .frame {
 """
 
 # The art window: 2:3 cover (or 16:9 with .art-hero), the 1px keyline drawn
-# over the image, one static 12% specular line. coverNode() drops straight in
-# (its wrap fills the window), so a missing cover is the name-seeded plate.
+# over the image, one static 8% specular line (a finish, not an artefact;
+# the hover sheen is unchanged). coverNode() drops straight in (its wrap
+# fills the window), so a missing cover is the name-seeded plate.
 ART_CSS = r"""  .art {
     position: relative;
     display: block;
@@ -2128,7 +2115,7 @@ PIPS_CSS = r"""  .pips { display: inline-flex; align-items: center; gap: 7px; he
   .pips-word { font-size: var(--gl-body); font-weight: var(--gl-heavy); color: var(--gl-tier-text); }
 """
 
-# The verdict / status band — the stamp's successor: 40px (slim 24px), the
+# The verdict / status band: 40px (slim 24px), the
 # tier fill, ink always --gl-ribbon-ink, notched ends. .ribbon-straddle
 # overhangs its card 20px each side (eval); .ribbon-art sits flush on the
 # art's bottom edge (grid, detail). A second span is the mono note.
@@ -2266,7 +2253,7 @@ MINI_CSS = r"""  .mini { position: relative; display: flex; align-items: flex-st
   }
   .mini-art > .cover-wrap { aspect-ratio: auto; width: 100%; height: 100%; }
   .mini-art .cover-fallback { color: transparent; text-shadow: none; }
-  .mini-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .mini-body { flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .mini-name {
     font-size: var(--gl-body);
     font-weight: var(--gl-strong);
@@ -2286,7 +2273,7 @@ MINI_CSS = r"""  .mini { position: relative; display: flex; align-items: flex-st
     color: var(--gl-muted);
   }
   .mini-meta .v { font-family: var(--gl-mono); color: var(--gl-text-2); }
-  .mini a, .mini button {
+  .mini-hit {
     position: absolute;
     inset: 0;
     z-index: 1;
@@ -2306,7 +2293,9 @@ MINI_CSS = r"""  .mini { position: relative; display: flex; align-items: flex-st
 """
 
 # Motion (docs/specs/assets/binder/MOTION.md, durations table). Compositor
-# only (transform, opacity, clip-path, background-position). Every movement
+# only (transform, opacity, clip-path, background-position), with MOTION.md's
+# one allowed layout animation: a disclosure opening (grid-template-rows
+# 0fr -> 1fr, 240ms; DISCLOSURE_JS). Every movement
 # sits in the no-preference block; outside it are the opacity-only fallbacks
 # a viewer who asked for reduced motion still gets — A11Y_CSS's wildcard stops
 # every other animation, so the two crossfades re-assert themselves there.
@@ -2315,7 +2304,10 @@ MINI_CSS = r"""  .mini { position: relative; display: flex; align-items: flex-st
 #      36ms apart; leaders +80/200, 36ms stagger) — at rest by 500ms. M2 grid
 #      cards (.frame-s) deal the body only, 40ms apart, capped at the 6th.
 #   M3 press: scale .985, 90ms in / 160ms out; the specular shifts 12px; the
-#      primary button darkens 6%.
+#      primary button darkens 6%. Every tappable thing presses: card frames,
+#      buttons, the fullscreen and link pills, link chips, and a mini card
+#      (its .mini-hit is the target; :active reaches the .mini ancestor, so
+#      no :has() is needed).
 #   M4 hover tilt + one 700ms sheen sweep, fine pointers only; the only
 #      will-change.
 #   M5 skeleton pulse 1600ms; leave 120ms ease-out; the result from +60ms
@@ -2323,9 +2315,11 @@ MINI_CSS = r"""  .mini { position: relative; display: flex; align-items: flex-st
 #   M7 meters fill 300ms from the left, +120ms.
 MOTION_CSS = r"""  .deal { animation: gl-fade-in 300ms ease-out backwards; animation-delay: var(--deal-at, 0ms); }
   .leaving { animation: gl-fade-out 120ms ease-out forwards; pointer-events: none; }
+  .fade-in { animation: gl-fade-in 200ms ease-out backwards; }
   @keyframes gl-fade-in { from { opacity: 0; } }
   @keyframes gl-fade-out { to { opacity: 0; } }
-  button.frame:active, a.frame:active, .frame[role="button"]:active, .btn:active { opacity: 0.8; }
+  button.frame:active, .btn:active, .fs-btn:active, .hero-pill:active, a.chip:active,
+  .mini:active { opacity: 0.8; }
   .btn.primary { isolation: isolate; }
   .btn.primary::before {
     content: "";
@@ -2338,8 +2332,9 @@ MOTION_CSS = r"""  .deal { animation: gl-fade-in 300ms ease-out backwards; anima
   }
   .btn.primary:active::before { opacity: 0.06; }
   @media (prefers-reduced-motion: reduce) {
-    .deal { animation: gl-fade-in 300ms ease-out backwards !important; }
+    .deal { animation: gl-fade-in 240ms ease-out backwards !important; }
     .leaving { animation: gl-fade-out 240ms ease-out forwards !important; }
+    .fade-in { animation: gl-fade-in 200ms ease-out backwards !important; }
   }
   @media (prefers-reduced-motion: no-preference) {
     .deal {
@@ -2372,44 +2367,47 @@ MOTION_CSS = r"""  .deal { animation: gl-fade-in 300ms ease-out backwards; anima
       animation: fill 300ms ease-out backwards;
       animation-delay: calc(var(--deal-at, 0ms) + 120ms);
     }
+    /* The one layout animation (MOTION.md): a disclosure opening. */
+    .disclosure-body.opening { animation: disclose 240ms ease-out; }
     .stats > :nth-child(2), .pips > :nth-child(2) { --j: 1; }
     .stats > :nth-child(3), .pips > :nth-child(3) { --j: 2; }
     .stats > :nth-child(4), .pips > :nth-child(4) { --j: 3; }
     .stats > :nth-child(5), .pips > :nth-child(5) { --j: 4; }
     .stats > :nth-child(n+6), .pips > :nth-child(n+6) { --j: 5; }
-    button.frame, a.frame, .frame[role="button"], .btn {
+    button.frame, .btn, .fs-btn, .hero-pill, a.chip, .mini {
       transition: transform 160ms ease-out, opacity 160ms ease-out;
     }
-    button.frame:active, a.frame:active, .frame[role="button"]:active, .btn:active {
+    button.frame:active, .btn:active, .fs-btn:active, .hero-pill:active, a.chip:active,
+    .mini:active {
       transform: scale(0.985);
       opacity: 1;
       transition-duration: 90ms;
     }
     .btn.primary::before { transition: opacity 160ms ease-out; }
     .btn.primary:active::before { transition-duration: 90ms; }
-    button.frame .art::after, a.frame .art::after, .frame[role="button"] .art::after {
+    button.frame .art::after {
       transition: transform 160ms ease-out;
     }
-    button.frame:active .art::after, a.frame:active .art::after, .frame[role="button"]:active .art::after {
+    button.frame:active .art::after {
       transform: translateX(-12px);
       transition-duration: 90ms;
     }
     @media (hover: hover) and (pointer: fine) {
-      button.frame:hover, a.frame:hover, .frame[role="button"]:hover {
+      button.frame:hover {
         transform: perspective(900px) rotateY(-5deg) rotateX(3deg);
         will-change: transform;
       }
-      button.frame:hover:active, a.frame:hover:active, .frame[role="button"]:hover:active {
+      button.frame:hover:active {
         transform: perspective(900px) rotateY(-5deg) rotateX(3deg) scale(0.985);
       }
-      button.frame .art::after, a.frame .art::after, .frame[role="button"] .art::after {
+      button.frame .art::after {
         background:
           linear-gradient(235deg, transparent 42%, var(--gl-sheen) 50%, transparent 58%) no-repeat,
           linear-gradient(235deg, transparent calc(30% - 0.5px), var(--gl-specular) calc(30% - 0.5px) calc(30% + 0.5px), transparent calc(30% + 0.5px));
         background-size: 300% 100%, 100% 100%;
         background-position: 0% 0, 0 0;
       }
-      button.frame:hover .art::after, a.frame:hover .art::after, .frame[role="button"]:hover .art::after {
+      button.frame:hover .art::after {
         animation: sheen 700ms ease-out 1;
       }
     }
@@ -2420,6 +2418,7 @@ MOTION_CSS = r"""  .deal { animation: gl-fade-in 300ms ease-out backwards; anima
     @keyframes pip { from { opacity: 0; transform: rotate(45deg) scale(0.6); } }
     @keyframes leader { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0); } }
     @keyframes fill { from { transform: scaleX(0); } }
+    @keyframes disclose { from { grid-template-rows: 0fr; } }
     @keyframes skel-pulse { 50% { opacity: 0.55; } }
     @keyframes sheen { from { background-position: 0% 0, 0 0; } to { background-position: 100% 0, 0 0; } }
   }
@@ -2566,21 +2565,47 @@ FLAVOR_JS = r"""  /* Italic serif prose (the craft note, a description); quote =
   }
 """
 
-MINI_JS = r"""  /* {name, cover_url, lines, tier, onClick} → a mini card: the 48x64 art
-     (coverNode, so a missing or broken cover is the name-seeded plate) in a
-     2px tier border, the name, at most two cap lines. A line is a list of
-     parts, each text (a figure in mono) or a node (pips), gap-separated —
-     never joined with middots. onClick makes the whole card one button,
-     named by the game. */
+MINI_JS = r"""  /* The ONE line format every mini uses — strips and lineage columns alike:
+       1. his rating as small pips, when rated (nothing otherwise);
+       2. hours and where it stands, two spans: "50h" "completed";
+          "unplayed" when the payload says so (or zero hours); "played" for
+          hours with no status; "not owned" for a game he doesn't have;
+       3. the year and the platform, when known.
+     {rating, hours, status, unplayed, owned, year, platform} → lines. */
+  var MINI_STATUS = { completed: "completed", evergreen: "evergreen", abandoned: "abandoned", playing: "playing" };
+  function miniLines(facts) {
+    var f = facts || {};
+    var lines = [];
+    var rating = num(f.rating);
+    if (rating != null) lines.push([pipsNode(rating, 10, ratingTier(rating))]);
+    var hours = num(f.hours);
+    var played = hours != null && hours > 0 ? hoursLabel(hours) : null;
+    var word = Object.prototype.hasOwnProperty.call(MINI_STATUS, f.status) ? MINI_STATUS[f.status]
+      : f.owned === false ? "not owned"
+      : f.unplayed || hours === 0 ? "unplayed"
+      : played ? "played" : null;
+    if (played || word) lines.push([played, word]);
+    var platform = f.platform ? label("platform_short", f.platform) : null;
+    if (f.year || platform) lines.push([f.year ? String(f.year) : null, platform]);
+    return lines;
+  }
+  /* {name, cover_url, lines, tier, title, onClick} → a mini card: the 48x64
+     art (coverNode, so a missing or broken cover is the name-seeded plate) in
+     a 2px tier border, the name (two lines at most, then an ellipsis), at most
+     three cap lines (miniLines). A line is a list of parts, each text (a
+     figure in mono) or a node (pips), gap-separated — never joined with
+     middots. title is the hover text; onClick makes the whole card one
+     button, named by the game. */
   function miniCard(opts) {
     var o = opts || {};
     var card = el("div", "mini tier-" + (o.tier || "none"));
+    if (o.title) card.title = o.title;
     var art = el("div", "mini-art");
     art.appendChild(coverNode({ name: o.name, cover_url: o.cover_url }));
     card.appendChild(art);
     var body = el("div", "mini-body");
     body.appendChild(el("div", "mini-name", o.name || "?"));
-    list(o.lines).slice(0, 2).forEach(function (line) {
+    list(o.lines).slice(0, 3).forEach(function (line) {
       var meta = el("div", "mini-meta");
       (Array.isArray(line) ? line : [line]).forEach(function (part) {
         if (part === null || part === undefined || part === "") return;
@@ -2613,12 +2638,19 @@ MOTION_JS = r"""  /* ---------- motion (MOTION.md; the CSS is MOTION_CSS) ------
     node.classList.add("deal");
     return node;
   }
+  /* M2: the set line fades in first (opacity only, 0ms / 200ms), once per
+     fresh page. */
+  function fadeIn(node) {
+    if (node) node.classList.add("fade-in");
+    return node;
+  }
   /* M5: the skeleton resolves into the result. build() makes the node. With
      the skeleton on screen the node takes its place at once (the content is
      there for every reader immediately) while the skeleton, lifted out of the
-     flow over its old box, fades out — 120ms, a 240ms crossfade under reduced
-     motion — and the node deals in from +60ms (no offset under reduced
-     motion): the overlap that reads as one object resolving. Without a
+     flow over its old box, fades out over 120ms and the node deals in from
+     +60ms: the overlap that reads as one object resolving. Under reduced
+     motion both halves are ONE 240ms crossfade (leave and enter together,
+     no offset). Without a
      skeleton the node is only dealt in and comes back detached for the
      caller to place. */
   var SKELETON_LEAVE_MS = 120;
@@ -3052,65 +3084,10 @@ MEDIA_PANEL_JS = r"""  function trailerEntry(media) {
   }
 """
 
-# ---- Ownership stickers, similar games, studio pedigree ---------------------
-# His rating, his hours (or "Unplayed") and, failing both, "Owned" — the chip
-# row for a related game (lineage comparisons). Zero hours on an owned game is
-# authoritative NOT-played; null hours is unknown and says nothing.
-OWNERSHIP_TAGS_JS = r"""  function ownershipTags(item) {
-    var hours = num(item.playtime_hours);
-    var unplayed = !!item.unplayed || (!!item.owned && hours === 0);
-    var chips = [youChip(item.my_rating), playedChip(hours, unplayed)];
-    if (item.owned && !chips[0] && !chips[1]) chips.push(scoreChip({ label: "Owned" }));
-    return chipRow(chips);
-  }
-"""
-
-# The owned games most like this one (tools/game_media.py's similar_in_library)
-# as a strip of mini covers. Each card is cover, name, year and ONE chip row:
-# every item is owned (the pool IS the library), so the row carries his rating
-# ("You 9/10"), then his hours ("Played 132h") or, unrated and unplayed,
-# "Unplayed" — at most two.
-SIMILAR_NODE_JS = r"""  function similarTags(item) {
-    var you = youChip(item.my_rating);
-    var unplayed = !you && !!item.unplayed;
-    return chipRow([you, playedChip(item.playtime_hours, unplayed)]);
-  }
-  function similarNode(parent, similar) {
-    var items = list(similar.items).filter(function (i) { return i && i.name; });
-    if (!items.length) return;
-    var box = section(parent, "Similar in your library");
-    var strip = el("div", "strip");
-    items.forEach(function (item) {
-      var card = el("div", "sim");
-      card.appendChild(coverNode(item));
-      var body = el("div", "sim-body");
-      body.appendChild(el("div", "sim-name", item.name || "?"));
-      if (item.release_year) body.appendChild(el("div", "sim-year", String(item.release_year)));
-      var why = list(item.shared_tags).filter(Boolean);
-      if (why.length) card.title = "Shares: " + why.join(", ");
-      var tags = similarTags(item);
-      if (tags) body.appendChild(tags);
-      card.appendChild(body);
-      strip.appendChild(card);
-    });
-    // No "+N more" chip: the extras are not in the payload, and there is
-    // nothing to click through to.
-    box.appendChild(strip);
-    var total = num(similar.count);
-    // The count is "owned games clearing the shared-tag bar", so it is a
-    // denominator the row can honestly claim — every one of them is his.
-    var note = (similar.truncated && total != null && total > items.length)
-      ? "The " + items.length + " of your " + plural(total, "game") + " most like this one"
-      : "Your " + plural(items.length, "game") + " most like this one";
-    var unplayed = items.filter(function (i) { return i.unplayed; }).length;
-    if (unplayed) note += ", " + unplayed + " unplayed";
-    box.appendChild(el("div", "note", note));
-  }
-"""
-
+# ---- Studio pedigree ---------------------------------------------------------
 # "From the studio": the headline (its parts — studio, "est. 2018", "5 games" —
-# as gap-separated spans, never a joined string), the per-poster badge and the
-# strip with its track-record footer (``plural`` lives in NUMBERS_JS).
+# as gap-separated spans, never a joined string). Each widget builds its own
+# strip of minis under it (``plural`` lives in NUMBERS_JS).
 PEDIGREE_JS = r"""  function pedigreeHeadline(ped) {
     var dev = ped.developer || {};
     var names = list(ped.developer_names).filter(Boolean);
@@ -3130,60 +3107,6 @@ PEDIGREE_JS = r"""  function pedigreeHeadline(ped) {
     var head = el("div", "ped-head");
     parts.forEach(function (part) { head.appendChild(el("span", null, part)); });
     return head;
-  }
-  /* ONE score per poster: his own rating ("You 8/10") outranks the critic
-     score ("Critics 84"), which only stands in when he hasn't rated it. An
-     owned game he never rated still says "Owned". */
-  function pedigreeBadges(item) {
-    var chips = [];
-    var rating = num(item.my_rating);
-    var critic = num(item.critic_score);
-    if (item.owned && rating != null) {
-      chips.push(youChip(rating));
-    } else if (critic != null && critic >= 0) {
-      chips.push(criticsChip(critic));
-    }
-    if (item.owned && rating == null) chips.push(scoreChip({ label: "Owned" }));
-    return chipRow(chips);
-  }
-  function pedigreeNode(parent, ped) {
-    if (!ped) return;
-    var head = pedigreeHead(ped);
-    var items = list(ped.previous_games).filter(function (i) { return i && i.name; });
-    if (!head && !items.length) return;
-    var box = section(parent, "From the studio");
-    if (head) box.appendChild(head);
-    // The publisher is a line of text, never a poster row: a publisher's back
-    // catalogue is a distribution list, not a body of work.
-    if (ped.publisher_name) {
-      box.appendChild(el("div", "ped-pub", "published by " + ped.publisher_name));
-    }
-    if (!items.length) return;
-    var strip = el("div", "strip ped-strip");
-    items.forEach(function (item) {
-      var card = el("div", "sim");
-      card.appendChild(coverNode(item));
-      var body = el("div", "sim-body");
-      body.appendChild(el("div", "sim-name", item.name || "?"));
-      if (item.release_year) body.appendChild(el("div", "sim-year", String(item.release_year)));
-      var badges = pedigreeBadges(item);
-      if (badges) body.appendChild(badges);
-      card.appendChild(body);
-      strip.appendChild(card);
-    });
-    box.appendChild(strip);
-    var record = ped.library_track_record;
-    if (record) {
-      var avg = num(record.avg_my_rating);
-      // The track record covers only the annotated (shown) games; when the
-      // catalogue runs deeper, "last N" keeps the claim honest.
-      var span = ped.previous_truncated
-        ? "their last " + plural(items.length, "game")
-        : "their " + plural(items.length, "previous game");
-      box.appendChild(el("div", "note",
-        "You've played " + (num(record.played_count) || 0) + " of "
-        + span + (avg != null ? " — avg " + avg + "/10." : ".")));
-    }
   }
 """
 

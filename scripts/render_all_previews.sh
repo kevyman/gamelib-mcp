@@ -4,6 +4,10 @@
 #   scripts/render_all_previews.sh            # -> /tmp/gl-previews
 #   OUT=/some/dir IMG_CACHE=/path/to/img scripts/render_all_previews.sh
 #
+# IMG_CACHE (optional) is a directory of cached cover/screenshot files (see
+# scripts/preview_samples/README.md). Unset, every image is a grey placeholder
+# — fully offline, the layout and heights still measurable.
+#
 # HTML goes to $OUT/html, PNGs to $OUT (<variant>-<width>.png). Inline
 # variants are shot at 360 and 760 px, fullscreen variants at 760 only. The
 # game cards render from the saved payloads in scripts/preview_samples/ (no
@@ -13,7 +17,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${OUT:-/tmp/gl-previews}"
-IMG_CACHE="${IMG_CACHE:-/tmp/claude-0/-home-user-gamelib-mcp/e1ccfc03-cae7-5be8-96fb-b7b0b565e6c9/scratchpad/canvas/img}"
+IMG_CACHE="${IMG_CACHE:-}"
 PY="$ROOT/.venv/bin/python"
 [[ -x "$PY" ]] || PY="python3"
 SAMPLES="$ROOT/scripts/preview_samples"
@@ -60,12 +64,15 @@ game_cards grid-dark-fullscreen full --from-json "$SAMPLES/discover_taste_match.
 game_cards detail-dark-fullscreen full --from-json "$SAMPLES/detail_ghost_of_tsushima.json" \
   --theme dark --display fullscreen
 
-cache_args=()
-if [[ -d "$IMG_CACHE" ]]; then
-  cache_args=(--img-cache "$IMG_CACHE")
-else
-  echo "render_all_previews: no image cache at $IMG_CACHE; images will hit the network" >&2
+if [[ -z "$IMG_CACHE" ]]; then
+  # An empty cache: every image request is answered with the placeholder.
+  IMG_CACHE="$OUT/.no-img-cache"
+  mkdir -p "$IMG_CACHE"
+elif [[ ! -d "$IMG_CACHE" ]]; then
+  echo "render_all_previews: IMG_CACHE=$IMG_CACHE is not a directory" >&2
+  exit 1
 fi
+cache_args=(--img-cache "$IMG_CACHE")
 
 table="$OUT/heights.txt"
 {

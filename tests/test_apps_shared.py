@@ -46,8 +46,9 @@ def css_rule(css: str, selector: str, exact: bool = False) -> str:
 INTERACTIVE = (
     "a.chip", ".btn", ".disclosure", ".fs-btn", ".car-nav",
     ".overlay-close", ".hero-pill",
-    # The Binder: a tappable card frame, and a mini card's link or button.
-    '.frame[role="button"]', "button.frame", ".mini a", ".mini button",
+    # The Binder: a tappable card frame (always a <button>), and a mini
+    # card's one hit button.
+    "button.frame", ".mini-hit",
 )
 # Large enough on their own, and their overflow: hidden would clip an
 # extension anyway — so they carry none (an inert rule is a false promise).
@@ -171,7 +172,7 @@ class HitAreaTests(unittest.TestCase):
         self.assertIn("position: relative;", css_rule(apps_shared.CHIP_CSS, ".chip", exact=True))
         self.assertIn("position: absolute;", css_rule(apps_shared.HERO_CSS, ".hero-pill", exact=True))
         self.assertIn("position: relative;", css_rule(apps_shared.FRAME_CSS, ".frame", exact=True))
-        self.assertIn("position: absolute;", css_rule(apps_shared.MINI_CSS, ".mini a, .mini button", exact=True))
+        self.assertIn("position: absolute;", css_rule(apps_shared.MINI_CSS, ".mini-hit", exact=True))
         # a frame never clips (the extension and a straddling ribbon reach
         # past it); the overflow: hidden is on the art window inside
         self.assertNotIn("overflow", css_rule(apps_shared.FRAME_CSS, ".frame", exact=True))
@@ -826,6 +827,7 @@ class OneCopyHelperTests(unittest.TestCase):
         homes = {
             "function frameNode(tag, cls, tier) {": apps_shared.GRAIN_JS,
             "function monthYear(iso) {": apps_shared.NUMBERS_JS,
+            "function dayMonthYear(iso) {": apps_shared.NUMBERS_JS,
             "var MONTHS = [": apps_shared.NUMBERS_JS,
             "function eyebrowSection(parent, text) {": apps_shared.DOM_HELPERS_JS,
             "function pedigreeHead(ped) {": apps_shared.PEDIGREE_JS,
@@ -901,6 +903,35 @@ class NoMiddotJoinTests(unittest.TestCase):
         self.assertNotIn("parts.join(", js)
         self.assertIn('parts.forEach(function (part) { head.appendChild(el("span", null, part)); });', js)
         self.assertIn(".ped-head { display: flex; flex-wrap: wrap; gap: 2px 10px;", apps_shared.PEDIGREE_CSS)
+
+
+class SpecularTests(unittest.TestCase):
+    """B8: the art's static specular line is an 8% finish; the hover sheen
+    keeps its own token."""
+
+    def test_the_specular_line_is_eight_percent(self) -> None:
+        self.assertIn("--gl-specular: rgba(255, 255, 255, 0.08);", apps_shared.TOKENS_CSS)
+        self.assertNotIn("--gl-specular: rgba(255, 255, 255, 0.12);", apps_shared.TOKENS_CSS)
+        self.assertIn("var(--gl-specular)", apps_shared.ART_CSS)
+        self.assertIn("var(--gl-sheen) 50%", apps_shared.MOTION_CSS)
+
+
+class LinkChipTests(unittest.TestCase):
+    """B6: a critic chip stays a link but drops the visible arrow; its name
+    says where it goes ("Metacritic 83, opens Metacritic") and it underlines
+    on hover / focus. The external glyph stays on the pills that leave the
+    host, the fullscreen mark on "Full breakdown" only."""
+
+    def test_link_chips_carry_no_glyph_and_name_their_destination(self) -> None:
+        js = apps_shared.SCORE_CHIP_JS
+        self.assertNotIn('"ext"', js)
+        self.assertNotIn("\u2197", js)
+        self.assertIn('chip.setAttribute("aria-label", named.join(" ") + ", opens " + (opts.site || opts.label));', js)
+        self.assertNotIn(".chip .ext", apps_shared.CHIP_CSS)
+        self.assertIn("a.chip:hover > .lbl, a.chip:hover > b, a.chip:focus-visible > .lbl, a.chip:focus-visible > b {\n"
+                      "    text-decoration: underline;", apps_shared.CHIP_CSS)
+        # the external mark survives on the link-out pills only
+        self.assertIn('linkPill(hero, "Watch on YouTube \u2197", watchUrl);', apps_shared.HERO_MEDIA_JS)
 
 
 class LightboxChromeTests(unittest.TestCase):
@@ -1407,6 +1438,21 @@ _FULLSCREEN_PROBE = r"""
     answer("ui/request-display-mode", { mode: "fullscreen" });
     await tick(); await tick();
     out.grantedHandler = [d.state(), handed];
+    // (e) A4: opening animates (the .opening row grows 0fr -> 1fr) and
+    // lands after DISCLOSE_MS; under reduced motion it is instant
+    flushTimers();
+    var e = make(["inline"]);
+    e.d.button.click();
+    out.animating = [e.d.body.classList.contains("opening"), e.d.body.children.map(function (n) { return n.className; }),
+                     e.d.inner.children.map(function (n) { return n.className; })];
+    flushTimers();
+    out.landed = e.d.body.classList.contains("opening");
+    var mm = window.matchMedia;
+    window.matchMedia = function (q) { return { matches: q === "(prefers-reduced-motion: reduce)" }; };
+    var f = make(["inline"]);
+    f.d.button.click();
+    out.reduced = f.d.body.classList.contains("opening");
+    window.matchMedia = mm;
     console.log(JSON.stringify(out));
   })();
 """
@@ -1440,6 +1486,23 @@ class FullscreenOrDisclosureTests(unittest.TestCase):
         self.assertEqual(self.out["grantedHandler"],
                          [{"expanded": "false", "hidden": True, "built": 0, "glyph": "⤢"}, ["fullscreen"]])
 
+    def test_opening_grows_the_row_then_lands_and_is_instant_when_reduced(self) -> None:
+        # A4: the body is one grid row holding .disclosure-inner (which the
+        # build fills); .opening runs MOTION_CSS's 0fr -> 1fr for 240ms, then
+        # comes off and the size is reported; reduced motion skips it.
+        self.assertEqual(self.out["animating"], [True, ["disclosure-inner"], ["row"]])
+        self.assertFalse(self.out["landed"])
+        self.assertFalse(self.out["reduced"])
+        motion = _block(apps_shared.MOTION_CSS, _MOTION_QUERY)
+        self.assertIn(".disclosure-body.opening { animation: disclose 240ms ease-out; }", motion)
+        self.assertIn("@keyframes disclose { from { grid-template-rows: 0fr; } }", motion)
+        self.assertNotIn("disclose", apps_shared.MOTION_CSS.split(_MOTION_QUERY, 1)[0])
+        self.assertIn("  .disclosure-body { display: grid; grid-template-rows: 1fr; margin-top: 12px; }",
+                      apps_shared.CONTROLS_CSS)
+        self.assertIn("  .disclosure-body.opening > .disclosure-inner { overflow: hidden; }", apps_shared.CONTROLS_CSS)
+        self.assertIn("var DISCLOSE_MS = 240;", apps_shared.DISCLOSURE_JS)
+        self.assertIn("opening = setTimeout(landed, DISCLOSE_MS);", apps_shared.DISCLOSURE_JS)
+
     def test_both_widgets_use_it_and_keep_no_mechanism_of_their_own(self) -> None:
         self.assertIn("function fullscreenOrDisclosure(parent, text, build, onFullscreen) {",
                       apps_shared.DISCLOSURE_JS)
@@ -1468,6 +1531,7 @@ _NUMBERS_PROBE = r"""
       one: compactCount(1, "review"),
       many: compactCount(9950, "review"),
       months: ["2022-09-21", "2026-10-03T13:04:42Z", "2026-13-01", "", null, "Sep 2022"].map(monthYear),
+      days: ["2026-10-03T13:04:42Z", "2026-05-12", "2026-05", "2026-13-01", null].map(dayMonthYear),
     }));
   })();
 """
@@ -1505,10 +1569,12 @@ class NumberBehaviourTests(unittest.TestCase):
         self.assertEqual(self.numbers["one"], "1 review")
         self.assertEqual(self.numbers["many"], "10k reviews")
 
-    def test_month_year_is_the_one_date_label(self) -> None:
-        # the detail card's LAST row and the evaluation card's provenance,
-        # ledger and note-card captions all read "Sep 2022"; junk is null
+    def test_the_two_date_labels(self) -> None:
+        # monthYear: the detail card's LAST row ("Sep 2022"). dayMonthYear:
+        # the evaluation card's provenance, ledger and note-card captions
+        # keep the stored UTC day ("3 Oct 2026"). Junk is null in both.
         self.assertEqual(self.numbers["months"], ["Sep 2022", "Oct 2026", None, None, None, None])
+        self.assertEqual(self.numbers["days"], ["3 Oct 2026", "12 May 2026", None, None, None])
 
     def test_positive_pct_is_already_a_percentage(self) -> None:
         # stored 0-100 (tools/assessment.py's _check_range): 1 is 1%, never 100%
@@ -1567,10 +1633,23 @@ _BINDER_PROBE = r"""
     var clicks = [];
     var mini = miniCard({
       name: "Marvel's Spider-Man", cover_url: "https://images.igdb.com/igdb/image/upload/t_cover_big/x.jpg",
-      lines: [["9/10", "50h"], ["completed"], ["a third line"]], tier: "good",
+      lines: [["9/10", "50h"], ["completed"], ["2018", "PS5"], ["a fourth line"]], tier: "good",
       onClick: function () { clicks.push("tap"); },
     });
     out.mini = shape(mini);
+    // B3: the one line format, from the facts
+    function lineText(lines) {
+      return lines.map(function (l) { return l.map(function (p) {
+        return p && p.nodeType ? "pips:" + p.querySelectorAll(".on").length : p; }); });
+    }
+    out.miniLines = {
+      rated: lineText(miniLines({ rating: 9, hours: 50, status: "completed", year: 2018, platform: "ps5" })),
+      played: lineText(miniLines({ hours: 25.3 })),
+      unplayed: lineText(miniLines({ unplayed: true, hours: null, year: 2023 })),
+      zero: lineText(miniLines({ hours: 0 })),
+      unowned: lineText(miniLines({ owned: false, year: 2014 })),
+      nothing: lineText(miniLines({})),
+    };
     mini.querySelector("button").click();
     out.clicks = clicks;
     var plate = miniCard({ name: "Alt254", lines: [[null, "", pipsNode(1, 3, "ok")], []] });
@@ -1754,8 +1833,10 @@ class BinderComponentTests(unittest.TestCase):
         self.assertEqual(body["kids"][0], {"tag": "DIV", "cls": "mini-name", "text": "Marvel's Spider-Man",
                                            "kids": []})
         lines = [[(k["cls"], k["text"]) for k in line["kids"]] for line in body["kids"][1:]]
-        # two lines at most; figures in mono (.v), words plain; never a middot
-        self.assertEqual(lines, [[("v", "9/10"), ("v", "50h")], [("", "completed")]])
+        # three lines at most; figures in mono (.v), words plain; never a middot
+        self.assertEqual(lines, [[("v", "9/10"), ("v", "50h")], [("", "completed")],
+                                 [("v", "2018"), ("v", "PS5")]])
+
         self.assertEqual((hit["tag"], hit["cls"], hit["attrs"]),
                          ("BUTTON", "mini-hit", {"type": "button", "aria-label": "Marvel's Spider-Man"}))
         self.assertEqual(self.out["clicks"], ["tap"])
@@ -1768,6 +1849,30 @@ class BinderComponentTests(unittest.TestCase):
         self.assertEqual([[k["cls"] for k in line["kids"]] for line in plate["kids"][1]["kids"][1:]],
                          [["pips tier-ok"]])
         self.assertNotIn("·", apps_shared.MINI_JS)
+
+    def test_every_mini_reads_one_line_format(self) -> None:
+        # B3: pips when rated; then hours + where it stands; then year +
+        # short platform — the same for strips and lineage columns
+        lines = self.out["miniLines"]
+        self.assertEqual(lines["rated"], [["pips:9"], ["50h", "completed"], ["2018", "PS5"]])
+        self.assertEqual(lines["played"], [["25h", "played"]])
+        self.assertEqual(lines["unplayed"], [[None, "unplayed"], ["2023", None]])
+        self.assertEqual(lines["zero"], [[None, "unplayed"]])
+        self.assertEqual(lines["unowned"], [[None, "not owned"], ["2014", None]])
+        self.assertEqual(lines["nothing"], [])
+        # no widget hand-builds mini lines any more
+        for module in ("apps.py", "apps_eval.py"):
+            source = _WIDGET_SOURCES[module]
+            with self.subTest(module=module):
+                self.assertIn("lines: miniLines({", source)
+                self.assertNotIn("lines: [[", source)
+                for gone in ("function similarLines(", "function studioLines(", "function comparisonLines(",
+                             "function playedParts(", "function ratingPips("):
+                    self.assertNotIn(gone, source)
+        # the mini name clamps to two lines (an ellipsis) in every context
+        name_rule = css_rule(apps_shared.MINI_CSS, ".mini-name", exact=True)
+        self.assertIn("-webkit-line-clamp: 2;", name_rule)
+        self.assertIn("min-width: 0;", css_rule(apps_shared.MINI_CSS, ".mini-body", exact=True))
 
     def test_deal_in_staggers_and_caps_at_the_sixth(self) -> None:
         self.assertEqual([i for _, i in self.out["dealt"]], ["0", "1", "2", "3", "4", "5", "5", "5"])
@@ -1815,9 +1920,12 @@ class BinderComponentTests(unittest.TestCase):
     def test_reduced_motion_keeps_the_crossfades_and_nothing_else(self) -> None:
         css = apps_shared.MOTION_CSS
         reduce = _block(css, "@media (prefers-reduced-motion: reduce) {")
-        self.assertIn(".deal { animation: gl-fade-in 300ms ease-out backwards !important; }", reduce)
+        # M5 under reduced motion: ONE 240ms crossfade, leave and enter alike
+        self.assertIn(".deal { animation: gl-fade-in 240ms ease-out backwards !important; }", reduce)
         self.assertIn(".leaving { animation: gl-fade-out 240ms ease-out forwards !important; }", reduce)
-        self.assertEqual(reduce.count("animation"), 2)
+        # M2's set-line fade is opacity-only, so it survives too
+        self.assertIn(".fade-in { animation: gl-fade-in 200ms ease-out backwards !important; }", reduce)
+        self.assertEqual(reduce.count("animation"), 3)
 
     def test_motion_durations_are_the_table(self) -> None:
         inside = _block(apps_shared.MOTION_CSS, _MOTION_QUERY)
@@ -1850,6 +1958,34 @@ class BinderComponentTests(unittest.TestCase):
         self.assertNotIn(".deal .badge", inside)
         self.assertIn(".deal:not(.frame-s) .badge {", inside)
         self.assertIn(".sk { animation: skel-pulse 1600ms ease-in-out infinite; }", apps_shared.SKELETON_CSS)
+
+    def test_every_tappable_thing_presses(self) -> None:
+        # M3 (A5): card frames, buttons, the fullscreen and link pills, link
+        # chips and minis (the .mini-hit target; :active reaches the .mini
+        # ancestor) all press — the fallback dims, motion scales
+        css = apps_shared.MOTION_CSS
+        outside = css.split(_MOTION_QUERY, 1)[0]
+        self.assertIn("  button.frame:active, .btn:active, .fs-btn:active, .hero-pill:active, a.chip:active,\n"
+                      "  .mini:active { opacity: 0.8; }", outside)
+        inside = _block(css, _MOTION_QUERY)
+        self.assertIn("    button.frame, .btn, .fs-btn, .hero-pill, a.chip, .mini {\n"
+                      "      transition: transform 160ms ease-out, opacity 160ms ease-out;", inside)
+        self.assertIn("    button.frame:active, .btn:active, .fs-btn:active, .hero-pill:active, a.chip:active,\n"
+                      "    .mini:active {\n      transform: scale(0.985);", inside)
+
+    def test_no_dead_card_selectors(self) -> None:
+        # A6: every tappable card is a <button class="frame"> and every mini's
+        # target is its .mini-hit, so the a.frame / [role=button] / .mini a
+        # alternatives matched nothing and are gone
+        for name, block in shared_css_blocks():
+            with self.subTest(block=name):
+                self.assertNotIn("a.frame", block)
+                self.assertNotIn('.frame[role="button"]', block)
+                self.assertNotRegex(block, r"\.mini a\b")
+                self.assertNotIn(".mini button", block)
+                self.assertNotIn("sk-stamp", block)
+        self.assertIn('row.appendChild(sk("sk-ribbon"));', apps_shared.SKELETON_JS)
+        self.assertIn("  .sk-ribbon { flex: 0 0 96px; height: 40px; }", apps_shared.SKELETON_CSS)
 
     def test_will_change_only_on_the_hover_tilt(self) -> None:
         hover = _block(_block(apps_shared.MOTION_CSS, _MOTION_QUERY), _HOVER_QUERY)

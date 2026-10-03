@@ -259,7 +259,7 @@ class ContentTypeBadgeTests(unittest.TestCase):
 
     def test_detail_cover_plate_drops_the_duplicate_title(self) -> None:
         # The plate's title sits right under the art on the detail card, so
-        # stamping the name onto the art stand-in reads as a doubled title. The
+        # lettering the name onto the art stand-in reads as a doubled title. The
         # gradient stays; grid cards keep their lettering.
         self.assertIn(
             ".dt-card .cover-fallback { color: transparent; text-shadow: none; }",
@@ -269,19 +269,21 @@ class ContentTypeBadgeTests(unittest.TestCase):
     def test_detail_card_has_an_empty_state_with_the_skip_reasons(self) -> None:
         # A never-enriched row (an assessment-minted candidate) fills nothing
         # but the title; say so through the shared notice, and relay
-        # get_game_detail's `enrichment` {provider: reason} map in words
-        # ("IGDB: no match", "Steam: no app id"), never as raw ids.
+        # get_game_detail's `enrichment` {provider: reason} map in plain words
+        # — one sentence per notice, no em dash, never raw ids (B7; executed
+        # in DetailCardBehaviourTests).
         for marker in (
             'var emptyText = "No details fetched yet";',
             "var reasons = enrichmentReasons(game.enrichment);",
-            'return source + ": " + reason;',
-            'emptyText += " — " + reasons.join("; ");',
+            'if (reasons.length) emptyText += ": " + midSentence(enrichmentSentence(reasons));',
+            "noticeText = enrichmentSentence(reasons);",
             "noticeText = emptyText;",
             # bookkeeping reads last: just before the actions row
             "if (noticeText) flow.insertBefore(notice(flow, noticeText), actions);",
             'var ENRICH_SOURCES = { steam_store: "Steam", protondb: "ProtonDB", igdb: "IGDB" };',
-            'no_steam_appid: "no app id",',
-            'no_match: "no match",',
+            'no_steam_appid: "No Steam page for this game",',
+            'no_match: "No {src} match for this game",',
+            'var ENRICH_MISSING = { steam_store: "Steam reviews", protondb: "ProtonDB", igdb: "IGDB details" };',
         ):
             self.assertIn(marker, apps.GAME_CARDS_HTML)
         self.assertNotIn("empty-state", apps.GAME_CARDS_HTML)
@@ -323,28 +325,31 @@ class ContentTypeBadgeTests(unittest.TestCase):
             'var sec = eyebrowSection(parent, "In your library");',
             'var strip = el("div", "strip ministrip");',
             'tier: rating != null ? ratingTier(rating) : "none",',
-            # two lines of separate spans, never "9/10 · 50h"
-            'lines: [[rating != null ? rating + "/10" : null, hours != null && hours > 0 ? hoursLabel(hours) : null],',
-            'mini.title = "Shares: " + why.join(", ");',
+            # the shared mini format (B3/B4): pips, "50h" "played"/status,
+            # the year — separate spans, never "9/10 · 50h"
+            'lines: miniLines({ rating: rating, hours: item.playtime_hours, status: item.completion_status,',
+            "unplayed: item.unplayed, year: item.release_year, platform: item.platform }),",
+            'title: why.length ? "Shares: " + why.join(", ") : null,',
         ):
             self.assertIn(marker, strip)
 
     def test_similar_cards_carry_no_truncated_tag_line(self) -> None:
-        # Spec §1.5: a mini card is cover, name, year and ONE chip row. The
-        # 10px one-line "why" (shared tags, ellipsized) is gone; the shared
-        # tags survive only as the card's tooltip.
+        # Spec §1.5, then the Binder: a similar game is a mini card. The 10px
+        # one-line "why" (shared tags, ellipsized) is gone; the shared tags
+        # survive only as the mini's tooltip. The pre-Binder poster cards
+        # (similarNode / pedigreeNode, the .sim CSS, the You/Played/Critics
+        # sticker chips) were spliced in but never called, so they are gone.
+        self.assertIn('title: why.length ? "Shares: " + why.join(", ") : null,', apps.GAME_CARDS_HTML)
         for name, html in WIDGETS:
             with self.subTest(widget=name):
                 self.assertNotIn("sim-why", html)
-                self.assertIn('card.title = "Shares: " + why.join(", ");', html)
-        start = apps_shared.SIMILAR_NODE_JS.index("function similarTags(item)")
-        end = apps_shared.SIMILAR_NODE_JS.index("function similarNode(", start)
-        tags = apps_shared.SIMILAR_NODE_JS[start:end]
-        # "You 9/10", then "Played 132h" — or "Unplayed" when unrated: at most
-        # two chips, both the shared scoreChip (no .tag stickers any more).
-        self.assertIn("var you = youChip(item.my_rating);", tags)
-        self.assertIn("var unplayed = !you && !!item.unplayed;", tags)
-        self.assertIn("return chipRow([you, playedChip(item.playtime_hours, unplayed)]);", tags)
+                for gone in ("function similarNode(", "function similarTags(", "function pedigreeNode(",
+                             "function pedigreeBadges(", "function ownershipTags(", "function youChip(",
+                             "function playedChip(", "function criticsChip(", "  .sim {", ".ped-pub",
+                             ".ped-strip"):
+                    self.assertNotIn(gone, html)
+        for gone in ("SIMILAR_CSS", "SIMILAR_NODE_JS", "OWNERSHIP_TAGS_JS"):
+            self.assertFalse(hasattr(apps_shared, gone), gone)
         for name, html in WIDGETS:
             with self.subTest(widget=name):
                 self.assertNotIn('"tag rated"', html)
@@ -385,7 +390,7 @@ class ContentTypeBadgeTests(unittest.TestCase):
         for marker in (
             "var items = list(ped.previous_games).filter(function (i) { return i && i.name; }).slice(0, 8);",
             'var sec = eyebrowSection(parent, "From the studio");',
-            "lines: [[item.release_year ? String(item.release_year) : null, score],",
+            "lines: miniLines({ rating: rating, hours: item.owned ? item.playtime_hours : null,",
         ):
             self.assertIn(marker, strip)
         self.assertIn("studioStrip(flow, game.pedigree);", apps.GAME_CARDS_HTML)
@@ -399,14 +404,15 @@ class ContentTypeBadgeTests(unittest.TestCase):
             self.assertIn(marker, breakdown)
 
     def test_pedigree_badge_prefers_his_rating_over_the_critic_score(self) -> None:
-        # One score per studio mini: his own rating wins the slot (and the
-        # mini's tier), the critic score only stands in when he hasn't rated it.
+        # A studio mini reads the shared mini format (B3): his rating as pips
+        # when he owns and rated it (and the mini's tier), his hours, "not
+        # owned" for one he doesn't have, the year. The critic-score stand-in
+        # is gone with the other per-strip line formats.
         strip = js_function(apps.GAME_CARDS_HTML, "function studioStrip(parent, ped)")
         self.assertIn("var rating = item.owned ? num(item.my_rating) : null;", strip)
-        self.assertIn('var score = rating != null ? rating + "/10" : realScore(critic) ? "Critics " '
-                      "+ Math.round(critic) : null;", strip)
         self.assertIn('tier: rating != null ? ratingTier(rating) : "none",', strip)
-        self.assertIn('[item.owned ? "in your library" : null]', strip)
+        self.assertIn("owned: !!item.owned, year: item.release_year, platform: item.platform }),", strip)
+        self.assertNotIn("critic", strip)
 
     def test_the_damper_branch_renders_the_header_line_alone(self) -> None:
         # previous_games is empty under the big-studio damper: the eyebrow and
@@ -486,7 +492,9 @@ class ContentTypeBadgeTests(unittest.TestCase):
         self.assertNotIn("counter(rank)", css)
         self.assertNotIn("№", apps.GAME_CARDS_HTML)
         self.assertIn("font-family: var(--gl-mono);", apps_shared.PLATE_CSS.split(".card-no {", 1)[1].split("}", 1)[0])
-        self.assertIn(".gc-card .card-no { margin-left: auto; }", css)
+        # B1: one row — "No. N" never wraps alone; the others ellipsize first
+        self.assertIn(".gc-card .card-no { margin-left: auto; flex-shrink: 0; overflow: visible; }", css)
+        self.assertIn(".gc-card .plate .sub { gap: 4px 6px; flex-wrap: nowrap; }", css)
 
     def test_platform_ids_and_hours_render_through_the_shared_helpers(self) -> None:
         for marker in (
@@ -605,13 +613,15 @@ class GridModeTests(unittest.TestCase):
         frame = js_function(self.HTML, "function frameNode(tag, cls, tier)")
         self.assertIn("var grain = grainNode();", frame)
         self.assertIn("if (grain) frame.appendChild(grain);", frame)
-        # Matched tags: at most three gap-separated spans with a 4px diamond
+        # Matched tags: at most three gap-separated spans with a 6px diamond
         # bullet drawn by CSS — never a " · " join, never pills.
         self.assertIn("var why = matchedTagNames(game).slice(0, 3);", card)
         self.assertIn('why.forEach(function (t) { tags.appendChild(el("span", null, t)); });', card)
         css = widget_css(self.HTML)
         bullet = css.split("  .gc-tags > span::before {", 1)[1].split("}", 1)[0]
-        for decl in ("width: 4px;", "height: 4px;", "transform: rotate(45deg);"):
+        # B2: a 6px diamond in the muted text color (not fainter)
+        self.assertIn("background: var(--gl-muted);", bullet)
+        for decl in ("width: 6px;", "height: 6px;", "transform: rotate(45deg);"):
             self.assertIn(decl, bullet)
         self.assertNotIn('"pill"', self.HTML)
         self.assertNotIn(".pill {", css)
@@ -749,12 +759,17 @@ class GridModeTests(unittest.TestCase):
                       js_function(self.HTML, "function hostContextChanged(ctx)"))
 
     def test_cards_are_dealt_in_once_per_payload(self) -> None:
-        # M2: each card dealt 40ms apart (dealIn caps the stagger); a redraw of
-        # the same payload keeps them still; a skeleton resolves into the view
-        # (M5). No other motion is local.
+        # M2: the set line fades in first, then each card is dealt 40ms apart
+        # (dealIn caps the stagger); a redraw of the same PAGE — keyed on its
+        # offset and game ids, not the payload object — keeps them still
+        # (executed in GridReplayBehaviourTests); a skeleton resolves into the
+        # view (M5). No other motion is local.
         grid = js_function(self.HTML, "function renderGrid(data)")
-        self.assertIn("var fresh = dealtData !== data;", grid)
+        self.assertIn("var key = gridKey(data);", grid)
+        self.assertIn("var fresh = dealtKey !== key;", grid)
+        self.assertIn("if (fresh) fadeIn(head);", grid)
         self.assertIn("if (fresh) dealIn(card, i);", grid)
+        self.assertNotIn("dealtData", self.HTML)
         render = js_function(self.HTML, "function render(data)")
         self.assertIn("gcResolve(skel, node);", render)
         resolve = js_function(self.HTML, "function gcResolve(skel, node)")
@@ -1163,9 +1178,20 @@ _GRID_PROBE = _DOM_READERS + r"""
       actions: actions ? kids(actions).map(function (n) { return [n.className, n.textContent]; }) : null,
       text: page.textContent,
     };
+    out.headFades = q(page, ".grid-head").classList.contains("fade-in");
+    out.firstDeals = root.querySelectorAll(".deal").length;
     // a redraw of the same payload (Back, a late tool input) deals nothing
     render(PAYLOAD);
     out.redrawDeals = root.querySelectorAll(".deal").length;
+    // nor does the host re-delivering the same page as a new object
+    render(JSON.parse(JSON.stringify(PAYLOAD)));
+    out.copyDeals = root.querySelectorAll(".deal").length;
+    out.copyFades = root.querySelectorAll(".fade-in").length;
+    // the next page (a new offset) is a fresh deal
+    var next = JSON.parse(JSON.stringify(PAYLOAD));
+    next.offset = (typeof next.offset === "number" ? next.offset : 0) + next.results.length;
+    render(next);
+    out.nextDeals = root.querySelectorAll(".deal").length;
     console.log(JSON.stringify(out));
   })();
 """
@@ -1186,6 +1212,42 @@ _RESOLVE_PROBE = r"""
     console.log(JSON.stringify(out));
   })();
 """
+
+
+_ENRICH_PROBE = r"""
+  (function () {
+    function say(why) { return enrichmentSentence(enrichmentReasons(why)); }
+    console.log(JSON.stringify({
+      steam: say({ steam_store: "no_steam_appid", protondb: "no_steam_appid" }),
+      mixed: say({ steam_store: "no_steam_platform_row", protondb: "no_steam_platform_row", igdb: "unconfigured" }),
+      one: say({ protondb: "no_steam_appid" }),
+      igdb: say({ igdb: "no_match" }),
+      odd: say({ hltb: "rate_limited" }),
+    }));
+  })();
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class EnrichmentNoticeTests(unittest.TestCase):
+    """B7, executed: the skipped-provider map as one plain sentence."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from test_apps_shared import run_widget
+
+        cls.out = run_widget("game-cards", _ENRICH_PROBE)
+
+    def test_reasons_read_as_one_plain_sentence(self) -> None:
+        self.assertEqual(self.out["steam"],
+                         "No Steam page for this game, so Steam reviews and ProtonDB are unavailable")
+        self.assertEqual(self.out["mixed"],
+                         "Not owned on Steam, so Steam reviews and ProtonDB are unavailable; IGDB is not configured")
+        self.assertEqual(self.out["one"], "No Steam page for this game, so ProtonDB is unavailable")
+        self.assertEqual(self.out["igdb"], "No IGDB match for this game")
+        self.assertEqual(self.out["odd"], "HowLongToBeat: rate limited")
+        for text in self.out.values():
+            self.assertNotIn("\u2014", text)
 
 
 @unittest.skipUnless(NODE, "node is not installed")
@@ -1293,6 +1355,14 @@ class GridCardBehaviourTests(unittest.TestCase):
         self.assertTrue(all(c["deal"] for c in cards))
         self.assertEqual([c["i"] for c in cards], ["0", "1", "2", "3", "4", "5", "5", "5"])
         self.assertEqual(self.match["redrawDeals"], 0)
+        # A1: keyed on offset + game ids, not identity — rendering the same
+        # page twice is ONE deal; a new page deals again. M2: the set line
+        # fades in first, only on a fresh page.
+        self.assertEqual(self.match["firstDeals"], len(cards))
+        self.assertEqual(self.match["copyDeals"], 0)
+        self.assertEqual(self.match["copyFades"], 0)
+        self.assertTrue(self.match["headFades"])
+        self.assertEqual(self.match["nextDeals"], len(cards))
         # the grain is every frame's first child
         self.assertTrue(all(c["kids"][0] == "grain" for c in cards))
 
@@ -1462,17 +1532,20 @@ class DetailCardBehaviourTests(unittest.TestCase):
 
     def test_the_library_and_studio_strips(self) -> None:
         minis = self.out["ghost"]["minis"]
-        self.assertEqual(minis[0], ["mini tier-good", "Marvel's Spider-Man", ["9/10", "50h"]])
-        self.assertEqual(minis[2], ["mini tier-none", "Marvel's Spider-Man 2", ["25h"]])
-        self.assertEqual(minis[4][2], ["unplayed"])
+        # B3/B4: the shared mini format — pips when rated (a node, no text),
+        # then hours + status ("played" for hours with no status, "unplayed"
+        # when the payload says so), then the year
+        self.assertEqual(minis[0], ["mini tier-good", "Marvel's Spider-Man", [""], ["50h", "played"], ["2018"]])
+        self.assertEqual(minis[2], ["mini tier-none", "Marvel's Spider-Man 2", ["25h", "played"], ["2023"]])
+        self.assertEqual(minis[4][2:], [["unplayed"], ["2023"]])
         self.assertEqual(self.out["ghost"]["notices"], [
             "No earlier games picked: Sucker Punch Productions has 30+ games on IGDB",
-            "Not fetched — Steam: no app id; ProtonDB: no app id",
+            "No Steam page for this game, so Steam reviews and ProtonDB are unavailable",
         ])
 
     def test_actions_and_the_empty_state(self) -> None:
         self.assertEqual(self.out["ghost"]["actions"][0][1], "Full breakdown▾")
-        self.assertEqual(self.out["bare"]["notices"], ["No details fetched yet — IGDB: no match"])
+        self.assertEqual(self.out["bare"]["notices"], ["No details fetched yet: no IGDB match for this game"])
         for key in ("ghost", "unrated", "unknown", "bare"):
             with self.subTest(card=key):
                 self.assertNotIn("·", self.out[key]["text"])
@@ -1912,12 +1985,13 @@ class SharedComponentTests(unittest.TestCase):
         # Spec item 3: similar / studio / lineage / anchors read their numbers
         # through scoreChip — "You 9/10", "Critics 84", "Played 132h",
         # "Unplayed", "Status Completed" — at most three per card.
+        # The small cards are minis now (MINI_JS): no "You 9/10" / "Played
+        # 132h" / "Critics 84" sticker chips are left; the status words and
+        # chipRow remain for the detail card's own chip row.
         js = apps_shared.SCORE_CHIP_JS
+        for gone in ('label: "You"', 'label: "Critics"', 'label: "Played"', 'label: "Unplayed"'):
+            self.assertNotIn(gone, js)
         for marker in (
-            'scoreChip({ label: "You", value: n + "/10", tier: ratingTier(n), title: "Your rating" })',
-            'scoreChip({ label: "Critics", value: Math.round(n), tier: mcTier(n), title: "Critic score" })',
-            'scoreChip({ label: "Played", value: hoursLabel(n), title: "Your playtime" })',
-            'scoreChip({ label: "Unplayed", title: "In your library, never played" })',
             'completed: ["Completed", "good"],',
             'evergreen: ["Evergreen", "good"],',
             'abandoned: ["Abandoned", "bad"],',
@@ -1925,9 +1999,6 @@ class SharedComponentTests(unittest.TestCase):
             "chips.filter(Boolean).slice(0, 3).forEach(",
         ):
             self.assertIn(marker, js)
-        own = apps_shared.OWNERSHIP_TAGS_JS
-        self.assertIn("var chips = [youChip(item.my_rating), playedChip(hours, unplayed)];", own)
-        self.assertIn("var unplayed = !!item.unplayed || (!!item.owned && hours === 0);", own)
         self.assertIn(".tags .chip { padding: 1px 6px;", apps_shared.TAG_CSS)
         self.assertIn("html.touch .tags .chip { min-height: 0; }", apps_shared.TAG_CSS)
 
@@ -1980,9 +2051,9 @@ class SharedComponentTests(unittest.TestCase):
         grid = js[start:js.index("return wrap;", start)]
         order = ['sk("sk-cover")', 'sk("sk-line")', 'sk("sk-bar")', "chips(body, 2);"]
         self.assertEqual([grid.index(m) for m in order], sorted(grid.index(m) for m in order))
-        # eval: header (cover, title, stamp), score chips, the facts row, the
+        # eval: header (cover, title, ribbon), score chips, the facts row, the
         # pitch's two lines; both shapes end on the media stage
-        for marker in ('row.appendChild(sk("sk-stamp"));', 'chips(panel, 3, "sk-facts");',
+        for marker in ('row.appendChild(sk("sk-ribbon"));', 'chips(panel, 3, "sk-facts");',
                        "lines(pitch, 2);", 'row.appendChild(sk("sk-media"));', "mediaBlock(wrap);",
                        # thumbs: the 3x3 grid beside the stage on a wide eval card, else a strip
                        'for (var t = 0; t < (kind === "eval" ? 9 : 6); t++) thumbs.appendChild(sk("sk-shot"));'):
@@ -2039,7 +2110,7 @@ class SharedComponentTests(unittest.TestCase):
         js = apps_shared.DISCLOSURE_JS
         for marker in (
             'btn.setAttribute("aria-expanded", "false");',
-            "if (open && !built) { built = true; buildFn(body); }",
+            "if (open && !built) { built = true; buildFn(inner); }",
             'btn.setAttribute("aria-expanded", open ? "true" : "false");',
             "reportSize();",
         ):

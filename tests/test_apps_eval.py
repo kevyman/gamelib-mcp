@@ -169,7 +169,7 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
         self.assertIn(': "none";', html[html.index("function verdictTier("):])
 
     def test_the_verdict_is_a_straddling_ribbon(self) -> None:
-        # The stamp is gone; the verdict is the shared ribbon, straddling the
+        # The old rotated badge is gone (guarded below); the verdict is the shared ribbon, straddling the
         # inline card, its ink the theme-invariant ribbon token, its ends the
         # shared notched clip-path, nothing rotated.
         html = apps_eval.EVAL_CARD_HTML
@@ -204,11 +204,11 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
         render = render[:render.index("\n  }\n")]
         order = [
             "if (data && data.package) {",
-            "place(evalCard(data.package, data));",
+            'place(evalCard(data.package, data), renderKey(data, "package"));',
             "} else if (data && data.voided) {",
-            "place(voidCard(data));",
+            'place(voidCard(data), renderKey(data, "voided"));',
             "} else if (data && data.verdict) {",
-            "place(recordedCard(data));",
+            'place(recordedCard(data), renderKey(data, "recorded"));',
             '"Nothing to display."',
         ]
         positions = [render.index(marker) for marker in order]
@@ -259,11 +259,13 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
             '" — avg " + avg + "/10."',
         ):
             self.assertIn(marker, studio)
-        # his rating as pips outranks the critic score, which only stands in
-        # for a game he doesn't own
-        lines = EvalCardLayoutTests._function("studioLines", "studioNode")
-        self.assertIn("var rating = item.owned ? num(item.my_rating) : null;", lines)
-        self.assertIn('[realScore(critic) ? "critics " + Math.round(critic) : null]', lines)
+        # the shared mini format (B3): his rating as pips and his hours only
+        # for a game he owns, "not owned" otherwise, then the year; the
+        # critic-score stand-in went with the per-strip formats
+        self.assertIn("lines: miniLines({ rating: item.owned ? item.my_rating : null, "
+                      "hours: item.owned ? item.playtime_hours : null,", studio)
+        self.assertIn("owned: !!item.owned, year: item.release_year, platform: item.platform }) };", studio)
+        self.assertNotIn("critic", studio)
 
     def test_why_care_renders_an_ability_per_kind(self) -> None:
         # The eval card is the only one that renders why_care (it is authored
@@ -290,16 +292,15 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
 
     def test_anchors_are_minis_with_his_rating_as_pips(self) -> None:
         # GROUNDED IN YOUR HISTORY: a mini per anchor, tiered by his rating
-        # (none when unrated), ten pips, then hours and how it ended.
-        anchors = EvalCardLayoutTests._function("anchorsNode", "comparisonLines")
+        # (none when unrated), the shared mini format: ten small pips, then
+        # hours and how it ended ("50h" "completed").
+        anchors = EvalCardLayoutTests._function("anchorsNode", "lineageNode")
         self.assertIn('eyebrowSection(parent, "Grounded in your history")', anchors)
         self.assertIn("tier: ratedTier(a.rating),", anchors)
-        self.assertIn(
-            'lines: [[ratingPips(a.rating) || "unrated"], playedParts(a.playtime_hours, a.completion_status)]',
-            anchors,
-        )
-        self.assertIn("return n == null ? null : pipsNode(n, 10, ratingTier(n));",
-                      EvalCardLayoutTests._function("ratingPips", "playedParts"))
+        self.assertIn("lines: miniLines({ rating: a.rating, hours: a.playtime_hours, status: a.completion_status,",
+                      anchors)
+        self.assertIn("if (rating != null) lines.push([pipsNode(rating, 10, ratingTier(rating))]);",
+                      apps_shared.MINI_JS)
         for gone in ("an-state", "an-good", "an-bad", "an-warn", "COMPLETION", "anchor-cover"):
             self.assertNotIn(gone, apps_eval.EVAL_CARD_HTML)
 
@@ -457,9 +458,10 @@ class EvalCardLayoutTests(unittest.TestCase):
         self.assertIn('traitsNode("For you if", "good", "plus", yes)', you)
         self.assertIn('traitsNode("Not for you if", "bad", "minus", no)', you)
         self.assertIn('if (pair.childNodes.length === 1) pair.classList.add("ev-one");', you)
-        lineage = self._function("lineageNode", "studioLines")
+        lineage = self._function("lineageNode", "studioNode")
         self.assertIn('eyebrowSection(parent, "Lineage").appendChild(pair);', lineage)
-        self.assertIn("miniCard({ name: c.name, tier: ratedTier(c.my_rating), lines: comparisonLines(c) })", lineage)
+        # the lineage minis read the same line format as every strip (B3)
+        self.assertIn("lines: miniLines({ rating: c.my_rating, hours: c.playtime_hours, owned: c.owned,", lineage)
         self.assertIn('if (c.note) item.appendChild(el("p", "ev-note", String(c.note)));', lineage)
         html = apps_eval.EVAL_CARD_HTML
         for relation, head in (("ancestor", "Ancestors"), ("descendant", "Descendants"),
@@ -476,7 +478,7 @@ class EvalCardLayoutTests(unittest.TestCase):
             'el("table", "ev-past")',
             '["Date", "Verdict", "Price"]',
             'th.setAttribute("scope", "col");',
-            'tr.appendChild(el("td", null, monthYear(p.assessed_at) || "earlier"));',
+            'tr.appendChild(el("td", null, dayMonthYear(p.assessed_at) || "earlier"));',
             'ribbonNode(label("verdict", p.verdict), verdictTier(p.verdict), null, "s")',
             "var seen = money(p.price_seen, p.price_currency);",
             'eyebrowSection(parent, "Past verdicts")',
@@ -628,7 +630,7 @@ class EvalCardLayoutTests(unittest.TestCase):
         self.assertIn('"Published by " + ped.publisher_name', prov)
         self.assertIn('"assessed " + when', prov)
         # the shared month-year date (NUMBERS_JS), no local date helper
-        self.assertIn("var when = monthYear(data.assessed_at);", prov)
+        self.assertIn("var when = dayMonthYear(data.assessed_at);", prov)
         self.assertNotIn("function dateLabel(", apps_eval.EVAL_CARD_HTML)
 
     def test_the_craft_note_is_flavor_text_after_the_abilities(self) -> None:
@@ -695,15 +697,17 @@ class EvalCardLayoutTests(unittest.TestCase):
         self.assertIn("} catch (e) {\n        btn.remove();", apps_eval.EVAL_CARD_HTML)
 
     def test_the_library_strip_is_minis_of_owned_neighbours(self) -> None:
-        # IN YOUR LIBRARY is the tag-similarity row as mini cards (≤8): year
-        # and his rating or hours, then "48% similar" and the shared tags.
-        library = self._function("libraryNode", "ratingPips")
+        # IN YOUR LIBRARY is the tag-similarity row as mini cards (≤8) in the
+        # shared mini format (pips, hours + status, year); how alike it is
+        # and why ("48% similar; shares stealth, drama") is the hover text.
+        library = self._function("libraryNode", "errorItem")
         self.assertIn('el("div", "section-title", "In your library")', library)
         self.assertIn("tier: ratedTier(item.my_rating),", library)
-        lines = self._function("similarLines", "ministrip")
-        self.assertIn('el("span", "v", Math.round(sim * 100) + "%")', lines)
-        self.assertIn('el("span", null, " similar")', lines)
-        self.assertIn('if (why.length) second.push(why.join(", "));', lines)
+        self.assertIn("title: similarTitle(item),", library)
+        title = self._function("similarTitle", "ministrip")
+        self.assertIn('if (sim != null) parts.push(Math.round(sim * 100) + "% similar");', title)
+        self.assertIn('if (why.length) parts.push("shares " + why.join(", "));', title)
+        self.assertIn('return parts.length ? parts.join("; ") : null;', title)
         # model-authored "similar" comparisons stay in the lineage, apart
         self.assertIn('["similar", "Similar"],', apps_eval.EVAL_CARD_HTML)
         self.assertNotIn("foldSimilar", apps_eval.EVAL_CARD_HTML)
@@ -720,7 +724,7 @@ class EvalCardLayoutTests(unittest.TestCase):
                       self._function("studioNode", "pastNode"))
 
     def test_nothing_tilts(self) -> None:
-        # The toybox tilt and the -3deg stamp are gone: the only rotations are
+        # The toybox tilt and the old -3deg verdict badge are gone: the only rotations are
         # the shared deal-in, pip and chevron ones (tests/test_apps.py
         # DesignSystemTests pins the whole CSS).
         for gone in (
@@ -1082,7 +1086,7 @@ _RENDER_PROBE = r"""
     out.actions = q(card, ".actions").children.filter(function (c) { return c.tagName === "BUTTON"; }).map(txt);
     var toggle = q(card, ".act-breakdown");
     toggle.click();
-    var bd = q(card, ".disclosure-body");
+    var bd = q(card, ".disclosure-inner");
     out.breakdown = bd.children.map(function (c) {
       var t = q(c, ".section-title");
       return t ? txt(t) : c.className;
@@ -1093,9 +1097,17 @@ _RENDER_PROBE = r"""
       return tr.children.map(function (td) { return td.textContent; });
     });
     out.ledgerRibbon = q(q(bd, ".ev-past"), ".ribbon").className;
+    out.firstDeals = root.querySelectorAll(".deal").length;
+    // A1: the host re-delivering the same result (a new object) redraws the
+    // card still — one deal per payload, keyed on what the card is
+    host({ jsonrpc: "2.0", method: "ui/notifications/tool-result",
+           params: { structuredContent: JSON.parse(JSON.stringify(PACKAGE)) } });
+    out.redeliveredDeals = root.querySelectorAll(".deal").length;
+    out.redeliveredFrame = q(root, ".frame") ? q(root, ".frame").className : null;
     host({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: {
       verdict: "play_what_you_own", name: "Slay the Spire II", assessed_at: "2026-10-03T08:40:00Z" } } });
     var note = q(root, ".frame");
+    out.noteSub = q(note, ".sub") ? true : false;
     out.note = [note.className, txt(q(note, ".plate-title-s")), txt(q(note, ".ribbon")),
                 q(note, ".ribbon").className, txt(q(root, ".ev-nc-cap")), note.classList.contains("deal")];
     host({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: {
@@ -1103,6 +1115,10 @@ _RENDER_PROBE = r"""
       assessed_at: "2026-10-03T13:04:42Z" } } });
     var gone = q(root, ".frame");
     out.voided = [gone.className, txt(q(gone, ".ribbon")), q(gone, ".ribbon").className, txt(q(root, ".ev-nc-cap"))];
+    render({ verdict: "buy_now", name: "Hades II", assessed_at: "2026-10-03T08:40:00Z",
+             playtime_hours: 12.5, platform: "epic" });
+    var rich = q(root, ".sub");
+    out.richSub = rich ? rich.children.map(function (s) { return [s.className, txt(s)]; }) : null;
     console.log(JSON.stringify(out));
   })();
 """
@@ -1125,6 +1141,33 @@ class EvalCardRenderTests(unittest.TestCase):
         # only the frame is dealt; the ground's text is in place at t=0
         self.assertFalse(self.out["wrapDealt"])
         self.assertIn("deal", self.out["frame"]["cls"].split())
+
+    def test_note_cards_show_only_the_sub_spans_the_response_carries(self) -> None:
+        # B9: hours played and a short platform lozenge under the title when
+        # present; today's record / void responses carry neither, so no line
+        self.assertFalse(self.out["noteSub"])
+        self.assertEqual(self.out["richSub"], [["v", "13h"], ["", "played"], ["loz", "Epic"]])
+
+    def test_the_straddling_ribbon_sits_on_the_frame_edge_clear_of_content(self) -> None:
+        # B5: the ribbon (40px) is centred on the frame's outer bottom edge —
+        # bottom: -(20px + frame) from the padding box — so it overlaps that
+        # edge the same way on every sample, and the card's 28px bottom
+        # padding keeps the last stat / chip row 14px clear of its top.
+        # Measured in headless Chromium for samples 0 and 5 at 360 and 760:
+        # ribbon mid == frame bottom, content ends 14px above the ribbon.
+        straddle = css_rule(apps_shared.RIBBON_CSS, ".ribbon-straddle")
+        self.assertIn("bottom: calc(-20px - var(--gl-frame));", straddle)
+        self.assertIn("height: 40px;", css_rule(apps_shared.RIBBON_CSS, ".ribbon"))
+        card = css_rule(widget_css(apps_eval.EVAL_CARD_HTML), ".ev-card")
+        self.assertIn("padding-bottom: 28px;", card)
+
+    def test_a_redelivered_result_does_not_replay_the_deal(self) -> None:
+        # A1: same game + assessment + verdict + kind → the redraw is still;
+        # the next, different response (the note card) deals again
+        self.assertEqual(self.out["firstDeals"], 1)
+        self.assertEqual(self.out["redeliveredDeals"], 0)
+        self.assertNotIn("deal", self.out["redeliveredFrame"].split())
+        self.assertTrue(self.out["note"][5])
 
     def test_the_frame_is_tiered_by_the_verdict_and_grained(self) -> None:
         frame = self.out["frame"]
@@ -1168,7 +1211,7 @@ class EvalCardRenderTests(unittest.TestCase):
         self.assertEqual(self.out["wrap"], ["ev-top", "ev-lib", "actions", "ev-prov", "disclosure-body ev-bd"])
         self.assertEqual(self.out["library"], ["MGS3"])
         self.assertEqual(self.out["prov"], ["Published by Sony Interactive Entertainment",
-                                            "assessed Oct 2026"])
+                                            "assessed 3 Oct 2026"])
         self.assertEqual(self.out["actions"], ["Full breakdown▾"])
 
     def test_the_breakdown_sections(self) -> None:
@@ -1177,21 +1220,21 @@ class EvalCardRenderTests(unittest.TestCase):
         ])
         self.assertEqual(self.out["traitHeads"], ["For you if", "Not for you if"])
         self.assertEqual(self.out["anchorPips"], 9)
-        self.assertEqual(self.out["ledger"], [["May 2026", "Skip", "seen€79.99"]])
+        self.assertEqual(self.out["ledger"], [["12 May 2026", "Skip", "seen€79.99"]])
         self.assertEqual(self.out["ledgerRibbon"].split(), ["ribbon", "ribbon-s", "tier-bad"])
 
     def test_note_cards(self) -> None:
         cls, name, ribbon, ribbon_cls, caption, dealt = self.out["note"]
         self.assertEqual(cls.split()[:4], ["frame", "frame-s", "ev-nc", "tier-good"])
         self.assertEqual((name, ribbon, caption), ("Slay the Spire II", "Play what you own",
-                                                   "Recorded Oct 2026"))
+                                                   "Recorded 3 Oct 2026"))
         self.assertEqual(ribbon_cls.split(), ["ribbon", "ribbon-s", "tier-good"])
         self.assertTrue(dealt)
         cls, ribbon, ribbon_cls, caption = self.out["voided"]
         self.assertEqual(cls.split()[:5], ["frame", "frame-s", "ev-nc", "ev-void", "tier-none"])
         self.assertEqual(ribbon, "Voided")
         self.assertIn("tier-none", ribbon_cls)
-        self.assertEqual(caption, "Verdict No. 046 of Oct 2026 voided")
+        self.assertEqual(caption, "Verdict No. 046 of 3 Oct 2026 voided")
 
 
 class SharedBlockTests(unittest.TestCase):
