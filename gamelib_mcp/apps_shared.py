@@ -29,6 +29,7 @@ nothing renders below 12px.
 import json
 
 from .platforms_registry import PLATFORMS
+from .tools.acquisition import PURCHASE_SOURCES
 
 # ---- Labels (generated) -----------------------------------------------------
 # Every platform field on the wire (suggested_platform, platforms[].platform,
@@ -78,6 +79,40 @@ VERDICT_LABELS: dict[str, str] = {
     "play_what_you_own": "Play what you own",
 }
 
+# ownership.purchase_source is tools/acquisition.py's closed PURCHASE_SOURCES
+# vocabulary. The card reads it as "paid €12.00 via <label>", so the labels
+# are phrased to follow "via"; tests/test_apps.py::LabelTests fails when a
+# vocabulary value has no explicit entry (unknown ones would humanize).
+_PURCHASE_SOURCE_DISPLAY: dict[str, str] = {
+    "steam": "Steam",
+    "gog": "GOG",
+    "epic": "Epic Games Store",
+    "eshop": "Nintendo eShop",
+    "psn": "PlayStation Store",
+    "xbox": "Xbox Store",
+    "humble": "Humble",
+    "fanatical": "Fanatical",
+    "itchio": "itch.io",
+    "ea": "EA app",
+    "ubisoft": "Ubisoft Store",
+    "key_reseller": "a key reseller",
+    "physical": "a physical copy",
+    "gift": "a gift",
+    "free": "a free giveaway",
+    "subscription": "a subscription",
+    "other": "another store",
+}
+
+
+def _purchase_source_labels() -> dict[str, str]:
+    return {
+        source: _PURCHASE_SOURCE_DISPLAY.get(source, _humanize(source))
+        for source in sorted(PURCHASE_SOURCES)
+    }
+
+
+PURCHASE_SOURCE_LABELS: dict[str, str] = _purchase_source_labels()
+
 # Provider prefixes as they appear in error strings and enrichment reasons.
 PROVIDER_LABELS: dict[str, str] = {
     "steam": "Steam",
@@ -94,8 +129,10 @@ PROVIDER_LABELS: dict[str, str] = {
 
 # ---- Design tokens, reset, accessibility ------------------------------------
 # The ONE place a color/radius/shadow/font value is written. Widget CSS uses
-# the --gl-* names only. The stage/scrim values are the media-viewer black,
-# which stays black in both schemes.
+# the --gl-* names only. Raw color values appear in exactly three places:
+# this block, the verdict stamp rule (apps_eval.py, built from tokens) and the
+# cover plate (its gradient is generated per name in coverNode; its ink is the
+# --gl-plate-* tokens below). tests/test_apps.py::DesignSystemTests pins that.
 TOKENS_CSS = r"""  :root {
     color-scheme: light dark;
     --gl-text: var(--color-text-primary, light-dark(#141413, #FAF9F5));
@@ -116,14 +153,23 @@ TOKENS_CSS = r"""  :root {
     --gl-bad-edge: var(--color-border-danger, light-dark(#A73D39, #CD5C58));
     --gl-inverse-bg: var(--color-background-inverse, light-dark(#141413, #FAF9F5));
     --gl-inverse-text: var(--color-text-inverse, light-dark(#FFFFFF, #141413));
+    /* Theming exception — the media stage. A media stage is dark in both
+       themes by design — it frames video and screenshots — so the stage, its
+       veil and scrim, the type on it and the glyph shadow never follow the
+       host theme. (The other two exceptions: the verdict stamp, and the cover
+       plate's ink below.) The plain --gl-shadow-ink value is the fallback;
+       @supports below derives it from --gl-stage. */
     --gl-stage: #0d0b07;
     --gl-stage-veil: rgba(12, 10, 6, 0.32);
     --gl-scrim: rgba(12, 10, 6, 0.5);
     --gl-on-stage: #ffffff;
     --gl-on-stage-dim: rgba(255, 255, 255, 0.78);
-    /* Glyph shadow on the stage veil (always dark, both schemes). The plain
-       value is the fallback; @supports below derives it from --gl-stage. */
     --gl-shadow-ink: rgba(13, 11, 7, 0.5);
+    /* Cover-plate ink: the lettering on the name-seeded gradient plate that
+       stands in for missing art. The plate is generated art, not a themed
+       surface, so its ink is white with a soft shadow in both themes. */
+    --gl-plate-ink: rgba(255, 255, 255, 0.92);
+    --gl-plate-shadow: rgba(0, 0, 0, 0.35);
     --gl-r-xs: var(--border-radius-xs, 4px);
     --gl-r-sm: var(--border-radius-sm, 6px);
     --gl-r-md: var(--border-radius-md, 8px);
@@ -133,13 +179,11 @@ TOKENS_CSS = r"""  :root {
     --gl-shadow: var(--shadow-sm, 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1));
     --gl-shadow-md: var(--shadow-md, 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1));
     --gl-font: var(--font-sans, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-    /* Clamped: a host token below 12px never shrinks the type under the
-       floor ("nothing renders below 12px"). */
-    --gl-title: max(12px, var(--font-heading-lg-size, 20px));
+    /* Exactly three sizes (16 / 14 / 12px). Clamped: a host token below 12px
+       never shrinks the type under the floor ("nothing renders below 12px"). */
     --gl-h: max(12px, var(--font-heading-md-size, 16px));
     --gl-body: max(12px, var(--font-text-sm-size, 14px));
     --gl-cap: max(12px, var(--font-text-xs-size, 12px));
-    --gl-title-lh: var(--font-heading-lg-line-height, 1.25);
     --gl-h-lh: var(--font-heading-md-line-height, 1.4);
     --gl-body-lh: var(--font-text-sm-line-height, 1.4);
     --gl-cap-lh: var(--font-text-xs-line-height, 1.4);
@@ -174,7 +218,9 @@ RESET_CSS = r"""  * { box-sizing: border-box; margin: 0; padding: 0; }
   button { font: inherit; color: inherit; }
 """
 
-# Focus rings, hit areas and reduced motion.
+# Focus rings, hit areas and reduced motion. The ring is the text color: a
+# solid ring well past 3:1 against the surface in either theme (the 0.4-alpha
+# border token was not).
 #
 # Hit-area rule: every interactive element carries an invisible ::after that
 # extends its tap target past its visual box — >=32px on pointer devices, >=44px
@@ -188,7 +234,7 @@ RESET_CSS = r"""  * { box-sizing: border-box; margin: 0; padding: 0; }
 # .disclosure and role=button cards are made relative here. A role=button card
 # can hold link chips, so its extension sits BEHIND its children (z-index -1
 # inside the card's own stacking context) and never steals their taps.
-A11Y_CSS = r"""  :focus-visible { outline: 2px solid var(--gl-border-strong); outline-offset: 2px; }
+A11Y_CSS = r"""  :focus-visible { outline: 2px solid var(--gl-text); outline-offset: 2px; }
   :focus:not(:focus-visible) { outline: none; }
   .card[role="button"] { position: relative; z-index: 0; }
   a.chip::after, .btn::after, .disclosure::after, .thumb::after, .fs-btn::after,
@@ -325,10 +371,13 @@ MATCH_BAR_CSS = r"""  .match { display: flex; flex-direction: column; gap: 4px; 
   .match .fill { display: block; height: 100%; background: var(--gl-inverse-bg); }
 """
 
-# Loading placeholders in each widget's shape; the pulse only runs when the
-# viewer allows motion.
+# Loading placeholders drawn in the real layouts' shapes (grid, evaluation
+# card, detail card); the pulse only runs when the viewer allows motion.
 SKELETON_CSS = r"""  .skel { display: flex; flex-direction: column; gap: 12px; max-width: 760px; }
-  .skel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(142px, 1fr)); gap: 12px; max-width: none; }
+  .skel-grid { max-width: none; gap: 10px; }
+  .skel-eval { margin: 0 auto; width: 100%; }
+  .skel-detail { max-width: 720px; }
+  .sk-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(142px, 1fr)); gap: 12px; }
   .sk-card, .sk-panel {
     background: var(--gl-surface);
     border: var(--gl-bw) solid var(--gl-border);
@@ -339,19 +388,36 @@ SKELETON_CSS = r"""  .skel { display: flex; flex-direction: column; gap: 12px; m
     flex-direction: column;
     gap: 8px;
   }
-  .sk-card { padding-bottom: 12px; }
-  .sk-card .sk-line { margin: 0 12px; }
+  .sk-body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
   .sk-panel { padding: 14px; }
   .sk-row { display: flex; gap: 14px; align-items: flex-start; }
-  .sk-col { flex: 1; display: flex; flex-direction: column; gap: 8px; padding-top: 4px; }
+  .sk-col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; padding-top: 4px; }
   .sk { background: var(--gl-inset); border-radius: var(--gl-r-sm); }
   .sk-cover { aspect-ratio: 2 / 3; border-radius: 0; }
   .sk-thumb { flex: 0 0 84px; aspect-ratio: 2 / 3; }
+  .skel-detail .sk-thumb { flex-basis: 120px; }
+  .sk-head { height: 12px; width: 60%; max-width: 340px; }
   .sk-line { height: 12px; }
   .sk-line.short { width: 55%; }
   .sk-line.wide { height: 16px; width: 70%; }
-  .sk-chips { display: flex; gap: 6px; }
+  .sk-bar { height: 4px; border-radius: var(--gl-r-full); }
+  .sk-chips { display: flex; gap: 6px; flex-wrap: wrap; }
   .sk-chip { width: 76px; height: 22px; }
+  .sk-card .sk-chip { width: 64px; }
+  .sk-stamp { flex: 0 0 96px; height: 40px; border-radius: var(--gl-r-md); }
+  .sk-facts { margin-top: 12px; padding-top: 12px; border-top: var(--gl-bw) solid var(--gl-border); }
+  .sk-media { aspect-ratio: 16 / 9; border-radius: var(--gl-r-md); }
+  .sk-media-row { display: flex; flex-direction: column; gap: 10px; }
+  .sk-thumbs { display: flex; gap: 10px; overflow: hidden; }
+  .sk-shot { flex: none; width: 116px; height: 66px; }
+  @media (min-width: 600px) {
+    .skel-eval .sk-media-row { display: grid; grid-template-columns: minmax(0, 1fr) 296px; }
+    .skel-eval .sk-thumbs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; align-content: start; }
+    .skel-eval .sk-shot { width: auto; height: auto; aspect-ratio: 16 / 9; }
+  }
+  @media (max-width: 559px) {
+    .skel-detail .sk-thumb { flex-basis: 84px; }
+  }
   @media (prefers-reduced-motion: no-preference) {
     .sk { animation: gl-pulse 1.6s ease-in-out infinite; }
   }
@@ -434,7 +500,7 @@ HERO_CSS = r"""  .hero {
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: var(--gl-title);
+    font-size: var(--gl-h);
     padding-left: 4px;
     transition: transform 0.12s ease;
   }
@@ -584,23 +650,13 @@ SIMILAR_CSS = r"""  .sim {
   .sim-year { font-size: var(--gl-cap); line-height: var(--gl-cap-lh); color: var(--gl-muted); font-variant-numeric: tabular-nums; }
 """
 
-# Small neutral stickers (owned / unplayed / a rating / hours). Not scores, so
-# no tier color: his own rating is the one emphasised (weight, not hue).
-TAG_CSS = r"""  .tags { display: flex; gap: 4px; flex-wrap: wrap; }
-  .tag {
-    font-size: var(--gl-cap);
-    line-height: var(--gl-cap-lh);
-    padding: 0 6px;
-    border-radius: var(--gl-r-xs);
-    border: var(--gl-bw) solid var(--gl-border);
-    background: var(--gl-inset);
-    color: var(--gl-text-2);
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-  }
-  .tag.owned, .tag.rated { color: var(--gl-text); }
-  .tag.rated { font-weight: var(--gl-strong); }
-  .tag.critic, .tag.unplayed { color: var(--gl-muted); }
+# The chip row on a small card (similar, studio, lineage, anchors): the same
+# scoreChip as every other score ("You 9/10", "Critics 84", "Played 132h",
+# "Status Completed"), just tighter — at most three per card. These chips are
+# not links, so the touch rule that grows tappable chips to 32px is undone.
+TAG_CSS = r"""  .tags, html.touch .tags { gap: 4px; }
+  .tags .chip { padding: 1px 6px; column-gap: 4px; font-variant-numeric: tabular-nums; }
+  html.touch .tags .chip { min-height: 0; }
 """
 
 # "From the studio" header and publisher lines.
@@ -719,11 +775,24 @@ BRIDGE_JS = r"""(function () {
   /* ---------- MCP Apps bridge (spec 2026-01-26, hand-rolled) ---------- */
   var nextId = 1;
   var pending = {};
+  var REQUEST_TIMEOUT_MS = 30000;
   function post(msg) { window.parent.postMessage(msg, "*"); }
-  function request(method, params) {
+  /* Resolves the host's result, or undefined on an error answer or when no
+     answer comes within timeoutMs (default 30s) — the pending entry is
+     deleted either way, so an unanswered request never leaks. Callers that
+     race their own shorter timer keep working: the loser is just ignored. */
+  function request(method, params, timeoutMs) {
     return new Promise(function (resolve) {
       var id = nextId++;
-      pending[id] = resolve;
+      var timer = setTimeout(function () {
+        if (!pending[id]) return;
+        delete pending[id];
+        resolve(undefined);
+      }, timeoutMs || REQUEST_TIMEOUT_MS);
+      pending[id] = function (result) {
+        clearTimeout(timer);
+        resolve(result);
+      };
       post({ jsonrpc: "2.0", id: id, method: method, params: params });
     });
   }
@@ -731,6 +800,7 @@ BRIDGE_JS = r"""(function () {
     post({ jsonrpc: "2.0", method: method, params: params || {} });
   }
   window.addEventListener("message", function (ev) {
+    if (ev.source !== window.parent) return;                     // only the host speaks
     var m = ev.data;
     if (!m || m.jsonrpc !== "2.0") return;
     if (m.id !== undefined && m.method === undefined) {          // response
@@ -785,6 +855,10 @@ BRIDGE_JS = r"""(function () {
     if (ctx.theme === "light" || ctx.theme === "dark") {
       docEl.dataset.theme = ctx.theme;
       docEl.style.colorScheme = ctx.theme;
+    } else if (ctx.theme !== undefined) {
+      // A theme we don't know: follow the viewer's prefers-color-scheme.
+      delete docEl.dataset.theme;
+      docEl.style.colorScheme = "";
     }
     var styles = ctx.styles || {};
     var vars = styles.variables;
@@ -923,7 +997,7 @@ TOOL_RESULT_JS = r"""  var lastToolInput = null;
   function handleToolCancelled() {
     gotResult = true;                               // keeps the skeleton out
     if (!rootShowsContent()) root.textContent = "";
-    notice(root, "Cancelled");
+    notice(root, "Cancelled before the result arrived.");
     reportSize();
   }
 """
@@ -951,11 +1025,15 @@ DOM_HELPERS_JS = r"""  var root = document.getElementById("root");
 # Raw ids never render: ``label(kind, raw)`` maps registry names, verdict
 # literals and provider prefixes, and humanizes anything unknown.
 LABELS_JS = (
-    "  /* ---------- labels (generated from platforms_registry + verdict literals) ---------- */\n"
+    "  /* ---------- labels (generated: platforms_registry, verdict literals, purchase sources) ---------- */\n"
     "  var PLATFORM_LABELS = " + json.dumps(PLATFORM_LABELS, sort_keys=True) + ";\n"
     "  var VERDICT_LABELS = " + json.dumps(VERDICT_LABELS) + ";\n"
     "  var PROVIDER_LABELS = " + json.dumps(PROVIDER_LABELS, sort_keys=True) + ";\n"
-    + r"""  var LABEL_MAPS = { platform: PLATFORM_LABELS, verdict: VERDICT_LABELS, provider: PROVIDER_LABELS };
+    "  var PURCHASE_SOURCE_LABELS = " + json.dumps(PURCHASE_SOURCE_LABELS, sort_keys=True) + ";\n"
+    + r"""  var LABEL_MAPS = {
+    platform: PLATFORM_LABELS, verdict: VERDICT_LABELS, provider: PROVIDER_LABELS,
+    purchase_source: PURCHASE_SOURCE_LABELS,
+  };
   function humanize(raw) {
     return String(raw).replace(/_+/g, " ").trim().replace(/\s+/g, " ")
       .replace(/(^|\s)(\S)/g, function (all, space, ch) { return space + ch.toUpperCase(); });
@@ -1039,6 +1117,15 @@ SCORE_CHIP_JS = r"""  /* ---------- score chip ---------- */
     return s == null ? "none" : s >= 6 ? "good" : s === 5 ? "ok" : "bad";
   }
   function craftTier(pct) { return pct >= 75 ? "good" : pct >= 50 ? "ok" : "bad"; }
+  /* His own 0-10 rating: good >=7, ok >=5, else bad. */
+  function ratingTier(n) { return n >= 7 ? "good" : n >= 5 ? "ok" : "bad"; }
+  /* ProtonDB: native/platinum/gold good, silver ok, bronze/borked bad. */
+  function protonTier(tierName) {
+    var t = String(tierName || "").toLowerCase();
+    if (t === "native" || t === "platinum" || t === "gold") return "good";
+    if (t === "silver") return "ok";
+    return t === "bronze" || t === "borked" ? "bad" : "none";
+  }
   /* {label, value, tier, title, url, meter (0-100), aux, cls} → one chip.
      Color is the quality tier only; the brand is the label text. */
   function scoreChip(opts) {
@@ -1074,6 +1161,41 @@ SCORE_CHIP_JS = r"""  /* ---------- score chip ---------- */
       });
     }
     return chip;
+  }
+  /* The library chips on a small card (similar, studio, lineage, anchors) are
+     the same chip as every score: "You 9/10", "Critics 84", "Played 132h",
+     "Unplayed", "Status Completed". chipRow keeps at most three. */
+  function youChip(rating) {
+    var n = num(rating);
+    if (n == null) return null;
+    return scoreChip({ label: "You", value: n + "/10", tier: ratingTier(n), title: "Your rating" });
+  }
+  function criticsChip(score) {
+    var n = num(score);
+    if (!realScore(n)) return null;
+    return scoreChip({ label: "Critics", value: Math.round(n), tier: mcTier(n), title: "Critic score" });
+  }
+  function playedChip(hours, unplayed) {
+    var n = num(hours);
+    if (n != null && n > 0) {
+      return scoreChip({ label: "Played", value: hoursLabel(n), title: "Your playtime" });
+    }
+    return unplayed ? scoreChip({ label: "Unplayed", title: "In your library, never played" }) : null;
+  }
+  var STATUS_CHIPS = {
+    completed: ["Completed", "good"],
+    evergreen: ["Evergreen", "good"],
+    abandoned: ["Abandoned", "bad"],
+    playing: ["Playing", "none"],
+  };
+  function statusChip(status) {
+    var s = STATUS_CHIPS[status];
+    return s ? scoreChip({ label: "Status", value: s[0], tier: s[1] }) : null;
+  }
+  function chipRow(chips) {
+    var row = el("div", "chips tags");
+    chips.filter(Boolean).slice(0, 3).forEach(function (c) { row.appendChild(c); });
+    return row.childNodes.length ? row : null;
   }
   /* The phrase always rides with the meter — the meter alone says nothing. */
   function steamChip(desc, url) {
@@ -1111,22 +1233,51 @@ MATCH_BAR_JS = r"""  function matchBar(percent) {
 
 # Shape-matched loading placeholders. ``showSkeleton`` asks the widget's own
 # ``skeletonKind()`` which shape to draw.
-SKELETON_JS = r"""  function skeleton(kind) {
+SKELETON_JS = r"""  /* Each placeholder is the real layout in grey: grid = header line + cards
+     (cover, title, match bar, one chip row); eval = header panel (cover,
+     title, stamp, score chips, the facts row), the pitch's two lines, the
+     media stage; detail = identity panel (cover, title + 3 lines, chip row)
+     and the media stage. */
+  function skeleton(kind) {
     function sk(cls) { return el("div", "sk " + cls); }
     function lines(parent, n) {
       for (var i = 0; i < n; i++) parent.appendChild(sk("sk-line" + (i === n - 1 ? " short" : "")));
     }
-    var wrap = el("div", "skel" + (kind === "grid" ? " skel-grid" : ""));
+    function chips(parent, n, cls) {
+      var row = el("div", "sk-chips" + (cls ? " " + cls : ""));
+      for (var k = 0; k < n; k++) row.appendChild(sk("sk-chip"));
+      parent.appendChild(row);
+    }
+    /* The stage plus its thumbs: beside it in a 3x3 grid on a wide
+       evaluation card, a strip under it otherwise (as the real panels). */
+    function mediaBlock(parent) {
+      var media = el("div", "sk-panel");
+      var row = el("div", "sk-media-row");
+      row.appendChild(sk("sk-media"));
+      var thumbs = el("div", "sk-thumbs");
+      for (var t = 0; t < (kind === "eval" ? 9 : 6); t++) thumbs.appendChild(sk("sk-shot"));
+      row.appendChild(thumbs);
+      media.appendChild(row);
+      parent.appendChild(media);
+    }
+    var wrap = el("div", "skel skel-" + kind);
     wrap.setAttribute("role", "status");
     wrap.setAttribute("aria-busy", "true");
     wrap.setAttribute("aria-label", "Loading");
     if (kind === "grid") {
+      wrap.appendChild(sk("sk-head"));
+      var cards = el("div", "sk-cards");
       for (var c = 0; c < 4; c++) {
         var card = el("div", "sk-card");
         card.appendChild(sk("sk-cover"));
-        lines(card, 2);
-        wrap.appendChild(card);
+        var body = el("div", "sk-body");
+        body.appendChild(sk("sk-line"));
+        body.appendChild(sk("sk-bar"));
+        chips(body, 2);
+        card.appendChild(body);
+        cards.appendChild(card);
       }
+      wrap.appendChild(cards);
       return wrap;
     }
     var panel = el("div", "sk-panel");
@@ -1134,16 +1285,25 @@ SKELETON_JS = r"""  function skeleton(kind) {
     row.appendChild(sk("sk-thumb"));
     var col = el("div", "sk-col");
     col.appendChild(sk("sk-line wide"));
-    lines(col, kind === "detail" ? 4 : 1);
-    row.appendChild(col);
-    panel.appendChild(row);
+    col.appendChild(sk("sk-line short"));
     if (kind === "eval") {
-      var chips = el("div", "sk-chips");
-      for (var k = 0; k < 3; k++) chips.appendChild(sk("sk-chip"));
-      panel.appendChild(chips);
-      lines(panel, 2);
+      chips(col, 3);
+      row.appendChild(col);
+      row.appendChild(sk("sk-stamp"));
+      panel.appendChild(row);
+      chips(panel, 3, "sk-facts");
+      wrap.appendChild(panel);
+      var pitch = el("div", "sk-panel");
+      lines(pitch, 2);
+      wrap.appendChild(pitch);
+    } else {
+      chips(col, 3);
+      lines(col, 2);
+      row.appendChild(col);
+      panel.appendChild(row);
+      wrap.appendChild(panel);
     }
-    wrap.appendChild(panel);
+    mediaBlock(wrap);
     return wrap;
   }
   function showSkeleton() {
@@ -1177,7 +1337,8 @@ DISPLAY_MODE_JS = r"""  /* ---------- display mode ---------- */
   }
 """
 
-# Telling the model what the user did, and speaking as the user.
+# Telling the model what the user did, and speaking as the user. ui/message's
+# content is a ContentBlock[] (ext-apps spec.types.ts), never a bare block.
 MODEL_CONTEXT_JS = r"""  /* Fire-and-forget: request() resolves undefined on method-not-found. */
   function updateModelContext(text, structured) {
     var params = { content: [{ type: "text", text: String(text) }] };
@@ -1185,7 +1346,7 @@ MODEL_CONTEXT_JS = r"""  /* Fire-and-forget: request() resolves undefined on met
     request("ui/update-model-context", params);
   }
   function sendMessage(text) {
-    request("ui/message", { role: "user", content: { type: "text", text: String(text) } });
+    request("ui/message", { role: "user", content: [{ type: "text", text: String(text) }] });
   }
 """
 
@@ -1578,31 +1739,27 @@ MEDIA_PANEL_JS = r"""  function trailerEntry(media) {
 """
 
 # ---- Ownership stickers, similar games, studio pedigree ---------------------
-# owned / unplayed / rating / hours stickers for a related game.
+# His rating, his hours (or "Unplayed") and, failing both, "Owned" — the chip
+# row for a related game (lineage comparisons). Zero hours on an owned game is
+# authoritative NOT-played; null hours is unknown and says nothing.
 OWNERSHIP_TAGS_JS = r"""  function ownershipTags(item) {
-    var tags = el("div", "tags");
-    if (item.owned) tags.appendChild(el("span", "tag owned", "owned"));
-    if (item.unplayed) tags.appendChild(el("span", "tag unplayed", "unplayed"));
-    var rating = num(item.my_rating);
-    if (rating != null) tags.appendChild(el("span", "tag rated", rating + "/10"));
-    var hours = hoursLabel(item.playtime_hours);
-    if (hours) tags.appendChild(el("span", "tag", hours));
-    return tags.childNodes.length ? tags : null;
+    var hours = num(item.playtime_hours);
+    var unplayed = !!item.unplayed || (!!item.owned && hours === 0);
+    var chips = [youChip(item.my_rating), playedChip(hours, unplayed)];
+    if (item.owned && !chips[0] && !chips[1]) chips.push(scoreChip({ label: "Owned" }));
+    return chipRow(chips);
   }
 """
 
 # The owned games most like this one (tools/game_media.py's similar_in_library)
 # as a strip of mini covers. Each card is cover, name, year and ONE chip row:
-# every item is owned (the pool IS the library), so the row carries his rating,
-# else "unplayed", then hours — at most two.
+# every item is owned (the pool IS the library), so the row carries his rating
+# ("You 9/10"), then his hours ("Played 132h") or, unrated and unplayed,
+# "Unplayed" — at most two.
 SIMILAR_NODE_JS = r"""  function similarTags(item) {
-    var tags = el("div", "tags");
-    var rating = num(item.my_rating);
-    if (rating != null) tags.appendChild(el("span", "tag rated", rating + "/10"));
-    else if (item.unplayed) tags.appendChild(el("span", "tag unplayed", "unplayed"));
-    var hours = num(item.playtime_hours) > 0 ? hoursLabel(item.playtime_hours) : null;
-    if (hours) tags.appendChild(el("span", "tag", hours));
-    return tags.childNodes.length ? tags : null;
+    var you = youChip(item.my_rating);
+    var unplayed = !you && !!item.unplayed;
+    return chipRow([you, playedChip(item.playtime_hours, unplayed)]);
   }
   function similarNode(parent, similar) {
     var items = list(similar.items).filter(function (i) { return i && i.name; });
@@ -1651,20 +1808,20 @@ PEDIGREE_JS = r"""  function pedigreeHeadline(ped) {
     if (size) parts.push(plural(size, "game", ped.catalog_truncated));
     return parts.join(" · ");
   }
-  /* ONE badge per poster: his own rating outranks the critic score, which
-     only stands in when he hasn't rated it. An owned game he never rated
-     still gets its ownership sticker. */
+  /* ONE score per poster: his own rating ("You 8/10") outranks the critic
+     score ("Critics 84"), which only stands in when he hasn't rated it. An
+     owned game he never rated still says "Owned". */
   function pedigreeBadges(item) {
-    var tags = el("div", "tags");
+    var chips = [];
     var rating = num(item.my_rating);
     var critic = num(item.critic_score);
     if (item.owned && rating != null) {
-      tags.appendChild(el("span", "tag rated", rating + "/10"));
+      chips.push(youChip(rating));
     } else if (critic != null && critic >= 0) {
-      tags.appendChild(el("span", "tag critic", "critics " + Math.round(critic)));
+      chips.push(criticsChip(critic));
     }
-    if (item.owned && rating == null) tags.appendChild(el("span", "tag owned", "owned"));
-    return tags.childNodes.length ? tags : null;
+    if (item.owned && rating == null) chips.push(scoreChip({ label: "Owned" }));
+    return chipRow(chips);
   }
   function pedigreeNode(parent, ped) {
     if (!ped) return;

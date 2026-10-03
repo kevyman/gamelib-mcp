@@ -1118,8 +1118,7 @@ async def record_assessment(
     Identity: game_id, Steam appid or name — at least one — plus `verdict`
     (required). PREFER game_id once get_assessment_context resolved the
     candidate, and when correcting or re-recording. `name` is matched EXACTLY
-    (case-insensitive)
-    or MINTED (created=true, normal for an unowned title) — never fuzzily; pass
+    (case-insensitive) or MINTED (created=true, normal for an unowned title) — never fuzzily; pass
     name= alongside an appid-only candidate, since a row cannot be minted
     without a title. `resolution` reports mode ("by_id", "by_appid",
     "by_assessed_appid", "exact", "minted"), the `query` and `matched_name` (the

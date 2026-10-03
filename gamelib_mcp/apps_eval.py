@@ -113,8 +113,8 @@ EVAL_CARD_HTML = (
     font-size: var(--gl-cap);
     font-weight: var(--gl-strong);
     line-height: var(--gl-cap-lh);
-    color: rgba(255, 255, 255, 0.92);
-    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+    color: var(--gl-plate-ink);
+    text-shadow: 0 1px 3px var(--gl-plate-shadow);
     padding: 8px;
     text-align: center;
     overflow: hidden;
@@ -163,6 +163,7 @@ EVAL_CARD_HTML = (
     font-size: var(--gl-h);
     line-height: var(--gl-h-lh);
     font-weight: var(--gl-strong);
+    letter-spacing: -0.01em;
     overflow-wrap: anywhere;
   }
   .sub {
@@ -236,43 +237,33 @@ EVAL_CARD_HTML = (
   .tick { font-weight: var(--gl-strong); flex: none; }
 
   /* ---- anchors ---- */
-  /* Deliberately NEUTRAL pills: an anchor is evidence, and the live card lit
+  /* Deliberately NEUTRAL cards: an anchor is evidence, and the live card lit
      up "Cyberpunk 2077 6.6h" — a game he bounced off — in endorsement green.
-     The STATUS glyph carries the colour instead: completed/evergreen good,
-     abandoned bad, everything else plain. */
+     The card is plain; its chips are the shared ones ("You 6/10", "Played
+     6.6h", "Status Abandoned"), each colored by what it says. */
+  .anchors { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
   .anchor {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--gl-cap);
-    line-height: var(--gl-cap-lh);
-    font-weight: var(--gl-strong);
-    padding: 3px 8px 3px 3px;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px 8px 6px 6px;
     border-radius: var(--gl-r-sm);
     border: var(--gl-bw) solid var(--gl-border);
     background: var(--gl-inset);
     font-variant-numeric: tabular-nums;
+    min-width: 0;
   }
   .anchor.no-cover { padding-left: 8px; }
   .anchor-cover {
-    width: 20px;
-    height: 30px;
+    width: 32px;
+    height: 48px;
     border-radius: var(--gl-r-xs);
     object-fit: cover;
     flex: none;
   }
-  .anchor .dim { color: var(--gl-text-2); font-weight: var(--gl-regular); }
-  .an-state {
-    flex: none;
-    font-weight: var(--gl-strong);
-    padding: 0 5px;
-    border-radius: var(--gl-r-xs);
-    border: var(--gl-bw) solid var(--gl-border);
-    background: var(--gl-surface);
-    color: var(--gl-muted);
-  }
-  .an-state.an-good { background: var(--gl-good-bg); color: var(--gl-good); border-color: var(--gl-good-edge); }
-  .an-state.an-bad { background: var(--gl-bad-bg); color: var(--gl-bad); border-color: var(--gl-bad-edge); }
+  .anchor-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .anchor-name { font-weight: var(--gl-strong); overflow-wrap: anywhere; }
+  .anchor .chip.tier-none { background: var(--gl-surface); }
 
   /* ---- lineage / comparisons ---- */
   .callout {
@@ -363,8 +354,13 @@ EVAL_CARD_HTML = (
   .media-slot > .panel { position: relative; }
   .fs-breakdown { display: none; flex-direction: column; gap: 12px; }
   html[data-display-mode="fullscreen"] .fs-breakdown { display: flex; }
-  html[data-display-mode="fullscreen"] .actions,
+  /* Fullscreen IS the breakdown, so its button goes — but the store link
+     stays: fullscreen is exactly where he has decided to read everything,
+     and the next step from there is the store page. */
+  html[data-display-mode="fullscreen"] .actions:not(.has-store),
+  html[data-display-mode="fullscreen"] .actions .act-breakdown,
   html[data-display-mode="fullscreen"] .eval > .disclosure-body { display: none; }
+  html[data-display-mode="fullscreen"] .actions { justify-content: flex-end; }
 
   .note-card { display: flex; gap: 14px; align-items: center; max-width: 560px; margin: 0 auto; }
   .note-text { font-weight: var(--gl-strong); overflow-wrap: anywhere; }
@@ -407,9 +403,6 @@ EVAL_CARD_HTML = (
     + apps_shared.CAROUSEL_CSS
     + apps_shared.TOAST_CSS
     + r"""
-  @media (min-width: 560px) {
-    .head-info h1 { font-size: var(--gl-title); line-height: var(--gl-title-lh); }
-  }
   /* Wide card: the thumbs stand beside the stage as a 3-column grid (the
      Steam store layout) instead of under it — the strip under a full-width
      16:9 stage cost ~160px of the inline budget, and the trailer plus eight
@@ -446,6 +439,9 @@ EVAL_CARD_HTML = (
   @media (max-width: 419px) {
     .actions { flex-direction: column; }
     .actions .act-store { width: 100%; }
+    /* "THE CALL" becomes a label above its chips instead of an eyebrow
+       sharing a first line with one lonely chip. */
+    .call .call-label { flex-basis: 100%; margin-right: 0; }
     .head {
       grid-template-columns: 84px minmax(0, 1fr);
       grid-template-areas: "cover info" "cover stamp" "scores scores" "note note";
@@ -662,11 +658,13 @@ EVAL_CARD_HTML = (
     var pct = craftPercent(craft);
     if (pct != null) {
       var rawPct = num(craft.positive_pct);
+      var count = compactCount(craft.review_count);
       row.appendChild(scoreChip({
-        label: "Craft", value: pct + "%", tier: craftTier(pct), meter: pct,
-        aux: compactCount(craft.review_count, "review"),
-        title: "Sample-adjusted review share"
-          + (rawPct != null ? " (raw " + Math.round(rawPct <= 1 ? rawPct * 100 : rawPct) + "% positive)" : ""),
+        label: "Reviews", value: pct + "% positive", tier: craftTier(pct), meter: pct,
+        aux: count,
+        title: "Sample-adjusted share of positive reviews"
+          + (rawPct != null ? " (raw " + Math.round(rawPct <= 1 ? rawPct * 100 : rawPct) + "% positive)" : "")
+          + (count ? ", from " + compactCount(craft.review_count, "review") : ""),
       }));
     }
 
@@ -689,10 +687,11 @@ EVAL_CARD_HTML = (
     }
 
     if (pkg.fit_call) {
-      var fit = String(pkg.fit_call);
+      // "strong fit" → Fit "Strong": the label already says fit.
+      var fit = String(pkg.fit_call).replace(/\s+fit$/i, "");
       row.appendChild(scoreChip({
         label: "Fit", value: fit.charAt(0).toUpperCase() + fit.slice(1),
-        tier: FIT_CLASSES[pkg.fit_call] || "none",
+        tier: FIT_CLASSES[pkg.fit_call] || "none", title: "How well it fits your taste",
       }));
     }
 
@@ -702,8 +701,8 @@ EVAL_CARD_HTML = (
   /* ---------- 3. the call: time, price, flags ---------- */
   /* Facts are tier-less chips and the flags are danger chips in the same
      row; the eyebrow rides inline, so the block costs no line of its own. */
-  function factChip(row, name, value) {
-    row.appendChild(scoreChip({ label: name, value: value }));
+  function factChip(row, name, value, aux, title) {
+    row.appendChild(scoreChip({ label: name, value: value, aux: aux, title: title }));
   }
   function factChips(pkg, row) {
     var time = pkg.time || {};
@@ -712,13 +711,14 @@ EVAL_CARD_HTML = (
 
     var main = hoursLabel(time.hltb_main_hours, true);
     var extra = hoursLabel(time.hltb_extra_hours);
-    if (main && extra) factChip(row, "HLTB", main + " / " + extra);
-    else if (main) factChip(row, "HLTB", main);
-    else if (extra) factChip(row, "HLTB", "~" + extra + " to complete");
+    var hltbTitle = "HowLongToBeat: main story, and main + extras (full)";
+    if (main) factChip(row, "Time to beat", main, extra ? extra + " full" : null, hltbTitle);
+    else if (extra) factChip(row, "Time to beat", "~" + extra, "full", hltbTitle);
 
     var weekly = num(time.recent_weekly_minutes);
     if (weekly != null && weekly > 0) {
-      factChip(row, "Pace", "your last 30 days: " + hoursLabel(weekly / 60, true) + "/wk");
+      factChip(row, "Your pace", hoursLabel(weekly / 60, true) + "/wk", "last 30 days",
+        "Your average weekly playtime over the last 30 days");
     }
 
     var seen = money(price.seen, price.currency);
@@ -732,7 +732,7 @@ EVAL_CARD_HTML = (
     var paid = money(own.price_paid, own.price_currency);
     if (paid) {
       var how = own.bundle_name ? " in " + own.bundle_name
-        : own.purchase_source ? " via " + own.purchase_source : "";
+        : own.purchase_source ? " via " + label("purchase_source", own.purchase_source) : "";
       factChip(row, "Owned", "paid " + paid + how);
     }
   }
@@ -827,45 +827,35 @@ EVAL_CARD_HTML = (
   }
 
   /* ---------- breakdown: anchors ---------- */
-  /* The PILL is neutral — an anchor is evidence, and half of them are
-     negative ("Cyberpunk 2077, 6.6h"). Only the status glyph is coloured:
-     completed/evergreen good, abandoned bad, anything else plain. */
-  var COMPLETION = {
-    completed: ["✓", "completed", "an-good"],
-    evergreen: ["∞", "evergreen", "an-good"],
-    playing: ["▶", "playing", ""],
-    abandoned: ["⚠", "abandoned", "an-bad"],
-  };
+  /* The card is neutral — an anchor is evidence, and half of them are
+     negative ("Cyberpunk 2077, 6.6h"). Its chips are the shared library
+     chips: his rating, his hours, and the completion status (Completed /
+     Evergreen good, Abandoned bad, Playing plain). */
   function anchorsNode(parent, anchors) {
     if (!anchors.length) return;
     var box = section(parent, "Grounded in your history");
-    var chips = el("div", "chips");
+    var grid = el("div", "anchors");
     anchors.forEach(function (a) {
-      var state = COMPLETION[a.completion_status];
-      var chip = el("div", "anchor" + (a.cover_url ? "" : " no-cover"));
+      var card = el("div", "anchor" + (a.cover_url ? "" : " no-cover"));
       if (a.cover_url) {
         var img = document.createElement("img");
         img.className = "anchor-cover";
         img.alt = "";
         img.loading = "lazy";
-        img.onerror = function () { img.remove(); chip.classList.add("no-cover"); };
+        img.onerror = function () { img.remove(); card.classList.add("no-cover"); };
         img.src = a.cover_url;
-        chip.appendChild(img);
+        card.appendChild(img);
       }
-      chip.appendChild(el("span", null, a.name || "?"));
-      var rating = num(a.rating);
-      if (rating != null) chip.appendChild(el("span", "dim", rating + "/10"));
-      var hours = hoursLabel(a.playtime_hours);
-      if (hours) chip.appendChild(el("span", "dim", hours));
-      if (state) {
-        var glyph = el("span", "an-state" + (state[2] ? " " + state[2] : ""), state[0]);
-        glyph.title = state[1];
-        glyph.setAttribute("aria-label", state[1]);
-        chip.appendChild(glyph);
-      }
-      chips.appendChild(chip);
+      var body = el("div", "anchor-body");
+      body.appendChild(el("div", "anchor-name", a.name || "?"));
+      var hours = num(a.playtime_hours);
+      var chips = chipRow([youChip(a.rating), playedChip(hours, hours === 0),
+        statusChip(a.completion_status)]);
+      if (chips) body.appendChild(chips);
+      card.appendChild(body);
+      grid.appendChild(card);
     });
-    box.appendChild(chips);
+    box.appendChild(grid);
   }
 
   /* ---------- breakdown: lineage / comparisons ---------- */
@@ -1003,6 +993,27 @@ EVAL_CARD_HTML = (
       : has.call(PROVIDER_LABELS, next) ? PROVIDER_LABELS[next] : "";
     return { what: ERROR_WHAT[key] || humanize(key).toLowerCase(), source: source };
   }
+  /* An error whose data is on the card anyway says nothing true: "couldn't
+     load time to beat" beside "~18h" reads as a contradiction. Drop it. */
+  function errorHasData(text, pkg) {
+    var key = String(text).split(":")[0].trim().toLowerCase();
+    var time = pkg.time || {};
+    var media = pkg.media || {};
+    var ped = pkg.pedigree;
+    if (key === "hltb") return num(time.hltb_main_hours) != null || num(time.hltb_extra_hours) != null;
+    if (key === "igdb" || key === "studio" || key === "pedigree") {
+      return !!(ped && (pedigreeHeadline(ped) || named(ped.previous_games).length));
+    }
+    if (key === "media") {
+      return !!(trailerEntry(media) || list(media.screenshots).some(function (s) {
+        return s && (s.thumb || s.full);
+      }));
+    }
+    return false;
+  }
+  function packageErrors(pkg) {
+    return list(pkg.errors).filter(function (e) { return e && !errorHasData(e, pkg); });
+  }
   function errorsNode(parent, errors) {
     if (!errors.length) return;
     // Deliberately quiet: a missing trailer is not an incident.
@@ -1048,7 +1059,7 @@ EVAL_CARD_HTML = (
     similarNode(parent, pkg.similar || {});
     pedigreeNode(parent, pkg.pedigree);
     pastNode(parent, pkg.past || {});
-    errorDetailNode(parent, list(pkg.errors).filter(Boolean));
+    errorDetailNode(parent, packageErrors(pkg));
   }
 
   /* ---------- 6. the action row ---------- */
@@ -1065,6 +1076,7 @@ EVAL_CARD_HTML = (
   function storeButton(row, appid) {
     var btn = el("button", "btn act-store", "Store page ↗");
     btn.type = "button";
+    row.classList.add("has-store");               // keeps the row up in fullscreen
     btn.addEventListener("click", function () {
       openLink("https://store.steampowered.com/app/" + appid + "/");
     });
@@ -1130,7 +1142,7 @@ EVAL_CARD_HTML = (
     var more = hasBreakdown(pkg);
     var appid = storeAppid(pkg);
     var inPlaceBody = more || appid ? actionsNode(wrap, pkg, more, appid) : null;
-    errorsNode(wrap, list(pkg.errors).filter(Boolean));
+    errorsNode(wrap, packageErrors(pkg));
     if (inPlaceBody) wrap.appendChild(inPlaceBody);
     if (more) {
       var fs = el("div", "fs-breakdown");

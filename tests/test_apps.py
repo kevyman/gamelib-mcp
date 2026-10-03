@@ -319,9 +319,16 @@ class ContentTypeBadgeTests(unittest.TestCase):
         start = apps_shared.SIMILAR_NODE_JS.index("function similarTags(item)")
         end = apps_shared.SIMILAR_NODE_JS.index("function similarNode(", start)
         tags = apps_shared.SIMILAR_NODE_JS[start:end]
-        # rating-or-unplayed, then hours: at most two stickers.
-        self.assertEqual(tags.count("tags.appendChild("), 3)
-        self.assertIn("else if (item.unplayed)", tags)
+        # "You 9/10", then "Played 132h" — or "Unplayed" when unrated: at most
+        # two chips, both the shared scoreChip (no .tag stickers any more).
+        self.assertIn("var you = youChip(item.my_rating);", tags)
+        self.assertIn("var unplayed = !you && !!item.unplayed;", tags)
+        self.assertIn("return chipRow([you, playedChip(item.playtime_hours, unplayed)]);", tags)
+        for name, html in WIDGETS:
+            with self.subTest(widget=name):
+                self.assertNotIn('"tag rated"', html)
+                self.assertNotIn('"tag owned"', html)
+                self.assertNotIn('"tag unplayed"', html)
 
     def test_the_dead_more_chip_is_gone_from_the_media_block(self) -> None:
         # Ported from the evaluation card: "+N more" was unclickable, because
@@ -371,9 +378,10 @@ class ContentTypeBadgeTests(unittest.TestCase):
         end = apps.GAME_CARDS_HTML.index("function pedigreeNode(", start)
         badges = apps.GAME_CARDS_HTML[start:end]
         self.assertIn('if (item.owned && rating != null) {', badges)
-        self.assertIn('el("span", "tag rated", rating + "/10")', badges)
+        self.assertIn("chips.push(youChip(rating));", badges)
         self.assertIn('} else if (critic != null && critic >= 0) {', badges)
-        self.assertIn('if (item.owned && rating == null) tags.appendChild', badges)
+        self.assertIn("chips.push(criticsChip(critic));", badges)
+        self.assertIn('if (item.owned && rating == null) chips.push(scoreChip({ label: "Owned" }));', badges)
 
     def test_the_damper_branch_renders_the_header_line_alone(self) -> None:
         # previous_games is empty under the big-studio damper: the header (and
@@ -540,7 +548,7 @@ class GridModeTests(unittest.TestCase):
         self.assertIn("body.appendChild(matchBar(game.match_percent));", card)
         self.assertNotIn('"% match"', card)
         order = [
-            'body.appendChild(el("div", "title", game.name));',
+            "body.appendChild(title);",
             "body.appendChild(matchBar(game.match_percent));",
             'body.appendChild(el("div", "meta", metaBits.join(" · ")));',
             "body.appendChild(scores);",
@@ -566,18 +574,41 @@ class GridModeTests(unittest.TestCase):
         self.assertIn('label: "Steam", value: phrase, tier: steamTier(desc),', chip)
         self.assertNotIn("meter", chip)                     # the meter stays on the detail card
         self.assertIn('cls: words >= 2 ? "steam-line" : "",', chip)
+        # A real space after the label: the only break point between "Steam"
+        # and the phrase ("Overwhelmingly" ran out of the chip at 360px).
+        self.assertIn('chip.insertBefore(document.createTextNode(" "), chip.querySelector("b"));', chip)
         css = widget_css(self.HTML)
-        self.assertIn(".card .chip.steam-line { flex-basis: 100%; display: block; }", css)
+        start = css.index("  .card .chip.steam-line {")
+        rule = css[start:css.index("}", start)]
+        for decl in ("display: block;", "flex-basis: 100%;", "white-space: normal;",
+                     "overflow: visible;", "overflow-wrap: anywhere;"):
+            self.assertIn(decl, rule)
+
+    def test_grid_hours_say_what_they_are(self) -> None:
+        card = js_function(self.HTML, "function gridCard(game)")
+        self.assertIn('if (hltb) metaBits.push(hltb + " to beat");', card)
+
+    def test_the_card_is_named_by_its_title(self) -> None:
+        card = js_function(self.HTML, "function gridCard(game)")
+        self.assertIn('title.id = "card-title-" + (++cardSeq);', card)
+        self.assertIn('card.setAttribute("aria-labelledby", title.id);', card)
+        self.assertIn('card.setAttribute("role", "button");', card)
+        self.assertIn('if (ev.key === "Enter" || ev.key === " ") {', card)
+        self.assertNotIn("Show details for", self.HTML)
 
     def test_show_next_button_only_when_has_more(self) -> None:
         actions = js_function(self.HTML, "function gridActions(data)")
         for marker in (
             "if (data.has_more && shown) {",
             "var limit = num(args.limit) || shown;",
-            'el("button", "btn act-more", "Show next " + count)',
+            'var idle = "Show next " + count;',
+            'el("button", "btn act-more", idle)',
             'sendMessage("Show the next " + count + " recommendations (offset " + next + ")");',
+            'more.textContent = "Asked the chat for the next " + count + "…";',
+            # a lost message stays retryable: the button comes back after 8s
+            "more.disabled = false;\n          more.textContent = idle;\n        }, 8000);",
             "if (canFullscreen()) {",
-            'el("button", "btn act-expand", "Expand")',
+            'el("button", "btn act-expand", "Open full screen")',
             'requestDisplayMode("fullscreen");',
         ):
             self.assertIn(marker, actions)
@@ -624,9 +655,18 @@ class GridModeTests(unittest.TestCase):
             'holder.appendChild(skeleton("detail"));',
             'callTool("get_game_detail", { game_id: game.game_id, media: true }, 30000)',
             "if (seq !== drillSeq) return;",
-            "else fill(game, true);",
+            # the failure names its cause, then says what is on screen
+            'if (res === TIMED_OUT) { fill(game, "The library didn\'t answer in 30s."); return; }',
+            "if (res && res.isError) { fill(game, toolErrorText(res)); return; }",
+            'else if (res === undefined) fill(game, "The host didn\'t run the lookup.");',
+            'if (failure) notice(holder, failure + " Showing what the list had.");',
         ):
             self.assertIn(marker, drill)
+        err = js_function(self.HTML, "function toolErrorText(res)")
+        self.assertIn('if (text.length > 120) text = text.slice(0, 119).trim() + "…";', err)
+        call = js_function(self.HTML, "function callTool(name, args, timeoutMs)")
+        self.assertIn('request("tools/call", { name: name, arguments: args }, ms + 1000)', call)
+        self.assertIn("resolve(TIMED_OUT); }, ms);", call)
         back = js_function(self.HTML, "function backToResults()")
         self.assertIn("if (gridData) render(gridData);", back)
         self.assertIn('if (restore !== "fullscreen") requestDisplayMode("inline");', back)
@@ -654,6 +694,12 @@ class DetailModeTests(unittest.TestCase):
         self.assertIn("grid-template-columns: 120px minmax(0, 1fr);", css)
         self.assertIn("@media (max-width: 559px) {\n    .detail {\n"
                       "      grid-template-columns: 84px minmax(0, 1fr);", css)
+
+    def test_time_to_beat_and_protondb_chips(self) -> None:
+        panel = js_function(self.HTML, "function identityPanel(game, media)")
+        self.assertIn('label: "Time to beat", value: hltb, title: "HowLongToBeat, main story",', panel)
+        self.assertNotIn('label: "HLTB"', self.HTML)
+        self.assertIn("tier: protonTier(game.protondb_tier),", panel)
 
     def test_your_rating_is_a_tiered_chip(self) -> None:
         panel = js_function(self.HTML, "function identityPanel(game, media)")
@@ -742,18 +788,43 @@ class DesignSystemTests(unittest.TestCase):
             self.assertIn(marker, apps_shared.TOKENS_CSS)
 
     def test_no_hex_color_outside_the_token_layer(self) -> None:
-        # Every structural color is a --gl-* token; the only hexes left are
-        # the fallbacks in TOKENS_CSS itself (the stamp and the cover plates
-        # are built from tokens and hsl()).
+        # Raw colors (hex, rgb/rgba, hsl) are allowed in exactly three places:
+        # (a) TOKENS_CSS, (b) the verdict stamp rule, (c) the cover plate —
+        # its name-seeded gradient (coverNode) and its ink text — and nothing
+        # else. The stamp and the plate's ink are built from tokens today, so
+        # (b) and (c) are allowances, not uses.
+        raw = r"#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\("
         for name, html in WIDGETS:
             css = widget_css(html).replace(apps_shared.TOKENS_CSS, "")
-            js = widget_js(html)
+            css = re.sub(r"[^{}]*\.stamp[^{}]*\{[^{}]*\}", "", css)          # (b)
+            css = re.sub(r"[^{}]*\.cover-fallback[^{}]*\{[^{}]*\}", "", css)  # (c) ink
+            js = widget_js(html).replace(apps_shared.COVER_NODE_JS, "")       # (c) gradient
             with self.subTest(widget=name):
-                self.assertEqual(re.findall(r"#[0-9a-fA-F]{3,8}\b", css), [])
-                self.assertEqual(re.findall(r"[\"']#[0-9a-fA-F]{3,8}[\"']", js), [])
+                self.assertEqual(re.findall(raw, css), [])
+                self.assertEqual(re.findall(r"[\"']#[0-9a-fA-F]{3,8}[\"']|rgba?\(|hsla?\(", js), [])
+                # the plate's ink is the shared token, in both widgets
+                self.assertIn("color: var(--gl-plate-ink);", widget_css(html))
+                self.assertIn("text-shadow: 0 1px 3px var(--gl-plate-shadow);", widget_css(html))
+        self.assertIn('"linear-gradient(160deg, hsl("', apps_shared.COVER_NODE_JS)
+        for token in ("--gl-plate-ink: rgba(255, 255, 255, 0.92);",
+                      "--gl-plate-shadow: rgba(0, 0, 0, 0.35);"):
+            self.assertIn(token, apps_shared.TOKENS_CSS)
+
+    def test_the_media_stage_is_the_documented_dark_exception(self) -> None:
+        tokens = apps_shared.TOKENS_CSS
+        self.assertIn("A media stage is dark in both\n       themes by design — it frames video and screenshots", tokens)
+        start = tokens.index("Theming exception — the media stage.")
+        group = tokens[start:tokens.index("--gl-r-xs:")]
+        for token in ("--gl-stage:", "--gl-stage-veil:", "--gl-scrim:", "--gl-on-stage:",
+                      "--gl-on-stage-dim:", "--gl-shadow-ink:"):
+            self.assertIn(token, group)
 
     def test_three_sizes_two_weights_nothing_below_12px(self) -> None:
-        sizes = {"var(--gl-cap)", "var(--gl-body)", "var(--gl-h)", "var(--gl-title)"}
+        # Exactly three size tokens exist, and nothing else sets a size.
+        defined = re.findall(r"--gl-([a-z0-9-]+): max\(12px,", apps_shared.TOKENS_CSS)
+        self.assertEqual(sorted(defined), ["body", "cap", "h"])
+        self.assertNotIn("--gl-title", apps_shared.TOKENS_CSS)
+        sizes = {"var(--gl-cap)", "var(--gl-body)", "var(--gl-h)"}
         weights = {"var(--gl-regular)", "var(--gl-strong)"}
         for name, html in WIDGETS:
             css = widget_css(html)
@@ -762,7 +833,7 @@ class DesignSystemTests(unittest.TestCase):
                 self.assertTrue(set(re.findall(r"font-weight:\s*([^;}]+)", css)) <= weights)
                 # the shorthand would smuggle a size past the check above
                 self.assertEqual(re.findall(r"(?<![-\w])font:(?!\s*inherit)", css), [])
-        for token, px in (("cap", 12), ("body", 14), ("h", 16), ("title", 20)):
+        for token, px in (("cap", 12), ("body", 14), ("h", 16)):
             self.assertRegex(
                 apps_shared.TOKENS_CSS,
                 rf"--gl-{token}: max\(12px, var\(--font-[a-z-]+-size, {px}px\)\);",
@@ -770,7 +841,7 @@ class DesignSystemTests(unittest.TestCase):
 
     def test_focus_rings_hit_areas_and_reduced_motion(self) -> None:
         self.assertIn(
-            ":focus-visible { outline: 2px solid var(--gl-border-strong); outline-offset: 2px; }",
+            ":focus-visible { outline: 2px solid var(--gl-text); outline-offset: 2px; }",
             apps_shared.A11Y_CSS,
         )
         self.assertIn("inset: -4px;", apps_shared.A11Y_CSS)    # 32px on pointer devices
@@ -813,7 +884,7 @@ class BridgeProtocolTests(unittest.TestCase):
         ):
             self.assertIn(marker, apps_shared.BRIDGE_JS)
         self.assertIn("lastToolInput = (params && params.arguments) || {};", apps_shared.TOOL_RESULT_JS)
-        self.assertIn('notice(root, "Cancelled");', apps_shared.TOOL_RESULT_JS)
+        self.assertIn('notice(root, "Cancelled before the result arrived.");', apps_shared.TOOL_RESULT_JS)
         self.assertIn("if (resizeObserver) resizeObserver.disconnect();", apps_shared.SIZING_JS)
 
     def test_host_context_is_merged_and_applied(self) -> None:
@@ -891,6 +962,18 @@ class LabelTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(set(apps_shared.VERDICT_LABELS), set(enum))
 
+    def test_every_purchase_source_has_an_explicit_label(self) -> None:
+        from gamelib_mcp.tools.acquisition import PURCHASE_SOURCES
+
+        self.assertEqual(set(apps_shared._PURCHASE_SOURCE_DISPLAY), set(PURCHASE_SOURCES))
+        self.assertEqual(set(apps_shared.PURCHASE_SOURCE_LABELS), set(PURCHASE_SOURCES))
+        for source in PURCHASE_SOURCES:
+            with self.subTest(source=source):
+                self.assertNotEqual(apps_shared.PURCHASE_SOURCE_LABELS[source], source)
+        self.assertIn("var PURCHASE_SOURCE_LABELS = ", apps_shared.LABELS_JS)
+        self.assertIn("purchase_source: PURCHASE_SOURCE_LABELS,", apps_shared.LABELS_JS)
+        self.assertIn('label("purchase_source", own.purchase_source)', apps_eval.EVAL_CARD_HTML)
+
     def test_the_maps_ride_in_both_widgets_with_a_humanizing_fallback(self) -> None:
         self.assertIn('"switch2": "Switch 2"', apps_shared.LABELS_JS)
         self.assertIn('"play_what_you_own": "Play what you own"', apps_shared.LABELS_JS)
@@ -923,6 +1006,34 @@ class SharedComponentTests(unittest.TestCase):
         self.assertIn('t = n >= 84 ? "mighty" : n >= 75 ? "strong" : n >= 65 ? "fair" : "weak";', js)
         self.assertIn('return s == null ? "none" : s >= 6 ? "good" : s === 5 ? "ok" : "bad";', js)
         self.assertIn('function craftTier(pct) { return pct >= 75 ? "good" : pct >= 50 ? "ok" : "bad"; }', js)
+        self.assertIn('function ratingTier(n) { return n >= 7 ? "good" : n >= 5 ? "ok" : "bad"; }', js)
+        proton = js_function(js, "function protonTier(tierName)")
+        self.assertIn('if (t === "native" || t === "platinum" || t === "gold") return "good";', proton)
+        self.assertIn('if (t === "silver") return "ok";', proton)
+        self.assertIn('return t === "bronze" || t === "borked" ? "bad" : "none";', proton)
+
+    def test_small_card_chips_are_the_one_score_chip(self) -> None:
+        # Spec item 3: similar / studio / lineage / anchors read their numbers
+        # through scoreChip — "You 9/10", "Critics 84", "Played 132h",
+        # "Unplayed", "Status Completed" — at most three per card.
+        js = apps_shared.SCORE_CHIP_JS
+        for marker in (
+            'scoreChip({ label: "You", value: n + "/10", tier: ratingTier(n), title: "Your rating" })',
+            'scoreChip({ label: "Critics", value: Math.round(n), tier: mcTier(n), title: "Critic score" })',
+            'scoreChip({ label: "Played", value: hoursLabel(n), title: "Your playtime" })',
+            'scoreChip({ label: "Unplayed", title: "In your library, never played" })',
+            'completed: ["Completed", "good"],',
+            'evergreen: ["Evergreen", "good"],',
+            'abandoned: ["Abandoned", "bad"],',
+            'return s ? scoreChip({ label: "Status", value: s[0], tier: s[1] }) : null;',
+            "chips.filter(Boolean).slice(0, 3).forEach(",
+        ):
+            self.assertIn(marker, js)
+        own = apps_shared.OWNERSHIP_TAGS_JS
+        self.assertIn("var chips = [youChip(item.my_rating), playedChip(hours, unplayed)];", own)
+        self.assertIn("var unplayed = !!item.unplayed || (!!item.owned && hours === 0);", own)
+        self.assertIn(".tags .chip { padding: 1px 6px;", apps_shared.TAG_CSS)
+        self.assertIn("html.touch .tags .chip { min-height: 0; }", apps_shared.TAG_CSS)
 
     def test_match_bar(self) -> None:
         js = apps_shared.MATCH_BAR_JS
@@ -940,10 +1051,26 @@ class SharedComponentTests(unittest.TestCase):
     def test_skeleton_shapes(self) -> None:
         js = apps_shared.SKELETON_JS
         self.assertIn('if (kind === "grid") {', js)
-        self.assertIn("for (var c = 0; c < 4; c++) {", js)          # 4 cards
-        self.assertIn('lines(col, kind === "detail" ? 4 : 1);', js)  # detail: 4 lines
-        self.assertIn("for (var k = 0; k < 3; k++) chips.appendChild", js)  # eval: 3 chips
+        # grid: the header line, then 4 cards of cover / title / match bar / chips
+        self.assertIn('wrap.appendChild(sk("sk-head"));', js)
+        self.assertIn("for (var c = 0; c < 4; c++) {", js)
+        grid = js[js.index('if (kind === "grid") {'):js.index("return wrap;")]
+        order = ['sk("sk-cover")', 'sk("sk-line")', 'sk("sk-bar")', "chips(body, 2);"]
+        self.assertEqual([grid.index(m) for m in order], sorted(grid.index(m) for m in order))
+        # eval: header (cover, title, stamp), score chips, the facts row, the
+        # pitch's two lines; both shapes end on the media stage
+        for marker in ('row.appendChild(sk("sk-stamp"));', 'chips(panel, 3, "sk-facts");',
+                       "lines(pitch, 2);", 'row.appendChild(sk("sk-media"));', "mediaBlock(wrap);",
+                       # thumbs: the 3x3 grid beside the stage on a wide eval card, else a strip
+                       'for (var t = 0; t < (kind === "eval" ? 9 : 6); t++) thumbs.appendChild(sk("sk-shot"));'):
+            self.assertIn(marker, js)
+        # detail: title + sub line, a chip row, two description lines
+        detail = js[js.index("} else {"):js.index("mediaBlock(wrap);")]
+        self.assertIn("chips(col, 3);\n      lines(col, 2);", detail)
         self.assertIn('wrap.setAttribute("aria-busy", "true");', js)
+        self.assertIn(".sk-media { aspect-ratio: 16 / 9;", apps_shared.SKELETON_CSS)
+        self.assertIn(".skel-eval .sk-media-row { display: grid; grid-template-columns: minmax(0, 1fr) 296px; }",
+                      apps_shared.SKELETON_CSS)
         self.assertIn("function skeletonKind()", apps.GAME_CARDS_HTML)
         self.assertIn('function skeletonKind() { return "eval"; }', apps_eval.EVAL_CARD_HTML)
 
@@ -963,7 +1090,8 @@ class SharedComponentTests(unittest.TestCase):
         self.assertIn('var params = { content: [{ type: "text", text: String(text) }] };', js)
         self.assertIn("if (structured) params.structuredContent = structured;", js)
         self.assertIn('request("ui/update-model-context", params);', js)
-        self.assertIn('request("ui/message", { role: "user", content: { type: "text", text: String(text) } });', js)
+        # ui/message content is a ContentBlock[] (ext-apps spec.types.ts).
+        self.assertIn('request("ui/message", { role: "user", content: [{ type: "text", text: String(text) }] });', js)
 
     def test_disclosure_builds_once_and_reports_state(self) -> None:
         js = apps_shared.DISCLOSURE_JS

@@ -32,7 +32,6 @@ from ..data.db import (
     fts_ready,
     get_db,
     get_game_by_appid,
-    get_steam_appid_for_game,
     load_cheapest_cached_price,
     load_recent_assessments,
     resolve_game_id_by_steam_appid,
@@ -1881,10 +1880,14 @@ async def _build_package(
             )
 
     # The card's "Store page" link. The one effective-appid chain (identifier
-    # row → Steam wishlist store_identifier → newest assessment), read after
-    # the commit so a candidate's just-recorded appid counts. An identity, not
-    # ownership evidence; null when nothing resolves, like the block's others.
-    store_appid = await get_steam_appid_for_game(game_id)
+    # row → Steam wishlist store_identifier → newest assessment) is already in
+    # the annotation row (STEAM_APPID_SQL), which was read after the commit,
+    # so a candidate's just-recorded appid counts. An identity, not ownership
+    # evidence; null when nothing resolves, like the block's others.
+    raw_store_appid = row["steam_appid"] if row is not None else None
+    store_appid = (
+        int(raw_store_appid) if raw_store_appid and int(raw_store_appid) > 0 else None
+    )
 
     past_items = [
         {

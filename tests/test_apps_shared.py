@@ -73,13 +73,13 @@ class HostContextTests(unittest.TestCase):
     def test_size_tokens_are_clamped_at_12px(self) -> None:
         css = apps_shared.TOKENS_CSS
         for token, source, px in (
-            ("title", "heading-lg", 20), ("h", "heading-md", 16),
-            ("body", "text-sm", 14), ("cap", "text-xs", 12),
+            ("h", "heading-md", 16), ("body", "text-sm", 14), ("cap", "text-xs", 12),
         ):
             with self.subTest(token=token):
                 self.assertIn(f"--gl-{token}: max(12px, var(--font-{source}-size, {px}px));", css)
-        # no size token escapes the clamp
+        # no size token escapes the clamp, and the fourth (title) size is gone
         self.assertEqual(re.findall(r"--gl-(?:title|h|body|cap): var\(", css), [])
+        self.assertNotIn("--gl-title", css)
 
     def test_touch_falls_back_to_media_queries_without_device_capabilities(self) -> None:
         js = apps_shared.BRIDGE_JS
@@ -95,6 +95,21 @@ class HostContextTests(unittest.TestCase):
         self.assertIn('docEl.style.setProperty("--gl-safe-" + side[0], extra + "px");', apps_shared.BRIDGE_JS)
         self.assertIn("--gl-safe-left: 0px;", apps_shared.TOKENS_CSS)
         self.assertIn("--gl-safe-right: 0px;", apps_shared.TOKENS_CSS)
+
+    def test_only_the_host_frame_is_heard(self) -> None:
+        self.assertIn("if (ev.source !== window.parent) return;", apps_shared.BRIDGE_JS)
+
+    def test_requests_expire_and_drop_their_pending_entry(self) -> None:
+        js = apps_shared.BRIDGE_JS
+        self.assertIn("var REQUEST_TIMEOUT_MS = 30000;", js)
+        self.assertIn("function request(method, params, timeoutMs) {", js)
+        self.assertIn("delete pending[id];\n        resolve(undefined);\n      }, timeoutMs || REQUEST_TIMEOUT_MS);", js)
+
+    def test_an_unknown_theme_falls_back_to_the_viewer_preference(self) -> None:
+        js = apps_shared.BRIDGE_JS
+        self.assertIn("} else if (ctx.theme !== undefined) {", js)
+        self.assertIn("delete docEl.dataset.theme;", js)
+        self.assertIn('docEl.style.colorScheme = "";', js)
 
     def test_root_declares_both_color_schemes(self) -> None:
         self.assertRegex(apps_shared.TOKENS_CSS, r":root \{\s*color-scheme: light dark;")
@@ -145,8 +160,10 @@ class HitAreaTests(unittest.TestCase):
 
 class SharedCssHygieneTests(unittest.TestCase):
     def test_no_raw_color_outside_the_token_layer(self) -> None:
-        # Raw colors live in TOKENS_CSS only; the cover plate (a widget-local
-        # rule today) is the one documented exception if it ever moves here.
+        # Raw colors live in TOKENS_CSS only (the media stage and the cover
+        # plate's ink are tokens there); a cover-plate rule is the documented
+        # exception if one ever moves here. tests/test_apps.py pins the whole
+        # widget CSS, stamp included.
         for name, css in shared_css_blocks():
             if name == "TOKENS_CSS":
                 continue
@@ -204,7 +221,7 @@ class LifecycleTests(unittest.TestCase):
         js = apps_shared.TOOL_RESULT_JS
         body = js.split("function handleToolCancelled() {", 1)[1].split("\n  }\n", 1)[0]
         self.assertIn('if (!rootShowsContent()) root.textContent = "";', body)
-        self.assertIn('notice(root, "Cancelled");', body)
+        self.assertIn('notice(root, "Cancelled before the result arrived.");', body)
         self.assertNotIn('\n    root.textContent = "";', body)
 
     def test_notice_paths(self) -> None:
@@ -274,9 +291,11 @@ var document = {
   },
   querySelector: function () { return null; },
 };
+var listeners = {};
+var hostFrame = { postMessage: function (m) { posted.push(m); } };
 var window = {
-  parent: { postMessage: function (m) { posted.push(m); } },
-  addEventListener: function () {},
+  parent: hostFrame,
+  addEventListener: function (k, f) { listeners[k] = f; },
   matchMedia: function (q) { return { matches: q === "(pointer: coarse)" }; },
 };
 var rendered = [];
@@ -301,6 +320,29 @@ PROBE = r"""
   out.hostTouch = classes.touch;
   applyHostContext({ theme: "dark" });
   out.touchAfterPartial = classes.touch;
+  out.themeDark = docEl.dataset.theme;
+  applyHostContext({ theme: "sepia" });
+  out.themeAfterUnknown = docEl.dataset.theme === undefined ? null : docEl.dataset.theme;
+  out.schemeAfterUnknown = docEl.style.colorScheme;
+
+  /* P1: ui/message carries a ContentBlock[]. */
+  posted = [];
+  sendMessage("Show me Hades II");
+  out.message = posted[0];
+  /* P2: only the host frame is heard; P3: an unanswered request expires. */
+  var answers = [];
+  posted = [];
+  request("ping", {}).then(function (r) { answers.push(["ping", r === undefined ? null : r]); });
+  var pingId = posted[0].id;
+  listeners.message({ source: {}, data: { jsonrpc: "2.0", id: pingId, result: { spoofed: true } } });
+  out.pendingAfterSpoof = !!pending[pingId];
+  listeners.message({ source: hostFrame, data: { jsonrpc: "2.0", id: pingId, result: { ok: true } } });
+  out.pendingAfterAnswer = !!pending[pingId];
+  request("never", {}, 50).then(function (r) { answers.push(["never", r === undefined ? null : r]); });
+  var neverId = posted[posted.length - 1].id;
+  out.pendingBeforeTimeout = !!pending[neverId];
+  flush();
+  out.pendingAfterTimeout = !!pending[neverId];
 
   var p = new FakeNode("div");
   notice(p, "Cancelled");
@@ -321,8 +363,11 @@ PROBE = r"""
   reportSize(); flush();
   applyHostContext({ theme: "light" });
   out.postedAfterTeardown = posted.length;
-  out.themeAfterTeardown = docEl.dataset.theme;
-  console.log(JSON.stringify(out));
+  out.themeAfterTeardown = docEl.dataset.theme || null;
+  Promise.resolve().then(function () {
+    out.answers = answers;
+    console.log(JSON.stringify(out));
+  });
 })();
 """
 
@@ -341,6 +386,7 @@ class BridgeBehaviourTests(unittest.TestCase):
             + apps_shared.TOOL_RESULT_JS
             + apps_shared.DOM_HELPERS_JS
             + apps_shared.NOTICE_JS
+            + apps_shared.MODEL_CONTEXT_JS
             + apps_shared.SIZING_JS
             + PROBE
         )
@@ -383,6 +429,26 @@ class BridgeBehaviourTests(unittest.TestCase):
     def test_unparseable_result_and_cancel_after_render(self) -> None:
         self.assertEqual(self.out["afterBadResult"], ["notice:Couldn't read the result"])
         self.assertEqual(self.out["afterCancel"], ["card", "notice"])
+
+    def test_an_unknown_theme_drops_the_forced_scheme(self) -> None:
+        self.assertEqual(self.out["themeDark"], "dark")
+        self.assertIsNone(self.out["themeAfterUnknown"])
+        self.assertEqual(self.out["schemeAfterUnknown"], "")
+
+    def test_ui_message_content_is_an_array_of_blocks(self) -> None:
+        msg = self.out["message"]
+        self.assertEqual(msg["method"], "ui/message")
+        self.assertEqual(
+            msg["params"],
+            {"role": "user", "content": [{"type": "text", "text": "Show me Hades II"}]},
+        )
+
+    def test_only_the_host_frame_answers_and_requests_expire(self) -> None:
+        self.assertTrue(self.out["pendingAfterSpoof"])      # a foreign frame is ignored
+        self.assertFalse(self.out["pendingAfterAnswer"])
+        self.assertTrue(self.out["pendingBeforeTimeout"])
+        self.assertFalse(self.out["pendingAfterTimeout"])   # the timeout deletes the entry
+        self.assertEqual(self.out["answers"], [["ping", {"ok": True}], ["never", None]])
 
     def test_nothing_reported_or_applied_after_teardown(self) -> None:
         self.assertEqual(self.out["postedAfterTeardown"], 0)

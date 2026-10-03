@@ -552,7 +552,10 @@ SAMPLE_IGDB_YOUTUBE: dict[str, Any] = {
             "hypes": 208,
         },
         "past": None,
-        "errors": ["hltb: completionist time unavailable"],
+        # Consistent with the payload: similar IS absent here. (An error about
+        # data the card shows anyway — the old "hltb" entry beside 18h — is
+        # suppressed by the widget and would never render.)
+        "errors": ["similar: lookup failed"],
     },
 }
 

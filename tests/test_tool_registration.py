@@ -372,7 +372,7 @@ class SchemaBudgetTests(unittest.IsolatedAsyncioTestCase):
     the skill, not on the wire). The 2026-10-03 widget-UX pass (spec §2.3)
     rewrote the eight largest descriptions as when-to-call / what-comes-back /
     call-time rules only, moving rationale to skills/ and docs/patterns/:
-    47,215 chars / 141,349 payload bytes. These caps sit ~5% above that, so
+    47,332 chars / 141,468 payload bytes. These caps sit ~5% above that, so
     ordinary editing is free and a new tool or a docstring that grows back into
     prose fails here instead of silently costing every turn.
 
@@ -382,9 +382,9 @@ class SchemaBudgetTests(unittest.IsolatedAsyncioTestCase):
     """
 
     # Whole serialized tools/list payload, json.dumps(separators=(",", ":")).
-    MAX_TOTAL_PAYLOAD_BYTES = 148_400  # achieved 141,349 (2026-10-03)
+    MAX_TOTAL_PAYLOAD_BYTES = 148_400  # achieved 141,468 (2026-10-03)
     # Sum of every tool description (chars, as the model reads them).
-    MAX_TOTAL_DESCRIPTION_CHARS = 49_600  # achieved 47,215 (2026-10-03)
+    MAX_TOTAL_DESCRIPTION_CHARS = 49_600  # achieved 47,332 (2026-10-03)
     # No single tool may hold a disproportionate share of that budget.
     MAX_TOOL_DESCRIPTION_CHARS = 2_890  # largest: get_stats, 2,755
     MAX_TOOL_PAYLOAD_BYTES = 9_970  # largest: get_stats, 9,496

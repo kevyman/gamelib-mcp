@@ -21,8 +21,8 @@ Grid mode (spec 2026-10-03 §2.1): a header line says what the grid IS
 rebuilt from the tool-input arguments whenever they arrive. Each card leads
 with the taste-match bar under the title, then one meta line, one chip row
 and the matched tags as plain text. The footer carries at most two actions:
-"Show next N" (a chat message asking for the next page) and "Expand" (the
-host's fullscreen mode, where the grid widens and the header sticks).
+"Show next N" (a chat message asking for the next page) and "Open full screen"
+(the host's fullscreen mode, where the grid widens and the header sticks).
 
 Tapping a card hands control back to the conversation instead of opening an
 in-widget overlay: the selection always goes into the model context
@@ -112,8 +112,8 @@ GAME_CARDS_HTML = (
     font-size: var(--gl-h);
     font-weight: var(--gl-strong);
     line-height: var(--gl-h-lh);
-    color: rgba(255, 255, 255, 0.92);
-    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+    color: var(--gl-plate-ink);
+    text-shadow: 0 1px 3px var(--gl-plate-shadow);
     padding: 12px;
     text-align: center;
     overflow: hidden;
@@ -239,11 +239,18 @@ GAME_CARDS_HTML = (
      label and phrase only (the meter stays on the detail card), and a
      two-word phrase gets a line of its own. */
   .card .chip { padding: 3px 6px; }
-  .card .chip.steam-line { flex-basis: 100%; display: block; }
-  /* Text flow, not flex: a phrase too long for the line breaks between its
-     words ("Steam Overwhelmingly / positive") instead of dropping the whole
-     value onto lines of its own. */
-  .card .chip.steam-line .lbl { margin-right: 4px; }
+  /* Text flow, not flex, and never clipped: the phrase wraps between its
+     words inside the chip ("Steam Overwhelmingly / positive"). gridSteamChip
+     puts a real space after the label — without it there is no break point
+     between "Steam" and the phrase, and "Overwhelmingly" ran out of the chip
+     at 360px. */
+  .card .chip.steam-line {
+    display: block;
+    flex-basis: 100%;
+    white-space: normal;
+    overflow: visible;
+    overflow-wrap: anywhere;
+  }
 
   /* At most two actions, bottom right; stacked full width on a phone. */
   .actions {
@@ -314,6 +321,7 @@ GAME_CARDS_HTML = (
     font-size: var(--gl-h);
     line-height: var(--gl-h-lh);
     font-weight: var(--gl-strong);
+    letter-spacing: -0.01em;
     overflow-wrap: anywhere;
   }
   .sub {
@@ -420,9 +428,6 @@ GAME_CARDS_HTML = (
     + apps_shared.CAROUSEL_CSS
     + apps_shared.TOAST_CSS
     + r"""
-  @media (min-width: 560px) {
-    .detail h1 { font-size: var(--gl-title); line-height: var(--gl-title-lh); }
-  }
   @media (max-width: 559px) {
     .detail {
       grid-template-columns: 84px minmax(0, 1fr);
@@ -446,12 +451,17 @@ GAME_CARDS_HTML = (
 """
     + apps_shared.BRIDGE_JS
     + r"""  /* App-initiated tool call, proxied by the host (MCP Apps shares the core
-     tools/call method). Resolves undefined on error, denial, or timeout so
-     callers can fall back to the data they already have. */
+     tools/call method). Resolves the tool result (which may carry isError),
+     undefined on a host error or denial, or TIMED_OUT when nothing answered
+     within timeoutMs — so a caller can say which one happened and fall back
+     to the data it already has. The bridge request itself expires a second
+     later, which drops its pending entry. */
+  var TIMED_OUT = { timedOut: true };
   function callTool(name, args, timeoutMs) {
+    var ms = timeoutMs || 15000;
     return Promise.race([
-      request("tools/call", { name: name, arguments: args }),
-      new Promise(function (resolve) { setTimeout(resolve, timeoutMs || 15000); }),
+      request("tools/call", { name: name, arguments: args }, ms + 1000),
+      new Promise(function (resolve) { setTimeout(function () { resolve(TIMED_OUT); }, ms); }),
     ]);
   }
 """
@@ -556,17 +566,23 @@ GAME_CARDS_HTML = (
       var next = offset + shown;
       var total = num(data.total_matches);
       var count = total != null && total > next ? Math.min(limit, total - next) : limit;
-      var more = el("button", "btn act-more", "Show next " + count);
+      var idle = "Show next " + count;
+      var more = el("button", "btn act-more", idle);
       more.type = "button";
       more.addEventListener("click", function () {
         sendMessage("Show the next " + count + " recommendations (offset " + next + ")");
         more.disabled = true;
-        more.textContent = "Asked for the next " + count;
+        more.textContent = "Asked the chat for the next " + count + "…";
+        // A lost message must be retryable: the button comes back after 8s.
+        setTimeout(function () {
+          more.disabled = false;
+          more.textContent = idle;
+        }, 8000);
       });
       bar.appendChild(more);
     }
     if (canFullscreen()) {
-      var expand = el("button", "btn act-expand", "Expand");
+      var expand = el("button", "btn act-expand", "Open full screen");
       expand.type = "button";
       expand.addEventListener("click", function () { requestDisplayMode("fullscreen"); });
       bar.appendChild(expand);
@@ -582,19 +598,27 @@ GAME_CARDS_HTML = (
     var phrase = String(desc).toLowerCase();
     phrase = phrase.charAt(0).toUpperCase() + phrase.slice(1);
     var words = phrase.split(/\s+/).filter(Boolean).length;
-    return scoreChip({
+    var chip = scoreChip({
       label: "Steam", value: phrase, tier: steamTier(desc), title: "Steam reviews",
       cls: words >= 2 ? "steam-line" : "",
     });
+    // The break point between label and phrase (see .chip.steam-line).
+    chip.insertBefore(document.createTextNode(" "), chip.querySelector("b"));
+    return chip;
   }
 
+  var cardSeq = 0;
   function gridCard(game) {
     var card = el("div", "card");
+    var title = el("div", "title", game.name);
+    title.id = "card-title-" + (++cardSeq);
     if (game.game_id != null) {
       card.tabIndex = 0;
       card.setAttribute("role", "button");
       card.setAttribute("data-game-id", String(game.game_id));
-      card.setAttribute("aria-label", "Show details for " + (game.name || "game"));
+      // Named by its own title, so a screen reader hears the game, not a
+      // generic "show details" label.
+      card.setAttribute("aria-labelledby", title.id);
       card.addEventListener("click", function () { selectGame(game); });
       card.addEventListener("keydown", function (ev) {
         if (ev.key === "Enter" || ev.key === " ") {
@@ -618,7 +642,7 @@ GAME_CARDS_HTML = (
     card.appendChild(cover);
 
     var body = el("div", "card-body");
-    body.appendChild(el("div", "title", game.name));
+    body.appendChild(title);
     var pName = parentName(game);
     if (pName) body.appendChild(el("div", "parent-sub", "⤷ " + pName));
     // The lead signal: how well this fits his taste.
@@ -627,7 +651,7 @@ GAME_CARDS_HTML = (
     // One line of text, so a wrap breaks between words, never before a "·".
     var metaBits = [];
     var hltb = hoursLabel(game.hltb_main, true);
-    if (hltb) metaBits.push(hltb);
+    if (hltb) metaBits.push(hltb + " to beat");
     if (game.suggested_platform) metaBits.push(label("platform", game.suggested_platform));
     var played = num(game.playtime_hours) > 0 ? hoursLabel(game.playtime_hours) : null;
     if (played) metaBits.push(played + " played");
@@ -709,24 +733,35 @@ GAME_CARDS_HTML = (
     back.focus({ preventScroll: true });
     reportSize();
 
-    function fill(data, failed) {
+    function fill(data, failure) {
       if (seq !== drillSeq) return;               // Back, or another tap, won
       holder.textContent = "";
       holder.appendChild(detailCard(data));
-      if (failed) notice(holder, "Couldn't load the full details — showing what the list had.");
+      if (failure) notice(holder, failure + " Showing what the list had.");
       reportSize();
     }
-    if (window.__PREVIEW_DATA__) { fill(game, false); return; }
+    if (window.__PREVIEW_DATA__) { fill(game, null); return; }
     // media:true is what turns the card into the full game representation —
     // trailer, screenshots, the owned games most like it; the grid payload
     // carries none of that. 30s, not callTool's 15s default: a cold
     // click-through runs the full lazy enrichment AND the media lookup's own
     // 8s budget server-side, and a response that loses the race is dropped.
     callTool("get_game_detail", { game_id: game.game_id, media: true }, 30000).then(function (res) {
+      if (res === TIMED_OUT) { fill(game, "The library didn't answer in 30s."); return; }
+      if (res && res.isError) { fill(game, toolErrorText(res)); return; }
       var data = resultData(res);
-      if (data && data.name) fill(data, false);
-      else fill(game, true);                      // declined or timed out
+      if (data && data.name) fill(data, null);
+      else if (res === undefined) fill(game, "The host didn't run the lookup.");
+      else fill(game, "The details came back unreadable.");
     });
+  }
+  /* A tool error names its own cause: the result's text, at most 120 chars,
+     ending as a sentence so "Showing what the list had." can follow it. */
+  function toolErrorText(res) {
+    var text = (list(res.content).find(function (c) { return c && c.type === "text"; }) || {}).text;
+    text = String(text || "The lookup failed").replace(/\s+/g, " ").trim();
+    if (text.length > 120) text = text.slice(0, 119).trim() + "…";
+    return /[.!?…]$/.test(text) ? text : text + ".";
   }
 
   function backToResults() {
@@ -916,13 +951,14 @@ GAME_CARDS_HTML = (
     var hltb = hoursLabel(game.hltb_main, true);
     if (hltb) {
       badges.appendChild(scoreChip({
-        label: "HLTB", value: hltb, title: "HowLongToBeat, main story",
+        label: "Time to beat", value: hltb, title: "HowLongToBeat, main story",
         url: game.name ? "https://howlongtobeat.com/?q=" + encodeURIComponent(game.name) : null,
       }));
     }
     if (game.protondb_tier) {
       badges.appendChild(scoreChip({
         label: "ProtonDB", value: label("tier", game.protondb_tier),
+        tier: protonTier(game.protondb_tier), title: "ProtonDB: how well it runs on Linux / Steam Deck",
         url: appid != null ? "https://www.protondb.com/app/" + appid : null,
       }));
     }

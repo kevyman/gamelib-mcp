@@ -216,9 +216,9 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
         end = apps_eval.EVAL_CARD_HTML.index("function pedigreeNode(", start)
         badges = apps_eval.EVAL_CARD_HTML[start:end]
         self.assertIn("if (item.owned && rating != null) {", badges)
-        self.assertIn('el("span", "tag rated", rating + "/10")', badges)
+        self.assertIn("chips.push(youChip(rating));", badges)
         self.assertIn("} else if (critic != null && critic >= 0) {", badges)
-        self.assertIn("if (item.owned && rating == null) tags.appendChild", badges)
+        self.assertIn("chips.push(criticsChip(critic));", badges)
 
     def test_the_damper_branch_renders_the_header_line_alone(self) -> None:
         start = apps_eval.EVAL_CARD_HTML.index("function pedigreeNode(parent, ped)")
@@ -253,28 +253,22 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
         # not argue from popularity, so no renderer may read it.
         self.assertNotIn("hypes", apps_eval.EVAL_CARD_HTML)
 
-    def test_anchor_pills_are_neutral_and_only_the_status_is_coloured(self) -> None:
+    def test_anchor_cards_are_neutral_and_carry_the_shared_chips(self) -> None:
         # The live card lit up "Cyberpunk 2077 6.6h" — a game he bounced off —
-        # in endorsement green. The pill is card-coloured now; the completion
-        # glyph carries good/bad, and an unstatused anchor carries neither.
-        for verdictish, cls in (
-            ("completed", "an-good"),
-            ("evergreen", "an-good"),
-            ("abandoned", "an-bad"),
-        ):
-            self.assertIn(f'"{cls}"', apps_eval.EVAL_CARD_HTML)
-            self.assertIn(f"{verdictish}: [", apps_eval.EVAL_CARD_HTML)
-        self.assertIn('playing: ["▶", "playing", ""]', apps_eval.EVAL_CARD_HTML)
+        # in endorsement green. The card stays neutral; its chips are the
+        # shared library chips ("You 6/10", "Played 6.6h", "Status
+        # Abandoned"), each tiered by what it says.
+        html = apps_eval.EVAL_CARD_HTML
         self.assertIn(
-            'el("span", "an-state" + (state[2] ? " " + state[2] : ""), state[0])',
-            apps_eval.EVAL_CARD_HTML,
+            "var chips = chipRow([youChip(a.rating), playedChip(hours, hours === 0),\n"
+            "        statusChip(a.completion_status)]);",
+            html,
         )
-        self.assertIn(".an-state.an-good { background: var(--gl-good-bg)", apps_eval.EVAL_CARD_HTML)
-        self.assertIn(".an-state.an-bad { background: var(--gl-bad-bg)", apps_eval.EVAL_CARD_HTML)
-        self.assertIn("  .anchor {\n", apps_eval.EVAL_CARD_HTML)
-        self.assertIn("    background: var(--gl-inset);\n    font-variant-numeric", apps_eval.EVAL_CARD_HTML)
-        # …and the pill itself no longer paints an opinion.
-        self.assertNotIn("an-warn", apps_eval.EVAL_CARD_HTML)
+        self.assertIn("  .anchor {\n", html)
+        self.assertIn("    background: var(--gl-inset);\n    font-variant-numeric", html)
+        # the glyph pills and their local colors are gone
+        for gone in ("an-state", "an-good", "an-bad", "an-warn", "COMPLETION"):
+            self.assertNotIn(gone, html)
 
 
 class EvalCardLayoutTests(unittest.TestCase):
@@ -430,7 +424,7 @@ class EvalCardLayoutTests(unittest.TestCase):
         html = apps_eval.EVAL_CARD_HTML
         for marker in (
             'html[data-display-mode="fullscreen"] .fs-breakdown { display: flex; }',
-            'html[data-display-mode="fullscreen"] .actions,',
+            'html[data-display-mode="fullscreen"] .actions .act-breakdown,',
             'if (fs && !fs.built && currentDisplayMode() === "fullscreen") {',
             'attributeFilter: ["data-display-mode"]',
             'if (currentDisplayMode() !== "fullscreen") reportInlineSize();',
@@ -451,9 +445,15 @@ class EvalCardLayoutTests(unittest.TestCase):
         for marker in (
             'scoreChip({ label: "Metacritic", value: Math.round(mc), tier: mcTier(mc) })',
             'scoreChip({ label: "OpenCritic", value: Math.round(oc), tier: ocTier(oc) })',
-            'label: "Craft", value: pct + "%", tier: craftTier(pct), meter: pct,',
-            'aux: compactCount(craft.review_count, "review"),',
+            # "Reviews ▬ 93% positive 114k" — the sample-adjusted wording
+            # lives in the tooltip
+            'label: "Reviews", value: pct + "% positive", tier: craftTier(pct), meter: pct,',
+            "var count = compactCount(craft.review_count);",
+            "aux: count,",
+            'title: "Sample-adjusted share of positive reviews"',
             'label: "Trend", value: traj[0], tier: traj[1],',
+            # "Fit Strong", not "Fit Strong fit"
+            'var fit = String(pkg.fit_call).replace(/\\s+fit$/i, "");',
             'label: "Fit", value: fit.charAt(0).toUpperCase() + fit.slice(1),',
             "num(craft.metacritic_score)",
         ):
@@ -587,6 +587,43 @@ class EvalCardLayoutTests(unittest.TestCase):
         ):
             self.assertNotIn(gone, apps_eval.EVAL_CARD_HTML)
 
+    def test_the_store_button_stays_in_fullscreen(self) -> None:
+        # Fullscreen drops the breakdown button (fullscreen IS the breakdown)
+        # but keeps a row holding the store link; a row without one goes.
+        css = apps_eval.EVAL_CARD_HTML.split("<style>")[1].split("</style>")[0]
+        self.assertIn(
+            'html[data-display-mode="fullscreen"] .actions:not(.has-store),\n'
+            '  html[data-display-mode="fullscreen"] .actions .act-breakdown,\n'
+            '  html[data-display-mode="fullscreen"] .eval > .disclosure-body { display: none; }',
+            css,
+        )
+        self.assertNotIn('html[data-display-mode="fullscreen"] .actions,', css)
+        self.assertIn('row.classList.add("has-store");', self._function("storeButton", "actionsNode"))
+
+    def test_the_call_reads_in_words(self) -> None:
+        facts = self._function("factChips", "callNode")
+        for marker in (
+            'factChip(row, "Time to beat", main, extra ? extra + " full" : null, hltbTitle);',
+            'else if (extra) factChip(row, "Time to beat", "~" + extra, "full", hltbTitle);',
+            'factChip(row, "Your pace", hoursLabel(weekly / 60, true) + "/wk", "last 30 days",',
+            '" via " + label("purchase_source", own.purchase_source)',
+        ):
+            self.assertIn(marker, facts)
+        self.assertNotIn('"HLTB"', apps_eval.EVAL_CARD_HTML)
+        self.assertNotIn('"Pace"', apps_eval.EVAL_CARD_HTML)
+        # Below 420px "THE CALL" is a label above its chips, not an eyebrow
+        # sharing a line with one chip.
+        css = apps_eval.EVAL_CARD_HTML.split("<style>")[1].split("</style>")[0]
+        phone = css[css.index("@media (max-width: 419px) {"):]
+        phone = phone[:phone.index("\n  }\n")]
+        self.assertIn(".call .call-label { flex-basis: 100%; margin-right: 0; }", phone)
+
+    def test_an_error_whose_data_is_present_is_suppressed(self) -> None:
+        body = self._function("evalCard", "noteCard")
+        self.assertIn("errorsNode(wrap, packageErrors(pkg));", body)
+        self.assertIn("errorDetailNode(parent, packageErrors(pkg));",
+                      self._function("breakdownNode", "storeAppid"))
+
 
 NODE = shutil.which("node")
 
@@ -637,6 +674,10 @@ var wrap = el("div", "eval");
 actionsNode(wrap, { game: { steam_appid: 1145350 } }, true, 1145350);
 wrap.children[0].children[2].handlers.click();
 out.opened = opened;
+out.storeRowClass = wrap.children[0].className;
+var bare = el("div", "eval");
+actionsNode(bare, { game: {} }, true, null);
+out.bareRowClass = bare.children[0].className;
 console.log(JSON.stringify(out));
 """
 
@@ -674,10 +715,59 @@ class ActionRowBehaviourTests(unittest.TestCase):
     def test_only_a_positive_integer_appid_counts(self) -> None:
         self.assertEqual(self.out["rejected"], [None] * 6)
 
+    def test_a_row_with_the_store_button_is_marked_for_fullscreen(self) -> None:
+        self.assertIn("has-store", self.out["storeRowClass"].split())
+        self.assertNotIn("has-store", self.out["bareRowClass"].split())
+
     def test_store_button_opens_the_steam_store_page(self) -> None:
         self.assertEqual(
             self.out["opened"], ["https://store.steampowered.com/app/1145350/"]
         )
+
+
+_ERRORS_PROBE = r"""
+var pkg = {
+  time: { hltb_main_hours: 18 },
+  media: { trailer: { kind: "youtube", video_id: "x" }, screenshots: [] },
+  pedigree: { developer: { name: "Retro" }, previous_games: [] },
+  errors: ["hltb: completionist time unavailable", "media: steam: no trailer",
+           "igdb: unresolved", "pace: unavailable", "", null],
+};
+var bare = { errors: ["hltb: down", "media: fetch failed", "igdb: unresolved"] };
+console.log(JSON.stringify({ full: packageErrors(pkg), bare: packageErrors(bare) }));
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class ErrorSuppressionBehaviourTests(unittest.TestCase):
+    """K4: an error entry whose data is on the card anyway is dropped."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        html = apps_eval.EVAL_CARD_HTML
+        start = html.index("function errorHasData(")
+        errors = html[start:html.index("function errorsNode(", start)]
+        named = html[html.index("function named(v)"):]
+        named = named[:named.index("\n") + 1]
+        script = (
+            "function num(v) { if (v === null || v === undefined || v === '') return null;"
+            " var n = Number(v); return isFinite(n) ? n : null; }\n"
+            "function list(v) { return Array.isArray(v) ? v : []; }\n"
+            "function plural(n, w) { return n + ' ' + w + 's'; }\n"
+            + apps_shared.MEDIA_PANEL_JS + apps_shared.PEDIGREE_JS + named + errors + _ERRORS_PROBE
+        )
+        assert NODE is not None
+        proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True,
+                              timeout=60, check=False)
+        if proc.returncode != 0:
+            raise AssertionError(proc.stderr)
+        cls.out = json.loads(proc.stdout)
+
+    def test_present_data_silences_its_error(self) -> None:
+        self.assertEqual(self.out["full"], ["pace: unavailable"])
+
+    def test_missing_data_keeps_its_error(self) -> None:
+        self.assertEqual(self.out["bare"], ["hltb: down", "media: fetch failed", "igdb: unresolved"])
 
 
 class SharedBlockTests(unittest.TestCase):
