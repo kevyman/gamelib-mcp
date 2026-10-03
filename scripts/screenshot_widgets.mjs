@@ -148,7 +148,13 @@ async function main() {
             ...(scheme ? { colorScheme: scheme } : {}),
           });
           const page = await context.newPage();
-          page.on("pageerror", (err) => console.error(`${name} ${width} pageerror: ${err.message}`));
+          // A widget that throws while starting up still lays out and screenshots
+          // fine, so a page error has to count as a failure or the run (and
+          // render_all_previews.sh) would report success for a broken widget.
+          page.on("pageerror", (err) => {
+            failures++;
+            console.error(`${name} ${width} pageerror: ${err.message}`);
+          });
           try {
             if (opts.imgCache) await routeImages(page, resolve(opts.imgCache));
             await page.goto(pathToFileURL(resolve(file)).href, { waitUntil: "load", timeout: 30000 });

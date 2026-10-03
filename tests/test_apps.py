@@ -1823,6 +1823,16 @@ class ReviewFixBehaviourTests(unittest.TestCase):
 
 
 class PreviewScriptTests(unittest.TestCase):
+    def test_screenshot_run_fails_on_a_page_error(self) -> None:
+        """A widget that throws at startup still screenshots fine, so the
+        pageerror handler must count as a failure (Codex review on #193)."""
+        src = (Path(__file__).resolve().parent.parent / "scripts" / "screenshot_widgets.mjs").read_text()
+        handler = re.search(r'page\.on\("pageerror",[^}]*\}', src, re.S)
+        self.assertIsNotNone(handler)
+        assert handler is not None
+        self.assertIn("failures++", handler.group(0))
+        self.assertIn("process.exit(failures ? 1 : 0)", src)
+
     def test_preview_simulates_fullscreen_instead_of_opening_an_overlay(self) -> None:
         from pathlib import Path
 
