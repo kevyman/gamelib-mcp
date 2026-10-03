@@ -52,6 +52,8 @@ SAMPLE_FULL_STEAM: dict[str, Any] = {
     "recorded": True,
     "game_id": 4821,
     "name": "Hades II",
+    "assessment_id": 212,
+    "assessed_at": "2026-10-03T09:12:00Z",
     "verdict": "buy_now",
     "package": {
         "game": {
@@ -617,17 +619,248 @@ SAMPLE_COMPACT: dict[str, Any] = {
     "recorded": True,
     "game_id": 771,
     "name": "Slay the Spire II",
+    "assessment_id": 301,
+    "assessed_at": "2026-10-03T08:40:00Z",
     "verdict": "play_what_you_own",
     "created": False,
 }
 
-# 4 — the void mode: one misfiled verdict hard-deleted.
+# 4 — the void mode: one misfiled verdict hard-deleted (void_assessment's
+# response shape: the deleted verdict and the day it was recorded).
 SAMPLE_VOID: dict[str, Any] = {
     "voided": True,
     "assessment_id": 318,
     "game_id": 512,
     "name": "Alan Wake",
+    "verdict": "skip",
+    "assessed_at": "2026-09-14T20:02:00Z",
     "suggested_action": None,
+}
+
+_IGDB = "https://images.igdb.com/igdb/image/upload"
+
+# 5 — the Binder mock-up's card (artboards B / C): an unowned PS5 candidate
+# with IGDB media, a target price, a three-flag weakness list, two why-care
+# lines, lineage, anchors, one library neighbour and a big-studio pedigree.
+SAMPLE_WOLVERINE: dict[str, Any] = {
+    "recorded": True,
+    "game_id": 4235,
+    "name": "Marvel's Wolverine",
+    "assessment_id": 46,
+    "assessed_at": "2026-10-03T13:04:42Z",
+    "verdict": "wishlist_for_sale",
+    "package": {
+        "game": {
+            "game_id": 4235,
+            "name": "Marvel's Wolverine",
+            "release_year": 2026,
+            "cover_url": f"{_IGDB}/t_cover_big/cob5mk.jpg",
+            "steam_appid": None,
+        },
+        "verdict": "wishlist_for_sale",
+        "summary": (
+            "Right studio and genre for the user, but a 79-OpenCritic, repetitive-combat game "
+            "isn't worth €70 with Slay the Spire 2 active and Guardians unplayed — wait "
+            "for ~€40."
+        ),
+        "presentation": {
+            "elevator_pitch": (
+                "Insomniac trades Spider-Man's open city for a linear, gory 12–15 hour Logan "
+                "story across Canada, Japan and Madripoor. The performances and set pieces "
+                "land; the claw combat runs out of new ideas before the credits."
+            ),
+            "craft_note": (
+                "OpenCritic 79, ~75% recommend; wide spread (IGN/GameSpot 6, GameStar 87). "
+                "Players rate it far higher than critics."
+            ),
+            "for_you_if": [
+                "You rated Marvel's Spider-Man 9/10 and finished it (50h)",
+                (
+                    "Ghost of Tsushima: 82h, completed, 8/10 — you finish Sony's open-world "
+                    "action games"
+                ),
+                "Assassin's Creed II is a 10/10 for you — stealth-action with a story lands",
+            ],
+            "not_for_you_if": [
+                (
+                    "Your last 30 days are 7.8h of Slay the Spire 2 — a 12–15h linear story "
+                    "has to displace that"
+                ),
+                "Guardians of the Galaxy, a same-shelf Marvel action game, is still unplayed",
+            ],
+            "why_care": [
+                {
+                    "kind": "studio",
+                    "text": "Insomniac's first Marvel game outside Spider-Man, and a "
+                            "deliberate break from its open-world formula",
+                },
+                {
+                    "kind": "moment",
+                    "text": "Critics and players split hard: lowest PS5-era PlayStation "
+                            "Studios Metascore, yet 4.85/5 on the PS Store",
+                },
+            ],
+        },
+        "comparisons": [
+            {
+                "name": "Marvel's Spider-Man 2",
+                "relation": "ancestor",
+                "note": "Same studio, same engine, open world instead of linear",
+                "game_id": 2242,
+                "owned": True,
+                "my_rating": None,
+                "playtime_hours": 25.3,
+            },
+            {
+                "name": "Marvel's Spider-Man",
+                "relation": "ancestor",
+                "note": "Where Insomniac's Marvel run started",
+                "game_id": 2354,
+                "owned": True,
+                "my_rating": 9,
+                "playtime_hours": 50.0,
+            },
+            {
+                "name": "Marvel's Guardians of the Galaxy",
+                "relation": "similar",
+                "note": "The substitute already on your shelf",
+                "game_id": 1622,
+                "owned": True,
+                "my_rating": None,
+                "playtime_hours": 0.0,
+            },
+        ],
+        "craft": {
+            "adjusted": None,
+            "positive_pct": None,
+            "review_count": None,
+            "trajectory": "stable",
+            "opencritic_score": 79,
+            "metacritic_score": None,
+        },
+        "fit_call": "probable fit",
+        "flags": [
+            "repetitive combat per critics",
+            "lowest-rated PS Studios PS5 game",
+            "unplayed substitute owned: Guardians of the Galaxy",
+        ],
+        "anchors": [
+            {"game_id": 2354, "name": "Marvel's Spider-Man", "rating": 9, "playtime_hours": 50.0,
+             "completion_status": "completed", "cover_url": f"{_IGDB}/t_cover_big/co1r77.jpg"},
+            {"game_id": 1180, "name": "Ghost of Tsushima", "rating": 8, "playtime_hours": 82.2,
+             "completion_status": "completed", "cover_url": f"{_IGDB}/t_cover_big/co2crj.jpg"},
+            {"game_id": 640, "name": "Assassin's Creed II", "rating": 10, "playtime_hours": 55.5,
+             "completion_status": "completed", "cover_url": f"{_IGDB}/t_cover_big/co1rcf.jpg"},
+            {"game_id": 2242, "name": "Marvel's Spider-Man 2", "rating": None,
+             "playtime_hours": 25.3, "completion_status": None,
+             "cover_url": f"{_IGDB}/t_cover_big/co798a.jpg"},
+            {"game_id": 905, "name": "Wolfenstein: The New Order", "rating": 8.5,
+             "playtime_hours": 15.2, "completion_status": None,
+             "cover_url": f"{_IGDB}/t_cover_big/co21c0.jpg"},
+            {"game_id": 1311, "name": "Horizon Zero Dawn Complete Edition", "rating": None,
+             "playtime_hours": 11.3, "completion_status": None,
+             "cover_url": f"{_IGDB}/t_cover_big/co2una.jpg"},
+            {"game_id": 777, "name": "SOMA", "rating": None, "playtime_hours": 6.9,
+             "completion_status": None, "cover_url": f"{_IGDB}/t_cover_big/co2a20.jpg"},
+        ],
+        "ownership": {
+            "owned": False,
+            "wishlisted": False,
+            "platforms": [],
+            "completion_status": None,
+            "my_rating": None,
+            "playtime_hours": None,
+            "price_paid": None,
+            "price_currency": None,
+            "purchase_source": None,
+            "bundle_name": None,
+        },
+        "time": {
+            "hltb_main_hours": 12.0,
+            "hltb_extra_hours": 15.0,
+            "recent_weekly_minutes": 156,
+        },
+        "price": {"seen": 69.99, "currency": "EUR", "platform": "ps5", "target": 40},
+        "media": {
+            "source": "igdb",
+            "trailer": {
+                "kind": "youtube",
+                "video_id": "rJrqHyojaa4",
+                "poster": "https://i.ytimg.com/vi/rJrqHyojaa4/hqdefault.jpg",
+                "name": "Ain't No Hero",
+            },
+            "screenshots": [
+                {
+                    "thumb": f"{_IGDB}/t_screenshot_med/{shot}.jpg",
+                    "full": f"{_IGDB}/t_screenshot_big/{shot}.jpg",
+                }
+                for shot in ("sc104gl", "sc104gn", "sc104go", "scfehk")
+            ],
+            "screenshot_count": 4,
+            "screenshots_truncated": False,
+            "short_description": None,
+        },
+        "similar": {
+            "items": [
+                {
+                    "game_id": 1991,
+                    "igdb_id": None,
+                    "name": "METAL GEAR SOLID 3: Snake Eater – Master Collection",
+                    "release_year": 2023,
+                    "cover_url": f"{_IGDB}/t_cover_big/cobl5l.jpg",
+                    "owned": True,
+                    "unplayed": True,
+                    "my_rating": None,
+                    "playtime_hours": 0.0,
+                    "similarity": 0.48,
+                    "shared_tags": ["stealth", "drama", "science fiction"],
+                },
+            ],
+            "count": 1,
+            "truncated": False,
+        },
+        "pedigree": {
+            "developer": {
+                "name": "Insomniac Games",
+                "igdb_company_id": 1153,
+                "founded_year": 1994,
+                "country": 840,
+            },
+            "developer_names": ["Insomniac Games"],
+            "publisher_name": "Sony Interactive Entertainment",
+            "previous_games": [
+                {
+                    "igdb_id": None,
+                    "name": "Marvel's Spider-Man 2",
+                    "release_year": 2023,
+                    "critic_score": None,
+                    "cover_url": f"{_IGDB}/t_cover_big/co798a.jpg",
+                    "owned": True,
+                    "my_rating": None,
+                    "playtime_hours": 25.3,
+                },
+                {
+                    "igdb_id": None,
+                    "name": "Marvel's Spider-Man",
+                    "release_year": 2018,
+                    "critic_score": None,
+                    "cover_url": f"{_IGDB}/t_cover_big/co1r77.jpg",
+                    "owned": True,
+                    "my_rating": 9,
+                    "playtime_hours": 50.0,
+                },
+            ],
+            "previous_count": 2,
+            "previous_truncated": False,
+            "catalog_size": None,
+            "catalog_truncated": False,
+            "big_catalog": True,
+            "library_track_record": None,
+            "hypes": None,
+        },
+        "past": None,
+        "errors": [],
+    },
 }
 
 SAMPLES: list[tuple[str, dict[str, Any]]] = [
@@ -636,6 +869,7 @@ SAMPLES: list[tuple[str, dict[str, Any]]] = [
     ("minimal package (no media/similar/pedigree/presentation, skip)", SAMPLE_MINIMAL),
     ("compact recorded verdict (no package)", SAMPLE_COMPACT),
     ("voided assessment", SAMPLE_VOID),
+    ("Binder mock-up: Marvel's Wolverine (IGDB media, PS5, wishlist_for_sale)", SAMPLE_WOLVERINE),
 ]
 
 

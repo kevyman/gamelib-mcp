@@ -10,20 +10,23 @@ lands in both widgets at once instead of being hand-ported (and forgotten).
 Splice, never reformat: the constants carry their own indentation and trailing
 newline, and a widget's HTML is the literal chunks and these constants
 concatenated in order. What is deliberately NOT here is anything the two
-widgets genuinely disagree on — the grid's cover plates, each lightbox's placement,
-the evaluation card's verdict stamp — that stays local to its widget.
+widgets genuinely disagree on — each card's layout and ground, each lightbox's
+placement — that stays local to its widget.
 ``tests/test_apps_eval.py::WidgetDriftTests`` fails if a block of any size
 worth sharing reappears in both files instead.
 
-Design system (docs/specs/2026-10-03-widget-ux-redesign.md §1): every color,
-radius, border width, shadow and font is a ``--gl-*`` custom property defined
-ONCE in ``TOKENS_CSS`` as ``var(<host token>, <fallback>)``. The host's
-``hostContext.styles.variables`` (Claude's theme tokens) win when present; the
-``light-dark()`` fallbacks keep ChatGPT, Goose and the offline preview
-rendering, and follow ``hostContext.theme`` (via ``color-scheme``) or, with no
-host at all, ``prefers-color-scheme``. Widget CSS references ``--gl-*`` names
-only. Type is three sizes (16 / 14 / 12px) in two weights (400 / 600);
-nothing renders below 12px.
+Design system (docs/specs/2026-10-03-widget-ux-redesign.md §1, restyled by
+"The Binder", docs/specs/2026-10-04-binder-design-language.md): every color,
+radius, shadow and font is a ``--gl-*`` custom property defined ONCE in
+``TOKENS_CSS`` as ``var(<host token>, <fallback>)`` (or a plain value when it
+is theme-invariant). The host's ``hostContext.styles.variables`` (Claude's
+theme tokens) win when present; the ``light-dark()`` fallbacks keep ChatGPT,
+Goose and the offline preview rendering, and follow ``hostContext.theme`` (via
+``color-scheme``) or, with no host at all, ``prefers-color-scheme``. Widget
+CSS references ``--gl-*`` names only. Type is four sizes (20 / 16 / 14 / 12px)
+in three weights (400 / 600 / 800); nothing renders below 12px. The Binder
+components (the card ``.frame``, its art, badge, plate, stats, pips, ribbon,
+traits, minis) and their motion live in ``BINDER_CSS`` / ``BINDER_JS``.
 """
 
 import json
@@ -51,15 +54,32 @@ _PLATFORM_DISPLAY: dict[str, str] = {
 }
 
 
+# The lozenge form ("EPIC", not "EPIC GAMES"): the plate's sub line is one row
+# beside "No. N", so a lozenge carries the shortest unambiguous name. The full
+# names above stay for prose and aria-labels.
+_PLATFORM_SHORT_DISPLAY: dict[str, str] = {
+    "steam": "Steam",
+    "epic": "Epic",
+    "gog": "GOG",
+    "switch2": "Switch 2",
+    "ps5": "PS5",
+    "xbox": "Xbox",
+    "itchio": "itch.io",
+    "ea": "EA",
+    "ubisoft": "Ubisoft",
+    "other": "Other",
+}
+
+
 def _humanize(raw: str) -> str:
     """Python twin of the JS ``humanize``: underscores out, words title-cased."""
     return " ".join(word[:1].upper() + word[1:] for word in raw.replace("_", " ").split())
 
 
-def _platform_labels() -> dict[str, str]:
+def _platform_labels(display: dict[str, str]) -> dict[str, str]:
     labels: dict[str, str] = {}
     for spec in PLATFORMS:
-        text = _PLATFORM_DISPLAY.get(spec.name, _humanize(spec.name))
+        text = display.get(spec.name, _humanize(spec.name))
         labels[spec.name] = text
         # Aliases ("nintendo", "origin", "uplay") are accepted inputs, not wire
         # values — mapped anyway so a stray one still reads as its platform.
@@ -68,7 +88,8 @@ def _platform_labels() -> dict[str, str]:
     return labels
 
 
-PLATFORM_LABELS: dict[str, str] = _platform_labels()
+PLATFORM_LABELS: dict[str, str] = _platform_labels(_PLATFORM_DISPLAY)
+PLATFORM_SHORT_LABELS: dict[str, str] = _platform_labels(_PLATFORM_SHORT_DISPLAY)
 
 # record_assessment's verdict Literal (main.py) == tools/assessment.py's
 # ASSESSMENT_VERDICTS; a test pins all three together.
@@ -130,10 +151,10 @@ PROVIDER_LABELS: dict[str, str] = {
 
 # ---- Design tokens, reset, accessibility ------------------------------------
 # The ONE place a color/radius/shadow/font value is written. Widget CSS uses
-# the --gl-* names only. Raw color values appear in exactly three places:
-# this block, the verdict stamp rule (apps_eval.py, built from tokens) and the
-# cover plate (its gradient is generated per name in coverNode; its ink is the
-# --gl-plate-* tokens below). tests/test_apps.py::DesignSystemTests pins that.
+# the --gl-* names only. Raw color values appear in exactly two places: this
+# block and the cover plate (its gradient is generated per name in coverNode;
+# its ink is the --gl-plate-* tokens below). tests/test_apps.py::
+# DesignSystemTests pins that.
 _TOKENS_LAYER_CSS = r"""  :root {
     color-scheme: light dark;
     --gl-text: var(--color-text-primary, light-dark(#141413, #FAF9F5));
@@ -152,17 +173,55 @@ _TOKENS_LAYER_CSS = r"""  :root {
     --gl-good-bg: var(--color-background-success, light-dark(#E9F1DC, #1B4614));
     --gl-ok-bg: var(--color-background-warning, light-dark(#F6EEDF, #483A0F));
     --gl-bad-bg: var(--color-background-danger, light-dark(#F7ECEC, #602A28));
-    --gl-good-edge: var(--color-border-success, light-dark(#437426, #599130));
-    --gl-ok-edge: var(--color-border-warning, light-dark(#805C1F, #A87829));
-    --gl-bad-edge: var(--color-border-danger, light-dark(#A73D39, #CD5C58));
+    /* The tier edge: the 2px badge ring, the chip and mini-art border. */
+    --gl-good-edge: var(--color-border-success, light-dark(#437426, #7AB948));
+    --gl-ok-edge: var(--color-border-warning, light-dark(#B8891F, #D1A041));
+    --gl-bad-edge: var(--color-border-danger, light-dark(#A73D39, #EE8884));
     --gl-inverse-bg: var(--color-background-inverse, light-dark(#141413, #FAF9F5));
     --gl-inverse-text: var(--color-text-inverse, light-dark(#FFFFFF, #141413));
+    /* The Binder (docs/specs/assets/binder/gl.css). The keyline is the 1px
+       inner line on art; the rarity stops are the three hues of each tier's
+       brushed-metal card border, at the light-token lightness under light. */
+    --gl-keyline: light-dark(rgba(20, 20, 19, 0.12), rgba(250, 249, 245, 0.14));
+    --gl-rarity-good-1: light-dark(#265B19, #437426);
+    --gl-rarity-good-2: light-dark(#437426, #7AB948);
+    --gl-rarity-good-3: light-dark(#7AB948, #A8D98A);
+    --gl-rarity-ok-1: light-dark(#805C1F, #8A6A24);
+    --gl-rarity-ok-2: light-dark(#B8891F, #D1A041);
+    --gl-rarity-ok-3: light-dark(#D1A041, #F0D08A);
+    --gl-rarity-bad-1: light-dark(#7F2C28, #602A28);
+    --gl-rarity-bad-2: light-dark(#A73D39, #EE8884);
+    --gl-rarity-bad-3: light-dark(#EE8884, #A73D39);
+    --gl-rarity-good: conic-gradient(from 210deg, var(--gl-rarity-good-1), var(--gl-rarity-good-2) 9%, var(--gl-rarity-good-3) 21%, var(--gl-rarity-good-1) 32%, var(--gl-rarity-good-2) 44%, var(--gl-rarity-good-3) 57%, var(--gl-rarity-good-1) 68%, var(--gl-rarity-good-2) 80%, var(--gl-rarity-good-3) 91%, var(--gl-rarity-good-1));
+    --gl-rarity-ok: conic-gradient(from 210deg, var(--gl-rarity-ok-1), var(--gl-rarity-ok-2) 9%, var(--gl-rarity-ok-3) 21%, var(--gl-rarity-ok-1) 32%, var(--gl-rarity-ok-2) 44%, var(--gl-rarity-ok-3) 57%, var(--gl-rarity-ok-1) 68%, var(--gl-rarity-ok-2) 80%, var(--gl-rarity-ok-3) 91%, var(--gl-rarity-ok-1));
+    --gl-rarity-bad: conic-gradient(from 210deg, var(--gl-rarity-bad-1), var(--gl-rarity-bad-2) 9%, var(--gl-rarity-bad-3) 21%, var(--gl-rarity-bad-1) 32%, var(--gl-rarity-bad-2) 44%, var(--gl-rarity-bad-3) 57%, var(--gl-rarity-bad-1) 68%, var(--gl-rarity-bad-2) 80%, var(--gl-rarity-bad-3) 91%, var(--gl-rarity-bad-1));
+    /* Theme-invariant Binder inks: the deep plate (badge tag, ribbon ink),
+       the ribbon fills and their bevel, the static specular line and the
+       hover sheen on art, and the play chip's ring (it sits on art, so it
+       never follows the theme either). */
+    --gl-deep: #141413;
+    --gl-deep-ink: #FAF9F5;
+    --gl-ribbon-ink: #141413;
+    --gl-ribbon-good: #7AB948;
+    --gl-ribbon-ok: #D1A041;
+    --gl-ribbon-bad: #EE8884;
+    --gl-ribbon-none: #C2C0B6;
+    --gl-ribbon-hi: rgba(255, 255, 255, 0.35);
+    --gl-ribbon-lo: rgba(0, 0, 0, 0.22);
+    --gl-specular: rgba(255, 255, 255, 0.08);
+    --gl-sheen: rgba(255, 255, 255, 0.16);
+    --gl-play-ring: rgba(20, 20, 19, 0.35);
+    /* What every component reads; a .tier-* class (below) re-points them. */
+    --gl-tier: var(--gl-border-strong);
+    --gl-tier-text: var(--gl-text-2);
+    --gl-tier-fill: var(--gl-ribbon-none);
+    --gl-rarity: none;
     /* Theming exception — the media stage. A media stage is dark in both
        themes by design — it frames video and screenshots — so the stage, its
        veil and scrim, the type on it and the glyph shadow never follow the
-       host theme. (The other two exceptions: the verdict stamp, and the cover
-       plate's ink below.) The plain --gl-shadow-ink value is the fallback;
-       @supports below derives it from --gl-stage. */
+       host theme. (The other exception: the cover plate's ink below.) The
+       plain --gl-shadow-ink value is the fallback; @supports below derives it
+       from --gl-stage. */
     --gl-stage: #0d0b07;
     --gl-stage-veil: rgba(12, 10, 6, 0.32);
     --gl-scrim: rgba(12, 10, 6, 0.5);
@@ -179,20 +238,32 @@ _TOKENS_LAYER_CSS = r"""  :root {
     --gl-r-md: var(--border-radius-md, 8px);
     --gl-r-lg: var(--border-radius-lg, 10px);
     --gl-r-full: var(--border-radius-full, 9999px);
+    /* The Binder card: 14px radius / 6px frame, the grid card 12px / 4px. */
+    --gl-r-card: 14px;
+    --gl-r-card-s: 12px;
+    --gl-frame: 6px;
     --gl-bw: var(--border-width-regular, 0.5px);
     --gl-shadow: var(--shadow-sm, 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1));
     --gl-shadow-md: var(--shadow-md, 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1));
     --gl-font: var(--font-sans, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-    /* Exactly three sizes (16 / 14 / 12px). Clamped: a host token below 12px
-       never shrinks the type under the floor ("nothing renders below 12px"). */
+    /* Numerals (stat values, badge numbers, prices) and flavor text only. */
+    --gl-mono: var(--font-mono, ui-monospace, Menlo, Consolas, monospace);
+    --gl-serif: ui-serif, Georgia, "Times New Roman", serif;
+    /* Exactly four sizes (20 / 16 / 14 / 12px: title, h, body, cap). Clamped:
+       a host token below 12px never shrinks the type under the floor
+       ("nothing renders below 12px"). */
+    --gl-title: max(12px, var(--font-heading-lg-size, 20px));
     --gl-h: max(12px, var(--font-heading-md-size, 16px));
     --gl-body: max(12px, var(--font-text-sm-size, 14px));
     --gl-cap: max(12px, var(--font-text-xs-size, 12px));
+    --gl-title-lh: var(--font-heading-lg-line-height, 1.25);
     --gl-h-lh: var(--font-heading-md-line-height, 1.4);
     --gl-body-lh: var(--font-text-sm-line-height, 1.4);
     --gl-cap-lh: var(--font-text-xs-line-height, 1.4);
+    /* Exactly three weights; mono numerals use the same three. */
     --gl-regular: var(--font-weight-normal, 400);
     --gl-strong: var(--font-weight-semibold, 600);
+    --gl-heavy: 800;
     /* Horizontal safe-area insets (set by applyHostContext); the strips'
        scroll-padding reads them. */
     --gl-safe-left: 0px;
@@ -205,8 +276,11 @@ _TOKENS_LAYER_CSS = r"""  :root {
   :root[data-theme="dark"] { color-scheme: dark; }
 """
 
+# ``--gl-x: var(--host, light-dark(L, D));`` or, with no host token,
+# ``--gl-x: light-dark(L, D);`` (the Binder's keyline and rarity stops).
 _LIGHT_DARK_TOKEN = re.compile(
-    r"^    (--gl-[a-z0-9-]+): var\((--[a-z0-9-]+), light-dark\((.+)\)\);$",
+    r"^    (--gl-[a-z0-9-]+): "
+    r"(?:var\((--[a-z0-9-]+), light-dark\((.+)\)\)|light-dark\((.+)\));$",
     re.MULTILINE,
 )
 
@@ -229,15 +303,20 @@ def _plain_color_fallback(layer: str) -> str:
     ``--gl-*: var(<host token>, light-dark(L, D))`` becomes ``var(<host
     token>, L)`` by default and ``var(<host token>, D)`` under a dark
     ``prefers-color-scheme`` (unless the host forced light) or a host dark
-    theme. Host variables still win either way.
+    theme. Host variables still win either way. A token with no host variable
+    (``--gl-*: light-dark(L, D)``) becomes the plain ``L`` / ``D``.
     """
     tokens = [
-        (name, host, *_split_pair(pair)) for name, host, pair in _LIGHT_DARK_TOKEN.findall(layer)
+        (name, host, *_split_pair(hosted or bare))
+        for name, host, hosted, bare in _LIGHT_DARK_TOKEN.findall(layer)
     ]
+
+    def value(host: str, color: str) -> str:
+        return f"var({host}, {color})" if host else color
 
     def block(indent: str, pick: int) -> str:
         return "".join(
-            f"{indent}{name}: var({host}, {(light, dark)[pick]});\n"
+            f"{indent}{name}: {value(host, (light, dark)[pick])};\n"
             for name, host, light, dark in tokens
         )
 
@@ -255,7 +334,33 @@ def _plain_color_fallback(layer: str) -> str:
     )
 
 
-TOKENS_CSS = _TOKENS_LAYER_CSS + _plain_color_fallback(_TOKENS_LAYER_CSS)
+# Theme-dependent values that are not colors (light-dark() takes colors only),
+# chosen the way the plain fallback above chooses: light by default, dark under
+# a dark prefers-color-scheme (unless the host forced light) or a host dark
+# theme.
+_THEMED_VALUES_CSS = r"""  :root { --gl-grain-opacity: 0.035; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --gl-grain-opacity: 0.06; }
+  }
+  :root[data-theme="dark"] { --gl-grain-opacity: 0.06; }
+"""
+
+# The four tier classes. They work on ANY component: each re-points the tier
+# tokens every Binder component reads — --gl-tier (edge, ring, chip border),
+# --gl-tier-text (value, pip), --gl-tier-fill (ribbon) and --gl-rarity (the
+# card border). Color encodes the quality tier only, never the brand.
+_TIERS_CSS = r"""  .tier-good { --gl-tier: var(--gl-good-edge); --gl-tier-text: var(--gl-good); --gl-tier-fill: var(--gl-ribbon-good); --gl-rarity: var(--gl-rarity-good); }
+  .tier-ok { --gl-tier: var(--gl-ok-edge); --gl-tier-text: var(--gl-ok); --gl-tier-fill: var(--gl-ribbon-ok); --gl-rarity: var(--gl-rarity-ok); }
+  .tier-bad { --gl-tier: var(--gl-bad-edge); --gl-tier-text: var(--gl-bad); --gl-tier-fill: var(--gl-ribbon-bad); --gl-rarity: var(--gl-rarity-bad); }
+  .tier-none { --gl-tier: var(--gl-border-strong); --gl-tier-text: var(--gl-text-2); --gl-tier-fill: var(--gl-ribbon-none); --gl-rarity: none; }
+"""
+
+TOKENS_CSS = (
+    _TOKENS_LAYER_CSS
+    + _plain_color_fallback(_TOKENS_LAYER_CSS)
+    + _THEMED_VALUES_CSS
+    + _TIERS_CSS
+)
 
 # Box-sizing reset, the transparent page and the body type. The 12px gutter is
 # the base the bridge adds safe-area insets to.
@@ -287,14 +392,20 @@ RESET_CSS = r"""  * { box-sizing: border-box; margin: 0; padding: 0; }
 # 24 + 2x4 = 32 on a pointer; on touch the chips grow to a 32px visual height
 # so 32 + 2x6 = 44 is met by the chip's own height plus the extension, not by
 # overlapping the next row. The host element must be a containing block
-# (positioned, or transformed like the stamp); .btn and .disclosure are made
-# relative in CONTROLS_CSS. Grid cards and media thumbs carry no extension:
-# their overflow: hidden would clip it, and both are far past 44px already.
+# (positioned or transformed); .btn and .disclosure are made
+# relative in CONTROLS_CSS, a tappable button.frame in FRAME_CSS and a mini
+# card's .mini-hit in MINI_CSS. The old grid cards and media thumbs carry no
+# extension: their overflow: hidden would clip it, and both are far past 44px
+# already. The Binder's card and pill take the ring 3px out (gl.css) in the
+# same text color — the reference sheet's 0.4-alpha border-strong ring is the
+# contrast failure described above, so its color is not ported; the thumbs
+# and minis keep 2px, the reach their strip's padding leaves unclipped.
 A11Y_CSS = r"""  :focus-visible { outline: 2px solid var(--gl-text); outline-offset: 2px; }
   :focus:not(:focus-visible) { outline: none; }
+  .frame:focus-visible, .btn:focus-visible, a.art:focus-visible { outline-offset: 3px; }
   a.chip::after, .btn::after, .disclosure::after, .fs-btn::after,
   .car-nav::after, .overlay-close::after, .hero-pill::after,
-  .stamp[role="button"]::after, button.stamp::after {
+  button.frame::after, .mini-hit::after {
     content: "";
     position: absolute;
     inset: -4px;
@@ -304,10 +415,20 @@ A11Y_CSS = r"""  :focus-visible { outline: 2px solid var(--gl-text); outline-off
   html.touch a.chip::after, html.touch .btn::after, html.touch .disclosure::after,
   html.touch .fs-btn::after, html.touch .car-nav::after,
   html.touch .overlay-close::after, html.touch .hero-pill::after,
-  html.touch .stamp[role="button"]::after, html.touch button.stamp::after {
+  html.touch button.frame::after, html.touch .mini-hit::after {
     inset: -6px;
   }
   html.touch .chips a.chip::after { inset: -6px -4px; }
+  /* Heard, not drawn (a small card's Steam brand, the reel's "Media"
+     eyebrow: the stage says what it is). */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
       animation: none !important;
@@ -341,14 +462,17 @@ PANEL_CSS = r"""  .panel {
     box-shadow: var(--gl-shadow);
     padding: 14px;
   }
+  /* The eyebrow over a block or strip ("IN YOUR LIBRARY"): the label style
+     (12px / 600, uppercase, tracked) in the tertiary text color. */
   .section-title {
+    display: block;
     font-size: var(--gl-cap);
     line-height: var(--gl-cap-lh);
     font-weight: var(--gl-strong);
-    letter-spacing: 0.04em;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
     color: var(--gl-muted);
-    margin-bottom: 8px;
+    margin-bottom: 10px;
   }
   .note {
     font-size: var(--gl-cap);
@@ -365,8 +489,12 @@ PANEL_CSS = r"""  .panel {
 """
 
 # ---- Components CSS: chip, match bar, skeleton, controls, notice -----------
-# The ONE chip for every score. Color encodes quality tier only; the brand is
-# the label text.
+# The ONE chip for every score. Color encodes quality tier only — on the 1px
+# border and the value, never a fill (the chip's ground is the card surface,
+# which also keeps a chip readable where it sits on cover art) — and the
+# brand is the label text. A
+# figure ("83", "25h", "€19.99") sits in the mono numerals; a phrase ("Very
+# positive", "Strong") is a ``b.word`` in the label face (scoreChip decides).
 CHIP_CSS = r"""  .chips { display: flex; gap: 8px 6px; flex-wrap: wrap; align-items: center; }
   html.touch .chips { gap: 12px 8px; }
   .chip {
@@ -377,39 +505,49 @@ CHIP_CSS = r"""  .chips { display: flex; gap: 8px 6px; flex-wrap: wrap; align-it
     column-gap: 6px;
     row-gap: 0;
     max-width: 100%;
+    min-height: 24px;
     font-size: var(--gl-cap);
     line-height: var(--gl-cap-lh);
     font-weight: var(--gl-regular);
-    padding: 3px 8px;
-    border-radius: var(--gl-r-sm);
-    border: var(--gl-bw) solid var(--gl-border);
-    background: var(--gl-inset);
-    color: var(--gl-text);
+    padding: 2px 7px;
+    border-radius: var(--gl-r-xs);
+    border: 1px solid var(--gl-tier);
+    background: var(--gl-surface);
+    color: var(--gl-text-2);
     font-variant-numeric: tabular-nums;
     text-decoration: none;
   }
   .chip .lbl { color: var(--gl-text-2); white-space: nowrap; }
-  .chip b { font-weight: var(--gl-strong); }
-  .chip .aux { color: var(--gl-text-2); white-space: nowrap; }
-  .chip.tier-good { background: var(--gl-good-bg); border-color: var(--gl-good-edge); color: var(--gl-good); }
-  .chip.tier-ok { background: var(--gl-ok-bg); border-color: var(--gl-ok-edge); color: var(--gl-ok); }
-  .chip.tier-bad { background: var(--gl-bad-bg); border-color: var(--gl-bad-edge); color: var(--gl-bad); }
-  .chip.tier-none { background: var(--gl-inset); color: var(--gl-text); }
-  .chip.tier-good .lbl, .chip.tier-ok .lbl, .chip.tier-bad .lbl,
-  .chip.tier-good .aux, .chip.tier-ok .aux, .chip.tier-bad .aux { color: inherit; }
+  .chip b {
+    font-family: var(--gl-mono);
+    font-size: var(--gl-h);
+    font-weight: var(--gl-regular);
+    line-height: 1;
+    color: var(--gl-tier-text);
+  }
+  .chip b.word {
+    font-family: var(--gl-font);
+    font-size: var(--gl-cap);
+    font-weight: var(--gl-strong);
+    line-height: var(--gl-cap-lh);
+  }
+  .chip .aux { color: var(--gl-muted); white-space: nowrap; }
   .chip .meter {
+    position: relative;
     width: 28px;
     height: 4px;
-    border-radius: var(--gl-r-full);
-    background: color-mix(in srgb, currentColor 22%, transparent);
+    background: var(--gl-border);
     overflow: hidden;
     flex: none;
   }
-  .chip .meter-fill { display: block; height: 100%; background: currentColor; }
-  .chip .ext { color: inherit; }
+  .chip .meter-fill { display: block; height: 100%; background: var(--gl-tier-text); }
   /* 24px + the -4px extension = a 32px target on a pointer (A11Y_CSS). */
   a.chip { cursor: pointer; min-height: 24px; }
-  a.chip:hover { border-color: var(--gl-border-strong); }
+  a.chip:hover { background: var(--gl-inset); }
+  a.chip:hover > .lbl, a.chip:hover > b, a.chip:focus-visible > .lbl, a.chip:focus-visible > b {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
 """
 
 # Labelled 4px taste-match bar.
@@ -426,7 +564,10 @@ MATCH_BAR_CSS = r"""  .match { display: flex; flex-direction: column; gap: 4px; 
 """
 
 # Loading placeholders drawn in the real layouts' shapes (grid, evaluation
-# card, detail card); the pulse only runs when the viewer allows motion.
+# card, detail card). Each card and panel is a common (tier-none) Binder frame
+# — a 1px hairline, the surface-colored frame and a 2px inner keyline — holding
+# inset blocks; the 1.6s pulse (MOTION_CSS's skel-pulse) only runs when the
+# viewer allows motion.
 SKELETON_CSS = r"""  .skel { display: flex; flex-direction: column; gap: 12px; max-width: 760px; }
   .skel-grid { max-width: none; gap: 10px; }
   .skel-eval { margin: 0 auto; width: 100%; }
@@ -434,20 +575,21 @@ SKELETON_CSS = r"""  .skel { display: flex; flex-direction: column; gap: 12px; m
   .sk-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(142px, 1fr)); gap: 12px; }
   .sk-card, .sk-panel {
     background: var(--gl-surface);
-    border: var(--gl-bw) solid var(--gl-border);
-    border-radius: var(--gl-r-md);
-    box-shadow: var(--gl-shadow);
+    border: var(--gl-frame) solid var(--gl-surface);
+    border-radius: var(--gl-r-card);
+    box-shadow: 0 0 0 1px var(--gl-border), inset 0 0 0 2px var(--gl-border);
     overflow: hidden;
     display: flex;
     flex-direction: column;
     gap: 8px;
   }
-  .sk-body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
-  .sk-panel { padding: 14px; }
+  .sk-card { border-width: 4px; border-radius: var(--gl-r-card-s); padding: 2px; }
+  .sk-body { padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 8px; }
+  .sk-panel { padding: 12px; }
   .sk-row { display: flex; gap: 14px; align-items: flex-start; }
   .sk-col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; padding-top: 4px; }
-  .sk { background: var(--gl-inset); border-radius: var(--gl-r-sm); }
-  .sk-cover { aspect-ratio: 2 / 3; border-radius: 0; }
+  .sk { background: var(--gl-inset); border-radius: var(--gl-r-xs); }
+  .sk-cover { aspect-ratio: 2 / 3; border-radius: var(--gl-r-sm) var(--gl-r-sm) 0 0; }
   .sk-thumb { flex: 0 0 84px; aspect-ratio: 2 / 3; }
   .skel-detail .sk-thumb { flex-basis: 120px; }
   .sk-head { height: 12px; width: 60%; max-width: 340px; }
@@ -456,10 +598,10 @@ SKELETON_CSS = r"""  .skel { display: flex; flex-direction: column; gap: 12px; m
   .sk-line.wide { height: 16px; width: 70%; }
   .sk-bar { height: 4px; border-radius: var(--gl-r-full); }
   .sk-chips { display: flex; gap: 6px; flex-wrap: wrap; }
-  .sk-chip { width: 76px; height: 22px; }
+  .sk-chip { width: 76px; height: 24px; }
   .sk-card .sk-chip { width: 64px; }
-  .sk-stamp { flex: 0 0 96px; height: 40px; border-radius: var(--gl-r-md); }
-  .sk-facts { margin-top: 12px; padding-top: 12px; border-top: var(--gl-bw) solid var(--gl-border); }
+  .sk-ribbon { flex: 0 0 96px; height: 40px; }
+  .sk-facts { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--gl-border); }
   .sk-media { aspect-ratio: 16 / 9; border-radius: var(--gl-r-md); }
   .sk-media-row { display: flex; flex-direction: column; gap: 10px; }
   .sk-thumbs { display: flex; gap: 10px; overflow: hidden; }
@@ -473,41 +615,75 @@ SKELETON_CSS = r"""  .skel { display: flex; flex-direction: column; gap: 12px; m
     .skel-detail .sk-thumb { flex-basis: 84px; }
   }
   @media (prefers-reduced-motion: no-preference) {
-    .sk { animation: gl-pulse 1.6s ease-in-out infinite; }
+    .sk { animation: skel-pulse 1600ms ease-in-out infinite; }
   }
-  @keyframes gl-pulse { 50% { opacity: 0.5; } }
 """
 
-# Buttons, the disclosure toggle and the muted failure notice.
+# Buttons (Binder pills: 40px on a pointer, 44px on touch; the primary in the
+# inverse fill, the secondary a 1px border-strong outline; an optional leading
+# 20px SVG glyph), the disclosure toggle and the muted failure notice with
+# its 16px outlined "!" (built in NOTICE_JS).
 CONTROLS_CSS = r"""  .btn, .disclosure {
     position: relative;
     min-height: 40px;
-    padding: 0 16px;
+    padding: 0 18px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 6px;
-    border-radius: var(--gl-r-md);
-    border: var(--gl-bw) solid var(--gl-border-strong);
-    background: var(--gl-surface);
+    gap: 8px;
+    border-radius: var(--gl-r-full);
+    border: 1px solid var(--gl-border-strong);
+    background: transparent;
     color: var(--gl-text);
-    font-size: var(--gl-body);
+    font-size: var(--gl-h);
     font-weight: var(--gl-strong);
+    text-decoration: none;
     cursor: pointer;
+  }
+  .btn > svg, .disclosure > svg {
+    width: 20px;
+    height: 20px;
+    flex: none;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
   }
   .btn.primary { background: var(--gl-inverse-bg); color: var(--gl-inverse-text); border-color: transparent; }
   html.touch .btn, html.touch .disclosure { min-height: 44px; }
+  /* A pill's label never wraps: in an action row, on the set line, in the
+     drill-in's top bar. */
+  .actions > .btn, .actions > .disclosure, .grid-head > .btn, .topbar > .btn { white-space: nowrap; }
   .disclosure { width: 100%; }
+  /* A full-width toggle whose label can run long ("Similar games you own
+     and From the studio"): body size keeps it on one line at 360px. */
+  .disclosure { font-size: var(--gl-body); }
   .disclosure .chev { transition: transform 0.15s ease; }
   .disclosure[aria-expanded="true"] .chev { transform: rotate(180deg); }
-  .disclosure-body { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+  /* One grid row so opening can grow 0fr → 1fr (MOTION_CSS); the content
+     column is the inner block. */
+  .disclosure-body { display: grid; grid-template-rows: 1fr; margin-top: 12px; }
   .disclosure-body[hidden] { display: none; }
+  .disclosure-inner { display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; }
+  .disclosure-body.opening > .disclosure-inner { overflow: hidden; }
   .notice {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     font-size: var(--gl-cap);
     line-height: var(--gl-cap-lh);
     color: var(--gl-muted);
-    text-align: center;
     padding: 4px 0;
+  }
+  .notice > svg {
+    width: 16px;
+    height: 16px;
+    flex: none;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.5;
+    stroke-linecap: round;
   }
 """
 
@@ -515,14 +691,25 @@ CONTROLS_CSS = r"""  .btn, .disclosure {
 COMPONENTS_CSS = CHIP_CSS + MATCH_BAR_CSS + SKELETON_CSS + CONTROLS_CSS
 
 # ---- Media CSS: hero stage, strips, thumbs ----------------------------------
-# The 16:9 trailer/screenshot stage, its poster, play badge and link pill.
+# The 16:9 trailer/screenshot stage (the Binder reel: 8px radius, the 1px
+# keyline drawn over the media), its poster, the play button — a stage-wide
+# target whose visible part is the 44px round chip bottom-right, so it never
+# covers the title lettering — and the link pill (bottom-left, clear of it).
 HERO_CSS = r"""  .hero {
     position: relative;
-    border: var(--gl-bw) solid var(--gl-border);
     border-radius: var(--gl-r-md);
     overflow: hidden;
     background: var(--gl-stage);
     aspect-ratio: 16 / 9;
+  }
+  .hero::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    border-radius: inherit;
+    box-shadow: inset 0 0 0 1px var(--gl-keyline);
+    pointer-events: none;
   }
   .hero-media {
     display: block;
@@ -535,9 +722,7 @@ HERO_CSS = r"""  .hero {
   .play-badge {
     position: absolute;
     inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    display: block;
     background: var(--gl-stage-veil);
     border: 0;
     padding: 0;
@@ -545,23 +730,28 @@ HERO_CSS = r"""  .hero {
     -webkit-tap-highlight-color: transparent;
   }
   .play-badge span {
-    width: 56px;
-    height: 56px;
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    width: 44px;
+    height: 44px;
     border-radius: var(--gl-r-full);
-    background: var(--gl-surface);
-    color: var(--gl-text);
-    box-shadow: var(--gl-shadow-md);
+    background: var(--gl-deep-ink);
+    color: var(--gl-deep);
+    box-shadow: 0 0 0 1px var(--gl-play-ring);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: var(--gl-h);
-    padding-left: 4px;
+    font-size: var(--gl-body);
+    line-height: 1;
+    padding-left: 3px;
     transition: transform 0.12s ease;
   }
   .play-badge:hover span, .play-badge:focus-visible span { transform: scale(1.06); }
+  .play-badge:focus-visible span { outline: 2px solid var(--gl-deep-ink); outline-offset: 2px; }
   .hero-pill {
     position: absolute;
-    right: 10px;
+    left: 10px;
     bottom: 10px;
     z-index: 2;
     font-size: var(--gl-cap);
@@ -569,10 +759,9 @@ HERO_CSS = r"""  .hero {
     font-weight: var(--gl-strong);
     padding: 4px 10px;
     border-radius: var(--gl-r-full);
-    border: var(--gl-bw) solid var(--gl-border);
+    border: 1px solid var(--gl-border);
     background: var(--gl-surface);
     color: var(--gl-text);
-    box-shadow: var(--gl-shadow);
     cursor: pointer;
   }
   .hero-missing {
@@ -586,9 +775,6 @@ HERO_CSS = r"""  .hero {
     text-align: center;
     padding: 0 12px;
   }
-  /* Under a centered play badge the line drops below it instead of being
-     covered by it. */
-  .hero-missing.below-badge { padding-top: 100px; }
 """
 
 # Sideways-scrolling strip shared by thumbs, similar games and pedigree.
@@ -628,7 +814,8 @@ SHOT_BTN_CSS = r"""  .shot-btn {
   }
 """
 
-# The fullscreen button and the thumb strip's thumbnails.
+# The fullscreen button and the thumb strip's thumbnails (4px radius, the 1px
+# keyline over the image; the selected thumb carries a 2px inverse outline).
 MEDIA_STRIP_CSS = r"""  .fs-btn {
     position: absolute;
     right: 10px;
@@ -653,17 +840,25 @@ MEDIA_STRIP_CSS = r"""  .fs-btn {
     position: relative;
     flex: none;
     padding: 0;
-    border: var(--gl-bw) solid var(--gl-border);
-    border-radius: var(--gl-r-sm);
+    border: 0;
+    border-radius: var(--gl-r-xs);
     overflow: hidden;
     background: var(--gl-inset);
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
-    transition: transform 0.12s ease;
+  }
+  .thumb::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    border-radius: inherit;
+    box-shadow: inset 0 0 0 1px var(--gl-keyline);
+    pointer-events: none;
   }
   .thumb img { display: block; width: 116px; height: 66px; object-fit: cover; }
-  html:not(.no-hover) .thumb:hover { transform: translateY(-1px); }
-  .thumb.sel { box-shadow: 0 0 0 2px var(--gl-text); }
+  /* On the keyline layer, not the outline: the focus ring keeps the outline. */
+  .thumb.sel::before { box-shadow: inset 0 0 0 2px var(--gl-inverse-bg); }
   .thumb-play {
     position: absolute;
     inset: 0;
@@ -688,46 +883,17 @@ MEDIA_STRIP_CSS = r"""  .fs-btn {
   }
 """
 
-# ---- Similar-games / pedigree / tags CSS ------------------------------------
-# Mini cover cards used by both the similar row and the pedigree row: cover,
-# name, year and one chip row — nothing else.
-SIMILAR_CSS = r"""  .sim {
-    flex: none;
-    width: 112px;
-    border: var(--gl-bw) solid var(--gl-border);
-    border-radius: var(--gl-r-md);
-    background: var(--gl-surface);
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-  }
-  .sim .cover-wrap { border-bottom: var(--gl-bw) solid var(--gl-border); }
-  .sim-body { padding: 8px; display: flex; flex-direction: column; gap: 4px; }
-  .sim-name {
-    font-size: var(--gl-cap);
-    font-weight: var(--gl-strong);
-    line-height: var(--gl-cap-lh);
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-  .sim-year { font-size: var(--gl-cap); line-height: var(--gl-cap-lh); color: var(--gl-muted); font-variant-numeric: tabular-nums; }
-"""
-
-# The chip row on a small card (similar, studio, lineage, anchors): the same
-# scoreChip as every other score ("You 9/10", "Critics 84", "Played 132h",
-# "Status Completed"), just tighter — at most three per card. These chips are
-# not links, so the touch rule that grows tappable chips to 32px is undone.
+# ---- Tag chip rows, pedigree CSS --------------------------------------------
+# A tight chip row (chipRow: the detail card's score chips): the same
+# scoreChip as every other score, just tighter — at most three. These chips
+# are not links, so the touch rule that grows tappable chips to 32px is undone.
 TAG_CSS = r"""  .tags, html.touch .tags { gap: 4px; }
   .tags .chip { padding: 1px 6px; column-gap: 4px; font-variant-numeric: tabular-nums; }
   html.touch .tags .chip { min-height: 0; }
 """
 
 # "From the studio" header and publisher lines.
-PEDIGREE_CSS = r"""  .ped-head { font-weight: var(--gl-strong); }
-  .ped-pub { font-size: var(--gl-cap); line-height: var(--gl-cap-lh); color: var(--gl-muted); margin-top: 2px; }
-  .ped-strip { margin-top: 8px; }
+PEDIGREE_CSS = r"""  .ped-head { display: flex; flex-wrap: wrap; gap: 2px 10px; font-weight: var(--gl-strong); }
 """
 
 # ---- Overlay / carousel / toast CSS -----------------------------------------
@@ -1131,6 +1297,13 @@ DOM_HELPERS_JS = r"""  var root = document.getElementById("root");
     parent.appendChild(box);
     return box;
   }
+  /* The Binder's ground: an eyebrow over content, never a boxed panel. */
+  function eyebrowSection(parent, text) {
+    var sec = el("section", "eyebrow-sec");
+    sec.appendChild(el("div", "section-title", text));
+    parent.appendChild(sec);
+    return sec;
+  }
 
   function list(v) { return Array.isArray(v) ? v : []; }
   function num(v) {
@@ -1146,12 +1319,13 @@ DOM_HELPERS_JS = r"""  var root = document.getElementById("root");
 LABELS_JS = (
     "  /* ---------- labels (generated: platforms_registry, verdict literals, purchase sources) ---------- */\n"
     "  var PLATFORM_LABELS = " + json.dumps(PLATFORM_LABELS, sort_keys=True) + ";\n"
+    "  var PLATFORM_SHORT_LABELS = " + json.dumps(PLATFORM_SHORT_LABELS, sort_keys=True) + ";\n"
     "  var VERDICT_LABELS = " + json.dumps(VERDICT_LABELS) + ";\n"
     "  var PROVIDER_LABELS = " + json.dumps(PROVIDER_LABELS, sort_keys=True) + ";\n"
     "  var PURCHASE_SOURCE_LABELS = " + json.dumps(PURCHASE_SOURCE_LABELS, sort_keys=True) + ";\n"
     + r"""  var LABEL_MAPS = {
-    platform: PLATFORM_LABELS, verdict: VERDICT_LABELS, provider: PROVIDER_LABELS,
-    purchase_source: PURCHASE_SOURCE_LABELS,
+    platform: PLATFORM_LABELS, platform_short: PLATFORM_SHORT_LABELS,
+    verdict: VERDICT_LABELS, provider: PROVIDER_LABELS, purchase_source: PURCHASE_SOURCE_LABELS,
   };
   function humanize(raw) {
     return String(raw).replace(/_+/g, " ").trim().replace(/\s+/g, " ")
@@ -1206,6 +1380,31 @@ NUMBERS_JS = r"""  /* ---------- numbers ---------- */
   function plural(n, word, truncated) {
     return n + (truncated ? "+" : "") + " " + word + (n === 1 && !truncated ? "" : "s");
   }
+  /* A card number: a real id (game, assessment) zero-padded to three digits
+     like a printed card — "No. 046", "No. 2333"; null for no id. A grid's
+     RANK is not an id and stays plain ("No. 1"): it is built by the grid,
+     never through cardNo. */
+  function cardNo(id) {
+    var n = num(id);
+    if (n == null || n < 0) return null;
+    var s = String(Math.round(n));
+    return "No. " + (s.length < 3 ? ("00" + s).slice(-3) : s);
+  }
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  /* "2022-09-21" (or a full timestamp) → "Sep 2022" — the detail card's
+     LAST row; anything else → null (unknown: the caller shows no row). */
+  function monthYear(iso) {
+    var m = /^(\d{4})-(\d{2})/.exec(String(iso || ""));
+    var month = m ? MONTHS[Number(m[2]) - 1] : null;
+    return month ? month + " " + m[1] : null;
+  }
+  /* "2026-10-03T13:04:42Z" → "3 Oct 2026" (the stored UTC day): the day an
+     assessment was made matters, so provenance, ledger and captions keep it. */
+  function dayMonthYear(iso) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ""));
+    var month = m ? MONTHS[Number(m[2]) - 1] : null;
+    return month ? Number(m[3]) + " " + month + " " + m[1] : null;
+  }
 """
 
 # The one score chip, its tier functions, and the Steam chip built on it.
@@ -1222,6 +1421,19 @@ SCORE_CHIP_JS = r"""  /* ---------- score chip ---------- */
       t = n >= 84 ? "mighty" : n >= 75 ? "strong" : n >= 65 ? "fair" : "weak";
     }
     return t === "mighty" || t === "strong" ? "good" : t === "fair" ? "ok" : "bad";
+  }
+  /* The ONE lead-critic precedence both widgets read (spec 2026-10-04 §1.3)
+     for every critic badge and critic tier: OpenCritic, else Metacritic,
+     each tiered by its own thresholds; null when neither has spoken.
+     scores carries opencritic_score / opencritic_tier / metacritic_score
+     (a game row and an assessment's craft block use the same keys). */
+  function leadCritic(scores) {
+    var s = scores || {};
+    var oc = num(s.opencritic_score);
+    if (realScore(oc)) return { value: Math.round(oc), source: "OpenCritic", tier: ocTier(oc, s.opencritic_tier) };
+    var mc = num(s.metacritic_score);
+    if (realScore(mc)) return { value: Math.round(mc), source: "Metacritic", tier: mcTier(mc) };
+    return null;
   }
   /* Steam's nine summary phrases, most-specific first, as 1..9 steps. */
   var STEAM_STEPS = [
@@ -1250,8 +1462,15 @@ SCORE_CHIP_JS = r"""  /* ---------- score chip ---------- */
     if (t === "silver") return "ok";
     return t === "bronze" || t === "borked" ? "bad" : "none";
   }
+  /* A figure ("83", "25h", "~4.1h/wk", "€19.99", "9/10") sits in the mono
+     numerals; a value with a space or no digit at all is a phrase. */
+  function isFigure(text) {
+    var t = String(text);
+    return /\d/.test(t) && !/\s/.test(t);
+  }
   /* {label, value, tier, title, url, meter (0-100), aux, cls} → one chip.
-     Color is the quality tier only; the brand is the label text. */
+     Color is the quality tier only; the brand is the label text. A phrase
+     value is a b.word (the label face), a figure a plain b (mono). */
   function scoreChip(opts) {
     var tier = opts.tier || "none";
     var chip = el(opts.url ? "a" : "span", "chip tier-" + tier + (opts.cls ? " " + opts.cls : ""));
@@ -1268,16 +1487,19 @@ SCORE_CHIP_JS = r"""  /* ---------- score chip ---------- */
       chip.appendChild(meter);
     }
     if (opts.value !== undefined && opts.value !== null && opts.value !== "") {
-      chip.appendChild(el("b", null, String(opts.value)));
+      var value = String(opts.value);
+      chip.appendChild(el("b", isFigure(value) ? null : "word", value));
     }
     if (opts.aux) chip.appendChild(el("span", "aux", opts.aux));
     if (opts.title) chip.title = opts.title;
     if (opts.url) {
+      /* A link chip carries no glyph (the external mark is for the pills
+         that leave the host); it says where it goes in its name and
+         underlines on hover / focus. */
       chip.href = opts.url;
       chip.setAttribute("data-link", "");
-      var ext = el("span", "ext", "↗");
-      ext.setAttribute("aria-hidden", "true");
-      chip.appendChild(ext);
+      var named = [opts.label, opts.value].filter(function (p) { return p !== undefined && p !== null && p !== ""; });
+      chip.setAttribute("aria-label", named.join(" ") + ", opens " + (opts.site || opts.label));
       chip.addEventListener("click", function (ev) {
         ev.preventDefault();
         ev.stopPropagation();
@@ -1286,39 +1508,19 @@ SCORE_CHIP_JS = r"""  /* ---------- score chip ---------- */
     }
     return chip;
   }
-  /* The library chips on a small card (similar, studio, lineage, anchors) are
-     the same chip as every score: "You 9/10", "Critics 84", "Played 132h",
-     "Unplayed", "Status Completed". chipRow keeps at most three. */
-  function youChip(rating) {
-    var n = num(rating);
-    if (n == null) return null;
-    return scoreChip({ label: "You", value: n + "/10", tier: ratingTier(n), title: "Your rating" });
-  }
-  function criticsChip(score) {
-    var n = num(score);
-    if (!realScore(n)) return null;
-    return scoreChip({ label: "Critics", value: Math.round(n), tier: mcTier(n), title: "Critic score" });
-  }
-  function playedChip(hours, unplayed) {
-    var n = num(hours);
-    if (n != null && n > 0) {
-      return scoreChip({ label: "Played", value: hoursLabel(n), title: "Your playtime" });
-    }
-    return unplayed ? scoreChip({ label: "Unplayed", title: "In your library, never played" }) : null;
-  }
+  /* completion_status → [the word, its tier]: the one place the status
+     wording lives (the detail card's status ribbon reads it). */
   var STATUS_CHIPS = {
     completed: ["Completed", "good"],
     evergreen: ["Evergreen", "good"],
     abandoned: ["Abandoned", "bad"],
     playing: ["Playing", "none"],
   };
-  function statusChip(status) {
-    var s = STATUS_CHIPS[status];
-    return s ? scoreChip({ label: "Status", value: s[0], tier: s[1] }) : null;
-  }
-  function chipRow(chips) {
+  /* A row of at most `limit` chips (default 3; the detail card passes 4 so
+     ProtonDB survives beside both critics and Steam). */
+  function chipRow(chips, limit) {
     var row = el("div", "chips tags");
-    chips.filter(Boolean).slice(0, 3).forEach(function (c) { row.appendChild(c); });
+    chips.filter(Boolean).slice(0, limit || 3).forEach(function (c) { row.appendChild(c); });
     return row.childNodes.length ? row : null;
   }
   /* The phrase always rides with the meter — the meter alone says nothing.
@@ -1366,7 +1568,7 @@ MATCH_BAR_JS = r"""  function matchBar(percent) {
 # ``skeletonKind()`` which shape to draw.
 SKELETON_JS = r"""  /* Each placeholder is the real layout in grey: grid = header line + cards
      (cover, title, match bar, one chip row); eval = header panel (cover,
-     title, stamp, score chips, the facts row), the pitch's two lines, the
+     title, ribbon, score chips, the facts row), the pitch's two lines, the
      media stage; detail = identity panel (cover, title + 3 lines, chip row)
      and the media stage. neutral = one panel (cover, three lines, a chip
      row): the startup shape, before the tool input says which tool ran. */
@@ -1433,7 +1635,7 @@ SKELETON_JS = r"""  /* Each placeholder is the real layout in grey: grid = heade
     if (kind === "eval") {
       chips(col, 3);
       row.appendChild(col);
-      row.appendChild(sk("sk-stamp"));
+      row.appendChild(sk("sk-ribbon"));
       panel.appendChild(row);
       chips(panel, 3, "sk-facts");
       wrap.appendChild(panel);
@@ -1502,6 +1704,12 @@ MODEL_CONTEXT_JS = r"""  /* Fire-and-forget: request() resolves undefined on met
 # fullscreen where the host offers it, the disclosure in place where it
 # doesn't or refuses.
 DISCLOSURE_JS = r"""  var disclosureSeq = 0;
+  /* The one layout animation MOTION.md allows: opening grows the body's
+     single grid row 0fr → 1fr over 240ms (MOTION_CSS, motion-allowed only)
+     while .disclosure-inner clips; the size is reported once it has landed —
+     at once under reduced motion, where the open is instant. buildFn fills
+     the inner block. */
+  var DISCLOSE_MS = 240;
   /* intercept(), when given, runs on a click that would OPEN the body; a
      true return means it took the click (setOpen opens it later, or not). */
   function disclosure(parent, text, buildFn, intercept) {
@@ -1515,13 +1723,28 @@ DISCLOSURE_JS = r"""  var disclosureSeq = 0;
     var body = el("div", "disclosure-body");
     body.id = "disclosure-" + (++disclosureSeq);
     body.hidden = true;
+    var inner = el("div", "disclosure-inner");
+    body.appendChild(inner);
     btn.setAttribute("aria-controls", body.id);
     var built = false;
+    var opening = null;
+    function landed() {
+      if (opening !== null) { clearTimeout(opening); opening = null; }
+      body.classList.remove("opening");
+      reportSize();
+    }
+    body.addEventListener("animationend", function (ev) { if (ev.target === body && opening !== null) landed(); });
     function setOpen(open) {
-      if (open && !built) { built = true; buildFn(body); }
+      if (open && !built) { built = true; buildFn(inner); }
+      var appearing = open && body.hidden;
       body.hidden = !open;
       btn.setAttribute("aria-expanded", open ? "true" : "false");
-      reportSize();
+      if (appearing && !mediaQueryMatches("(prefers-reduced-motion: reduce)")) {
+        body.classList.add("opening");
+        opening = setTimeout(landed, DISCLOSE_MS);
+        return;
+      }
+      landed();
     }
     btn.addEventListener("click", function () {
       var open = btn.getAttribute("aria-expanded") !== "true";
@@ -1530,7 +1753,7 @@ DISCLOSURE_JS = r"""  var disclosureSeq = 0;
     });
     parent.appendChild(btn);
     parent.appendChild(body);
-    return { button: btn, body: body, setOpen: setOpen };
+    return { button: btn, body: body, inner: inner, setOpen: setOpen };
   }
   /* The button that opens a block "big": on a host offering fullscreen (and
      not in it already) a click asks for fullscreen — ⤢ says so — and on a
@@ -1560,8 +1783,49 @@ DISCLOSURE_JS = r"""  var disclosureSeq = 0;
   }
 """
 
-# The one muted failure line: "Couldn't load: trailer (Steam), studio (IGDB)".
-NOTICE_JS = r"""  function notice(parent, items) {
+# The one muted failure line: "Couldn't load: trailer (Steam), studio (IGDB)",
+# led by its 16px outlined "!". It carries the SVG builder every Binder icon
+# uses (svgEl / iconNode): here, because NOTICE_JS is the first shared block
+# that draws one and some test shims splice it alone.
+NOTICE_JS = r"""  /* ---------- SVG (icons, the card grain) ---------- */
+  /* One SVG element: attributes set verbatim, kids appended (nulls skipped).
+     Null where the document cannot make SVG at all, so every caller degrades
+     to its text alone. Strings only ever reach attributes — never markup. */
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  function svgEl(tag, attrs, kids) {
+    if (!document.createElementNS) return null;
+    var node = document.createElementNS(SVG_NS, tag);
+    Object.keys(attrs || {}).forEach(function (k) { node.setAttribute(k, String(attrs[k])); });
+    list(kids).forEach(function (kid) { if (kid) node.appendChild(kid); });
+    return node;
+  }
+  /* A decorative icon: [[tag, attrs], ...] shapes in a viewBox, hidden from
+     assistive tech (the text beside it says what it means). */
+  function iconNode(viewBox, shapes) {
+    return svgEl("svg", { viewBox: viewBox, "aria-hidden": "true", focusable: "false" },
+      list(shapes).map(function (s) { return svgEl(s[0], s[1]); }));
+  }
+  /* The external-link arrow: the one glyph on every pill that leaves the
+     host (the store pills). */
+  var EXT_LINK_ICON = [["path", { d: "M11.5 3.5h5v5M16.5 3.5 9 11M14 11.5v5H3.5V6h5" }]];
+  /* A secondary pill that opens url through the host (openLink): the
+     external arrow, then the text. A real link (href, data-link) so it reads
+     as one and copies as one; the click never navigates the sandbox. */
+  function storePill(url, text) {
+    var link = el("a", "btn");
+    link.href = url;
+    link.setAttribute("data-link", "");
+    var glyph = iconNode("0 0 20 20", EXT_LINK_ICON);
+    if (glyph) link.appendChild(glyph);
+    link.appendChild(el("span", null, text));
+    link.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      openLink(url);
+    });
+    return link;
+  }
+  var NOTICE_ICON = [["circle", { cx: 8, cy: 8, r: 6.5 }], ["path", { d: "M8 4.8v3.8M8 11.1v.1" }]];
+  function notice(parent, items) {
     var text;
     if (typeof items === "string") {
       text = items;
@@ -1581,8 +1845,11 @@ NOTICE_JS = r"""  function notice(parent, items) {
       if (!parts.length) return null;
       text = "Couldn't load: " + parts.join(", ");
     }
-    var node = el("div", "notice", text);
+    var node = el("div", "notice");
     node.setAttribute("role", "status");
+    var icon = iconNode("0 0 16 16", NOTICE_ICON);
+    if (icon) node.appendChild(icon);
+    node.appendChild(el("span", null, text));
     parent.appendChild(node);
     return node;
   }
@@ -1610,7 +1877,7 @@ COVER_HUE_JS = r"""  function coverHue(name) {
 """
 
 # Cover art with the gradient-plate fallback on a missing/broken image;
-# ``coverPlate`` is the plate alone (the evaluation card's anchor covers).
+# ``coverPlate`` is the plate alone (coverNode's fallback).
 COVER_NODE_JS = r"""  function coverPlate(name, cls, text) {
     var hue = coverHue(name || "?");
     var plate = el("div", cls, text);
@@ -1634,6 +1901,864 @@ COVER_NODE_JS = r"""  function coverPlate(name, cls, text) {
     return wrap;
   }
 """
+
+# ---- The Binder: card components + motion -----------------------------------
+# docs/specs/2026-10-04-binder-design-language.md §1.2, ported from
+# docs/specs/assets/binder/gl.css (repo class names: unprefixed, like .chip).
+# Every game is a collectible card: a ``.frame`` (the rarity border encodes
+# the one tier the card is about), its ``.grain``, the ``.art`` window, the
+# ``.badge``, the title ``.plate``, the ``.stats`` block, ``.pips``, the
+# ``.ribbon``, ``.trait`` rows, ``.ability`` run-ins, ``.flavor`` prose and
+# ``.mini`` cards for strips. Each part is a public constant; BINDER_CSS /
+# BINDER_JS splice them all, in this order, into both widgets.
+
+# The card frame: a 6px (grid: 4px) conic rarity border via the padding-box /
+# border-box background trick; a common card (tier-none, or no tier class) is
+# a 1px hairline plus a 2px inner keyline in the same footprint. A tappable
+# card is a <button class="frame …"> (or role=button). The grain is an inline
+# SVG (grainNode), never a background image — the CSP forbids data: URIs.
+FRAME_CSS = r"""  .frame {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    border: var(--gl-frame) solid transparent;
+    border-radius: var(--gl-r-card);
+    color: var(--gl-text);
+    background: linear-gradient(var(--gl-surface), var(--gl-surface)) padding-box, var(--gl-rarity) border-box;
+  }
+  .frame-s { --gl-frame: 4px; border-radius: var(--gl-r-card-s); }
+  .frame:not(.tier-good):not(.tier-ok):not(.tier-bad) {
+    background: var(--gl-surface);
+    border-color: var(--gl-surface);
+    box-shadow: 0 0 0 1px var(--gl-border), inset 0 0 0 2px var(--gl-border);
+  }
+  button.frame { width: 100%; padding: 0; text-align: left; text-decoration: none; cursor: pointer; }
+  .grain {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border-radius: calc(var(--gl-r-card) - var(--gl-frame));
+    overflow: hidden;
+    opacity: var(--gl-grain-opacity);
+    mix-blend-mode: overlay;
+    pointer-events: none;
+  }
+  .frame-s > .grain { border-radius: calc(var(--gl-r-card-s) - var(--gl-frame)); }
+  /* The one filter definition (installGrain): out of flow and 0x0, never
+     display:none (a filter in an undisplayed <svg> renders nothing). */
+  .grain-defs { position: absolute; width: 0; height: 0; overflow: hidden; pointer-events: none; }
+"""
+
+# The art window: 2:3 cover (or 16:9 with .art-hero), the 1px keyline drawn
+# over the image, one static 8% specular line (a finish, not an artefact;
+# the hover sheen is unchanged). coverNode() drops straight in (its wrap
+# fills the window), so a missing cover is the name-seeded plate.
+ART_CSS = r"""  .art {
+    position: relative;
+    display: block;
+    aspect-ratio: 2 / 3;
+    overflow: hidden;
+    border-radius: var(--gl-r-md);
+    background: var(--gl-inset);
+  }
+  .art-hero { aspect-ratio: 16 / 9; }
+  .frame > .art { border-radius: calc(var(--gl-r-card) - var(--gl-frame)) calc(var(--gl-r-card) - var(--gl-frame)) 0 0; }
+  .frame-s > .art { border-radius: calc(var(--gl-r-card-s) - var(--gl-frame)) calc(var(--gl-r-card-s) - var(--gl-frame)) 0 0; }
+  .art > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+  .art > .cover-wrap { position: absolute; inset: 0; aspect-ratio: auto; }
+  .art::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    border-radius: inherit;
+    box-shadow: inset 0 0 0 1px var(--gl-keyline);
+    pointer-events: none;
+  }
+  .art::after {
+    content: "";
+    position: absolute;
+    inset: 0 -24px;
+    z-index: 1;
+    pointer-events: none;
+    background: linear-gradient(235deg, transparent calc(30% - 0.5px), var(--gl-specular) calc(30% - 0.5px) calc(30% + 0.5px), transparent calc(30% + 0.5px));
+  }
+"""
+
+# The overall badge: a 52px inverse disc, the mono number (an optional "/10"
+# suffix), the 2px tier ring, and the tag on the deep plate beneath it.
+# .badge-on-art pins it top-left over the art; .badge-low drops it to the
+# bottom-left for art whose lettering sits at the top.
+BADGE_CSS = r"""  .badge {
+    position: relative;
+    z-index: 2;
+    width: 52px;
+    height: 52px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--gl-r-full);
+    background: var(--gl-inverse-bg);
+    color: var(--gl-inverse-text);
+    box-shadow: 0 0 0 2px var(--gl-tier);
+    font-family: var(--gl-mono);
+    font-size: var(--gl-title);
+    font-weight: var(--gl-heavy);
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .badge-on-art { position: absolute; top: 10px; left: 10px; }
+  .badge-on-art .badge-tag { left: -4px; transform: none; }
+  .badge-low { top: auto; bottom: 22px; }
+  .badge-suffix {
+    align-self: center;
+    margin-left: 1px;
+    padding-top: 4px;
+    font-size: var(--gl-cap);
+    font-weight: var(--gl-regular);
+  }
+  .badge-tag {
+    position: absolute;
+    top: calc(100% - 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    padding: 0 6px;
+    border-radius: var(--gl-r-xs);
+    background: var(--gl-deep);
+    color: var(--gl-deep-ink);
+    font-family: var(--gl-font);
+    font-size: var(--gl-cap);
+    font-weight: var(--gl-strong);
+    line-height: 18px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+"""
+
+# The title plate under the art: the title left, the card number right
+# ("No. 046" — the real game or assessment id, never invented), then the .sub
+# line of separate gap-separated spans (studio, year, the platform .loz) —
+# never middots or pipes. .sub is scoped to the plate: both widgets still
+# carry their own .sub line until Phase 2 rebuilds them on the plate. .caps is
+# the label style (12px / 600, uppercase, tracked) every run-in uses.
+PLATE_CSS = r"""  .plate { position: relative; padding: 10px 12px 8px; border-bottom: 1px solid var(--gl-border); }
+  .plate-row { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
+  .plate-row > :first-child { min-width: 0; margin: 0; }
+  .plate-title {
+    font-size: var(--gl-title);
+    font-weight: var(--gl-heavy);
+    line-height: var(--gl-title-lh);
+    letter-spacing: -0.025em;
+    overflow-wrap: anywhere;
+  }
+  .plate-title-s {
+    font-size: var(--gl-h);
+    font-weight: var(--gl-heavy);
+    line-height: var(--gl-title-lh);
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+  }
+  .card-no {
+    flex: none;
+    font-family: var(--gl-mono);
+    font-size: var(--gl-cap);
+    color: var(--gl-muted);
+    white-space: nowrap;
+  }
+  .plate .sub {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 10px;
+    margin-top: 4px;
+    font-size: var(--gl-cap);
+    line-height: 20px;
+    color: var(--gl-muted);
+  }
+  .loz {
+    display: inline-flex;
+    align-items: center;
+    height: 20px;
+    padding: 0 6px;
+    border: 1px solid var(--gl-border);
+    border-radius: var(--gl-r-xs);
+    background: var(--gl-inset);
+    color: var(--gl-text-2);
+    font-size: var(--gl-cap);
+    font-weight: var(--gl-strong);
+    line-height: 1;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .caps {
+    font-size: var(--gl-cap);
+    font-weight: var(--gl-strong);
+    line-height: var(--gl-cap-lh);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+"""
+
+# The stat block: label (with an optional note after it, "last 30d"), the
+# dotted leader, the mono value; .is-key marks the strongest value. At most
+# six rows on a card.
+STATS_CSS = r"""  .stats { display: flex; flex-direction: column; margin: 0; padding: 6px 12px 0; }
+  .stat { display: flex; align-items: baseline; min-height: 24px; line-height: 24px; }
+  .stat-label {
+    font-size: var(--gl-cap);
+    font-weight: var(--gl-strong);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--gl-muted);
+    white-space: nowrap;
+  }
+  .stat-note {
+    margin-left: 6px;
+    font-size: var(--gl-cap);
+    font-weight: var(--gl-regular);
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--gl-muted);
+    white-space: nowrap;
+  }
+  .stat-lead {
+    flex: 1;
+    min-width: 12px;
+    margin: 0 8px;
+    border-bottom: 1px dotted var(--gl-muted);
+    opacity: 0.7;
+    align-self: flex-end;
+    transform: translateY(-7px);
+  }
+  .stat-val {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--gl-mono);
+    font-size: var(--gl-h);
+    font-weight: var(--gl-regular);
+    color: var(--gl-text-2);
+    white-space: nowrap;
+  }
+  .stat.is-key .stat-label { color: var(--gl-text-2); }
+  .stat.is-key .stat-val { color: var(--gl-text); font-weight: var(--gl-heavy); }
+  .stat-val .chip, .stat-val .pips-word { font-family: var(--gl-font); }
+"""
+
+# Pips: 8px diamonds (a 45deg square, 4px between the tips), lit in the tier's
+# text color, unlit in the hairline; .half is lit on its left.
+PIPS_CSS = r"""  .pips { display: inline-flex; align-items: center; gap: 7px; height: 12px; padding: 0 2px; }
+  .pips > span { width: 8px; height: 8px; flex: none; transform: rotate(45deg); background: var(--gl-border); }
+  .pips > .on { background: var(--gl-tier-text); }
+  .pips > .half { background: linear-gradient(45deg, var(--gl-tier-text) 50%, var(--gl-border) 50%); }
+  .pips-word { font-size: var(--gl-body); font-weight: var(--gl-heavy); color: var(--gl-tier-text); }
+"""
+
+# The verdict / status band: 40px (slim 24px), the
+# tier fill, ink always --gl-ribbon-ink, notched ends. .ribbon-straddle
+# overhangs its card 20px each side (eval); .ribbon-art sits flush on the
+# art's bottom edge (grid, detail). A second span is the mono note.
+RIBBON_CSS = r"""  .ribbon {
+    position: relative;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    height: 40px;
+    padding: 0 18px;
+    background: var(--gl-tier-fill);
+    color: var(--gl-ribbon-ink);
+    font-size: var(--gl-body);
+    font-weight: var(--gl-heavy);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    clip-path: polygon(0 0, 100% 0, calc(100% - 10px) 50%, 100% 100%, 0 100%, 10px 50%);
+    box-shadow: inset 0 1px 0 var(--gl-ribbon-hi), inset 0 -1px 0 var(--gl-ribbon-lo);
+  }
+  .ribbon.has-note { justify-content: space-between; gap: 10px; letter-spacing: 0.08em; }
+  .ribbon-note {
+    font-family: var(--gl-mono);
+    font-size: var(--gl-cap);
+    font-weight: var(--gl-heavy);
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .ribbon-s {
+    height: 24px;
+    padding: 0 16px;
+    font-size: var(--gl-cap);
+    letter-spacing: 0.08em;
+    clip-path: polygon(0 0, 100% 0, calc(100% - 7px) 50%, 100% 100%, 0 100%, 7px 50%);
+  }
+  .ribbon-straddle {
+    position: absolute;
+    left: calc(-20px - var(--gl-frame));
+    right: calc(-20px - var(--gl-frame));
+    bottom: calc(-20px - var(--gl-frame));
+  }
+  .ribbon-art { position: absolute; left: 0; right: 0; bottom: 0; }
+"""
+
+# For-you / weakness rows: the 20px icon (a four-point spark, good; the shield
+# outline, bad) and the text; .traits-head is the label in the tier color.
+TRAIT_CSS = r"""  .traits { display: flex; flex-direction: column; }
+  .traits-head {
+    padding-bottom: 6px;
+    font-size: var(--gl-cap);
+    font-weight: var(--gl-strong);
+    line-height: var(--gl-cap-lh);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--gl-tier-text);
+  }
+  .trait {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 0;
+    border-top: 1px solid var(--gl-border);
+    font-size: var(--gl-body);
+    line-height: 20px;
+    color: var(--gl-text);
+  }
+  .trait:last-child { border-bottom: 1px solid var(--gl-border); }
+  .trait > svg {
+    flex: none;
+    width: 20px;
+    height: 20px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linejoin: round;
+  }
+  .trait-plus > svg { color: var(--gl-good); }
+  .trait-minus > svg { color: var(--gl-bad); }
+"""
+
+# The run-in: the kind as a label (STUDIO, PEOPLE, MOMENT, ANTICIPATION,
+# AWARD), then body text on the same line.
+ABILITY_CSS = r"""  .ability { margin: 0; font-size: var(--gl-body); line-height: 1.5; color: var(--gl-text-2); }
+  .ability > b {
+    margin-right: 6px;
+    color: var(--gl-text);
+    font-size: var(--gl-cap);
+    font-weight: var(--gl-strong);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+"""
+
+# Flavor text: italic serif in the secondary color (craft note, description);
+# .flavor-quote hangs a quotation mark for his own review.
+FLAVOR_CSS = r"""  .flavor {
+    margin: 0;
+    font-family: var(--gl-serif);
+    font-style: italic;
+    font-size: var(--gl-body);
+    line-height: 1.5;
+    color: var(--gl-text-2);
+  }
+  .flavor-quote { position: relative; padding-left: 22px; }
+  .flavor-quote::before {
+    content: "\201C";
+    position: absolute;
+    left: 0;
+    top: -2px;
+    font-family: var(--gl-serif);
+    font-style: normal;
+    font-size: var(--gl-title);
+    line-height: 1;
+    color: var(--gl-muted);
+  }
+"""
+
+# Mini cards for strips (similar, studio, anchors, lineage): 48x64 art in a
+# 2px tier border, the name (2-line clamp), up to two cap lines of separate
+# spans (a figure in mono). A tappable mini is one transparent button over the
+# whole card, so the content stays plain flow. .ministrip rides on .strip
+# (STRIP_CSS: padding, snap, the trailing spacer) with the Binder's 12px gap
+# and peeking cards.
+MINI_CSS = r"""  .mini { position: relative; display: flex; align-items: flex-start; gap: 10px; min-height: 64px; color: var(--gl-text); }
+  .mini-art {
+    flex: none;
+    width: 48px;
+    height: 64px;
+    border: 2px solid var(--gl-tier);
+    border-radius: var(--gl-r-sm);
+    overflow: hidden;
+    background: var(--gl-inset);
+  }
+  .mini-art > .cover-wrap { aspect-ratio: auto; width: 100%; height: 100%; }
+  .mini-art .cover-fallback { color: transparent; text-shadow: none; }
+  .mini-body { flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .mini-name {
+    font-size: var(--gl-body);
+    font-weight: var(--gl-strong);
+    line-height: 1.35;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+  }
+  .mini-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0 8px;
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    color: var(--gl-muted);
+  }
+  .mini-meta .v { font-family: var(--gl-mono); color: var(--gl-text-2); }
+  .mini-hit {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    padding: 0;
+    border: 0;
+    border-radius: var(--gl-r-sm);
+    background: transparent;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .strip.ministrip { gap: 12px; }
+  .ministrip > * { flex: 0 0 min(232px, 74%); }
+  .ministrip > :only-child { flex-basis: 100%; }
+  /* Pips at mini size: 6px diamonds on a 10px line. */
+  .mini .pips { gap: 5px; height: 10px; padding: 0 1px; }
+  .mini .pips > span { width: 6px; height: 6px; }
+"""
+
+# Motion (docs/specs/assets/binder/MOTION.md, durations table). Compositor
+# only (transform, opacity, clip-path, background-position), with MOTION.md's
+# one allowed layout animation: a disclosure opening (grid-template-rows
+# 0fr -> 1fr, 240ms; DISCLOSURE_JS). Every movement
+# sits in the no-preference block; outside it are the opacity-only fallbacks
+# a viewer who asked for reduced motion still gets — A11Y_CSS's wildcard stops
+# every other animation, so the two crossfades re-assert themselves there.
+#   M1 deal-in (card 300ms cubic-bezier(.2,0,0,1): fade, rise 12px, -1deg to
+#      0; ribbon stamp +100/200 overshoot; badge pop +140/180; pips from +160,
+#      36ms apart; leaders +80/200, 36ms stagger) — at rest by 500ms. M2 grid
+#      cards (.frame-s) deal the body only, 40ms apart, capped at the 6th.
+#   M3 press: scale .985, 90ms in / 160ms out; the specular shifts 12px; the
+#      primary button darkens 6%. Every tappable thing presses: card frames,
+#      buttons, the fullscreen and link pills, link chips, and a mini card
+#      (its .mini-hit is the target; :active reaches the .mini ancestor, so
+#      no :has() is needed).
+#   M4 hover tilt + one 700ms sheen sweep, fine pointers only; the only
+#      will-change.
+#   M5 skeleton pulse 1600ms; leave 120ms ease-out; the result from +60ms
+#      (resolveSkeleton). M6 the straddling ribbon settles 2px (+340/140).
+#   M7 meters fill 300ms from the left, +120ms.
+MOTION_CSS = r"""  .deal { animation: gl-fade-in 300ms ease-out backwards; animation-delay: var(--deal-at, 0ms); }
+  .leaving { animation: gl-fade-out 120ms ease-out forwards; pointer-events: none; }
+  .fade-in { animation: gl-fade-in 200ms ease-out backwards; }
+  @keyframes gl-fade-in { from { opacity: 0; } }
+  @keyframes gl-fade-out { to { opacity: 0; } }
+  button.frame:active, .btn:active, .fs-btn:active, .hero-pill:active, a.chip:active,
+  .mini:active { opacity: 0.8; }
+  .btn.primary { isolation: isolate; }
+  .btn.primary::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    background: var(--gl-deep);
+    opacity: 0;
+  }
+  .btn.primary:active::before { opacity: 0.06; }
+  @media (prefers-reduced-motion: reduce) {
+    .deal { animation: gl-fade-in 240ms ease-out backwards !important; }
+    .leaving { animation: gl-fade-out 240ms ease-out forwards !important; }
+    .fade-in { animation: gl-fade-in 200ms ease-out backwards !important; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .deal {
+      animation: deal 300ms cubic-bezier(0.2, 0, 0, 1) backwards;
+      animation-delay: calc(var(--deal-at, 0ms) + var(--i, 0) * 40ms);
+    }
+    .deal:not(.frame-s) .ribbon {
+      transform-origin: 0 50%;
+      animation: stamp 200ms cubic-bezier(0.34, 1.4, 0.64, 1) backwards;
+      animation-delay: calc(var(--deal-at, 0ms) + 100ms);
+    }
+    .deal:not(.frame-s) .ribbon-straddle {
+      animation: stamp 200ms cubic-bezier(0.34, 1.4, 0.64, 1) backwards, settle 140ms ease-out backwards;
+      animation-delay: calc(var(--deal-at, 0ms) + 100ms), calc(var(--deal-at, 0ms) + 340ms);
+    }
+    .deal:not(.frame-s) .badge {
+      animation: pop 180ms ease-out backwards;
+      animation-delay: calc(var(--deal-at, 0ms) + 140ms);
+    }
+    .deal:not(.frame-s) .pips > .on, .deal:not(.frame-s) .pips > .half {
+      animation: pip 160ms ease-out backwards;
+      animation-delay: calc(var(--deal-at, 0ms) + 160ms + var(--j, 0) * 36ms);
+    }
+    .deal:not(.frame-s) .stat-lead {
+      animation: leader 200ms ease-out backwards;
+      animation-delay: calc(var(--deal-at, 0ms) + 80ms + var(--j, 0) * 36ms);
+    }
+    .deal .meter-fill, .deal .match .fill {
+      transform-origin: 0 50%;
+      animation: fill 300ms ease-out backwards;
+      animation-delay: calc(var(--deal-at, 0ms) + 120ms);
+    }
+    /* The one layout animation (MOTION.md): a disclosure opening. */
+    .disclosure-body.opening { animation: disclose 240ms ease-out; }
+    .stats > :nth-child(2), .pips > :nth-child(2) { --j: 1; }
+    .stats > :nth-child(3), .pips > :nth-child(3) { --j: 2; }
+    .stats > :nth-child(4), .pips > :nth-child(4) { --j: 3; }
+    .stats > :nth-child(5), .pips > :nth-child(5) { --j: 4; }
+    .stats > :nth-child(n+6), .pips > :nth-child(n+6) { --j: 5; }
+    button.frame, .btn, .fs-btn, .hero-pill, a.chip, .mini {
+      transition: transform 160ms ease-out, opacity 160ms ease-out;
+    }
+    button.frame:active, .btn:active, .fs-btn:active, .hero-pill:active, a.chip:active,
+    .mini:active {
+      transform: scale(0.985);
+      opacity: 1;
+      transition-duration: 90ms;
+    }
+    .btn.primary::before { transition: opacity 160ms ease-out; }
+    .btn.primary:active::before { transition-duration: 90ms; }
+    button.frame .art::after {
+      transition: transform 160ms ease-out;
+    }
+    button.frame:active .art::after {
+      transform: translateX(-12px);
+      transition-duration: 90ms;
+    }
+    @media (hover: hover) and (pointer: fine) {
+      button.frame:hover {
+        transform: perspective(900px) rotateY(-5deg) rotateX(3deg);
+        will-change: transform;
+      }
+      button.frame:hover:active {
+        transform: perspective(900px) rotateY(-5deg) rotateX(3deg) scale(0.985);
+      }
+      button.frame .art::after {
+        background:
+          linear-gradient(235deg, transparent 42%, var(--gl-sheen) 50%, transparent 58%) no-repeat,
+          linear-gradient(235deg, transparent calc(30% - 0.5px), var(--gl-specular) calc(30% - 0.5px) calc(30% + 0.5px), transparent calc(30% + 0.5px));
+        background-size: 300% 100%, 100% 100%;
+        background-position: 0% 0, 0 0;
+      }
+      button.frame:hover .art::after {
+        animation: sheen 700ms ease-out 1;
+      }
+    }
+    @keyframes deal { from { opacity: 0; transform: translateY(12px) rotate(-1deg); } }
+    @keyframes stamp { from { opacity: 0; transform: scaleX(0.6); } }
+    /* M6 is a landing: settle moves `translate`, not `transform` (which the
+       stamp's scale owns), and its backwards fill holds the ribbon 2px up
+       from the deal's start — through the stamp and the gap after it —
+       until the settle lowers it, so it never jumps up before landing. */
+    @keyframes settle { from { translate: 0 -2px; } to { translate: none; } }
+    @keyframes pop { from { opacity: 0; transform: scale(0.6); } }
+    @keyframes pip { from { opacity: 0; transform: rotate(45deg) scale(0.6); } }
+    @keyframes leader { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0); } }
+    @keyframes fill { from { transform: scaleX(0); } }
+    @keyframes disclose { from { grid-template-rows: 0fr; } }
+    @keyframes skel-pulse { 50% { opacity: 0.55; } }
+    @keyframes sheen { from { background-position: 0% 0, 0 0; } to { background-position: 100% 0, 0 0; } }
+  }
+"""
+
+# All Binder CSS in splice order (one line per widget).
+BINDER_CSS = (
+    FRAME_CSS
+    + ART_CSS
+    + BADGE_CSS
+    + PLATE_CSS
+    + STATS_CSS
+    + PIPS_CSS
+    + RIBBON_CSS
+    + TRAIT_CSS
+    + ABILITY_CSS
+    + FLAVOR_CSS
+    + MINI_CSS
+    + MOTION_CSS
+)
+
+# The Binder builders. Every node comes from el() (strings via textContent) or
+# svgEl() (document.createElementNS; NOTICE_JS) — never markup.
+GRAIN_JS = r"""  /* ---------- the Binder: builders ---------- */
+  /* The card grain — gl.css's inline SVG. The noise filter is defined ONCE
+     per document (installGrain, called by startWidget): a hidden 0x0 <svg>
+     on <body>, outside #root, so clearing the view never takes it along.
+     Every .frame's FIRST child is then only a rect that references it. */
+  var GRAIN_FILTER_ID = "gl-grain-f";
+  function installGrain() {
+    if (document.getElementById(GRAIN_FILTER_ID)) return;
+    var defs = svgEl("svg", { "class": "grain-defs", "aria-hidden": "true", focusable: "false", width: 0, height: 0 }, [
+      svgEl("filter", { id: GRAIN_FILTER_ID }, [
+        svgEl("feTurbulence", { type: "fractalNoise", baseFrequency: ".9", numOctaves: "2", stitchTiles: "stitch" }),
+        svgEl("feColorMatrix", { type: "saturate", values: "0" }),
+      ]),
+    ]);
+    if (defs) document.body.appendChild(defs);
+  }
+  function grainNode() {
+    return svgEl("svg", { "class": "grain", "aria-hidden": "true" }, [
+      svgEl("rect", { width: "100%", height: "100%", filter: "url(#" + GRAIN_FILTER_ID + ")" }),
+    ]);
+  }
+  /* A card's opening: the .frame (a <button> when the whole card is the tap
+     target) in its tier, the grain as its first child. */
+  function frameNode(tag, cls, tier) {
+    var frame = el(tag, "frame " + cls + " tier-" + (tier || "none"));
+    var grain = grainNode();
+    if (grain) frame.appendChild(grain);
+    return frame;
+  }
+"""
+
+BADGE_JS = r"""  /* {value, suffix, tag, tier} → the badge: the number, an optional suffix
+     ("/10"), the tag beneath ("OpenCritic", "Match", "Your rating"; CSS
+     uppercases it) and the ring in the tier color. No value, no badge. */
+  function badgeNode(opts) {
+    var o = opts || {};
+    if (o.value === undefined || o.value === null || o.value === "") return null;
+    var badge = el("div", "badge tier-" + (o.tier || "none"));
+    badge.appendChild(el("span", "badge-num", String(o.value)));
+    if (o.suffix) badge.appendChild(el("span", "badge-suffix", String(o.suffix)));
+    if (o.tag) badge.appendChild(el("span", "badge-tag", String(o.tag)));
+    return badge;
+  }
+"""
+
+STATS_JS = r"""  /* {label, note, value, key} → one stat row: the label (its note after it,
+     "last 30d"), the dotted leader, the value — text, or a node (a chip,
+     pips). key marks the strongest value on the card. */
+  function statRow(opts) {
+    var o = opts || {};
+    var row = el("div", "stat" + (o.key ? " is-key" : ""));
+    var name = el("span", "stat-label", o.label);
+    if (o.note) name.appendChild(el("span", "stat-note", String(o.note)));
+    row.appendChild(name);
+    var lead = el("span", "stat-lead");
+    lead.setAttribute("aria-hidden", "true");
+    row.appendChild(lead);
+    var value = el("span", "stat-val");
+    if (o.value && typeof o.value === "object" && o.value.nodeType) value.appendChild(o.value);
+    else if (o.value !== undefined && o.value !== null) value.textContent = String(o.value);
+    row.appendChild(value);
+    return row;
+  }
+"""
+
+PIPS_JS = r"""  /* `lit` of `of` diamonds in the tier's text color. lit rounds to the
+     nearest half; a half pip is lit on its left. Read as "8.5 of 10". */
+  function pipsNode(lit, of, tier) {
+    var total = Math.max(0, Math.round(num(of) || 0));
+    var n = Math.max(0, Math.min(total, Math.round((num(lit) || 0) * 2) / 2));
+    var node = el("span", "pips tier-" + (tier || "none"));
+    node.setAttribute("role", "img");
+    node.setAttribute("aria-label", n + " of " + total);
+    for (var i = 0; i < total; i++) {
+      node.appendChild(el("span", i + 1 <= n ? "on" : i + 0.5 === n ? "half" : null));
+    }
+    return node;
+  }
+"""
+
+RIBBON_JS = r"""  /* The verdict / status band: the text (CSS uppercases it), an optional
+     mono note on the right ("wait for ~€40", "82h"), the tier fill. variant:
+     "" (40px), "s" (24px), "straddle" (eval: overhangs its card), "art"
+     (flush on the art's bottom edge) — or several, space-separated ("s art"). */
+  var RIBBON_VARIANTS = ["s", "straddle", "art"];
+  function ribbonNode(text, tier, note, variant) {
+    var cls = "ribbon";
+    String(variant || "").split(/\s+/).forEach(function (v) {
+      if (RIBBON_VARIANTS.indexOf(v) >= 0) cls += " ribbon-" + v;
+    });
+    cls += " tier-" + (tier || "none");
+    if (note) cls += " has-note";
+    var node = el("div", cls);
+    node.appendChild(el("span", "ribbon-text", text));
+    if (note) node.appendChild(el("span", "ribbon-note", String(note)));
+    return node;
+  }
+"""
+
+TRAIT_JS = r"""  /* One for-you ("plus": the four-point spark) or weakness ("minus": the
+     shield outline) row: the 20px icon, then the text. */
+  var TRAIT_ICONS = {
+    plus: "M10 2.5c.6 4.3 3.2 6.9 7.5 7.5-4.3.6-6.9 3.2-7.5 7.5-.6-4.3-3.2-6.9-7.5-7.5 4.3-.6 6.9-3.2 7.5-7.5Z",
+    minus: "M10 2.2 16.5 4.7v5c0 4.2-2.8 7.1-6.5 8.6-3.7-1.5-6.5-4.4-6.5-8.6v-5L10 2.2Z",
+  };
+  function traitNode(kind, text) {
+    var k = kind === "plus" ? "plus" : "minus";
+    var node = el("div", "trait trait-" + k);
+    var icon = iconNode("0 0 20 20", [["path", { d: TRAIT_ICONS[k] }]]);
+    if (icon) node.appendChild(icon);
+    node.appendChild(el("span", null, text));
+    return node;
+  }
+"""
+
+ABILITY_JS = r"""  /* A run-in: the kind label (STUDIO, PEOPLE, MOMENT, ANTICIPATION,
+     AWARD), then the text on the same line. */
+  function abilityNode(kindLabel, text) {
+    var node = el("p", "ability");
+    node.appendChild(el("b", null, kindLabel));
+    node.appendChild(el("span", null, text));
+    return node;
+  }
+"""
+
+FLAVOR_JS = r"""  /* Italic serif prose (the craft note, a description); quote = his own
+     review, with the hanging quotation mark. */
+  function flavorNode(text, quote) {
+    return el("p", "flavor" + (quote ? " flavor-quote" : ""), text);
+  }
+"""
+
+MINI_JS = r"""  /* The ONE line format every mini uses — strips and lineage columns alike:
+       1. his rating as small pips, when rated; unrated, the critic score
+          as "Critics" "86" when the caller passes one (a studio's earlier
+          game he doesn't own); nothing otherwise;
+       2. hours and where it stands, two spans: "50h" "played", or the
+          completion status where the payload carries one (anchors:
+          "50h" "completed"); "unplayed" when the payload says so (or zero
+          hours); "not owned" for a game he doesn't have. Library
+          neighbours (similar_in_library) carry no status, so they read
+          "50h" "played" or "unplayed", never a status word;
+       3. the year and the platform, when known.
+     {rating, critic, hours, status, unplayed, owned, year, platform} → lines. */
+  var MINI_STATUS = { completed: "completed", evergreen: "evergreen", abandoned: "abandoned", playing: "playing" };
+  function miniLines(facts) {
+    var f = facts || {};
+    var lines = [];
+    var rating = num(f.rating);
+    var critic = num(f.critic);
+    if (rating != null) lines.push([pipsNode(rating, 10, ratingTier(rating))]);
+    else if (realScore(critic)) lines.push(["Critics", String(Math.round(critic))]);
+    var hours = num(f.hours);
+    var played = hours != null && hours > 0 ? hoursLabel(hours) : null;
+    var word = Object.prototype.hasOwnProperty.call(MINI_STATUS, f.status) ? MINI_STATUS[f.status]
+      : f.owned === false ? "not owned"
+      : f.unplayed || hours === 0 ? "unplayed"
+      : played ? "played" : null;
+    if (played || word) lines.push([played, word]);
+    var platform = f.platform ? label("platform_short", f.platform) : null;
+    if (f.year || platform) lines.push([f.year ? String(f.year) : null, platform]);
+    return lines;
+  }
+  /* {name, cover_url, lines, tier, title, onClick} → a mini card: the 48x64
+     art (coverNode, so a missing or broken cover is the name-seeded plate) in
+     a 2px tier border, the name (two lines at most, then an ellipsis), at most
+     three cap lines (miniLines). A line is a list of parts, each text (a
+     figure in mono) or a node (pips), gap-separated — never joined with
+     middots. title is the hover text; onClick makes the whole card one
+     button, named by the game. */
+  function miniCard(opts) {
+    var o = opts || {};
+    var card = el("div", "mini tier-" + (o.tier || "none"));
+    if (o.title) card.title = o.title;
+    var art = el("div", "mini-art");
+    art.appendChild(coverNode({ name: o.name, cover_url: o.cover_url }));
+    card.appendChild(art);
+    var body = el("div", "mini-body");
+    body.appendChild(el("div", "mini-name", o.name || "?"));
+    list(o.lines).slice(0, 3).forEach(function (line) {
+      var meta = el("div", "mini-meta");
+      (Array.isArray(line) ? line : [line]).forEach(function (part) {
+        if (part === null || part === undefined || part === "") return;
+        if (typeof part === "object" && part.nodeType) { meta.appendChild(part); return; }
+        var text = String(part);
+        meta.appendChild(el("span", isFigure(text) ? "v" : null, text));
+      });
+      if (meta.childNodes.length) body.appendChild(meta);
+    });
+    card.appendChild(body);
+    if (typeof o.onClick === "function") {
+      var hit = el("button", "mini-hit");
+      hit.type = "button";
+      hit.setAttribute("aria-label", o.name || "Game");
+      hit.addEventListener("click", function (ev) { o.onClick(ev); });
+      card.appendChild(hit);
+    }
+    return card;
+  }
+"""
+
+MOTION_JS = r"""  /* ---------- motion (MOTION.md; the CSS is MOTION_CSS) ---------- */
+  /* M1/M2: deal a card in. index staggers siblings 40ms apart, capped at the
+     6th (index 5) — later cards share its delay. */
+  var DEAL_STAGGER_CAP = 5;
+  function dealIn(node, index) {
+    if (!node) return node;
+    var i = Math.max(0, Math.min(DEAL_STAGGER_CAP, Math.floor(num(index) || 0)));
+    node.style.setProperty("--i", String(i));
+    node.classList.add("deal");
+    return node;
+  }
+  /* M2: the set line fades in first (opacity only, 0ms / 200ms), once per
+     fresh page. */
+  function fadeIn(node) {
+    if (node) node.classList.add("fade-in");
+    return node;
+  }
+  /* M5: the skeleton resolves into the result. build() makes the node. With
+     the skeleton on screen the node takes its place at once (the content is
+     there for every reader immediately) while the skeleton, lifted out of the
+     flow over its old box, fades out over 120ms and the node deals in from
+     +60ms: the overlap that reads as one object resolving. Under reduced
+     motion both halves are ONE 240ms crossfade (leave and enter together,
+     no offset). Without a
+     skeleton the node is only dealt in and comes back detached for the
+     caller to place. */
+  var SKELETON_LEAVE_MS = 120;
+  var SKELETON_LEAVE_REDUCED_MS = 240;
+  var RESOLVE_OFFSET_MS = 60;
+  function resolveSkeleton(skel, build) {
+    var node = build();
+    if (!node) return node;
+    var parent = skel && skel.parentNode;
+    if (parent) {
+      var reduced = mediaQueryMatches("(prefers-reduced-motion: reduce)");
+      var top = skel.offsetTop, left = skel.offsetLeft, width = skel.offsetWidth;
+      parent.insertBefore(node, skel);
+      skel.style.position = "absolute";
+      skel.style.top = top + "px";
+      skel.style.left = left + "px";
+      skel.style.width = width + "px";
+      skel.style.margin = "0";
+      skel.setAttribute("aria-hidden", "true");
+      skel.classList.add("leaving");
+      if (!reduced) node.style.setProperty("--deal-at", RESOLVE_OFFSET_MS + "ms");
+      setTimeout(function () {
+        if (skel.parentNode) skel.parentNode.removeChild(skel);
+        reportSize();
+      }, reduced ? SKELETON_LEAVE_REDUCED_MS : SKELETON_LEAVE_MS);
+    }
+    return dealIn(node, 0);
+  }
+"""
+
+# All Binder JS in splice order (one line per widget).
+BINDER_JS = (
+    GRAIN_JS
+    + BADGE_JS
+    + STATS_JS
+    + PIPS_JS
+    + RIBBON_JS
+    + TRAIT_JS
+    + ABILITY_JS
+    + FLAVOR_JS
+    + MINI_JS
+    + MOTION_JS
+)
 
 # ---- Fullscreen and the screenshot carousel ---------------------------------
 # Best-effort fullscreen: no button where the API is absent, and the
@@ -2024,64 +3149,10 @@ MEDIA_PANEL_JS = r"""  function trailerEntry(media) {
   }
 """
 
-# ---- Ownership stickers, similar games, studio pedigree ---------------------
-# His rating, his hours (or "Unplayed") and, failing both, "Owned" — the chip
-# row for a related game (lineage comparisons). Zero hours on an owned game is
-# authoritative NOT-played; null hours is unknown and says nothing.
-OWNERSHIP_TAGS_JS = r"""  function ownershipTags(item) {
-    var hours = num(item.playtime_hours);
-    var unplayed = !!item.unplayed || (!!item.owned && hours === 0);
-    var chips = [youChip(item.my_rating), playedChip(hours, unplayed)];
-    if (item.owned && !chips[0] && !chips[1]) chips.push(scoreChip({ label: "Owned" }));
-    return chipRow(chips);
-  }
-"""
-
-# The owned games most like this one (tools/game_media.py's similar_in_library)
-# as a strip of mini covers. Each card is cover, name, year and ONE chip row:
-# every item is owned (the pool IS the library), so the row carries his rating
-# ("You 9/10"), then his hours ("Played 132h") or, unrated and unplayed,
-# "Unplayed" — at most two.
-SIMILAR_NODE_JS = r"""  function similarTags(item) {
-    var you = youChip(item.my_rating);
-    var unplayed = !you && !!item.unplayed;
-    return chipRow([you, playedChip(item.playtime_hours, unplayed)]);
-  }
-  function similarNode(parent, similar) {
-    var items = list(similar.items).filter(function (i) { return i && i.name; });
-    if (!items.length) return;
-    var box = section(parent, "Similar in your library");
-    var strip = el("div", "strip");
-    items.forEach(function (item) {
-      var card = el("div", "sim");
-      card.appendChild(coverNode(item));
-      var body = el("div", "sim-body");
-      body.appendChild(el("div", "sim-name", item.name || "?"));
-      if (item.release_year) body.appendChild(el("div", "sim-year", String(item.release_year)));
-      var why = list(item.shared_tags).filter(Boolean);
-      if (why.length) card.title = "Shares: " + why.join(", ");
-      var tags = similarTags(item);
-      if (tags) body.appendChild(tags);
-      card.appendChild(body);
-      strip.appendChild(card);
-    });
-    // No "+N more" chip: the extras are not in the payload, and there is
-    // nothing to click through to.
-    box.appendChild(strip);
-    var total = num(similar.count);
-    // The count is "owned games clearing the shared-tag bar", so it is a
-    // denominator the row can honestly claim — every one of them is his.
-    var note = (similar.truncated && total != null && total > items.length)
-      ? "The " + items.length + " of your " + plural(total, "game") + " most like this one"
-      : "Your " + plural(items.length, "game") + " most like this one";
-    var unplayed = items.filter(function (i) { return i.unplayed; }).length;
-    if (unplayed) note += " · " + unplayed + " unplayed";
-    box.appendChild(el("div", "note", note));
-  }
-"""
-
-# "From the studio": the headline, the per-poster badge and the strip with its
-# track-record footer (``plural`` lives in NUMBERS_JS).
+# ---- Studio pedigree ---------------------------------------------------------
+# "From the studio": the headline (its parts — studio, "est. 2018", "5 games" —
+# as gap-separated spans, never a joined string). Each widget builds its own
+# strip of minis under it (``plural`` lives in NUMBERS_JS).
 PEDIGREE_JS = r"""  function pedigreeHeadline(ped) {
     var dev = ped.developer || {};
     var names = list(ped.developer_names).filter(Boolean);
@@ -2092,61 +3163,15 @@ PEDIGREE_JS = r"""  function pedigreeHeadline(ped) {
     if (founded != null) parts.push("est. " + founded);
     var size = num(ped.catalog_size);
     if (size) parts.push(plural(size, "game", ped.catalog_truncated));
-    return parts.join(" · ");
+    return parts;
   }
-  /* ONE score per poster: his own rating ("You 8/10") outranks the critic
-     score ("Critics 84"), which only stands in when he hasn't rated it. An
-     owned game he never rated still says "Owned". */
-  function pedigreeBadges(item) {
-    var chips = [];
-    var rating = num(item.my_rating);
-    var critic = num(item.critic_score);
-    if (item.owned && rating != null) {
-      chips.push(youChip(rating));
-    } else if (critic != null && critic >= 0) {
-      chips.push(criticsChip(critic));
-    }
-    if (item.owned && rating == null) chips.push(scoreChip({ label: "Owned" }));
-    return chipRow(chips);
-  }
-  function pedigreeNode(parent, ped) {
-    if (!ped) return;
-    var headline = pedigreeHeadline(ped);
-    var items = list(ped.previous_games).filter(function (i) { return i && i.name; });
-    if (!headline && !items.length) return;
-    var box = section(parent, "From the studio");
-    if (headline) box.appendChild(el("div", "ped-head", headline));
-    // The publisher is a line of text, never a poster row: a publisher's back
-    // catalogue is a distribution list, not a body of work.
-    if (ped.publisher_name) {
-      box.appendChild(el("div", "ped-pub", "published by " + ped.publisher_name));
-    }
-    if (!items.length) return;
-    var strip = el("div", "strip ped-strip");
-    items.forEach(function (item) {
-      var card = el("div", "sim");
-      card.appendChild(coverNode(item));
-      var body = el("div", "sim-body");
-      body.appendChild(el("div", "sim-name", item.name || "?"));
-      if (item.release_year) body.appendChild(el("div", "sim-year", String(item.release_year)));
-      var badges = pedigreeBadges(item);
-      if (badges) body.appendChild(badges);
-      card.appendChild(body);
-      strip.appendChild(card);
-    });
-    box.appendChild(strip);
-    var record = ped.library_track_record;
-    if (record) {
-      var avg = num(record.avg_my_rating);
-      // The track record covers only the annotated (shown) games; when the
-      // catalogue runs deeper, "last N" keeps the claim honest.
-      var span = ped.previous_truncated
-        ? "their last " + plural(items.length, "game")
-        : "their " + plural(items.length, "previous game");
-      box.appendChild(el("div", "note",
-        "You've played " + (num(record.played_count) || 0) + " of "
-        + span + (avg != null ? " — avg " + avg + "/10." : ".")));
-    }
+  /* The headline as a div of spans (PEDIGREE_CSS gaps them), or null. */
+  function pedigreeHead(ped) {
+    var parts = pedigreeHeadline(ped);
+    if (!parts.length) return null;
+    var head = el("div", "ped-head");
+    parts.forEach(function (part) { head.appendChild(el("span", null, part)); });
+    return head;
   }
 """
 
@@ -2199,6 +3224,7 @@ INIT_JS = r"""  /* ---------- startup ---------- */
      widget stays quiet and still renders whatever tool-result arrives. */
   function startWidget(appName) {
     document.documentElement.setAttribute("data-display-mode", "inline");
+    installGrain();
     if (window.__PREVIEW_HOST_CONTEXT__) applyHostContext(window.__PREVIEW_HOST_CONTEXT__);
     if (window.__PREVIEW_DATA__) {
       render(window.__PREVIEW_DATA__);

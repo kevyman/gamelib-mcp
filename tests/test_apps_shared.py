@@ -46,7 +46,9 @@ def css_rule(css: str, selector: str, exact: bool = False) -> str:
 INTERACTIVE = (
     "a.chip", ".btn", ".disclosure", ".fs-btn", ".car-nav",
     ".overlay-close", ".hero-pill",
-    '.stamp[role="button"]', "button.stamp",
+    # The Binder: a tappable card frame (always a <button>), and a mini
+    # card's one hit button.
+    "button.frame", ".mini-hit",
 )
 # Large enough on their own, and their overflow: hidden would clip an
 # extension anyway — so they carry none (an inert rule is a false promise).
@@ -85,13 +87,15 @@ class HostContextTests(unittest.TestCase):
     def test_size_tokens_are_clamped_at_12px(self) -> None:
         css = apps_shared.TOKENS_CSS
         for token, source, px in (
-            ("h", "heading-md", 16), ("body", "text-sm", 14), ("cap", "text-xs", 12),
+            ("title", "heading-lg", 20), ("h", "heading-md", 16), ("body", "text-sm", 14),
+            ("cap", "text-xs", 12),
         ):
             with self.subTest(token=token):
                 self.assertIn(f"--gl-{token}: max(12px, var(--font-{source}-size, {px}px));", css)
-        # no size token escapes the clamp, and the fourth (title) size is gone
+        # no size token escapes the clamp; the Binder's card title is the
+        # fourth size, and there is no fifth
         self.assertEqual(re.findall(r"--gl-(?:title|h|body|cap): var\(", css), [])
-        self.assertNotIn("--gl-title", css)
+        self.assertEqual(len(re.findall(r"--gl-[a-z]+: max\(12px,", css)), 4)
 
     def test_touch_falls_back_to_media_queries_without_device_capabilities(self) -> None:
         js = apps_shared.BRIDGE_JS
@@ -167,6 +171,15 @@ class HitAreaTests(unittest.TestCase):
         self.assertIn("position: relative;", css_rule(apps_shared.CONTROLS_CSS, ".btn, .disclosure", exact=True))
         self.assertIn("position: relative;", css_rule(apps_shared.CHIP_CSS, ".chip", exact=True))
         self.assertIn("position: absolute;", css_rule(apps_shared.HERO_CSS, ".hero-pill", exact=True))
+        self.assertIn("position: relative;", css_rule(apps_shared.FRAME_CSS, ".frame", exact=True))
+        self.assertIn("position: absolute;", css_rule(apps_shared.MINI_CSS, ".mini-hit", exact=True))
+        # a frame never clips (the extension and a straddling ribbon reach
+        # past it); the overflow: hidden is on the art window inside
+        self.assertNotIn("overflow", css_rule(apps_shared.FRAME_CSS, ".frame", exact=True))
+
+    def test_mini_cards_sit_twice_the_touch_extension_apart(self) -> None:
+        # 12px between minis against the -6px touch extension: never overlaps.
+        self.assertIn(".strip.ministrip { gap: 12px; }", apps_shared.MINI_CSS)
 
     def test_reduced_motion_wildcard(self) -> None:
         css = apps_shared.A11Y_CSS
@@ -178,10 +191,11 @@ class HitAreaTests(unittest.TestCase):
 
 class SharedCssHygieneTests(unittest.TestCase):
     def test_no_raw_color_outside_the_token_layer(self) -> None:
-        # Raw colors live in TOKENS_CSS only (the media stage and the cover
-        # plate's ink are tokens there); a cover-plate rule is the documented
-        # exception if one ever moves here. tests/test_apps.py pins the whole
-        # widget CSS, stamp included.
+        # Raw colors live in TOKENS_CSS only (the media stage, the cover
+        # plate's ink and every Binder ink — rarity stops, ribbon fills, the
+        # deep plate, specular, sheen — are tokens there); a cover-plate rule
+        # is the documented exception (MINI_CSS hides the plate's lettering in
+        # a 48px mini). tests/test_apps.py pins the whole widget CSS.
         for name, css in shared_css_blocks():
             if name == "TOKENS_CSS":
                 continue
@@ -205,6 +219,46 @@ class SharedCssHygieneTests(unittest.TestCase):
         self.assertEqual(found, ["inherit"])
         self.assertIn("button { font: inherit; color: inherit; }", apps_shared.RESET_CSS)
         self.assertEqual(re.findall(r"(?<![-\w])font:(?!\s*inherit)", "button { font: inherit; }"), [])
+
+    def test_tier_classes_only_repoint_tier_tokens(self) -> None:
+        # Color is the quality tier only: a .tier-* rule sets the four tier
+        # tokens and nothing else, and it is written once, in TOKENS_CSS.
+        rules = re.findall(r"^  \.tier-(good|ok|bad|none) \{([^}]*)\}", apps_shared.TOKENS_CSS, re.MULTILINE)
+        self.assertEqual([tier for tier, _ in rules], ["good", "ok", "bad", "none"])
+        for tier, body in rules:
+            with self.subTest(tier=tier):
+                props = re.findall(r"(--?[\w-]+):", body)
+                self.assertEqual(props, ["--gl-tier", "--gl-tier-text", "--gl-tier-fill", "--gl-rarity"])
+        for name, css in shared_css_blocks():
+            if name == "TOKENS_CSS":
+                continue
+            with self.subTest(block=name):
+                self.assertNotRegex(css, r"(?m)^  \.tier-(good|ok|bad|none) \{")
+
+    def test_keyframes_live_in_motion_css_only(self) -> None:
+        # One home for motion: the skeleton pulse is MOTION_CSS's skel-pulse.
+        for name, css in shared_css_blocks():
+            if name in ("MOTION_CSS", "BINDER_CSS"):
+                continue
+            with self.subTest(block=name):
+                self.assertNotIn("@keyframes", css)
+        self.assertNotIn("gl-pulse", apps.GAME_CARDS_HTML + apps_eval.EVAL_CARD_HTML)
+
+    def test_no_has_selector_and_no_inline_markup(self) -> None:
+        # :has() is too new for the WebViews the plain-color fallback serves:
+        # the noted ribbon is a class (.has-note) instead.
+        for name, css in shared_css_blocks():
+            with self.subTest(block=name):
+                self.assertNotIn(":has(", css)
+        self.assertIn(".ribbon.has-note {", apps_shared.RIBBON_CSS)
+
+    def test_the_plate_sub_line_is_scoped_until_phase_2(self) -> None:
+        # Both widgets still own a bare .sub line; the Binder's gap-separated
+        # one only applies inside a .plate, so neither widget changes look.
+        self.assertIn("  .plate .sub {", apps_shared.PLATE_CSS)
+        for name, css in shared_css_blocks():
+            with self.subTest(block=name):
+                self.assertNotRegex(css, r"(?m)^  \.sub \{")
 
     def test_strips_snap_and_leave_room_for_the_last_item(self) -> None:
         strip = css_rule(apps_shared.STRIP_CSS, ".strip", exact=True)
@@ -598,17 +652,25 @@ class ImageFallbackTests(unittest.TestCase):
     """Item 6 (F1): no broken-image glyph, no alt text over the stage."""
 
     def test_every_img_element_has_an_error_fallback(self) -> None:
-        sites = 0
+        # The rule: EVERY <img> the widgets create is a named
+        # ``var x = document.createElement("img");`` whose onerror swaps in a
+        # fallback before its src is set. No other way to make one exists —
+        # no el("img"), no <img> markup, no anonymous createElement.
         for name, source in _WIDGET_SOURCES.items():
-            for match in re.finditer(r'var (\w+) = document\.createElement\("img"\);', source):
-                sites += 1
+            sites = list(re.finditer(r'var (\w+) = document\.createElement\("img"\);', source))
+            with self.subTest(module=name, check="every creation is a named site"):
+                self.assertEqual(len(sites), source.count('createElement("img")'))
+                self.assertNotIn('el("img"', source)
+                self.assertNotRegex(source, r"<img[\s>]")
+            for match in sites:
                 var = match.group(1)
                 # the handler is attached before src is set, within the builder
                 window = source[match.end():match.end() + 2000]
                 with self.subTest(module=name, var=var, at=match.start()):
                     self.assertRegex(window, rf"\b{var}\.onerror = function")
                     self.assertLess(window.index(f"{var}.onerror"), window.index(f"{var}.src"))
-        self.assertGreaterEqual(sites, 6)   # cover, poster, stage, thumb, carousel, anchor
+        # the scan is not vacuous: the shared cover builder is one such site
+        self.assertRegex(apps_shared.COVER_NODE_JS, r'var img = document\.createElement\("img"\);')
 
     def test_the_fallbacks_are_the_neutral_tiles(self) -> None:
         self.assertIn('el("span", "thumb-text", text)', apps_shared.MEDIA_PANEL_JS)
@@ -616,7 +678,14 @@ class ImageFallbackTests(unittest.TestCase):
         self.assertIn('el("div", "hero-missing below-badge", missingText || "Trailer")', apps_shared.HERO_MEDIA_JS)
         self.assertIn('var missing = el("div", "hero-missing", "Screenshot unavailable");',
                       apps_shared.CAROUSEL_STAGE_JS)
-        self.assertIn('coverPlate(a.name, "anchor-cover")', apps_eval.EVAL_CARD_HTML)
+        # Anchors (and every other strip entry) are mini cards, whose art is
+        # coverNode — so a missing or broken anchor cover is the shared plate.
+        self.assertIn("ministrip(box, anchors, function (a) {", apps_eval.EVAL_CARD_HTML)
+        self.assertIn("strip.appendChild(miniCard(toMini(item)));", apps_eval.EVAL_CARD_HTML)
+        self.assertIn("art.appendChild(coverNode({ name: o.name, cover_url: o.cover_url }));",
+                      apps_shared.MINI_JS)
+        self.assertIn('var fallback = coverPlate(game.name, "cover-fallback", game.name || "?");',
+                      apps_shared.COVER_NODE_JS)
 
 
 # Just enough DOM for the media builders: parent links, replaceChild, remove.
@@ -751,6 +820,119 @@ class OneCopyHelperTests(unittest.TestCase):
                 self.assertNotIn("gridSteamChip", _WIDGET_SOURCES[module])
                 self.assertNotIn(">= 7 ?", _WIDGET_SOURCES[module])     # ratingTier's thresholds
 
+    def test_binder_glue_lives_once_in_the_shared_blocks(self) -> None:
+        # Folded out of both widgets (spec 2026-10-04 §2 Phase 3): the card
+        # frame opener, the month-year date, the eyebrow section, the
+        # visually-hidden label, the pill no-wrap and the mini-size pips.
+        homes = {
+            "function frameNode(tag, cls, tier) {": apps_shared.GRAIN_JS,
+            "function monthYear(iso) {": apps_shared.NUMBERS_JS,
+            "function dayMonthYear(iso) {": apps_shared.NUMBERS_JS,
+            "var MONTHS = [": apps_shared.NUMBERS_JS,
+            "function eyebrowSection(parent, text) {": apps_shared.DOM_HELPERS_JS,
+            "function pedigreeHead(ped) {": apps_shared.PEDIGREE_JS,
+            "  .sr-only {": apps_shared.A11Y_CSS,
+            ".actions > .btn, .actions > .disclosure, .grid-head > .btn, .topbar > .btn "
+            "{ white-space: nowrap; }": apps_shared.CONTROLS_CSS,
+            ".ministrip > :only-child { flex-basis: 100%; }": apps_shared.MINI_CSS,
+            ".mini .pips { gap: 5px; height: 10px; padding: 0 1px; }": apps_shared.MINI_CSS,
+        }
+        frame = apps_shared.GRAIN_JS.split("function frameNode(", 1)[1]
+        self.assertIn("var grain = grainNode();", frame)
+        self.assertIn("if (grain) frame.appendChild(grain);", frame)
+        for name, html in (("game-cards", apps.GAME_CARDS_HTML), ("eval-card", apps_eval.EVAL_CARD_HTML)):
+            for marker, block in homes.items():
+                with self.subTest(widget=name, marker=marker):
+                    self.assertIn(marker, block)
+                    self.assertEqual(html.count(marker), 1)
+            with self.subTest(widget=name, check="both widgets build frames through it"):
+                self.assertIn('frameNode("article", ', html)
+                self.assertGreaterEqual(html.count("eyebrowSection(parent, "), 2)
+        for module in ("apps.py", "apps_eval.py"):
+            source = _WIDGET_SOURCES[module]
+            with self.subTest(module=module):
+                for gone in ("function gcFrame(", "function dateLabel(", "function bdSection(",
+                             "var MONTHS", "grainNode()", ".sr-only {", "white-space: nowrap; }"):
+                    self.assertNotIn(gone, source)
+
+
+# Every quoted JS string, comments stripped first (a comment's apostrophe
+# would otherwise open a phantom string). A ``//`` only starts a comment
+# after whitespace or at a line start, so "https://" inside a string stays.
+_JS_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+_JS_LINE_COMMENT = re.compile(r"(^|\s)//[^\n]*", re.MULTILINE)
+_JS_STRING = re.compile(r'"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)*\'')
+
+
+def _middot_strings(js: str) -> list[str]:
+    """The lines holding a quoted string with a middot, minus aria-labels."""
+    code = _JS_LINE_COMMENT.sub(r"\1", _JS_BLOCK_COMMENT.sub("", js))
+    found = []
+    for line in code.splitlines():
+        if "aria-label" in line:
+            continue
+        if any("\u00b7" in s for s in _JS_STRING.findall(line)):
+            found.append(line.strip())
+    return found
+
+
+class NoMiddotJoinTests(unittest.TestCase):
+    """The Binder separates parts with gap-separated spans, never " · "
+    strings — the one allowed place is an aria-label's composition."""
+
+    def test_no_shared_js_constant_carries_a_middot_string(self) -> None:
+        for name, value in shared_blocks():
+            if name.endswith("_JS"):
+                with self.subTest(block=name):
+                    self.assertEqual(_middot_strings(value), [])
+
+    def test_no_widget_render_code_carries_a_middot_string(self) -> None:
+        for name, html in (("game-cards", apps.GAME_CARDS_HTML), ("eval-card", apps_eval.EVAL_CARD_HTML)):
+            script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+            with self.subTest(widget=name):
+                self.assertEqual(_middot_strings(script), [])
+
+    def test_the_scan_sees_a_middot_and_spares_an_aria_label(self) -> None:
+        self.assertEqual(_middot_strings('  var t = a + " \u00b7 " + b;\n'), ['var t = a + " \u00b7 " + b;'])
+        self.assertEqual(_middot_strings('  n.setAttribute("aria-label", a + " \u00b7 " + b);\n'), [])
+        self.assertEqual(_middot_strings("  /* a \u00b7 b, it's a comment */\n  // x \u00b7 y\n"), [])
+
+    def test_the_pedigree_headline_is_parts(self) -> None:
+        js = apps_shared.PEDIGREE_JS
+        self.assertIn("    return parts;\n", js)
+        self.assertNotIn("parts.join(", js)
+        self.assertIn('parts.forEach(function (part) { head.appendChild(el("span", null, part)); });', js)
+        self.assertIn(".ped-head { display: flex; flex-wrap: wrap; gap: 2px 10px;", apps_shared.PEDIGREE_CSS)
+
+
+class SpecularTests(unittest.TestCase):
+    """B8: the art's static specular line is an 8% finish; the hover sheen
+    keeps its own token."""
+
+    def test_the_specular_line_is_eight_percent(self) -> None:
+        self.assertIn("--gl-specular: rgba(255, 255, 255, 0.08);", apps_shared.TOKENS_CSS)
+        self.assertNotIn("--gl-specular: rgba(255, 255, 255, 0.12);", apps_shared.TOKENS_CSS)
+        self.assertIn("var(--gl-specular)", apps_shared.ART_CSS)
+        self.assertIn("var(--gl-sheen) 50%", apps_shared.MOTION_CSS)
+
+
+class LinkChipTests(unittest.TestCase):
+    """B6: a critic chip stays a link but drops the visible arrow; its name
+    says where it goes ("Metacritic 83, opens Metacritic") and it underlines
+    on hover / focus. The external glyph stays on the pills that leave the
+    host, the fullscreen mark on "Full breakdown" only."""
+
+    def test_link_chips_carry_no_glyph_and_name_their_destination(self) -> None:
+        js = apps_shared.SCORE_CHIP_JS
+        self.assertNotIn('"ext"', js)
+        self.assertNotIn("\u2197", js)
+        self.assertIn('chip.setAttribute("aria-label", named.join(" ") + ", opens " + (opts.site || opts.label));', js)
+        self.assertNotIn(".chip .ext", apps_shared.CHIP_CSS)
+        self.assertIn("a.chip:hover > .lbl, a.chip:hover > b, a.chip:focus-visible > .lbl, a.chip:focus-visible > b {\n"
+                      "    text-decoration: underline;", apps_shared.CHIP_CSS)
+        # the external mark survives on the link-out pills only
+        self.assertIn('linkPill(hero, "Watch on YouTube \u2197", watchUrl);', apps_shared.HERO_MEDIA_JS)
+
 
 class LightboxChromeTests(unittest.TestCase):
     """A4: one focus trap, one ✕, one key router — in both widgets."""
@@ -792,16 +974,27 @@ class PlainColorFallbackTests(unittest.TestCase):
     def test_every_color_token_is_redeclared_with_plain_values(self) -> None:
         tokens = apps_shared.TOKENS_CSS
         layer, fallback = tokens.split("@supports not (color: light-dark(red, blue)) {", 1)
-        names = re.findall(r"^    (--gl-[a-z0-9-]+): var\([^,]+, light-dark\(", layer, re.MULTILINE)
-        self.assertGreaterEqual(len(names), 18)
+        hosted = re.findall(r"^    (--gl-[a-z0-9-]+): var\([^,]+, light-dark\(", layer, re.MULTILINE)
+        # The Binder's keyline and rarity stops have no host token.
+        bare = re.findall(r"^    (--gl-[a-z0-9-]+): light-dark\(", layer, re.MULTILINE)
+        self.assertGreaterEqual(len(hosted), 18)
+        self.assertEqual(len(bare), 10)
+        self.assertIn("--gl-keyline", bare)
         light = fallback.split("@media (prefers-color-scheme: dark)", 1)[0]
         dark_media = fallback.split('[data-theme="light"])', 1)[1].split("}", 1)[0]
         dark_theme = fallback.split(':root[data-theme="dark"] {', 1)[1].split("}", 1)[0]
-        for name in names:
+        for name in hosted:
             with self.subTest(token=name):
                 for part in (light, dark_media, dark_theme):
                     self.assertRegex(part, rf"{name}: var\(--[a-z-]+, [^;]+\);")
+        for name in bare:
+            with self.subTest(token=name):
+                for part in (light, dark_media, dark_theme):
+                    self.assertRegex(part, rf"{name}: (?!var\()[^;]+;")
         self.assertNotIn("light-dark(", fallback)
+        self.assertIn("--gl-keyline: rgba(20, 20, 19, 0.12);", light)
+        self.assertIn("--gl-keyline: rgba(250, 249, 245, 0.14);", dark_media)
+        self.assertIn("--gl-rarity-good-3: #A8D98A;", dark_theme)
         self.assertIn("--gl-text: var(--color-text-primary, #141413);", light)
         self.assertIn("--gl-text: var(--color-text-primary, #FAF9F5);", dark_media)
 
@@ -961,6 +1154,7 @@ El.prototype.addEventListener = addListener;
 El.prototype.removeEventListener = removeListener;
 El.prototype.getBoundingClientRect = function () { return { top: 0, left: 0, width: 0, height: 0 }; };
 El.prototype.offsetHeight = 0; El.prototype.scrollHeight = 0; El.prototype.clientHeight = 0;
+El.prototype.offsetTop = 0; El.prototype.offsetLeft = 0; El.prototype.offsetWidth = 0;
 El.prototype.focus = function () { document.activeElement = this; dispatch(this, "focusin"); };
 El.prototype.click = function () { return dispatch(this, "click"); };
 
@@ -996,6 +1190,8 @@ var document = {
   documentElement: htmlEl, head: headEl, body: bodyEl, activeElement: bodyEl, listeners: [],
   fullscreenEnabled: false,
   createElement: function (t) { return new El(t); },
+  /* SVG keeps its tag's case ("feTurbulence"); its class is an attribute. */
+  createElementNS: function (ns, t) { var n = new El(t); n.tagName = t; n.namespaceURI = ns; return n; },
   createTextNode: function (t) { return new TextNode(t); },
   getElementById: function (id) { return htmlEl.querySelector("[id=\"" + id + "\"]"); },
   querySelector: function (s) { return htmlEl.querySelector(s); },
@@ -1242,6 +1438,21 @@ _FULLSCREEN_PROBE = r"""
     answer("ui/request-display-mode", { mode: "fullscreen" });
     await tick(); await tick();
     out.grantedHandler = [d.state(), handed];
+    // (e) A4: opening animates (the .opening row grows 0fr -> 1fr) and
+    // lands after DISCLOSE_MS; under reduced motion it is instant
+    flushTimers();
+    var e = make(["inline"]);
+    e.d.button.click();
+    out.animating = [e.d.body.classList.contains("opening"), e.d.body.children.map(function (n) { return n.className; }),
+                     e.d.inner.children.map(function (n) { return n.className; })];
+    flushTimers();
+    out.landed = e.d.body.classList.contains("opening");
+    var mm = window.matchMedia;
+    window.matchMedia = function (q) { return { matches: q === "(prefers-reduced-motion: reduce)" }; };
+    var f = make(["inline"]);
+    f.d.button.click();
+    out.reduced = f.d.body.classList.contains("opening");
+    window.matchMedia = mm;
     console.log(JSON.stringify(out));
   })();
 """
@@ -1275,6 +1486,23 @@ class FullscreenOrDisclosureTests(unittest.TestCase):
         self.assertEqual(self.out["grantedHandler"],
                          [{"expanded": "false", "hidden": True, "built": 0, "glyph": "⤢"}, ["fullscreen"]])
 
+    def test_opening_grows_the_row_then_lands_and_is_instant_when_reduced(self) -> None:
+        # A4: the body is one grid row holding .disclosure-inner (which the
+        # build fills); .opening runs MOTION_CSS's 0fr -> 1fr for 240ms, then
+        # comes off and the size is reported; reduced motion skips it.
+        self.assertEqual(self.out["animating"], [True, ["disclosure-inner"], ["row"]])
+        self.assertFalse(self.out["landed"])
+        self.assertFalse(self.out["reduced"])
+        motion = _block(apps_shared.MOTION_CSS, _MOTION_QUERY)
+        self.assertIn(".disclosure-body.opening { animation: disclose 240ms ease-out; }", motion)
+        self.assertIn("@keyframes disclose { from { grid-template-rows: 0fr; } }", motion)
+        self.assertNotIn("disclose", apps_shared.MOTION_CSS.split(_MOTION_QUERY, 1)[0])
+        self.assertIn("  .disclosure-body { display: grid; grid-template-rows: 1fr; margin-top: 12px; }",
+                      apps_shared.CONTROLS_CSS)
+        self.assertIn("  .disclosure-body.opening > .disclosure-inner { overflow: hidden; }", apps_shared.CONTROLS_CSS)
+        self.assertIn("var DISCLOSE_MS = 240;", apps_shared.DISCLOSURE_JS)
+        self.assertIn("opening = setTimeout(landed, DISCLOSE_MS);", apps_shared.DISCLOSURE_JS)
+
     def test_both_widgets_use_it_and_keep_no_mechanism_of_their_own(self) -> None:
         self.assertIn("function fullscreenOrDisclosure(parent, text, build, onFullscreen) {",
                       apps_shared.DISCLOSURE_JS)
@@ -1285,70 +1513,21 @@ class FullscreenOrDisclosureTests(unittest.TestCase):
                 self.assertNotIn("disclosure(stack, text, build)", source)
                 self.assertNotIn(".button.click()", source)
                 self.assertNotIn("var inPlace = ", source)
-                self.assertNotIn('requestDisplayMode("fullscreen").then', source)
+                # no widget-level fullscreen-then-disclose mechanism; the one
+                # .then on a fullscreen request is the grid's "Open full
+                # screen" laying the grid out for the grant (no disclosure)
+                expected = 1 if module == "apps.py" else 0
+                self.assertEqual(source.count('requestDisplayMode("fullscreen").then'), expected)
+        html = apps.GAME_CARDS_HTML
+        start = html.index("function gridActions(data)")
+        actions = html[start:html.index("function cardBits(game, ctx)", start)]
+        self.assertIn('requestDisplayMode("fullscreen").then', actions)
 
 
-_CARD_PROBE = r"""
-  (function () {
-    function chipText(chip) {
-      return chip.childNodes.filter(function (c) {
-        return c.nodeType === 1 && (c.classList.contains("lbl") || c.tagName === "B");
-      }).map(function (c) { return c.textContent; }).join(" ");
-    }
-    function visible(card) {
-      var bits = [];
-      findAll(card, function (n) { return n.classList.contains("match"); }).forEach(function (m) {
-        bits.push(m.children[0].textContent);
-      });
-      findAll(card, function (n) { return n.classList.contains("meta"); }).forEach(function (m) {
-        bits = bits.concat(m.textContent.split(" · "));
-      });
-      findAll(card, function (n) { return n.classList.contains("chip"); }).forEach(function (c) {
-        bits.push(chipText(c));
-      });
-      return bits;
-    }
-    var games = {
-      full: { game_id: 1, name: "Hades II", match_percent: 100, hltb_main: 26.5, suggested_platform: "steam",
-              playtime_hours: 2.3, metacritic_score: 93, opencritic_score: 91,
-              steam_review_desc: "Overwhelmingly Positive" },
-      sparse: { game_id: 2, name: "Noita", match_percent: 74.4, metacritic_score: -1 },
-      bare: { game_id: 3, name: "Mystery" },
-    };
-    var out = {};
-    Object.keys(games).forEach(function (k) {
-      var card = gridCard(games[k]);
-      out[k] = { label: card.getAttribute("aria-label"), visible: visible(card) };
-    });
-    console.log(JSON.stringify(out));
-  })();
-"""
 
-
-@unittest.skipUnless(NODE, "node is not installed")
-class CardLabelBehaviourTests(unittest.TestCase):
-    """Item 14, executed: a grid card's accessible name IS what it shows."""
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.out = run_widget("game-cards", _CARD_PROBE)
-
-    def test_the_label_is_the_title_then_the_visible_bits(self) -> None:
-        for key in ("full", "sparse", "bare"):
-            with self.subTest(card=key):
-                out = self.out[key]
-                name = out["label"].split(": ", 1)[0]
-                expected = name + (": " + ", ".join(out["visible"]) if out["visible"] else "")
-                self.assertEqual(out["label"], expected)
-
-    def test_the_label_reads_match_meta_and_scores_in_order(self) -> None:
-        self.assertEqual(
-            self.out["full"]["label"],
-            "Hades II: 100% match, ~27h to beat, Steam, 2.3h played, Metacritic 93, OpenCritic 91, "
-            "Steam Overwhelmingly positive",
-        )
-        self.assertEqual(self.out["sparse"]["label"], "Noita: 74% match")
-        self.assertEqual(self.out["bare"]["label"], "Mystery")
+# A grid card's accessible name == its visible bits is pinned by
+# tests/test_apps.py::GridCardBehaviourTests (the Binder card replaced the
+# match-bar/meta-line card this file used to probe).
 
 
 _NUMBERS_PROBE = r"""
@@ -1359,6 +1538,8 @@ _NUMBERS_PROBE = r"""
       }),
       one: compactCount(1, "review"),
       many: compactCount(9950, "review"),
+      months: ["2022-09-21", "2026-10-03T13:04:42Z", "2026-13-01", "", null, "Sep 2022"].map(monthYear),
+      days: ["2026-10-03T13:04:42Z", "2026-05-12", "2026-05", "2026-13-01", null].map(dayMonthYear),
     }));
   })();
 """
@@ -1396,6 +1577,13 @@ class NumberBehaviourTests(unittest.TestCase):
         self.assertEqual(self.numbers["one"], "1 review")
         self.assertEqual(self.numbers["many"], "10k reviews")
 
+    def test_the_two_date_labels(self) -> None:
+        # monthYear: the detail card's LAST row ("Sep 2022"). dayMonthYear:
+        # the evaluation card's provenance, ledger and note-card captions
+        # keep the stored UTC day ("3 Oct 2026"). Junk is null in both.
+        self.assertEqual(self.numbers["months"], ["Sep 2022", "Oct 2026", None, None, None, None])
+        self.assertEqual(self.numbers["days"], ["3 Oct 2026", "12 May 2026", None, None, None])
+
     def test_positive_pct_is_already_a_percentage(self) -> None:
         # stored 0-100 (tools/assessment.py's _check_range): 1 is 1%, never 100%
         self.assertEqual(self.craft["rawOne"][0][:2], ["Reviews", "1% positive"])
@@ -1406,6 +1594,487 @@ class NumberBehaviourTests(unittest.TestCase):
         self.assertEqual(self.craft["adjusted"][0][:2], ["Reviews", "88% positive"])
         self.assertIn("(raw 91% positive), from 114k reviews", self.craft["adjusted"][0][2])
         self.assertEqual(self.craft["adjustedOne"][0][:2], ["Reviews", "100% positive"])
+
+
+
+# ---- the Binder components (spec 2026-10-04 §1.2, Phase 1A item 6) ----------
+_BINDER_PROBE = r"""
+  (function () {
+    function shape(n) {
+      if (n.nodeType === 3) return n.textContent;
+      var cls = n.className || n.getAttribute("class") || "";
+      var out = { tag: n.tagName, cls: cls, text: n._text, kids: n.childNodes.map(shape) };
+      var attrs = {};
+      Object.keys(n.attrs).forEach(function (k) { if (k !== "class") attrs[k] = n.attrs[k]; });
+      if (Object.keys(attrs).length) out.attrs = attrs;
+      return out;
+    }
+    function classes(node) { return node.children.map(function (c) { return c.className; }); }
+    var out = {};
+    out.grain = shape(grainNode());
+    // #8: ONE filter in the document (installGrain, at startup, on <body>),
+    // N rects; it survives the view being cleared and a second install
+    function svgTag(t) { return function (n) { return n.tagName === t; }; }
+    for (var g = 0; g < 3; g++) root.appendChild(frameNode("div", "probe-frame", "good"));
+    installGrain();
+    out.grainDoc = {
+      filters: findAll(document.documentElement, svgTag("filter")).length,
+      rects: findAll(root, svgTag("rect")).length,
+      defsParent: findAll(document.documentElement, svgTag("filter"))[0].parentNode.parentNode.tagName,
+      defs: shape(findAll(document.documentElement, svgTag("filter"))[0].parentNode),
+    };
+    root.textContent = "";
+    out.grainDoc.afterClear = findAll(document.documentElement, svgTag("filter")).length;
+    out.badge = shape(badgeNode({ value: 8, suffix: "/10", tag: "Your rating", tier: "good" }));
+    out.badgePlain = shape(badgeNode({ value: 79, tag: "OpenCritic" }));
+    out.badgeEmpty = [badgeNode({ value: null }), badgeNode({ value: "" }), badgeNode()];
+    out.stat = shape(statRow({ label: "Pace", note: "last 30d", value: "~2.6h/wk" }));
+    out.statKey = shape(statRow({ label: "Target", value: "€40.00", key: true }));
+    out.statNode = shape(statRow({ label: "Fit", value: pipsNode(2, 3, "good") }));
+    function pips(lit, of, tier) {
+      var p = pipsNode(lit, of, tier);
+      return { cls: p.className, label: p.getAttribute("aria-label"), role: p.getAttribute("role"),
+               pips: classes(p) };
+    }
+    out.pipsHalf = pips(8.5, 10, "good");
+    out.pipsRounded = pips(7.3, 10, "ok");
+    out.pipsNearHalf = pips(7.8, 10, "ok");
+    out.pipsClamped = pips(12, 3);
+    out.pipsNone = pips(null, 3, "bad");
+    out.ribbon = shape(ribbonNode("Wishlist for a sale", "ok", "wait for ~€40", "straddle"));
+    out.ribbonSlim = ribbonNode("Top match", "good", null, "s art").className;
+    out.ribbonPlain = shape(ribbonNode("Skip", "bad", "", "sideways"));
+    out.ribbonNone = ribbonNode("Recorded").className;
+    out.plus = shape(traitNode("plus", "You rated Marvel's Spider-Man 9/10"));
+    out.minus = shape(traitNode("minus", "Your last 30 days are 7.8h"));
+    out.unknownTrait = traitNode("meh", "x").className;
+    out.ability = shape(abilityNode("Studio", "Insomniac's first Marvel game"));
+    out.flavor = [flavorNode("Players rate it higher.").className, flavorNode("Mine.", true).className,
+                  flavorNode("Mine.", true).textContent];
+    var clicks = [];
+    var mini = miniCard({
+      name: "Marvel's Spider-Man", cover_url: "https://images.igdb.com/igdb/image/upload/t_cover_big/x.jpg",
+      lines: [["9/10", "50h"], ["completed"], ["2018", "PS5"], ["a fourth line"]], tier: "good",
+      onClick: function () { clicks.push("tap"); },
+    });
+    out.mini = shape(mini);
+    // B3: the one line format, from the facts
+    function lineText(lines) {
+      return lines.map(function (l) { return l.map(function (p) {
+        return p && p.nodeType ? "pips:" + p.querySelectorAll(".on").length : p; }); });
+    }
+    out.miniLines = {
+      rated: lineText(miniLines({ rating: 9, hours: 50, status: "completed", year: 2018, platform: "ps5" })),
+      played: lineText(miniLines({ hours: 25.3 })),
+      unplayed: lineText(miniLines({ unplayed: true, hours: null, year: 2023 })),
+      zero: lineText(miniLines({ hours: 0 })),
+      unowned: lineText(miniLines({ owned: false, year: 2014 })),
+      nothing: lineText(miniLines({})),
+    };
+    mini.querySelector("button").click();
+    out.clicks = clicks;
+    var plate = miniCard({ name: "Alt254", lines: [[null, "", pipsNode(1, 3, "ok")], []] });
+    out.plateMini = shape(plate);
+    out.dealt = [0, 1, 2, 3, 4, 5, 6, 9].map(function (i) {
+      var card = dealIn(el("button", "frame frame-s"), i);
+      return [card.className, card.style["--i"]];
+    });
+    out.dealtNull = dealIn(null, 0);
+    var host = el("div", "host");
+    var skel = el("div", "skel skel-grid");
+    host.appendChild(skel);
+    var built = resolveSkeleton(skel, function () { return el("div", "frame tier-good"); });
+    out.resolving = {
+      kids: classes(host), first: host.children[0] === built,
+      skel: [skel.style.position, skel.style.top, skel.getAttribute("aria-hidden")],
+      dealAt: built.style["--deal-at"], i: built.style["--i"],
+    };
+    flushTimers();
+    out.resolved = classes(host);
+    var loose = resolveSkeleton(null, function () { return el("div", "frame"); });
+    out.loose = [loose.parentNode === null, loose.className, loose.style["--deal-at"] || null];
+    out.looseNull = resolveSkeleton(null, function () { return null; });
+    console.log(JSON.stringify(out));
+  })();
+"""
+
+_BINDER_NAMES = (
+    "grainNode", "badgeNode", "statRow", "pipsNode", "ribbonNode", "traitNode",
+    "abilityNode", "flavorNode", "miniCard", "dealIn", "resolveSkeleton", "svgEl", "iconNode",
+)
+
+
+def _block(css: str, opener: str) -> str:
+    """The body of the brace block that ``opener`` (an at-rule head) opens."""
+    start = css.index(opener) + len(opener)
+    depth = 1
+    for i in range(start, len(css)):
+        depth += css[i] == "{"
+        depth -= css[i] == "}"
+        if depth == 0:
+            return css[start:i]
+    raise AssertionError(f"unclosed block {opener!r}")
+
+
+_MOTION_QUERY = "@media (prefers-reduced-motion: no-preference) {"
+_HOVER_QUERY = "@media (hover: hover) and (pointer: fine) {"
+
+
+def _widget_css(html: str) -> str:
+    return html.split("<style>", 1)[1].split("</style>", 1)[0]
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class BinderComponentTests(unittest.TestCase):
+    """Phase 1A item 6, executed: each builder under Node, in the real widget."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.out = run_widget("game-cards", _BINDER_PROBE)
+
+    def test_both_widgets_carry_every_builder_once(self) -> None:
+        for name, html in (("game-cards", apps.GAME_CARDS_HTML), ("eval-card", apps_eval.EVAL_CARD_HTML)):
+            with self.subTest(widget=name):
+                self.assertIn(apps_shared.BINDER_CSS, html)
+                self.assertIn(apps_shared.BINDER_JS, html)
+                for fn in _BINDER_NAMES:
+                    self.assertEqual(html.count(f"function {fn}("), 1, fn)
+        # the aggregates are their parts, in order
+        css_parts = ("FRAME", "ART", "BADGE", "PLATE", "STATS", "PIPS", "RIBBON", "TRAIT",
+                     "ABILITY", "FLAVOR", "MINI", "MOTION")
+        js_parts = ("GRAIN", "BADGE", "STATS", "PIPS", "RIBBON", "TRAIT", "ABILITY", "FLAVOR",
+                    "MINI", "MOTION")
+        self.assertEqual(apps_shared.BINDER_CSS,
+                         "".join(getattr(apps_shared, f"{part}_CSS") for part in css_parts))
+        self.assertEqual(apps_shared.BINDER_JS,
+                         "".join(getattr(apps_shared, f"{part}_JS") for part in js_parts))
+
+    def test_builders_make_nodes_never_markup(self) -> None:
+        js = apps_shared.BINDER_JS
+        for banned in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write",
+                       "document.createElement(", "createElementNS("):
+            self.assertNotIn(banned, js)      # el() and svgEl() only
+        self.assertIn("var node = document.createElementNS(SVG_NS, tag);", apps_shared.NOTICE_JS)
+
+    def test_grain_is_the_reference_inline_svg(self) -> None:
+        # Each frame's grain is only a rect referencing the one filter
+        grain = self.out["grain"]
+        self.assertEqual((grain["tag"], grain["cls"], grain["attrs"]), ("svg", "grain", {"aria-hidden": "true"}))
+        (rect,) = grain["kids"]
+        self.assertEqual((rect["tag"], rect["attrs"]),
+                         ("rect", {"width": "100%", "height": "100%", "filter": "url(#gl-grain-f)"}))
+        # ...defined ONCE per document, in a hidden 0x0 <svg> on <body>
+        # (outside #root, so clearing the view keeps it)
+        doc = self.out["grainDoc"]
+        self.assertEqual((doc["filters"], doc["rects"], doc["afterClear"]), (1, 3, 1))
+        self.assertEqual(doc["defsParent"], "BODY")
+        defs = doc["defs"]
+        self.assertEqual((defs["tag"], defs["cls"], defs["attrs"]),
+                         ("svg", "grain-defs", {"aria-hidden": "true", "focusable": "false", "width": "0",
+                                                "height": "0"}))
+        (flt,) = defs["kids"]
+        self.assertEqual((flt["tag"], flt["attrs"]), ("filter", {"id": "gl-grain-f"}))
+        self.assertEqual(
+            [(k["tag"], k["attrs"]) for k in flt["kids"]],
+            [("feTurbulence", {"type": "fractalNoise", "baseFrequency": ".9", "numOctaves": "2",
+                               "stitchTiles": "stitch"}),
+             ("feColorMatrix", {"type": "saturate", "values": "0"})],
+        )
+        self.assertIn("    installGrain();\n", apps_shared.INIT_JS)
+        rule = css_rule(apps_shared.FRAME_CSS, ".grain-defs")
+        self.assertIn("position: absolute; width: 0; height: 0;", rule)
+        self.assertNotIn("display: none", rule)
+
+    def test_badge_is_number_suffix_tag_and_tier_ring(self) -> None:
+        badge = self.out["badge"]
+        self.assertEqual(badge["cls"], "badge tier-good")
+        self.assertEqual([(k["cls"], k["text"]) for k in badge["kids"]],
+                         [("badge-num", "8"), ("badge-suffix", "/10"), ("badge-tag", "Your rating")])
+        self.assertEqual(self.out["badgePlain"]["cls"], "badge tier-none")
+        self.assertEqual([k["cls"] for k in self.out["badgePlain"]["kids"]], ["badge-num", "badge-tag"])
+        self.assertEqual(self.out["badgeEmpty"], [None, None, None])
+        self.assertIn("box-shadow: 0 0 0 2px var(--gl-tier);", apps_shared.BADGE_CSS)
+
+    def test_stat_row_is_label_note_leader_value(self) -> None:
+        stat = self.out["stat"]
+        self.assertEqual(stat["cls"], "stat")
+        label, lead, value = stat["kids"]
+        self.assertEqual((label["cls"], label["text"]), ("stat-label", "Pace"))
+        self.assertEqual([(k["cls"], k["text"]) for k in label["kids"]], [("stat-note", "last 30d")])
+        self.assertEqual((lead["cls"], lead["attrs"], lead["kids"]), ("stat-lead", {"aria-hidden": "true"}, []))
+        self.assertEqual((value["cls"], value["text"]), ("stat-val", "~2.6h/wk"))
+        self.assertEqual(self.out["statKey"]["cls"], "stat is-key")
+        self.assertEqual([k["cls"] for k in self.out["statKey"]["kids"][0]["kids"]], [])    # no note
+        node_value = self.out["statNode"]["kids"][2]
+        self.assertEqual(node_value["kids"][0]["cls"], "pips tier-good")
+        self.assertIn("border-bottom: 1px dotted var(--gl-muted);", apps_shared.STATS_CSS)
+
+    def test_pips_light_whole_and_half_diamonds(self) -> None:
+        half = self.out["pipsHalf"]
+        self.assertEqual((half["cls"], half["role"], half["label"]), ("pips tier-good", "img", "8.5 of 10"))
+        self.assertEqual(half["pips"], ["on"] * 8 + ["half", ""])
+        self.assertEqual(self.out["pipsRounded"]["pips"], ["on"] * 7 + ["half"] + [""] * 2)   # 7.3 → 7.5
+        self.assertEqual(self.out["pipsNearHalf"]["pips"], ["on"] * 8 + [""] * 2)            # 7.8 → 8
+        self.assertEqual((self.out["pipsClamped"]["pips"], self.out["pipsClamped"]["cls"]),
+                         (["on"] * 3, "pips tier-none"))
+        self.assertEqual(self.out["pipsNone"]["pips"], [""] * 3)
+        self.assertIn("transform: rotate(45deg);", apps_shared.PIPS_CSS)
+
+    def test_ribbon_text_note_tier_and_variant(self) -> None:
+        ribbon = self.out["ribbon"]
+        self.assertEqual(ribbon["cls"], "ribbon ribbon-straddle tier-ok has-note")
+        self.assertEqual([(k["cls"], k["text"]) for k in ribbon["kids"]],
+                         [("ribbon-text", "Wishlist for a sale"), ("ribbon-note", "wait for ~€40")])
+        self.assertEqual(self.out["ribbonSlim"], "ribbon ribbon-s ribbon-art tier-good")
+        plain = self.out["ribbonPlain"]
+        self.assertEqual(plain["cls"], "ribbon tier-bad")              # unknown variant, empty note
+        self.assertEqual([k["cls"] for k in plain["kids"]], ["ribbon-text"])
+        self.assertEqual(self.out["ribbonNone"], "ribbon tier-none")
+        css = apps_shared.RIBBON_CSS
+        self.assertIn("clip-path: polygon(0 0, 100% 0, calc(100% - 10px) 50%, 100% 100%, 0 100%, 10px 50%);", css)
+        self.assertIn("color: var(--gl-ribbon-ink);", css)
+        self.assertIn("background: var(--gl-tier-fill);", css)
+        self.assertNotIn("rotate", css)
+        self.assertIn("left: calc(-20px - var(--gl-frame));", css)
+
+    def test_trait_icon_follows_its_kind(self) -> None:
+        plus, minus = self.out["plus"], self.out["minus"]
+        self.assertEqual((plus["cls"], minus["cls"]), ("trait trait-plus", "trait trait-minus"))
+        for node, path in ((plus, "M10 2.5c.6 4.3"), (minus, "M10 2.2 16.5 4.7v5")):
+            icon, text = node["kids"]
+            self.assertEqual((icon["tag"], icon["attrs"]["viewBox"], icon["attrs"]["aria-hidden"]),
+                             ("svg", "0 0 20 20", "true"))
+            self.assertTrue(icon["kids"][0]["attrs"]["d"].startswith(path))
+            self.assertEqual(text["tag"], "SPAN")
+        self.assertEqual(plus["kids"][1]["text"], "You rated Marvel's Spider-Man 9/10")
+        self.assertEqual(self.out["unknownTrait"], "trait trait-minus")
+        self.assertIn(".trait-plus > svg { color: var(--gl-good); }", apps_shared.TRAIT_CSS)
+        self.assertIn(".trait-minus > svg { color: var(--gl-bad); }", apps_shared.TRAIT_CSS)
+
+    def test_ability_and_flavor(self) -> None:
+        ability = self.out["ability"]
+        self.assertEqual((ability["tag"], ability["cls"]), ("P", "ability"))
+        self.assertEqual([(k["tag"], k["text"]) for k in ability["kids"]],
+                         [("B", "Studio"), ("SPAN", "Insomniac's first Marvel game")])
+        self.assertEqual(self.out["flavor"], ["flavor", "flavor flavor-quote", "Mine."])
+        self.assertIn("font-family: var(--gl-serif);", apps_shared.FLAVOR_CSS)
+        self.assertIn("font-style: italic;", apps_shared.FLAVOR_CSS)
+
+    def test_mini_card_lines_art_and_one_button(self) -> None:
+        mini = self.out["mini"]
+        self.assertEqual(mini["cls"], "mini tier-good")
+        art, body, hit = mini["kids"]
+        self.assertEqual(art["cls"], "mini-art")
+        self.assertEqual(art["kids"][0]["cls"], "cover-wrap")              # coverNode, plate fallback
+        self.assertEqual(body["kids"][0], {"tag": "DIV", "cls": "mini-name", "text": "Marvel's Spider-Man",
+                                           "kids": []})
+        lines = [[(k["cls"], k["text"]) for k in line["kids"]] for line in body["kids"][1:]]
+        # three lines at most; figures in mono (.v), words plain; never a middot
+        self.assertEqual(lines, [[("v", "9/10"), ("v", "50h")], [("", "completed")],
+                                 [("v", "2018"), ("v", "PS5")]])
+
+        self.assertEqual((hit["tag"], hit["cls"], hit["attrs"]),
+                         ("BUTTON", "mini-hit", {"type": "button", "aria-label": "Marvel's Spider-Man"}))
+        self.assertEqual(self.out["clicks"], ["tap"])
+        plate = self.out["plateMini"]
+        self.assertEqual(plate["cls"], "mini tier-none")
+        self.assertEqual(len(plate["kids"]), 2)                             # no button without onClick
+        self.assertEqual(plate["kids"][0]["kids"][0]["kids"][0]["cls"], "cover-fallback")
+        # empty parts are skipped and a node part (pips) rides as-is; an
+        # empty line is dropped
+        self.assertEqual([[k["cls"] for k in line["kids"]] for line in plate["kids"][1]["kids"][1:]],
+                         [["pips tier-ok"]])
+        self.assertNotIn("·", apps_shared.MINI_JS)
+
+    def test_every_mini_reads_one_line_format(self) -> None:
+        # B3: pips when rated; then hours + where it stands; then year +
+        # short platform — the same for strips and lineage columns
+        lines = self.out["miniLines"]
+        self.assertEqual(lines["rated"], [["pips:9"], ["50h", "completed"], ["2018", "PS5"]])
+        self.assertEqual(lines["played"], [["25h", "played"]])
+        self.assertEqual(lines["unplayed"], [[None, "unplayed"], ["2023", None]])
+        self.assertEqual(lines["zero"], [[None, "unplayed"]])
+        self.assertEqual(lines["unowned"], [[None, "not owned"], ["2014", None]])
+        self.assertEqual(lines["nothing"], [])
+        # no widget hand-builds mini lines any more
+        for module in ("apps.py", "apps_eval.py"):
+            source = _WIDGET_SOURCES[module]
+            with self.subTest(module=module):
+                self.assertIn("lines: miniLines({", source)
+                self.assertNotIn("lines: [[", source)
+                for gone in ("function similarLines(", "function studioLines(", "function comparisonLines(",
+                             "function playedParts(", "function ratingPips("):
+                    self.assertNotIn(gone, source)
+        # the mini name clamps to two lines (an ellipsis) in every context
+        name_rule = css_rule(apps_shared.MINI_CSS, ".mini-name", exact=True)
+        self.assertIn("-webkit-line-clamp: 2;", name_rule)
+        self.assertIn("min-width: 0;", css_rule(apps_shared.MINI_CSS, ".mini-body", exact=True))
+
+    def test_deal_in_staggers_and_caps_at_the_sixth(self) -> None:
+        self.assertEqual([i for _, i in self.out["dealt"]], ["0", "1", "2", "3", "4", "5", "5", "5"])
+        self.assertTrue(all(cls == "frame frame-s deal" for cls, _ in self.out["dealt"]))
+        self.assertIsNone(self.out["dealtNull"])
+        self.assertIn("var DEAL_STAGGER_CAP = 5;", apps_shared.MOTION_JS)
+        self.assertIn("animation-delay: calc(var(--deal-at, 0ms) + var(--i, 0) * 40ms);", apps_shared.MOTION_CSS)
+
+    def test_resolve_skeleton_overlaps_the_leave_and_the_deal(self) -> None:
+        resolving = self.out["resolving"]
+        # the result takes the skeleton's place at once; the skeleton, lifted
+        # out of the flow, fades
+        self.assertEqual(resolving["kids"], ["frame tier-good deal", "skel skel-grid leaving"])
+        self.assertTrue(resolving["first"])
+        self.assertEqual(resolving["skel"], ["absolute", "0px", "true"])
+        self.assertEqual((resolving["dealAt"], resolving["i"]), ("60ms", "0"))
+        self.assertEqual(self.out["resolved"], ["frame tier-good deal"])     # gone after 120ms
+        self.assertEqual(self.out["loose"], [True, "frame deal", None])
+        self.assertIsNone(self.out["looseNull"])
+        js = apps_shared.MOTION_JS
+        for marker in ("var SKELETON_LEAVE_MS = 120;", "var SKELETON_LEAVE_REDUCED_MS = 240;",
+                       "var RESOLVE_OFFSET_MS = 60;",
+                       'var reduced = mediaQueryMatches("(prefers-reduced-motion: reduce)");'):
+            self.assertIn(marker, js)
+        self.assertIn(".leaving { animation: gl-fade-out 120ms ease-out forwards; pointer-events: none; }",
+                      apps_shared.MOTION_CSS)
+
+    def test_motion_keyframes_sit_inside_the_motion_query(self) -> None:
+        css = apps_shared.MOTION_CSS
+        inside = _block(css, _MOTION_QUERY)
+        for name in ("deal", "stamp", "pop", "pip", "leader", "settle", "fill", "skel-pulse", "sheen"):
+            with self.subTest(keyframes=name):
+                self.assertIn(f"@keyframes {name} {{", inside)
+                self.assertEqual(css.count(f"@keyframes {name} {{"), 1)
+        # outside: only the two opacity crossfades
+        outside = css.replace(inside, "")
+        self.assertEqual(re.findall(r"@keyframes ([\w-]+)", outside), ["gl-fade-in", "gl-fade-out"])
+        for body in re.findall(r"@keyframes [\w-]+ \{(.*)\}", outside):
+            self.assertNotRegex(body, r"transform|clip-path|background-position")
+        # every movement — transform, clip-path, the sheen's position — and
+        # every transition is inside the query
+        for prop in ("transform", "clip-path", "background-position", "transition"):
+            self.assertNotIn(prop, outside, prop)
+
+    def test_reduced_motion_keeps_the_crossfades_and_nothing_else(self) -> None:
+        css = apps_shared.MOTION_CSS
+        reduce = _block(css, "@media (prefers-reduced-motion: reduce) {")
+        # M5 under reduced motion: ONE 240ms crossfade, leave and enter alike
+        self.assertIn(".deal { animation: gl-fade-in 240ms ease-out backwards !important; }", reduce)
+        self.assertIn(".leaving { animation: gl-fade-out 240ms ease-out forwards !important; }", reduce)
+        # M2's set-line fade is opacity-only, so it survives too
+        self.assertIn(".fade-in { animation: gl-fade-in 200ms ease-out backwards !important; }", reduce)
+        self.assertEqual(reduce.count("animation"), 3)
+
+    def test_motion_durations_are_the_table(self) -> None:
+        inside = _block(apps_shared.MOTION_CSS, _MOTION_QUERY)
+        for marker in (
+            "animation: deal 300ms cubic-bezier(0.2, 0, 0, 1) backwards;",
+            "animation: stamp 200ms cubic-bezier(0.34, 1.4, 0.64, 1) backwards;",
+            "animation-delay: calc(var(--deal-at, 0ms) + 100ms);",
+            "animation: stamp 200ms cubic-bezier(0.34, 1.4, 0.64, 1) backwards, settle 140ms ease-out backwards;",
+            "animation-delay: calc(var(--deal-at, 0ms) + 100ms), calc(var(--deal-at, 0ms) + 340ms);",
+            "animation: pop 180ms ease-out backwards;",
+            "animation-delay: calc(var(--deal-at, 0ms) + 140ms);",
+            "animation-delay: calc(var(--deal-at, 0ms) + 160ms + var(--j, 0) * 36ms);",
+            "animation: leader 200ms ease-out backwards;",
+            "animation-delay: calc(var(--deal-at, 0ms) + 80ms + var(--j, 0) * 36ms);",
+            "animation: fill 300ms ease-out backwards;",
+            "animation-delay: calc(var(--deal-at, 0ms) + 120ms);",
+            ".stats > :nth-child(n+6), .pips > :nth-child(n+6) { --j: 5; }",
+            "transition: transform 160ms ease-out, opacity 160ms ease-out;",
+            "transform: scale(0.985);",
+            "transition-duration: 90ms;",
+            "transform: translateX(-12px);",
+            "animation: sheen 700ms ease-out 1;",
+            "@keyframes skel-pulse { 50% { opacity: 0.55; } }",
+        ):
+            self.assertIn(marker, inside)
+        hover = _block(inside, _HOVER_QUERY)
+        self.assertIn("transform: perspective(900px) rotateY(-5deg) rotateX(3deg);", hover)
+        self.assertIn("animation: sheen 700ms ease-out 1;", hover)
+        # grid cards deal the body only: no part pops on a .frame-s
+        self.assertNotIn(".deal .badge", inside)
+        self.assertIn(".deal:not(.frame-s) .badge {", inside)
+        self.assertIn(".sk { animation: skel-pulse 1600ms ease-in-out infinite; }", apps_shared.SKELETON_CSS)
+
+    def test_m6_settle_is_a_landing_not_a_jump(self) -> None:
+        # #5: the straddling ribbon sits 2px up from the end of the stamp
+        # until the settle starts, then lands: settle owns `translate` (the
+        # stamp owns `transform`) and fills backwards over its 340ms delay,
+        # so nothing snaps up to -2px when the settle begins.
+        inside = _block(apps_shared.MOTION_CSS, _MOTION_QUERY)
+        self.assertIn("@keyframes settle { from { translate: 0 -2px; } to { translate: none; } }", inside)
+        straddle = inside[inside.index(".deal:not(.frame-s) .ribbon-straddle {"):]
+        straddle = straddle[:straddle.index("}")]
+        self.assertIn("settle 140ms ease-out backwards;", straddle)
+        self.assertIn("calc(var(--deal-at, 0ms) + 340ms)", straddle)
+        stamp = re.search(r"@keyframes stamp \{(.*?)\}\s*\}", inside).group(1)
+        self.assertNotIn("translate", stamp)
+        settle = re.search(r"@keyframes settle \{(.*?)\}\s*\}", inside).group(1)
+        self.assertNotIn("transform", settle)
+
+    def test_every_tappable_thing_presses(self) -> None:
+        # M3 (A5): card frames, buttons, the fullscreen and link pills, link
+        # chips and minis (the .mini-hit target; :active reaches the .mini
+        # ancestor) all press — the fallback dims, motion scales
+        css = apps_shared.MOTION_CSS
+        outside = css.split(_MOTION_QUERY, 1)[0]
+        self.assertIn("  button.frame:active, .btn:active, .fs-btn:active, .hero-pill:active, a.chip:active,\n"
+                      "  .mini:active { opacity: 0.8; }", outside)
+        inside = _block(css, _MOTION_QUERY)
+        self.assertIn("    button.frame, .btn, .fs-btn, .hero-pill, a.chip, .mini {\n"
+                      "      transition: transform 160ms ease-out, opacity 160ms ease-out;", inside)
+        self.assertIn("    button.frame:active, .btn:active, .fs-btn:active, .hero-pill:active, a.chip:active,\n"
+                      "    .mini:active {\n      transform: scale(0.985);", inside)
+
+    def test_no_dead_card_selectors(self) -> None:
+        # A6: every tappable card is a <button class="frame"> and every mini's
+        # target is its .mini-hit, so the a.frame / [role=button] / .mini a
+        # alternatives matched nothing and are gone
+        for name, block in shared_css_blocks():
+            with self.subTest(block=name):
+                self.assertNotIn("a.frame", block)
+                self.assertNotIn('.frame[role="button"]', block)
+                self.assertNotRegex(block, r"\.mini a\b")
+                self.assertNotIn(".mini button", block)
+                self.assertNotIn("sk-stamp", block)
+        self.assertIn('row.appendChild(sk("sk-ribbon"));', apps_shared.SKELETON_JS)
+        self.assertIn("  .sk-ribbon { flex: 0 0 96px; height: 40px; }", apps_shared.SKELETON_CSS)
+
+    def test_will_change_only_on_the_hover_tilt(self) -> None:
+        hover = _block(_block(apps_shared.MOTION_CSS, _MOTION_QUERY), _HOVER_QUERY)
+        tilt = hover.split("{", 1)[1].split("}", 1)[0]
+        self.assertIn("will-change: transform;", tilt)
+        self.assertEqual(hover.count("will-change"), 1)
+        for name, html in (("game-cards", apps.GAME_CARDS_HTML), ("eval-card", apps_eval.EVAL_CARD_HTML)):
+            with self.subTest(widget=name):
+                self.assertEqual(_widget_css(html).count("will-change"), 1)
+        # the 3D tilt never reaches a touch screen or a reduced-motion viewer
+        for name, html in (("game-cards", apps.GAME_CARDS_HTML), ("eval-card", apps_eval.EVAL_CARD_HTML)):
+            with self.subTest(widget=name):
+                css = _widget_css(html).replace(hover, "")
+                self.assertNotRegex(css, r"rotate[XY]\(|perspective\(")
+
+    def test_no_data_uri_anywhere(self) -> None:
+        # The CSP forbids data: URIs; the grain is an inline <svg>, never a
+        # background image.
+        for name, html in (("game-cards", apps.GAME_CARDS_HTML), ("eval-card", apps_eval.EVAL_CARD_HTML)):
+            with self.subTest(widget=name):
+                self.assertNotIn("data:", html)
+                self.assertNotIn("url(", _widget_css(html))
+                self.assertNotIn("background-image", _widget_css(html))
+
+    def test_frame_rarity_and_common_look(self) -> None:
+        css = apps_shared.FRAME_CSS
+        frame = css_rule(css, ".frame", exact=True)
+        self.assertIn("border: var(--gl-frame) solid transparent;", frame)
+        self.assertIn("background: linear-gradient(var(--gl-surface), var(--gl-surface)) padding-box, "
+                      "var(--gl-rarity) border-box;", frame)
+        self.assertIn(".frame-s { --gl-frame: 4px; border-radius: var(--gl-r-card-s); }", css)
+        common = css_rule(css, ".frame:not(.tier-good):not(.tier-ok):not(.tier-bad)", exact=True)
+        self.assertIn("box-shadow: 0 0 0 1px var(--gl-border), inset 0 0 0 2px var(--gl-border);", common)
+        grain = css_rule(css, ".grain", exact=True)
+        for decl in ("opacity: var(--gl-grain-opacity);", "mix-blend-mode: overlay;", "pointer-events: none;"):
+            self.assertIn(decl, grain)
+        self.assertIn("box-shadow: inset 0 0 0 1px var(--gl-keyline);", css_rule(apps_shared.ART_CSS, ".art::before"))
 
 
 if __name__ == "__main__":
