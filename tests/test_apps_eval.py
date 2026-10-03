@@ -10,6 +10,7 @@ three small builders also run under Node (``ActionRowBehaviourTests``).
 import difflib
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import unittest
@@ -260,12 +261,13 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
         ):
             self.assertIn(marker, studio)
         # the shared mini format (B3): his rating as pips and his hours only
-        # for a game he owns, "not owned" otherwise, then the year; the
-        # critic-score stand-in went with the per-strip formats
-        self.assertIn("lines: miniLines({ rating: item.owned ? item.my_rating : null, "
-                      "hours: item.owned ? item.playtime_hours : null,", studio)
+        # for a game he owns, "not owned" otherwise, then the year; with no
+        # rating, the critic score as a "Critics 86" line (miniLines' critic
+        # input; executed in tests/test_apps.py::StudioCriticLineTests)
+        self.assertIn("lines: miniLines({ rating: item.owned ? item.my_rating : null, critic: item.critic_score,",
+                      studio)
+        self.assertIn("hours: item.owned ? item.playtime_hours : null,", studio)
         self.assertIn("owned: !!item.owned, year: item.release_year, platform: item.platform }) };", studio)
-        self.assertNotIn("critic", studio)
 
     def test_why_care_renders_an_ability_per_kind(self) -> None:
         # The eval card is the only one that renders why_care (it is authored
@@ -321,24 +323,32 @@ class EvalCardLayoutTests(unittest.TestCase):
     def test_the_card_assembles_in_the_reading_order(self) -> None:
         # frame → candidate → summary → weakness → pitch → abilities → flavor
         # → reel → library → actions → provenance → notice; the breakdown
-        # bodies (in place, and fullscreen) after all of it.
+        # bodies (in place, and fullscreen) after all of it. Built once each:
+        # the candidate line and the provenance under the card in .ev-left
+        # (where fullscreen shows them); inline, CSS order places them
+        # (executed in EvalCardRenderTests.test_each_part_is_built_once_in_both_modes).
         card = self._function("evalCard", "noteCard")
         order = [
             "var frame = cardNode(pkg, cardNo(",
+            "var cand = candidateNode(pkg);",
+            "var prov = provenanceNode(pkg, data);",
             "groundNode(flow, pkg);",
             "mediaSlot(wrap, pkg.media || {}, game.name);",
             "libraryNode(wrap, pkg.similar);",
             "actionsNode(wrap, pkg, more, appid)",
-            "var prov = provenanceNode(pkg, data);",
             "errorsNode(wrap, packageErrors(pkg));",
             "wrap.appendChild(inPlaceBody);",
             'el("div", "fs-breakdown")',
         ]
         positions = [card.index(marker) for marker in order]
         self.assertEqual(positions, sorted(positions))
+        css = widget_css(apps_eval.EVAL_CARD_HTML)
+        inline = 'html:not([data-display-mode="fullscreen"])'
+        self.assertIn(f"{inline} .ev-pkg .ev-top,\n  {inline} .ev-pkg .ev-left {{ display: contents; }}", css)
+        self.assertIn(".ev-pkg .ev-prov, .ev-pkg > .notice, .ev-pkg > .disclosure-body { order: 1; }", css)
         ground = self._function("groundNode", "mediaSlot")
+        self.assertNotIn("candidateNode(", ground)
         order = [
-            "var cand = candidateNode(pkg);",
             'el("p", "ev-sum", pkg.summary)',
             'traitsNode("Weakness", "bad", "minus", flags, "ev-weak")',
             'el("p", "ev-pitch", pres.elevator_pitch)',
@@ -353,7 +363,7 @@ class EvalCardLayoutTests(unittest.TestCase):
         order = [
             'var frame = frameNode("article", "ev-card", tier);',
             "art.appendChild(coverNode(game));",
-            "badgeNode({ value: critic.value, tag: critic.tag, tier: critic.tier })",
+            "badgeNode({ value: critic.value, tag: critic.source, tier: critic.tier })",
             'badge.classList.add("badge-low");',
             "frame.appendChild(plateNode(pkg, no));",
             "var stats = statsNode(pkg);",
@@ -367,12 +377,18 @@ class EvalCardLayoutTests(unittest.TestCase):
         self.assertIn("object-position: 50% 0;", css_rule(css, ".ev-card > .art .cover-wrap img"))
 
     def test_the_badge_is_opencritic_else_metacritic_else_none(self) -> None:
-        badge = self._function("criticBadge", "plateNode")
-        self.assertLess(badge.index("craft.opencritic_score"), badge.index("craft.metacritic_score"))
-        self.assertIn('tag: "OpenCritic", tier: ocTier(oc)', badge)
-        self.assertIn('tag: "Metacritic", tier: mcTier(mc)', badge)
-        self.assertIn("if (realScore(oc))", badge)
-        self.assertIn("return null;", badge)
+        # The shared lead critic (apps_shared.SCORE_CHIP_JS), the same one the
+        # game cards read; no local precedence (executed in
+        # tests/test_apps.py::LeadCriticBehaviourTests).
+        self.assertNotIn("function criticBadge(", apps_eval.EVAL_CARD_HTML)
+        frame = self._function("cardNode", "candidateNode")
+        self.assertIn("var critic = leadCritic(pkg.craft);", frame)
+        lead = apps_shared.SCORE_CHIP_JS
+        lead = lead[lead.index("function leadCritic(scores)"):lead.index("var STEAM_STEPS")]
+        self.assertLess(lead.index("s.opencritic_score"), lead.index("s.metacritic_score"))
+        self.assertIn('source: "OpenCritic", tier: ocTier(oc, s.opencritic_tier)', lead)
+        self.assertIn('source: "Metacritic", tier: mcTier(mc)', lead)
+        self.assertIn("return null;", lead)
 
     def test_the_plate_numbers_the_card_and_spans_its_sub_line(self) -> None:
         card = self._function("evalCard", "noteCard")
@@ -440,7 +456,6 @@ class EvalCardLayoutTests(unittest.TestCase):
             "forYouNode(",
             "anchorsNode(",
             "lineageNode(",
-            "if (withLibrary) libraryNode(",
             "studioNode(",
             "pastNode(",
             "errorDetailNode(",
@@ -450,8 +465,10 @@ class EvalCardLayoutTests(unittest.TestCase):
             self.assertIn(section_call, breakdown)
         positions = [breakdown.index(c) for c in sections]
         self.assertEqual(positions, sorted(positions))
-        # fullscreen carries the library strip (it hides the inline one)
-        self.assertIn("breakdownNode(fs.node, fs.pkg, true);", self._function("syncDisplayMode", "provenanceNode"))
+        # the library strip is never part of the breakdown: one copy, after
+        # the reel inline and before it in fullscreen
+        self.assertNotIn("libraryNode(", breakdown)
+        self.assertIn("breakdownNode(fs.node, fs.pkg);", self._function("syncDisplayMode", "provenanceNode"))
 
     def test_breakdown_sections_are_trait_columns_minis_and_a_ledger(self) -> None:
         you = self._function("forYouNode", "anchorsNode")
@@ -527,13 +544,12 @@ class EvalCardLayoutTests(unittest.TestCase):
 
     def test_store_button_is_a_secondary_btn_opening_the_steam_page(self) -> None:
         button = self._function("storeButton", "actionsNode")
-        self.assertIn('el("button", "btn act-store")', button)
-        self.assertIn('var icon = iconNode("0 0 20 20", EXT_ICON);', button)
-        self.assertIn('btn.appendChild(el("span", null, "Store page"));', button)
+        # the shared store pill (apps_shared.NOTICE_JS), as the game cards' is
+        self.assertIn('var pill = storePill("https://store.steampowered.com/app/" + appid + "/", "Store page");',
+                      button)
+        self.assertIn('pill.classList.add("act-store");', button)
         self.assertNotIn("primary", button)
-        self.assertIn(
-            'openLink("https://store.steampowered.com/app/" + appid + "/");', button
-        )
+        self.assertNotIn("EXT_ICON", apps_eval.EVAL_CARD_HTML)
         # Only a positive integer appid yields a button; anything else is null.
         appid = self._function("storeAppid", "storeButton")
         self.assertIn("var appid = (pkg.game || {}).steam_appid;", appid)
@@ -570,7 +586,9 @@ class EvalCardLayoutTests(unittest.TestCase):
             'html[data-display-mode="fullscreen"] .ev-flow > .fs-breakdown { order: 3;',
             'html[data-display-mode="fullscreen"] .ev-flow > .ev-pitch { order: 2;',
             'html[data-display-mode="fullscreen"] .ev-flow > .ev-weak { order: 4; }',
-            'html[data-display-mode="fullscreen"] .eval > .ev-lib,',
+            # the library strip reads before the reel in fullscreen (one
+            # copy, moved by order — never a hidden second strip)
+            'html[data-display-mode="fullscreen"] .ev-pkg > .ev-lib { order: -1; }',
             'if (fs && !fs.built && currentDisplayMode() === "fullscreen") {',
             'attributeFilter: ["data-display-mode"]',
             'hooks.shouldReportSize = function () { return currentDisplayMode() !== "fullscreen"; };',
@@ -589,7 +607,7 @@ class EvalCardLayoutTests(unittest.TestCase):
             "aux: count,",
             'title: "Sample-adjusted share of positive reviews"',
             'label: "Trend", value: traj[0], tier: traj[1],',
-            'if (realScore(mc) && !(badge && badge.source === "mc")) {',
+            'if (realScore(mc) && !(badge && badge.source === "Metacritic")) {',
             'scoreChip({ label: "Metacritic", value: Math.round(mc), tier: mcTier(mc) })',
         ):
             self.assertIn(marker, chips)
@@ -776,6 +794,7 @@ var opened = [];
 function el(tag, cls, text) {
   var n = { tag: tag, className: cls || "", text: text || "", children: [], handlers: {},
             classList: { add: function (c) { n.className += " " + c; } },
+            attrs: {}, setAttribute: function (k, v) { n.attrs[k] = String(v); },
             addEventListener: function (k, f) { n.handlers[k] = f; },
             appendChild: function (c) { n.children.push(c); return c; } };
   return n;
@@ -818,8 +837,11 @@ var out = {
 };
 var wrap = el("div", "eval");
 actionsNode(wrap, { game: { steam_appid: 1145350 } }, true, 1145350);
-wrap.children[0].children[2].handlers.click();
+var clicked = { defaultPrevented: false, preventDefault: function () { this.defaultPrevented = true; } };
+var pill = wrap.children[0].children[2];
+pill.handlers.click(clicked);
 out.opened = opened;
+out.pill = [pill.tag, pill.className, pill.href, pill.attrs["data-link"], clicked.defaultPrevented];
 out.storeRowClass = wrap.children[0].className;
 var bare = el("div", "eval");
 actionsNode(bare, { game: {} }, true, null);
@@ -837,9 +859,12 @@ class ActionRowBehaviourTests(unittest.TestCase):
         html = apps_eval.EVAL_CARD_HTML
         start = html.index("function storeAppid(")
         builders = html[start:html.index("function syncDisplayMode(", start)]
+        # the real shared store pill (apps_shared.NOTICE_JS), not a stub
+        notice = apps_shared.NOTICE_JS
+        pill = notice[notice.index("  var EXT_LINK_ICON"):notice.index("  var NOTICE_ICON")]
         assert NODE is not None
         proc = subprocess.run(
-            [NODE, "-e", _ACTION_ROW_SHIM + builders + _ACTION_ROW_PROBE],
+            [NODE, "-e", _ACTION_ROW_SHIM + pill + builders + _ACTION_ROW_PROBE],
             capture_output=True, text=True, timeout=60, check=False,
         )
         if proc.returncode != 0:
@@ -869,6 +894,9 @@ class ActionRowBehaviourTests(unittest.TestCase):
         self.assertEqual(
             self.out["opened"], ["https://store.steampowered.com/app/1145350/"]
         )
+        # the shared store pill: a real link that never navigates the sandbox
+        self.assertEqual(self.out["pill"], ["a", "btn act-store", "https://store.steampowered.com/app/1145350/",
+                                            "", True])
 
 
 _ERRORS_PROBE = r"""
@@ -1075,14 +1103,23 @@ _RENDER_PROBE = r"""
     out.ribbon = [ribbon.className, texts(ribbon, "span")];
     out.ground = q(card, ".ev-flow").children.map(function (c) { return c.className; });
     var flow = q(card, ".ev-flow");
-    out.cand = q(flow, ".ev-cand").children.filter(function (c) { return c.tagName === "SPAN"; }).map(txt);
+    out.cand = q(card, ".ev-cand").children.filter(function (c) { return c.tagName === "SPAN"; }).map(txt);
+    out.left = q(card, ".ev-left").children.map(function (c) { return c.className; });
     out.weak = q(flow, ".ev-weak").querySelectorAll(".trait").map(function (t) {
       return txt(t.children[t.children.length - 1]);
     });
     out.abilities = q(flow, ".ev-abil").querySelectorAll(".ability").map(function (a) { return txt(q(a, "b")); });
     out.wrap = card.children.map(function (c) { return c.className; });
     out.library = texts(q(card, ".ev-lib"), ".mini-name");
-    out.prov = card.children.filter(function (c) { return c.classList.contains("ev-prov"); })[0].children.map(txt);
+    out.prov = q(card, ".ev-prov").children.map(txt);
+    // #11: every part once, inline and (after a re-render) in fullscreen
+    function counts() {
+      var c = q(root, ".eval");
+      return [c.querySelectorAll(".ev-cand").length, c.querySelectorAll(".ev-prov").length,
+              c.querySelectorAll(".ev-lib").length,
+              c.querySelectorAll(".section-title").filter(function (t) { return t.textContent === "In your library"; }).length];
+    }
+    out.onceInline = counts();
     out.actions = q(card, ".actions").children.filter(function (c) { return c.tagName === "BUTTON"; }).map(txt);
     var toggle = q(card, ".act-breakdown");
     toggle.click();
@@ -1104,6 +1141,13 @@ _RENDER_PROBE = r"""
            params: { structuredContent: JSON.parse(JSON.stringify(PACKAGE)) } });
     out.redeliveredDeals = root.querySelectorAll(".deal").length;
     out.redeliveredFrame = q(root, ".frame") ? q(root, ".frame").className : null;
+    hostContext.displayMode = "fullscreen";
+    document.documentElement.setAttribute("data-display-mode", "fullscreen");
+    render(JSON.parse(JSON.stringify(PACKAGE)));
+    out.onceFullscreen = counts();
+    out.fsBuilt = q(root, ".fs-breakdown").children.length > 0;
+    hostContext.displayMode = "inline";
+    document.documentElement.setAttribute("data-display-mode", "inline");
     host({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: {
       verdict: "play_what_you_own", name: "Slay the Spire II", assessed_at: "2026-10-03T08:40:00Z" } } });
     var note = q(root, ".frame");
@@ -1202,17 +1246,30 @@ class EvalCardRenderTests(unittest.TestCase):
 
     def test_the_ground_and_the_tail_in_order(self) -> None:
         self.assertEqual(self.out["ground"], [
-            "ev-cand is-candidate", "ev-sum", "traits ev-weak", "ev-pitch", "ev-abil", "flavor",
-            "fs-breakdown",
+            "ev-sum", "traits ev-weak", "ev-pitch", "ev-abil", "flavor", "fs-breakdown",
         ])
+        # the candidate line and the provenance sit under the card in
+        # .ev-left; inline, CSS dissolves it and orders them into the flow
+        self.assertEqual(self.out["left"], ["ev-cardwrap", "ev-cand is-candidate", "ev-prov"])
         self.assertEqual(self.out["cand"], ["Candidate", "Not owned, not wishlisted"])
         self.assertEqual(self.out["weak"], ["Repetitive combat per critics", "Lowest-rated PS Studios PS5 game"])
         self.assertEqual(self.out["abilities"], ["Studio", "Moment"])
-        self.assertEqual(self.out["wrap"], ["ev-top", "ev-lib", "actions", "ev-prov", "disclosure-body ev-bd"])
+        self.assertEqual(self.out["wrap"], ["ev-top", "ev-lib", "actions", "disclosure-body ev-bd"])
         self.assertEqual(self.out["library"], ["MGS3"])
         self.assertEqual(self.out["prov"], ["Published by Sony Interactive Entertainment",
                                             "assessed 3 Oct 2026"])
         self.assertEqual(self.out["actions"], ["Full breakdown▾"])
+
+    def test_each_part_is_built_once_in_both_modes(self) -> None:
+        # #11: one candidate line, one provenance line, one IN YOUR LIBRARY
+        # strip per render — inline and fullscreen alike (no hidden twin)
+        self.assertEqual(self.out["onceInline"], [1, 1, 1, 1])
+        self.assertEqual(self.out["onceFullscreen"], [1, 1, 1, 1])
+        self.assertTrue(self.out["fsBuilt"])
+        css = widget_css(apps_eval.EVAL_CARD_HTML)
+        self.assertNotIn(".ev-side", css + apps_eval.EVAL_CARD_HTML)
+        for selector in (".ev-cand", ".ev-lib", ".ev-prov"):
+            self.assertNotRegex(css, re.escape(selector) + r"[^{]*\{[^}]*display: none")
 
     def test_the_breakdown_sections(self) -> None:
         self.assertEqual(self.out["breakdown"], [

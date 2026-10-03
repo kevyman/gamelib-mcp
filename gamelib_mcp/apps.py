@@ -429,11 +429,11 @@ GAME_CARDS_HTML = (
     if (game.parent_name) return game.parent_name;
     return null;
   }
-  /* The critic tier of a game: Metacritic, else OpenCritic, else none. */
+  /* The critic tier of a game: the shared lead critic's (OpenCritic, else
+     Metacritic), else none. */
   function criticTier(game) {
-    if (realScore(game.metacritic_score)) return mcTier(game.metacritic_score);
-    if (realScore(game.opencritic_score)) return ocTier(game.opencritic_score, game.opencritic_tier);
-    return "none";
+    var lead = leadCritic(game);
+    return lead ? lead.tier : "none";
   }
 
   /* ---------- view state ---------- */
@@ -527,7 +527,14 @@ GAME_CARDS_HTML = (
     if (canFullscreen() && data.results.length) {
       var expand = el("button", "btn primary act-expand", "Open full screen");
       expand.type = "button";
-      expand.addEventListener("click", function () { requestDisplayMode("fullscreen"); });
+      // A grant through this request lays the grid out for fullscreen at
+      // once (the sticky "Show next", no footer), as the drill-in does —
+      // the host may never send a host-context-changed for it.
+      expand.addEventListener("click", function () {
+        requestDisplayMode("fullscreen").then(function (mode) {
+          if (mode === "fullscreen" && view === "grid" && gridData && gridMode !== mode) render(gridData);
+        });
+      });
       bar.appendChild(expand);
     }
     return bar.childNodes.length ? bar : null;
@@ -535,8 +542,8 @@ GAME_CARDS_HTML = (
 
   /* ---------- grid: cards ---------- */
   /* What a card shows besides its cover, title and matched tags, in reading
-     order: the badge ("73% match", or "Metacritic 88" on a critic or value
-     sort), the ribbon ("Top match", "Critics' pick"), the plate's hours
+     order: the badge ("73% match", or the lead critic — "OpenCritic 84",
+     else "Metacritic 88" — on a critic or value sort), the ribbon ("Top match", "Critics' pick"), the plate's hours
      ("~4h to beat" / "2.3h played") and platform, then at most two score
      chips (Metacritic and OpenCritic drawn as MC / OC, or the Steam phrase).
      gridCard renders these and cardLabel reads them, so what is heard is
@@ -553,14 +560,14 @@ GAME_CARDS_HTML = (
     var pct = game.match_percent != null
       ? Math.max(0, Math.min(100, Math.round(num(game.match_percent) || 0))) : null;
     var badgeSource = null;
+    var lead = leadCritic(game);
     if (pct != null && sort === "match") {
       bits.push({ part: "badge", value: pct, suffix: "%", tag: "Match",
                   tier: pct >= TOP_MATCH ? "good" : pct >= 50 ? "ok" : "none", text: pct + "% match" });
-    } else if (mc != null || oc != null) {
-      badgeSource = mc != null ? "mc" : "oc";
-      var critic = mc != null ? mc : oc;
-      var name = mc != null ? "Metacritic" : "OpenCritic";
-      bits.push({ part: "badge", value: critic, tag: name, tier: criticTier(game), text: name + " " + critic });
+    } else if (lead) {
+      badgeSource = lead.source;
+      bits.push({ part: "badge", value: lead.value, tag: lead.source, tier: lead.tier,
+                  text: lead.source + " " + lead.value });
     }
     if (pct != null && pct >= TOP_MATCH && sort === "match" && c.index === 0 && c.offset === 0) {
       bits.push({ part: "ribbon", text: "Top match" });
@@ -576,11 +583,11 @@ GAME_CARDS_HTML = (
         short: label("platform_short", game.suggested_platform) });
     }
     var chips = [];
-    if (mc != null && badgeSource !== "mc") {
+    if (mc != null && badgeSource !== "Metacritic") {
       chips.push({ part: "chip", label: "MC", value: mc, tier: mcTier(mc), title: "Metacritic",
                    text: "Metacritic " + mc });
     }
-    if (oc != null && badgeSource !== "oc") {
+    if (oc != null && badgeSource !== "OpenCritic") {
       chips.push({ part: "chip", label: "OC", value: oc, tier: ocTier(oc, game.opencritic_tier),
                    title: "OpenCritic", text: "OpenCritic " + oc });
     }
@@ -611,14 +618,20 @@ GAME_CARDS_HTML = (
     // A card with no game_id has nothing to open: a plain frame, not a button.
     var tappable = game.game_id != null;
     var card = frameNode(tappable ? "button" : "div", "frame-s gc-card", badgeBit ? badgeBit.tier : "none");
+    var titleId = "gc-title-" + (typeof c.index === "number" ? c.index : 0);
     if (tappable) {
       card.type = "button";
       card.setAttribute("data-game-id", String(game.game_id));
       card.addEventListener("click", function () { selectGame(game); });
+      // The button is named by the game and what the card shows (no
+      // aria-labelledby: the name must carry the scores, not the title alone).
+      card.setAttribute("aria-label", cardLabel(game, bits));
+    } else {
+      // A plain card is a group named by its own title, its content read as
+      // it stands; an aria-label on a bare <div> would be ignored or override it.
+      card.setAttribute("role", "group");
+      card.setAttribute("aria-labelledby", titleId);
     }
-    // Named by the game and what the card shows (no aria-labelledby: the
-    // label must carry the scores, not the title alone).
-    card.setAttribute("aria-label", cardLabel(game, bits));
 
     // The art: the cover, the badge top-left, the ribbon on its bottom edge.
     var art = el("div", "art");
@@ -635,7 +648,9 @@ GAME_CARDS_HTML = (
     // The plate: title-s, then the sub line of separate spans — hours, the
     // platform lozenge, the type lozenge, and the rank on the right.
     var plate = el("div", "plate");
-    plate.appendChild(el("div", "plate-title-s", game.name));
+    var title = el("div", "plate-title-s", game.name);
+    title.id = titleId;
+    plate.appendChild(title);
     var pName = parentName(game);
     if (pName) plate.appendChild(el("div", "parent-sub", "⤷ " + pName));
     var sub = el("div", "sub");
@@ -649,7 +664,9 @@ GAME_CARDS_HTML = (
     if (type) sub.appendChild(type);
     // Rank only when the payload is explicitly rank-ordered: discover_games
     // sends its pagination offset, so numbering is global (page two starts
-    // at No. 21). Payloads without it stay unnumbered.
+    // at No. 21). Payloads without it stay unnumbered. A rank is a position,
+    // not an id, so it stays plain ("No. 1") — cardNo's zero-padding is for
+    // ids (the detail card's "No. 046").
     if (typeof c.offset === "number" && typeof c.index === "number") {
       sub.appendChild(el("span", "card-no", "No. " + (c.offset + c.index + 1)));
     }
@@ -978,30 +995,29 @@ GAME_CARDS_HTML = (
     var mine = myRating(game);
     return mine != null ? ratingTier(mine) : criticTier(game);
   }
-  /* "8 /10" YOUR RATING, else the critic score and its source. */
+  /* "8 /10" YOUR RATING, else the lead critic (leadCritic) and its source. */
   function detailBadge(game) {
     var mine = myRating(game);
+    var lead = mine == null ? leadCritic(game) : null;
     var badge = null;
     if (mine != null) {
       badge = badgeNode({ value: mine, suffix: "/10", tag: "Your rating", tier: ratingTier(mine) });
-    } else if (realScore(game.metacritic_score)) {
-      badge = badgeNode({ value: Math.round(game.metacritic_score), tag: "Metacritic",
-                          tier: mcTier(game.metacritic_score) });
-    } else if (realScore(game.opencritic_score)) {
-      badge = badgeNode({ value: Math.round(game.opencritic_score), tag: "OpenCritic",
-                          tier: ocTier(game.opencritic_score, game.opencritic_tier) });
+    } else if (lead) {
+      badge = badgeNode({ value: lead.value, tag: lead.source, tier: lead.tier });
     }
     if (badge) badge.classList.add("badge-on-art");
     return badge;
   }
-  /* The art-edge ribbon: his completion status (with his hours as the
-     note), "Unplayed" when an owned game's hours are a measured zero, and
-     nothing when the state is unknown (null hours say nothing). */
+  /* The art-edge ribbon: his completion status in STATUS_CHIPS's words and
+     tier (with his hours as the note), "Unplayed" when an owned game's hours
+     are a measured zero, and nothing when the state is unknown (null hours
+     say nothing). */
   function statusRibbon(game) {
     var hours = num(game.playtime_hours);
     var note = hours != null && hours > 0 ? hoursLabel(hours) : null;
-    var status = STATUS_CHIPS[game.completion_status];
-    if (status) return ribbonNode(label("status", game.completion_status), status[1], note, "art");
+    var status = Object.prototype.hasOwnProperty.call(STATUS_CHIPS, game.completion_status)
+      ? STATUS_CHIPS[game.completion_status] : null;
+    if (status) return ribbonNode(status[0], status[1], note, "art");
     if (hours === 0 && game.owned) return ribbonNode("Unplayed", "none", null, "art");
     return null;
   }
@@ -1017,9 +1033,10 @@ GAME_CARDS_HTML = (
       value: amount === 0 ? "Free" : money(amount, row.price_currency),
     });
   }
-  /* The score chips (chipRow keeps three): Metacritic, OpenCritic, Steam
-     (phrase + meter), ProtonDB; each links out via the host when a URL is
-     known or derivable. Time to beat is the LENGTH row above them. */
+  /* The score chips (all four: chipRow's limit is 4 here): Metacritic,
+     OpenCritic, Steam (phrase + meter), ProtonDB; each links out via the
+     host when a URL is known or derivable. Time to beat is the LENGTH row
+     above them. */
   function detailChips(game) {
     var appid = game.steam_appid != null ? game.steam_appid : game.appid;
     var chips = [];
@@ -1044,7 +1061,7 @@ GAME_CARDS_HTML = (
         url: appid != null ? "https://www.protondb.com/app/" + appid : null,
       }));
     }
-    return chipRow(chips);
+    return chipRow(chips, 4);
   }
   function detailStats(game) {
     var stats = el("div", "stats");
@@ -1086,7 +1103,8 @@ GAME_CARDS_HTML = (
     var plate = el("div", "plate");
     var row = el("div", "plate-row");
     row.appendChild(el("h2", "plate-title", game.name));
-    if (game.game_id != null) row.appendChild(el("span", "card-no", "No. " + game.game_id));
+    var no = cardNo(game.game_id);
+    if (no) row.appendChild(el("span", "card-no", no));
     plate.appendChild(row);
     var pName = parentName(game);
     if (pName) plate.appendChild(el("div", "parent-sub", "part of " + pName));
@@ -1200,8 +1218,9 @@ GAME_CARDS_HTML = (
 
   /* ---------- detail: library + studio strips ---------- */
   /* A mini's tier is his rating of that game (none when unrated); its lines
-     are the shared miniLines format (pips, then "50h" "completed", then the
-     year). */
+     are the shared miniLines format: pips, then "50h" "played" (or
+     "unplayed"), then the year. similar_in_library carries no completion
+     status or platform, so none is passed. */
   function similarStrip(parent, similar) {
     var items = list(similar && similar.items).filter(function (i) { return i && i.name; }).slice(0, 8);
     if (!items.length) return;
@@ -1214,8 +1233,8 @@ GAME_CARDS_HTML = (
         name: item.name, cover_url: item.cover_url,
         tier: rating != null ? ratingTier(rating) : "none",
         title: why.length ? "Shares: " + why.join(", ") : null,
-        lines: miniLines({ rating: rating, hours: item.playtime_hours, status: item.completion_status,
-          unplayed: item.unplayed, year: item.release_year, platform: item.platform }),
+        lines: miniLines({ rating: rating, hours: item.playtime_hours, unplayed: item.unplayed,
+          year: item.release_year }),
       }));
     });
     sec.appendChild(strip);
@@ -1244,7 +1263,8 @@ GAME_CARDS_HTML = (
       strip.appendChild(miniCard({
         name: item.name, cover_url: item.cover_url,
         tier: rating != null ? ratingTier(rating) : "none",
-        lines: miniLines({ rating: rating, hours: item.owned ? item.playtime_hours : null,
+        lines: miniLines({ rating: rating, critic: item.critic_score,
+          hours: item.owned ? item.playtime_hours : null,
           owned: !!item.owned, year: item.release_year, platform: item.platform }),
       }));
     });
@@ -1311,23 +1331,12 @@ GAME_CARDS_HTML = (
     };
     fullscreenOrDisclosure(actions, "Full breakdown", build);
   }
-  var EXT_GLYPH = [["path", { d: "M11.5 3.5h5v5M16.5 3.5 9 11M14 11.5v5H3.5V6h5" }]];
-  /* The store page, when one is derivable (Steam, from the app id). */
+  /* The store page, when one is derivable (Steam, from the app id): the
+     shared store pill. */
   function storeLink(game) {
     var appid = game.steam_appid != null ? game.steam_appid : game.appid;
     if (appid == null) return null;
-    var url = "https://store.steampowered.com/app/" + appid + "/";
-    var link = el("a", "btn");
-    link.href = url;
-    link.setAttribute("data-link", "");
-    var glyph = iconNode("0 0 20 20", EXT_GLYPH);
-    if (glyph) link.appendChild(glyph);
-    link.appendChild(el("span", null, "Open on Steam"));
-    link.addEventListener("click", function (ev) {
-      ev.preventDefault();
-      openLink(url);
-    });
-    return link;
+    return storePill("https://store.steampowered.com/app/" + appid + "/", "Open on Steam");
   }
 
   function detailCard(game) {

@@ -1380,6 +1380,16 @@ NUMBERS_JS = r"""  /* ---------- numbers ---------- */
   function plural(n, word, truncated) {
     return n + (truncated ? "+" : "") + " " + word + (n === 1 && !truncated ? "" : "s");
   }
+  /* A card number: a real id (game, assessment) zero-padded to three digits
+     like a printed card — "No. 046", "No. 2333"; null for no id. A grid's
+     RANK is not an id and stays plain ("No. 1"): it is built by the grid,
+     never through cardNo. */
+  function cardNo(id) {
+    var n = num(id);
+    if (n == null || n < 0) return null;
+    var s = String(Math.round(n));
+    return "No. " + (s.length < 3 ? ("00" + s).slice(-3) : s);
+  }
   var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   /* "2022-09-21" (or a full timestamp) → "Sep 2022" — the detail card's
      LAST row; anything else → null (unknown: the caller shows no row). */
@@ -1411,6 +1421,19 @@ SCORE_CHIP_JS = r"""  /* ---------- score chip ---------- */
       t = n >= 84 ? "mighty" : n >= 75 ? "strong" : n >= 65 ? "fair" : "weak";
     }
     return t === "mighty" || t === "strong" ? "good" : t === "fair" ? "ok" : "bad";
+  }
+  /* The ONE lead-critic precedence both widgets read (spec 2026-10-04 §1.3)
+     for every critic badge and critic tier: OpenCritic, else Metacritic,
+     each tiered by its own thresholds; null when neither has spoken.
+     scores carries opencritic_score / opencritic_tier / metacritic_score
+     (a game row and an assessment's craft block use the same keys). */
+  function leadCritic(scores) {
+    var s = scores || {};
+    var oc = num(s.opencritic_score);
+    if (realScore(oc)) return { value: Math.round(oc), source: "OpenCritic", tier: ocTier(oc, s.opencritic_tier) };
+    var mc = num(s.metacritic_score);
+    if (realScore(mc)) return { value: Math.round(mc), source: "Metacritic", tier: mcTier(mc) };
+    return null;
   }
   /* Steam's nine summary phrases, most-specific first, as 1..9 steps. */
   var STEAM_STEPS = [
@@ -1485,19 +1508,19 @@ SCORE_CHIP_JS = r"""  /* ---------- score chip ---------- */
     }
     return chip;
   }
+  /* completion_status → [the word, its tier]: the one place the status
+     wording lives (the detail card's status ribbon reads it). */
   var STATUS_CHIPS = {
     completed: ["Completed", "good"],
     evergreen: ["Evergreen", "good"],
     abandoned: ["Abandoned", "bad"],
     playing: ["Playing", "none"],
   };
-  function statusChip(status) {
-    var s = STATUS_CHIPS[status];
-    return s ? scoreChip({ label: "Status", value: s[0], tier: s[1] }) : null;
-  }
-  function chipRow(chips) {
+  /* A row of at most `limit` chips (default 3; the detail card passes 4 so
+     ProtonDB survives beside both critics and Steam). */
+  function chipRow(chips, limit) {
     var row = el("div", "chips tags");
-    chips.filter(Boolean).slice(0, 3).forEach(function (c) { row.appendChild(c); });
+    chips.filter(Boolean).slice(0, limit || 3).forEach(function (c) { row.appendChild(c); });
     return row.childNodes.length ? row : null;
   }
   /* The phrase always rides with the meter — the meter alone says nothing.
@@ -1782,6 +1805,25 @@ NOTICE_JS = r"""  /* ---------- SVG (icons, the card grain) ---------- */
     return svgEl("svg", { viewBox: viewBox, "aria-hidden": "true", focusable: "false" },
       list(shapes).map(function (s) { return svgEl(s[0], s[1]); }));
   }
+  /* The external-link arrow: the one glyph on every pill that leaves the
+     host (the store pills). */
+  var EXT_LINK_ICON = [["path", { d: "M11.5 3.5h5v5M16.5 3.5 9 11M14 11.5v5H3.5V6h5" }]];
+  /* A secondary pill that opens url through the host (openLink): the
+     external arrow, then the text. A real link (href, data-link) so it reads
+     as one and copies as one; the click never navigates the sandbox. */
+  function storePill(url, text) {
+    var link = el("a", "btn");
+    link.href = url;
+    link.setAttribute("data-link", "");
+    var glyph = iconNode("0 0 20 20", EXT_LINK_ICON);
+    if (glyph) link.appendChild(glyph);
+    link.appendChild(el("span", null, text));
+    link.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      openLink(url);
+    });
+    return link;
+  }
   var NOTICE_ICON = [["circle", { cx: 8, cy: 8, r: 6.5 }], ["path", { d: "M8 4.8v3.8M8 11.1v.1" }]];
   function notice(parent, items) {
     var text;
@@ -1903,6 +1945,9 @@ FRAME_CSS = r"""  .frame {
     pointer-events: none;
   }
   .frame-s > .grain { border-radius: calc(var(--gl-r-card-s) - var(--gl-frame)); }
+  /* The one filter definition (installGrain): out of flow and 0x0, never
+     display:none (a filter in an undisplayed <svg> renders nothing). */
+  .grain-defs { position: absolute; width: 0; height: 0; overflow: hidden; pointer-events: none; }
 """
 
 # The art window: 2:3 cover (or 16:9 with .art-hero), the 1px keyline drawn
@@ -2347,7 +2392,7 @@ MOTION_CSS = r"""  .deal { animation: gl-fade-in 300ms ease-out backwards; anima
       animation-delay: calc(var(--deal-at, 0ms) + 100ms);
     }
     .deal:not(.frame-s) .ribbon-straddle {
-      animation: stamp 200ms cubic-bezier(0.34, 1.4, 0.64, 1) backwards, settle 140ms ease-out;
+      animation: stamp 200ms cubic-bezier(0.34, 1.4, 0.64, 1) backwards, settle 140ms ease-out backwards;
       animation-delay: calc(var(--deal-at, 0ms) + 100ms), calc(var(--deal-at, 0ms) + 340ms);
     }
     .deal:not(.frame-s) .badge {
@@ -2413,7 +2458,11 @@ MOTION_CSS = r"""  .deal { animation: gl-fade-in 300ms ease-out backwards; anima
     }
     @keyframes deal { from { opacity: 0; transform: translateY(12px) rotate(-1deg); } }
     @keyframes stamp { from { opacity: 0; transform: scaleX(0.6); } }
-    @keyframes settle { from { transform: translateY(-2px); } to { transform: none; } }
+    /* M6 is a landing: settle moves `translate`, not `transform` (which the
+       stamp's scale owns), and its backwards fill holds the ribbon 2px up
+       from the deal's start — through the stamp and the gap after it —
+       until the settle lowers it, so it never jumps up before landing. */
+    @keyframes settle { from { translate: 0 -2px; } to { translate: none; } }
     @keyframes pop { from { opacity: 0; transform: scale(0.6); } }
     @keyframes pip { from { opacity: 0; transform: rotate(45deg) scale(0.6); } }
     @keyframes leader { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0); } }
@@ -2443,15 +2492,24 @@ BINDER_CSS = (
 # The Binder builders. Every node comes from el() (strings via textContent) or
 # svgEl() (document.createElementNS; NOTICE_JS) — never markup.
 GRAIN_JS = r"""  /* ---------- the Binder: builders ---------- */
-  /* The card grain — gl.css's inline SVG, the FIRST child of every .frame.
-     Identical filter ids across cards are harmless: it is the same filter. */
-  function grainNode() {
-    return svgEl("svg", { "class": "grain", "aria-hidden": "true" }, [
-      svgEl("filter", { id: "gl-grain-f" }, [
+  /* The card grain — gl.css's inline SVG. The noise filter is defined ONCE
+     per document (installGrain, called by startWidget): a hidden 0x0 <svg>
+     on <body>, outside #root, so clearing the view never takes it along.
+     Every .frame's FIRST child is then only a rect that references it. */
+  var GRAIN_FILTER_ID = "gl-grain-f";
+  function installGrain() {
+    if (document.getElementById(GRAIN_FILTER_ID)) return;
+    var defs = svgEl("svg", { "class": "grain-defs", "aria-hidden": "true", focusable: "false", width: 0, height: 0 }, [
+      svgEl("filter", { id: GRAIN_FILTER_ID }, [
         svgEl("feTurbulence", { type: "fractalNoise", baseFrequency: ".9", numOctaves: "2", stitchTiles: "stitch" }),
         svgEl("feColorMatrix", { type: "saturate", values: "0" }),
       ]),
-      svgEl("rect", { width: "100%", height: "100%", filter: "url(#gl-grain-f)" }),
+    ]);
+    if (defs) document.body.appendChild(defs);
+  }
+  function grainNode() {
+    return svgEl("svg", { "class": "grain", "aria-hidden": "true" }, [
+      svgEl("rect", { width: "100%", height: "100%", filter: "url(#" + GRAIN_FILTER_ID + ")" }),
     ]);
   }
   /* A card's opening: the .frame (a <button> when the whole card is the tap
@@ -2566,18 +2624,25 @@ FLAVOR_JS = r"""  /* Italic serif prose (the craft note, a description); quote =
 """
 
 MINI_JS = r"""  /* The ONE line format every mini uses — strips and lineage columns alike:
-       1. his rating as small pips, when rated (nothing otherwise);
-       2. hours and where it stands, two spans: "50h" "completed";
-          "unplayed" when the payload says so (or zero hours); "played" for
-          hours with no status; "not owned" for a game he doesn't have;
+       1. his rating as small pips, when rated; unrated, the critic score
+          as "Critics" "86" when the caller passes one (a studio's earlier
+          game he doesn't own); nothing otherwise;
+       2. hours and where it stands, two spans: "50h" "played", or the
+          completion status where the payload carries one (anchors:
+          "50h" "completed"); "unplayed" when the payload says so (or zero
+          hours); "not owned" for a game he doesn't have. Library
+          neighbours (similar_in_library) carry no status, so they read
+          "50h" "played" or "unplayed", never a status word;
        3. the year and the platform, when known.
-     {rating, hours, status, unplayed, owned, year, platform} → lines. */
+     {rating, critic, hours, status, unplayed, owned, year, platform} → lines. */
   var MINI_STATUS = { completed: "completed", evergreen: "evergreen", abandoned: "abandoned", playing: "playing" };
   function miniLines(facts) {
     var f = facts || {};
     var lines = [];
     var rating = num(f.rating);
+    var critic = num(f.critic);
     if (rating != null) lines.push([pipsNode(rating, 10, ratingTier(rating))]);
+    else if (realScore(critic)) lines.push(["Critics", String(Math.round(critic))]);
     var hours = num(f.hours);
     var played = hours != null && hours > 0 ? hoursLabel(hours) : null;
     var word = Object.prototype.hasOwnProperty.call(MINI_STATUS, f.status) ? MINI_STATUS[f.status]
@@ -3159,6 +3224,7 @@ INIT_JS = r"""  /* ---------- startup ---------- */
      widget stays quiet and still renders whatever tool-result arrives. */
   function startWidget(appName) {
     document.documentElement.setAttribute("data-display-mode", "inline");
+    installGrain();
     if (window.__PREVIEW_HOST_CONTEXT__) applyHostContext(window.__PREVIEW_HOST_CONTEXT__);
     if (window.__PREVIEW_DATA__) {
       render(window.__PREVIEW_DATA__);

@@ -121,10 +121,10 @@ clipped at 360px with the 12px gutters.
 
 | Surface | Frame tier | Badge |
 |---|---|---|
-| Eval card | verdict: `buy_now`/`play_what_you_own` good, `wishlist_for_sale`/`try_demo` ok, `skip` bad | OpenCritic, else Metacritic (tier by score), else none |
+| Eval card | verdict: `buy_now`/`play_what_you_own` good, `wishlist_for_sale`/`try_demo` ok, `skip` bad | lead critic (`leadCritic`: OpenCritic, else Metacritic, tier by score), else none |
 | Grid, sort match | `match_percent` ≥70 good, 50–69 ok, else none | `{match}%` + MATCH |
-| Grid, sort critic/value | Metacritic/OpenCritic tier | Metacritic (OC fallback) + METACRITIC/OPENCRITIC |
-| Detail | `my_rating` ≥7 good, 5–6.9 ok, <5 bad; unrated → critic tier; else none | rating `8` + `/10` + YOUR RATING, else critic |
+| Grid, sort critic/value | lead critic tier (`leadCritic`) | lead critic + OPENCRITIC/METACRITIC |
+| Detail | `my_rating` ≥7 good, 5–6.9 ok, <5 bad; unrated → lead critic tier; else none | rating `8` + `/10` + YOUR RATING, else lead critic |
 | Note card | verdict tier; void → none | none |
 | Skeleton | none | none |
 

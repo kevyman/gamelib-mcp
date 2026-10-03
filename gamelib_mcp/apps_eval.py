@@ -194,6 +194,22 @@ EVAL_CARD_HTML = (
     line-height: var(--gl-cap-lh);
     color: var(--gl-muted);
   }
+  /* ---- one copy of every part, placed per display mode ---- */
+  /* The candidate line and the provenance are built once, in .ev-left under
+     the card, which is where fullscreen shows them. Inline, .ev-top and
+     .ev-left dissolve (display: contents) so the card, the candidate line,
+     the ground and the provenance are the page's own flex items (grid items
+     from 560px): the candidate line reads under the card (atop the ground
+     from 560px) and `order` moves the provenance after the action row.
+     Fullscreen reads the library strip before the reel. */
+  html:not([data-display-mode="fullscreen"]) .ev-pkg .ev-top,
+  html:not([data-display-mode="fullscreen"]) .ev-pkg .ev-left { display: contents; }
+  .ev-pkg .ev-prov, .ev-pkg > .notice, .ev-pkg > .disclosure-body { order: 1; }
+  html:not([data-display-mode="fullscreen"]) .ev-pkg .ev-cand,
+  html:not([data-display-mode="fullscreen"]) .ev-pkg .ev-flow { margin-top: -6px; }
+  html[data-display-mode="fullscreen"] .ev-pkg > .ev-top { order: -2; }
+  html[data-display-mode="fullscreen"] .ev-pkg > .ev-lib { order: -1; }
+  html[data-display-mode="fullscreen"] .ev-left > .ev-cand, html[data-display-mode="fullscreen"] .ev-left > .ev-prov { padding: 0 20px; }
   /* Sections are eyebrow + content on the ground, never boxed panels. */
   .eval .panel { background: none; border: 0; box-shadow: none; padding: 0; }
 
@@ -245,22 +261,17 @@ EVAL_CARD_HTML = (
     font-size: var(--gl-h);
   }
   .eval > .disclosure-body { margin-top: 0; }
-  .ev-side, .fs-breakdown { display: none; }
-  .fs-breakdown { flex-direction: column; gap: 24px; }
+  .fs-breakdown { display: none; flex-direction: column; gap: 24px; }
   html[data-display-mode="fullscreen"] .fs-breakdown { display: flex; }
-  html[data-display-mode="fullscreen"] .ev-side { display: flex; flex-direction: column; gap: 14px; padding: 0 20px; }
   /* Fullscreen IS the breakdown, so its button goes — but the store link
      stays: fullscreen is exactly where he has decided to read everything,
      and the next step from there is the store page. The candidate line and
-     the provenance move under the card; the library strip moves into the
-     breakdown, which reads after the pitch and before the weaknesses. */
+     the provenance stand under the card; the breakdown reads after the
+     pitch and before the weaknesses. */
   html[data-display-mode="fullscreen"] .actions:not(.has-store),
   html[data-display-mode="fullscreen"] .actions .act-breakdown,
   html[data-display-mode="fullscreen"] .eval > .disclosure-body { display: none; }
   html[data-display-mode="fullscreen"] .actions { justify-content: flex-end; }
-  html[data-display-mode="fullscreen"] .ev-flow > .ev-cand,
-  html[data-display-mode="fullscreen"] .eval > .ev-lib,
-  html[data-display-mode="fullscreen"] .eval > .ev-prov { display: none; }
   html[data-display-mode="fullscreen"] .ev-flow > .ev-sum { order: 1; margin-top: 0; }
   html[data-display-mode="fullscreen"] .ev-flow > .ev-pitch { order: 2; margin-top: -4px; }
   html[data-display-mode="fullscreen"] .ev-flow > .fs-breakdown { order: 3; margin: 10px 0; }
@@ -335,6 +346,24 @@ EVAL_CARD_HTML = (
     }
     .ev-flow { padding-top: 4px; }
     html[data-display-mode="fullscreen"] .ev-left { position: sticky; top: 12px; }
+    /* Inline, the page itself is the two-column grid: the card down the
+       left, spanning the 1fr row that absorbs whatever it is taller than
+       the right column; the candidate line and the ground on the right;
+       everything after them across both columns. Spacing is margins (no
+       row gap), so an empty track adds nothing. */
+    html:not([data-display-mode="fullscreen"]) .ev-pkg {
+      display: grid;
+      grid-template-columns: 340px minmax(0, 1fr);
+      grid-template-rows: auto auto 1fr;
+      column-gap: 24px;
+      row-gap: 0;
+      align-items: start;
+    }
+    html:not([data-display-mode="fullscreen"]) .ev-pkg > *, html:not([data-display-mode="fullscreen"]) .ev-pkg .ev-prov { grid-column: 1 / -1; margin-top: 20px; }
+    html:not([data-display-mode="fullscreen"]) .ev-pkg .ev-prov { margin-top: 14px; }
+    html:not([data-display-mode="fullscreen"]) .ev-pkg .ev-cardwrap { grid-column: 1; grid-row: 1 / 4; }
+    html:not([data-display-mode="fullscreen"]) .ev-pkg .ev-cand { grid-column: 2; grid-row: 1; margin: 4px 0 10px; }
+    html:not([data-display-mode="fullscreen"]) .ev-pkg .ev-flow { grid-column: 2; grid-row: 2; margin-top: 0; }
     .media-slot .thumb { flex-basis: calc((100% - 18px) / 4); }
   }
   @media (max-width: 479px) {
@@ -453,14 +482,6 @@ EVAL_CARD_HTML = (
   function verdictTier(verdict) {
     return Object.prototype.hasOwnProperty.call(VERDICT_TIERS, verdict) ? VERDICT_TIERS[verdict] : "none";
   }
-  /* "No. 046": a real id (the assessment's, else the game's), zero-padded to
-     three digits like a printed card number. */
-  function cardNo(id) {
-    var n = num(id);
-    if (n == null || n < 0) return null;
-    var s = String(Math.round(n));
-    return "No. " + (s.length < 3 ? ("00" + s).slice(-3) : s);
-  }
   function capFirst(text) {
     var t = String(text);
     return t.charAt(0).toUpperCase() + t.slice(1);
@@ -471,16 +492,6 @@ EVAL_CARD_HTML = (
   }
 
   /* ---------- 1. the frame: art + badge, plate, stats, ribbon ---------- */
-  /* One overall badge: OpenCritic, else Metacritic, tiered by its own
-     thresholds; none when neither critic has spoken (negative sentinels are
-     "no score yet"). */
-  function criticBadge(craft) {
-    var oc = num(craft.opencritic_score);
-    if (realScore(oc)) return { value: Math.round(oc), tag: "OpenCritic", tier: ocTier(oc), source: "oc" };
-    var mc = num(craft.metacritic_score);
-    if (realScore(mc)) return { value: Math.round(mc), tag: "Metacritic", tier: mcTier(mc), source: "mc" };
-    return null;
-  }
   /* The plate: title and card number, then the sub spans — the developer,
      the release year, the platform lozenge (where the price was seen, else
      the first platform he owns it on) — gap-separated, never middots. */
@@ -578,7 +589,7 @@ EVAL_CARD_HTML = (
   }
   function scoreChips(pkg) {
     var craft = pkg.craft || {};
-    var badge = criticBadge(craft);
+    var badge = leadCritic(craft);
     var row = el("div", "chips tags ev-scores");
 
     var pct = craftPercent(craft);
@@ -602,7 +613,7 @@ EVAL_CARD_HTML = (
     }
 
     var mc = num(craft.metacritic_score);
-    if (realScore(mc) && !(badge && badge.source === "mc")) {
+    if (realScore(mc) && !(badge && badge.source === "Metacritic")) {
       row.appendChild(scoreChip({ label: "Metacritic", value: Math.round(mc), tier: mcTier(mc) }));
     }
     return row.childNodes.length ? row : null;
@@ -626,8 +637,10 @@ EVAL_CARD_HTML = (
 
     var art = el("div", "art");
     art.appendChild(coverNode(game));
-    var critic = criticBadge(pkg.craft || {});
-    var badge = critic ? badgeNode({ value: critic.value, tag: critic.tag, tier: critic.tier }) : null;
+    // One overall badge: the shared lead critic (OpenCritic, else
+    // Metacritic); none when neither has spoken.
+    var critic = leadCritic(pkg.craft);
+    var badge = critic ? badgeNode({ value: critic.value, tag: critic.source, tier: critic.tier }) : null;
     if (badge) {
       badge.classList.add("badge-on-art");
       badge.classList.add("badge-low");
@@ -697,8 +710,6 @@ EVAL_CARD_HTML = (
   }
   function groundNode(flow, pkg) {
     var pres = pkg.presentation || {};
-    var cand = candidateNode(pkg);
-    if (cand) flow.appendChild(cand);
     if (pkg.summary) flow.appendChild(el("p", "ev-sum", pkg.summary));
     var flags = list(pkg.flags).filter(Boolean);
     if (flags.length) flow.appendChild(traitsNode("Weakness", "bad", "minus", flags, "ev-weak"));
@@ -723,7 +734,9 @@ EVAL_CARD_HTML = (
 
   /* ---------- 4. mini-card strips: library, history, studio ---------- */
   /* Every mini reads the shared miniLines format; a library item's
-     similarity and shared tags are its hover text. */
+     similarity and shared tags are its hover text. similar_in_library
+     carries no completion status or platform, so its minis read hours
+     ("50h" "played") or "unplayed" only. */
   function similarTitle(item) {
     var sim = num(item.similarity);
     var why = list(item.shared_tags).filter(Boolean).slice(0, 3);
@@ -746,8 +759,8 @@ EVAL_CARD_HTML = (
     ministrip(box, items, function (item) {
       return { name: item.name, cover_url: item.cover_url, tier: ratedTier(item.my_rating),
         title: similarTitle(item),
-        lines: miniLines({ rating: item.my_rating, hours: item.playtime_hours, status: item.completion_status,
-          unplayed: item.unplayed, year: item.release_year, platform: item.platform }) };
+        lines: miniLines({ rating: item.my_rating, hours: item.playtime_hours, unplayed: item.unplayed,
+          year: item.release_year }) };
     });
     parent.appendChild(box);
   }
@@ -913,7 +926,8 @@ EVAL_CARD_HTML = (
     ministrip(box, items, function (item) {
       return { name: item.name, cover_url: item.cover_url,
         tier: item.owned ? ratedTier(item.my_rating) : "none",
-        lines: miniLines({ rating: item.owned ? item.my_rating : null, hours: item.owned ? item.playtime_hours : null,
+        lines: miniLines({ rating: item.owned ? item.my_rating : null, critic: item.critic_score,
+          hours: item.owned ? item.playtime_hours : null,
           owned: !!item.owned, year: item.release_year, platform: item.platform }) };
     });
     var record = ped.library_track_record;
@@ -977,8 +991,8 @@ EVAL_CARD_HTML = (
   /* ---------- the full breakdown (fullscreen, or a disclosure in place) ---------- */
   /* Everything that argues FOR the verdict rather than stating it. Kept out
      of the inline card on purpose: inline, the card is the verdict and its
-     facts; the evidence is one click further. The library strip is inline
-     already — only fullscreen, which moves it, carries it here. */
+     facts; the evidence is one click further. The library strip is never
+     part of it: it is built once, after the reel, in both display modes. */
   function hasBreakdown(pkg) {
     var pres = pkg.presentation || {};
     var ped = pkg.pedigree;
@@ -989,11 +1003,10 @@ EVAL_CARD_HTML = (
       || (ped && (pedigreeHeadline(ped).length || named(ped.previous_games).length))
       || list((pkg.past || {}).items).length);
   }
-  function breakdownNode(parent, pkg, withLibrary) {
+  function breakdownNode(parent, pkg) {
     forYouNode(parent, pkg.presentation || {});
     anchorsNode(parent, named(pkg.anchors));
     lineageNode(parent, named(pkg.comparisons));
-    if (withLibrary) libraryNode(parent, pkg.similar);
     studioNode(parent, pkg.pedigree);
     pastNode(parent, pkg.past || {});
     errorDetailNode(parent, packageErrors(pkg));
@@ -1010,18 +1023,11 @@ EVAL_CARD_HTML = (
     return typeof appid === "number" && isFinite(appid) && appid > 0 && Math.floor(appid) === appid
       ? appid : null;
   }
-  var EXT_ICON = [["path", { d: "M11.5 3.5h5v5M16.5 3.5 9 11M14 11.5v5H3.5V6h5" }]];
   function storeButton(row, appid) {
-    var btn = el("button", "btn act-store");
-    btn.type = "button";
-    var icon = iconNode("0 0 20 20", EXT_ICON);
-    if (icon) btn.appendChild(icon);
-    btn.appendChild(el("span", null, "Store page"));
+    var pill = storePill("https://store.steampowered.com/app/" + appid + "/", "Store page");
+    pill.classList.add("act-store");
     row.classList.add("has-store");               // keeps the row up in fullscreen
-    btn.addEventListener("click", function () {
-      openLink("https://store.steampowered.com/app/" + appid + "/");
-    });
-    row.appendChild(btn);
+    row.appendChild(pill);
   }
   function actionsNode(wrap, pkg, more, appid) {
     var row = el("div", "actions");
@@ -1054,7 +1060,7 @@ EVAL_CARD_HTML = (
     var fs = fullscreenBreakdown;
     if (fs && !fs.built && currentDisplayMode() === "fullscreen") {
       fs.built = true;
-      breakdownNode(fs.node, fs.pkg, true);
+      breakdownNode(fs.node, fs.pkg);
       reportSize();
     }
   }
@@ -1070,25 +1076,26 @@ EVAL_CARD_HTML = (
     if (when) line.appendChild(el("span", null, "assessed " + when));
     return line.childNodes.length ? line : null;
   }
-  /* The inline tier, top to bottom: the frame, then the ground (candidate,
-     summary, weakness, pitch, abilities, flavor), the reel, the library
-     strip, the action row, the provenance, the failure notice. */
+  /* Top to bottom inline: the frame, the candidate line, the ground
+     (summary, weakness, pitch, abilities, flavor), the reel, the library
+     strip, the action row, the provenance, the failure notice. Every part
+     is built ONCE: the candidate line and the provenance live in .ev-left
+     under the card — where fullscreen shows them — and inline, CSS
+     dissolves .ev-top/.ev-left (display: contents) and places them with
+     `order` and grid areas, so no display mode hides a second copy. */
   function evalCard(pkg, data) {
     var game = pkg.game || {};
-    var wrap = el("div", "eval");
+    var wrap = el("div", "eval ev-pkg");
     var top = el("div", "ev-top");
     var left = el("div", "ev-left");
     var cardwrap = el("div", "ev-cardwrap");
     var frame = cardNode(pkg, cardNo(data.assessment_id != null ? data.assessment_id : game.game_id));
     cardwrap.appendChild(frame);
     left.appendChild(cardwrap);
-    // Fullscreen only: the candidate line and the provenance under the card.
-    var side = el("div", "ev-side");
-    var sideCand = candidateNode(pkg);
-    if (sideCand) side.appendChild(sideCand);
-    var sideProv = provenanceNode(pkg, data);
-    if (sideProv) side.appendChild(sideProv);
-    if (side.childNodes.length) left.appendChild(side);
+    var cand = candidateNode(pkg);
+    if (cand) left.appendChild(cand);
+    var prov = provenanceNode(pkg, data);
+    if (prov) left.appendChild(prov);
     top.appendChild(left);
     var flow = el("div", "ev-flow");
     groundNode(flow, pkg);
@@ -1100,14 +1107,12 @@ EVAL_CARD_HTML = (
     var more = hasBreakdown(pkg);
     var appid = storeAppid(pkg);
     var inPlaceBody = more || appid ? actionsNode(wrap, pkg, more, appid) : null;
-    var prov = provenanceNode(pkg, data);
-    if (prov) wrap.appendChild(prov);
     errorsNode(wrap, packageErrors(pkg));
     if (inPlaceBody) {
       inPlaceBody.classList.add("ev-bd");
       wrap.appendChild(inPlaceBody);
     }
-    if (more || named((pkg.similar || {}).items).length) {
+    if (more) {
       var fs = el("div", "fs-breakdown");
       flow.appendChild(fs);
       fullscreenBreakdown = { node: fs, pkg: pkg, built: false };

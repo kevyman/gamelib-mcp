@@ -1513,7 +1513,15 @@ class FullscreenOrDisclosureTests(unittest.TestCase):
                 self.assertNotIn("disclosure(stack, text, build)", source)
                 self.assertNotIn(".button.click()", source)
                 self.assertNotIn("var inPlace = ", source)
-                self.assertNotIn('requestDisplayMode("fullscreen").then', source)
+                # no widget-level fullscreen-then-disclose mechanism; the one
+                # .then on a fullscreen request is the grid's "Open full
+                # screen" laying the grid out for the grant (no disclosure)
+                expected = 1 if module == "apps.py" else 0
+                self.assertEqual(source.count('requestDisplayMode("fullscreen").then'), expected)
+        html = apps.GAME_CARDS_HTML
+        start = html.index("function gridActions(data)")
+        actions = html[start:html.index("function cardBits(game, ctx)", start)]
+        self.assertIn('requestDisplayMode("fullscreen").then', actions)
 
 
 
@@ -1604,6 +1612,19 @@ _BINDER_PROBE = r"""
     function classes(node) { return node.children.map(function (c) { return c.className; }); }
     var out = {};
     out.grain = shape(grainNode());
+    // #8: ONE filter in the document (installGrain, at startup, on <body>),
+    // N rects; it survives the view being cleared and a second install
+    function svgTag(t) { return function (n) { return n.tagName === t; }; }
+    for (var g = 0; g < 3; g++) root.appendChild(frameNode("div", "probe-frame", "good"));
+    installGrain();
+    out.grainDoc = {
+      filters: findAll(document.documentElement, svgTag("filter")).length,
+      rects: findAll(root, svgTag("rect")).length,
+      defsParent: findAll(document.documentElement, svgTag("filter"))[0].parentNode.parentNode.tagName,
+      defs: shape(findAll(document.documentElement, svgTag("filter"))[0].parentNode),
+    };
+    root.textContent = "";
+    out.grainDoc.afterClear = findAll(document.documentElement, svgTag("filter")).length;
     out.badge = shape(badgeNode({ value: 8, suffix: "/10", tag: "Your rating", tier: "good" }));
     out.badgePlain = shape(badgeNode({ value: 79, tag: "OpenCritic" }));
     out.badgeEmpty = [badgeNode({ value: null }), badgeNode({ value: "" }), badgeNode()];
@@ -1736,9 +1757,22 @@ class BinderComponentTests(unittest.TestCase):
         self.assertIn("var node = document.createElementNS(SVG_NS, tag);", apps_shared.NOTICE_JS)
 
     def test_grain_is_the_reference_inline_svg(self) -> None:
+        # Each frame's grain is only a rect referencing the one filter
         grain = self.out["grain"]
         self.assertEqual((grain["tag"], grain["cls"], grain["attrs"]), ("svg", "grain", {"aria-hidden": "true"}))
-        flt, rect = grain["kids"]
+        (rect,) = grain["kids"]
+        self.assertEqual((rect["tag"], rect["attrs"]),
+                         ("rect", {"width": "100%", "height": "100%", "filter": "url(#gl-grain-f)"}))
+        # ...defined ONCE per document, in a hidden 0x0 <svg> on <body>
+        # (outside #root, so clearing the view keeps it)
+        doc = self.out["grainDoc"]
+        self.assertEqual((doc["filters"], doc["rects"], doc["afterClear"]), (1, 3, 1))
+        self.assertEqual(doc["defsParent"], "BODY")
+        defs = doc["defs"]
+        self.assertEqual((defs["tag"], defs["cls"], defs["attrs"]),
+                         ("svg", "grain-defs", {"aria-hidden": "true", "focusable": "false", "width": "0",
+                                                "height": "0"}))
+        (flt,) = defs["kids"]
         self.assertEqual((flt["tag"], flt["attrs"]), ("filter", {"id": "gl-grain-f"}))
         self.assertEqual(
             [(k["tag"], k["attrs"]) for k in flt["kids"]],
@@ -1746,8 +1780,10 @@ class BinderComponentTests(unittest.TestCase):
                                "stitchTiles": "stitch"}),
              ("feColorMatrix", {"type": "saturate", "values": "0"})],
         )
-        self.assertEqual((rect["tag"], rect["attrs"]),
-                         ("rect", {"width": "100%", "height": "100%", "filter": "url(#gl-grain-f)"}))
+        self.assertIn("    installGrain();\n", apps_shared.INIT_JS)
+        rule = css_rule(apps_shared.FRAME_CSS, ".grain-defs")
+        self.assertIn("position: absolute; width: 0; height: 0;", rule)
+        self.assertNotIn("display: none", rule)
 
     def test_badge_is_number_suffix_tag_and_tier_ring(self) -> None:
         badge = self.out["badge"]
@@ -1933,7 +1969,7 @@ class BinderComponentTests(unittest.TestCase):
             "animation: deal 300ms cubic-bezier(0.2, 0, 0, 1) backwards;",
             "animation: stamp 200ms cubic-bezier(0.34, 1.4, 0.64, 1) backwards;",
             "animation-delay: calc(var(--deal-at, 0ms) + 100ms);",
-            "animation: stamp 200ms cubic-bezier(0.34, 1.4, 0.64, 1) backwards, settle 140ms ease-out;",
+            "animation: stamp 200ms cubic-bezier(0.34, 1.4, 0.64, 1) backwards, settle 140ms ease-out backwards;",
             "animation-delay: calc(var(--deal-at, 0ms) + 100ms), calc(var(--deal-at, 0ms) + 340ms);",
             "animation: pop 180ms ease-out backwards;",
             "animation-delay: calc(var(--deal-at, 0ms) + 140ms);",
@@ -1958,6 +1994,22 @@ class BinderComponentTests(unittest.TestCase):
         self.assertNotIn(".deal .badge", inside)
         self.assertIn(".deal:not(.frame-s) .badge {", inside)
         self.assertIn(".sk { animation: skel-pulse 1600ms ease-in-out infinite; }", apps_shared.SKELETON_CSS)
+
+    def test_m6_settle_is_a_landing_not_a_jump(self) -> None:
+        # #5: the straddling ribbon sits 2px up from the end of the stamp
+        # until the settle starts, then lands: settle owns `translate` (the
+        # stamp owns `transform`) and fills backwards over its 340ms delay,
+        # so nothing snaps up to -2px when the settle begins.
+        inside = _block(apps_shared.MOTION_CSS, _MOTION_QUERY)
+        self.assertIn("@keyframes settle { from { translate: 0 -2px; } to { translate: none; } }", inside)
+        straddle = inside[inside.index(".deal:not(.frame-s) .ribbon-straddle {"):]
+        straddle = straddle[:straddle.index("}")]
+        self.assertIn("settle 140ms ease-out backwards;", straddle)
+        self.assertIn("calc(var(--deal-at, 0ms) + 340ms)", straddle)
+        stamp = re.search(r"@keyframes stamp \{(.*?)\}\s*\}", inside).group(1)
+        self.assertNotIn("translate", stamp)
+        settle = re.search(r"@keyframes settle \{(.*?)\}\s*\}", inside).group(1)
+        self.assertNotIn("transform", settle)
 
     def test_every_tappable_thing_presses(self) -> None:
         # M3 (A5): card frames, buttons, the fullscreen and link pills, link
