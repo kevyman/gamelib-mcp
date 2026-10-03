@@ -4,13 +4,19 @@ One `ui://` resource renders `record_assessment` results: the full
 evaluation package when the response carries one, and a compact note card for
 the bookkeeping-only responses (a plain recorded verdict, or a void).
 
-The package layout reads top to bottom as one argument: a header panel (cover,
-title, verdict stamp, the score chips and the authored craft note), the pitch
-panel (one-liner, elevator pitch, why-care eyebrow lines), the media panel (one
-viewer plus one thumb strip, trailer first, screenshots opening an edge-to-edge
-carousel), for-you-if / not-for-you-if, the anchors it rests on, lineage,
-the owned games most like it, the "from the studio" pedigree strip, and one closing
-"the call" panel holding time, price, flags and past verdicts.
+The package card is tiered (spec 2026-10-03 §2.2). INLINE, always rendered
+and budgeted at ≤900px tall at 760px wide: one header panel (cover, title, sub
+line, verdict stamp, the score chips, the authored craft note, then "the
+call" — HLTB, pace, price seen, target, paid and the flags — directly under
+the scores), the verdict in words (summary, elevator pitch, why-care eyebrow
+lines), the media panel (one viewer plus one thumb strip, trailer first,
+screenshots opening an edge-to-edge carousel), one action row ("Full
+breakdown") and a single notice naming what failed to load. The FULL
+BREAKDOWN — for-you-if / not-for-you-if, the anchors it rests on, lineage,
+the owned games most like it, the "from the studio" pedigree strip, past
+verdicts and the failure detail — opens fullscreen where the host offers it
+(the inline card stays on top, the host's close button is the way back) and
+as an in-place disclosure where it doesn't.
 Clients that don't speak the Apps extension ignore the tool metadata and see
 the normal JSON, so attaching ``EVAL_CARD_APP`` to a tool is purely additive.
 
@@ -130,15 +136,28 @@ EVAL_CARD_HTML = (
 """
     + apps_shared.MEDIA_STRIP_CSS
     + r"""
-  /* ---- header ---- */
-  .head { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
+  /* ---- header: cover | title + sub | stamp, the score row under the title ---- */
+  /* Grid areas, so the stamp keeps the top-right corner on a wide card and
+     drops under the title on a phone (below 420px) without ever covering it,
+     and the score row fills the space beside the cover instead of starting
+     under it. */
+  .head {
+    display: grid;
+    grid-template-columns: 84px minmax(0, 1fr) auto;
+    grid-template-areas: "cover info stamp" "cover scores scores" "cover note note";
+    grid-template-rows: auto auto 1fr;
+    column-gap: 14px;
+    row-gap: 10px;
+    align-items: start;
+  }
   .head .cover-wrap {
-    flex: 0 0 96px;
+    grid-area: cover;
     border: var(--gl-bw) solid var(--gl-border);
     border-radius: var(--gl-r-sm);
     overflow: hidden;
   }
-  .head-info { flex: 1 1 200px; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .head-info { grid-area: info; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .head .stamp { grid-area: stamp; }
   .head-info h1 {
     font-size: var(--gl-h);
     line-height: var(--gl-h-lh);
@@ -153,10 +172,25 @@ EVAL_CARD_HTML = (
   }
   /* The score chips live INSIDE the header: two lonely chips in a panel of
      their own ("CRAFT & FIT") was the first thing the owner called out. */
-  .head-chips { margin-top: 12px; }
+  .head-chips { grid-area: scores; }
   /* One model-authored line of craft context under the chips — the spread, the
      recurring knock, the review-bomb caveat a number can't carry. */
-  .craft-note { margin-top: 8px; color: var(--gl-text-2); }
+  .craft-note { grid-area: note; color: var(--gl-text-2); }
+  /* The call: hours and money, directly under the scores. */
+  .call {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: var(--gl-bw) solid var(--gl-border);
+  }
+  .call-label {
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    font-weight: var(--gl-strong);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--gl-muted);
+    margin-right: 2px;
+  }
   .one-liner { font-weight: var(--gl-strong); }
   .pitch {
     margin-top: 8px;
@@ -308,6 +342,27 @@ EVAL_CARD_HTML = (
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
   }
+  .err-list { list-style: none; display: flex; flex-direction: column; gap: 4px; color: var(--gl-text-2); }
+  .err-list b { font-weight: var(--gl-strong); color: var(--gl-text); }
+
+  /* ---- action row, in-place breakdown, fullscreen breakdown ---- */
+  .actions { display: flex; gap: 8px; }
+  .eval > .disclosure-body { margin-top: 0; }
+  /* The stage is self-evident inline; its eyebrow stays for screen readers. */
+  .media-slot .section-title {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .media-slot > .panel { position: relative; }
+  .fs-breakdown { display: none; flex-direction: column; gap: 12px; }
+  html[data-display-mode="fullscreen"] .fs-breakdown { display: flex; }
+  html[data-display-mode="fullscreen"] .actions,
+  html[data-display-mode="fullscreen"] .eval > .disclosure-body { display: none; }
+
   .note-card { display: flex; gap: 14px; align-items: center; max-width: 560px; margin: 0 auto; }
   .note-text { font-weight: var(--gl-strong); overflow-wrap: anywhere; }
   .note-card .stamp { font-size: var(--gl-cap); max-width: 130px; padding: 6px 10px; margin: 0; }
@@ -352,10 +407,50 @@ EVAL_CARD_HTML = (
   @media (min-width: 560px) {
     .head-info h1 { font-size: var(--gl-title); line-height: var(--gl-title-lh); }
   }
+  /* Wide card: the thumbs stand beside the stage as a 3-column grid (the
+     Steam store layout) instead of under it — the strip under a full-width
+     16:9 stage cost ~160px of the inline budget, and the trailer plus eight
+     screenshots fill the 3x3 grid exactly. contain: size keeps the column
+     from growing the row, so the stage sets the height and any overflow
+     scrolls inside it. */
+  @media (min-width: 600px) {
+    .media-slot.has-thumbs > .panel {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 296px;
+      column-gap: 10px;
+    }
+    .media-slot.has-thumbs .section-title { grid-column: 1 / -1; }
+    .media-slot.has-thumbs .thumbs {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      align-content: start;
+      gap: 6px;
+      margin-top: 0;
+      contain: size;
+      overflow-x: hidden;
+      overflow-y: auto;
+    }
+    .media-slot.has-thumbs .thumb img, .media-slot.has-thumbs .thumb-text {
+      width: 100%;
+      height: auto;
+      aspect-ratio: 16 / 9;
+    }
+    /* The grid scrolls vertically: no sideways snap, and no trailing spacer
+       (it would wrap into a stray grid cell). */
+    .media-slot.has-thumbs .thumbs { scroll-snap-type: none; }
+    .media-slot.has-thumbs .thumbs::after { content: none; }
+  }
+  @media (max-width: 419px) {
+    .head {
+      grid-template-columns: 84px minmax(0, 1fr);
+      grid-template-areas: "cover info" "cover stamp" "scores scores" "note note";
+      grid-template-rows: auto 1fr auto auto;
+    }
+    .head .stamp { justify-self: start; }
+  }
   @media (max-width: 480px) {
     .two-col { grid-template-columns: 1fr; }
     .lin-arrow { display: none; }
-    .head .cover-wrap { flex-basis: 84px; }
     /* Narrow phone: smaller thumbs so several fit before scrolling. */
     .thumb img, .thumb-text { width: 96px; height: 55px; }
   }
@@ -460,7 +555,7 @@ EVAL_CARD_HTML = (
     panel.focus({ preventScroll: true });
   }
 
-  /* ---------- 1. media: one viewer + one thumb strip ---------- */
+  /* ---------- media: one viewer + one thumb strip ---------- */
 """
     + apps_shared.HERO_MEDIA_JS
     + r"""
@@ -471,7 +566,7 @@ EVAL_CARD_HTML = (
 """
     + apps_shared.MEDIA_PANEL_JS
     + r"""
-  /* ---------- 2. header + verdict stamp ---------- */
+  /* ---------- 2. header: identity, scores, the call ---------- */
   /* The stamp's text is label("verdict", …); this map only picks its fill. */
   var VERDICT_STAMPS = {
     buy_now: "stamp-good",
@@ -488,6 +583,10 @@ EVAL_CARD_HTML = (
     stamp.setAttribute("aria-label", "Verdict: " + text);
     return stamp;
   }
+  /* Everything the verdict rests on sits in this one panel, in the order it
+     is read: what the game is (cover, title, stamp), how good it is (scores,
+     craft note), and what it costs in hours and money (the call — which used
+     to close the card 2,400px down and is now the third thing on it). */
   function headerNode(pkg) {
     var game = pkg.game || {};
     var own = pkg.ownership || {};
@@ -515,55 +614,20 @@ EVAL_CARD_HTML = (
 
     var stamp = stampNode(pkg.verdict);
     if (stamp) head.appendChild(stamp);
+
+    // The score row and the craft note are grid areas of .head: beside the
+    // cover on a wide card, full width under it on a phone.
+    var chips = scoreChips(pkg);
+    if (chips) head.appendChild(chips);
+    if (pres.craft_note) head.appendChild(el("div", "craft-note", pres.craft_note));
     box.appendChild(head);
 
-    // The scores belong to the identity block, not to a panel of their own:
-    // "CRAFT & FIT" held two chips and a lot of air on the live card.
-    var chips = scoreChips(pkg);
-    if (chips) box.appendChild(chips);
-    if (pres.craft_note) box.appendChild(el("div", "craft-note", pres.craft_note));
+    var call = callNode(pkg);
+    if (call) box.appendChild(call);
     return box;
   }
 
-  /* The verdict in words: the one-liner, the authored pitch, and the why-care
-     eyebrow — one panel, because they are one argument. */
-  function pitchNode(parent, pkg) {
-    var pres = pkg.presentation || {};
-    var hasWhyCare = list(pres.why_care).filter(function (e) { return e && e.text; }).length;
-    if (!pkg.summary && !pres.elevator_pitch && !hasWhyCare) return;
-    var box = el("section", "panel");
-    if (pkg.summary) box.appendChild(el("p", "one-liner", pkg.summary));
-    if (pres.elevator_pitch) box.appendChild(el("p", "pitch", pres.elevator_pitch));
-    whyCareNode(box, pres);
-    parent.appendChild(box);
-  }
-
-  /* why_care: up to three model-authored lines answering "why look at this at
-     all" — the editorial counterpart to the server-fetched pedigree strip
-     below. An eyebrow per kind, one line each, no paragraphs; absent when the
-     recording client authored none. */
-  var WHY_CARE_KINDS = {
-    people: ["People", "wc-people"],
-    studio: ["Studio", "wc-studio"],
-    anticipation: ["Hype", "wc-hype"],
-    moment: ["Moment", "wc-moment"],
-  };
-  function whyCareNode(parent, pres) {
-    var entries = list(pres.why_care).filter(function (e) { return e && e.text; });
-    if (!entries.length) return;
-    var wrap = el("div", "why-care");
-    entries.slice(0, 3).forEach(function (entry) {
-      var known = WHY_CARE_KINDS[entry.kind];
-      var line = el("div", "wc-line");
-      line.appendChild(el("span", "wc-eyebrow " + (known ? known[1] : "wc-studio"),
-        known ? known[0] : humanize(entry.kind || "why")));
-      line.appendChild(el("span", null, String(entry.text)));
-      wrap.appendChild(line);
-    });
-    parent.appendChild(wrap);
-  }
-
-  /* ---------- 3. the score chips (rendered inside the header) ---------- */
+  /* ---------- the score chips (a grid area of the header) ---------- */
   /* Every one is the shared scoreChip: tier color, source as label text. */
   var TRAJECTORIES = {
     improving: ["↗ Improving", "good"],
@@ -630,7 +694,107 @@ EVAL_CARD_HTML = (
     return row.childNodes.length ? row : null;
   }
 
-  /* ---------- 4. for you / not for you ---------- */
+  /* ---------- 3. the call: time, price, flags ---------- */
+  /* Facts are tier-less chips and the flags are danger chips in the same
+     row; the eyebrow rides inline, so the block costs no line of its own. */
+  function factChip(row, name, value) {
+    row.appendChild(scoreChip({ label: name, value: value }));
+  }
+  function factChips(pkg, row) {
+    var time = pkg.time || {};
+    var price = pkg.price || {};
+    var own = pkg.ownership || {};
+
+    var main = hoursLabel(time.hltb_main_hours, true);
+    var extra = hoursLabel(time.hltb_extra_hours);
+    if (main && extra) factChip(row, "HLTB", main + " / " + extra);
+    else if (main) factChip(row, "HLTB", main);
+    else if (extra) factChip(row, "HLTB", "~" + extra + " to complete");
+
+    var weekly = num(time.recent_weekly_minutes);
+    if (weekly != null && weekly > 0) {
+      factChip(row, "Pace", "your last 30 days: " + hoursLabel(weekly / 60, true) + "/wk");
+    }
+
+    var seen = money(price.seen, price.currency);
+    if (seen) {
+      factChip(row, "Price", "seen at " + seen
+        + (price.platform ? " on " + label("platform", price.platform) : ""));
+    }
+    var target = money(price.target, price.currency);
+    if (target) factChip(row, "Target", target);
+
+    var paid = money(own.price_paid, own.price_currency);
+    if (paid) {
+      var how = own.bundle_name ? " in " + own.bundle_name
+        : own.purchase_source ? " via " + own.purchase_source : "";
+      factChip(row, "Owned", "paid " + paid + how);
+    }
+  }
+  function callNode(pkg) {
+    var row = el("div", "chips");
+    factChips(pkg, row);
+    list(pkg.flags).filter(Boolean).forEach(function (f) {
+      row.appendChild(scoreChip({ label: String(f), tier: "bad", cls: "flag" }));
+    });
+    if (!row.childNodes.length) return null;
+    row.insertBefore(el("span", "call-label", "The call"), row.firstChild);
+    var call = el("div", "call");
+    call.appendChild(row);
+    return call;
+  }
+
+  /* ---------- 4. the verdict in words ---------- */
+  /* The one-liner, the authored pitch, and the why-care eyebrow — one panel,
+     because they are one argument. */
+  function pitchNode(parent, pkg) {
+    var pres = pkg.presentation || {};
+    var hasWhyCare = list(pres.why_care).filter(function (e) { return e && e.text; }).length;
+    if (!pkg.summary && !pres.elevator_pitch && !hasWhyCare) return;
+    var box = el("section", "panel");
+    if (pkg.summary) box.appendChild(el("p", "one-liner", pkg.summary));
+    if (pres.elevator_pitch) box.appendChild(el("p", "pitch", pres.elevator_pitch));
+    whyCareNode(box, pres);
+    parent.appendChild(box);
+  }
+
+  /* why_care: up to three model-authored lines answering "why look at this at
+     all" — the editorial counterpart to the server-fetched pedigree strip in
+     the breakdown. An eyebrow per kind, one line each, no paragraphs; absent
+     when the recording client authored none. */
+  var WHY_CARE_KINDS = {
+    people: ["People", "wc-people"],
+    studio: ["Studio", "wc-studio"],
+    anticipation: ["Hype", "wc-hype"],
+    moment: ["Moment", "wc-moment"],
+  };
+  function whyCareNode(parent, pres) {
+    var entries = list(pres.why_care).filter(function (e) { return e && e.text; });
+    if (!entries.length) return;
+    var wrap = el("div", "why-care");
+    entries.slice(0, 3).forEach(function (entry) {
+      var known = WHY_CARE_KINDS[entry.kind];
+      var line = el("div", "wc-line");
+      line.appendChild(el("span", "wc-eyebrow " + (known ? known[1] : "wc-studio"),
+        known ? known[0] : humanize(entry.kind || "why")));
+      line.appendChild(el("span", null, String(entry.text)));
+      wrap.appendChild(line);
+    });
+    parent.appendChild(wrap);
+  }
+
+  /* ---------- 5. media (one viewer + one thumb strip) ---------- */
+  /* The shared mediaNode builds the panel; the slot lets the card lay it out
+     (thumbs beside the stage on a wide card) without touching shared code. */
+  function mediaSlot(parent, media, gameName) {
+    var slot = el("div", "media-slot");
+    mediaNode(slot, media, gameName);
+    if (!slot.childNodes.length) return;
+    if (slot.querySelector(".thumbs")) slot.classList.add("has-thumbs");
+    parent.appendChild(slot);
+  }
+
+  /* ---------- breakdown: for you / not for you ---------- */
   function bulletColumn(title, items, kind) {
     var col = el("div", "col " + kind);
     col.appendChild(el("div", "col-title", title));
@@ -657,7 +821,7 @@ EVAL_CARD_HTML = (
     box.appendChild(cols);
   }
 
-  /* ---------- 5. anchors ---------- */
+  /* ---------- breakdown: anchors ---------- */
   /* The PILL is neutral — an anchor is evidence, and half of them are
      negative ("Cyberpunk 2077, 6.6h"). Only the status glyph is coloured:
      completed/evergreen good, abandoned bad, anything else plain. */
@@ -699,7 +863,7 @@ EVAL_CARD_HTML = (
     box.appendChild(chips);
   }
 
-  /* ---------- 6. lineage / comparisons ---------- */
+  /* ---------- breakdown: lineage / comparisons ---------- */
   var CALLOUT_HEADS = {
     better_version: "A better version exists",
     cheaper_substitute: "Cheaper substitute",
@@ -760,7 +924,7 @@ EVAL_CARD_HTML = (
     }
 
     if (loose.length) {
-      // Labelled, because these note-cards now sit above the library's own
+      // Labelled, because these note-cards sit above the library's own
       // similar strip and the two must not read as one list.
       var onlySimilar = loose.every(function (c) { return c.relation === "similar"; });
       var head = el("div", "lin-head", onlySimilar ? "Also similar" : "Other comparisons");
@@ -775,11 +939,11 @@ EVAL_CARD_HTML = (
     }
   }
 
-  /* ---------- 7. similar in your library (tag similarity) ---------- */
+  /* ---------- breakdown: similar in your library (tag similarity) ---------- */
 """
     + apps_shared.SIMILAR_NODE_JS
     + r"""
-  /* ---------- 8. from the studio (pedigree) ---------- */
+  /* ---------- breakdown: from the studio (pedigree) ---------- */
   /* Server-fetched and library-annotated (tools/game_media.py): who made this,
      and what they shipped BEFORE it. Under the big-studio damper, or with
      nothing released earlier, only the header line renders — six arbitrary
@@ -788,56 +952,7 @@ EVAL_CARD_HTML = (
 """
     + apps_shared.PEDIGREE_JS
     + r"""
-  /* ---------- 9. the call: time, price, flags, past verdicts ---------- */
-  /* One closing panel instead of three: three boxes holding a chip apiece was
-     the other half of the "too busy" complaint. Facts are tier-less chips. */
-  function factChip(row, name, value) {
-    row.appendChild(scoreChip({ label: name, value: value }));
-  }
-  function factChips(pkg) {
-    var time = pkg.time || {};
-    var price = pkg.price || {};
-    var own = pkg.ownership || {};
-    var row = el("div", "chips");
-
-    var main = hoursLabel(time.hltb_main_hours, true);
-    var extra = hoursLabel(time.hltb_extra_hours);
-    if (main && extra) factChip(row, "HLTB", main + " / " + extra);
-    else if (main) factChip(row, "HLTB", main);
-    else if (extra) factChip(row, "HLTB", "~" + extra + " to complete");
-
-    var weekly = num(time.recent_weekly_minutes);
-    if (weekly != null && weekly > 0) {
-      factChip(row, "Pace", "your last 30 days: " + hoursLabel(weekly / 60, true) + "/wk");
-    }
-
-    var seen = money(price.seen, price.currency);
-    if (seen) {
-      factChip(row, "Price", "seen at " + seen
-        + (price.platform ? " on " + label("platform", price.platform) : ""));
-    }
-    var target = money(price.target, price.currency);
-    if (target) factChip(row, "Target", target);
-
-    var paid = money(own.price_paid, own.price_currency);
-    if (paid) {
-      var how = own.bundle_name ? " in " + own.bundle_name
-        : own.purchase_source ? " via " + own.purchase_source : "";
-      factChip(row, "Owned", "paid " + paid + how);
-    }
-
-    return row.childNodes.length ? row : null;
-  }
-
-  function flagsRow(flags) {
-    if (!flags.length) return null;
-    var chips = el("div", "chips");
-    chips.style.marginTop = "10px";
-    flags.forEach(function (f) {
-      chips.appendChild(scoreChip({ label: String(f), tier: "bad", cls: "flag" }));
-    });
-    return chips;
-  }
+  /* ---------- breakdown: past verdicts ---------- */
   function pastRow(past) {
     var items = list(past.items).slice();
     if (!items.length) return null;
@@ -845,7 +960,6 @@ EVAL_CARD_HTML = (
       return String(b.assessed_at || "").localeCompare(String(a.assessed_at || ""));
     });
     var line = el("div", "timeline");
-    line.style.marginTop = "10px";
     items.forEach(function (p) {
       var parts = [];
       if (p.assessed_at) parts.push(String(p.assessed_at).slice(0, 10));
@@ -862,25 +976,18 @@ EVAL_CARD_HTML = (
     }
     return line;
   }
-  function closingNode(parent, pkg) {
-    var facts = factChips(pkg);
-    var flags = flagsRow(list(pkg.flags).filter(Boolean));
-    var past = pastRow(pkg.past || {});
-    if (!facts && !flags && !past) return;
-    var box = section(parent, "The call");
-    if (facts) box.appendChild(facts);
-    [flags, past].forEach(function (row) {
-      if (!row) return;
-      if (!box.querySelector(".chips, .timeline")) row.style.marginTop = "0";
-      box.appendChild(row);
-    });
+  function pastNode(parent, past) {
+    var line = pastRow(past);
+    if (line) section(parent, "Past verdicts").appendChild(line);
   }
+
+  /* ---------- 7. what failed: one notice inline, the detail in the breakdown ---------- */
   /* package.errors are "<block>: <reason>" strings ("media: steam: …",
      "igdb: unresolved — …"). The notice names WHAT is missing and from WHERE;
-     the raw strings stay in the tooltip. */
+     the raw reasons stay in its tooltip and in the breakdown's last section. */
   var ERROR_WHAT = {
     media: "media", pace: "your pace", similar: "similar games",
-    igdb: "studio", steam: "store data", package: "evaluation details",
+    igdb: "studio", steam: "store data", package: "evaluation details", hltb: "time to beat",
   };
   function errorItem(text) {
     var parts = String(text).split(":");
@@ -897,28 +1004,113 @@ EVAL_CARD_HTML = (
     var node = notice(parent, errors.map(errorItem));
     if (node) node.title = errors.join("; ");
   }
+  function errorDetailNode(parent, errors) {
+    if (!errors.length) return;
+    var box = section(parent, "Couldn't load");
+    var ul = el("ul", "err-list");
+    errors.forEach(function (text) {
+      var item = errorItem(text);
+      var li = document.createElement("li");
+      li.appendChild(el("b", null, item.what.charAt(0).toUpperCase() + item.what.slice(1)
+        + (item.source ? " (" + item.source + ")" : "")));
+      var why = String(text).split(":").slice(1).join(":").trim();
+      if (why) li.appendChild(el("span", null, " — " + why));
+      ul.appendChild(li);
+    });
+    box.appendChild(ul);
+  }
+
+  /* ---------- the full breakdown (fullscreen, or a disclosure in place) ---------- */
+  /* Everything that argues FOR the verdict rather than stating it. Kept out
+     of the inline card on purpose: inline, the card is the verdict and its
+     facts (≤900px at 760); the evidence is one click further. */
+  function named(v) { return list(v).filter(function (i) { return i && i.name; }); }
+  function hasBreakdown(pkg) {
+    var pres = pkg.presentation || {};
+    var ped = pkg.pedigree;
+    return !!(list(pres.for_you_if).filter(Boolean).length
+      || list(pres.not_for_you_if).filter(Boolean).length
+      || named(pkg.anchors).length
+      || named(pkg.comparisons).length
+      || named((pkg.similar || {}).items).length
+      || (ped && (pedigreeHeadline(ped) || named(ped.previous_games).length))
+      || list((pkg.past || {}).items).length);
+  }
+  function breakdownNode(parent, pkg) {
+    forYouNode(parent, pkg.presentation || {});
+    anchorsNode(parent, named(pkg.anchors));
+    lineageNode(parent, pkg, named(pkg.comparisons));
+    similarNode(parent, pkg.similar || {});
+    pedigreeNode(parent, pkg.pedigree);
+    pastNode(parent, pkg.past || {});
+    errorDetailNode(parent, list(pkg.errors).filter(Boolean));
+  }
+
+  /* ---------- 6. the action row ---------- */
+  /* One action: "Full breakdown" — fullscreen where the host offers it, the
+     shared disclosure in place where it doesn't (or refuses). The spec's
+     second action, "Store page ↗", needs a Steam app id and the package
+     carries none, so it is left out rather than guessed from an art URL. */
+  function actionsNode(wrap, pkg) {
+    var row = el("div", "actions");
+    var d = disclosure(row, "Full breakdown", function (body) { breakdownNode(body, pkg); });
+    d.button.classList.add("act-breakdown");
+    var inPlace = false;                            // the host refused once: stay in place
+    var asking = false;
+    // Capture on the row, so the disclosure's own click handler only runs
+    // when fullscreen is off the table.
+    row.addEventListener("click", function (ev) {
+      if (!d.button.contains(ev.target)) return;
+      if (inPlace || !canFullscreen() || d.button.getAttribute("aria-expanded") === "true") return;
+      ev.stopPropagation();
+      if (asking) return;
+      asking = true;
+      requestDisplayMode("fullscreen").then(function (mode) {
+        asking = false;
+        if (mode === "fullscreen") return;          // syncDisplayMode builds the breakdown
+        inPlace = true;
+        d.button.click();
+      });
+    }, true);
+    wrap.appendChild(row);
+    return d.body;
+  }
+
+  /* ---------- fullscreen ---------- */
+  /* Fullscreen keeps the inline card on top and puts the breakdown under it;
+     CSS on html[data-display-mode] swaps the action row out and the
+     breakdown in, so a host-initiated switch — or the host's own close
+     button, the only way back — needs no re-render. The breakdown is built
+     on first entry only. */
+  var fullscreenBreakdown = null;                   // { node, pkg, built }
+  function syncDisplayMode() {
+    var fs = fullscreenBreakdown;
+    if (fs && !fs.built && currentDisplayMode() === "fullscreen") {
+      fs.built = true;
+      breakdownNode(fs.node, fs.pkg);
+    }
+  }
 
   /* ---------- card assembly ---------- */
-  /* Read top to bottom: what it is (header + scores), what it says (pitch),
-     what it looks like (media), whether it is for HIM (for-you, anchors),
-     where it comes from (lineage, similar, studio), and the call. */
-  function evalCard(pkg) {
-    var wrap = el("div", "eval");
-    var game = pkg.game || {};
-
+  /* The inline tier, top to bottom: the header panel (identity, stamp,
+     scores, craft note, the call), the verdict in words, the media. */
+  function inlineCard(wrap, pkg) {
     wrap.appendChild(headerNode(pkg));
     pitchNode(wrap, pkg);
-    mediaNode(wrap, pkg.media || {}, game.name);
-    forYouNode(wrap, pkg.presentation || {});
-    anchorsNode(wrap, list(pkg.anchors).filter(function (a) { return a && a.name; }));
-
-    var comps = list(pkg.comparisons).filter(function (c) { return c && c.name; });
-    lineageNode(wrap, pkg, comps);
-    similarNode(wrap, pkg.similar || {});
-    pedigreeNode(wrap, pkg.pedigree);
-
-    closingNode(wrap, pkg);
+    mediaSlot(wrap, pkg.media || {}, (pkg.game || {}).name);
+  }
+  function evalCard(pkg) {
+    var wrap = el("div", "eval");
+    inlineCard(wrap, pkg);
+    var more = hasBreakdown(pkg);
+    var inPlaceBody = more ? actionsNode(wrap, pkg) : null;
     errorsNode(wrap, list(pkg.errors).filter(Boolean));
+    if (inPlaceBody) wrap.appendChild(inPlaceBody);
+    if (more) {
+      var fs = el("div", "fs-breakdown");
+      wrap.appendChild(fs);
+      fullscreenBreakdown = { node: fs, pkg: pkg, built: false };
+    }
     return wrap;
   }
 
@@ -938,11 +1130,13 @@ EVAL_CARD_HTML = (
 
   function render(data) {
     root.textContent = "";
-    var name = data && data.name ? " — " + data.name : "";
+    fullscreenBreakdown = null;
+    var name = data && data.name ? " · " + data.name : "";
     if (data && data.package) {
       root.appendChild(evalCard(data.package));
+      syncDisplayMode();
     } else if (data && data.verdict) {
-      root.appendChild(noteCard("Recorded: " + label("verdict", data.verdict) + name, data.verdict));
+      root.appendChild(noteCard("Recorded — " + label("verdict", data.verdict) + name, data.verdict));
     } else {
       root.appendChild(el("div", "empty", "Nothing to display."));
     }
@@ -952,7 +1146,28 @@ EVAL_CARD_HTML = (
 """
     + apps_shared.SIZING_JS
     + apps_shared.INIT_JS
-    + r"""  startWidget("gamelib-eval-card");
+    + r"""
+  /* Fullscreen hands the frame's size to the host, so size-changed stays
+     quiet there; leaving it re-announces the inline height even when it
+     matches the last one sent. The shared observer captured the inline
+     reporter by reference, so it is re-armed on the wrapper. */
+  var reportInlineSize = reportSize;
+  reportSize = function () {
+    if (currentDisplayMode() !== "fullscreen") reportInlineSize();
+  };
+  if (resizeObserver) {
+    resizeObserver.disconnect();
+    resizeObserver = new ResizeObserver(function () { reportSize(); });
+    resizeObserver.observe(document.body);
+  }
+  if (window.MutationObserver) {
+    new MutationObserver(function () {
+      if (currentDisplayMode() !== "fullscreen") lastSize = "";
+      syncDisplayMode();
+    }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-display-mode"] });
+  }
+
+  startWidget("gamelib-eval-card");
 })();
 </script>
 </body>

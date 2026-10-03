@@ -44,7 +44,11 @@ Baseline measurements (before): evaluation card 2,400px tall at 760px and
   tests/test_apps_eval.py tests/test_tool_registration.py tests/test_docs_drift.py -q`.
   A test that pins the OLD look is updated to pin the NEW rule, never deleted
   without a replacement assertion.
-- No new Python dependency. No new MCP tool, no new response field.
+- No new Python dependency. No new MCP tool, no new response field — with
+  one deliberate amendment (2026-10-03, UX over invariant): `record_assessment`'s
+  `package.game` gains an additive, optional `steam_appid`, resolved through
+  the one existing Steam-appid chain, so the evaluation card can offer a
+  store link on a buy/wishlist verdict. Nothing else on the wire changes.
 
 ## 1. Phase A — design system foundation (one executor, `apps_shared.py` + both widgets)
 

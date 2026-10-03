@@ -170,11 +170,21 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
         for marker in (
             "if (data && data.package)",
             "else if (data && data.verdict)",
-            '"Recorded: " + label("verdict", data.verdict)',
+            '"Recorded — " + label("verdict", data.verdict) + name',
             '"Nothing to display."',
         ):
             self.assertIn(marker, apps_eval.EVAL_CARD_HTML)
         self.assertNotIn("data.voided", apps_eval.EVAL_CARD_HTML)
+
+    def test_the_note_card_reads_as_words(self) -> None:
+        # "Recorded — Play what you own · Slay the Spire II", stamp beside it:
+        # the verdict goes through label(), never the raw literal.
+        self.assertIn('var name = data && data.name ? " · " + data.name : "";',
+                      apps_eval.EVAL_CARD_HTML)
+        self.assertNotIn('"Recorded: "', apps_eval.EVAL_CARD_HTML)
+        start = apps_eval.EVAL_CARD_HTML.index("function noteCard(text, verdict)")
+        body = apps_eval.EVAL_CARD_HTML[start:apps_eval.EVAL_CARD_HTML.index("function render(", start)]
+        self.assertIn("var stamp = verdict ? stampNode(verdict) : null;", body)
 
     def test_trailer_falls_back_when_the_media_element_fails(self) -> None:
         # Valve's constructed mp4 URLs are undocumented legacy surface and a
@@ -186,7 +196,7 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
 
     def test_pedigree_strip_renders_from_the_package(self) -> None:
         for marker in (
-            "pedigreeNode(wrap, pkg.pedigree)",
+            "pedigreeNode(parent, pkg.pedigree)",
             'section(parent, "From the studio")',
             'el("div", "ped-head", headline)',
             'el("div", "ped-pub", "published by " + ped.publisher_name)',
@@ -270,27 +280,120 @@ class EvalCardLayoutTests(unittest.TestCase):
     and the panels they build, in the order the card assembles them.
     """
 
+    @staticmethod
+    def _function(name: str, until: str) -> str:
+        html = apps_eval.EVAL_CARD_HTML
+        start = html.index(f"function {name}(")
+        return html[start:html.index(f"function {until}(", start)]
+
     def test_panels_assemble_in_the_reading_order(self) -> None:
-        start = apps_eval.EVAL_CARD_HTML.index("function evalCard(pkg)")
-        end = apps_eval.EVAL_CARD_HTML.index("function noteCard(", start)
-        body = apps_eval.EVAL_CARD_HTML[start:end]
+        # Spec §2.2: inline header (identity, scores, the call) → the verdict
+        # in words → media → the action row → the failure notice; the
+        # breakdown bodies (in place, and fullscreen) come after all of it.
+        body = self._function("evalCard", "noteCard")
+        order = [
+            "inlineCard(wrap, pkg)",
+            "actionsNode(wrap, pkg)",
+            "errorsNode(wrap,",
+            "wrap.appendChild(inPlaceBody)",
+            'el("div", "fs-breakdown")',
+        ]
+        positions = [body.index(marker) for marker in order]
+        self.assertEqual(positions, sorted(positions))
+        inline = self._function("inlineCard", "evalCard")
         order = [
             "headerNode(pkg)",
             "pitchNode(wrap, pkg)",
-            "mediaNode(wrap, pkg.media || {}, game.name)",
-            "forYouNode(wrap, pkg.presentation || {})",
-            "anchorsNode(wrap,",
-            "lineageNode(wrap, pkg, comps)",
-            "similarNode(wrap, pkg.similar || {})",
-            "pedigreeNode(wrap, pkg.pedigree)",
-            "closingNode(wrap, pkg)",
-            "errorsNode(wrap,",
+            "mediaSlot(wrap, pkg.media || {}, (pkg.game || {}).name)",
         ]
-        positions = []
-        for marker in order:
-            self.assertIn(marker, body)
-            positions.append(body.index(marker))
+        positions = [inline.index(marker) for marker in order]
         self.assertEqual(positions, sorted(positions))
+
+    def test_the_call_sits_under_the_scores_before_the_pitch(self) -> None:
+        # The facts block used to close the card ~2,400px down; it is now
+        # inside the header panel, after the score row and craft note and
+        # before the summary/pitch panel is even built.
+        header = self._function("headerNode", "craftPercent")
+        order = [
+            "head.appendChild(coverNode(game))",
+            "var stamp = stampNode(pkg.verdict);",
+            "var chips = scoreChips(pkg);",
+            'el("div", "craft-note", pres.craft_note)',
+            "var call = callNode(pkg);",
+        ]
+        positions = [header.index(marker) for marker in order]
+        self.assertEqual(positions, sorted(positions))
+        call = self._function("callNode", "pitchNode")
+        self.assertIn("factChips(pkg, row);", call)
+        self.assertIn('scoreChip({ label: String(f), tier: "bad", cls: "flag" })', call)
+        self.assertIn('el("span", "call-label", "The call")', call)
+
+    def test_the_breakdown_stays_out_of_the_inline_tier(self) -> None:
+        # The height budget (≤900px at 760 with media, ≤1,300px at 360) holds
+        # only because the evidence sections are one click away: none of them
+        # may be called from the inline builders.
+        inline = (
+            self._function("inlineCard", "evalCard")
+            + self._function("headerNode", "craftPercent")
+            + self._function("pitchNode", "whyCareNode")
+        )
+        breakdown = self._function("breakdownNode", "actionsNode")
+        sections = (
+            "forYouNode(",
+            "anchorsNode(",
+            "lineageNode(",
+            "similarNode(",
+            "pedigreeNode(",
+            "pastNode(",
+            "errorDetailNode(",
+        )
+        for section_call in sections:
+            self.assertNotIn(section_call, inline)
+            self.assertIn(section_call, breakdown)
+        # …and the order inside the breakdown is the spec's.
+        positions = [breakdown.index(c) for c in sections]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_at_most_two_actions_and_none_without_a_breakdown(self) -> None:
+        # One action row, built only when there is something to disclose; it
+        # holds the disclosure button and nothing else (the store-page action
+        # needs a Steam app id, which the package does not carry).
+        body = self._function("evalCard", "noteCard")
+        self.assertIn("var more = hasBreakdown(pkg);", body)
+        self.assertIn("var inPlaceBody = more ? actionsNode(wrap, pkg) : null;", body)
+        actions = self._function("actionsNode", "syncDisplayMode")
+        self.assertEqual(actions.count('el("div", "actions")'), 1)
+        self.assertLessEqual(actions.count("row.appendChild(") + actions.count("disclosure(row,"), 2)
+        self.assertIn(
+            'disclosure(row, "Full breakdown", function (body) { breakdownNode(body, pkg); });',
+            actions,
+        )
+        self.assertNotIn("steam_appid", apps_eval.EVAL_CARD_HTML)
+
+    def test_full_breakdown_requests_fullscreen_and_falls_back_in_place(self) -> None:
+        actions = self._function("actionsNode", "syncDisplayMode")
+        for marker in (
+            'if (inPlace || !canFullscreen() || d.button.getAttribute("aria-expanded") === "true") return;',
+            "ev.stopPropagation();",
+            'requestDisplayMode("fullscreen").then(function (mode) {',
+            'if (mode === "fullscreen") return;',
+            "inPlace = true;",
+            "d.button.click();",
+            "}, true);",                    # capture: runs before the disclosure's own handler
+        ):
+            self.assertIn(marker, actions)
+        # Fullscreen: the inline card stays, the breakdown builds once below
+        # it, CSS swaps the action row out, and size reports go quiet.
+        html = apps_eval.EVAL_CARD_HTML
+        for marker in (
+            'html[data-display-mode="fullscreen"] .fs-breakdown { display: flex; }',
+            'html[data-display-mode="fullscreen"] .actions,',
+            'if (fs && !fs.built && currentDisplayMode() === "fullscreen") {',
+            'attributeFilter: ["data-display-mode"]',
+            'if (currentDisplayMode() !== "fullscreen") reportInlineSize();',
+            "resizeObserver = new ResizeObserver(function () { reportSize(); });",
+        ):
+            self.assertIn(marker, html)
 
     def test_the_score_chips_live_in_the_header_panel(self) -> None:
         # The standalone "CRAFT & FIT" panel is gone — it held two chips.
@@ -336,9 +439,11 @@ class EvalCardLayoutTests(unittest.TestCase):
 
     def test_the_craft_note_renders_under_the_chips(self) -> None:
         self.assertIn(
-            'if (pres.craft_note) box.appendChild(el("div", "craft-note", pres.craft_note));',
+            'if (pres.craft_note) head.appendChild(el("div", "craft-note", pres.craft_note));',
             apps_eval.EVAL_CARD_HTML,
         )
+        self.assertIn('"cover info stamp" "cover scores scores" "cover note note"',
+                      apps_eval.EVAL_CARD_HTML)
 
     def test_media_is_one_viewer_and_one_thumb_strip(self) -> None:
         for marker in (
@@ -402,10 +507,18 @@ class EvalCardLayoutTests(unittest.TestCase):
         self.assertNotIn("foldSimilar", apps_eval.EVAL_CARD_HTML)
         self.assertIn("function similarNode(parent, similar)", apps_eval.EVAL_CARD_HTML)
 
-    def test_the_closing_panel_merges_time_price_flags_and_past(self) -> None:
-        self.assertIn('section(parent, "The call")', apps_eval.EVAL_CARD_HTML)
-        for gone in ("Time & price", '"Flags"', "Past verdicts"):
+    def test_the_call_is_one_row_and_past_verdicts_moved_to_the_breakdown(self) -> None:
+        # The closing "The call" panel is gone: its facts and flags are one
+        # chip row in the header, and past verdicts are a breakdown section.
+        self.assertNotIn('section(parent, "The call")', apps_eval.EVAL_CARD_HTML)
+        self.assertIn('section(parent, "Past verdicts")', apps_eval.EVAL_CARD_HTML)
+        for gone in ("Time & price", '"Flags"', "closingNode"):
             self.assertNotIn(gone, apps_eval.EVAL_CARD_HTML)
+
+    def test_the_stamp_stacks_under_the_title_on_a_phone(self) -> None:
+        css = apps_eval.EVAL_CARD_HTML.split("<style>")[1].split("</style>")[0]
+        narrow = css[css.index("@media (max-width: 419px)"):]
+        self.assertIn('"cover info" "cover stamp" "scores scores" "note note"', narrow)
 
     def test_counts_are_pluralized(self) -> None:
         # "Rebel Wolves · est. 2022 · 1 games" shipped to the phone.

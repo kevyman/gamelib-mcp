@@ -105,7 +105,7 @@ class GameCardsResourceTests(unittest.IsolatedAsyncioTestCase):
             "ui/notifications/initialized",
             "ui/notifications/tool-result",
             "ui/notifications/size-changed",
-            "tools/call",           # click-to-expand fetches get_game_detail
+            "tools/call",           # a card tap drills into get_game_detail
             "get_game_detail",
             "ui/open-link",         # rating pills link out via the host
             "__PREVIEW_DATA__",
@@ -151,9 +151,10 @@ class GameCardsResourceTests(unittest.IsolatedAsyncioTestCase):
         body = apps_shared.SCORE_CHIP_JS[start:]
         self.assertIn("if (!desc) return null;", body)
         self.assertIn('label: "Steam", value: phrase, tier: steamTier(desc),', body)
-        # The grid and the detail card both render Steam through it.
-        self.assertIn("steamChip(game.steam_review_desc)", apps.GAME_CARDS_HTML)
+        # The detail card renders Steam through it (phrase + meter); the grid
+        # renders the phrase without the meter (GridModeTests pins that rule).
         self.assertIn("steamChip(game.steam_review_desc,", apps.GAME_CARDS_HTML)
+        self.assertIn("gridSteamChip(game.steam_review_desc)", apps.GAME_CARDS_HTML)
         self.assertNotIn("steamBadge", apps.GAME_CARDS_HTML)
 
     def test_csp_allows_exactly_the_cover_and_media_hosts(self) -> None:
@@ -253,15 +254,22 @@ class ContentTypeBadgeTests(unittest.TestCase):
 
     def test_detail_card_has_an_empty_state_with_the_skip_reasons(self) -> None:
         # A never-enriched row (an assessment-minted candidate) fills nothing
-        # but the title; say so, and relay get_game_detail's `enrichment`
-        # {provider: reason} map when it explains why.
+        # but the title; say so through the shared notice, and relay
+        # get_game_detail's `enrichment` {provider: reason} map in words
+        # ("IGDB: no match", "Steam: no app id"), never as raw ids.
         for marker in (
             'var emptyText = "No details fetched yet";',
-            "var why = game.enrichment;",
-            'parts.push(k + ": " + why[k]);',
-            'el("div", "sub empty-state", emptyText)',
+            "var reasons = enrichmentReasons(game.enrichment);",
+            'return source + ": " + reason;',
+            'emptyText += " — " + reasons.join(" · ");',
+            "notice(body, emptyText);",
+            'var ENRICH_SOURCES = { steam_store: "Steam", protondb: "ProtonDB", igdb: "IGDB" };',
+            'no_steam_appid: "no app id",',
+            'no_match: "no match",',
         ):
             self.assertIn(marker, apps.GAME_CARDS_HTML)
+        self.assertNotIn("empty-state", apps.GAME_CARDS_HTML)
+        self.assertNotIn('parts.push(k + ": " + why[k]);', apps.GAME_CARDS_HTML)
 
     def test_parent_name_supports_both_grid_and_detail_shapes(self) -> None:
         # Grid/search rows carry a flat parent_name; get_game_detail carries
@@ -283,13 +291,15 @@ class ContentTypeBadgeTests(unittest.TestCase):
         # there is no headless-DOM harness.
         for marker in (
             'var media = game.media || {};',      # detailCard reads the block
+            'stack.appendChild(identityPanel(game, media));',
             'mediaNode(stack, media, game.name)',
+            'relatedBlock(stack, game);',
             'section(parent, "Media")',
             'var viewer = el("div", "hero viewer")',
             'el("div", "strip thumbs")',
             'btn.classList.toggle("sel", i === j)',
             'select(0);',                         # trailer first when there is one
-            'if (game.similar) similarNode(stack, game.similar)',
+            'if (similar) similarNode(parent, game.similar);',
             'el("div", "sim-name", item.name || "?")',
             'section(parent, "Similar in your library")',
             '"Your " + plural(items.length, "game") + " most like this one"',
@@ -344,7 +354,7 @@ class ContentTypeBadgeTests(unittest.TestCase):
         # row, and the track-record footer. Source-presence style, like the
         # media markers above.
         for marker in (
-            "pedigreeNode(stack, game.pedigree)",
+            "if (studio) pedigreeNode(parent, game.pedigree);",
             'section(parent, "From the studio")',
             'el("div", "ped-head", headline)',
             'el("div", "ped-pub", "published by " + ped.publisher_name)',
@@ -394,17 +404,28 @@ class ContentTypeBadgeTests(unittest.TestCase):
             apps.GAME_CARDS_HTML,
         )
 
-    def test_screenshots_open_a_carousel_over_the_detail_card(self) -> None:
-        # The overlay machinery is a stack, so paging screenshots from inside a
-        # detail overlay must not close the card underneath it — and only the
-        # topmost overlay answers keys, so the carousel's arrows never reach it.
+    def test_screenshot_lightbox_is_fixed_closable_and_keyboard_reachable(self) -> None:
+        # The detail card's own media viewer survives the overlay removal: it
+        # is a media viewer, not navigation. One slot, position: fixed over
+        # the iframe, closed by the ✕, Escape or a backdrop click, with Tab
+        # kept inside it and focus handed back to the stage that opened it.
         self.assertIn(
             "openCarousel(shots, entry.index, gameName, btn)", apps.GAME_CARDS_HTML
         )
-        self.assertIn('el("div", "overlay-panel carousel")', apps.GAME_CARDS_HTML)
-        self.assertIn(
-            "if (overlays[overlays.length - 1] !== entry) return;", apps.GAME_CARDS_HTML
-        )
+        css = widget_css(apps.GAME_CARDS_HTML)
+        self.assertIn(".overlay.lightbox { position: fixed; inset: 0; }", css)
+        for marker in (
+            'var overlay = el("div", "overlay lightbox");',
+            'panel.setAttribute("role", "dialog");',
+            'panel.setAttribute("aria-modal", "true");',
+            'closer.addEventListener("click", closeLightbox);',
+            "if (ev.target === overlay) closeLightbox();",
+            'if (ev.key === "Escape") { ev.preventDefault(); closeLightbox(); }',
+            'else if (ev.key === "Tab") keepFocusInside(ev, panel);',
+            "closer.focus({ preventScroll: true });",
+            "current.trigger.focus({ preventScroll: true });",
+        ):
+            self.assertIn(marker, apps.GAME_CARDS_HTML)
         for marker in (
             'navButton("car-prev", "‹"',
             'navButton("car-next", "›"',
@@ -442,7 +463,7 @@ class ContentTypeBadgeTests(unittest.TestCase):
         self.assertEqual(apps.GAME_CARDS_HTML.count("function hoursLabel("), 1)
         self.assertNotIn('game.playtime_hours + "h played"', apps.GAME_CARDS_HTML)
 
-    def test_grid_overlay_upgrade_call_requests_media(self) -> None:
+    def test_drill_in_detail_call_requests_media(self) -> None:
         self.assertIn(
             # 30s, not callTool's 15s default: a cold click-through runs full
             # enrichment plus the media lookup's own 8s budget server-side.
@@ -463,6 +484,239 @@ class ContentTypeBadgeTests(unittest.TestCase):
             + ".html"
         )
         self.assertEqual(apps.GAME_CARDS_URI, expected)
+
+
+def js_function(html: str, signature: str) -> str:
+    """The source of one widget function, from its signature to the next one."""
+    start = html.index(signature)
+    end = html.find("\n  function ", start + len(signature))
+    return html[start:end if end > 0 else len(html)]
+
+
+class GridModeTests(unittest.TestCase):
+    """Spec 2026-10-03 §2.1.1–§2.1.4: header line, card body, footer, card tap."""
+
+    HTML = apps.GAME_CARDS_HTML
+
+    def test_the_overlay_drill_in_is_gone(self) -> None:
+        # A card tap hands back to the conversation; no in-widget overlay.
+        for gone in (
+            "function openOverlay(",
+            "function openDetail(",
+            "overlay-panel",
+            "var overlays = []",
+            "__PREVIEW_OPEN_INDEX__",
+            "loading-note",
+            '"pill match"',
+        ):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, self.HTML)
+
+    def test_header_line_reads_the_tool_input(self) -> None:
+        head = js_function(self.HTML, "function headerParts(data)")
+        for marker in (
+            'var SORT_LABELS = { match: "taste match", critic: "critic score", value: "value" };',
+            '? shown + " of " + plural(total, "game")',          # "12 of 143 games"
+            ': plural(shown, "game");',
+            'parts.push("sorted by " + (SORT_LABELS[args.sort_by] || SORT_LABELS.match));',
+            'parts.push(vibes.join(" + "));',
+            'if (args.unplayed_only !== false) parts.push("unplayed only");',
+            'parts.push("≤ " + maxHours + "h");',
+            'parts.push("critics ≥ " + minScore);',
+        ):
+            self.assertIn(marker, self.HTML if marker.startswith("var SORT") else head)
+        # get_game_detail's arguments never produce discover filters.
+        self.assertIn("if (args && !isDetailArgs(args)) {", head)
+        # The count is the emphasised part; the rest is the muted caption.
+        self.assertIn('head.appendChild(el("b", null, parts.count));', self.HTML)
+        css = widget_css(self.HTML)
+        self.assertIn(".grid-head b { color: var(--gl-text); font-weight: var(--gl-strong); }", css)
+        # Tool input arriving after the result redraws the grid.
+        self.assertIn("handleToolInput = function (params) {", self.HTML)
+        self.assertIn("if (gotResult && view === \"grid\" && gridData) render(gridData);", self.HTML)
+
+    def test_match_bar_leads_the_card_body(self) -> None:
+        card = js_function(self.HTML, "function gridCard(game)")
+        self.assertIn("body.appendChild(matchBar(game.match_percent));", card)
+        self.assertNotIn('"% match"', card)
+        order = [
+            'body.appendChild(el("div", "title", game.name));',
+            "body.appendChild(matchBar(game.match_percent));",
+            'body.appendChild(el("div", "meta", metaBits.join(" · ")));',
+            "body.appendChild(scores);",
+            'body.appendChild(el("div", "tagline", why.join(" · ")));',
+        ]
+        positions = [card.index(marker) for marker in order]
+        self.assertEqual(positions, sorted(positions))
+        # Matched tags are one muted text line, at most three, no pills.
+        self.assertIn("var why = matchedTagNames(game).slice(0, 3);", card)
+        self.assertNotIn('"pill"', self.HTML)
+        self.assertNotIn(".pill {", widget_css(self.HTML))
+
+    def test_cover_carries_only_rank_metacritic_and_type_chip(self) -> None:
+        card = js_function(self.HTML, "function gridCard(game)")
+        self.assertEqual(card.count("cover.appendChild("), 2)
+        self.assertIn('cls: "corner",', card)
+        self.assertIn('if (typeLabel) cover.appendChild(el("span", "type-chip", typeLabel));', card)
+        self.assertIn(".cover-wrap .type-chip { position: absolute; left: 6px; bottom: 6px;",
+                      widget_css(self.HTML))
+
+    def test_grid_steam_chip_is_phrase_only_on_a_line_of_its_own(self) -> None:
+        chip = js_function(self.HTML, "function gridSteamChip(desc)")
+        self.assertIn('label: "Steam", value: phrase, tier: steamTier(desc),', chip)
+        self.assertNotIn("meter", chip)                     # the meter stays on the detail card
+        self.assertIn('cls: words >= 2 ? "steam-line" : "",', chip)
+        css = widget_css(self.HTML)
+        self.assertIn(".card .chip.steam-line { flex-basis: 100%; display: block; }", css)
+
+    def test_show_next_button_only_when_has_more(self) -> None:
+        actions = js_function(self.HTML, "function gridActions(data)")
+        for marker in (
+            "if (data.has_more && shown) {",
+            "var limit = num(args.limit) || shown;",
+            'el("button", "btn act-more", "Show next " + count)',
+            'sendMessage("Show the next " + count + " recommendations (offset " + next + ")");',
+            "if (canFullscreen()) {",
+            'el("button", "btn act-expand", "Expand")',
+            'requestDisplayMode("fullscreen");',
+        ):
+            self.assertIn(marker, actions)
+        # At most two actions: exactly these two buttons are ever built.
+        self.assertEqual(actions.count('el("button"'), 2)
+        css = widget_css(self.HTML)
+        self.assertIn('html[data-display-mode="fullscreen"] .act-expand { display: none; }', css)
+        self.assertIn("justify-content: flex-end;", css)
+        self.assertIn("@media (max-width: 419px) {\n    .actions { flex-direction: column; }\n"
+                      "    .actions .btn { width: 100%; }", css)
+
+    def test_fullscreen_grid_widens_and_sticks_the_header(self) -> None:
+        css = widget_css(self.HTML)
+        self.assertIn(
+            'html[data-display-mode="fullscreen"] .grid { grid-template-columns: '
+            "repeat(auto-fill, minmax(160px, 1fr)); }",
+            css,
+        )
+        start = css.index('html[data-display-mode="fullscreen"] .grid-head, .topbar {')
+        rule = css[start:css.index("}", start)]
+        self.assertIn("position: sticky;", rule)
+        self.assertIn("background: var(--gl-surface);", rule)
+
+    def test_card_tap_updates_model_context_then_fullscreen_or_chat(self) -> None:
+        tap = js_function(self.HTML, "function selectGame(game)")
+        self.assertIn(
+            '"User selected " + game.name + " (game_id " + game.game_id + ") from the recommendations",',
+            tap,
+        )
+        self.assertIn("{ game_id: game.game_id, name: game.name });", tap)
+        # The model hears about it before anything else happens.
+        self.assertLess(tap.index("updateModelContext("), tap.index("canFullscreen()"))
+        self.assertIn('if (!canFullscreen()) {\n      sendMessage("Show me " + game.name);', tap)
+        self.assertIn('requestDisplayMode("fullscreen").then(function (mode) {', tap)
+        self.assertIn('if (mode === "fullscreen") openDrill(game, before);', tap)
+        self.assertIn('else sendMessage("Show me " + game.name);', tap)
+
+    def test_the_drill_in_shows_a_skeleton_then_the_live_detail(self) -> None:
+        drill = js_function(self.HTML, "function openDrill(game, before)")
+        for marker in (
+            'el("button", "btn", "← Back to results")',
+            'back.addEventListener("click", backToResults);',
+            'el("div", "topbar-title", game.name)',
+            'holder.appendChild(skeleton("detail"));',
+            'callTool("get_game_detail", { game_id: game.game_id, media: true }, 30000)',
+            "if (seq !== drillSeq) return;",
+            "else fill(game, true);",
+        ):
+            self.assertIn(marker, drill)
+        back = js_function(self.HTML, "function backToResults()")
+        self.assertIn("if (gridData) render(gridData);", back)
+        self.assertIn('if (restore !== "fullscreen") requestDisplayMode("inline");', back)
+        # The host's own close button ends the drill-in too.
+        self.assertIn(
+            'if (view === "drill" && currentDisplayMode() !== "fullscreen" && gridData) render(gridData);',
+            self.HTML,
+        )
+
+
+class DetailModeTests(unittest.TestCase):
+    """Spec 2026-10-03 §2.1.5–§2.1.6: identity panel, disclosure, carousel rows."""
+
+    HTML = apps.GAME_CARDS_HTML
+
+    def test_identity_panel_leads_the_stack(self) -> None:
+        card = js_function(self.HTML, "function detailCard(game)")
+        order = ["identityPanel(game, media)", "mediaNode(stack, media, game.name)",
+                 "relatedBlock(stack, game)"]
+        positions = [card.index(marker) for marker in order]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_identity_panel_cover_widths(self) -> None:
+        css = widget_css(self.HTML)
+        self.assertIn("grid-template-columns: 120px minmax(0, 1fr);", css)
+        self.assertIn("@media (max-width: 559px) {\n    .detail {\n"
+                      "      grid-template-columns: 84px minmax(0, 1fr);", css)
+
+    def test_your_rating_is_a_tiered_chip(self) -> None:
+        panel = js_function(self.HTML, "function identityPanel(game, media)")
+        self.assertIn('label: "Your rating", value: mine + "/10",', panel)
+        self.assertIn('tier: mine >= 7 ? "good" : mine >= 5 ? "ok" : "bad",', panel)
+        self.assertNotIn("My rating: ", self.HTML)
+
+    def test_description_clamps_to_three_lines_with_a_more_toggle(self) -> None:
+        css = widget_css(self.HTML)
+        start = css.index("  .desc {")
+        self.assertIn("-webkit-line-clamp: 3;", css[start:css.index("}", start)])
+        panel = js_function(self.HTML, "function identityPanel(game, media)")
+        for marker in (
+            'var more = el("button", "more-toggle", "More");',
+            'more.textContent = open ? "Less" : "More";',
+            'more.setAttribute("aria-expanded", open ? "true" : "false");',
+            "if (desc.scrollHeight > desc.clientHeight + 1) {",
+        ):
+            self.assertIn(marker, panel)
+
+    def test_tags_are_one_muted_line_of_at_most_eight(self) -> None:
+        panel = js_function(self.HTML, "function identityPanel(game, media)")
+        self.assertIn("var tags = (game.tags || []).filter(Boolean).slice(0, 8);", panel)
+        self.assertIn('body.appendChild(el("div", "tagline", tags.join(" · ")));', panel)
+
+    def test_similar_and_studio_sit_behind_fullscreen_or_a_disclosure(self) -> None:
+        block = js_function(self.HTML, "function relatedBlock(stack, game)")
+        for marker in (
+            '[similar ? "Similar games you own" : null, studio ? "From the studio" : null]',
+            'if (currentDisplayMode() === "fullscreen") { build(stack); return; }',
+            "if (!canFullscreen()) { disclosure(stack, text, build); return; }",
+            'requestDisplayMode("fullscreen").then(function (mode) {',
+            'if (mode === "fullscreen") build(wrap);',
+            "else disclosure(wrap, text, build).button.click();",
+        ):
+            self.assertIn(marker, block)
+
+    def test_carousel_rows_snap_and_peek(self) -> None:
+        css = widget_css(self.HTML)
+        start = css.index(".strip:not(.thumbs) {")
+        rule = css[start:css.index("}", start)]
+        for decl in (
+            "scroll-snap-type: x mandatory;",
+            "overscroll-behavior-x: contain;",
+            "scroll-padding-left: calc(2px + var(--gl-safe-left, 0px));",
+            "scroll-padding-right: calc(2px + var(--gl-safe-right, 0px));",
+        ):
+            self.assertIn(decl, rule)
+        self.assertIn(".sim { width: 120px; scroll-snap-align: start; }", css)
+
+
+class PreviewScriptTests(unittest.TestCase):
+    def test_preview_simulates_fullscreen_instead_of_opening_an_overlay(self) -> None:
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parent.parent / "scripts" / "preview_game_cards.py").read_text()
+        self.assertNotIn("--open", source)
+        self.assertNotIn("__PREVIEW_OPEN_INDEX__", source)
+        self.assertIn('"--display", choices=["inline", "fullscreen"]', source)
+        self.assertIn('context["displayMode"] = "fullscreen"', source)
+        self.assertIn('context["availableDisplayModes"] = ["inline", "fullscreen"]', source)
+        self.assertIn("if (window.__PREVIEW_TOOL_INPUT__) lastToolInput = window.__PREVIEW_TOOL_INPUT__;",
+                      apps.GAME_CARDS_HTML)
 
 
 class DesignSystemTests(unittest.TestCase):
@@ -509,15 +763,18 @@ class DesignSystemTests(unittest.TestCase):
                 # the shorthand would smuggle a size past the check above
                 self.assertEqual(re.findall(r"(?<![-\w])font:(?!\s*inherit)", css), [])
         for token, px in (("cap", 12), ("body", 14), ("h", 16), ("title", 20)):
-            self.assertRegex(apps_shared.TOKENS_CSS, rf"--gl-{token}: var\(--font-[a-z-]+-size, {px}px\);")
+            self.assertRegex(
+                apps_shared.TOKENS_CSS,
+                rf"--gl-{token}: max\(12px, var\(--font-[a-z-]+-size, {px}px\)\);",
+            )
 
     def test_focus_rings_hit_areas_and_reduced_motion(self) -> None:
         self.assertIn(
             ":focus-visible { outline: 2px solid var(--gl-border-strong); outline-offset: 2px; }",
             apps_shared.A11Y_CSS,
         )
-        self.assertIn("width: max(100%, 32px);", apps_shared.A11Y_CSS)
-        self.assertIn("width: max(100%, 44px);", apps_shared.A11Y_CSS)
+        self.assertIn("inset: -4px;", apps_shared.A11Y_CSS)    # 32px on pointer devices
+        self.assertIn("inset: -6px;", apps_shared.A11Y_CSS)    # 44px on touch
         self.assertIn("@media (prefers-reduced-motion: reduce)", apps_shared.A11Y_CSS)
         self.assertIn("html.touch .btn, html.touch .disclosure { min-height: 44px; }",
                       apps_shared.CONTROLS_CSS)

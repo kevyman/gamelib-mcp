@@ -121,6 +121,9 @@ TOKENS_CSS = r"""  :root {
     --gl-scrim: rgba(12, 10, 6, 0.5);
     --gl-on-stage: #ffffff;
     --gl-on-stage-dim: rgba(255, 255, 255, 0.78);
+    /* Glyph shadow on the stage veil (always dark, both schemes). The plain
+       value is the fallback; @supports below derives it from --gl-stage. */
+    --gl-shadow-ink: rgba(13, 11, 7, 0.5);
     --gl-r-xs: var(--border-radius-xs, 4px);
     --gl-r-sm: var(--border-radius-sm, 6px);
     --gl-r-md: var(--border-radius-md, 8px);
@@ -130,16 +133,25 @@ TOKENS_CSS = r"""  :root {
     --gl-shadow: var(--shadow-sm, 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1));
     --gl-shadow-md: var(--shadow-md, 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1));
     --gl-font: var(--font-sans, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-    --gl-title: var(--font-heading-lg-size, 20px);
-    --gl-h: var(--font-heading-md-size, 16px);
-    --gl-body: var(--font-text-sm-size, 14px);
-    --gl-cap: var(--font-text-xs-size, 12px);
+    /* Clamped: a host token below 12px never shrinks the type under the
+       floor ("nothing renders below 12px"). */
+    --gl-title: max(12px, var(--font-heading-lg-size, 20px));
+    --gl-h: max(12px, var(--font-heading-md-size, 16px));
+    --gl-body: max(12px, var(--font-text-sm-size, 14px));
+    --gl-cap: max(12px, var(--font-text-xs-size, 12px));
     --gl-title-lh: var(--font-heading-lg-line-height, 1.25);
     --gl-h-lh: var(--font-heading-md-line-height, 1.4);
     --gl-body-lh: var(--font-text-sm-line-height, 1.4);
     --gl-cap-lh: var(--font-text-xs-line-height, 1.4);
     --gl-regular: var(--font-weight-normal, 400);
     --gl-strong: var(--font-weight-semibold, 600);
+    /* Horizontal safe-area insets (set by applyHostContext); the strips'
+       scroll-padding reads them. */
+    --gl-safe-left: 0px;
+    --gl-safe-right: 0px;
+  }
+  @supports (color: color-mix(in srgb, red 50%, transparent)) {
+    :root { --gl-shadow-ink: color-mix(in srgb, var(--gl-stage) 50%, transparent); }
   }
   :root[data-theme="light"] { color-scheme: light; }
   :root[data-theme="dark"] { color-scheme: dark; }
@@ -162,24 +174,41 @@ RESET_CSS = r"""  * { box-sizing: border-box; margin: 0; padding: 0; }
   button { font: inherit; color: inherit; }
 """
 
-# Focus rings, hit areas (≥32px, ≥44px on touch — the ::after grows the
-# target, never the visual) and reduced motion.
+# Focus rings, hit areas and reduced motion.
+#
+# Hit-area rule: every interactive element carries an invisible ::after that
+# extends its tap target past its visual box — >=32px on pointer devices, >=44px
+# on html.touch — and the extension NEVER reaches a sibling's own box. A chip
+# row's gap is therefore at least twice the extension on that axis
+# (.chips: 8px rows / 6px columns against -4px / -3px; on touch 12px / 8px
+# against -6px / -4px), and on touch the chips themselves grow to a 32px
+# visual height so 32 + 2x6 = 44 is met by the chip's own height plus the
+# extension, not by overlapping the next row. The host element must be a
+# containing block (positioned, or transformed like the stamp); .btn,
+# .disclosure and role=button cards are made relative here. A role=button card
+# can hold link chips, so its extension sits BEHIND its children (z-index -1
+# inside the card's own stacking context) and never steals their taps.
 A11Y_CSS = r"""  :focus-visible { outline: 2px solid var(--gl-border-strong); outline-offset: 2px; }
   :focus:not(:focus-visible) { outline: none; }
-  a.chip::after, .hero-pill::after, .fs-btn::after, .car-nav::after, .overlay-close::after {
+  .card[role="button"] { position: relative; z-index: 0; }
+  a.chip::after, .btn::after, .disclosure::after, .thumb::after, .fs-btn::after,
+  .car-nav::after, .overlay-close::after, .card[role="button"]::after, .hero-pill::after,
+  .stamp[role="button"]::after, button.stamp::after {
     content: "";
     position: absolute;
-    left: 50%;
-    top: 50%;
-    width: max(100%, 32px);
-    height: max(100%, 32px);
-    transform: translate(-50%, -50%);
+    inset: -4px;
   }
-  html.touch a.chip::after, html.touch .hero-pill::after, html.touch .fs-btn::after,
-  html.touch .car-nav::after, html.touch .overlay-close::after {
-    width: max(100%, 44px);
-    height: max(100%, 44px);
+  .card[role="button"]::after { z-index: -1; }
+  .chips a.chip::after { inset: -4px -3px; }
+  html.touch .chip, html.touch .hero-pill { min-height: 32px; }
+  html.touch a.chip::after, html.touch .btn::after, html.touch .disclosure::after,
+  html.touch .thumb::after, html.touch .fs-btn::after, html.touch .car-nav::after,
+  html.touch .overlay-close::after, html.touch .card[role="button"]::after,
+  html.touch .hero-pill::after, html.touch .stamp[role="button"]::after,
+  html.touch button.stamp::after {
+    inset: -6px;
   }
+  html.touch .chips a.chip::after { inset: -6px -4px; }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
       animation: none !important;
@@ -239,7 +268,8 @@ PANEL_CSS = r"""  .panel {
 # ---- Components CSS: chip, match bar, skeleton, controls, notice -----------
 # The ONE chip for every score. Color encodes quality tier only; the brand is
 # the label text.
-CHIP_CSS = r"""  .chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+CHIP_CSS = r"""  .chips { display: flex; gap: 8px 6px; flex-wrap: wrap; align-items: center; }
+  html.touch .chips { gap: 12px 8px; }
   .chip {
     position: relative;
     display: inline-flex;
@@ -330,6 +360,7 @@ SKELETON_CSS = r"""  .skel { display: flex; flex-direction: column; gap: 12px; m
 
 # Buttons, the disclosure toggle and the muted failure notice.
 CONTROLS_CSS = r"""  .btn, .disclosure {
+    position: relative;
     min-height: 40px;
     padding: 0 16px;
     display: inline-flex;
@@ -442,7 +473,14 @@ STRIP_CSS = r"""  .strip {
     overflow-x: auto;
     padding: 2px 2px 6px;
     scrollbar-width: thin;
+    scroll-snap-type: x proximity;
+    scroll-padding-inline: calc(2px + var(--gl-safe-left)) calc(2px + var(--gl-safe-right));
+    overscroll-behavior-x: contain;
   }
+  .strip > * { scroll-snap-align: start; }
+  /* Trailing spacer: the last item can scroll fully into view (clear of the
+     safe area) instead of ending flush against a clipped edge. */
+  .strip::after { content: ""; flex: 0 0 max(2px, var(--gl-safe-right)); }
 """
 
 # The click-to-enlarge screenshot button filling the stage.
@@ -504,7 +542,7 @@ MEDIA_STRIP_CSS = r"""  .fs-btn {
     background: var(--gl-stage-veil);
     color: var(--gl-on-stage);
     font-size: var(--gl-h);
-    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+    text-shadow: 0 1px 3px var(--gl-shadow-ink);
   }
   .thumb-text {
     display: flex;
@@ -722,8 +760,26 @@ BRIDGE_JS = r"""(function () {
      host-context-changed payload. Updates are partial: merge, never replace. */
   var hostContext = {};
   var BASE_GUTTER = 12;
+  var tornDown = false;               // set by teardown(); the view is gone
+  var hostFontsCss = null;            // the fonts string last injected
+  var appliedHostVars = {};           // custom properties we set from styles.variables
+  var HOST_TOKEN_PREFIXES = ["--color-", "--font-", "--border-", "--shadow-"];
+  function isHostToken(name) {
+    return HOST_TOKEN_PREFIXES.some(function (p) { return name.indexOf(p) === 0; });
+  }
+  function mediaQueryMatches(query) {
+    try { return !!(window.matchMedia && window.matchMedia(query).matches); } catch (e) { return false; }
+  }
+  /* No deviceCapabilities from the host (ChatGPT, Goose, preview, or before
+     ui/initialize answers): ask the browser instead. */
+  function applyInputFallback() {
+    var docEl = document.documentElement;
+    docEl.classList.toggle("touch", mediaQueryMatches("(pointer: coarse)"));
+    docEl.classList.toggle("no-hover", mediaQueryMatches("(hover: none)"));
+  }
+  applyInputFallback();
   function applyHostContext(ctx) {
-    if (!ctx || typeof ctx !== "object") return;
+    if (tornDown || !ctx || typeof ctx !== "object") return;
     Object.keys(ctx).forEach(function (k) { hostContext[k] = ctx[k]; });
     var docEl = document.documentElement;
     if (ctx.theme === "light" || ctx.theme === "dark") {
@@ -733,14 +789,28 @@ BRIDGE_JS = r"""(function () {
     var styles = ctx.styles || {};
     var vars = styles.variables;
     if (vars && typeof vars === "object") {
+      /* A variables map is the host's whole current set (a theme switch sends
+         a fresh one): a token we set earlier that it no longer carries is
+         removed so the --gl-* fallback shows instead of a stale value. */
+      var nextVars = {};
       Object.keys(vars).forEach(function (name) {
         var value = vars[name];
         if (name.indexOf("--") === 0 && value !== null && value !== undefined && value !== "") {
           docEl.style.setProperty(name, String(value));
+          nextVars[name] = true;
         }
       });
+      Object.keys(appliedHostVars).forEach(function (name) {
+        if (nextVars[name]) return;
+        if (isHostToken(name)) docEl.style.removeProperty(name);
+        else nextVars[name] = true;
+      });
+      appliedHostVars = nextVars;
     }
-    if (styles.css && typeof styles.css.fonts === "string") {
+    /* One <style id="host-fonts">, rewritten only when the string changes:
+       re-injecting identical @font-face rules re-triggers font loading. */
+    if (styles.css && typeof styles.css.fonts === "string" && styles.css.fonts !== hostFontsCss) {
+      hostFontsCss = styles.css.fonts;
       var fonts = document.getElementById("host-fonts");
       if (!fonts) {
         fonts = document.createElement("style");
@@ -754,12 +824,17 @@ BRIDGE_JS = r"""(function () {
       [["top", "Top"], ["right", "Right"], ["bottom", "Bottom"], ["left", "Left"]].forEach(function (side) {
         var extra = Math.max(0, Number(insets[side[0]]) || 0);
         document.body.style["padding" + side[1]] = (BASE_GUTTER + extra) + "px";
+        if (side[0] === "left" || side[0] === "right") {
+          docEl.style.setProperty("--gl-safe-" + side[0], extra + "px");
+        }
       });
     }
     var device = ctx.deviceCapabilities;
     if (device && typeof device === "object") {
       docEl.classList.toggle("touch", !!device.touch);
       docEl.classList.toggle("no-hover", device.hover === false);
+    } else if (!hostContext.deviceCapabilities) {
+      applyInputFallback();
     }
     if (ctx.displayMode) docEl.setAttribute("data-display-mode", String(ctx.displayMode));
     reportSize();
@@ -817,10 +892,25 @@ TOOL_RESULT_JS = r"""  var lastToolInput = null;
     }
     return data;
   }
+  /* True when #root holds rendered content — anything but the skeleton or an
+     earlier notice. Decides whether a late notice replaces or joins. */
+  function rootShowsContent() {
+    for (var n = root.firstElementChild; n; n = n.nextElementSibling) {
+      if (!n.classList.contains("skel") && !n.classList.contains("notice")) return true;
+    }
+    return false;
+  }
   function handleToolResult(result) {
     gotResult = true;
     var data = resultData(result);
-    if (data) render(data);
+    if (data) {
+      render(data);
+      return;
+    }
+    // Never leave the skeleton pulsing forever over a result we can't read.
+    if (!rootShowsContent()) root.textContent = "";
+    notice(root, "Couldn't read the result");
+    reportSize();
   }
   /* The arguments arrive before the result: keep them (Phase B builds the
      grid's header line from them) and pick the matching skeleton. */
@@ -828,9 +918,11 @@ TOOL_RESULT_JS = r"""  var lastToolInput = null;
     lastToolInput = (params && params.arguments) || {};
     if (!gotResult) showSkeleton();
   }
+  /* Content already on screen stays (with the notice under it); only a
+     skeleton — nothing real yet — is replaced. */
   function handleToolCancelled() {
     gotResult = true;                               // keeps the skeleton out
-    root.textContent = "";
+    if (!rootShowsContent()) root.textContent = "";
     notice(root, "Cancelled");
     reportSize();
   }
@@ -1136,6 +1228,8 @@ NOTICE_JS = r"""  function notice(parent, items) {
       var parts = list(items).map(function (it) {
         if (!it) return null;
         if (typeof it === "string") return it;
+        // No `what`: the source alone if there is one, else nothing to say.
+        if (!it.what) return it.source ? String(it.source) : null;
         return it.what + (it.source ? " (" + it.source + ")" : "");
       }).filter(function (p) {
         if (!p || seen[p]) return false;
@@ -1620,9 +1714,11 @@ SIZING_JS = r"""  /* ---------- sizing ---------- */
   var sizeTimer = null;
   var lastSize = "";
   function reportSize() {
-    if (window.__PREVIEW_DATA__) return;
+    if (tornDown || window.__PREVIEW_DATA__) return;
     clearTimeout(sizeTimer);
     sizeTimer = setTimeout(function () {
+      sizeTimer = null;
+      if (tornDown) return;
       // Only notify on real changes: some hosts (Android app) get confused
       // by a stream of identical/oscillating size notifications.
       var w = Math.ceil(document.documentElement.scrollWidth);
@@ -1638,8 +1734,12 @@ SIZING_JS = r"""  /* ---------- sizing ---------- */
     resizeObserver = new ResizeObserver(reportSize);
     resizeObserver.observe(document.body);
   }
+  /* After teardown the view is gone: reportSize() and host-context-changed
+     become no-ops and no timer survives. */
   function teardown() {
+    tornDown = true;
     clearTimeout(sizeTimer);
+    sizeTimer = null;
     clearTimeout(hintTimer);
     if (resizeObserver) resizeObserver.disconnect();
   }

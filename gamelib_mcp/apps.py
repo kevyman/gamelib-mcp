@@ -16,27 +16,30 @@ genuinely rank-ordered) get "#1"-style rank badges numbered globally across
 pagination; payloads without that signal (e.g. the detail card) never show a
 rank.
 
-Every score renders through the one shared chip (apps_shared.SCORE_CHIP_JS):
-color is the quality tier only (good / ok / bad / none, from the host's
-success / warning / danger tokens), and the source is the label text —
-Metacritic, OpenCritic, Steam (phrase plus a 9-step meter, never the meter
-alone). Platform ids render through ``label("platform", …)``.
+Grid mode (spec 2026-10-03 §2.1): a header line says what the grid IS
+("12 of 143 games · sorted by taste match · roguelike · unplayed only"),
+rebuilt from the tool-input arguments whenever they arrive. Each card leads
+with the taste-match bar under the title, then one meta line, one chip row
+and the matched tags as plain text. The footer carries at most two actions:
+"Show next N" (a chat message asking for the next page) and "Expand" (the
+host's fullscreen mode, where the grid widens and the header sticks).
 
-Grid cards are interactive: clicking (or Enter/Space — cards are keyboard
-buttons) opens an overlay that renders instantly from the card's own data,
-then upgrades in place when a live ``get_game_detail`` result arrives via an
-app-initiated ``tools/call`` through the bridge. If the host denies or does
-not support app tool calls, the overlay simply keeps the lite view.
+Tapping a card hands control back to the conversation instead of opening an
+in-widget overlay: the selection always goes into the model context
+(ui/update-model-context); then, on a host that offers fullscreen, the widget
+goes fullscreen and drills into a live ``get_game_detail(media=True)`` call
+(app-initiated ``tools/call``) behind a "Back to results" bar; elsewhere it
+posts "Show me <name>" as the user.
 
-A detail card whose payload carries ``media`` (get_game_detail(media=True) —
-which is what that upgrade call asks for) also renders the neutral game
-representation: a media panel leading the stack (one 16:9 viewer plus one
-thumb strip, trailer first, screenshots opening an edge-to-edge carousel
-lightbox), a "similar in your library" row (the owned games sharing this
-one's tags), and a "From the studio" strip (the developer, and their previous
-games against his library — header line alone for a studio too big for six
-posters to describe). Those blocks live in apps_shared.py and are spliced
-verbatim into both this widget and the evaluation card (apps_eval.py).
+Detail mode leads with the identity panel (cover, title, one sub line, one
+chip row, a 3-line description, tags as text), then the media reel (one 16:9
+viewer plus one thumb strip, trailer first, screenshots opening a lightbox),
+then "Similar games you own · From the studio" — fullscreen on a host that
+has it, an in-place disclosure otherwise. Every score renders through the one
+shared chip (apps_shared.SCORE_CHIP_JS): color is the quality tier only and
+the source is the label text. The media, similar and studio blocks live in
+apps_shared.py and are spliced verbatim into both this widget and the
+evaluation card (apps_eval.py).
 
 The HTML is deliberately dependency-free: the host↔iframe bridge is the
 hand-rolled JSON-RPC postMessage handshake from the MCP Apps spec
@@ -117,26 +120,10 @@ GAME_CARDS_HTML = (
     overflow-wrap: anywhere;
   }
   .sim .cover-fallback { font-size: var(--gl-cap); line-height: var(--gl-cap-lh); padding: 8px; }
-  /* The Metacritic score in the cover's corner: the shared chip, tier-colored. */
+  /* The cover carries three things and only three: the rank badge (top
+     left), the Metacritic chip (top right, the shared chip, tier-colored)
+     and the nested-content type chip (bottom left). */
   .chip.corner { position: absolute; top: 6px; right: 6px; z-index: 1; }
-  .pills { display: flex; gap: 4px; flex-wrap: wrap; }
-  .pill {
-    font-size: var(--gl-cap);
-    line-height: var(--gl-cap-lh);
-    padding: 0 7px;
-    border-radius: var(--gl-r-full);
-    border: var(--gl-bw) solid var(--gl-border);
-    background: var(--gl-inset);
-    color: var(--gl-text-2);
-    white-space: nowrap;
-  }
-  .pill.match {
-    background: var(--gl-inverse-bg);
-    color: var(--gl-inverse-text);
-    border-color: transparent;
-    font-weight: var(--gl-strong);
-    font-variant-numeric: tabular-nums;
-  }
 
   /* Nested-content chip (DLC/expansion/bundle/edition/add-on) — a quiet
      identity tag, not a rating, so it carries no tier color. */
@@ -151,6 +138,7 @@ GAME_CARDS_HTML = (
     background: var(--gl-surface);
     color: var(--gl-text-2);
   }
+  .cover-wrap .type-chip { position: absolute; left: 6px; bottom: 6px; z-index: 1; padding: 2px 7px; }
   .chip.content-badge { padding: 3px 8px; border-radius: var(--gl-r-sm); }
   /* Subtle "part of <base game>" line under the title on nested rows. */
   .parent-sub {
@@ -161,8 +149,28 @@ GAME_CARDS_HTML = (
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* Matched tags (grid) and the game's tags (detail): one muted text line,
+     " · "-joined — words, not a row of pills. */
+  .tagline {
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    color: var(--gl-muted);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
 
   /* ---- grid mode ---- */
+  /* What the grid is: "12 of 143 games · sorted by taste match · …". */
+  .grid-head {
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    color: var(--gl-muted);
+    font-variant-numeric: tabular-nums;
+    margin-bottom: 10px;
+  }
+  .grid-head b { color: var(--gl-text); font-weight: var(--gl-strong); }
   .grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(142px, 1fr));
@@ -187,7 +195,7 @@ GAME_CARDS_HTML = (
   .card .cover-wrap { border-bottom: var(--gl-bw) solid var(--gl-border); }
 
   /* Rank badge — only on grids whose payload is genuinely rank-ordered
-     (render() adds .ranked and seeds the counter from the payload offset).
+     (renderGrid() adds .ranked and seeds the counter from the payload offset).
      Quieter than the score chip on the right: muted text, no tilt. */
   .grid.ranked { counter-reset: rank; }
   .grid.ranked .card { counter-increment: rank; }
@@ -207,6 +215,7 @@ GAME_CARDS_HTML = (
     color: var(--gl-muted);
   }
 
+  /* Body order: title → match bar (the lead signal) → meta → chips → tags. */
   .card-body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 6px; flex: 1; }
   .title {
     font-size: var(--gl-body);
@@ -217,40 +226,91 @@ GAME_CARDS_HTML = (
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
+  .card .match { margin: 2px 0; }
   .meta {
     font-size: var(--gl-cap);
     line-height: var(--gl-cap-lh);
     color: var(--gl-text-2);
     font-variant-numeric: tabular-nums;
   }
-  .card-body .pills { margin-top: auto; padding-top: 2px; }
-  .scores { gap: 4px; }
+  .card .chips { gap: 4px; }
+  /* A 150px card cannot hold label + meter + "Very positive" on one line, and
+     the folded three-line chip read as a block. So the grid's Steam chip is
+     label and phrase only (the meter stays on the detail card), and a
+     two-word phrase gets a line of its own. */
+  .card .chip { padding: 3px 6px; }
+  .card .chip.steam-line { flex-basis: 100%; display: block; }
+  /* Text flow, not flex: a phrase too long for the line breaks between its
+     words ("Steam Overwhelmingly / positive") instead of dropping the whole
+     value onto lines of its own. */
+  .card .chip.steam-line .lbl { margin-right: 4px; }
+
+  /* At most two actions, bottom right; stacked full width on a phone. */
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .btn[disabled] { cursor: default; color: var(--gl-muted); border-color: var(--gl-border); }
+  html[data-display-mode="fullscreen"] .act-expand { display: none; }
+
+  /* Fullscreen: wider cards, and the header line (or the drill-in's back
+     bar) sticks to the top while the grid scrolls under it. */
+  html[data-display-mode="fullscreen"] .grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+  html[data-display-mode="fullscreen"] .grid-head, .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    margin: -12px -12px 12px;
+    padding: 12px;
+    background: var(--gl-surface);
+    border-bottom: var(--gl-bw) solid var(--gl-border);
+  }
+  .topbar { display: flex; align-items: center; gap: 12px; }
+  .topbar .btn { flex: none; padding: 0 12px; }
+  .topbar-title {
+    min-width: 0;
+    font-weight: var(--gl-strong);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  html[data-display-mode="fullscreen"] .detail-stack { margin: 0 auto; }
 
   /* ---- detail mode ---- */
+  /* Identity panel: cover beside the title block; on a wide card the cover
+     spans the whole panel, on a phone the chips and text run full width
+     under a cover-and-title header. */
   .detail {
-    display: flex;
-    gap: 16px;
+    display: grid;
+    grid-template-columns: 120px minmax(0, 1fr);
+    grid-template-areas: "cover head" "cover body";
+    grid-template-rows: auto 1fr;
+    column-gap: 16px;
+    row-gap: 10px;
     background: var(--gl-surface);
     border: var(--gl-bw) solid var(--gl-border);
     border-radius: var(--gl-r-md);
     box-shadow: var(--gl-shadow);
     padding: 14px;
-    max-width: 720px;
   }
-  .detail .cover-wrap {
-    flex: 0 0 120px;
+  .detail > .cover-wrap {
+    grid-area: cover;
+    align-self: start;
     border: var(--gl-bw) solid var(--gl-border);
     border-radius: var(--gl-r-sm);
     overflow: hidden;
-    align-self: flex-start;
   }
   /* On the detail card the h1 sits right beside the plate and already says
      the name, so the plate stamped with it reads as a duplicate title. The
      gradient stays (it is the art stand-in); only the lettering goes. Grid
      cards have no heading beside the cover and keep theirs. */
   .detail .cover-fallback { color: transparent; text-shadow: none; }
-  .detail-info { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-  .detail-info h1 {
+  .detail-head { grid-area: head; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .detail-body { grid-area: body; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  .detail h1 {
     font-size: var(--gl-h);
     line-height: var(--gl-h-lh);
     font-weight: var(--gl-strong);
@@ -265,18 +325,45 @@ GAME_CARDS_HTML = (
   .desc {
     color: var(--gl-text-2);
     display: -webkit-box;
-    -webkit-line-clamp: 4;
+    -webkit-line-clamp: 3;
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
-  .rating-row { font-variant-numeric: tabular-nums; }
-  .rating-row b { font-weight: var(--gl-strong); }
+  .desc.open { display: block; overflow: visible; }
+  .more-toggle {
+    position: relative;
+    align-self: flex-start;
+    margin-top: -6px;
+    padding: 0;
+    border: 0;
+    background: none;
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    font-weight: var(--gl-strong);
+    color: var(--gl-text-2);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+  }
+  .more-toggle[hidden] { display: none; }
+  .more-toggle::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: max(100%, 32px);
+    height: 32px;
+    transform: translate(-50%, -50%);
+  }
+  html.touch .more-toggle::after { width: max(100%, 44px); height: 44px; }
+  .detail .notice { text-align: left; padding: 0; }
 
   /* ---- detail media (get_game_detail(media=True)) ---- */
-  /* The detail card becomes a column stack: the media reel, the card itself,
-     then the similar-games and studio panels. */
+  /* The detail view is a column stack: the identity panel, the media reel,
+     then the similar-games and studio rows. */
   .detail-stack { display: flex; flex-direction: column; gap: 12px; max-width: 720px; }
-  .detail-stack .detail { max-width: none; }
+  .related { display: flex; flex-direction: column; gap: 12px; }
+  .disclosure .chev-out { font-weight: var(--gl-regular); }
 
   /* Hero trailer — mp4 with a poster fallback, or a click-to-load embed. */
 """
@@ -299,61 +386,57 @@ GAME_CARDS_HTML = (
     + apps_shared.SIMILAR_CSS
     + apps_shared.TAG_CSS
     + apps_shared.PEDIGREE_CSS
-    + r"""
-  /* ---- click-to-expand overlays (detail card, screenshot lightbox) ---- */
-  /* Anchored near the clicked card rather than centered in the (possibly
-     very tall) iframe — hosts that don't auto-scroll to modals would
-     otherwise open it off-screen. JS sets the panel's top and the overlay's
-     height to span the whole document. */
+    + r"""  /* Carousel rows (similar, studio): 120px cards that snap card by card,
+     the next one peeking past the edge. The snap padding comes from the
+     host's safe-area insets and the shared strip's trailing spacer keeps the
+     last card reachable. */
+  .strip:not(.thumbs) {
+    scroll-snap-type: x mandatory;
+    overscroll-behavior-x: contain;
+    scroll-padding-left: calc(2px + var(--gl-safe-left, 0px));
+    scroll-padding-right: calc(2px + var(--gl-safe-right, 0px));
+  }
+  .sim { width: 120px; scroll-snap-align: start; }
+
+  /* ---- screenshot lightbox (the detail card's own media viewer) ---- */
+  /* Fixed over the iframe's viewport — the whole document in an auto-sized
+     inline frame, the screen in fullscreen — with the panel anchored at the
+     stage that opened it so it never lands off-screen. */
 """
     + apps_shared.OVERLAY_CSS
-    + r"""  .overlay-panel {
+    + r"""  .overlay.lightbox { position: fixed; inset: 0; }
+  .lightbox-panel {
     position: absolute;
-    left: 50%;
-    width: calc(100% - 24px);
-    max-width: 720px;
-    border-radius: var(--gl-r-lg);
-    transform: translateX(-50%) scale(0.97) translateY(8px);
-    transition: transform 0.19s ease;
-  }
-  .overlay.open .overlay-panel { transform: translateX(-50%); }
-  .overlay-panel .detail-stack { max-width: none; }
-  .overlay-panel .detail { max-width: none; margin: 0; }
-  /* The screenshot carousel is a bare panel of its own (the detail overlay
-     borrows its frame from the card inside it), and goes edge-to-edge of the
-     iframe: on a phone a centered panel wasted a third of the width. */
-  .overlay-panel.carousel {
     left: 0;
-    width: 100%;
-    max-width: none;
+    right: 0;
+    background: var(--gl-stage);
     border-top: var(--gl-bw) solid var(--gl-border);
     border-bottom: var(--gl-bw) solid var(--gl-border);
-    border-radius: 0;
-    background: var(--gl-stage);
-    overflow: hidden;
     transform: translateY(14px);
+    transition: transform 0.19s ease;
   }
-  .overlay.open .overlay-panel.carousel { transform: none; }
+  .overlay.open .lightbox-panel { transform: none; }
 """
     + apps_shared.CAROUSEL_CSS
     + apps_shared.TOAST_CSS
-    + r"""  .loading-note { font-size: var(--gl-cap); line-height: var(--gl-cap-lh); color: var(--gl-muted); }
-  .loading-note::after {
-    content: "…";
-    display: inline-block;
-    animation: pulse 1.1s ease-in-out infinite;
-  }
-  @keyframes pulse { 50% { opacity: 0.25; } }
-
+    + r"""
   @media (min-width: 560px) {
-    .detail-info h1 { font-size: var(--gl-title); line-height: var(--gl-title-lh); }
+    .detail h1 { font-size: var(--gl-title); line-height: var(--gl-title-lh); }
+  }
+  @media (max-width: 559px) {
+    .detail {
+      grid-template-columns: 84px minmax(0, 1fr);
+      grid-template-areas: "cover head" "body body";
+      column-gap: 12px;
+    }
   }
   @media (max-width: 460px) {
-    .detail { flex-direction: column; }
-    .detail .cover-wrap { flex-basis: auto; width: 96px; }
     /* Narrow phone: smaller thumbs so more than one fits before scrolling. */
     .thumb img, .thumb-text { width: 96px; height: 55px; }
-    .sim { width: 100px; }
+  }
+  @media (max-width: 419px) {
+    .actions { flex-direction: column; }
+    .actions .btn { width: 100%; }
   }
 </style>
 </head>
@@ -418,111 +501,245 @@ GAME_CARDS_HTML = (
     return null;
   }
 
-  /* ---- click-to-expand overlays: detail card + screenshot lightbox ---- */
-  /* A STACK, not a single slot: a screenshot enlarged from inside a detail
-     overlay has to sit on top of it, not replace it. Later overlays are
-     appended later in the DOM, so equal z-index already stacks them right. */
-  var overlays = []; // [{ node, trigger, keydown, position }] — last is topmost
+  /* ---------- view state ---------- */
+  var view = "none";              // "grid" | "detail" | "drill" | "none"
+  var gridData = null;            // the grid payload Back returns to
+  var drillSeq = 0;               // invalidates a superseded detail fetch
+  var modeBeforeDrill = "inline";
+  var lastSelectedId = null;
 
-  function closeOverlay(entry) {
-    var s = entry || overlays[overlays.length - 1];
-    if (!s) return;
-    var i = overlays.indexOf(s);
-    if (i < 0) return; // already closed
-    overlays.splice(i, 1);
-    document.removeEventListener("keydown", s.keydown);
-    s.node.classList.remove("open");
-    setTimeout(function () { s.node.remove(); }, 200);
-    if (s.trigger && s.trigger.focus) s.trigger.focus();
+  /* ---------- grid: header line ---------- */
+  /* get_game_detail is called with a name / game_id / appid / items;
+     discover_games never is. */
+  function isDetailArgs(args) {
+    return !!(args.name || args.game_id != null || args.appid != null || args.items);
   }
-  function closeAllOverlays() {
-    while (overlays.length) closeOverlay();
-  }
-
-  function closeButton(ariaText, onClose) {
-    var btn = el("button", "overlay-close", "✕");
-    btn.setAttribute("aria-label", ariaText);
-    btn.addEventListener("click", onClose);
-    return btn;
-  }
-
-  function openOverlay(panel, trigger, onKey) {
-    var overlay = el("div", "overlay");
-    var entry = { node: overlay, trigger: trigger, keydown: null, position: position };
-    overlay.appendChild(panel);
-    overlay.addEventListener("click", function (ev) {
-      if (ev.target === overlay) closeOverlay(entry);
-    });
-    // Only the topmost overlay answers keys, so closing a lightbox leaves the
-    // detail card it was opened from standing — and the carousel's arrow keys
-    // never reach a card sitting underneath it.
-    entry.keydown = function (ev) {
-      if (overlays[overlays.length - 1] !== entry) return;
-      if (ev.key === "Escape") {
-        closeOverlay(entry);
-        return;
-      }
-      if (onKey) onKey(ev);
-    };
-    document.addEventListener("keydown", entry.keydown);
-    overlays.push(entry);
-    document.body.appendChild(overlay);
-
-    // Anchor the panel near whatever was clicked, clamped inside the document;
-    // stretch the backdrop over the full document height.
-    function position() {
-      var docH = document.documentElement.scrollHeight;
-      var scrollTop = window.scrollY || document.documentElement.scrollTop || 0;
-      var anchor = trigger ? trigger.getBoundingClientRect().top + scrollTop - 8 : 12;
-      var top = Math.max(12, Math.min(anchor, docH - panel.offsetHeight - 12));
-      panel.style.top = top + "px";
-      overlay.style.height = Math.max(docH, top + panel.offsetHeight + 14) + "px";
+  var SORT_LABELS = { match: "taste match", critic: "critic score", value: "value" };
+  function headerParts(data) {
+    var shown = data.results.length;
+    var total = num(data.total_matches);
+    var count = total != null && total > shown
+      ? shown + " of " + plural(total, "game")
+      : plural(shown, "game");
+    var parts = [];
+    var args = lastToolInput;
+    if (args && !isDetailArgs(args)) {
+      parts.push("sorted by " + (SORT_LABELS[args.sort_by] || SORT_LABELS.match));
+      var vibes = list(args.vibes).filter(Boolean);
+      if (vibes.length) parts.push(vibes.join(" + "));
+      // discover_games defaults unplayed_only to true: absent means on.
+      if (args.unplayed_only !== false) parts.push("unplayed only");
+      var maxHours = num(args.max_hltb_hours);
+      if (maxHours != null) parts.push("≤ " + maxHours + "h");
+      var minScore = num(args.min_score);
+      if (minScore != null) parts.push("critics ≥ " + minScore);
+      if (args.protondb_min_tier) parts.push("ProtonDB " + label("tier", args.protondb_min_tier) + "+");
     }
-    position();
-    requestAnimationFrame(function () { overlay.classList.add("open"); });
-    panel.focus({ preventScroll: true });
-    return entry;
+    return { count: count, parts: parts };
+  }
+  function headerLine(data) {
+    var parts = headerParts(data);
+    var head = el("div", "grid-head");
+    head.appendChild(el("b", null, parts.count));
+    if (parts.parts.length) head.appendChild(document.createTextNode(" · " + parts.parts.join(" · ")));
+    return head;
   }
 
-  function openDetail(game, trigger) {
-    closeAllOverlays();
-    var entry;
-    var panel = el("div", "overlay-panel");
-    panel.setAttribute("role", "dialog");
-    panel.setAttribute("aria-modal", "true");
-    panel.setAttribute("aria-label", game.name || "Game details");
-    panel.tabIndex = -1;
-    panel.appendChild(closeButton("Close details", function () { closeOverlay(entry); }));
+  /* ---------- grid: footer actions (at most two) ---------- */
+  function gridActions(data) {
+    var bar = el("div", "actions");
+    var shown = data.results.length;
+    if (data.has_more && shown) {
+      var args = lastToolInput || {};
+      var limit = num(args.limit) || shown;
+      var offset = typeof data.offset === "number" ? data.offset : 0;
+      var next = offset + shown;
+      var total = num(data.total_matches);
+      var count = total != null && total > next ? Math.min(limit, total - next) : limit;
+      var more = el("button", "btn act-more", "Show next " + count);
+      more.type = "button";
+      more.addEventListener("click", function () {
+        sendMessage("Show the next " + count + " recommendations (offset " + next + ")");
+        more.disabled = true;
+        more.textContent = "Asked for the next " + count;
+      });
+      bar.appendChild(more);
+    }
+    if (canFullscreen()) {
+      var expand = el("button", "btn act-expand", "Expand");
+      expand.type = "button";
+      expand.addEventListener("click", function () { requestDisplayMode("fullscreen"); });
+      bar.appendChild(expand);
+    }
+    return bar.childNodes.length ? bar : null;
+  }
 
-    // Instant view from the data already on the card; the live
-    // get_game_detail result replaces it when it arrives.
-    var lite = detailCard(game);
-    var note = el("div", "loading-note", "Loading full details");
-    var liteInfo = lite.querySelector(".detail-info");
-    if (liteInfo) liteInfo.appendChild(note);
-    panel.appendChild(lite);
-
-    entry = openOverlay(panel, trigger);
-
-    if (window.__PREVIEW_DATA__) { note.remove(); return; }
-    // media:true is what turns the upgraded card into the full game
-    // representation — trailer, screenshots, the owned games most like it.
-    // The grid payload carries none of that.
-    // 30s, not callTool's 15s default: a cold click-through runs the full
-    // lazy enrichment AND the media lookup's own 8s budget server-side, and a
-    // response that loses the race is discarded — the overlay would sit on
-    // the lite card forever even though media eventually arrived.
-    callTool("get_game_detail", { game_id: game.game_id, media: true }, 30000).then(function (res) {
-      if (overlays.indexOf(entry) < 0) return; // closed or superseded
-      var data = resultData(res);
-      if (data && data.name) {
-        var full = detailCard(data);
-        panel.replaceChild(full, lite);
-        entry.position(); // content height changed
-      } else {
-        note.remove(); // host declined or timed out: keep the lite view
-      }
+  /* ---------- grid: cards ---------- */
+  /* Label and phrase only — no meter in a 150px card; a phrase of two or more
+     words takes a line of its own (.steam-line) rather than folding. */
+  function gridSteamChip(desc) {
+    if (!desc) return null;
+    var phrase = String(desc).toLowerCase();
+    phrase = phrase.charAt(0).toUpperCase() + phrase.slice(1);
+    var words = phrase.split(/\s+/).filter(Boolean).length;
+    return scoreChip({
+      label: "Steam", value: phrase, tier: steamTier(desc), title: "Steam reviews",
+      cls: words >= 2 ? "steam-line" : "",
     });
+  }
+
+  function gridCard(game) {
+    var card = el("div", "card");
+    if (game.game_id != null) {
+      card.tabIndex = 0;
+      card.setAttribute("role", "button");
+      card.setAttribute("data-game-id", String(game.game_id));
+      card.setAttribute("aria-label", "Show details for " + (game.name || "game"));
+      card.addEventListener("click", function () { selectGame(game); });
+      card.addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          selectGame(game);
+        }
+      });
+    }
+    var cover = coverNode(game);
+    // The cover chip is always Metacritic (the fullest-coverage source in
+    // this library) so the corner never switches identity between sources;
+    // the chip row below carries the others rather than repeating it.
+    if (realScore(game.metacritic_score)) {
+      cover.appendChild(scoreChip({
+        label: "Metacritic", value: Math.round(game.metacritic_score),
+        tier: mcTier(game.metacritic_score), cls: "corner",
+      }));
+    }
+    var typeLabel = contentTypeLabel(game);
+    if (typeLabel) cover.appendChild(el("span", "type-chip", typeLabel));
+    card.appendChild(cover);
+
+    var body = el("div", "card-body");
+    body.appendChild(el("div", "title", game.name));
+    var pName = parentName(game);
+    if (pName) body.appendChild(el("div", "parent-sub", "⤷ " + pName));
+    // The lead signal: how well this fits his taste.
+    if (game.match_percent != null) body.appendChild(matchBar(game.match_percent));
+
+    // One line of text, so a wrap breaks between words, never before a "·".
+    var metaBits = [];
+    var hltb = hoursLabel(game.hltb_main, true);
+    if (hltb) metaBits.push(hltb);
+    if (game.suggested_platform) metaBits.push(label("platform", game.suggested_platform));
+    var played = num(game.playtime_hours) > 0 ? hoursLabel(game.playtime_hours) : null;
+    if (played) metaBits.push(played + " played");
+    if (metaBits.length) body.appendChild(el("div", "meta", metaBits.join(" · ")));
+
+    var scores = el("div", "chips");
+    if (realScore(game.opencritic_score)) {
+      scores.appendChild(scoreChip({
+        label: "OpenCritic", value: Math.round(game.opencritic_score),
+        tier: ocTier(game.opencritic_score, game.opencritic_tier),
+      }));
+    }
+    var steam = gridSteamChip(game.steam_review_desc);
+    if (steam) scores.appendChild(steam);
+    if (scores.childNodes.length) body.appendChild(scores);
+
+    var why = matchedTagNames(game).slice(0, 3);
+    if (why.length) body.appendChild(el("div", "tagline", why.join(" · ")));
+
+    card.appendChild(body);
+    return card;
+  }
+
+  function renderGrid(data) {
+    root.appendChild(headerLine(data));
+    if (!data.results.length) {
+      root.appendChild(el("div", "empty", "No games matched."));
+    } else {
+      var grid = el("div", "grid");
+      // Rank badges only when the payload is explicitly rank-ordered:
+      // discover_games sends its pagination offset, so numbering is global
+      // (page two starts at #21). Payloads without it stay unnumbered.
+      if (typeof data.offset === "number") {
+        grid.classList.add("ranked");
+        grid.style.counterReset = "rank " + data.offset;
+      }
+      data.results.forEach(function (g) { grid.appendChild(gridCard(g)); });
+      root.appendChild(grid);
+    }
+    var actions = gridActions(data);
+    if (actions) root.appendChild(actions);
+  }
+
+  /* ---------- card tap: hand back to the conversation ---------- */
+  /* The selection always reaches the model. Then: fullscreen + a live detail
+     drill-in where the host offers fullscreen, else a chat message. */
+  function selectGame(game) {
+    lastSelectedId = game.game_id;
+    updateModelContext(
+      "User selected " + game.name + " (game_id " + game.game_id + ") from the recommendations",
+      { game_id: game.game_id, name: game.name });
+    if (!canFullscreen()) {
+      sendMessage("Show me " + game.name);
+      return;
+    }
+    var before = currentDisplayMode();
+    requestDisplayMode("fullscreen").then(function (mode) {
+      if (mode === "fullscreen") openDrill(game, before);
+      else sendMessage("Show me " + game.name);  // the host said no after all
+    });
+  }
+
+  function openDrill(game, before) {
+    var seq = ++drillSeq;
+    modeBeforeDrill = before;
+    view = "drill";
+    root.textContent = "";
+    var bar = el("div", "topbar");
+    var back = el("button", "btn", "← Back to results");
+    back.type = "button";
+    back.addEventListener("click", backToResults);
+    bar.appendChild(back);
+    bar.appendChild(el("div", "topbar-title", game.name));
+    root.appendChild(bar);
+    var holder = el("div");
+    holder.appendChild(skeleton("detail"));
+    root.appendChild(holder);
+    window.scrollTo(0, 0);
+    back.focus({ preventScroll: true });
+    reportSize();
+
+    function fill(data, failed) {
+      if (seq !== drillSeq) return;               // Back, or another tap, won
+      holder.textContent = "";
+      holder.appendChild(detailCard(data));
+      if (failed) notice(holder, "Couldn't load the full details — showing what the list had.");
+      reportSize();
+    }
+    if (window.__PREVIEW_DATA__) { fill(game, false); return; }
+    // media:true is what turns the card into the full game representation —
+    // trailer, screenshots, the owned games most like it; the grid payload
+    // carries none of that. 30s, not callTool's 15s default: a cold
+    // click-through runs the full lazy enrichment AND the media lookup's own
+    // 8s budget server-side, and a response that loses the race is dropped.
+    callTool("get_game_detail", { game_id: game.game_id, media: true }, 30000).then(function (res) {
+      var data = resultData(res);
+      if (data && data.name) fill(data, false);
+      else fill(game, true);                      // declined or timed out
+    });
+  }
+
+  function backToResults() {
+    var restore = modeBeforeDrill;
+    if (gridData) render(gridData);
+    if (restore !== "fullscreen") requestDisplayMode("inline");
+    var cards = root.querySelectorAll(".card");
+    for (var i = 0; i < cards.length; i++) {
+      if (cards[i].getAttribute("data-game-id") === String(lastSelectedId)) {
+        cards[i].focus({ preventScroll: false });
+        break;
+      }
+    }
   }
 
   /* Best-effort fullscreen: rendered only where the API exists, dropped when
@@ -534,94 +751,76 @@ GAME_CARDS_HTML = (
     + "\n"
     + apps_shared.NAV_BUTTON_JS
     + r"""
-  /* The screenshot lightbox is a carousel over EVERY delivered screenshot:
-     drag/swipe, the two arrow buttons, and the arrow keys all move through it. */
+  /* ---------- screenshot lightbox ---------- */
+  /* The detail card's own media viewer (not navigation): one slot, fixed over
+     the iframe, closed by ✕, Escape or the backdrop; Tab stays inside it and
+     focus returns to the stage that opened it. */
+  var lightbox = null;
+  function closeLightbox() {
+    var current = lightbox;
+    if (!current) return;
+    lightbox = null;
+    document.removeEventListener("keydown", current.onKey, true);
+    current.overlay.classList.remove("open");
+    setTimeout(function () { current.overlay.remove(); }, 200);
+    if (current.trigger && current.trigger.focus) current.trigger.focus({ preventScroll: true });
+  }
+  function keepFocusInside(ev, panel) {
+    var buttons = panel.querySelectorAll("button");
+    if (!buttons.length) return;
+    var first = buttons[0];
+    var last = buttons[buttons.length - 1];
+    if (ev.shiftKey && document.activeElement === first) {
+      ev.preventDefault();
+      last.focus();
+    } else if (!ev.shiftKey && document.activeElement === last) {
+      ev.preventDefault();
+      first.focus();
+    }
+  }
   function openCarousel(shots, startIndex, gameName, trigger) {
-    var entry;
+    closeLightbox();
     var index = startIndex;
-    var panel = el("div", "overlay-panel carousel");
+    var overlay = el("div", "overlay lightbox");
+    var panel = el("div", "lightbox-panel carousel");
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-modal", "true");
     panel.setAttribute("aria-label", (gameName ? gameName + " " : "") + "screenshots");
     panel.tabIndex = -1;
-    panel.appendChild(closeButton("Close screenshots", function () { closeOverlay(entry); }));
+    var closer = el("button", "overlay-close", "✕");
+    closer.type = "button";
+    closer.setAttribute("aria-label", "Close screenshots");
+    closer.addEventListener("click", closeLightbox);
+    panel.appendChild(closer);
 
 """
     + apps_shared.CAROUSEL_STAGE_JS
     + r"""
-    entry = openOverlay(panel, trigger, function (ev) {
-      if (ev.key === "ArrowLeft") show(index - 1);
+    overlay.appendChild(panel);
+    overlay.addEventListener("click", function (ev) {
+      if (ev.target === overlay) closeLightbox();
+    });
+    var onKey = function (ev) {
+      if (ev.key === "Escape") { ev.preventDefault(); closeLightbox(); }
+      else if (ev.key === "ArrowLeft") show(index - 1);
       else if (ev.key === "ArrowRight") show(index + 1);
-    });
-    img.addEventListener("load", entry.position); // full-size art changes the height
-  }
+      else if (ev.key === "Tab") keepFocusInside(ev, panel);
+    };
+    document.addEventListener("keydown", onKey, true);
+    lightbox = { overlay: overlay, trigger: trigger, onKey: onKey };
+    document.body.appendChild(overlay);
 
-  function gridCard(game) {
-    var card = el("div", "card");
-    if (game.game_id != null) {
-      card.tabIndex = 0;
-      card.setAttribute("role", "button");
-      card.setAttribute("aria-label", "Show details for " + (game.name || "game"));
-      card.addEventListener("click", function () { openDetail(game, card); });
-      card.addEventListener("keydown", function (ev) {
-        if (ev.key === "Enter" || ev.key === " ") {
-          ev.preventDefault();
-          openDetail(game, card);
-        }
-      });
-    }
-    var cover = coverNode(game);
-    // The cover chip is always Metacritic (the fullest-coverage source in
-    // this library) so the top-right corner never switches identity between
-    // sources; everything else lives in the scores row below.
-    if (realScore(game.metacritic_score)) {
-      cover.appendChild(scoreChip({
-        label: "Metacritic", value: Math.round(game.metacritic_score),
-        tier: mcTier(game.metacritic_score), cls: "corner",
-      }));
-    }
-    card.appendChild(cover);
-
-    var body = el("div", "card-body");
-    var typeLabel = contentTypeLabel(game);
-    if (typeLabel) body.appendChild(el("span", "type-chip", typeLabel));
-    body.appendChild(el("div", "title", game.name));
-    var pName = parentName(game);
-    if (pName) body.appendChild(el("div", "parent-sub", "⤷ " + pName));
-
-    // One line of text, so a wrap breaks between words, never before a "·".
-    var metaBits = [];
-    var hltb = hoursLabel(game.hltb_main, true);
-    if (hltb) metaBits.push(hltb);
-    if (game.suggested_platform) metaBits.push(label("platform", game.suggested_platform));
-    var played = num(game.playtime_hours) > 0 ? hoursLabel(game.playtime_hours) : null;
-    if (played) metaBits.push(played + " played");
-    if (metaBits.length) body.appendChild(el("div", "meta", metaBits.join(" · ")));
-
-    // Secondary ratings: OpenCritic and Steam always live here.
-    var scores = el("div", "chips scores");
-    if (realScore(game.opencritic_score)) {
-      scores.appendChild(scoreChip({
-        label: "OpenCritic", value: Math.round(game.opencritic_score),
-        tier: ocTier(game.opencritic_score, game.opencritic_tier),
-      }));
-    }
-    var steam = steamChip(game.steam_review_desc);
-    if (steam) scores.appendChild(steam);
-    if (scores.childNodes.length) body.appendChild(scores);
-
-    var pills = el("div", "pills");
-    if (game.match_percent != null) {
-      pills.appendChild(el("span", "pill match", game.match_percent + "% match"));
-    }
-    matchedTagNames(game).slice(0, 3).forEach(function (t) {
-      pills.appendChild(el("span", "pill", t));
-    });
-    if (game.value_note) pills.appendChild(el("span", "pill", game.value_note));
-    if (pills.childNodes.length) body.appendChild(pills);
-
-    card.appendChild(body);
-    return card;
+    // Viewport coordinates (the overlay is fixed): start at the stage that
+    // was clicked, clamped so the whole panel stays on screen.
+    var place = function () {
+      var viewH = window.innerHeight || document.documentElement.clientHeight;
+      var anchor = trigger ? trigger.getBoundingClientRect().top - 8 : 12;
+      panel.style.top = Math.max(12, Math.min(anchor, viewH - panel.offsetHeight - 12)) + "px";
+    };
+    place();
+    img.addEventListener("load", place);          // full-size art changes the height
+    requestAnimationFrame(function () { overlay.classList.add("open"); });
+    closer.focus({ preventScroll: true });
   }
 
   /* ---- media blocks (get_game_detail(media=True)) ---- */
@@ -632,7 +831,7 @@ GAME_CARDS_HTML = (
   /* The trailer and the screenshots are one reel, shown the way a store page
      shows them: a single 16:9 stage plus one thumb strip, trailer first.
      Clicking a thumb swaps the stage in place; clicking a screenshot IN the
-     stage opens the carousel. */
+     stage opens the lightbox. */
 """
     + apps_shared.MEDIA_PANEL_JS
     + "\n"
@@ -650,23 +849,37 @@ GAME_CARDS_HTML = (
 """
     + apps_shared.PEDIGREE_JS
     + r"""
-  function detailCard(game) {
-    // A column stack so the media blocks can span the card's full width; with
-    // no media it holds the one .detail panel and looks exactly as before.
-    var stack = el("div", "detail-stack");
-    var media = game.media || {};
-    // The media panel LEADS the stack, where the bare trailer hero used to:
-    // the trailer and the screenshots are one reel and belong together.
-    mediaNode(stack, media, game.name);
+  /* ---------- detail: identity panel ---------- */
+  /* get_game_detail's `enrichment` is {provider: reason} for providers that
+     were skipped for a structural reason — said in words, never as ids. */
+  var ENRICH_SOURCES = { steam_store: "Steam", protondb: "ProtonDB", igdb: "IGDB" };
+  var ENRICH_REASONS = {
+    no_steam_appid: "no app id",
+    no_steam_platform_row: "not owned on Steam",
+    unconfigured: "not configured",
+    no_match: "no match",
+    unresolved: "unresolved",
+    link_pending: "still linking",
+    failed: "lookup failed",
+  };
+  function enrichmentReasons(why) {
+    if (!why || typeof why !== "object") return [];
+    return Object.keys(why).map(function (k) {
+      var source = ENRICH_SOURCES[k] || label("provider", k);
+      var reason = ENRICH_REASONS[why[k]] || humanize(why[k]).toLowerCase();
+      return source + ": " + reason;
+    });
+  }
 
+  var descSeq = 0;
+  function identityPanel(game, media) {
     var box = el("div", "detail");
     box.appendChild(coverNode(game));
 
-    var info = el("div", "detail-info");
-    info.appendChild(el("h1", null, game.name));
+    var head = el("div", "detail-head");
+    head.appendChild(el("h1", null, game.name));
     var pName = parentName(game);
-    if (pName) info.appendChild(el("div", "sub parent-sub", "part of " + pName));
-
+    if (pName) head.appendChild(el("div", "sub parent-sub", "part of " + pName));
     var subBits = [];
     if (game.release_date) subBits.push(String(game.release_date).slice(0, 4));
     var owned = (game.platforms || []).filter(function (p) { return p.owned; })
@@ -675,10 +888,12 @@ GAME_CARDS_HTML = (
     var played = num(game.playtime_hours) > 0 ? hoursLabel(game.playtime_hours) : null;
     if (played) subBits.push(played + " played");
     if (game.wishlisted && !game.owned) subBits.push("wishlisted");
-    if (subBits.length) info.appendChild(el("div", "sub", subBits.join(" · ")));
+    if (subBits.length) head.appendChild(el("div", "sub", subBits.join(" · ")));
+    box.appendChild(head);
 
-    // Metacritic leads (it's the cover-chip source); every chip links out to
-    // its source page via the host when a URL is known or derivable.
+    var body = el("div", "detail-body");
+    // Metacritic leads (it's the grid's cover-chip source); every chip links
+    // out to its source page via the host when a URL is known or derivable.
     var appid = game.steam_appid != null ? game.steam_appid : game.appid;
     var badges = el("div", "chips badges");
     var typeLabel = contentTypeLabel(game);
@@ -711,47 +926,110 @@ GAME_CARDS_HTML = (
         url: appid != null ? "https://www.protondb.com/app/" + appid : null,
       }));
     }
-    if (badges.childNodes.length) info.appendChild(badges);
-
-    if (game.my_rating && game.my_rating.normalized_score != null) {
-      var r = el("div", "rating-row");
-      r.appendChild(el("span", null, "My rating: "));
-      r.appendChild(el("b", null, game.my_rating.normalized_score + "/10"));
-      info.appendChild(r);
+    var mine = game.my_rating ? num(game.my_rating.normalized_score) : null;
+    if (mine != null) {
+      badges.appendChild(scoreChip({
+        label: "Your rating", value: mine + "/10",
+        tier: mine >= 7 ? "good" : mine >= 5 ? "ok" : "bad",
+      }));
     }
+    if (badges.childNodes.length) body.appendChild(badges);
 
     // media.short_description is the same kind of blurb as the stored one and
     // often literally identical — render one, preferring the library's own.
     var description = game.short_description || media.short_description;
-    if (description) info.appendChild(el("p", "desc", description));
-
-    var tags = (game.tags || []).slice(0, 8);
-    if (tags.length) {
-      var pills = el("div", "pills");
-      tags.forEach(function (t) { pills.appendChild(el("span", "pill", t)); });
-      info.appendChild(pills);
+    if (description) {
+      var desc = el("p", "desc", description);
+      desc.id = "desc-" + (++descSeq);
+      body.appendChild(desc);
+      var more = el("button", "more-toggle", "More");
+      more.type = "button";
+      more.hidden = true;                         // only when the clamp bites
+      more.setAttribute("aria-controls", desc.id);
+      more.setAttribute("aria-expanded", "false");
+      more.addEventListener("click", function () {
+        var open = desc.classList.toggle("open");
+        more.textContent = open ? "Less" : "More";
+        more.setAttribute("aria-expanded", open ? "true" : "false");
+        reportSize();
+      });
+      body.appendChild(more);
+      requestAnimationFrame(function () {
+        if (desc.scrollHeight > desc.clientHeight + 1) {
+          more.hidden = false;
+          reportSize();
+        }
+      });
     }
+
+    var tags = (game.tags || []).filter(Boolean).slice(0, 8);
+    if (tags.length) body.appendChild(el("div", "tagline", tags.join(" · ")));
 
     // A never-enriched row (an assessment-minted candidate, a fresh wishlist
     // entry) fills nothing but the title, which renders as a card that looks
     // broken. Say so, and — when the response explained which providers were
     // skipped and why (get_game_detail's `enrichment`) — say that too.
-    if (info.childNodes.length === 1) {
+    var reasons = enrichmentReasons(game.enrichment);
+    var filled = head.childNodes.length > 1 || body.childNodes.length > 0;
+    if (!filled) {
       var emptyText = "No details fetched yet";
-      var why = game.enrichment;
-      if (why && typeof why === "object") {
-        var parts = [];
-        Object.keys(why).forEach(function (k) { parts.push(k + ": " + why[k]); });
-        if (parts.length) emptyText += " — " + parts.join(", ");
-      }
-      info.appendChild(el("div", "sub empty-state", emptyText));
+      if (reasons.length) emptyText += " — " + reasons.join(" · ");
+      notice(body, emptyText);
+    } else if (reasons.length) {
+      notice(body, "Not fetched — " + reasons.join(" · "));
     }
+    box.appendChild(body);
+    return box;
+  }
 
-    box.appendChild(info);
-    stack.appendChild(box);
+  /* ---------- detail: similar + studio, behind one control ---------- */
+  function hasStudio(ped) {
+    if (!ped) return false;
+    if (pedigreeHeadline(ped)) return true;
+    return list(ped.previous_games).some(function (i) { return i && i.name; });
+  }
+  function relatedBlock(stack, game) {
+    var similar = !!(game.similar && list(game.similar.items).some(function (i) { return i && i.name; }));
+    var studio = hasStudio(game.pedigree);
+    if (!similar && !studio) return;
+    var build = function (parent) {
+      if (similar) similarNode(parent, game.similar);
+      if (studio) pedigreeNode(parent, game.pedigree);
+      reportSize();
+    };
+    var text = [similar ? "Similar games you own" : null, studio ? "From the studio" : null]
+      .filter(Boolean).join(" · ");
+    // Already fullscreen: everything expanded, no control at all.
+    if (currentDisplayMode() === "fullscreen") { build(stack); return; }
+    // No fullscreen on this host: the in-place disclosure.
+    if (!canFullscreen()) { disclosure(stack, text, build); return; }
+    // A fullscreen host: the control opens the big view with the rows
+    // expanded; if the host refuses after all, it opens in place instead.
+    var wrap = el("div", "related");
+    var btn = el("button", "disclosure");
+    btn.type = "button";
+    btn.appendChild(el("span", null, text));
+    var icon = el("span", "chev-out", "⤢");
+    icon.setAttribute("aria-hidden", "true");
+    btn.appendChild(icon);
+    btn.addEventListener("click", function () {
+      requestDisplayMode("fullscreen").then(function (mode) {
+        wrap.textContent = "";
+        if (mode === "fullscreen") build(wrap);
+        else disclosure(wrap, text, build).button.click();
+      });
+    });
+    wrap.appendChild(btn);
+    stack.appendChild(wrap);
+  }
 
-    if (game.similar) similarNode(stack, game.similar);
-    pedigreeNode(stack, game.pedigree);
+  function detailCard(game) {
+    var stack = el("div", "detail-stack");
+    var media = game.media || {};
+    // Who the game is first, then how it looks, then what it is like.
+    stack.appendChild(identityPanel(game, media));
+    mediaNode(stack, media, game.name);
+    relatedBlock(stack, game);
     return stack;
   }
 
@@ -763,25 +1041,17 @@ GAME_CARDS_HTML = (
   }
 
   function render(data) {
+    drillSeq++;
     root.textContent = "";
     if (data && Array.isArray(data.results)) {
-      if (!data.results.length) {
-        root.appendChild(el("div", "empty", "No games matched."));
-      } else {
-        var grid = el("div", "grid");
-        // Rank badges only when the payload is explicitly rank-ordered:
-        // discover_games sends its pagination offset, so numbering is global
-        // (page two starts at #21). Payloads without it stay unnumbered.
-        if (typeof data.offset === "number") {
-          grid.classList.add("ranked");
-          grid.style.counterReset = "rank " + data.offset;
-        }
-        data.results.forEach(function (g) { grid.appendChild(gridCard(g)); });
-        root.appendChild(grid);
-      }
+      view = "grid";
+      gridData = data;
+      renderGrid(data);
     } else if (data && data.name) {
+      view = "detail";
       root.appendChild(detailCard(data));
     } else {
+      view = "none";
       root.appendChild(el("div", "empty", "Nothing to display."));
     }
     reportSize();
@@ -790,12 +1060,25 @@ GAME_CARDS_HTML = (
 """
     + apps_shared.SIZING_JS
     + apps_shared.INIT_JS
-    + r"""  startWidget("gamelib-game-cards");
-  if (window.__PREVIEW_DATA__ && window.__PREVIEW_OPEN_INDEX__ != null) {
-    var previewCards = root.querySelectorAll(".card");
-    var target = previewCards[window.__PREVIEW_OPEN_INDEX__];
-    if (target) target.click();
-  }
+    + r"""
+  /* Tool input can land after the result: the grid's header line and its
+     "Show next" count are built from it, so redraw the grid when it does. */
+  var baseToolInput = handleToolInput;
+  handleToolInput = function (params) {
+    baseToolInput(params);
+    if (gotResult && view === "grid" && gridData) render(gridData);
+  };
+  /* The host leaving fullscreen (its own close button) ends a drill-in. */
+  var baseApplyHostContext = applyHostContext;
+  applyHostContext = function (ctx) {
+    baseApplyHostContext(ctx);
+    if (view === "drill" && currentDisplayMode() !== "fullscreen" && gridData) render(gridData);
+  };
+
+  // Preview only: the arguments the preview script called the tool with, so
+  // the header line can be judged offline.
+  if (window.__PREVIEW_TOOL_INPUT__) lastToolInput = window.__PREVIEW_TOOL_INPUT__;
+  startWidget("gamelib-game-cards");
 })();
 </script>
 </body>

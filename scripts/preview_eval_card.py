@@ -16,11 +16,19 @@ Usage:
     python scripts/preview_eval_card.py 1 -o eval.html
     python scripts/preview_eval_card.py --list
     python scripts/preview_eval_card.py 0 --theme dark [--touch]   # Claude's tokens
+    python scripts/preview_eval_card.py 0 --fullscreen             # card + breakdown
+    python scripts/preview_eval_card.py 0 --expanded               # disclosure open
 
 --theme simulates a host: the page gets window.__PREVIEW_HOST_CONTEXT__ with
 Claude's style variables (scripts/preview_host_context.py), as a real
 ui/initialize would deliver them. Without it the widget's own fallbacks and
 prefers-color-scheme decide.
+
+--fullscreen simulates a host that has the card in fullscreen (displayMode
+"fullscreen" plus availableDisplayModes); it implies a host, so without
+--theme it uses the light one. --expanded clicks "Full breakdown" once the
+page has loaded — the in-place disclosure when there is no host, the host's
+refused fullscreen request falling back to it with --theme.
 """
 
 import argparse
@@ -627,10 +635,29 @@ SAMPLES: list[tuple[str, dict[str, Any]]] = [
 ]
 
 
-def build_html(data: dict[str, Any], theme: str | None = None, touch: bool = False) -> str:
+# Runs after the widget's own script has rendered the preview payload.
+_EXPAND_JS = (
+    ' document.addEventListener("DOMContentLoaded", function () {'
+    ' var b = document.querySelector(".act-breakdown"); if (b) b.click(); });'
+)
+
+
+def build_html(
+    data: dict[str, Any],
+    theme: str | None = None,
+    touch: bool = False,
+    *,
+    fullscreen: bool = False,
+    expanded: bool = False,
+) -> str:
     """Inject a payload (and, with a theme, a simulated hostContext)."""
+    if fullscreen and not theme:
+        theme = "light"
     context = host_context(theme, touch=touch) if theme else None
-    return inject(EVAL_CARD_HTML, data, context)
+    if context is not None and fullscreen:
+        context["displayMode"] = "fullscreen"
+        context["availableDisplayModes"] = ["inline", "fullscreen"]
+    return inject(EVAL_CARD_HTML, data, context, _EXPAND_JS if expanded else "")
 
 
 def main() -> None:
@@ -645,9 +672,16 @@ def main() -> None:
         help="simulate a host: inject Claude's style variables as __PREVIEW_HOST_CONTEXT__",
     )
     parser.add_argument("--touch", action="store_true", help="with --theme: a touch device")
+    parser.add_argument(
+        "--fullscreen", action="store_true",
+        help="simulate a host showing the card fullscreen (inline card + full breakdown)",
+    )
+    parser.add_argument(
+        "--expanded", action="store_true", help="open the Full breakdown once the page loads",
+    )
     parser.add_argument("-o", "--out", type=Path, help="output path (default: stdout)")
     args = parser.parse_args()
-    if args.touch and not args.theme:
+    if args.touch and not (args.theme or args.fullscreen):
         parser.error("--touch is part of the simulated host; pass --theme")
 
     if args.list:
@@ -656,7 +690,9 @@ def main() -> None:
         return
 
     label, data = SAMPLES[args.sample]
-    html = build_html(data, args.theme, args.touch)
+    html = build_html(
+        data, args.theme, args.touch, fullscreen=args.fullscreen, expanded=args.expanded
+    )
     if args.out:
         args.out.write_text(html)
         print(f"wrote {args.out} ({label})", file=sys.stderr)
