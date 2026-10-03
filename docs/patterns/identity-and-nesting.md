@@ -16,10 +16,10 @@ a write that silently attaches one game onto another. Moved out of the root
 
 **DLC & nested content**: `is_primary_library_item` is always derived from `content_type ∈ PRIMARY_CONTENT_TYPES`, never set independently. Classification precedence: manual override > Steam store type/fullgame > IGDB category/version_parent > title overrides > importer hint > default; a default-clobber guard prevents bare base_game signals from flipping stored nested rows back to primary. Every writer goes through `apply_content_classification` or `_apply_igdb_metadata` (kept in sync), and both enforce two nesting guards. **A parent must stay primary, both ways**: `update_game` refuses to nest under nested content, and — the inverse — no writer may nest a row that other rows hang off (`has_nested_children` guard in both writers; `update_game` raises instead of skipping). Nesting a parent hides it from the is_primary rollups *and* strands its children behind it, which is how both Fallout: New Vegas rows went invisible; `check_library`'s `nesting.misclassified` check surfaces any that already exist (`nested_parent` bucket). **Substance guard** (`nesting_substance_conflict`): a row holding a store identifier + real playtime is never demoted under a parent that has neither (skipped in the classifiers, raised in update_game) — a wrong version-parent match must not hide a real game behind an empty shell; the `inconsistent_primary_nested` bucket surfaces the legacy "nested type + primary flag" rows. **Edition-ownership guard** (`edition_hides_owned_game`): an OWNED row is never demoted to an `edition` of a parent nobody owns (or of a to-be-minted empty parent) — an owned edition IS the game's ownership record, and the playtime-keyed substance guard alone let owned-but-unplayed edition SKUs ("Burnout Paradise: The Ultimate Box") vanish behind minted shells; scoped to editions so owned DLC without its base game (Epic giveaways) stays nestable. **Primary rows keep no parent**: parent links are resolved/minted/written only for nested verdicts, a non-default primary verdict clears a stored parent link, and a primary title override never inherits the IGDB record's parent (IGDB lists Civ IV: Colonization under the 1994 Colonization). Parent guesses for minted addons run through `parent_name_candidates` (addon-suffix stripping + separator splits, longest candidate first — "Deus Ex: Mankind Divided Season Pass" parents under Mankind Divided, not the 2000 original). Money spent on DLC always counts in spending totals and breakdowns (by_family rolls base games + their owned nested children for cost-per-hour). Nested rows stay searchable (nested-content fallback) and repairable (`check_library`'s `nesting.misclassified` check surfaces candidates for `update_game`). Catalog data (Steam dlc arrays, IGDB children) lives in `meta` KV only — never mints games rows; parents are never minted from title guesses. Nested purchase items match exact identity only (no fuzzy) to prevent spend corruption. The Epic sync applies the same rule to catalog DLC (`metadata.mainGameItem`): identifier-only resolution, a nested mint under the base item resolved from the same run's catalog ids / `releaseInfo` appIds / exact title, never name or IGDB resolution — which is how two different games' "Ultra HD Texture Pack" once shared a row — and Unreal marketplace assets (namespace `ue`) and mods never enter the library. An IGDB `bundle` (category 3) record with no parent is a purchasable compilation ("UFO 50", "Fallout Classic") and classifies primary; parentless nested rows were the invisible alternative. Read docs/adr/0002-dlc-first-class.md for the invariants.
 
-## Purchase import (`import_purchases`)
+## Acquisition writes (`set_acquisition`, `import_purchases`)
 
-The tool description carries the call-time rules; the reasons behind them
-live here (moved out of the docstring 2026-10-03, widget-UX spec §2.3):
+The tool descriptions carry the call-time rules; the reasons behind them
+live here (moved out of the docstrings 2026-10-03, widget-UX spec §2.3):
 
 - Only NULL acquisition fields are filled by default so re-running an import
   never clobbers values set by hand.
@@ -35,3 +35,14 @@ live here (moved out of the docstring 2026-10-03, widget-UX spec §2.3):
   `bundles_needing_split` instead of `unmatched`. One order often carries a key
   per platform, hence the collapse into one entry with `platforms`; and every
   import re-surfaces every bundle, hence `already_recorded`.
+- `set_acquisition`'s mode-split defaults: a single-game call overwrites
+  (`overwrite=None` → True) because naming a field means you meant to correct
+  it, and creates a missing owned platform row because recording a purchase is
+  recording ownership. `items` mode fills NULL columns only, so re-importing a
+  purchase export never clobbers hand-set values, and reports
+  `no_platform_row` rather than silently giving a game a row.
+- A per-item `clear` always writes, even in fill-only mode, so `items` with
+  `clear` is the way to undo a bad import in bulk.
+- A NESTED `content_type` restricts name matching to exact (never
+  prefix/substring/token/fuzzy) so a DLC's price can't attach onto its base
+  game.

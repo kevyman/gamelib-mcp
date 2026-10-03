@@ -1385,52 +1385,43 @@ async def update_game(
     dry_run: bool = False,
 ) -> UpdateGameResponse:
     """
-    Manually edit game properties (including marking farmed) — one, or many.
+    Call to correct or override a game's metadata by hand (including marking it
+    farmed) — one game, or many via `items`. Returns the fields updated and
+    cleared plus the row's manual_overrides.
 
-    Correct or override game metadata by hand: rename, fix tags/genres/release
-    date, set HowLongToBeat times, edit the description, flag or unflag farmed.
-    Resolve with game_id or name (partial/fuzzy), then set any subset of fields.
-    Every edited field is recorded as a manual override so later syncs and
-    background enrichment will NOT overwrite it; list a column in
-    clear_overrides to hand it back to automatic sync, keeping the current value
-    but letting future syncs update it.
+    Resolve with game_id or name (partial/fuzzy), then set any subset. Every
+    edited field becomes a manual override that syncs and enrichment skip;
+    clear_overrides hands columns back to sync, keeping the current value.
+    Editing tags recomputes the taste profile.
 
     completion_status: playing | completed | abandoned | evergreen (endless
-    games with no completion concept — Rocket League, MMOs, sandboxes), or
-    'none' to reset to automatic inference. content_type corrects a wrong
-    DLC/bundle/edition classification; it re-derives is_primary_library_item —
-    which controls whether the game appears in stats/series/discover — and
-    detaches a wrong parent when promoting to a primary type.
+    games with no completion, e.g. MMOs, sandboxes), or 'none' to reset to
+    inference. content_type fixes a wrong DLC/bundle/edition classification: it
+    re-derives is_primary_library_item (whether the game shows in
+    stats/series/discover) and detaches a wrong parent when promoting to a
+    primary type.
 
-    parent_game_id/parent_name (mutually exclusive) attach this game under a
-    base game — the repair for check_library's nesting.misclassified findings,
-    whose suggested_action carries the args. The target must be an existing
-    PRIMARY library item (not another nested row) and can't be the game itself;
-    linking only succeeds once the row is (or is being) classified with a nested
-    content_type. parent_game_id=0 detaches without changing content_type, and
-    setting a parent together with a primary content_type is rejected as
-    contradictory. Editing tags recomputes the taste profile.
+    parent_game_id/parent_name (mutually exclusive) nest this game under an
+    existing PRIMARY item other than itself — the repair for check_library's
+    nesting.misclassified, whose suggested_action carries the args. Linking
+    needs a nested content_type (stored or set in this call); a parent plus a
+    primary content_type is rejected. parent_game_id=0 detaches, content_type
+    unchanged.
 
-    cover_image_id, igdb_id and igdb_platforms fix a wrong IGDB match or cover:
-    cover_image_id is the IGDB cover slug ("co1wyy"); igdb_id repins the IGDB
-    link (positive, unique across the library — discover_series_gaps matches on
-    it, so a wrong id hides gaps); igdb_platforms is the IGDB platform id list.
-    All three are protected as manual overrides until cleared.
+    cover_image_id (IGDB cover slug, "co1wyy"), igdb_id (repins the link;
+    positive, unique across the library; discover_series_gaps matches on it) and
+    igdb_platforms (IGDB platform ids) fix a wrong IGDB match or cover.
 
-    This edits the GAMES row only. Per-platform columns live elsewhere:
-    playtime_minutes/last_played on set_playtime, delisted on
-    add_game_to_platform (released via set_playtime(clear=[...])), acquisition
-    columns on set_acquisition.
+    GAMES row only: playtime/last_played → set_playtime, delisted →
+    add_game_to_platform, acquisition → set_acquisition.
 
-    `items` (max 200) — a list taking exactly the parameters above — for bulk
-    repair loops, same guards per item; a guard refusal is that item's
-    status="error" and never aborts the rest, and a tags edit's affinity
-    recompute runs ONCE after the loop.
+    `items` (max 200, same parameters): a guard refusal is that item's
+    status="error" and never aborts the rest; a tags edit recomputes affinity
+    ONCE after the loop.
 
-    dry_run=True runs the identical validation/guard path and writes nothing.
-    Preview statuses are computed against the current database, so in `items`
-    mode an item depending on an earlier item's write may preview ok yet error
-    in the wet run.
+    dry_run=True runs the same guards without writing, against the current
+    database: in `items` mode an item depending on an earlier item's write may
+    preview ok yet error in the wet run.
     """
     from .tools.platforms import update_game as _update
     from .tools.platforms import update_games_batch as _many
@@ -1480,55 +1471,43 @@ async def set_acquisition(
     dry_run: bool = False,
 ) -> SetAcquisitionResponse:
     """
-    Record when, where and for how much games were acquired — one, or many.
+    Call to record or correct when, where and for how much a game was acquired —
+    one game, or a purchase history via `items`. Returns the acquisition written
+    (with platform_row_created and cleared) or, for `items`, per-item status
+    plus counters.
 
-    Resolve the game with game_id or name (partial/fuzzy), pass the platform it
-    was acquired on (required), then set any subset of acquired_at (YYYY,
-    YYYY-MM or YYYY-MM-DD — as precise as you know), price_paid (>= 0; 0 for a
-    free acquisition), price_currency (3-letter ISO, USD when a price is given),
-    purchase_source and bundle_name. For a bundle, record price_paid as this
-    game's share of the total and put the bundle's name in bundle_name so
-    get_stats(report="spending") groups it.
+    Resolve with game_id or name (partial/fuzzy); platform is required. Set any
+    subset of acquired_at (YYYY, YYYY-MM or YYYY-MM-DD), price_paid (>= 0; 0 =
+    free), price_currency (3-letter ISO; USD when a price is given),
+    purchase_source and bundle_name. For a bundle, price_paid is this game's
+    share and bundle_name groups it in get_stats(report="spending").
 
-    purchase_source is one of: steam, gog, epic, eshop, psn, xbox, humble,
-    fanatical, itchio, ea, ubisoft, physical, gift, free, subscription, other
-    (aliases like "Humble Bundle", "PS Store", "Game Pass" are normalized). Use
-    "free" for a no-strings giveaway you keep forever, "subscription" for a
-    title claimed through a paid membership whose access may lapse.
+    purchase_source: steam, gog, epic, eshop, psn, xbox, humble, fanatical,
+    itchio, ea, ubisoft, physical, gift, free, subscription, other (aliases like
+    "Humble Bundle", "PS Store", "Game Pass" normalize). "free" = a giveaway
+    kept forever; "subscription" = claimed through a membership whose access may
+    lapse.
 
-    clear lists acquisition columns to reset to NULL; a column cannot be set and
-    cleared in the same call. It is also a valid per-item key in `items` mode,
-    which is the only way to PREVIEW a clear (dry_run is items-only) and the way
-    to undo a bad import in bulk — a clear always writes, in fill-only mode too,
-    and an item may carry nothing but clear. If the game has no row on that
-    platform yet one is created (owned); create_platform_row=False reports it
-    instead. Acquisition columns are only ever written by these tools — library
-    syncs never touch them.
+    clear lists columns to reset to NULL; a column can't be set and cleared in
+    one call. It is also a per-item key — the only way to preview a clear
+    (dry_run is items-only) — always writes, even in fill-only mode, and may be
+    an item's only key. Library syncs never write acquisition columns.
 
-    `items` (max 200) bulk-imports a purchase history: {name or game_id,
-    platform, any of the fields above, optionally clear=[...]}. An item may also
-    carry identifier_type + identifier_value (both or neither), which resolves
-    exactly even when the item's name differs from the library title, falling
-    back to game_id/name; and content_type (dlc/expansion/edition), where a
-    NESTED type restricts name matching to EXACT only — never
-    prefix/substring/token/fuzzy — so a DLC's price can't attach onto its base
-    game, and a match landing on a row still at the default base_game
-    classification is reclassified nested with a resolved parent. Per-item
-    status is applied / filled / no_change / created / unmatched /
-    no_platform_row / error, with matched_name — review fuzzy matches to confirm
-    the intended game.
+    `items` (max 200): {name or game_id, platform, any fields above, optional
+    clear}. identifier_type + identifier_value (both or neither) resolve exactly
+    even when the name differs, falling back to game_id/name. content_type
+    (dlc/expansion/edition): a NESTED type restricts name matching to EXACT
+    only, and a match still classified base_game is reclassified nested under a
+    resolved parent. Status: applied / filled / no_change / created / unmatched
+    / no_platform_row / error, with matched_name — review fuzzy matches.
 
-    `overwrite` differs by mode by design. None means True for a single-game
-    call — you named the field, so you meant to correct it — and False for
-    `items`, where only missing (NULL) columns are filled so re-importing a
-    purchase export never clobbers values set by hand. `create_platform_row`
-    splits the same way: True for a single game (recording a purchase is
-    recording ownership), False for `items`, where a game with no row on that
-    platform is reported as no_platform_row rather than silently given one.
-    create_missing (items mode) mints an owned game when identifier, name and
-    fuzzy matching all miss; it defaults False here, unlike import_purchases.
-    dry_run=True runs the identical matching path without writing, so preview
-    counters are faithful.
+    Mode defaults differ: overwrite=None means True for a single game, False for
+    `items` (only NULL columns filled). create_platform_row=None likewise: a
+    single game gets a missing owned row created (False reports it instead);
+    `items` reports no_platform_row. create_missing (items only, default False,
+    unlike import_purchases) mints an owned game when identifier, name and fuzzy
+    matching all miss. dry_run (items only) runs the identical matching path
+    without writing.
     """
     from .tools.acquisition import (
         set_acquisition as _set_acquisition,
