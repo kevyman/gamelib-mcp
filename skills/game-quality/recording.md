@@ -81,7 +81,8 @@ unknown keys are rejected; every sentence must cite at least one source that
 exists (a sentence citing none, or a number past the list, is rejected); every
 url must start with http:// or https:// and be ≤300 chars (rejected, not
 shortened — a truncated url is a broken citation); kind is one of "press",
-"studio" (a developer or publisher post), "store" (a store page), "wiki",
+"studio" (a developer or publisher post; a press release is "studio" wherever
+it is hosted), "store" (a store page), "wiki",
 "social"; sentence text truncates at 240 chars and a title at 120. A source no
 sentence cites is dropped and the numbers re-based. Over-cap lists are
 rejected.
@@ -99,6 +100,9 @@ The honesty rules, which the server cannot check:
   and confirms it.
 - No "same team" or team-size claims unless a source states them; roles are
   worded as the source words them; secondhand claims say "reported".
+- A video is a source only through a written transcript fetched as raw text;
+  without one, drop the claim. When sources contradict each other on a fact,
+  write around it rather than picking one (3.4.3).
 - The store blurb's "from the creators of…" is NOT a source for a people
   claim: the server already shows it, attributed, as "The store says"
   (package.pedigree.store_claim). Don't restate it in the story.
