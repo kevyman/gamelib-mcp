@@ -2387,6 +2387,19 @@ class EvaluationPackageTests(ToolDBTestCase):
                 result = await record_assessment(game_id=game_id, verdict="skip")
                 self.assertIn(_SIMILAR_SKIPPED_NOTE, result["package"]["errors"])
 
+    async def test_a_malformed_future_looking_date_is_unknown_not_unreleased(self):
+        # A manual release_date lands verbatim; one that merely STARTS with a
+        # future year must not suppress the note (the prefix is not a date).
+        rows = [
+            await seed_game("Junk Suffix", release_date="2099-01-01junk"),
+            await seed_game("Junk Body", release_date="2099-not-a-date"),
+            await seed_game("Five Digits", release_date="20990"),
+        ]
+        with self._media(None):
+            for game_id in rows:
+                result = await record_assessment(game_id=game_id, verdict="skip")
+                self.assertIn(_SIMILAR_SKIPPED_NOTE, result["package"]["errors"])
+
     async def test_a_comparison_he_has_carries_its_cover_and_year(self):
         game_id = await seed_game("Cover Probe")
         other = await seed_game("Infamous", release_date="2009-05-26")

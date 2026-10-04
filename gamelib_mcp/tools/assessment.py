@@ -1678,16 +1678,21 @@ def _is_unreleased(release_date: str | None) -> bool:
 
     NULL is NOT unreleased: it is an unknown, and most often a row enrichment
     has not reached yet — exactly the row the too-few-tags note is for. A bare
-    year ('2027') compares by year; anything unparseable is unknown too.
+    year ('2027') compares by year; anything else must parse as a whole ISO
+    date — a malformed string is unknown even when it starts with a year.
     """
     if not release_date:
         return False
     text = str(release_date).strip()
+    if re.fullmatch(r"\d{4}", text):
+        return int(text) > datetime.now(UTC).year
     try:
-        return date.fromisoformat(text[:10]) > datetime.now(UTC).date()
+        parsed = date.fromisoformat(text)
     except ValueError:
-        year = _release_year(text)
-        return year is not None and year > datetime.now(UTC).year
+        # Malformed ('2099-01-01junk', '2099-not-a-date'): unknown, never
+        # a future date — the whole string must parse, no prefix is trusted.
+        return False
+    return parsed > datetime.now(UTC).date()
 
 
 def _hours(minutes: float | None) -> float | None:
