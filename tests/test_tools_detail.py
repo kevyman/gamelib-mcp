@@ -1213,6 +1213,24 @@ class GetGameDetailPedigreeTests(ToolDBTestCase):
             {"text": "Veterans of Example Studio return.", "source": "steam"},
         )
 
+    async def test_a_hand_edited_blurb_is_never_attributed_to_the_store(self):
+        # update_game can overwrite short_description; the override marker
+        # says so. The owner's own words carry no store attribution.
+        gid = await seed_game(
+            "Edited Detail",
+            short_description="From the makers of Example Quest, my own notes.",
+        )
+        async with db_module.get_db() as db:
+            await db.execute(
+                "UPDATE games SET manual_overrides = ? WHERE id = ?",
+                (json.dumps(["short_description"]), gid),
+            )
+            await db.commit()
+        with self._media(self._payload(_pedigree_raw([]))):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        self.assertNotIn("store_claim", result["pedigree"])
+
     async def test_a_blurb_without_a_claim_adds_no_store_claim(self):
         gid = await seed_game("Plain Detail", short_description="Illuminate the unseen.")
         with self._media(self._payload(_pedigree_raw([]))):
