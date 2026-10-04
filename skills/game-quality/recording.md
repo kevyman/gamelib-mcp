@@ -105,7 +105,8 @@ The honesty rules, which the server cannot check:
   stake, units sold, a listing) are not a story — omit the block and say
   "No sourced story found" in chat; never pad it.
 - The research is mandatory for every candidate (SKILL.md Step 0 item 5); the
-  block is omitted only after the searches came back empty.
+  block is omitted only when the searches found no qualifying story, and
+  the omission is said in chat.
 - why_care is authored independently of the story and is never dropped
   because the story was omitted; the only coupling is no verbatim repetition.
 - He reads these as fact: write for him, name his game, no hype.
