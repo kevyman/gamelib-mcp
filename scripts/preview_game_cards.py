@@ -200,7 +200,6 @@ SAMPLE_PEDIGREE: dict[str, Any] = {
     "catalog_size": 5,
     "catalog_truncated": False,
     "big_catalog": False,
-    "library_track_record": {"owned_count": 3, "played_count": 2, "avg_my_rating": 8.5},
     "hypes": 41,
 }
 
@@ -222,7 +221,6 @@ SAMPLE_PEDIGREE_BIG: dict[str, Any] = {
     "catalog_size": 30,
     "catalog_truncated": True,
     "big_catalog": True,
-    "library_track_record": None,
     "hypes": 12,
 }
 

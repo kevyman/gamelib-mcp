@@ -1,53 +1,397 @@
 {
-  "_note": "Real get_game_detail(game_id=2333, media=True) response captured 2026-10-03 for offline previews. The `similar` block was absent on the live response (no Steam row); it is filled here from owned games sharing the core tags so the strip has something to render.",
-  "game_id": 2333, "appid": null, "steam_appid": null, "name": "Ghost of Tsushima",
+  "_note": "Real get_game_detail(game_id=2333, media=True) response captured 2026-10-03 for offline previews. The `similar` block was absent on the live response (no Steam row); it is filled here from owned games sharing the core tags so the strip has something to render. The pedigree `timeline` (and `previous_games`) were added by hand on 2026-10-04 from Sucker Punch's own releases so the studio strip renders; IGDB cover ids are left null (name plates). The pedigree.timeline entries are real Sucker Punch releases with igdb_id left null (not looked up).",
+  "game_id": 2333,
+  "appid": null,
+  "steam_appid": null,
+  "name": "Ghost of Tsushima",
   "cover_url": "https://images.igdb.com/igdb/image/upload/t_cover_big/co2crj.jpg",
   "release_date": "2020-07-17",
-  "series": [{"name": "Ghost", "kind": "collection", "igdb_id": 10557}],
-  "platforms": [{"game_platform_id": 4685, "platform": "ps5", "owned": true, "delisted": false, "unowned_at": null, "last_seen_in_source": null, "playtime_minutes": 4933, "playtime_hours": 82.2, "playtime_2weeks_minutes": null, "playtime_2weeks_hours": 0, "last_played_date": "2022-09-21", "last_synced": "2026-08-11T09:30:53.225811+00:00", "acquired_at": "2022-06-16", "price_paid": 0, "price_currency": "USD", "purchase_source": "free", "bundle_name": null, "identifiers": {"psn_title_id": "CUSA32708_00"}, "provider_data": {}, "platform_release_date": "2020-11-12", "metacritic_score": 83, "metacritic_url": "https://www.metacritic.com/game/ghost-of-tsushima/?platform=playstation-5", "opencritic_score": 84, "opencritic_tier": "Mighty", "opencritic_percent_rec": 88.14, "opencritic_url": "https://opencritic.com/game/9592/ghost-of-tsushima", "opencritic_num_reviews": 201}],
-  "playtime_hours": 82.2, "playtime_2weeks_hours": 0, "last_played_date": "2022-09-21", "is_farmed": false,
-  "completion_status": "completed", "play_state": "played", "content_type": "base_game", "parent_game_id": null, "is_primary_library_item": true, "owned": true, "wishlisted": false,
-  "related_content": {"dlc": [], "expansions": [], "editions": [], "bundles": [], "other": []},
-  "genres": ["Role-playing (RPG)", "Hack and slash/Beat 'em up", "Adventure"],
-  "tags": ["action", "historical", "stealth", "drama", "open world", "assassin", "samurai", "action-adventure", "japan", "feudal japan", "horse riding", "poisoning"],
-  "features": ["the game awards - best action-adventure game - nominee", "the game awards - best art direction - winner", "the game awards - best audio design - nominee", "the game awards - best game direction - nominee", "the game awards - best narrative - nominee", "the game awards - best performance - nominee", "the game awards - game of the year - nominee"],
-  "short_description": null, "steam_review_score": null, "steam_review_desc": null,
-  "metacritic_score": 83, "metacritic_url": "https://www.metacritic.com/game/ghost-of-tsushima/?platform=playstation-5",
-  "opencritic_score": 84, "opencritic_tier": "Mighty", "opencritic_percent_rec": 88.14, "opencritic_url": "https://opencritic.com/game/9592/ghost-of-tsushima",
-  "hltb_main": 25.12, "hltb_extra": 46.25, "hltb_complete": 62.43, "protondb_tier": null,
-  "manual_overrides": ["completion_status"],
-  "my_rating": {"source": "manual", "raw_score": 8, "normalized_score": 8, "review_text": "Absolutely beautiful and well made. Completed 100%, and it wore out its welcome near the end. Despite the excellent production values, it's far from innovative — a highly competent samurai/ninja spin on the standard Ubisoft-style open world."},
-  "enrichment": {"steam_store": "no_steam_appid", "protondb": "no_steam_appid"},
+  "series": [
+    {
+      "name": "Ghost",
+      "kind": "collection",
+      "igdb_id": 10557
+    }
+  ],
+  "platforms": [
+    {
+      "game_platform_id": 4685,
+      "platform": "ps5",
+      "owned": true,
+      "delisted": false,
+      "unowned_at": null,
+      "last_seen_in_source": null,
+      "playtime_minutes": 4933,
+      "playtime_hours": 82.2,
+      "playtime_2weeks_minutes": null,
+      "playtime_2weeks_hours": 0,
+      "last_played_date": "2022-09-21",
+      "last_synced": "2026-08-11T09:30:53.225811+00:00",
+      "acquired_at": "2022-06-16",
+      "price_paid": 0,
+      "price_currency": "USD",
+      "purchase_source": "free",
+      "bundle_name": null,
+      "identifiers": {
+        "psn_title_id": "CUSA32708_00"
+      },
+      "provider_data": {},
+      "platform_release_date": "2020-11-12",
+      "metacritic_score": 83,
+      "metacritic_url": "https://www.metacritic.com/game/ghost-of-tsushima/?platform=playstation-5",
+      "opencritic_score": 84,
+      "opencritic_tier": "Mighty",
+      "opencritic_percent_rec": 88.14,
+      "opencritic_url": "https://opencritic.com/game/9592/ghost-of-tsushima",
+      "opencritic_num_reviews": 201
+    }
+  ],
+  "playtime_hours": 82.2,
+  "playtime_2weeks_hours": 0,
+  "last_played_date": "2022-09-21",
+  "is_farmed": false,
+  "completion_status": "completed",
+  "play_state": "played",
+  "content_type": "base_game",
+  "parent_game_id": null,
+  "is_primary_library_item": true,
+  "owned": true,
+  "wishlisted": false,
+  "related_content": {
+    "dlc": [],
+    "expansions": [],
+    "editions": [],
+    "bundles": [],
+    "other": []
+  },
+  "genres": [
+    "Role-playing (RPG)",
+    "Hack and slash/Beat 'em up",
+    "Adventure"
+  ],
+  "tags": [
+    "action",
+    "historical",
+    "stealth",
+    "drama",
+    "open world",
+    "assassin",
+    "samurai",
+    "action-adventure",
+    "japan",
+    "feudal japan",
+    "horse riding",
+    "poisoning"
+  ],
+  "features": [
+    "the game awards - best action-adventure game - nominee",
+    "the game awards - best art direction - winner",
+    "the game awards - best audio design - nominee",
+    "the game awards - best game direction - nominee",
+    "the game awards - best narrative - nominee",
+    "the game awards - best performance - nominee",
+    "the game awards - game of the year - nominee"
+  ],
+  "short_description": null,
+  "steam_review_score": null,
+  "steam_review_desc": null,
+  "metacritic_score": 83,
+  "metacritic_url": "https://www.metacritic.com/game/ghost-of-tsushima/?platform=playstation-5",
+  "opencritic_score": 84,
+  "opencritic_tier": "Mighty",
+  "opencritic_percent_rec": 88.14,
+  "opencritic_url": "https://opencritic.com/game/9592/ghost-of-tsushima",
+  "hltb_main": 25.12,
+  "hltb_extra": 46.25,
+  "hltb_complete": 62.43,
+  "protondb_tier": null,
+  "manual_overrides": [
+    "completion_status"
+  ],
+  "my_rating": {
+    "source": "manual",
+    "raw_score": 8,
+    "normalized_score": 8,
+    "review_text": "Absolutely beautiful and well made. Completed 100%, and it wore out its welcome near the end. Despite the excellent production values, it's far from innovative — a highly competent samurai/ninja spin on the standard Ubisoft-style open world."
+  },
+  "enrichment": {
+    "steam_store": "no_steam_appid",
+    "protondb": "no_steam_appid"
+  },
   "media": {
     "source": "igdb",
-    "trailer": {"kind": "youtube", "video_id": "k3CqzUCNDjU", "poster": "https://i.ytimg.com/vi/k3CqzUCNDjU/hqdefault.jpg", "name": "PGW17 Trailer"},
+    "trailer": {
+      "kind": "youtube",
+      "video_id": "k3CqzUCNDjU",
+      "poster": "https://i.ytimg.com/vi/k3CqzUCNDjU/hqdefault.jpg",
+      "name": "PGW17 Trailer"
+    },
     "screenshots": [
-      {"thumb": "https://images.igdb.com/igdb/image/upload/t_screenshot_med/heyxlphesv7cpuml9ids.jpg", "full": "https://images.igdb.com/igdb/image/upload/t_screenshot_big/heyxlphesv7cpuml9ids.jpg"},
-      {"thumb": "https://images.igdb.com/igdb/image/upload/t_screenshot_med/towtfurjgbucvoafbaq9.jpg", "full": "https://images.igdb.com/igdb/image/upload/t_screenshot_big/towtfurjgbucvoafbaq9.jpg"},
-      {"thumb": "https://images.igdb.com/igdb/image/upload/t_screenshot_med/tpgj7ycwworclmurbw0h.jpg", "full": "https://images.igdb.com/igdb/image/upload/t_screenshot_big/tpgj7ycwworclmurbw0h.jpg"},
-      {"thumb": "https://images.igdb.com/igdb/image/upload/t_screenshot_med/zwcxfagpos7elct133ip.jpg", "full": "https://images.igdb.com/igdb/image/upload/t_screenshot_big/zwcxfagpos7elct133ip.jpg"},
-      {"thumb": "https://images.igdb.com/igdb/image/upload/t_screenshot_med/ctzhlbj69v5epi2r9l4h.jpg", "full": "https://images.igdb.com/igdb/image/upload/t_screenshot_big/ctzhlbj69v5epi2r9l4h.jpg"},
-      {"thumb": "https://images.igdb.com/igdb/image/upload/t_screenshot_med/dnvj1xmm95eloumjv6q5.jpg", "full": "https://images.igdb.com/igdb/image/upload/t_screenshot_big/dnvj1xmm95eloumjv6q5.jpg"},
-      {"thumb": "https://images.igdb.com/igdb/image/upload/t_screenshot_med/lykfms7zl20y2wlkaji7.jpg", "full": "https://images.igdb.com/igdb/image/upload/t_screenshot_big/lykfms7zl20y2wlkaji7.jpg"},
-      {"thumb": "https://images.igdb.com/igdb/image/upload/t_screenshot_med/opsy0q92riwnnsmvumja.jpg", "full": "https://images.igdb.com/igdb/image/upload/t_screenshot_big/opsy0q92riwnnsmvumja.jpg"}
+      {
+        "thumb": "https://images.igdb.com/igdb/image/upload/t_screenshot_med/heyxlphesv7cpuml9ids.jpg",
+        "full": "https://images.igdb.com/igdb/image/upload/t_screenshot_big/heyxlphesv7cpuml9ids.jpg"
+      },
+      {
+        "thumb": "https://images.igdb.com/igdb/image/upload/t_screenshot_med/towtfurjgbucvoafbaq9.jpg",
+        "full": "https://images.igdb.com/igdb/image/upload/t_screenshot_big/towtfurjgbucvoafbaq9.jpg"
+      },
+      {
+        "thumb": "https://images.igdb.com/igdb/image/upload/t_screenshot_med/tpgj7ycwworclmurbw0h.jpg",
+        "full": "https://images.igdb.com/igdb/image/upload/t_screenshot_big/tpgj7ycwworclmurbw0h.jpg"
+      },
+      {
+        "thumb": "https://images.igdb.com/igdb/image/upload/t_screenshot_med/zwcxfagpos7elct133ip.jpg",
+        "full": "https://images.igdb.com/igdb/image/upload/t_screenshot_big/zwcxfagpos7elct133ip.jpg"
+      },
+      {
+        "thumb": "https://images.igdb.com/igdb/image/upload/t_screenshot_med/ctzhlbj69v5epi2r9l4h.jpg",
+        "full": "https://images.igdb.com/igdb/image/upload/t_screenshot_big/ctzhlbj69v5epi2r9l4h.jpg"
+      },
+      {
+        "thumb": "https://images.igdb.com/igdb/image/upload/t_screenshot_med/dnvj1xmm95eloumjv6q5.jpg",
+        "full": "https://images.igdb.com/igdb/image/upload/t_screenshot_big/dnvj1xmm95eloumjv6q5.jpg"
+      },
+      {
+        "thumb": "https://images.igdb.com/igdb/image/upload/t_screenshot_med/lykfms7zl20y2wlkaji7.jpg",
+        "full": "https://images.igdb.com/igdb/image/upload/t_screenshot_big/lykfms7zl20y2wlkaji7.jpg"
+      },
+      {
+        "thumb": "https://images.igdb.com/igdb/image/upload/t_screenshot_med/opsy0q92riwnnsmvumja.jpg",
+        "full": "https://images.igdb.com/igdb/image/upload/t_screenshot_big/opsy0q92riwnnsmvumja.jpg"
+      }
     ],
-    "screenshot_count": 12, "screenshots_truncated": true,
+    "screenshot_count": 12,
+    "screenshots_truncated": true,
     "short_description": "Uncover the hidden wonders of Tsushima in this open-world action adventure. Forge a new path and wage an unconventional war for the freedom of Tsushima. Challenge opponents with your katana, master the bow to eliminate distant threats, develop stealth tactics to ambush enemies in order to win over the mongols."
   },
   "similar": {
     "items": [
-      {"game_id": 2354, "igdb_id": null, "name": "Marvel's Spider-Man", "release_year": 2018, "cover_url": "https://images.igdb.com/igdb/image/upload/t_cover_big/co1r77.jpg", "owned": true, "unplayed": false, "my_rating": 9, "playtime_hours": 50.0, "similarity": 0.61, "shared_tags": ["action", "stealth", "drama"]},
-      {"game_id": 10, "igdb_id": null, "name": "Assassin's Creed II", "release_year": 2009, "cover_url": "https://images.igdb.com/igdb/image/upload/t_cover_big/co1rcf.jpg", "owned": true, "unplayed": false, "my_rating": 10, "playtime_hours": 55.5, "similarity": 0.58, "shared_tags": ["action", "stealth", "historical", "assassin"]},
-      {"game_id": 2242, "igdb_id": null, "name": "Marvel's Spider-Man 2", "release_year": 2023, "cover_url": "https://images.igdb.com/igdb/image/upload/t_cover_big/co798a.jpg", "owned": true, "unplayed": false, "my_rating": null, "playtime_hours": 25.3, "similarity": 0.52, "shared_tags": ["action", "stealth", "drama", "open world"]},
-      {"game_id": 2244, "igdb_id": null, "name": "Horizon Zero Dawn Complete Edition", "release_year": 2017, "cover_url": "https://images.igdb.com/igdb/image/upload/t_cover_big/co2una.jpg", "owned": true, "unplayed": false, "my_rating": null, "playtime_hours": 11.3, "similarity": 0.49, "shared_tags": ["action", "stealth", "drama", "open world"]},
-      {"game_id": 1991, "igdb_id": 383391, "name": "METAL GEAR SOLID 3: Snake Eater - Master Collection Version", "release_year": 2023, "cover_url": "https://images.igdb.com/igdb/image/upload/t_cover_big/cobl5l.jpg", "owned": true, "unplayed": true, "my_rating": null, "playtime_hours": null, "similarity": 0.48, "shared_tags": ["drama", "stealth", "action"]}
+      {
+        "game_id": 2354,
+        "igdb_id": null,
+        "name": "Marvel's Spider-Man",
+        "release_year": 2018,
+        "cover_url": "https://images.igdb.com/igdb/image/upload/t_cover_big/co1r77.jpg",
+        "owned": true,
+        "unplayed": false,
+        "my_rating": 9,
+        "playtime_hours": 50.0,
+        "similarity": 0.61,
+        "shared_tags": [
+          "action",
+          "stealth",
+          "drama"
+        ]
+      },
+      {
+        "game_id": 10,
+        "igdb_id": null,
+        "name": "Assassin's Creed II",
+        "release_year": 2009,
+        "cover_url": "https://images.igdb.com/igdb/image/upload/t_cover_big/co1rcf.jpg",
+        "owned": true,
+        "unplayed": false,
+        "my_rating": 10,
+        "playtime_hours": 55.5,
+        "similarity": 0.58,
+        "shared_tags": [
+          "action",
+          "stealth",
+          "historical",
+          "assassin"
+        ]
+      },
+      {
+        "game_id": 2242,
+        "igdb_id": null,
+        "name": "Marvel's Spider-Man 2",
+        "release_year": 2023,
+        "cover_url": "https://images.igdb.com/igdb/image/upload/t_cover_big/co798a.jpg",
+        "owned": true,
+        "unplayed": false,
+        "my_rating": null,
+        "playtime_hours": 25.3,
+        "similarity": 0.52,
+        "shared_tags": [
+          "action",
+          "stealth",
+          "drama",
+          "open world"
+        ]
+      },
+      {
+        "game_id": 2244,
+        "igdb_id": null,
+        "name": "Horizon Zero Dawn Complete Edition",
+        "release_year": 2017,
+        "cover_url": "https://images.igdb.com/igdb/image/upload/t_cover_big/co2una.jpg",
+        "owned": true,
+        "unplayed": false,
+        "my_rating": null,
+        "playtime_hours": 11.3,
+        "similarity": 0.49,
+        "shared_tags": [
+          "action",
+          "stealth",
+          "drama",
+          "open world"
+        ]
+      },
+      {
+        "game_id": 1991,
+        "igdb_id": 383391,
+        "name": "METAL GEAR SOLID 3: Snake Eater - Master Collection Version",
+        "release_year": 2023,
+        "cover_url": "https://images.igdb.com/igdb/image/upload/t_cover_big/cobl5l.jpg",
+        "owned": true,
+        "unplayed": true,
+        "my_rating": null,
+        "playtime_hours": null,
+        "similarity": 0.48,
+        "shared_tags": [
+          "drama",
+          "stealth",
+          "action"
+        ]
+      }
     ],
-    "count": 5, "truncated": false
+    "count": 5,
+    "truncated": false
   },
   "pedigree": {
-    "developer": {"name": "Sucker Punch Productions", "igdb_company_id": 403, "founded_year": 1997, "country": 840},
-    "developer_names": ["Sucker Punch Productions"], "publisher_name": "Sony Interactive Entertainment",
-    "previous_count": 0, "previous_truncated": false, "catalog_size": 30, "catalog_truncated": true, "big_catalog": true, "hypes": 117,
-    "previous_games": [], "library_track_record": null
+    "developer": {
+      "name": "Sucker Punch Productions",
+      "igdb_company_id": 403,
+      "founded_year": 1997,
+      "country": 840
+    },
+    "developer_names": [
+      "Sucker Punch Productions"
+    ],
+    "publisher_name": "Sony Interactive Entertainment",
+    "previous_count": 4,
+    "previous_truncated": false,
+    "catalog_size": 30,
+    "catalog_truncated": true,
+    "big_catalog": true,
+    "hypes": 117,
+    "previous_games": [
+      {
+        "igdb_id": 7350,
+        "name": "inFAMOUS: First Light",
+        "release_year": 2014,
+        "release_date": "2014-08-27",
+        "cover_url": null,
+        "critic_score": 73,
+        "owned": false,
+        "played": false,
+        "my_rating": null,
+        "playtime_hours": null
+      },
+      {
+        "igdb_id": 2350,
+        "name": "inFAMOUS Second Son",
+        "release_year": 2014,
+        "release_date": "2014-03-21",
+        "cover_url": null,
+        "critic_score": 80,
+        "owned": false,
+        "played": false,
+        "my_rating": null,
+        "playtime_hours": null
+      },
+      {
+        "igdb_id": 1222,
+        "name": "inFAMOUS 2",
+        "release_year": 2011,
+        "release_date": "2011-06-07",
+        "cover_url": null,
+        "critic_score": 83,
+        "owned": false,
+        "played": false,
+        "my_rating": null,
+        "playtime_hours": null
+      },
+      {
+        "igdb_id": 1221,
+        "name": "inFAMOUS",
+        "release_year": 2009,
+        "release_date": "2009-05-26",
+        "cover_url": null,
+        "critic_score": 85,
+        "owned": false,
+        "played": false,
+        "my_rating": null,
+        "playtime_hours": null
+      }
+    ],
+    "timeline": {
+      "before": [
+        {
+          "igdb_id": null,
+          "name": "inFAMOUS: First Light",
+          "release_year": 2014,
+          "release_date": "2014-08-27",
+          "cover_url": null,
+          "critic_score": 73,
+          "owned": false,
+          "played": false,
+          "my_rating": null,
+          "playtime_hours": null
+        },
+        {
+          "igdb_id": null,
+          "name": "inFAMOUS Second Son",
+          "release_year": 2014,
+          "release_date": "2014-03-21",
+          "cover_url": null,
+          "critic_score": 80,
+          "owned": false,
+          "played": false,
+          "my_rating": null,
+          "playtime_hours": null
+        },
+        {
+          "igdb_id": null,
+          "name": "inFAMOUS 2",
+          "release_year": 2011,
+          "release_date": "2011-06-07",
+          "cover_url": null,
+          "critic_score": 83,
+          "owned": false,
+          "played": false,
+          "my_rating": null,
+          "playtime_hours": null
+        },
+        {
+          "igdb_id": null,
+          "name": "inFAMOUS",
+          "release_year": 2009,
+          "release_date": "2009-05-26",
+          "cover_url": null,
+          "critic_score": 85,
+          "owned": false,
+          "played": false,
+          "my_rating": null,
+          "playtime_hours": null
+        }
+      ],
+      "after": [
+        {
+          "igdb_id": null,
+          "name": "Ghost of Yōtei",
+          "release_year": 2025,
+          "release_date": "2025-10-02",
+          "cover_url": null,
+          "critic_score": 87,
+          "owned": false,
+          "played": false,
+          "my_rating": null,
+          "playtime_hours": null
+        }
+      ],
+      "before_count": 4,
+      "after_count": 1
+    }
   }
 }

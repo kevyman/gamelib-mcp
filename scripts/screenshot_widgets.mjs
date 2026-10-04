@@ -159,6 +159,22 @@ async function main() {
             if (opts.imgCache) await routeImages(page, resolve(opts.imgCache));
             await page.goto(pathToFileURL(resolve(file)).href, { waitUntil: "load", timeout: 30000 });
             await settle(page);
+            // A scrolled studio timeline must open on a whole mini: nothing in
+            // the strip may end within 8px of its left edge (a clipped sliver
+            // of the previous card, the artefact the owner flagged).
+            const slivers = await page.evaluate(() =>
+              [...document.querySelectorAll(".timeline")].flatMap((strip) => {
+                const left = strip.getBoundingClientRect().left;
+                return [...strip.querySelectorAll("*")]
+                  .map((node) => node.getBoundingClientRect())
+                  .filter((r) => r.width > 0 && r.right > left && r.right < left + 8)
+                  .map((r) => `right=${r.right.toFixed(1)} strip.left=${left.toFixed(1)}`);
+              }),
+            );
+            if (slivers.length) {
+              failures++;
+              console.error(`${name} ${width} timeline sliver at the left edge: ${slivers.join("; ")}`);
+            }
             // The content's own height (what documentElement.scrollHeight,
             // the widgets' size-changed figure, reads in an auto-sized host
             // frame) — scrollHeight here would be floored at the viewport.

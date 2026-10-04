@@ -21,7 +21,7 @@ import logging
 import math
 import re
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from functools import partial
 from typing import Any
 
@@ -1673,6 +1673,22 @@ def _release_year(release_date: str | None) -> int | None:
     return int(head) if head.isdigit() else None
 
 
+def _is_unreleased(release_date: str | None) -> bool:
+    """No stored release date, or one after today (UTC): a pre-release row.
+
+    A bare year ('2027') compares by year; anything unparseable counts as no
+    date at all.
+    """
+    if not release_date:
+        return True
+    text = str(release_date).strip()
+    try:
+        return date.fromisoformat(text[:10]) > datetime.now(UTC).date()
+    except ValueError:
+        year = _release_year(text)
+        return year is None or year > datetime.now(UTC).year
+
+
 def _hours(minutes: float | None) -> float | None:
     return round(minutes / 60, 1) if minutes is not None else None
 
@@ -1767,6 +1783,16 @@ async def _package_comparisons(presentation: dict[str, Any]) -> list[dict[str, A
                 "my_rating": row["my_rating"] if row is not None else None,
                 "playtime_hours": (
                     _hours(row["playtime_minutes"]) if row is not None else None
+                ),
+                # The same cover and year the anchors carry, so a lineage mini
+                # of a game he has shows its art instead of the name plate.
+                "cover_url": (
+                    cover_url(row["cover_image_id"], row["steam_appid"])
+                    if row is not None
+                    else None
+                ),
+                "release_year": (
+                    _release_year(row["release_date"]) if row is not None else None
                 ),
             }
         )
@@ -1870,8 +1896,14 @@ async def _build_package(
             "match; pedigree unavailable until the IGDB backfill links this row"
         )
     # Enough tags but no qualifying neighbour is a legitimate empty answer and
-    # stays silent; too few tags means there was nothing to reason from.
-    if similar_block is None and not similar_failed:
+    # stays silent; too few tags means there was nothing to reason from. An
+    # unreleased (or undated) candidate stays silent too: it has no community
+    # tags yet BY DEFINITION, so the note would report the expected as a gap.
+    if (
+        similar_block is None
+        and not similar_failed
+        and not _is_unreleased(row["release_date"] if row else None)
+    ):
         source_tags = _parse_json(row["tags"]) if row else None
         if len(source_tags or []) < SIMILAR_MIN_SOURCE_TAGS:
             errors.append(

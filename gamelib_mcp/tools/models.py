@@ -228,11 +228,11 @@ class GameDetailResponse(GameSummary):
     # trailer + screenshots (capped, with screenshot_count/truncated),
     # `similar` — the owned games most like this one by shared tags, each item
     # carrying game_id/similarity/shared_tags (every item is owned; capped,
-    # with count/truncated) — and `pedigree`, the developer (name, founding
-    # year, catalogue size),
-    # their previous games annotated with ownership/rating/playtime (capped at
-    # 6, empty under the big-studio damper) and library_track_record. All
-    # absent when nothing resolved or the lookup failed.
+    # with count/truncated) — and `pedigree`, the lead developer (name,
+    # founding year, catalogue size), their previous games and the `timeline`
+    # (5 before / 3 after the candidate, nearest first), each annotated with
+    # ownership/rating/playtime. All absent when nothing resolved or the
+    # lookup failed.
     media: dict[str, Any] | None = None
     similar: dict[str, Any] | None = None
     pedigree: dict[str, Any] | None = None

@@ -903,6 +903,13 @@ class NoMiddotJoinTests(unittest.TestCase):
         self.assertNotIn("parts.join(", js)
         self.assertIn('parts.forEach(function (part) { head.appendChild(el("span", null, part)); });', js)
         self.assertIn(".ped-head { display: flex; flex-wrap: wrap; gap: 2px 10px;", apps_shared.PEDIGREE_CSS)
+        # the co-developer line (round-2 F6): 12px, muted, under the headline
+        self.assertIn(".ped-with { margin-top: 2px; font-size: var(--gl-cap); line-height: var(--gl-cap-lh); "
+                      "color: var(--gl-muted); }", apps_shared.PEDIGREE_CSS)
+        # the timeline hairline (F7): 1px in the border token, the strip's height
+        self.assertIn(".tl-line { flex: 1 1 auto; width: 1px; min-height: 48px; background: var(--gl-border); }",
+                      apps_shared.PEDIGREE_CSS)
+        self.assertIn("align-self: stretch;", apps_shared.PEDIGREE_CSS.split(".ministrip > .tl-mark {", 1)[1])
 
 
 class SpecularTests(unittest.TestCase):
@@ -1233,7 +1240,9 @@ def run_widget(widget: str, probe: str) -> dict:
     assert script.count(tail) == 1, widget
     script = script.replace(tail, tail.split("\n")[0] + "\n" + probe + "\n})();")
     assert NODE is not None
-    proc = subprocess.run([NODE, "-e", MINI_DOM + script], capture_output=True, text=True,
+    # On stdin, not `-e`: a whole widget plus the DOM shim outgrows Linux's
+    # 128 KiB limit on a single argv string (E2BIG).
+    proc = subprocess.run([NODE, "-"], input=MINI_DOM + script, capture_output=True, text=True,
                           timeout=60, check=False)
     if proc.returncode != 0:
         raise AssertionError(proc.stderr)
@@ -1506,10 +1515,14 @@ class FullscreenOrDisclosureTests(unittest.TestCase):
     def test_both_widgets_use_it_and_keep_no_mechanism_of_their_own(self) -> None:
         self.assertIn("function fullscreenOrDisclosure(parent, text, build, onFullscreen) {",
                       apps_shared.DISCLOSURE_JS)
+        # The evaluation card's "Full breakdown" is its one caller: the game
+        # card's breakdown dissolved into the card (round-2 F3), and neither
+        # widget may grow a mechanism of its own.
+        self.assertIn("fullscreenOrDisclosure(", _WIDGET_SOURCES["apps_eval.py"])
+        self.assertNotIn("fullscreenOrDisclosure(", _WIDGET_SOURCES["apps.py"])
         for module in ("apps.py", "apps_eval.py"):
             with self.subTest(module=module):
                 source = _WIDGET_SOURCES[module]
-                self.assertIn("fullscreenOrDisclosure(", source)
                 self.assertNotIn("disclosure(stack, text, build)", source)
                 self.assertNotIn(".button.click()", source)
                 self.assertNotIn("var inPlace = ", source)

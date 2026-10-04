@@ -1004,10 +1004,10 @@ def _pedigree_raw(previous: list[dict], **overrides) -> dict:
 
 
 class GetGameDetailPedigreeTests(ToolDBTestCase):
-    """`pedigree`: the developer's previous games, read against the library.
+    """`pedigree`: the developer's catalogue rows, read against the library.
 
     Same seam and same absence discipline as the media/similar blocks above —
-    what is new here is the annotation and the track record computed from it.
+    what is new here is the annotation of previous_games and the timeline.
     """
 
     def _media(self, payload, **kwargs):
@@ -1085,16 +1085,20 @@ class GetGameDetailPedigreeTests(ToolDBTestCase):
                 "igdb_id": 501,
                 "name": "Rated And Played",
                 "release_year": 2014,
+                "release_date": None,
                 "critic_score": 86,
                 "cover_url": (
                     "https://images.igdb.com/igdb/image/upload/t_cover_big/abc.jpg"
                 ),
                 "owned": True,
+                "played": True,
                 "my_rating": 8.0,
                 "playtime_hours": 10.0,
             },
         )
         self.assertTrue(unplayed["owned"])
+        self.assertFalse(unplayed["played"])
+        self.assertFalse(let_go["played"])
         self.assertEqual(unplayed["playtime_hours"], 0.0)
         self.assertIsNone(unplayed["my_rating"])
         self.assertFalse(let_go["owned"])
@@ -1104,40 +1108,50 @@ class GetGameDetailPedigreeTests(ToolDBTestCase):
         # The raw slug is replaced by the URL, never carried alongside it.
         self.assertNotIn("cover_image_id", played)
 
-        self.assertEqual(
-            block["library_track_record"],
-            # Owned twice, but only one of them was ever launched; both ratings
-            # count, including the one he no longer owns.
-            {"owned_count": 2, "played_count": 1, "avg_my_rating": 8.5},
-        )
+        # The track-record summary is gone: each mini states its own
+        # ownership, so a sum over them said nothing new.
+        self.assertNotIn("library_track_record", block)
 
-    async def test_no_ratings_leaves_the_average_null(self):
-        gid = await seed_game("Unrated Studio")
-        owned = await seed_game("Owned Unrated")
-        await add_platform(owned, "steam", playtime_minutes=0)
-        async with db_module.get_db() as db:
-            await db.execute("UPDATE games SET igdb_id = 601 WHERE id = ?", (owned,))
-            await db.commit()
+    async def test_the_timeline_is_annotated_on_both_sides(self):
+        gid = await seed_game("Timeline Probe")
+        await self._library_neighbours()
+
+        def entry(igdb_id, name, year):
+            return {
+                "igdb_id": igdb_id,
+                "name": name,
+                "release_year": year,
+                "release_date": f"{year}-05-01",
+                "cover_image_id": None,
+                "critic_score": 80,
+            }
+
         pedigree = _pedigree_raw(
-            [
-                {
-                    "igdb_id": 601,
-                    "name": "Owned Unrated",
-                    "release_year": 2015,
-                    "cover_image_id": None,
-                    "critic_score": 70,
-                }
-            ]
+            [],
+            timeline={
+                "before": [entry(501, "Rated And Played", 2014), entry(599, "Unknown", 2011)],
+                "after": [entry(502, "Owned Unplayed", 2025)],
+                "before_count": 2,
+                "after_count": 1,
+            },
         )
         with self._media(self._payload(pedigree)):
             result = await detail.get_game_detail(game_id=gid, media=True)
 
-        self.assertEqual(
-            result["pedigree"]["library_track_record"],
-            {"owned_count": 1, "played_count": 0, "avg_my_rating": None},
-        )
+        timeline = result["pedigree"]["timeline"]
+        played, unknown = timeline["before"]
+        (later,) = timeline["after"]
+        self.assertEqual(played["release_date"], "2014-05-01")
+        self.assertTrue(played["owned"])
+        self.assertTrue(played["played"])
+        self.assertEqual(played["my_rating"], 8.0)
+        self.assertFalse(unknown["owned"])
+        self.assertFalse(unknown["played"])
+        self.assertTrue(later["owned"])
+        self.assertFalse(later["played"])
+        self.assertEqual((timeline["before_count"], timeline["after_count"]), (2, 1))
 
-    async def test_the_damper_leaves_the_studio_facts_without_a_track_record(self):
+    async def test_a_big_catalog_keeps_its_studio_facts_and_its_timeline(self):
         gid = await seed_game("Big Studio Probe")
         pedigree = _pedigree_raw(
             [], big_catalog=True, catalog_size=30, catalog_truncated=True
@@ -1147,7 +1161,12 @@ class GetGameDetailPedigreeTests(ToolDBTestCase):
 
         block = result["pedigree"]
         self.assertEqual(block["previous_games"], [])
-        self.assertIsNone(block["library_track_record"])
+        # A raw block without a timeline (an older cache entry) still yields
+        # the key, empty, so renderers read one shape.
+        self.assertEqual(
+            block["timeline"],
+            {"before": [], "after": [], "before_count": 0, "after_count": 0},
+        )
         self.assertTrue(block["big_catalog"])
         self.assertEqual(block["catalog_size"], 30)
 

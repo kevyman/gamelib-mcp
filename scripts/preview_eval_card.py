@@ -283,10 +283,10 @@ SAMPLE_FULL_STEAM: dict[str, Any] = {
             "count": 12,
             "truncated": True,
         },
-        # The "From the studio" strip, contract-exact (tools/game_media.py's
-        # annotated shape). The badge rule is visible in one row: his rating
-        # beats the critic score, and an owned-but-unrated game gets the
-        # ownership sticker instead.
+        # The "From the studio" strip from previous_games alone (an older
+        # payload with no timeline). The mini rule is visible in one row: his
+        # rating beats the critic score, an owned-but-unrated game shows its
+        # hours or "unplayed".
         "pedigree": {
             "developer": {
                 "name": "Supergiant Games",
@@ -345,11 +345,6 @@ SAMPLE_FULL_STEAM: dict[str, Any] = {
             "catalog_size": 5,
             "catalog_truncated": False,
             "big_catalog": False,
-            "library_track_record": {
-                "owned_count": 3,
-                "played_count": 2,
-                "avg_my_rating": 8.5,
-            },
             "hypes": 41,
         },
         "past": {
@@ -532,9 +527,9 @@ SAMPLE_IGDB_YOUTUBE: dict[str, Any] = {
             "short_description": None,
         },
         "similar": None,
-        # The big-studio damper: over BIG_CATALOG_THRESHOLD developed games the
-        # strip is a header line and nothing else, since six arbitrary posters
-        # out of a catalogue this size say nothing about this game.
+        # A big studio with nothing resolved around this game: the header
+        # line alone (lead developer, est., publisher, the catalogue size)
+        # and the co-developer line under it.
         "pedigree": {
             "developer": {
                 "name": "Retro Studios",
@@ -550,7 +545,6 @@ SAMPLE_IGDB_YOUTUBE: dict[str, Any] = {
             "catalog_size": 30,
             "catalog_truncated": True,
             "big_catalog": True,
-            "library_track_record": None,
             "hypes": 208,
         },
         "past": None,
@@ -710,6 +704,8 @@ SAMPLE_WOLVERINE: dict[str, Any] = {
                 "owned": True,
                 "my_rating": None,
                 "playtime_hours": 25.3,
+                "cover_url": f"{_IGDB}/t_cover_big/co798a.jpg",
+                "release_year": 2023,
             },
             {
                 "name": "Marvel's Spider-Man",
@@ -719,6 +715,8 @@ SAMPLE_WOLVERINE: dict[str, Any] = {
                 "owned": True,
                 "my_rating": 9,
                 "playtime_hours": 50.0,
+                "cover_url": f"{_IGDB}/t_cover_big/co1r77.jpg",
+                "release_year": 2018,
             },
             {
                 "name": "Marvel's Guardians of the Galaxy",
@@ -852,10 +850,54 @@ SAMPLE_WOLVERINE: dict[str, Any] = {
             ],
             "previous_count": 2,
             "previous_truncated": False,
+            # The studio's releases around this one (data/media.py's
+            # timeline, annotated): nearest first on each side.
+            "timeline": {
+                "before": [
+                    {
+                        "igdb_id": None,
+                        "name": "Marvel's Spider-Man 2",
+                        "release_year": 2023,
+                        "release_date": "2023-10-20",
+                        "critic_score": None,
+                        "cover_url": f"{_IGDB}/t_cover_big/co798a.jpg",
+                        "owned": True,
+                        "played": True,
+                        "my_rating": None,
+                        "playtime_hours": 25.3,
+                    },
+                    {
+                        "igdb_id": None,
+                        "name": "Ratchet & Clank: Rift Apart",
+                        "release_year": 2021,
+                        "release_date": "2021-06-11",
+                        "critic_score": 88,
+                        "cover_url": None,
+                        "owned": False,
+                        "played": False,
+                        "my_rating": None,
+                        "playtime_hours": None,
+                    },
+                    {
+                        "igdb_id": None,
+                        "name": "Marvel's Spider-Man",
+                        "release_year": 2018,
+                        "release_date": "2018-09-07",
+                        "critic_score": None,
+                        "cover_url": f"{_IGDB}/t_cover_big/co1r77.jpg",
+                        "owned": True,
+                        "played": True,
+                        "my_rating": 9,
+                        "playtime_hours": 50.0,
+                    },
+                ],
+                "after": [],
+                "before_count": 3,
+                "after_count": 0,
+            },
             "catalog_size": None,
             "catalog_truncated": False,
             "big_catalog": True,
-            "library_track_record": None,
             "hypes": None,
         },
         "past": None,

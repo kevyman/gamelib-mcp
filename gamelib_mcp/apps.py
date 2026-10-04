@@ -38,14 +38,15 @@ posts "Show me <name>" as the user.
 
 Detail mode is the big card — frame tier from his rating (else the critic
 tier), badge "8 /10" YOUR RATING, the status ribbon on the art's edge, the
-plate, the stat block (PLAYED, LAST, LENGTH, PAID, the score chips, RATING
-pips) — then the ground: the 3-line description, his review as a quote, The
-Game Awards lines, the tags, the media reel (one 16:9 viewer plus one thumb
-strip, trailer first, screenshots opening a lightbox), IN YOUR LIBRARY and
-FROM THE STUDIO strips of mini cards, any enrichment notice ("Not fetched —
-Steam: no app id"), and the actions ("Full breakdown" —
-fullscreen on a host that has it, an in-place disclosure otherwise — and the
-store link when one is derivable). The media blocks live in apps_shared.py and
+plate, the stat block (PLAYED, LAST, LENGTH or the three HowLongToBeat
+lengths, PAID, the score chips, RATING pips) — then the ground: the 3-line
+description, his review as a quote, The Game Awards lines, the genres and
+tags, the media reel (one 16:9 viewer plus one thumb strip, trailer first,
+screenshots opening a lightbox), IN YOUR LIBRARY and FROM THE STUDIO (the
+lead developer, founding year and publisher, then the studio's releases
+around this game with a hairline at its year) strips of mini cards, any
+enrichment notice ("Not fetched — Steam: no app id"), and the store link
+when one is derivable. The media blocks live in apps_shared.py and
 are spliced verbatim into both this widget and the evaluation card
 (apps_eval.py).
 
@@ -196,6 +197,10 @@ GAME_CARDS_HTML = (
     html[data-display-mode="fullscreen"] .grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   }
   .gc-card { -webkit-tap-highlight-color: transparent; }
+  /* A 12px bottom inset: nothing the card ends on (chip row, tag line, the
+     Steam phrase chip) may sit on the frame's edge. */
+  .frame.gc-card { padding-bottom: 12px; }
+  .gc-card > :last-child { padding-bottom: 0; margin-bottom: 0; }
   .gc-card .plate { border: 0; padding: 8px 8px 0; }
   /* One row, always: the hours and the lozenge give way (ellipsis) before
      "No. N" would wrap onto a line of its own. */
@@ -213,6 +218,7 @@ GAME_CARDS_HTML = (
   /* The Steam chip on a small card: the phrase, then its meter; the brand
      name (an .sr-only label) is heard, and is in the card's label. */
   .gc-card .chip.gc-steam b { order: -1; }
+  .gc-card .chip.gc-steam { flex-wrap: nowrap; }
 
   /* At most two pills, bottom right; side by side, wrapping only when they
      cannot share a line. */
@@ -284,19 +290,6 @@ GAME_CARDS_HTML = (
   }
   .more-toggle[hidden] { display: none; }
   .dt-actions { justify-content: flex-start; }
-  /* "Full breakdown" is the shared disclosure dressed as the primary pill;
-     its body takes the whole row under the pills. */
-  .dt-actions > .disclosure {
-    width: auto;
-    font-size: var(--gl-h);
-    background: var(--gl-inverse-bg);
-    color: var(--gl-inverse-text);
-    border-color: transparent;
-  }
-  .dt-actions > .disclosure-body { flex-basis: 100%; order: 3; margin-top: 4px; }
-  .dt-break { display: flex; flex-direction: column; gap: 12px; }
-  .dt-break .stats { padding: 0; }
-  .dt-break .note { margin-top: 0; }
   @media (min-width: 560px) {
     .detail-stack {
       display: grid;
@@ -983,12 +976,6 @@ GAME_CARDS_HTML = (
   function ownedPlatforms(game) {
     return list(game.platforms).filter(function (p) { return p && p.owned; });
   }
-  function studioName(ped) {
-    if (!ped) return null;
-    var names = list(ped.developer_names).filter(Boolean);
-    if (names.length) return names.join(" & ");
-    return ped.developer && ped.developer.name ? ped.developer.name : null;
-  }
   /* Detail tier: his rating (>=7 good, >=5 ok, else bad); unrated, the
      critic tier; else a common card. */
   function detailTier(game) {
@@ -1063,6 +1050,20 @@ GAME_CARDS_HTML = (
     }
     return chipRow(chips, 4);
   }
+  /* Time to beat: the three HowLongToBeat lengths as their own rows when the
+     longer two are known (this card's stat block may then reach seven rows);
+     with only the main story, the one LENGTH row. */
+  function lengthRows(game) {
+    var main = hoursLabel(game.hltb_main, true);
+    var extra = hoursLabel(game.hltb_extra, true);
+    var complete = hoursLabel(game.hltb_complete, true);
+    if (!extra && !complete) {
+      return main ? [statRow({ label: "Length", note: "main story", value: main })] : [];
+    }
+    return [["Main story", main], ["Main + extras", extra], ["Completionist", complete]]
+      .filter(function (l) { return l[1]; })
+      .map(function (l) { return statRow({ label: l[0], value: l[1] }); });
+  }
   function detailStats(game) {
     var stats = el("div", "stats");
     var hours = num(game.playtime_hours);
@@ -1071,8 +1072,7 @@ GAME_CARDS_HTML = (
     }
     var last = monthYear(game.last_played_date);
     if (last) stats.appendChild(statRow({ label: "Last", value: last }));
-    var length = hoursLabel(game.hltb_main, true);
-    if (length) stats.appendChild(statRow({ label: "Length", note: "main story", value: length }));
+    lengthRows(game).forEach(function (row) { stats.appendChild(row); });
     var paid = paidRow(game);
     if (paid) stats.appendChild(paid);
     var chips = detailChips(game);
@@ -1110,7 +1110,7 @@ GAME_CARDS_HTML = (
     if (pName) plate.appendChild(el("div", "parent-sub", "part of " + pName));
     // Separate spans, never a middot string: studio, year, platforms.
     var sub = el("div", "sub");
-    var studio = studioName(game.pedigree);
+    var studio = leadStudio(game.pedigree);
     if (studio) sub.appendChild(el("span", null, studio));
     if (game.release_date) sub.appendChild(el("span", null, String(game.release_date).slice(0, 4)));
     ownedPlatforms(game).forEach(function (p) {
@@ -1211,7 +1211,10 @@ GAME_CARDS_HTML = (
       awards.forEach(function (text) { abil.appendChild(abilityNode("Award", text)); });
       flow.appendChild(abil);
     }
-    var tags = list(game.tags).filter(Boolean).slice(0, 8);
+    // One line of what it is: the genres first, then the community tags.
+    var tags = list(game.genres).concat(list(game.tags)).filter(function (t, i, all) {
+      return t && all.indexOf(t) === i;
+    }).slice(0, 8);
     if (tags.length) flow.appendChild(tagLine(tags));
     return flow;
   }
@@ -1238,98 +1241,6 @@ GAME_CARDS_HTML = (
       }));
     });
     sec.appendChild(strip);
-  }
-  /* What the studio shipped BEFORE this game, as minis; under the big-studio
-     damper, or with nothing earlier resolved, the notice says which. */
-  function studioStrip(parent, ped) {
-    if (!ped) return;
-    var items = list(ped.previous_games).filter(function (i) { return i && i.name; }).slice(0, 8);
-    var studio = studioName(ped);
-    if (!items.length && !studio) return;
-    var sec = eyebrowSection(parent, "From the studio");
-    if (!items.length) {
-      var size = num(ped.catalog_size);
-      if (ped.big_catalog && size) {
-        notice(sec, "No earlier games picked: " + studio + " has "
-          + plural(size, "game", ped.catalog_truncated) + " on IGDB");
-      } else {
-        notice(sec, [{ what: "from the studio", source: "IGDB: no earlier games resolved" }]);
-      }
-      return;
-    }
-    var strip = el("div", "strip ministrip");
-    items.forEach(function (item) {
-      var rating = item.owned ? num(item.my_rating) : null;
-      strip.appendChild(miniCard({
-        name: item.name, cover_url: item.cover_url,
-        tier: rating != null ? ratingTier(rating) : "none",
-        lines: miniLines({ rating: rating, critic: item.critic_score,
-          hours: item.owned ? item.playtime_hours : null,
-          owned: !!item.owned, year: item.release_year, platform: item.platform }),
-      }));
-    });
-    sec.appendChild(strip);
-  }
-
-  /* ---------- detail: the full breakdown, behind one control ---------- */
-  /* The facts the card leaves out: the studio and publisher, his record
-     with them, the three HLTB lengths, how many of his games are like it,
-     and the genres. Null when there is none of it. */
-  function breakdownNode(game) {
-    var box = el("div", "dt-break");
-    var ped = game.pedigree;
-    if (ped) {
-      var founded = num(ped.developer && ped.developer.founded_year);
-      var size = num(ped.catalog_size);
-      var facts = [studioName(ped), founded != null ? "founded " + founded : null,
-                   size ? plural(size, "game", ped.catalog_truncated) + " on IGDB" : null].filter(Boolean);
-      if (facts.length) box.appendChild(abilityNode("Studio", facts.join(", ")));
-      if (ped.publisher_name) box.appendChild(abilityNode("Publisher", ped.publisher_name));
-      var record = ped.library_track_record;
-      var shown = list(ped.previous_games).filter(function (i) { return i && i.name; }).length;
-      if (record && shown) {
-        var avg = num(record.avg_my_rating);
-        var span = ped.previous_truncated ? "their last " + plural(shown, "game") : "their " + plural(shown, "previous game");
-        box.appendChild(el("div", "note", "You've played " + (num(record.played_count) || 0) + " of "
-          + span + (avg != null ? " — avg " + avg + "/10." : ".")));
-      }
-    }
-    var lengths = el("div", "stats");
-    [["Main story", game.hltb_main], ["Main + extras", game.hltb_extra], ["Completionist", game.hltb_complete]]
-      .forEach(function (l) {
-        var h = hoursLabel(l[1], true);
-        if (h) lengths.appendChild(statRow({ label: l[0], value: h }));
-      });
-    if (lengths.childNodes.length) box.appendChild(lengths);
-    var similar = game.similar;
-    var count = list(similar && similar.items).filter(function (i) { return i && i.name; }).length;
-    if (count) {
-      var total = num(similar.count);
-      box.appendChild(el("div", "note", similar.truncated && total != null && total > count
-        ? "The " + count + " of your " + plural(total, "game") + " most like this one are above."
-        : "Your " + plural(count, "game") + " most like this one are above."));
-    }
-    var genres = list(game.genres).filter(Boolean);
-    if (genres.length) box.appendChild(tagLine(genres));
-    return box.childNodes.length ? box : null;
-  }
-  /* "Full breakdown": fullscreen with it open where the host offers it, the
-     in-place disclosure where it doesn't or refuses — and already
-     fullscreen, everything shown with no control at all. */
-  function relatedBlock(flow, actions, game) {
-    var node = breakdownNode(game);
-    if (!node) return;
-    if (currentDisplayMode() === "fullscreen") {
-      var sec = eyebrowSection(flow, "Full breakdown");
-      sec.appendChild(node);
-      flow.insertBefore(sec, actions);
-      return;
-    }
-    var build = function (body) {
-      body.appendChild(node);
-      reportSize();
-    };
-    fullscreenOrDisclosure(actions, "Full breakdown", build);
   }
   /* The store page, when one is derivable (Steam, from the app id): the
      shared store pill. */
@@ -1372,10 +1283,12 @@ GAME_CARDS_HTML = (
       if (reelTitle) reelTitle.classList.add("sr-only");
     }
     similarStrip(flow, game.similar);
-    studioStrip(flow, game.pedigree);
+    // FROM THE STUDIO (the shared builder): the headline, then the studio's
+    // releases around this one. The lengths, genres, studio and publisher
+    // all sit on the card or here, so the actions row is the store link alone.
+    studioStrip(flow, game.pedigree, game.release_date ? String(game.release_date).slice(0, 4) : null);
     var actions = el("div", "actions dt-actions");
     flow.appendChild(actions);
-    relatedBlock(flow, actions, game);
     if (noticeText) flow.insertBefore(notice(flow, noticeText), actions);
     var store = storeLink(game);
     if (store) actions.appendChild(store);

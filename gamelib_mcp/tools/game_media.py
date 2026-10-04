@@ -72,9 +72,11 @@ _SIMILAR_IDF_DF_FLOOR = 5
 # the match without the tail being discarded outright.
 _SIMILAR_PROMINENCE_HALF = 8.0
 
-# Mirrors data/media.py's PREVIOUS_GAMES_CAP: the fetch already caps the
-# studio's previous games, and this is the second gate on the same row.
+# Mirror data/media.py's PREVIOUS_GAMES_CAP and TIMELINE_*_CAP: the fetch
+# already caps the studio's rows, and these are the second gate on them.
 PEDIGREE_ITEM_CAP = 6
+TIMELINE_BEFORE_CAP = 5
+TIMELINE_AFTER_CAP = 3
 
 # Ownership/playtime/rating for the IGDB-keyed entries of the PEDIGREE row.
 # Narrower than tools/assessment.py's package annotation query (which also feeds
@@ -340,68 +342,69 @@ async def similar_in_library(game_id: int) -> dict[str, Any] | None:
     return {"items": items, "count": total, "truncated": total > len(items)}
 
 
-def _track_record(items: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """What HIS library says about the studio's previous games.
-
-    The point of the strip: not "this studio is acclaimed" (critic scores say
-    that, and every card already carries them) but "you played four of their
-    last six and rated them 8.5". Null when there is nothing to count —
-    the header line then stands alone rather than reporting three zeroes.
-    """
-    if not items:
-        return None
-    owned = [item for item in items if item["owned"]]
-    # Every rated entry counts, owned or not: a rating is his judgement of the
-    # studio's work, and a game he rated and later let go still is one.
-    ratings = [item["my_rating"] for item in items if item["my_rating"] is not None]
+def _annotated_entry(entry: dict[str, Any], row: Any) -> dict[str, Any]:
+    """One studio catalogue entry read against the library (row None = not his)."""
+    hours = _hours(row["playtime_minutes"]) if row is not None else None
+    owned = bool(row["owned"]) if row is not None else False
     return {
-        "owned_count": len(owned),
-        # Owned-and-touched: an owned-but-never-launched game is evidence about
-        # the backlog, not about the studio.
-        "played_count": sum(1 for item in owned if item["playtime_hours"]),
-        "avg_my_rating": round(sum(ratings) / len(ratings), 1) if ratings else None,
+        "igdb_id": entry.get("igdb_id"),
+        "name": entry.get("name"),
+        "release_year": entry.get("release_year"),
+        "release_date": entry.get("release_date"),
+        "critic_score": entry.get("critic_score"),
+        "cover_url": (
+            IGDB_COVER_URL.format(image_id=entry["cover_image_id"])
+            if entry.get("cover_image_id")
+            else None
+        ),
+        "owned": owned,
+        # Owned-and-touched, the same rule the mini's "played" word uses: an
+        # unknown playtime is not a session, and neither is an unowned row.
+        "played": bool(owned and hours),
+        "my_rating": row["my_rating"] if row is not None else None,
+        "playtime_hours": hours,
     }
 
 
+def _entries(value: Any, cap: int) -> list[dict[str, Any]]:
+    return [entry for entry in (value or []) if isinstance(entry, dict)][:cap]
+
+
 async def annotate_pedigree(pedigree_raw: dict[str, Any]) -> dict[str, Any]:
-    """The raw pedigree block with its previous games read against the library.
+    """The raw pedigree block with its catalogue entries read against the library.
 
     Everything else passes through untouched — this layer only knows about
-    ownership. Under the big-studio damper ``previous_games`` is already empty
-    upstream, so the track record comes back null and the widgets render the
-    header line alone.
+    ownership. ``previous_games`` and the ``timeline`` (before / after the
+    candidate, nearest first) share one library lookup; the caps are re-applied
+    here as the second gate on the same rows.
     """
-    raw_previous = [
-        entry
-        for entry in (pedigree_raw.get("previous_games") or [])
-        if isinstance(entry, dict)
-    ]
-    library = await _annotate_by_igdb_id([entry.get("igdb_id") for entry in raw_previous])
-    items: list[dict[str, Any]] = []
-    for entry in raw_previous[:PEDIGREE_ITEM_CAP]:
-        row = library.get(entry.get("igdb_id"))
-        items.append(
-            {
-                "igdb_id": entry.get("igdb_id"),
-                "name": entry.get("name"),
-                "release_year": entry.get("release_year"),
-                "critic_score": entry.get("critic_score"),
-                "cover_url": (
-                    IGDB_COVER_URL.format(image_id=entry["cover_image_id"])
-                    if entry.get("cover_image_id")
-                    else None
-                ),
-                "owned": bool(row["owned"]) if row is not None else False,
-                "my_rating": row["my_rating"] if row is not None else None,
-                "playtime_hours": (
-                    _hours(row["playtime_minutes"]) if row is not None else None
-                ),
-            }
-        )
+    raw_previous = _entries(pedigree_raw.get("previous_games"), PEDIGREE_ITEM_CAP)
+    raw_timeline = pedigree_raw.get("timeline")
+    timeline_raw = raw_timeline if isinstance(raw_timeline, dict) else {}
+    raw_before = _entries(timeline_raw.get("before"), TIMELINE_BEFORE_CAP)
+    raw_after = _entries(timeline_raw.get("after"), TIMELINE_AFTER_CAP)
+    library = await _annotate_by_igdb_id(
+        [entry.get("igdb_id") for entry in (*raw_previous, *raw_before, *raw_after)]
+    )
+
+    def annotate(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [_annotated_entry(entry, library.get(entry.get("igdb_id"))) for entry in entries]
+
+    before = annotate(raw_before)
+    after = annotate(raw_after)
     return {
-        **{key: value for key, value in pedigree_raw.items() if key != "previous_games"},
-        "previous_games": items,
-        "library_track_record": _track_record(items),
+        **{
+            key: value
+            for key, value in pedigree_raw.items()
+            if key not in ("previous_games", "timeline")
+        },
+        "previous_games": annotate(raw_previous),
+        "timeline": {
+            "before": before,
+            "after": after,
+            "before_count": timeline_raw.get("before_count", len(before)),
+            "after_count": timeline_raw.get("after_count", len(after)),
+        },
     }
 
 

@@ -634,6 +634,18 @@ class ResponseSizeGuardTests(ToolDBTestCase):
                 ],
                 "previous_count": 10,
                 "previous_truncated": True,
+                "timeline": {
+                    "before": [
+                        {"igdb_id": 900 + i, "name": f"Before {i}", "release_year": 2015 - i}
+                        for i in range(9)
+                    ],
+                    "after": [
+                        {"igdb_id": 950 + i, "name": f"After {i}", "release_year": 2020 + i}
+                        for i in range(6)
+                    ],
+                    "before_count": 9,
+                    "after_count": 6,
+                },
                 "catalog_size": 12,
                 "catalog_truncated": False,
                 "big_catalog": False,
@@ -651,6 +663,8 @@ class ResponseSizeGuardTests(ToolDBTestCase):
             "media.screenshots": 8,
             "similar.items": 8,
             "pedigree.previous_games": 6,
+            "pedigree.timeline.before": 5,
+            "pedigree.timeline.after": 3,
         }.items():
             node = result
             for key in path.split("."):
@@ -667,6 +681,8 @@ class ResponseSizeGuardTests(ToolDBTestCase):
         self.assertTrue(result["similar"]["truncated"])
         self.assertEqual(result["pedigree"]["previous_count"], 10)
         self.assertTrue(result["pedigree"]["previous_truncated"])
+        self.assertEqual(result["pedigree"]["timeline"]["before_count"], 9)
+        self.assertEqual(result["pedigree"]["timeline"]["after_count"], 6)
 
     async def test_evaluation_package_lists_are_capped(self):
         # record_assessment's package is a WRITE response, but it carries the
@@ -717,6 +733,18 @@ class ResponseSizeGuardTests(ToolDBTestCase):
                 ],
                 "previous_count": 10,
                 "previous_truncated": True,
+                "timeline": {
+                    "before": [
+                        {"igdb_id": 900 + i, "name": f"Before {i}", "release_year": 2015 - i}
+                        for i in range(9)
+                    ],
+                    "after": [
+                        {"igdb_id": 950 + i, "name": f"After {i}", "release_year": 2020 + i}
+                        for i in range(6)
+                    ],
+                    "before_count": 9,
+                    "after_count": 6,
+                },
                 "catalog_size": 12,
                 "catalog_truncated": False,
                 "big_catalog": False,
@@ -751,6 +779,8 @@ class ResponseSizeGuardTests(ToolDBTestCase):
             "media.screenshots": 8,
             "similar.items": 8,
             "pedigree.previous_games": 6,
+            "pedigree.timeline.before": 5,
+            "pedigree.timeline.after": 3,
             "past.items": 5,
             "presentation.for_you_if": 4,
         }

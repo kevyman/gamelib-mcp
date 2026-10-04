@@ -530,6 +530,13 @@ CHIP_CSS = r"""  .chips { display: flex; gap: 8px 6px; flex-wrap: wrap; align-it
     font-size: var(--gl-cap);
     font-weight: var(--gl-strong);
     line-height: var(--gl-cap-lh);
+    /* A phrase ("Overwhelmingly positive") stays one line: it ellipsises in
+       a narrow chip rather than wrapping the chip to two. */
+    white-space: nowrap;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .chip .aux { color: var(--gl-muted); white-space: nowrap; }
   .chip .meter {
@@ -894,6 +901,26 @@ TAG_CSS = r"""  .tags, html.touch .tags { gap: 4px; }
 
 # "From the studio" header and publisher lines.
 PEDIGREE_CSS = r"""  .ped-head { display: flex; flex-wrap: wrap; gap: 2px 10px; font-weight: var(--gl-strong); }
+  .ped-head > :not(:first-child) { font-weight: var(--gl-regular); color: var(--gl-text-2); }
+  .ped-with { margin-top: 2px; font-size: var(--gl-cap); line-height: var(--gl-cap-lh); color: var(--gl-muted); }
+  .ped-hd + .strip { margin-top: 8px; }
+  /* The timeline strip: this game's place is a 1px hairline the strip's
+     height, its year in mono above the line. */
+  .ministrip > .tl-mark {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    align-self: stretch;
+  }
+  .tl-year {
+    font-family: var(--gl-mono);
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    color: var(--gl-text-2);
+  }
+  .tl-line { flex: 1 1 auto; width: 1px; min-height: 48px; background: var(--gl-border); }
 """
 
 # ---- Overlay / carousel / toast CSS -----------------------------------------
@@ -2107,7 +2134,8 @@ PLATE_CSS = r"""  .plate { position: relative; padding: 10px 12px 8px; border-bo
 
 # The stat block: label (with an optional note after it, "last 30d"), the
 # dotted leader, the mono value; .is-key marks the strongest value. At most
-# six rows on a card.
+# six rows on a card (the detail card seven, with the three HowLongToBeat
+# lengths).
 STATS_CSS = r"""  .stats { display: flex; flex-direction: column; margin: 0; padding: 6px 12px 0; }
   .stat { display: flex; align-items: baseline; min-height: 24px; line-height: 24px; }
   .stat-label {
@@ -2287,6 +2315,10 @@ FLAVOR_CSS = r"""  .flavor {
 # (STRIP_CSS: padding, snap, the trailing spacer) with the Binder's 12px gap
 # and peeking cards.
 MINI_CSS = r"""  .mini { position: relative; display: flex; align-items: flex-start; gap: 10px; min-height: 64px; color: var(--gl-text); }
+  /* A mini clips its own box, so a scrolled strip never shows a neighbour's
+     text spilling past its edge; the focus ring is drawn inside it. */
+  .mini { overflow: hidden; }
+  .mini-hit:focus-visible { outline-offset: -2px; }
   .mini-art {
     flex: none;
     width: 48px;
@@ -3153,25 +3185,116 @@ MEDIA_PANEL_JS = r"""  function trailerEntry(media) {
 # "From the studio": the headline (its parts — studio, "est. 2018", "5 games" —
 # as gap-separated spans, never a joined string). Each widget builds its own
 # strip of minis under it (``plural`` lives in NUMBERS_JS).
-PEDIGREE_JS = r"""  function pedigreeHeadline(ped) {
+PEDIGREE_JS = r"""  /* The lead developer: the studio the strip is about (the first developer
+     IGDB credits; data/media.py fetches that one company's catalogue). */
+  function leadStudio(ped) {
+    if (!ped) return null;
     var dev = ped.developer || {};
+    if (dev.name) return String(dev.name);
     var names = list(ped.developer_names).filter(Boolean);
+    return names.length ? String(names[0]) : null;
+  }
+  /* The headline parts: the lead developer, "est. 1997", the publisher, and
+     the catalogue size only for a big studio (the strip then shows the
+     nearest releases of many). Gap-separated spans, never joined. */
+  function pedigreeHeadline(ped) {
+    var dev = ped.developer || {};
     var parts = [];
-    if (names.length) parts.push(names.join(" & "));
-    else if (dev.name) parts.push(dev.name);
+    var lead = leadStudio(ped);
+    if (lead) parts.push(lead);
     var founded = num(dev.founded_year);
     if (founded != null) parts.push("est. " + founded);
+    if (ped.publisher_name && ped.publisher_name !== lead) parts.push(String(ped.publisher_name));
     var size = num(ped.catalog_size);
-    if (size) parts.push(plural(size, "game", ped.catalog_truncated));
+    if (ped.big_catalog && size) parts.push(plural(size, "game", ped.catalog_truncated));
     return parts;
   }
-  /* The headline as a div of spans (PEDIGREE_CSS gaps them), or null. */
+  /* Co-developers beside the lead, as one muted "with B, C" line. */
+  function coDevelopers(ped) {
+    var lead = leadStudio(ped);
+    return list(ped.developer_names).filter(function (n) { return n && n !== lead; });
+  }
+  /* The headline as a div of spans (PEDIGREE_CSS gaps them) with the
+     co-developer line under it, or null. */
   function pedigreeHead(ped) {
     var parts = pedigreeHeadline(ped);
     if (!parts.length) return null;
+    var box = el("div", "ped-hd");
     var head = el("div", "ped-head");
     parts.forEach(function (part) { head.appendChild(el("span", null, part)); });
-    return head;
+    box.appendChild(head);
+    var co = coDevelopers(ped);
+    if (co.length) box.appendChild(el("div", "ped-with", "with " + co.join(", ")));
+    return box;
+  }
+  /* The studio's releases around this game, oldest to newest: the timeline's
+     "before" (nearest first on the wire, so reversed) then its "after". An
+     older payload with no timeline reads previous_games as "before". */
+  function timelineSides(ped) {
+    var keep = function (v) { return list(v).filter(function (i) { return i && i.name; }); };
+    var t = ped.timeline && typeof ped.timeline === "object" ? ped.timeline : null;
+    var before = keep(t ? t.before : ped.previous_games).slice(0, 5);
+    var after = t ? keep(t.after).slice(0, 3) : [];
+    return { before: before.slice().reverse(), after: after };
+  }
+  /* One studio mini: his rating as pips when he owns and rated it, else the
+     critic line; the ownership line; the year (the shared miniLines). */
+  function studioMini(item) {
+    var rating = item.owned ? num(item.my_rating) : null;
+    return miniCard({
+      name: item.name, cover_url: item.cover_url,
+      tier: rating != null ? ratingTier(rating) : "none",
+      lines: miniLines({ rating: rating, critic: item.critic_score,
+        hours: item.owned ? item.playtime_hours : null,
+        owned: !!item.owned, year: item.release_year, platform: item.platform }),
+    });
+  }
+  /* FROM THE STUDIO, shared by both widgets: the headline, then one strip of
+     minis oldest to newest with a hairline where this game falls (its year
+     above the line). With no releases around it, the headline stands alone.
+     candidateYear is the year of the game the card is about, when known. */
+  function studioStrip(parent, ped, candidateYear) {
+    if (!ped) return null;
+    var head = pedigreeHead(ped);
+    var sides = timelineSides(ped);
+    if (!head && !sides.before.length && !sides.after.length) return null;
+    var sec = eyebrowSection(parent, "From the studio");
+    if (head) sec.appendChild(head);
+    if (!sides.before.length && !sides.after.length) return sec;
+    var strip = el("div", "strip ministrip timeline");
+    sides.before.forEach(function (item) { strip.appendChild(studioMini(item)); });
+    var mark = el("div", "tl-mark");
+    var year = num(candidateYear);
+    mark.setAttribute("role", "separator");
+    mark.setAttribute("aria-label", year != null ? "This game, " + year : "This game");
+    mark.appendChild(el("span", "tl-year", year != null ? String(year) : ""));
+    mark.appendChild(el("span", "tl-line"));
+    strip.appendChild(mark);
+    sides.after.forEach(function (item) { strip.appendChild(studioMini(item)); });
+    sec.appendChild(strip);
+    // Open on this game's neighbourhood: the nearest earlier release's
+    // left edge on the strip's content edge, so the hairline and what came
+    // next follow it in view (showNearest says when not to).
+    if (sides.before.length > 1 && typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(function () { showNearest(strip, mark.previousSibling); });
+    }
+    return sec;
+  }
+  /* An instant scroll (not an animation) that puts `stop`'s left edge
+     exactly on the strip's content edge, measured from the layout. It does
+     not scroll at all — the strip starts at the oldest — when everything
+     already fits, or when the aligned position lies past the end of the
+     content (nothing, or too little, follows the hairline): the browser
+     would clamp it and leave a sliver of the previous mini at the edge. */
+  function showNearest(strip, stop) {
+    if (!stop || !stop.getBoundingClientRect || !strip.getBoundingClientRect || !window.getComputedStyle) return;
+    var max = strip.scrollWidth - strip.clientWidth;
+    if (!(max > 0)) return;
+    var pad = parseFloat(getComputedStyle(strip).paddingLeft) || 0;
+    var target = stop.getBoundingClientRect().left - strip.getBoundingClientRect().left
+      - (strip.clientLeft || 0) + strip.scrollLeft - pad;
+    if (!isFinite(target) || target <= 0 || target > max) return;
+    strip.scrollLeft = target;
   }
 """
 
