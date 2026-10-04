@@ -48,7 +48,12 @@ logger = logging.getLogger(__name__)
 # have: the "+N more" chip was unclickable (the extra images were never in the
 # payload), so it went, and a couple more real screenshots took its place.
 SCREENSHOT_CAP = 8
-PREVIOUS_GAMES_CAP = 6
+# The studio timeline around the candidate: the nearest releases on each side,
+# so the strip reads "what they made before this, and what came next". The one
+# source of these caps: tools/game_media.py re-applies them and the widgets'
+# PEDIGREE_JS embeds them (apps_shared.py).
+TIMELINE_BEFORE_CAP = 5
+TIMELINE_AFTER_CAP = 3
 SUMMARY_MAX_CHARS = 500
 
 # The developer's own back catalogue, fetched with ONE bounded query on the
@@ -56,10 +61,11 @@ SUMMARY_MAX_CHARS = 500
 # is unbounded, and an EA or a Ubisoft would drag a five-hundred-entry array
 # through every card.
 COMPANY_CATALOG_LIMIT = 30
-# Above this, the studio is a factory rather than an authorship signal: six
-# arbitrary posters out of a 500-game catalogue say nothing about the game in
-# front of you, so the strip degrades to its header line. Deliberately below
-# COMPANY_CATALOG_LIMIT, so "we fetched a full page" is not the same test.
+# Above this, the studio is a factory rather than a small body of work. The
+# flag no longer empties the strip (the timeline is the NEAREST releases, which
+# say something even for a big studio); it stays on the wire so the headline
+# can say the catalogue is large. Deliberately below COMPANY_CATALOG_LIMIT, so
+# "we fetched a full page" is not the same test.
 BIG_CATALOG_THRESHOLD = 25
 
 MEDIA_CACHE_TTL = timedelta(days=7)
@@ -103,9 +109,14 @@ _IGDB_MEDIA_FIELDS = (
 
 # One bounded page of the developer's own games, newest first. The `where` runs
 # on the GAMES endpoint so the limit actually bounds the response — the same
-# filter expressed as a company expansion would not.
+# filter expressed as a company expansion would not. The involved_companies
+# flags come back so a title the company only PORTED can be dropped: IGDB's
+# where-clause matches the company and the developer flag on any rows, not
+# necessarily the same one.
 _IGDB_COMPANY_CATALOG_QUERY = (
-    "fields id, name, cover.image_id, first_release_date, aggregated_rating; "
+    "fields id, name, cover.image_id, first_release_date, aggregated_rating, "
+    "involved_companies.company, involved_companies.developer, "
+    "involved_companies.porting, involved_companies.supporting; "
     "where involved_companies.company = {company_id} & "
     "involved_companies.developer = true; "
     "sort first_release_date desc; limit {limit};"
@@ -140,16 +151,23 @@ _FETCH_FAILED: Any = object()
 # 2026-08) refetches instead of rendering half a card for seven days is to ask
 # a question the old entries are not the answer to. Bump this whenever the
 # cached payload grows a member a renderer depends on.
-MEDIA_CACHE_VERSION = "v3"
+MEDIA_CACHE_VERSION = "v5"
 
 
 def _cache_key(kind: str, identity: str | int) -> str:
     return f"game_media:{MEDIA_CACHE_VERSION}:{kind}:{identity}"
 
 
+# The catalogue's own version: v2 drops the titles the company only ported
+# (2026-10), so an older entry must not be served for its 30 days; v3 wraps the
+# entries with the RAW page's size and oldest date (the page-full test and the
+# timeline's after_gap read the page as fetched, before the porting filter).
+COMPANY_CACHE_VERSION = "v3"
+
+
 def _company_cache_key(company_id: int) -> str:
     """Per-company, not per-game: one studio's catalogue serves every card of its games."""
-    return f"game_media_company:{company_id}"
+    return f"game_media_company:{COMPANY_CACHE_VERSION}:{company_id}"
 
 
 def _name_cache_key(name: str) -> str:
@@ -339,6 +357,16 @@ def _igdb_trailer(videos: list | None) -> dict | None:
     }
 
 
+def _release_date(epoch: Any) -> str | None:
+    """An IGDB epoch as an ISO date ('2014-03-21'), or None."""
+    if not isinstance(epoch, int) or isinstance(epoch, bool):
+        return None
+    try:
+        return datetime.fromtimestamp(epoch, tz=UTC).date().isoformat()
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
 def _release_year(epoch: Any) -> int | None:
     if not isinstance(epoch, int) or isinstance(epoch, bool):
         return None
@@ -404,14 +432,56 @@ def _company_roles(involved: list | None) -> tuple[dict | None, list[str], str |
     return primary, names, publisher_name
 
 
-async def _fetch_company_catalog(company_id: int) -> list[dict] | None:
-    """One bounded page of games this company DEVELOPED, newest first."""
+def _developed_by(game: dict, company_id: int) -> bool:
+    """True when ``company_id`` is credited on ``game`` as its developer.
+
+    The row naming the company must itself carry ``developer=true`` and
+    neither ``porting`` nor ``supporting`` — the same contractor rule
+    ``_company_roles`` applies to the candidate: a studio's ports of, and
+    support work on, other studios' games are contract work, not its body of
+    work (Bluepoint's remakes, a Switch port house).
+    """
+    for row in game.get("involved_companies") or []:
+        if not isinstance(row, dict):
+            continue
+        company = row.get("company")
+        involved_id = company.get("id") if isinstance(company, dict) else company
+        if (
+            involved_id == company_id
+            and row.get("developer") is True
+            and not row.get("porting")
+            and not row.get("supporting")
+        ):
+            return True
+    return False
+
+
+async def _fetch_company_catalog(company_id: int) -> dict | None:
+    """One bounded page of games this company DEVELOPED, newest first.
+
+    ``{"entries", "page_size", "page_oldest"}``: the entries are filtered to
+    the studio's own work, but the page is measured AS FETCHED — whether it
+    came back full (``page_size``) and how far back it reached
+    (``page_oldest``, an epoch) are facts about the query's bound, and a port
+    dropped afterwards still occupied a slot on the page.
+    """
     results = await _post_igdb_media_query(
         _IGDB_COMPANY_CATALOG_QUERY.format(
             company_id=company_id, limit=COMPANY_CATALOG_LIMIT
         ),
         f"company {company_id}",
     )
+    if not results:
+        return None
+    page_dates = [
+        epoch
+        for epoch in (
+            _int_field(game.get("first_release_date"))
+            for game in results
+            if isinstance(game, dict)
+        )
+        if epoch is not None
+    ]
     entries = [
         {
             "igdb_id": game["id"],
@@ -421,33 +491,57 @@ async def _fetch_company_catalog(company_id: int) -> list[dict] | None:
             "critic_score": _critic_score(game.get("aggregated_rating")),
         }
         for game in results
-        if isinstance(game, dict) and game.get("id") is not None
+        if isinstance(game, dict)
+        and game.get("id") is not None
+        and _developed_by(game, company_id)
     ]
-    return entries or None
+    return {
+        "entries": entries,
+        "page_size": len(results),
+        "page_oldest": min(page_dates) if page_dates else None,
+    }
 
 
-async def _company_catalog(company_id: int) -> tuple[list[dict], bool]:
-    """(catalog, fetch_failed) — the flag keeps a failed catalog fetch from
-    masquerading as an empty catalog, which the enclosing game payload would
-    otherwise cache for seven days."""
+async def _company_catalog(company_id: int) -> tuple[dict, bool]:
+    """(catalog page, fetch_failed) — the flag keeps a failed catalog fetch
+    from masquerading as an empty catalog, which the enclosing game payload
+    would otherwise cache for seven days. The page is ``_fetch_company_catalog``'s
+    shape; a miss or a failure is an empty page."""
     payload = await _cached(
         _company_cache_key(company_id),
         lambda: _fetch_company_catalog(company_id),
         ttl=COMPANY_CACHE_TTL,
         label=f"company {company_id}",
     )
+    empty: dict[str, Any] = {"entries": [], "page_size": 0, "page_oldest": None}
     if payload is _FETCH_FAILED:
-        return [], True
-    return (payload, False) if isinstance(payload, list) else ([], False)
+        return empty, True
+    if not isinstance(payload, dict) or not isinstance(payload.get("entries"), list):
+        return empty, False
+    return payload, False
+
+
+def _catalog_item(entry: dict) -> dict[str, Any]:
+    """One catalogue entry as the pedigree carries it (pre-annotation)."""
+    return {
+        "igdb_id": entry["igdb_id"],
+        "name": entry["name"],
+        "release_year": _release_year(entry["first_release_date"]),
+        "release_date": _release_date(entry["first_release_date"]),
+        "cover_image_id": entry["cover_image_id"],
+        "critic_score": entry["critic_score"],
+    }
 
 
 async def _igdb_pedigree(item: dict, igdb_id: int) -> tuple[dict | None, bool]:
     """(raw pedigree block, catalog_fetch_failed).
 
     Returns (None, False) when IGDB names no qualifying developer — a pedigree
-    with no studio is not a weaker pedigree, it is no claim at all. The flag
-    reports a FAILED catalog fetch (rendered header-only, like the big-studio
-    damper) so the caller can keep the incomplete payload out of the cache.
+    with no studio is not a weaker pedigree, it is no claim at all. The lead
+    (first qualifying) developer is the studio: its catalogue is the one
+    fetched, while ``developer_names`` keeps every co-developer for the header.
+    The flag reports a FAILED catalog fetch (rendered header-only) so the
+    caller can keep the incomplete payload out of the cache.
     Annotation against the library happens one layer up (tools/game_media.py);
     nothing here knows what is owned.
     """
@@ -458,47 +552,55 @@ async def _igdb_pedigree(item: dict, igdb_id: int) -> tuple[dict | None, bool]:
         return None, False
 
     company_id = _int_field(developer.get("id"))
-    catalog, catalog_failed = (
-        await _company_catalog(company_id) if company_id is not None else ([], False)
-    )
-    catalog_size = len(catalog)
+    page: dict[str, Any] = {"entries": [], "page_size": 0, "page_oldest": None}
+    catalog_failed = False
+    if company_id is not None:
+        page, catalog_failed = await _company_catalog(company_id)
+    catalog = [entry for entry in page["entries"] if isinstance(entry, dict)]
+    # The page as FETCHED, before the porting filter: "the page came back
+    # full" is a fact about the query's bound, and a dropped port still took
+    # a slot on it.
+    catalog_size = _int_field(page.get("page_size")) or 0
+    catalog_truncated = catalog_size >= COMPANY_CATALOG_LIMIT
     big_catalog = catalog_size > BIG_CATALOG_THRESHOLD
 
-    previous: list[dict[str, Any]] = []
-    previous_count = 0
-    if not big_catalog:
-        # "Before this game", not "everything they made": a studio's later
-        # releases say nothing about the track record that produced this one.
-        # A candidate with no release date of its own (an announced game) falls
-        # back to now, which is the same question asked loosely.
-        cutoff = _int_field(item.get("first_release_date")) or int(
-            datetime.now(UTC).timestamp()
-        )
-        qualifying = sorted(
-            (
-                entry
-                for entry in catalog
-                if entry["igdb_id"] != igdb_id
-                and entry["first_release_date"] is not None
-                and entry["first_release_date"] < cutoff
-            ),
-            key=lambda entry: entry["first_release_date"],
-            reverse=True,
-        )
-        # Counted within the fetched page, so it is a floor rather than the
-        # studio's true output — bounded by design, and catalog_truncated says
-        # when the page was full.
-        previous_count = len(qualifying)
-        previous = [
-            {
-                "igdb_id": entry["igdb_id"],
-                "name": entry["name"],
-                "release_year": _release_year(entry["first_release_date"]),
-                "cover_image_id": entry["cover_image_id"],
-                "critic_score": entry["critic_score"],
-            }
-            for entry in qualifying[:PREVIOUS_GAMES_CAP]
-        ]
+    # The candidate's place in the studio's output: the nearest releases on
+    # each side. A candidate with no release date of its own (an announced
+    # game) falls back to now, so "before" is the shipped record and "after"
+    # what else they have announced.
+    cutoff = _int_field(item.get("first_release_date")) or int(
+        datetime.now(UTC).timestamp()
+    )
+    dated = [
+        entry
+        for entry in catalog
+        if entry["igdb_id"] != igdb_id and entry["first_release_date"] is not None
+    ]
+    # Nearest first on both sides. Counted within the fetched page, so each
+    # count is a floor rather than the studio's true output — bounded by
+    # design, and catalog_truncated says when the page was full.
+    before = sorted(
+        (entry for entry in dated if entry["first_release_date"] < cutoff),
+        key=lambda entry: entry["first_release_date"],
+        reverse=True,
+    )
+    after = sorted(
+        (entry for entry in dated if entry["first_release_date"] > cutoff),
+        key=lambda entry: entry["first_release_date"],
+    )
+    # A full page that never reached back past the candidate: the studio's
+    # releases between it and the page's oldest row were never fetched, so
+    # "after" is the page's oldest rows, not what came next.
+    page_oldest = _int_field(page.get("page_oldest"))
+    timeline = {
+        "before": [_catalog_item(entry) for entry in before[:TIMELINE_BEFORE_CAP]],
+        "after": [_catalog_item(entry) for entry in after[:TIMELINE_AFTER_CAP]],
+        "before_count": len(before),
+        "after_count": len(after),
+        "after_gap": bool(
+            catalog_truncated and page_oldest is not None and page_oldest > cutoff
+        ),
+    }
 
     return {
         "developer": {
@@ -509,11 +611,9 @@ async def _igdb_pedigree(item: dict, igdb_id: int) -> tuple[dict | None, bool]:
         },
         "developer_names": developer_names,
         "publisher_name": publisher_name,
-        "previous_games": previous,
-        "previous_count": previous_count,
-        "previous_truncated": previous_count > len(previous),
+        "timeline": timeline,
         "catalog_size": catalog_size,
-        "catalog_truncated": catalog_size >= COMPANY_CATALOG_LIMIT,
+        "catalog_truncated": catalog_truncated,
         "big_catalog": big_catalog,
         # Carried, never rendered: an anticipation counter is a popularity
         # signal, and this card does not argue from popularity.

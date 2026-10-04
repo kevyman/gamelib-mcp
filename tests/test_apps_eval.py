@@ -247,27 +247,26 @@ class EvalCardHtmlSanityTests(unittest.TestCase):
         self.assertIn('video.preload = "none";', apps_eval.EVAL_CARD_HTML)
 
     def test_the_studio_renders_from_the_package(self) -> None:
-        studio = EvalCardLayoutTests._function("studioNode", "pastNode")
-        for marker in (
-            'var box = eyebrowSection(parent, "From the studio");',
-            # the shared headline: its parts as gap-separated spans, no middots
-            "var head = pedigreeHead(ped);",
-            "if (head) box.appendChild(head);",
-            # under the big-studio damper only the headline renders
-            "if (!items.length) return;",
-            "ministrip(box, items, function (item) {",
-            '"You\'ve played " + (num(record.played_count) || 0)',
-            '" — avg " + avg + "/10."',
-        ):
-            self.assertIn(marker, studio)
+        # FROM THE STUDIO is the shared builder (apps_shared.PEDIGREE_JS),
+        # given the candidate's year for the timeline hairline; the local
+        # studioNode and its track-record sentence are gone (each mini states
+        # its own ownership).
+        breakdown = EvalCardLayoutTests._function("breakdownNode", "storeAppid")
+        self.assertIn("studioStrip(parent, pkg.pedigree, (pkg.game || {}).release_year);", breakdown)
+        source = Path(apps_eval.__file__).read_text()
+        for gone in ("function studioNode(", "function studioStrip(", "library_track_record",
+                     "You've played", "previous game\")"):
+            self.assertNotIn(gone, source)
         # the shared mini format (B3): his rating as pips and his hours only
         # for a game he owns, "not owned" otherwise, then the year; with no
-        # rating, the critic score as a "Critics 86" line (miniLines' critic
-        # input; executed in tests/test_apps.py::StudioCriticLineTests)
-        self.assertIn("lines: miniLines({ rating: item.owned ? item.my_rating : null, critic: item.critic_score,",
-                      studio)
+        # rating, the critic score as a "Critics 86" line (executed in
+        # tests/test_apps.py::ReviewFixBehaviourTests for both widgets)
+        studio = apps_shared.PEDIGREE_JS.split("function studioMini(item) {", 1)[1].split("\n  }\n", 1)[0]
+        self.assertIn("var rating = item.owned ? num(item.my_rating) : null;", studio)
+        self.assertIn("lines: miniLines({ rating: rating, critic: item.critic_score,", studio)
         self.assertIn("hours: item.owned ? item.playtime_hours : null,", studio)
-        self.assertIn("owned: !!item.owned, year: item.release_year, platform: item.platform }) };", studio)
+        self.assertIn("owned: !!item.owned, year: item.release_year, platform: item.platform }),", studio)
+        self.assertEqual(apps_eval.EVAL_CARD_HTML.count("function studioMini(item) {"), 1)
 
     def test_why_care_renders_an_ability_per_kind(self) -> None:
         # The eval card is the only one that renders why_care (it is authored
@@ -456,7 +455,7 @@ class EvalCardLayoutTests(unittest.TestCase):
             "forYouNode(",
             "anchorsNode(",
             "lineageNode(",
-            "studioNode(",
+            "studioStrip(",
             "pastNode(",
             "errorDetailNode(",
         )
@@ -475,8 +474,12 @@ class EvalCardLayoutTests(unittest.TestCase):
         self.assertIn('traitsNode("For you if", "good", "plus", yes)', you)
         self.assertIn('traitsNode("Not for you if", "bad", "minus", no)', you)
         self.assertIn('if (pair.childNodes.length === 1) pair.classList.add("ev-one");', you)
-        lineage = self._function("lineageNode", "studioNode")
+        lineage = self._function("lineageNode", "pastNode")
         self.assertIn('eyebrowSection(parent, "Lineage").appendChild(pair);', lineage)
+        # F1: a comparison he has carries its cover (no plate) and year
+        self.assertIn("item.appendChild(miniCard({ name: c.name, cover_url: c.cover_url, tier: ratedTier(c.my_rating),",
+                      lineage)
+        self.assertIn("year: c.release_year, platform: c.platform }) }));", lineage)
         # the lineage minis read the same line format as every strip (B3)
         self.assertIn("lines: miniLines({ rating: c.my_rating, hours: c.playtime_hours, owned: c.owned,", lineage)
         self.assertIn('if (c.note) item.appendChild(el("p", "ev-note", String(c.note)));', lineage)
@@ -629,7 +632,7 @@ class EvalCardLayoutTests(unittest.TestCase):
             'traitsNode("Weakness", "bad", "minus", flags, "ev-weak")',
             'items.forEach(function (text) { box.appendChild(traitNode(kind, capFirst(text))); });',
             '.map(function (p) { return label("platform", p); });',
-            "var node = notice(parent, errors.map(errorItem));",
+            'var node = notice(parent, errorSentences(errors).join(" "));',
         ):
             self.assertIn(marker, html)
         self.assertNotIn("some data unavailable", html)
@@ -737,9 +740,8 @@ class EvalCardLayoutTests(unittest.TestCase):
             '+ (n === 1 && !truncated ? "" : "s");',
             apps_eval.EVAL_CARD_HTML,
         )
+        # the big-studio headline's catalogue size (the shared PEDIGREE_JS)
         self.assertIn('plural(size, "game", ped.catalog_truncated)', apps_eval.EVAL_CARD_HTML)
-        self.assertIn('"their " + plural(items.length, "previous game")',
-                      self._function("studioNode", "pastNode"))
 
     def test_nothing_tilts(self) -> None:
         # The toybox tilt and the old -3deg verdict badge are gone: the only rotations are
@@ -903,12 +905,17 @@ _ERRORS_PROBE = r"""
 var pkg = {
   time: { hltb_main_hours: 18 },
   media: { trailer: { kind: "youtube", video_id: "x" }, screenshots: [] },
-  pedigree: { developer: { name: "Retro" }, previous_games: [] },
+  pedigree: { developer: { name: "Retro" }, timeline: { before: [], after: [] } },
   errors: ["hltb: completionist time unavailable", "media: steam: no trailer",
            "igdb: unresolved", "pace: unavailable", "", null],
 };
 var bare = { errors: ["hltb: down", "media: fetch failed", "igdb: unresolved"] };
-console.log(JSON.stringify({ full: packageErrors(pkg), bare: packageErrors(bare) }));
+var tags = "similar: skipped \u2014 fewer than 3 tags on this row (not enriched yet)";
+var year = new Date().getFullYear();
+var gap = function (game) { return packageErrors({ game: game, errors: [tags, "similar: lookup failed"] }); };
+console.log(JSON.stringify({ full: packageErrors(pkg), bare: packageErrors(bare),
+  released: gap({ release_year: 2017 }), undated: gap({ release_year: null }), noGame: gap(undefined),
+  future: gap({ release_year: year + 1 }), thisYear: gap({ release_year: year }) }));
 """
 
 
@@ -943,6 +950,17 @@ class ErrorSuppressionBehaviourTests(unittest.TestCase):
     def test_missing_data_keeps_its_error(self) -> None:
         self.assertEqual(self.out["bare"], ["hltb: down", "media: fetch failed", "igdb: unresolved"])
 
+    def test_too_few_tags_is_silent_before_release(self) -> None:
+        # Round-2 F8: a future game has no community tags yet by definition,
+        # so the similar line is held back; a failed lookup is still
+        # reported. A released game keeps the tags line, and so does an
+        # undated one: no year is an unknown, not "not out yet".
+        tags = "similar: skipped \u2014 fewer than 3 tags on this row (not enriched yet)"
+        for key in ("released", "thisYear", "undated", "noGame"):
+            with self.subTest(case=key):
+                self.assertEqual(self.out[key], [tags, "similar: lookup failed"])
+        self.assertEqual(self.out["future"], ["similar: lookup failed"])
+
 
 _ERROR_LABEL_SHIM = r"""
 function El(tag, cls, text) { this.tag = tag; this.className = cls || ""; this.text = text || ""; this.kids = []; this.attrs = {}; }
@@ -958,7 +976,8 @@ function section(parent, title) { var b = el("section", "panel"); parent.appendC
 """
 
 _ERROR_LABEL_PROBE = r"""
-function item(t) { return errorItem(t); }
+function item(t) { var i = errorItem(t); return { what: i.what, source: i.source, why: i.why }; }
+function say(t) { return errorItem(t).text; }
 var out = {
   similar: item("similar: lookup failed"),
   anchors: item("anchors: lookup failed"),
@@ -969,30 +988,48 @@ var out = {
   mediaIgdb: item("media: igdb: name resolution failed"),
   mediaBare: item("media: fetch failed"),
   unknown: item("weird_block: boom"),
+  sentences: {
+    similarTags: say("similar: skipped — fewer than 3 tags on this row (not enriched yet)"),
+    similar: say("similar: lookup failed"),
+    anchors: say("anchors: lookup failed"),
+    pace: say("pace: unavailable"),
+    pedigree: say("pedigree: unavailable"),
+    studio: say("studio: unavailable"),
+    igdbUnresolved: say("igdb: unresolved — no igdb_id stored and no unique exact-name match"),
+    igdb: say("igdb: rate limited"),
+    steam: say("steam: appdetails failed"),
+    hltb: say("hltb: down"),
+    mediaSteam: say("media: steam: fetch failed"),
+    mediaBare: say("media: fetch failed"),
+    package: say("package: assembly failed"),
+    unknown: say("weird_block: boom"),
+  },
 };
 var p = el("div");
-out.notice = notice(p, ["similar: lookup failed", "media: steam: fetch failed", "weird_block: boom"]
-  .map(errorItem)).textContent;
+out.notice = notice(p, errorSentences(["similar: lookup failed", "media: steam: fetch failed", "weird_block: boom",
+                                        "pedigree: x", "studio: y"]).join(" ")).textContent;
 var detail = el("div");
 errorDetailNode(detail, ["media: steam: fetch failed", "igdb_resolver: " + new Array(40).join("slow ")]);
-out.detail = detail.kids[0].kids[0].kids.map(function (li) { return li.textContent; });
+out.detail = detail.kids[0].kids[0].kids.map(function (li) { return [li.textContent, li.attrs.title]; });
 console.log(JSON.stringify(out));
 """
 
 
 @unittest.skipUnless(NODE, "node is not installed")
 class ErrorLabelBehaviourTests(unittest.TestCase):
-    """F2/F4, executed: every failure names what and where, in words."""
+    """F2/F4, then round-2 F8, executed: every failure is ONE plain sentence
+    naming what and where; the server's string is hover text only."""
 
     @classmethod
     def setUpClass(cls) -> None:
         html = apps_eval.EVAL_CARD_HTML
         start = html.index("  var ERROR_BLOCKS = {")
         mapping = html[start:html.index("  function errorHasData(", start)]
+        sentences = html[html.index("  function errorSentences("):html.index("  function errorsNode(")]
         detail = html[html.index("  function errorDetailNode("):html.index("  function named(v)")]
         detail = detail[:detail.index("\n  }\n") + 4]
         script = (_ERROR_LABEL_SHIM + apps_shared.LABELS_JS + apps_shared.NOTICE_JS
-                  + mapping + detail + _ERROR_LABEL_PROBE)
+                  + mapping + sentences + detail + _ERROR_LABEL_PROBE)
         assert NODE is not None
         proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True,
                               timeout=60, check=False)
@@ -1019,18 +1056,43 @@ class ErrorLabelBehaviourTests(unittest.TestCase):
     def test_an_unknown_block_is_humanized_without_a_source(self) -> None:
         self.assertEqual(self.out["unknown"], {"what": "weird block", "source": "", "why": "boom"})
 
-    def test_the_notice_names_what_and_where(self) -> None:
-        self.assertEqual(self.out["notice"],
-                         "Couldn't load: similar games (library), media (Steam), weird block")
+    def test_every_reason_is_one_plain_sentence(self) -> None:
+        self.assertEqual(self.out["sentences"], {
+            "similarTags": "Not enough tags yet to find similar games in your library.",
+            "similar": "Couldn't compare it with the games in your library.",
+            "anchors": "Couldn't load your history behind this verdict.",
+            "pace": "Couldn't work out your recent play pace.",
+            "pedigree": "Couldn't load the studio's games from IGDB.",
+            "studio": "Couldn't load the studio's games from IGDB.",
+            "igdbUnresolved": "Not linked to IGDB yet, so the studio's games are missing.",
+            "igdb": "Couldn't load the studio from IGDB.",
+            "steam": "Couldn't load store data from Steam.",
+            "hltb": "Couldn't load time to beat from HowLongToBeat.",
+            "mediaSteam": "Couldn't load screenshots or the trailer from Steam.",
+            "mediaBare": "Couldn't load screenshots or the trailer.",
+            "package": "Some evaluation details couldn't load.",
+            "unknown": "Couldn't load weird block.",
+        })
+        for text in self.out["sentences"].values():
+            with self.subTest(text=text):
+                self.assertNotIn("—", text)                 # no em dash
+                self.assertEqual(text.count("."), 1)              # one sentence
+                self.assertTrue(text.endswith("."))
 
-    def test_the_detail_humanizes_the_key_and_caps_the_reason(self) -> None:
-        media, long_one = self.out["detail"]
-        self.assertEqual(media, "Media (Steam) — fetch failed")
-        self.assertTrue(long_one.startswith("Igdb resolver — slow slow"))
-        self.assertNotIn("_", long_one)
-        reason = long_one.split(" — ", 1)[1]
-        self.assertLessEqual(len(reason), 120)
-        self.assertTrue(reason.endswith("…"))
+    def test_the_notice_is_the_sentences_once_each(self) -> None:
+        self.assertEqual(self.out["notice"],
+                         "Couldn't compare it with the games in your library. "
+                         "Couldn't load screenshots or the trailer from Steam. "
+                         "Couldn't load weird block. Couldn't load the studio's games from IGDB.")
+
+    def test_the_detail_shows_the_sentence_and_hides_the_capped_reason(self) -> None:
+        (media, media_title), (long_one, long_title) = self.out["detail"]
+        self.assertEqual(media, "Couldn't load screenshots or the trailer from Steam.")
+        self.assertEqual(media_title, "fetch failed")
+        self.assertEqual(long_one, "Couldn't load igdb resolver.")
+        self.assertNotIn("—", long_one)
+        self.assertLessEqual(len(long_title), 120)
+        self.assertTrue(long_title.endswith("…"))
 
 
 _RENDER_PACKAGE = {
@@ -1066,7 +1128,7 @@ _RENDER_PACKAGE = {
         "similar": {"items": [{"game_id": 1991, "name": "MGS3", "release_year": 2023, "owned": True,
                                "unplayed": True, "playtime_hours": 0.0, "similarity": 0.48,
                                "shared_tags": ["stealth", "drama"]}]},
-        "pedigree": {"developer": {"name": "Insomniac Games"}, "previous_games": [],
+        "pedigree": {"developer": {"name": "Insomniac Games"}, "timeline": {"before": [], "after": []},
                      "publisher_name": "Sony Interactive Entertainment"},
         "past": {"items": [{"assessed_at": "2026-05-12T18:04:11Z", "verdict": "skip",
                             "price_seen": 79.99, "price_currency": "EUR"}]},

@@ -136,7 +136,17 @@ def _pedigree_game(
     ]
 
 
-def _catalog(count: int, *, first_year: int = 2016, start_id: int = 200) -> list[dict]:
+def _dev(company_id: int = 6455, *, developer: bool = True, porting: bool = False) -> list[dict]:
+    """A catalogue row's involved_companies, as the catalogue query fetches them
+    (``company`` unexpanded: IGDB returns the bare id)."""
+    return [
+        {"company": company_id, "developer": developer, "porting": porting, "supporting": False}
+    ]
+
+
+def _catalog(
+    count: int, *, first_year: int = 2016, start_id: int = 200, company_id: int = 6455
+) -> list[dict]:
     """``count`` developed games, one per year going backwards from ``first_year``."""
     return [
         {
@@ -145,6 +155,7 @@ def _catalog(count: int, *, first_year: int = 2016, start_id: int = 200) -> list
             "cover": {"image_id": f"cat{index}"},
             "first_release_date": _epoch(first_year - index),
             "aggregated_rating": 80.4 + index,
+            "involved_companies": _dev(company_id),
         }
         for index in range(count)
     ]
@@ -509,7 +520,7 @@ class PedigreeTests(ToolDBTestCase):
             self.assertEqual(result["errors"], ["igdb: company catalog fetch failed"])
             pedigree = result["pedigree_raw"]
             self.assertEqual(pedigree["developer"]["name"], "Team Cherry")
-            self.assertEqual(pedigree["previous_games"], [])
+            self.assertEqual(pedigree["timeline"]["before"], [])
             self.assertFalse(pedigree["big_catalog"])
         # Neither the game payload nor a catalog miss was cached: both queries
         # ran again on the second call.
@@ -588,13 +599,24 @@ class PedigreeTests(ToolDBTestCase):
         catalog = [
             # The candidate itself, a dateless row, and a LATER release all
             # drop out; the rest are the track record.
-            {"id": 1520, "name": "Hollow Knight", "first_release_date": _epoch(2017)},
-            {"id": 777, "name": "Undated", "first_release_date": None},
+            {
+                "id": 1520,
+                "name": "Hollow Knight",
+                "first_release_date": _epoch(2017),
+                "involved_companies": _dev(),
+            },
+            {
+                "id": 777,
+                "name": "Undated",
+                "first_release_date": None,
+                "involved_companies": _dev(),
+            },
             {
                 "id": 778,
                 "name": "Silksong",
                 "first_release_date": _epoch(2025),
                 "aggregated_rating": 95.0,
+                "involved_companies": _dev(),
             },
             *_catalog(8, first_year=2016),
         ]
@@ -602,17 +624,22 @@ class PedigreeTests(ToolDBTestCase):
 
         assert result is not None
         pedigree = result["pedigree_raw"]
-        self.assertEqual(pedigree["previous_count"], 8)
-        self.assertEqual(len(pedigree["previous_games"]), media.PREVIOUS_GAMES_CAP)
-        self.assertTrue(pedigree["previous_truncated"])
-        names = [entry["name"] for entry in pedigree["previous_games"]]
-        self.assertEqual(names, [f"Earlier {i}" for i in range(6)])  # newest first
+        timeline = pedigree["timeline"]
+        self.assertEqual(timeline["before_count"], 8)
+        self.assertEqual(len(timeline["before"]), media.TIMELINE_BEFORE_CAP)
+        names = [entry["name"] for entry in timeline["before"]]
+        self.assertEqual(names, [f"Earlier {i}" for i in range(5)])  # newest first
+        # The later release is "after"; the legacy previous_* trio is gone.
+        self.assertEqual([e["name"] for e in timeline["after"]], ["Silksong"])
+        for gone in ("previous_games", "previous_count", "previous_truncated"):
+            self.assertNotIn(gone, pedigree)
         self.assertEqual(
-            pedigree["previous_games"][0],
+            timeline["before"][0],
             {
                 "igdb_id": 200,
                 "name": "Earlier 0",
                 "release_year": 2016,
+                "release_date": "2016-01-01",
                 "cover_image_id": "cat0",
                 "critic_score": 80,
             },
@@ -626,31 +653,101 @@ class PedigreeTests(ToolDBTestCase):
         # the same question asked loosely — never "everything they ever made".
         catalog = [
             *_catalog(2, first_year=2016),
-            {"id": 900, "name": "Not Out Yet", "first_release_date": _epoch(2099)},
+            {
+                "id": 900,
+                "name": "Not Out Yet",
+                "first_release_date": _epoch(2099),
+                "involved_companies": _dev(),
+            },
         ]
         result, _ = await self._fetch(
             _pedigree_game(involved=[_involved()], first_release_date=None), catalog
         )
 
         assert result is not None
-        names = [e["name"] for e in result["pedigree_raw"]["previous_games"]]
+        names = [e["name"] for e in result["pedigree_raw"]["timeline"]["before"]]
         self.assertEqual(names, ["Earlier 0", "Earlier 1"])
+        # …and the announced sibling is what comes "after" now.
+        after = [e["name"] for e in result["pedigree_raw"]["timeline"]["after"]]
+        self.assertEqual(after, ["Not Out Yet"])
 
-    async def test_the_big_studio_damper_leaves_the_header_line_alone(self):
+    async def test_a_big_catalog_still_yields_a_capped_timeline(self):
+        # 30 releases, the candidate (2017) in the middle: the big-studio flag
+        # no longer empties the strip, and the timeline is the NEAREST five
+        # before and three after, each side nearest first.
+        catalog = _catalog(30, first_year=2032)  # 2032 down to 2003
         result, _ = await self._fetch(
-            _pedigree_game(involved=[_involved(name="Ubisoft Montreal")]),
-            _catalog(media.BIG_CATALOG_THRESHOLD + 1),
+            _pedigree_game(involved=[_involved(name="Ubisoft Montreal")]), catalog
         )
 
         assert result is not None
         pedigree = result["pedigree_raw"]
         self.assertTrue(pedigree["big_catalog"])
-        self.assertEqual(pedigree["previous_games"], [])
-        self.assertEqual(pedigree["previous_count"], 0)
-        self.assertFalse(pedigree["previous_truncated"])
-        # The studio facts still stand — only the poster row is dropped.
-        self.assertEqual(pedigree["catalog_size"], media.BIG_CATALOG_THRESHOLD + 1)
+        timeline = pedigree["timeline"]
+        # The candidate shipped 2017-02-24; the catalogue's 2017 row (1 Jan,
+        # another id) is the nearest thing before it.
+        self.assertEqual(
+            [e["release_year"] for e in timeline["before"]], [2017, 2016, 2015, 2014, 2013]
+        )
+        self.assertEqual([e["release_year"] for e in timeline["after"]], [2018, 2019, 2020])
+        self.assertEqual(len(timeline["before"]), media.TIMELINE_BEFORE_CAP)
+        self.assertEqual(len(timeline["after"]), media.TIMELINE_AFTER_CAP)
+        # True totals within the fetched page.
+        self.assertEqual((timeline["before_count"], timeline["after_count"]), (15, 15))
+        self.assertEqual(timeline["before"][0]["release_date"], "2017-01-01")
+        # The page reaches back past the candidate: nothing between is missing.
+        self.assertFalse(timeline["after_gap"])
+        self.assertEqual(pedigree["catalog_size"], 30)
         self.assertEqual(pedigree["developer"]["name"], "Ubisoft Montreal")
+
+    async def test_a_title_the_studio_only_ported_leaves_the_catalogue(self):
+        catalog = [
+            *_catalog(2, first_year=2016),
+            {
+                "id": 950,
+                "name": "Someone Else's Game",
+                "first_release_date": _epoch(2015),
+                "involved_companies": [
+                    {"company": 7000, "developer": True, "porting": False},
+                    {"company": 6455, "developer": True, "porting": True},
+                ],
+            },
+            {
+                "id": 951,
+                "name": "Support Credit",
+                "first_release_date": _epoch(2014),
+                "involved_companies": [
+                    {"company": 6455, "developer": False, "supporting": True},
+                    # IGDB's where-clause can match the developer flag on a
+                    # DIFFERENT company's row; only the studio's own row counts.
+                    {"company": 7000, "developer": True},
+                ],
+            },
+        ]
+        result, _ = await self._fetch(_pedigree_game(involved=[_involved()]), catalog)
+
+        assert result is not None
+        pedigree = result["pedigree_raw"]
+        names = [e["name"] for e in pedigree["timeline"]["before"]]
+        self.assertEqual(names, ["Earlier 0", "Earlier 1"])
+        # The page is measured as FETCHED: the two dropped rows took slots.
+        self.assertEqual(pedigree["catalog_size"], 4)
+
+    async def test_the_first_developer_drives_the_catalogue(self):
+        _, calls = await self._fetch(
+            _pedigree_game(
+                involved=[
+                    _involved(name="Sucker Punch", company_id=6455),
+                    _involved(name="Co Studio", company_id=6456),
+                ]
+            ),
+            _catalog(3),
+        )
+
+        (query,) = calls["catalog"]
+        self.assertIn("involved_companies.company = 6455", query)
+        self.assertNotIn("6456", query)
+        self.assertIn("involved_companies.porting", query)
 
     async def test_a_studio_at_the_threshold_still_gets_its_posters(self):
         result, _ = await self._fetch(
@@ -661,7 +758,7 @@ class PedigreeTests(ToolDBTestCase):
         assert result is not None
         self.assertFalse(result["pedigree_raw"]["big_catalog"])
         self.assertEqual(
-            len(result["pedigree_raw"]["previous_games"]), media.PREVIOUS_GAMES_CAP
+            len(result["pedigree_raw"]["timeline"]["before"]), media.TIMELINE_BEFORE_CAP
         )
 
     async def test_a_full_page_reports_the_catalog_as_truncated(self):
@@ -672,6 +769,74 @@ class PedigreeTests(ToolDBTestCase):
 
         assert result is not None
         self.assertTrue(result["pedigree_raw"]["catalog_truncated"])
+
+    async def test_the_page_is_measured_before_the_porting_filter(self):
+        # A full page with six ports on it: the page still came back FULL, so
+        # it is truncated and big, though only 24 rows are the studio's own.
+        ports = [
+            {
+                "id": 600 + index,
+                "name": f"Port {index}",
+                "first_release_date": _epoch(2010 - index),
+                "involved_companies": _dev(porting=True),
+            }
+            for index in range(6)
+        ]
+        catalog = [*_catalog(24, first_year=2040), *ports]
+        self.assertEqual(len(catalog), media.COMPANY_CATALOG_LIMIT)
+        result, _ = await self._fetch(_pedigree_game(involved=[_involved()]), catalog)
+
+        assert result is not None
+        pedigree = result["pedigree_raw"]
+        self.assertEqual(pedigree["catalog_size"], 30)
+        self.assertTrue(pedigree["catalog_truncated"])
+        self.assertTrue(pedigree["big_catalog"])
+        # …and no port reaches the strip.
+        timeline = pedigree["timeline"]
+        shown = [e["name"] for e in (*timeline["before"], *timeline["after"])]
+        self.assertFalse([name for name in shown if name.startswith("Port")])
+
+    async def test_a_full_page_that_never_reaches_the_candidate_flags_the_gap(self):
+        # The newest 30 releases all postdate the 2017 candidate: "after" is
+        # the page's OLDEST rows, not what came next, and the block says so.
+        result, _ = await self._fetch(
+            _pedigree_game(involved=[_involved()]),
+            _catalog(media.COMPANY_CATALOG_LIMIT, first_year=2060),  # 2060..2031
+        )
+
+        assert result is not None
+        timeline = result["pedigree_raw"]["timeline"]
+        self.assertTrue(timeline["after_gap"])
+        self.assertEqual(timeline["before"], [])
+        self.assertEqual([e["release_year"] for e in timeline["after"]], [2031, 2032, 2033])
+
+    async def test_a_page_that_is_not_full_has_no_gap(self):
+        # Fewer rows than the bound: nothing went unfetched, whatever the dates.
+        result, _ = await self._fetch(
+            _pedigree_game(involved=[_involved()]), _catalog(5, first_year=2060)
+        )
+        assert result is not None
+        self.assertFalse(result["pedigree_raw"]["timeline"]["after_gap"])
+
+    async def test_a_supporting_credit_is_not_the_studios_own_work(self):
+        # _developed_by applies _company_roles' contractor rule: a row that
+        # is developer=true AND supporting=true is support work.
+        catalog = [
+            *_catalog(1, first_year=2016),
+            {
+                "id": 960,
+                "name": "Co-Dev Support",
+                "first_release_date": _epoch(2015),
+                "involved_companies": [
+                    {"company": 6455, "developer": True, "porting": False, "supporting": True},
+                ],
+            },
+        ]
+        result, _ = await self._fetch(_pedigree_game(involved=[_involved()]), catalog)
+
+        assert result is not None
+        names = [e["name"] for e in result["pedigree_raw"]["timeline"]["before"]]
+        self.assertEqual(names, ["Earlier 0"])
 
     async def test_the_company_catalog_is_cached_across_games_and_expires(self):
         post, calls = _dispatching_post(
@@ -685,11 +850,11 @@ class PedigreeTests(ToolDBTestCase):
 
         self.assertEqual(len(calls["game"]), 2)
         self.assertEqual(len(calls["catalog"]), 1)
-        self.assertIsNotNone(await get_meta("game_media_company:6455"))
+        self.assertIsNotNone(await get_meta(media._company_cache_key(6455)))
 
         # A 30-day-old entry is refetched; a fresh one would not be.
         await set_meta(
-            "game_media_company:6455",
+            media._company_cache_key(6455),
             json.dumps(
                 {
                     "fetched_at": (datetime.now(UTC) - timedelta(days=31)).isoformat(),
@@ -718,7 +883,7 @@ class PedigreeTests(ToolDBTestCase):
         assert result is not None
         pedigree = result["pedigree_raw"]
         self.assertEqual(pedigree["developer"]["name"], "Team Cherry")
-        self.assertEqual(pedigree["previous_games"], [])
+        self.assertEqual(pedigree["timeline"]["before"], [])
         self.assertEqual(pedigree["catalog_size"], 0)
 
     async def test_a_steam_result_borrows_the_pedigree_from_igdb(self):
