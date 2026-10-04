@@ -100,7 +100,13 @@ The honesty rules, which the server cannot check:
 - The store blurb's "from the creators of…" is NOT a source for a people
   claim: the server already shows it, attributed, as "The store says"
   (package.pedigree.store_claim). Don't restate it in the story.
-- why_care keeps the short chips; the story must not repeat a why_care line
-  verbatim, and why_care must not carry what the story already says with a
-  citation.
+- What qualifies (3.4.1): at least one sentence about a NAMED person or about
+  how the game was made. Business and sales facts alone (a parent company's
+  stake, units sold, a listing) are not a story — omit the block and say
+  "No sourced story found" in chat; never pad it.
+- The research is mandatory for every candidate (SKILL.md Step 0 item 5); the
+  block is omitted only when the searches found no qualifying story, and
+  the omission is said in chat.
+- why_care is authored independently of the story and is never dropped
+  because the story was omitted; the only coupling is no verbatim repetition.
 - He reads these as fact: write for him, name his game, no hype.
