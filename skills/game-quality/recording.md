@@ -88,8 +88,10 @@ rejected.
 
 The honesty rules, which the server cannot check:
 
-- Every sentence ends in a citation to a url you FETCHED — read the page,
-  never a search snippet. A sentence you cannot cite is deleted, not hedged.
+- Every sentence ends in a citation to a url you FETCHED and rests on that
+  page's RAW text — never a search snippet or a fetch tool's summary, which
+  can paraphrase inside quotation marks and truncate silently (3.4.2). A
+  sentence you cannot cite is deleted, not hedged.
 - A person-level lineage claim ("the Life is Strange writer wrote this") needs
   a NAMED person in at least one non-store, non-wiki source; a shared studio
   name only ever supports "same studio".
