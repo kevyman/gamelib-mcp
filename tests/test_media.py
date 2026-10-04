@@ -1210,10 +1210,17 @@ class LineageClaimTests(unittest.TestCase):
         "Built by former Blizzard developers",
         "made by ex-Ubisoft devs",
         "Made by the studio that brought you Example Quest",
+        "founded by veterans of Blizzard and Riot Games",
+        "made by veterans from the Halo and Destiny teams",
+        "Veterans of Example Studio return",
+        "crafted by a team of industry veterans",
     )
     NEGATIVES = (
         "capture her treasonous sister",
         "a former soldier returns",
+        # "veterans" as plot copy, never a maker claim (Codex, #195).
+        "You play as veterans of the Great War, fighting for survival.",
+        "Veterans of the war return home to a town that forgot them",
         "Explore, upgrade your abilities",
         "Illuminate the unseen",
     )

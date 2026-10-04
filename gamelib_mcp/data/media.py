@@ -157,7 +157,24 @@ _LINEAGE_PATTERNS = (
         r"(?:behind|of|who (?:made|brought you|created))\b",
         re.IGNORECASE,
     ),
-    re.compile(r"\bveterans? (?:of|from)\b", re.IGNORECASE),
+    # "veterans of …" only in developer context: a maker verb before it
+    # ("founded by veterans of …", "made by veterans from …"), a studio or
+    # industry noun shortly after ("veterans of Example Studio"), or an
+    # industry adjective ("industry veterans") — never plot copy such as
+    # "you play as veterans of the Great War".
+    re.compile(
+        r"\b(?:from|by|founded by|formed by|made by|developed by|created by|"
+        r"built by|a team of|team of|led by|staffed by) (?:\w+ ){0,2}?"
+        r"veterans? (?:of|from)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bveterans? (?:of|from) (?:[\w'&.:-]+ ){0,5}?"
+        r"(?:studios?|games?|entertainment|software|interactive|industry|"
+        r"teams?|developers?|franchise|series)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:industry|development|AAA|indie|games?) veterans?\b", re.IGNORECASE),
     re.compile(r"\bfounded by (?:former|ex-|veterans?)\b", re.IGNORECASE),
     # "former Blizzard developers", "ex-Ubisoft devs": the studio name keeps
     # its capital, so only the words around it ignore case.
