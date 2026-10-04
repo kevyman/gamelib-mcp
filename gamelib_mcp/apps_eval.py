@@ -828,7 +828,7 @@ EVAL_CARD_HTML = (
     var ped = pkg.pedigree;
     if (key === "hltb") return num(time.hltb_main_hours) != null || num(time.hltb_extra_hours) != null;
     if (key === "igdb" || key === "studio" || key === "pedigree") {
-      return !!(ped && (pedigreeHeadline(ped).length || named(ped.previous_games).length));
+      return hasStudio(ped);
     }
     if (key === "media") {
       return !!(trailerEntry(media) || list(media.screenshots).some(function (s) {
@@ -837,15 +837,15 @@ EVAL_CARD_HTML = (
     }
     return false;
   }
-  /* Too few tags is the expected state of a game that is not out yet (or
-     has no date at all): no community has tagged it, so the line would
-     report the expected as a gap. The server already holds it back; this
-     keeps an older payload quiet too. */
+  /* Too few tags is the expected state of a game that is not out yet: no
+     community has tagged it, so the line would report the expected as a gap.
+     An undated game is an unknown, not "not out yet", and keeps the line.
+     The server already holds it back; this keeps an older payload quiet. */
   function expectedGap(text, pkg) {
     var raw = String(text);
     if (!/^similar:/i.test(raw) || !/fewer than \d+ tags/i.test(raw)) return false;
     var year = num((pkg.game || {}).release_year);
-    return year == null || year > new Date().getFullYear();
+    return year != null && year > new Date().getFullYear();
   }
   function packageErrors(pkg) {
     return list(pkg.errors).filter(function (e) {
@@ -998,7 +998,7 @@ EVAL_CARD_HTML = (
       || list(pres.not_for_you_if).filter(Boolean).length
       || named(pkg.anchors).length
       || named(pkg.comparisons).length
-      || (ped && (pedigreeHeadline(ped).length || named(ped.previous_games).length))
+      || hasStudio(ped)
       || list((pkg.past || {}).items).length);
   }
   function breakdownNode(parent, pkg) {

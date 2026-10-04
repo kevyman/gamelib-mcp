@@ -420,8 +420,8 @@ class ContentTypeBadgeTests(unittest.TestCase):
         self.assertIn("critic: item.critic_score,", mini)
 
     def test_no_releases_around_it_renders_the_header_line_alone(self) -> None:
-        # Nothing in the timeline (or an older payload's previous_games): the
-        # eyebrow and the headline, no strip and no notice; the big-studio
+        # Nothing in the timeline: the eyebrow and the headline, no strip and
+        # no notice; the big-studio
         # flag only adds the catalogue size to the headline.
         strip = js_function(apps.GAME_CARDS_HTML, "function studioStrip(parent, ped, candidateYear)")
         self.assertIn("if (!sides.before.length && !sides.after.length) return sec;", strip)
@@ -1083,7 +1083,7 @@ class DetailModeTests(unittest.TestCase):
         # The genres lead the one tag line (the breakdown that held them is
         # gone), then the community tags, deduplicated, eight at most.
         ground = js_function(self.HTML, "function groundNode(game, media)")
-        self.assertIn("var tags = list(game.genres).concat(list(game.tags)).filter(function (t, i, all) {", ground)
+        self.assertIn("var tags = list(game.genres).concat(list(game.tags)).filter(function (t) {", ground)
         self.assertIn("}).slice(0, 8);", ground)
         line = js_function(self.HTML, "function tagLine(tags, cls)")
         self.assertIn('tags.forEach(function (t) { line.appendChild(el("span", null, t)); });', line)
@@ -2515,6 +2515,146 @@ class SharedBlockTests(unittest.TestCase):
             "MODEL_CONTEXT_JS", "DISCLOSURE_JS", "NOTICE_JS",
         ):
             self.assertIn(expected, names)
+
+
+# ---- the studio-strip round-2 review fixes, executed in both widgets ----
+
+_PED_AFTER_ONLY = {
+    # no developer, no headline: the only content is the "after" side
+    "timeline": {"before": [], "after": [{"name": "Later One", "release_year": 2031}],
+                 "before_count": 0, "after_count": 1, "after_gap": False},
+}
+_PED_GAP = {
+    "developer": {"name": "Big Studio"},
+    "timeline": {"before": [], "after": [{"name": "Page Oldest", "release_year": 2031},
+                                          {"name": "Next Oldest", "release_year": 2032}],
+                 "before_count": 0, "after_count": 2, "after_gap": True},
+}
+_PED_OVER_CAPS = {
+    "developer": {"name": "Prolific"},
+    "timeline": {"before": [{"name": f"B{i}", "release_year": 2015 - i} for i in range(9)],
+                 "after": [{"name": f"A{i}", "release_year": 2020 + i} for i in range(6)]},
+}
+_PED_LEGACY = {
+    # a pre-timeline payload: previous_games is no longer read at all
+    "developer": {"name": "Old Shape"},
+    "previous_games": [{"name": "Legacy Mini", "release_year": 2010}],
+}
+
+_STRIP_FIX_READERS = r"""
+  function q(n, s) { return n.querySelector(s); }
+  function txt(n) { return n ? n.textContent : null; }
+  function stripOf(ped) {
+    var box = el("div");
+    studioStrip(box, ped, 2017);
+    var strip = q(box, ".timeline");
+    return strip ? strip.children.map(function (c) {
+      if (c.classList.contains("tl-mark")) return "mark";
+      if (c.classList.contains("tl-gap")) return ["gap", c.tagName, txt(c)];
+      return txt(q(c, ".mini-name"));
+    }) : (box.children.length ? "header-only" : "nothing");
+  }
+  function strips() {
+    return { afterOnly: stripOf(PED_AFTER_ONLY), gap: stripOf(PED_GAP),
+             noGap: stripOf(Object.assign({}, PED_GAP, { timeline: Object.assign({}, PED_GAP.timeline, { after_gap: false }) })),
+             overCaps: stripOf(PED_OVER_CAPS), legacy: stripOf(PED_LEGACY),
+             hasStudio: [hasStudio(PED_AFTER_ONLY), hasStudio(PED_LEGACY), hasStudio(null)] };
+  }
+"""
+
+_CARDS_STRIP_PROBE = _STRIP_FIX_READERS + r"""
+  (function () {
+    var out = strips();
+    render({ game_id: 1, name: "Tagged", genres: ["Adventure", "Role-playing (RPG)"],
+             tags: ["adventure", "role-playing (rpg)", "Stealth", "stealth", "open world"] });
+    out.tags = q(root, ".tagline").children.map(function (c) { return c.textContent; });
+    console.log(JSON.stringify(out));
+  })();
+"""
+
+_EVAL_STRIP_PROBE = _STRIP_FIX_READERS + r"""
+  (function () {
+    var out = strips();
+    out.breakdown = [hasBreakdown({ pedigree: PED_AFTER_ONLY }), hasBreakdown({ pedigree: PED_LEGACY }),
+                     hasBreakdown({ pedigree: { timeline: { before: [], after: [] } } })];
+    out.studioError = packageErrors({ pedigree: PED_AFTER_ONLY, errors: ["igdb: rate limited"] });
+    console.log(JSON.stringify(out));
+  })();
+"""
+
+
+class StudioStripCapsTests(unittest.TestCase):
+    """The timeline caps live in data/media.py alone (finding 6)."""
+
+    def test_the_widgets_embed_the_python_caps(self) -> None:
+        from gamelib_mcp.data import media
+        from gamelib_mcp.tools import game_media
+
+        self.assertIs(game_media.TIMELINE_BEFORE_CAP, media.TIMELINE_BEFORE_CAP)
+        self.assertIs(game_media.TIMELINE_AFTER_CAP, media.TIMELINE_AFTER_CAP)
+        source = Path(game_media.__file__).read_text()
+        self.assertNotRegex(source, r"(?m)^(TIMELINE_\w+_CAP|PEDIGREE_ITEM_CAP)\s*=")
+        for _, html in WIDGETS:
+            self.assertIn(f"var TIMELINE_BEFORE_CAP = {media.TIMELINE_BEFORE_CAP};", html)
+            self.assertIn(f"var TIMELINE_AFTER_CAP = {media.TIMELINE_AFTER_CAP};", html)
+        sides = js_function(apps_shared.PEDIGREE_JS, "function timelineSides(ped)")
+        self.assertIn(".slice(0, TIMELINE_BEFORE_CAP)", sides)
+        self.assertIn(".slice(0, TIMELINE_AFTER_CAP)", sides)
+        self.assertNotRegex(sides, r"\.slice\(0, \d")
+        # the legacy previous_games fallback is gone from the shared builder
+        self.assertNotIn("previous_games", apps_shared.PEDIGREE_JS)
+
+    def test_the_tag_line_dedupes_on_a_lowercased_key(self) -> None:
+        ground = js_function(apps.GAME_CARDS_HTML, "function groundNode(game, media)")
+        self.assertIn("var key = String(t).toLowerCase();", ground)
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class StudioStripBehaviourTests(unittest.TestCase):
+    """The studio-strip review fixes, executed in both widgets."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from test_apps_shared import run_widget
+
+        data = ("  var PED_AFTER_ONLY = " + json.dumps(_PED_AFTER_ONLY) + ";\n  var PED_GAP = "
+                + json.dumps(_PED_GAP) + ";\n  var PED_OVER_CAPS = " + json.dumps(_PED_OVER_CAPS)
+                + ";\n  var PED_LEGACY = " + json.dumps(_PED_LEGACY) + ";\n")
+        cls.cards = run_cards(data + _CARDS_STRIP_PROBE)
+        cls.eval = run_widget("eval-card", data + _EVAL_STRIP_PROBE)
+
+    def test_a_page_gap_is_said_between_the_hairline_and_the_after_group(self) -> None:
+        # timeline.after_gap: the "after" minis are the page's oldest rows, so
+        # a muted note sits after the hairline and before them; without the
+        # flag there is no note.
+        gap = ["mark", ["gap", "SPAN", "earlier releases not fetched"], "Page Oldest", "Next Oldest"]
+        for out in (self.cards, self.eval):
+            self.assertEqual(out["gap"], gap)
+            self.assertEqual(out["noGap"], ["mark", "Page Oldest", "Next Oldest"])
+        css = apps_shared.PEDIGREE_CSS.split(".ministrip > .tl-gap {", 1)[1].split("}", 1)[0]
+        self.assertIn("font-size: var(--gl-cap);", css)
+        self.assertIn("color: var(--gl-muted);", css)
+
+    def test_the_strip_reads_the_timeline_only_at_the_python_caps(self) -> None:
+        # nine before / six after on the wire: five and three render, oldest
+        # to newest; a previous_games-only payload renders the header alone.
+        over = ["B4", "B3", "B2", "B1", "B0", "mark", "A0", "A1", "A2"]
+        for out in (self.cards, self.eval):
+            self.assertEqual(out["overCaps"], over)
+            self.assertEqual(out["legacy"], "header-only")
+            self.assertEqual(out["afterOnly"], ["mark", "Later One"])
+            self.assertEqual(out["hasStudio"], [True, True, False])
+
+    def test_after_only_releases_make_the_breakdown_available(self) -> None:
+        # hasBreakdown and errorHasData read the same hasStudio the renderer
+        # does, so a strip of only later releases opens the breakdown and
+        # silences the studio error its data contradicts.
+        self.assertEqual(self.eval["breakdown"], [True, True, False])
+        self.assertEqual(self.eval["studioError"], [])
+
+    def test_genres_and_tags_render_once_whatever_the_case(self) -> None:
+        # the first spelling wins: the genre's "Adventure", the tag's "Stealth"
+        self.assertEqual(self.cards["tags"], ["Adventure", "Role-playing (RPG)", "Stealth", "open world"])
 
 
 if __name__ == "__main__":

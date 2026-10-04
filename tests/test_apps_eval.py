@@ -905,7 +905,7 @@ _ERRORS_PROBE = r"""
 var pkg = {
   time: { hltb_main_hours: 18 },
   media: { trailer: { kind: "youtube", video_id: "x" }, screenshots: [] },
-  pedigree: { developer: { name: "Retro" }, previous_games: [] },
+  pedigree: { developer: { name: "Retro" }, timeline: { before: [], after: [] } },
   errors: ["hltb: completionist time unavailable", "media: steam: no trailer",
            "igdb: unresolved", "pace: unavailable", "", null],
 };
@@ -951,15 +951,15 @@ class ErrorSuppressionBehaviourTests(unittest.TestCase):
         self.assertEqual(self.out["bare"], ["hltb: down", "media: fetch failed", "igdb: unresolved"])
 
     def test_too_few_tags_is_silent_before_release(self) -> None:
-        # Round-2 F8: an undated or future game has no community tags yet by
-        # definition, so the similar line is held back; a failed lookup is
-        # still reported, and a released game keeps the tags line.
+        # Round-2 F8: a future game has no community tags yet by definition,
+        # so the similar line is held back; a failed lookup is still
+        # reported. A released game keeps the tags line, and so does an
+        # undated one: no year is an unknown, not "not out yet".
         tags = "similar: skipped \u2014 fewer than 3 tags on this row (not enriched yet)"
-        self.assertEqual(self.out["released"], [tags, "similar: lookup failed"])
-        self.assertEqual(self.out["thisYear"], [tags, "similar: lookup failed"])
-        for key in ("undated", "noGame", "future"):
+        for key in ("released", "thisYear", "undated", "noGame"):
             with self.subTest(case=key):
-                self.assertEqual(self.out[key], ["similar: lookup failed"])
+                self.assertEqual(self.out[key], [tags, "similar: lookup failed"])
+        self.assertEqual(self.out["future"], ["similar: lookup failed"])
 
 
 _ERROR_LABEL_SHIM = r"""
@@ -1128,7 +1128,7 @@ _RENDER_PACKAGE = {
         "similar": {"items": [{"game_id": 1991, "name": "MGS3", "release_year": 2023, "owned": True,
                                "unplayed": True, "playtime_hours": 0.0, "similarity": 0.48,
                                "shared_tags": ["stealth", "drama"]}]},
-        "pedigree": {"developer": {"name": "Insomniac Games"}, "previous_games": [],
+        "pedigree": {"developer": {"name": "Insomniac Games"}, "timeline": {"before": [], "after": []},
                      "publisher_name": "Sony Interactive Entertainment"},
         "past": {"items": [{"assessed_at": "2026-05-12T18:04:11Z", "verdict": "skip",
                             "price_seen": 79.99, "price_currency": "EUR"}]},

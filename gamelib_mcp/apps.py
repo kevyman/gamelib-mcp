@@ -1211,9 +1211,16 @@ GAME_CARDS_HTML = (
       awards.forEach(function (text) { abil.appendChild(abilityNode("Award", text)); });
       flow.appendChild(abil);
     }
-    // One line of what it is: the genres first, then the community tags.
-    var tags = list(game.genres).concat(list(game.tags)).filter(function (t, i, all) {
-      return t && all.indexOf(t) === i;
+    // One line of what it is: the genres first, then the community tags,
+    // each word once whatever its case ("Adventure" and the "adventure" tag
+    // render once, as the first spelling).
+    var seenTag = Object.create(null);
+    var tags = list(game.genres).concat(list(game.tags)).filter(function (t) {
+      if (!t) return false;
+      var key = String(t).toLowerCase();
+      if (seenTag[key]) return false;
+      seenTag[key] = true;
+      return true;
     }).slice(0, 8);
     if (tags.length) flow.appendChild(tagLine(tags));
     return flow;

@@ -7,8 +7,8 @@ verdict-aware: it describes the GAME, not an opinion about it.
 
 The block shapes are frozen (two widgets render them). ``media`` is whatever
 ``data.media.get_game_media`` returned for its source, untouched; ``pedigree``
-is the developer's own previous games annotated with what the library owns,
-plus the track record that reads out of it.
+is the lead developer and its ``timeline`` — the studio's nearest releases
+before and after this game — annotated with what the library owns.
 
 ``similar`` is NOT a provider block at all. It used to be IGDB's
 ``similar_games`` field, which was unreliable enough that the row rarely
@@ -30,7 +30,7 @@ import math
 from typing import Any
 
 from ..data.db import get_db
-from ..data.media import get_game_media
+from ..data.media import TIMELINE_AFTER_CAP, TIMELINE_BEFORE_CAP, get_game_media
 from .common import (
     IGDB_COVER_URL,
     OWNED_SQL,
@@ -72,11 +72,9 @@ _SIMILAR_IDF_DF_FLOOR = 5
 # the match without the tail being discarded outright.
 _SIMILAR_PROMINENCE_HALF = 8.0
 
-# Mirror data/media.py's PREVIOUS_GAMES_CAP and TIMELINE_*_CAP: the fetch
-# already caps the studio's rows, and these are the second gate on them.
-PEDIGREE_ITEM_CAP = 6
-TIMELINE_BEFORE_CAP = 5
-TIMELINE_AFTER_CAP = 3
+# TIMELINE_BEFORE_CAP / TIMELINE_AFTER_CAP come from data/media.py, the one
+# place they live: the fetch caps the studio's rows, annotate_pedigree
+# re-applies the same caps as the second gate, and the widgets embed them.
 
 # Ownership/playtime/rating for the IGDB-keyed entries of the PEDIGREE row.
 # Narrower than tools/assessment.py's package annotation query (which also feeds
@@ -374,17 +372,16 @@ async def annotate_pedigree(pedigree_raw: dict[str, Any]) -> dict[str, Any]:
     """The raw pedigree block with its catalogue entries read against the library.
 
     Everything else passes through untouched — this layer only knows about
-    ownership. ``previous_games`` and the ``timeline`` (before / after the
-    candidate, nearest first) share one library lookup; the caps are re-applied
-    here as the second gate on the same rows.
+    ownership. Both sides of the ``timeline`` (before / after the candidate,
+    nearest first) share one library lookup; the caps are re-applied here as
+    the second gate on the same rows.
     """
-    raw_previous = _entries(pedigree_raw.get("previous_games"), PEDIGREE_ITEM_CAP)
     raw_timeline = pedigree_raw.get("timeline")
     timeline_raw = raw_timeline if isinstance(raw_timeline, dict) else {}
     raw_before = _entries(timeline_raw.get("before"), TIMELINE_BEFORE_CAP)
     raw_after = _entries(timeline_raw.get("after"), TIMELINE_AFTER_CAP)
     library = await _annotate_by_igdb_id(
-        [entry.get("igdb_id") for entry in (*raw_previous, *raw_before, *raw_after)]
+        [entry.get("igdb_id") for entry in (*raw_before, *raw_after)]
     )
 
     def annotate(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -396,14 +393,14 @@ async def annotate_pedigree(pedigree_raw: dict[str, Any]) -> dict[str, Any]:
         **{
             key: value
             for key, value in pedigree_raw.items()
-            if key not in ("previous_games", "timeline")
+            if key != "timeline"
         },
-        "previous_games": annotate(raw_previous),
         "timeline": {
             "before": before,
             "after": after,
             "before_count": timeline_raw.get("before_count", len(before)),
             "after_count": timeline_raw.get("after_count", len(after)),
+            "after_gap": bool(timeline_raw.get("after_gap")),
         },
     }
 

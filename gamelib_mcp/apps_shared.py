@@ -32,6 +32,7 @@ traits, minis) and their motion live in ``BINDER_CSS`` / ``BINDER_JS``.
 import json
 import re
 
+from .data.media import TIMELINE_AFTER_CAP, TIMELINE_BEFORE_CAP
 from .data.purchases import PURCHASE_SOURCES
 from .platforms_registry import PLATFORMS
 
@@ -921,6 +922,17 @@ PEDIGREE_CSS = r"""  .ped-head { display: flex; flex-wrap: wrap; gap: 2px 10px; 
     color: var(--gl-text-2);
   }
   .tl-line { flex: 1 1 auto; width: 1px; min-height: 48px; background: var(--gl-border); }
+  /* After the hairline when the fetched page never reached back to this
+     game (timeline.after_gap): the minis that follow are not "what came
+     next", and this says so before them. */
+  .ministrip > .tl-gap {
+    flex: 0 0 auto;
+    align-self: center;
+    max-width: 96px;
+    font-size: var(--gl-cap);
+    line-height: var(--gl-cap-lh);
+    color: var(--gl-muted);
+  }
 """
 
 # ---- Overlay / carousel / toast CSS -----------------------------------------
@@ -3184,8 +3196,13 @@ MEDIA_PANEL_JS = r"""  function trailerEntry(media) {
 # ---- Studio pedigree ---------------------------------------------------------
 # "From the studio": the headline (its parts — studio, "est. 2018", "5 games" —
 # as gap-separated spans, never a joined string). Each widget builds its own
-# strip of minis under it (``plural`` lives in NUMBERS_JS).
-PEDIGREE_JS = r"""  /* The lead developer: the studio the strip is about (the first developer
+# strip of minis under it (``plural`` lives in NUMBERS_JS). The timeline caps
+# are data/media.py's, embedded like LABELS_JS's maps so the slices below and
+# the server's caps are one number each.
+PEDIGREE_JS = (
+    "  var TIMELINE_BEFORE_CAP = " + json.dumps(TIMELINE_BEFORE_CAP) + ";\n"
+    "  var TIMELINE_AFTER_CAP = " + json.dumps(TIMELINE_AFTER_CAP) + ";\n"
+    + r"""  /* The lead developer: the studio the strip is about (the first developer
      IGDB credits; data/media.py fetches that one company's catalogue). */
   function leadStudio(ped) {
     if (!ped) return null;
@@ -3228,14 +3245,23 @@ PEDIGREE_JS = r"""  /* The lead developer: the studio the strip is about (the fi
     return box;
   }
   /* The studio's releases around this game, oldest to newest: the timeline's
-     "before" (nearest first on the wire, so reversed) then its "after". An
-     older payload with no timeline reads previous_games as "before". */
+     "before" (nearest first on the wire, so reversed) then its "after".
+     gap: the fetched page stopped short of this game, so the "after" minis
+     are the page's oldest, not what came next (timeline.after_gap). */
   function timelineSides(ped) {
     var keep = function (v) { return list(v).filter(function (i) { return i && i.name; }); };
-    var t = ped.timeline && typeof ped.timeline === "object" ? ped.timeline : null;
-    var before = keep(t ? t.before : ped.previous_games).slice(0, 5);
-    var after = t ? keep(t.after).slice(0, 3) : [];
-    return { before: before.slice().reverse(), after: after };
+    var t = ped && ped.timeline && typeof ped.timeline === "object" ? ped.timeline : {};
+    var before = keep(t.before).slice(0, TIMELINE_BEFORE_CAP);
+    var after = keep(t.after).slice(0, TIMELINE_AFTER_CAP);
+    return { before: before.slice().reverse(), after: after, gap: t.after_gap === true };
+  }
+  /* Whether FROM THE STUDIO has anything to show: the same test studioStrip
+     renders by, so a caller asking "is there a studio section?" (the eval
+     card's breakdown) can never disagree with the section itself. */
+  function hasStudio(ped) {
+    if (!ped) return false;
+    var sides = timelineSides(ped);
+    return !!(pedigreeHeadline(ped).length || sides.before.length || sides.after.length);
   }
   /* One studio mini: his rating as pips when he owns and rated it, else the
      critic line; the ownership line; the year (the shared miniLines). */
@@ -3254,10 +3280,9 @@ PEDIGREE_JS = r"""  /* The lead developer: the studio the strip is about (the fi
      above the line). With no releases around it, the headline stands alone.
      candidateYear is the year of the game the card is about, when known. */
   function studioStrip(parent, ped, candidateYear) {
-    if (!ped) return null;
+    if (!hasStudio(ped)) return null;
     var head = pedigreeHead(ped);
     var sides = timelineSides(ped);
-    if (!head && !sides.before.length && !sides.after.length) return null;
     var sec = eyebrowSection(parent, "From the studio");
     if (head) sec.appendChild(head);
     if (!sides.before.length && !sides.after.length) return sec;
@@ -3270,6 +3295,7 @@ PEDIGREE_JS = r"""  /* The lead developer: the studio the strip is about (the fi
     mark.appendChild(el("span", "tl-year", year != null ? String(year) : ""));
     mark.appendChild(el("span", "tl-line"));
     strip.appendChild(mark);
+    if (sides.gap && sides.after.length) strip.appendChild(el("span", "tl-gap", "earlier releases not fetched"));
     sides.after.forEach(function (item) { strip.appendChild(studioMini(item)); });
     sec.appendChild(strip);
     // Open on this game's neighbourhood: the nearest earlier release's
@@ -3297,6 +3323,7 @@ PEDIGREE_JS = r"""  /* The lead developer: the studio the strip is about (the fi
     strip.scrollLeft = target;
   }
 """
+)
 
 # ---- Size reporting + teardown ----------------------------------------------
 # Debounced, change-only ui/notifications/size-changed reporting; teardown()

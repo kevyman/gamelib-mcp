@@ -269,62 +269,10 @@
       "Sucker Punch Productions"
     ],
     "publisher_name": "Sony Interactive Entertainment",
-    "previous_count": 4,
-    "previous_truncated": false,
     "catalog_size": 30,
     "catalog_truncated": true,
     "big_catalog": true,
     "hypes": 117,
-    "previous_games": [
-      {
-        "igdb_id": 7350,
-        "name": "inFAMOUS: First Light",
-        "release_year": 2014,
-        "release_date": "2014-08-27",
-        "cover_url": null,
-        "critic_score": 73,
-        "owned": false,
-        "played": false,
-        "my_rating": null,
-        "playtime_hours": null
-      },
-      {
-        "igdb_id": 2350,
-        "name": "inFAMOUS Second Son",
-        "release_year": 2014,
-        "release_date": "2014-03-21",
-        "cover_url": null,
-        "critic_score": 80,
-        "owned": false,
-        "played": false,
-        "my_rating": null,
-        "playtime_hours": null
-      },
-      {
-        "igdb_id": 1222,
-        "name": "inFAMOUS 2",
-        "release_year": 2011,
-        "release_date": "2011-06-07",
-        "cover_url": null,
-        "critic_score": 83,
-        "owned": false,
-        "played": false,
-        "my_rating": null,
-        "playtime_hours": null
-      },
-      {
-        "igdb_id": 1221,
-        "name": "inFAMOUS",
-        "release_year": 2009,
-        "release_date": "2009-05-26",
-        "cover_url": null,
-        "critic_score": 85,
-        "owned": false,
-        "played": false,
-        "my_rating": null,
-        "playtime_hours": null
-      }
-    ],
     "timeline": {
       "before": [
         {
@@ -391,7 +339,8 @@
         }
       ],
       "before_count": 4,
-      "after_count": 1
+      "after_count": 1,
+      "after_gap": false
     }
   }
 }

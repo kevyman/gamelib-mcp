@@ -1674,19 +1674,20 @@ def _release_year(release_date: str | None) -> int | None:
 
 
 def _is_unreleased(release_date: str | None) -> bool:
-    """No stored release date, or one after today (UTC): a pre-release row.
+    """A stored release date that parses and is after today (UTC).
 
-    A bare year ('2027') compares by year; anything unparseable counts as no
-    date at all.
+    NULL is NOT unreleased: it is an unknown, and most often a row enrichment
+    has not reached yet — exactly the row the too-few-tags note is for. A bare
+    year ('2027') compares by year; anything unparseable is unknown too.
     """
     if not release_date:
-        return True
+        return False
     text = str(release_date).strip()
     try:
         return date.fromisoformat(text[:10]) > datetime.now(UTC).date()
     except ValueError:
         year = _release_year(text)
-        return year is None or year > datetime.now(UTC).year
+        return year is not None and year > datetime.now(UTC).year
 
 
 def _hours(minutes: float | None) -> float | None:
@@ -1896,9 +1897,10 @@ async def _build_package(
             "match; pedigree unavailable until the IGDB backfill links this row"
         )
     # Enough tags but no qualifying neighbour is a legitimate empty answer and
-    # stays silent; too few tags means there was nothing to reason from. An
-    # unreleased (or undated) candidate stays silent too: it has no community
-    # tags yet BY DEFINITION, so the note would report the expected as a gap.
+    # stays silent; too few tags means there was nothing to reason from. A
+    # candidate dated in the future stays silent too: it has no community tags
+    # yet BY DEFINITION, so the note would report the expected as a gap. An
+    # undated row is not "unreleased" — it keeps the note.
     if (
         similar_block is None
         and not similar_failed

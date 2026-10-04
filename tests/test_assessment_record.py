@@ -1929,14 +1929,9 @@ class EvaluationPackageTests(ToolDBTestCase):
         )
 
     async def test_the_frozen_shape_comes_back_whole(self):
+        # Undated (NULL release_date): an unknown, NOT a pre-release row, so
+        # the too-few-tags note is owed (see the errors tests below).
         game_id = await make_steam_game("Hollow Knight", 367520, playtime_minutes=180)
-        # Released, so the too-few-tags note is owed (a pre-release row is
-        # silent; see the errors tests below).
-        async with db_module.get_db() as db:
-            await db.execute(
-                "UPDATE games SET release_date = '2017-02-24' WHERE id = ?", (game_id,)
-            )
-            await db.commit()
         await add_rating(game_id, "manual", 9.0, 9.0)
         anchor_id = await seed_game("Ori")
         await add_platform(anchor_id, "steam", playtime_minutes=600)
@@ -1975,7 +1970,7 @@ class EvaluationPackageTests(ToolDBTestCase):
             {
                 "game_id": game_id,
                 "name": "Hollow Knight",
-                "release_year": 2017,
+                "release_year": None,
                 "cover_url": (
                     "https://cdn.cloudflare.steamstatic.com/steam/apps/"
                     "367520/library_600x900.jpg"
@@ -2223,17 +2218,21 @@ class EvaluationPackageTests(ToolDBTestCase):
                 },
                 "developer_names": ["Team Cherry"],
                 "publisher_name": None,
-                "previous_games": [
-                    {
-                        "igdb_id": 501,
-                        "name": "Their Last One",
-                        "release_year": 2014,
-                        "cover_image_id": "abc",
-                        "critic_score": 88,
-                    }
-                ],
-                "previous_count": 1,
-                "previous_truncated": False,
+                "timeline": {
+                    "before": [
+                        {
+                            "igdb_id": 501,
+                            "name": "Their Last One",
+                            "release_year": 2014,
+                            "cover_image_id": "abc",
+                            "critic_score": 88,
+                        }
+                    ],
+                    "after": [],
+                    "before_count": 1,
+                    "after_count": 0,
+                    "after_gap": False,
+                },
                 "catalog_size": 2,
                 "catalog_truncated": False,
                 "big_catalog": False,
@@ -2245,7 +2244,7 @@ class EvaluationPackageTests(ToolDBTestCase):
 
         pedigree = result["package"]["pedigree"]
         self.assertEqual(pedigree["developer"]["founded_year"], 2012)
-        (entry,) = pedigree["previous_games"]
+        (entry,) = pedigree["timeline"]["before"]
         self.assertTrue(entry["owned"])
         self.assertEqual(entry["my_rating"], 9.0)
         self.assertEqual(entry["playtime_hours"], 5.0)
@@ -2255,8 +2254,14 @@ class EvaluationPackageTests(ToolDBTestCase):
             "https://images.igdb.com/igdb/image/upload/t_cover_big/abc.jpg",
         )
         self.assertTrue(entry["played"])
-        self.assertNotIn("library_track_record", pedigree)
-        self.assertEqual(pedigree["timeline"]["before"], [])
+        for gone in (
+            "library_track_record",
+            "previous_games",
+            "previous_count",
+            "previous_truncated",
+        ):
+            self.assertNotIn(gone, pedigree)
+        self.assertEqual(pedigree["timeline"]["after"], [])
 
     async def test_a_candidate_with_no_pedigree_gets_a_null_block(self):
         game_id = await seed_game("Studioless Package")
@@ -2351,24 +2356,19 @@ class EvaluationPackageTests(ToolDBTestCase):
                 name="Fresh Candidate", appid=2132850, verdict="wishlist_for_sale"
             )
         self.assertTrue(result["created"])
-        self.assertIn(_IGDB_UNRESOLVED_NOTE, result["package"]["errors"])
-
-        # A RELEASED row with too few tags owes the similar note (a minted
-        # row is undated until enrichment, which silences it: see below).
-        released = await seed_game("Released Candidate", release_date="2023-05-12")
-        with self._media(None):
-            result = await record_assessment(game_id=released, verdict="skip")
+        # The minted row is undated until enrichment: an unknown, so the
+        # similar note is owed like on any other untagged row.
         errors = result["package"]["errors"]
         self.assertIn(_IGDB_UNRESOLVED_NOTE, errors)
         self.assertIn(_SIMILAR_SKIPPED_NOTE, errors)
 
     async def test_a_pre_release_candidate_owes_no_similar_note(self):
-        # No community tags is the EXPECTED state of an unreleased (or
-        # undated) game, so the too-few-tags note would report it as a gap.
-        undated = await seed_game("Undated Candidate")
+        # No community tags is the EXPECTED state of a game dated in the
+        # future, so the too-few-tags note would report it as a gap.
         future = await seed_game("Future Candidate", release_date="2099-03-01")
+        future_year = await seed_game("Future Year Candidate", release_date="2099")
         with self._media(None):
-            for game_id in (undated, future):
+            for game_id in (future, future_year):
                 result = await record_assessment(game_id=game_id, verdict="wishlist_for_sale")
                 errors = result["package"]["errors"]
                 self.assertFalse(
@@ -2376,6 +2376,16 @@ class EvaluationPackageTests(ToolDBTestCase):
                 )
                 # The other structural note is unaffected.
                 self.assertIn(_IGDB_UNRESOLVED_NOTE, errors)
+
+    async def test_an_undated_or_released_candidate_keeps_the_similar_note(self):
+        # NULL is an unknown, not "unreleased": an undated row is most often
+        # one enrichment has not reached, exactly what the note is for.
+        undated = await seed_game("Undated Candidate")
+        released = await seed_game("Released Candidate", release_date="2023-05-12")
+        with self._media(None):
+            for game_id in (undated, released):
+                result = await record_assessment(game_id=game_id, verdict="skip")
+                self.assertIn(_SIMILAR_SKIPPED_NOTE, result["package"]["errors"])
 
     async def test_a_comparison_he_has_carries_its_cover_and_year(self):
         game_id = await seed_game("Cover Probe")

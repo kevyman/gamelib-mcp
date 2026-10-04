@@ -980,7 +980,7 @@ class GetGameDetailMediaTests(ToolDBTestCase):
         self.assertEqual(result["name"], "Hanging Provider")
 
 
-def _pedigree_raw(previous: list[dict], **overrides) -> dict:
+def _pedigree_raw(before: list[dict], **overrides) -> dict:
     """A raw pedigree block as data/media.py hands it over (un-annotated)."""
     block = {
         "developer": {
@@ -991,10 +991,14 @@ def _pedigree_raw(previous: list[dict], **overrides) -> dict:
         },
         "developer_names": ["Team Cherry"],
         "publisher_name": "Team Cherry",
-        "previous_games": previous,
-        "previous_count": len(previous),
-        "previous_truncated": False,
-        "catalog_size": len(previous) + 1,
+        "timeline": {
+            "before": before,
+            "after": [],
+            "before_count": len(before),
+            "after_count": 0,
+            "after_gap": False,
+        },
+        "catalog_size": len(before) + 1,
         "catalog_truncated": False,
         "big_catalog": False,
         "hypes": 12,
@@ -1007,7 +1011,7 @@ class GetGameDetailPedigreeTests(ToolDBTestCase):
     """`pedigree`: the developer's catalogue rows, read against the library.
 
     Same seam and same absence discipline as the media/similar blocks above —
-    what is new here is the annotation of previous_games and the timeline.
+    what is new here is the annotation of the timeline's entries.
     """
 
     def _media(self, payload, **kwargs):
@@ -1035,7 +1039,7 @@ class GetGameDetailPedigreeTests(ToolDBTestCase):
     def _payload(self, pedigree: dict | None) -> dict:
         return {**_MEDIA_PAYLOAD, "pedigree_raw": pedigree}
 
-    async def test_previous_games_are_annotated_and_scored_against_the_library(self):
+    async def test_timeline_entries_are_annotated_against_the_library(self):
         gid = await seed_game("Pedigree Probe")
         await self._library_neighbours()
         pedigree = _pedigree_raw(
@@ -1078,7 +1082,7 @@ class GetGameDetailPedigreeTests(ToolDBTestCase):
         self.assertEqual(block["developer"]["name"], "Team Cherry")
         self.assertEqual(block["publisher_name"], "Team Cherry")
         self.assertEqual(block["hypes"], 12)
-        played, unplayed, let_go, unknown = block["previous_games"]
+        played, unplayed, let_go, unknown = block["timeline"]["before"]
         self.assertEqual(
             played,
             {
@@ -1109,8 +1113,15 @@ class GetGameDetailPedigreeTests(ToolDBTestCase):
         self.assertNotIn("cover_image_id", played)
 
         # The track-record summary is gone: each mini states its own
-        # ownership, so a sum over them said nothing new.
-        self.assertNotIn("library_track_record", block)
+        # ownership, so a sum over them said nothing new — and the legacy
+        # previous_* trio is off the wire (the timeline is the contract).
+        for gone in (
+            "library_track_record",
+            "previous_games",
+            "previous_count",
+            "previous_truncated",
+        ):
+            self.assertNotIn(gone, block)
 
     async def test_the_timeline_is_annotated_on_both_sides(self):
         gid = await seed_game("Timeline Probe")
@@ -1133,6 +1144,7 @@ class GetGameDetailPedigreeTests(ToolDBTestCase):
                 "after": [entry(502, "Owned Unplayed", 2025)],
                 "before_count": 2,
                 "after_count": 1,
+                "after_gap": True,
             },
         )
         with self._media(self._payload(pedigree)):
@@ -1150,22 +1162,30 @@ class GetGameDetailPedigreeTests(ToolDBTestCase):
         self.assertTrue(later["owned"])
         self.assertFalse(later["played"])
         self.assertEqual((timeline["before_count"], timeline["after_count"]), (2, 1))
+        # The page-gap flag passes through untouched.
+        self.assertIs(timeline["after_gap"], True)
 
     async def test_a_big_catalog_keeps_its_studio_facts_and_its_timeline(self):
         gid = await seed_game("Big Studio Probe")
         pedigree = _pedigree_raw(
             [], big_catalog=True, catalog_size=30, catalog_truncated=True
         )
+        del pedigree["timeline"]
         with self._media(self._payload(pedigree)):
             result = await detail.get_game_detail(game_id=gid, media=True)
 
         block = result["pedigree"]
-        self.assertEqual(block["previous_games"], [])
-        # A raw block without a timeline (an older cache entry) still yields
-        # the key, empty, so renderers read one shape.
+        # A raw block without a timeline still yields the key, empty, so
+        # renderers read one shape.
         self.assertEqual(
             block["timeline"],
-            {"before": [], "after": [], "before_count": 0, "after_count": 0},
+            {
+                "before": [],
+                "after": [],
+                "before_count": 0,
+                "after_count": 0,
+                "after_gap": False,
+            },
         )
         self.assertTrue(block["big_catalog"])
         self.assertEqual(block["catalog_size"], 30)
