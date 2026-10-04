@@ -387,6 +387,7 @@ async def get_game_detail(
     else:
         play_state = "played"
 
+    overrides = _parse_json(row["manual_overrides"]) or []
     result = {
         "game_id": row["id"],
         "appid": steam_appid,
@@ -437,7 +438,7 @@ async def get_game_detail(
         "hltb_extra": row["hltb_extra"],
         "hltb_complete": row["hltb_complete"],
         "protondb_tier": steam_data.get("protondb_tier"),
-        "manual_overrides": _parse_json(row["manual_overrides"]) or [],
+        "manual_overrides": overrides,
     }
 
     if rating:
@@ -482,6 +483,13 @@ async def get_game_detail(
                     steam_appid=steam_appid,
                     igdb_id=row["igdb_id"],
                     name=row["name"],
+                    # A hand-edited blurb (update_game) is the owner's words,
+                    # not the store's: it must never render as "The store says".
+                    short_description=(
+                        None
+                        if "short_description" in overrides
+                        else row["short_description"]
+                    ),
                 ),
                 timeout=DETAIL_MEDIA_TIMEOUT_SECONDS,
             )

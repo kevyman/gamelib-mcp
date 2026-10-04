@@ -84,12 +84,10 @@ SAMPLE_FULL_STEAM: dict[str, Any] = {
                 "You bounced off Dead Cells twice at under 3h",
                 "You want a story you can finish in one sitting",
             ],
+            # No "studio" chip: the story below already says this is the
+            # studio's first sequel, with a citation, and the skill forbids
+            # a why_care line that repeats a sourced story sentence.
             "why_care": [
-                {
-                    "kind": "studio",
-                    "text": "Supergiant's first-ever sequel, after four "
-                            "stand-alone games in fourteen years",
-                },
                 {
                     "kind": "people",
                     "text": "Darren Korb and Ashley Barrett are back on the "
@@ -101,6 +99,53 @@ SAMPLE_FULL_STEAM: dict[str, Any] = {
                             "verdict is about",
                 },
             ],
+            # THE STORY, verbatim from the verified probe (every sentence
+            # checked against the fetched page it cites). The second sentence
+            # is 221 chars, which is why the sentence cap is 240, not 220.
+            "story": {
+                "sentences": [
+                    {
+                        "text": "Hades II is the first sequel Supergiant Games has ever "
+                                "made, from the studio's San Francisco team behind Hades.",
+                        "sources": [1, 2],
+                    },
+                    {
+                        "text": "Writer/creative director Greg Kasavin and composer Darren "
+                                "Korb, who also voiced Zagreus in the first game, have been "
+                                "at Supergiant since Bastion, and Kasavin says all seven "
+                                "people from the Bastion days are still together.",
+                        "sources": [2],
+                    },
+                    {
+                        "text": "It follows Melinoe, the sister of Hades' Zagreus, as its "
+                                "new protagonist.",
+                        "sources": [1],
+                    },
+                    {
+                        "text": "Supergiant was formed in 2009 by Amir Rao and Gavin Simon, "
+                                "both previously at EA Los Angeles on the Command & Conquer "
+                                "series.",
+                        "sources": [3],
+                    },
+                ],
+                "sources": [
+                    {
+                        "url": "https://gameinformer.com/cover-reveal/2024/05/06/"
+                               "cover-reveal-the-making-of-hades-ii",
+                        "kind": "press",
+                    },
+                    {
+                        "url": "https://www.rpgsite.net/interview/20348-supergiant-games-"
+                               "interview-2026-greg-kasavin-darren-korb-hades-2-ending-"
+                               "music-future-coffee",
+                        "kind": "press",
+                    },
+                    {
+                        "url": "https://en.wikipedia.org/wiki/Supergiant_Games",
+                        "kind": "wiki",
+                    },
+                ],
+            },
         },
         "comparisons": [
             {
@@ -889,7 +934,7 @@ SAMPLE_WOLVERINE: dict[str, Any] = {
 }
 
 SAMPLES: list[tuple[str, dict[str, Any]]] = [
-    ("full Steam package (mp4 trailer, 8 screenshots, craft note, buy_now)", SAMPLE_FULL_STEAM),
+    ("full Steam package (mp4 trailer, 8 screenshots, story, craft note, buy_now)", SAMPLE_FULL_STEAM),
     ("IGDB package (YouTube trailer, switch2, lineage, big-studio pedigree)", SAMPLE_IGDB_YOUTUBE),
     ("minimal package (no media/similar/pedigree/presentation, skip)", SAMPLE_MINIMAL),
     ("compact recorded verdict (no package)", SAMPLE_COMPACT),

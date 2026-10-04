@@ -30,7 +30,12 @@ import math
 from typing import Any
 
 from ..data.db import get_db
-from ..data.media import TIMELINE_AFTER_CAP, TIMELINE_BEFORE_CAP, get_game_media
+from ..data.media import (
+    TIMELINE_AFTER_CAP,
+    TIMELINE_BEFORE_CAP,
+    get_game_media,
+    lineage_claim,
+)
 from .common import (
     IGDB_COVER_URL,
     OWNED_SQL,
@@ -405,6 +410,24 @@ async def annotate_pedigree(pedigree_raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def with_store_claim(
+    pedigree: dict[str, Any] | None, steam_description: str | None
+) -> dict[str, Any] | None:
+    """The pedigree with the Steam blurb's lineage sentence as ``store_claim``.
+
+    ``{"text", "source": "steam"}``, attributed rather than asserted: the
+    widgets render it under FROM THE STUDIO as "The store says: …". Absent when
+    the blurb makes no claim — and nothing at all is emitted without a
+    pedigree, because a claim with no studio header has nowhere to render.
+    """
+    if pedigree is None:
+        return None
+    claim = lineage_claim(steam_description)
+    if claim is None:
+        return pedigree
+    return {**pedigree, "store_claim": {"text": claim, "source": "steam"}}
+
+
 async def media_context(payload: dict | None) -> dict[str, Any]:
     """``{"media", "pedigree"}`` from one ``get_game_media`` payload.
 
@@ -435,6 +458,7 @@ async def game_media_context(
     steam_appid: int | None,
     igdb_id: int | None,
     name: str | None,
+    short_description: str | None = None,
 ) -> dict[str, Any]:
     """Fetch + shape: ``{"media", "pedigree"}`` (each …|None) for one game.
 
@@ -443,6 +467,12 @@ async def game_media_context(
     comes back as an empty context, never an exception. Anything else — a DB
     error annotating the pedigree — propagates, and the caller decides what a
     missing trailer costs it.
+
+    ``short_description`` is the row's stored Steam blurb (games
+    .short_description); its lineage sentence, if any, rides on the pedigree
+    as ``store_claim`` (``with_store_claim``).
     """
     payload = await get_game_media(steam_appid=steam_appid, igdb_id=igdb_id, name=name)
-    return await media_context(payload)
+    context = await media_context(payload)
+    context["pedigree"] = with_store_claim(context["pedigree"], short_description)
+    return context

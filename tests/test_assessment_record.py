@@ -1462,6 +1462,7 @@ class PresentationFieldTests(ToolDBTestCase):
                 # for the ones this recording didn't write.
                 "why_care": None,
                 "craft_note": None,
+                "story": None,
             },
         )
 
@@ -1703,6 +1704,179 @@ class WhyCareTests(ToolDBTestCase):
             json.loads(row["presentation"])["why_care"],
             [{"kind": "studio", "text": "their first in a decade"}],
         )
+
+
+def _story(**overrides):
+    """A structurally valid two-sentence story (synthetic names only)."""
+    story = {
+        "sentences": [
+            {"text": "Studio Example was founded by two ex-Sample developers.", "sources": [1]},
+            {"text": "Its writer also wrote Example Quest.", "sources": [1, 2]},
+        ],
+        "sources": [
+            {"url": "https://www.example.test/interview", "kind": "press",
+             "title": "An interview with Studio Example"},
+            {"url": "https://studio.example.test/blog", "kind": "studio"},
+        ],
+    }
+    story.update(overrides)
+    return story
+
+
+class StoryTests(ToolDBTestCase):
+    """story: THE STORY block — sourced creator lore, declared-only content.
+
+    The server validates STRUCTURE (every sentence cites a source that exists,
+    every source is a real http(s) URL of a known kind), never truth. It rides
+    in the same free-form `presentation` column as why_care, so no migration.
+    """
+
+    async def test_round_trip_and_package_echo(self):
+        game_id = await seed_game("Story Round Trip")
+        result = await main.record_assessment(
+            game_id=game_id, verdict="buy_now", story=_story()
+        )
+        (row,) = await _assessment_rows(game_id)
+        stored = json.loads(row["presentation"])
+        self.assertEqual(stored["story"], _story())
+        self.assertEqual(result["package"]["presentation"]["story"], stored["story"])
+
+    async def test_the_echo_is_null_when_unauthored(self):
+        game_id = await seed_game("No Story")
+        result = await record_assessment(
+            game_id=game_id, verdict="skip", elevator_pitch="just a pitch"
+        )
+        self.assertIsNone(result["package"]["presentation"]["story"])
+        stored = json.loads((await _assessment_rows(game_id))[0]["presentation"])
+        self.assertNotIn("story", stored)
+
+    async def test_an_uncited_source_is_dropped_and_indices_rebased(self):
+        game_id = await seed_game("Story Rebase")
+        story = {
+            "sentences": [
+                {"text": "First claim.", "sources": [3, 1, 3]},
+                {"text": "Second claim.", "sources": [3]},
+            ],
+            "sources": [
+                {"url": "https://a.example.test/1", "kind": "press"},
+                {"url": "https://b.example.test/2", "kind": "wiki"},
+                {"url": "  https://c.example.test/3  ", "kind": "store"},
+            ],
+        }
+        await record_assessment(game_id=game_id, verdict="skip", story=story)
+        stored = json.loads((await _assessment_rows(game_id))[0]["presentation"])["story"]
+        # Source 2 is cited by nothing: dropped, and [3] becomes [2]. Dedupe
+        # keeps first-seen order; the url is stored stripped; nothing derived.
+        self.assertEqual(
+            stored,
+            {
+                "sentences": [
+                    {"text": "First claim.", "sources": [2, 1]},
+                    {"text": "Second claim.", "sources": [2]},
+                ],
+                "sources": [
+                    {"url": "https://a.example.test/1", "kind": "press"},
+                    {"url": "https://c.example.test/3", "kind": "store"},
+                ],
+            },
+        )
+
+    async def test_a_sentence_without_a_fetched_source_is_rejected(self):
+        game_id = await seed_game("Story Honesty")
+        for sources in ([], [3], [0], [-1]):
+            with self.subTest(sources=sources), self.assertRaises(ToolError) as ctx:
+                await record_assessment(
+                    game_id=game_id,
+                    verdict="skip",
+                    story=_story(sentences=[{"text": "An uncited claim.", "sources": sources}]),
+                )
+            self.assertIn(
+                "every story sentence cites at least one fetched source", str(ctx.exception)
+            )
+        self.assertEqual(await _assessment_rows(game_id), [])
+
+    async def test_malformed_stories_are_named_and_nothing_is_written(self):
+        game_id = await seed_game("Story Shapes")
+        good_sentence = {"text": "A claim.", "sources": [1]}
+        good_source = {"url": "https://example.test/a", "kind": "press"}
+        cases = [
+            ("not a dict", "story"),
+            ({"sentences": [good_sentence]}, "sources"),
+            ({"sources": [good_source]}, "sentences"),
+            ({"sentences": [], "sources": [good_source]}, "sentences"),
+            ({"sentences": [good_sentence], "sources": []}, "sources"),
+            ({**_story(), "verified": True}, "verified"),
+            (_story(sentences=[{**good_sentence, "confidence": "high"}]), "confidence"),
+            (_story(sources=[{**good_source, "domain": "example.test"}]), "domain"),
+            (_story(sentences=["a bare string"]), "sentence"),
+            (_story(sentences=[{"text": "  ", "sources": [1]}]), "text"),
+            (_story(sentences=[{"text": "A claim.", "sources": "1"}]), "sources"),
+            (_story(sentences=[{"text": "A claim.", "sources": [True]}]), "integer"),
+            (_story(sources=["https://example.test/a"]), "source"),
+            (_story(sources=[{"url": "ftp://example.test/a", "kind": "press"}]), "http"),
+            (_story(sources=[{"url": "example.test/a", "kind": "press"}]), "http"),
+            (_story(sources=[{"kind": "press"}]), "url"),
+            (_story(sources=[{"url": "https://example.test/a", "kind": "blog"}]), "blog"),
+            (_story(sources=[{"url": "https://example.test/a", "kind": "press", "title": 7}]),
+             "title"),
+        ]
+        for story, expected in cases:
+            with self.subTest(story=story), self.assertRaises(ToolError) as ctx:
+                await record_assessment(game_id=game_id, verdict="skip", story=story)
+            self.assertIn(expected, str(ctx.exception))
+        self.assertEqual(await _assessment_rows(game_id), [])
+
+    async def test_over_cap_lists_and_urls_are_rejected_and_prose_truncated(self):
+        game_id = await seed_game("Story Caps")
+        source = {"url": "https://example.test/a", "kind": "press"}
+        too_many_sentences = _story(
+            sentences=[{"text": f"claim {i}", "sources": [1]} for i in range(5)]
+        )
+        too_many_sources = _story(sources=[source] * 7)
+        long_url = _story(
+            sources=[{"url": "https://example.test/" + "x" * 300, "kind": "press"}],
+            sentences=[{"text": "A claim.", "sources": [1]}],
+        )
+        for story, expected in (
+            (too_many_sentences, "at most 4"),
+            (too_many_sources, "at most 6"),
+            (long_url, "300"),
+        ):
+            with self.subTest(expected=expected), self.assertRaises(ToolError) as ctx:
+                await record_assessment(game_id=game_id, verdict="skip", story=story)
+            self.assertIn(expected, str(ctx.exception))
+        self.assertEqual(await _assessment_rows(game_id), [])
+
+        at_cap_url = "https://example.test/" + "y" * (300 - len("https://example.test/"))
+        await record_assessment(
+            game_id=game_id,
+            verdict="skip",
+            story={
+                "sentences": [{"text": "t" * 400, "sources": [1]}],
+                "sources": [{"url": at_cap_url, "kind": "social", "title": "n" * 400}],
+            },
+        )
+        stored = json.loads((await _assessment_rows(game_id))[0]["presentation"])["story"]
+        self.assertEqual(len(stored["sentences"][0]["text"]), 240)
+        self.assertEqual(len(stored["sources"][0]["title"]), 120)
+        self.assertEqual(stored["sources"][0]["url"], at_cap_url)
+
+    async def test_story_is_an_item_key(self):
+        game_id = await seed_game("Bulk Story")
+        result = await main.record_assessment(
+            items=[{"game_id": game_id, "verdict": "skip", "story": _story()}]
+        )
+        self.assertEqual(result["ok"], 1)
+        (row,) = await _assessment_rows(game_id)
+        self.assertEqual(json.loads(row["presentation"])["story"], _story())
+
+    async def test_a_story_never_reaches_affinity(self):
+        game_id = await seed_game("Story Affinity", tags=["Roguelike"])
+        with patch(
+            "gamelib_mcp.data.db.recompute_tag_affinity", new=AsyncMock()
+        ) as recompute:
+            await record_assessment(game_id=game_id, verdict="buy_now", story=_story())
+        recompute.assert_not_awaited()
 
 
 class CraftNoteTests(ToolDBTestCase):
@@ -2268,6 +2442,69 @@ class EvaluationPackageTests(ToolDBTestCase):
         with self._media(_MEDIA_PAYLOAD):
             result = await record_assessment(game_id=game_id, verdict="skip")
         self.assertIsNone(result["package"]["pedigree"])
+
+    def _claim_payload(self, description, *, source="steam", pedigree=True):
+        return {
+            **_MEDIA_PAYLOAD,
+            "media": {
+                **_MEDIA_PAYLOAD["media"],
+                "source": source,
+                "short_description": description,
+            },
+            "pedigree_raw": (
+                {
+                    "developer": {"name": "Studio Example", "igdb_company_id": 1},
+                    "developer_names": ["Studio Example"],
+                    "publisher_name": None,
+                    "timeline": {"before": [], "after": []},
+                    "catalog_size": 1,
+                    "catalog_truncated": False,
+                    "big_catalog": False,
+                    "hypes": None,
+                }
+                if pedigree
+                else None
+            ),
+        }
+
+    async def test_the_store_blurbs_lineage_claim_rides_on_the_pedigree(self):
+        game_id = await seed_game("Claimed Package")
+        blurb = (
+            "A tactics game about cats.  From the creators of Example Quest "
+            "comes a new adventure! Explore the world."
+        )
+        with self._media(self._claim_payload(blurb)):
+            result = await record_assessment(game_id=game_id, verdict="skip")
+        self.assertEqual(
+            result["package"]["pedigree"]["store_claim"],
+            {
+                "text": "From the creators of Example Quest comes a new adventure!",
+                "source": "steam",
+            },
+        )
+
+    async def test_no_claim_leaves_the_key_absent(self):
+        game_id = await seed_game("Unclaimed Package")
+        with self._media(self._claim_payload("Explore, upgrade your abilities.")):
+            result = await record_assessment(game_id=game_id, verdict="skip")
+        self.assertNotIn("store_claim", result["package"]["pedigree"])
+
+    async def test_a_claim_without_a_studio_header_is_not_emitted(self):
+        # Nowhere to render it: the claim line hangs off FROM THE STUDIO.
+        game_id = await seed_game("Headless Claim")
+        payload = self._claim_payload("From the makers of Example Quest.", pedigree=False)
+        with self._media(payload):
+            result = await record_assessment(game_id=game_id, verdict="skip")
+        self.assertIsNone(result["package"]["pedigree"])
+
+    async def test_only_a_steam_blurb_is_read_as_the_store_claim(self):
+        # An IGDB-sourced card carries IGDB's summary, which is not the store
+        # page the line attributes the claim to.
+        game_id = await seed_game("IGDB Claim")
+        payload = self._claim_payload("From the makers of Example Quest.", source="igdb")
+        with self._media(payload):
+            result = await record_assessment(game_id=game_id, verdict="skip")
+        self.assertNotIn("store_claim", result["package"]["pedigree"])
 
     async def test_past_verdicts_come_from_the_rows_already_queried(self):
         game_id = await seed_game("Repeat Ask")

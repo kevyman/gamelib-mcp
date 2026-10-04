@@ -1,7 +1,7 @@
 ---
 name: game-quality
 description: Evaluate whether a NAMED game is good and worth the user's time and money — owned or not. Triggers: "is X any good", "should I get X", "thoughts on X", "X vs Y", "is X worth playing", buy/wishlist/skip calls. NOT for picking a game for him ("what should I play", "I have 2 hours") — that's backlog-triage.
-version: "3.3.0"
+version: "3.4.0"
 ---
 
 # Game Quality Assessment
@@ -53,6 +53,7 @@ All tools below live on the **Game Library** MCP.
    - `game` / `game_resolution` — when identity resolves, a compact ownership block: owned platforms with playtime and acquisition (`price_paid`/`bundle_name`/`purchase_source`), `wishlisted`, `completion_status`, `play_state`, `my_rating`, HLTB main/extra hours. `game_resolution="not_found"` is normal for an unowned candidate — the other blocks still come back. Check that `game.name` is actually the candidate: a partial or fuzzy match can land on a sibling title. The `resolution` block says exactly how identity resolved — `mode` (`by_id` / `by_appid` / `by_assessed_appid` / `exact` / `partial` / `fuzzy` / `none`), the `query` used, and `matched_name`. **Whenever mode is not `exact` or `by_id`, diff `matched_name` against the candidate before using the `game` block**; if it's a different game, treat it as unowned and pass `name=` + `appid=` onward rather than that row's `game_id`. A sequel-shaped near miss is rejected for you: "Alan Wake 2" against a library "Alan Wake" (either direction) comes back `not_found` with `resolution.rejected_near_miss: "Alan Wake"` — if that row genuinely IS the candidate (a title he owns under a different spelling), re-ask with `game_id`.
 3. **Critic/technical detail** — `get_game_detail` (accepts `name`, `game_id`, or Steam `appid`) still, for what assessment context doesn't carry: OpenCritic score + percentile, Metacritic score, ProtonDB rating, the full tags list (if you didn't already pass them), and — for the DLC note in Step 3 — `related_content`, `parent_game_id`, `dlc_ownership`. No need to re-derive ownership, wishlist status, completion status, HLTB, or personal rating — assessment context already returned those.
 4. For Switch 2 / non-Steam titles: substitute OpenCritic + Metacritic user score + reputable outlet consensus from `get_game_detail`; skip the Steam review web search and pass no review numbers to `get_assessment_context` (its `craft` block falls back to `source="server_cache"`, or stays absent).
+5. **Story research (3.4)** — for the card's `story` block (Step 4). Budget-bound: **at most 3 web searches and 4 page reads**. Read the PAGE (fetch it), never a search snippet — snippets paraphrase, and a paraphrase is not a source. Suggested queries: `"<game> developer interview"`, `"<studio> founded former"`, `"<game> writer OR composer OR director <anchor game>"`. The goal: who made it, how it connects **by named person** to a game in his library (the anchors and series from items 2–3, plus what you know of his ratings), and the studio's story (founding, split, closure, troubled development). Stop early when the first two reads already give a sourced block; skip the step entirely for a game with no press and no connection — the block is optional and the card is fine without it.
 
 Note: `discover_games` belongs to backlog-triage, not here — it answers "what should I play," which is out of scope. For a named candidate, go straight to `get_assessment_context` + `get_game_detail`.
 
@@ -153,13 +154,15 @@ record_assessment(
     comparisons=[{"name": "...", "relation": "ancestor", "note": "...", "game_id": 123}, ...],  # ≤6
     why_care=[{"kind": "people", "text": "..."}, ...],   # ≤3; kind: people|studio|anticipation|moment
     craft_note="...",              # ≤200 chars (3.2): the craft context the score chips can't carry
+    story={"sentences": [{"text": "...", "sources": [1]}, ...],   # (3.4) 1–4 sentences, ≤240 chars, each citing ≥1 source
+           "sources": [{"url": "https://...", "kind": "press", "title": "..."}, ...]},  # ≤6; kind: press|studio|store|wiki|social
     skill="game-quality",
     skill_version="<this file's frontmatter version — read it above, don't hardcode it>",
     model="<the model id YOUR environment declares — see below>",
 )
 ```
 
-The per-field rules — every cap, the `comparisons`/`why_care` vocabularies, and the provenance policy — are collected in this skill's `recording.md`, which is where the server's `record_assessment` description now points instead of restating them on the wire: `get_skill(skill="game-quality", path="recording.md")`. The sections below are the same rules, expanded.
+The per-field rules — every cap, the `comparisons`/`why_care`/`story` vocabularies, and the provenance policy — are collected in this skill's `recording.md`, which is where the server's `record_assessment` description now points instead of restating them on the wire: `get_skill(skill="game-quality", path="recording.md")`. The sections below are the same rules, expanded.
 
 **Authoring the presentation fields (3.0).** These render on the card verbatim, so write them for the user, grounded in HIS data — never generic genre talk:
 
@@ -169,6 +172,15 @@ The per-field rules — every cap, the `comparisons`/`why_care` vocabularies, an
 - `comparisons` — the game's lineage and substitutes, from your knowledge: `relation` is one of `ancestor` (games this one is a baby of), `descendant` (games that are babies of this one), `better_version`, `cheaper_substitute`, `similar`. Add `game_id` when the entry is a library game you've resolved; a short `note` saying why. Only claim `better_version`/`cheaper_substitute` when you'd actually defend it.
 
 - `why_care` (3.1) — up to 3 one-liners on why this game matters beyond its scores, each `{kind, text ≤160}`. `kind` picks the label the card shows: `people` (a creator connection — "Directed by the creative director of Bastion and Hades"), `studio` (the studio's story — "First release in 9 years; the team stayed at ~20 people"), `anticipation` ("Steam's most-wishlisted game of 2025"), `moment` (why now — "v1.0 just landed after a beloved two-year early access"). **Every claim must be sourceable** — from Step 0's web search or knowledge you would defend; anticipation is context, never craft evidence (the existing anti-pattern applies to this field). The server has no credits data, so people-connections exist only if you write them. Skip the field rather than pad it. Note the card already shows the studio's previous games with his ratings (the pedigree strip, server-fetched) — don't duplicate that list here; add what the strip can't say.
+
+- `story` (3.4) — THE STORY: 1–4 sentences of creator lore from Step 0's story research, one serif paragraph on the card with a numbered source chip per citation. **He reads these as fact**: write for him, name his game, no hype. The rules:
+  - Every sentence ends in a citation to a url you FETCHED (`sources: [1]`, `[1, 2]`). A sentence you cannot cite is deleted, not hedged. The server rejects a sentence with no valid source.
+  - `kind` per source: `press` (journalism, interviews), `studio` (a developer or publisher post), `store` (a store page), `wiki`, `social`.
+  - A person-level lineage claim ("the Life is Strange writer wrote this") needs a NAMED person in at least one non-store, non-wiki source. A shared studio name only ever supports "same studio".
+  - A wiki-only claim is dropped unless the primary source it cites was fetched and confirms it (Wikipedia can cite an article that never mentions the person).
+  - No "same team" or team-size claims unless a source states them; roles are worded as the source words them; secondhand claims say "reported".
+  - The store blurb's "from the creators of…" is NOT a source for a people claim — the server shows it separately, attributed, as "The store says" (`package.pedigree.store_claim`). Don't restate it in the story.
+  - `why_care` keeps the short chips (anticipation/moment, and a one-line people/studio headline). The story must not repeat a why_care line verbatim, and why_care must not carry anything the story already says with a citation.
 
 The server fetches trailer/screenshots/similar-games/studio-pedigree itself and annotates ownership — don't describe media or list the studio's catalog in these fields. The response's `package` block is the card; you don't need to restate its contents in chat.
 
@@ -195,3 +207,5 @@ If he already owns the game, the Price line reports what he paid from the acquis
 - Assuming his play pace instead of reading it from `get_play_history`.
 - Drifting into backlog-triage's territory: session-budget advice, ranked "play this next" lists, or shelving suggestions. Evaluate the game, give the verdict, offer the handoff.
 - Treating what he already paid as a reason to play a game.
+- A story sentence without a fetched source.
+- Citing a search snippet instead of the page it summarizes.

@@ -64,3 +64,43 @@ the card, so write what you could point at, never a guess about who worked on
 what — the server fetches the developer and their previous games itself
 (package.pedigree) and never fetches credits, which is exactly the gap this
 fills.
+
+## story
+
+story (3.4) is THE STORY block: creator lore with a citation on every sentence.
+Wire shape:
+
+    story = {
+      "sentences": [{"text": "<≤240 chars>", "sources": [1, 2]}, …],   # 1–4
+      "sources": [{"url": "https://…", "kind": "press", "title": "<≤120, optional>"}, …],  # 1–6
+    }
+
+`sources` on a sentence are 1-based numbers into `story.sources`. The server
+checks STRUCTURE only, never truth: both lists are required and non-empty;
+unknown keys are rejected; every sentence must cite at least one source that
+exists (a sentence citing none, or a number past the list, is rejected); every
+url must start with http:// or https:// and be ≤300 chars (rejected, not
+shortened — a truncated url is a broken citation); kind is one of "press",
+"studio" (a developer or publisher post), "store" (a store page), "wiki",
+"social"; sentence text truncates at 240 chars and a title at 120. A source no
+sentence cites is dropped and the numbers re-based. Over-cap lists are
+rejected.
+
+The honesty rules, which the server cannot check:
+
+- Every sentence ends in a citation to a url you FETCHED — read the page,
+  never a search snippet. A sentence you cannot cite is deleted, not hedged.
+- A person-level lineage claim ("the Life is Strange writer wrote this") needs
+  a NAMED person in at least one non-store, non-wiki source; a shared studio
+  name only ever supports "same studio".
+- A wiki-only claim is dropped unless the primary source it cites was fetched
+  and confirms it.
+- No "same team" or team-size claims unless a source states them; roles are
+  worded as the source words them; secondhand claims say "reported".
+- The store blurb's "from the creators of…" is NOT a source for a people
+  claim: the server already shows it, attributed, as "The store says"
+  (package.pedigree.store_claim). Don't restate it in the story.
+- why_care keeps the short chips; the story must not repeat a why_care line
+  verbatim, and why_care must not carry what the story already says with a
+  citation.
+- He reads these as fact: write for him, name his game, no hype.
