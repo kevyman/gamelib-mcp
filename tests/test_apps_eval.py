@@ -1356,6 +1356,166 @@ class EvalCardRenderTests(unittest.TestCase):
         self.assertEqual(caption, "Verdict No. 046 of 3 Oct 2026 voided")
 
 
+# THE STORY, synthetic (never a claim about a real person): two sentences,
+# two sources, the second sentence citing both.
+_STORY = {
+    "sentences": [
+        {"text": "Studio Example was founded in 2019.", "sources": [1]},
+        {"text": "Its writer also wrote Example Quest.", "sources": [1, 2]},
+    ],
+    "sources": [
+        {"url": "https://www.example.test/interview", "kind": "press", "title": "An interview"},
+        {"url": "https://studio.example.test/blog", "kind": "studio"},
+    ],
+}
+
+_STORY_PROBE = r"""
+  (async function () {
+    function q(n, s) { return n.querySelector(s); }
+    function txt(n) { return n ? n.textContent : null; }
+    function withStory(story) {
+      var pkg = JSON.parse(JSON.stringify(PACKAGE));
+      if (story === undefined) delete pkg.package.presentation.story;
+      else pkg.package.presentation.story = story;
+      return pkg;
+    }
+    function storyOf() {
+      var box = q(root, ".ev-story");
+      if (!box) return null;
+      return {
+        tag: box.tagName,
+        eyebrow: txt(q(box, ".section-title")),
+        paragraphs: box.querySelectorAll("p").map(function (p) { return p.className; }),
+        text: txt(q(box, ".story-text")),
+        refs: box.querySelectorAll(".story-ref").map(txt),
+        sup: box.querySelectorAll("sup").length,
+        row: q(box, ".story-sources") ? q(box, ".story-sources").className : null,
+        chips: box.querySelectorAll(".story-src").map(function (c) {
+          return { tag: c.tagName, cls: c.className, href: c.href, link: c.hasAttribute("data-link"),
+                   title: c.title || null,
+                   spans: c.children.map(function (k) { return [k.className, k.textContent]; }) };
+        }),
+      };
+    }
+    var out = {};
+    answer("ui/initialize", { hostCapabilities: {}, hostContext: {} });
+    await tick();
+    render(withStory(STORY));
+    out.ground = q(root, ".ev-flow").children.map(function (c) { return c.className; });
+    out.story = storyOf();
+    var chip = q(root, ".story-src");
+    var ev = chip.click();
+    await tick();
+    out.prevented = ev.defaultPrevented;
+    var opened = sent("ui/open-link");
+    out.opened = opened.length ? opened[opened.length - 1].params.url : null;
+
+    render(withStory({ sentences: [{ text: "Cited.", sources: [1] }, { text: "Dangling.", sources: [9] }],
+                       sources: [{ url: "not a url at all, just a rather long run of text", kind: "wiki" },
+                                 { url: "https://uncited.example.test/", kind: "social" }] }));
+    out.dangling = storyOf();
+
+    out.empty = [undefined, null, {}, { sentences: [], sources: STORY.sources },
+                 { sentences: STORY.sentences, sources: [] },
+                 { sentences: [{ text: "", sources: [1] }], sources: STORY.sources }].map(function (story) {
+      render(withStory(story));
+      return q(root, ".ev-story") ? "rendered" : null;
+    });
+    console.log(JSON.stringify(out));
+  })();
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class StoryBlockRenderTests(unittest.TestCase):
+    """THE STORY: one serif paragraph, mono refs, one source chip per citation."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from test_apps_shared import run_widget
+
+        probe = ("  var PACKAGE = " + json.dumps(_RENDER_PACKAGE) + ";\n  var STORY = "
+                 + json.dumps(_STORY) + ";\n" + _STORY_PROBE)
+        cls.out = run_widget("eval-card", probe)
+
+    def test_the_story_sits_after_the_abilities_and_before_the_craft_note(self) -> None:
+        self.assertEqual(self.out["ground"], [
+            "ev-sum", "traits ev-weak", "ev-pitch", "ev-abil", "ev-story", "flavor", "fs-breakdown",
+        ])
+
+    def test_one_paragraph_with_a_ref_after_each_sentence(self) -> None:
+        story = self.out["story"]
+        self.assertEqual(story["tag"], "SECTION")
+        self.assertEqual(story["eyebrow"], "The story")
+        self.assertEqual(story["paragraphs"], ["story-text"])
+        self.assertEqual(story["refs"], ["[1]", "[1,2]"])
+        self.assertEqual(story["sup"], 0)
+        # a thin NO-BREAK space between a sentence and its ref (a ref never
+        # wraps to the start of the next line); a space between sentences
+        self.assertEqual(story["text"], "Studio Example was founded in 2019.\u202f[1] "
+                                        "Its writer also wrote Example Quest.\u202f[1,2]")
+
+    def test_one_link_chip_per_cited_source_as_three_spans(self) -> None:
+        story = self.out["story"]
+        self.assertIn("story-sources", story["row"].split())
+        self.assertEqual([c["spans"] for c in story["chips"]], [
+            [["story-n", "[1]"], ["story-dom", "example.test"], ["story-kind", "Press"]],
+            [["story-n", "[2]"], ["story-dom", "studio.example.test"], ["story-kind", "Studio"]],
+        ])
+        first, second = story["chips"]
+        self.assertEqual((first["tag"], first["href"], first["link"]),
+                         ("A", "https://www.example.test/interview", True))
+        self.assertIn("chip", first["cls"].split())
+        self.assertEqual(first["title"], "An interview")
+        self.assertEqual(second["href"], "https://studio.example.test/blog")
+
+    def test_a_chip_opens_through_the_host_like_the_store_pill(self) -> None:
+        self.assertTrue(self.out["prevented"])
+        self.assertEqual(self.out["opened"], "https://www.example.test/interview")
+
+    def test_a_missing_index_renders_without_a_ref_and_without_throwing(self) -> None:
+        dangling = self.out["dangling"]
+        self.assertEqual(dangling["refs"], ["[1]"])
+        self.assertEqual(dangling["text"], "Cited.\u202f[1] Dangling.")
+        # only the cited source gets a chip; an unparseable url shows its
+        # first 40 characters as the "domain"
+        self.assertEqual([c["spans"] for c in dangling["chips"]], [
+            [["story-n", "[1]"], ["story-dom", "not a url at all, just a rather long run"],
+             ["story-kind", "Wiki"]],
+        ])
+
+    def test_an_absent_or_empty_story_renders_nothing(self) -> None:
+        self.assertEqual(self.out["empty"], [None] * 6)
+
+
+class StoryBlockCssTests(unittest.TestCase):
+    def test_the_paragraph_is_upright_serif_body_text(self) -> None:
+        rule = css_rule(widget_css(apps_eval.EVAL_CARD_HTML), ".story-text")
+        for decl in ("font-family: var(--gl-serif);", "font-style: normal;",
+                     "font-size: var(--gl-body);", "line-height: 1.55;", "color: var(--gl-text);"):
+            self.assertIn(decl, rule)
+
+    def test_refs_hold_the_12px_floor_in_mono(self) -> None:
+        rule = css_rule(widget_css(apps_eval.EVAL_CARD_HTML), ".story-ref")
+        for decl in ("font-family: var(--gl-mono);", "font-size: var(--gl-cap);",
+                     "color: var(--gl-muted);"):
+            self.assertIn(decl, rule)
+        self.assertNotIn("<sup", apps_eval.EVAL_CARD_HTML)
+        self.assertNotIn('"sup"', apps_eval.EVAL_CARD_HTML)
+
+    def test_fullscreen_places_the_story_between_abilities_and_flavor(self) -> None:
+        css = widget_css(apps_eval.EVAL_CARD_HTML)
+        fs = 'html[data-display-mode="fullscreen"] .ev-flow > '
+        self.assertIn(fs + ".ev-abil { order: 5; }", css)
+        self.assertIn(fs + ".ev-story { order: 6; max-width: 560px; }", css)
+        self.assertIn(fs + ".flavor { order: 7; }", css)
+
+    def test_the_story_stays_local_to_the_eval_card(self) -> None:
+        for name, block in shared_blocks():
+            with self.subTest(block=name):
+                self.assertIsNone(re.search(r"\bstory", block))
+
+
 class SharedBlockTests(unittest.TestCase):
     """apps_shared.py is spliced in, never paraphrased (see tests/test_apps.py)."""
 

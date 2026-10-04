@@ -1106,6 +1106,7 @@ async def record_assessment(
     comparisons: list[dict] | None = None,
     why_care: list[dict] | None = None,
     craft_note: str | None = None,
+    story: dict | None = None,
     items: list[dict] | None = None,
 ) -> RecordAssessmentResponse:
     """
@@ -1132,8 +1133,9 @@ async def record_assessment(
     seen/target, instead_game_id, steam_appid, context, the DECLARED
     skill/skill_version/model, and the card's presentation fields
     (elevator_pitch, craft_note, for_you_if, not_for_you_if, comparisons,
-    why_care). assessed_at backfills a past verdict (default now). Over-cap
-    lists are rejected, long text truncated. Field rules and caps:
+    why_care, story). story: 1–4 sourced sentences, each citing ≥1 of ≤6
+    {url, kind} sources. assessed_at backfills a past verdict (default now).
+    Over-cap lists are rejected, long text truncated. Field rules and caps:
     get_skill(skill="game-quality", path="recording.md").
 
     `package` is best-effort (library, media providers, IGDB): failed or
@@ -1186,6 +1188,7 @@ async def record_assessment(
         comparisons,
         why_care,
         craft_note,
+        story,
     )
 
 

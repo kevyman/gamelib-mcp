@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -135,6 +136,73 @@ class _MediaFetchError(RuntimeError):
 def _truncate(text: str, limit: int) -> str:
     text = text.strip()
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+# ── Store-blurb lineage claim ────────────────────────────────────────────────
+#
+# A store blurb's own "from the creators of …" sentence. It is MARKETING, so
+# the widgets attribute it ("The store says: …") and it never stands as a fact
+# about people: a shared studio name supports "same studio" at most. The
+# families are the shapes the owner's own Steam blurbs use; each needs a maker
+# noun, so "a former soldier returns" is not a lineage claim.
+LINEAGE_CLAIM_MAX_CHARS = 200
+_LINEAGE_PATTERNS = (
+    # "from the award-winning team behind …", "by the makers of …", and the
+    # aside form "by Zachtronics, the creators of …" (a short "<Name>, ").
+    re.compile(
+        r"\b(?:from|by) (?:[\w'&.:-]+(?: [\w'&.:-]+){0,3}, )?(?:the )?"
+        r"(?:award[- ]winning )?"
+        r"(?:creators?|makers?|team|studio|developers?|minds?|people|"
+        r"key (?:creative )?talent|veterans?|folks|devs) "
+        r"(?:behind|of|who (?:made|brought you|created))\b",
+        re.IGNORECASE,
+    ),
+    # "veterans of …" only in developer context: a maker verb before it
+    # ("founded by veterans of …", "made by veterans from …"), a studio or
+    # industry noun shortly after ("veterans of Example Studio"), or an
+    # industry adjective ("industry veterans") — never plot copy such as
+    # "you play as veterans of the Great War".
+    re.compile(
+        r"\b(?:from|by|founded by|formed by|made by|developed by|created by|"
+        r"built by|a team of|team of|led by|staffed by) (?:\w+ ){0,2}?"
+        r"veterans? (?:of|from)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bveterans? (?:of|from) (?:[\w'&.:-]+ ){0,5}?"
+        r"(?:studios?|games?|entertainment|software|interactive|industry|"
+        r"teams?|developers?|franchise|series)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:industry|development|AAA|indie|games?) veterans?\b", re.IGNORECASE),
+    re.compile(r"\bfounded by (?:former|ex-|veterans?)\b", re.IGNORECASE),
+    # "former Blizzard developers", "ex-Ubisoft devs": the studio name keeps
+    # its capital, so only the words around it ignore case.
+    re.compile(r"\b(?i:former |ex-)[A-Z]\w+ (?i:developers?|devs|staff|team)\b"),
+    re.compile(r"\bthe (?:studio|team) that brought you\b", re.IGNORECASE),
+    re.compile(
+        r"\bfrom some of the (?:key )?(?:creative )?(?:talent|people|minds)\b",
+        re.IGNORECASE,
+    ),
+)
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?]) ")
+
+
+def lineage_claim(description: str | None) -> str | None:
+    """The first sentence of a store blurb that claims a maker lineage, or None.
+
+    Whitespace is collapsed first; sentences split after ". ", "! " and "? "
+    and keep their own closing punctuation. Capped at
+    ``LINEAGE_CLAIM_MAX_CHARS`` with the module's ellipsis truncation. Pure:
+    the callers attach it to a pedigree as ``store_claim``.
+    """
+    if not description:
+        return None
+    text = " ".join(description.split())
+    for sentence in _SENTENCE_BREAK.split(text):
+        if any(pattern.search(sentence) for pattern in _LINEAGE_PATTERNS):
+            return _truncate(sentence, LINEAGE_CLAIM_MAX_CHARS)
+    return None
 
 
 # Returned by ``_cached`` when a refresh FAILED and no stale copy exists — as

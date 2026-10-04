@@ -134,7 +134,7 @@ EXPECTED_TOOLS = {
             "price_platform", "target_price", "instead_game_id", "steam_appid",
             "context", "skill", "skill_version", "model",
             "elevator_pitch", "for_you_if", "not_for_you_if", "comparisons",
-            "why_care", "craft_note", "items",
+            "why_care", "craft_note", "story", "items",
         },
         "required": set(),
     },

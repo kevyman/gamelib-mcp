@@ -108,7 +108,8 @@ of it is inside `@media (prefers-reduced-motion: no-preference)`.
 sub) → stats (PACE, SEEN, TARGET key, LENGTH, FIT pips) → straddling ribbon
 (verdict + "wait for ~€40"). Below on the ground: candidate line (cap),
 summary (`h`), WEAKNESS traits, pitch (body), abilities (STUDIO, MOMENT),
-craft note as flavor, reel, IN YOUR LIBRARY strip, actions, provenance cap.
+THE STORY (sourced creator lore: upright serif paragraph, mono `[n]` refs,
+one source chip per citation), craft note as flavor, reel, IN YOUR LIBRARY strip, actions, provenance cap.
 
 **Eval full breakdown (760)** — two columns: the inline card (300) sticky
 left; right: summary + pitch, FOR YOU IF / NOT FOR YOU IF traits in two

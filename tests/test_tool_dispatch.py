@@ -745,6 +745,17 @@ class ResponseSizeGuardTests(ToolDBTestCase):
                 comparisons=[
                     {"name": f"Anchor {i}", "relation": "similar"} for i in range(6)
                 ],
+                # THE STORY at both caps: 4 sentences citing all 6 sources.
+                story={
+                    "sentences": [
+                        {"text": f"Claim {i}.", "sources": [i + 1, (i + 4) % 6 + 1]}
+                        for i in range(4)
+                    ],
+                    "sources": [
+                        {"url": f"https://example.test/{i}", "kind": "press"}
+                        for i in range(6)
+                    ],
+                },
             )
 
         package = result["package"]
@@ -758,6 +769,8 @@ class ResponseSizeGuardTests(ToolDBTestCase):
             "pedigree.timeline.after": 3,
             "past.items": 5,
             "presentation.for_you_if": 4,
+            "presentation.story.sentences": 4,
+            "presentation.story.sources": 6,
         }
         for path, cap in caps.items():
             node = package
