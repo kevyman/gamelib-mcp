@@ -311,7 +311,7 @@ class ContentTypeBadgeTests(unittest.TestCase):
             'stack.appendChild(panel.frame);',
             'mediaNode(flow, media, game.name)',
             'similarStrip(flow, game.similar);',
-            'relatedBlock(flow, actions, game);',
+            'studioStrip(flow, game.pedigree, ',
             'section(parent, "Media")',
             'var viewer = el("div", "hero viewer")',
             'el("div", "strip thumbs")',
@@ -384,26 +384,28 @@ class ContentTypeBadgeTests(unittest.TestCase):
         self.assertIn('plural(size, "game", ped.catalog_truncated)', apps.GAME_CARDS_HTML)
 
     def test_pedigree_strip_renders_from_the_detail_payload(self) -> None:
-        # FROM THE STUDIO: the eyebrow and a strip of minis of what the studio
-        # shipped before; the studio, publisher and track record moved into
-        # the full breakdown.
-        strip = js_function(apps.GAME_CARDS_HTML, "function studioStrip(parent, ped)")
+        # FROM THE STUDIO is ONE shared builder (apps_shared.PEDIGREE_JS): the
+        # headline (lead developer, est., publisher) with the co-developer
+        # line, then the timeline strip; the detail card passes its year.
+        strip = js_function(apps.GAME_CARDS_HTML, "function studioStrip(parent, ped, candidateYear)")
         for marker in (
-            "var items = list(ped.previous_games).filter(function (i) { return i && i.name; }).slice(0, 8);",
+            "var head = pedigreeHead(ped);",
+            "var sides = timelineSides(ped);",
             'var sec = eyebrowSection(parent, "From the studio");',
-            "lines: miniLines({ rating: rating, critic: item.critic_score,",
-            "hours: item.owned ? item.playtime_hours : null,",
+            'var strip = el("div", "strip ministrip timeline");',
+            "sides.before.forEach(function (item) { strip.appendChild(studioMini(item)); });",
+            'var mark = el("div", "tl-mark");',
+            "sides.after.forEach(function (item) { strip.appendChild(studioMini(item)); });",
         ):
             self.assertIn(marker, strip)
-        self.assertIn("studioStrip(flow, game.pedigree);", apps.GAME_CARDS_HTML)
-        breakdown = js_function(apps.GAME_CARDS_HTML, "function breakdownNode(game)")
-        for marker in (
-            'box.appendChild(abilityNode("Studio", facts.join(", ")));',
-            'if (ped.publisher_name) box.appendChild(abilityNode("Publisher", ped.publisher_name));',
-            '"You\'ve played " + (num(record.played_count) || 0) + " of "',
-            '" — avg " + avg + "/10."',
-        ):
-            self.assertIn(marker, breakdown)
+        self.assertIn("function studioStrip(parent, ped, candidateYear) {", apps_shared.PEDIGREE_JS)
+        self.assertIn("studioStrip(flow, game.pedigree, game.release_date ? String(game.release_date).slice(0, 4) : null);",
+                      apps.GAME_CARDS_HTML)
+        # no local copy of the strip, the breakdown or the track record
+        source = Path(apps.__file__).read_text()
+        for gone in ("function studioStrip(", "function breakdownNode(", "function relatedBlock(",
+                     "library_track_record", "You've played", "most like this one"):
+            self.assertNotIn(gone, source)
 
     def test_pedigree_badge_prefers_his_rating_over_the_critic_score(self) -> None:
         # A studio mini reads the shared mini format (B3): his rating as pips
@@ -411,25 +413,22 @@ class ContentTypeBadgeTests(unittest.TestCase):
         # the critic score as a "Critics 86" line (miniLines' critic input,
         # executed in StudioCriticLineTests); his hours, "not owned" for one
         # he doesn't have, the year.
-        strip = js_function(apps.GAME_CARDS_HTML, "function studioStrip(parent, ped)")
-        self.assertIn("var rating = item.owned ? num(item.my_rating) : null;", strip)
-        self.assertIn('tier: rating != null ? ratingTier(rating) : "none",', strip)
-        self.assertIn("owned: !!item.owned, year: item.release_year, platform: item.platform }),", strip)
-        self.assertIn("critic: item.critic_score,", strip)
+        mini = js_function(apps.GAME_CARDS_HTML, "function studioMini(item)")
+        self.assertIn("var rating = item.owned ? num(item.my_rating) : null;", mini)
+        self.assertIn('tier: rating != null ? ratingTier(rating) : "none",', mini)
+        self.assertIn("owned: !!item.owned, year: item.release_year, platform: item.platform }),", mini)
+        self.assertIn("critic: item.critic_score,", mini)
 
-    def test_the_damper_branch_renders_the_header_line_alone(self) -> None:
-        # previous_games is empty under the big-studio damper: the eyebrow and
-        # a notice saying why (or that nothing earlier resolved), no strip.
-        strip = js_function(apps.GAME_CARDS_HTML, "function studioStrip(parent, ped)")
-        empty = strip[strip.index("if (!items.length) {"):strip.index('var strip = el("div", "strip ministrip");')]
-        for marker in (
-            "if (ped.big_catalog && size) {",
-            'notice(sec, "No earlier games picked: " + studio + " has "',
-            '+ plural(size, "game", ped.catalog_truncated) + " on IGDB");',
-            'notice(sec, [{ what: "from the studio", source: "IGDB: no earlier games resolved" }]);',
-            "return;",
-        ):
-            self.assertIn(marker, empty)
+    def test_no_releases_around_it_renders_the_header_line_alone(self) -> None:
+        # Nothing in the timeline: the eyebrow and the headline, no strip and
+        # no notice; the big-studio
+        # flag only adds the catalogue size to the headline.
+        strip = js_function(apps.GAME_CARDS_HTML, "function studioStrip(parent, ped, candidateYear)")
+        self.assertIn("if (!sides.before.length && !sides.after.length) return sec;", strip)
+        self.assertNotIn("notice(", strip)
+        headline = js_function(apps.GAME_CARDS_HTML, "function pedigreeHeadline(ped)")
+        self.assertIn('if (ped.big_catalog && size) parts.push(plural(size, "game", ped.catalog_truncated));',
+                      headline)
 
     def test_hype_counts_are_never_rendered(self) -> None:
         # `hypes` rides in the payload for completeness; this card does not
@@ -967,12 +966,12 @@ class DetailModeTests(unittest.TestCase):
 
     def test_identity_panel_leads_the_stack(self) -> None:
         # the card, then the ground: what it is like, the reel, the strips,
-        # the actions (Full breakdown + the store link)
+        # the actions (the store link: nothing sits behind a breakdown now)
         card = js_function(self.HTML, "function detailCard(game)")
         order = ["var panel = identityPanel(game, media);", "stack.appendChild(panel.frame);",
                  "dealIn(panel.frame, 0);", "var flow = groundNode(game, media);",
                  "mediaNode(flow, media, game.name)", "similarStrip(flow, game.similar);",
-                 "studioStrip(flow, game.pedigree);", "relatedBlock(flow, actions, game);",
+                 "studioStrip(flow, game.pedigree, ", 'var actions = el("div", "actions dt-actions");',
                  "var store = storeLink(game);", "stack.appendChild(flow);"]
         positions = [card.index(marker) for marker in order]
         self.assertEqual(positions, sorted(positions))
@@ -1035,7 +1034,7 @@ class DetailModeTests(unittest.TestCase):
         order = [
             'stats.appendChild(statRow({ label: "Played", value: hoursLabel(hours), key: true }));',
             'if (last) stats.appendChild(statRow({ label: "Last", value: last }));',
-            'if (length) stats.appendChild(statRow({ label: "Length", note: "main story", value: length }));',
+            "lengthRows(game).forEach(function (row) { stats.appendChild(row); });",
             "if (paid) stats.appendChild(paid);",
             "if (chips) stats.appendChild(chips);",
             'var rating = statRow({ label: "Rating", value: pipsNode(mine, 10, tier) });',
@@ -1043,6 +1042,15 @@ class DetailModeTests(unittest.TestCase):
         positions = [stats.index(marker) for marker in order]
         self.assertEqual(positions, sorted(positions))
         self.assertIn("if (hours != null && hours > 0) {", stats)
+        # Time to beat: the one LENGTH row with only the main story; the three
+        # HowLongToBeat rows when the longer two are known.
+        lengths = js_function(self.HTML, "function lengthRows(game)")
+        for marker in (
+            'return main ? [statRow({ label: "Length", note: "main story", value: main })] : [];',
+            'return [["Main story", main], ["Main + extras", extra], ["Completionist", complete]]',
+            "if (!extra && !complete) {",
+        ):
+            self.assertIn(marker, lengths)
         paid = js_function(self.HTML, "function paidRow(game)")
         self.assertIn('value: amount === 0 ? "Free" : money(amount, row.price_currency),', paid)
         self.assertIn('label("purchase_source", row.purchase_source)', paid)
@@ -1072,8 +1080,11 @@ class DetailModeTests(unittest.TestCase):
             self.assertIn(marker, ground)
 
     def test_tags_are_one_muted_line_of_at_most_eight(self) -> None:
+        # The genres lead the one tag line (the breakdown that held them is
+        # gone), then the community tags, deduplicated, eight at most.
         ground = js_function(self.HTML, "function groundNode(game, media)")
-        self.assertIn("var tags = list(game.tags).filter(Boolean).slice(0, 8);", ground)
+        self.assertIn("var tags = list(game.genres).concat(list(game.tags)).filter(function (t) {", ground)
+        self.assertIn("}).slice(0, 8);", ground)
         line = js_function(self.HTML, "function tagLine(tags, cls)")
         self.assertIn('tags.forEach(function (t) { line.appendChild(el("span", null, t)); });', line)
 
@@ -1084,23 +1095,19 @@ class DetailModeTests(unittest.TestCase):
         self.assertIn('if (nominated.length) lines.push("Nominee for " + names(nominated).join(", "));', lines)
         self.assertIn(".slice(0, 3)", lines)
 
-    def test_similar_and_studio_sit_behind_fullscreen_or_a_disclosure(self) -> None:
-        # The strips are inline now; what sits behind "Full breakdown" is the
-        # rest — studio, publisher, track record, the three lengths, genres.
-        block = js_function(self.HTML, "function relatedBlock(flow, actions, game)")
-        for marker in (
-            "var node = breakdownNode(game);",
-            "if (!node) return;",
-            'if (currentDisplayMode() === "fullscreen") {',
-            # the shared control (apps_shared.DISCLOSURE_JS), no local copy
-            'fullscreenOrDisclosure(actions, "Full breakdown", build);',
-        ):
-            self.assertIn(marker, block)
-        self.assertNotIn("requestDisplayMode", block)
+    def test_nothing_sits_behind_a_full_breakdown_any_more(self) -> None:
+        # Everything the detail card's "Full breakdown" held moved onto the
+        # card (the three lengths, the genres) or into FROM THE STUDIO (the
+        # studio, publisher); the track record and the "N games like this"
+        # sentence are gone. No eyebrow, no disclosure, no button.
+        card = js_function(self.HTML, "function detailCard(game)")
+        self.assertNotIn("fullscreenOrDisclosure", card)
+        self.assertNotIn("Full breakdown", card)
+        source = Path(apps.__file__).read_text()
+        for gone in ('"Full breakdown"', "dt-break", "function breakdownNode(", "function relatedBlock(",
+                     ".dt-actions > .disclosure"):
+            self.assertNotIn(gone, source)
         self.assertNotIn("chev-out", self.HTML)
-        css = widget_css(self.HTML)
-        self.assertIn("  .dt-actions > .disclosure {", css)
-        self.assertIn("  .dt-actions > .disclosure-body { flex-basis: 100%; order: 3; margin-top: 4px; }", css)
         store = js_function(self.HTML, "function storeLink(game)")
         self.assertIn('return storePill("https://store.steampowered.com/app/" + appid + "/", "Open on Steam");',
                       store)
@@ -1518,7 +1525,9 @@ class DetailCardBehaviourTests(unittest.TestCase):
         self.assertEqual(self.out["ghost"]["stats"], [
             ["Played", None, "82h", True],
             ["Last", None, "Sep 2022", False],
-            ["Length", "main story", "~25h", False],
+            ["Main story", None, "~25h", False],
+            ["Main + extras", None, "~46h", False],
+            ["Completionist", None, "~62h", False],
             ["Paid", "free giveaway", "Free", False],
             ["chips", "Metacritic", "OpenCritic"],
             ["Rating", None, "", False],
@@ -1533,10 +1542,13 @@ class DetailCardBehaviourTests(unittest.TestCase):
         ghost = self.out["ghost"]
         # the enrichment notice is bookkeeping: after FROM THE STUDIO, just
         # before the actions row, never in the middle of the copy
+        # (no store link and nothing behind a breakdown: no actions row)
         self.assertEqual(ghost["flow"], ["desc", "more-toggle", "flavor flavor-quote", "dt-abil", "tagline",
-                                         "panel reel", "eyebrow-sec", "eyebrow-sec", "notice", "actions dt-actions"])
+                                         "panel reel", "eyebrow-sec", "eyebrow-sec", "notice"])
         self.assertTrue(ghost["flavor"].startswith("Absolutely beautiful and well made."))
-        self.assertEqual(len(ghost["tags"]), 8)
+        # genres first, then the tags, eight in all
+        self.assertEqual(ghost["tags"], ["Role-playing (RPG)", "Hack and slash/Beat 'em up", "Adventure",
+                                         "action", "historical", "stealth", "drama", "open world"])
         self.assertEqual(ghost["eyebrows"], ["Media", "In your library", "From the studio"])
 
     def test_award_lines(self) -> None:
@@ -1557,13 +1569,23 @@ class DetailCardBehaviourTests(unittest.TestCase):
         self.assertEqual(minis[0], ["mini tier-good", "Marvel's Spider-Man", [""], ["50h", "played"], ["2018"]])
         self.assertEqual(minis[2], ["mini tier-none", "Marvel's Spider-Man 2", ["25h", "played"], ["2023"]])
         self.assertEqual(minis[4][2:], [["unplayed"], ["2023"]])
+        # the studio timeline, oldest to newest: name, critics, ownership, year
+        self.assertEqual([m[1:] for m in minis[5:]], [
+            ["inFAMOUS", ["Critics", "85"], ["not owned"], ["2009"]],
+            ["inFAMOUS 2", ["Critics", "83"], ["not owned"], ["2011"]],
+            ["inFAMOUS Second Son", ["Critics", "80"], ["not owned"], ["2014"]],
+            ["inFAMOUS: First Light", ["Critics", "73"], ["not owned"], ["2014"]],
+            ["Ghost of Y\u014dtei", ["Critics", "87"], ["not owned"], ["2025"]],
+        ])
+        # the damper notice is gone: a big studio still shows its nearest releases
         self.assertEqual(self.out["ghost"]["notices"], [
-            "No earlier games picked: Sucker Punch Productions has 30+ games on IGDB",
             "No Steam page for this game, so Steam reviews and ProtonDB are unavailable",
         ])
 
     def test_actions_and_the_empty_state(self) -> None:
-        self.assertEqual(self.out["ghost"]["actions"][0][1], "Full breakdown▾")
+        # nothing behind a breakdown and no store link: no actions at all
+        self.assertEqual(self.out["ghost"]["actions"], [])
+        self.assertNotIn("Full breakdown", self.out["ghost"]["text"])
         self.assertEqual(self.out["bare"]["notices"], ["No details fetched yet: no IGDB match for this game"])
         for key in ("ghost", "unrated", "unknown", "bare"):
             with self.subTest(card=key):
@@ -1589,6 +1611,21 @@ _FIX_READERS = r"""
     var ring = b.className.split(" ").filter(function (c) { return c === "badge" || c.indexOf("tier-") === 0; });
     return [txt(q(b, ".badge-num")), txt(q(b, ".badge-tag")), ring.join(" ")];
   }
+  /* FROM THE STUDIO's frame: the headline spans, the co-developer line, and
+     the strip's children in order (a mini by name, the hairline by year). */
+  function studioShape(box) {
+    var head = q(box, ".ped-head");
+    var strip = q(box, ".timeline");
+    return {
+      head: head ? head.children.map(function (s) { return s.textContent; }) : null,
+      withLine: txt(q(box, ".ped-with")),
+      strip: strip ? strip.children.map(function (c) {
+        return c.classList.contains("tl-mark")
+          ? ["mark", txt(q(c, ".tl-year")), c.getAttribute("role"), c.getAttribute("aria-label"), !!q(c, ".tl-line")]
+          : txt(q(c, ".mini-name"));
+      }) : null,
+    };
+  }
   function miniText(strip) {
     return strip.querySelectorAll(".mini").map(function (m) {
       return [txt(q(m, ".mini-name"))].concat(m.querySelectorAll(".mini-meta").map(function (line) {
@@ -1602,11 +1639,19 @@ _FIX_READERS = r"""
 
 _SCORES = {"metacritic_score": 88, "opencritic_score": 79, "opencritic_tier": "Strong"}
 _MC_ONLY = {"metacritic_score": 71, "opencritic_score": -1}
-_STUDIO = {"developer_names": ["Sucker Punch"], "previous_games": [
-    {"name": "inFAMOUS", "owned": False, "critic_score": 86, "release_year": 2009},
-    {"name": "Sly Cooper", "owned": True, "my_rating": 8, "critic_score": 90, "playtime_hours": 12,
-     "release_year": 2002},
-]}
+_STUDIO = {
+    "developer": {"name": "Sucker Punch", "founded_year": 1997},
+    "developer_names": ["Sucker Punch", "Nixxes"], "publisher_name": "Sony Interactive Entertainment",
+    "timeline": {
+        # nearest first on each side, as data/media.py sends it
+        "before": [
+            {"name": "inFAMOUS", "owned": False, "critic_score": 86, "release_year": 2009},
+            {"name": "Sly Cooper", "owned": True, "my_rating": 8, "critic_score": 90, "playtime_hours": 12,
+             "release_year": 2002},
+        ],
+        "after": [{"name": "Ghost of Yotei", "owned": False, "critic_score": 87, "release_year": 2025}],
+    },
+}
 _SIMILAR = {"items": [
     # the dead inputs a library neighbour never carries: status, platform
     {"name": "Spider-Man", "playtime_hours": 50, "completion_status": "completed", "platform": "ps5",
@@ -1646,10 +1691,11 @@ _CARDS_FIX_PROBE = _FIX_READERS + r"""
       out.detailChips = q(root, ".dt-card").querySelectorAll(".chip").map(function (c) { return txt(q(c, ".lbl")); });
     });
     part("studio", function () {
-      // #4: the studio strip, through its builder
+      // #4: the studio strip, through its (shared) builder
       var studio = el("div");
-      studioStrip(studio, STUDIO);
+      studioStrip(studio, STUDIO, 2020);
       out.studio = miniText(studio);
+      out.studioShape = studioShape(studio);
     });
     part("similar", function () {
       // #7: the library strip, through its builder
@@ -1724,8 +1770,9 @@ _EVAL_FIX_PROBE = _FIX_READERS + r"""
     });
     part("studio", function () {
       var studio = el("div");
-      studioNode(studio, STUDIO);
+      studioStrip(studio, STUDIO, 2020);
       out.studio = miniText(studio);
+      out.studioShape = studioShape(studio);
     });
     part("similar", function () {
       var similar = el("div");
@@ -1777,10 +1824,26 @@ class ReviewFixBehaviourTests(unittest.TestCase):
 
     def test_an_unrated_studio_game_shows_its_critic_score(self) -> None:
         # #4: not owned / not rated → "Critics 86"; owned and rated → pips
-        expected = [["inFAMOUS", ["Critics", "86"], ["not owned"], ["2009"]],
-                    ["Sly Cooper", ["pips:8"], ["12h", "played"], ["2002"]]]
+        # oldest to newest, the shared builder in both widgets
+        expected = [["Sly Cooper", ["pips:8"], ["12h", "played"], ["2002"]],
+                    ["inFAMOUS", ["Critics", "86"], ["not owned"], ["2009"]],
+                    ["Ghost of Yotei", ["Critics", "87"], ["not owned"], ["2025"]]]
         self.assertEqual(self.cards["studio"], expected)
         self.assertEqual(self.eval["studio"], expected)
+
+    def test_the_studio_strip_is_a_timeline_under_the_lead_developer(self) -> None:
+        # F3/F6/F7: the headline is the LEAD developer, est. and the publisher
+        # as separate spans; the co-developers a "with ..." line beneath; the
+        # strip runs oldest to newest with a hairline at this game's year
+        # between the before and after groups. Identical in both widgets.
+        shape = {
+            "head": ["Sucker Punch", "est. 1997", "Sony Interactive Entertainment"],
+            "withLine": "with Nixxes",
+            "strip": ["Sly Cooper", "inFAMOUS", ["mark", "2020", "separator", "This game, 2020", True],
+                      "Ghost of Yotei"],
+        }
+        self.assertEqual(self.cards["studioShape"], shape)
+        self.assertEqual(self.eval["studioShape"], shape)
 
     def test_a_plain_card_is_a_group_named_by_its_title(self) -> None:
         # #6: only the tappable button carries aria-label; the div is a
@@ -2277,6 +2340,20 @@ class SharedComponentTests(unittest.TestCase):
         self.assertIn(".tags .chip { padding: 1px 6px;", apps_shared.TAG_CSS)
         self.assertIn("html.touch .tags .chip { min-height: 0; }", apps_shared.TAG_CSS)
 
+    def test_the_grid_card_ends_clear_of_its_frame(self) -> None:
+        # Round-2 F9: the chip row or tag line a card ends on sat flush on the
+        # frame's bottom edge, and the Steam phrase chip wrapped to two lines.
+        css = widget_css(apps.GAME_CARDS_HTML)
+        self.assertIn("  .frame.gc-card { padding-bottom: 12px; }", css)
+        self.assertIn("  .gc-card > :last-child { padding-bottom: 0; margin-bottom: 0; }", css)
+        self.assertIn("  .gc-card .chip.gc-steam { flex-wrap: nowrap; }", css)
+        word = apps_shared.CHIP_CSS.split("  .chip b.word {\n", 1)[1].split("}", 1)[0]
+        for decl in ("white-space: nowrap;", "min-width: 0;", "max-width: 100%;", "overflow: hidden;",
+                     "text-overflow: ellipsis;"):
+            self.assertIn(decl, word)
+        # nothing in the card may pull its last child back onto the edge
+        self.assertNotRegex(css, r"\.gc-[a-z-]+ \{[^}]*margin(-bottom)?: [^;]*-\d")
+
     def test_the_chip_is_a_tier_border_and_a_mono_figure(self) -> None:
         # The Binder chip (gl.css §12): 1px border in the tier edge, radius 4,
         # the surface as its ground (no tier fill, and readable on art); a
@@ -2438,6 +2515,146 @@ class SharedBlockTests(unittest.TestCase):
             "MODEL_CONTEXT_JS", "DISCLOSURE_JS", "NOTICE_JS",
         ):
             self.assertIn(expected, names)
+
+
+# ---- the studio-strip round-2 review fixes, executed in both widgets ----
+
+_PED_AFTER_ONLY = {
+    # no developer, no headline: the only content is the "after" side
+    "timeline": {"before": [], "after": [{"name": "Later One", "release_year": 2031}],
+                 "before_count": 0, "after_count": 1, "after_gap": False},
+}
+_PED_GAP = {
+    "developer": {"name": "Big Studio"},
+    "timeline": {"before": [], "after": [{"name": "Page Oldest", "release_year": 2031},
+                                          {"name": "Next Oldest", "release_year": 2032}],
+                 "before_count": 0, "after_count": 2, "after_gap": True},
+}
+_PED_OVER_CAPS = {
+    "developer": {"name": "Prolific"},
+    "timeline": {"before": [{"name": f"B{i}", "release_year": 2015 - i} for i in range(9)],
+                 "after": [{"name": f"A{i}", "release_year": 2020 + i} for i in range(6)]},
+}
+_PED_LEGACY = {
+    # a pre-timeline payload: previous_games is no longer read at all
+    "developer": {"name": "Old Shape"},
+    "previous_games": [{"name": "Legacy Mini", "release_year": 2010}],
+}
+
+_STRIP_FIX_READERS = r"""
+  function q(n, s) { return n.querySelector(s); }
+  function txt(n) { return n ? n.textContent : null; }
+  function stripOf(ped) {
+    var box = el("div");
+    studioStrip(box, ped, 2017);
+    var strip = q(box, ".timeline");
+    return strip ? strip.children.map(function (c) {
+      if (c.classList.contains("tl-mark")) return "mark";
+      if (c.classList.contains("tl-gap")) return ["gap", c.tagName, txt(c)];
+      return txt(q(c, ".mini-name"));
+    }) : (box.children.length ? "header-only" : "nothing");
+  }
+  function strips() {
+    return { afterOnly: stripOf(PED_AFTER_ONLY), gap: stripOf(PED_GAP),
+             noGap: stripOf(Object.assign({}, PED_GAP, { timeline: Object.assign({}, PED_GAP.timeline, { after_gap: false }) })),
+             overCaps: stripOf(PED_OVER_CAPS), legacy: stripOf(PED_LEGACY),
+             hasStudio: [hasStudio(PED_AFTER_ONLY), hasStudio(PED_LEGACY), hasStudio(null)] };
+  }
+"""
+
+_CARDS_STRIP_PROBE = _STRIP_FIX_READERS + r"""
+  (function () {
+    var out = strips();
+    render({ game_id: 1, name: "Tagged", genres: ["Adventure", "Role-playing (RPG)"],
+             tags: ["adventure", "role-playing (rpg)", "Stealth", "stealth", "open world"] });
+    out.tags = q(root, ".tagline").children.map(function (c) { return c.textContent; });
+    console.log(JSON.stringify(out));
+  })();
+"""
+
+_EVAL_STRIP_PROBE = _STRIP_FIX_READERS + r"""
+  (function () {
+    var out = strips();
+    out.breakdown = [hasBreakdown({ pedigree: PED_AFTER_ONLY }), hasBreakdown({ pedigree: PED_LEGACY }),
+                     hasBreakdown({ pedigree: { timeline: { before: [], after: [] } } })];
+    out.studioError = packageErrors({ pedigree: PED_AFTER_ONLY, errors: ["igdb: rate limited"] });
+    console.log(JSON.stringify(out));
+  })();
+"""
+
+
+class StudioStripCapsTests(unittest.TestCase):
+    """The timeline caps live in data/media.py alone (finding 6)."""
+
+    def test_the_widgets_embed_the_python_caps(self) -> None:
+        from gamelib_mcp.data import media
+        from gamelib_mcp.tools import game_media
+
+        self.assertIs(game_media.TIMELINE_BEFORE_CAP, media.TIMELINE_BEFORE_CAP)
+        self.assertIs(game_media.TIMELINE_AFTER_CAP, media.TIMELINE_AFTER_CAP)
+        source = Path(game_media.__file__).read_text()
+        self.assertNotRegex(source, r"(?m)^(TIMELINE_\w+_CAP|PEDIGREE_ITEM_CAP)\s*=")
+        for _, html in WIDGETS:
+            self.assertIn(f"var TIMELINE_BEFORE_CAP = {media.TIMELINE_BEFORE_CAP};", html)
+            self.assertIn(f"var TIMELINE_AFTER_CAP = {media.TIMELINE_AFTER_CAP};", html)
+        sides = js_function(apps_shared.PEDIGREE_JS, "function timelineSides(ped)")
+        self.assertIn(".slice(0, TIMELINE_BEFORE_CAP)", sides)
+        self.assertIn(".slice(0, TIMELINE_AFTER_CAP)", sides)
+        self.assertNotRegex(sides, r"\.slice\(0, \d")
+        # the legacy previous_games fallback is gone from the shared builder
+        self.assertNotIn("previous_games", apps_shared.PEDIGREE_JS)
+
+    def test_the_tag_line_dedupes_on_a_lowercased_key(self) -> None:
+        ground = js_function(apps.GAME_CARDS_HTML, "function groundNode(game, media)")
+        self.assertIn("var key = String(t).toLowerCase();", ground)
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class StudioStripBehaviourTests(unittest.TestCase):
+    """The studio-strip review fixes, executed in both widgets."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from test_apps_shared import run_widget
+
+        data = ("  var PED_AFTER_ONLY = " + json.dumps(_PED_AFTER_ONLY) + ";\n  var PED_GAP = "
+                + json.dumps(_PED_GAP) + ";\n  var PED_OVER_CAPS = " + json.dumps(_PED_OVER_CAPS)
+                + ";\n  var PED_LEGACY = " + json.dumps(_PED_LEGACY) + ";\n")
+        cls.cards = run_cards(data + _CARDS_STRIP_PROBE)
+        cls.eval = run_widget("eval-card", data + _EVAL_STRIP_PROBE)
+
+    def test_a_page_gap_is_said_between_the_hairline_and_the_after_group(self) -> None:
+        # timeline.after_gap: the "after" minis are the page's oldest rows, so
+        # a muted note sits after the hairline and before them; without the
+        # flag there is no note.
+        gap = ["mark", ["gap", "SPAN", "earlier releases not fetched"], "Page Oldest", "Next Oldest"]
+        for out in (self.cards, self.eval):
+            self.assertEqual(out["gap"], gap)
+            self.assertEqual(out["noGap"], ["mark", "Page Oldest", "Next Oldest"])
+        css = apps_shared.PEDIGREE_CSS.split(".ministrip > .tl-gap {", 1)[1].split("}", 1)[0]
+        self.assertIn("font-size: var(--gl-cap);", css)
+        self.assertIn("color: var(--gl-muted);", css)
+
+    def test_the_strip_reads_the_timeline_only_at_the_python_caps(self) -> None:
+        # nine before / six after on the wire: five and three render, oldest
+        # to newest; a previous_games-only payload renders the header alone.
+        over = ["B4", "B3", "B2", "B1", "B0", "mark", "A0", "A1", "A2"]
+        for out in (self.cards, self.eval):
+            self.assertEqual(out["overCaps"], over)
+            self.assertEqual(out["legacy"], "header-only")
+            self.assertEqual(out["afterOnly"], ["mark", "Later One"])
+            self.assertEqual(out["hasStudio"], [True, True, False])
+
+    def test_after_only_releases_make_the_breakdown_available(self) -> None:
+        # hasBreakdown and errorHasData read the same hasStudio the renderer
+        # does, so a strip of only later releases opens the breakdown and
+        # silences the studio error its data contradicts.
+        self.assertEqual(self.eval["breakdown"], [True, True, False])
+        self.assertEqual(self.eval["studioError"], [])
+
+    def test_genres_and_tags_render_once_whatever_the_case(self) -> None:
+        # the first spelling wins: the genre's "Adventure", the tag's "Stealth"
+        self.assertEqual(self.cards["tags"], ["Adventure", "Role-playing (RPG)", "Stealth", "open world"])
 
 
 if __name__ == "__main__":

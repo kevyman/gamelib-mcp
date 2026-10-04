@@ -228,11 +228,11 @@ class GameDetailResponse(GameSummary):
     # trailer + screenshots (capped, with screenshot_count/truncated),
     # `similar` — the owned games most like this one by shared tags, each item
     # carrying game_id/similarity/shared_tags (every item is owned; capped,
-    # with count/truncated) — and `pedigree`, the developer (name, founding
-    # year, catalogue size),
-    # their previous games annotated with ownership/rating/playtime (capped at
-    # 6, empty under the big-studio damper) and library_track_record. All
-    # absent when nothing resolved or the lookup failed.
+    # with count/truncated) — and `pedigree`, the lead developer (name,
+    # founding year, catalogue size) and the `timeline` (5 before / 3 after
+    # the candidate, nearest first, with after_gap), each entry annotated with
+    # ownership/rating/playtime. All absent when nothing resolved or the
+    # lookup failed.
     media: dict[str, Any] | None = None
     similar: dict[str, Any] | None = None
     pedigree: dict[str, Any] | None = None
@@ -958,7 +958,7 @@ class RecordAssessmentResponse(BatchEnvelope):
     # and anchors resolved against the library, craft, fit_call, flags,
     # ownership, time, price, media, the similar-in-library row (owned games
     # sharing this one's tags, each with game_id/similarity/shared_tags),
-    # pedigree (the developer and their previous games, annotated), past
+    # pedigree (the developer and its release timeline, annotated), past
     # verdicts, and an
     # `errors` list naming whatever could not be gathered. Left untyped (like
     # the other display blocks here) because it is a render payload read whole

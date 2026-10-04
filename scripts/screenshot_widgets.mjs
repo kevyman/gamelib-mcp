@@ -159,6 +159,28 @@ async function main() {
             if (opts.imgCache) await routeImages(page, resolve(opts.imgCache));
             await page.goto(pathToFileURL(resolve(file)).href, { waitUntil: "load", timeout: 30000 });
             await settle(page);
+            // A scrolled studio timeline must open on a whole mini (the
+            // artefact the owner flagged was a clipped piece of the previous
+            // card at the left edge): no strip child may straddle the strip's
+            // left edge, and nothing in it may end within 8px of that edge.
+            const slivers = await page.evaluate(() =>
+              [...document.querySelectorAll(".timeline")].flatMap((strip) => {
+                const left = strip.getBoundingClientRect().left;
+                const cut = [...strip.children]
+                  .map((node) => node.getBoundingClientRect())
+                  .filter((r) => r.width > 0 && r.left < left - 0.5 && r.right > left + 0.5)
+                  .map((r) => `child ${r.left.toFixed(1)}..${r.right.toFixed(1)} straddles ${left.toFixed(1)}`);
+                const thin = [...strip.querySelectorAll("*")]
+                  .map((node) => node.getBoundingClientRect())
+                  .filter((r) => r.width > 0 && r.right > left && r.right < left + 8)
+                  .map((r) => `right=${r.right.toFixed(1)} strip.left=${left.toFixed(1)}`);
+                return cut.concat(thin);
+              }),
+            );
+            if (slivers.length) {
+              failures++;
+              console.error(`${name} ${width} timeline sliver at the left edge: ${slivers.join("; ")}`);
+            }
             // The content's own height (what documentElement.scrollHeight,
             // the widgets' size-changed figure, reads in an auto-sized host
             // frame) — scrollHeight here would be floored at the viewport.

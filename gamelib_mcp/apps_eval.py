@@ -769,23 +769,29 @@ EVAL_CARD_HTML = (
     + r"""
   /* ---------- 6. what failed: one notice inline, the detail in the breakdown ---------- */
   /* package.errors are "<block>: <reason>" strings ("media: steam: …",
-     "igdb: unresolved — …"). The notice names WHAT is missing and from WHERE
-     ("Couldn't load: similar games (library)"); the reasons stay in its
-     tooltip and in the breakdown's last section. Each known block maps to
-     [what, where]; "media" takes its source from the provider prefix of its
-     reason, and an unknown block is its humanized key with no source. */
+     "igdb: unresolved — …"). Each becomes ONE plain sentence saying what is
+     missing and from where ("Couldn't load the studio's games from IGDB.");
+     the raw string stays in the title attribute only. Each known block maps
+     to [what, where, sentence]; a reason the server words for a structural
+     gap has its own sentence (ERROR_REASONS, matched first); "media" takes
+     its source from the provider prefix of its reason; an unknown block is
+     its humanized key with no source. */
   var ERROR_BLOCKS = {
-    media: ["media", null],
-    similar: ["similar games", "library"],
-    anchors: ["your history", "library"],
-    pace: ["your pace", "library"],
-    pedigree: ["studio", "IGDB"],
-    studio: ["studio", "IGDB"],
-    igdb: ["studio", "IGDB"],
-    steam: ["store data", "Steam"],
-    hltb: ["time to beat", "HowLongToBeat"],
-    package: ["evaluation details", null],
+    media: ["media", null, "Couldn't load screenshots or the trailer{from}."],
+    similar: ["similar games", "library", "Couldn't compare it with the games in your library."],
+    anchors: ["your history", "library", "Couldn't load your history behind this verdict."],
+    pace: ["your pace", "library", "Couldn't work out your recent play pace."],
+    pedigree: ["studio", "IGDB", "Couldn't load the studio's games from IGDB."],
+    studio: ["studio", "IGDB", "Couldn't load the studio's games from IGDB."],
+    igdb: ["studio", "IGDB", "Couldn't load the studio from IGDB."],
+    steam: ["store data", "Steam", "Couldn't load store data from Steam."],
+    hltb: ["time to beat", "HowLongToBeat", "Couldn't load time to beat from HowLongToBeat."],
+    package: ["evaluation details", null, "Some evaluation details couldn't load."],
   };
+  var ERROR_REASONS = [
+    ["similar", /fewer than \d+ tags/i, "Not enough tags yet to find similar games in your library."],
+    ["igdb", /^unresolved/i, "Not linked to IGDB yet, so the studio's games are missing."],
+  ];
   var ERROR_REASON_CAP = 120;
   function errorItem(text) {
     var raw = String(text);
@@ -804,12 +810,14 @@ EVAL_CARD_HTML = (
         why = why.slice(sub + 1).trim();
       }
     }
+    var what = known ? known[0] : humanize(key || "details").toLowerCase();
+    var sentence = known ? known[2].replace("{from}", source ? " from " + source : "")
+      : "Couldn't load " + what + ".";
+    ERROR_REASONS.forEach(function (r) {
+      if (r[0] === key && r[1].test(why)) sentence = r[2];
+    });
     if (why.length > ERROR_REASON_CAP) why = why.slice(0, ERROR_REASON_CAP - 1).trim() + "…";
-    return {
-      what: known ? known[0] : humanize(key || "details").toLowerCase(),
-      source: source || "",
-      why: why,
-    };
+    return { what: what, source: source || "", why: why, text: sentence, raw: raw };
   }
   /* An error whose data is on the card anyway says nothing true: "couldn't
      load time to beat" beside "~18h" reads as a contradiction. Drop it. */
@@ -820,7 +828,7 @@ EVAL_CARD_HTML = (
     var ped = pkg.pedigree;
     if (key === "hltb") return num(time.hltb_main_hours) != null || num(time.hltb_extra_hours) != null;
     if (key === "igdb" || key === "studio" || key === "pedigree") {
-      return !!(ped && (pedigreeHeadline(ped).length || named(ped.previous_games).length));
+      return hasStudio(ped);
     }
     if (key === "media") {
       return !!(trailerEntry(media) || list(media.screenshots).some(function (s) {
@@ -829,27 +837,47 @@ EVAL_CARD_HTML = (
     }
     return false;
   }
+  /* Too few tags is the expected state of a game that is not out yet: no
+     community has tagged it, so the line would report the expected as a gap.
+     An undated game is an unknown, not "not out yet", and keeps the line.
+     The server already holds it back; this keeps an older payload quiet. */
+  function expectedGap(text, pkg) {
+    var raw = String(text);
+    if (!/^similar:/i.test(raw) || !/fewer than \d+ tags/i.test(raw)) return false;
+    var year = num((pkg.game || {}).release_year);
+    return year != null && year > new Date().getFullYear();
+  }
   function packageErrors(pkg) {
-    return list(pkg.errors).filter(function (e) { return e && !errorHasData(e, pkg); });
+    return list(pkg.errors).filter(function (e) {
+      return e && !errorHasData(e, pkg) && !expectedGap(e, pkg);
+    });
+  }
+  function errorSentences(errors) {
+    var seen = {};
+    return errors.map(errorItem).map(function (item) { return item.text; }).filter(function (t) {
+      if (seen[t]) return false;
+      seen[t] = true;
+      return true;
+    });
   }
   function errorsNode(parent, errors) {
     if (!errors.length) return;
-    // Deliberately quiet: a missing trailer is not an incident.
-    var node = notice(parent, errors.map(errorItem));
+    // Deliberately quiet: a missing trailer is not an incident. Plain
+    // sentences on the card; the server's own strings only on hover.
+    var node = notice(parent, errorSentences(errors).join(" "));
     if (node) node.title = errors.join("; ");
   }
   function errorDetailNode(parent, errors) {
     if (!errors.length) return;
     var box = section(parent, "Couldn't load");
     var ul = el("ul", "err-list");
-    // "Media (Steam) — fetch failed": the block in words, never its key,
-    // then the server's own reason, capped.
+    // One plain sentence per failure; the server's own reason (capped) is
+    // the hover text, never the copy.
     errors.forEach(function (text) {
       var item = errorItem(text);
       var li = document.createElement("li");
-      li.appendChild(el("b", null, item.what.charAt(0).toUpperCase() + item.what.slice(1)
-        + (item.source ? " (" + item.source + ")" : "")));
-      if (item.why) li.appendChild(el("span", null, " — " + item.why));
+      li.appendChild(el("span", null, item.text));
+      li.setAttribute("title", item.why ? item.why : item.raw);
       ul.appendChild(li);
     });
     box.appendChild(ul);
@@ -901,7 +929,7 @@ EVAL_CARD_HTML = (
       column.appendChild(el("div", "ev-lin-head", col[1]));
       entries.forEach(function (c) {
         var item = el("div", "ev-lin-item");
-        item.appendChild(miniCard({ name: c.name, tier: ratedTier(c.my_rating),
+        item.appendChild(miniCard({ name: c.name, cover_url: c.cover_url, tier: ratedTier(c.my_rating),
           lines: miniLines({ rating: c.my_rating, hours: c.playtime_hours, owned: c.owned,
             year: c.release_year, platform: c.platform }) }));
         if (c.note) item.appendChild(el("p", "ev-note", String(c.note)));
@@ -911,36 +939,6 @@ EVAL_CARD_HTML = (
     });
     if (pair.childNodes.length === 1) pair.classList.add("ev-one");
     eyebrowSection(parent, "Lineage").appendChild(pair);
-  }
-  /* From the studio: the headline (names, founding year, catalogue size —
-     under the big-studio damper it is all that renders), what they shipped
-     before as minis, and his track record with them. */
-  function studioNode(parent, ped) {
-    if (!ped) return;
-    var head = pedigreeHead(ped);
-    var items = named(ped.previous_games);
-    if (!head && !items.length) return;
-    var box = eyebrowSection(parent, "From the studio");
-    if (head) box.appendChild(head);
-    if (!items.length) return;
-    ministrip(box, items, function (item) {
-      return { name: item.name, cover_url: item.cover_url,
-        tier: item.owned ? ratedTier(item.my_rating) : "none",
-        lines: miniLines({ rating: item.owned ? item.my_rating : null, critic: item.critic_score,
-          hours: item.owned ? item.playtime_hours : null,
-          owned: !!item.owned, year: item.release_year, platform: item.platform }) };
-    });
-    var record = ped.library_track_record;
-    if (record) {
-      var avg = num(record.avg_my_rating);
-      // The track record covers only the annotated (shown) games; when the
-      // catalogue runs deeper, "last N" keeps the claim honest.
-      var span = ped.previous_truncated
-        ? "their last " + plural(items.length, "game")
-        : "their " + plural(items.length, "previous game");
-      box.appendChild(el("div", "note", "You've played " + (num(record.played_count) || 0)
-        + " of " + span + (avg != null ? " — avg " + avg + "/10." : ".")));
-    }
   }
   /* Past verdicts: a small ledger, newest first — the day, the verdict as a
      slim ribbon in its tier, the price seen then. */
@@ -1000,14 +998,15 @@ EVAL_CARD_HTML = (
       || list(pres.not_for_you_if).filter(Boolean).length
       || named(pkg.anchors).length
       || named(pkg.comparisons).length
-      || (ped && (pedigreeHeadline(ped).length || named(ped.previous_games).length))
+      || hasStudio(ped)
       || list((pkg.past || {}).items).length);
   }
   function breakdownNode(parent, pkg) {
     forYouNode(parent, pkg.presentation || {});
     anchorsNode(parent, named(pkg.anchors));
     lineageNode(parent, named(pkg.comparisons));
-    studioNode(parent, pkg.pedigree);
+    // FROM THE STUDIO: the shared builder (apps_shared.PEDIGREE_JS).
+    studioStrip(parent, pkg.pedigree, (pkg.game || {}).release_year);
     pastNode(parent, pkg.past || {});
     errorDetailNode(parent, packageErrors(pkg));
   }
