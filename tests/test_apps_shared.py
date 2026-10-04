@@ -2090,5 +2090,52 @@ class BinderComponentTests(unittest.TestCase):
         self.assertIn("box-shadow: inset 0 0 0 1px var(--gl-keyline);", css_rule(apps_shared.ART_CSS, ".art::before"))
 
 
+
+_STORE_CLAIM_PROBE = r"""
+  (async function () {
+    function q(n, s) { return n.querySelector(s); }
+    function txt(n) { return n ? n.textContent : null; }
+    var claim = { text: "From the creators of Example Quest.", source: "steam" };
+    var full = { developer: { name: "Studio Example" }, developer_names: ["Studio Example", "Partner Example"],
+                 timeline: { before: [{ name: "Example Quest", release_year: 2015 }], after: [] },
+                 store_claim: claim };
+    var out = {};
+    var box = el("div");
+    studioStrip(box, full, 2020);
+    var hd = q(box, ".ped-hd");
+    out.head = hd ? hd.children.map(function (c) { return c.className; }) : null;
+    out.claim = txt(q(box, ".ped-claim"));
+    var plain = el("div");
+    studioStrip(plain, { developer: { name: "Studio Example" } }, 2020);
+    out.plain = plain.querySelectorAll(".ped-claim").length;
+    var alone = el("div");
+    out.alone = [studioStrip(alone, { store_claim: claim }, 2020), alone.children.length,
+                 hasStudio({ store_claim: claim })];
+    console.log(JSON.stringify(out));
+  })();
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class StoreClaimLineTests(unittest.TestCase):
+    """FROM THE STUDIO's "The store says" line, through the shared builder,
+    executed in BOTH widgets (the eval card's breakdown and the detail card)."""
+
+    def test_the_claim_follows_the_co_developer_line_in_both_widgets(self) -> None:
+        for widget in ("eval-card", "game-cards"):
+            with self.subTest(widget=widget):
+                out = run_widget(widget, _STORE_CLAIM_PROBE)
+                self.assertEqual(out["head"], ["ped-head", "ped-with", "ped-claim"])
+                self.assertEqual(out["claim"], 'The store says: "From the creators of Example Quest."')
+                self.assertEqual(out["plain"], 0)
+                # a claim alone never opens the section
+                self.assertEqual(out["alone"], [None, 0, False])
+
+    def test_the_claim_line_is_12px_and_muted(self) -> None:
+        self.assertIn(".ped-claim { margin-top: 2px; font-size: var(--gl-cap); line-height: var(--gl-cap-lh); "
+                      "color: var(--gl-muted); }", apps_shared.PEDIGREE_CSS)
+        self.assertIn('"The store says: \\"" + claim + "\\""', apps_shared.PEDIGREE_JS)
+
+
 if __name__ == "__main__":
     unittest.main()

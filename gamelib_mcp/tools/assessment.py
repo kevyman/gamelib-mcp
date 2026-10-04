@@ -53,7 +53,12 @@ from .common import (
 )
 from .deals import _at_history_low, _fetched_at_is_stale
 from .detail import get_game_detail
-from .game_media import SIMILAR_MIN_SOURCE_TAGS, media_context, similar_in_library
+from .game_media import (
+    SIMILAR_MIN_SOURCE_TAGS,
+    media_context,
+    similar_in_library,
+    with_store_claim,
+)
 from .history import get_play_history
 from .ratings import get_taste_profile
 from .search import NORMALIZED_NAME_SQL, build_name_match, fuzzy_fallback_game_ids
@@ -1012,6 +1017,22 @@ WHY_CARE_CAP = 3
 WHY_CARE_TEXT_MAX_CHARS = 160
 WHY_CARE_KINDS = ("people", "studio", "anticipation", "moment")
 
+# story: THE STORY block — 1-4 sentences of creator lore (who made it, how it
+# connects BY NAMED PERSON to a game he played, the studio's story), every
+# sentence citing at least one page the model actually fetched. Declared-only
+# like every presentation field: the server checks the STRUCTURE (each
+# sentence cites a source that exists; each source is an http(s) URL of a
+# known kind), never whether the page says what the sentence claims. Prose is
+# truncated; lists and URLs over their cap are rejected — a truncated URL is a
+# broken citation. Kinds name where the claim comes from, which the card shows
+# beside each source chip.
+STORY_SENTENCES_CAP = 4
+STORY_SENTENCE_MAX_CHARS = 240
+STORY_SOURCES_CAP = 6
+STORY_URL_MAX_CHARS = 300
+STORY_TITLE_MAX_CHARS = 120
+STORY_SOURCE_KINDS = ("press", "studio", "store", "wiki", "social")
+
 # "Played" for calibration: two hours is the same bar the taste-profile
 # playtime pseudo-rating uses for "he actually engaged with this".
 CALIBRATION_PLAYED_MINUTES = 120
@@ -1061,6 +1082,7 @@ _PRESENTATION_PARAMS = (
     "comparisons",
     "why_care",
     "craft_note",
+    "story",
 )
 
 # Everything a recording write touches, in wire order.
@@ -1276,6 +1298,137 @@ def _normalize_why_care(why_care: list | None) -> list[dict[str, Any]] | None:
     return normalized or None
 
 
+_STORY_HONESTY_RULE = "every story sentence cites at least one fetched source"
+
+
+def _reject_unknown_keys(label: str, entry: dict, allowed: set[str]) -> None:
+    unknown = set(entry) - allowed
+    if unknown:
+        raise ToolError(
+            f"{label} accept only {sorted(allowed)} (got unknown {sorted(unknown)})"
+        )
+
+
+def _normalize_story_source(index: int, source: Any) -> dict[str, Any]:
+    if not isinstance(source, dict):
+        raise ToolError(f"story source {index} must be a {{url, kind, title?}} object")
+    _reject_unknown_keys("story sources", source, {"url", "kind", "title"})
+    url = source.get("url")
+    if not isinstance(url, str) or not url.strip():
+        raise ToolError(f"story source {index} needs a 'url'")
+    url = url.strip()
+    if not url.lower().startswith(("http://", "https://")):
+        raise ToolError(
+            f"story source {index} url must start with http:// or https:// "
+            f"(got {url[:40]!r})"
+        )
+    if len(url) > STORY_URL_MAX_CHARS:
+        raise ToolError(
+            f"story source {index} url is {len(url)} chars; at most "
+            f"{STORY_URL_MAX_CHARS} — a shortened url is a broken citation, so "
+            "cite a shorter link to the same page"
+        )
+    kind = source.get("kind")
+    if kind not in STORY_SOURCE_KINDS:
+        raise ToolError(
+            f"Unknown story source kind {kind!r}. Valid: {list(STORY_SOURCE_KINDS)}"
+        )
+    entry: dict[str, Any] = {"url": url, "kind": kind}
+    title = source.get("title")
+    if title is not None:
+        if not isinstance(title, str):
+            raise ToolError(f"story source {index} title must be a string")
+        if title.strip():
+            entry["title"] = _truncate(title, STORY_TITLE_MAX_CHARS)
+    return entry
+
+
+def _normalize_story(story: dict | None) -> dict[str, Any] | None:
+    """THE STORY: ``{sentences: [{text, sources}], sources: [{url, kind, title?}]}``.
+
+    Structure only, never truth (ADR 0006 decision 5): every sentence must
+    cite at least one source by its 1-based index, and every source must be a
+    real http(s) URL of a known kind. A source no sentence cites is dropped and
+    the indices re-based, so the stored object is dense — sentence citations
+    always name a chip the card can draw. Nothing is derived (the widget reads
+    the domain off the url itself).
+    """
+    if story is None:
+        return None
+    if not isinstance(story, dict):
+        raise ToolError("story must be a {sentences, sources} object")
+    _reject_unknown_keys("story", story, {"sentences", "sources"})
+    sentences = story.get("sentences")
+    sources = story.get("sources")
+    if not isinstance(sentences, list) or not sentences:
+        raise ToolError("story needs a non-empty 'sentences' list of {text, sources}")
+    if not isinstance(sources, list) or not sources:
+        raise ToolError(
+            f"story needs a non-empty 'sources' list of {{url, kind}} — {_STORY_HONESTY_RULE}"
+        )
+    if len(sentences) > STORY_SENTENCES_CAP:
+        raise ToolError(
+            f"story accepts at most {STORY_SENTENCES_CAP} sentences "
+            f"(got {len(sentences)}) — keep the ones you could cite"
+        )
+    if len(sources) > STORY_SOURCES_CAP:
+        raise ToolError(
+            f"story accepts at most {STORY_SOURCES_CAP} sources (got {len(sources)})"
+        )
+    normalized_sources = [
+        _normalize_story_source(index, source)
+        for index, source in enumerate(sources, 1)
+    ]
+
+    cited_sentences: list[tuple[str, list[int]]] = []
+    for position, sentence in enumerate(sentences, 1):
+        if not isinstance(sentence, dict):
+            raise ToolError(
+                f"story sentence {position} must be a {{text, sources}} object"
+            )
+        _reject_unknown_keys("story sentences", sentence, {"text", "sources"})
+        text = sentence.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise ToolError(f"story sentence {position} needs a non-empty 'text'")
+        refs = sentence.get("sources")
+        if not isinstance(refs, list):
+            raise ToolError(
+                f"story sentence {position} 'sources' must be a list of source "
+                f"numbers — {_STORY_HONESTY_RULE}"
+            )
+        cited: list[int] = []
+        for ref in refs:
+            if isinstance(ref, bool) or not isinstance(ref, int):
+                raise ToolError(
+                    f"story sentence {position} cites {ref!r}; source numbers are "
+                    "1-based integers into story.sources"
+                )
+            if not 1 <= ref <= len(normalized_sources):
+                raise ToolError(
+                    f"story sentence {position} cites source {ref}, but only "
+                    f"{len(normalized_sources)} were given — {_STORY_HONESTY_RULE}"
+                )
+            if ref not in cited:
+                cited.append(ref)
+        if not cited:
+            raise ToolError(
+                f"story sentence {position} cites no source — {_STORY_HONESTY_RULE}; "
+                "delete a sentence you cannot cite rather than hedge it"
+            )
+        cited_sentences.append((_truncate(text, STORY_SENTENCE_MAX_CHARS), cited))
+
+    # Dense re-basing: keep the cited sources in their given order, renumbered.
+    used = sorted({ref for _, refs in cited_sentences for ref in refs})
+    renumber = {old: new for new, old in enumerate(used, 1)}
+    return {
+        "sentences": [
+            {"text": text, "sources": [renumber[ref] for ref in refs]}
+            for text, refs in cited_sentences
+        ],
+        "sources": [normalized_sources[old - 1] for old in used],
+    }
+
+
 def _build_presentation(
     elevator_pitch: str | None,
     for_you_if: list | None,
@@ -1283,6 +1436,7 @@ def _build_presentation(
     comparisons: list | None,
     why_care: list | None,
     craft_note: str | None,
+    story: dict | None = None,
 ) -> str | None:
     """The presentation params as ONE JSON column value (NULL when empty).
 
@@ -1313,6 +1467,9 @@ def _build_presentation(
     resolved_why_care = _normalize_why_care(why_care)
     if resolved_why_care:
         presentation["why_care"] = resolved_why_care
+    resolved_story = _normalize_story(story)
+    if resolved_story:
+        presentation["story"] = resolved_story
     return json.dumps(presentation) if presentation else None
 
 
@@ -1384,6 +1541,7 @@ async def _validate_assessment_inputs(
     comparisons: list | None,
     why_care: list | None,
     craft_note: str | None,
+    story: dict | None = None,
 ) -> dict[str, Any]:
     """Validate EVERYTHING before any write (ADR 0004's multi-mode rule).
 
@@ -1467,7 +1625,13 @@ async def _validate_assessment_inputs(
         ),
         "model": _normalize_declared("model", model, MODEL_MAX_CHARS, lowercase=True),
         "presentation": _build_presentation(
-            elevator_pitch, for_you_if, not_for_you_if, comparisons, why_care, craft_note
+            elevator_pitch,
+            for_you_if,
+            not_for_you_if,
+            comparisons,
+            why_care,
+            craft_note,
+            story,
         ),
     }
 
@@ -1874,6 +2038,18 @@ async def _build_package(
     # module's own budget and errors bookkeeping: the package decorates a
     # committed verdict and must degrade, not raise.
     media_context_block = await media_context(media_payload)
+    # The store blurb's own "from the creators of…" sentence, attributed under
+    # FROM THE STUDIO. Attached here, where both halves are in hand: the
+    # pedigree is IGDB's (borrowed onto a Steam result), the blurb is the
+    # Steam media branch's short_description — only a Steam-sourced one, since
+    # an IGDB summary is not the store page the line names.
+    fetched_media = media_context_block["media"] or {}
+    media_context_block["pedigree"] = with_store_claim(
+        media_context_block["pedigree"],
+        fetched_media.get("short_description")
+        if fetched_media.get("source") == "steam"
+        else None,
+    )
 
     # The similar row is the library's own tag similarity, not a provider
     # answer: one DB query, outside the media budget, so a dead IGDB costs the
@@ -1966,6 +2142,10 @@ async def _build_package(
                 # Echoed with the rest of the authored half, so the block keeps
                 # a stable shape: null here means "unauthored", not "absent".
                 "why_care": presentation.get("why_care"),
+                # THE STORY passes through unchanged: it was validated
+                # (structure only) on the way in, and the card derives the
+                # source domains itself.
+                "story": presentation.get("story"),
             }
         ),
         "comparisons": await _package_comparisons(presentation),
@@ -2081,6 +2261,7 @@ async def record_assessment(
     comparisons: list | None = None,
     why_care: list | None = None,
     craft_note: str | None = None,
+    story: dict | None = None,
     *,
     with_package: bool = True,
 ) -> dict:
@@ -2105,7 +2286,9 @@ async def record_assessment(
     content like the provenance columns — capped and truncated, never
     synthesized here. ``why_care`` is the editorial half of the pedigree pair:
     the server fetches the studio and its back catalogue, the model writes the
-    credits and the moment no API holds.
+    credits and the moment no API holds. ``story`` is its long form: 1-4
+    sentences each citing at least one fetched source, validated for structure
+    only (``_normalize_story``).
 
     A misfiled verdict is repaired with ``void_assessment``, a tool of its
     own — hard-deleting a row is not idempotent, and this one is.
@@ -2151,6 +2334,7 @@ async def record_assessment(
         comparisons=comparisons,
         why_care=why_care,
         craft_note=craft_note,
+        story=story,
     )
 
     resolved_id, mode = await _resolve_by_id_or_appid(appid, game_id)

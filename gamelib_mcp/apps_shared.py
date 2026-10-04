@@ -904,6 +904,7 @@ TAG_CSS = r"""  .tags, html.touch .tags { gap: 4px; }
 PEDIGREE_CSS = r"""  .ped-head { display: flex; flex-wrap: wrap; gap: 2px 10px; font-weight: var(--gl-strong); }
   .ped-head > :not(:first-child) { font-weight: var(--gl-regular); color: var(--gl-text-2); }
   .ped-with { margin-top: 2px; font-size: var(--gl-cap); line-height: var(--gl-cap-lh); color: var(--gl-muted); }
+  .ped-claim { margin-top: 2px; font-size: var(--gl-cap); line-height: var(--gl-cap-lh); color: var(--gl-muted); }
   .ped-hd + .strip { margin-top: 8px; }
   /* The timeline strip: this game's place is a 1px hairline the strip's
      height, its year in mono above the line. */
@@ -3232,16 +3233,23 @@ PEDIGREE_JS = (
     return list(ped.developer_names).filter(function (n) { return n && n !== lead; });
   }
   /* The headline as a div of spans (PEDIGREE_CSS gaps them) with the
-     co-developer line under it, or null. */
+     co-developer line under it, then the store blurb's own lineage sentence
+     (store_claim), attributed, never asserted — or null. The claim alone
+     never opens the section: hasStudio does not read it. */
   function pedigreeHead(ped) {
     var parts = pedigreeHeadline(ped);
-    if (!parts.length) return null;
+    var sc = ped.store_claim;
+    var claim = sc && typeof sc === "object" && sc.text ? String(sc.text) : null;
+    if (!parts.length && !claim) return null;
     var box = el("div", "ped-hd");
-    var head = el("div", "ped-head");
-    parts.forEach(function (part) { head.appendChild(el("span", null, part)); });
-    box.appendChild(head);
+    if (parts.length) {
+      var head = el("div", "ped-head");
+      parts.forEach(function (part) { head.appendChild(el("span", null, part)); });
+      box.appendChild(head);
+    }
     var co = coDevelopers(ped);
     if (co.length) box.appendChild(el("div", "ped-with", "with " + co.join(", ")));
+    if (claim) box.appendChild(el("div", "ped-claim", "The store says: \"" + claim + "\""));
     return box;
   }
   /* The studio's releases around this game, oldest to newest: the timeline's

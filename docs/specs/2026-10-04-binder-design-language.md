@@ -133,6 +133,33 @@ page when its match ≥70; `CRITICS' PICK` when Metacritic ≥85 (good tier);
 otherwise none. Minis take the tier of the game's rating (none when
 unrated).
 
+### 1.4 THE STORY (eval card, 2026-10-04 addendum)
+
+`presentation.story` — 1–4 model-authored sentences of creator lore, each
+citing ≥1 of ≤6 `{url, kind}` sources (record_assessment validates structure,
+never truth). `storyNode` in `apps_eval.py` (local: the detail card has no
+story):
+
+- **Placement**: on the ground after the abilities and before the craft-note
+  flavor; fullscreen `order: 6` (abilities 5, `.flavor` 7) with
+  `max-width: 560px`, the `.ev-notes` measure.
+- **Eyebrow** "The story" — the `.section-title` label, like "From the studio".
+- **Paragraph** `p.story-text`: ONE upright `--gl-serif` paragraph (the
+  flavor face without its italic), `--gl-text`, body size, line-height 1.55.
+- **Refs** `span.story-ref` "[1]" / "[1,2]" after each sentence, mono,
+  `--gl-muted`, 12px (`--gl-cap`) — never a `<sup>`, never smaller — joined to
+  the sentence by a narrow no-break space so a ref never wraps away from it;
+  a ref to a missing source is dropped, not thrown on.
+- **Chips** `div.chips.story-sources` of `a.chip.story-src`, one per CITED
+  source in index order, three spans: mono number, domain (hostname without
+  `www.`), kind label (Press / Studio / Store page / Wiki / Social) — no
+  middot. Each opens through `openLink` like the store pill.
+- **Store line** (both widgets, shared `PEDIGREE_JS`): FROM THE STUDIO's
+  header gains a 12px muted `.ped-claim` after `.ped-with` — `The store says:
+  "<text>"` from `pedigree.store_claim` (the Steam blurb's own "from the
+  creators of…" sentence). Attributed marketing, never a people claim; a
+  claim alone never opens the section (`hasStudio` ignores it).
+
 ## 2. Phases and ownership (disjoint files per parallel executor)
 
 ### Phase 1A — foundation (`apps_shared.py`, `tests/test_apps_shared.py`, the `DesignSystemTests`/`SharedComponentTests`/`HitAreaTests`/`SharedCssHygiene` classes in `tests/test_apps.py` and `tests/test_apps_eval.py`, plus the one-line splices in both widgets)

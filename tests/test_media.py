@@ -9,6 +9,7 @@ what the caching tests are about, so they run on the shared temp-DB harness.
 
 import json
 import os
+import unittest
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -1182,3 +1183,75 @@ class MediaCacheTests(ToolDBTestCase):
 
     async def test_nothing_resolvable_returns_none(self):
         self.assertIsNone(await media.get_game_media())
+
+
+class LineageClaimTests(unittest.TestCase):
+    """lineage_claim: the store blurb's own "from the creators of…" sentence.
+
+    The positives are the owner's own Steam blurbs; the negatives are real
+    blurb phrases that share a word with a family but make no lineage claim.
+    """
+
+    POSITIVES = (
+        (
+            "Warhammer 40,000: Darktide is the new co-op focused experience from the "
+            "award-winning team behind the Vermintide series"
+        ),
+        "developed by the makers of Samorost series",
+        "From the makers of the award-winning Imperium Galactica",
+        "by Zachtronics, the creators of SpaceChem and Infiniminer",
+        "From the creators of Mutant Year Zero: Road to Eden comes…",
+        "from the creators of Guacamelee!",
+        "From the creators of Prison Architect",
+        "From the makers of Heavenly Sword",
+        "arrives from the makers of the 2006 and 2008 Games of the Year",
+        "from some of the key creative talent behind 'Donkey Kong Country'",
+        "A studio founded by former Example Interactive leads",
+        "Built by former Blizzard developers",
+        "made by ex-Ubisoft devs",
+        "Made by the studio that brought you Example Quest",
+    )
+    NEGATIVES = (
+        "capture her treasonous sister",
+        "a former soldier returns",
+        "Explore, upgrade your abilities",
+        "Illuminate the unseen",
+    )
+
+    def test_every_owner_blurb_family_matches(self):
+        for blurb in self.POSITIVES:
+            with self.subTest(blurb=blurb):
+                self.assertEqual(media.lineage_claim(blurb), blurb)
+
+    def test_near_misses_do_not_match(self):
+        for blurb in self.NEGATIVES:
+            with self.subTest(blurb=blurb):
+                self.assertIsNone(media.lineage_claim(blurb))
+
+    def test_the_first_matching_sentence_is_returned_whole(self):
+        blurb = (
+            "Cats.\n\nSo many   cats. From the creators of Example Quest comes a "
+            "feline tactics game! From the makers of Another Example."
+        )
+        self.assertEqual(
+            media.lineage_claim(blurb),
+            "From the creators of Example Quest comes a feline tactics game!",
+        )
+
+    def test_matching_is_case_insensitive(self):
+        self.assertEqual(
+            media.lineage_claim("FROM THE CREATORS OF EXAMPLE QUEST"),
+            "FROM THE CREATORS OF EXAMPLE QUEST",
+        )
+
+    def test_a_long_sentence_is_truncated_to_200(self):
+        blurb = "From the creators of Example Quest " + "and more " * 40
+        claim = media.lineage_claim(blurb)
+        assert claim is not None
+        self.assertLessEqual(len(claim), 200)
+        self.assertTrue(claim.endswith("…"))
+
+    def test_nothing_in_nothing_out(self):
+        for value in (None, "", "   "):
+            with self.subTest(value=value):
+                self.assertIsNone(media.lineage_claim(value))

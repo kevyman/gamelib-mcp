@@ -1198,6 +1198,37 @@ class GetGameDetailPedigreeTests(ToolDBTestCase):
         self.assertNotIn("pedigree", result)
         self.assertIn("media", result)
 
+    async def test_the_rows_store_blurb_claim_rides_on_the_pedigree(self):
+        # The detail card reads games.short_description (the Steam store
+        # blurb enrichment stored), not whatever the media source returned.
+        gid = await seed_game(
+            "Claimed Detail",
+            short_description="Veterans of Example Studio return. Build a city.",
+        )
+        with self._media(self._payload(_pedigree_raw([]))):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        self.assertEqual(
+            result["pedigree"]["store_claim"],
+            {"text": "Veterans of Example Studio return.", "source": "steam"},
+        )
+
+    async def test_a_blurb_without_a_claim_adds_no_store_claim(self):
+        gid = await seed_game("Plain Detail", short_description="Illuminate the unseen.")
+        with self._media(self._payload(_pedigree_raw([]))):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        self.assertNotIn("store_claim", result["pedigree"])
+
+    async def test_a_claim_without_a_pedigree_is_not_emitted(self):
+        gid = await seed_game(
+            "Headless Detail", short_description="From the makers of Example Quest."
+        )
+        with self._media(self._payload(None)):
+            result = await detail.get_game_detail(game_id=gid, media=True)
+
+        self.assertNotIn("pedigree", result)
+
     async def test_media_off_by_default_never_carries_pedigree(self):
         gid = await seed_game("Quiet Detail")
         result = await detail.get_game_detail(game_id=gid)

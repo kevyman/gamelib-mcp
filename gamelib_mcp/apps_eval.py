@@ -185,6 +185,30 @@ EVAL_CARD_HTML = (
   .ev-weak, .ev-pitch { margin-top: 6px; }
   .ev-pitch { color: var(--gl-text-2); }
   .ev-abil { display: flex; flex-direction: column; gap: 10px; }
+  /* THE STORY: one upright serif paragraph (the craft note's face, not its
+     italic), a mono ref after each sentence at the 12px floor (never a
+     superscript), then one link chip per cited source. */
+  .ev-story { min-width: 0; }
+  .ev-story > .section-title { margin-bottom: 6px; }
+  .story-text {
+    margin: 0;
+    font-family: var(--gl-serif);
+    font-style: normal;
+    font-size: var(--gl-body);
+    line-height: 1.55;
+    color: var(--gl-text);
+    overflow-wrap: break-word;
+  }
+  .story-ref {
+    font-family: var(--gl-mono);
+    font-size: var(--gl-cap);
+    color: var(--gl-muted);
+    white-space: nowrap;
+  }
+  .story-sources { margin-top: 10px; }
+  .story-src .story-n { font-family: var(--gl-mono); color: var(--gl-muted); }
+  .story-src .story-dom { color: var(--gl-text-2); overflow-wrap: anywhere; }
+  .story-src .story-kind { white-space: nowrap; color: var(--gl-muted); }
   .ev-prov {
     display: flex;
     flex-wrap: wrap;
@@ -277,7 +301,8 @@ EVAL_CARD_HTML = (
   html[data-display-mode="fullscreen"] .ev-flow > .fs-breakdown { order: 3; margin: 10px 0; }
   html[data-display-mode="fullscreen"] .ev-flow > .ev-weak { order: 4; }
   html[data-display-mode="fullscreen"] .ev-flow > .ev-abil { order: 5; }
-  html[data-display-mode="fullscreen"] .ev-flow > .flavor { order: 6; }
+  html[data-display-mode="fullscreen"] .ev-flow > .ev-story { order: 6; max-width: 560px; }
+  html[data-display-mode="fullscreen"] .ev-flow > .flavor { order: 7; }
 
   /* ---- note cards: a horizontal small frame, its ribbon, one caption ---- */
   .ev-notes { max-width: 560px; gap: 10px; }
@@ -708,6 +733,79 @@ EVAL_CARD_HTML = (
     });
     return box;
   }
+  /* An eyebrow section built detached (eyebrowSection appends to its
+     parent): the same label element, so THE STORY reads like "From the
+     studio" and "Grounded in your history". */
+  function eyebrowBlock(cls, text) {
+    var sec = el("section", cls);
+    sec.appendChild(el("div", "section-title", text));
+    return sec;
+  }
+  /* THE STORY: model-authored creator lore, every sentence citing a fetched
+     source (record_assessment validates the structure, never the truth).
+     One serif paragraph; after each sentence a thin no-break space (U+202F,
+     so a ref never wraps away from its sentence) and its mono ref
+     "[1]" / "[1,2]"; then a chip per cited source, in index order, opening
+     through the host like the store pill. A ref to a source that is not
+     there is dropped rather than thrown on. */
+  var STORY_KINDS = { press: "Press", studio: "Studio", store: "Store page", wiki: "Wiki", social: "Social" };
+  function storyDomain(url) {
+    var raw = String(url || "");
+    try {
+      var host = new URL(raw).hostname;
+      if (host) return host.replace(/^www\./, "");
+    } catch (e) { /* not a URL: show the start of it */ }
+    return raw.slice(0, 40);
+  }
+  function storyChip(n, source) {
+    var url = String(source.url || "");
+    var known = Object.prototype.hasOwnProperty.call(STORY_KINDS, source.kind);
+    var kind = known ? STORY_KINDS[source.kind] : humanize(source.kind || "source");
+    var domain = storyDomain(url);
+    var chip = el("a", "chip story-src");
+    chip.href = url;
+    chip.setAttribute("data-link", "");
+    chip.setAttribute("aria-label", "Source " + n + ", " + domain + ", " + kind + ", opens " + domain);
+    if (source.title) chip.title = String(source.title);
+    chip.appendChild(el("span", "story-n", "[" + n + "]"));
+    chip.appendChild(el("span", "story-dom", domain));
+    chip.appendChild(el("span", "story-kind", kind));
+    chip.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      openLink(url);
+    });
+    return chip;
+  }
+  function storyNode(story) {
+    if (!story || typeof story !== "object") return null;
+    var sources = list(story.sources);
+    var sentences = list(story.sentences).filter(function (s) { return s && s.text; });
+    if (!sentences.length || !sources.length) return null;
+    var valid = function (n) { return n === Math.floor(n) && n >= 1 && n <= sources.length && !!sources[n - 1]; };
+    var para = el("p", "story-text");
+    var cited = [];
+    sentences.forEach(function (sentence, i) {
+      if (i) para.appendChild(document.createTextNode(" "));
+      var refs = [];
+      list(sentence.sources).forEach(function (raw) {
+        var n = num(raw);
+        if (n != null && valid(n) && refs.indexOf(n) < 0) refs.push(n);
+      });
+      para.appendChild(document.createTextNode(String(sentence.text) + (refs.length ? "\u202f" : "")));
+      if (refs.length) para.appendChild(el("span", "story-ref", "[" + refs.join(",") + "]"));
+      refs.forEach(function (n) { if (cited.indexOf(n) < 0) cited.push(n); });
+    });
+    var box = eyebrowBlock("ev-story", "The story");
+    box.appendChild(para);
+    cited.sort(function (a, b) { return a - b; });
+    if (cited.length) {
+      var row = el("div", "chips story-sources");
+      cited.forEach(function (n) { row.appendChild(storyChip(n, sources[n - 1])); });
+      box.appendChild(row);
+    }
+    return box;
+  }
   function groundNode(flow, pkg) {
     var pres = pkg.presentation || {};
     if (pkg.summary) flow.appendChild(el("p", "ev-sum", pkg.summary));
@@ -716,6 +814,8 @@ EVAL_CARD_HTML = (
     if (pres.elevator_pitch) flow.appendChild(el("p", "ev-pitch", pres.elevator_pitch));
     var abilities = abilitiesNode(pres);
     if (abilities) flow.appendChild(abilities);
+    var story = storyNode(pres.story);
+    if (story) flow.appendChild(story);
     if (pres.craft_note) flow.appendChild(flavorNode(pres.craft_note));
   }
 

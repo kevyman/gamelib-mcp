@@ -482,6 +482,7 @@ async def get_game_detail(
                     steam_appid=steam_appid,
                     igdb_id=row["igdb_id"],
                     name=row["name"],
+                    short_description=row["short_description"],
                 ),
                 timeout=DETAIL_MEDIA_TIMEOUT_SECONDS,
             )
