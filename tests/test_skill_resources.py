@@ -466,6 +466,31 @@ class GetSkillToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.path, "SKILL.md")
         self.assertEqual(response.version, "3.4.4")
 
+    async def test_story_qualification_pins_the_served_methodology(self) -> None:
+        # game-quality 3.4.4 (#199): a story needs a NAMED person or a making-of
+        # fact; a founding year, a stake, launch dates or sales never qualify.
+        # The served text is what every client follows, so the rule is pinned
+        # on both files it lives in — a later edit that softens it, or lets
+        # recording.md drift from SKILL.md, fails here rather than in a card.
+        from gamelib_mcp import main
+
+        skill = (await main.get_skill(skill="game-quality")).content
+        recording = (
+            await main.get_skill(skill="game-quality", path="recording.md")
+        ).content
+        for text, label in ((skill, "SKILL.md"), (recording, "recording.md")):
+            with self.subTest(file=label):
+                self.assertIn("NAMED person", text)
+                self.assertIn("corporate timeline", text)
+                self.assertIn("No sourced story found", text)
+                # A qualifying founding needs its founders; a bare year does not.
+                self.assertIn("named founders", text)
+                self.assertNotIn("a studio founding or split)", text)
+        # The research is mandatory and the omission is said, not silent.
+        self.assertIn("mandatory since 3.4.1", skill)
+        self.assertIn("never a silent", skill)
+        self.assertIn("mandatory for every candidate", recording)
+
     async def test_wire_call_returns_structured_content(self) -> None:
         from gamelib_mcp import main
 
