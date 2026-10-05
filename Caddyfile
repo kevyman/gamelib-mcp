@@ -1,4 +1,6 @@
-gamelibmcp.johnwilkos.com {
+# The site address comes from MCP_DOMAIN in .env (docker-compose.yml passes it
+# through and refuses to start Caddy when it is unset).
+{$MCP_DOMAIN} {
     redir /stacks /stacks/ 308
     handle_path /stacks/* {
         root * /srv/stacks
@@ -11,6 +13,6 @@ gamelibmcp.johnwilkos.com {
 }
 
 # Add future MCPs here, e.g.:
-# notes.johnwilkos.com {
+# notes.example.com {
 #     reverse_proxy notes-mcp:8001
 # }

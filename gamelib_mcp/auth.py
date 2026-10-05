@@ -91,6 +91,10 @@ class OAuthSecurityConfig:
     github_client_secret: str = field(repr=False)
     oauth_jwt_signing_key: str = field(repr=False)
     github_user_ids: frozenset[str]
+    # Lower-cased GitHub logins (MCP_OAUTH_GITHUB_LOGINS). Logins can be
+    # renamed and re-registered, so numeric IDs are the safer allowlist; the
+    # login form exists for first-run convenience.
+    github_logins: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -130,12 +134,16 @@ class SecurityConfig:
         if self.oauth is None:
             raise RuntimeError("Owner authorization requires OAuth mode")
         allowed_user_ids = self.oauth.github_user_ids
+        allowed_logins = self.oauth.github_logins
 
         def is_configured_owner(context: AuthContext) -> bool:
             if context.token is None:
                 return False
             subject = str(context.token.claims.get("sub", ""))
-            return subject in allowed_user_ids
+            if subject in allowed_user_ids:
+                return True
+            login = str(context.token.claims.get("login") or "").lower()
+            return bool(login) and login in allowed_logins
 
         return is_configured_owner
 
@@ -162,8 +170,11 @@ def _public_base_url(value: str) -> tuple[str, str]:
     return normalized, f"{parsed.scheme}://{parsed.netloc}"
 
 
+_GITHUB_LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$")
+
+
 def _github_user_ids(environ: Mapping[str, str]) -> frozenset[str]:
-    raw = _required(environ, "MCP_OAUTH_GITHUB_USER_IDS")
+    raw = environ.get("MCP_OAUTH_GITHUB_USER_IDS", "")
     user_ids = {value.strip() for value in raw.split(",") if value.strip()}
     for user_id in user_ids:
         if not user_id.isdecimal() or int(user_id) <= 0:
@@ -171,6 +182,28 @@ def _github_user_ids(environ: Mapping[str, str]) -> frozenset[str]:
                 "MCP_OAUTH_GITHUB_USER_IDS must be a comma-separated list of positive numeric GitHub IDs"
             )
     return frozenset(user_ids)
+
+
+def _github_logins(environ: Mapping[str, str]) -> frozenset[str]:
+    raw = environ.get("MCP_OAUTH_GITHUB_LOGINS", "")
+    logins = {value.strip().lower() for value in raw.split(",") if value.strip()}
+    for login in logins:
+        if not _GITHUB_LOGIN_RE.match(login):
+            raise RuntimeError(
+                "MCP_OAUTH_GITHUB_LOGINS must be a comma-separated list of GitHub usernames"
+            )
+    return frozenset(logins)
+
+
+def _github_allowlist(environ: Mapping[str, str]) -> tuple[frozenset[str], frozenset[str]]:
+    user_ids = _github_user_ids(environ)
+    logins = _github_logins(environ)
+    if not user_ids and not logins:
+        raise RuntimeError(
+            "Set MCP_OAUTH_GITHUB_USER_IDS (numeric ids) and/or MCP_OAUTH_GITHUB_LOGINS "
+            "(usernames): at least one GitHub account must be allowed to use the tools"
+        )
+    return user_ids, logins
 
 
 def load_security_config(environ: Mapping[str, str] | None = None) -> SecurityConfig:
@@ -203,6 +236,7 @@ def load_security_config(environ: Mapping[str, str] | None = None) -> SecurityCo
     allowed_origins.add(public_origin)
 
     _required(values, "FASTMCP_HOME")
+    github_user_ids, github_logins = _github_allowlist(values)
 
     return SecurityConfig(
         auth_mode="oauth",
@@ -213,6 +247,7 @@ def load_security_config(environ: Mapping[str, str] | None = None) -> SecurityCo
             github_client_id=_required(values, "GITHUB_OAUTH_CLIENT_ID"),
             github_client_secret=_required(values, "GITHUB_OAUTH_CLIENT_SECRET"),
             oauth_jwt_signing_key=_secret(values, "MCP_OAUTH_JWT_SIGNING_KEY"),
-            github_user_ids=_github_user_ids(values),
+            github_user_ids=github_user_ids,
+            github_logins=github_logins,
         ),
     )

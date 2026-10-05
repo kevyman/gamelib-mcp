@@ -705,7 +705,7 @@ SAMPLE_WOLVERINE: dict[str, Any] = {
         },
         "verdict": "wishlist_for_sale",
         "summary": (
-            "Right studio and genre for John, but a 79-OpenCritic, repetitive-combat game "
+            "Right studio and genre for you, but a 79-OpenCritic, repetitive-combat game "
             "isn't worth €70 with Slay the Spire 2 active and Guardians unplayed — wait "
             "for ~€40."
         ),
