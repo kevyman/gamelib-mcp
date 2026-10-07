@@ -447,6 +447,28 @@ class SyncErrorRedactionTests(ToolDBTestCase):
         self.assertNotIn(SECRET_KEY, json.dumps(status))
         self.assertIn("key=***", status["platforms"]["steam"]["error"])
 
+    async def test_health_payload_redacts_a_legacy_library_sync_error(self):
+        from gamelib_mcp import http_admin
+
+        await set_meta_many({"library_sync_error": self._KEYED_SUMMARY})
+        payload = await http_admin._health_payload()
+        self.assertNotIn(SECRET_KEY, json.dumps(payload))
+        self.assertIn("key=***", payload["checks"]["library_sync"]["error"])
+
+    async def test_integration_status_payload_redacts_a_legacy_summary(self):
+        from gamelib_mcp import http_admin
+
+        await set_meta_many(
+            {
+                "integration_sync_steam_last_error_summary": self._KEYED_SUMMARY,
+                "integration_sync_steam_last_error_classification": "auth_stale",
+                "integration_sync_steam_last_attempt_at": "2026-10-07T00:00:00+00:00",
+            }
+        )
+        payload = await http_admin._integration_status_payload(force_refresh=True)
+        self.assertNotIn(SECRET_KEY, json.dumps(payload, default=str))
+        self.assertIn("key=***", json.dumps(payload, default=str))
+
 
 class RunLibrarySyncStateTests(ToolDBTestCase):
     async def test_writes_done_state_for_successful_platform(self):
