@@ -43,7 +43,7 @@ Copy `.env.example` → `.env` for production (OAuth required) or `.env.local.ex
 
 - `STEAM_API_KEY`, `STEAM_ID` — required.
 - `DATABASE_URL` — leave unset for normal dev (defaults to `data/gamelib.db`). If `./gamelib.db` exists in the repo root, it is stale — delete it.
-- Production OAuth: `MCP_PUBLIC_BASE_URL`, `GITHUB_OAUTH_CLIENT_ID`/`_SECRET`, `MCP_OAUTH_JWT_SIGNING_KEY`, `MCP_OAUTH_GITHUB_USER_IDS` (numeric ids) and/or `MCP_OAUTH_GITHUB_LOGINS` (usernames; ids are safer) — at least one, comma-separated — `FASTMCP_HOME`.
+- Production OAuth: `MCP_PUBLIC_BASE_URL`, `GITHUB_OAUTH_CLIENT_ID`/`_SECRET`, `MCP_OAUTH_JWT_SIGNING_KEY`, `MCP_OAUTH_GITHUB_USER_IDS` (comma-separated), `FASTMCP_HOME`.
 - `MCP_ADMIN_AUTH_TOKEN` — independent header-only bearer token gating `/admin/*`.
 - `MCP_DUPLICATE_TEXT_CONTENT` — `1` restores the MCP spec's duplicate serialized-JSON text block on every tool result; off by default because both registered clients read `structuredContent` (halves response bytes). See `response_encoding.py`.
 - `MCP_ALLOWED_ORIGINS` — browser origins allowed on the HTTP surface; requests with no `Origin` (native/CLI clients) still pass. oauth mode auto-allowlists `MCP_PUBLIC_BASE_URL`'s origin; local `disabled` mode must list `http://localhost:8000`.

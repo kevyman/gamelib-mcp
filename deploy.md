@@ -96,7 +96,6 @@ GITHUB_OAUTH_CLIENT_ID=<from the GitHub OAuth App>
 GITHUB_OAUTH_CLIENT_SECRET=<from the GitHub OAuth App>
 MCP_OAUTH_JWT_SIGNING_KEY=<generate with: openssl rand -hex 32>
 MCP_OAUTH_GITHUB_USER_IDS=<your numeric GitHub user id>   # comma-separated to authorize more than one GitHub user
-MCP_OAUTH_GITHUB_LOGINS=                                  # or usernames; ids are safer (a username can be re-registered)
 MCP_ADMIN_AUTH_TOKEN=<generate separately with: openssl rand -hex 32>
 FASTMCP_HOME=/data/fastmcp
 MCP_ALLOWED_ORIGINS=https://claude.ai,https://chatgpt.com

@@ -11,8 +11,6 @@ All notable changes to gamelib-mcp. The format follows
 First tagged release. Everything before this shipped straight from `main`.
 
 ### Added
-- `MCP_OAUTH_GITHUB_LOGINS`: allowlist GitHub accounts by username as well as
-  by numeric id.
 - `SECURITY.md` and this changelog.
 
 ### Upgrading an existing deployment

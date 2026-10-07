@@ -149,14 +149,21 @@ def test_owner_authorization_accepts_only_configured_github_user_ids():
     assert check(AuthContext(token=None, component=Mock())) is False
 
 
-def test_owner_authorization_accepts_allowlisted_github_logins():
+def test_owner_authorization_never_trusts_the_login_claim():
+    """A GitHub login is not an identity: it can be renamed and re-registered.
+
+    An owner who renames their account frees the old username for anyone to
+    claim; that account signs in with a different ``sub`` and the same
+    ``login``. Authorization must therefore key on the immutable numeric id
+    alone, whatever username-shaped configuration is present (Codex P0 on
+    PR #202, which had added a ``MCP_OAUTH_GITHUB_LOGINS`` allowlist).
+    """
     environ = _oauth_environment()
-    del environ["MCP_OAUTH_GITHUB_USER_IDS"]
-    environ["MCP_OAUTH_GITHUB_LOGINS"] = "Octocat, other-user"
+    environ["MCP_OAUTH_GITHUB_LOGINS"] = "octocat"
     config = load_security_config(environ)
     check = config.owner_authorization_check()
 
-    def _token(sub: str, login: str | None) -> AccessToken:
+    def _token(sub: str, login: str) -> AccessToken:
         return AccessToken(
             token=f"{sub}-token",
             client_id="client",
@@ -164,23 +171,18 @@ def test_owner_authorization_accepts_allowlisted_github_logins():
             claims={"sub": sub, "login": login},
         )
 
-    # Logins compare case-insensitively (GitHub treats them that way).
-    assert check(AuthContext(token=_token("1", "octocat"), component=Mock())) is True
-    assert check(AuthContext(token=_token("2", "OTHER-USER"), component=Mock())) is True
-    assert check(AuthContext(token=_token("3", "stranger"), component=Mock())) is False
-    assert check(AuthContext(token=_token("4", None), component=Mock())) is False
+    # The re-registered username: right login, someone else's id.
+    assert check(AuthContext(token=_token("999", "octocat"), component=Mock())) is False
+    # The owner after a rename: new login, same id.
+    assert check(AuthContext(token=_token("424242", "renamed"), component=Mock())) is True
 
 
-def test_github_allowlist_rejects_malformed_logins_and_requires_one_form():
+def test_a_username_allowlist_alone_does_not_configure_oauth():
     environ = _oauth_environment()
-    environ["MCP_OAUTH_GITHUB_LOGINS"] = "not a login"
-    with pytest.raises(RuntimeError, match="MCP_OAUTH_GITHUB_LOGINS"):
-        load_security_config(environ)
+    del environ["MCP_OAUTH_GITHUB_USER_IDS"]
+    environ["MCP_OAUTH_GITHUB_LOGINS"] = "octocat"
 
-    environ = _oauth_environment()
-    environ["MCP_OAUTH_GITHUB_USER_IDS"] = ""
-    environ["MCP_OAUTH_GITHUB_LOGINS"] = " , "
-    with pytest.raises(RuntimeError, match="at least one GitHub account"):
+    with pytest.raises(RuntimeError, match="MCP_OAUTH_GITHUB_USER_IDS"):
         load_security_config(environ)
 
 

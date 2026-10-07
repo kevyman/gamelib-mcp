@@ -32,8 +32,9 @@ Only the latest tagged release and `main` receive fixes.
 ## What the deployment relies on
 
 - `MCP_AUTH_MODE` must be explicit; the server fails closed otherwise.
-- Tools are restricted to the GitHub accounts in `MCP_OAUTH_GITHUB_USER_IDS`
-  / `MCP_OAUTH_GITHUB_LOGINS`. Numeric IDs are the safer form.
+- Tools are restricted to the GitHub accounts in `MCP_OAUTH_GITHUB_USER_IDS`,
+  matched on the numeric id: a username can be renamed and re-registered by
+  someone else, so it is never an authorization key.
 - `/admin/*` needs its own bearer token (`MCP_ADMIN_AUTH_TOKEN`).
 - Session files are written owner-only and never echoed back through MCP.
 - CI audits the locked dependencies with `pip-audit` on every pull request

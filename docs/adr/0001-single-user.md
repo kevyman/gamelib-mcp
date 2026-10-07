@@ -5,7 +5,7 @@ Status: accepted (2026-07-02)
 ## Context
 - Every identity input is process-level: STEAM_ID, PSN/Nintendo/Epic session
   material, DEKUDEALS_WISHLIST_URL are env vars or mounted files owned by one
-  person. MCP_OAUTH_GITHUB_USER_IDS / MCP_OAUTH_GITHUB_LOGINS may list several GitHub accounts, but they
+  person. MCP_OAUTH_GITHUB_USER_IDS may list several GitHub accounts, but they
   authorize access to the *same* library (household semantics), not per-user data.
 - Every table assumes one owner: ratings, tag_affinity, game_wishlist,
   nintendo_play_summary, and meta (hardware_preference, sync timestamps) have
