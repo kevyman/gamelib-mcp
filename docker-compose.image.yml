@@ -1,0 +1,8 @@
+# Override: run the published image instead of building from the checkout.
+#   docker compose -f docker-compose.yml -f docker-compose.image.yml --profile prod pull app
+#   docker compose -f docker-compose.yml -f docker-compose.image.yml --profile prod up -d --no-build
+# Pin GAMELIB_IMAGE_TAG in .env (e.g. 1.0.1) for production; `latest` follows the
+# most recently published tag, which can be a hotfix of an older line.
+services:
+  app:
+    image: ghcr.io/kevyman/gamelib-mcp:${GAMELIB_IMAGE_TAG:-latest}

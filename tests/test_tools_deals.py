@@ -308,6 +308,44 @@ class GetWishlistDealsTests(ToolDBTestCase):
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["deals"][0]["price"], 14.99)
 
+    async def test_fetcher_http_error_never_exposes_the_itad_key(self):
+        # The ITAD key travels as ?key=... ; httpx's HTTPStatusError message
+        # quotes the full request URL, so the error text that is logged and
+        # returned must go through describe_failure, which strips the query.
+        import httpx
+
+        game_id = await seed_game("Stale Game")
+        await _seed_wishlist(game_id, "steam", store_identifier="42")
+        await _seed_price(
+            game_id, "steam", "steam", 14.99, fetched_at="2020-01-01T00:00:00+00:00"
+        )
+        request = httpx.Request(
+            "GET", "https://api.isthereanydeal.com/games/prices/v3?key=ITADSECRET&country=US"
+        )
+        error = httpx.HTTPStatusError(
+            "Client error '401 Unauthorized' for url "
+            "'https://api.isthereanydeal.com/games/prices/v3?key=ITADSECRET&country=US'",
+            request=request,
+            response=httpx.Response(401, request=request),
+        )
+
+        with patch(
+            "gamelib_mcp.tools.deals.fetch_steam_prices", AsyncMock(side_effect=error)
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_wishlist_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.fetch_search_prices", AsyncMock()
+        ), patch(
+            "gamelib_mcp.tools.deals.is_itad_configured", return_value=True
+        ), self.assertLogs("gamelib_mcp.tools.deals", level="WARNING") as logs:
+            result = await deals.get_wishlist_deals()
+
+        errors = result["price_refresh_errors"]
+        self.assertTrue(errors)
+        self.assertNotIn("ITADSECRET", json.dumps(result))
+        self.assertIn("401 Unauthorized", errors[0])
+        self.assertNotIn("ITADSECRET", "\n".join(logs.output))
+
     async def test_refresh_prunes_stale_cheaper_shop_from_previous_winner(self):
         # End-to-end regression for the game_prices staleness bug: a GOG sale
         # two weeks ago cached (steam, GOG, 5.00) as the winner. Today's ITAD

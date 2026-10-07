@@ -137,7 +137,7 @@ async def run_library_sync(
                 # time) now rather than after the whole run, so a poll between
                 # platforms never pairs a fresh state with a stale error.
                 await record_platform_sync_outcome(name, payload, finished_at)
-                logger.info("Failed %s refresh: %s", result_name, redact_secrets(failure))
+                logger.info("Failed %s refresh: %s", result_name, failure)
             else:
                 # A platform that reports its own failure text (instead of
                 # raising) can embed a request URL; the caller's copy must be

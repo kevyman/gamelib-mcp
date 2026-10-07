@@ -9,9 +9,9 @@ on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write   # create the GitHub Release
-  packages: write   # push to ghcr.io
+# Least privilege per job (Scorecard: Token-Permissions): the build job can
+# only push packages, the release job can only write repository contents.
+permissions: {}
 
 concurrency:
   group: release-${{ github.ref }}
@@ -22,10 +22,18 @@ jobs:
     name: Build and publish image
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
     steps:
       # Pinned to full commit SHAs like the other workflows; Dependabot's
       # github-actions entry keeps them current.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The arm64 leg runs the Dockerfile's RUN steps under emulation; without
+      # binfmt handlers Buildx fails with "exec format error".
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -42,6 +50,9 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository }}
+          # `latest` follows the most recently pushed tag, so a hotfix on an
+          # older line moves it backwards; production pins a version via
+          # GAMELIB_IMAGE_TAG (docker-compose.image.yml) rather than tracking it.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -63,6 +74,8 @@ jobs:
     needs: image
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: write
     steps:
       - name: Create the release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3

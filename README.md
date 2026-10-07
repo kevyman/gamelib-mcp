@@ -137,8 +137,11 @@ See [LOCAL_DOCKER.md](LOCAL_DOCKER.md) for the full local walkthrough.
 Production (with Caddy reverse proxy), from source or from the published image:
 
 ```bash
-docker compose --profile prod build && docker compose --profile prod up -d          # from this checkout
-docker compose --profile prod pull app && docker compose --profile prod up -d --no-build   # published image
+docker compose --profile prod build && docker compose --profile prod up -d   # from this checkout
+
+# or the published image (pin GAMELIB_IMAGE_TAG in .env; `latest` is simply the most recently published tag)
+docker compose -f docker-compose.yml -f docker-compose.image.yml --profile prod pull app
+docker compose -f docker-compose.yml -f docker-compose.image.yml --profile prod up -d --no-build
 docker compose --profile prod logs -f app
 ```
 

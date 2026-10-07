@@ -24,7 +24,8 @@ All notable changes to gamelib-mcp. The format follows
 - A release workflow: pushing a `v*` tag publishes
   `ghcr.io/kevyman/gamelib-mcp` (amd64 and arm64, tagged with the version and
   `latest`) and opens a GitHub Release. README documents running the image
-  without a clone, and `docker-compose.yml` names it beside the local build.
+  without a clone, and the `docker-compose.image.yml` override runs it in
+  place of the local build.
 - README: the Claude Code one-liner for connecting to a local server.
 
 ## [1.0.0] — 2026-10-05
