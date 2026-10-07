@@ -82,11 +82,10 @@ All configuration is via environment variables. Production starts from [.env.exa
 | `STEAM_API_KEY` | yes | From [steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey) |
 | `STEAM_ID` | yes | Your 64-bit Steam ID |
 | `MCP_AUTH_MODE` | yes | `oauth` in production; `disabled` only for localhost development |
-| `MCP_PUBLIC_BASE_URL` | OAuth | Public HTTPS origin used for OAuth discovery, callbacks, and token audience |
+| `MCP_PUBLIC_BASE_URL` | OAuth | Public HTTPS origin used for OAuth discovery, callbacks, and token audience; the Docker Caddy service serves it as its site address |
 | `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` | OAuth | Credentials for the GitHub OAuth App |
 | `MCP_OAUTH_JWT_SIGNING_KEY` | OAuth | Independent secret used to sign FastMCP access tokens |
 | `MCP_OAUTH_GITHUB_USER_IDS` | OAuth | Comma-separated GitHub numeric user ID(s) allowed to use tools (`https://api.github.com/users/<login>` shows the `id`) |
-| `MCP_DOMAIN` | Docker prod | Bare public hostname Caddy serves (same host as `MCP_PUBLIC_BASE_URL`) |
 | `MCP_ADMIN_AUTH_TOKEN` | yes | Independent header-only token for `/admin/*` |
 | `FASTMCP_HOME` | OAuth | Persistent encrypted OAuth state directory; `/data/fastmcp` in Docker |
 | `MCP_ALLOWED_ORIGINS` | recommended | Comma-separated browser origins allowed to call MCP |

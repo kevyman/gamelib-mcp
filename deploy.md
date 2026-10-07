@@ -22,8 +22,9 @@ These are the primary operator entrypoints for a Docker deploy. They show:
 
 ### Prerequisites
 
-- A Linux VPS you can SSH into, with Docker installed (step 1 below). A small
-  box (2 vCPU, 4 GB RAM) is plenty.
+- A Linux VPS you can SSH into, with Docker installed (step 1 below) and the
+  `sqlite3` command-line tool (`apt-get install -y sqlite3`; the deploy's schema
+  gate and the backup cron use it). A small box (2 vCPU, 4 GB RAM) is plenty.
 - A domain you control, with a DNS record you can point at the server.
 - A GitHub OAuth App (step 3 below) and the numeric GitHub user ID(s) allowed
   to use the tools.
@@ -90,7 +91,6 @@ DATABASE_URL=file:/data/gamelib.db
 STEAM_API_KEY=your-key-from-steamcommunity.com/dev/apikey
 STEAM_ID=your-64bit-steamid
 MCP_AUTH_MODE=oauth
-MCP_DOMAIN=gamelib.example.com                     # bare host, no scheme: Caddy's site address
 MCP_PUBLIC_BASE_URL=https://gamelib.example.com
 GITHUB_OAUTH_CLIENT_ID=<from the GitHub OAuth App>
 GITHUB_OAUTH_CLIENT_SECRET=<from the GitHub OAuth App>
@@ -105,9 +105,9 @@ STEAM_PROFILE_ID=your-steam-community-profile-id   # your steamcommunity.com/id/
 BACKLOGGD_USER=your-backloggd-username             # your backloggd.com/u/<this part>
 ```
 
-`MCP_DOMAIN` and `MCP_PUBLIC_BASE_URL` name the same host: the first is the
-bare hostname Caddy serves (and gets a certificate for), the second the full
-`https://` origin the app advertises in its OAuth metadata.
+`MCP_PUBLIC_BASE_URL` does double duty: the app advertises it in its OAuth
+metadata, and Caddy serves it as its site address (and gets the certificate for
+its host), so the two cannot drift apart.
 
 Generate the JWT signing key and admin token independently. Never commit either
 secret. `MCP_ALLOWED_ORIGINS` remains limited to trusted clients; the server's
@@ -127,10 +127,10 @@ Point your subdomain to the server IP. Caddy handles TLS automatically.
 
 #### 6. Caddyfile: no edit needed
 
-The committed `Caddyfile` uses `{$MCP_DOMAIN}` as its site address, and the
-`caddy` service in `docker-compose.yml` passes `MCP_DOMAIN` through from
-`.env`. Compose refuses to start if `MCP_DOMAIN` is unset, so a missing value
-fails loudly instead of serving the wrong host.
+The committed `Caddyfile` uses `{$MCP_PUBLIC_BASE_URL}` as its site address,
+and the `caddy` service in `docker-compose.yml` passes that value through from
+`.env`. The app refuses to start without it in `oauth` mode, so a missing value
+is caught by the deploy's health gate rather than by Caddy serving nothing.
 
 #### 7. Deploy
 
@@ -158,10 +158,13 @@ Use that output or `/admin/integrations/ui` as the first readiness check:
 
 ### Upgrading a pre-1.0 deployment
 
-Two settings became configurable in 1.0.0 and the deploy fails without them:
-`MCP_DOMAIN` must be in the server's `.env` (Caddy's site address), and if the
-clone is not at `~/gamelib-mcp` the `DEPLOY_PATH` secret must hold its absolute
-path. Set both before merging or pulling 1.0.0.
+The deploy workflow's clone path became configurable in 1.0.0: if the clone on
+the server is not at `~/gamelib-mcp`, add a `DEPLOY_PATH` repository secret with
+its absolute path BEFORE merging or pulling 1.0.0. Without it the workflow stops
+at its first step with an error naming the missing directory; nothing is
+deployed and nothing is rolled back, because nothing changed. The schema gate
+also needs `sqlite3` on the host (it always did; the workflow now checks and
+says so instead of silently skipping the gate).
 
 ### Redeploying after code changes
 
@@ -300,7 +303,7 @@ Then delete the local `deploy_key`/`deploy_key.pub` files.
 The deploy does `git reset --hard origin/main`, so the server tracks `main`
 exactly. **Never hand-edit tracked files on the box** (including `Caddyfile`
 and `docker-compose.yml`): the next deploy resets them. Per-deployment values
-belong in `.env` (the domain reaches Caddy through `MCP_DOMAIN`), and
+belong in `.env` (the domain reaches Caddy through `MCP_PUBLIC_BASE_URL`), and
 untracked, gitignored files (`.env`, `data/`, the Legendary/lgogdownloader
 mounts) are never touched, so they are safe.
 

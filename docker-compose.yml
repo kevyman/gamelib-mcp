@@ -36,11 +36,11 @@ services:
     profiles:
       - prod
     restart: always
-    # The Caddyfile's site address is {$MCP_DOMAIN}; compose refuses to start
-    # the service when .env does not set it, so a missing value fails the
-    # deploy instead of serving nothing.
+    # The Caddyfile's site address is {$MCP_PUBLIC_BASE_URL}, the same origin
+    # the app's OAuth config requires (auth.py fails closed without it, and the
+    # deploy's health gate catches that), so one .env value drives both.
     environment:
-      MCP_DOMAIN: ${MCP_DOMAIN:?set MCP_DOMAIN (the bare public hostname) in .env}
+      MCP_PUBLIC_BASE_URL: ${MCP_PUBLIC_BASE_URL:-}
     ports:
       - "80:80"
       - "443:443"

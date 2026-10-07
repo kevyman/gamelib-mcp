@@ -71,10 +71,29 @@ jobs:
           script: |
             set -euo pipefail
             deploy_path="${DEPLOY_PATH:-$HOME/gamelib-mcp}"
+            if [ ! -d "$deploy_path" ]; then
+              echo "::error::DEPLOY_PATH ${deploy_path} does not exist on the host (set the DEPLOY_PATH secret to the clone's absolute path)"
+              exit 1
+            fi
             cd "$deploy_path"
-            previous="$(git rev-parse HEAD)"
             db="$deploy_path/data/library/gamelib.db"
-            schema_before="$(sqlite3 "$db" 'PRAGMA user_version' 2>/dev/null || echo unknown)"
+            # Without sqlite3 both schema reads below come back "unknown", the
+            # rollback check compares unknown to unknown and silently passes:
+            # refuse to deploy rather than run without the gate. A host with
+            # no database yet needs no reads (first deploy, handled below).
+            if [ -f "$db" ] && ! command -v sqlite3 >/dev/null 2>&1; then
+              echo "::error::sqlite3 is required on the host for the schema gate (apt-get install -y sqlite3)"
+              exit 1
+            fi
+            previous="$(git rev-parse HEAD)"
+            # A first deploy on a fresh host starts with no database; reading
+            # one here would only create an empty file.
+            db_existed=0
+            schema_before=unknown
+            if [ -f "$db" ]; then
+              db_existed=1
+              schema_before="$(sqlite3 "$db" 'PRAGMA user_version' 2>/dev/null || echo unknown)"
+            fi
             # Keep .git/config pointing at the canonical, credential-free URL
             # (the clone predates the repository's rename), and fetch through
             # a one-off URL that carries the token: it never lands on disk,
@@ -89,21 +108,31 @@ jobs:
             # Server-local secrets live in .env (gitignored) and survive this.
             git reset --hard origin/main
             target="$(git rev-parse --short HEAD)"
-            # Both rollback paths below call this before resetting the
-            # checkout. Two signals that the new build touched the schema: the
-            # version stamp moved, or the app's ".migrating" marker exists
-            # (written after the pre-migration snapshot, removed after the
-            # final stamp — so an interruption mid-step, which leaves the stamp
-            # unchanged, is still visible). Old code must not start against
-            # either: it refuses a newer stamp outright, and would run on a
-            # schema between versions. Restore the app's own snapshot first;
-            # return 1 when that cannot be done, and the caller then leaves the
-            # new build in place (crash-looping is visible; a silently wrong
-            # schema is not). Every step is checked by hand because errexit is
-            # off inside a function called from a condition.
+            # Both rollback paths below stop the app and then call this before
+            # resetting the checkout. Two signals that the new build touched
+            # the schema: the version stamp moved, or the app's ".migrating"
+            # marker exists (written after the pre-migration snapshot, removed
+            # after the final stamp — so an interruption mid-step, which leaves
+            # the stamp unchanged, is still visible). Old code must not start
+            # against either: it refuses a newer stamp outright, and would run
+            # on a schema between versions. Restore the app's own snapshot
+            # first; return 1 when that cannot be done, and the caller then
+            # leaves the new build in place (crash-looping is visible; a
+            # silently wrong schema is not). When no database existed before
+            # this deploy there is nothing to restore (the app snapshots no
+            # fresh database): whatever the new build created is removed, so
+            # the old build starts clean. Every step is checked by hand because
+            # errexit is off inside a function called from a condition.
             restore_snapshot_if_migrated() {
-              schema_after="$(sqlite3 "$db" 'PRAGMA user_version' 2>/dev/null || echo unknown)"
               marker="${db}.migrating"
+              if [ "$db_existed" != "1" ]; then
+                if [ -e "$db" ] || [ -e "${db}-wal" ] || [ -e "${db}-shm" ] || [ -f "$marker" ]; then
+                  echo "no database existed before this deploy; removing the one ${target} created before rolling back"
+                  rm -f "$db" "${db}-wal" "${db}-shm" "$marker" || return 1
+                fi
+                return 0
+              fi
+              schema_after="$(sqlite3 "$db" 'PRAGMA user_version' 2>/dev/null || echo unknown)"
               if [ "$schema_before" = "$schema_after" ] && [ ! -f "$marker" ]; then
                 return 0
               fi
@@ -117,10 +146,19 @@ jobs:
               cp -f "$snapshot" "$db" || return 1
               rm -f "${db}-wal" "${db}-shm" "$marker" || return 1
             }
-            # A compose failure here (an unset required variable, a build error)
-            # happens before the health gate below, so roll the checkout back
-            # too; otherwise "previous" on the next run would be this broken commit.
-            if ! docker compose --profile prod up -d --build; then
+            # Build before touching any container: a pure image-build failure
+            # (or a compose file that does not parse) leaves the running
+            # containers and the previous image exactly as they were, so the
+            # only thing to undo is the checkout; otherwise "previous" on the
+            # next run would be this broken commit.
+            if ! docker compose --profile prod build; then
+              echo "::error::${target}: docker compose build failed; rolling the checkout back to ${previous} (no container was touched)"
+              git reset --hard "$previous"
+              exit 1
+            fi
+            # A compose failure here happens before the health gate below, so
+            # roll the checkout back too.
+            if ! docker compose --profile prod up -d; then
               echo "::error::${target}: docker compose up failed; rolling back to ${previous}"
               # A nonzero exit does not prove nothing started: compose can start
               # the app, which migrates on startup, and then fail on another
@@ -155,7 +193,14 @@ jobs:
             if [ "$healthy" != "1" ]; then
               echo "::error::${target} never answered /health"
               docker compose --profile prod logs --tail=100 app || true
-              restore_snapshot_if_migrated || exit 1
+              # A crash-looping container restarts (and can migrate) at any
+              # moment: stop it before the schema state is read, as above.
+              docker compose --profile prod stop app || true
+              if ! restore_snapshot_if_migrated; then
+                # Leave the new build crash-looping where it can be seen.
+                docker compose --profile prod start app || true
+                exit 1
+              fi
               echo "rolling back to ${previous}"
               git reset --hard "$previous"
               docker compose --profile prod up -d --build
