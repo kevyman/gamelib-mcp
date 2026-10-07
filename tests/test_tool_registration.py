@@ -5,8 +5,13 @@ that changes a tool name, drops a parameter, or alters required-ness will fail
 here. Description assertions stay limited to known regressions.
 """
 
+import asyncio
+import contextlib
 import json
 import unittest
+from unittest.mock import patch
+
+from conftest import DEADLOCK_TIMEOUT, make_client
 
 from gamelib_mcp import main
 from gamelib_mcp.data.purchases import PURCHASE_SOURCES
@@ -188,78 +193,78 @@ EXPECTED_TOOLS = {
 }
 
 EXPECTED_ANNOTATIONS = {
-    "search_games": {"readOnlyHint": True, "idempotentHint": True},
-    "get_library_stats": {"readOnlyHint": True, "idempotentHint": True},
-    "get_game_detail": {"readOnlyHint": True, "idempotentHint": True},
-    "discover_games": {"readOnlyHint": True, "idempotentHint": True},
-    "get_ratings": {"readOnlyHint": True, "idempotentHint": True},
-    "get_stats": {"readOnlyHint": True, "idempotentHint": True},
-    "get_play_history": {"readOnlyHint": True, "idempotentHint": True},
+    "search_games": {"read_only_hint": True, "idempotent_hint": True},
+    "get_library_stats": {"read_only_hint": True, "idempotent_hint": True},
+    "get_game_detail": {"read_only_hint": True, "idempotent_hint": True},
+    "discover_games": {"read_only_hint": True, "idempotent_hint": True},
+    "get_ratings": {"read_only_hint": True, "idempotent_hint": True},
+    "get_stats": {"read_only_hint": True, "idempotent_hint": True},
+    "get_play_history": {"read_only_hint": True, "idempotent_hint": True},
     # Pure DB read — craft/fit inputs the caller can't compute locally come in
     # as parameters (web-searched review counts), never fetched here.
-    "get_assessment_context": {"readOnlyHint": True, "idempotentHint": True},
+    "get_assessment_context": {"read_only_hint": True, "idempotent_hint": True},
     # Serves the skills/ text from disk — the tool twin of the skill://
     # resources for hosts whose model can't call resources/read (claude.ai).
-    "get_skill": {"readOnlyHint": True, "idempotentHint": True},
+    "get_skill": {"read_only_hint": True, "idempotent_hint": True},
     # Absorbing get_wishlist_deals made this open-world: with_prices=True
     # live-fetches ITAD/DekuDeals. Still read-only.
-    "get_wishlist": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
+    "get_wishlist": {"read_only_hint": True, "idempotent_hint": True, "open_world_hint": True},
     "discover_series_gaps": {
-        "readOnlyHint": True,
-        "idempotentHint": True,
-        "openWorldHint": True,
+        "read_only_hint": True,
+        "idempotent_hint": True,
+        "open_world_hint": True,
     },
-    "query_library": {"readOnlyHint": True, "idempotentHint": True},
-    "get_sync_status": {"readOnlyHint": True, "idempotentHint": True},
-    "get_integration_status": {"readOnlyHint": True, "idempotentHint": True},
-    "rate_game": {"readOnlyHint": False, "idempotentHint": True},
-    "add_game_to_platform": {"readOnlyHint": False, "idempotentHint": True},
-    "update_game": {"readOnlyHint": False, "idempotentHint": True},
-    "set_playtime": {"readOnlyHint": False, "idempotentHint": True},
-    "set_acquisition": {"readOnlyHint": False, "idempotentHint": True},
+    "query_library": {"read_only_hint": True, "idempotent_hint": True},
+    "get_sync_status": {"read_only_hint": True, "idempotent_hint": True},
+    "get_integration_status": {"read_only_hint": True, "idempotent_hint": True},
+    "rate_game": {"read_only_hint": False, "idempotent_hint": True},
+    "add_game_to_platform": {"read_only_hint": False, "idempotent_hint": True},
+    "update_game": {"read_only_hint": False, "idempotent_hint": True},
+    "set_playtime": {"read_only_hint": False, "idempotent_hint": True},
+    "set_acquisition": {"read_only_hint": False, "idempotent_hint": True},
     # A same-day re-record replaces that day's row, so repeating the call is a
     # no-op rather than a second verdict — idempotent, and it destroys nothing.
-    "record_assessment": {"readOnlyHint": False, "idempotentHint": True},
+    "record_assessment": {"read_only_hint": False, "idempotent_hint": True},
     # The void HARD-deletes one row, so a repeat call errors ("not found")
     # rather than being a no-op — the reason it is not a record_assessment mode.
     "void_assessment": {
-        "readOnlyHint": False,
-        "idempotentHint": False,
-        "destructiveHint": True,
+        "read_only_hint": False,
+        "idempotent_hint": False,
+        "destructive_hint": True,
     },
-    "merge_games": {"readOnlyHint": False, "idempotentHint": False, "destructiveHint": True},
-    "delete_game": {"readOnlyHint": False, "idempotentHint": False, "destructiveHint": True},
-    "sync": {"readOnlyHint": False, "idempotentHint": True, "openWorldHint": True},
+    "merge_games": {"read_only_hint": False, "idempotent_hint": False, "destructive_hint": True},
+    "delete_game": {"read_only_hint": False, "idempotent_hint": False, "destructive_hint": True},
+    "sync": {"read_only_hint": False, "idempotent_hint": True, "open_world_hint": True},
     "check_library": {
-        "readOnlyHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
+        "read_only_hint": False,
+        "idempotent_hint": True,
+        "open_world_hint": True,
     },
-    "split_game": {"readOnlyHint": False, "idempotentHint": False, "destructiveHint": True},
-    "set_hardware_preference": {"readOnlyHint": False, "idempotentHint": True},
-    "set_switch2_playtime_baseline": {"readOnlyHint": False, "idempotentHint": True},
-    "split_bundle_acquisition": {"readOnlyHint": False, "idempotentHint": True},
+    "split_game": {"read_only_hint": False, "idempotent_hint": False, "destructive_hint": True},
+    "set_hardware_preference": {"read_only_hint": False, "idempotent_hint": True},
+    "set_switch2_playtime_baseline": {"read_only_hint": False, "idempotent_hint": True},
+    "split_bundle_acquisition": {"read_only_hint": False, "idempotent_hint": True},
     "import_purchases": {
-        "readOnlyHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
+        "read_only_hint": False,
+        "idempotent_hint": True,
+        "open_world_hint": True,
     },
     # Non-idempotent (every call mints a fresh nonce) but destroys nothing:
     # outstanding links die by TTL, never by a later mint.
     "create_session_ingest_link": {
-        "readOnlyHint": False,
-        "idempotentHint": False,
-        "destructiveHint": False,
+        "read_only_hint": False,
+        "idempotent_hint": False,
+        "destructive_hint": False,
     },
     # diagnose=True live-fetches the provider page, so the merged read tool is
     # open-world; it stays read-only because neither mode writes.
-    "get_scrape_config": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
+    "get_scrape_config": {"read_only_hint": True, "idempotent_hint": True, "open_world_hint": True},
     # Takes the strictest of the three actions it absorbs: each rollback walks
     # back one more version, so a retry is not a no-op.
     "manage_scrape_config": {
-        "readOnlyHint": False,
-        "idempotentHint": False,
-        "destructiveHint": True,
+        "read_only_hint": False,
+        "idempotent_hint": False,
+        "destructive_hint": True,
     },
 }
 
@@ -316,7 +321,7 @@ class ToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         icons = main.mcp.icons
         self.assertEqual(len(icons), 1)
         self.assertTrue(icons[0].src.startswith("data:image/svg+xml;base64,"))
-        self.assertEqual(icons[0].mimeType, "image/svg+xml")
+        self.assertEqual(icons[0].mime_type, "image/svg+xml")
 
     async def test_all_tools_have_output_schema(self):
         tools = await self._tools()
@@ -390,22 +395,26 @@ class SchemaBudgetTests(unittest.IsolatedAsyncioTestCase):
     Output schemas are inside the payload cap but have no cap of their own:
     whether hosts forward outputSchema to the model is unmeasured (see the
     amendment's open question). Measure before optimizing that slice.
+
+    2026-10-07 FastMCP 4 / SDK v2 re-baseline: 47,516 chars / 141,804 bytes.
     """
 
     # Whole serialized tools/list payload, json.dumps(separators=(",", ":")).
-    MAX_TOTAL_PAYLOAD_BYTES = 148_400  # achieved 141,562 (2026-10-03)
+    MAX_TOTAL_PAYLOAD_BYTES = 148_900  # achieved 141,804 (2026-10-07)
     # Sum of every tool description (chars, as the model reads them).
-    MAX_TOTAL_DESCRIPTION_CHARS = 49_600  # achieved 47,420 (2026-10-03)
+    MAX_TOTAL_DESCRIPTION_CHARS = 49_900  # achieved 47,516 (2026-10-07)
     # No single tool may hold a disproportionate share of that budget.
-    MAX_TOOL_DESCRIPTION_CHARS = 2_890  # largest: get_stats, 2,755
-    MAX_TOOL_PAYLOAD_BYTES = 9_970  # largest: get_stats, 9,496
+    MAX_TOOL_DESCRIPTION_CHARS = 2_890  # largest: get_stats, 2,755 (2026-10-07)
+    MAX_TOOL_PAYLOAD_BYTES = 9_970  # largest: get_stats, 9,497 (2026-10-07)
 
     async def _serialized(self) -> dict[str, tuple[int, int]]:
         """Per tool: (serialized payload bytes, description chars)."""
         tools = await main.mcp.list_tools()
         sizes = {}
         for tool in tools:
-            dumped = tool.to_mcp_tool().model_dump(mode="json", exclude_none=True)
+            # by_alias: SDK v2 models dump snake_case field names otherwise;
+            # the wire (and so the model's context) carries inputSchema/_meta.
+            dumped = tool.to_mcp_tool().model_dump(mode="json", exclude_none=True, by_alias=True)
             payload = json.dumps(dumped, separators=(",", ":"))
             sizes[dumped["name"]] = (len(payload), len(dumped.get("description") or ""))
         return sizes
@@ -451,6 +460,38 @@ class SchemaBudgetTests(unittest.IsolatedAsyncioTestCase):
                     f"{name} serializes to {payload} bytes, over the "
                     f"{self.MAX_TOOL_PAYLOAD_BYTES} per-tool cap",
                 )
+
+
+@contextlib.asynccontextmanager
+async def _noop_lifespan(server):
+    """Stand-in for lifecycle.lifespan: no refresh, no enrichment, no loop."""
+    yield {}
+
+
+class CacheHintTests(unittest.IsolatedAsyncioTestCase):
+    """tools/list carries the cache hint on 2026-07-28 only (both eras served)."""
+
+    async def _raw_tools_list(self, mode: str):
+        with patch.object(main.mcp, "_lifespan", _noop_lifespan):
+            async with make_client(main.mcp, mode) as client:
+                return await asyncio.wait_for(
+                    client.list_tools_mcp(cache_mode="bypass"), timeout=DEADLOCK_TIMEOUT
+                )
+
+    async def test_modern_era_tools_list_carries_public_one_hour_hint(self):
+        result = await self._raw_tools_list("auto")
+        self.assertEqual(main.TOOLS_LIST_CACHE_TTL_SECONDS, 3600)
+        self.assertEqual(result.ttl_ms, 3_600_000)
+        self.assertEqual(result.cache_scope, "public")
+        self.assertLessEqual({"ttl_ms", "cache_scope"}, result.model_fields_set)
+
+    async def test_legacy_era_tools_list_carries_no_hint(self):
+        # The SDK model fills defaults (0 / "private") for absent fields, so
+        # "not on the wire" is "not in model_fields_set".
+        result = await self._raw_tools_list("legacy")
+        self.assertTrue(result.tools)
+        self.assertNotIn("ttl_ms", result.model_fields_set)
+        self.assertNotIn("cache_scope", result.model_fields_set)
 
 
 if __name__ == "__main__":

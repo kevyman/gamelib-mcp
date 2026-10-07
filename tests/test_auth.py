@@ -12,8 +12,6 @@ from fastmcp.server.auth import AccessToken, AuthContext
 from key_value.aio.stores.memory import MemoryStore
 
 from gamelib_mcp.auth import (
-    _normalize_token_audience,
-    _patch_cimd_token_audience,
     load_security_config,
 )
 
@@ -367,53 +365,15 @@ print(json.dumps(result))
     assert outcome == {"owner": True, "other_user": False, "no_token": False}
 
 
-def test_cimd_private_key_jwt_audience_is_normalized():
-    """The shim must undo FastMCP's double-slash CIMD token audience.
+def test_cimd_token_audience_has_a_single_slash():
+    """Upstream builds the CIMD private_key_jwt audience without a double slash.
 
-    FastMCP builds the expected private_key_jwt audience as
-    ``f"{self.base_url}/token"`` (oauth_proxy/proxy.py); base_url stringifies
-    with a trailing slash, so ChatGPT's correctly-signed assertion
-    (aud = the advertised single-slash token endpoint) is rejected with 401.
+    FastMCP <=3.4.x built it as ``f"{self.base_url}/token"`` with a trailing-
+    slash base_url, so ChatGPT's correctly-signed assertion (aud = the advertised
+    single-slash token endpoint) 401'd and a local shim rewrote it. 4.x strips
+    the slash itself; this pins that so the deleted shim stays unneeded.
     """
-    from fastmcp.server.auth.auth import PrivateKeyJWTClientAuthenticator
-
     config = load_security_config(_oauth_environment())
     provider = config.build_auth_provider(client_storage=MemoryStore())
 
-    # The upstream call-site expression, verbatim. If this stops producing a
-    # double slash, upstream fixed the bug — delete _patch_cimd_token_audience.
-    upstream_audience = f"{provider.base_url}/token"
-    assert upstream_audience == "https://gamelib.example.com//token"
-
-    authenticator = PrivateKeyJWTClientAuthenticator(
-        provider=Mock(),
-        cimd_manager=Mock(),
-        token_endpoint_url=upstream_audience,
-    )
-
-    assert (
-        authenticator._token_endpoint_url == "https://gamelib.example.com/token"
-    )
-
-
-def test_cimd_audience_patch_is_idempotent():
-    from fastmcp.server.auth.auth import PrivateKeyJWTClientAuthenticator
-
-    _patch_cimd_token_audience()
-    patched_once = PrivateKeyJWTClientAuthenticator.__init__
-    _patch_cimd_token_audience()
-
-    assert PrivateKeyJWTClientAuthenticator.__init__ is patched_once
-
-
-@pytest.mark.parametrize(
-    ("url", "expected"),
-    [
-        ("https://gamelib.example.com//token", "https://gamelib.example.com/token"),
-        ("https://gamelib.example.com/token", "https://gamelib.example.com/token"),
-        ("https://host///deep//path", "https://host/deep/path"),
-        ("no-scheme-passthrough", "no-scheme-passthrough"),
-    ],
-)
-def test_normalize_token_audience(url: str, expected: str):
-    assert _normalize_token_audience(url) == expected
+    assert provider.token_endpoint_url == "https://gamelib.example.com/token"

@@ -21,7 +21,7 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import NamedTuple
+from typing import Any, NamedTuple
 from unittest.mock import patch
 
 import pytest
@@ -42,9 +42,34 @@ os.environ.update(
     )
 )
 
+import fastmcp
+from fastmcp import Client
+
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.db import readonly
 from gamelib_mcp.data.title_normalization import normalize_search_text
+
+# FastMCP 4's camelCase read bridge over SDK v2 models is scheduled for removal;
+# the suite must fail on a stale camelCase read rather than merely warn.
+fastmcp.settings.mcp_camelcase_compat = False
+
+
+@pytest.fixture(autouse=True)
+def _production_warning_filters():
+    """Re-apply main.py's warning filters inside every test.
+
+    pytest saves and restores ``warnings.filters`` around collection (where
+    gamelib_mcp.main is first imported) and around each test, and inserts its
+    own -W / ini filters ahead of anything already installed, so the filter
+    main.py installs at import is otherwise lost or outranked here. Calling the
+    real function per test keeps the suite on production's warning policy, and
+    makes ``-W "error:Pydantic serializer warnings"`` prove that the filter, as
+    written, catches every serializer warning on the protocol path.
+    """
+    from gamelib_mcp.main import install_warning_filters
+
+    install_warning_filters()
+    yield
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -225,6 +250,51 @@ def adopt_migrated_db(db_path: Path) -> None:
 # nothing on a passing run and still reports a real deadlock well inside CI's
 # ten-minute job cap.
 DEADLOCK_TIMEOUT = 10.0
+
+
+# --- protocol eras ------------------------------------------------------------
+
+# Production serves both MCP protocol eras from one process: "auto" negotiates
+# 2026-07-28 (server/discover, per-request _meta), "legacy" runs the 2025-11-25
+# initialize handshake. Every test that opens a Client must run in both.
+PROTOCOL_MODES = ("auto", "legacy")
+PROTOCOL_VERSION_BY_MODE = {"auto": "2026-07-28", "legacy": "2025-11-25"}
+
+
+def make_client(server: Any, mode: str = "auto", **kwargs: Any) -> Client:
+    """An in-memory ``fastmcp.Client`` pinned to one protocol era."""
+    if mode not in PROTOCOL_MODES:
+        raise ValueError(f"mode must be one of {PROTOCOL_MODES}, got {mode!r}")
+    return Client(server, mode=mode, **kwargs)
+
+
+class ProtocolEraMixin:
+    """Open every Client in this class's protocol era.
+
+    Write the test once against ``self.open_client(server)`` (default era
+    "auto"), then add a one-line legacy twin whose name reads as the era when
+    it fails::
+
+        class WireTests(ProtocolEraMixin, unittest.IsolatedAsyncioTestCase):
+            async def test_call(self):
+                async with self.open_client(server) as client:
+                    ...
+
+        class LegacyWireTests(WireTests):
+            PROTOCOL_MODE = "legacy"
+
+    Keep era-independent tests (pure HTML, in-process registry reads) out of
+    the base class so they run once.
+    """
+
+    PROTOCOL_MODE = "auto"
+
+    def open_client(self, server: Any, **kwargs: Any) -> Client:
+        return make_client(server, self.PROTOCOL_MODE, **kwargs)
+
+    @property
+    def protocol_version(self) -> str:
+        return PROTOCOL_VERSION_BY_MODE[self.PROTOCOL_MODE]
 
 
 # --- virtual clock ------------------------------------------------------------

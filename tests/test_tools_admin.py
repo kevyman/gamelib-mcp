@@ -12,6 +12,7 @@ import unittest
 from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
+import httpx
 from conftest import (
     DEADLOCK_TIMEOUT,
     ToolDBTestCase,
@@ -28,6 +29,21 @@ from gamelib_mcp import lifecycle
 from gamelib_mcp.data import db as db_module
 from gamelib_mcp.data.db import get_meta, set_meta_many
 from gamelib_mcp.tools import admin, detectors, session_admin
+
+SECRET_KEY = "SECRETKEY123"
+_KEYED_URL = (
+    f"https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key={SECRET_KEY}&steamid=1"
+)
+
+
+def _keyed_status_error() -> httpx.HTTPStatusError:
+    """A real 401 whose str() embeds the request URL, API key included."""
+    request = httpx.Request("GET", _KEYED_URL)
+    return httpx.HTTPStatusError(
+        f"Client error '401 Unauthorized' for url '{_KEYED_URL}'",
+        request=request,
+        response=httpx.Response(401, request=request),
+    )
 
 
 async def _insert_play_history(game_id: int, platform: str, day: str, minutes: int) -> None:
@@ -322,15 +338,37 @@ class RefreshLibraryValidationTests(ToolDBTestCase):
             patch.object(admin, "fetch_library", AsyncMock(return_value={"platform": "steam"})),
             patch.object(admin, "sync_epic", AsyncMock(return_value={"platform": "epic"})),
             patch.object(admin, "detect_farmed_games", AsyncMock(return_value={"candidates": 0})),
+            self.assertLogs("gamelib_mcp.tools.admin", level="INFO") as logs,
         ):
             result = await admin.run_library_sync(["steam", "epic"], ctx=ctx)
 
         self.assertEqual(result["steam"], {"platform": "steam", "play_history_rows": 0})
         self.assertEqual(result["epic"], {"platform": "epic", "play_history_rows": 0})
         self.assertEqual(ctx.progress, [(0, 2), (1, 2), (2, 2)])
-        self.assertIn("Refreshing 2 platform(s)", ctx.infos)
-        self.assertIn("Finished steam refresh", ctx.infos)
-        self.assertIn("Finished epic refresh", ctx.infos)
+        # Status lines go to the server log, never to MCP logging notifications
+        # (deprecated, and request-opt-in only on 2026-07-28).
+        self.assertEqual(ctx.infos, [])
+        messages = [record.getMessage() for record in logs.records]
+        self.assertIn("Refreshing 2 platform(s)", messages)
+        self.assertIn("Finished steam refresh", messages)
+        self.assertIn("Finished epic refresh", messages)
+
+    async def test_failure_text_never_carries_the_request_url_query(self):
+        ctx = self.FakeContext()
+        with (
+            patch.object(admin, "fetch_library", AsyncMock(side_effect=_keyed_status_error())),
+            patch.object(admin, "_schedule_background_enrich", AsyncMock()),
+            self.assertLogs("gamelib_mcp.tools.admin", level="INFO") as logs,
+        ):
+            result = await admin.run_library_sync(["steam"], ctx=ctx)
+
+        for record in logs.records:
+            self.assertNotIn(SECRET_KEY, record.getMessage())
+        error = result["steam"]["error"]
+        self.assertNotIn(SECRET_KEY, error)
+        self.assertIn("401", error)
+        self.assertIn("api.steampowered.com", error)
+        self.assertNotIn(SECRET_KEY, json.dumps(await admin.get_sync_status()))
 
     async def test_refresh_library_xbox_uses_patched_sync(self):
         with (
@@ -515,6 +553,23 @@ class SyncWishlistTests(ToolDBTestCase):
         steam_fn.assert_awaited_once()
         deku_fn.assert_awaited_once()
         self.assertEqual(result, {"steam": {"added": 1}, "switch2": {"matched": 2}})
+
+    async def test_failure_text_never_carries_the_request_url_query(self):
+        with (
+            patch(
+                "gamelib_mcp.data.steam_wishlist.fetch_wishlist",
+                AsyncMock(side_effect=_keyed_status_error()),
+            ),
+            self.assertLogs("gamelib_mcp.tools.admin", level="INFO") as logs,
+        ):
+            result = await admin.sync_wishlist(["steam"])
+
+        for record in logs.records:
+            self.assertNotIn(SECRET_KEY, record.getMessage())
+        error = result["steam"]["error"]
+        self.assertNotIn(SECRET_KEY, error)
+        self.assertIn("401", error)
+        self.assertIn("api.steampowered.com", error)
 
     async def test_clears_fulfilled_wishlist_entries_after_sync(self):
         game_id = await seed_game("Already Owned Elsewhere")

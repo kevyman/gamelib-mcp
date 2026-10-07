@@ -14,7 +14,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from fastmcp import Client, FastMCP
+from conftest import ProtocolEraMixin
+from fastmcp import FastMCP
 
 from gamelib_mcp import apps, apps_eval, apps_shared
 from gamelib_mcp.data import igdb
@@ -90,11 +91,13 @@ class IGDBCoverParseTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(igdb._parse_igdb_item(item).cover_image_id)
 
 
-class GameCardsResourceTests(unittest.IsolatedAsyncioTestCase):
+class GameCardsWireTests(ProtocolEraMixin, unittest.IsolatedAsyncioTestCase):
+    """The widget resources as a real Client reads them, in both eras."""
+
     async def test_resource_registered_and_serves_widget(self) -> None:
         mcp = FastMCP("test")
         apps.register_apps(mcp)
-        async with Client(mcp) as client:
+        async with self.open_client(mcp) as client:
             resources = await client.list_resources()
             uris = [str(r.uri) for r in resources]
             self.assertIn(apps.GAME_CARDS_URI, uris)
@@ -116,6 +119,24 @@ class GameCardsResourceTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertIn(marker, html)
 
+    async def test_both_resources_prefer_no_host_border(self) -> None:
+        # The widgets paint their own panels on a transparent page; a host
+        # frame around them would double every border.
+        mcp = FastMCP("test")
+        apps.register_apps(mcp)
+        apps_eval.register_eval_app(mcp)
+        async with self.open_client(mcp) as client:
+            resources = {str(r.uri): r for r in await client.list_resources()}
+        for uri in (apps.GAME_CARDS_URI, apps_eval.EVAL_CARD_URI):
+            with self.subTest(uri=uri):
+                self.assertIs(resources[uri].meta["ui"]["prefersBorder"], False)
+
+
+class LegacyGameCardsWireTests(GameCardsWireTests):
+    PROTOCOL_MODE = "legacy"
+
+
+class GameCardsResourceTests(unittest.TestCase):
     def test_score_chips_encode_quality_tier_not_brand(self) -> None:
         # Replaces the old brand-palette pin (spec 2026-10-03 §1.3): color is
         # the quality tier only, the source is the label text.
@@ -184,18 +205,6 @@ class GameCardsResourceTests(unittest.IsolatedAsyncioTestCase):
                 "https://assets.claude.ai",   # the host's own font files
             ],
         )
-
-    async def test_both_resources_prefer_no_host_border(self) -> None:
-        # The widgets paint their own panels on a transparent page; a host
-        # frame around them would double every border.
-        mcp = FastMCP("test")
-        apps.register_apps(mcp)
-        apps_eval.register_eval_app(mcp)
-        async with Client(mcp) as client:
-            resources = {str(r.uri): r for r in await client.list_resources()}
-        for uri in (apps.GAME_CARDS_URI, apps_eval.EVAL_CARD_URI):
-            with self.subTest(uri=uri):
-                self.assertIs(resources[uri].meta["ui"]["prefersBorder"], False)
 
     def test_csp_frames_only_the_privacy_mode_youtube_host(self) -> None:
         # frame_domains feeds frame-src; the trailer embed is the only nested

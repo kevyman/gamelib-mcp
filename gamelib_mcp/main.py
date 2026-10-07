@@ -11,6 +11,7 @@ import base64
 import importlib.metadata
 import logging
 import os
+import warnings
 from typing import Literal
 
 from .env import load_project_dotenv
@@ -31,6 +32,7 @@ from .apps_eval import EVAL_CARD_APP, register_eval_app
 from .auth import load_security_config
 from .http_admin import HttpSecurityMiddleware, register_http_routes
 from .lifecycle import lifespan
+from .protocol_telemetry import ClientEraLogMiddleware
 from .response_encoding import StructuredOnlyMiddleware, duplicate_text_content_enabled
 from .skill_resources import register_skill_resources
 from .tools.integrations import get_integration_status as _filter_integration_status
@@ -83,9 +85,28 @@ def _log_level_from_env() -> int:
     return level if isinstance(level, int) else logging.INFO
 
 
+def install_warning_filters() -> None:
+    """Silence the one per-call serializer warning FastMCP 4 triggers here.
+
+    FastMCP 4 dumps each tool's return through its annotated model's
+    TypeAdapter; our passthroughs return the tool-layer dict, which IS the
+    intended wire shape (see the mypy override note in pyproject), so the
+    payload is unchanged. FastMCP 4's own output-schema validation still
+    rejects a dict that does not match the declared schema, so a real shape
+    bug surfaces as a tool error, not a swallowed warning.
+    """
+    warnings.filterwarnings(
+        "ignore",
+        message=r"^Pydantic serializer warnings",
+        category=UserWarning,
+        module=r"^pydantic\.",
+    )
+
+
 logging.basicConfig(
     level=_log_level_from_env(), format="%(asctime)s %(levelname)s %(name)s: %(message)s"
 )
+install_warning_filters()
 logger = logging.getLogger(__name__)
 
 security_config = load_security_config()
@@ -101,6 +122,9 @@ component_middleware: list[FastMCPMiddleware] = (
 # behavior for a client that needs it.
 if not duplicate_text_content_enabled():
     component_middleware.append(StructuredOnlyMiddleware())
+# Logs which protocol era / client capabilities each client negotiates (ADR
+# 0005's open question); observation only, in every auth mode.
+component_middleware.append(ClientEraLogMiddleware())
 
 _display_name = os.getenv("STEAM_PROFILE_ID") or os.getenv("BACKLOGGD_USER") or "the configured user"
 
@@ -126,29 +150,37 @@ def _package_version() -> str:
     except importlib.metadata.PackageNotFoundError:  # bare checkout, not installed
         return "0.0.0"
 
-READ_ONLY_TOOL = ToolAnnotations(readOnlyHint=True, idempotentHint=True)
-NETWORK_SYNC_TOOL = ToolAnnotations(readOnlyHint=False, idempotentHint=True, openWorldHint=True)
-MUTATION_TOOL = ToolAnnotations(readOnlyHint=False, idempotentHint=True)
+READ_ONLY_TOOL = ToolAnnotations(read_only_hint=True, idempotent_hint=True)
+NETWORK_SYNC_TOOL = ToolAnnotations(read_only_hint=False, idempotent_hint=True, open_world_hint=True)
+MUTATION_TOOL = ToolAnnotations(read_only_hint=False, idempotent_hint=True)
 # Read-only against local state, but fetches a live page from the open web.
-DIAGNOSTIC_NETWORK_TOOL = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=True)
+DIAGNOSTIC_NETWORK_TOOL = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=True)
 # merge_games deletes the source row, so a repeat call with the same source
 # errors ("not found") rather than being a no-op — explicitly non-idempotent.
-# destructiveHint=True is the spec default for writes; stated explicitly so it
+# destructive_hint=True is the spec default for writes; stated explicitly so it
 # isn't "cleaned up": every tool on this annotation destroys prior state
 # (merge consumes its source, delete erases, scrape rollback retires the
 # active override).
 NON_IDEMPOTENT_MUTATION_TOOL = ToolAnnotations(
-    readOnlyHint=False, idempotentHint=False, destructiveHint=True
+    read_only_hint=False, idempotent_hint=False, destructive_hint=True
 )
 # create_session_ingest_link: non-idempotent (each call mints a fresh
 # single-use nonce URL) but destroys nothing — outstanding links die by TTL,
-# never by a later mint. destructiveHint=False spares it the destructive-write
+# never by a later mint. destructive_hint=False spares it the destructive-write
 # confirmation UX hosts may attach to the default.
-MINT_TOOL = ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=False)
+MINT_TOOL = ToolAnnotations(read_only_hint=False, idempotent_hint=False, destructive_hint=False)
 # check_library is report-only by default but can write (apply/suppressions)
 # and can reach the network (identity.cross_store_collapse, extid.igdb_drift,
 # ownership.license_gap) depending on selection/options.
-VALIDATION_TOOL = ToolAnnotations(readOnlyHint=False, idempotentHint=True, openWorldHint=True)
+VALIDATION_TOOL = ToolAnnotations(read_only_hint=False, idempotent_hint=True, open_world_hint=True)
+
+# Cache hint (2026-07-28 connections only) on tools/list and the other list /
+# read results. The tool list is stable per deploy and identical for every
+# caller (single-user, ADR 0001), so "public" is honest. One hour bounds how
+# long a host keeps a stale content-hashed ui:// URI after a deploy (the
+# CLAUDE.md "reconnect" caveat); the hint covers resources/read too, so a
+# skill:// file may lag an edit by at most this long.
+TOOLS_LIST_CACHE_TTL_SECONDS = 3600
 
 mcp = FastMCP(
     name="game-library",
@@ -158,7 +190,7 @@ mcp = FastMCP(
         Icon(
             src="data:image/svg+xml;base64,"
             + base64.b64encode(_SERVER_ICON_SVG.encode()).decode(),
-            mimeType="image/svg+xml",
+            mime_type="image/svg+xml",
             sizes=["any"],
         )
     ],
@@ -178,6 +210,8 @@ mcp = FastMCP(
     auth=auth_provider,
     middleware=component_middleware,
     lifespan=lifespan,
+    cache_ttl=TOOLS_LIST_CACHE_TTL_SECONDS,
+    cache_scope="public",
 )
 
 register_apps(mcp)
@@ -1953,6 +1987,11 @@ if __name__ == "__main__":
         transport="http",
         host="0.0.0.0",
         port=port,
+        # Explicit, not the "auto" heuristic: HttpSecurityMiddleware already
+        # enforces the spec's Origin MUST from MCP_ALLOWED_ORIGINS, and this
+        # process binds 0.0.0.0 behind Caddy, so a Host-header check against
+        # localhost would reject every proxied request.
+        host_origin_protection=False,
         middleware=[
             Middleware(
                 HttpSecurityMiddleware,

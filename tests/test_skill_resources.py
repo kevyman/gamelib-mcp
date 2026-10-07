@@ -12,21 +12,22 @@ from pathlib import Path
 from unittest.mock import patch
 
 import yaml  # transitively pinned via the MCP SDK stack; used to prove stub validity
-from fastmcp import Client, FastMCP
+from conftest import ProtocolEraMixin
+from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 from gamelib_mcp import skill_resources
 
 
-class SkillResourcesRegisteredTests(unittest.IsolatedAsyncioTestCase):
+class SkillResourcesRegisteredTests(ProtocolEraMixin, unittest.IsolatedAsyncioTestCase):
     """Registers against the real repo skills/ directory."""
 
     async def test_resources_list_includes_skill_and_index_uris(self) -> None:
         mcp = FastMCP("test")
         skill_resources.register_skill_resources(mcp)
 
-        async with Client(mcp) as client:
+        async with self.open_client(mcp) as client:
             resources = await client.list_resources()
             uris = {str(r.uri) for r in resources}
 
@@ -46,7 +47,7 @@ class SkillResourcesRegisteredTests(unittest.IsolatedAsyncioTestCase):
         mcp = FastMCP("test")
         skill_resources.register_skill_resources(mcp)
 
-        async with Client(mcp) as client:
+        async with self.open_client(mcp) as client:
             content = await client.read_resource("skill://backlog-triage/SKILL.md")
 
         text = content[0].text
@@ -66,7 +67,7 @@ class SkillResourcesRegisteredTests(unittest.IsolatedAsyncioTestCase):
         mcp = FastMCP("test")
         skill_resources.register_skill_resources(mcp)
 
-        async with Client(mcp) as client:
+        async with self.open_client(mcp) as client:
             resources = await client.list_resources()
             uris = {str(r.uri) for r in resources}
 
@@ -80,7 +81,7 @@ class SkillResourcesRegisteredTests(unittest.IsolatedAsyncioTestCase):
         mcp = FastMCP("test")
         skill_resources.register_skill_resources(mcp)
 
-        async with Client(mcp) as client:
+        async with self.open_client(mcp) as client:
             content = await client.read_resource("skill://index.json")
 
         payload = json.loads(content[0].text)
@@ -111,11 +112,11 @@ class SkillResourcesRegisteredTests(unittest.IsolatedAsyncioTestCase):
         mcp = FastMCP("test")
         skill_resources.register_skill_resources(mcp)
 
-        async with Client(mcp) as client:
+        async with self.open_client(mcp) as client:
             resources = await client.list_resources()
 
         index_resource = next(r for r in resources if str(r.uri) == "skill://index.json")
-        self.assertEqual(index_resource.mimeType, "application/json")
+        self.assertEqual(index_resource.mime_type, "application/json")
 
     async def test_edited_file_is_served_fresh_without_reregistration(self) -> None:
         # Content is read lazily at request time, not captured at registration.
@@ -132,7 +133,7 @@ class SkillResourcesRegisteredTests(unittest.IsolatedAsyncioTestCase):
                 encoding="utf-8",
             )
 
-            async with Client(mcp) as client:
+            async with self.open_client(mcp) as client:
                 content = await client.read_resource("skill://demo-skill/SKILL.md")
 
         self.assertIn("Edited after registration.", content[0].text)
@@ -156,7 +157,7 @@ class SkillResourcesRegisteredTests(unittest.IsolatedAsyncioTestCase):
                 encoding="utf-8",
             )
 
-            async with Client(mcp) as client:
+            async with self.open_client(mcp) as client:
                 index = json.loads(
                     (await client.read_resource("skill://index.json"))[0].text
                 )
@@ -166,17 +167,21 @@ class SkillResourcesRegisteredTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Late body.", content[0].text)
 
                 # The whitelist guard holds on the template path as well.
-                with self.assertRaises(McpError):
+                with self.assertRaises(MCPError):
                     await client.read_resource("skill://late-skill/no-such-file.md")
 
 
-class SkillResourcesRealAppTests(unittest.IsolatedAsyncioTestCase):
+class LegacySkillResourcesRegisteredTests(SkillResourcesRegisteredTests):
+    PROTOCOL_MODE = "legacy"
+
+
+class SkillResourcesRealAppTests(ProtocolEraMixin, unittest.IsolatedAsyncioTestCase):
     """Sanity check against the actual server app, not a bare FastMCP()."""
 
     async def test_real_app_serves_skill_index(self) -> None:
         from gamelib_mcp.main import mcp
 
-        async with Client(mcp) as client:
+        async with self.open_client(mcp) as client:
             resources = await client.list_resources()
             uris = {str(r.uri) for r in resources}
             self.assertIn("skill://index.json", uris)
@@ -191,7 +196,11 @@ class SkillResourcesRealAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("skill://index.json", mcp.instructions)
 
 
-class SkillResourcesMissingDirTests(unittest.IsolatedAsyncioTestCase):
+class LegacySkillResourcesRealAppTests(SkillResourcesRealAppTests):
+    PROTOCOL_MODE = "legacy"
+
+
+class SkillResourcesMissingDirTests(ProtocolEraMixin, unittest.IsolatedAsyncioTestCase):
     async def test_missing_skills_dir_registers_nothing_and_logs_warning(self) -> None:
         missing = Path("/nonexistent/definitely-not-here/skills")
         self.assertFalse(missing.exists())
@@ -203,7 +212,7 @@ class SkillResourcesMissingDirTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue(any("skills/ directory not found" in msg for msg in log_ctx.output))
 
-            async with Client(mcp) as client:
+            async with self.open_client(mcp) as client:
                 resources = await client.list_resources()
 
         self.assertEqual(resources, [])
@@ -219,10 +228,14 @@ class SkillResourcesMissingDirTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue(any("No skill files found" in msg for msg in log_ctx.output))
 
-            async with Client(mcp) as client:
+            async with self.open_client(mcp) as client:
                 resources = await client.list_resources()
 
         self.assertEqual(resources, [])
+
+
+class LegacySkillResourcesMissingDirTests(SkillResourcesMissingDirTests):
+    PROTOCOL_MODE = "legacy"
 
 
 class ResolveSkillsDirTests(unittest.TestCase):
@@ -258,7 +271,7 @@ class SkillPackagingDriftTests(unittest.TestCase):
         self.assertIn("COPY skills/ skills/", dockerfile)
 
 
-class SkillToolReferenceDriftTests(unittest.IsolatedAsyncioTestCase):
+class SkillToolReferenceDriftTests(ProtocolEraMixin, unittest.IsolatedAsyncioTestCase):
     """Every tool call written in a SKILL.md must exist on the wire surface.
 
     ADR 0006's motivating failure: the installed skills kept referencing
@@ -300,9 +313,9 @@ class SkillToolReferenceDriftTests(unittest.IsolatedAsyncioTestCase):
     async def _tool_schemas(self) -> dict[str, dict]:
         from gamelib_mcp.main import mcp
 
-        async with Client(mcp) as client:
+        async with self.open_client(mcp) as client:
             tools = await client.list_tools()
-        return {tool.name: (tool.inputSchema or {}) for tool in tools}
+        return {tool.name: (tool.input_schema or {}) for tool in tools}
 
     def _skill_texts(self) -> dict[str, str]:
         return {
@@ -427,9 +440,12 @@ class SkillToolReferenceDriftTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class GetSkillToolTests(unittest.IsolatedAsyncioTestCase):
-    """get_skill (ADR 0006 decision 4b): the resources' tool twin, for hosts
-    whose model cannot call resources/read (claude.ai custom connectors)."""
+class LegacySkillToolReferenceDriftTests(SkillToolReferenceDriftTests):
+    PROTOCOL_MODE = "legacy"
+
+
+class GetSkillWireTests(ProtocolEraMixin, unittest.IsolatedAsyncioTestCase):
+    """get_skill and the skill:// resources over a real Client, in both eras."""
 
     async def test_index_mode_matches_resource_index(self) -> None:
         from gamelib_mcp import main
@@ -437,7 +453,7 @@ class GetSkillToolTests(unittest.IsolatedAsyncioTestCase):
         response = await main.get_skill()
         by_name = {entry.name: entry for entry in response.skills}
 
-        async with Client(main.mcp) as client:
+        async with self.open_client(main.mcp) as client:
             content = await client.read_resource("skill://index.json")
         resource_index = {entry["name"]: entry for entry in json.loads(content[0].text)}
 
@@ -453,6 +469,22 @@ class GetSkillToolTests(unittest.IsolatedAsyncioTestCase):
                 resource_entry["files"],
             )
         self.assertIsNone(response.note)
+
+    async def test_wire_call_returns_structured_content(self) -> None:
+        from gamelib_mcp import main
+
+        async with self.open_client(main.mcp) as client:
+            result = await client.call_tool("get_skill", {"skill": "backlog-triage"})
+        self.assertIn("name: backlog-triage", result.data.content)
+
+
+class LegacyGetSkillWireTests(GetSkillWireTests):
+    PROTOCOL_MODE = "legacy"
+
+
+class GetSkillToolTests(unittest.IsolatedAsyncioTestCase):
+    """get_skill (ADR 0006 decision 4b): the resources' tool twin, for hosts
+    whose model cannot call resources/read (claude.ai custom connectors)."""
 
     async def test_file_mode_returns_exact_disk_bytes(self) -> None:
         from gamelib_mcp import main
@@ -490,13 +522,6 @@ class GetSkillToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("mandatory since 3.4.1", skill)
         self.assertIn("never a silent", skill)
         self.assertIn("mandatory for every candidate", recording)
-
-    async def test_wire_call_returns_structured_content(self) -> None:
-        from gamelib_mcp import main
-
-        async with Client(main.mcp) as client:
-            result = await client.call_tool("get_skill", {"skill": "backlog-triage"})
-        self.assertIn("name: backlog-triage", result.data.content)
 
     async def test_skill_added_after_startup_is_served_without_restart(self) -> None:
         # The tool re-scans the skills directory per call, unlike the
