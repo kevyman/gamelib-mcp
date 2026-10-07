@@ -8,6 +8,7 @@ them would change query output.
 """
 
 import asyncio
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 
 from fastmcp import Context
@@ -23,6 +24,20 @@ from ..platforms_registry import (  # noqa: F401
     SYNCABLE_PLATFORMS,
     resolve_platform_functions,
 )
+
+_URL_QUERY_RE = re.compile(r"""(https?://[^\s?#'"]+)[?#][^\s'"]*""")
+
+
+def describe_failure(exc: BaseException) -> str:
+    """``str(exc)`` with the query string and fragment stripped from every URL.
+
+    Provider errors echo the request URL (``httpx.HTTPStatusError`` does), and
+    Steam's carries the API key in its query. Every place an exception becomes
+    stored or logged text must go through this.
+    """
+    text = _URL_QUERY_RE.sub(r"\1", str(exc))
+    return text or type(exc).__name__
+
 
 # Result-count ceiling shared by all list-returning tools. Keeps a single tool
 # call from blowing the client's context with a multi-megabyte response.

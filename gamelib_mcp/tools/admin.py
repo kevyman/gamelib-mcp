@@ -47,6 +47,7 @@ from .common import (
     PLATFORM_ALIASES,
     SYNCABLE_PLATFORMS,
     PlatformSyncFanout,
+    describe_failure,
     report_progress,
 )
 
@@ -128,13 +129,14 @@ async def run_library_sync(
             result_name = result_names.get(name, name)
             finished_at = datetime.now(UTC).isoformat()
             if isinstance(outcome, BaseException):
-                payload = {"error": str(outcome)}
+                failure = describe_failure(outcome)
+                payload = {"error": failure}
                 results[result_name] = payload
                 # Record this platform's own outcome (state + error + success
                 # time) now rather than after the whole run, so a poll between
                 # platforms never pairs a fresh state with a stale error.
                 await record_platform_sync_outcome(name, payload, finished_at)
-                logger.info("Failed %s refresh: %s", result_name, outcome)
+                logger.info("Failed %s refresh: %s", result_name, failure)
             else:
                 results[result_name] = outcome
                 await record_platform_sync_outcome(
@@ -397,8 +399,9 @@ async def sync_wishlist(
     results: dict = {}
     async for name, outcome in fanout.gather(ctx):
         if isinstance(outcome, BaseException):
-            results[name] = {"error": str(outcome)}
-            logger.info("Failed %s wishlist sync: %s", name, outcome)
+            failure = describe_failure(outcome)
+            results[name] = {"error": failure}
+            logger.info("Failed %s wishlist sync: %s", name, failure)
         else:
             results[name] = outcome
             logger.info("Finished %s wishlist sync", name)

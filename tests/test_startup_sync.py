@@ -1,10 +1,12 @@
 import asyncio
 import contextlib
+import logging
 import os
 import unittest
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
 from conftest import DEADLOCK_TIMEOUT, ToolDBTestCase
 
 from gamelib_mcp import lifecycle
@@ -234,6 +236,32 @@ class StartupSyncTests(unittest.IsolatedAsyncioTestCase):
             ),
             logs.output,
         )
+
+    async def test_failed_refresh_error_meta_never_carries_the_request_url_query(self) -> None:
+        request = httpx.Request("GET", "https://api.steampowered.com/x/?key=SECRETKEY123&steamid=1")
+        error = httpx.HTTPStatusError(
+            "Client error '401 Unauthorized' for url "
+            "'https://api.steampowered.com/x/?key=SECRETKEY123&steamid=1'",
+            request=request,
+            response=httpx.Response(401, request=request),
+        )
+
+        with (
+            patch("gamelib_mcp.data.db.set_meta_many", AsyncMock()) as mock_set_meta_many,
+            patch("gamelib_mcp.lifecycle._admin_refresh_library", AsyncMock(side_effect=error)),
+            patch("gamelib_mcp.lifecycle._drain_background_enrich_reruns", AsyncMock()),
+            self.assertLogs("gamelib_mcp.lifecycle", level="ERROR") as logs,
+        ):
+            await _run_startup_refresh()
+
+        finished = mock_set_meta_many.await_args_list[-1].args[0]
+        self.assertNotIn("SECRETKEY123", finished["library_sync_error"])
+        self.assertIn("401", finished["library_sync_error"])
+        # The failure log keeps the stack frames but never the raw exception
+        # line (logger.exception would print the keyed URL as its last line).
+        rendered = "\n".join(logging.Formatter().format(record) for record in logs.records)
+        self.assertNotIn("SECRETKEY123", rendered)
+        self.assertIn("Startup library refresh failed", rendered)
 
     async def test_deal_alerts_still_run_when_the_sync_itself_raised(self) -> None:
         # A failed sync is exactly when a price may still have moved; the drain
