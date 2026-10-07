@@ -47,6 +47,7 @@ from ..data.title_normalization import (
     normalize_search_text,
 )
 from ..platforms_registry import NESTED_LISTING_PLATFORMS, SYNCABLE_PLATFORMS
+from ..redaction import redact_secrets
 from .detectors import (
     detect_collapsed_games,
     detect_cross_platform_collapses,
@@ -1671,7 +1672,7 @@ async def _run_sync_platform_error(*, apply: bool, options: dict[str, Any]) -> C
     never_synced: list[str] = []
     for platform in sorted(SYNCABLE_PLATFORMS):
         state = states.get(f"sync_platform_state_{platform}")
-        error = integ.get(f"integration_sync_{platform}_last_error_summary")
+        error = redact_secrets(integ.get(f"integration_sync_{platform}_last_error_summary"))
         classification = integ.get(f"integration_sync_{platform}_last_error_classification")
         last_success_raw = integ.get(f"integration_sync_{platform}_last_success_at")
 

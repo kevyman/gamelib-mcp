@@ -38,7 +38,7 @@ from ..data.db import (
 from ..data.dekudeals import fetch_search_prices, fetch_wishlist_prices
 from ..data.itad import fetch_steam_prices, is_itad_configured
 from ..data.scrape_config import load_scrape_config
-from .common import LIBRARY_PLATFORMS
+from .common import LIBRARY_PLATFORMS, describe_failure
 from .common import validate_platform as _validate_platform
 
 logger = logging.getLogger(__name__)
@@ -446,8 +446,11 @@ async def get_wishlist_deals(
             try:
                 prices = await fetch_steam_prices(list(steam_needs_refresh.keys()))
             except Exception as exc:  # noqa: BLE001 - isolation boundary: any failure becomes an error record
-                logger.warning("ITAD price refresh failed: %s", exc)
-                price_refresh_errors.append(f"itad refresh failed: {exc}")
+                # describe_failure strips the request query (the ITAD key
+                # travels as ?key=...) before the text is logged or returned.
+                failure = describe_failure(exc)
+                logger.warning("ITAD price refresh failed: %s", failure)
+                price_refresh_errors.append(f"itad refresh failed: {failure}")
             else:
                 upsert_rows = [
                     {

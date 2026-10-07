@@ -55,7 +55,7 @@ git clone https://github.com/kevyman/gamelib-mcp.git
 cd gamelib-mcp
 uv sync
 
-cp .env.local.example .env   # localhost-only auth mode; then fill in Steam values
+cp .env.local.example .env   # localhost-only auth mode, no Docker paths; fill in STEAM_API_KEY and STEAM_ID
 
 # Run the server (Streamable HTTP on port 8000)
 uv run python -m gamelib_mcp.main
@@ -67,7 +67,13 @@ Verify it's up:
 curl http://localhost:8000/health
 ```
 
-On startup the server initializes the SQLite database (default: `./data/gamelib.db`), refreshes the library if stale, and kicks off background enrichment.
+On startup the server initializes the SQLite database (default: `./data/gamelib.db`), refreshes the library if stale, and kicks off background enrichment. The Steam fetch is one call; enriching a large library from the rate-limited external sources takes hours in the background, while search, stats and the Steam data work right away.
+
+With [Claude Code](https://docs.claude.com/en/docs/claude-code) as the client:
+
+```bash
+claude mcp add --transport http gamelib http://localhost:8000/mcp
+```
 
 ### Connecting an MCP client
 
@@ -107,7 +113,20 @@ All configuration is via environment variables. Production starts from [.env.exa
 
 ## Docker
 
-Local testing (publishes the app port on localhost, production-only services disabled):
+Run the published image without cloning (needs only Docker and the two Steam values):
+
+```bash
+mkdir gamelib && cd gamelib
+curl -fsSLO https://raw.githubusercontent.com/kevyman/gamelib-mcp/main/.env.local.example && mv .env.local.example .env
+# edit .env: STEAM_API_KEY and STEAM_ID
+mkdir -p data && sudo chown 10001:10001 data   # the image runs as uid 10001; skip the chown on Docker Desktop
+docker run -d --name gamelib -p 127.0.0.1:8000:8000 --env-file .env -v "$PWD/data:/data" ghcr.io/kevyman/gamelib-mcp:latest
+curl http://localhost:8000/health
+```
+
+Images are published by the release workflow for every `v*` tag (`ghcr.io/kevyman/gamelib-mcp:<version>`, plus `latest`), for amd64 and arm64. The database and session files live in the mounted `data/` directory.
+
+Local testing from a checkout (publishes the app port on localhost, production-only services disabled):
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build app
@@ -115,11 +134,14 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build a
 
 See [LOCAL_DOCKER.md](LOCAL_DOCKER.md) for the full local walkthrough.
 
-Production (with Caddy reverse proxy):
+Production (with Caddy reverse proxy), from source or from the published image:
 
 ```bash
-docker compose --profile prod build
-docker compose --profile prod up -d
+docker compose --profile prod build && docker compose --profile prod up -d   # from this checkout
+
+# or the published image (pin GAMELIB_IMAGE_TAG in .env; `latest` is simply the most recently published tag)
+docker compose -f docker-compose.yml -f docker-compose.image.yml --profile prod pull app
+docker compose -f docker-compose.yml -f docker-compose.image.yml --profile prod up -d --no-build
 docker compose --profile prod logs -f app
 ```
 

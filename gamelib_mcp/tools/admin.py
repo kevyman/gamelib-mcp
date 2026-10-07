@@ -42,6 +42,7 @@ from ..lifecycle import (
     record_platform_sync_outcome,
 )
 from ..platforms_registry import WISHLIST_SYNCABLE_PLATFORMS
+from ..redaction import redact_secrets
 from .batch import apply_batch_item, check_batch_items, count_status
 from .common import (
     PLATFORM_ALIASES,
@@ -138,6 +139,11 @@ async def run_library_sync(
                 await record_platform_sync_outcome(name, payload, finished_at)
                 logger.info("Failed %s refresh: %s", result_name, failure)
             else:
+                # A platform that reports its own failure text (instead of
+                # raising) can embed a request URL; the caller's copy must be
+                # as clean as the stored and logged ones.
+                if isinstance(outcome, dict) and isinstance(outcome.get("error_summary"), str):
+                    outcome["error_summary"] = redact_secrets(outcome["error_summary"])
                 results[result_name] = outcome
                 await record_platform_sync_outcome(
                     name, outcome if isinstance(outcome, dict) else {}, finished_at
@@ -333,7 +339,9 @@ async def get_sync_status() -> dict:
     platforms: dict[str, dict] = {}
     for name in sorted(SYNCABLE_PLATFORMS):
         state = state_keys.get(f"sync_platform_state_{name}", "pending")
-        error = integ.get(f"integration_sync_{name}_last_error_summary")
+        # Redacted on read too: a summary stored by an older build may still
+        # carry a keyed request URL.
+        error = redact_secrets(integ.get(f"integration_sync_{name}_last_error_summary"))
         # Heals rows recorded before "unconfigured" existed: a platform whose
         # last failure was a missing-credential one is not "done".
         if (

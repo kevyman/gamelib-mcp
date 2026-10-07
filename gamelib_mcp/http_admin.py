@@ -22,6 +22,7 @@ from .lifecycle import (
     SYNC_METADATA_PLATFORMS,
     background_task_flags,
 )
+from .redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,10 @@ async def _integration_status_payload(force_refresh: bool = False) -> dict[str, 
                 if key.startswith(prefix)
             }
             if platform_meta:
+                if "last_error_summary" in platform_meta:
+                    platform_meta["last_error_summary"] = redact_secrets(
+                        platform_meta["last_error_summary"]
+                    )
                 inspector_name = INSPECTOR_PLATFORM_ALIASES.get(platform, platform)
                 # The meta writer (build_platform_sync_metadata) emits exactly
                 # the LastSyncMeta key set, so this narrowing is sound.
@@ -207,7 +212,8 @@ async def _health_payload() -> dict:
 
     last_sync = await get_meta("library_synced_at")
     library_sync_status = await get_meta("library_sync_status") or "idle"
-    library_sync_error = await get_meta("library_sync_error")
+    # Redacted on read: a value stored by an older build may carry a keyed URL.
+    library_sync_error = redact_secrets(await get_meta("library_sync_error"))
 
     # A platform is only expected to have games once it has synced successfully
     # at least once; platforms that were never configured don't degrade health.

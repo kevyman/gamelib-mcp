@@ -1,5 +1,7 @@
 services:
   app:
+    # Builds from this checkout (what the deploy workflow does). To run the
+    # published image instead, add the docker-compose.image.yml override.
     build: .
     restart: always
     # The app runs as a fixed non-root UID and binds an unprivileged port, so
