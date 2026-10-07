@@ -322,15 +322,20 @@ class RefreshLibraryValidationTests(ToolDBTestCase):
             patch.object(admin, "fetch_library", AsyncMock(return_value={"platform": "steam"})),
             patch.object(admin, "sync_epic", AsyncMock(return_value={"platform": "epic"})),
             patch.object(admin, "detect_farmed_games", AsyncMock(return_value={"candidates": 0})),
+            self.assertLogs("gamelib_mcp.tools.admin", level="INFO") as logs,
         ):
             result = await admin.run_library_sync(["steam", "epic"], ctx=ctx)
 
         self.assertEqual(result["steam"], {"platform": "steam", "play_history_rows": 0})
         self.assertEqual(result["epic"], {"platform": "epic", "play_history_rows": 0})
         self.assertEqual(ctx.progress, [(0, 2), (1, 2), (2, 2)])
-        self.assertIn("Refreshing 2 platform(s)", ctx.infos)
-        self.assertIn("Finished steam refresh", ctx.infos)
-        self.assertIn("Finished epic refresh", ctx.infos)
+        # Status lines go to the server log, never to MCP logging notifications
+        # (deprecated, and request-opt-in only on 2026-07-28).
+        self.assertEqual(ctx.infos, [])
+        messages = [record.getMessage() for record in logs.records]
+        self.assertIn("Refreshing 2 platform(s)", messages)
+        self.assertIn("Finished steam refresh", messages)
+        self.assertIn("Finished epic refresh", messages)
 
     async def test_refresh_library_xbox_uses_patched_sync(self):
         with (

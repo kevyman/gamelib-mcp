@@ -30,9 +30,6 @@ from .common import (
     clamp_limit as _clamp_limit,
 )
 from .common import (
-    info as _info,
-)
-from .common import (
     report_progress,
 )
 from .search import (
@@ -62,16 +59,12 @@ async def sync_ratings(ctx: Context | None = None) -> dict:
     then recompute tag_affinity.
     """
     await report_progress(ctx, 0, 3)
-    await _info(ctx, "Syncing Backloggd ratings")
     bl_result = await sync_backloggd()
     await report_progress(ctx, 1, 3)
-    await _info(ctx, "Syncing Steam review ratings")
     sr_result = await sync_steam_reviews()
     await report_progress(ctx, 2, 3)
-    await _info(ctx, "Recomputing tag affinity")
     tag_count = await recompute_tag_affinity()
     await report_progress(ctx, 3, 3)
-    await _info(ctx, "Finished rating sync")
 
     from datetime import datetime
     await set_meta("ratings_synced_at", datetime.now(UTC).isoformat())

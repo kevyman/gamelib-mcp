@@ -198,11 +198,6 @@ async def report_progress(ctx: Context | None, progress: int, total: int) -> Non
         await ctx.report_progress(progress, total)
 
 
-async def info(ctx: Context | None, message: str) -> None:
-    if ctx is not None:
-        await ctx.info(message)
-
-
 class PlatformSyncFanout:
     """The resolve → validate → dispatch → gather skeleton of a sync fan-out.
 
