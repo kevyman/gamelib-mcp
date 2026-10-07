@@ -18,6 +18,9 @@ If the clone on the server is not at `~/gamelib-mcp`, add a `DEPLOY_PATH`
 repository secret with its absolute path BEFORE merging or pulling 1.0.0.
 Without it the deploy workflow stops at its first step (nothing is deployed or
 rolled back). The host also needs `sqlite3`, which the workflow now checks.
+A local Docker `.env` copied before 1.0.0 needs `MCP_PUBLIC_BASE_URL=http://localhost:8000`
+added: compose now requires the value for the Caddy service even when it is
+not selected.
 
 ### Changed
 - The three served skills (`game-quality` 3.5.0, `backlog-triage` 2.3.0,

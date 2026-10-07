@@ -37,10 +37,14 @@ services:
       - prod
     restart: always
     # The Caddyfile's site address is {$MCP_PUBLIC_BASE_URL}, the same origin
-    # the app's OAuth config requires (auth.py fails closed without it, and the
-    # deploy's health gate catches that), so one .env value drives both.
+    # the app's OAuth config requires, so one .env value drives both. It is
+    # required here too: with it empty Caddy would parse the site block as a
+    # global-options block and start with no site, which the deploy's health
+    # gate (it probes the app, not Caddy) would not notice. Compose interpolates
+    # the whole file even when this prod-only service is not selected, so the
+    # local example sets the value as well.
     environment:
-      MCP_PUBLIC_BASE_URL: ${MCP_PUBLIC_BASE_URL:-}
+      MCP_PUBLIC_BASE_URL: ${MCP_PUBLIC_BASE_URL:?set MCP_PUBLIC_BASE_URL in .env (the public origin, e.g. https://gamelib.example.com; http://localhost:8000 for local docker)}
     ports:
       - "80:80"
       - "443:443"
