@@ -36,7 +36,9 @@ docstring length, response caps and doc/tool-name drift are enforced by CI
 `test_docs_drift.py`) — do not spend findings on them. One precise finding
 with a file:line and a concrete failure beats five plausible ones: every
 finding is reproduced or refuted with a test before it is fixed, so a finding
-that cannot be made to fail costs more than it saves.
+that cannot be made to fail costs more than it saves. When nothing rises to
+P1, post nothing: the clean-pass signal in this repo is the 👍 reaction on
+the pull request, not an approving review or an "LGTM" comment.
 
 ### Severity here
 

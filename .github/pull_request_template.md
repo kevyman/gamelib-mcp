@@ -24,4 +24,6 @@
 ## Codex review outcome
 
 <!-- Filled after the single review pass, before merge:
-     findings N · fixed F (commit sha) · refuted R (thread links) · P0 0 -->
+     findings N · fixed F (commit sha) · refuted R (thread links) · P0 0
+     A clean pass is Codex's 👍 reaction on the PR with no inline comments:
+     findings 0 · fixed 0 · refuted 0 · P0 0 -->

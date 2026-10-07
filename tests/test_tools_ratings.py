@@ -345,8 +345,9 @@ class SyncRatingsTests(ToolDBTestCase):
             await ratings.sync_ratings(ctx=ctx)
 
         self.assertEqual(ctx.progress, [(0, 3), (1, 3), (2, 3), (3, 3)])
-        self.assertIn("Syncing Backloggd ratings", ctx.infos)
-        self.assertIn("Recomputing tag affinity", ctx.infos)
+        # Progress survives; MCP logging notifications are gone (deprecated,
+        # and request-opt-in only on 2026-07-28).
+        self.assertEqual(ctx.infos, [])
 
 
 class RateGameTests(ToolDBTestCase):

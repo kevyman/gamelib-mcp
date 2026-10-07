@@ -6,14 +6,17 @@ narrow cases the middleware must never get wrong: a result with no structured
 content, a non-text block, an error result, and the env escape hatch.
 """
 
+import asyncio
+import contextlib
 import json
 import os
 import unittest
 from unittest.mock import patch
 
+from conftest import DEADLOCK_TIMEOUT, ProtocolEraMixin
 from fastmcp import FastMCP
-from fastmcp.tools.tool import ToolResult
-from mcp.types import TextContent
+from fastmcp.tools import ToolResult
+from mcp.types import CallToolResult, TextContent
 
 from gamelib_mcp.response_encoding import (
     ENV_VAR,
@@ -43,7 +46,7 @@ def _server() -> FastMCP:
         return ToolResult(
             content=[
                 TextContent(type="text", text='{"a": 1}'),
-                ImageContent(type="image", data="aGk=", mimeType="image/png"),
+                ImageContent(type="image", data="aGk=", mime_type="image/png"),
             ],
             structured_content={"a": 1},
         )
@@ -56,18 +59,31 @@ def _server() -> FastMCP:
     return mcp
 
 
-async def _wire(mcp: FastMCP, name: str):
-    result = await mcp._call_tool_mcp(name, {})
-    if isinstance(result, tuple):
-        return result
-    if isinstance(result, list):
-        return result, None
-    return (result.content or []), getattr(result, "structuredContent", None)
+@contextlib.asynccontextmanager
+async def _noop_lifespan(server):
+    """Stand-in for lifecycle.lifespan when connecting to the real app."""
+    yield {}
 
 
-class StructuredOnlyMiddlewareTests(unittest.IsolatedAsyncioTestCase):
+class WireMixin(ProtocolEraMixin):
+    async def _call(self, mcp: FastMCP, name: str) -> CallToolResult:
+        """One tools/call over the in-memory protocol, as the client sees it."""
+        with patch.object(mcp, "_lifespan", _noop_lifespan):
+            async with self.open_client(mcp) as client:
+                return await asyncio.wait_for(
+                    client.call_tool_mcp(name, {}), timeout=DEADLOCK_TIMEOUT
+                )
+
+    async def _wire(self, mcp: FastMCP, name: str):
+        """(content blocks, structured content) of a successful call."""
+        result = await self._call(mcp, name)
+        self.assertFalse(result.is_error, f"{name} failed: {result.content!r}")
+        return (result.content or []), result.structured_content
+
+
+class StructuredOnlyMiddlewareTests(WireMixin, unittest.IsolatedAsyncioTestCase):
     async def test_duplicate_text_block_is_dropped(self):
-        content, structured = await _wire(_server(), "structured")
+        content, structured = await self._wire(_server(), "structured")
         self.assertEqual(content, [])
         self.assertEqual(structured, {"a": 1, "b": [1, 2, 3]})
 
@@ -77,23 +93,24 @@ class StructuredOnlyMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         # against a middleware-free server: content=1 block, structured=
         # {"result": "just text"}. None of this server's 30 tools return a
         # scalar, but a future one must not silently lose its payload.
-        content, structured = await _wire(_server(), "text_only")
+        content, structured = await self._wire(_server(), "text_only")
         self.assertEqual(content, [])
         self.assertEqual(structured, {"result": "just text"})
 
     async def test_non_text_blocks_survive(self):
-        content, structured = await _wire(_server(), "mixed")
+        content, structured = await self._wire(_server(), "mixed")
         self.assertEqual([c.type for c in content], ["image"])
         self.assertEqual(structured, {"a": 1})
 
     async def test_errors_propagate_untouched(self):
         # A failing tool RAISES through call_next rather than returning a
-        # ToolResult, so the middleware never post-processes it — error
-        # messages reach the model intact and can't be stripped. This asserts
-        # that property rather than assuming it.
-        with self.assertRaises(Exception) as ctx:
-            await _wire(_server(), "boom")
-        self.assertIn("kaboom", str(ctx.exception))
+        # ToolResult, so the middleware never post-processes it — the error
+        # result keeps its text block and the message reaches the model intact.
+        # This asserts that property at the wire rather than assuming it.
+        result = await self._call(_server(), "boom")
+        self.assertTrue(result.is_error)
+        text = " ".join(getattr(block, "text", "") for block in result.content or [])
+        self.assertIn("kaboom", text)
 
     async def test_payload_is_unchanged_apart_from_the_dropped_block(self):
         plain = FastMCP(name="plain")
@@ -103,13 +120,17 @@ class StructuredOnlyMiddlewareTests(unittest.IsolatedAsyncioTestCase):
             """Same tool, no middleware."""
             return {"a": 1, "b": [1, 2, 3]}
 
-        _, baseline = await _wire(plain, "structured")
-        _, stripped = await _wire(_server(), "structured")
+        _, baseline = await self._wire(plain, "structured")
+        _, stripped = await self._wire(_server(), "structured")
         self.assertEqual(baseline, stripped)
 
     async def test_output_schema_is_unaffected(self):
         tools = {t.name: t for t in await _server().list_tools()}
         self.assertTrue(tools["structured"].output_schema)
+
+
+class LegacyStructuredOnlyMiddlewareTests(StructuredOnlyMiddlewareTests):
+    PROTOCOL_MODE = "legacy"
 
 
 class EscapeHatchTests(unittest.TestCase):
@@ -129,11 +150,11 @@ class EscapeHatchTests(unittest.TestCase):
                 self.assertFalse(duplicate_text_content_enabled())
 
 
-class ServerWiringTests(unittest.IsolatedAsyncioTestCase):
+class ServerWiringTests(WireMixin, unittest.IsolatedAsyncioTestCase):
     async def test_the_real_server_strips_duplicates(self):
         from gamelib_mcp import main
 
-        content, structured = await _wire(main.mcp, "get_sync_status")
+        content, structured = await self._wire(main.mcp, "get_sync_status")
         self.assertEqual(content, [])
         self.assertIsNotNone(structured)
         # and the payload is still complete
@@ -145,9 +166,12 @@ class ServerWiringTests(unittest.IsolatedAsyncioTestCase):
         # that is no longer there.
         from gamelib_mcp import main
 
-        _, structured = await _wire(main.mcp, "get_sync_status")
+        _, structured = await self._wire(main.mcp, "get_sync_status")
         self.assertIsInstance(json.loads(json.dumps(structured)), dict)
 
+
+class LegacyServerWiringTests(ServerWiringTests):
+    PROTOCOL_MODE = "legacy"
 
 if __name__ == "__main__":
     unittest.main()
