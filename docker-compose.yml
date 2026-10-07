@@ -1,5 +1,8 @@
 services:
   app:
+    # `up -d --build` builds from this checkout (what the deploy workflow does).
+    # To run the published image instead: `docker compose pull app && docker compose up -d --no-build app`.
+    image: ghcr.io/kevyman/gamelib-mcp:${GAMELIB_IMAGE_TAG:-latest}
     build: .
     restart: always
     # The app runs as a fixed non-root UID and binds an unprivileged port, so

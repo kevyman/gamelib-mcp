@@ -6,6 +6,25 @@ All notable changes to gamelib-mcp. The format follows
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-10-07
+
+### Fixed
+- The Steam Web API key (and the IsThereAnyDeal key) no longer appear in logs
+  or in sync status: the HTTP client's request lines are not logged at INFO,
+  and every stored or logged sync failure has `key=`-style query values
+  redacted before it reaches `get_sync_status`, `get_integration_status` or
+  `/health`.
+- `.env.local.example` works for a plain `uv run` as well as Docker: it no
+  longer pins the database and session files to the container's `/data`,
+  which a laptop user cannot write to.
+
+### Added
+- A release workflow: pushing a `v*` tag publishes
+  `ghcr.io/kevyman/gamelib-mcp` (amd64 and arm64, tagged with the version and
+  `latest`) and opens a GitHub Release. README documents running the image
+  without a clone, and `docker-compose.yml` names it beside the local build.
+- README: the Claude Code one-liner for connecting to a local server.
+
 ## [1.0.0] — 2026-10-05
 
 First tagged release. Everything before this shipped straight from `main`.
@@ -37,5 +56,6 @@ not selected.
   reads `GAMELIB_DEPLOY_HOST` / `GAMELIB_DEPLOY_DIR`.
 - `.env.example` carries placeholders instead of one deployment's values.
 
-[Unreleased]: https://github.com/kevyman/gamelib-mcp/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/kevyman/gamelib-mcp/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/kevyman/gamelib-mcp/releases/tag/v1.0.1
 [1.0.0]: https://github.com/kevyman/gamelib-mcp/releases/tag/v1.0.0
