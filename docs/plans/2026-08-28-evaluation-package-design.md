@@ -5,7 +5,7 @@
 "evaluation package" appears in the chat — trailer, screenshots, description,
 an AI-written elevator pitch, "for you if / not for you if", comparisons and
 lineage, price and time context, and the verdict itself — everything needed to
-decide whether the game is right for John, in one card.
+decide whether the game is right for the user, in one card.
 
 ## Why this is cheap to build here
 

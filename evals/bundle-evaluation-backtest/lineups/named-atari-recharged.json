@@ -2,7 +2,7 @@
   "id": "named-atari-recharged",
   "official_name": "Atari: Recharged Retro Revival",
   "store": "humble",
-  "sale_window": "2024-10 to 2024-11 (live by 2024-10-21 per press and Wayback snapshot; John bought 2024-10-20; typical ~3-week run ending early November 2024 — exact start/end dates not recovered)",
+  "sale_window": "2024-10 to 2024-11 (live by 2024-10-21 per press and Wayback snapshot; the owner bought 2024-10-20; typical ~3-week run ending early November 2024 — exact start/end dates not recovered)",
   "purchase_date": "2024-10-20",
   "price_paid": "EUR 18.32",
   "structure": "tiered",
@@ -54,7 +54,7 @@
   ],
   "key_platform": "steam",
   "db_received_matches": true,
-  "discrepancies": "John's 11 received items exactly match the full top-tier ($20) lineup: all 10 Recharged titles plus Atari 50. Price paid EUR 18.32 is consistent with the EUR equivalent of the $20 top tier; per-tier EUR minimums were not published in the sources found. The $5 tier and up also included 10% off Humble Store coupons for Yars Rising and the Atari 50 Expanded Edition DLC bundle (coupons, not keys).",
+  "discrepancies": "The owner's 11 received items exactly match the full top-tier ($20) lineup: all 10 Recharged titles plus Atari 50. Price paid EUR 18.32 is consistent with the EUR equivalent of the $20 top tier; per-tier EUR minimums were not published in the sources found. The $5 tier and up also included 10% off Humble Store coupons for Yars Rising and the Atari 50 Expanded Edition DLC bundle (coupons, not keys).",
   "confidence": "high",
   "sources": [
     "https://www.gamespot.com/articles/humbles-atari-bundle-features-all-10-recharged-classics-and-atari-50-celebration-for-only-20/1100-6527308/",

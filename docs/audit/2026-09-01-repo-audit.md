@@ -333,7 +333,7 @@ last-run failure rates through `/health` or `get_integration_status`.
   `set_nintendo_pctl_session` (line 32, contradicted by line 33),
   `get_wishlist_deals` (48), `get_recommendations` (52),
   `propose_scrape_config`/`approve_scrape_config` (56-58).
-- `LOCAL_DOCKER.md:3` links to `/home/john/code/gamelib-mcp/...`.
+- `LOCAL_DOCKER.md:3` links to `/home/<user>/code/gamelib-mcp/...`.
 - Fix the text, then add a test asserting every backticked `*_*` name in
   README/.env.example that matches a tool pattern is a registered tool (the
   registration test already has the inventory), or generate the README table

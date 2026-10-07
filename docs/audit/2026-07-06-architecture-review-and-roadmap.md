@@ -111,7 +111,7 @@ instead of a vibe.
 
 **Problem.** `get_wishlist_deals` sorts by price ascending. A €2 shovelware
 deal outranks a €19.99-from-€59.99 game the taste profile would score 95%.
-The buying decision John actually makes weighs taste, discount quality,
+The buying decision the owner actually makes weighs taste, discount quality,
 length-per-euro, and whether the backlog already covers that itch.
 
 **Design.** Extend `get_wishlist_deals` (new `sort_by="advice"` plus new
@@ -150,13 +150,13 @@ Prerequisites, in order:
      chooses the platform; advice ranks *games*, not platforms.
 
 **Effort:** medium (three PRs: enrichment claim set, ITAD history columns,
-scoring). **Payoff:** the tool John explicitly wants during every seasonal
+scoring). **Payoff:** the tool the owner explicitly wants during every seasonal
 sale; converts the wishlist from a price list into a decision.
 
 ### 3. Deal alerts: push, not pull
 
 **Problem.** Deals expire. `get_wishlist_deals` only answers when asked;
-a historical low that lasts 48h during a week John doesn't ask is missed.
+a historical low that lasts 48h during a week the owner doesn't ask is missed.
 
 **Design.** The periodic refresh loop in `lifecycle.py` already wakes
 regularly. Add a post-refresh hook: re-price wishlist games (respecting the

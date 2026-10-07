@@ -14,7 +14,7 @@ Everything below exists to compute those two numbers honestly and turn them into
 
 ## Step 0: Establish contents, price, and structure
 
-Get a concrete constituent list and price(s). If John pasted the list, use it verbatim (raw store SKU titles are fine — see Step 6). If he gave only a bundle name or URL, web-search the contents; IsThereAnyDeal's bundle pages and barter.vg are the best sources because they also show **per-game bundled-count and recency** ("14× bundled — last time 7 months ago"), which Step 4 uses.
+Get a concrete constituent list and price(s). If the user pasted the list, use it verbatim (raw store SKU titles are fine — see Step 6). If he gave only a bundle name or URL, web-search the contents; IsThereAnyDeal's bundle pages and barter.vg are the best sources because they also show **per-game bundled-count and recency** ("14× bundled — last time 7 months ago"), which Step 4 uses.
 
 Note the structure while you're there:
 
