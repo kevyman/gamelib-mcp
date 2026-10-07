@@ -26,9 +26,14 @@ from .lifecycle import (
 logger = logging.getLogger(__name__)
 
 _CORS_ALLOW_METHODS = b"GET, POST, DELETE, OPTIONS"
-# mcp-protocol-version is required: the Streamable HTTP spec has clients send it
-# on every post-initialize request, so the preflight must allow it.
-_CORS_ALLOW_HEADERS = b"authorization, content-type, accept, mcp-session-id, last-event-id, mcp-protocol-version"
+# mcp-session-id, last-event-id and mcp-protocol-version serve the 2025-11-25
+# era (still served): clients send them on post-initialize requests.
+# mcp-method and mcp-name are REQUIRED on every 2026-07-28 Streamable HTTP POST.
+# A preflight that omits any of them blocks the browser request.
+_CORS_ALLOW_HEADERS = (
+    b"authorization, content-type, accept, mcp-session-id, last-event-id, "
+    b"mcp-protocol-version, mcp-method, mcp-name"
+)
 _CORS_EXPOSE_HEADERS = b"mcp-session-id"
 _CORS_MAX_AGE = b"86400"  # cache preflight for a day to cut repeat OPTIONS
 

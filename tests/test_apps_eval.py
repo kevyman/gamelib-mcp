@@ -16,7 +16,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from fastmcp import Client, FastMCP
+from conftest import ProtocolEraMixin
+from fastmcp import FastMCP
 
 from gamelib_mcp import apps_eval, apps_shared
 
@@ -32,11 +33,13 @@ def shared_blocks() -> list[tuple[str, str]]:
     ]
 
 
-class EvalCardResourceTests(unittest.IsolatedAsyncioTestCase):
+class EvalCardWireTests(ProtocolEraMixin, unittest.IsolatedAsyncioTestCase):
+    """The eval-card resource as a real Client reads it, in both eras."""
+
     async def test_resource_registered_and_serves_widget(self) -> None:
         mcp = FastMCP("test")
         apps_eval.register_eval_app(mcp)
-        async with Client(mcp) as client:
+        async with self.open_client(mcp) as client:
             resources = await client.list_resources()
             uris = [str(r.uri) for r in resources]
             self.assertIn(apps_eval.EVAL_CARD_URI, uris)
@@ -58,6 +61,12 @@ class EvalCardResourceTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertIn(marker, apps_eval.EVAL_CARD_HTML)
 
+
+class LegacyEvalCardWireTests(EvalCardWireTests):
+    PROTOCOL_MODE = "legacy"
+
+
+class EvalCardResourceTests(unittest.IsolatedAsyncioTestCase):
     async def test_app_config_points_at_the_widget_uri(self) -> None:
         self.assertEqual(apps_eval.EVAL_CARD_APP.resource_uri, apps_eval.EVAL_CARD_URI)
 

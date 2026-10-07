@@ -11,7 +11,9 @@ handful of representative calls through the in-memory MCP transport against
 
 Transport: ``fastmcp.Client(main.mcp)``, which is the real protocol path
 (JSON-RPC over in-memory streams, ``call_tool_mcp`` returning the wire
-``CallToolResult``). Its transport enters ``server._lifespan_manager()``, so
+``CallToolResult``). Production serves both protocol eras from one process, so
+every class runs twice: as written (2026-07-28, ``mode="auto"``) and as its
+``Legacy*`` twin (the 2025-11-25 initialize handshake). Its transport enters ``server._lifespan_manager()``, so
 ``gamelib_mcp.lifecycle.lifespan`` — startup library refresh, background
 enrichment, the periodic refresh loop — would fire on connect. It is patched
 out with a no-op for the duration of each test; nothing here needs it, and
@@ -25,11 +27,13 @@ offline work (check_library's offline check ids).
 import asyncio
 import contextlib
 import unittest
+import warnings
 from contextlib import AsyncExitStack
 from unittest.mock import patch
 
 from conftest import (
     DEADLOCK_TIMEOUT,
+    ProtocolEraMixin,
     ToolDBTestCase,
     add_platform,
     add_rating,
@@ -37,7 +41,6 @@ from conftest import (
     seed_game,
     set_tag_affinity,
 )
-from fastmcp import Client
 from mcp.types import CallToolResult
 
 from gamelib_mcp import main
@@ -49,7 +52,7 @@ async def _noop_lifespan(server):
     yield {}
 
 
-class MCPWireTestCase(ToolDBTestCase):
+class MCPWireTestCase(ProtocolEraMixin, ToolDBTestCase):
     """A migrated temp DB plus a connected in-memory MCP client."""
 
     async def asyncSetUp(self) -> None:
@@ -57,7 +60,7 @@ class MCPWireTestCase(ToolDBTestCase):
         await self._seed()
         self._stack = AsyncExitStack()
         self._stack.enter_context(patch.object(main.mcp, "_lifespan", _noop_lifespan))
-        self.client = await self._stack.enter_async_context(Client(main.mcp))
+        self.client = await self._stack.enter_async_context(self.open_client(main.mcp))
 
     async def asyncTearDown(self) -> None:
         await self._stack.aclose()
@@ -99,18 +102,18 @@ class MCPWireTestCase(ToolDBTestCase):
         """Call, assert the wire result is a success, return structuredContent."""
         result = await self.call(name, arguments)
         self.assertFalse(
-            result.isError,
+            result.is_error,
             f"{name} returned isError with content {result.content!r}",
         )
         self.assertIsInstance(
-            result.structuredContent, dict, f"{name} returned no structuredContent"
+            result.structured_content, dict, f"{name} returned no structuredContent"
         )
-        return result.structuredContent
+        return result.structured_content
 
     async def failure_text(self, name: str, arguments: dict) -> str:
         """Call, assert the wire result is an error, return its joined text."""
         result = await self.call(name, arguments)
-        self.assertTrue(result.isError, f"{name} unexpectedly succeeded: {result!r}")
+        self.assertTrue(result.is_error, f"{name} unexpectedly succeeded: {result!r}")
         return " ".join(
             getattr(block, "text", "") for block in (result.content or [])
         )
@@ -289,6 +292,38 @@ class WireEdgeCaseTests(MCPWireTestCase):
         self.assertEqual(by_name["Wire Probe Alpha"]["review_text"], "fine")
         self.assertEqual(by_name["Wire Probe Beta"]["score"], 9.0)
         self.assertEqual(by_name["Wire Probe Alpha"]["game_id"], self.alpha)
+
+
+class SerializerWarningFilterTests(MCPWireTestCase):
+    async def test_serializer_warning_filter_is_what_keeps_tool_calls_clean(self):
+        # FastMCP 4 dumps each passthrough's dict through its annotated model's
+        # TypeAdapter, which warns on every call. With warnings as errors the
+        # call fails at the wire; main.install_warning_filters() — the real
+        # function main.py runs at import — is what makes the same call succeed.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            message = await self.failure_text("get_wishlist", {})
+            self.assertIn("Pydantic serializer warnings", message)
+
+            main.install_warning_filters()
+            payload = await self.ok("get_wishlist", {})
+        self.assertIsInstance(payload["items"], list)
+
+
+class LegacyReadToolWireTests(ReadToolWireTests):
+    PROTOCOL_MODE = "legacy"
+
+
+class LegacyMutationToolWireTests(MutationToolWireTests):
+    PROTOCOL_MODE = "legacy"
+
+
+class LegacyWireEdgeCaseTests(WireEdgeCaseTests):
+    PROTOCOL_MODE = "legacy"
+
+
+class LegacySerializerWarningFilterTests(SerializerWarningFilterTests):
+    PROTOCOL_MODE = "legacy"
 
 
 if __name__ == "__main__":

@@ -47,9 +47,9 @@ from .common import (
     PLATFORM_ALIASES,
     SYNCABLE_PLATFORMS,
     PlatformSyncFanout,
+    describe_failure,
     report_progress,
 )
-from .common import info as _info
 
 # Bound on this module on purpose: run_library_sync calls it after a Steam sync,
 # and the established test seam is patch("gamelib_mcp.tools.admin.detect_farmed_games").
@@ -103,7 +103,7 @@ async def run_library_sync(
         startup_task = get_startup_refresh_task()
         current_task = asyncio.current_task()
         if startup_task is not None and not startup_task.done() and startup_task is not current_task:
-            await _info(ctx, "Waiting for running startup library refresh")
+            logger.info("Waiting for running startup library refresh")
             result = await asyncio.shield(startup_task)
             if isinstance(result, dict):
                 return result
@@ -122,20 +122,21 @@ async def run_library_sync(
         # On the tool path it's an idempotent re-write of state the tool already set.
         await _mark_sync_started(targets)
         await report_progress(ctx, 0, len(selected))
-        await _info(ctx, f"Refreshing {len(selected)} platform(s)")
+        logger.info("Refreshing %d platform(s)", len(selected))
 
         results: dict = {}
         async for name, outcome in fanout.gather(ctx):
             result_name = result_names.get(name, name)
             finished_at = datetime.now(UTC).isoformat()
             if isinstance(outcome, BaseException):
-                payload = {"error": str(outcome)}
+                failure = describe_failure(outcome)
+                payload = {"error": failure}
                 results[result_name] = payload
                 # Record this platform's own outcome (state + error + success
                 # time) now rather than after the whole run, so a poll between
                 # platforms never pairs a fresh state with a stale error.
                 await record_platform_sync_outcome(name, payload, finished_at)
-                await _info(ctx, f"Failed {result_name} refresh: {outcome}")
+                logger.info("Failed %s refresh: %s", result_name, failure)
             else:
                 results[result_name] = outcome
                 await record_platform_sync_outcome(
@@ -150,7 +151,7 @@ async def run_library_sync(
                     history_rows = None
                 if isinstance(outcome, dict) and history_rows is not None:
                     outcome["play_history_rows"] = history_rows
-                await _info(ctx, f"Finished {result_name} refresh")
+                logger.info("Finished %s refresh", result_name)
 
         steam_result = results.get("steam")
         steam_synced = (
@@ -392,17 +393,18 @@ async def sync_wishlist(
     )
     selected = fanout.dispatch("wishlist_sync", namespace=sys.modules[__name__])
 
-    await _info(ctx, f"Syncing wishlist for {len(selected)} platform(s)")
+    logger.info("Syncing wishlist for %d platform(s)", len(selected))
     await report_progress(ctx, 0, len(selected))
 
     results: dict = {}
     async for name, outcome in fanout.gather(ctx):
         if isinstance(outcome, BaseException):
-            results[name] = {"error": str(outcome)}
-            await _info(ctx, f"Failed {name} wishlist sync: {outcome}")
+            failure = describe_failure(outcome)
+            results[name] = {"error": failure}
+            logger.info("Failed %s wishlist sync: %s", name, failure)
         else:
             results[name] = outcome
-            await _info(ctx, f"Finished {name} wishlist sync")
+            logger.info("Finished %s wishlist sync", name)
 
     # A stale external wishlist can list a game already owned locally (bought
     # elsewhere, or ownership synced since the last wishlist check) — reconcile

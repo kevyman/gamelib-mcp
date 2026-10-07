@@ -203,9 +203,12 @@ def test_http_security_middleware_allows_browser_origin_in_allowlist():
     assert headers["access-control-allow-origin"] == "https://claude.ai"
     assert headers["access-control-allow-methods"] == "GET, POST, DELETE, OPTIONS"
     assert headers["access-control-allow-headers"] == (
-        "authorization, content-type, accept, mcp-session-id, last-event-id, mcp-protocol-version"
+        "authorization, content-type, accept, mcp-session-id, last-event-id, "
+        "mcp-protocol-version, mcp-method, mcp-name"
     )
     assert "mcp-protocol-version" in headers["access-control-allow-headers"]
+    assert "mcp-method" in headers["access-control-allow-headers"]
+    assert "mcp-name" in headers["access-control-allow-headers"]
     assert headers["access-control-expose-headers"] == "mcp-session-id"
     assert headers["vary"] == "Origin"
     assert body == b""
@@ -243,9 +246,12 @@ def test_http_security_middleware_answers_allowed_browser_preflight_before_app()
     assert headers["access-control-allow-origin"] == "https://chatgpt.com"
     assert headers["access-control-allow-methods"] == "GET, POST, DELETE, OPTIONS"
     assert headers["access-control-allow-headers"] == (
-        "authorization, content-type, accept, mcp-session-id, last-event-id, mcp-protocol-version"
+        "authorization, content-type, accept, mcp-session-id, last-event-id, "
+        "mcp-protocol-version, mcp-method, mcp-name"
     )
     assert "mcp-protocol-version" in headers["access-control-allow-headers"]
+    assert "mcp-method" in headers["access-control-allow-headers"]
+    assert "mcp-name" in headers["access-control-allow-headers"]
     assert headers["access-control-expose-headers"] == "mcp-session-id"
     assert headers["access-control-max-age"] == "86400"
     assert headers["content-length"] == "0"

@@ -34,6 +34,7 @@ from .platforms_registry import (  # noqa: E402, F401
     INSPECTOR_PLATFORM_ALIASES,
     SYNC_METADATA_PLATFORMS,
 )
+from .tools.common import describe_failure  # noqa: E402
 
 # Lazily bound to tools.admin.run_library_sync (the worker) on first startup
 # refresh. Kept as a module-level name so tests can patch it directly.
@@ -447,8 +448,14 @@ async def _run_startup_refresh(platforms: list[str] | None = None) -> dict:
         final_error = "cancelled"
         raise
     except Exception as exc:
-        logger.exception("Startup library refresh failed")
-        final_error = str(exc)
+        final_error = describe_failure(exc)
+        # Not logger.exception: a traceback's last line is the raw str(exc),
+        # which for a provider HTTP error carries the keyed request URL. Log
+        # the original frames under a sanitized stand-in exception instead.
+        logger.error(
+            "Startup library refresh failed",
+            exc_info=(RuntimeError, RuntimeError(final_error), exc.__traceback__),
+        )
     finally:
         finished_at = datetime.now(UTC).isoformat()
         finished_meta = {

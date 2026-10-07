@@ -24,7 +24,7 @@ ADR 0004 before turning it back off.
 import os
 
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 from mcp.types import CallToolRequestParams
 
 ENV_VAR = "MCP_DUPLICATE_TEXT_CONTENT"
