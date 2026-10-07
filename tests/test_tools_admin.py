@@ -385,6 +385,69 @@ class RefreshLibraryValidationTests(ToolDBTestCase):
         )
 
 
+class SyncErrorRedactionTests(ToolDBTestCase):
+    """A provider-built error_summary (not an exception, so describe_failure
+    never sees it) is redacted before it is persisted or echoed back."""
+
+    _KEYED_SUMMARY = f"Steam sync failed: Client error '401 Unauthorized' for url '{_KEYED_URL}'"
+
+    async def test_failing_steam_refresh_stores_redacted_error_summary(self):
+        failed = {"sync_status": "failed", "error_summary": self._KEYED_SUMMARY}
+        with (
+            patch.object(admin, "fetch_library", AsyncMock(return_value=failed)),
+            patch.object(admin, "_schedule_background_enrich", AsyncMock()),
+        ):
+            result = await admin.run_library_sync(["steam"])
+
+        # The copy handed back to the caller is redacted like the stored one.
+        self.assertNotIn(SECRET_KEY, json.dumps(result))
+        self.assertIn("key=***", result["steam"]["error_summary"])
+
+        stored = await get_meta("integration_sync_steam_last_error_summary")
+        self.assertNotIn(SECRET_KEY, stored)
+        self.assertIn("key=***", stored)
+        # Operators still get the status text and the endpoint to act on.
+        self.assertIn("401 Unauthorized", stored)
+        self.assertIn("api.steampowered.com/IPlayerService/GetOwnedGames", stored)
+        self.assertIn("steamid=1", stored)
+        # Classification still reads the raw summary.
+        self.assertEqual(
+            await get_meta("integration_sync_steam_last_error_classification"),
+            lifecycle.classify_platform_sync_error(self._KEYED_SUMMARY),
+        )
+        self.assertEqual(await get_meta("sync_platform_state_steam"), "error")
+        self.assertNotIn(SECRET_KEY, json.dumps(await admin.get_sync_status()))
+
+    async def test_startup_refresh_stores_redacted_library_sync_error(self):
+        refresh_result = {"steam": {"sync_status": "failed", "error_summary": self._KEYED_SUMMARY}}
+        with (
+            patch.object(lifecycle, "_admin_refresh_library", AsyncMock(return_value=refresh_result)),
+            patch.object(lifecycle, "_drain_background_enrich_reruns", AsyncMock()),
+            patch("gamelib_mcp.deal_alerts.is_deal_alerts_configured", return_value=False),
+            self.assertLogs("gamelib_mcp.lifecycle", level="WARNING") as logs,
+        ):
+            await lifecycle._run_startup_refresh(["steam"])
+
+        error = await get_meta("library_sync_error")
+        self.assertNotIn(SECRET_KEY, error)
+        self.assertIn("key=***", error)
+        self.assertIn("401 Unauthorized", error)
+        for record in logs.records:
+            self.assertNotIn(SECRET_KEY, record.getMessage())
+
+    async def test_summary_stored_by_an_older_build_is_redacted_on_read(self):
+        await set_meta_many(
+            {
+                "sync_platform_state_steam": "error",
+                "integration_sync_steam_last_error_summary": self._KEYED_SUMMARY,
+                "integration_sync_steam_last_error_classification": "auth_stale",
+            }
+        )
+        status = await admin.get_sync_status()
+        self.assertNotIn(SECRET_KEY, json.dumps(status))
+        self.assertIn("key=***", status["platforms"]["steam"]["error"])
+
+
 class RunLibrarySyncStateTests(ToolDBTestCase):
     async def test_writes_done_state_for_successful_platform(self):
         async def fake_steam():

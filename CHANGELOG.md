@@ -10,10 +10,12 @@ All notable changes to gamelib-mcp. The format follows
 
 ### Fixed
 - The Steam Web API key (and the IsThereAnyDeal key) no longer appear in logs
-  or in sync status: the HTTP client's request lines are not logged at INFO,
-  and every stored or logged sync failure has `key=`-style query values
-  redacted before it reaches `get_sync_status`, `get_integration_status` or
-  `/health`.
+  or in sync status. The HTTP client's request lines, which carried the key
+  in the URL, are no longer logged at INFO; and failure text a platform
+  module builds itself (PSN, Xbox, GOG, Epic, Nintendo) has `key=`-style
+  query values redacted before it is stored, logged, returned from `sync`,
+  or served by `get_sync_status`, `get_integration_status`, `check_library`
+  or `/health`, including values an older build already stored.
 - `.env.local.example` works for a plain `uv run` as well as Docker: it no
   longer pins the database and session files to the container's `/data`,
   which a laptop user cannot write to.

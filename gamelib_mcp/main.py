@@ -106,6 +106,12 @@ def install_warning_filters() -> None:
 logging.basicConfig(
     level=_log_level_from_env(), format="%(asctime)s %(levelname)s %(name)s: %(message)s"
 )
+# httpx logs every request line at INFO, full URL included, and the Steam Web
+# API and IsThereAnyDeal take their API key as a `key=` query parameter. Held
+# at WARNING even under LOG_LEVEL=DEBUG: a debug log is still a log, and the
+# request URL would put the key in it.
+for _http_logger in ("httpx", "httpcore"):
+    logging.getLogger(_http_logger).setLevel(logging.WARNING)
 install_warning_filters()
 logger = logging.getLogger(__name__)
 

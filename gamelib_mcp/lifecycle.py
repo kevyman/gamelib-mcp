@@ -34,6 +34,7 @@ from .platforms_registry import (  # noqa: E402, F401
     INSPECTOR_PLATFORM_ALIASES,
     SYNC_METADATA_PLATFORMS,
 )
+from .redaction import redact_secrets  # noqa: E402
 from .tools.common import describe_failure  # noqa: E402
 
 # Lazily bound to tools.admin.run_library_sync (the worker) on first startup
@@ -109,7 +110,8 @@ def build_platform_sync_metadata(refresh_result: dict, finished_at: str) -> dict
         error = _platform_sync_error_summary(payload)
         metadata[f"{prefix}_last_attempt_at"] = finished_at
         metadata[f"{prefix}_last_finished_at"] = finished_at
-        metadata[f"{prefix}_last_error_summary"] = error
+        # Redact only the stored text; classification reads the raw summary.
+        metadata[f"{prefix}_last_error_summary"] = redact_secrets(error)
         metadata[f"{prefix}_last_error_classification"] = (
             _platform_sync_error_classification(payload, error) if error else None
         )
@@ -388,7 +390,7 @@ def _summarize_refresh_result(result: object) -> str | None:
             continue
         error = payload.get("error") or payload.get("error_summary")
         if error:
-            errors.append(f"{platform}: {error}")
+            errors.append(f"{platform}: {redact_secrets(error)}")
 
     return "; ".join(errors) if errors else None
 

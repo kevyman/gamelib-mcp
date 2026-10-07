@@ -24,6 +24,7 @@ from ..platforms_registry import (  # noqa: F401
     SYNCABLE_PLATFORMS,
     resolve_platform_functions,
 )
+from ..redaction import redact_secrets
 
 _URL_QUERY_RE = re.compile(r"""(https?://[^\s?#'"]+)[?#][^\s'"]*""")
 
@@ -33,9 +34,10 @@ def describe_failure(exc: BaseException) -> str:
 
     Provider errors echo the request URL (``httpx.HTTPStatusError`` does), and
     Steam's carries the API key in its query. Every place an exception becomes
-    stored or logged text must go through this.
+    stored or logged text must go through this. ``redact_secrets`` also masks a
+    secret ``key=``-style parameter outside a full ``http(s)://`` URL.
     """
-    text = _URL_QUERY_RE.sub(r"\1", str(exc))
+    text = _URL_QUERY_RE.sub(r"\1", redact_secrets(str(exc)))
     return text or type(exc).__name__
 
 
