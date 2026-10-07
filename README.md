@@ -120,7 +120,7 @@ mkdir gamelib && cd gamelib
 curl -fsSLO https://raw.githubusercontent.com/kevyman/gamelib-mcp/main/.env.local.example && mv .env.local.example .env
 # edit .env: STEAM_API_KEY and STEAM_ID
 mkdir -p data && sudo chown 10001:10001 data   # the image runs as uid 10001; skip the chown on Docker Desktop
-docker run -d --name gamelib -p 8000:8000 --env-file .env -v "$PWD/data:/data" ghcr.io/kevyman/gamelib-mcp:latest
+docker run -d --name gamelib -p 127.0.0.1:8000:8000 --env-file .env -v "$PWD/data:/data" ghcr.io/kevyman/gamelib-mcp:latest
 curl http://localhost:8000/health
 ```
 
