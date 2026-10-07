@@ -59,7 +59,8 @@ jobs:
           # "Why the fetch authenticates".
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          # Where the clone lives on the host; defaults to ~/gamelib-mcp.
+          # Absolute path of the clone on the host (a leading ~ is not expanded);
+          # defaults to $HOME/gamelib-mcp.
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
@@ -69,9 +70,10 @@ jobs:
           envs: GITHUB_TOKEN,GITHUB_REPOSITORY,DEPLOY_PATH
           script: |
             set -euo pipefail
-            cd "${DEPLOY_PATH:-$HOME/gamelib-mcp}"
+            deploy_path="${DEPLOY_PATH:-$HOME/gamelib-mcp}"
+            cd "$deploy_path"
             previous="$(git rev-parse HEAD)"
-            db="${DEPLOY_PATH:-$HOME/gamelib-mcp}/data/library/gamelib.db"
+            db="$deploy_path/data/library/gamelib.db"
             schema_before="$(sqlite3 "$db" 'PRAGMA user_version' 2>/dev/null || echo unknown)"
             # Keep .git/config pointing at the canonical, credential-free URL
             # (the clone predates the repository's rename), and fetch through
@@ -87,7 +89,15 @@ jobs:
             # Server-local secrets live in .env (gitignored) and survive this.
             git reset --hard origin/main
             target="$(git rev-parse --short HEAD)"
-            docker compose --profile prod up -d --build
+            # A compose failure here (an unset required variable, a build error)
+            # happens before the health gate below, so roll the checkout back
+            # too; otherwise "previous" on the next run would be this broken commit.
+            if ! docker compose --profile prod up -d --build; then
+              echo "::error::${target}: docker compose up failed; rolling back to ${previous}"
+              git reset --hard "$previous"
+              docker compose --profile prod up -d --build || true
+              exit 1
+            fi
             # Gate: the new container must answer /health (HTTP 200) within the
             # budget. A build that succeeds and a process that dies before the
             # lifespan yields (bad env, failed migration, import error) would

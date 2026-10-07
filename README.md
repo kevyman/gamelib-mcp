@@ -85,8 +85,8 @@ All configuration is via environment variables. Production starts from [.env.exa
 | `MCP_PUBLIC_BASE_URL` | OAuth | Public HTTPS origin used for OAuth discovery, callbacks, and token audience |
 | `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` | OAuth | Credentials for the GitHub OAuth App |
 | `MCP_OAUTH_JWT_SIGNING_KEY` | OAuth | Independent secret used to sign FastMCP access tokens |
-| `MCP_OAUTH_GITHUB_USER_IDS` | OAuth | Comma-separated GitHub numeric user ID(s) allowed to use tools (`https://api.github.com/users/<login>` shows the `id`) |
-| `MCP_OAUTH_GITHUB_LOGINS` | OAuth | GitHub usernames allowed to use tools, as an alternative or addition to the IDs; IDs are safer because a username can be renamed and re-registered |
+| `MCP_OAUTH_GITHUB_USER_IDS` | OAuth (one of) | Comma-separated GitHub numeric user ID(s) allowed to use tools (`https://api.github.com/users/<login>` shows the `id`) |
+| `MCP_OAUTH_GITHUB_LOGINS` | OAuth (one of) | GitHub usernames allowed to use tools, as an alternative or addition to the IDs; IDs are safer because a username can be renamed and re-registered |
 | `MCP_DOMAIN` | Docker prod | Bare public hostname Caddy serves (same host as `MCP_PUBLIC_BASE_URL`) |
 | `MCP_ADMIN_AUTH_TOKEN` | yes | Independent header-only token for `/admin/*` |
 | `FASTMCP_HOME` | OAuth | Persistent encrypted OAuth state directory; `/data/fastmcp` in Docker |

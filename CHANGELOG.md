@@ -15,6 +15,13 @@ First tagged release. Everything before this shipped straight from `main`.
   by numeric id.
 - `SECURITY.md` and this changelog.
 
+### Upgrading an existing deployment
+Do these BEFORE merging or pulling 1.0.0, or the deploy fails (it rolls back):
+1. Add `MCP_DOMAIN=<your public host>` to the server's `.env`; Caddy now reads
+   its site address from it.
+2. If the clone on the server is not at `~/gamelib-mcp`, add a `DEPLOY_PATH`
+   repository secret with its absolute path.
+
 ### Changed
 - The three served skills (`game-quality` 3.5.0, `backlog-triage` 2.3.0,
   `bundle-evaluation` 1.3.0) now address "the user" and read every personal

@@ -40,10 +40,9 @@ purchases, ratings and play behavior. `.gitignore` here drops `results/`,
 `*.sqlite`, `*.db` and `*.bak`; **only metrics are ever committed or pasted.**
 
 Use the nightly backup described in `deploy.md` → "Database backups": either
-`/root/mcps/data/library/gamelib-nightly.bak` on the server (a consistent
-`sqlite3 .backup`, taken 04:15 UTC) or its off-machine copy on the Windows box
-(`C:\Users\<user>\Backups\gamelib\gamelib-<date>.bak`, 14 rotated). Locally you
-can produce one the same way:
+`~/gamelib-mcp/data/library/gamelib-nightly.bak` on the server (a consistent
+`sqlite3 .backup`) or its off-machine copy, wherever your pull job keeps it.
+Locally you can produce one the same way:
 
 ```bash
 sqlite3 data/gamelib.db ".backup /tmp/gamelib-snapshot.bak"

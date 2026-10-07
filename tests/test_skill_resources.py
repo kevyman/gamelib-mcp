@@ -496,7 +496,14 @@ class GetSkillToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.content, on_disk)
         self.assertEqual(response.skill, "game-quality")
         self.assertEqual(response.path, "SKILL.md")
-        self.assertEqual(response.version, "3.5.0")
+        # The served version is whatever the frontmatter says; pin the
+        # agreement, not a literal that every methodology bump would break.
+        version = next(
+            line.split(":", 1)[1].strip().strip('"')
+            for line in on_disk.splitlines()
+            if line.startswith("version:")
+        )
+        self.assertEqual(response.version, version)
 
     async def test_story_qualification_pins_the_served_methodology(self) -> None:
         # game-quality 3.4.4 (#199): a story needs a NAMED person or a making-of

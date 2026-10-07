@@ -157,6 +157,13 @@ Use that output or `/admin/integrations/ui` as the first readiness check:
 
 ---
 
+### Upgrading a pre-1.0 deployment
+
+Two settings became configurable in 1.0.0 and the deploy fails without them:
+`MCP_DOMAIN` must be in the server's `.env` (Caddy's site address), and if the
+clone is not at `~/gamelib-mcp` the `DEPLOY_PATH` secret must hold its absolute
+path. Set both before merging or pulling 1.0.0.
+
 ### Redeploying after code changes
 
 Pushes to `main` deploy automatically — see **Continuous deployment** below.
@@ -263,7 +270,7 @@ secret**:
 | `DEPLOY_USER` | `root` |
 | `DEPLOY_SSH_KEY` | A **private** SSH key whose public half is in the server's `~/.ssh/authorized_keys` |
 | `DEPLOY_PORT` | *(optional)* SSH port, defaults to `22` |
-| `DEPLOY_PATH` | *(optional)* path of the clone on the host, defaults to `~/gamelib-mcp` |
+| `DEPLOY_PATH` | *(optional)* absolute path of the clone on the host (e.g. `/root/gamelib-mcp`; a leading `~` is not expanded), defaults to `$HOME/gamelib-mcp` |
 
 Generate a dedicated deploy key (don't reuse a personal key):
 

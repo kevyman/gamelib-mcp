@@ -6,7 +6,7 @@
 # library changes you want reflected under /stacks/ on the server.
 #
 # GAMELIB_DEPLOY_HOST=user@host selects the server (required); GAMELIB_DEPLOY_DIR
-# is the repo clone on it (default ~/gamelib-mcp).
+# is the repo clone on it, relative to the login home (default gamelib-mcp).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -15,7 +15,7 @@ REMOTE_DIR="${GAMELIB_DEPLOY_DIR:-gamelib-mcp}"
 SNAP=/tmp/prod-gamelib.db
 
 echo "==> snapshotting prod DB"
-ssh "$SERVER" "sqlite3 $REMOTE_DIR/data/library/gamelib.db '.backup /tmp/gamelib-snap.db'"
+ssh "$SERVER" "sqlite3 $(printf %q "$REMOTE_DIR/data/library/gamelib.db") '.backup /tmp/gamelib-snap.db'"
 scp -q "$SERVER:/tmp/gamelib-snap.db" "$SNAP"
 ssh "$SERVER" 'rm -f /tmp/gamelib-snap.db'
 
