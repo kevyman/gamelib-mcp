@@ -214,6 +214,14 @@ triggered manually from the Actions tab via *Run workflow*):
    enforces the same rule itself: with a marker present and the stamp not at
    the build's version it refuses to start and names the snapshot to restore.
 
+   A failed `docker compose up` rolls back the same way and runs the same
+   check first. A nonzero exit there does not prove nothing started: compose
+   can start the app, which migrates on startup, and then fail on another
+   service. The script stops the app before reading the schema state, so a
+   container that only just started cannot begin migrating between the check
+   and the rollback. `tests/test_deploy_workflow.py` runs the script against
+   stubbed `git`/`docker`/`sqlite3` for each of these paths.
+
 **Why the fetch authenticates.** GitHub can refuse anonymous HTTPS fetches
 from shared cloud IP ranges (unauthenticated clones are rate-limited, and a
 VPS shares that anonymous quota with every neighbour on its range). git then
