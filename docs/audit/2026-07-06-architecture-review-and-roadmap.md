@@ -87,7 +87,7 @@ measurement. These constants were picked by feel; nobody knows if they're
 right, and nobody will know if a future change makes them wrong.
 
 **Design.** Offline leave-one-out evaluation over the ratings table, run
-against a **prod DB snapshot** (the nightly CLOSET backups make this free):
+against a **prod DB snapshot** (the nightly off-machine backups make this free):
 
 - `scripts/eval_recsys.py --db <snapshot>`:
   - For each rated game: recompute tag affinity with that rating held out
@@ -192,7 +192,7 @@ affinity.
 
 ### 5. Smaller items, worth a line each
 
-- **Restore drill.** Run one scripted restore from a CLOSET backup into a
+- **Restore drill.** Run one scripted restore from an off-machine backup into a
   scratch dir + `init_db` + row-count sanity check; document in deploy.md.
   Backups that have never been restored are Schrödinger's backups.
 - **Deals widget.** `apps.py`'s game-cards widget + item 2's fields =

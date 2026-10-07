@@ -42,7 +42,7 @@ purchases, ratings and play behavior. `.gitignore` here drops `results/`,
 Use the nightly backup described in `deploy.md` → "Database backups": either
 `/root/mcps/data/library/gamelib-nightly.bak` on the server (a consistent
 `sqlite3 .backup`, taken 04:15 UTC) or its off-machine copy on the Windows box
-(`C:\Users\porta\Backups\gamelib\gamelib-<date>.bak`, 14 rotated). Locally you
+(`C:\Users\<user>\Backups\gamelib\gamelib-<date>.bak`, 14 rotated). Locally you
 can produce one the same way:
 
 ```bash
