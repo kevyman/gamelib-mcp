@@ -35,3 +35,6 @@ stacks/.cover_cache/
 .coverage
 coverage.xml
 requirements-audit.txt
+
+# Private operator notes (the generic runbook is deploy.md)
+/ops/

@@ -1,4 +1,7 @@
-gamelib.example.com {
+# The site address is the public origin the app already requires
+# (MCP_PUBLIC_BASE_URL, e.g. https://gamelib.example.com); docker-compose.yml
+# passes it through from .env, so Caddy and the OAuth metadata cannot drift.
+{$MCP_PUBLIC_BASE_URL} {
     redir /stacks /stacks/ 308
     handle_path /stacks/* {
         root * /srv/stacks

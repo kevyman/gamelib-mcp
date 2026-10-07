@@ -1,8 +1,8 @@
 # Bundle-evaluation backtest — Phase 1 inventory
 
 Goal: test whether the `bundle-evaluation` skill's triage (must-have / nice / filler per
-constituent) and verdicts match the user's actual historical engagement. This file is the
-candidate test set for the user to pick/veto before fixtures are built. Failure-mode
+constituent) and verdicts match the owner's actual historical engagement. This file is the
+candidate test set for the owner to pick/veto before fixtures are built. Failure-mode
 discovery, not a benchmark score.
 
 ## Ground-truth definitions (per constituent, from current DB)
@@ -68,12 +68,12 @@ tests both over-dismissal and over-selling at bundle level and per game.
 | 19 | Atari: Recharged Retro Revival | 2024-10 | €18.32 | 11 | 0 | 10 | 1 |
 
 (15, 18, 19 are pure hoard purchases by engagement — the interesting question is whether the
-skill would have said Skip. 16 and 17 hit the user's roguelite-deckbuilder prior — good
+skill would have said Skip. 16 and 17 hit the owner's roguelite-deckbuilder prior — good
 discrimination tests. #18 Muv-Luv and #19 Atari at real €18–24 prices are the highest-stakes
 verdicts in the set.)
 
 Optional borderline: **Indie Fears Bundle** (2025-10, €13.50, 13 games, 0 wanted) — only 10
-months old, ground truth weak; include only if the user confirms he's already sure he'd skip it.
+months old, ground truth weak; include only if the owner confirms he's already sure he'd skip it.
 
 ### D. True negatives — skipped/paused months (pending Gmail verification)
 

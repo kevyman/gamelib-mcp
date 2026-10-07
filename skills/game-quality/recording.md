@@ -20,7 +20,7 @@ opencritic_score, fit_call (the same four strings get_assessment_context's
 fit.suggested_call uses), anchors_cited (up to 8 names or {name, game_id}
 objects — use the game_ids from the anchors block), flags (up to 8 short
 strings), price_seen + price_currency + price_platform, target_price (the
-"wishlist at €X" threshold), instead_game_id (the game pointed at by "play what
+"wishlist at X [currency]" threshold), instead_game_id (the game pointed at by "play what
 you own instead: X"), steam_appid, and context (e.g. "bundle: Humble Choice
 2026-08"). assessed_at backfills a past verdict (ISO 8601, UTC); it defaults to
 now.
@@ -44,8 +44,8 @@ the evaluation card. elevator_pitch is one synthesized, spoiler-free line (420
 chars). craft_note is one line of craft context the chips can't carry — the
 critic spread, the recurring knock, the review-bomb caveat (200 chars).
 for_you_if / not_for_you_if take up to 4 bullets each (200 chars each), and
-each bullet must be GROUNDED IN HIS DATA ("you put 244h into Slay the Spire",
-"you abandoned both survival crafters you tried"), never generic genre talk.
+each bullet must be GROUNDED IN THE USER'S DATA ("you put 200h into [anchor]",
+"you abandoned both [genre] games you tried"), never generic genre talk.
 comparisons takes up to 6 {name, relation, note, game_id} objects tracing
 lineage, with relation one of "better_version", "similar", "ancestor",
 "descendant" or "cheaper_substitute"; pass game_id when the library already
@@ -118,4 +118,4 @@ The honesty rules, which the server cannot check:
   the omission is said in chat.
 - why_care is authored independently of the story and is never dropped
   because the story was omitted; the only coupling is no verbatim repetition.
-- He reads these as fact: write for him, name his game, no hype.
+- The user reads these as fact: write for them, name their game, no hype.
