@@ -26,8 +26,12 @@ applies are `AGENTS.md` → "Code Review Rules".
    reply), since both firing would be two reviews. (Measured: the toggle
    was off until 2026-09-02, so #162, #166 and #167 needed the comment;
    #168 then hit the missing environment.) Codex reads `AGENTS.md`,
-   reviews the diff statically, posts P0/P1 inline, reacts 👍 when it has
-   nothing.
+   reviews the diff statically, posts P0/P1 inline, and when it has nothing
+   it does not comment or approve: the only signal is a 👍 reaction on the
+   PR (👀 while running). A reaction raises no PR event, so a session that
+   waits on `subscribe_pr_activity` must read the PR's reactions at its
+   check-in; 👍 and no inline comments means the fix pass is empty and the
+   outcome line reads `findings 0 · fixed 0 · refuted 0`.
 4. **Refute or fix, once.** Every finding gets the test that would prove it.
    Fails → fix. Cannot be made to fail → refuted on the thread with evidence.
    Reply, resolve. No second full review; one targeted re-check only for a

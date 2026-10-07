@@ -67,10 +67,20 @@ standards live.
   check-in ~20 minutes out in case the event is missed; end the turn.
 - Do not poll with sleeps. Do not touch the branch while the review runs —
   a new push invalidates the reviewed commit.
+- **A clean pass is a 👍 reaction on the PR and nothing else.** Codex reacts
+  👀 while reviewing, posts inline P0/P1 comments only when it found
+  something, and reacts 👍 on the PR when every review finished with no
+  findings — no "LGTM" comment, no approving review. Reactions raise no PR
+  event, so the subscription stays silent on a clean pass: when the
+  check-in fires, read the PR's reactions (`issue_read` / the Codex Review
+  Summary comment's status table) before concluding the review is still
+  running. 👍 present and no inline comments = step 4 has nothing to do;
+  record `findings 0 · fixed 0 · refuted 0 · P0 0` and go to step 5.
 
 ## 4. Act on the review — one pass
 
-For every Codex finding, in the thread:
+Skip this step when the review ended in a 👍 reaction with no inline
+comments (step 3). Otherwise, for every Codex finding, in the thread:
 
 1. **Reproduce or refute.** Write the test that demonstrates the finding.
    If it fails, keep it and fix the code. If it cannot be made to fail, the
