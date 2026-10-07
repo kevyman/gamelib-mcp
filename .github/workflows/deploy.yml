@@ -108,7 +108,8 @@ jobs:
             # Server-local secrets live in .env (gitignored) and survive this.
             git reset --hard origin/main
             target="$(git rev-parse --short HEAD)"
-            # Both rollback paths below stop the app and then call this before
+            # Both rollback paths below stop the app (exiting with everything
+            # left in place when that stop fails) and then call this before
             # resetting the checkout. Two signals that the new build touched
             # the schema: the version stamp moved, or the app's ".migrating"
             # marker exists (written after the pre-migration snapshot, removed
@@ -164,10 +165,14 @@ jobs:
               # the app, which migrates on startup, and then fail on another
               # service (Caddy losing its port). Stop the app BEFORE reading the
               # schema state, so a container that only just started cannot begin
-              # migrating between the check and the rollback. The stop itself
-              # fails when the compose file does not parse (an unset required
-              # variable), and then nothing new was started either.
-              docker compose --profile prod stop app || true
+              # migrating between the check and the rollback. The build above
+              # already proved the compose file parses, so a failed stop is a
+              # real failure (a Docker daemon error): the app may still be
+              # running, so neither inspect the schema nor reset the checkout.
+              if ! docker compose --profile prod stop app; then
+                echo "::error::${target}: could not stop the app container; leaving the new checkout and containers in place (an unverified rollback could reset code while a migration runs). Inspect the host by hand."
+                exit 1
+              fi
               if ! restore_snapshot_if_migrated; then
                 docker compose --profile prod start app || true
                 exit 1
@@ -194,8 +199,13 @@ jobs:
               echo "::error::${target} never answered /health"
               docker compose --profile prod logs --tail=100 app || true
               # A crash-looping container restarts (and can migrate) at any
-              # moment: stop it before the schema state is read, as above.
-              docker compose --profile prod stop app || true
+              # moment: stop it before the schema state is read, as above. A
+              # failed stop leaves everything in place, as above: a container
+              # that may still be running is never rolled back under.
+              if ! docker compose --profile prod stop app; then
+                echo "::error::${target}: could not stop the app container; leaving the new checkout and containers in place (an unverified rollback could reset code while a migration runs). Inspect the host by hand."
+                exit 1
+              fi
               if ! restore_snapshot_if_migrated; then
                 # Leave the new build crash-looping where it can be seen.
                 docker compose --profile prod start app || true

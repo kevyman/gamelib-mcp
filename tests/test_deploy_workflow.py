@@ -46,13 +46,19 @@ _STUBS = {
     "sqlite3": """
         cat "$STUB_STATE/user_version"
     """,
-    # `build` fails when the scenario says so. The first `up` starts the new
-    # build: it runs the scenario's hook (what the new containers did) and
-    # exits with the hook's status. `exec` is the /health probe.
+    # `build` and `stop app` fail when the scenario says so. The first `up`
+    # starts the new build: it runs the scenario's hook (what the new
+    # containers did) and exits with the hook's status. `exec` is the /health
+    # probe.
     "docker": """
         case "$*" in
           "compose --profile prod build")
             if [ -f "$STUB_STATE/build_fails" ]; then
+              exit 1
+            fi
+            ;;
+          "compose --profile prod stop app")
+            if [ -f "$STUB_STATE/stop_fails" ]; then
               exit 1
             fi
             ;;
@@ -117,6 +123,10 @@ class _Host:
 
     def fail_build(self) -> None:
         (self.state / "build_fails").touch()
+
+    def fail_stop(self) -> None:
+        """`docker compose stop app` fails (a transient Docker daemon error)."""
+        (self.state / "stop_fails").touch()
 
     def fresh(self) -> None:
         """A first deploy: no database on the host yet."""
@@ -294,6 +304,58 @@ def test_failed_health_gate_stops_the_app_before_reading_the_schema(host: _Host)
     health_probes = [i for i, call in enumerate(calls) if " exec " in call]
     assert health_probes[-1] < calls.index(_STOP_APP) < schema_reads[1] < calls.index(_ROLL_BACK)
     assert host.db.read_text().strip() == "v41 data", output
+
+
+_STOP_FAILED = (
+    "::error::new-sha: could not stop the app container; leaving the new checkout and "
+    "containers in place (an unverified rollback could reset code while a migration "
+    "runs). Inspect the host by hand."
+)
+
+
+def test_failed_health_gate_with_a_failed_stop_leaves_the_new_build_in_place(
+    host: _Host,
+) -> None:
+    """Codex P1: a swallowed stop failure let a live app migrate under the rollback.
+
+    A container that may still be running (or restarting) can begin migrating
+    after the schema read, and the rollback would then reset the checkout and
+    recreate the container mid-migration. A failed stop touches nothing.
+    """
+    host.on_first_up(host.migrated_to_v42())
+    host.fail_stop()
+
+    code, calls, output = host.deploy()
+
+    assert code == 1, output
+    assert _STOP_FAILED in output
+    health_probes = [i for i, call in enumerate(calls) if " exec " in call]
+    stop = calls.index(_STOP_APP)
+    assert health_probes[-1] < stop
+    after_stop = calls[stop + 1 :]
+    assert not any(call.startswith("sqlite3 ") for call in after_stop), calls
+    assert not any(call.startswith("git reset") for call in after_stop), calls
+    assert _REBUILD not in calls
+    assert host.db.read_text().strip() == "v42 data"
+
+
+def test_up_failure_with_a_failed_stop_leaves_the_new_build_in_place(host: _Host) -> None:
+    """The build already proved the compose file parses: a failed stop is real."""
+    host.on_first_up(host.migrated_to_v42() + "exit 1\n")
+    host.fail_stop()
+
+    code, calls, output = host.deploy()
+
+    assert code == 1, output
+    assert "docker compose up failed" in output
+    assert _STOP_FAILED in output
+    stop = calls.index(_STOP_APP)
+    assert calls.index(_UP) < stop
+    after_stop = calls[stop + 1 :]
+    assert not any(call.startswith("sqlite3 ") for call in after_stop), calls
+    assert not any(call.startswith("git reset") for call in after_stop), calls
+    assert _REBUILD not in calls
+    assert host.db.read_text().strip() == "v42 data"
 
 
 def test_build_failure_rolls_the_checkout_back_without_touching_containers(host: _Host) -> None:
