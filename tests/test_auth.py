@@ -233,6 +233,8 @@ def test_oauth_metadata_and_unauthenticated_challenge_are_mcp_compliant():
     ("redirect_uri", "expected_status"),
     [
         ("https://chatgpt.com/connector/oauth/callback-id", 302),
+        ("https://chatgpt.com/connector_platform_oauth_redirect", 302),
+        ("https://chatgpt.com/connector_platform_oauth_redirect/extra", 400),
         ("https://claude.ai/api/mcp/auth_callback", 302),
         ("https://evil.example/oauth/callback", 400),
     ],
